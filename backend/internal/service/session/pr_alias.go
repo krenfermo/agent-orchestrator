@@ -90,6 +90,13 @@ func pullRequestAliasKey(rawURL string, number int, sourceBranch, targetBranch, 
 		return ""
 	}
 	identityNumber := strconv.Itoa(parsedNumber)
+	// GitHub preserves PR numbers when transferring a repository. Normalize
+	// both names from AO's own transfer before considering mutable head state;
+	// this is stronger alias evidence than branch or head-SHA heuristics.
+	switch owner + "/" + repoName {
+	case "agentwrapper/agent-orchestrator", "untrivial-ai/agent-orchestrator":
+		return strings.Join([]string{"github-known-transfer", host, "untrivial-ai/agent-orchestrator", identityNumber}, "|")
+	}
 	branch := normalizedAliasPart(sourceBranch)
 	head := normalizedAliasPart(headSHA)
 	if branch == "" || head == "" {

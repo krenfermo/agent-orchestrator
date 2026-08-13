@@ -2769,6 +2769,60 @@ func TestListPRSummariesCollapsesTransferredRepoAliases(t *testing.T) {
 	}
 }
 
+func TestListPRSummariesTransferredRepoUsesCurrentObservationAcrossHeadChanges(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["agent-orchestrator-31"] = domain.SessionRecord{ID: "agent-orchestrator-31", ProjectID: "agent-orchestrator", Kind: domain.KindWorker}
+	oldObservedAt := time.Date(2026, 7, 26, 16, 19, 15, 0, time.UTC)
+	currentObservedAt := time.Date(2026, 8, 13, 3, 8, 46, 0, time.UTC)
+	oldURL := "https://github.com/AgentWrapper/agent-orchestrator/pull/2870"
+	currentURL := "https://github.com/Untrivial-ai/agent-orchestrator/pull/2870"
+	stList := &multiPRFakeStore{fakeStore: st, prs: []domain.PullRequest{
+		{
+			URL:                      oldURL,
+			SessionID:                "agent-orchestrator-31",
+			Number:                   2870,
+			Provider:                 "github",
+			Host:                     "github.com",
+			Repo:                     "AgentWrapper/agent-orchestrator",
+			SourceBranch:             "ao/agent-orchestrator-31/fix",
+			TargetBranch:             "main",
+			HeadSHA:                  "6273ce786a300757e2cdcf2f2d6ea59ea4435992",
+			Mergeability:             domain.MergeConflicting,
+			ProviderMergeable:        "CONFLICTING",
+			ProviderMergeStateStatus: "DIRTY",
+			UpdatedAt:                oldObservedAt,
+		},
+		{
+			URL:                      currentURL,
+			HTMLURL:                  currentURL,
+			SessionID:                "agent-orchestrator-31",
+			Number:                   2870,
+			Provider:                 "github",
+			Host:                     "github.com",
+			Repo:                     "Untrivial-ai/agent-orchestrator",
+			SourceBranch:             "ao/agent-orchestrator-31/fix",
+			TargetBranch:             "main",
+			HeadSHA:                  "b960b45af86951ff3770a8f51ae4d2fffcd4d22f",
+			Review:                   domain.ReviewRequired,
+			Mergeability:             domain.MergeBlocked,
+			ProviderMergeable:        "MERGEABLE",
+			ProviderMergeStateStatus: "BLOCKED",
+			UpdatedAt:                currentObservedAt,
+		},
+	}}
+
+	got, err := (&Service{store: stList}).ListPRSummaries(context.Background(), "agent-orchestrator-31")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("summaries = %d, want transferred aliases collapsed: %+v", len(got), got)
+	}
+	if got[0].URL != currentURL || got[0].Mergeability.State != domain.MergeBlocked || got[0].Review.Decision != domain.ReviewRequired {
+		t.Fatalf("summary = %+v, want current blocked/review-required observation", got[0])
+	}
+}
+
 func TestDeduplicatePRFactsKeepsSameNumberAcrossDifferentRepos(t *testing.T) {
 	now := time.Date(2026, 7, 31, 10, 0, 0, 0, time.UTC)
 	got := deduplicatePRFacts([]domain.PRFacts{
@@ -2841,6 +2895,66 @@ func TestDeduplicatePRFactsCollapsesTransferredRepoAliasesWithSameHead(t *testin
 	}
 	if got[0].URL != "https://github.com/Untrivial-ai/agent-orchestrator/pull/3193" || !got[0].ReviewComments {
 		t.Fatalf("merged facts = %+v, want newest URL and preserved comments", got[0])
+	}
+}
+
+func TestDeduplicatePRFactsTransferredRepoUsesCurrentObservationAcrossHeadChanges(t *testing.T) {
+	oldObservedAt := time.Date(2026, 7, 26, 16, 19, 15, 0, time.UTC)
+	currentObservedAt := time.Date(2026, 8, 13, 3, 8, 46, 0, time.UTC)
+	currentURL := "https://github.com/Untrivial-ai/agent-orchestrator/pull/2870"
+	got := deduplicatePRFacts([]domain.PRFacts{
+		{
+			URL:          "https://github.com/AgentWrapper/agent-orchestrator/pull/2870",
+			Number:       2870,
+			SourceBranch: "ao/agent-orchestrator-31/fix",
+			TargetBranch: "main",
+			HeadSHA:      "6273ce786a300757e2cdcf2f2d6ea59ea4435992",
+			Mergeability: domain.MergeConflicting,
+			UpdatedAt:    oldObservedAt,
+		},
+		{
+			URL:          currentURL,
+			Number:       2870,
+			SourceBranch: "ao/agent-orchestrator-31/fix",
+			TargetBranch: "main",
+			HeadSHA:      "b960b45af86951ff3770a8f51ae4d2fffcd4d22f",
+			Review:       domain.ReviewRequired,
+			Mergeability: domain.MergeBlocked,
+			UpdatedAt:    currentObservedAt,
+		},
+	})
+	if len(got) != 1 {
+		t.Fatalf("facts = %d, want transferred aliases collapsed: %+v", len(got), got)
+	}
+	if got[0].URL != currentURL || got[0].Mergeability != domain.MergeBlocked {
+		t.Fatalf("facts = %+v, want current non-conflicting observation", got[0])
+	}
+	if status := deriveSCMStatus(got); status != domain.StatusReviewPending {
+		t.Fatalf("SCM status = %q, want %q", status, domain.StatusReviewPending)
+	}
+}
+
+func TestDeduplicatePRFactsTransferredRepoPreservesCurrentConflict(t *testing.T) {
+	now := time.Date(2026, 8, 13, 3, 8, 46, 0, time.UTC)
+	currentURL := "https://github.com/Untrivial-ai/agent-orchestrator/pull/2870"
+	got := deduplicatePRFacts([]domain.PRFacts{
+		{
+			URL:          "https://github.com/AgentWrapper/agent-orchestrator/pull/2870",
+			Number:       2870,
+			HeadSHA:      "old-head",
+			Mergeability: domain.MergeBlocked,
+			UpdatedAt:    now.Add(-time.Hour),
+		},
+		{
+			URL:          currentURL,
+			Number:       2870,
+			HeadSHA:      "current-head",
+			Mergeability: domain.MergeConflicting,
+			UpdatedAt:    now,
+		},
+	})
+	if len(got) != 1 || got[0].URL != currentURL || got[0].Mergeability != domain.MergeConflicting {
+		t.Fatalf("facts = %+v, want the current authoritative conflict preserved", got)
 	}
 }
 
