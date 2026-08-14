@@ -29,7 +29,7 @@ type RunSummary = domain.WorkflowRun
 
 // Manager is the workflows surface the HTTP controller depends on.
 type Manager interface {
-	CreateRun(ctx context.Context, projectID, objective string) (workflowcore.RunDetail, error)
+	CreateRun(ctx context.Context, projectID, objective string, verification workflowcore.VerificationPlan) (workflowcore.RunDetail, error)
 	GetRun(ctx context.Context, runID string) (workflowcore.RunDetail, error)
 	ListRuns(ctx context.Context, filter ListFilter) ([]RunSummary, error)
 	CancelRun(ctx context.Context, runID string) (workflowcore.RunDetail, error)
@@ -54,8 +54,8 @@ func New(coordinator *workflowcore.Coordinator) *Service {
 }
 
 // CreateRun creates a new workflow run and seeds its initial steps.
-func (s *Service) CreateRun(ctx context.Context, projectID, objective string) (workflowcore.RunDetail, error) {
-	return s.coordinator.CreateRun(ctx, projectID, objective)
+func (s *Service) CreateRun(ctx context.Context, projectID, objective string, verification workflowcore.VerificationPlan) (workflowcore.RunDetail, error) {
+	return s.coordinator.CreateRun(ctx, projectID, objective, verification)
 }
 
 // GetRun returns one workflow run with its steps and attempts.

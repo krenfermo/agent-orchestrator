@@ -1160,5 +1160,13 @@
 	"shell.workflowsReviewer": "Revisor",
 	"shell.workflowsTarget": "Alvo",
 	"shell.workflowsVerdict": "Veredito",
-	"shell.workflowsFindings": "Achados"
+	"shell.workflowsFindings": "Achados",
+	"shell.workflowsCompletedVerified": "Concluído — implementação local verificada",
+	"shell.workflowsVerifyResult": "Resultado",
+	"shell.workflowsVerifyFingerprint": "Impressão digital",
+	"shell.workflowsVerifyFailure": "Falha",
+	"shell.workflowsVerifyPass": "PASSOU",
+	"shell.workflowsVerifyFail": "FALHOU",
+	"shell.workflowsVerifyExit": "saída {{code}}",
+	"shell.workflowsVerifyDuration": "{{duration}} ms"
 }

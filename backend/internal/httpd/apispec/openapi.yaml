@@ -6248,6 +6248,8 @@ components:
         objective:
           description: The workflow run's objective.
           type: string
+        verification:
+          $ref: '#/components/schemas/WorkflowVerificationPlan'
       required:
       - objective
       type: object
@@ -8585,6 +8587,13 @@ components:
           - ambiguous_worker_state
           - reviewer_launch_failed
           - fix_budget_exhausted
+          - verify_command_failed
+          - verify_timeout
+          - verify_environment_error
+          - verify_artifact_missing
+          - verify_artifact_mismatch
+          - verify_workspace_changed
+          - verify_ambiguous
           type: string
         finishedAt:
           format: date-time
@@ -8746,6 +8755,8 @@ components:
           - approved
           - changes_requested
           type: string
+        verification:
+          $ref: '#/components/schemas/WorkflowVerifyResult'
         worktreePath:
           type: string
       required:
@@ -8756,6 +8767,109 @@ components:
       - createdAt
       - updatedAt
       - attempts
+      type: object
+    WorkflowVerificationCommand:
+      properties:
+        args:
+          items:
+            type: string
+          type: array
+        command:
+          type: string
+        requiredExitCode:
+          type: integer
+        retrySafe:
+          type: boolean
+        timeoutSeconds:
+          type: integer
+        workingDirectory:
+          type: string
+      required:
+      - command
+      - requiredExitCode
+      - retrySafe
+      type: object
+    WorkflowVerificationFile:
+      properties:
+        exactContent:
+          type:
+          - "null"
+          - string
+        exists:
+          type: boolean
+        path:
+          type: string
+        sha256:
+          type: string
+      required:
+      - path
+      - exists
+      type: object
+    WorkflowVerificationPlan:
+      properties:
+        commands:
+          items:
+            $ref: '#/components/schemas/WorkflowVerificationCommand'
+          type: array
+        files:
+          items:
+            $ref: '#/components/schemas/WorkflowVerificationFile'
+          type: array
+      type: object
+    WorkflowVerifyCheckResult:
+      properties:
+        durationMs:
+          format: int64
+          type: integer
+        exitCode:
+          type:
+          - "null"
+          - integer
+        failureReason:
+          type: string
+        kind:
+          type: string
+        label:
+          type: string
+        passed:
+          type: boolean
+        stderrTail:
+          type: string
+        stdoutTail:
+          type: string
+      required:
+      - kind
+      - label
+      - passed
+      type: object
+    WorkflowVerifyResult:
+      properties:
+        checks:
+          items:
+            $ref: '#/components/schemas/WorkflowVerifyCheckResult'
+          type: array
+        errorClass:
+          type: string
+        passed:
+          type: boolean
+        postFingerprint:
+          type: string
+        preFingerprint:
+          type: string
+        reviewedFingerprint:
+          type: string
+        targetKey:
+          type: string
+        version:
+          type: string
+      required:
+      - version
+      - targetKey
+      - reviewedFingerprint
+      - preFingerprint
+      - postFingerprint
+      - checks
+      - passed
       type: object
     WorkspaceFileResponse:
       properties:

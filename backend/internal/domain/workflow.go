@@ -240,7 +240,14 @@ const (
 	// latest verdict was still changes_requested. Distinct from every prior
 	// value: none of them mean "ran out of retries" — the fix step's own work
 	// is not itself judged wrong, the loop simply exhausted its budget.
-	WorkflowErrorFixBudgetExhausted WorkflowErrorClass = "fix_budget_exhausted"
+	WorkflowErrorFixBudgetExhausted     WorkflowErrorClass = "fix_budget_exhausted"
+	WorkflowErrorVerifyCommandFailed    WorkflowErrorClass = "verify_command_failed"
+	WorkflowErrorVerifyTimeout          WorkflowErrorClass = "verify_timeout"
+	WorkflowErrorVerifyEnvironment      WorkflowErrorClass = "verify_environment_error"
+	WorkflowErrorVerifyArtifactMissing  WorkflowErrorClass = "verify_artifact_missing"
+	WorkflowErrorVerifyArtifactMismatch WorkflowErrorClass = "verify_artifact_mismatch"
+	WorkflowErrorVerifyWorkspaceChanged WorkflowErrorClass = "verify_workspace_changed"
+	WorkflowErrorVerifyAmbiguous        WorkflowErrorClass = "verify_ambiguous"
 )
 
 // Valid reports whether an error class is persistable. The empty value is
@@ -252,7 +259,11 @@ func (c WorkflowErrorClass) Valid() bool {
 		WorkflowErrorSessionCreateFailed, WorkflowErrorAgentStartFailed,
 		WorkflowErrorPromptDeliveryFailed, WorkflowErrorRuntimeFailed,
 		WorkflowErrorReviewerLaunchFailed, WorkflowErrorFixBudgetExhausted,
-		WorkflowErrorWorkerTerminatedUnexpectedly, WorkflowErrorAmbiguousWorkerState:
+		WorkflowErrorWorkerTerminatedUnexpectedly, WorkflowErrorAmbiguousWorkerState,
+		WorkflowErrorVerifyCommandFailed, WorkflowErrorVerifyTimeout,
+		WorkflowErrorVerifyEnvironment, WorkflowErrorVerifyArtifactMissing,
+		WorkflowErrorVerifyArtifactMismatch, WorkflowErrorVerifyWorkspaceChanged,
+		WorkflowErrorVerifyAmbiguous:
 		return true
 	default:
 		return false

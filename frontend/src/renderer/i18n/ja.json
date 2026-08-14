@@ -1145,5 +1145,13 @@
 	"shell.workflowsReviewer": "レビュアー",
 	"shell.workflowsTarget": "対象",
 	"shell.workflowsVerdict": "判定",
-	"shell.workflowsFindings": "所見"
+	"shell.workflowsFindings": "所見",
+	"shell.workflowsCompletedVerified": "完了 — ローカル実装を検証済み",
+	"shell.workflowsVerifyResult": "結果",
+	"shell.workflowsVerifyFingerprint": "フィンガープリント",
+	"shell.workflowsVerifyFailure": "失敗",
+	"shell.workflowsVerifyPass": "成功",
+	"shell.workflowsVerifyFail": "失敗",
+	"shell.workflowsVerifyExit": "終了 {{code}}",
+	"shell.workflowsVerifyDuration": "{{duration}} ms"
 }

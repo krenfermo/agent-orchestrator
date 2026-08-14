@@ -45,16 +45,10 @@ func BuildReviewPrompt(in ReviewPromptInput) string {
 		criteria = "- (none recorded)\n"
 	}
 
-	commitNote := "The worker was instructed not to commit, so most likely the change is " +
-		"still uncommitted in the worktree (dirty/staged/untracked files) and HEAD may be " +
-		"unchanged from the base commit. That is expected and not itself a problem."
-	if in.HeadSHA != "" && in.HeadSHA != in.BaseSHA {
-		commitNote = fmt.Sprintf(
-			"A commit did land on this branch (HEAD moved from %s to %s). As a secondary check, "+
-				"also run `git diff %s..%s` to see the committed diff, in addition to `git status`/"+
-				"`git diff` for any further uncommitted changes on top of it.",
-			in.BaseSHA, in.HeadSHA, in.BaseSHA, in.HeadSHA)
-	}
+	commitNote := "The reviewed target above is AO's content-aware SHA-256 workspace " +
+		"fingerprint, not a Git object id or a claim that a commit landed. The worker was " +
+		"instructed not to commit, so dirty/staged/untracked changes with Git HEAD still at " +
+		"the base commit are expected and are not themselves a review problem."
 
 	return fmt.Sprintf(`You are the automatic reviewer for one step of an AO-managed workflow run.
 
@@ -66,7 +60,7 @@ Worker session under review: %s
 Branch: %s
 Worktree path (already your current checkout — do not clone or fetch elsewhere): %s
 Base commit: %s
-Head commit: %s
+Reviewed workspace fingerprint: %s
 
 %s
 

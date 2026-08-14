@@ -1,6 +1,7 @@
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import { useWorkflowRun, workflowRunIsTerminal } from "../hooks/useWorkflowRun";
+import { WorkflowVerifyDetails } from "../components/workflow-verify-details";
 
 export const Route = createFileRoute("/_shell/workflows/$workflowId")({
 	component: WorkflowRunRoute,
@@ -44,6 +45,11 @@ function WorkflowRunRoute() {
 
 	return (
 		<div className="mx-auto flex max-w-2xl flex-col gap-6 p-6">
+			{workflow.run.state === "completed" && (
+				<div className="rounded-lg border border-green-500/40 bg-green-500/10 p-3 text-sm font-medium text-green-700 dark:text-green-300">
+					{t("shell.workflowsCompletedVerified")}
+				</div>
+			)}
 			<div className="flex flex-col gap-1">
 				<h1 className="text-lg font-semibold">{workflow.run.objective}</h1>
 				<p className="text-sm text-muted-foreground">
@@ -176,6 +182,7 @@ function WorkflowRunRoute() {
 								)}
 							</dl>
 						)}
+						{step.kind === "verify" && step.verification && <WorkflowVerifyDetails result={step.verification} />}
 						{step.attempts.length > 0 && (
 							<ul className="mt-2 flex flex-col gap-1 border-t border-border pt-2">
 								{step.attempts.map((attempt) => (

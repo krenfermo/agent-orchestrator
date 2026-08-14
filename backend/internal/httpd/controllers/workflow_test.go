@@ -18,9 +18,10 @@ import (
 )
 
 type fakeWorkflowService struct {
-	createdProjectID string
-	createdObjective string
-	createErr        error
+	createdProjectID    string
+	createdObjective    string
+	createdVerification workflowcore.VerificationPlan
+	createErr           error
 
 	getRunID string
 	getErr   error
@@ -43,9 +44,10 @@ type fakeWorkflowService struct {
 	runs   []domain.WorkflowRun
 }
 
-func (f *fakeWorkflowService) CreateRun(_ context.Context, projectID, objective string) (workflowcore.RunDetail, error) {
+func (f *fakeWorkflowService) CreateRun(_ context.Context, projectID, objective string, verification workflowcore.VerificationPlan) (workflowcore.RunDetail, error) {
 	f.createdProjectID = projectID
 	f.createdObjective = objective
+	f.createdVerification = verification
 	if f.createErr != nil {
 		return workflowcore.RunDetail{}, f.createErr
 	}
@@ -127,6 +129,21 @@ func TestWorkflowCreateRun(t *testing.T) {
 	}
 	if svc.createdProjectID != "proj-1" || svc.createdObjective != "ship the thing" {
 		t.Fatalf("forwarded projectID=%q objective=%q", svc.createdProjectID, svc.createdObjective)
+	}
+}
+
+func TestWorkflowCreateRunForwardsStructuredVerification(t *testing.T) {
+	svc := &fakeWorkflowService{}
+	srv := newWorkflowTestServer(t, svc)
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/projects/proj-1/workflows", `{"objective":"ship","verification":{"commands":[{"command":"go","args":["test","./..."],"timeoutSeconds":60,"requiredExitCode":0,"retrySafe":true}],"files":[{"path":"result.txt","exists":true}]}}`)
+	if status != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	if len(svc.createdVerification.Commands) != 1 || svc.createdVerification.Commands[0].Command != "go" || !svc.createdVerification.Commands[0].RetrySafe {
+		t.Fatalf("commands=%+v", svc.createdVerification.Commands)
+	}
+	if len(svc.createdVerification.Files) != 1 || svc.createdVerification.Files[0].Path != "result.txt" {
+		t.Fatalf("files=%+v", svc.createdVerification.Files)
 	}
 }
 

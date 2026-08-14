@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -33,7 +34,27 @@ type ListWorkflowsQuery struct {
 
 // CreateWorkflowRunRequest is the body of POST /api/v1/projects/{projectId}/workflows.
 type CreateWorkflowRunRequest struct {
-	Objective string `json:"objective" description:"The workflow run's objective."`
+	Objective    string                   `json:"objective" description:"The workflow run's objective."`
+	Verification WorkflowVerificationPlan `json:"verification,omitempty"`
+}
+
+type WorkflowVerificationPlan struct {
+	Commands []WorkflowVerificationCommand `json:"commands,omitempty"`
+	Files    []WorkflowVerificationFile    `json:"files,omitempty"`
+}
+type WorkflowVerificationCommand struct {
+	Command          string   `json:"command"`
+	Args             []string `json:"args,omitempty"`
+	WorkingDirectory string   `json:"workingDirectory,omitempty"`
+	TimeoutSeconds   int      `json:"timeoutSeconds,omitempty"`
+	RequiredExitCode int      `json:"requiredExitCode"`
+	RetrySafe        bool     `json:"retrySafe"`
+}
+type WorkflowVerificationFile struct {
+	Path         string  `json:"path"`
+	Exists       bool    `json:"exists"`
+	ExactContent *string `json:"exactContent,omitempty"`
+	SHA256       string  `json:"sha256,omitempty"`
 }
 
 // WorkflowAttemptView is one execution attempt of a workflow step.
@@ -45,7 +66,7 @@ type WorkflowAttemptView struct {
 	StartedAt     time.Time                     `json:"startedAt"`
 	FinishedAt    *time.Time                    `json:"finishedAt,omitempty"`
 	Outcome       domain.WorkflowAttemptOutcome `json:"outcome,omitempty" enum:"succeeded,failed,cancelled"`
-	ErrorClass    domain.WorkflowErrorClass     `json:"errorClass,omitempty" enum:"rate_limited,auth,transient,tool,test_failed,review_changes_requested,session_create_failed,agent_start_failed,prompt_delivery_failed,runtime_failed,worker_terminated_unexpectedly,ambiguous_worker_state,reviewer_launch_failed,fix_budget_exhausted"`
+	ErrorClass    domain.WorkflowErrorClass     `json:"errorClass,omitempty" enum:"rate_limited,auth,transient,tool,test_failed,review_changes_requested,session_create_failed,agent_start_failed,prompt_delivery_failed,runtime_failed,worker_terminated_unexpectedly,ambiguous_worker_state,reviewer_launch_failed,fix_budget_exhausted,verify_command_failed,verify_timeout,verify_environment_error,verify_artifact_missing,verify_artifact_mismatch,verify_workspace_changed,verify_ambiguous"`
 	RetryAfter    *time.Time                    `json:"retryAfter,omitempty"`
 }
 
@@ -74,10 +95,11 @@ type WorkflowStepView struct {
 	// step's live review_run facts (Checkpoint 8C), fetched at read time —
 	// never persisted into workflow_checkpoints beyond the review_run_id
 	// reference itself.
-	Reviewer        string `json:"reviewer,omitempty"`
-	Verdict         string `json:"verdict,omitempty" enum:",approved,changes_requested"`
-	Target          string `json:"target,omitempty"`
-	FindingsSummary string `json:"findingsSummary,omitempty"`
+	Reviewer        string                     `json:"reviewer,omitempty"`
+	Verdict         string                     `json:"verdict,omitempty" enum:",approved,changes_requested"`
+	Target          string                     `json:"target,omitempty"`
+	FindingsSummary string                     `json:"findingsSummary,omitempty"`
+	Verification    *workflowcore.VerifyResult `json:"verification,omitempty"`
 }
 
 // WorkflowRunView is a workflow run summary (no step/attempt fan-out).
@@ -156,11 +178,18 @@ func workflowRunDetailView(detail workflowcore.RunDetail) WorkflowRunDetailView 
 			})
 		}
 		var branch, worktreePath, headSHA, nextAction string
+		var verification *workflowcore.VerifyResult
 		if sd.LatestCheckpoint != nil {
 			branch = sd.LatestCheckpoint.Branch
 			worktreePath = sd.LatestCheckpoint.WorktreePath
 			headSHA = sd.LatestCheckpoint.HeadSHA
 			nextAction = sd.LatestCheckpoint.NextAction
+			if step.Kind == domain.WorkflowStepVerify && sd.LatestCheckpoint.DurablePhase == "verify_result" {
+				var result workflowcore.VerifyResult
+				if json.Unmarshal([]byte(sd.LatestCheckpoint.RetryState), &result) == nil {
+					verification = &result
+				}
+			}
 		}
 		var reviewer, verdict, target, findings string
 		if sd.Review != nil {
@@ -190,6 +219,7 @@ func workflowRunDetailView(detail workflowcore.RunDetail) WorkflowRunDetailView 
 			Verdict:         verdict,
 			Target:          target,
 			FindingsSummary: findings,
+			Verification:    verification,
 		})
 	}
 	return WorkflowRunDetailView{Run: workflowRunView(detail.Run, detail.NextAction), Steps: steps}
@@ -221,7 +251,14 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
 		return
 	}
-	detail, err := c.Svc.CreateRun(r.Context(), projectID, strings.TrimSpace(in.Objective))
+	verification := workflowcore.VerificationPlan{}
+	for _, check := range in.Verification.Commands {
+		verification.Commands = append(verification.Commands, workflowcore.VerificationCommandCheck{Command: check.Command, Args: check.Args, WorkingDirectory: check.WorkingDirectory, TimeoutSeconds: check.TimeoutSeconds, RequiredExitCode: check.RequiredExitCode, RetrySafe: check.RetrySafe})
+	}
+	for _, check := range in.Verification.Files {
+		verification.Files = append(verification.Files, workflowcore.VerificationFileCheck{Path: check.Path, Exists: check.Exists, ExactContent: check.ExactContent, SHA256: check.SHA256})
+	}
+	detail, err := c.Svc.CreateRun(r.Context(), projectID, strings.TrimSpace(in.Objective), verification)
 	if err != nil {
 		writeWorkflowError(w, r, err)
 		return

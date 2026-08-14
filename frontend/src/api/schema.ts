@@ -2137,6 +2137,7 @@ export interface components {
         CreateWorkflowRunRequest: {
             /** @description The workflow run's objective. */
             objective: string;
+            verification?: components["schemas"]["WorkflowVerificationPlan"];
         };
         DegradedProject: {
             id: string;
@@ -3022,7 +3023,7 @@ export interface components {
             /** Format: int64 */
             attemptNumber: number;
             /** @enum {string} */
-            errorClass?: "rate_limited" | "auth" | "transient" | "tool" | "test_failed" | "review_changes_requested" | "session_create_failed" | "agent_start_failed" | "prompt_delivery_failed" | "runtime_failed" | "worker_terminated_unexpectedly" | "ambiguous_worker_state" | "reviewer_launch_failed" | "fix_budget_exhausted";
+            errorClass?: "rate_limited" | "auth" | "transient" | "tool" | "test_failed" | "review_changes_requested" | "session_create_failed" | "agent_start_failed" | "prompt_delivery_failed" | "runtime_failed" | "worker_terminated_unexpectedly" | "ambiguous_worker_state" | "reviewer_launch_failed" | "fix_budget_exhausted" | "verify_command_failed" | "verify_timeout" | "verify_environment_error" | "verify_artifact_missing" | "verify_artifact_mismatch" | "verify_workspace_changed" | "verify_ambiguous";
             /** Format: date-time */
             finishedAt?: null | string;
             harness?: string;
@@ -3085,7 +3086,47 @@ export interface components {
             updatedAt: string;
             /** @enum {string} */
             verdict?: "" | "approved" | "changes_requested";
+            verification?: components["schemas"]["WorkflowVerifyResult"];
             worktreePath?: string;
+        };
+        WorkflowVerificationCommand: {
+            args?: string[];
+            command: string;
+            requiredExitCode: number;
+            retrySafe: boolean;
+            timeoutSeconds?: number;
+            workingDirectory?: string;
+        };
+        WorkflowVerificationFile: {
+            exactContent?: null | string;
+            exists: boolean;
+            path: string;
+            sha256?: string;
+        };
+        WorkflowVerificationPlan: {
+            commands?: components["schemas"]["WorkflowVerificationCommand"][];
+            files?: components["schemas"]["WorkflowVerificationFile"][];
+        };
+        WorkflowVerifyCheckResult: {
+            /** Format: int64 */
+            durationMs?: number;
+            exitCode?: null | number;
+            failureReason?: string;
+            kind: string;
+            label: string;
+            passed: boolean;
+            stderrTail?: string;
+            stdoutTail?: string;
+        };
+        WorkflowVerifyResult: {
+            checks: components["schemas"]["WorkflowVerifyCheckResult"][];
+            errorClass?: string;
+            passed: boolean;
+            postFingerprint: string;
+            preFingerprint: string;
+            reviewedFingerprint: string;
+            targetKey: string;
+            version: string;
         };
         WorkspaceFileResponse: {
             additions: number;

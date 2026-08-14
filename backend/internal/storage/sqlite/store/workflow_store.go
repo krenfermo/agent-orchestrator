@@ -43,6 +43,10 @@ func (s *Store) CreateWorkflowRun(
 		}
 		insertedRun = workflowRunFromRow(row)
 		for _, step := range steps {
+			artifactJSON := step.ArtifactJSON
+			if artifactJSON == "" {
+				artifactJSON = "{}"
+			}
 			stepRow, err := q.InsertWorkflowStep(ctx, gen.InsertWorkflowStepParams{
 				ID:              step.ID,
 				WorkflowRunID:   step.WorkflowRunID,
@@ -52,6 +56,7 @@ func (s *Store) CreateWorkflowRun(
 				State:           step.State,
 				CreatedAt:       step.CreatedAt,
 				UpdatedAt:       step.UpdatedAt,
+				ArtifactJson:    artifactJSON,
 			})
 			if err != nil {
 				return fmt.Errorf("insert workflow step %d: %w", step.Ordinal, err)

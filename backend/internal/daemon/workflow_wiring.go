@@ -31,6 +31,7 @@ func startWorkflows(store *sqlite.Store, sessionMgr *sessionmanager.Manager, wor
 		WorkspaceFacts:   workspace,
 		ReviewerLauncher: reviewerLauncher,
 		MessageSender:    sessionMgr,
+		Verifier:         workflowVerifyRunner{},
 		Logger:           log,
 	})
 	return coordinator, workflowsvc.New(coordinator)

@@ -384,7 +384,7 @@ INSERT INTO workflow_steps (
     id, workflow_run_id, kind, ordinal, depends_on_step_id, state,
     assigned_harness, session_id, review_run_id, expected_artifacts_version,
     created_at, updated_at, completed_at, artifact_json
-) VALUES (?, ?, ?, ?, ?, ?, '', NULL, NULL, '', ?, ?, NULL, '{}')
+) VALUES (?, ?, ?, ?, ?, ?, '', NULL, NULL, '', ?, ?, NULL, ?)
 RETURNING id, workflow_run_id, kind, ordinal, depends_on_step_id, state,
           assigned_harness, session_id, review_run_id, expected_artifacts_version,
           created_at, updated_at, completed_at, artifact_json
@@ -399,6 +399,7 @@ type InsertWorkflowStepParams struct {
 	State           domain.WorkflowStepState
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+	ArtifactJson    string
 }
 
 func (q *Queries) InsertWorkflowStep(ctx context.Context, arg InsertWorkflowStepParams) (WorkflowStep, error) {
@@ -411,6 +412,7 @@ func (q *Queries) InsertWorkflowStep(ctx context.Context, arg InsertWorkflowStep
 		arg.State,
 		arg.CreatedAt,
 		arg.UpdatedAt,
+		arg.ArtifactJson,
 	)
 	var i WorkflowStep
 	err := row.Scan(

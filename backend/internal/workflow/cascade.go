@@ -31,7 +31,7 @@ import (
 // already-reviewed-fingerprint guard) make this equally safe against the 2s
 // poll interval re-triggering dispatch redundantly.
 func (c *Coordinator) advanceReviewFixCycle(ctx stdctx.Context, run domain.WorkflowRun, steps []domain.WorkflowStep, includeCycle1Unblock bool) (domain.WorkflowRun, error) {
-	var workStep, reviewStep, fixStep *domain.WorkflowStep
+	var workStep, reviewStep, fixStep, verifyStep *domain.WorkflowStep
 	for i := range steps {
 		switch steps[i].Kind {
 		case domain.WorkflowStepWork:
@@ -40,6 +40,8 @@ func (c *Coordinator) advanceReviewFixCycle(ctx stdctx.Context, run domain.Workf
 			reviewStep = &steps[i]
 		case domain.WorkflowStepFix:
 			fixStep = &steps[i]
+		case domain.WorkflowStepVerify:
+			verifyStep = &steps[i]
 		}
 	}
 	if workStep == nil || reviewStep == nil || fixStep == nil {
@@ -111,6 +113,16 @@ func (c *Coordinator) advanceReviewFixCycle(ctx stdctx.Context, run domain.Workf
 		if err := refreshRun(); err != nil {
 			return run, err
 		}
+	}
+
+	// 5. An approved review is not completion. Execute the structured local
+	// verification target automatically and complete the run only from facts.
+	if !run.State.Terminal() && verifyStep != nil && reviewStep.State == domain.WorkflowStepCompleted {
+		updatedRun, updatedStep, err := c.maybeVerify(ctx, run, *workStep, *reviewStep, *verifyStep)
+		if err != nil {
+			return run, err
+		}
+		run, *verifyStep = updatedRun, updatedStep
 	}
 
 	return run, nil

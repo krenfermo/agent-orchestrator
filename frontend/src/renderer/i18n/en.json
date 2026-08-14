@@ -1127,5 +1127,13 @@
 	"shell.workflowsReviewer": "Reviewer",
 	"shell.workflowsTarget": "Target",
 	"shell.workflowsVerdict": "Verdict",
-	"shell.workflowsFindings": "Findings"
+	"shell.workflowsFindings": "Findings",
+	"shell.workflowsCompletedVerified": "Completed — local implementation verified",
+	"shell.workflowsVerifyResult": "Result",
+	"shell.workflowsVerifyFingerprint": "Fingerprint",
+	"shell.workflowsVerifyFailure": "Failure",
+	"shell.workflowsVerifyPass": "PASS",
+	"shell.workflowsVerifyFail": "FAIL",
+	"shell.workflowsVerifyExit": "exit {{code}}",
+	"shell.workflowsVerifyDuration": "{{duration}} ms"
 }

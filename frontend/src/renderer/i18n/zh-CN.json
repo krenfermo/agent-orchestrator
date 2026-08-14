@@ -1127,5 +1127,13 @@
 	"shell.workflowsReviewer": "审查者",
 	"shell.workflowsTarget": "目标",
 	"shell.workflowsVerdict": "结论",
-	"shell.workflowsFindings": "发现"
+	"shell.workflowsFindings": "发现",
+	"shell.workflowsCompletedVerified": "已完成 — 本地实现已验证",
+	"shell.workflowsVerifyResult": "结果",
+	"shell.workflowsVerifyFingerprint": "指纹",
+	"shell.workflowsVerifyFailure": "失败",
+	"shell.workflowsVerifyPass": "通过",
+	"shell.workflowsVerifyFail": "失败",
+	"shell.workflowsVerifyExit": "退出 {{code}}",
+	"shell.workflowsVerifyDuration": "{{duration}} 毫秒"
 }

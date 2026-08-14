@@ -112,6 +112,7 @@ type Deps struct {
 	// delivering fix findings to the SAME worker session, never a new Spawn.
 	// Optional: a nil MessageSender means dispatchFixStep is a no-op.
 	MessageSender MessageSender
+	Verifier      VerifyRunner
 
 	// Clock and NewID are injectable for deterministic tests.
 	Clock func() time.Time
@@ -142,6 +143,7 @@ type Coordinator struct {
 
 	// messageSender backs Checkpoint 8D's fix-step dispatch. Optional.
 	messageSender MessageSender
+	verifier      VerifyRunner
 }
 
 // New wires a Coordinator from its dependencies, defaulting the clock and id source.
@@ -165,6 +167,7 @@ func New(d Deps) *Coordinator {
 		workspaceFacts:   d.WorkspaceFacts,
 		reviewerLauncher: d.ReviewerLauncher,
 		messageSender:    d.MessageSender,
+		verifier:         d.Verifier,
 		clock:            clock,
 		newID:            newID,
 	}
@@ -213,7 +216,7 @@ const reviewFindingsSummaryMaxLen = 500
 // except the first, which starts ready since nothing blocks it — no
 // automatic execution happens; a future checkpoint decides when to actually
 // run it.
-func (c *Coordinator) CreateRun(ctx stdctx.Context, projectID, objective string) (RunDetail, error) {
+func (c *Coordinator) CreateRun(ctx stdctx.Context, projectID, objective string, verification ...VerificationPlan) (RunDetail, error) {
 	if projectID == "" {
 		return RunDetail{}, fmt.Errorf("%w: project id is required", ErrInvalid)
 	}
@@ -246,6 +249,11 @@ func (c *Coordinator) CreateRun(ctx stdctx.Context, projectID, objective string)
 	}
 
 	steps := make([]domain.WorkflowStep, 0, len(workflowStepPolicyV1))
+	planArtifact := BuildPlanArtifact(projectID, objective, policyVersionV1, verification...)
+	planArtifactJSON, err := MarshalPlanArtifact(planArtifact)
+	if err != nil {
+		return RunDetail{}, err
+	}
 	var prevID *string
 	for i, kind := range workflowStepPolicyV1 {
 		state := domain.WorkflowStepPending
@@ -263,6 +271,9 @@ func (c *Coordinator) CreateRun(ctx stdctx.Context, projectID, objective string)
 			CreatedAt:       now,
 			UpdatedAt:       now,
 		})
+		if kind == domain.WorkflowStepPlan {
+			steps[len(steps)-1].ArtifactJSON = planArtifactJSON
+		}
 		id := stepID
 		prevID = &id
 	}
@@ -409,7 +420,13 @@ func (c *Coordinator) StartRun(ctx stdctx.Context, runID string) (RunDetail, err
 		return RunDetail{}, fmt.Errorf("%w: workflow run %q is missing its plan/work step", ErrInvalid, runID)
 	}
 
-	artifact := BuildPlanArtifact(run.ProjectID, run.Objective, run.PolicyVersion)
+	artifact, err := UnmarshalPlanArtifact(planStep.ArtifactJSON)
+	if err != nil {
+		return RunDetail{}, err
+	}
+	if artifact.Objective == "" {
+		artifact = BuildPlanArtifact(run.ProjectID, run.Objective, run.PolicyVersion)
+	}
 	artifactJSON, err := MarshalPlanArtifact(artifact)
 	if err != nil {
 		return RunDetail{}, err

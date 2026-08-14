@@ -1160,5 +1160,13 @@
 	"shell.workflowsReviewer": "Relecteur",
 	"shell.workflowsTarget": "Cible",
 	"shell.workflowsVerdict": "Verdict",
-	"shell.workflowsFindings": "Constats"
+	"shell.workflowsFindings": "Constats",
+	"shell.workflowsCompletedVerified": "Terminé — implémentation locale vérifiée",
+	"shell.workflowsVerifyResult": "Résultat",
+	"shell.workflowsVerifyFingerprint": "Empreinte",
+	"shell.workflowsVerifyFailure": "Échec",
+	"shell.workflowsVerifyPass": "RÉUSSI",
+	"shell.workflowsVerifyFail": "ÉCHEC",
+	"shell.workflowsVerifyExit": "sortie {{code}}",
+	"shell.workflowsVerifyDuration": "{{duration}} ms"
 }

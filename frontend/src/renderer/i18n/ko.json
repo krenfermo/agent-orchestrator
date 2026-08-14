@@ -1145,5 +1145,13 @@
 	"shell.workflowsReviewer": "리뷰어",
 	"shell.workflowsTarget": "대상",
 	"shell.workflowsVerdict": "판정",
-	"shell.workflowsFindings": "검토 결과"
+	"shell.workflowsFindings": "검토 결과",
+	"shell.workflowsCompletedVerified": "완료 — 로컬 구현 검증됨",
+	"shell.workflowsVerifyResult": "결과",
+	"shell.workflowsVerifyFingerprint": "지문",
+	"shell.workflowsVerifyFailure": "실패",
+	"shell.workflowsVerifyPass": "통과",
+	"shell.workflowsVerifyFail": "실패",
+	"shell.workflowsVerifyExit": "종료 {{code}}",
+	"shell.workflowsVerifyDuration": "{{duration}} ms"
 }

@@ -11,17 +11,39 @@ import (
 // it is a pure template expansion, not a call to any LLM/planner service —
 // Checkpoint 8B's plan step does no IO beyond persisting this JSON.
 type PlanArtifact struct {
-	Objective          string   `json:"objective"`
-	TaskPrompt         string   `json:"taskPrompt"`
-	AcceptanceCriteria []string `json:"acceptanceCriteria"`
-	ProjectID          string   `json:"projectId"`
-	PolicyVersion      string   `json:"policyVersion"`
+	Objective          string           `json:"objective"`
+	TaskPrompt         string           `json:"taskPrompt"`
+	AcceptanceCriteria []string         `json:"acceptanceCriteria"`
+	ProjectID          string           `json:"projectId"`
+	PolicyVersion      string           `json:"policyVersion"`
+	Verification       VerificationPlan `json:"verification"`
+}
+
+type VerificationPlan struct {
+	Commands []VerificationCommandCheck `json:"commands,omitempty"`
+	Files    []VerificationFileCheck    `json:"files,omitempty"`
+}
+
+type VerificationCommandCheck struct {
+	Command          string   `json:"command"`
+	Args             []string `json:"args,omitempty"`
+	WorkingDirectory string   `json:"workingDirectory,omitempty"`
+	TimeoutSeconds   int      `json:"timeoutSeconds,omitempty"`
+	RequiredExitCode int      `json:"requiredExitCode"`
+	RetrySafe        bool     `json:"retrySafe"`
+}
+
+type VerificationFileCheck struct {
+	Path         string  `json:"path"`
+	Exists       bool    `json:"exists"`
+	ExactContent *string `json:"exactContent,omitempty"`
+	SHA256       string  `json:"sha256,omitempty"`
 }
 
 // BuildPlanArtifact deterministically derives a PlanArtifact from a run's
 // objective. No IO, no randomness, no model call: same inputs always produce
 // the same artifact.
-func BuildPlanArtifact(projectID, objective, policyVersion string) PlanArtifact {
+func BuildPlanArtifact(projectID, objective, policyVersion string, verification ...VerificationPlan) PlanArtifact {
 	artifact := PlanArtifact{
 		Objective: objective,
 		AcceptanceCriteria: []string{
@@ -31,6 +53,9 @@ func BuildPlanArtifact(projectID, objective, policyVersion string) PlanArtifact 
 		},
 		ProjectID:     projectID,
 		PolicyVersion: policyVersion,
+	}
+	if len(verification) > 0 {
+		artifact.Verification = verification[0]
 	}
 	artifact.TaskPrompt = BuildWorkStepPrompt(artifact)
 	return artifact
