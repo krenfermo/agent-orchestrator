@@ -208,6 +208,119 @@ func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessi
 	return i, err
 }
 
+const getSessionByProjectAndIssueID = `-- name: GetSessionByProjectAndIssueID :one
+SELECT id, project_id, num, issue_id, kind, harness,
+    activity_state, activity_last_at, is_terminated, branch, workspace_path,
+    runtime_handle_id, agent_session_id, prompt,
+    created_at, updated_at, display_name, first_signal_at, preview_url,
+    preview_revision, cleanup_generation, runtime_launch_id,
+    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
+    reviewer_harness, is_pinned, pinned_at,
+    session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
+    latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled
+FROM sessions WHERE project_id = ? AND issue_id = ? ORDER BY created_at DESC, num DESC LIMIT 1
+`
+
+type GetSessionByProjectAndIssueIDParams struct {
+	ProjectID domain.ProjectID
+	IssueID   domain.IssueID
+}
+
+type GetSessionByProjectAndIssueIDRow struct {
+	ID                        domain.SessionID
+	ProjectID                 domain.ProjectID
+	Num                       int64
+	IssueID                   domain.IssueID
+	Kind                      domain.SessionKind
+	Harness                   domain.AgentHarness
+	ActivityState             domain.ActivityState
+	ActivityLastAt            time.Time
+	IsTerminated              bool
+	Branch                    string
+	WorkspacePath             string
+	RuntimeHandleID           string
+	AgentSessionID            string
+	Prompt                    string
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
+	DisplayName               string
+	FirstSignalAt             sql.NullTime
+	PreviewURL                string
+	PreviewRevision           int64
+	CleanupGeneration         int64
+	RuntimeLaunchID           string
+	WorkspaceRepoPath         string
+	TerminateOnPRMerge        bool
+	DiffBaseSha               string
+	DiffBaseRef               string
+	ReviewerHarness           domain.ReviewerHarness
+	IsPinned                  bool
+	PinnedAt                  sql.NullTime
+	SessionMode               domain.SessionMode
+	ProviderConversationID    string
+	ControllerGeneration      string
+	BrowserCapabilityVerifier string
+	LatestUserPrompt          string
+	LatestAssistantUpdate     string
+	NativeTranscriptPath      string
+	AutoInjectReview          bool
+	AutoInjectCI              bool
+	AutoReviewEnabled         bool
+}
+
+// Workflow (Checkpoint 8B) uses issue_id as a durable natural key to find a
+// session it may already have spawned for one workflow step, independent of
+// whether the workflow's own bookkeeping (step.session_id / checkpoint) made
+// it to disk. Most-recently-created wins if more than one session somehow
+// shares the key (should not happen in practice, since issue_id embeds the
+// unique workflow step id).
+func (q *Queries) GetSessionByProjectAndIssueID(ctx context.Context, arg GetSessionByProjectAndIssueIDParams) (GetSessionByProjectAndIssueIDRow, error) {
+	row := q.db.QueryRowContext(ctx, getSessionByProjectAndIssueID, arg.ProjectID, arg.IssueID)
+	var i GetSessionByProjectAndIssueIDRow
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.Num,
+		&i.IssueID,
+		&i.Kind,
+		&i.Harness,
+		&i.ActivityState,
+		&i.ActivityLastAt,
+		&i.IsTerminated,
+		&i.Branch,
+		&i.WorkspacePath,
+		&i.RuntimeHandleID,
+		&i.AgentSessionID,
+		&i.Prompt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DisplayName,
+		&i.FirstSignalAt,
+		&i.PreviewURL,
+		&i.PreviewRevision,
+		&i.CleanupGeneration,
+		&i.RuntimeLaunchID,
+		&i.WorkspaceRepoPath,
+		&i.TerminateOnPRMerge,
+		&i.DiffBaseSha,
+		&i.DiffBaseRef,
+		&i.ReviewerHarness,
+		&i.IsPinned,
+		&i.PinnedAt,
+		&i.SessionMode,
+		&i.ProviderConversationID,
+		&i.ControllerGeneration,
+		&i.BrowserCapabilityVerifier,
+		&i.LatestUserPrompt,
+		&i.LatestAssistantUpdate,
+		&i.NativeTranscriptPath,
+		&i.AutoInjectReview,
+		&i.AutoInjectCI,
+		&i.AutoReviewEnabled,
+	)
+	return i, err
+}
+
 const insertSession = `-- name: InsertSession :exec
 INSERT INTO sessions (
     id, project_id, num, issue_id, kind, harness, reviewer_harness, auto_review_enabled, display_name,

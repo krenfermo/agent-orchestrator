@@ -586,6 +586,7 @@ type WorkflowStep struct {
 	CreatedAt                time.Time
 	UpdatedAt                time.Time
 	CompletedAt              sql.NullTime
+	ArtifactJson             string
 }
 
 type WorkspaceRepo struct {

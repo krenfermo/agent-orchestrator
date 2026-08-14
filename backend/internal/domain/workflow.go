@@ -206,6 +206,25 @@ const (
 	WorkflowErrorTestFailed WorkflowErrorClass = "test_failed"
 	// WorkflowErrorReviewChangesRequested means a review pass requested changes.
 	WorkflowErrorReviewChangesRequested WorkflowErrorClass = "review_changes_requested"
+	// WorkflowErrorSessionCreateFailed means Spawn failed before or at session
+	// row creation (Checkpoint 8B).
+	WorkflowErrorSessionCreateFailed WorkflowErrorClass = "session_create_failed"
+	// WorkflowErrorAgentStartFailed means the session row was created but the
+	// agent process failed to launch (Checkpoint 8B).
+	WorkflowErrorAgentStartFailed WorkflowErrorClass = "agent_start_failed"
+	// WorkflowErrorPromptDeliveryFailed means the initial task prompt failed to
+	// deliver to the spawned worker (Checkpoint 8B).
+	WorkflowErrorPromptDeliveryFailed WorkflowErrorClass = "prompt_delivery_failed"
+	// WorkflowErrorRuntimeFailed means the underlying terminal/runtime failed
+	// independent of the agent process itself (Checkpoint 8B).
+	WorkflowErrorRuntimeFailed WorkflowErrorClass = "runtime_failed"
+	// WorkflowErrorWorkerTerminatedUnexpectedly means the worker session ended
+	// with no evidence of committed work (Checkpoint 8B).
+	WorkflowErrorWorkerTerminatedUnexpectedly WorkflowErrorClass = "worker_terminated_unexpectedly"
+	// WorkflowErrorAmbiguousWorkerState means AO could not durably prove
+	// whether a dispatch/worker attempt succeeded or failed, so it surfaces the
+	// ambiguity rather than guessing (Checkpoint 8B; "nunca asumir éxito").
+	WorkflowErrorAmbiguousWorkerState WorkflowErrorClass = "ambiguous_worker_state"
 )
 
 // Valid reports whether an error class is persistable. The empty value is
@@ -213,7 +232,10 @@ const (
 func (c WorkflowErrorClass) Valid() bool {
 	switch c {
 	case "", WorkflowErrorRateLimited, WorkflowErrorAuth, WorkflowErrorTransient,
-		WorkflowErrorTool, WorkflowErrorTestFailed, WorkflowErrorReviewChangesRequested:
+		WorkflowErrorTool, WorkflowErrorTestFailed, WorkflowErrorReviewChangesRequested,
+		WorkflowErrorSessionCreateFailed, WorkflowErrorAgentStartFailed,
+		WorkflowErrorPromptDeliveryFailed, WorkflowErrorRuntimeFailed,
+		WorkflowErrorWorkerTerminatedUnexpectedly, WorkflowErrorAmbiguousWorkerState:
 		return true
 	default:
 		return false
@@ -297,61 +319,65 @@ type WorkflowStep struct {
 	SessionID                *string
 	ReviewRunID              *string
 	ExpectedArtifactsVersion string
-	CreatedAt                time.Time
-	UpdatedAt                time.Time
-	CompletedAt              *time.Time
+	// ArtifactJSON is a generic small JSON slot (Checkpoint 8B). The plan step
+	// stores its structured PlanArtifact here; other step kinds may use it
+	// later. Defaults to "{}".
+	ArtifactJSON string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	CompletedAt  *time.Time
 }
 
 // WorkflowAttempt is one execution attempt of a workflow step.
 type WorkflowAttempt struct {
-	ID              string
-	WorkflowStepID  string
-	AttemptNumber   int64
-	Harness         string
-	Model           string
-	StartedAt       time.Time
-	FinishedAt      *time.Time
-	Outcome         WorkflowAttemptOutcome
-	ErrorClass      WorkflowErrorClass
-	RetryAfter      *time.Time
+	ID             string
+	WorkflowStepID string
+	AttemptNumber  int64
+	Harness        string
+	Model          string
+	StartedAt      time.Time
+	FinishedAt     *time.Time
+	Outcome        WorkflowAttemptOutcome
+	ErrorClass     WorkflowErrorClass
+	RetryAfter     *time.Time
 }
 
 // WorkflowCheckpoint is one append-only durable checkpoint recorded while a
 // workflow step attempt progresses. Never updated; a new row is inserted to
 // advance.
 type WorkflowCheckpoint struct {
-	ID              string
-	WorkflowRunID   string
-	WorkflowStepID  *string
-	AttemptID       *string
-	ProjectID       string
-	SessionID       *string
-	Branch          string
-	WorktreePath    string
-	BaseSHA         string
-	HeadSHA         string
-	ReviewRunID     *string
-	ReviewVerdict   string
-	RetryState      string
-	NextAction      string
-	DurablePhase    string
-	PayloadVersion  string
-	CreatedAt       time.Time
+	ID             string
+	WorkflowRunID  string
+	WorkflowStepID *string
+	AttemptID      *string
+	ProjectID      string
+	SessionID      *string
+	Branch         string
+	WorktreePath   string
+	BaseSHA        string
+	HeadSHA        string
+	ReviewRunID    *string
+	ReviewVerdict  string
+	RetryState     string
+	NextAction     string
+	DurablePhase   string
+	PayloadVersion string
+	CreatedAt      time.Time
 }
 
 // WorkflowOutboxEntry is one durable idempotent-command staging row. Nothing
 // dispatches these yet in this checkpoint.
 type WorkflowOutboxEntry struct {
-	ID              string
-	WorkflowRunID   string
-	WorkflowStepID  *string
-	IdempotencyKey  string
-	CommandType     WorkflowOutboxCommandType
-	Payload         string
-	Status          WorkflowOutboxStatus
-	CreatedAt       time.Time
-	DispatchedAt    *time.Time
-	AcknowledgedAt  *time.Time
-	FailedAt        *time.Time
-	ErrorClass      string
+	ID             string
+	WorkflowRunID  string
+	WorkflowStepID *string
+	IdempotencyKey string
+	CommandType    WorkflowOutboxCommandType
+	Payload        string
+	Status         WorkflowOutboxStatus
+	CreatedAt      time.Time
+	DispatchedAt   *time.Time
+	AcknowledgedAt *time.Time
+	FailedAt       *time.Time
+	ErrorClass     string
 }

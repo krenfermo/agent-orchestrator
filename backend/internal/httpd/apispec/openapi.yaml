@@ -5011,6 +5011,46 @@ paths:
       summary: Cancel a workflow run and its non-terminal steps
       tags:
       - workflows
+  /api/v1/workflows/{workflowId}/start:
+    post:
+      operationId: startWorkflowRun
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRunResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Start a pending workflow run: run its plan step and dispatch its work
+        step''s Codex worker'
+      tags:
+      - workflows
 components:
   schemas:
     APIError:
@@ -8496,6 +8536,12 @@ components:
           - tool
           - test_failed
           - review_changes_requested
+          - session_create_failed
+          - agent_start_failed
+          - prompt_delivery_failed
+          - runtime_failed
+          - worker_terminated_unexpectedly
+          - ambiguous_worker_state
           type: string
         finishedAt:
           format: date-time
@@ -8563,6 +8609,8 @@ components:
           type: string
         id:
           type: string
+        nextAction:
+          type: string
         objective:
           type: string
         projectId:
@@ -8596,6 +8644,8 @@ components:
           items:
             $ref: '#/components/schemas/WorkflowAttemptView'
           type: array
+        branch:
+          type: string
         completedAt:
           format: date-time
           type:
@@ -8605,6 +8655,8 @@ components:
           format: date-time
           type: string
         dependsOnStepId:
+          type: string
+        headSha:
           type: string
         id:
           type: string
@@ -8616,6 +8668,8 @@ components:
           - fix
           - verify
           - advance
+          type: string
+        nextAction:
           type: string
         ordinal:
           format: int64
@@ -8636,6 +8690,8 @@ components:
           type: string
         updatedAt:
           format: date-time
+          type: string
+        worktreePath:
           type: string
       required:
       - id

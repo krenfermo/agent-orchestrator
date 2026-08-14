@@ -1670,6 +1670,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflowId}/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start a pending workflow run: run its plan step and dispatch its work step's Codex worker */
+        post: operations["startWorkflowRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2988,7 +3005,7 @@ export interface components {
             /** Format: int64 */
             attemptNumber: number;
             /** @enum {string} */
-            errorClass?: "rate_limited" | "auth" | "transient" | "tool" | "test_failed" | "review_changes_requested";
+            errorClass?: "rate_limited" | "auth" | "transient" | "tool" | "test_failed" | "review_changes_requested" | "session_create_failed" | "agent_start_failed" | "prompt_delivery_failed" | "runtime_failed" | "worker_terminated_unexpectedly" | "ambiguous_worker_state";
             /** Format: date-time */
             finishedAt?: null | string;
             harness?: string;
@@ -3016,6 +3033,7 @@ export interface components {
             /** Format: date-time */
             createdAt: string;
             id: string;
+            nextAction?: string;
             objective: string;
             projectId: string;
             /** @enum {string} */
@@ -3026,14 +3044,17 @@ export interface components {
         WorkflowStepView: {
             assignedHarness?: string;
             attempts: components["schemas"]["WorkflowAttemptView"][];
+            branch?: string;
             /** Format: date-time */
             completedAt?: null | string;
             /** Format: date-time */
             createdAt: string;
             dependsOnStepId?: string;
+            headSha?: string;
             id: string;
             /** @enum {string} */
             kind: "plan" | "work" | "review" | "fix" | "verify" | "advance";
+            nextAction?: string;
             /** Format: int64 */
             ordinal: number;
             reviewRunId?: string;
@@ -3042,6 +3063,7 @@ export interface components {
             state: "pending" | "ready" | "running" | "waiting" | "completed" | "failed" | "cancelled";
             /** Format: date-time */
             updatedAt: string;
+            worktreePath?: string;
         };
         WorkspaceFileResponse: {
             additions: number;
@@ -9383,6 +9405,56 @@ export interface operations {
         };
     };
     cancelWorkflowRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    startWorkflowRun: {
         parameters: {
             query?: never;
             header?: never;

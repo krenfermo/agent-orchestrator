@@ -143,7 +143,7 @@ func (q *Queries) GetWorkflowRun(ctx context.Context, id string) (WorkflowRun, e
 const getWorkflowStep = `-- name: GetWorkflowStep :one
 SELECT id, workflow_run_id, kind, ordinal, depends_on_step_id, state,
        assigned_harness, session_id, review_run_id, expected_artifacts_version,
-       created_at, updated_at, completed_at
+       created_at, updated_at, completed_at, artifact_json
 FROM workflow_steps
 WHERE id = ?
 `
@@ -165,6 +165,7 @@ func (q *Queries) GetWorkflowStep(ctx context.Context, id string) (WorkflowStep,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CompletedAt,
+		&i.ArtifactJson,
 	)
 	return i, err
 }
@@ -371,11 +372,11 @@ const insertWorkflowStep = `-- name: InsertWorkflowStep :one
 INSERT INTO workflow_steps (
     id, workflow_run_id, kind, ordinal, depends_on_step_id, state,
     assigned_harness, session_id, review_run_id, expected_artifacts_version,
-    created_at, updated_at, completed_at
-) VALUES (?, ?, ?, ?, ?, ?, '', NULL, NULL, '', ?, ?, NULL)
+    created_at, updated_at, completed_at, artifact_json
+) VALUES (?, ?, ?, ?, ?, ?, '', NULL, NULL, '', ?, ?, NULL, '{}')
 RETURNING id, workflow_run_id, kind, ordinal, depends_on_step_id, state,
           assigned_harness, session_id, review_run_id, expected_artifacts_version,
-          created_at, updated_at, completed_at
+          created_at, updated_at, completed_at, artifact_json
 `
 
 type InsertWorkflowStepParams struct {
@@ -415,6 +416,7 @@ func (q *Queries) InsertWorkflowStep(ctx context.Context, arg InsertWorkflowStep
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.CompletedAt,
+		&i.ArtifactJson,
 	)
 	return i, err
 }
@@ -683,7 +685,7 @@ func (q *Queries) ListWorkflowRunsByProject(ctx context.Context, projectID domai
 const listWorkflowStepsByRun = `-- name: ListWorkflowStepsByRun :many
 SELECT id, workflow_run_id, kind, ordinal, depends_on_step_id, state,
        assigned_harness, session_id, review_run_id, expected_artifacts_version,
-       created_at, updated_at, completed_at
+       created_at, updated_at, completed_at, artifact_json
 FROM workflow_steps
 WHERE workflow_run_id = ?
 ORDER BY ordinal
@@ -712,6 +714,7 @@ func (q *Queries) ListWorkflowStepsByRun(ctx context.Context, workflowRunID stri
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.CompletedAt,
+			&i.ArtifactJson,
 		); err != nil {
 			return nil, err
 		}
@@ -724,6 +727,79 @@ func (q *Queries) ListWorkflowStepsByRun(ctx context.Context, workflowRunID stri
 		return nil, err
 	}
 	return items, nil
+}
+
+const updateWorkflowAttemptOutcome = `-- name: UpdateWorkflowAttemptOutcome :execrows
+UPDATE workflow_attempts
+SET finished_at = ?1,
+    outcome = ?2,
+    error_class = ?3
+WHERE id = ?4
+`
+
+type UpdateWorkflowAttemptOutcomeParams struct {
+	FinishedAt sql.NullTime
+	Outcome    *domain.WorkflowAttemptOutcome
+	ErrorClass *domain.WorkflowErrorClass
+	ID         string
+}
+
+// Updates an existing attempt row's terminal facts. Used both when a dispatch
+// attempt concludes (success/failure) and when a later fact-based observation
+// refines an already-recorded attempt's error_class (e.g. to
+// ambiguous_worker_state) without creating a second attempt row for the same
+// execution.
+func (q *Queries) UpdateWorkflowAttemptOutcome(ctx context.Context, arg UpdateWorkflowAttemptOutcomeParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateWorkflowAttemptOutcome,
+		arg.FinishedAt,
+		arg.Outcome,
+		arg.ErrorClass,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const updateWorkflowOutboxStatus = `-- name: UpdateWorkflowOutboxStatus :execrows
+UPDATE workflow_outbox
+SET status = ?1,
+    dispatched_at = ?2,
+    acknowledged_at = ?3,
+    failed_at = ?4,
+    error_class = ?5
+WHERE id = ?6 AND status = ?7
+`
+
+type UpdateWorkflowOutboxStatusParams struct {
+	Status         domain.WorkflowOutboxStatus
+	DispatchedAt   sql.NullTime
+	AcknowledgedAt sql.NullTime
+	FailedAt       sql.NullTime
+	ErrorClass     string
+	ID             string
+	ExpectedStatus domain.WorkflowOutboxStatus
+}
+
+// Compare-and-swap outbox status transition (pending -> dispatched ->
+// acknowledged, or -> failed from either pending or dispatched). Timestamps
+// are set by the caller only for the column matching the target status; the
+// store layer null-guards the other two.
+func (q *Queries) UpdateWorkflowOutboxStatus(ctx context.Context, arg UpdateWorkflowOutboxStatusParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateWorkflowOutboxStatus,
+		arg.Status,
+		arg.DispatchedAt,
+		arg.AcknowledgedAt,
+		arg.FailedAt,
+		arg.ErrorClass,
+		arg.ID,
+		arg.ExpectedStatus,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const updateWorkflowRunState = `-- name: UpdateWorkflowRunState :execrows
@@ -751,6 +827,53 @@ func (q *Queries) UpdateWorkflowRunState(ctx context.Context, arg UpdateWorkflow
 		arg.ID,
 		arg.ExpectedState,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const updateWorkflowStepArtifact = `-- name: UpdateWorkflowStepArtifact :execrows
+UPDATE workflow_steps
+SET artifact_json = ?1, updated_at = ?2
+WHERE id = ?3
+`
+
+type UpdateWorkflowStepArtifactParams struct {
+	ArtifactJson string
+	UpdatedAt    time.Time
+	ID           string
+}
+
+// Persists the plan step's deterministic PlanArtifact (or, later, another
+// step kind's artifact). Not a state transition, so no expected/next guard
+// beyond the row existing.
+func (q *Queries) UpdateWorkflowStepArtifact(ctx context.Context, arg UpdateWorkflowStepArtifactParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateWorkflowStepArtifact, arg.ArtifactJson, arg.UpdatedAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const updateWorkflowStepSession = `-- name: UpdateWorkflowStepSession :execrows
+UPDATE workflow_steps
+SET session_id = ?1, updated_at = ?2
+WHERE id = ?3 AND session_id IS NULL
+`
+
+type UpdateWorkflowStepSessionParams struct {
+	SessionID sql.NullString
+	UpdatedAt time.Time
+	ID        string
+}
+
+// Backfills the work step's session_id once a spawn is durably known to have
+// happened (either just-dispatched or adopted via natural-key lookup).
+// Guarded on session_id currently NULL so a second caller can never clobber
+// an already-associated session.
+func (q *Queries) UpdateWorkflowStepSession(ctx context.Context, arg UpdateWorkflowStepSessionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateWorkflowStepSession, arg.SessionID, arg.UpdatedAt, arg.ID)
 	if err != nil {
 		return 0, err
 	}

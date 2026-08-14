@@ -14,10 +14,24 @@ import (
 type fakeStore struct {
 	runs  map[string]domain.WorkflowRun
 	steps map[string][]domain.WorkflowStep
+
+	// attempts, checkpoints, and outbox back Checkpoint 8B's dispatch/
+	// observation methods. Keyed the same way the real store's queries are.
+	attempts    map[string][]domain.WorkflowAttempt    // by workflow_step_id
+	checkpoints map[string][]domain.WorkflowCheckpoint // by workflow_run_id, oldest first
+	outbox      map[string]domain.WorkflowOutboxEntry  // by idempotency_key
+
+	seq int
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{runs: map[string]domain.WorkflowRun{}, steps: map[string][]domain.WorkflowStep{}}
+	return &fakeStore{
+		runs:        map[string]domain.WorkflowRun{},
+		steps:       map[string][]domain.WorkflowStep{},
+		attempts:    map[string][]domain.WorkflowAttempt{},
+		checkpoints: map[string][]domain.WorkflowCheckpoint{},
+		outbox:      map[string]domain.WorkflowOutboxEntry{},
+	}
 }
 
 func (f *fakeStore) CreateWorkflowRun(_ context.Context, run domain.WorkflowRun, steps []domain.WorkflowStep) (domain.WorkflowRun, []domain.WorkflowStep, error) {
@@ -93,8 +107,147 @@ func (f *fakeStore) UpdateWorkflowStepState(_ context.Context, id string, expect
 	return false, nil
 }
 
-func (f *fakeStore) ListWorkflowAttempts(_ context.Context, _ string) ([]domain.WorkflowAttempt, error) {
-	return nil, nil
+func (f *fakeStore) ListWorkflowAttempts(_ context.Context, stepID string) ([]domain.WorkflowAttempt, error) {
+	return append([]domain.WorkflowAttempt{}, f.attempts[stepID]...), nil
+}
+
+func (f *fakeStore) UpdateWorkflowStepArtifact(_ context.Context, stepID, artifactJSON string, now time.Time) (bool, error) {
+	for runID, steps := range f.steps {
+		for i, step := range steps {
+			if step.ID != stepID {
+				continue
+			}
+			step.ArtifactJSON = artifactJSON
+			step.UpdatedAt = now
+			f.steps[runID][i] = step
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeStore) UpdateWorkflowStepSession(_ context.Context, stepID, sessionID string, now time.Time) (bool, error) {
+	for runID, steps := range f.steps {
+		for i, step := range steps {
+			if step.ID != stepID {
+				continue
+			}
+			if step.SessionID != nil {
+				return false, nil
+			}
+			sid := sessionID
+			step.SessionID = &sid
+			step.UpdatedAt = now
+			f.steps[runID][i] = step
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeStore) CreateWorkflowAttempt(_ context.Context, id, stepID, harness, model string, startedAt time.Time) (domain.WorkflowAttempt, error) {
+	f.seq++
+	attempt := domain.WorkflowAttempt{
+		ID:             id,
+		WorkflowStepID: stepID,
+		AttemptNumber:  int64(len(f.attempts[stepID]) + 1),
+		Harness:        harness,
+		Model:          model,
+		StartedAt:      startedAt,
+	}
+	f.attempts[stepID] = append(f.attempts[stepID], attempt)
+	return attempt, nil
+}
+
+func (f *fakeStore) GetLatestWorkflowAttempt(_ context.Context, stepID string) (domain.WorkflowAttempt, bool, error) {
+	list := f.attempts[stepID]
+	if len(list) == 0 {
+		return domain.WorkflowAttempt{}, false, nil
+	}
+	return list[len(list)-1], true, nil
+}
+
+func (f *fakeStore) UpdateWorkflowAttemptOutcome(_ context.Context, attemptID string, finishedAt time.Time, outcome domain.WorkflowAttemptOutcome, errorClass domain.WorkflowErrorClass) error {
+	for stepID, list := range f.attempts {
+		for i, a := range list {
+			if a.ID != attemptID {
+				continue
+			}
+			if !finishedAt.IsZero() {
+				t := finishedAt
+				a.FinishedAt = &t
+			} else {
+				a.FinishedAt = nil
+			}
+			a.Outcome = outcome
+			a.ErrorClass = errorClass
+			f.attempts[stepID][i] = a
+			return nil
+		}
+	}
+	return nil
+}
+
+func (f *fakeStore) CreateWorkflowCheckpoint(_ context.Context, cp domain.WorkflowCheckpoint) (domain.WorkflowCheckpoint, error) {
+	f.checkpoints[cp.WorkflowRunID] = append(f.checkpoints[cp.WorkflowRunID], cp)
+	return cp, nil
+}
+
+func (f *fakeStore) ListWorkflowCheckpoints(_ context.Context, runID string) ([]domain.WorkflowCheckpoint, error) {
+	return append([]domain.WorkflowCheckpoint{}, f.checkpoints[runID]...), nil
+}
+
+func (f *fakeStore) GetLatestWorkflowCheckpointByStep(_ context.Context, stepID string) (domain.WorkflowCheckpoint, bool, error) {
+	var latest domain.WorkflowCheckpoint
+	found := false
+	for _, list := range f.checkpoints {
+		for _, cp := range list {
+			if cp.WorkflowStepID == nil || *cp.WorkflowStepID != stepID {
+				continue
+			}
+			if !found || cp.CreatedAt.After(latest.CreatedAt) {
+				latest = cp
+				found = true
+			}
+		}
+	}
+	return latest, found, nil
+}
+
+func (f *fakeStore) EnqueueWorkflowOutboxEntry(_ context.Context, entry domain.WorkflowOutboxEntry) (domain.WorkflowOutboxEntry, bool, error) {
+	if existing, ok := f.outbox[entry.IdempotencyKey]; ok {
+		return existing, false, nil
+	}
+	entry.Status = domain.WorkflowOutboxPending
+	f.outbox[entry.IdempotencyKey] = entry
+	return entry, true, nil
+}
+
+func (f *fakeStore) UpdateWorkflowOutboxStatus(_ context.Context, id string, expected, next domain.WorkflowOutboxStatus, now time.Time, errorClass string) (bool, error) {
+	for key, entry := range f.outbox {
+		if entry.ID != id {
+			continue
+		}
+		if entry.Status != expected {
+			return false, nil
+		}
+		entry.Status = next
+		switch next {
+		case domain.WorkflowOutboxDispatched:
+			t := now
+			entry.DispatchedAt = &t
+		case domain.WorkflowOutboxAcknowledged:
+			t := now
+			entry.AcknowledgedAt = &t
+		case domain.WorkflowOutboxFailed:
+			t := now
+			entry.FailedAt = &t
+		}
+		entry.ErrorClass = errorClass
+		f.outbox[key] = entry
+		return true, nil
+	}
+	return false, nil
 }
 
 func newCoordinator() (*workflowcore.Coordinator, *fakeStore) {

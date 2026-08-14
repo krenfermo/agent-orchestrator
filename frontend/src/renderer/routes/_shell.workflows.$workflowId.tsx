@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { Link, createFileRoute } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import { useWorkflowRun, workflowRunIsTerminal } from "../hooks/useWorkflowRun";
 
@@ -9,7 +9,8 @@ export const Route = createFileRoute("/_shell/workflows/$workflowId")({
 function WorkflowRunRoute() {
 	const { t } = useTranslation();
 	const { workflowId } = Route.useParams();
-	const { workflow, isLoading, error, cancel, cancelling, cancelError } = useWorkflowRun(workflowId);
+	const { workflow, isLoading, error, cancel, cancelling, cancelError, start, starting, startError } =
+		useWorkflowRun(workflowId);
 
 	if (isLoading && !workflow) {
 		return <p className="p-6 text-sm text-muted-foreground">{t("shell.workflowsLoading")}</p>;
@@ -22,6 +23,7 @@ function WorkflowRunRoute() {
 	}
 
 	const nonTerminal = !workflowRunIsTerminal(workflow.run.state);
+	const isPending = workflow.run.state === "pending";
 
 	return (
 		<div className="mx-auto flex max-w-2xl flex-col gap-6 p-6">
@@ -30,21 +32,41 @@ function WorkflowRunRoute() {
 				<p className="text-sm text-muted-foreground">
 					{t("shell.workflowsRunHeader", { projectId: workflow.run.projectId, state: workflow.run.state })}
 				</p>
+				{workflow.run.nextAction && (
+					<p className="text-sm text-muted-foreground">
+						{t("shell.workflowsNextAction", { nextAction: workflow.run.nextAction })}
+					</p>
+				)}
 			</div>
 
-			{nonTerminal && (
-				<div>
-					<button
-						className="rounded border border-border px-3 py-1.5 text-sm disabled:opacity-50"
-						disabled={cancelling}
-						onClick={() => void cancel()}
-						type="button"
-					>
-						{cancelling ? t("shell.workflowsCancelling") : t("shell.workflowsCancel")}
-					</button>
-					{cancelError && <p className="mt-1 text-sm text-destructive">{cancelError}</p>}
-				</div>
-			)}
+			<div className="flex items-center gap-2">
+				{isPending && (
+					<div>
+						<button
+							className="rounded border border-border px-3 py-1.5 text-sm disabled:opacity-50"
+							disabled={starting}
+							onClick={() => void start()}
+							type="button"
+						>
+							{starting ? t("shell.workflowsStarting") : t("shell.workflowsStart")}
+						</button>
+						{startError && <p className="mt-1 text-sm text-destructive">{startError}</p>}
+					</div>
+				)}
+				{nonTerminal && (
+					<div>
+						<button
+							className="rounded border border-border px-3 py-1.5 text-sm disabled:opacity-50"
+							disabled={cancelling}
+							onClick={() => void cancel()}
+							type="button"
+						>
+							{cancelling ? t("shell.workflowsCancelling") : t("shell.workflowsCancel")}
+						</button>
+						{cancelError && <p className="mt-1 text-sm text-destructive">{cancelError}</p>}
+					</div>
+				)}
+			</div>
 
 			<div className="flex flex-col gap-3">
 				<h2 className="text-sm font-semibold text-muted-foreground">{t("shell.workflowsSteps")}</h2>
@@ -56,6 +78,44 @@ function WorkflowRunRoute() {
 							</span>
 							<span className="text-xs text-muted-foreground">{step.state}</span>
 						</div>
+						{step.kind === "work" && (
+							<dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 border-t border-border pt-2 text-xs text-muted-foreground">
+								<dt>{t("shell.workflowsHarness")}</dt>
+								<dd>{step.assignedHarness || "codex"}</dd>
+								{step.sessionId && (
+									<>
+										<dt>{t("shell.workflowsSession")}</dt>
+										<dd>
+											<Link
+												className="text-primary underline underline-offset-2"
+												params={{ sessionId: step.sessionId }}
+												to="/sessions/$sessionId"
+											>
+												{step.sessionId}
+											</Link>
+										</dd>
+									</>
+								)}
+								{step.branch && (
+									<>
+										<dt>{t("shell.workflowsBranch")}</dt>
+										<dd>{step.branch}</dd>
+									</>
+								)}
+								{step.headSha && (
+									<>
+										<dt>{t("shell.workflowsHeadSha")}</dt>
+										<dd className="font-mono">{step.headSha}</dd>
+									</>
+								)}
+								{step.nextAction && (
+									<>
+										<dt>{t("shell.workflowsNextActionLabel")}</dt>
+										<dd>{step.nextAction}</dd>
+									</>
+								)}
+							</dl>
+						)}
 						{step.attempts.length > 0 && (
 							<ul className="mt-2 flex flex-col gap-1 border-t border-border pt-2">
 								{step.attempts.map((attempt) => (
@@ -70,6 +130,7 @@ function WorkflowRunRoute() {
 													number: attempt.attemptNumber,
 													startedAt: new Date(attempt.startedAt).toLocaleString(),
 												})}
+										{attempt.errorClass && ` · ${attempt.errorClass}`}
 									</li>
 								))}
 							</ul>

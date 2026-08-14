@@ -265,3 +265,72 @@ func TestWorkflowOutboxIdempotency(t *testing.T) {
 		t.Fatalf("list outbox: %d entries, err=%v", len(list), err)
 	}
 }
+
+// TestWorkflowAttemptFKAgainstNonexistentStep is Checkpoint 8B integrity
+// coverage: an attempt row can never dangle off a step that does not exist.
+func TestWorkflowAttemptFKAgainstNonexistentStep(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if _, err := s.CreateWorkflowAttempt(ctx, "wfa-orphan", "no-such-step", "codex", "", now); err == nil {
+		t.Fatal("create attempt against a nonexistent step: want error, got nil")
+	}
+}
+
+// TestWorkflowStepArtifactJSONCheckRejectsInvalidJSON is Checkpoint 8B
+// integrity coverage for the 0095 migration's json_valid(artifact_json) CHECK.
+func TestWorkflowStepArtifactJSONCheckRejectsInvalidJSON(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "proj7")
+	now := time.Now().UTC().Truncate(time.Second)
+	_, steps, err := s.CreateWorkflowRun(ctx, sampleWorkflowRun("proj7", "wf-7", now), sampleWorkflowSteps("wf-7", now))
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	stepID := steps[0].ID
+
+	if _, err := s.UpdateWorkflowStepArtifact(ctx, stepID, "not valid json", now); err == nil {
+		t.Fatal("update artifact_json with invalid JSON: want error, got nil")
+	}
+	if _, err := s.UpdateWorkflowStepArtifact(ctx, stepID, `{"objective":"ship it"}`, now); err != nil {
+		t.Fatalf("update artifact_json with valid JSON: %v", err)
+	}
+}
+
+// TestWorkflowAttemptErrorClassRebuiltCheckAcceptsOldAndNewValues is
+// Checkpoint 8B store-level coverage for the 0096 migration's rebuilt
+// workflow_attempts table: the six 8A error classes and the six new 8B
+// classes must all still be accepted by the CHECK constraint, proving the
+// rebuild preserved the old values while adding the new ones.
+func TestWorkflowAttemptErrorClassRebuiltCheckAcceptsOldAndNewValues(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "proj8")
+	now := time.Now().UTC().Truncate(time.Second)
+	_, steps, err := s.CreateWorkflowRun(ctx, sampleWorkflowRun("proj8", "wf-8", now), sampleWorkflowSteps("wf-8", now))
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	stepID := steps[0].ID
+
+	classes := []domain.WorkflowErrorClass{
+		// 8A classes (must still be accepted after the 0096 rebuild).
+		domain.WorkflowErrorRateLimited, domain.WorkflowErrorAuth, domain.WorkflowErrorTransient,
+		domain.WorkflowErrorTool, domain.WorkflowErrorTestFailed, domain.WorkflowErrorReviewChangesRequested,
+		// 8B classes (new).
+		domain.WorkflowErrorSessionCreateFailed, domain.WorkflowErrorAgentStartFailed,
+		domain.WorkflowErrorPromptDeliveryFailed, domain.WorkflowErrorRuntimeFailed,
+		domain.WorkflowErrorWorkerTerminatedUnexpectedly, domain.WorkflowErrorAmbiguousWorkerState,
+	}
+	for i, class := range classes {
+		attempt, err := s.CreateWorkflowAttempt(ctx, "wfa-class-"+string(rune('a'+i)), stepID, "codex", "", now)
+		if err != nil {
+			t.Fatalf("create attempt for class %q: %v", class, err)
+		}
+		if err := s.UpdateWorkflowAttemptOutcome(ctx, attempt.ID, now, domain.WorkflowAttemptFailed, class); err != nil {
+			t.Fatalf("record error class %q: %v", class, err)
+		}
+	}
+}

@@ -241,7 +241,7 @@ func Run() error {
 		NewID:    uuid.NewString,
 	})
 
-	sessionSvc, reviewSvc, sessMgr, err := startSession(ctx, cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, agents, managedPreview, browserBroker, browserAuthority, chatLauncher{svc: chatSvc}, settingsSvc, log)
+	sessionSvc, reviewSvc, sessMgr, rawSessionMgr, workspaceObserver, err := startSession(ctx, cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, agents, managedPreview, browserBroker, browserAuthority, chatLauncher{svc: chatSvc}, settingsSvc, log)
 	if err != nil {
 		stop()
 		lcStack.Stop()
@@ -359,7 +359,7 @@ func Run() error {
 	// and run its own read-mostly boot recovery. This never calls Session
 	// Manager or Review Engine and never launches anything — it only
 	// self-repairs workflow's own rows interrupted by the restart.
-	workflowCoordinator, workflowSvc := startWorkflows(store, log)
+	workflowCoordinator, workflowSvc := startWorkflows(store, rawSessionMgr, workspaceObserver, log)
 	if reconcileErr := workflowCoordinator.Reconcile(ctx); reconcileErr != nil {
 		log.Error("reconcile workflow runs on boot failed", "err", reconcileErr)
 	}

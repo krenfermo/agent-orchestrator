@@ -33,6 +33,7 @@ type Manager interface {
 	GetRun(ctx context.Context, runID string) (workflowcore.RunDetail, error)
 	ListRuns(ctx context.Context, filter ListFilter) ([]RunSummary, error)
 	CancelRun(ctx context.Context, runID string) (workflowcore.RunDetail, error)
+	StartRun(ctx context.Context, runID string) (workflowcore.RunDetail, error)
 }
 
 // Service is the API-facing workflow service. It delegates to the core coordinator.
@@ -65,4 +66,10 @@ func (s *Service) ListRuns(ctx context.Context, filter ListFilter) ([]RunSummary
 // CancelRun cancels a workflow run and cascades cancellation to its non-terminal steps.
 func (s *Service) CancelRun(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
 	return s.coordinator.CancelRun(ctx, runID)
+}
+
+// StartRun transitions a pending run to running, runs its plan step, and
+// dispatches its work step's Codex worker (idempotently).
+func (s *Service) StartRun(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
+	return s.coordinator.StartRun(ctx, runID)
 }

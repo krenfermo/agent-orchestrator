@@ -164,7 +164,7 @@ func (m sessionLifecycleMessenger) Send(ctx context.Context, id domain.SessionID
 // LCM, the per-session agent resolver, and the agent messenger. The returned
 // service is mounted at httpd APIDeps.Sessions. It also returns the manager so
 // the caller can wire Reconcile into the boot sequence.
-func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.Runtime, store *sqlite.Store, lcm *lifecycle.Manager, messenger ports.AgentMessenger, telemetry ports.EventSink, agents ports.AgentResolver, previewLifecycle sessionmanager.PreviewLifecycle, browserLifecycle sessionmanager.BrowserLifecycle, browserCapabilities sessionmanager.BrowserCapabilityIssuer, chat sessionmanager.ChatLauncher, defaults sessionmanager.SessionModeDefaults, log *slog.Logger) (*sessionsvc.Service, reviewsvc.Manager, sessionLifecycle, error) {
+func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.Runtime, store *sqlite.Store, lcm *lifecycle.Manager, messenger ports.AgentMessenger, telemetry ports.EventSink, agents ports.AgentResolver, previewLifecycle sessionmanager.PreviewLifecycle, browserLifecycle sessionmanager.BrowserLifecycle, browserCapabilities sessionmanager.BrowserCapabilityIssuer, chat sessionmanager.ChatLauncher, defaults sessionmanager.SessionModeDefaults, log *slog.Logger) (*sessionsvc.Service, reviewsvc.Manager, sessionLifecycle, *sessionmanager.Manager, *workspacerouter.Workspace, error) {
 	gitWS, err := gitworktree.New(gitworktree.Options{
 		// Per-session worktrees live under the data dir, so a single AO_DATA_DIR
 		// override moves all durable per-user state together.
@@ -175,13 +175,13 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		RepoResolver: projectRepoResolver{store: store},
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("session workspace: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("session workspace: %w", err)
 	}
 	scratchWS, err := scratchworkspace.New(scratchworkspace.Options{
 		ManagedRoot: filepath.Join(cfg.DataDir, "worktrees"),
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("scratch session workspace: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("scratch session workspace: %w", err)
 	}
 	ws := workspacerouter.New(workspacerouter.Deps{
 		Git:      gitWS,
@@ -230,7 +230,7 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 	// writer.
 	reviewers, err := reviewer.NewResolver()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("reviewer resolver: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("reviewer resolver: %w", err)
 	}
 	reviewEngine := reviewcore.New(reviewcore.Deps{
 		Store:    store,
@@ -245,7 +245,7 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		reviewsvc.WithLifecycleReducer(lcm),
 		reviewsvc.WithTelemetry(telemetry))
 	mgr.SetReviewerTerminator(reviewSvc)
-	return sessionSvc, reviewSvc, mgr, nil
+	return sessionSvc, reviewSvc, mgr, mgr, ws, nil
 }
 
 // runtimeMessageSender is the narrow part of the concrete runtime needed by

@@ -44,14 +44,14 @@ func (s *Store) CreateWorkflowRun(
 		insertedRun = workflowRunFromRow(row)
 		for _, step := range steps {
 			stepRow, err := q.InsertWorkflowStep(ctx, gen.InsertWorkflowStepParams{
-				ID:               step.ID,
-				WorkflowRunID:    step.WorkflowRunID,
-				Kind:             step.Kind,
-				Ordinal:          step.Ordinal,
-				DependsOnStepID:  stringPtrToNullString(step.DependsOnStepID),
-				State:            step.State,
-				CreatedAt:        step.CreatedAt,
-				UpdatedAt:        step.UpdatedAt,
+				ID:              step.ID,
+				WorkflowRunID:   step.WorkflowRunID,
+				Kind:            step.Kind,
+				Ordinal:         step.Ordinal,
+				DependsOnStepID: stringPtrToNullString(step.DependsOnStepID),
+				State:           step.State,
+				CreatedAt:       step.CreatedAt,
+				UpdatedAt:       step.UpdatedAt,
 			})
 			if err != nil {
 				return fmt.Errorf("insert workflow step %d: %w", step.Ordinal, err)
@@ -199,6 +199,113 @@ func (s *Store) UpdateWorkflowStepState(
 	return rows > 0, nil
 }
 
+// UpdateWorkflowStepArtifact persists a step's deterministic artifact JSON
+// (e.g. the plan step's PlanArtifact). Not a state transition.
+func (s *Store) UpdateWorkflowStepArtifact(ctx context.Context, stepID, artifactJSON string, now time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.UpdateWorkflowStepArtifact(ctx, gen.UpdateWorkflowStepArtifactParams{
+		ArtifactJson: artifactJSON,
+		UpdatedAt:    now,
+		ID:           stepID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("update workflow step %s artifact: %w", stepID, err)
+	}
+	return rows > 0, nil
+}
+
+// UpdateWorkflowStepSession backfills a step's session_id once a spawn is
+// durably known to have happened. Guarded on session_id currently NULL: a
+// second caller can never clobber an already-associated session, making this
+// safe to call redundantly from recovery/observation.
+func (s *Store) UpdateWorkflowStepSession(ctx context.Context, stepID, sessionID string, now time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.UpdateWorkflowStepSession(ctx, gen.UpdateWorkflowStepSessionParams{
+		SessionID: sql.NullString{String: sessionID, Valid: sessionID != ""},
+		UpdatedAt: now,
+		ID:        stepID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("update workflow step %s session: %w", stepID, err)
+	}
+	return rows > 0, nil
+}
+
+// UpdateWorkflowOutboxStatus compare-and-swaps an outbox entry's dispatch
+// status. Only the timestamp column matching next is set; the others are
+// left NULL (a status can only move forward, never back, so a NULL retains
+// correctness for columns not yet reached).
+func (s *Store) UpdateWorkflowOutboxStatus(
+	ctx context.Context,
+	id string,
+	expected, next domain.WorkflowOutboxStatus,
+	now time.Time,
+	errorClass string,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	var dispatchedAt, acknowledgedAt, failedAt sql.NullTime
+	switch next {
+	case domain.WorkflowOutboxDispatched:
+		dispatchedAt = sql.NullTime{Time: now, Valid: true}
+	case domain.WorkflowOutboxAcknowledged:
+		acknowledgedAt = sql.NullTime{Time: now, Valid: true}
+	case domain.WorkflowOutboxFailed:
+		failedAt = sql.NullTime{Time: now, Valid: true}
+	}
+	rows, err := s.qw.UpdateWorkflowOutboxStatus(ctx, gen.UpdateWorkflowOutboxStatusParams{
+		Status:         next,
+		DispatchedAt:   dispatchedAt,
+		AcknowledgedAt: acknowledgedAt,
+		FailedAt:       failedAt,
+		ErrorClass:     errorClass,
+		ID:             id,
+		ExpectedStatus: expected,
+	})
+	if err != nil {
+		return false, fmt.Errorf("update workflow outbox %s status: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// UpdateWorkflowAttemptOutcome updates an existing attempt row's terminal
+// facts (finished_at/outcome/error_class). Used both to conclude a dispatch
+// attempt and to later refine an already-recorded attempt's error_class
+// (e.g. to ambiguous_worker_state) without creating a second attempt row.
+func (s *Store) UpdateWorkflowAttemptOutcome(
+	ctx context.Context,
+	attemptID string,
+	finishedAt time.Time,
+	outcome domain.WorkflowAttemptOutcome,
+	errorClass domain.WorkflowErrorClass,
+) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	var finishedAtNull sql.NullTime
+	if !finishedAt.IsZero() {
+		finishedAtNull = sql.NullTime{Time: finishedAt, Valid: true}
+	}
+	var outcomePtr *domain.WorkflowAttemptOutcome
+	if outcome != "" {
+		outcomePtr = &outcome
+	}
+	var errorClassPtr *domain.WorkflowErrorClass
+	if errorClass != "" {
+		errorClassPtr = &errorClass
+	}
+	if _, err := s.qw.UpdateWorkflowAttemptOutcome(ctx, gen.UpdateWorkflowAttemptOutcomeParams{
+		FinishedAt: finishedAtNull,
+		Outcome:    outcomePtr,
+		ErrorClass: errorClassPtr,
+		ID:         attemptID,
+	}); err != nil {
+		return fmt.Errorf("update workflow attempt %s outcome: %w", attemptID, err)
+	}
+	return nil
+}
+
 // CreateWorkflowAttempt inserts a new attempt for a step, assigning it the
 // next sequential attempt_number for that step. writeMu serialises the
 // read-then-insert against concurrent writers, mirroring the store's other
@@ -215,12 +322,12 @@ func (s *Store) CreateWorkflowAttempt(
 		return domain.WorkflowAttempt{}, fmt.Errorf("get max workflow attempt number for step %s: %w", stepID, err)
 	}
 	row, err := s.qw.InsertWorkflowAttempt(ctx, gen.InsertWorkflowAttemptParams{
-		ID:            id,
+		ID:             id,
 		WorkflowStepID: stepID,
-		AttemptNumber: maxAttempt + 1,
-		Harness:       harness,
-		Model:         model,
-		StartedAt:     startedAt,
+		AttemptNumber:  maxAttempt + 1,
+		Harness:        harness,
+		Model:          model,
+		StartedAt:      startedAt,
 	})
 	if err != nil {
 		return domain.WorkflowAttempt{}, fmt.Errorf("insert workflow attempt for step %s: %w", stepID, err)
@@ -316,13 +423,13 @@ func (s *Store) EnqueueWorkflowOutboxEntry(ctx context.Context, entry domain.Wor
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	rows, err := s.qw.InsertWorkflowOutboxEntry(ctx, gen.InsertWorkflowOutboxEntryParams{
-		ID:              entry.ID,
-		WorkflowRunID:   entry.WorkflowRunID,
-		WorkflowStepID:  stringPtrToNullString(entry.WorkflowStepID),
-		IdempotencyKey:  entry.IdempotencyKey,
-		CommandType:     entry.CommandType,
-		Payload:         entry.Payload,
-		CreatedAt:       entry.CreatedAt,
+		ID:             entry.ID,
+		WorkflowRunID:  entry.WorkflowRunID,
+		WorkflowStepID: stringPtrToNullString(entry.WorkflowStepID),
+		IdempotencyKey: entry.IdempotencyKey,
+		CommandType:    entry.CommandType,
+		Payload:        entry.Payload,
+		CreatedAt:      entry.CreatedAt,
 	})
 	if err != nil {
 		return domain.WorkflowOutboxEntry{}, false, fmt.Errorf("insert workflow outbox entry: %w", err)
@@ -374,6 +481,7 @@ func workflowStepFromRow(r gen.WorkflowStep) domain.WorkflowStep {
 		SessionID:                nullStringToPtr(r.SessionID),
 		ReviewRunID:              nullStringToPtr(r.ReviewRunID),
 		ExpectedArtifactsVersion: r.ExpectedArtifactsVersion,
+		ArtifactJSON:             r.ArtifactJson,
 		CreatedAt:                r.CreatedAt,
 		UpdatedAt:                r.UpdatedAt,
 		CompletedAt:              nullTimeToTimePtr(r.CompletedAt),

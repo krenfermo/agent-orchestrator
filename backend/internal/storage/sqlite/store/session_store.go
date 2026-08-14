@@ -326,6 +326,25 @@ func (s *Store) GetSession(ctx context.Context, id domain.SessionID) (domain.Ses
 	return getSessionRowToRecord(row), true, nil
 }
 
+// FindSessionByProjectAndIssueID looks up a session by its (project, issue)
+// natural key, ok=false if none. Workflow (Checkpoint 8B) uses this to detect
+// whether a session was already spawned for a given workflow step
+// independent of workflow's own bookkeeping — issue_id is set to
+// "workflow-step:<stepID>" for workflow-spawned worker sessions.
+func (s *Store) FindSessionByProjectAndIssueID(ctx context.Context, projectID domain.ProjectID, issueID domain.IssueID) (domain.SessionRecord, bool, error) {
+	row, err := s.qr.GetSessionByProjectAndIssueID(ctx, gen.GetSessionByProjectAndIssueIDParams{
+		ProjectID: projectID,
+		IssueID:   issueID,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.SessionRecord{}, false, nil
+	}
+	if err != nil {
+		return domain.SessionRecord{}, false, fmt.Errorf("find session by project %s issue %s: %w", projectID, issueID, err)
+	}
+	return getSessionRowToRecord(gen.GetSessionRow(row)), true, nil
+}
+
 // ListSessions returns every session in a project, ordered by num.
 func (s *Store) ListSessions(ctx context.Context, project domain.ProjectID) ([]domain.SessionRecord, error) {
 	rows, err := s.qr.ListSessionsByProject(ctx, project)

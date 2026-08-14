@@ -509,6 +509,17 @@ func workflowOperations() []operation {
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
 		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/start", id: "startWorkflowRun", tag: "workflows",
+			summary:    "Start a pending workflow run: run its plan step and dispatch its work step's Codex worker",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
 	}
 }
 

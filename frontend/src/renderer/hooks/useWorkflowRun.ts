@@ -53,6 +53,22 @@ export function useWorkflowRun(workflowId: string | undefined) {
 		},
 	});
 
+	const start = useMutation({
+		mutationFn: async () => {
+			if (!workflowId) throw new Error("workflow id is required");
+			const { data, error } = await apiClient.POST("/api/v1/workflows/{workflowId}/start", {
+				params: { path: { workflowId } },
+			});
+			if (error) throw error;
+			return data.workflow;
+		},
+		onSuccess: () => {
+			if (!workflowId) return;
+			void queryClient.invalidateQueries({ queryKey: workflowRunQueryKey(workflowId) });
+			void queryClient.invalidateQueries({ queryKey: workflowRunsQueryKey() });
+		},
+	});
+
 	return {
 		workflow: query.data,
 		isLoading: query.isLoading,
@@ -60,5 +76,31 @@ export function useWorkflowRun(workflowId: string | undefined) {
 		cancel: cancel.mutateAsync,
 		cancelling: cancel.isPending,
 		cancelError: cancel.error ? apiErrorMessage(cancel.error) : undefined,
+		start: start.mutateAsync,
+		starting: start.isPending,
+		startError: start.error ? apiErrorMessage(start.error) : undefined,
 	};
+}
+
+/**
+ * Standalone start mutation, for callers that only need to trigger /start
+ * (e.g. a list view) without subscribing to the full run detail query.
+ */
+export function useStartWorkflowRun(workflowId: string | undefined) {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: async () => {
+			if (!workflowId) throw new Error("workflow id is required");
+			const { data, error } = await apiClient.POST("/api/v1/workflows/{workflowId}/start", {
+				params: { path: { workflowId } },
+			});
+			if (error) throw error;
+			return data.workflow;
+		},
+		onSuccess: () => {
+			if (!workflowId) return;
+			void queryClient.invalidateQueries({ queryKey: workflowRunQueryKey(workflowId) });
+			void queryClient.invalidateQueries({ queryKey: workflowRunsQueryKey() });
+		},
+	});
 }

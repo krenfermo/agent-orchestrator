@@ -98,6 +98,8 @@ var shippedMigrations = map[int64]string{
 	92: "0092_pr_reviews_target_sha.sql",
 	93: "0093_review_run_trigger_source.sql",
 	94: "0094_workflow.sql",
+	95: "0095_workflow_step_artifact.sql",
+	96: "0096_workflow_attempt_error_classes.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

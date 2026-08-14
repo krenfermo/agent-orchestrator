@@ -81,6 +81,24 @@ SELECT id, project_id, num, issue_id, kind, harness,
     latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled
 FROM sessions WHERE id = ?;
 
+-- name: GetSessionByProjectAndIssueID :one
+-- Workflow (Checkpoint 8B) uses issue_id as a durable natural key to find a
+-- session it may already have spawned for one workflow step, independent of
+-- whether the workflow's own bookkeeping (step.session_id / checkpoint) made
+-- it to disk. Most-recently-created wins if more than one session somehow
+-- shares the key (should not happen in practice, since issue_id embeds the
+-- unique workflow step id).
+SELECT id, project_id, num, issue_id, kind, harness,
+    activity_state, activity_last_at, is_terminated, branch, workspace_path,
+    runtime_handle_id, agent_session_id, prompt,
+    created_at, updated_at, display_name, first_signal_at, preview_url,
+    preview_revision, cleanup_generation, runtime_launch_id,
+    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
+    reviewer_harness, is_pinned, pinned_at,
+    session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
+    latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled
+FROM sessions WHERE project_id = ? AND issue_id = ? ORDER BY created_at DESC, num DESC LIMIT 1;
+
 -- name: ListSessionsByProject :many
 SELECT id, project_id, num, issue_id, kind, harness,
     activity_state, activity_last_at, is_terminated, branch, workspace_path,

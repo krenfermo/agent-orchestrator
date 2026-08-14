@@ -45,11 +45,12 @@ type WorkflowAttemptView struct {
 	StartedAt     time.Time                     `json:"startedAt"`
 	FinishedAt    *time.Time                    `json:"finishedAt,omitempty"`
 	Outcome       domain.WorkflowAttemptOutcome `json:"outcome,omitempty" enum:"succeeded,failed,cancelled"`
-	ErrorClass    domain.WorkflowErrorClass     `json:"errorClass,omitempty" enum:"rate_limited,auth,transient,tool,test_failed,review_changes_requested"`
+	ErrorClass    domain.WorkflowErrorClass     `json:"errorClass,omitempty" enum:"rate_limited,auth,transient,tool,test_failed,review_changes_requested,session_create_failed,agent_start_failed,prompt_delivery_failed,runtime_failed,worker_terminated_unexpectedly,ambiguous_worker_state"`
 	RetryAfter    *time.Time                    `json:"retryAfter,omitempty"`
 }
 
-// WorkflowStepView is one step in a workflow run, with its recorded attempts.
+// WorkflowStepView is one step in a workflow run, with its recorded attempts
+// and the facts from its latest durable checkpoint (Checkpoint 8B), when any.
 type WorkflowStepView struct {
 	ID              string                   `json:"id"`
 	Kind            domain.WorkflowStepKind  `json:"kind" enum:"plan,work,review,fix,verify,advance"`
@@ -63,6 +64,12 @@ type WorkflowStepView struct {
 	UpdatedAt       time.Time                `json:"updatedAt"`
 	CompletedAt     *time.Time               `json:"completedAt,omitempty"`
 	Attempts        []WorkflowAttemptView    `json:"attempts"`
+	// Branch, WorktreePath, and HeadSHA come from the step's latest
+	// workflow_checkpoint row, when one exists (Checkpoint 8B).
+	Branch       string `json:"branch,omitempty"`
+	WorktreePath string `json:"worktreePath,omitempty"`
+	HeadSHA      string `json:"headSha,omitempty"`
+	NextAction   string `json:"nextAction,omitempty"`
 }
 
 // WorkflowRunView is a workflow run summary (no step/attempt fan-out).
@@ -75,6 +82,9 @@ type WorkflowRunView struct {
 	UpdatedAt   time.Time               `json:"updatedAt"`
 	CompletedAt *time.Time              `json:"completedAt,omitempty"`
 	CancelledAt *time.Time              `json:"cancelledAt,omitempty"`
+	// NextAction is the run's last-known next action across all its steps'
+	// checkpoints (e.g. "start_review"), informational only (Checkpoint 8B).
+	NextAction string `json:"nextAction,omitempty"`
 }
 
 // WorkflowRunDetailView is a workflow run plus its steps and their attempts.
@@ -93,7 +103,7 @@ type ListWorkflowsResponse struct {
 	Workflows []WorkflowRunView `json:"workflows"`
 }
 
-func workflowRunView(run domain.WorkflowRun) WorkflowRunView {
+func workflowRunView(run domain.WorkflowRun, nextAction string) WorkflowRunView {
 	return WorkflowRunView{
 		ID:          run.ID,
 		ProjectID:   run.ProjectID,
@@ -103,6 +113,7 @@ func workflowRunView(run domain.WorkflowRun) WorkflowRunView {
 		UpdatedAt:   run.UpdatedAt,
 		CompletedAt: run.CompletedAt,
 		CancelledAt: run.CancelledAt,
+		NextAction:  nextAction,
 	}
 }
 
@@ -136,6 +147,13 @@ func workflowRunDetailView(detail workflowcore.RunDetail) WorkflowRunDetailView 
 				RetryAfter:    a.RetryAfter,
 			})
 		}
+		var branch, worktreePath, headSHA, nextAction string
+		if sd.LatestCheckpoint != nil {
+			branch = sd.LatestCheckpoint.Branch
+			worktreePath = sd.LatestCheckpoint.WorktreePath
+			headSHA = sd.LatestCheckpoint.HeadSHA
+			nextAction = sd.LatestCheckpoint.NextAction
+		}
 		steps = append(steps, WorkflowStepView{
 			ID:              step.ID,
 			Kind:            step.Kind,
@@ -149,9 +167,13 @@ func workflowRunDetailView(detail workflowcore.RunDetail) WorkflowRunDetailView 
 			UpdatedAt:       step.UpdatedAt,
 			CompletedAt:     step.CompletedAt,
 			Attempts:        attempts,
+			Branch:          branch,
+			WorktreePath:    worktreePath,
+			HeadSHA:         headSHA,
+			NextAction:      nextAction,
 		})
 	}
-	return WorkflowRunDetailView{Run: workflowRunView(detail.Run), Steps: steps}
+	return WorkflowRunDetailView{Run: workflowRunView(detail.Run, detail.NextAction), Steps: steps}
 }
 
 // WorkflowsController owns the /workflows routes. A nil Svc returns 501.
@@ -165,6 +187,7 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	r.Get("/workflows/{workflowId}", c.get)
 	r.Get("/workflows", c.list)
 	r.Post("/workflows/{workflowId}/cancel", c.cancel)
+	r.Post("/workflows/{workflowId}/start", c.start)
 }
 
 func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
@@ -212,7 +235,7 @@ func (c *WorkflowsController) list(w http.ResponseWriter, r *http.Request) {
 	}
 	views := make([]WorkflowRunView, 0, len(runs))
 	for _, run := range runs {
-		views = append(views, workflowRunView(run))
+		views = append(views, workflowRunView(run, ""))
 	}
 	envelope.WriteJSON(w, http.StatusOK, ListWorkflowsResponse{Workflows: views})
 }
@@ -223,6 +246,19 @@ func (c *WorkflowsController) cancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	detail, err := c.Svc.CancelRun(r.Context(), chi.URLParam(r, "workflowId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: workflowRunDetailView(detail)})
+}
+
+func (c *WorkflowsController) start(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/start")
+		return
+	}
+	detail, err := c.Svc.StartRun(r.Context(), chi.URLParam(r, "workflowId"))
 	if err != nil {
 		writeWorkflowError(w, r, err)
 		return
