@@ -157,6 +157,7 @@ func TestTelemetryMetaClassifiesRegisteredCommandPaths(t *testing.T) {
 		"ao agent-process supervise": {},
 		"ao completion":              {},
 		"ao daemon":                  {},
+		"ao server":                  {},
 		"ao help":                    {},
 		"ao pty-host":                {},
 		"ao start":                   {},

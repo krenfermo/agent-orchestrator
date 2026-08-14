@@ -67,6 +67,7 @@ var legacyActorlessSystemCLICommands = map[string]struct{}{
 	"ao agent-process supervise": {},
 	"ao completion":              {},
 	"ao daemon":                  {},
+	"ao server":                  {},
 	"ao help":                    {},
 	"ao pty-host":                {},
 	"ao start":                   {},

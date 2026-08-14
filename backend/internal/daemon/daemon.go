@@ -58,6 +58,14 @@ func Run() error {
 	if err != nil {
 		return err
 	}
+	return RunWithConfig(cfg)
+}
+
+// RunWithConfig starts the same daemon composition root as Run with an
+// already-resolved configuration. It exists for the foreground `ao server`
+// command; Electron continues to use Run and environment-based discovery.
+func RunWithConfig(cfg config.Config) error {
+	var err error
 	if cwd, err := os.Getwd(); err == nil {
 		cfg.StartupWorkingDirectory = cwd
 	}
@@ -67,6 +75,7 @@ func Run() error {
 	ignoreBrokenPipeSignal()
 
 	log := newLogger()
+	log.Info("daemon starting", "data_dir", cfg.DataDir, "listen", cfg.Addr(), "frontend_root", cfg.WebRoot)
 	var browserRuntimeToken string
 	if os.Getenv(browserruntime.RuntimeTokenStdinEnv) == "1" {
 		browserRuntimeToken, err = browserruntime.ReadRuntimeToken(os.Stdin)

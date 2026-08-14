@@ -113,6 +113,10 @@ type Config struct {
 	// DataDir is the directory holding durable SQLite state: DB and WAL files.
 	// It is created on first use by the storage layer.
 	DataDir string
+	// WebRoot is an optional directory containing the compiled React renderer.
+	// Empty keeps the daemon API-only (the Electron desktop default); ao server
+	// sets it for headless browser mode.
+	WebRoot string
 	// Agent is the compatibility agent adapter id selected by AO_AGENT;
 	// startSession fails fast if no adapter with this id is registered.
 	Agent string

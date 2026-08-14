@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, Outlet, useMatchRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useWorkflowRuns } from "../hooks/useWorkflowRuns";
@@ -8,6 +8,14 @@ export const Route = createFileRoute("/_shell/workflows")({
 });
 
 function WorkflowsListRoute() {
+	const matchRoute = useMatchRoute();
+	if (matchRoute({ to: "/workflows/$workflowId", fuzzy: true })) {
+		return <Outlet />;
+	}
+	return <WorkflowsList />;
+}
+
+function WorkflowsList() {
 	const { t } = useTranslation();
 	const { runs, isLoading, error, createRun, creating, createError } = useWorkflowRuns();
 	const [projectId, setProjectId] = useState("");

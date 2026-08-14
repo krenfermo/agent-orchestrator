@@ -19,6 +19,7 @@
 		"predev": "npm run build:daemon && node ./scripts/ensure-browser-runtime.mjs && npm run build:acp-runtime",
 		"dev": "electron-forge start",
 		"dev:web": "VITE_NO_ELECTRON=1 vite --config vite.renderer.config.ts",
+		"build:web": "vite build --config vite.renderer.config.ts --outDir dist/web",
 		"prepackage": "npm run build:daemon && npm run browser-runtime:prepare && npm run build:acp-runtime",
 		"package": "electron-forge package",
 		"premake": "npm run build:daemon && npm run browser-runtime:prepare && npm run build:acp-runtime",

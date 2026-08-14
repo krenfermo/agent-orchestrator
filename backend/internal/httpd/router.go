@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -59,7 +61,11 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	// JSON envelopes for unmatched routes / methods — chi's defaults are
 	// text/plain, which would break consumers that parse every response as
 	// the locked APIError shape.
-	r.NotFound(notFoundJSON)
+	if cfg.WebRoot == "" {
+		r.NotFound(notFoundJSON)
+	} else {
+		r.NotFound(spaFallback(cfg.WebRoot))
+	}
 	r.MethodNotAllowed(methodNotAllowedJSON)
 
 	mountHealth(r, cfg)
@@ -93,6 +99,38 @@ func mountHealth(r chi.Router, cfg config.Config) {
 	r.Get("/readyz", func(w http.ResponseWriter, _ *http.Request) {
 		envelope.WriteJSON(w, http.StatusOK, daemonProbePayload("ready", cfg))
 	})
+}
+
+// spaFallback serves compiled renderer files and falls back to index.html for
+// extensionless browser routes. It only runs after chi failed to match a real
+// daemon route, and explicitly preserves JSON 404s for API/internal surfaces.
+func spaFallback(root string) http.HandlerFunc {
+	root = filepath.Clean(root)
+	files := http.FileServer(http.Dir(root))
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			methodNotAllowedJSON(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/internal/") || r.URL.Path == "/mux" {
+			notFoundJSON(w, r)
+			return
+		}
+
+		rel := strings.TrimPrefix(filepath.Clean("/"+r.URL.Path), string(filepath.Separator))
+		candidate := filepath.Join(root, rel)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			files.ServeHTTP(w, r)
+			return
+		}
+		// Missing assets are genuine 404s; only application routes receive the
+		// SPA document. This avoids returning HTML for a mistyped JS/CSS URL.
+		if filepath.Ext(rel) != "" {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, filepath.Join(root, "index.html"))
+	}
 }
 
 // mountControl registers the loopback daemon-control endpoints. /shutdown is
@@ -319,9 +357,10 @@ func localControlRequest(r *http.Request) bool {
 // daemon is ready to answer requests.
 func daemonProbePayload(status string, cfg config.Config) map[string]any {
 	payload := map[string]any{
-		"status":  status,
-		"service": daemonmeta.ServiceName,
-		"pid":     os.Getpid(),
+		"status":            status,
+		"service":           daemonmeta.ServiceName,
+		"pid":               os.Getpid(),
+		"frontendAvailable": webFrontendAvailable(cfg.WebRoot),
 	}
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		payload["executablePath"] = exe
@@ -340,4 +379,12 @@ func daemonProbePayload(status string, cfg config.Config) map[string]any {
 		payload["appImagePath"] = appImage
 	}
 	return payload
+}
+
+func webFrontendAvailable(root string) bool {
+	if root == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(root, "index.html"))
+	return err == nil && !info.IsDir()
 }

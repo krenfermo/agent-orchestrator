@@ -9,7 +9,7 @@ function devApiBaseUrl(): string {
 }
 
 const explicitApiBaseUrl = import.meta.env.VITE_AO_API_BASE_URL;
-const initialApiBaseUrl = explicitApiBaseUrl ?? (import.meta.env.DEV ? devApiBaseUrl() : "http://127.0.0.1:3001");
+const initialApiBaseUrl = explicitApiBaseUrl ?? devApiBaseUrl();
 
 let runtimeApiBaseUrl: string | null = explicitApiBaseUrl ?? null;
 let daemonStatus: DaemonStatus = { state: "stopped" };
