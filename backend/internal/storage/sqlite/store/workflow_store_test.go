@@ -334,3 +334,74 @@ func TestWorkflowAttemptErrorClassRebuiltCheckAcceptsOldAndNewValues(t *testing.
 		}
 	}
 }
+
+// TestWorkflowAttemptErrorClassAcceptsCheckpoint8HClasses covers the 0102
+// rebuild: capacity_exhausted and binary_missing must be accepted by the
+// real sqlite CHECK constraint, not just by domain.WorkflowErrorClass.Valid.
+func TestWorkflowAttemptErrorClassAcceptsCheckpoint8HClasses(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "proj8h")
+	now := time.Now().UTC().Truncate(time.Second)
+	_, steps, err := s.CreateWorkflowRun(ctx, sampleWorkflowRun("proj8h", "wf-8h", now), sampleWorkflowSteps("wf-8h", now))
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	stepID := steps[0].ID
+
+	for i, class := range []domain.WorkflowErrorClass{domain.WorkflowErrorCapacityExhausted, domain.WorkflowErrorBinaryMissing} {
+		attempt, err := s.CreateWorkflowAttempt(ctx, "wfa-8h-"+string(rune('a'+i)), stepID, "codex", "", now)
+		if err != nil {
+			t.Fatalf("create attempt for class %q: %v", class, err)
+		}
+		if err := s.UpdateWorkflowAttemptOutcome(ctx, attempt.ID, now, domain.WorkflowAttemptFailed, class); err != nil {
+			t.Fatalf("record error class %q: %v", class, err)
+		}
+	}
+}
+
+// TestAgentHealthEventAppendOnlyAndLatestWins covers Checkpoint 8H's minimal
+// durable agent health: RecordAgentHealthEvent never updates a prior row, and
+// GetAgentHealth always derives from the most recently recorded event.
+func TestAgentHealthEventAppendOnlyAndLatestWins(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if _, ok, err := s.GetAgentHealth(ctx, domain.HarnessCodex); err != nil || ok {
+		t.Fatalf("GetAgentHealth before any event: ok=%v err=%v, want not found", ok, err)
+	}
+
+	first, err := s.RecordAgentHealthEvent(ctx, domain.AgentHealthEvent{
+		ID: "ahe-1", Harness: domain.HarnessCodex, State: domain.AgentHealthCooldown,
+		Reason: "rate_limited (inferred)", FailureClass: domain.WorkflowErrorRateLimited,
+		ConsecutiveFailures: 1, CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("RecordAgentHealthEvent 1: %v", err)
+	}
+	if first.State != domain.AgentHealthCooldown {
+		t.Fatalf("first.State = %q, want cooldown", first.State)
+	}
+
+	later := now.Add(time.Minute)
+	if _, err := s.RecordAgentHealthEvent(ctx, domain.AgentHealthEvent{
+		ID: "ahe-2", Harness: domain.HarnessCodex, State: domain.AgentHealthAvailable,
+		Reason: "dispatch succeeded", ConsecutiveFailures: 0, CreatedAt: later,
+	}); err != nil {
+		t.Fatalf("RecordAgentHealthEvent 2: %v", err)
+	}
+
+	latest, ok, err := s.GetAgentHealth(ctx, domain.HarnessCodex)
+	if err != nil || !ok {
+		t.Fatalf("GetAgentHealth: ok=%v err=%v", ok, err)
+	}
+	if latest.ID != "ahe-2" || latest.State != domain.AgentHealthAvailable {
+		t.Fatalf("latest = %+v, want ahe-2/available (most recent event wins)", latest)
+	}
+
+	// A different harness must never see codex's events.
+	if _, ok, err := s.GetAgentHealth(ctx, domain.HarnessClaudeCode); err != nil || ok {
+		t.Fatalf("GetAgentHealth(claude-code): ok=%v err=%v, want not found (per-harness isolation)", ok, err)
+	}
+}

@@ -178,8 +178,42 @@ function WorkflowRunRoute() {
 						</div>
 						{step.kind === "work" && (
 							<dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 border-t border-border pt-2 text-xs text-muted-foreground">
-								<dt>{t("shell.workflowsHarness")}</dt>
-								<dd>{step.assignedHarness || "codex"}</dd>
+								{(() => {
+									// Checkpoint 8H: the harness actually in use is the latest
+									// attempt's harness, not the (unused) assignedHarness column —
+									// a failover changes provider without changing that field.
+									const attempts = step.attempts;
+									const currentHarness =
+										attempts.length > 0
+											? attempts[attempts.length - 1].harness || step.assignedHarness || "codex"
+											: step.assignedHarness || "codex";
+									const harnessChain = attempts
+										.map((a) => a.harness)
+										.filter((h): h is string => Boolean(h))
+										.filter((h, i, arr) => i === 0 || arr[i - 1] !== h);
+									const failedOver = harnessChain.length > 1;
+									const failoverReason = failedOver
+										? (attempts.find((a) => a.outcome === "failed" && a.harness === harnessChain[0])?.errorClass ?? "")
+										: "";
+									return (
+										<>
+											<dt>{t("shell.workflowsCurrentAgent")}</dt>
+											<dd>{currentHarness}</dd>
+											{failedOver && (
+												<>
+													<dt>{t("shell.workflowsFailoverLabel")}</dt>
+													<dd>
+														{t("shell.workflowsFailover", {
+															from: harnessChain[0],
+															to: harnessChain[harnessChain.length - 1],
+															reason: failoverReason,
+														})}
+													</dd>
+												</>
+											)}
+										</>
+									);
+								})()}
 								{step.sessionId && (
 									<>
 										<dt>{t("shell.workflowsSession")}</dt>
@@ -259,6 +293,7 @@ function WorkflowRunRoute() {
 													number: attempt.attemptNumber,
 													startedAt: new Date(attempt.startedAt).toLocaleString(),
 												})}
+										{attempt.harness && ` · ${attempt.harness}`}
 										{attempt.errorClass && ` · ${attempt.errorClass}`}
 									</li>
 								))}

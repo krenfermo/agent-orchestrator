@@ -135,21 +135,63 @@ func (c *Coordinator) dispatchFromPending(ctx stdctx.Context, run domain.Workflo
 		step.State = domain.WorkflowStepRunning
 	}
 
+	return c.attemptWorkHarness(ctx, run, step, entry, prompt, domain.HarnessCodex, 1)
+}
+
+// attemptWorkHarness tries one provider for one work-step dispatch attempt
+// (Checkpoint 8H). On failure it classifies the error and — only if the
+// class is failover-eligible, the step is still within its policy attempt
+// budget, and the fallback harness is healthy — tries exactly one fallback
+// harness (V1's fixed codex->claude-code order) before giving up. This is
+// deliberately synchronous within one dispatchWorkStep call rather than
+// waiting for a later poll/reconcile pass: dispatchWorkStep is only re-
+// entered by StartRun and boot Reconcile, never by GetRun's read-time
+// polling, so a mid-uptime Spawn failure has no other opportunity to retry
+// before the checkpoint's own attempt budget would otherwise go unused.
+func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, entry domain.WorkflowOutboxEntry, prompt string, harness domain.AgentHarness, attemptNumber int) (domain.WorkflowStep, error) {
 	rec, _, _, err := c.spawner.Spawn(ctx, ports.SpawnConfig{
 		ProjectID:   domain.ProjectID(run.ProjectID),
 		Kind:        domain.KindWorker,
-		Harness:     domain.AgentHarness("codex"),
+		Harness:     harness,
 		IssueID:     workStepIssueID(step.ID),
 		Prompt:      prompt,
 		DisplayName: workDisplayName(run.Objective),
 	})
 	if err != nil {
-		// Cannot distinguish from here whether the failure happened before or
-		// at session-row creation vs. after (agent launch); session_create_failed
-		// is the safer default per the 8B spec.
-		return c.recordDispatchFailure(ctx, run, step, entry, domain.WorkflowErrorSessionCreateFailed, err)
+		classification := classifyProviderFailure(err)
+		now := c.clock()
+		c.recordAgentHealthFailure(ctx, harness, classification, now)
+		// Always record this attempt's failure first — audit history, never
+		// deleted or overwritten, regardless of whether a fallback follows.
+		if aerr := c.recordWorkAttemptFailure(ctx, step.ID, harness, classification.Class, now); aerr != nil {
+			return step, aerr
+		}
+		if fallback, ok := c.selectFallbackForWork(ctx, run, harness, attemptNumber, classification); ok {
+			if c.log != nil {
+				c.log.Warn("workflow: work step failing over to fallback harness", "step", step.ID, "from", harness, "to", fallback, "class", classification.Class)
+			}
+			return c.attemptWorkHarness(ctx, run, step, entry, prompt, fallback, attemptNumber+1)
+		}
+		return c.recordDispatchFailure(ctx, run, step, entry, classification.Class, err)
 	}
+	if attemptNumber > 1 && c.log != nil {
+		c.log.Info("workflow: work step provider failover succeeded", "step", step.ID, "harness", harness, "attempt", attemptNumber)
+	}
+	c.recordAgentHealthSuccess(ctx, harness, c.clock())
 	return c.recordDispatchSuccess(ctx, run, step, entry, rec)
+}
+
+// recordWorkAttemptFailure appends a terminal, failed workflow_attempts row
+// for one provider attempt (Checkpoint 8H). Always called before any
+// fallback decision, so the losing provider's attempt is never lost even
+// when a fallback attempt subsequently succeeds ("no borres el intento
+// Codex").
+func (c *Coordinator) recordWorkAttemptFailure(ctx stdctx.Context, stepID string, harness domain.AgentHarness, errClass domain.WorkflowErrorClass, now time.Time) error {
+	attempt, err := c.store.CreateWorkflowAttempt(ctx, "wfa-"+c.newID(), stepID, string(harness), "", now)
+	if err != nil {
+		return err
+	}
+	return c.store.UpdateWorkflowAttemptOutcome(ctx, attempt.ID, now, domain.WorkflowAttemptFailed, errClass)
 }
 
 // adoptOrMarkAmbiguous handles a retry/recovery call that found the outbox
@@ -219,7 +261,11 @@ func (c *Coordinator) recordDispatchSuccess(ctx stdctx.Context, run domain.Workf
 	if err != nil {
 		return step, err
 	}
-	if len(attempts) == 0 {
+	// Create a new attempt row unless one is already open for this dispatch:
+	// no attempts yet (first-ever attempt), or the latest one is already
+	// terminal (Checkpoint 8H: a prior provider's attempt failed and this
+	// success belongs to the fallback harness — never overwrite that row).
+	if len(attempts) == 0 || attempts[len(attempts)-1].Outcome != "" {
 		if _, err := c.store.CreateWorkflowAttempt(ctx, "wfa-"+c.newID(), step.ID, string(rec.Harness), "", now); err != nil {
 			return step, err
 		}
@@ -273,19 +319,9 @@ func (c *Coordinator) recordDispatchFailure(ctx stdctx.Context, run domain.Workf
 	if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, entry.Status, domain.WorkflowOutboxFailed, now, string(errClass)); err != nil {
 		return step, err
 	}
-	attempts, err := c.store.ListWorkflowAttempts(ctx, step.ID)
-	if err != nil {
-		return step, err
-	}
-	if len(attempts) == 0 {
-		attempt, err := c.store.CreateWorkflowAttempt(ctx, "wfa-"+c.newID(), step.ID, "codex", "", now)
-		if err != nil {
-			return step, err
-		}
-		if err := c.store.UpdateWorkflowAttemptOutcome(ctx, attempt.ID, now, domain.WorkflowAttemptFailed, errClass); err != nil {
-			return step, err
-		}
-	}
+	// The failing (and any tried-and-failed fallback) attempt row was
+	// already recorded by attemptWorkHarness/recordWorkAttemptFailure before
+	// this terminal path was reached — never duplicated here.
 	if step.State == domain.WorkflowStepRunning {
 		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, domain.WorkflowStepRunning, domain.WorkflowStepFailed, now); err != nil {
 			return step, err

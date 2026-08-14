@@ -249,6 +249,16 @@ const (
 	WorkflowErrorVerifyArtifactMismatch WorkflowErrorClass = "verify_artifact_mismatch"
 	WorkflowErrorVerifyWorkspaceChanged WorkflowErrorClass = "verify_workspace_changed"
 	WorkflowErrorVerifyAmbiguous        WorkflowErrorClass = "verify_ambiguous"
+	// WorkflowErrorCapacityExhausted means the provider reported it is out of
+	// capacity for this account/plan (Checkpoint 8H) — distinct from
+	// rate_limited: a rate limit is time-boxed (a reset is expected), capacity
+	// exhaustion carries no such typed reset signal.
+	WorkflowErrorCapacityExhausted WorkflowErrorClass = "capacity_exhausted"
+	// WorkflowErrorBinaryMissing means the harness's CLI binary could not be
+	// resolved on PATH (Checkpoint 8H), mirroring ports.ErrAgentBinaryNotFound.
+	// Distinct from WorkflowErrorAgentStartFailed: this is a specific, typed
+	// signal, not a catch-all.
+	WorkflowErrorBinaryMissing WorkflowErrorClass = "binary_missing"
 )
 
 // Valid reports whether an error class is persistable. The empty value is
@@ -264,7 +274,7 @@ func (c WorkflowErrorClass) Valid() bool {
 		WorkflowErrorVerifyCommandFailed, WorkflowErrorVerifyTimeout,
 		WorkflowErrorVerifyEnvironment, WorkflowErrorVerifyArtifactMissing,
 		WorkflowErrorVerifyArtifactMismatch, WorkflowErrorVerifyWorkspaceChanged,
-		WorkflowErrorVerifyAmbiguous:
+		WorkflowErrorVerifyAmbiguous, WorkflowErrorCapacityExhausted, WorkflowErrorBinaryMissing:
 		return true
 	default:
 		return false
@@ -284,13 +294,19 @@ const (
 	WorkflowOutboxSendMessage WorkflowOutboxCommandType = "send_message"
 	// WorkflowOutboxCancelSession stages a cancel-session command.
 	WorkflowOutboxCancelSession WorkflowOutboxCommandType = "cancel_session"
+	// WorkflowOutboxSwitchWorkerAgent stages a durable Codex->Claude (or
+	// future reverse) provider failover command for a work step's already
+	// -live session (Checkpoint 8H). Its dispatch calls
+	// session_manager.Manager.SwitchAgent — the existing agent-switching
+	// saga — never a second switching mechanism.
+	WorkflowOutboxSwitchWorkerAgent WorkflowOutboxCommandType = "switch_worker_agent"
 )
 
 // Valid reports whether an outbox command type is persistable.
 func (t WorkflowOutboxCommandType) Valid() bool {
 	switch t {
 	case WorkflowOutboxSpawnWorkerSession, WorkflowOutboxTriggerReview,
-		WorkflowOutboxSendMessage, WorkflowOutboxCancelSession:
+		WorkflowOutboxSendMessage, WorkflowOutboxCancelSession, WorkflowOutboxSwitchWorkerAgent:
 		return true
 	default:
 		return false

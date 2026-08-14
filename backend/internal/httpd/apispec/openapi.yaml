@@ -8722,6 +8722,8 @@ components:
           - verify_artifact_mismatch
           - verify_workspace_changed
           - verify_ambiguous
+          - capacity_exhausted
+          - binary_missing
           type: string
         finishedAt:
           format: date-time

@@ -1,17 +1,36 @@
 package daemon
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"time"
 
 	plannercommand "github.com/aoagents/agent-orchestrator/backend/internal/adapters/planner/command"
 	workspacerouter "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/router"
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 )
+
+// workflowAgentSwitcher adapts *session_manager.Manager.SwitchAgent — the
+// existing durable, generation-fenced Claude<->Codex switching saga — to
+// workflow.AgentSwitcher (Checkpoint 8H). Workflow's own package
+// deliberately does not import session_manager, so this tiny field-for-field
+// translation lives here in composition-root wiring instead.
+type workflowAgentSwitcher struct {
+	mgr *sessionmanager.Manager
+}
+
+func (w workflowAgentSwitcher) SwitchAgent(ctx context.Context, id domain.SessionID, cfg workflowcore.AgentSwitchRequest) (domain.AgentSwitch, error) {
+	return w.mgr.SwitchAgent(ctx, id, sessionmanager.SwitchAgentConfig{
+		TargetHarness:  cfg.TargetHarness,
+		Note:           cfg.Note,
+		IdempotencyKey: cfg.IdempotencyKey,
+	})
+}
 
 // startWorkflows wires the workflow durable foundation (Checkpoint 8A) plus
 // Checkpoint 8B's work-step Codex dispatch/observation and Checkpoint 8C's
@@ -45,6 +64,7 @@ func startWorkflows(store *sqlite.Store, sessionMgr *sessionmanager.Manager, wor
 		Verifier:              workflowVerifyRunner{},
 		Planner:               plannercommand.Planner{Binary: plannerBinary, Model: plannerModel, Timeout: 3 * time.Minute},
 		PlannerContextBuilder: plannercommand.ContextBuilder{},
+		Switcher:              workflowAgentSwitcher{mgr: sessionMgr},
 		Logger:                log,
 	})
 	return coordinator, workflowsvc.New(coordinator)

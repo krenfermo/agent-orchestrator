@@ -21,17 +21,36 @@ type fakeStore struct {
 	checkpoints map[string][]domain.WorkflowCheckpoint // by workflow_run_id, oldest first
 	outbox      map[string]domain.WorkflowOutboxEntry  // by idempotency_key
 
+	// healthEvents backs Checkpoint 8H's minimal agent health, append-only
+	// per harness, oldest first (mirrors agent_health_events).
+	healthEvents map[string][]domain.AgentHealthEvent
+
 	seq int
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		runs:        map[string]domain.WorkflowRun{},
-		steps:       map[string][]domain.WorkflowStep{},
-		attempts:    map[string][]domain.WorkflowAttempt{},
-		checkpoints: map[string][]domain.WorkflowCheckpoint{},
-		outbox:      map[string]domain.WorkflowOutboxEntry{},
+		runs:         map[string]domain.WorkflowRun{},
+		steps:        map[string][]domain.WorkflowStep{},
+		attempts:     map[string][]domain.WorkflowAttempt{},
+		checkpoints:  map[string][]domain.WorkflowCheckpoint{},
+		outbox:       map[string]domain.WorkflowOutboxEntry{},
+		healthEvents: map[string][]domain.AgentHealthEvent{},
 	}
+}
+
+func (f *fakeStore) RecordAgentHealthEvent(_ context.Context, ev domain.AgentHealthEvent) (domain.AgentHealthEvent, error) {
+	key := string(ev.Harness)
+	f.healthEvents[key] = append(f.healthEvents[key], ev)
+	return ev, nil
+}
+
+func (f *fakeStore) GetAgentHealth(_ context.Context, harness domain.AgentHarness) (domain.AgentHealthEvent, bool, error) {
+	list := f.healthEvents[string(harness)]
+	if len(list) == 0 {
+		return domain.AgentHealthEvent{}, false, nil
+	}
+	return list[len(list)-1], true, nil
 }
 
 func (f *fakeStore) CreateWorkflowRun(_ context.Context, run domain.WorkflowRun, steps []domain.WorkflowStep) (domain.WorkflowRun, []domain.WorkflowStep, error) {

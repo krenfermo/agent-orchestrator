@@ -3095,7 +3095,7 @@ export interface components {
             /** Format: int64 */
             attemptNumber: number;
             /** @enum {string} */
-            errorClass?: "rate_limited" | "auth" | "transient" | "tool" | "test_failed" | "review_changes_requested" | "session_create_failed" | "agent_start_failed" | "prompt_delivery_failed" | "runtime_failed" | "worker_terminated_unexpectedly" | "ambiguous_worker_state" | "reviewer_launch_failed" | "fix_budget_exhausted" | "verify_command_failed" | "verify_timeout" | "verify_environment_error" | "verify_artifact_missing" | "verify_artifact_mismatch" | "verify_workspace_changed" | "verify_ambiguous";
+            errorClass?: "rate_limited" | "auth" | "transient" | "tool" | "test_failed" | "review_changes_requested" | "session_create_failed" | "agent_start_failed" | "prompt_delivery_failed" | "runtime_failed" | "worker_terminated_unexpectedly" | "ambiguous_worker_state" | "reviewer_launch_failed" | "fix_budget_exhausted" | "verify_command_failed" | "verify_timeout" | "verify_environment_error" | "verify_artifact_missing" | "verify_artifact_mismatch" | "verify_workspace_changed" | "verify_ambiguous" | "capacity_exhausted" | "binary_missing";
             /** Format: date-time */
             finishedAt?: null | string;
             harness?: string;

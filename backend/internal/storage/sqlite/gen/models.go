@@ -12,6 +12,17 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
+type AgentHealthEvent struct {
+	ID                  string
+	Harness             string
+	State               string
+	Reason              string
+	FailureClass        string
+	CooldownUntil       sql.NullTime
+	ConsecutiveFailures int64
+	CreatedAt           time.Time
+}
+
 type AgentModelCatalog struct {
 	AgentID       string
 	ProjectID     string

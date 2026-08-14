@@ -583,6 +583,54 @@ func workflowOutboxFromRow(r gen.WorkflowOutbox) domain.WorkflowOutboxEntry {
 	}
 }
 
+// RecordAgentHealthEvent inserts an append-only health fact for a harness
+// (Checkpoint 8H). Never updated; GetAgentHealth derives current state from
+// the latest event.
+func (s *Store) RecordAgentHealthEvent(ctx context.Context, ev domain.AgentHealthEvent) (domain.AgentHealthEvent, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	row, err := s.qw.InsertAgentHealthEvent(ctx, gen.InsertAgentHealthEventParams{
+		ID:                  ev.ID,
+		Harness:             string(ev.Harness),
+		State:               string(ev.State),
+		Reason:              ev.Reason,
+		FailureClass:        string(ev.FailureClass),
+		CooldownUntil:       timePtrToNullTime(ev.CooldownUntil),
+		ConsecutiveFailures: ev.ConsecutiveFailures,
+		CreatedAt:           ev.CreatedAt,
+	})
+	if err != nil {
+		return domain.AgentHealthEvent{}, fmt.Errorf("insert agent health event for harness %s: %w", ev.Harness, err)
+	}
+	return agentHealthEventFromRow(row), nil
+}
+
+// GetAgentHealth returns the latest recorded health event for a harness,
+// ok=false if none has ever been recorded (domain.AgentHealthUnknown).
+func (s *Store) GetAgentHealth(ctx context.Context, harness domain.AgentHarness) (domain.AgentHealthEvent, bool, error) {
+	row, err := s.qr.GetLatestAgentHealthEvent(ctx, string(harness))
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.AgentHealthEvent{}, false, nil
+	}
+	if err != nil {
+		return domain.AgentHealthEvent{}, false, fmt.Errorf("get latest agent health event for harness %s: %w", harness, err)
+	}
+	return agentHealthEventFromRow(row), true, nil
+}
+
+func agentHealthEventFromRow(r gen.AgentHealthEvent) domain.AgentHealthEvent {
+	return domain.AgentHealthEvent{
+		ID:                  r.ID,
+		Harness:             domain.AgentHarness(r.Harness),
+		State:               domain.AgentHealthState(r.State),
+		Reason:              r.Reason,
+		FailureClass:        domain.WorkflowErrorClass(r.FailureClass),
+		CooldownUntil:       nullTimeToTimePtr(r.CooldownUntil),
+		ConsecutiveFailures: r.ConsecutiveFailures,
+		CreatedAt:           r.CreatedAt,
+	}
+}
+
 func stringPtrToNullString(s *string) sql.NullString {
 	if s == nil {
 		return sql.NullString{}

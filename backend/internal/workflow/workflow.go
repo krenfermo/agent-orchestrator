@@ -74,6 +74,13 @@ type Store interface {
 	// review_run_id as "current/most-recent" (mutable across review cycles),
 	// so this is an unconditional set, not write-once.
 	SetWorkflowStepReviewRun(ctx stdctx.Context, stepID, reviewRunID string, now time.Time) (bool, error)
+
+	// RecordAgentHealthEvent and GetAgentHealth back Checkpoint 8H's minimal
+	// durable agent health (failure_classifier.go, health.go, failover.go).
+	// Append-only: RecordAgentHealthEvent never updates a prior row;
+	// GetAgentHealth derives current health from the latest one.
+	RecordAgentHealthEvent(ctx stdctx.Context, ev domain.AgentHealthEvent) (domain.AgentHealthEvent, error)
+	GetAgentHealth(ctx stdctx.Context, harness domain.AgentHarness) (domain.AgentHealthEvent, bool, error)
 }
 
 type masterPlanStore interface {
@@ -132,6 +139,14 @@ type Deps struct {
 	Planner               Planner
 	PlannerContextBuilder PlannerContextBuilder
 
+	// Switcher backs Checkpoint 8H's live-session Codex->Claude failover
+	// (failover.go): the durable, generation-fenced session_manager agent-
+	// switching saga, reused unmodified — workflow only decides WHEN to call
+	// it. Optional: a nil Switcher means a live-session provider failure can
+	// still be classified/recorded (RecordAgentHealthEvent) but cannot
+	// durably switch the session, and is surfaced as needs_attention instead.
+	Switcher AgentSwitcher
+
 	// Clock and NewID are injectable for deterministic tests.
 	Clock func() time.Time
 	NewID func() string
@@ -165,6 +180,9 @@ type Coordinator struct {
 	planStore             masterPlanStore
 	planner               Planner
 	plannerContextBuilder PlannerContextBuilder
+
+	// switcher backs Checkpoint 8H's live-session failover. Optional.
+	switcher AgentSwitcher
 }
 
 // New wires a Coordinator from its dependencies, defaulting the clock and id source.
@@ -192,6 +210,7 @@ func New(d Deps) *Coordinator {
 		planStore:             func() masterPlanStore { s, _ := d.Store.(masterPlanStore); return s }(),
 		planner:               d.Planner,
 		plannerContextBuilder: d.PlannerContextBuilder,
+		switcher:              d.Switcher,
 		clock:                 clock,
 		newID:                 newID,
 	}

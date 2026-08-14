@@ -320,8 +320,14 @@ func TestDispatchOutboxIdempotencyNeverDoubleSpawns(t *testing.T) {
 }
 
 // TestDispatchFailureRecordsFailedAttemptAndNeedsAttention covers Spawn
-// itself failing: step -> failed, run -> needs_attention (not failed), and
-// a failed attempt row with error_class session_create_failed.
+// itself failing with an untyped, unclassifiable error: step -> failed, run
+// -> needs_attention (not failed), and a failed attempt row. Checkpoint 8H
+// replaced the old blanket session_create_failed default with the real
+// provider-neutral classifier (failure_classifier.go): an untyped error with
+// no typed sentinel or known rate-limit/capacity/auth phrase classifies as
+// agent_start_failed with unknown certainty — still accurate ("dispatch
+// failed to start the agent") but not eligible for automatic failover, since
+// an unclassified failure must never silently trigger a provider switch.
 func TestDispatchFailureRecordsFailedAttemptAndNeedsAttention(t *testing.T) {
 	spawner := &fakeSpawner{err: errors.New("boom")}
 	c, store, _ := newCoordinatorFull(spawner, newFakeSessionFacts(), &fakeWorkspaceFacts{})
@@ -346,8 +352,8 @@ func TestDispatchFailureRecordsFailedAttemptAndNeedsAttention(t *testing.T) {
 	if err != nil || len(attempts) != 1 {
 		t.Fatalf("attempts = %+v, err=%v, want exactly 1", attempts, err)
 	}
-	if attempts[0].Outcome != domain.WorkflowAttemptFailed || attempts[0].ErrorClass != domain.WorkflowErrorSessionCreateFailed {
-		t.Fatalf("attempt = %+v, want failed/session_create_failed", attempts[0])
+	if attempts[0].Outcome != domain.WorkflowAttemptFailed || attempts[0].ErrorClass != domain.WorkflowErrorAgentStartFailed {
+		t.Fatalf("attempt = %+v, want failed/agent_start_failed", attempts[0])
 	}
 }
 

@@ -203,3 +203,21 @@ SET finished_at = sqlc.arg(finished_at),
     outcome = sqlc.arg(outcome),
     error_class = sqlc.arg(error_class)
 WHERE id = sqlc.arg(id);
+
+-- name: InsertAgentHealthEvent :one
+-- Checkpoint 8H: append-only durable fact about one harness's dispatch
+-- outcome. Never updated; GetLatestAgentHealthEvent derives current health.
+INSERT INTO agent_health_events (
+    id, harness, state, reason, failure_class, cooldown_until,
+    consecutive_failures, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, harness, state, reason, failure_class, cooldown_until,
+          consecutive_failures, created_at;
+
+-- name: GetLatestAgentHealthEvent :one
+SELECT id, harness, state, reason, failure_class, cooldown_until,
+       consecutive_failures, created_at
+FROM agent_health_events
+WHERE harness = ?
+ORDER BY created_at DESC, id DESC
+LIMIT 1;

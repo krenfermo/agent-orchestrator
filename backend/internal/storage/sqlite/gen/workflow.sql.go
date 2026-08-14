@@ -13,6 +13,31 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
+const getLatestAgentHealthEvent = `-- name: GetLatestAgentHealthEvent :one
+SELECT id, harness, state, reason, failure_class, cooldown_until,
+       consecutive_failures, created_at
+FROM agent_health_events
+WHERE harness = ?
+ORDER BY created_at DESC, id DESC
+LIMIT 1
+`
+
+func (q *Queries) GetLatestAgentHealthEvent(ctx context.Context, harness string) (AgentHealthEvent, error) {
+	row := q.db.QueryRowContext(ctx, getLatestAgentHealthEvent, harness)
+	var i AgentHealthEvent
+	err := row.Scan(
+		&i.ID,
+		&i.Harness,
+		&i.State,
+		&i.Reason,
+		&i.FailureClass,
+		&i.CooldownUntil,
+		&i.ConsecutiveFailures,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getLatestWorkflowAttemptByStep = `-- name: GetLatestWorkflowAttemptByStep :one
 SELECT id, workflow_step_id, attempt_number, harness, model,
        started_at, finished_at, outcome, error_class, retry_after
@@ -171,6 +196,53 @@ func (q *Queries) GetWorkflowStep(ctx context.Context, id string) (WorkflowStep,
 		&i.UpdatedAt,
 		&i.CompletedAt,
 		&i.ArtifactJson,
+	)
+	return i, err
+}
+
+const insertAgentHealthEvent = `-- name: InsertAgentHealthEvent :one
+INSERT INTO agent_health_events (
+    id, harness, state, reason, failure_class, cooldown_until,
+    consecutive_failures, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, harness, state, reason, failure_class, cooldown_until,
+          consecutive_failures, created_at
+`
+
+type InsertAgentHealthEventParams struct {
+	ID                  string
+	Harness             string
+	State               string
+	Reason              string
+	FailureClass        string
+	CooldownUntil       sql.NullTime
+	ConsecutiveFailures int64
+	CreatedAt           time.Time
+}
+
+// Checkpoint 8H: append-only durable fact about one harness's dispatch
+// outcome. Never updated; GetLatestAgentHealthEvent derives current health.
+func (q *Queries) InsertAgentHealthEvent(ctx context.Context, arg InsertAgentHealthEventParams) (AgentHealthEvent, error) {
+	row := q.db.QueryRowContext(ctx, insertAgentHealthEvent,
+		arg.ID,
+		arg.Harness,
+		arg.State,
+		arg.Reason,
+		arg.FailureClass,
+		arg.CooldownUntil,
+		arg.ConsecutiveFailures,
+		arg.CreatedAt,
+	)
+	var i AgentHealthEvent
+	err := row.Scan(
+		&i.ID,
+		&i.Harness,
+		&i.State,
+		&i.Reason,
+		&i.FailureClass,
+		&i.CooldownUntil,
+		&i.ConsecutiveFailures,
+		&i.CreatedAt,
 	)
 	return i, err
 }
