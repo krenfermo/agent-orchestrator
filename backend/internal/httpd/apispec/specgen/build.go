@@ -328,6 +328,11 @@ var schemaNames = map[string]string{
 	"WorkflowVerifyCheckResult":              "WorkflowVerifyCheckResult",
 	"ControllersWorkflowRunView":             "WorkflowRunView",
 	"ControllersWorkflowRunDetailView":       "WorkflowRunDetailView",
+	"ControllersWorkflowPlanView":            "WorkflowPlanView",
+	"ControllersWorkflowTaskView":            "WorkflowTaskView",
+	"WorkflowMasterPlan":                     "WorkflowMasterPlan",
+	"WorkflowPlannedStep":                    "WorkflowPlannedStep",
+	"WorkflowPlanValidation":                 "WorkflowPlanValidation",
 	"ControllersWorkflowRunResponse":         "WorkflowRunResponse",
 	"ControllersListWorkflowsResponse":       "ListWorkflowsResponse",
 	"ControllersWorkflowProjectIDParam":      "WorkflowProjectIDParam",
@@ -536,6 +541,10 @@ func workflowOperations() []operation {
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
 		},
+		{method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/plan/generate", id: "generateWorkflowPlan", tag: "workflows", summary: "Generate and deterministically validate a durable master plan", pathParams: []any{controllers.WorkflowIDParam{}}, resps: []respUnit{{http.StatusOK, controllers.WorkflowRunResponse{}}, {http.StatusConflict, envelope.APIError{}}, {http.StatusUnprocessableEntity, envelope.APIError{}}}},
+		{method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/plan", id: "getWorkflowPlan", tag: "workflows", summary: "Get a durable master plan and planned tasks", pathParams: []any{controllers.WorkflowIDParam{}}, resps: []respUnit{{http.StatusOK, controllers.WorkflowRunResponse{}}, {http.StatusNotFound, envelope.APIError{}}}},
+		{method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/plan/approve", id: "approveWorkflowPlan", tag: "workflows", summary: "Approve a validated plan and dispatch the first eligible task", pathParams: []any{controllers.WorkflowIDParam{}}, resps: []respUnit{{http.StatusOK, controllers.WorkflowRunResponse{}}, {http.StatusConflict, envelope.APIError{}}, {http.StatusUnprocessableEntity, envelope.APIError{}}}},
+		{method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/plan/reject", id: "rejectWorkflowPlan", tag: "workflows", summary: "Reject and cancel a master plan", pathParams: []any{controllers.WorkflowIDParam{}}, resps: []respUnit{{http.StatusOK, controllers.WorkflowRunResponse{}}, {http.StatusConflict, envelope.APIError{}}}},
 	}
 }
 

@@ -5052,6 +5052,126 @@ paths:
         is currently dispatchable.'
       tags:
       - workflows
+  /api/v1/workflows/{workflowId}/plan:
+    get:
+      operationId: getWorkflowPlan
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRunResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+      summary: Get a durable master plan and planned tasks
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/plan/approve:
+    post:
+      operationId: approveWorkflowPlan
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRunResponse'
+          description: OK
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unprocessable Entity
+      summary: Approve a validated plan and dispatch the first eligible task
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/plan/generate:
+    post:
+      operationId: generateWorkflowPlan
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRunResponse'
+          description: OK
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unprocessable Entity
+      summary: Generate and deterministically validate a durable master plan
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/plan/reject:
+    post:
+      operationId: rejectWorkflowPlan
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRunResponse'
+          description: OK
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+      summary: Reject and cancel a master plan
+      tags:
+      - workflows
   /api/v1/workflows/{workflowId}/start:
     post:
       operationId: startWorkflowRun
@@ -6245,8 +6365,16 @@ components:
       type: object
     CreateWorkflowRunRequest:
       properties:
+        masterPlan:
+          description: Generate a provider-neutral master plan before execution.
+          type: boolean
         objective:
           description: The workflow run's objective.
+          type: string
+        planApprovalMode:
+          enum:
+          - manual
+          - auto
           type: string
         verification:
           $ref: '#/components/schemas/WorkflowVerificationPlan'
@@ -8625,13 +8753,100 @@ components:
       - attemptNumber
       - startedAt
       type: object
+    WorkflowMasterPlan:
+      properties:
+        objective:
+          type: string
+        steps:
+          items:
+            $ref: '#/components/schemas/WorkflowPlannedStep'
+          type: array
+        summary:
+          type: string
+        version:
+          type: string
+      required:
+      - version
+      - objective
+      - summary
+      - steps
+      type: object
+    WorkflowPlanValidation:
+      properties:
+        errors:
+          items:
+            type: string
+          type: array
+        valid:
+          type: boolean
+      required:
+      - valid
+      - errors
+      type: object
+    WorkflowPlanView:
+      properties:
+        approvalMode:
+          type: string
+        errorClass:
+          type: string
+        generated:
+          $ref: '#/components/schemas/WorkflowMasterPlan'
+        model:
+          type: string
+        planHash:
+          type: string
+        promptContextVersion:
+          type: string
+        provider:
+          type: string
+        status:
+          type: string
+        validation:
+          $ref: '#/components/schemas/WorkflowPlanValidation'
+      required:
+      - status
+      - approvalMode
+      - promptContextVersion
+      type: object
+    WorkflowPlannedStep:
+      properties:
+        acceptanceCriteria:
+          items:
+            type: string
+          type: array
+        dependencies:
+          items:
+            type: string
+          type: array
+        description:
+          type: string
+        id:
+          type: string
+        title:
+          type: string
+        verify:
+          $ref: '#/components/schemas/WorkflowVerificationPlanType2'
+      required:
+      - id
+      - title
+      - description
+      - dependencies
+      - acceptanceCriteria
+      - verify
+      type: object
     WorkflowRunDetailView:
       properties:
+        plan:
+          $ref: '#/components/schemas/WorkflowPlanView'
         run:
           $ref: '#/components/schemas/WorkflowRunView'
         steps:
           items:
             $ref: '#/components/schemas/WorkflowStepView'
+          type: array
+        tasks:
+          items:
+            $ref: '#/components/schemas/WorkflowTaskView'
           type: array
       required:
       - run
@@ -8768,7 +8983,63 @@ components:
       - updatedAt
       - attempts
       type: object
+    WorkflowTaskView:
+      properties:
+        acceptanceCriteria:
+          items:
+            type: string
+          type: array
+        dependencies:
+          items:
+            type: string
+          type: array
+        description:
+          type: string
+        executionWorkflowId:
+          type: string
+        id:
+          type: string
+        number:
+          format: int64
+          type: integer
+        state:
+          type: string
+        title:
+          type: string
+        verify:
+          $ref: '#/components/schemas/WorkflowVerificationPlanType2'
+      required:
+      - id
+      - number
+      - title
+      - description
+      - dependencies
+      - acceptanceCriteria
+      - verify
+      - state
+      type: object
     WorkflowVerificationCommand:
+      properties:
+        args:
+          items:
+            type: string
+          type: array
+        command:
+          type: string
+        requiredExitCode:
+          type: integer
+        retrySafe:
+          type: boolean
+        timeoutSeconds:
+          type: integer
+        workingDirectory:
+          type: string
+      required:
+      - command
+      - requiredExitCode
+      - retrySafe
+      type: object
+    WorkflowVerificationCommandCheck:
       properties:
         args:
           items:
@@ -8805,6 +9076,22 @@ components:
       - path
       - exists
       type: object
+    WorkflowVerificationFileCheck:
+      properties:
+        exactContent:
+          type:
+          - "null"
+          - string
+        exists:
+          type: boolean
+        path:
+          type: string
+        sha256:
+          type: string
+      required:
+      - path
+      - exists
+      type: object
     WorkflowVerificationPlan:
       properties:
         commands:
@@ -8814,6 +9101,17 @@ components:
         files:
           items:
             $ref: '#/components/schemas/WorkflowVerificationFile'
+          type: array
+      type: object
+    WorkflowVerificationPlanType2:
+      properties:
+        commands:
+          items:
+            $ref: '#/components/schemas/WorkflowVerificationCommandCheck'
+          type: array
+        files:
+          items:
+            $ref: '#/components/schemas/WorkflowVerificationFileCheck'
           type: array
       type: object
     WorkflowVerifyCheckResult:

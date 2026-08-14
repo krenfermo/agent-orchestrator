@@ -82,6 +82,12 @@ func (c *Coordinator) observeFixStep(ctx stdctx.Context, run domain.WorkflowRun,
 			return c.recordFixOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunWaiting,
 				fp, true, "fix delivered — awaiting next review cycle", "")
 		}
+		// As with the initial work step, idle is the persisted default before
+		// the first TUI hook signal. A restart during that initialization window
+		// must not turn missing evidence into a failed fix attempt.
+		if sess.FirstSignalAt.IsZero() {
+			return step, nil
+		}
 		// Conservative, mirrors evaluateWorkStepProgress's idle+no-evidence
 		// rule exactly: "Codex went idle but did not actually change
 		// anything new" must not silently trigger a new review.

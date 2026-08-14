@@ -23,6 +23,15 @@ function WorkflowRunRoute() {
 		continueRun,
 		continuing,
 		continueError,
+		generatePlan,
+		generatingPlan,
+		generatePlanError,
+		approvePlan,
+		approvingPlan,
+		approvePlanError,
+		rejectPlan,
+		rejectingPlan,
+		rejectPlanError,
 	} = useWorkflowRun(workflowId);
 
 	if (isLoading && !workflow) {
@@ -63,7 +72,7 @@ function WorkflowRunRoute() {
 			</div>
 
 			<div className="flex items-center gap-2">
-				{isPending && (
+				{isPending && !workflow.plan && (
 					<div>
 						<button
 							className="rounded border border-border px-3 py-1.5 text-sm disabled:opacity-50"
@@ -74,6 +83,30 @@ function WorkflowRunRoute() {
 							{starting ? t("shell.workflowsStarting") : t("shell.workflowsStart")}
 						</button>
 						{startError && <p className="mt-1 text-sm text-destructive">{startError}</p>}
+					</div>
+				)}
+				{workflow.plan?.status === "pending" && (
+					<div>
+						<button className="rounded border border-border px-3 py-1.5 text-sm disabled:opacity-50" disabled={generatingPlan} onClick={() => void generatePlan()} type="button">
+							{generatingPlan ? "Generating plan…" : "Generate Plan"}
+						</button>
+						{generatePlanError && <p className="mt-1 text-sm text-destructive">{generatePlanError}</p>}
+					</div>
+				)}
+				{workflow.plan?.status === "validated" && workflow.plan.approvalMode === "manual" && (
+					<div>
+						<button className="rounded border border-primary bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50" disabled={approvingPlan} onClick={() => void approvePlan()} type="button">
+							{approvingPlan ? "Approving…" : "Approve Plan"}
+						</button>
+						{approvePlanError && <p className="mt-1 text-sm text-destructive">{approvePlanError}</p>}
+					</div>
+				)}
+				{workflow.plan && workflow.plan.status !== "approved" && workflow.plan.status !== "rejected" && (
+					<div>
+						<button className="rounded border border-border px-3 py-1.5 text-sm disabled:opacity-50" disabled={rejectingPlan} onClick={() => void rejectPlan()} type="button">
+							{rejectingPlan ? "Cancelling…" : "Cancel"}
+						</button>
+						{rejectPlanError && <p className="mt-1 text-sm text-destructive">{rejectPlanError}</p>}
 					</div>
 				)}
 				{canContinueReview && (
@@ -103,6 +136,35 @@ function WorkflowRunRoute() {
 					</div>
 				)}
 			</div>
+
+			{workflow.plan && (
+				<section className="flex flex-col gap-3">
+					<div>
+						<h2 className="text-sm font-semibold">Master Plan</h2>
+						<p className="text-xs text-muted-foreground">
+							{workflow.plan.status} · {workflow.plan.provider || "planner"}/{workflow.plan.model || "default"}
+							{workflow.plan.planHash ? ` · ${workflow.plan.planHash.slice(0, 12)}` : ""}
+						</p>
+					</div>
+					{workflow.plan.generated?.summary && <p className="text-sm text-muted-foreground">{workflow.plan.generated.summary}</p>}
+					{workflow.tasks?.map((task) => (
+						<article className="rounded-lg border border-border p-3" key={task.id}>
+							<div className="flex items-center justify-between gap-3">
+								<h3 className="font-medium">{task.number}. {task.title}</h3>
+								<span className="text-xs text-muted-foreground">{task.state}</span>
+							</div>
+							<p className="mt-1 text-sm text-muted-foreground">{task.description}</p>
+							{task.dependencies.length > 0 && <p className="mt-2 text-xs text-muted-foreground">Depends on: {task.dependencies.join(", ")}</p>}
+							<ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-muted-foreground">{task.acceptanceCriteria.map((criterion) => <li key={criterion}>{criterion}</li>)}</ul>
+							<div className="mt-2 text-xs text-muted-foreground">
+								{task.verify.commands?.map((check) => <code className="mr-2" key={`${check.command}-${check.args?.join("-")}`}>{[check.command, ...(check.args ?? [])].join(" ")}</code>)}
+								{task.verify.files?.map((check) => <code className="mr-2" key={check.path}>{check.path}</code>)}
+							</div>
+							{task.executionWorkflowId && <Link className="mt-2 inline-block text-xs text-primary underline underline-offset-2" params={{ workflowId: task.executionWorkflowId }} to="/workflows/$workflowId">Execution workflow</Link>}
+						</article>
+					))}
+				</section>
+			)}
 
 			<div className="flex flex-col gap-3">
 				<h2 className="text-sm font-semibold text-muted-foreground">{t("shell.workflowsSteps")}</h2>

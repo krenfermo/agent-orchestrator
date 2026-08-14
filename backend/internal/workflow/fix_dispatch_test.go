@@ -156,7 +156,8 @@ func TestFixCycleUnchangedFingerprintStaysAmbiguous(t *testing.T) {
 	sessionFacts.put(domain.SessionRecord{
 		ID: domain.SessionID(*work.Step.SessionID), ProjectID: "proj-1",
 		Activity: domain.Activity{State: domain.ActivityIdle}, IsTerminated: false,
-		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/wf", Branch: "ao/wf"},
+		FirstSignalAt: time.Now(),
+		Metadata:      domain.SessionMetadata{WorkspacePath: "/ws/wf", Branch: "ao/wf"},
 	})
 	clk.Advance(10 * time.Second)
 	unchanged, err := c.GetRun(ctx, created.Run.ID)
@@ -171,6 +172,41 @@ func TestFixCycleUnchangedFingerprintStaysAmbiguous(t *testing.T) {
 	}
 	if unchanged.Run.State != domain.WorkflowRunNeedsAttention {
 		t.Fatalf("run state = %q, want needs_attention (ambiguous fix outcome)", unchanged.Run.State)
+	}
+}
+
+func TestFixCycleBeforeFirstSignalRemainsInProgress(t *testing.T) {
+	sessionFacts := newFakeSessionFacts()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
+	workspaceFacts := &fakeWorkspaceFacts{}
+	reviewRuns := newFakeReviewRuns()
+	launcher := &fakeReviewerLauncher{}
+	sender := &fakeMessageSender{}
+	c, store, clk := newCoordinatorWithFix(spawner, sessionFacts, workspaceFacts, reviewRuns, launcher, sender)
+	ctx := context.Background()
+
+	created, err := c.CreateRun(ctx, "proj-1", "ship the thing")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	got := driveToChangesRequested(t, c, store, clk, sessionFacts, workspaceFacts, reviewRuns, created.Run.ID)
+	work := workStepFrom(got)
+	sessionFacts.put(domain.SessionRecord{
+		ID: domain.SessionID(*work.Step.SessionID), ProjectID: "proj-1",
+		Activity: domain.Activity{State: domain.ActivityIdle}, IsTerminated: false,
+		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/wf", Branch: "ao/wf"},
+	})
+	clk.Advance(10 * time.Second)
+
+	unchanged, err := c.GetRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("GetRun before first signal: %v", err)
+	}
+	if fixStepFrom(unchanged).Step.State != domain.WorkflowStepRunning {
+		t.Fatalf("fix step state = %q, want running", fixStepFrom(unchanged).Step.State)
+	}
+	if reviewRuns.insertCalls != 1 {
+		t.Fatalf("InsertReviewRun calls = %d, want 1", reviewRuns.insertCalls)
 	}
 }
 

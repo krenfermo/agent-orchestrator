@@ -87,13 +87,27 @@ func (p VerificationPlan) validate() error {
 		if strings.TrimSpace(check.Command) == "" {
 			return fmt.Errorf("%w: verify command is required", ErrInvalid)
 		}
+		workingDirectory := strings.TrimSpace(check.WorkingDirectory)
+		if workingDirectory != "" {
+			clean := filepath.Clean(workingDirectory)
+			if filepath.IsAbs(workingDirectory) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+				return fmt.Errorf("%w: verify working directory must stay inside the workspace", ErrInvalid)
+			}
+		}
 		if check.TimeoutSeconds < 0 || check.TimeoutSeconds > 3600 {
 			return fmt.Errorf("%w: verify timeout must be between 0 and 3600 seconds", ErrInvalid)
+		}
+		if err := ValidateVerifyCommand(check.Command, check.Args); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalid, err)
 		}
 	}
 	for _, check := range p.Files {
 		if strings.TrimSpace(check.Path) == "" {
 			return fmt.Errorf("%w: verify file path is required", ErrInvalid)
+		}
+		clean := filepath.Clean(check.Path)
+		if filepath.IsAbs(check.Path) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("%w: verify file path must stay inside the workspace", ErrInvalid)
 		}
 		if check.SHA256 != "" {
 			if len(check.SHA256) != 64 {
@@ -101,6 +115,25 @@ func (p VerificationPlan) validate() error {
 			}
 			if _, err := hex.DecodeString(check.SHA256); err != nil {
 				return fmt.Errorf("%w: invalid verify file sha256", ErrInvalid)
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateVerifyCommand is the shared 8E safety policy used both before a
+// generated plan is accepted and immediately before process execution.
+func ValidateVerifyCommand(name string, args []string) error {
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(name)))
+	switch base {
+	case "sh", "bash", "zsh", "fish", "cmd", "cmd.exe", "powershell", "pwsh", "rm", "rmdir", "del", "deploy", "terraform", "kubectl", "helm":
+		return fmt.Errorf("verify command %q is not allowed", base)
+	}
+	if base == "git" {
+		for _, arg := range args {
+			switch strings.ToLower(arg) {
+			case "push", "merge", "reset", "clean", "checkout", "switch", "commit", "rebase":
+				return fmt.Errorf("verify git subcommand %q is not allowed", arg)
 			}
 		}
 	}

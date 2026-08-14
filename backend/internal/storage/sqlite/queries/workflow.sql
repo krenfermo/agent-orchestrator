@@ -1,33 +1,34 @@
 -- name: InsertWorkflowRun :one
 INSERT INTO workflow_runs (
     id, project_id, objective, state, policy_version, policy_snapshot,
-    created_at, updated_at, completed_at, cancelled_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+    created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
 RETURNING id, project_id, objective, state, policy_version, policy_snapshot,
-          created_at, updated_at, completed_at, cancelled_at;
+          created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id;
 
 -- name: GetWorkflowRun :one
 SELECT id, project_id, objective, state, policy_version, policy_snapshot,
-       created_at, updated_at, completed_at, cancelled_at
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
 FROM workflow_runs
 WHERE id = ?;
 
 -- name: ListWorkflowRuns :many
 SELECT id, project_id, objective, state, policy_version, policy_snapshot,
-       created_at, updated_at, completed_at, cancelled_at
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
 FROM workflow_runs
+WHERE parent_workflow_id IS NULL
 ORDER BY created_at DESC, id DESC;
 
 -- name: ListWorkflowRunsByProject :many
 SELECT id, project_id, objective, state, policy_version, policy_snapshot,
-       created_at, updated_at, completed_at, cancelled_at
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
 FROM workflow_runs
-WHERE project_id = ?
+WHERE project_id = ? AND parent_workflow_id IS NULL
 ORDER BY created_at DESC, id DESC;
 
 -- name: ListNonTerminalWorkflowRuns :many
 SELECT id, project_id, objective, state, policy_version, policy_snapshot,
-       created_at, updated_at, completed_at, cancelled_at
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
 FROM workflow_runs
 WHERE state NOT IN ('completed', 'failed', 'cancelled')
 ORDER BY created_at;

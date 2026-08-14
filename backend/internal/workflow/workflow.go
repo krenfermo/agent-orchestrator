@@ -28,6 +28,7 @@ var (
 	// error, not a silent success: it must never flip a completed run back
 	// toward running.
 	ErrAlreadyTerminal = errors.New("workflow: run is already terminal")
+	ErrPlanLocked      = errors.New("workflow: plan is already accepted or generation is in progress")
 )
 
 // workflowStepPolicyV1 is the fixed Checkpoint 8A seeding policy: a strict
@@ -75,6 +76,21 @@ type Store interface {
 	SetWorkflowStepReviewRun(ctx stdctx.Context, stepID, reviewRunID string, now time.Time) (bool, error)
 }
 
+type masterPlanStore interface {
+	CreateWorkflowPlan(ctx stdctx.Context, runID string, mode domain.WorkflowPlanApprovalMode, contextVersion string, now time.Time) (domain.WorkflowPlanRecord, error)
+	GetWorkflowPlan(ctx stdctx.Context, runID string) (domain.WorkflowPlanRecord, bool, error)
+	StartWorkflowPlanCommand(ctx stdctx.Context, runID, provider, model, manifest string, now time.Time) (bool, error)
+	PersistWorkflowPlanResponse(ctx stdctx.Context, runID, planJSON string, now time.Time) (bool, error)
+	FinishWorkflowPlan(ctx stdctx.Context, runID string, status domain.WorkflowPlanStatus, command domain.WorkflowPlanCommandStatus, validationJSON, hash, errorClass string, now time.Time) (bool, error)
+	InsertWorkflowTasks(ctx stdctx.Context, tasks []domain.WorkflowTask) error
+	ListWorkflowTasks(ctx stdctx.Context, runID string) ([]domain.WorkflowTask, error)
+	UpdateWorkflowTaskState(ctx stdctx.Context, id string, expected, next domain.WorkflowTaskState, now time.Time) (bool, error)
+	SetWorkflowTaskExecutionRun(ctx stdctx.Context, taskID, executionRunID string, now time.Time) (bool, error)
+	FindWorkflowRunByPlannedTask(ctx stdctx.Context, taskID string) (string, bool, error)
+	ApproveWorkflowPlan(ctx stdctx.Context, runID string, now time.Time) (bool, error)
+	RejectWorkflowPlan(ctx stdctx.Context, runID string, now time.Time) (bool, error)
+}
+
 // Projects resolves the project a run belongs to.
 type Projects interface {
 	GetProject(ctx stdctx.Context, id string) (domain.ProjectRecord, bool, error)
@@ -111,8 +127,10 @@ type Deps struct {
 	// MessageSender backs Checkpoint 8D's fix-step dispatch (fix_dispatch.go):
 	// delivering fix findings to the SAME worker session, never a new Spawn.
 	// Optional: a nil MessageSender means dispatchFixStep is a no-op.
-	MessageSender MessageSender
-	Verifier      VerifyRunner
+	MessageSender         MessageSender
+	Verifier              VerifyRunner
+	Planner               Planner
+	PlannerContextBuilder PlannerContextBuilder
 
 	// Clock and NewID are injectable for deterministic tests.
 	Clock func() time.Time
@@ -142,8 +160,11 @@ type Coordinator struct {
 	reviewerLauncher ReviewerLauncher
 
 	// messageSender backs Checkpoint 8D's fix-step dispatch. Optional.
-	messageSender MessageSender
-	verifier      VerifyRunner
+	messageSender         MessageSender
+	verifier              VerifyRunner
+	planStore             masterPlanStore
+	planner               Planner
+	plannerContextBuilder PlannerContextBuilder
 }
 
 // New wires a Coordinator from its dependencies, defaulting the clock and id source.
@@ -157,19 +178,22 @@ func New(d Deps) *Coordinator {
 		newID = uuid.NewString
 	}
 	return &Coordinator{
-		store:            d.Store,
-		projects:         d.Projects,
-		sessions:         d.Sessions,
-		reviewRuns:       d.ReviewRuns,
-		log:              d.Logger,
-		spawner:          d.Spawner,
-		sessionFacts:     d.SessionFacts,
-		workspaceFacts:   d.WorkspaceFacts,
-		reviewerLauncher: d.ReviewerLauncher,
-		messageSender:    d.MessageSender,
-		verifier:         d.Verifier,
-		clock:            clock,
-		newID:            newID,
+		store:                 d.Store,
+		projects:              d.Projects,
+		sessions:              d.Sessions,
+		reviewRuns:            d.ReviewRuns,
+		log:                   d.Logger,
+		spawner:               d.Spawner,
+		sessionFacts:          d.SessionFacts,
+		workspaceFacts:        d.WorkspaceFacts,
+		reviewerLauncher:      d.ReviewerLauncher,
+		messageSender:         d.MessageSender,
+		verifier:              d.Verifier,
+		planStore:             func() masterPlanStore { s, _ := d.Store.(masterPlanStore); return s }(),
+		planner:               d.Planner,
+		plannerContextBuilder: d.PlannerContextBuilder,
+		clock:                 clock,
+		newID:                 newID,
 	}
 }
 
@@ -181,6 +205,8 @@ type RunDetail struct {
 	// all its steps (e.g. "start_review" once the work step completes).
 	// Empty when no checkpoint has recorded one yet.
 	NextAction string
+	Plan       *domain.WorkflowPlanRecord
+	Tasks      []domain.WorkflowTask
 }
 
 // StepDetail is one workflow step plus its recorded attempts and latest
@@ -217,6 +243,10 @@ const reviewFindingsSummaryMaxLen = 500
 // automatic execution happens; a future checkpoint decides when to actually
 // run it.
 func (c *Coordinator) CreateRun(ctx stdctx.Context, projectID, objective string, verification ...VerificationPlan) (RunDetail, error) {
+	return c.createSingleTaskRun(ctx, projectID, objective, nil, nil, verification...)
+}
+
+func (c *Coordinator) createSingleTaskRun(ctx stdctx.Context, projectID, objective string, parentWorkflowID, plannedTaskID *string, verification ...VerificationPlan) (RunDetail, error) {
 	if projectID == "" {
 		return RunDetail{}, fmt.Errorf("%w: project id is required", ErrInvalid)
 	}
@@ -238,14 +268,16 @@ func (c *Coordinator) CreateRun(ctx stdctx.Context, projectID, objective string,
 		return RunDetail{}, fmt.Errorf("marshal default workflow policy: %w", err)
 	}
 	run := domain.WorkflowRun{
-		ID:             runID,
-		ProjectID:      projectID,
-		Objective:      objective,
-		State:          domain.WorkflowRunPending,
-		PolicyVersion:  policyVersionV1,
-		PolicySnapshot: string(policySnapshot),
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		ID:               runID,
+		ProjectID:        projectID,
+		Objective:        objective,
+		State:            domain.WorkflowRunPending,
+		PolicyVersion:    policyVersionV1,
+		PolicySnapshot:   string(policySnapshot),
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		ParentWorkflowID: parentWorkflowID,
+		PlannedTaskID:    plannedTaskID,
 	}
 
 	steps := make([]domain.WorkflowStep, 0, len(workflowStepPolicyV1))
@@ -306,6 +338,13 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 	steps, err := c.store.ListWorkflowSteps(ctx, runID)
 	if err != nil {
 		return RunDetail{}, err
+	}
+	if c.planStore != nil {
+		if plan, isMaster, planErr := c.planStore.GetWorkflowPlan(ctx, runID); planErr != nil {
+			return RunDetail{}, planErr
+		} else if isMaster {
+			return c.getMasterRun(ctx, run, steps, plan)
+		}
 	}
 
 	detail := RunDetail{Run: run}

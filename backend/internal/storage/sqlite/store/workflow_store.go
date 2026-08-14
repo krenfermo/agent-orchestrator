@@ -29,14 +29,16 @@ func (s *Store) CreateWorkflowRun(
 	)
 	err := s.inTx(ctx, "create workflow run", func(q *gen.Queries) error {
 		row, err := q.InsertWorkflowRun(ctx, gen.InsertWorkflowRunParams{
-			ID:             run.ID,
-			ProjectID:      domain.ProjectID(run.ProjectID),
-			Objective:      run.Objective,
-			State:          run.State,
-			PolicyVersion:  run.PolicyVersion,
-			PolicySnapshot: run.PolicySnapshot,
-			CreatedAt:      run.CreatedAt,
-			UpdatedAt:      run.UpdatedAt,
+			ID:               run.ID,
+			ProjectID:        domain.ProjectID(run.ProjectID),
+			Objective:        run.Objective,
+			State:            run.State,
+			PolicyVersion:    run.PolicyVersion,
+			PolicySnapshot:   run.PolicySnapshot,
+			CreatedAt:        run.CreatedAt,
+			UpdatedAt:        run.UpdatedAt,
+			ParentWorkflowID: stringPtrToNullString(run.ParentWorkflowID),
+			PlannedTaskID:    stringPtrToNullString(run.PlannedTaskID),
 		})
 		if err != nil {
 			return fmt.Errorf("insert workflow run: %w", err)
@@ -483,16 +485,18 @@ func (s *Store) ListWorkflowOutboxByRun(ctx context.Context, runID string) ([]do
 
 func workflowRunFromRow(r gen.WorkflowRun) domain.WorkflowRun {
 	return domain.WorkflowRun{
-		ID:             r.ID,
-		ProjectID:      string(r.ProjectID),
-		Objective:      r.Objective,
-		State:          r.State,
-		PolicyVersion:  r.PolicyVersion,
-		PolicySnapshot: r.PolicySnapshot,
-		CreatedAt:      r.CreatedAt,
-		UpdatedAt:      r.UpdatedAt,
-		CompletedAt:    nullTimeToTimePtr(r.CompletedAt),
-		CancelledAt:    nullTimeToTimePtr(r.CancelledAt),
+		ID:               r.ID,
+		ProjectID:        string(r.ProjectID),
+		Objective:        r.Objective,
+		State:            r.State,
+		PolicyVersion:    r.PolicyVersion,
+		PolicySnapshot:   r.PolicySnapshot,
+		CreatedAt:        r.CreatedAt,
+		UpdatedAt:        r.UpdatedAt,
+		CompletedAt:      nullTimeToTimePtr(r.CompletedAt),
+		CancelledAt:      nullTimeToTimePtr(r.CancelledAt),
+		ParentWorkflowID: nullStringToPtr(r.ParentWorkflowID),
+		PlannedTaskID:    nullStringToPtr(r.PlannedTaskID),
 	}
 }
 

@@ -17,6 +17,7 @@ var (
 	ErrInvalid         = workflowcore.ErrInvalid
 	ErrNotFound        = workflowcore.ErrNotFound
 	ErrAlreadyTerminal = workflowcore.ErrAlreadyTerminal
+	ErrPlanLocked      = workflowcore.ErrPlanLocked
 )
 
 // ListFilter narrows ListRuns. An empty ProjectID means every project.
@@ -41,6 +42,14 @@ type Manager interface {
 	ContinueRun(ctx context.Context, runID string) (workflowcore.RunDetail, error)
 }
 
+type PlannerManager interface {
+	Manager
+	CreateObjectiveRun(ctx context.Context, projectID, objective string, mode domain.WorkflowPlanApprovalMode) (workflowcore.RunDetail, error)
+	GeneratePlan(ctx context.Context, runID string) (workflowcore.RunDetail, error)
+	ApprovePlan(ctx context.Context, runID string) (workflowcore.RunDetail, error)
+	RejectPlan(ctx context.Context, runID string) (workflowcore.RunDetail, error)
+}
+
 // Service is the API-facing workflow service. It delegates to the core coordinator.
 type Service struct {
 	coordinator *workflowcore.Coordinator
@@ -56,6 +65,19 @@ func New(coordinator *workflowcore.Coordinator) *Service {
 // CreateRun creates a new workflow run and seeds its initial steps.
 func (s *Service) CreateRun(ctx context.Context, projectID, objective string, verification workflowcore.VerificationPlan) (workflowcore.RunDetail, error) {
 	return s.coordinator.CreateRun(ctx, projectID, objective, verification)
+}
+
+func (s *Service) CreateObjectiveRun(ctx context.Context, projectID, objective string, mode domain.WorkflowPlanApprovalMode) (workflowcore.RunDetail, error) {
+	return s.coordinator.CreateObjectiveRun(ctx, projectID, objective, mode)
+}
+func (s *Service) GeneratePlan(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
+	return s.coordinator.GeneratePlan(ctx, runID)
+}
+func (s *Service) ApprovePlan(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
+	return s.coordinator.ApprovePlan(ctx, runID)
+}
+func (s *Service) RejectPlan(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
+	return s.coordinator.RejectPlan(ctx, runID)
 }
 
 // GetRun returns one workflow run with its steps and attempts.

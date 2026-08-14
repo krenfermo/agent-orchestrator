@@ -4,10 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"os/exec"
-	"path/filepath"
-	"strings"
 	"time"
 
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
@@ -19,7 +16,7 @@ const verifyOutputTailLimit = 16 * 1024
 type workflowVerifyRunner struct{}
 
 func (workflowVerifyRunner) Run(ctx context.Context, req workflowcore.VerifyCommandRequest) (workflowcore.VerifyCommandExecution, error) {
-	if err := validateVerifyCommand(req.Command, req.Args); err != nil {
+	if err := workflowcore.ValidateVerifyCommand(req.Command, req.Args); err != nil {
 		return workflowcore.VerifyCommandExecution{ExitCode: -1}, err
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, req.Timeout)
@@ -49,23 +46,6 @@ func (workflowVerifyRunner) Run(ctx context.Context, req workflowcore.VerifyComm
 		return result, nil
 	}
 	return result, err
-}
-
-func validateVerifyCommand(name string, args []string) error {
-	base := strings.ToLower(filepath.Base(strings.TrimSpace(name)))
-	switch base {
-	case "sh", "bash", "zsh", "fish", "cmd", "cmd.exe", "powershell", "pwsh", "rm", "rmdir", "del", "deploy", "terraform", "kubectl", "helm":
-		return fmt.Errorf("verify command %q is not allowed", base)
-	}
-	if base == "git" {
-		for _, arg := range args {
-			switch strings.ToLower(arg) {
-			case "push", "merge", "reset", "clean", "checkout", "switch", "commit", "rebase":
-				return fmt.Errorf("verify git subcommand %q is not allowed", arg)
-			}
-		}
-	}
-	return nil
 }
 
 type tailBuffer struct {

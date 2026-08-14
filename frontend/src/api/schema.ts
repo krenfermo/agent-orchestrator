@@ -1687,6 +1687,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflowId}/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a durable master plan and planned tasks */
+        get: operations["getWorkflowPlan"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/plan/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Approve a validated plan and dispatch the first eligible task */
+        post: operations["approveWorkflowPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/plan/generate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Generate and deterministically validate a durable master plan */
+        post: operations["generateWorkflowPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/plan/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reject and cancel a master plan */
+        post: operations["rejectWorkflowPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workflows/{workflowId}/start": {
         parameters: {
             query?: never;
@@ -2135,8 +2203,12 @@ export interface components {
             totalTokens: number;
         };
         CreateWorkflowRunRequest: {
+            /** @description Generate a provider-neutral master plan before execution. */
+            masterPlan?: boolean;
             /** @description The workflow run's objective. */
             objective: string;
+            /** @enum {string} */
+            planApprovalMode?: "manual" | "auto";
             verification?: components["schemas"]["WorkflowVerificationPlan"];
         };
         DegradedProject: {
@@ -3036,9 +3108,40 @@ export interface components {
             /** Format: date-time */
             startedAt: string;
         };
+        WorkflowMasterPlan: {
+            objective: string;
+            steps: components["schemas"]["WorkflowPlannedStep"][];
+            summary: string;
+            version: string;
+        };
+        WorkflowPlanValidation: {
+            errors: string[];
+            valid: boolean;
+        };
+        WorkflowPlanView: {
+            approvalMode: string;
+            errorClass?: string;
+            generated?: components["schemas"]["WorkflowMasterPlan"];
+            model?: string;
+            planHash?: string;
+            promptContextVersion: string;
+            provider?: string;
+            status: string;
+            validation?: components["schemas"]["WorkflowPlanValidation"];
+        };
+        WorkflowPlannedStep: {
+            acceptanceCriteria: string[];
+            dependencies: string[];
+            description: string;
+            id: string;
+            title: string;
+            verify: components["schemas"]["WorkflowVerificationPlanType2"];
+        };
         WorkflowRunDetailView: {
+            plan?: components["schemas"]["WorkflowPlanView"];
             run: components["schemas"]["WorkflowRunView"];
             steps: components["schemas"]["WorkflowStepView"][];
+            tasks?: components["schemas"]["WorkflowTaskView"][];
         };
         WorkflowRunResponse: {
             workflow: components["schemas"]["WorkflowRunDetailView"];
@@ -3089,7 +3192,27 @@ export interface components {
             verification?: components["schemas"]["WorkflowVerifyResult"];
             worktreePath?: string;
         };
+        WorkflowTaskView: {
+            acceptanceCriteria: string[];
+            dependencies: string[];
+            description: string;
+            executionWorkflowId?: string;
+            id: string;
+            /** Format: int64 */
+            number: number;
+            state: string;
+            title: string;
+            verify: components["schemas"]["WorkflowVerificationPlanType2"];
+        };
         WorkflowVerificationCommand: {
+            args?: string[];
+            command: string;
+            requiredExitCode: number;
+            retrySafe: boolean;
+            timeoutSeconds?: number;
+            workingDirectory?: string;
+        };
+        WorkflowVerificationCommandCheck: {
             args?: string[];
             command: string;
             requiredExitCode: number;
@@ -3103,9 +3226,19 @@ export interface components {
             path: string;
             sha256?: string;
         };
+        WorkflowVerificationFileCheck: {
+            exactContent?: null | string;
+            exists: boolean;
+            path: string;
+            sha256?: string;
+        };
         WorkflowVerificationPlan: {
             commands?: components["schemas"]["WorkflowVerificationCommand"][];
             files?: components["schemas"]["WorkflowVerificationFile"][];
+        };
+        WorkflowVerificationPlanType2: {
+            commands?: components["schemas"]["WorkflowVerificationCommandCheck"][];
+            files?: components["schemas"]["WorkflowVerificationFileCheck"][];
         };
         WorkflowVerifyCheckResult: {
             /** Format: int64 */
@@ -9558,6 +9691,152 @@ export interface operations {
             };
             /** @description Not Implemented */
             501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    approveWorkflowPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    generateWorkflowPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    rejectWorkflowPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

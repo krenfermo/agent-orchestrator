@@ -57,6 +57,29 @@ func (c *Coordinator) Reconcile(ctx stdctx.Context) error {
 	}
 	now := c.clock()
 	for _, run := range runs {
+		if c.planStore != nil {
+			if plan, master, planErr := c.planStore.GetWorkflowPlan(ctx, run.ID); planErr != nil {
+				return planErr
+			} else if master {
+				switch {
+				case plan.Status == domain.WorkflowPlanRunning && plan.CommandStatus == domain.WorkflowPlanCommandResponded:
+					if _, err := c.finalizeGeneratedPlan(ctx, run, plan); err != nil {
+						return err
+					}
+				case plan.Status == domain.WorkflowPlanRunning:
+					validation := `{"valid":false,"errors":["planner state is ambiguous after daemon restart"]}`
+					_, _ = c.planStore.FinishWorkflowPlan(ctx, run.ID, domain.WorkflowPlanInvalid, domain.WorkflowPlanCommandFailed, validation, "", "planner_ambiguous", now)
+					if run.State == domain.WorkflowRunPending || run.State == domain.WorkflowRunWaiting || run.State == domain.WorkflowRunRunning {
+						_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, now)
+					}
+				case plan.Status == domain.WorkflowPlanApproved:
+					if err := c.reconcileMasterTasks(ctx, run); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+		}
 		steps, err := c.store.ListWorkflowSteps(ctx, run.ID)
 		if err != nil {
 			return err

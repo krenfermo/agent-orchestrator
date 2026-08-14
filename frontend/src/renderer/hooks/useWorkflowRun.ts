@@ -85,6 +85,23 @@ export function useWorkflowRun(workflowId: string | undefined) {
 		},
 	});
 
+	const planMutation = (path: "/api/v1/workflows/{workflowId}/plan/generate" | "/api/v1/workflows/{workflowId}/plan/approve" | "/api/v1/workflows/{workflowId}/plan/reject") => useMutation({
+		mutationFn: async () => {
+			if (!workflowId) throw new Error("workflow id is required");
+			const { data, error } = await apiClient.POST(path, { params: { path: { workflowId } } });
+			if (error) throw error;
+			return data.workflow;
+		},
+		onSuccess: () => {
+			if (!workflowId) return;
+			void queryClient.invalidateQueries({ queryKey: workflowRunQueryKey(workflowId) });
+			void queryClient.invalidateQueries({ queryKey: workflowRunsQueryKey() });
+		},
+	});
+	const generatePlan = planMutation("/api/v1/workflows/{workflowId}/plan/generate");
+	const approvePlan = planMutation("/api/v1/workflows/{workflowId}/plan/approve");
+	const rejectPlan = planMutation("/api/v1/workflows/{workflowId}/plan/reject");
+
 	return {
 		workflow: query.data,
 		isLoading: query.isLoading,
@@ -98,6 +115,15 @@ export function useWorkflowRun(workflowId: string | undefined) {
 		continueRun: continueRun.mutateAsync,
 		continuing: continueRun.isPending,
 		continueError: continueRun.error ? apiErrorMessage(continueRun.error) : undefined,
+		generatePlan: generatePlan.mutateAsync,
+		generatingPlan: generatePlan.isPending,
+		generatePlanError: generatePlan.error ? apiErrorMessage(generatePlan.error) : undefined,
+		approvePlan: approvePlan.mutateAsync,
+		approvingPlan: approvePlan.isPending,
+		approvePlanError: approvePlan.error ? apiErrorMessage(approvePlan.error) : undefined,
+		rejectPlan: rejectPlan.mutateAsync,
+		rejectingPlan: rejectPlan.isPending,
+		rejectPlanError: rejectPlan.error ? apiErrorMessage(rejectPlan.error) : undefined,
 	};
 }
 

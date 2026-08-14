@@ -62,7 +62,8 @@ func ValidWorkflowRunTransition(from, to WorkflowRunState) bool {
 	}
 	switch from {
 	case WorkflowRunPending:
-		return to == WorkflowRunRunning || to == WorkflowRunCancelled
+		return to == WorkflowRunRunning || to == WorkflowRunWaiting ||
+			to == WorkflowRunNeedsAttention || to == WorkflowRunCancelled
 	case WorkflowRunRunning:
 		return to == WorkflowRunWaiting || to == WorkflowRunNeedsAttention ||
 			to == WorkflowRunCompleted || to == WorkflowRunFailed || to == WorkflowRunCancelled
@@ -323,16 +324,18 @@ func (s WorkflowOutboxStatus) Valid() bool {
 // WorkflowRun is one durable workflow run: an objective decomposed into an
 // ordered chain of steps.
 type WorkflowRun struct {
-	ID             string
-	ProjectID      string
-	Objective      string
-	State          WorkflowRunState
-	PolicyVersion  string
-	PolicySnapshot string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	CompletedAt    *time.Time
-	CancelledAt    *time.Time
+	ID               string
+	ProjectID        string
+	Objective        string
+	State            WorkflowRunState
+	PolicyVersion    string
+	PolicySnapshot   string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	CompletedAt      *time.Time
+	CancelledAt      *time.Time
+	ParentWorkflowID *string
+	PlannedTaskID    *string
 }
 
 // WorkflowStep is one step in a workflow run's linear chain.

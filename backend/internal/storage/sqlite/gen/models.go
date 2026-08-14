@@ -561,17 +561,39 @@ type WorkflowOutbox struct {
 	ErrorClass     string
 }
 
+type WorkflowPlan struct {
+	WorkflowRunID        string
+	Status               string
+	ApprovalMode         string
+	Provider             string
+	Model                string
+	PromptContextVersion string
+	ContextManifestJson  string
+	GeneratedPlanJson    string
+	ValidationJson       string
+	PlanHash             string
+	CommandStatus        string
+	ErrorClass           string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+	GeneratedAt          sql.NullTime
+	ApprovedAt           sql.NullTime
+	RejectedAt           sql.NullTime
+}
+
 type WorkflowRun struct {
-	ID             string
-	ProjectID      domain.ProjectID
-	Objective      string
-	State          domain.WorkflowRunState
-	PolicyVersion  string
-	PolicySnapshot string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	CompletedAt    sql.NullTime
-	CancelledAt    sql.NullTime
+	ID               string
+	ProjectID        domain.ProjectID
+	Objective        string
+	State            domain.WorkflowRunState
+	PolicyVersion    string
+	PolicySnapshot   string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	CompletedAt      sql.NullTime
+	CancelledAt      sql.NullTime
+	ParentWorkflowID sql.NullString
+	PlannedTaskID    sql.NullString
 }
 
 type WorkflowStep struct {
@@ -589,6 +611,27 @@ type WorkflowStep struct {
 	UpdatedAt                time.Time
 	CompletedAt              sql.NullTime
 	ArtifactJson             string
+}
+
+type WorkflowTask struct {
+	ID                     string
+	WorkflowRunID          string
+	PlanStepID             string
+	Ordinal                int64
+	Title                  string
+	Description            string
+	AcceptanceCriteriaJson string
+	VerifyJson             string
+	State                  string
+	ExecutionRunID         sql.NullString
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	CompletedAt            sql.NullTime
+}
+
+type WorkflowTaskDependency struct {
+	WorkflowTaskID  string
+	DependsOnTaskID string
 }
 
 type WorkspaceRepo struct {

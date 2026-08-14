@@ -4,6 +4,7 @@ import (
 	stdctx "context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -166,6 +167,14 @@ func (c *Coordinator) adoptOrMarkAmbiguous(ctx stdctx.Context, run domain.Workfl
 	}
 	if found && (rec.Metadata.WorkspacePath != "" || rec.Metadata.Branch != "") {
 		return c.recordDispatchSuccess(ctx, run, step, entry, rec)
+	}
+	// Session creation persists the natural-key row before workspace
+	// provisioning finishes. A concurrent GetRun/reconcile can therefore see a
+	// freshly dispatched command plus a real but not-yet-populated session. Give
+	// that in-flight provisioning window time to settle; old/unknown dispatched
+	// commands still take the conservative ambiguous path below.
+	if entry.DispatchedAt != nil && c.clock().Sub(*entry.DispatchedAt) < 30*time.Second {
+		return step, nil
 	}
 
 	now := c.clock()

@@ -120,7 +120,7 @@ func (q *Queries) GetWorkflowOutboxByIdempotencyKey(ctx context.Context, idempot
 
 const getWorkflowRun = `-- name: GetWorkflowRun :one
 SELECT id, project_id, objective, state, policy_version, policy_snapshot,
-       created_at, updated_at, completed_at, cancelled_at
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
 FROM workflow_runs
 WHERE id = ?
 `
@@ -139,6 +139,8 @@ func (q *Queries) GetWorkflowRun(ctx context.Context, id string) (WorkflowRun, e
 		&i.UpdatedAt,
 		&i.CompletedAt,
 		&i.CancelledAt,
+		&i.ParentWorkflowID,
+		&i.PlannedTaskID,
 	)
 	return i, err
 }
@@ -335,21 +337,23 @@ func (q *Queries) InsertWorkflowOutboxEntry(ctx context.Context, arg InsertWorkf
 const insertWorkflowRun = `-- name: InsertWorkflowRun :one
 INSERT INTO workflow_runs (
     id, project_id, objective, state, policy_version, policy_snapshot,
-    created_at, updated_at, completed_at, cancelled_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+    created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
 RETURNING id, project_id, objective, state, policy_version, policy_snapshot,
-          created_at, updated_at, completed_at, cancelled_at
+          created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
 `
 
 type InsertWorkflowRunParams struct {
-	ID             string
-	ProjectID      domain.ProjectID
-	Objective      string
-	State          domain.WorkflowRunState
-	PolicyVersion  string
-	PolicySnapshot string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID               string
+	ProjectID        domain.ProjectID
+	Objective        string
+	State            domain.WorkflowRunState
+	PolicyVersion    string
+	PolicySnapshot   string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	ParentWorkflowID sql.NullString
+	PlannedTaskID    sql.NullString
 }
 
 func (q *Queries) InsertWorkflowRun(ctx context.Context, arg InsertWorkflowRunParams) (WorkflowRun, error) {
@@ -362,6 +366,8 @@ func (q *Queries) InsertWorkflowRun(ctx context.Context, arg InsertWorkflowRunPa
 		arg.PolicySnapshot,
 		arg.CreatedAt,
 		arg.UpdatedAt,
+		arg.ParentWorkflowID,
+		arg.PlannedTaskID,
 	)
 	var i WorkflowRun
 	err := row.Scan(
@@ -375,6 +381,8 @@ func (q *Queries) InsertWorkflowRun(ctx context.Context, arg InsertWorkflowRunPa
 		&i.UpdatedAt,
 		&i.CompletedAt,
 		&i.CancelledAt,
+		&i.ParentWorkflowID,
+		&i.PlannedTaskID,
 	)
 	return i, err
 }
@@ -436,7 +444,7 @@ func (q *Queries) InsertWorkflowStep(ctx context.Context, arg InsertWorkflowStep
 
 const listNonTerminalWorkflowRuns = `-- name: ListNonTerminalWorkflowRuns :many
 SELECT id, project_id, objective, state, policy_version, policy_snapshot,
-       created_at, updated_at, completed_at, cancelled_at
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
 FROM workflow_runs
 WHERE state NOT IN ('completed', 'failed', 'cancelled')
 ORDER BY created_at
@@ -462,6 +470,8 @@ func (q *Queries) ListNonTerminalWorkflowRuns(ctx context.Context) ([]WorkflowRu
 			&i.UpdatedAt,
 			&i.CompletedAt,
 			&i.CancelledAt,
+			&i.ParentWorkflowID,
+			&i.PlannedTaskID,
 		); err != nil {
 			return nil, err
 		}
@@ -617,8 +627,9 @@ func (q *Queries) ListWorkflowOutboxByRun(ctx context.Context, workflowRunID str
 
 const listWorkflowRuns = `-- name: ListWorkflowRuns :many
 SELECT id, project_id, objective, state, policy_version, policy_snapshot,
-       created_at, updated_at, completed_at, cancelled_at
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
 FROM workflow_runs
+WHERE parent_workflow_id IS NULL
 ORDER BY created_at DESC, id DESC
 `
 
@@ -642,6 +653,8 @@ func (q *Queries) ListWorkflowRuns(ctx context.Context) ([]WorkflowRun, error) {
 			&i.UpdatedAt,
 			&i.CompletedAt,
 			&i.CancelledAt,
+			&i.ParentWorkflowID,
+			&i.PlannedTaskID,
 		); err != nil {
 			return nil, err
 		}
@@ -658,9 +671,9 @@ func (q *Queries) ListWorkflowRuns(ctx context.Context) ([]WorkflowRun, error) {
 
 const listWorkflowRunsByProject = `-- name: ListWorkflowRunsByProject :many
 SELECT id, project_id, objective, state, policy_version, policy_snapshot,
-       created_at, updated_at, completed_at, cancelled_at
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
 FROM workflow_runs
-WHERE project_id = ?
+WHERE project_id = ? AND parent_workflow_id IS NULL
 ORDER BY created_at DESC, id DESC
 `
 
@@ -684,6 +697,8 @@ func (q *Queries) ListWorkflowRunsByProject(ctx context.Context, projectID domai
 			&i.UpdatedAt,
 			&i.CompletedAt,
 			&i.CancelledAt,
+			&i.ParentWorkflowID,
+			&i.PlannedTaskID,
 		); err != nil {
 			return nil, err
 		}

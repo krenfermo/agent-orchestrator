@@ -34,8 +34,10 @@ type ListWorkflowsQuery struct {
 
 // CreateWorkflowRunRequest is the body of POST /api/v1/projects/{projectId}/workflows.
 type CreateWorkflowRunRequest struct {
-	Objective    string                   `json:"objective" description:"The workflow run's objective."`
-	Verification WorkflowVerificationPlan `json:"verification,omitempty"`
+	Objective        string                          `json:"objective" description:"The workflow run's objective."`
+	Verification     WorkflowVerificationPlan        `json:"verification,omitempty"`
+	MasterPlan       bool                            `json:"masterPlan,omitempty" description:"Generate a provider-neutral master plan before execution."`
+	PlanApprovalMode domain.WorkflowPlanApprovalMode `json:"planApprovalMode,omitempty" enum:"manual,auto"`
 }
 
 type WorkflowVerificationPlan struct {
@@ -121,6 +123,32 @@ type WorkflowRunView struct {
 type WorkflowRunDetailView struct {
 	Run   WorkflowRunView    `json:"run"`
 	Steps []WorkflowStepView `json:"steps"`
+	Plan  *WorkflowPlanView  `json:"plan,omitempty"`
+	Tasks []WorkflowTaskView `json:"tasks,omitempty"`
+}
+
+type WorkflowPlanView struct {
+	Status               domain.WorkflowPlanStatus       `json:"status"`
+	ApprovalMode         domain.WorkflowPlanApprovalMode `json:"approvalMode"`
+	Provider             string                          `json:"provider,omitempty"`
+	Model                string                          `json:"model,omitempty"`
+	PromptContextVersion string                          `json:"promptContextVersion"`
+	PlanHash             string                          `json:"planHash,omitempty"`
+	ErrorClass           string                          `json:"errorClass,omitempty"`
+	Generated            *workflowcore.MasterPlan        `json:"generated,omitempty"`
+	Validation           *workflowcore.PlanValidation    `json:"validation,omitempty"`
+}
+
+type WorkflowTaskView struct {
+	ID                  string                        `json:"id"`
+	Number              int64                         `json:"number"`
+	Title               string                        `json:"title"`
+	Description         string                        `json:"description"`
+	Dependencies        []string                      `json:"dependencies"`
+	AcceptanceCriteria  []string                      `json:"acceptanceCriteria"`
+	Verify              workflowcore.VerificationPlan `json:"verify"`
+	State               domain.WorkflowTaskState      `json:"state"`
+	ExecutionWorkflowID string                        `json:"executionWorkflowId,omitempty"`
 }
 
 // WorkflowRunResponse is the body of create/get/cancel (200/201).
@@ -222,7 +250,41 @@ func workflowRunDetailView(detail workflowcore.RunDetail) WorkflowRunDetailView 
 			Verification:    verification,
 		})
 	}
-	return WorkflowRunDetailView{Run: workflowRunView(detail.Run, detail.NextAction), Steps: steps}
+	view := WorkflowRunDetailView{Run: workflowRunView(detail.Run, detail.NextAction), Steps: steps}
+	if detail.Plan != nil {
+		pv := WorkflowPlanView{Status: detail.Plan.Status, ApprovalMode: detail.Plan.ApprovalMode, Provider: detail.Plan.Provider, Model: detail.Plan.Model, PromptContextVersion: detail.Plan.PromptContextVersion, PlanHash: detail.Plan.PlanHash, ErrorClass: detail.Plan.ErrorClass}
+		var generated workflowcore.MasterPlan
+		if detail.Plan.GeneratedPlanJSON != "" && detail.Plan.GeneratedPlanJSON != "{}" && json.Unmarshal([]byte(detail.Plan.GeneratedPlanJSON), &generated) == nil {
+			pv.Generated = &generated
+		}
+		var validation workflowcore.PlanValidation
+		if detail.Plan.ValidationJSON != "" && detail.Plan.ValidationJSON != "{}" && json.Unmarshal([]byte(detail.Plan.ValidationJSON), &validation) == nil {
+			pv.Validation = &validation
+		}
+		view.Plan = &pv
+	}
+	planIDByTask := map[string]string{}
+	for _, task := range detail.Tasks {
+		planIDByTask[task.ID] = task.PlanStepID
+	}
+	for _, task := range detail.Tasks {
+		var criteria []string
+		var verify workflowcore.VerificationPlan
+		_ = json.Unmarshal([]byte(task.AcceptanceCriteriaJSON), &criteria)
+		_ = json.Unmarshal([]byte(task.VerifyJSON), &verify)
+		deps := make([]string, 0, len(task.Dependencies))
+		for _, dep := range task.Dependencies {
+			if id := planIDByTask[dep]; id != "" {
+				deps = append(deps, id)
+			}
+		}
+		execID := ""
+		if task.ExecutionRunID != nil {
+			execID = *task.ExecutionRunID
+		}
+		view.Tasks = append(view.Tasks, WorkflowTaskView{ID: task.PlanStepID, Number: task.Ordinal, Title: task.Title, Description: task.Description, Dependencies: deps, AcceptanceCriteria: criteria, Verify: verify, State: task.State, ExecutionWorkflowID: execID})
+	}
+	return view
 }
 
 // WorkflowsController owns the /workflows routes. A nil Svc returns 501.
@@ -238,6 +300,10 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	r.Post("/workflows/{workflowId}/cancel", c.cancel)
 	r.Post("/workflows/{workflowId}/start", c.start)
 	r.Post("/workflows/{workflowId}/continue", c.continueRun)
+	r.Post("/workflows/{workflowId}/plan/generate", c.generatePlan)
+	r.Get("/workflows/{workflowId}/plan", c.get)
+	r.Post("/workflows/{workflowId}/plan/approve", c.approvePlan)
+	r.Post("/workflows/{workflowId}/plan/reject", c.rejectPlan)
 }
 
 func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
@@ -258,12 +324,75 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 	for _, check := range in.Verification.Files {
 		verification.Files = append(verification.Files, workflowcore.VerificationFileCheck{Path: check.Path, Exists: check.Exists, ExactContent: check.ExactContent, SHA256: check.SHA256})
 	}
-	detail, err := c.Svc.CreateRun(r.Context(), projectID, strings.TrimSpace(in.Objective), verification)
+	var detail workflowcore.RunDetail
+	var err error
+	if in.MasterPlan {
+		plannerSvc, ok := c.Svc.(workflowsvc.PlannerManager)
+		if !ok {
+			apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/projects/{projectId}/workflows")
+			return
+		}
+		detail, err = plannerSvc.CreateObjectiveRun(r.Context(), projectID, strings.TrimSpace(in.Objective), in.PlanApprovalMode)
+	} else {
+		detail, err = c.Svc.CreateRun(r.Context(), projectID, strings.TrimSpace(in.Objective), verification)
+	}
 	if err != nil {
 		writeWorkflowError(w, r, err)
 		return
 	}
 	envelope.WriteJSON(w, http.StatusCreated, WorkflowRunResponse{Workflow: workflowRunDetailView(detail)})
+}
+
+func (c *WorkflowsController) generatePlan(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/workflows/{workflowId}/plan/generate")
+		return
+	}
+	plannerSvc, ok := c.Svc.(workflowsvc.PlannerManager)
+	if !ok {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/workflows/{workflowId}/plan/generate")
+		return
+	}
+	detail, err := plannerSvc.GeneratePlan(r.Context(), chi.URLParam(r, "workflowId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: workflowRunDetailView(detail)})
+}
+func (c *WorkflowsController) approvePlan(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/workflows/{workflowId}/plan/approve")
+		return
+	}
+	plannerSvc, ok := c.Svc.(workflowsvc.PlannerManager)
+	if !ok {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/workflows/{workflowId}/plan/approve")
+		return
+	}
+	detail, err := plannerSvc.ApprovePlan(r.Context(), chi.URLParam(r, "workflowId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: workflowRunDetailView(detail)})
+}
+func (c *WorkflowsController) rejectPlan(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/workflows/{workflowId}/plan/reject")
+		return
+	}
+	plannerSvc, ok := c.Svc.(workflowsvc.PlannerManager)
+	if !ok {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/workflows/{workflowId}/plan/reject")
+		return
+	}
+	detail, err := plannerSvc.RejectPlan(r.Context(), chi.URLParam(r, "workflowId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: workflowRunDetailView(detail)})
 }
 
 func (c *WorkflowsController) get(w http.ResponseWriter, r *http.Request) {
@@ -344,6 +473,8 @@ func writeWorkflowError(w http.ResponseWriter, r *http.Request, err error) {
 		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "WORKFLOW_NOT_FOUND", err.Error(), nil)
 	case errors.Is(err, workflowsvc.ErrAlreadyTerminal):
 		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "WORKFLOW_ALREADY_TERMINAL", err.Error(), nil)
+	case errors.Is(err, workflowsvc.ErrPlanLocked):
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "WORKFLOW_PLAN_LOCKED", err.Error(), nil)
 	default:
 		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "WORKFLOW_OPERATION_FAILED", "Workflow operation failed", nil)
 	}

@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"testing"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -15,9 +16,10 @@ import (
 func TestEvaluateWorkStepProgress(t *testing.T) {
 	activeSession := func(state domain.ActivityState, terminated bool) domain.SessionRecord {
 		return domain.SessionRecord{
-			ID:           "sess-1",
-			IsTerminated: terminated,
-			Activity:     domain.Activity{State: state},
+			ID:            "sess-1",
+			IsTerminated:  terminated,
+			Activity:      domain.Activity{State: state},
+			FirstSignalAt: time.Now(),
 		}
 	}
 
@@ -88,6 +90,15 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 			baseSHA:            "base-sha",
 			wantStep:           domain.WorkflowStepCompleted,
 			wantRun:            domain.WorkflowRunWaiting,
+		},
+		{
+			name:               "idle before first signal and without work evidence -> no change",
+			sessionFound:       true,
+			session:            domain.SessionRecord{ID: "sess-1", Activity: domain.Activity{State: domain.ActivityIdle}},
+			workspaceAvailable: true,
+			obs:                ports.WorkspaceObservation{HeadSHA: "base-sha"},
+			baseSHA:            "base-sha",
+			wantNoChange:       true,
 		},
 		{
 			name:               "idle with no verifiable change -> waiting, ambiguous",

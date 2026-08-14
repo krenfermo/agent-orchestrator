@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"log/slog"
+	"os"
+	"time"
 
+	plannercommand "github.com/aoagents/agent-orchestrator/backend/internal/adapters/planner/command"
 	workspacerouter "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/router"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
@@ -21,18 +24,28 @@ import (
 // goroutine — progress is derived at read time (GetRun) and at boot
 // (Reconcile), never polled by a scheduler.
 func startWorkflows(store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, reviewerLauncher workflowcore.ReviewerLauncher, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service) {
+	plannerBinary := os.Getenv("AO_PLANNER_BIN")
+	if plannerBinary == "" {
+		plannerBinary = "claude"
+	}
+	plannerModel := os.Getenv("AO_PLANNER_MODEL")
+	if plannerModel == "" {
+		plannerModel = "sonnet"
+	}
 	coordinator := workflowcore.New(workflowcore.Deps{
-		Store:            store,
-		Projects:         store,
-		Sessions:         store,
-		ReviewRuns:       store,
-		Spawner:          sessionMgr,
-		SessionFacts:     store,
-		WorkspaceFacts:   workspace,
-		ReviewerLauncher: reviewerLauncher,
-		MessageSender:    sessionMgr,
-		Verifier:         workflowVerifyRunner{},
-		Logger:           log,
+		Store:                 store,
+		Projects:              store,
+		Sessions:              store,
+		ReviewRuns:            store,
+		Spawner:               sessionMgr,
+		SessionFacts:          store,
+		WorkspaceFacts:        workspace,
+		ReviewerLauncher:      reviewerLauncher,
+		MessageSender:         sessionMgr,
+		Verifier:              workflowVerifyRunner{},
+		Planner:               plannercommand.Planner{Binary: plannerBinary, Model: plannerModel, Timeout: 3 * time.Minute},
+		PlannerContextBuilder: plannercommand.ContextBuilder{},
+		Logger:                log,
 	})
 	return coordinator, workflowsvc.New(coordinator)
 }

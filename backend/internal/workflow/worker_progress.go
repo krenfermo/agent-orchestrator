@@ -122,6 +122,13 @@ func evaluateWorkStepProgress(
 				NextAction: "start_review",
 			}
 		}
+		// A newly launched TUI session is stored as idle before its first hook
+		// callback. In particular, this window can span a daemon restart while
+		// the agent is already working. Without a signal or workspace evidence,
+		// idle is only an initialization default—not proof the worker finished.
+		if session.FirstSignalAt.IsZero() {
+			return WorkStepDecision{Progress: WorkerCreated, NoChange: true}
+		}
 		return WorkStepDecision{
 			Progress:   WorkerIdle,
 			NextStep:   domain.WorkflowStepWaiting,
