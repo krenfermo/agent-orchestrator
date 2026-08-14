@@ -81,6 +81,8 @@ func Build() ([]byte, error) {
 			"Connect Mobile LAN bridge control (loopback/desktop only)"),
 		*(&openapi31.Tag{Name: "browser"}).WithDescription(
 			"Target-isolated desktop browser runtime (loopback only)"),
+		*(&openapi31.Tag{Name: "workflows"}).WithDescription(
+			"Durable workflow runs (Checkpoint 8A structure only — no execution)"),
 	}
 
 	for _, op := range operations() {
@@ -315,6 +317,17 @@ var schemaNames = map[string]string{
 	"ControllersRestoreReviewResponse": "RestoreReviewResponse",
 	"ControllersSubmitReviewItem":      "SubmitReviewItem",
 	"ControllersSubmitReviewInput":     "SubmitReviewInput",
+	// httpd/controllers — workflow wire envelopes
+	"ControllersCreateWorkflowRunRequest": "CreateWorkflowRunRequest",
+	"ControllersWorkflowAttemptView":      "WorkflowAttemptView",
+	"ControllersWorkflowStepView":         "WorkflowStepView",
+	"ControllersWorkflowRunView":          "WorkflowRunView",
+	"ControllersWorkflowRunDetailView":    "WorkflowRunDetailView",
+	"ControllersWorkflowRunResponse":      "WorkflowRunResponse",
+	"ControllersListWorkflowsResponse":    "ListWorkflowsResponse",
+	"ControllersWorkflowProjectIDParam":   "WorkflowProjectIDParam",
+	"ControllersWorkflowIDParam":          "WorkflowIDParam",
+	"ControllersListWorkflowsQuery":       "ListWorkflowsQuery",
 	// domain review entities
 	"DomainReviewRun":     "ReviewRun",
 	"ReviewPRReviewState": "PRReviewState",
@@ -444,7 +457,59 @@ func operations() []operation {
 	ops = append(ops, mobileDeviceOperations()...)
 	ops = append(ops, browserOperations()...)
 	ops = append(ops, shellTerminalOperations()...)
+	ops = append(ops, workflowOperations()...)
 	return ops
+}
+
+// workflowOperations declares the /workflows operations (Checkpoint 8A). Must
+// stay 1:1 with the routes WorkflowsController.Register mounts (enforced by
+// the parity test).
+func workflowOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{projectId}/workflows", id: "createWorkflowRun", tag: "workflows",
+			summary:    "Create a workflow run and seed its initial steps",
+			pathParams: []any{controllers.WorkflowProjectIDParam{}},
+			reqBody:    controllers.CreateWorkflowRunRequest{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.WorkflowRunResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}", id: "getWorkflowRun", tag: "workflows",
+			summary:    "Get a workflow run with its steps and attempts",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/workflows", id: "listWorkflowRuns", tag: "workflows",
+			summary:    "List workflow run summaries",
+			pathParams: []any{controllers.ListWorkflowsQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListWorkflowsResponse{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/cancel", id: "cancelWorkflowRun", tag: "workflows",
+			summary:    "Cancel a workflow run and its non-terminal steps",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
 }
 
 func browserOperations() []operation {

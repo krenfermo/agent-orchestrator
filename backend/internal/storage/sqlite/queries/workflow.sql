@@ -1,0 +1,145 @@
+-- name: InsertWorkflowRun :one
+INSERT INTO workflow_runs (
+    id, project_id, objective, state, policy_version, policy_snapshot,
+    created_at, updated_at, completed_at, cancelled_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+RETURNING id, project_id, objective, state, policy_version, policy_snapshot,
+          created_at, updated_at, completed_at, cancelled_at;
+
+-- name: GetWorkflowRun :one
+SELECT id, project_id, objective, state, policy_version, policy_snapshot,
+       created_at, updated_at, completed_at, cancelled_at
+FROM workflow_runs
+WHERE id = ?;
+
+-- name: ListWorkflowRuns :many
+SELECT id, project_id, objective, state, policy_version, policy_snapshot,
+       created_at, updated_at, completed_at, cancelled_at
+FROM workflow_runs
+ORDER BY created_at DESC, id DESC;
+
+-- name: ListWorkflowRunsByProject :many
+SELECT id, project_id, objective, state, policy_version, policy_snapshot,
+       created_at, updated_at, completed_at, cancelled_at
+FROM workflow_runs
+WHERE project_id = ?
+ORDER BY created_at DESC, id DESC;
+
+-- name: ListNonTerminalWorkflowRuns :many
+SELECT id, project_id, objective, state, policy_version, policy_snapshot,
+       created_at, updated_at, completed_at, cancelled_at
+FROM workflow_runs
+WHERE state NOT IN ('completed', 'failed', 'cancelled')
+ORDER BY created_at;
+
+-- name: UpdateWorkflowRunState :execrows
+UPDATE workflow_runs
+SET state = sqlc.arg(state), updated_at = sqlc.arg(updated_at),
+    completed_at = sqlc.arg(completed_at), cancelled_at = sqlc.arg(cancelled_at)
+WHERE id = sqlc.arg(id) AND state = sqlc.arg(expected_state);
+
+-- name: InsertWorkflowStep :one
+INSERT INTO workflow_steps (
+    id, workflow_run_id, kind, ordinal, depends_on_step_id, state,
+    assigned_harness, session_id, review_run_id, expected_artifacts_version,
+    created_at, updated_at, completed_at
+) VALUES (?, ?, ?, ?, ?, ?, '', NULL, NULL, '', ?, ?, NULL)
+RETURNING id, workflow_run_id, kind, ordinal, depends_on_step_id, state,
+          assigned_harness, session_id, review_run_id, expected_artifacts_version,
+          created_at, updated_at, completed_at;
+
+-- name: GetWorkflowStep :one
+SELECT id, workflow_run_id, kind, ordinal, depends_on_step_id, state,
+       assigned_harness, session_id, review_run_id, expected_artifacts_version,
+       created_at, updated_at, completed_at
+FROM workflow_steps
+WHERE id = ?;
+
+-- name: ListWorkflowStepsByRun :many
+SELECT id, workflow_run_id, kind, ordinal, depends_on_step_id, state,
+       assigned_harness, session_id, review_run_id, expected_artifacts_version,
+       created_at, updated_at, completed_at
+FROM workflow_steps
+WHERE workflow_run_id = ?
+ORDER BY ordinal;
+
+-- name: UpdateWorkflowStepState :execrows
+UPDATE workflow_steps
+SET state = sqlc.arg(state), updated_at = sqlc.arg(updated_at),
+    completed_at = sqlc.arg(completed_at)
+WHERE id = sqlc.arg(id) AND state = sqlc.arg(expected_state);
+
+-- name: GetMaxWorkflowAttemptNumber :one
+SELECT CAST(COALESCE(MAX(attempt_number), 0) AS INTEGER) AS max_attempt_number
+FROM workflow_attempts
+WHERE workflow_step_id = ?;
+
+-- name: InsertWorkflowAttempt :one
+INSERT INTO workflow_attempts (
+    id, workflow_step_id, attempt_number, harness, model,
+    started_at, finished_at, outcome, error_class, retry_after
+) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
+RETURNING id, workflow_step_id, attempt_number, harness, model,
+          started_at, finished_at, outcome, error_class, retry_after;
+
+-- name: ListWorkflowAttemptsByStep :many
+SELECT id, workflow_step_id, attempt_number, harness, model,
+       started_at, finished_at, outcome, error_class, retry_after
+FROM workflow_attempts
+WHERE workflow_step_id = ?
+ORDER BY attempt_number;
+
+-- name: GetLatestWorkflowAttemptByStep :one
+SELECT id, workflow_step_id, attempt_number, harness, model,
+       started_at, finished_at, outcome, error_class, retry_after
+FROM workflow_attempts
+WHERE workflow_step_id = ?
+ORDER BY attempt_number DESC
+LIMIT 1;
+
+-- name: InsertWorkflowCheckpoint :one
+INSERT INTO workflow_checkpoints (
+    id, workflow_run_id, workflow_step_id, attempt_id, project_id, session_id,
+    branch, worktree_path, base_sha, head_sha, review_run_id, review_verdict,
+    retry_state, next_action, durable_phase, payload_version, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, workflow_run_id, workflow_step_id, attempt_id, project_id, session_id,
+          branch, worktree_path, base_sha, head_sha, review_run_id, review_verdict,
+          retry_state, next_action, durable_phase, payload_version, created_at;
+
+-- name: ListWorkflowCheckpointsByRun :many
+SELECT id, workflow_run_id, workflow_step_id, attempt_id, project_id, session_id,
+       branch, worktree_path, base_sha, head_sha, review_run_id, review_verdict,
+       retry_state, next_action, durable_phase, payload_version, created_at
+FROM workflow_checkpoints
+WHERE workflow_run_id = ?
+ORDER BY created_at, id;
+
+-- name: GetLatestWorkflowCheckpointByStep :one
+SELECT id, workflow_run_id, workflow_step_id, attempt_id, project_id, session_id,
+       branch, worktree_path, base_sha, head_sha, review_run_id, review_verdict,
+       retry_state, next_action, durable_phase, payload_version, created_at
+FROM workflow_checkpoints
+WHERE workflow_step_id = ?
+ORDER BY created_at DESC, id DESC
+LIMIT 1;
+
+-- name: InsertWorkflowOutboxEntry :execrows
+INSERT INTO workflow_outbox (
+    id, workflow_run_id, workflow_step_id, idempotency_key, command_type,
+    payload, status, created_at, dispatched_at, acknowledged_at, failed_at, error_class
+) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, NULL, '')
+ON CONFLICT (idempotency_key) DO NOTHING;
+
+-- name: GetWorkflowOutboxByIdempotencyKey :one
+SELECT id, workflow_run_id, workflow_step_id, idempotency_key, command_type,
+       payload, status, created_at, dispatched_at, acknowledged_at, failed_at, error_class
+FROM workflow_outbox
+WHERE idempotency_key = ?;
+
+-- name: ListWorkflowOutboxByRun :many
+SELECT id, workflow_run_id, workflow_step_id, idempotency_key, command_type,
+       payload, status, created_at, dispatched_at, acknowledged_at, failed_at, error_class
+FROM workflow_outbox
+WHERE workflow_run_id = ?
+ORDER BY created_at, id;

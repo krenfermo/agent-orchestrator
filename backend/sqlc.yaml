@@ -319,3 +319,43 @@ sql:
               import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
               type: "ProjectID"
               pointer: true
+          # Checkpoint 8A: Workflow Durable Foundation enum columns.
+          - column: "workflow_runs.project_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "ProjectID"
+          - column: "workflow_checkpoints.project_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "ProjectID"
+          - column: "workflow_runs.state"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "WorkflowRunState"
+          - column: "workflow_steps.kind"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "WorkflowStepKind"
+          - column: "workflow_steps.state"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "WorkflowStepState"
+          # Nullable: an attempt only has an outcome/error class once it finishes.
+          - column: "workflow_attempts.outcome"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "WorkflowAttemptOutcome"
+              pointer: true
+          - column: "workflow_attempts.error_class"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "WorkflowErrorClass"
+              pointer: true
+          - column: "workflow_outbox.command_type"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "WorkflowOutboxCommandType"
+          - column: "workflow_outbox.status"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "WorkflowOutboxStatus"

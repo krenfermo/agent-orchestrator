@@ -469,6 +469,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{projectId}/workflows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create a workflow run and seed its initial steps */
+        post: operations["createWorkflowRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/initialize": {
         parameters: {
             query?: never;
@@ -1602,6 +1619,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List workflow run summaries */
+        get: operations["listWorkflowRuns"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a workflow run with its steps and attempts */
+        get: operations["getWorkflowRun"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel a workflow run and its non-terminal steps */
+        post: operations["cancelWorkflowRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2032,6 +2100,10 @@ export interface components {
             /** Format: int64 */
             totalTokens: number;
         };
+        CreateWorkflowRunRequest: {
+            /** @description The workflow run's objective. */
+            objective: string;
+        };
         DegradedProject: {
             id: string;
             /** @enum {string} */
@@ -2166,6 +2238,9 @@ export interface components {
         };
         ListShellTerminalsResponse: {
             shellTerminals: components["schemas"]["ShellTerminalResponse"][];
+        };
+        ListWorkflowsResponse: {
+            workflows: components["schemas"]["WorkflowRunView"][];
         };
         ListWorkspaceFilesResponse: {
             compareBaseRef?: string;
@@ -2908,6 +2983,65 @@ export interface components {
             outputTokens: null | number;
             reasoningTokens: null | number;
             uncachedInputTokens: null | number;
+        };
+        WorkflowAttemptView: {
+            /** Format: int64 */
+            attemptNumber: number;
+            /** @enum {string} */
+            errorClass?: "rate_limited" | "auth" | "transient" | "tool" | "test_failed" | "review_changes_requested";
+            /** Format: date-time */
+            finishedAt?: null | string;
+            harness?: string;
+            id: string;
+            model?: string;
+            /** @enum {string} */
+            outcome?: "succeeded" | "failed" | "cancelled";
+            /** Format: date-time */
+            retryAfter?: null | string;
+            /** Format: date-time */
+            startedAt: string;
+        };
+        WorkflowRunDetailView: {
+            run: components["schemas"]["WorkflowRunView"];
+            steps: components["schemas"]["WorkflowStepView"][];
+        };
+        WorkflowRunResponse: {
+            workflow: components["schemas"]["WorkflowRunDetailView"];
+        };
+        WorkflowRunView: {
+            /** Format: date-time */
+            cancelledAt?: null | string;
+            /** Format: date-time */
+            completedAt?: null | string;
+            /** Format: date-time */
+            createdAt: string;
+            id: string;
+            objective: string;
+            projectId: string;
+            /** @enum {string} */
+            state: "pending" | "running" | "waiting" | "needs_attention" | "completed" | "failed" | "cancelled";
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        WorkflowStepView: {
+            assignedHarness?: string;
+            attempts: components["schemas"]["WorkflowAttemptView"][];
+            /** Format: date-time */
+            completedAt?: null | string;
+            /** Format: date-time */
+            createdAt: string;
+            dependsOnStepId?: string;
+            id: string;
+            /** @enum {string} */
+            kind: "plan" | "work" | "review" | "fix" | "verify" | "advance";
+            /** Format: int64 */
+            ordinal: number;
+            reviewRunId?: string;
+            sessionId?: string;
+            /** @enum {string} */
+            state: "pending" | "ready" | "running" | "waiting" | "completed" | "failed" | "cancelled";
+            /** Format: date-time */
+            updatedAt: string;
         };
         WorkspaceFileResponse: {
             additions: number;
@@ -4569,6 +4703,69 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    createWorkflowRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateWorkflowRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -9094,6 +9291,129 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listWorkflowRuns: {
+        parameters: {
+            query?: {
+                /** @description Project id filter. */
+                projectId?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListWorkflowsResponse"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    cancelWorkflowRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

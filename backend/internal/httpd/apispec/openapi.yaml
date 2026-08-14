@@ -1244,6 +1244,57 @@ paths:
       summary: Replace a project's per-project config
       tags:
       - projects
+  /api/v1/projects/{projectId}/workflows:
+    post:
+      operationId: createWorkflowRun
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: projectId
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorkflowRunRequest'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRunResponse'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unprocessable Entity
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Create a workflow run and seed its initial steps
+      tags:
+      - workflows
   /api/v1/projects/initialize:
     post:
       operationId: initializeProjectRepository
@@ -4862,6 +4913,104 @@ paths:
       summary: Get detailed token usage for one session
       tags:
       - usage
+  /api/v1/workflows:
+    get:
+      operationId: listWorkflowRuns
+      parameters:
+      - description: Project id filter.
+        in: query
+        name: projectId
+        schema:
+          description: Project id filter.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListWorkflowsResponse'
+          description: OK
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: List workflow run summaries
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}:
+    get:
+      operationId: getWorkflowRun
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRunResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Get a workflow run with its steps and attempts
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/cancel:
+    post:
+      operationId: cancelWorkflowRun
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRunResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Cancel a workflow run and its non-terminal steps
+      tags:
+      - workflows
 components:
   schemas:
     APIError:
@@ -6013,6 +6162,14 @@ components:
       - cachedTokens
       - totalTokens
       type: object
+    CreateWorkflowRunRequest:
+      properties:
+        objective:
+          description: The workflow run's objective.
+          type: string
+      required:
+      - objective
+      type: object
     DegradedProject:
       properties:
         id:
@@ -6407,6 +6564,15 @@ components:
           type: array
       required:
       - shellTerminals
+      type: object
+    ListWorkflowsResponse:
+      properties:
+        workflows:
+          items:
+            $ref: '#/components/schemas/WorkflowRunView'
+          type: array
+      required:
+      - workflows
       type: object
     ListWorkspaceFilesResponse:
       properties:
@@ -8317,6 +8483,169 @@ components:
       - outputTokens
       - reasoningTokens
       type: object
+    WorkflowAttemptView:
+      properties:
+        attemptNumber:
+          format: int64
+          type: integer
+        errorClass:
+          enum:
+          - rate_limited
+          - auth
+          - transient
+          - tool
+          - test_failed
+          - review_changes_requested
+          type: string
+        finishedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        harness:
+          type: string
+        id:
+          type: string
+        model:
+          type: string
+        outcome:
+          enum:
+          - succeeded
+          - failed
+          - cancelled
+          type: string
+        retryAfter:
+          format: date-time
+          type:
+          - "null"
+          - string
+        startedAt:
+          format: date-time
+          type: string
+      required:
+      - id
+      - attemptNumber
+      - startedAt
+      type: object
+    WorkflowRunDetailView:
+      properties:
+        run:
+          $ref: '#/components/schemas/WorkflowRunView'
+        steps:
+          items:
+            $ref: '#/components/schemas/WorkflowStepView'
+          type: array
+      required:
+      - run
+      - steps
+      type: object
+    WorkflowRunResponse:
+      properties:
+        workflow:
+          $ref: '#/components/schemas/WorkflowRunDetailView'
+      required:
+      - workflow
+      type: object
+    WorkflowRunView:
+      properties:
+        cancelledAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        completedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        createdAt:
+          format: date-time
+          type: string
+        id:
+          type: string
+        objective:
+          type: string
+        projectId:
+          type: string
+        state:
+          enum:
+          - pending
+          - running
+          - waiting
+          - needs_attention
+          - completed
+          - failed
+          - cancelled
+          type: string
+        updatedAt:
+          format: date-time
+          type: string
+      required:
+      - id
+      - projectId
+      - objective
+      - state
+      - createdAt
+      - updatedAt
+      type: object
+    WorkflowStepView:
+      properties:
+        assignedHarness:
+          type: string
+        attempts:
+          items:
+            $ref: '#/components/schemas/WorkflowAttemptView'
+          type: array
+        completedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        createdAt:
+          format: date-time
+          type: string
+        dependsOnStepId:
+          type: string
+        id:
+          type: string
+        kind:
+          enum:
+          - plan
+          - work
+          - review
+          - fix
+          - verify
+          - advance
+          type: string
+        ordinal:
+          format: int64
+          type: integer
+        reviewRunId:
+          type: string
+        sessionId:
+          type: string
+        state:
+          enum:
+          - pending
+          - ready
+          - running
+          - waiting
+          - completed
+          - failed
+          - cancelled
+          type: string
+        updatedAt:
+          format: date-time
+          type: string
+      required:
+      - id
+      - kind
+      - ordinal
+      - state
+      - createdAt
+      - updatedAt
+      - attempts
+      type: object
     WorkspaceFileResponse:
       properties:
         additions:
@@ -8448,3 +8777,5 @@ tags:
   name: mobile
 - description: Target-isolated desktop browser runtime (loopback only)
   name: browser
+- description: Durable workflow runs (Checkpoint 8A structure only — no execution)
+  name: workflows

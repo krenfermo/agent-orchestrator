@@ -20,6 +20,7 @@ import {
 	Settings,
 	Trash2,
 	User,
+	Workflow,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -146,6 +147,7 @@ function useSelection() {
 		// terminal, board, etc.) stays underneath.
 		goGlobalSettings: () => openGlobalSettings(),
 		goSettings: (projectId: string) => openProjectSettings(projectId),
+		goWorkflows: () => void navigate({ to: "/workflows" }),
 		goProject: (projectId: string) => void navigate({ to: "/projects/$projectId", params: { projectId } }),
 		goSession: (projectId: string, sessionId: string) =>
 			void navigate({ to: "/projects/$projectId/sessions/$sessionId", params: { projectId, sessionId } }),
@@ -423,6 +425,19 @@ export function Sidebar({
 					<RestartToUpdateRow status={updateStatus} tabIndex={isCollapsed ? -1 : 0} />
 					<CloudAccountRow tabIndex={isCollapsed ? -1 : 0} />
 					<button
+						aria-label={t("shell.workflows")}
+						className={cn(
+							NAV_ROW_CLASS,
+							"flex h-[42px] w-full items-center text-left [&_svg]:size-icon-md [&_svg]:shrink-0",
+						)}
+						onClick={() => selection.goWorkflows()}
+						tabIndex={isCollapsed ? -1 : 0}
+						type="button"
+					>
+						<Workflow aria-hidden="true" />
+						<span className="tracking-tight">{t("shell.workflows")}</span>
+					</button>
+					<button
 						aria-label={t("shell.settings")}
 						className={cn(
 							NAV_ROW_CLASS,
@@ -442,6 +457,20 @@ export function Sidebar({
 				>
 					<RestartToUpdateRailButton status={updateStatus} tabIndex={isCollapsed ? 0 : -1} />
 					<CloudAccountRailButton tabIndex={isCollapsed ? 0 : -1} />
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<button
+								aria-label={t("shell.workflows")}
+								className="grid size-control-board place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-interactive-hover hover:text-foreground [&_svg]:size-icon-base"
+								onClick={() => selection.goWorkflows()}
+								tabIndex={isCollapsed ? 0 : -1}
+								type="button"
+							>
+								<Workflow aria-hidden="true" />
+							</button>
+						</TooltipTrigger>
+						<TooltipContent side="right">{t("shell.workflows")}</TooltipContent>
+					</Tooltip>
 					<Tooltip>
 						<TooltipTrigger asChild>
 							<button

@@ -18,6 +18,7 @@ import (
 	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 	reviewsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/review"
+	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
 )
 
 // The synchronous switch budget covers one 60s optional source handoff, a
@@ -36,6 +37,10 @@ type APIDeps struct {
 	UsageSummary       controllers.UsageSummaryService
 	PRs                prsvc.ActionManager
 	Reviews            reviewsvc.Manager
+	// Workflows is nil until wired; the controller then answers 501, matching
+	// the other optional surfaces. Checkpoint 8A: durable foundation only, no
+	// execution.
+	Workflows          workflowsvc.Manager
 	Notifications      controllers.NotificationService
 	NotificationStream controllers.NotificationStream
 	Push               controllers.PushRegistry
@@ -110,6 +115,7 @@ type API struct {
 	settings      *controllers.SettingsController
 	dev           *controllers.DevController
 	browser       *controllers.BrowserController
+	workflows     *controllers.WorkflowsController
 	events        *EventsController
 }
 
@@ -144,6 +150,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		settings:      &controllers.SettingsController{Svc: deps.Settings},
 		dev:           &controllers.DevController{Import: deps.DevImport},
 		browser:       &controllers.BrowserController{Svc: deps.Browser},
+		workflows:     &controllers.WorkflowsController{Svc: deps.Workflows},
 		events:        &EventsController{Source: deps.CDC, Live: deps.Events},
 	}
 }
@@ -181,6 +188,7 @@ func (a *API) Register(root chi.Router) {
 			a.settings.Register(r)
 			a.dev.Register(r)
 			a.browser.Register(r)
+			a.workflows.Register(r)
 			// Sibling REST controllers plug in here.
 		})
 		// Agent switching synchronously collects a handoff, starts the target,

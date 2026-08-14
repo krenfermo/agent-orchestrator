@@ -511,6 +511,83 @@ type UsageSource struct {
 	UpdatedAt       time.Time
 }
 
+type WorkflowAttempt struct {
+	ID             string
+	WorkflowStepID string
+	AttemptNumber  int64
+	Harness        string
+	Model          string
+	StartedAt      time.Time
+	FinishedAt     sql.NullTime
+	Outcome        *domain.WorkflowAttemptOutcome
+	ErrorClass     *domain.WorkflowErrorClass
+	RetryAfter     sql.NullTime
+}
+
+type WorkflowCheckpoint struct {
+	ID             string
+	WorkflowRunID  string
+	WorkflowStepID sql.NullString
+	AttemptID      sql.NullString
+	ProjectID      domain.ProjectID
+	SessionID      sql.NullString
+	Branch         string
+	WorktreePath   string
+	BaseSha        string
+	HeadSha        string
+	ReviewRunID    sql.NullString
+	ReviewVerdict  string
+	RetryState     string
+	NextAction     string
+	DurablePhase   string
+	PayloadVersion string
+	CreatedAt      time.Time
+}
+
+type WorkflowOutbox struct {
+	ID             string
+	WorkflowRunID  string
+	WorkflowStepID sql.NullString
+	IdempotencyKey string
+	CommandType    domain.WorkflowOutboxCommandType
+	Payload        string
+	Status         domain.WorkflowOutboxStatus
+	CreatedAt      time.Time
+	DispatchedAt   sql.NullTime
+	AcknowledgedAt sql.NullTime
+	FailedAt       sql.NullTime
+	ErrorClass     string
+}
+
+type WorkflowRun struct {
+	ID             string
+	ProjectID      domain.ProjectID
+	Objective      string
+	State          domain.WorkflowRunState
+	PolicyVersion  string
+	PolicySnapshot string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	CompletedAt    sql.NullTime
+	CancelledAt    sql.NullTime
+}
+
+type WorkflowStep struct {
+	ID                       string
+	WorkflowRunID            string
+	Kind                     domain.WorkflowStepKind
+	Ordinal                  int64
+	DependsOnStepID          sql.NullString
+	State                    domain.WorkflowStepState
+	AssignedHarness          string
+	SessionID                sql.NullString
+	ReviewRunID              sql.NullString
+	ExpectedArtifactsVersion string
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
+	CompletedAt              sql.NullTime
+}
+
 type WorkspaceRepo struct {
 	ProjectID     domain.ProjectID
 	Name          string

@@ -355,6 +355,14 @@ func Run() error {
 	if reconcileErr := lcStack.ReconcileRuntime(ctx); reconcileErr != nil {
 		log.Error("reconcile agent processes on boot failed", "err", reconcileErr)
 	}
+	// Workflow durable foundation (Checkpoint 8A): wire the coordinator/service
+	// and run its own read-mostly boot recovery. This never calls Session
+	// Manager or Review Engine and never launches anything — it only
+	// self-repairs workflow's own rows interrupted by the restart.
+	workflowCoordinator, workflowSvc := startWorkflows(store, log)
+	if reconcileErr := workflowCoordinator.Reconcile(ctx); reconcileErr != nil {
+		log.Error("reconcile workflow runs on boot failed", "err", reconcileErr)
+	}
 	autoReview := autoreview.New(store, reviewSvc, autoreview.Config{Logger: log})
 	lcStack.autoReviewDone = autoReview.Start(ctx)
 	// Push-device registry: persisted phones that receive OS push notifications.
@@ -403,6 +411,7 @@ func Run() error {
 		Sessions:           sessionSvc,
 		PRs:                prActions,
 		Reviews:            reviewSvc,
+		Workflows:          workflowSvc,
 		Notifications:      notifier,
 		NotificationStream: notificationHub,
 		Push:               pushRegistry,
