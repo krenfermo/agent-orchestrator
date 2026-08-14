@@ -45,7 +45,7 @@ type WorkflowAttemptView struct {
 	StartedAt     time.Time                     `json:"startedAt"`
 	FinishedAt    *time.Time                    `json:"finishedAt,omitempty"`
 	Outcome       domain.WorkflowAttemptOutcome `json:"outcome,omitempty" enum:"succeeded,failed,cancelled"`
-	ErrorClass    domain.WorkflowErrorClass     `json:"errorClass,omitempty" enum:"rate_limited,auth,transient,tool,test_failed,review_changes_requested,session_create_failed,agent_start_failed,prompt_delivery_failed,runtime_failed,worker_terminated_unexpectedly,ambiguous_worker_state"`
+	ErrorClass    domain.WorkflowErrorClass     `json:"errorClass,omitempty" enum:"rate_limited,auth,transient,tool,test_failed,review_changes_requested,session_create_failed,agent_start_failed,prompt_delivery_failed,runtime_failed,worker_terminated_unexpectedly,ambiguous_worker_state,reviewer_launch_failed,fix_budget_exhausted"`
 	RetryAfter    *time.Time                    `json:"retryAfter,omitempty"`
 }
 
@@ -70,6 +70,14 @@ type WorkflowStepView struct {
 	WorktreePath string `json:"worktreePath,omitempty"`
 	HeadSHA      string `json:"headSha,omitempty"`
 	NextAction   string `json:"nextAction,omitempty"`
+	// Reviewer, Verdict, Target, and FindingsSummary surface the review
+	// step's live review_run facts (Checkpoint 8C), fetched at read time —
+	// never persisted into workflow_checkpoints beyond the review_run_id
+	// reference itself.
+	Reviewer        string `json:"reviewer,omitempty"`
+	Verdict         string `json:"verdict,omitempty" enum:",approved,changes_requested"`
+	Target          string `json:"target,omitempty"`
+	FindingsSummary string `json:"findingsSummary,omitempty"`
 }
 
 // WorkflowRunView is a workflow run summary (no step/attempt fan-out).
@@ -154,6 +162,13 @@ func workflowRunDetailView(detail workflowcore.RunDetail) WorkflowRunDetailView 
 			headSHA = sd.LatestCheckpoint.HeadSHA
 			nextAction = sd.LatestCheckpoint.NextAction
 		}
+		var reviewer, verdict, target, findings string
+		if sd.Review != nil {
+			reviewer = string(sd.Review.Harness)
+			verdict = string(sd.Review.Verdict)
+			target = sd.Review.Target
+			findings = sd.Review.FindingsSummary
+		}
 		steps = append(steps, WorkflowStepView{
 			ID:              step.ID,
 			Kind:            step.Kind,
@@ -171,6 +186,10 @@ func workflowRunDetailView(detail workflowcore.RunDetail) WorkflowRunDetailView 
 			WorktreePath:    worktreePath,
 			HeadSHA:         headSHA,
 			NextAction:      nextAction,
+			Reviewer:        reviewer,
+			Verdict:         verdict,
+			Target:          target,
+			FindingsSummary: findings,
 		})
 	}
 	return WorkflowRunDetailView{Run: workflowRunView(detail.Run, detail.NextAction), Steps: steps}
@@ -188,6 +207,7 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	r.Get("/workflows", c.list)
 	r.Post("/workflows/{workflowId}/cancel", c.cancel)
 	r.Post("/workflows/{workflowId}/start", c.start)
+	r.Post("/workflows/{workflowId}/continue", c.continueRun)
 }
 
 func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
@@ -259,6 +279,19 @@ func (c *WorkflowsController) start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	detail, err := c.Svc.StartRun(r.Context(), chi.URLParam(r, "workflowId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: workflowRunDetailView(detail)})
+}
+
+func (c *WorkflowsController) continueRun(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/continue")
+		return
+	}
+	detail, err := c.Svc.ContinueRun(r.Context(), chi.URLParam(r, "workflowId"))
 	if err != nil {
 		writeWorkflowError(w, r, err)
 		return

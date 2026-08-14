@@ -1139,5 +1139,11 @@
 	"chat.edit.image": "画像",
 	"chat.edit.cancel": "編集をキャンセル",
 	"chat.edit.send": "編集したメッセージを送信",
-	"chat.edit.sendShortcut": "編集したメッセージを送信（⌘/Ctrl+Enter）"
+	"chat.edit.sendShortcut": "編集したメッセージを送信（⌘/Ctrl+Enter）",
+	"shell.workflowsStartReview": "レビューを開始",
+	"shell.workflowsContinuing": "続行中…",
+	"shell.workflowsReviewer": "レビュアー",
+	"shell.workflowsTarget": "対象",
+	"shell.workflowsVerdict": "判定",
+	"shell.workflowsFindings": "所見"
 }

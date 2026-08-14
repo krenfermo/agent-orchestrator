@@ -213,8 +213,20 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 
 	stepID := step.ID
 	headSHA := ""
+	fingerprintAfter := ""
 	if workspaceAvailable {
 		headSHA = obs.HeadSHA
+		// Checkpoint 8D: on the completion checkpoint specifically, also
+		// record the WorkspaceFingerprint of the completed state. Reused
+		// (not duplicated) by dispatchReviewStep as cycle 1's target_sha —
+		// see design decision 3's identity-column reuse: a cycle 1 review
+		// target_sha must be a fingerprint hash too, or the fix step's
+		// "did the workspace genuinely change" comparison (fingerprintBefore
+		// == the addressed review_run's target_sha) would compare a real
+		// SHA256 hash against a raw (often empty) HeadSHA and never match.
+		if decision.NextStep == domain.WorkflowStepCompleted {
+			fingerprintAfter = WorkspaceFingerprint(obs)
+		}
 	}
 	var sessionIDPtr *string
 	if step.SessionID != nil {
@@ -227,13 +239,25 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 		WorkflowStepID: &stepID,
 		ProjectID:      run.ProjectID,
 		SessionID:      sessionIDPtr,
-		BaseSHA:        baseSHA,
-		HeadSHA:        headSHA,
-		NextAction:     decision.NextAction,
-		DurablePhase:   "worker_observed_" + string(decision.Progress),
-		PayloadVersion: "v1",
-		RetryState:     "{}",
-		CreatedAt:      now,
+		// Branch/WorktreePath must carry forward from session facts on every
+		// checkpoint, not just the initial "worker_dispatched" one — a later
+		// checkpoint is what "the latest checkpoint for this step" resolves
+		// to (e.g. Checkpoint 8C's review dispatch reads it to find the
+		// worktree to launch the reviewer against), so dropping these here
+		// silently loses them the moment work observation writes its own
+		// checkpoint on completion. Found via 8C's real E2E run: the
+		// reviewer launch failed with "workspace path is required" because
+		// this checkpoint had gone through without them.
+		Branch:           sess.Metadata.Branch,
+		WorktreePath:     sess.Metadata.WorkspacePath,
+		BaseSHA:          baseSHA,
+		HeadSHA:          headSHA,
+		FingerprintAfter: fingerprintAfter,
+		NextAction:       decision.NextAction,
+		DurablePhase:     "worker_observed_" + string(decision.Progress),
+		PayloadVersion:   "v1",
+		RetryState:       "{}",
+		CreatedAt:        now,
 	}); err != nil {
 		return step, err
 	}

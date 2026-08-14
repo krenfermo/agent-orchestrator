@@ -18,6 +18,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/modelcatalog"
 	chatdriverregistry "github.com/aoagents/agent-orchestrator/backend/internal/adapters/chatdriver/registry"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/runtime/runtimeselect"
 	"github.com/aoagents/agent-orchestrator/backend/internal/autoreview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/browserruntime"
@@ -355,11 +356,32 @@ func Run() error {
 	if reconcileErr := lcStack.ReconcileRuntime(ctx); reconcileErr != nil {
 		log.Error("reconcile agent processes on boot failed", "err", reconcileErr)
 	}
-	// Workflow durable foundation (Checkpoint 8A): wire the coordinator/service
-	// and run its own read-mostly boot recovery. This never calls Session
-	// Manager or Review Engine and never launches anything — it only
-	// self-repairs workflow's own rows interrupted by the restart.
-	workflowCoordinator, workflowSvc := startWorkflows(store, rawSessionMgr, workspaceObserver, log)
+	// Workflow durable foundation (Checkpoint 8A) + Checkpoint 8C's review
+	// dispatch: wire the coordinator/service and run its own read-mostly boot
+	// recovery. Checkpoint 8C needs its own reviewer-launch path — deliberately
+	// NOT the reviewEngine/reviewSvc wired into startSession above, since that
+	// engine's Launcher always builds a PR-centric prompt internally with no
+	// override hook (see workflow_reviewer_launcher.go's doc comment for the
+	// full reasoning). It reuses the same reviewer registry/resolver and the
+	// same runtime adapter every other session pane already uses — just not
+	// the same Launcher wrapper.
+	workflowReviewers, err := reviewer.NewResolver()
+	if err != nil {
+		stop()
+		lcStack.Stop()
+		if cdcErr := cdcPipe.Stop(); cdcErr != nil {
+			log.Error("cdc pipeline shutdown", "err", cdcErr)
+		}
+		return fmt.Errorf("workflow reviewer resolver: %w", err)
+	}
+	workflowReviewerLauncher := &workflowReviewerLauncher{
+		reviewers: workflowReviewers,
+		runtime:   runtimeAdapter,
+		dataDir:   cfg.DataDir,
+		runFile:   cfg.RunFilePath,
+		auth:      reviewerAgentAuth{agents: agents},
+	}
+	workflowCoordinator, workflowSvc := startWorkflows(store, rawSessionMgr, workspaceObserver, workflowReviewerLauncher, log)
 	if reconcileErr := workflowCoordinator.Reconcile(ctx); reconcileErr != nil {
 		log.Error("reconcile workflow runs on boot failed", "err", reconcileErr)
 	}

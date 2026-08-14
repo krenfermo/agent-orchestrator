@@ -233,6 +233,26 @@ func (s *Store) UpdateWorkflowStepSession(ctx context.Context, stepID, sessionID
 	return rows > 0, nil
 }
 
+// SetWorkflowStepReviewRun unconditionally sets the review step's
+// review_run_id to the current/most-recent review_run for that step
+// (Checkpoint 8D: this column is no longer write-once — it cycles across
+// review->fix->re-review iterations). The primary anti-duplication guard
+// against creating two review_runs for the same cycle is the outbox
+// idempotency key (cycle-specific), not a CAS on this column.
+func (s *Store) SetWorkflowStepReviewRun(ctx context.Context, stepID, reviewRunID string, now time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.SetWorkflowStepReviewRun(ctx, gen.SetWorkflowStepReviewRunParams{
+		ReviewRunID: sql.NullString{String: reviewRunID, Valid: reviewRunID != ""},
+		UpdatedAt:   now,
+		ID:          stepID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("set workflow step %s review run: %w", stepID, err)
+	}
+	return rows > 0, nil
+}
+
 // UpdateWorkflowOutboxStatus compare-and-swaps an outbox entry's dispatch
 // status. Only the timestamp column matching next is set; the others are
 // left NULL (a status can only move forward, never back, so a NULL retains
@@ -366,23 +386,25 @@ func (s *Store) CreateWorkflowCheckpoint(ctx context.Context, cp domain.Workflow
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	row, err := s.qw.InsertWorkflowCheckpoint(ctx, gen.InsertWorkflowCheckpointParams{
-		ID:             cp.ID,
-		WorkflowRunID:  cp.WorkflowRunID,
-		WorkflowStepID: stringPtrToNullString(cp.WorkflowStepID),
-		AttemptID:      stringPtrToNullString(cp.AttemptID),
-		ProjectID:      domain.ProjectID(cp.ProjectID),
-		SessionID:      stringPtrToNullString(cp.SessionID),
-		Branch:         cp.Branch,
-		WorktreePath:   cp.WorktreePath,
-		BaseSha:        cp.BaseSHA,
-		HeadSha:        cp.HeadSHA,
-		ReviewRunID:    stringPtrToNullString(cp.ReviewRunID),
-		ReviewVerdict:  cp.ReviewVerdict,
-		RetryState:     cp.RetryState,
-		NextAction:     cp.NextAction,
-		DurablePhase:   cp.DurablePhase,
-		PayloadVersion: cp.PayloadVersion,
-		CreatedAt:      cp.CreatedAt,
+		ID:                cp.ID,
+		WorkflowRunID:     cp.WorkflowRunID,
+		WorkflowStepID:    stringPtrToNullString(cp.WorkflowStepID),
+		AttemptID:         stringPtrToNullString(cp.AttemptID),
+		ProjectID:         domain.ProjectID(cp.ProjectID),
+		SessionID:         stringPtrToNullString(cp.SessionID),
+		Branch:            cp.Branch,
+		WorktreePath:      cp.WorktreePath,
+		BaseSha:           cp.BaseSHA,
+		HeadSha:           cp.HeadSHA,
+		ReviewRunID:       stringPtrToNullString(cp.ReviewRunID),
+		ReviewVerdict:     cp.ReviewVerdict,
+		RetryState:        cp.RetryState,
+		NextAction:        cp.NextAction,
+		DurablePhase:      cp.DurablePhase,
+		PayloadVersion:    cp.PayloadVersion,
+		CreatedAt:         cp.CreatedAt,
+		FingerprintBefore: cp.FingerprintBefore,
+		FingerprintAfter:  cp.FingerprintAfter,
 	})
 	if err != nil {
 		return domain.WorkflowCheckpoint{}, fmt.Errorf("insert workflow checkpoint for run %s: %w", cp.WorkflowRunID, err)
@@ -513,23 +535,25 @@ func workflowAttemptFromRow(r gen.WorkflowAttempt) domain.WorkflowAttempt {
 
 func workflowCheckpointFromRow(r gen.WorkflowCheckpoint) domain.WorkflowCheckpoint {
 	return domain.WorkflowCheckpoint{
-		ID:             r.ID,
-		WorkflowRunID:  r.WorkflowRunID,
-		WorkflowStepID: nullStringToPtr(r.WorkflowStepID),
-		AttemptID:      nullStringToPtr(r.AttemptID),
-		ProjectID:      string(r.ProjectID),
-		SessionID:      nullStringToPtr(r.SessionID),
-		Branch:         r.Branch,
-		WorktreePath:   r.WorktreePath,
-		BaseSHA:        r.BaseSha,
-		HeadSHA:        r.HeadSha,
-		ReviewRunID:    nullStringToPtr(r.ReviewRunID),
-		ReviewVerdict:  r.ReviewVerdict,
-		RetryState:     r.RetryState,
-		NextAction:     r.NextAction,
-		DurablePhase:   r.DurablePhase,
-		PayloadVersion: r.PayloadVersion,
-		CreatedAt:      r.CreatedAt,
+		ID:                r.ID,
+		WorkflowRunID:     r.WorkflowRunID,
+		WorkflowStepID:    nullStringToPtr(r.WorkflowStepID),
+		AttemptID:         nullStringToPtr(r.AttemptID),
+		ProjectID:         string(r.ProjectID),
+		SessionID:         nullStringToPtr(r.SessionID),
+		Branch:            r.Branch,
+		WorktreePath:      r.WorktreePath,
+		BaseSHA:           r.BaseSha,
+		HeadSHA:           r.HeadSha,
+		ReviewRunID:       nullStringToPtr(r.ReviewRunID),
+		ReviewVerdict:     r.ReviewVerdict,
+		RetryState:        r.RetryState,
+		NextAction:        r.NextAction,
+		DurablePhase:      r.DurablePhase,
+		PayloadVersion:    r.PayloadVersion,
+		FingerprintBefore: r.FingerprintBefore,
+		FingerprintAfter:  r.FingerprintAfter,
+		CreatedAt:         r.CreatedAt,
 	}
 }
 

@@ -525,23 +525,25 @@ type WorkflowAttempt struct {
 }
 
 type WorkflowCheckpoint struct {
-	ID             string
-	WorkflowRunID  string
-	WorkflowStepID sql.NullString
-	AttemptID      sql.NullString
-	ProjectID      domain.ProjectID
-	SessionID      sql.NullString
-	Branch         string
-	WorktreePath   string
-	BaseSha        string
-	HeadSha        string
-	ReviewRunID    sql.NullString
-	ReviewVerdict  string
-	RetryState     string
-	NextAction     string
-	DurablePhase   string
-	PayloadVersion string
-	CreatedAt      time.Time
+	ID                string
+	WorkflowRunID     string
+	WorkflowStepID    sql.NullString
+	AttemptID         sql.NullString
+	ProjectID         domain.ProjectID
+	SessionID         sql.NullString
+	Branch            string
+	WorktreePath      string
+	BaseSha           string
+	HeadSha           string
+	ReviewRunID       sql.NullString
+	ReviewVerdict     string
+	RetryState        string
+	NextAction        string
+	DurablePhase      string
+	PayloadVersion    string
+	CreatedAt         time.Time
+	FingerprintBefore string
+	FingerprintAfter  string
 }
 
 type WorkflowOutbox struct {

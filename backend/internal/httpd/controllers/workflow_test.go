@@ -35,6 +35,10 @@ type fakeWorkflowService struct {
 	startErr   error
 	startCalls int
 
+	continueRunID string
+	continueErr   error
+	continueCalls int
+
 	detail workflowcore.RunDetail
 	runs   []domain.WorkflowRun
 }
@@ -90,6 +94,18 @@ func (f *fakeWorkflowService) StartRun(_ context.Context, runID string) (workflo
 		return f.detail, nil
 	}
 	return workflowcore.RunDetail{Run: domain.WorkflowRun{ID: runID, State: domain.WorkflowRunRunning}}, nil
+}
+
+func (f *fakeWorkflowService) ContinueRun(_ context.Context, runID string) (workflowcore.RunDetail, error) {
+	f.continueRunID = runID
+	f.continueCalls++
+	if f.continueErr != nil {
+		return workflowcore.RunDetail{}, f.continueErr
+	}
+	if f.detail.Run.ID != "" {
+		return f.detail, nil
+	}
+	return workflowcore.RunDetail{Run: domain.WorkflowRun{ID: runID, State: domain.WorkflowRunWaiting}}, nil
 }
 
 func newWorkflowTestServer(t *testing.T, svc workflowsvc.Manager) *httptest.Server {
@@ -226,6 +242,104 @@ func TestWorkflowStartRunNotFound(t *testing.T) {
 	body, status, headers := doRequest(t, srv, "POST", "/api/v1/workflows/missing/start", "")
 	assertJSON(t, headers)
 	assertErrorCode(t, body, status, http.StatusNotFound, "WORKFLOW_NOT_FOUND")
+}
+
+// TestWorkflowContinueRun covers the Checkpoint 8C /continue endpoint's
+// success path: the controller forwards to the service and returns 200 with
+// the run detail.
+func TestWorkflowContinueRun(t *testing.T) {
+	svc := &fakeWorkflowService{}
+	srv := newWorkflowTestServer(t, svc)
+
+	body, status, headers := doRequest(t, srv, "POST", "/api/v1/workflows/wf-1/continue", "")
+	assertJSON(t, headers)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	if svc.continueRunID != "wf-1" {
+		t.Fatalf("forwarded run id = %q", svc.continueRunID)
+	}
+}
+
+// TestWorkflowContinueRunIdempotentSecondCall mirrors
+// TestWorkflowStartRunIdempotentSecondCall: the controller forwards every
+// call (idempotency lives in the service/coordinator), and a repeat call
+// when nothing is currently dispatchable must still return 200, not error.
+func TestWorkflowContinueRunIdempotentSecondCall(t *testing.T) {
+	svc := &fakeWorkflowService{}
+	srv := newWorkflowTestServer(t, svc)
+
+	for i := 0; i < 2; i++ {
+		body, status, headers := doRequest(t, srv, "POST", "/api/v1/workflows/wf-1/continue", "")
+		assertJSON(t, headers)
+		if status != http.StatusOK {
+			t.Fatalf("call %d: status=%d body=%s", i, status, body)
+		}
+	}
+	if svc.continueCalls != 2 {
+		t.Fatalf("service ContinueRun calls = %d, want 2", svc.continueCalls)
+	}
+}
+
+func TestWorkflowContinueRunNotFound(t *testing.T) {
+	svc := &fakeWorkflowService{continueErr: workflowsvc.ErrNotFound}
+	srv := newWorkflowTestServer(t, svc)
+
+	body, status, headers := doRequest(t, srv, "POST", "/api/v1/workflows/missing/continue", "")
+	assertJSON(t, headers)
+	assertErrorCode(t, body, status, http.StatusNotFound, "WORKFLOW_NOT_FOUND")
+}
+
+// TestWorkflowContinueRunAlreadyTerminal covers calling /continue on an
+// already-terminal run: a real error, not a silent no-op.
+func TestWorkflowContinueRunAlreadyTerminal(t *testing.T) {
+	svc := &fakeWorkflowService{continueErr: workflowsvc.ErrAlreadyTerminal}
+	srv := newWorkflowTestServer(t, svc)
+
+	body, status, headers := doRequest(t, srv, "POST", "/api/v1/workflows/wf-1/continue", "")
+	assertJSON(t, headers)
+	assertErrorCode(t, body, status, http.StatusConflict, "WORKFLOW_ALREADY_TERMINAL")
+}
+
+// TestWorkflowGetRunSurfacesReviewFields is a regression guard for
+// Checkpoint 8C's response extension: reviewer/verdict/target/findingsSummary
+// per review step must round-trip through the wire view.
+func TestWorkflowGetRunSurfacesReviewFields(t *testing.T) {
+	now := time.Now().UTC()
+	reviewRunID := "rvr-1"
+	stepID := "wfs-review"
+	svc := &fakeWorkflowService{detail: workflowcore.RunDetail{
+		Run:        domain.WorkflowRun{ID: "wf-1", ProjectID: "proj-1", Objective: "ship it", State: domain.WorkflowRunWaiting, CreatedAt: now, UpdatedAt: now},
+		NextAction: "fix",
+		Steps: []workflowcore.StepDetail{
+			{
+				Step: domain.WorkflowStep{
+					ID: stepID, WorkflowRunID: "wf-1", Kind: domain.WorkflowStepReview, Ordinal: 3,
+					State: domain.WorkflowStepCompleted, ReviewRunID: &reviewRunID, CreatedAt: now, UpdatedAt: now,
+				},
+				Review: &workflowcore.ReviewSummary{
+					Harness: domain.ReviewerClaudeCode, Verdict: domain.VerdictChangesRequested,
+					Target: "deadbeef", FindingsSummary: "found an issue with the error handling",
+				},
+			},
+		},
+	}}
+	srv := newWorkflowTestServer(t, svc)
+
+	body, status, headers := doRequest(t, srv, "GET", "/api/v1/workflows/wf-1", "")
+	assertJSON(t, headers)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	bodyStr := string(body)
+	for _, want := range []string{
+		`"reviewRunId":"rvr-1"`, `"reviewer":"claude-code"`, `"verdict":"changes_requested"`,
+		`"target":"deadbeef"`, `"findingsSummary":"found an issue with the error handling"`, `"nextAction":"fix"`,
+	} {
+		if !strings.Contains(bodyStr, want) {
+			t.Fatalf("response body missing %q: %s", want, bodyStr)
+		}
+	}
 }
 
 // TestWorkflowGetRunSurfacesCheckpointAndNextActionFields is a regression

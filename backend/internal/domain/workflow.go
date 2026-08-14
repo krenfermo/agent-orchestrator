@@ -223,8 +223,24 @@ const (
 	WorkflowErrorWorkerTerminatedUnexpectedly WorkflowErrorClass = "worker_terminated_unexpectedly"
 	// WorkflowErrorAmbiguousWorkerState means AO could not durably prove
 	// whether a dispatch/worker attempt succeeded or failed, so it surfaces the
-	// ambiguity rather than guessing (Checkpoint 8B; "nunca asumir éxito").
+	// ambiguity rather than guessing (Checkpoint 8B; "nunca asumir éxito"). It
+	// is also reused (not duplicated) for an ambiguous *review* dispatch state
+	// in Checkpoint 8C: the same "could not prove, surface it" meaning applies.
 	WorkflowErrorAmbiguousWorkerState WorkflowErrorClass = "ambiguous_worker_state"
+	// WorkflowErrorReviewerLaunchFailed means the review step's outbox command
+	// reached "about to launch the real Claude reviewer" but the launch itself
+	// (Preflight or the actual spawn) failed (Checkpoint 8C). Kept distinct
+	// from WorkflowErrorSessionCreateFailed/WorkflowErrorAgentStartFailed
+	// because those name a *worker* Codex session failure; this one names a
+	// *reviewer* pane failure, a different failure surface a human triaging
+	// attempts needs to tell apart at a glance.
+	WorkflowErrorReviewerLaunchFailed WorkflowErrorClass = "reviewer_launch_failed"
+	// WorkflowErrorFixBudgetExhausted means the review->fix->re-review loop
+	// (Checkpoint 8D) hit its policy-configured max_fix_cycles while the
+	// latest verdict was still changes_requested. Distinct from every prior
+	// value: none of them mean "ran out of retries" — the fix step's own work
+	// is not itself judged wrong, the loop simply exhausted its budget.
+	WorkflowErrorFixBudgetExhausted WorkflowErrorClass = "fix_budget_exhausted"
 )
 
 // Valid reports whether an error class is persistable. The empty value is
@@ -235,6 +251,7 @@ func (c WorkflowErrorClass) Valid() bool {
 		WorkflowErrorTool, WorkflowErrorTestFailed, WorkflowErrorReviewChangesRequested,
 		WorkflowErrorSessionCreateFailed, WorkflowErrorAgentStartFailed,
 		WorkflowErrorPromptDeliveryFailed, WorkflowErrorRuntimeFailed,
+		WorkflowErrorReviewerLaunchFailed, WorkflowErrorFixBudgetExhausted,
 		WorkflowErrorWorkerTerminatedUnexpectedly, WorkflowErrorAmbiguousWorkerState:
 		return true
 	default:
@@ -362,7 +379,15 @@ type WorkflowCheckpoint struct {
 	NextAction     string
 	DurablePhase   string
 	PayloadVersion string
-	CreatedAt      time.Time
+	// FingerprintBefore and FingerprintAfter are Checkpoint 8D's workspace
+	// fingerprints (see workflow.WorkspaceFingerprint): FingerprintBefore is
+	// the fingerprint that produced a changes_requested verdict (the state a
+	// fix attempt is addressing); FingerprintAfter is the newly observed
+	// fingerprint once that fix cycle is judged to have genuinely landed.
+	// Empty for every checkpoint kind that predates 8D.
+	FingerprintBefore string
+	FingerprintAfter  string
+	CreatedAt         time.Time
 }
 
 // WorkflowOutboxEntry is one durable idempotent-command staging row. Nothing

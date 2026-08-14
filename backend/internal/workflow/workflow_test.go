@@ -126,6 +126,22 @@ func (f *fakeStore) UpdateWorkflowStepArtifact(_ context.Context, stepID, artifa
 	return false, nil
 }
 
+func (f *fakeStore) SetWorkflowStepReviewRun(_ context.Context, stepID, reviewRunID string, now time.Time) (bool, error) {
+	for runID, steps := range f.steps {
+		for i, step := range steps {
+			if step.ID != stepID {
+				continue
+			}
+			rid := reviewRunID
+			step.ReviewRunID = &rid
+			step.UpdatedAt = now
+			f.steps[runID][i] = step
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (f *fakeStore) UpdateWorkflowStepSession(_ context.Context, stepID, sessionID string, now time.Time) (bool, error) {
 	for runID, steps := range f.steps {
 		for i, step := range steps {

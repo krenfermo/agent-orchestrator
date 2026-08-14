@@ -1670,6 +1670,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflowId}/continue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Continue a workflow run: dispatch its review step's real Claude reviewer once the work step has completed (Checkpoint 8C). Idempotent no-op when nothing is currently dispatchable. */
+        post: operations["continueWorkflowRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workflows/{workflowId}/start": {
         parameters: {
             query?: never;
@@ -3005,7 +3022,7 @@ export interface components {
             /** Format: int64 */
             attemptNumber: number;
             /** @enum {string} */
-            errorClass?: "rate_limited" | "auth" | "transient" | "tool" | "test_failed" | "review_changes_requested" | "session_create_failed" | "agent_start_failed" | "prompt_delivery_failed" | "runtime_failed" | "worker_terminated_unexpectedly" | "ambiguous_worker_state";
+            errorClass?: "rate_limited" | "auth" | "transient" | "tool" | "test_failed" | "review_changes_requested" | "session_create_failed" | "agent_start_failed" | "prompt_delivery_failed" | "runtime_failed" | "worker_terminated_unexpectedly" | "ambiguous_worker_state" | "reviewer_launch_failed" | "fix_budget_exhausted";
             /** Format: date-time */
             finishedAt?: null | string;
             harness?: string;
@@ -3050,6 +3067,7 @@ export interface components {
             /** Format: date-time */
             createdAt: string;
             dependsOnStepId?: string;
+            findingsSummary?: string;
             headSha?: string;
             id: string;
             /** @enum {string} */
@@ -3058,11 +3076,15 @@ export interface components {
             /** Format: int64 */
             ordinal: number;
             reviewRunId?: string;
+            reviewer?: string;
             sessionId?: string;
             /** @enum {string} */
             state: "pending" | "ready" | "running" | "waiting" | "completed" | "failed" | "cancelled";
+            target?: string;
             /** Format: date-time */
             updatedAt: string;
+            /** @enum {string} */
+            verdict?: "" | "approved" | "changes_requested";
             worktreePath?: string;
         };
         WorkspaceFileResponse: {
@@ -9405,6 +9427,56 @@ export interface operations {
         };
     };
     cancelWorkflowRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    continueWorkflowRun: {
         parameters: {
             query?: never;
             header?: never;

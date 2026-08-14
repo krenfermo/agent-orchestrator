@@ -9,8 +9,20 @@ export const Route = createFileRoute("/_shell/workflows/$workflowId")({
 function WorkflowRunRoute() {
 	const { t } = useTranslation();
 	const { workflowId } = Route.useParams();
-	const { workflow, isLoading, error, cancel, cancelling, cancelError, start, starting, startError } =
-		useWorkflowRun(workflowId);
+	const {
+		workflow,
+		isLoading,
+		error,
+		cancel,
+		cancelling,
+		cancelError,
+		start,
+		starting,
+		startError,
+		continueRun,
+		continuing,
+		continueError,
+	} = useWorkflowRun(workflowId);
 
 	if (isLoading && !workflow) {
 		return <p className="p-6 text-sm text-muted-foreground">{t("shell.workflowsLoading")}</p>;
@@ -24,6 +36,11 @@ function WorkflowRunRoute() {
 
 	const nonTerminal = !workflowRunIsTerminal(workflow.run.state);
 	const isPending = workflow.run.state === "pending";
+	const workStep = workflow.steps.find((step) => step.kind === "work");
+	const reviewStep = workflow.steps.find((step) => step.kind === "review");
+	const canContinueReview = Boolean(
+		workStep?.state === "completed" && (reviewStep?.state === "pending" || reviewStep?.state === "ready"),
+	);
 
 	return (
 		<div className="mx-auto flex max-w-2xl flex-col gap-6 p-6">
@@ -51,6 +68,19 @@ function WorkflowRunRoute() {
 							{starting ? t("shell.workflowsStarting") : t("shell.workflowsStart")}
 						</button>
 						{startError && <p className="mt-1 text-sm text-destructive">{startError}</p>}
+					</div>
+				)}
+				{canContinueReview && (
+					<div>
+						<button
+							className="rounded border border-border px-3 py-1.5 text-sm disabled:opacity-50"
+							disabled={continuing}
+							onClick={() => void continueRun()}
+							type="button"
+						>
+							{continuing ? t("shell.workflowsContinuing") : t("shell.workflowsStartReview")}
+						</button>
+						{continueError && <p className="mt-1 text-sm text-destructive">{continueError}</p>}
 					</div>
 				)}
 				{nonTerminal && (
@@ -106,6 +136,36 @@ function WorkflowRunRoute() {
 									<>
 										<dt>{t("shell.workflowsHeadSha")}</dt>
 										<dd className="font-mono">{step.headSha}</dd>
+									</>
+								)}
+								{step.nextAction && (
+									<>
+										<dt>{t("shell.workflowsNextActionLabel")}</dt>
+										<dd>{step.nextAction}</dd>
+									</>
+								)}
+							</dl>
+						)}
+						{step.kind === "review" && (step.reviewRunId || step.reviewer) && (
+							<dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 border-t border-border pt-2 text-xs text-muted-foreground">
+								<dt>{t("shell.workflowsReviewer")}</dt>
+								<dd>{step.reviewer || "claude-code"}</dd>
+								{step.target && (
+									<>
+										<dt>{t("shell.workflowsTarget")}</dt>
+										<dd className="font-mono">{step.target}</dd>
+									</>
+								)}
+								{step.verdict && (
+									<>
+										<dt>{t("shell.workflowsVerdict")}</dt>
+										<dd>{step.verdict}</dd>
+									</>
+								)}
+								{step.findingsSummary && (
+									<>
+										<dt>{t("shell.workflowsFindings")}</dt>
+										<dd className="whitespace-pre-wrap">{step.findingsSummary}</dd>
 									</>
 								)}
 								{step.nextAction && (

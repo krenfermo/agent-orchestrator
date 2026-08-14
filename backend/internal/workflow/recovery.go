@@ -12,11 +12,11 @@ type Sessions interface {
 	GetSession(ctx stdctx.Context, id domain.SessionID) (domain.SessionRecord, bool, error)
 }
 
-// ReviewRuns resolves a referenced review run for the recovery integrity
-// check. Optional: a nil ReviewRuns dependency simply skips the check.
-type ReviewRuns interface {
-	GetReviewRun(ctx stdctx.Context, id string) (domain.ReviewRun, bool, error)
-}
+// ReviewRuns is declared in review_dispatch.go (Checkpoint 8C widened it
+// beyond this file's original read-only recovery-integrity-check need to
+// also cover review creation/dedupe; checkStepIntegrity below only ever
+// calls its GetReviewRun method). Optional: a nil ReviewRuns dependency
+// simply skips both the integrity check here and review dispatch.
 
 // Reconcile is workflow's own durable self-state repair, run once at daemon
 // boot after storage opens and before the daemon starts serving. It never
@@ -90,6 +90,15 @@ func (c *Coordinator) Reconcile(ctx stdctx.Context) error {
 				continue
 			}
 
+			if step.Kind == domain.WorkflowStepReview || step.Kind == domain.WorkflowStepFix {
+				// Checkpoint 8C/8D: recovery re-enters the exact same
+				// idempotent dispatch/observe cascade ContinueRun/GetRun use
+				// (advanceReviewFixCycle), handled once per run below (not
+				// per step) — skip the generic per-step fallback for both
+				// kinds here.
+				continue
+			}
+
 			if step.State != domain.WorkflowStepRunning {
 				continue
 			}
@@ -99,11 +108,35 @@ func (c *Coordinator) Reconcile(ctx stdctx.Context) error {
 			}
 		}
 
+		// Re-read the run and steps: the work-step handling above may already
+		// have moved the run (e.g. to needs_attention or waiting) and the
+		// work step itself to completed — the review/fix cascade below must
+		// see that fresh state, not the pre-loop snapshot.
+		if refreshedRun, ok, rerr := c.store.GetWorkflowRun(ctx, run.ID); rerr == nil && ok {
+			run = refreshedRun
+		}
+		if refreshedSteps, rerr := c.store.ListWorkflowSteps(ctx, run.ID); rerr == nil {
+			steps = refreshedSteps
+		}
+		// Checkpoint 8D: the same automatic review<->fix cascade
+		// GetRun/ContinueRun drive, re-entered at boot so a crash mid-cycle
+		// resumes without any HTTP traffic at all. includeCycle1Unblock=false,
+		// mirroring 8C's original exclusion: a review step that has never
+		// been explicitly unblocked (no ContinueRun call yet, still
+		// "pending") stays untouched by boot recovery.
+		if !run.State.Terminal() {
+			if updatedRun, err := c.advanceReviewFixCycle(ctx, run, steps, false); err != nil {
+				return err
+			} else {
+				run = updatedRun
+			}
+		}
+
 		if !interrupted {
 			continue
 		}
-		// Re-read the run: a work step's observeWorkStep call above may
-		// already have moved it (e.g. to needs_attention or waiting).
+		// Re-read the run again: a work step's observeWorkStep call above, or
+		// the cascade just run, may already have moved it.
 		current, ok, err := c.store.GetWorkflowRun(ctx, run.ID)
 		if err != nil {
 			return err

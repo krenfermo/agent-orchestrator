@@ -1121,5 +1121,11 @@
 	"chat.edit.image": "Image",
 	"chat.edit.cancel": "Cancel edit",
 	"chat.edit.send": "Send edited message",
-	"chat.edit.sendShortcut": "Send edited message (⌘/Ctrl+Enter)"
+	"chat.edit.sendShortcut": "Send edited message (⌘/Ctrl+Enter)",
+	"shell.workflowsStartReview": "Start review",
+	"shell.workflowsContinuing": "Continuing…",
+	"shell.workflowsReviewer": "Reviewer",
+	"shell.workflowsTarget": "Target",
+	"shell.workflowsVerdict": "Verdict",
+	"shell.workflowsFindings": "Findings"
 }

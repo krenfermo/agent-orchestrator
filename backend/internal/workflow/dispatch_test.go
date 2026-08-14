@@ -557,3 +557,59 @@ func TestReviewStepUntouchedAfterWorkCompletion(t *testing.T) {
 		t.Fatalf("review step has a review_run_id %v; no code path in 8B can create one", review.Step.ReviewRunID)
 	}
 }
+
+// Regression: discovered by Checkpoint 8C's real E2E run. The checkpoint
+// observeWorkStep writes when a work step transitions to completed must
+// still carry Branch/WorktreePath forward from session facts — a caller
+// resolving "the latest checkpoint for this step" (as Checkpoint 8C's review
+// dispatch does, to find the worktree to launch the reviewer against) would
+// otherwise silently lose them the moment work observation supersedes the
+// earlier "worker_dispatched" checkpoint that did carry them, and the real
+// reviewer launch failed with "workspace path is required" as a direct
+// result.
+func TestWorkStepCompletionCheckpointCarriesBranchAndWorktreePath(t *testing.T) {
+	sessionFacts := newFakeSessionFacts()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
+	workspaceFacts := &fakeWorkspaceFacts{obs: ports.WorkspaceObservation{HeadSHA: "base-sha"}}
+	c, store, clk := newCoordinatorFull(spawner, sessionFacts, workspaceFacts)
+	ctx := context.Background()
+
+	created, err := c.CreateRun(ctx, "proj-1", "ship the thing")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	detail, err := c.StartRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	work := workStepFrom(detail)
+	sessionFacts.put(domain.SessionRecord{
+		ID: domain.SessionID(*work.Step.SessionID), ProjectID: "proj-1",
+		Activity: domain.Activity{State: domain.ActivityIdle}, IsTerminated: false,
+		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/wf", Branch: "ao/wf"},
+	})
+	workspaceFacts.obs = ports.WorkspaceObservation{Dirty: true} // uncommitted work evidence
+	clk.Advance(10 * time.Second)                                // clear the observation throttle
+
+	got, err := c.GetRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if workStepFrom(got).Step.State != domain.WorkflowStepCompleted {
+		t.Fatalf("work step state = %q, want completed", workStepFrom(got).Step.State)
+	}
+
+	cp, ok, err := store.GetLatestWorkflowCheckpointByStep(ctx, work.Step.ID)
+	if err != nil {
+		t.Fatalf("GetLatestWorkflowCheckpointByStep: %v", err)
+	}
+	if !ok {
+		t.Fatalf("no checkpoint found for work step %s", work.Step.ID)
+	}
+	if cp.WorktreePath != "/ws/wf" {
+		t.Fatalf("latest checkpoint WorktreePath = %q, want /ws/wf", cp.WorktreePath)
+	}
+	if cp.Branch != "ao/wf" {
+		t.Fatalf("latest checkpoint Branch = %q, want ao/wf", cp.Branch)
+	}
+}

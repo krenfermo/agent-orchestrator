@@ -69,6 +69,22 @@ export function useWorkflowRun(workflowId: string | undefined) {
 		},
 	});
 
+	const continueRun = useMutation({
+		mutationFn: async () => {
+			if (!workflowId) throw new Error("workflow id is required");
+			const { data, error } = await apiClient.POST("/api/v1/workflows/{workflowId}/continue", {
+				params: { path: { workflowId } },
+			});
+			if (error) throw error;
+			return data.workflow;
+		},
+		onSuccess: () => {
+			if (!workflowId) return;
+			void queryClient.invalidateQueries({ queryKey: workflowRunQueryKey(workflowId) });
+			void queryClient.invalidateQueries({ queryKey: workflowRunsQueryKey() });
+		},
+	});
+
 	return {
 		workflow: query.data,
 		isLoading: query.isLoading,
@@ -79,6 +95,9 @@ export function useWorkflowRun(workflowId: string | undefined) {
 		start: start.mutateAsync,
 		starting: start.isPending,
 		startError: start.error ? apiErrorMessage(start.error) : undefined,
+		continueRun: continueRun.mutateAsync,
+		continuing: continueRun.isPending,
+		continueError: continueRun.error ? apiErrorMessage(continueRun.error) : undefined,
 	};
 }
 
@@ -92,6 +111,30 @@ export function useStartWorkflowRun(workflowId: string | undefined) {
 		mutationFn: async () => {
 			if (!workflowId) throw new Error("workflow id is required");
 			const { data, error } = await apiClient.POST("/api/v1/workflows/{workflowId}/start", {
+				params: { path: { workflowId } },
+			});
+			if (error) throw error;
+			return data.workflow;
+		},
+		onSuccess: () => {
+			if (!workflowId) return;
+			void queryClient.invalidateQueries({ queryKey: workflowRunQueryKey(workflowId) });
+			void queryClient.invalidateQueries({ queryKey: workflowRunsQueryKey() });
+		},
+	});
+}
+
+/**
+ * Standalone continue mutation (Checkpoint 8C), for callers that only need
+ * to trigger /continue (e.g. a list view) without subscribing to the full
+ * run detail query. Mirrors useStartWorkflowRun exactly.
+ */
+export function useContinueWorkflowRun(workflowId: string | undefined) {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: async () => {
+			if (!workflowId) throw new Error("workflow id is required");
+			const { data, error } = await apiClient.POST("/api/v1/workflows/{workflowId}/continue", {
 				params: { path: { workflowId } },
 			});
 			if (error) throw error;

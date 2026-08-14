@@ -43,7 +43,8 @@ func (q *Queries) GetLatestWorkflowAttemptByStep(ctx context.Context, workflowSt
 const getLatestWorkflowCheckpointByStep = `-- name: GetLatestWorkflowCheckpointByStep :one
 SELECT id, workflow_run_id, workflow_step_id, attempt_id, project_id, session_id,
        branch, worktree_path, base_sha, head_sha, review_run_id, review_verdict,
-       retry_state, next_action, durable_phase, payload_version, created_at
+       retry_state, next_action, durable_phase, payload_version, created_at,
+       fingerprint_before, fingerprint_after
 FROM workflow_checkpoints
 WHERE workflow_step_id = ?
 ORDER BY created_at DESC, id DESC
@@ -71,6 +72,8 @@ func (q *Queries) GetLatestWorkflowCheckpointByStep(ctx context.Context, workflo
 		&i.DurablePhase,
 		&i.PayloadVersion,
 		&i.CreatedAt,
+		&i.FingerprintBefore,
+		&i.FingerprintAfter,
 	)
 	return i, err
 }
@@ -217,31 +220,35 @@ const insertWorkflowCheckpoint = `-- name: InsertWorkflowCheckpoint :one
 INSERT INTO workflow_checkpoints (
     id, workflow_run_id, workflow_step_id, attempt_id, project_id, session_id,
     branch, worktree_path, base_sha, head_sha, review_run_id, review_verdict,
-    retry_state, next_action, durable_phase, payload_version, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    retry_state, next_action, durable_phase, payload_version, created_at,
+    fingerprint_before, fingerprint_after
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id, workflow_run_id, workflow_step_id, attempt_id, project_id, session_id,
           branch, worktree_path, base_sha, head_sha, review_run_id, review_verdict,
-          retry_state, next_action, durable_phase, payload_version, created_at
+          retry_state, next_action, durable_phase, payload_version, created_at,
+          fingerprint_before, fingerprint_after
 `
 
 type InsertWorkflowCheckpointParams struct {
-	ID             string
-	WorkflowRunID  string
-	WorkflowStepID sql.NullString
-	AttemptID      sql.NullString
-	ProjectID      domain.ProjectID
-	SessionID      sql.NullString
-	Branch         string
-	WorktreePath   string
-	BaseSha        string
-	HeadSha        string
-	ReviewRunID    sql.NullString
-	ReviewVerdict  string
-	RetryState     string
-	NextAction     string
-	DurablePhase   string
-	PayloadVersion string
-	CreatedAt      time.Time
+	ID                string
+	WorkflowRunID     string
+	WorkflowStepID    sql.NullString
+	AttemptID         sql.NullString
+	ProjectID         domain.ProjectID
+	SessionID         sql.NullString
+	Branch            string
+	WorktreePath      string
+	BaseSha           string
+	HeadSha           string
+	ReviewRunID       sql.NullString
+	ReviewVerdict     string
+	RetryState        string
+	NextAction        string
+	DurablePhase      string
+	PayloadVersion    string
+	CreatedAt         time.Time
+	FingerprintBefore string
+	FingerprintAfter  string
 }
 
 func (q *Queries) InsertWorkflowCheckpoint(ctx context.Context, arg InsertWorkflowCheckpointParams) (WorkflowCheckpoint, error) {
@@ -263,6 +270,8 @@ func (q *Queries) InsertWorkflowCheckpoint(ctx context.Context, arg InsertWorkfl
 		arg.DurablePhase,
 		arg.PayloadVersion,
 		arg.CreatedAt,
+		arg.FingerprintBefore,
+		arg.FingerprintAfter,
 	)
 	var i WorkflowCheckpoint
 	err := row.Scan(
@@ -283,6 +292,8 @@ func (q *Queries) InsertWorkflowCheckpoint(ctx context.Context, arg InsertWorkfl
 		&i.DurablePhase,
 		&i.PayloadVersion,
 		&i.CreatedAt,
+		&i.FingerprintBefore,
+		&i.FingerprintAfter,
 	)
 	return i, err
 }
@@ -508,7 +519,8 @@ func (q *Queries) ListWorkflowAttemptsByStep(ctx context.Context, workflowStepID
 const listWorkflowCheckpointsByRun = `-- name: ListWorkflowCheckpointsByRun :many
 SELECT id, workflow_run_id, workflow_step_id, attempt_id, project_id, session_id,
        branch, worktree_path, base_sha, head_sha, review_run_id, review_verdict,
-       retry_state, next_action, durable_phase, payload_version, created_at
+       retry_state, next_action, durable_phase, payload_version, created_at,
+       fingerprint_before, fingerprint_after
 FROM workflow_checkpoints
 WHERE workflow_run_id = ?
 ORDER BY created_at, id
@@ -541,6 +553,8 @@ func (q *Queries) ListWorkflowCheckpointsByRun(ctx context.Context, workflowRunI
 			&i.DurablePhase,
 			&i.PayloadVersion,
 			&i.CreatedAt,
+			&i.FingerprintBefore,
+			&i.FingerprintAfter,
 		); err != nil {
 			return nil, err
 		}
@@ -727,6 +741,34 @@ func (q *Queries) ListWorkflowStepsByRun(ctx context.Context, workflowRunID stri
 		return nil, err
 	}
 	return items, nil
+}
+
+const setWorkflowStepReviewRun = `-- name: SetWorkflowStepReviewRun :execrows
+UPDATE workflow_steps
+SET review_run_id = ?1, updated_at = ?2
+WHERE id = ?3
+`
+
+type SetWorkflowStepReviewRunParams struct {
+	ReviewRunID sql.NullString
+	UpdatedAt   time.Time
+	ID          string
+}
+
+// Checkpoint 8D: workflow_steps.review_run_id now means "the current/most-
+// recent review_run for this step" (mutable across review cycles), not
+// write-once as Checkpoint 8C originally modeled it. Unconditional update, no
+// WHERE review_run_id IS NULL guard: the primary anti-duplication guard
+// against creating two review_runs for the same cycle is the outbox
+// idempotency key (cycle-specific), not this column. Supersedes 8C's
+// write-once UpdateWorkflowStepReviewRun, which 8D's cycling dispatch flow
+// fully replaces (its one call site now uses this instead).
+func (q *Queries) SetWorkflowStepReviewRun(ctx context.Context, arg SetWorkflowStepReviewRunParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setWorkflowStepReviewRun, arg.ReviewRunID, arg.UpdatedAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const updateWorkflowAttemptOutcome = `-- name: UpdateWorkflowAttemptOutcome :execrows

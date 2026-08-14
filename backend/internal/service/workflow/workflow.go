@@ -34,6 +34,11 @@ type Manager interface {
 	ListRuns(ctx context.Context, filter ListFilter) ([]RunSummary, error)
 	CancelRun(ctx context.Context, runID string) (workflowcore.RunDetail, error)
 	StartRun(ctx context.Context, runID string) (workflowcore.RunDetail, error)
+	// ContinueRun is Checkpoint 8C's generic unblock-and-dispatch entry
+	// point. Today it dispatches the review step once the work step has
+	// completed; a future checkpoint can extend it (fix/verify automation)
+	// without a breaking API change.
+	ContinueRun(ctx context.Context, runID string) (workflowcore.RunDetail, error)
 }
 
 // Service is the API-facing workflow service. It delegates to the core coordinator.
@@ -72,4 +77,10 @@ func (s *Service) CancelRun(ctx context.Context, runID string) (workflowcore.Run
 // dispatches its work step's Codex worker (idempotently).
 func (s *Service) StartRun(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
 	return s.coordinator.StartRun(ctx, runID)
+}
+
+// ContinueRun dispatches the review step's real Claude reviewer once the
+// work step has completed (idempotently); a no-op otherwise.
+func (s *Service) ContinueRun(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
+	return s.coordinator.ContinueRun(ctx, runID)
 }

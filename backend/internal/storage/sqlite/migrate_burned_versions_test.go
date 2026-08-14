@@ -100,6 +100,9 @@ var shippedMigrations = map[int64]string{
 	94: "0094_workflow.sql",
 	95: "0095_workflow_step_artifact.sql",
 	96: "0096_workflow_attempt_error_classes.sql",
+	97: "0097_workflow_attempt_reviewer_launch_failed.sql",
+	98: "0098_workflow_checkpoint_fingerprint.sql",
+	99: "0099_workflow_attempt_fix_budget_exhausted.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

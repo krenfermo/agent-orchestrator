@@ -11,7 +11,7 @@ vi.mock("../lib/api-client", () => ({
 	hasTrustedApiBaseUrl: () => true,
 }));
 
-import { useStartWorkflowRun, useWorkflowRun, workflowRunIsTerminal } from "./useWorkflowRun";
+import { useContinueWorkflowRun, useStartWorkflowRun, useWorkflowRun, workflowRunIsTerminal } from "./useWorkflowRun";
 
 function wrapper({ children }: { children: ReactNode }) {
 	const queryClient = new QueryClient({
@@ -113,6 +113,36 @@ describe("useWorkflowRun", () => {
 			expect.objectContaining({ params: { path: { workflowId: "wf-1" } } }),
 		);
 	});
+
+	it("continues a run and invalidates its query", async () => {
+		getMock.mockResolvedValue({
+			data: {
+				workflow: {
+					run: { id: "wf-1", projectId: "proj-1", objective: "ship it", state: "waiting" },
+					steps: [],
+				},
+			},
+			error: undefined,
+		});
+		postMock.mockResolvedValue({
+			data: {
+				workflow: {
+					run: { id: "wf-1", projectId: "proj-1", objective: "ship it", state: "waiting" },
+					steps: [],
+				},
+			},
+			error: undefined,
+		});
+
+		const { result } = renderHook(() => useWorkflowRun("wf-1"), { wrapper });
+		await waitFor(() => expect(result.current.workflow?.run.id).toBe("wf-1"));
+
+		await result.current.continueRun();
+		expect(postMock).toHaveBeenCalledWith(
+			"/api/v1/workflows/{workflowId}/continue",
+			expect.objectContaining({ params: { path: { workflowId: "wf-1" } } }),
+		);
+	});
 });
 
 describe("useStartWorkflowRun", () => {
@@ -139,6 +169,35 @@ describe("useStartWorkflowRun", () => {
 
 	it("rejects when no workflow id is set", async () => {
 		const { result } = renderHook(() => useStartWorkflowRun(undefined), { wrapper });
+		await expect(result.current.mutateAsync()).rejects.toThrow("workflow id is required");
+		expect(postMock).not.toHaveBeenCalled();
+	});
+});
+
+describe("useContinueWorkflowRun", () => {
+	it("calls the continue endpoint for the given workflow id", async () => {
+		postMock.mockResolvedValue({
+			data: {
+				workflow: {
+					run: { id: "wf-2", projectId: "proj-1", objective: "ship it", state: "waiting" },
+					steps: [],
+				},
+			},
+			error: undefined,
+		});
+
+		const { result } = renderHook(() => useContinueWorkflowRun("wf-2"), { wrapper });
+		const data = await result.current.mutateAsync();
+
+		expect(postMock).toHaveBeenCalledWith(
+			"/api/v1/workflows/{workflowId}/continue",
+			expect.objectContaining({ params: { path: { workflowId: "wf-2" } } }),
+		);
+		expect(data.run.state).toBe("waiting");
+	});
+
+	it("rejects when no workflow id is set", async () => {
+		const { result } = renderHook(() => useContinueWorkflowRun(undefined), { wrapper });
 		await expect(result.current.mutateAsync()).rejects.toThrow("workflow id is required");
 		expect(postMock).not.toHaveBeenCalled();
 	});

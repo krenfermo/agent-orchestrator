@@ -1121,5 +1121,11 @@
 	"chat.edit.image": "图像",
 	"chat.edit.cancel": "取消编辑",
 	"chat.edit.send": "发送编辑后的消息",
-	"chat.edit.sendShortcut": "发送编辑后的消息（⌘/Ctrl+Enter）"
+	"chat.edit.sendShortcut": "发送编辑后的消息（⌘/Ctrl+Enter）",
+	"shell.workflowsStartReview": "开始审查",
+	"shell.workflowsContinuing": "继续中…",
+	"shell.workflowsReviewer": "审查者",
+	"shell.workflowsTarget": "目标",
+	"shell.workflowsVerdict": "结论",
+	"shell.workflowsFindings": "发现"
 }

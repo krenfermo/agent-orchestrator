@@ -8,6 +8,7 @@ package workflow
 
 import (
 	stdctx "context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -66,6 +67,12 @@ type Store interface {
 	GetLatestWorkflowCheckpointByStep(ctx stdctx.Context, stepID string) (domain.WorkflowCheckpoint, bool, error)
 	EnqueueWorkflowOutboxEntry(ctx stdctx.Context, entry domain.WorkflowOutboxEntry) (domain.WorkflowOutboxEntry, bool, error)
 	UpdateWorkflowOutboxStatus(ctx stdctx.Context, id string, expected, next domain.WorkflowOutboxStatus, now time.Time, errorClass string) (bool, error)
+
+	// SetWorkflowStepReviewRun backs Checkpoint 8C/8D's review-step dispatch
+	// (review_dispatch.go). Checkpoint 8D redefines workflow_steps.
+	// review_run_id as "current/most-recent" (mutable across review cycles),
+	// so this is an unconditional set, not write-once.
+	SetWorkflowStepReviewRun(ctx stdctx.Context, stepID, reviewRunID string, now time.Time) (bool, error)
 }
 
 // Projects resolves the project a run belongs to.
@@ -94,6 +101,18 @@ type Deps struct {
 	SessionFacts   SessionFacts
 	WorkspaceFacts WorkspaceFacts
 
+	// ReviewerLauncher backs Checkpoint 8C's review-step dispatch
+	// (review_dispatch.go). Optional: a nil ReviewerLauncher means
+	// dispatchReviewStep is a no-op, same convention as a nil Spawner for
+	// dispatchWorkStep. ReviewRuns (above) doubles as 8C's review read/write
+	// path in addition to its original 8A recovery-integrity-check role.
+	ReviewerLauncher ReviewerLauncher
+
+	// MessageSender backs Checkpoint 8D's fix-step dispatch (fix_dispatch.go):
+	// delivering fix findings to the SAME worker session, never a new Spawn.
+	// Optional: a nil MessageSender means dispatchFixStep is a no-op.
+	MessageSender MessageSender
+
 	// Clock and NewID are injectable for deterministic tests.
 	Clock func() time.Time
 	NewID func() string
@@ -117,6 +136,12 @@ type Coordinator struct {
 	spawner        Spawner
 	sessionFacts   SessionFacts
 	workspaceFacts WorkspaceFacts
+
+	// reviewerLauncher backs Checkpoint 8C's review-step dispatch. Optional.
+	reviewerLauncher ReviewerLauncher
+
+	// messageSender backs Checkpoint 8D's fix-step dispatch. Optional.
+	messageSender MessageSender
 }
 
 // New wires a Coordinator from its dependencies, defaulting the clock and id source.
@@ -130,16 +155,18 @@ func New(d Deps) *Coordinator {
 		newID = uuid.NewString
 	}
 	return &Coordinator{
-		store:          d.Store,
-		projects:       d.Projects,
-		sessions:       d.Sessions,
-		reviewRuns:     d.ReviewRuns,
-		log:            d.Logger,
-		spawner:        d.Spawner,
-		sessionFacts:   d.SessionFacts,
-		workspaceFacts: d.WorkspaceFacts,
-		clock:          clock,
-		newID:          newID,
+		store:            d.Store,
+		projects:         d.Projects,
+		sessions:         d.Sessions,
+		reviewRuns:       d.ReviewRuns,
+		log:              d.Logger,
+		spawner:          d.Spawner,
+		sessionFacts:     d.SessionFacts,
+		workspaceFacts:   d.WorkspaceFacts,
+		reviewerLauncher: d.ReviewerLauncher,
+		messageSender:    d.MessageSender,
+		clock:            clock,
+		newID:            newID,
 	}
 }
 
@@ -159,7 +186,26 @@ type StepDetail struct {
 	Step             domain.WorkflowStep
 	Attempts         []domain.WorkflowAttempt
 	LatestCheckpoint *domain.WorkflowCheckpoint
+	// Review is populated for a review step whose ReviewRunID is set,
+	// fetched live from ReviewRuns.GetReviewRun (Checkpoint 8C). Nil when
+	// not applicable or the review run could not be read. The findings body
+	// is truncated here, not persisted: workflow_checkpoints only ever store
+	// the review_run_id reference, never a copy of the body.
+	Review *ReviewSummary
 }
+
+// ReviewSummary is a read-time-only projection of a review step's review_run
+// facts, for the API layer to surface without importing review internals.
+type ReviewSummary struct {
+	Harness         domain.ReviewerHarness
+	Verdict         domain.ReviewVerdict
+	Target          string
+	FindingsSummary string
+}
+
+// reviewFindingsSummaryMaxLen bounds the truncated findings preview surfaced
+// in GetRun's response (Checkpoint 8C §7).
+const reviewFindingsSummaryMaxLen = 500
 
 // CreateRun creates a new workflow run in state pending and seeds its initial
 // steps under the fixed v1 policy: a strict linear chain of six steps
@@ -184,13 +230,17 @@ func (c *Coordinator) CreateRun(ctx stdctx.Context, projectID, objective string)
 
 	now := c.clock()
 	runID := "wf-" + c.newID()
+	policySnapshot, err := json.Marshal(domain.DefaultWorkflowPolicy())
+	if err != nil {
+		return RunDetail{}, fmt.Errorf("marshal default workflow policy: %w", err)
+	}
 	run := domain.WorkflowRun{
 		ID:             runID,
 		ProjectID:      projectID,
 		Objective:      objective,
 		State:          domain.WorkflowRunPending,
 		PolicyVersion:  policyVersionV1,
-		PolicySnapshot: "{}",
+		PolicySnapshot: string(policySnapshot),
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
@@ -255,12 +305,28 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 				return RunDetail{}, err
 			}
 			steps[i] = updated
-			step = updated
 			if refreshed, ok2, rerr := c.store.GetWorkflowRun(ctx, runID); rerr == nil && ok2 {
 				run = refreshed
 				detail.Run = run
 			}
 		}
+	}
+
+	// Checkpoint 8D: the automatic review<->fix progression cascade —
+	// opportunistically observes a running review/fix step and dispatches
+	// the next eligible cycle within this same call (see advanceReviewFixCycle's
+	// doc comment). includeCycle1Unblock=false: the very first review
+	// dispatch (work-just-completed, review step still "pending") stays
+	// ContinueRun's explicit job, exactly as Checkpoint 8C originally scoped
+	// it (see TestReviewStepUntouchedAfterWorkCompletion).
+	if updatedRun, err := c.advanceReviewFixCycle(ctx, run, steps, false); err != nil {
+		return RunDetail{}, err
+	} else {
+		run = updatedRun
+		detail.Run = run
+	}
+
+	for _, step := range steps {
 		attempts, err := c.store.ListWorkflowAttempts(ctx, step.ID)
 		if err != nil {
 			return RunDetail{}, err
@@ -270,7 +336,22 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 			cp := cp
 			cpPtr = &cp
 		}
-		detail.Steps = append(detail.Steps, StepDetail{Step: step, Attempts: attempts, LatestCheckpoint: cpPtr})
+		var reviewSummary *ReviewSummary
+		if step.Kind == domain.WorkflowStepReview && step.ReviewRunID != nil && c.reviewRuns != nil {
+			if rr, found, rrErr := c.reviewRuns.GetReviewRun(ctx, *step.ReviewRunID); rrErr == nil && found {
+				body := rr.Body
+				if len(body) > reviewFindingsSummaryMaxLen {
+					body = body[:reviewFindingsSummaryMaxLen]
+				}
+				reviewSummary = &ReviewSummary{
+					Harness:         rr.Harness,
+					Verdict:         rr.Verdict,
+					Target:          rr.TargetSHA,
+					FindingsSummary: body,
+				}
+			}
+		}
+		detail.Steps = append(detail.Steps, StepDetail{Step: step, Attempts: attempts, LatestCheckpoint: cpPtr, Review: reviewSummary})
 	}
 
 	if checkpoints, cperr := c.store.ListWorkflowCheckpoints(ctx, runID); cperr == nil {
@@ -359,6 +440,94 @@ func (c *Coordinator) StartRun(ctx stdctx.Context, runID string) (RunDetail, err
 	}
 
 	return c.GetRun(ctx, runID)
+}
+
+// ContinueRun is Checkpoint 8C's explicit unblock-and-dispatch entry point,
+// named generically (not "startReview") so it stays reusable without a
+// breaking API change. Checkpoint 8D widens what it drives (the full
+// review<->fix cascade, see advanceReviewFixCycle) but its contract is
+// unchanged: any state with nothing eligible to dispatch is an idempotent
+// no-op that just returns the current detail, mirroring StartRun's shape.
+//
+// 8C->8D root-cause fix (double-continue bug): manual E2E testing of 8C
+// found that the FIRST POST /continue call sometimes left the review step
+// "pending" with reviewRunId: null, requiring a second identical call to
+// actually dispatch. Root cause: ContinueRun read the work step's state
+// straight from storage without ever opportunistically observing it first
+// (unlike GetRun, which always does before deciding anything) — so if the
+// real Codex worker had already finished but no prior GetRun poll had yet
+// observed that fact, the work step was still durably "running" in the DB,
+// dispatchReviewStep's own `workStep.State != Completed` guard correctly
+// no-op'd, and the review step stayed "pending" until some later GetRun call
+// happened to observe completion first. The fix: ContinueRun now calls
+// observeWorkStep itself, within this same call, before evaluating anything
+// downstream — exactly mirroring GetRun's existing pattern — so a single
+// call reliably dispatches whenever the underlying state is genuinely
+// eligible, without depending on interleaving with the frontend's separate
+// 2s poll. See TestContinueRunSingleCallDispatchesReviewFromCompletedWork
+// for the regression test.
+func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, error) {
+	run, ok, err := c.store.GetWorkflowRun(ctx, runID)
+	if err != nil {
+		return RunDetail{}, err
+	}
+	if !ok {
+		return RunDetail{}, fmt.Errorf("%w: workflow run %q", ErrNotFound, runID)
+	}
+	if run.State.Terminal() {
+		return RunDetail{}, fmt.Errorf("%w: workflow run %q is already %s", ErrAlreadyTerminal, runID, run.State)
+	}
+
+	steps, err := c.store.ListWorkflowSteps(ctx, runID)
+	if err != nil {
+		return RunDetail{}, err
+	}
+	var workStep, reviewStep *domain.WorkflowStep
+	for i := range steps {
+		switch steps[i].Kind {
+		case domain.WorkflowStepWork:
+			workStep = &steps[i]
+		case domain.WorkflowStepReview:
+			reviewStep = &steps[i]
+		}
+	}
+	if workStep == nil || reviewStep == nil {
+		return RunDetail{}, fmt.Errorf("%w: workflow run %q is missing its work/review step", ErrInvalid, runID)
+	}
+
+	if workStep.State == domain.WorkflowStepRunning {
+		updated, err := c.observeWorkStep(ctx, run, *workStep)
+		if err != nil {
+			return RunDetail{}, err
+		}
+		*workStep = updated
+		if refreshed, ok2, rerr := c.store.GetWorkflowRun(ctx, runID); rerr == nil && ok2 {
+			run = refreshed
+		}
+	}
+
+	if _, err := c.advanceReviewFixCycle(ctx, run, steps, true); err != nil {
+		return RunDetail{}, err
+	}
+
+	return c.GetRun(ctx, runID)
+}
+
+// policyForRun decodes a run's durable policy_snapshot into a
+// domain.WorkflowPolicy, falling back to domain.DefaultWorkflowPolicy() if
+// the snapshot is empty/unparseable (defensive: every run created via
+// CreateRun always has a valid snapshot; this only guards pre-8D or
+// hand-edited rows). Checkpoint 8D's fix-budget enforcement (fix_dispatch.go)
+// always reads the policy back through this function — never a bare
+// constant scattered in dispatch code.
+func policyForRun(run domain.WorkflowRun) domain.WorkflowPolicy {
+	var p domain.WorkflowPolicy
+	if run.PolicySnapshot != "" && run.PolicySnapshot != "{}" {
+		if err := json.Unmarshal([]byte(run.PolicySnapshot), &p); err == nil && p.MaxFixCycles > 0 {
+			return p
+		}
+	}
+	return domain.DefaultWorkflowPolicy()
 }
 
 // ListRuns lists workflow run summaries, optionally filtered by project id.

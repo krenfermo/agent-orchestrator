@@ -5011,6 +5011,47 @@ paths:
       summary: Cancel a workflow run and its non-terminal steps
       tags:
       - workflows
+  /api/v1/workflows/{workflowId}/continue:
+    post:
+      operationId: continueWorkflowRun
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRunResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Continue a workflow run: dispatch its review step''s real Claude reviewer
+        once the work step has completed (Checkpoint 8C). Idempotent no-op when nothing
+        is currently dispatchable.'
+      tags:
+      - workflows
   /api/v1/workflows/{workflowId}/start:
     post:
       operationId: startWorkflowRun
@@ -8542,6 +8583,8 @@ components:
           - runtime_failed
           - worker_terminated_unexpectedly
           - ambiguous_worker_state
+          - reviewer_launch_failed
+          - fix_budget_exhausted
           type: string
         finishedAt:
           format: date-time
@@ -8656,6 +8699,8 @@ components:
           type: string
         dependsOnStepId:
           type: string
+        findingsSummary:
+          type: string
         headSha:
           type: string
         id:
@@ -8676,6 +8721,8 @@ components:
           type: integer
         reviewRunId:
           type: string
+        reviewer:
+          type: string
         sessionId:
           type: string
         state:
@@ -8688,8 +8735,16 @@ components:
           - failed
           - cancelled
           type: string
+        target:
+          type: string
         updatedAt:
           format: date-time
+          type: string
+        verdict:
+          enum:
+          - ""
+          - approved
+          - changes_requested
           type: string
         worktreePath:
           type: string

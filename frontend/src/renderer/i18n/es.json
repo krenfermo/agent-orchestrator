@@ -1154,5 +1154,11 @@
 	"chat.edit.image": "Imagen",
 	"chat.edit.cancel": "Cancelar edición",
 	"chat.edit.send": "Enviar mensaje editado",
-	"chat.edit.sendShortcut": "Enviar mensaje editado (⌘/Ctrl+Enter)"
+	"chat.edit.sendShortcut": "Enviar mensaje editado (⌘/Ctrl+Enter)",
+	"shell.workflowsStartReview": "Iniciar revisión",
+	"shell.workflowsContinuing": "Continuando…",
+	"shell.workflowsReviewer": "Revisor",
+	"shell.workflowsTarget": "Objetivo revisado",
+	"shell.workflowsVerdict": "Veredicto",
+	"shell.workflowsFindings": "Hallazgos"
 }

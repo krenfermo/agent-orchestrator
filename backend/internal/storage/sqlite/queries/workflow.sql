@@ -86,6 +86,19 @@ UPDATE workflow_steps
 SET session_id = sqlc.arg(session_id), updated_at = sqlc.arg(updated_at)
 WHERE id = sqlc.arg(id) AND session_id IS NULL;
 
+-- name: SetWorkflowStepReviewRun :execrows
+-- Checkpoint 8D: workflow_steps.review_run_id now means "the current/most-
+-- recent review_run for this step" (mutable across review cycles), not
+-- write-once as Checkpoint 8C originally modeled it. Unconditional update, no
+-- WHERE review_run_id IS NULL guard: the primary anti-duplication guard
+-- against creating two review_runs for the same cycle is the outbox
+-- idempotency key (cycle-specific), not this column. Supersedes 8C's
+-- write-once UpdateWorkflowStepReviewRun, which 8D's cycling dispatch flow
+-- fully replaces (its one call site now uses this instead).
+UPDATE workflow_steps
+SET review_run_id = sqlc.arg(review_run_id), updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id);
+
 -- name: GetMaxWorkflowAttemptNumber :one
 SELECT CAST(COALESCE(MAX(attempt_number), 0) AS INTEGER) AS max_attempt_number
 FROM workflow_attempts
@@ -118,16 +131,19 @@ LIMIT 1;
 INSERT INTO workflow_checkpoints (
     id, workflow_run_id, workflow_step_id, attempt_id, project_id, session_id,
     branch, worktree_path, base_sha, head_sha, review_run_id, review_verdict,
-    retry_state, next_action, durable_phase, payload_version, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    retry_state, next_action, durable_phase, payload_version, created_at,
+    fingerprint_before, fingerprint_after
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id, workflow_run_id, workflow_step_id, attempt_id, project_id, session_id,
           branch, worktree_path, base_sha, head_sha, review_run_id, review_verdict,
-          retry_state, next_action, durable_phase, payload_version, created_at;
+          retry_state, next_action, durable_phase, payload_version, created_at,
+          fingerprint_before, fingerprint_after;
 
 -- name: ListWorkflowCheckpointsByRun :many
 SELECT id, workflow_run_id, workflow_step_id, attempt_id, project_id, session_id,
        branch, worktree_path, base_sha, head_sha, review_run_id, review_verdict,
-       retry_state, next_action, durable_phase, payload_version, created_at
+       retry_state, next_action, durable_phase, payload_version, created_at,
+       fingerprint_before, fingerprint_after
 FROM workflow_checkpoints
 WHERE workflow_run_id = ?
 ORDER BY created_at, id;
@@ -135,7 +151,8 @@ ORDER BY created_at, id;
 -- name: GetLatestWorkflowCheckpointByStep :one
 SELECT id, workflow_run_id, workflow_step_id, attempt_id, project_id, session_id,
        branch, worktree_path, base_sha, head_sha, review_run_id, review_verdict,
-       retry_state, next_action, durable_phase, payload_version, created_at
+       retry_state, next_action, durable_phase, payload_version, created_at,
+       fingerprint_before, fingerprint_after
 FROM workflow_checkpoints
 WHERE workflow_step_id = ?
 ORDER BY created_at DESC, id DESC

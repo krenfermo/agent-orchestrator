@@ -1139,5 +1139,11 @@
 	"chat.edit.image": "이미지",
 	"chat.edit.cancel": "편집 취소",
 	"chat.edit.send": "편집한 메시지 보내기",
-	"chat.edit.sendShortcut": "편집한 메시지 보내기(⌘/Ctrl+Enter)"
+	"chat.edit.sendShortcut": "편집한 메시지 보내기(⌘/Ctrl+Enter)",
+	"shell.workflowsStartReview": "리뷰 시작",
+	"shell.workflowsContinuing": "계속하는 중…",
+	"shell.workflowsReviewer": "리뷰어",
+	"shell.workflowsTarget": "대상",
+	"shell.workflowsVerdict": "판정",
+	"shell.workflowsFindings": "검토 결과"
 }
