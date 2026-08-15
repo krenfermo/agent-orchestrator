@@ -283,6 +283,56 @@ func TestLoadGitLabAllowedHosts(t *testing.T) {
 	}
 }
 
+func TestLoadProjectRootsDefault(t *testing.T) {
+	t.Setenv("AO_PROJECT_ROOTS", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AllowedProjectRoots != nil {
+		t.Errorf("AllowedProjectRoots = %v, want nil", cfg.AllowedProjectRoots)
+	}
+}
+
+func TestLoadProjectRoots(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string
+		want    []string
+		wantErr bool
+	}{
+		{"single root", "/srv/ao/repos", []string{"/srv/ao/repos"}, false},
+		{"comma-separated", "/srv/ao/repos,/home/ao/repos", []string{"/srv/ao/repos", "/home/ao/repos"}, false},
+		{"trimmed whitespace", " /srv/ao/repos , /home/ao/repos ", []string{"/srv/ao/repos", "/home/ao/repos"}, false},
+		{"empty entries skipped", "/srv/ao/repos,,/home/ao/repos,", []string{"/srv/ao/repos", "/home/ao/repos"}, false},
+		{"trailing slash cleaned", "/srv/ao/repos/", []string{"/srv/ao/repos"}, false},
+		{"relative path rejected", "relative/repos", nil, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AO_PROJECT_ROOTS", tc.env)
+			cfg, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load: want error, got nil (cfg=%+v)", cfg)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if len(cfg.AllowedProjectRoots) != len(tc.want) {
+				t.Fatalf("AllowedProjectRoots = %v, want %v", cfg.AllowedProjectRoots, tc.want)
+			}
+			for i, r := range tc.want {
+				if cfg.AllowedProjectRoots[i] != r {
+					t.Errorf("AllowedProjectRoots[%d] = %q, want %q", i, cfg.AllowedProjectRoots[i], r)
+				}
+			}
+		})
+	}
+}
+
 func TestLoadGitLabHostTokens(t *testing.T) {
 	tests := []struct {
 		name string

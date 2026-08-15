@@ -142,6 +142,14 @@ func (f *fakeProjectManager) Remove(context.Context, domain.ProjectID) (projects
 	return projectsvc.RemoveResult{}, nil
 }
 
+func (f *fakeProjectManager) ListAllowedRootEntries(context.Context, string) ([]projectsvc.BrowseEntry, error) {
+	return nil, nil
+}
+
+func (f *fakeProjectManager) CloneFromGitHub(_ context.Context, in projectsvc.CloneInput) (projectsvc.Project, error) {
+	return projectsvc.Project{ID: "cloned", Path: in.Repo}, nil
+}
+
 // startDriftTestDaemon stands up the real router+controllers backed by the
 // supplied fakes and points the CLI's run-file at it. The CLI discovers the
 // server purely via AO_RUN_FILE + the run-file port, so this is a genuine

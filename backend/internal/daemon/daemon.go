@@ -37,6 +37,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/push"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
+	environmentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/environment"
 	browsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/browser"
 	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	devimportsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/devimport"
@@ -266,7 +267,7 @@ func RunWithConfig(cfg config.Config) error {
 	lcStack.LCM.SetSessionInputLease(sessMgr)
 	lcStack.LCM.SetSessionOperationGate(sessMgr)
 	termMgr.SetSessionInputLease(sessMgr)
-	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink})
+	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink, AllowedRoots: cfg.AllowedProjectRoots})
 	if err := seedScratchProjectOnBoot(ctx, cfg, projectSvc); err != nil {
 		stop()
 		lcStack.Stop()
@@ -283,6 +284,7 @@ func RunWithConfig(cfg config.Config) error {
 			log.Warn("initial agent catalog refresh failed", "err", err)
 		}
 	}()
+	environmentSvc := environmentsvc.New(agentSvc, projectSvc)
 
 	// Connect Mobile: the bridge service needs the LAN listener, but the LAN
 	// listener needs the built router's handler, which only exists once srv is
@@ -439,6 +441,7 @@ func RunWithConfig(cfg config.Config) error {
 	srv, err := httpd.NewWithDeps(cfg, log, termMgr, httpd.APIDeps{
 		Projects:           projectSvc,
 		Agents:             agentSvc,
+		Environment:        environmentSvc,
 		Sessions:           sessionSvc,
 		PRs:                prActions,
 		Reviews:            reviewSvc,

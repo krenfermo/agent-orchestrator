@@ -54,9 +54,12 @@ polling, cancellation, review/fix/verify state, and recovery all use the same
 daemon API in both modes. Workflow detail polling remains at two seconds; 8G
 does not add another realtime transport.
 
-A browser cannot select a repository directory on the server. Web mode uses
-projects already registered in AO. Register new repositories with the CLI or
-desktop app, then select/view them in the browser. Native folder dialogs,
+A browser cannot use a native OS folder picker on the server. Web mode instead
+lets an operator register an existing repository or clone one from GitHub
+through Settings → Projects, confined to the directories configured via
+`AO_PROJECT_ROOTS` (see "Setup UX and integrations" below) — no CLI/desktop
+step is required for this anymore. Registering outside those configured
+roots still requires the CLI or desktop app. Native folder dialogs,
 embedded Electron BrowserViews, window chrome, tray/dock integration,
 auto-update, and desktop lifecycle supervision are desktop-only and degrade to
 no-ops or unavailable controls in browser mode. Clipboard and external links
@@ -74,6 +77,82 @@ execution, or generic filesystem access. It serves only the selected compiled
 asset directory and the existing API. Remote deployment, TLS, and
 authentication belong to a later checkpoint.
 
+## Setup UX and integrations (checkpoint 8H.5)
+
+Settings is a real "is this box ready to run autonomous workflows" console in
+both web and desktop mode, driven entirely by real local probes — never
+invented status. Open it via the gear icon (desktop) or the same in-app
+Settings modal (web); it has four sections relevant to headless setup:
+
+- **Environment** — a top-level readiness summary (Codex / Claude / GitHub /
+  Projects / Headless), plus an overall "Ready for autonomous workflows" vs.
+  "Setup required" verdict. Overall readiness today requires at least one
+  registered project and at least one installed-and-authorized development
+  agent; GitHub is reported but does not currently gate it.
+- **Development Agents** — Codex and Claude Code: installed, resolved binary
+  path, version, auth state (`authorized` / `unauthorized` / `unknown` — never
+  shown as "Connected" unless authentication was actually verified), and a
+  cheap "Test connection" button that reuses the existing agent probe
+  (`POST /api/v1/agents/{agent}/probe`); it never runs a real task or changes
+  auth.
+- **Source Control** — the `gh` CLI: installed, version, and auth state via
+  `gh auth status` (never `--show-token`; no GitHub REST call, no token is
+  ever read, stored, or displayed).
+- **Projects** — every AO-registered project (display name, path, origin URL,
+  default branch, kind, and a validity check), plus "Register existing
+  repository" and "Clone from GitHub".
+
+### Agent prerequisites
+
+| Tool | Install | Auth |
+|---|---|---|
+| Codex CLI | `codex` on `PATH` (or a well-known install location) | `codex`'s own login flow; AO only reads its local auth status, never modifies it |
+| Claude Code CLI | `claude` on `PATH` | `ANTHROPIC_API_KEY` env, or `claude`'s own login (`~/.claude` config / `claude auth status`) |
+| GitHub CLI (`gh`) | `gh` on `PATH` | `gh auth login` (device or web flow) for the account that should own clones and PR operations |
+
+### Allowed project roots
+
+Web-originated project registration, the Settings → Projects browse listing,
+and Clone-from-GitHub are confined to directories set via `AO_PROJECT_ROOTS`
+(comma-separated absolute paths). This is unset by default (no restriction —
+the historical desktop behavior, where the OS file picker is the trust
+boundary); set it before exposing AO's Settings surface beyond your own
+machine:
+
+```bash
+export AO_PROJECT_ROOTS=/srv/ao/repos
+# or multiple roots:
+export AO_PROJECT_ROOTS=/srv/ao/repos,/home/ao/repos
+```
+
+Paths are canonicalized (symlinks resolved) and checked against these roots
+before any registration, browse, or clone proceeds; a path that resolves
+outside every configured root — including via a symlink planted inside one —
+is rejected. Clone always targets the first configured root.
+
+### Register an existing repository (web)
+
+Settings → Projects → "Register existing repository": type a path relative to
+an allowed root (or click "Browse" to list its subdirectories, which flags
+which ones already look like Git repos), then "Register". The repository must
+have at least one commit.
+
+### Clone from GitHub (web)
+
+Settings → Projects → "Clone from GitHub": enter `owner/repo` or an
+`https://github.com/owner/repo` URL and an optional destination folder name.
+Requires `gh` to be authenticated (checked before the clone runs); the clone
+target must not already exist. On success the repository is registered
+automatically.
+
+### Creating a workflow (web or desktop)
+
+The Workflows page's "New workflow" form selects a project from a dropdown
+populated by AO's registered projects — the internal project id is never
+typed by hand. If no projects are registered, the form shows a "No projects
+registered. Register or clone a repository first." message with a direct link
+into Settings → Projects instead of a raw `WORKFLOW_NOT_FOUND` error.
+
 ## Linux prerequisites
 
 Runtime requirements are:
@@ -83,7 +162,12 @@ Runtime requirements are:
 - `tmux` for the existing Linux runtime adapter;
 - Codex CLI and Claude Code CLI, installed and authenticated for the service
   account running AO;
+- `gh` (GitHub CLI), installed and authenticated, for GitHub-backed clone/PR
+  flows;
 - a writable AO data directory (default `~/.ao/data`);
+- `AO_PROJECT_ROOTS` set to the directory(ies) repositories may be
+  registered/cloned into from the web Settings UI (see "Setup UX and
+  integrations" above);
 - loopback TCP port 3001 by default.
 
 Go and Node.js are build-time dependencies when compiling from source. They are

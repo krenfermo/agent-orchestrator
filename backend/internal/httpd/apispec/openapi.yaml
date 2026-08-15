@@ -371,6 +371,46 @@ paths:
       summary: Run the developer project-registry import through the daemon store
       tags:
       - dev
+  /api/v1/environment/github/test:
+    post:
+      operationId: testGitHubConnection
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnvironmentGitHubStatus'
+          description: OK
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Run a fresh, cheap local GitHub CLI probe (no REST call, never returns
+        a token)
+      tags:
+      - environment
+  /api/v1/environment/status:
+    get:
+      operationId: getEnvironmentStatus
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnvironmentStatus'
+          description: OK
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Report real local Codex/Claude/GitHub/project readiness for the Setup
+        UX
+      tags:
+      - environment
   /api/v1/events:
     get:
       operationId: streamEvents
@@ -1295,6 +1335,85 @@ paths:
       summary: Create a workflow run and seed its initial steps
       tags:
       - workflows
+  /api/v1/projects/browse:
+    get:
+      operationId: browseProjectRoot
+      parameters:
+      - description: Directory path, relative to an allowed project root, to list.
+          Empty lists the root itself.
+        in: query
+        name: path
+        schema:
+          description: Directory path, relative to an allowed project root, to list.
+            Empty lists the root itself.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectBrowseResult'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: List the immediate subdirectories of a path under the configured allowed
+        project roots
+      tags:
+      - projects
+  /api/v1/projects/clone:
+    post:
+      operationId: cloneProjectFromGitHub
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectCloneInput'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectResponse'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Clone a GitHub repository into an allowed project root and register
+        it
+      tags:
+      - projects
   /api/v1/projects/initialize:
     post:
       operationId: initializeProjectRepository
@@ -5277,9 +5396,16 @@ components:
           - unauthorized
           - unknown
           type: string
+        binaryPath:
+          description: Resolved executable path from the last successful local probe.
+          type: string
         id:
           type: string
         label:
+          type: string
+        version:
+          description: Best-effort CLI version string from the last successful local
+            probe.
           type: string
       required:
       - id
@@ -6579,6 +6705,119 @@ components:
       - sourceBranchId
       - activeBranchId
       type: object
+    EnvironmentAgentCapability:
+      properties:
+        authState:
+          enum:
+          - authorized
+          - unauthorized
+          - unknown
+          type: string
+        binaryPath:
+          type: string
+        configuredRoles:
+          items:
+            type: string
+          type: array
+        id:
+          type: string
+        installed:
+          type: boolean
+        lastCheckedAt:
+          format: date-time
+          type: string
+        model:
+          type: string
+        source:
+          type: string
+        version:
+          type: string
+      required:
+      - id
+      - installed
+      - authState
+      - source
+      - lastCheckedAt
+      type: object
+    EnvironmentGitHubStatus:
+      properties:
+        authState:
+          enum:
+          - authenticated
+          - unauthenticated
+          - unknown
+          type: string
+        binaryPath:
+          type: string
+        errorCode:
+          type: string
+        host:
+          type: string
+        installed:
+          type: boolean
+        lastCheckedAt:
+          format: date-time
+          type: string
+        login:
+          type: string
+        version:
+          type: string
+      required:
+      - installed
+      - authState
+      - lastCheckedAt
+      type: object
+    EnvironmentProjectsSummary:
+      properties:
+        count:
+          type: integer
+      required:
+      - count
+      type: object
+    EnvironmentReadiness:
+      properties:
+        claude:
+          type: string
+        codex:
+          type: string
+        github:
+          type: string
+        headless:
+          type: string
+        overall:
+          enum:
+          - ready
+          - setup_required
+          type: string
+        projects:
+          type: string
+      required:
+      - codex
+      - claude
+      - github
+      - projects
+      - headless
+      - overall
+      type: object
+    EnvironmentStatus:
+      properties:
+        claude:
+          $ref: '#/components/schemas/EnvironmentAgentCapability'
+        codex:
+          $ref: '#/components/schemas/EnvironmentAgentCapability'
+        github:
+          $ref: '#/components/schemas/EnvironmentGitHubStatus'
+        projects:
+          $ref: '#/components/schemas/EnvironmentProjectsSummary'
+        readiness:
+          $ref: '#/components/schemas/EnvironmentReadiness'
+      required:
+      - codex
+      - claude
+      - github
+      - projects
+      - readiness
+      type: object
     ImportReport:
       properties:
         dryRun:
@@ -7155,6 +7394,42 @@ components:
       - repo
       - defaultBranch
       type: object
+    ProjectBrowseEntry:
+      properties:
+        isGitRepo:
+          type: boolean
+        name:
+          type: string
+        path:
+          type: string
+      required:
+      - name
+      - path
+      - isGitRepo
+      type: object
+    ProjectBrowseResult:
+      properties:
+        entries:
+          items:
+            $ref: '#/components/schemas/ProjectBrowseEntry'
+          type: array
+        path:
+          type: string
+      required:
+      - path
+      - entries
+      type: object
+    ProjectCloneInput:
+      properties:
+        destinationName:
+          type:
+          - "null"
+          - string
+        repo:
+          type: string
+      required:
+      - repo
+      type: object
     ProjectConfig:
       properties:
         agentConfig:
@@ -7221,6 +7496,8 @@ components:
       type: object
     ProjectSummary:
       properties:
+        defaultBranch:
+          type: string
         id:
           type: string
         kind:
@@ -7235,16 +7512,21 @@ components:
           type: string
         path:
           type: string
+        repo:
+          type: string
         resolveError:
           type: string
         sessionPrefix:
           type: string
+        valid:
+          type: boolean
       required:
       - id
       - name
       - path
       - kind
       - sessionPrefix
+      - valid
       type: object
     PromoteQueuedTurnResponse:
       properties:

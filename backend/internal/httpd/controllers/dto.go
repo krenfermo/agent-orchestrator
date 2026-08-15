@@ -11,6 +11,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/legacyimport"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
+	environmentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/environment"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 	sessionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/session"
 )
@@ -905,6 +906,20 @@ type RefreshAgentsResponse = agentsvc.Inventory
 
 // ProbeAgentResponse is the body of POST /api/v1/agents/{agent}/probe.
 type ProbeAgentResponse = agentsvc.ProbeResult
+
+// EnvironmentStatusResponse is the body of GET /api/v1/environment/status.
+type EnvironmentStatusResponse = environmentsvc.Status
+
+// GitHubTestResponse is the body of POST /api/v1/environment/github/test.
+type GitHubTestResponse = environmentsvc.GitHubStatus
+
+// BrowseProjectRootResponse is the body of GET /api/v1/projects/browse.
+type BrowseProjectRootResponse = projectsvc.BrowseResult
+
+// BrowseProjectRootQuery is the query string accepted by GET /api/v1/projects/browse.
+type BrowseProjectRootQuery struct {
+	Path string `query:"path,omitempty" description:"Directory path, relative to an allowed project root, to list. Empty lists the root itself."`
+}
 
 // AgentModelsQuery scopes a model catalog to a project where providers may be
 // configured per workspace.

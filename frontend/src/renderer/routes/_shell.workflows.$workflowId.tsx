@@ -140,7 +140,7 @@ function WorkflowRunRoute() {
 			{workflow.plan && (
 				<section className="flex flex-col gap-3">
 					<div>
-						<h2 className="text-sm font-semibold">Master Plan</h2>
+						<h2 className="text-sm font-semibold">{t("shell.workflowsMasterPlan")}</h2>
 						<p className="text-xs text-muted-foreground">
 							{workflow.plan.status} · {workflow.plan.provider || "planner"}/{workflow.plan.model || "default"}
 							{workflow.plan.planHash ? ` · ${workflow.plan.planHash.slice(0, 12)}` : ""}
@@ -154,13 +154,25 @@ function WorkflowRunRoute() {
 								<span className="text-xs text-muted-foreground">{task.state}</span>
 							</div>
 							<p className="mt-1 text-sm text-muted-foreground">{task.description}</p>
-							{task.dependencies.length > 0 && <p className="mt-2 text-xs text-muted-foreground">Depends on: {task.dependencies.join(", ")}</p>}
+							{task.dependencies.length > 0 && (
+							<p className="mt-2 text-xs text-muted-foreground">
+								{t("shell.workflowsDependsOn", { dependencies: task.dependencies.join(", ") })}
+							</p>
+						)}
 							<ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-muted-foreground">{task.acceptanceCriteria.map((criterion) => <li key={criterion}>{criterion}</li>)}</ul>
 							<div className="mt-2 text-xs text-muted-foreground">
 								{task.verify.commands?.map((check) => <code className="mr-2" key={`${check.command}-${check.args?.join("-")}`}>{[check.command, ...(check.args ?? [])].join(" ")}</code>)}
 								{task.verify.files?.map((check) => <code className="mr-2" key={check.path}>{check.path}</code>)}
 							</div>
-							{task.executionWorkflowId && <Link className="mt-2 inline-block text-xs text-primary underline underline-offset-2" params={{ workflowId: task.executionWorkflowId }} to="/workflows/$workflowId">Execution workflow</Link>}
+							{task.executionWorkflowId && (
+								<Link
+									className="mt-2 inline-block text-xs text-primary underline underline-offset-2"
+									params={{ workflowId: task.executionWorkflowId }}
+									to="/workflows/$workflowId"
+								>
+									{t("shell.workflowsExecutionWorkflow")}
+								</Link>
+							)}
 						</article>
 					))}
 				</section>

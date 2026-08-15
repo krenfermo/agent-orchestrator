@@ -46,3 +46,16 @@ type RemoveResult struct {
 	ProjectID         domain.ProjectID `json:"projectId"`
 	RemovedStorageDir bool             `json:"removedStorageDir"`
 }
+
+// CloneInput is the body shape for POST /api/v1/projects/clone. Repo accepts
+// either an "owner/repo" slug or an "https://github.com/owner/repo" URL.
+type CloneInput struct {
+	Repo            string  `json:"repo"`
+	DestinationName *string `json:"destinationName,omitempty"`
+}
+
+// BrowseResult is the response shape for GET /api/v1/projects/browse.
+type BrowseResult struct {
+	Path    string        `json:"path"`
+	Entries []BrowseEntry `json:"entries"`
+}

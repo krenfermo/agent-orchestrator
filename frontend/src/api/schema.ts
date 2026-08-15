@@ -140,6 +140,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/environment/github/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run a fresh, cheap local GitHub CLI probe (no REST call, never returns a token) */
+        post: operations["testGitHubConnection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/environment/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Report real local Codex/Claude/GitHub/project readiness for the Setup UX */
+        get: operations["getEnvironmentStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events": {
         parameters: {
             query?: never;
@@ -480,6 +514,40 @@ export interface paths {
         put?: never;
         /** Create a workflow run and seed its initial steps */
         post: operations["createWorkflowRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/browse": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the immediate subdirectories of a path under the configured allowed project roots */
+        get: operations["browseProjectRoot"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/clone": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Clone a GitHub repository into an allowed project root and register it */
+        post: operations["cloneProjectFromGitHub"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1806,8 +1874,12 @@ export interface components {
              * @enum {string}
              */
             authStatus?: "authorized" | "unauthorized" | "unknown";
+            /** @description Resolved executable path from the last successful local probe. */
+            binaryPath?: string;
             id: string;
             label: string;
+            /** @description Best-effort CLI version string from the last successful local probe. */
+            version?: string;
         };
         AgentModelInfo: {
             id: string;
@@ -2277,6 +2349,50 @@ export interface components {
             state?: "queued" | "running" | "completed" | "interrupted" | "failed";
             turnId?: string;
         };
+        EnvironmentAgentCapability: {
+            /** @enum {string} */
+            authState: "authorized" | "unauthorized" | "unknown";
+            binaryPath?: string;
+            configuredRoles?: string[];
+            id: string;
+            installed: boolean;
+            /** Format: date-time */
+            lastCheckedAt: string;
+            model?: string;
+            source: string;
+            version?: string;
+        };
+        EnvironmentGitHubStatus: {
+            /** @enum {string} */
+            authState: "authenticated" | "unauthenticated" | "unknown";
+            binaryPath?: string;
+            errorCode?: string;
+            host?: string;
+            installed: boolean;
+            /** Format: date-time */
+            lastCheckedAt: string;
+            login?: string;
+            version?: string;
+        };
+        EnvironmentProjectsSummary: {
+            count: number;
+        };
+        EnvironmentReadiness: {
+            claude: string;
+            codex: string;
+            github: string;
+            headless: string;
+            /** @enum {string} */
+            overall: "ready" | "setup_required";
+            projects: string;
+        };
+        EnvironmentStatus: {
+            claude: components["schemas"]["EnvironmentAgentCapability"];
+            codex: components["schemas"]["EnvironmentAgentCapability"];
+            github: components["schemas"]["EnvironmentGitHubStatus"];
+            projects: components["schemas"]["EnvironmentProjectsSummary"];
+            readiness: components["schemas"]["EnvironmentReadiness"];
+        };
         ImportReport: {
             dryRun: boolean;
             notes?: string[];
@@ -2500,6 +2616,19 @@ export interface components {
             repo: string;
             workspaceRepos?: components["schemas"]["WorkspaceRepo"][];
         };
+        ProjectBrowseEntry: {
+            isGitRepo: boolean;
+            name: string;
+            path: string;
+        };
+        ProjectBrowseResult: {
+            entries: components["schemas"]["ProjectBrowseEntry"][];
+            path: string;
+        };
+        ProjectCloneInput: {
+            destinationName?: null | string;
+            repo: string;
+        };
         ProjectConfig: {
             agentConfig?: components["schemas"]["AgentConfig"];
             agentRules?: string;
@@ -2528,14 +2657,17 @@ export interface components {
             project: components["schemas"]["Project"];
         };
         ProjectSummary: {
+            defaultBranch?: string;
             id: string;
             /** @enum {string} */
             kind: "single_repo" | "workspace" | "scratch";
             name: string;
             orchestratorAgent?: string;
             path: string;
+            repo?: string;
             resolveError?: string;
             sessionPrefix: string;
+            valid: boolean;
         };
         PromoteQueuedTurnResponse: {
             activityId: string;
@@ -3772,6 +3904,64 @@ export interface operations {
             };
         };
     };
+    testGitHubConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnvironmentGitHubStatus"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getEnvironmentStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EnvironmentStatus"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     streamEvents: {
         parameters: {
             query?: {
@@ -4984,6 +5174,107 @@ export interface operations {
             };
             /** @description Not Implemented */
             501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    browseProjectRoot: {
+        parameters: {
+            query?: {
+                /** @description Directory path, relative to an allowed project root, to list. Empty lists the root itself. */
+                path?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectBrowseResult"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    cloneProjectFromGitHub: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProjectCloneInput"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

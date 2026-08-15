@@ -27,6 +27,8 @@ func (c *ProjectsController) Register(r chi.Router) {
 	r.Get("/projects", c.list)
 	r.Post("/projects", c.add)
 	r.Post("/projects/initialize", c.initialize)
+	r.Get("/projects/browse", c.browse)
+	r.Post("/projects/clone", c.clone)
 	r.Get("/projects/{id}", c.get)
 	r.Put("/projects/{id}", c.updateSettings)
 	r.Put("/projects/{id}/config", c.setConfig)
@@ -84,6 +86,41 @@ func (c *ProjectsController) initialize(w http.ResponseWriter, r *http.Request) 
 	}
 	envelope.WriteJSON(w, http.StatusOK, result)
 }
+func (c *ProjectsController) browse(w http.ResponseWriter, r *http.Request) {
+	if c.Mgr == nil {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/projects/browse")
+		return
+	}
+	path := r.URL.Query().Get("path")
+	entries, err := c.Mgr.ListAllowedRootEntries(r.Context(), path)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	if entries == nil {
+		entries = []projectsvc.BrowseEntry{}
+	}
+	envelope.WriteJSON(w, http.StatusOK, projectsvc.BrowseResult{Path: path, Entries: entries})
+}
+
+func (c *ProjectsController) clone(w http.ResponseWriter, r *http.Request) {
+	if c.Mgr == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/projects/clone")
+		return
+	}
+	var in projectsvc.CloneInput
+	if err := decodeJSONStrict(r, &in); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	p, err := c.Mgr.CloneFromGitHub(r.Context(), in)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusCreated, ProjectResponse{Project: p})
+}
+
 func (c *ProjectsController) get(w http.ResponseWriter, r *http.Request) {
 	if c.Mgr == nil {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/projects/{id}")

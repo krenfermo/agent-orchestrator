@@ -11,6 +11,7 @@ import (
 	"time"
 
 	agentregistry "github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/registry"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/versionprobe"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -66,6 +67,13 @@ type Info struct {
 	ID         string                `json:"id"`
 	Label      string                `json:"label"`
 	AuthStatus ports.AgentAuthStatus `json:"authStatus,omitempty" enum:"authorized,unauthorized,unknown" description:"Advisory local auth probe result. authorized means a recent local probe passed; spawn remains the authoritative validation point."`
+	// BinaryPath is the resolved executable path from the last successful
+	// probe. Empty when the binary could not be resolved.
+	BinaryPath string `json:"binaryPath,omitempty" description:"Resolved executable path from the last successful local probe."`
+	// Version is the first line of "<binary> --version" output, best-effort.
+	// Empty means version detection is not attempted for this agent or failed;
+	// this never fails the surrounding probe.
+	Version string `json:"version,omitempty" description:"Best-effort CLI version string from the last successful local probe."`
 }
 
 // Inventory describes all daemon-supported agents and best-effort local probe
@@ -499,8 +507,17 @@ func (s *Service) probeAgent(ctx context.Context, item agentregistry.HarnessAgen
 	lock := s.resolverMu[info.ID]
 	lock.Lock()
 	defer lock.Unlock()
-	if _, err := resolver.ResolveBinary(probeCtx); err != nil {
+	binaryPath, err := resolver.ResolveBinary(probeCtx)
+	if err != nil {
 		return probeResult{info: info}
+	}
+	info.BinaryPath = binaryPath
+	if versionArg, ok := versionprobe.KnownVersionArgs[info.ID]; ok {
+		// Best-effort: a version probe failure must not fail the whole probe,
+		// it only means Version stays empty.
+		if version, verr := versionprobe.CLIVersion(ctx, binaryPath, versionArg); verr == nil {
+			info.Version = version
+		}
 	}
 	authCtx, authCancel := context.WithTimeout(ctx, agentAuthProbeTimeout)
 	defer authCancel()

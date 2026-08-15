@@ -46,6 +46,15 @@ type Manager interface {
 	// Remove unregisters a project, stopping its sessions and reclaiming
 	// managed workspaces.
 	Remove(ctx context.Context, id domain.ProjectID) (RemoveResult, error)
+
+	// ListAllowedRootEntries lists the immediate subdirectories of relPath
+	// under the configured allowed project roots, for the web "register
+	// existing repository" browse UX.
+	ListAllowedRootEntries(ctx context.Context, relPath string) ([]BrowseEntry, error)
+
+	// CloneFromGitHub clones a repository into the first allowed project root
+	// and registers it.
+	CloneFromGitHub(ctx context.Context, in CloneInput) (Project, error)
 }
 
 // SessionTeardowner is the narrow session-service surface project removal
@@ -61,11 +70,17 @@ type Service struct {
 	clock          func() time.Time
 	telemetry      ports.EventSink
 	defaultHarness domain.AgentHarness
+	// allowedRoots confines Add/ListAllowedRootEntries/CloneFromGitHub to these
+	// absolute directories when non-empty. Empty preserves the historical
+	// desktop behavior (any path the OS file picker can reach).
+	allowedRoots []string
 	// addMu serialises the whole body of Add. Workspace registration performs
 	// filesystem mutations (git init, .gitignore writes, commits) that are not
 	// covered by the store's own writeMu, so path/id conflict checks plus the
 	// subsequent mutation must be atomic from the perspective of concurrent callers.
 	addMu sync.Mutex
+	// cloneRunner executes `gh repo clone`. See Deps.CloneRunner.
+	cloneRunner func(ctx context.Context, args ...string) ([]byte, error)
 }
 
 const maxDisplayNameLen = 20
@@ -81,6 +96,13 @@ type Deps struct {
 	Sessions       SessionTeardowner
 	Clock          func() time.Time
 	Telemetry      ports.EventSink
+	// AllowedRoots confines web-originated project registration/browsing/
+	// cloning to these absolute directories. See config.AllowedProjectRoots.
+	AllowedRoots []string
+	// CloneRunner executes "gh repo clone <slug> <destPath>" and returns its
+	// combined output. Nil uses the real `gh` binary via aoprocess; tests
+	// inject a fake so CloneFromGitHub never shells out.
+	CloneRunner func(ctx context.Context, args ...string) ([]byte, error)
 }
 
 // New returns a project service backed by the given durable store.
@@ -100,9 +122,14 @@ func NewWithDeps(d Deps) *Service {
 		clock:          d.Clock,
 		telemetry:      d.Telemetry,
 		defaultHarness: defaultHarness,
+		allowedRoots:   d.AllowedRoots,
+		cloneRunner:    d.CloneRunner,
 	}
 	if s.clock == nil {
 		s.clock = time.Now
+	}
+	if s.cloneRunner == nil {
+		s.cloneRunner = defaultCloneRunner
 	}
 	return s
 }
@@ -115,13 +142,21 @@ func (m *Service) List(ctx context.Context) ([]Summary, error) {
 	}
 	out := make([]Summary, 0, len(projects))
 	for _, row := range projects {
+		kind := row.Kind.WithDefault()
+		defaultBranch := ""
+		if kind != domain.ProjectKindScratch {
+			defaultBranch = row.Config.WithDefaults().DefaultBranch
+		}
 		out = append(out, Summary{
 			ID:                domain.ProjectID(row.ID),
 			Name:              displayName(row),
 			Path:              row.Path,
-			Kind:              row.Kind.WithDefault(),
+			Kind:              kind,
 			SessionPrefix:     resolveSessionPrefix(row),
 			OrchestratorAgent: row.Config.Orchestrator.Harness,
+			Repo:              row.RepoOriginURL,
+			DefaultBranch:     defaultBranch,
+			Valid:             pathLooksValid(row.Path, kind),
 		})
 	}
 	return out, nil
@@ -157,8 +192,11 @@ func (m *Service) Get(ctx context.Context, id domain.ProjectID) (GetResult, erro
 // check and the store write — two concurrent calls for the same path would both
 // pass FindProjectByPath and then race on those mutations.
 func (m *Service) Add(ctx context.Context, in AddInput) (Project, error) {
-	path, err := normalizePath(in.Path)
+	path, err := m.resolveInputPath(in.Path)
 	if err != nil {
+		return Project{}, err
+	}
+	if err := validateWithinAllowedRoots(path, m.allowedRoots); err != nil {
 		return Project{}, err
 	}
 	id := defaultProjectID(path)
@@ -788,6 +826,17 @@ func repoHasCommit(ctx context.Context, path string) bool {
 func isBareGitRepository(ctx context.Context, path string) bool {
 	out, err := gitOutput(ctx, path, "rev-parse", "--is-bare-repository")
 	return err == nil && strings.TrimSpace(out) == "true"
+}
+
+// pathLooksValid is the cheap (stat-only) check backing Summary.Valid. Scratch
+// projects are intentionally not Git repositories, so their validity is just
+// "the directory still exists"; every other kind also expects Git metadata.
+func pathLooksValid(path string, kind domain.ProjectKind) bool {
+	if kind == domain.ProjectKindScratch {
+		info, err := os.Stat(path)
+		return err == nil && info.IsDir()
+	}
+	return hasGitMetadata(path)
 }
 
 func hasGitMetadata(path string) bool {

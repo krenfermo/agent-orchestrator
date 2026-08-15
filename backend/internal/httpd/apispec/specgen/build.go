@@ -454,6 +454,7 @@ type operation struct {
 func operations() []operation {
 	ops := append([]operation{}, eventOperations()...)
 	ops = append(ops, agentOperations()...)
+	ops = append(ops, environmentOperations()...)
 	ops = append(ops, projectOperations()...)
 	ops = append(ops, sessionOperations()...)
 	ops = append(ops, prOperations()...)
@@ -1322,6 +1323,27 @@ func eventOperations() []operation {
 // projectOperations declares the canonical /projects operations. The set must
 // stay 1:1 with the routes ProjectsController.Register mounts —
 // TestRouteSpecParity fails the build otherwise.
+func environmentOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodGet, path: "/api/v1/environment/status", id: "getEnvironmentStatus", tag: "environment",
+			summary: "Report real local Codex/Claude/GitHub/project readiness for the Setup UX",
+			resps: []respUnit{
+				{http.StatusOK, controllers.EnvironmentStatusResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/environment/github/test", id: "testGitHubConnection", tag: "environment",
+			summary: "Run a fresh, cheap local GitHub CLI probe (no REST call, never returns a token)",
+			resps: []respUnit{
+				{http.StatusOK, controllers.GitHubTestResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+	}
+}
+
 func projectOperations() []operation {
 	return []operation{
 		{
@@ -1349,6 +1371,28 @@ func projectOperations() []operation {
 			reqBody: projectsvc.InitializeRepositoryInput{},
 			resps: []respUnit{
 				{http.StatusOK, projectsvc.InitializeRepositoryResult{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/browse", id: "browseProjectRoot", tag: "projects",
+			summary:    "List the immediate subdirectories of a path under the configured allowed project roots",
+			pathParams: []any{controllers.BrowseProjectRootQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.BrowseProjectRootResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/clone", id: "cloneProjectFromGitHub", tag: "projects",
+			summary: "Clone a GitHub repository into an allowed project root and register it",
+			reqBody: projectsvc.CloneInput{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.ProjectResponse{}},
 				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusConflict, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},

@@ -31,6 +31,7 @@ const minimumSwitchAgentRequestTimeout = 6 * time.Minute
 type APIDeps struct {
 	Agents             controllers.AgentCatalog
 	Projects           projectsvc.Manager
+	Environment        controllers.EnvironmentStatusProvider
 	Sessions           controllers.SessionService
 	Activity           controllers.ActivityRecorder
 	UsageHooks         controllers.UsageHookRecorder
@@ -103,6 +104,7 @@ type API struct {
 	deps          APIDeps
 	agents        *controllers.AgentsController
 	projects      *controllers.ProjectsController
+	environment   *controllers.EnvironmentController
 	sessions      *controllers.SessionsController
 	usage         *controllers.UsageController
 	prs           *controllers.PRsController
@@ -131,6 +133,9 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		},
 		projects: &controllers.ProjectsController{
 			Mgr: deps.Projects,
+		},
+		environment: &controllers.EnvironmentController{
+			Svc: deps.Environment,
 		},
 		sessions: &controllers.SessionsController{
 			Svc:           deps.Sessions,
@@ -176,6 +181,7 @@ func (a *API) Register(root chi.Router) {
 			r.Use(presenceMiddleware(a.deps.Presence))
 			a.agents.Register(r)
 			a.projects.Register(r)
+			a.environment.Register(r)
 			a.sessions.Register(r)
 			a.usage.Register(r)
 			a.prs.Register(r)

@@ -19,11 +19,23 @@ export type { Theme, ThemePreference, ThemeStyle } from "../lib/theme";
 export { readStoredThemePreference, readStoredThemeStyle, resolveTheme } from "../lib/theme";
 
 export type SettingsModal =
-	| { scope: "global" }
+	| { scope: "global"; section?: GlobalSettingsSectionId }
 	| {
 			scope: "project";
 			projectId: string;
 	  };
+
+// Kept as a plain string union (not imported from GlobalSettingsForm) to
+// avoid a store → renderer-component dependency; GlobalSettingsForm's
+// GlobalSettingsSection type is a superset that includes "all".
+export type GlobalSettingsSectionId =
+	| "general"
+	| "environment"
+	| "agents"
+	| "sourceControl"
+	| "projects"
+	| "updates"
+	| "help";
 
 /** Worker detail view toggles — Changes (Git rail) is the default. */
 export type WorkbenchTab = "changes" | "files" | "terminal";
@@ -84,7 +96,7 @@ type UiState = {
 	setWorkbenchTab: (tab: WorkbenchTab) => void;
 	setThemePreference: (theme: ThemePreference) => void;
 	setThemeStyle: (style: ThemeStyle) => void;
-	openGlobalSettings: () => void;
+	openGlobalSettings: (section?: GlobalSettingsSectionId) => void;
 	openProjectSettings: (projectId: string) => void;
 	closeSettings: () => void;
 	/** Refresh resolvedTheme from OS without writing light/dark to storage. */
@@ -166,7 +178,7 @@ export const useUiStore = create<UiState>((set, get) => ({
 			set({ themeStyle });
 		});
 	},
-	openGlobalSettings: () => set({ settingsModal: { scope: "global" } }),
+	openGlobalSettings: (section) => set({ settingsModal: { scope: "global", section } }),
 	openProjectSettings: (projectId) => set({ settingsModal: { scope: "project", projectId } }),
 	closeSettings: () => set({ settingsModal: null }),
 	syncSystemTheme: () => {

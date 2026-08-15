@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/codex"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/versionprobe"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 )
 
@@ -613,13 +614,10 @@ func parseGitVersion(out string) (string, error) {
 	return m[1], nil
 }
 
+// firstOutputLine delegates to the shared versionprobe helper so doctor and
+// the HTTP-facing capability probe never drift apart on output parsing.
 func firstOutputLine(out []byte) string {
-	clean := strings.TrimSpace(ansiRE.ReplaceAllString(string(out), ""))
-	if clean == "" {
-		return ""
-	}
-	line := strings.SplitN(clean, "\n", 2)[0]
-	return strings.TrimSpace(line)
+	return versionprobe.FirstOutputLine(out)
 }
 
 func compareDottedVersion(a, b string) (int, error) {

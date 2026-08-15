@@ -1,4 +1,17 @@
-import { Bot, CircleHelp, GitBranch, Inbox, MonitorCog, RefreshCw, Settings2, TriangleAlert, X } from "lucide-react";
+import {
+	Bot,
+	CircleHelp,
+	FolderGit2,
+	Gauge,
+	GitBranch,
+	Inbox,
+	Link2,
+	MonitorCog,
+	RefreshCw,
+	Settings2,
+	TriangleAlert,
+	X,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { GlobalSettingsForm, type GlobalSettingsSection } from "./GlobalSettingsForm";
@@ -47,6 +60,10 @@ export function SettingsDialog() {
 
 	const globalSections: Array<{ id: Exclude<GlobalSettingsSection, "all">; label: string; icon: typeof Settings2 }> = [
 		{ id: "general", label: t("settings.general"), icon: Settings2 },
+		{ id: "environment", label: "Environment", icon: Gauge },
+		{ id: "agents", label: "Development Agents", icon: Bot },
+		{ id: "sourceControl", label: "Source Control", icon: Link2 },
+		{ id: "projects", label: "Projects", icon: FolderGit2 },
 		{ id: "updates", label: t("settings.updates"), icon: RefreshCw },
 		{ id: "help", label: t("settings.help"), icon: CircleHelp },
 	];
@@ -105,7 +122,7 @@ export function SettingsDialog() {
 	};
 
 	useEffect(() => {
-		if (settingsModal?.scope === "global") setActiveSection("general");
+		if (settingsModal?.scope === "global") setActiveSection(settingsModal.section ?? "general");
 		if (settingsModal?.scope === "project") {
 			setActiveProjectSection("general");
 			setProjectSaveState({

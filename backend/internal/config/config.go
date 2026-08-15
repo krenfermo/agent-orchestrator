@@ -141,6 +141,16 @@ type Config struct {
 	// GitLab carries the self-managed GitLab host allowlist and per-host
 	// token overrides, loaded once at boot from environment variables.
 	GitLab GitLabConfig
+	// AllowedProjectRoots confines server-side project registration/browsing/
+	// cloning (the web Setup UX) to these absolute directories. Empty means no
+	// restriction — the historical desktop behavior, where the user's own OS
+	// file picker is the trust boundary. Once set, any project-registration
+	// path outside these roots (after symlink resolution) is rejected; this is
+	// the boundary that makes registering-from-a-browser safe to expose on a
+	// future networked deployment. It does not sandbox anything else: a
+	// process spawned inside a registered project's worktree can still read
+	// wherever the OS lets it.
+	AllowedProjectRoots []string
 }
 
 // Addr returns the host:port the HTTP server binds. It uses net.JoinHostPort so
@@ -171,6 +181,8 @@ func (c Config) Addr() string {
 //	AO_TELEMETRY_POSTHOG_HOST  PostHog host (default DefaultTelemetryPostHogHost)
 //	AO_GITLAB_ALLOWED_HOSTS    comma-separated self-managed GitLab hosts (each may include :port)
 //	AO_GITLAB_HOST_TOKENS      host=token,host=token per-host token overrides
+//	AO_PROJECT_ROOTS     comma-separated absolute directories that confine web
+//	                     project registration/browsing/cloning (default: unrestricted)
 //
 // The bind host is not configurable: the daemon is loopback-only by design.
 func Load() (Config, error) {
@@ -300,6 +312,14 @@ func Load() (Config, error) {
 		cfg.GitLab.HostTokens = tokens
 	}
 
+	if raw, ok := os.LookupEnv("AO_PROJECT_ROOTS"); ok && raw != "" {
+		roots, err := parseProjectRoots(raw)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.AllowedProjectRoots = roots
+	}
+
 	runFile, err := resolveRunFilePath()
 	if err != nil {
 		return Config{}, err
@@ -381,6 +401,26 @@ func parseHostTokenMap(name, raw string) (map[string]string, error) {
 		tokens[host] = token
 	}
 	return tokens, nil
+}
+
+// parseProjectRoots splits AO_PROJECT_ROOTS on commas and absolutizes each
+// entry against the process's launch cwd (see absOverride's double-nesting
+// note — the same daemon chdir applies here). Relative entries are rejected
+// outright rather than silently resolved against a cwd that may not be what
+// the operator expects for a security boundary.
+func parseProjectRoots(raw string) ([]string, error) {
+	roots := make([]string, 0, 4)
+	for _, part := range strings.Split(raw, ",") {
+		p := strings.TrimSpace(part)
+		if p == "" {
+			continue
+		}
+		if !filepath.IsAbs(p) {
+			return nil, fmt.Errorf("invalid AO_PROJECT_ROOTS entry %q: must be an absolute path", p)
+		}
+		roots = append(roots, filepath.Clean(p))
+	}
+	return roots, nil
 }
 
 // parsePositiveDuration rejects zero and negative durations: a zero

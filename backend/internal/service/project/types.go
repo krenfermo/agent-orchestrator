@@ -11,6 +11,14 @@ type Summary struct {
 	SessionPrefix     string              `json:"sessionPrefix"`
 	OrchestratorAgent domain.AgentHarness `json:"orchestratorAgent,omitempty"`
 	ResolveError      string              `json:"resolveError,omitempty"`
+	// Repo is the project's `origin` remote URL, empty when the repo has none.
+	Repo string `json:"repo,omitempty"`
+	// DefaultBranch is the base branch new session worktrees are created from.
+	DefaultBranch string `json:"defaultBranch,omitempty"`
+	// Valid is a cheap (stat-only, no shell-out) check that the registered
+	// path still exists and still looks like a Git repository. false surfaces
+	// a project whose folder moved or was deleted since registration.
+	Valid bool `json:"valid"`
 }
 
 // Project is the full read-model returned by GET /api/v1/projects/{id}.

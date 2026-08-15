@@ -1,7 +1,17 @@
 import { createFileRoute, Link, Outlet, useMatchRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useProjectsList } from "../hooks/useProjectsList";
 import { useWorkflowRuns } from "../hooks/useWorkflowRuns";
+import { useUiStore } from "../stores/ui-store";
+import { Button } from "../components/ui/button";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "../components/ui/select";
 
 export const Route = createFileRoute("/_shell/workflows")({
 	component: WorkflowsListRoute,
@@ -15,11 +25,22 @@ function WorkflowsListRoute() {
 	return <WorkflowsList />;
 }
 
-function WorkflowsList() {
+function initialProjectIdFromSearch(): string {
+	if (typeof window === "undefined") return "";
+	return new URLSearchParams(window.location.search).get("projectId") ?? "";
+}
+
+export function WorkflowsList() {
 	const { t } = useTranslation();
 	const { runs, isLoading, error, createRun, creating, createError } = useWorkflowRuns();
-	const [projectId, setProjectId] = useState("");
+	const { projects, isLoading: projectsLoading } = useProjectsList();
+	const openGlobalSettings = useUiStore((state) => state.openGlobalSettings);
+	const [projectId, setProjectId] = useState(initialProjectIdFromSearch);
 	const [objective, setObjective] = useState("");
+
+	// The preselected project from a deep link may not (yet) be in the loaded
+	// list; keep the select controlled either way, it just shows no match.
+	const selectedProject = useMemo(() => projects.find((p) => p.id === projectId), [projects, projectId]);
 
 	const onSubmit = (event: React.FormEvent) => {
 		event.preventDefault();
@@ -29,38 +50,65 @@ function WorkflowsList() {
 		});
 	};
 
+	const noProjects = !projectsLoading && projects.length === 0;
+
 	return (
 		<div className="mx-auto flex max-w-2xl flex-col gap-6 p-6">
 			<h1 className="text-lg font-semibold">{t("shell.workflows")}</h1>
 
-			<form className="flex flex-col gap-2 rounded-lg border border-border p-4" onSubmit={onSubmit}>
-				<label className="flex flex-col gap-1 text-sm">
-					{t("shell.workflowsProjectId")}
-					<input
-						className="rounded border border-border bg-background px-2 py-1"
-						onChange={(event) => setProjectId(event.target.value)}
-						placeholder={t("shell.workflowsProjectIdPlaceholder")}
-						value={projectId}
-					/>
-				</label>
-				<label className="flex flex-col gap-1 text-sm">
-					{t("shell.workflowsObjective")}
-					<input
-						className="rounded border border-border bg-background px-2 py-1"
-						onChange={(event) => setObjective(event.target.value)}
-						placeholder={t("shell.workflowsObjectivePlaceholder")}
-						value={objective}
-					/>
-				</label>
-				<button
-					className="mt-1 self-start rounded bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50"
-					disabled={creating || !projectId.trim() || !objective.trim()}
-					type="submit"
-				>
-					{creating ? t("shell.workflowsCreating") : t("shell.workflowsCreate")}
-				</button>
-				{createError && <p className="text-sm text-destructive">{createError}</p>}
-			</form>
+			{noProjects ? (
+				<div className="flex flex-col gap-3 rounded-lg border border-border p-4">
+					<p className="text-sm text-muted-foreground">{t("shell.workflowsNoProjects")}</p>
+					<Button
+						type="button"
+						variant="outline"
+						className="self-start"
+						onClick={() => openGlobalSettings("projects")}
+					>
+						{t("shell.workflowsGoToSettings")}
+					</Button>
+				</div>
+			) : (
+				<form className="flex flex-col gap-3 rounded-lg border border-border p-4" onSubmit={onSubmit}>
+					<label className="flex flex-col gap-1 text-sm">
+						{t("shell.workflowsProjectLabel")}
+						<Select value={projectId} onValueChange={setProjectId}>
+							<SelectTrigger className="w-full" aria-label={t("shell.workflowsProjectLabel")}>
+								<SelectValue placeholder={t("shell.workflowsSelectProjectPlaceholder")}>
+									{selectedProject ? selectedProject.name : undefined}
+								</SelectValue>
+							</SelectTrigger>
+							<SelectContent>
+								{projects.map((project) => (
+									<SelectItem key={project.id} value={project.id}>
+										<div className="flex flex-col">
+											<span>{project.name}</span>
+											<span className="text-xs text-muted-foreground">{project.repo || project.path}</span>
+										</div>
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+					</label>
+					<label className="flex flex-col gap-1 text-sm">
+						{t("shell.workflowsObjective")}
+						<input
+							className="rounded border border-border bg-background px-2 py-1"
+							onChange={(event) => setObjective(event.target.value)}
+							placeholder={t("shell.workflowsObjectivePlaceholder")}
+							value={objective}
+						/>
+					</label>
+					<button
+						className="mt-1 self-start rounded bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50"
+						disabled={creating || !projectId.trim() || !objective.trim()}
+						type="submit"
+					>
+						{creating ? t("shell.workflowsCreating") : t("shell.workflowsCreate")}
+					</button>
+					{createError && <p className="text-sm text-destructive">{createError}</p>}
+				</form>
+			)}
 
 			{isLoading && <p className="text-sm text-muted-foreground">{t("shell.workflowsLoading")}</p>}
 			{error && <p className="text-sm text-destructive">{error}</p>}

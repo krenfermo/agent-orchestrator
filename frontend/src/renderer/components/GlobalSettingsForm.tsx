@@ -1,12 +1,24 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { DevelopmentAgentsSettingsSection } from "./settings/DevelopmentAgentsSettingsSection";
+import { EnvironmentSettingsSection } from "./settings/EnvironmentSettingsSection";
 import { GeneralSettingsSection } from "./settings/GeneralSettingsSection";
+import { ProjectsSettingsSection } from "./settings/ProjectsSettingsSection";
 import { ReportProblemDialog } from "./settings/ReportProblemDialog";
 import { SettingsLinkRow } from "./settings/SettingsRow";
 import { SettingsSection } from "./settings/SettingsSection";
+import { SourceControlSettingsSection } from "./settings/SourceControlSettingsSection";
 import { UpdatesSection } from "./settings/UpdatesSection";
 
-export type GlobalSettingsSection = "general" | "updates" | "help" | "all";
+export type GlobalSettingsSection =
+	| "general"
+	| "environment"
+	| "agents"
+	| "sourceControl"
+	| "projects"
+	| "updates"
+	| "help"
+	| "all";
 
 export function GlobalSettingsForm({
 	section = "all",
@@ -44,6 +56,18 @@ export function GlobalSettingsForm({
 							/>
 						</SettingsSection>
 					</>
+				)}
+				{(section === "all" || section === "environment") && (
+					<EnvironmentSettingsSection titleHidden={leadingTitleHidden} />
+				)}
+				{(section === "all" || section === "agents") && (
+					<DevelopmentAgentsSettingsSection titleHidden={leadingTitleHidden} />
+				)}
+				{(section === "all" || section === "sourceControl") && (
+					<SourceControlSettingsSection titleHidden={leadingTitleHidden} />
+				)}
+				{(section === "all" || section === "projects") && (
+					<ProjectsSettingsSection titleHidden={leadingTitleHidden} />
 				)}
 				{(section === "all" || section === "updates") && <UpdatesSection titleHidden={leadingTitleHidden} />}
 				{(section === "all" || section === "help") && (
