@@ -6,6 +6,7 @@ package config
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -151,6 +152,15 @@ type Config struct {
 	// process spawned inside a registered project's worktree can still read
 	// wherever the OS lets it.
 	AllowedProjectRoots []string
+	// TmuxSocket names the isolated tmux server (`tmux -L <TmuxSocket>`) the
+	// tmux runtime (Darwin/Linux) issues every session command against, so AO
+	// never shares — and never touches — the operator's own default tmux
+	// server. An explicit AO_TMUX_SOCKET wins; otherwise it is derived from
+	// DataDir so it stays stable across daemon restarts (recovery needs to
+	// reconnect to the same server) while remaining distinct per AO instance
+	// (distinct AO_DATA_DIR, e.g. two profiles or a test sandbox, never share
+	// a server). Unused on Windows (the conpty runtime has no tmux server).
+	TmuxSocket string
 }
 
 // Addr returns the host:port the HTTP server binds. It uses net.JoinHostPort so
@@ -183,6 +193,8 @@ func (c Config) Addr() string {
 //	AO_GITLAB_HOST_TOKENS      host=token,host=token per-host token overrides
 //	AO_PROJECT_ROOTS     comma-separated absolute directories that confine web
 //	                     project registration/browsing/cloning (default: unrestricted)
+//	AO_TMUX_SOCKET       isolated tmux server name (Darwin/Linux only)
+//	                     (default: derived from DataDir, e.g. "ao-<hash>")
 //
 // The bind host is not configurable: the daemon is loopback-only by design.
 func Load() (Config, error) {
@@ -332,6 +344,8 @@ func Load() (Config, error) {
 	}
 	cfg.DataDir = dataDir
 
+	cfg.TmuxSocket = resolveTmuxSocket(dataDir)
+
 	return cfg, nil
 }
 
@@ -476,6 +490,28 @@ func resolveDataDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(stateDir, "data"), nil
+}
+
+// resolveTmuxSocket picks the tmux server name AO's tmux runtime (Darwin/
+// Linux) isolates itself onto. An explicit AO_TMUX_SOCKET always wins —
+// operators who need several independent AO instances to still share one
+// tmux server (or want a recognizable name for manual `tmux -L` debugging)
+// can set it directly.
+//
+// Otherwise the name is derived from dataDir: `tmux -L <name>` starts a
+// brand-new, empty server the first time that name is used and reconnects to
+// the same one on every later call, so hashing a value that is itself stable
+// across daemon restarts (DataDir) is what lets Destroy/IsAlive/Attach after
+// a restart find the sessions a prior boot created (recovery), while two AO
+// instances pointed at different AO_DATA_DIR (distinct profiles, or a test
+// sandboxed via AO_DATA_DIR) land on distinct servers and can never observe
+// or kill each other's sessions.
+func resolveTmuxSocket(dataDir string) string {
+	if raw, ok := os.LookupEnv("AO_TMUX_SOCKET"); ok && strings.TrimSpace(raw) != "" {
+		return strings.TrimSpace(raw)
+	}
+	sum := sha256.Sum256([]byte(dataDir))
+	return "ao-" + hex.EncodeToString(sum[:6])
 }
 
 func defaultStateDir() (string, error) {

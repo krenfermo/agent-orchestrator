@@ -29,11 +29,17 @@ type Runtime interface {
 var _ Runtime = (*tmux.Runtime)(nil)
 var _ Runtime = (*conpty.Runtime)(nil)
 
-// New returns the per-platform runtime: tmux on Darwin/Linux, conpty on Windows.
-// log is accepted for signature stability with callers but is currently unused.
-func New(_ *slog.Logger) Runtime {
+// New returns the per-platform runtime: tmux on Darwin/Linux, conpty on
+// Windows. log is accepted for signature stability with callers but is
+// currently unused. tmuxSocket names the isolated tmux server (`tmux -L
+// <tmuxSocket>`) every tmux session command runs against — see
+// config.Config.TmuxSocket for how it is derived; it is ignored on Windows,
+// where conpty has no tmux server to isolate. An empty tmuxSocket still
+// isolates AO from the caller's default tmux server: tmux.New falls back to
+// its own safe default rather than the unnamed default server.
+func New(_ *slog.Logger, tmuxSocket string) Runtime {
 	if runtime.GOOS != "windows" {
-		return tmux.New(tmux.Options{})
+		return tmux.New(tmux.Options{Socket: tmuxSocket})
 	}
 	return conpty.New(conpty.Options{})
 }

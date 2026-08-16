@@ -221,6 +221,147 @@ func TestRuntimeIntegrationSupervisedExitKeepsInteractiveShell(t *testing.T) {
 	}
 }
 
+// TestRuntimeIntegrationServerIsolation is the E2E proof for AO's tmux server
+// isolation (checkpoint 8I.1): AO's tmux runtime must never share, list, or
+// be able to kill sessions on the operator's own default tmux server, and
+// vice versa. It:
+//  1. creates a "user-control" session directly on the plain default tmux
+//     server (no -L), simulating a session that predates and is unrelated to
+//     AO — e.g. the decades-old shared server with dozens of unrelated
+//     sessions that the original incident hit;
+//  2. creates an AO session through the Runtime, pinned to its own isolated
+//     socket via Options.Socket;
+//  3. asserts the AO session is invisible to a plain `tmux ls` (default
+//     server) and the user-control session is invisible to `tmux -L <ao
+//     socket> ls`;
+//  4. destroys the AO session and asserts the default server's user-control
+//     session is still alive — an AO teardown must never reach the default
+//     server.
+func TestRuntimeIntegrationServerIsolation(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux unavailable")
+	}
+
+	base := strings.ReplaceAll(t.Name(), "/", "_")
+	controlSession := base + "_user_control"
+	aoSocket := "ao-test-" + base
+	aoID := base + "_ao_session"
+
+	// Clean slate on both servers before asserting anything.
+	_ = exec.Command("tmux", "kill-session", "-t", controlSession).Run()
+	_ = exec.Command("tmux", "-L", aoSocket, "kill-server").Run()
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "kill-session", "-t", controlSession).Run()
+		_ = exec.Command("tmux", "-L", aoSocket, "kill-server").Run()
+	})
+
+	// 1. A session on the operator's own default tmux server, wholly unrelated
+	// to AO. This is the server AO must never touch.
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", controlSession).CombinedOutput(); err != nil {
+		t.Fatalf("seed default-server control session: %v: %s", err, out)
+	}
+
+	// 2. AO creates its own session, pinned to an isolated socket distinct from
+	// the default server.
+	ctx := context.Background()
+	r := New(Options{Timeout: 5 * time.Second, Socket: aoSocket})
+	h, err := r.Create(ctx, ports.RuntimeConfig{
+		SessionID:     domain.SessionID(aoID),
+		WorkspacePath: t.TempDir(),
+		Argv:          []string{"sh", "-c", "echo isolation-ready"},
+	})
+	if err != nil {
+		t.Fatalf("Create on isolated AO socket: %v", err)
+	}
+
+	// 3a. The AO session must be invisible on the default server.
+	if err := exec.Command("tmux", "has-session", "-t", SessionName(aoID)).Run(); err == nil {
+		t.Fatal("AO session is visible on the default tmux server; isolation broken")
+	}
+	defaultLs, _ := exec.Command("tmux", "ls").CombinedOutput()
+	if strings.Contains(string(defaultLs), SessionName(aoID)) {
+		t.Fatalf("plain `tmux ls` lists the AO session: %s", defaultLs)
+	}
+	if !strings.Contains(string(defaultLs), controlSession) {
+		t.Fatalf("plain `tmux ls` lost the pre-existing default-server session: %s", defaultLs)
+	}
+
+	// 3b. The default server's control session must be invisible on AO's socket.
+	if err := exec.Command("tmux", "-L", aoSocket, "has-session", "-t", controlSession).Run(); err == nil {
+		t.Fatal("default-server session is visible on AO's isolated socket; isolation broken")
+	}
+	aoLs, err := exec.Command("tmux", "-L", aoSocket, "ls").CombinedOutput()
+	if err != nil {
+		t.Fatalf("list AO socket sessions: %v: %s", err, aoLs)
+	}
+	if !strings.Contains(string(aoLs), SessionName(aoID)) {
+		t.Fatalf("AO socket does not list its own session: %s", aoLs)
+	}
+	if strings.Contains(string(aoLs), controlSession) {
+		t.Fatalf("AO socket lists the default-server control session: %s", aoLs)
+	}
+
+	// 4. Destroying the AO session must never touch the default server.
+	if err := r.Destroy(ctx, h); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	if err := exec.Command("tmux", "has-session", "-t", controlSession).Run(); err != nil {
+		t.Fatal("default-server control session died after an AO Destroy; isolation broken")
+	}
+}
+
+// TestRuntimeIntegrationServerIsolationSurvivesRestart proves recovery after
+// a daemon restart: a fresh Runtime built with the same Options.Socket (the
+// only thing a restarted daemon carries forward — it is re-derived from the
+// stable DataDir, see config.resolveTmuxSocket) reconnects to the same tmux
+// server and finds the session a prior "boot" created, without needing any
+// other persisted state.
+func TestRuntimeIntegrationServerIsolationSurvivesRestart(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux unavailable")
+	}
+
+	base := strings.ReplaceAll(t.Name(), "/", "_")
+	aoSocket := "ao-test-" + base
+	aoID := base + "_ao_session"
+
+	_ = exec.Command("tmux", "-L", aoSocket, "kill-server").Run()
+	t.Cleanup(func() { _ = exec.Command("tmux", "-L", aoSocket, "kill-server").Run() })
+
+	ctx := context.Background()
+
+	// "Boot 1": create the session.
+	rBoot1 := New(Options{Timeout: 5 * time.Second, Socket: aoSocket})
+	h, err := rBoot1.Create(ctx, ports.RuntimeConfig{
+		SessionID:     domain.SessionID(aoID),
+		WorkspacePath: t.TempDir(),
+		Argv:          []string{"sh", "-c", "echo pre-restart"},
+	})
+	if err != nil {
+		t.Fatalf("Create (boot 1): %v", err)
+	}
+
+	// "Daemon restart": a brand-new Runtime value, as a fresh process boot
+	// would build, sharing nothing with rBoot1 except the socket name.
+	rBoot2 := New(Options{Timeout: 5 * time.Second, Socket: aoSocket})
+	alive, err := rBoot2.IsAlive(ctx, h)
+	if err != nil {
+		t.Fatalf("IsAlive after restart: %v", err)
+	}
+	if !alive {
+		t.Fatal("session not found by a fresh Runtime on the same socket after simulated restart")
+	}
+
+	out := waitForOutput(t, rBoot2, h, "pre-restart", 5*time.Second)
+	if !strings.Contains(out, "pre-restart") {
+		t.Fatalf("recovered session output = %q, want pre-restart", out)
+	}
+
+	if err := rBoot2.Destroy(ctx, h); err != nil {
+		t.Fatalf("Destroy after restart: %v", err)
+	}
+}
+
 func TestSupervisorProcessHelper(t *testing.T) {
 	if os.Getenv("AO_TMUX_SUPERVISOR_HELPER") != "1" {
 		return

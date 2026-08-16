@@ -40,6 +40,18 @@ const (
 	// in roughly this long instead of always burning the full grace — which the
 	// DELETE handler blocks on, and the user sees as a tab that will not close.
 	reapPollInterval = 50 * time.Millisecond
+	// defaultSocket names AO's own tmux server (`tmux -L <socket>`). tmux
+	// starts a brand-new server per distinct -L name on first use, so this is
+	// what keeps AO off the user's default tmux server (issue: AO sessions
+	// were sharing the user's personal `tmux` server, a decades-old shared
+	// server with dozens of unrelated sessions, and a daemon-triggered
+	// operation there risked touching sessions AO never created). Callers
+	// (runtimeselect, wired from config) normally pass a data-dir-derived
+	// socket name via Options.Socket so distinct AO instances (distinct
+	// AO_DATA_DIR) never collide; this constant is only the last-resort
+	// default when Options.Socket is left empty, so AO is never accidentally
+	// unisolated.
+	defaultSocket = "ao"
 )
 
 var sessionIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -55,6 +67,15 @@ type Options struct {
 	ChunkSize  int           // default 16*1024
 	EnterDelay time.Duration // pause after pasting a non-empty message before pressing Enter; default defaultEnterDelay. Conpty already does this (ptyInputEnterDelay); tmux lacked it, so a large multiline paste could absorb the trailing Enter and leave the prompt unsubmitted (issue #2342).
 	ReapGrace  time.Duration // grace between SIGTERM and SIGKILL when reaping a pane's leftover background processes on Destroy; default defaultReapGrace.
+	// Socket names the tmux server (`tmux -L <Socket>`) every operation this
+	// Runtime issues runs against. Every command — new-session, has-session,
+	// list-sessions, attach-session, send-keys, kill-session, capture-pane —
+	// is scoped to this server; AO never touches the caller's default tmux
+	// server. Empty defaults to defaultSocket ("ao"), so the zero value is
+	// still isolated. Callers wired from the daemon config normally pass a
+	// AO_DATA_DIR-derived name instead, so distinct AO instances (distinct
+	// data dirs, e.g. two profiles or a test sandbox) get distinct servers.
+	Socket string
 }
 
 // Runtime runs agent sessions inside tmux sessions, driving them via the tmux
@@ -62,6 +83,7 @@ type Options struct {
 type Runtime struct {
 	binary       string
 	shell        string
+	socket       string
 	timeout      time.Duration
 	chunkSize    int
 	enterDelay   time.Duration
@@ -271,9 +293,14 @@ func New(opts Options) *Runtime {
 	if reapGrace <= 0 {
 		reapGrace = defaultReapGrace
 	}
+	socket := opts.Socket
+	if socket == "" {
+		socket = defaultSocket
+	}
 	return &Runtime{
 		binary:       binary,
 		shell:        shellPath,
+		socket:       socket,
 		timeout:      timeout,
 		chunkSize:    chunkSize,
 		enterDelay:   enterDelay,
@@ -733,7 +760,10 @@ func (r *Runtime) attachCommand(handle ports.RuntimeHandle) ([]string, error) {
 	// The embedded xterm renderer supports 24-bit SGR colors. Tell this tmux
 	// client explicitly so tmux forwards RGB instead of quantizing it to the
 	// xterm-256color palette. -T is available in AO's minimum tmux version (3.2).
-	return []string{r.binary, "-u", "-T", "RGB", "attach-session", "-t", id}, nil
+	//
+	// -L pins the attach to AO's own server (see Options.Socket / r.socket) so
+	// attaching never falls through to the caller's default tmux server.
+	return []string{r.binary, "-L", r.socket, "-u", "-T", "RGB", "attach-session", "-t", id}, nil
 }
 
 func attachEnv(base []string) []string {
@@ -759,9 +789,16 @@ func attachEnv(base []string) []string {
 	return env
 }
 
-// run wraps runner.Run with a per-call timeout context.
+// run wraps runner.Run with a per-call timeout context. Every tmux
+// subcommand goes through here, so prepending `-L <socket>` here is what
+// scopes all of new-session/has-session/list-panes/send-keys/kill-session/
+// capture-pane/etc. to AO's own isolated tmux server instead of the
+// caller's default one (see Options.Socket).
 func (r *Runtime) run(ctx context.Context, args ...string) ([]byte, error) {
-	return r.runCommand(ctx, r.binary, args...)
+	serverArgs := make([]string, 0, len(args)+2)
+	serverArgs = append(serverArgs, "-L", r.socket)
+	serverArgs = append(serverArgs, args...)
+	return r.runCommand(ctx, r.binary, serverArgs...)
 }
 
 func (r *Runtime) runCommand(ctx context.Context, name string, args ...string) ([]byte, error) {

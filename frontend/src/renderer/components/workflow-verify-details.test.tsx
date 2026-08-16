@@ -11,4 +11,22 @@ describe("WorkflowVerifyDetails", () => {
 		expect(screen.getByText(/FAIL · go test/)).toHaveTextContent("exit 1");
 		expect(screen.getByText(/FAIL · go test/)).toHaveTextContent("42 ms");
 	});
+
+	it("shows the Checkpoint 8I verify scope decision, with package dir when narrowed", () => {
+		render(
+			<WorkflowVerifyDetails
+				result={{
+					version: "v1",
+					targetKey: "target",
+					reviewedFingerprint: "reviewed",
+					preFingerprint: "pre",
+					postFingerprint: "post",
+					passed: true,
+					checks: [],
+					scope: { policyVersion: "v1", scope: "targeted", packageDir: "internal/foo", reasons: ["single_go_package_changed"], changedFiles: ["internal/foo/bar.go"] },
+				}}
+			/>,
+		);
+		expect(screen.getByText("targeted (internal/foo)")).toBeInTheDocument();
+	});
 });

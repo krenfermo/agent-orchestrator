@@ -102,6 +102,12 @@ type WorkflowStepView struct {
 	Target          string                     `json:"target,omitempty"`
 	FindingsSummary string                     `json:"findingsSummary,omitempty"`
 	Verification    *workflowcore.VerifyResult `json:"verification,omitempty"`
+	// ReviewPolicy surfaces Checkpoint 8I's durable REQUIRED/SKIPPED
+	// decision for a review step, independent of whether a reviewer ever
+	// actually ran — the frontend uses this to distinguish "Reviewed: No —
+	// policy skipped" from "Claude approved" rather than inferring it from
+	// the absence of Reviewer/Verdict.
+	ReviewPolicy *workflowcore.ReviewPolicyDecision `json:"reviewPolicy,omitempty"`
 }
 
 // WorkflowRunView is a workflow run summary (no step/attempt fan-out).
@@ -248,6 +254,7 @@ func workflowRunDetailView(detail workflowcore.RunDetail) WorkflowRunDetailView 
 			Target:          target,
 			FindingsSummary: findings,
 			Verification:    verification,
+			ReviewPolicy:    sd.ReviewPolicy,
 		})
 	}
 	view := WorkflowRunDetailView{Run: workflowRunView(detail.Run, detail.NextAction), Steps: steps}

@@ -57,6 +57,15 @@ type VerifyResult struct {
 	Checks              []VerifyCheckResult       `json:"checks"`
 	Passed              bool                      `json:"passed"`
 	ErrorClass          domain.WorkflowErrorClass `json:"errorClass,omitempty"`
+	// Scope is Checkpoint 8I's VerifyScopePolicy decision for this attempt —
+	// always recorded, even when the scope resolved to repository (i.e. no
+	// narrowing applied), so a run can later explain exactly which commands
+	// actually executed and why.
+	Scope *VerifyScopeDecision `json:"scope,omitempty"`
+	// ScopeAppliedTransforms lists each command rewrite VerifyScopePolicy
+	// actually applied (e.g. "go test ./... -> go test ./internal/foo/...").
+	// Empty when scope is repository or no recognizable command qualified.
+	ScopeAppliedTransforms []string `json:"scopeAppliedTransforms,omitempty"`
 }
 
 func verificationTargetKey(fingerprint string, plan VerificationPlan) string {
@@ -148,15 +157,46 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 	if run.State.Terminal() || reviewStep.State != domain.WorkflowStepCompleted || verifyStep.State.Terminal() || c.verifier == nil || c.workspaceFacts == nil || c.reviewRuns == nil {
 		return run, verifyStep, nil
 	}
-	if reviewStep.ReviewRunID == nil {
-		return run, verifyStep, nil
-	}
-	reviewRun, ok, err := c.reviewRuns.GetReviewRun(ctx, *reviewStep.ReviewRunID)
-	if err != nil || !ok {
+	workCP, hasCP, err := c.store.GetLatestWorkflowCheckpointByStep(ctx, workStep.ID)
+	if err != nil {
 		return run, verifyStep, err
 	}
-	if reviewRun.Verdict != domain.VerdictApproved {
-		return run, verifyStep, nil
+	if !hasCP || workCP.WorktreePath == "" || workCP.SessionID == nil {
+		return c.failVerifyWithoutExecution(ctx, run, verifyStep, domain.WorkflowErrorVerifyEnvironment, "verify worktree/session facts are missing")
+	}
+
+	// Checkpoint 8I: a review step can reach "completed" two ways —
+	// approved by a real Claude reviewer (reviewRun.Verdict ==
+	// VerdictApproved), or advanced directly by ReviewPolicy's SKIPPED path
+	// (applyReviewPolicySkip, review_dispatch.go), which never creates a
+	// review_run at all. Verify must treat both as equally eligible to run
+	// — "Reviewed: No — policy skipped" still means the work is ready to be
+	// verified, it only means Claude never looked at it — but must derive
+	// "reviewed" from a different source in the SKIPPED case: the work
+	// step's own completion fingerprint, the same value dispatchReviewStep
+	// would have used as target_sha had a reviewer actually run.
+	var reviewed string
+	if reviewStep.ReviewRunID != nil {
+		reviewRun, ok, err := c.reviewRuns.GetReviewRun(ctx, *reviewStep.ReviewRunID)
+		if err != nil || !ok {
+			return run, verifyStep, err
+		}
+		if reviewRun.Verdict != domain.VerdictApproved {
+			return run, verifyStep, nil
+		}
+		reviewed = reviewRun.TargetSHA
+	} else {
+		decision, ok := c.reviewPolicyDecisionForStep(ctx, run.ID, reviewStep.ID)
+		if !ok || decision.Decision != ReviewSkipped {
+			// No review_run AND no recorded SKIPPED decision: an ambiguous
+			// state Verify must not guess about (mirrors every other
+			// "cannot durably prove" branch in this package).
+			return run, verifyStep, nil
+		}
+		reviewed = workCP.FingerprintAfter
+		if reviewed == "" {
+			reviewed = workCP.HeadSHA
+		}
 	}
 
 	artifact, err := c.planArtifactForRun(ctx, run)
@@ -166,14 +206,6 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 	if err := artifact.Verification.validate(); err != nil {
 		return c.failVerifyWithoutExecution(ctx, run, verifyStep, domain.WorkflowErrorVerifyAmbiguous, err.Error())
 	}
-	workCP, hasCP, err := c.store.GetLatestWorkflowCheckpointByStep(ctx, workStep.ID)
-	if err != nil {
-		return run, verifyStep, err
-	}
-	if !hasCP || workCP.WorktreePath == "" || workCP.SessionID == nil {
-		return c.failVerifyWithoutExecution(ctx, run, verifyStep, domain.WorkflowErrorVerifyEnvironment, "verify worktree/session facts are missing")
-	}
-	reviewed := reviewRun.TargetSHA
 	targetKey := verificationTargetKey(reviewed, artifact.Verification)
 
 	latest, hasAttempt, err := c.store.GetLatestWorkflowAttempt(ctx, verifyStep.ID)
@@ -242,8 +274,12 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 			verifyStep.State = domain.WorkflowStepRunning
 		}
 		stepID, attemptID := verifyStep.ID, latest.ID
+		reviewVerdictLabel := ""
+		if reviewStep.ReviewRunID != nil {
+			reviewVerdictLabel = string(domain.VerdictApproved)
+		}
 		stateJSON, _ := json.Marshal(map[string]any{"targetKey": targetKey, "verification": artifact.Verification})
-		_, err = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{ID: "wfc-" + c.newID(), WorkflowRunID: run.ID, WorkflowStepID: &stepID, AttemptID: &attemptID, ProjectID: run.ProjectID, SessionID: workCP.SessionID, Branch: workCP.Branch, WorktreePath: workCP.WorktreePath, ReviewRunID: reviewStep.ReviewRunID, ReviewVerdict: string(domain.VerdictApproved), RetryState: string(stateJSON), NextAction: "verify", DurablePhase: "verify_started", PayloadVersion: verifyResultVersion, FingerprintBefore: reviewed, CreatedAt: now})
+		_, err = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{ID: "wfc-" + c.newID(), WorkflowRunID: run.ID, WorkflowStepID: &stepID, AttemptID: &attemptID, ProjectID: run.ProjectID, SessionID: workCP.SessionID, Branch: workCP.Branch, WorktreePath: workCP.WorktreePath, ReviewRunID: reviewStep.ReviewRunID, ReviewVerdict: reviewVerdictLabel, RetryState: string(stateJSON), NextAction: "verify", DurablePhase: "verify_started", PayloadVersion: verifyResultVersion, FingerprintBefore: reviewed, CreatedAt: now})
 		if err != nil {
 			return run, verifyStep, err
 		}
@@ -260,7 +296,20 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 		return c.finishVerifyFailure(ctx, run, verifyStep, latest, result, "workspace fingerprint no longer matches the approved review target")
 	}
 
-	for _, check := range artifact.Verification.Commands {
+	// Checkpoint 8I: VerifyScopePolicy narrows the Planner's commands (when
+	// safely recognizable) BEFORE execution. reviewReasons/finalIntegration
+	// come from data already durable elsewhere (the review step's own
+	// policy-decision checkpoint, and the plan's dependency graph) — never a
+	// new LLM call. A lookup failure defaults conservatively to repository
+	// scope (i.e. the Planner's commands run completely unmodified).
+	reviewReasons, _ := c.reviewPolicyReasonsForStep(ctx, run.ID, reviewStep.ID)
+	finalIntegration := c.isFinalIntegrationTask(ctx, run)
+	scopeDecision := ComputeVerifyScope(reviewReasons, finalIntegration, workspaceChangedPaths(obs))
+	narrowedPlan, applied := NarrowVerificationPlan(artifact.Verification, scopeDecision)
+	result.Scope = &scopeDecision
+	result.ScopeAppliedTransforms = applied
+
+	for _, check := range narrowedPlan.Commands {
 		dir, pathErr := secureWorktreePath(workCP.WorktreePath, check.WorkingDirectory)
 		if pathErr != nil {
 			result.ErrorClass = domain.WorkflowErrorVerifyEnvironment

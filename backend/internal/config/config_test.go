@@ -10,7 +10,7 @@ import (
 func TestLoadDefaults(t *testing.T) {
 	// Clear every recognised var so we observe pure defaults regardless of the
 	// surrounding environment.
-	for _, k := range []string{"AO_PORT", "AO_REQUEST_TIMEOUT", "AO_SHUTDOWN_TIMEOUT", "AO_RUN_FILE", "AO_DATA_DIR", "AO_AGENT", "AO_ALLOWED_ORIGINS", "AO_TELEMETRY_EVENTS", "AO_TELEMETRY_METRICS", "AO_TELEMETRY_REMOTE", "AO_TELEMETRY_POSTHOG_KEY", "AO_TELEMETRY_POSTHOG_HOST", "AO_TELEMETRY_DISABLED_EVENTS", "AO_TELEMETRY_APP_VERSION"} {
+	for _, k := range []string{"AO_PORT", "AO_REQUEST_TIMEOUT", "AO_SHUTDOWN_TIMEOUT", "AO_RUN_FILE", "AO_DATA_DIR", "AO_AGENT", "AO_ALLOWED_ORIGINS", "AO_TELEMETRY_EVENTS", "AO_TELEMETRY_METRICS", "AO_TELEMETRY_REMOTE", "AO_TELEMETRY_POSTHOG_KEY", "AO_TELEMETRY_POSTHOG_HOST", "AO_TELEMETRY_DISABLED_EVENTS", "AO_TELEMETRY_APP_VERSION", "AO_TMUX_SOCKET"} {
 		t.Setenv(k, "")
 	}
 
@@ -50,6 +50,12 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Telemetry.Remote != TelemetryRemoteOff || cfg.Telemetry.PostHogHost != DefaultTelemetryPostHogHost {
 		t.Fatalf("Telemetry defaults = %+v", cfg.Telemetry)
+	}
+	if cfg.TmuxSocket == "" {
+		t.Error("TmuxSocket is empty, want a resolved default isolated from the user's default tmux server")
+	}
+	if cfg.TmuxSocket == "default" || cfg.TmuxSocket == "tmux" {
+		t.Errorf("TmuxSocket = %q, want a name distinct from tmux's own default server", cfg.TmuxSocket)
 	}
 }
 
@@ -122,6 +128,55 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.Telemetry.Remote != TelemetryRemotePostHog || cfg.Telemetry.PostHogKey != "phc_test" || cfg.Telemetry.PostHogHost != "https://eu.i.posthog.com" {
 		t.Fatalf("Telemetry remote = %+v", cfg.Telemetry)
+	}
+}
+
+// TestLoadTmuxSocketDefaultIsStablePerDataDirAndDistinctAcrossDataDirs pins
+// the two properties AO's tmux isolation depends on: the default socket name
+// must be reproducible across repeated Load() calls for the same DataDir (so
+// a daemon restart reconnects to the same tmux server and recovers its
+// sessions), and different DataDirs (distinct AO instances/profiles) must
+// resolve to different servers so they can never see or kill each other's
+// sessions.
+func TestLoadTmuxSocketDefaultIsStablePerDataDirAndDistinctAcrossDataDirs(t *testing.T) {
+	t.Setenv("AO_TMUX_SOCKET", "")
+
+	dirA := filepath.Join(t.TempDir(), "a")
+	t.Setenv("AO_DATA_DIR", dirA)
+	cfg1, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cfg2, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg1.TmuxSocket != cfg2.TmuxSocket {
+		t.Fatalf("TmuxSocket not stable across Load() calls for the same DataDir: %q vs %q", cfg1.TmuxSocket, cfg2.TmuxSocket)
+	}
+
+	dirB := filepath.Join(t.TempDir(), "b")
+	t.Setenv("AO_DATA_DIR", dirB)
+	cfg3, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg3.TmuxSocket == cfg1.TmuxSocket {
+		t.Fatalf("TmuxSocket collided across distinct DataDirs: both %q", cfg1.TmuxSocket)
+	}
+}
+
+// TestLoadTmuxSocketExplicitOverrideWins ensures AO_TMUX_SOCKET always beats
+// the DataDir-derived default, so an operator can pin a recognizable name or
+// intentionally share one server across AO instances.
+func TestLoadTmuxSocketExplicitOverrideWins(t *testing.T) {
+	t.Setenv("AO_TMUX_SOCKET", "my-custom-ao-socket")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.TmuxSocket != "my-custom-ao-socket" {
+		t.Errorf("TmuxSocket = %q, want explicit AO_TMUX_SOCKET override", cfg.TmuxSocket)
 	}
 }
 

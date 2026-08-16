@@ -260,6 +260,22 @@ function WorkflowRunRoute() {
 								)}
 							</dl>
 						)}
+						{step.kind === "review" && step.reviewPolicy && (
+							<dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 border-t border-border pt-2 text-xs text-muted-foreground">
+								<dt>{t("shell.workflowsReviewPolicyLabel")}</dt>
+								<dd>
+									{step.reviewPolicy.decision === "skipped"
+										? t("shell.workflowsReviewPolicySkipped")
+										: t("shell.workflowsReviewPolicyRequired")}
+								</dd>
+								{step.reviewPolicy.reasons && step.reviewPolicy.reasons.length > 0 && (
+									<>
+										<dt>{t("shell.workflowsReviewPolicyReason")}</dt>
+										<dd>{step.reviewPolicy.reasons.join(", ")}</dd>
+									</>
+								)}
+							</dl>
+						)}
 						{step.kind === "review" && (step.reviewRunId || step.reviewer) && (
 							<dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 border-t border-border pt-2 text-xs text-muted-foreground">
 								<dt>{t("shell.workflowsReviewer")}</dt>

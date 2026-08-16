@@ -197,6 +197,31 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		if workStep.State != domain.WorkflowStepCompleted {
 			return reviewStep, nil
 		}
+
+		// Checkpoint 8I: ReviewPolicy evaluates exactly once, right here, at
+		// cycle 1 — before any reviewer is ever launched. A later fix cycle
+		// (the WorkflowStepWaiting case below) never re-evaluates: once a
+		// cycle 1 decision is REQUIRED, every subsequent cycle for this same
+		// review step stays REQUIRED (checkpoint brief §10 — "no reevaluar y
+		// saltar reviewer a mitad de una corrección sensible"). SKIPPED is
+		// therefore only ever reachable from this exact branch.
+		policyArtifact, err := c.planArtifactForRun(ctx, run)
+		if err != nil {
+			return reviewStep, err
+		}
+		facts, err := c.computeReviewRiskFacts(ctx, run, workStep, policyArtifact, workCP)
+		if err != nil {
+			return reviewStep, err
+		}
+		decision := EvaluateReviewPolicy(facts)
+		decision.EvaluatedAt = c.clock()
+		if err := c.persistReviewPolicyDecision(ctx, run, reviewStep, decision); err != nil {
+			return reviewStep, err
+		}
+		if decision.Decision == ReviewSkipped {
+			return c.applyReviewPolicySkip(ctx, run, reviewStep)
+		}
+
 		// Checkpoint 8D: target_sha is the work-completion checkpoint's own
 		// WorkspaceFingerprint (workflow.WorkspaceFingerprint, computed by
 		// observeWorkStep and stored on its FingerprintAfter field) — not a
@@ -230,6 +255,20 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		// is exactly this ReviewRunID check.
 		if reviewStep.ReviewRunID != nil {
 			return reviewStep, nil
+		}
+		// Checkpoint 8I crash-recovery: if the most recently persisted
+		// checkpoint for this step is a SKIPPED review_policy_decision, a
+		// prior call recorded the decision but crashed before
+		// applyReviewPolicySkip finished walking ready->running->completed.
+		// Resuming here must complete that same skip, never fall through to
+		// a real reviewer dispatch (which would silently turn a SKIPPED
+		// decision into a REQUIRED one on retry).
+		if latestCP, hasLatestCP, cpErr := c.store.GetLatestWorkflowCheckpointByStep(ctx, reviewStep.ID); cpErr != nil {
+			return reviewStep, cpErr
+		} else if hasLatestCP && latestCP.DurablePhase == reviewPolicyDurablePhase {
+			if decision, ok := decodeReviewPolicyDecision(latestCP.RetryState); ok && decision.Decision == ReviewSkipped {
+				return c.applyReviewPolicySkip(ctx, run, reviewStep)
+			}
 		}
 		if workStep.State != domain.WorkflowStepCompleted {
 			return reviewStep, nil

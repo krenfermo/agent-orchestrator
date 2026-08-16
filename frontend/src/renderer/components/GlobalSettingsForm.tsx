@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { DevelopmentAgentsSettingsSection } from "./settings/DevelopmentAgentsSettingsSection";
+import { EfficiencyPolicySettingsSection } from "./settings/EfficiencyPolicySettingsSection";
 import { EnvironmentSettingsSection } from "./settings/EnvironmentSettingsSection";
 import { GeneralSettingsSection } from "./settings/GeneralSettingsSection";
 import { ProjectsSettingsSection } from "./settings/ProjectsSettingsSection";
@@ -55,6 +56,7 @@ export function GlobalSettingsForm({
 								onClick={() => onOpenKeyboardShortcuts?.()}
 							/>
 						</SettingsSection>
+						<EfficiencyPolicySettingsSection />
 					</>
 				)}
 				{(section === "all" || section === "environment") && (

@@ -3269,6 +3269,24 @@ export interface components {
             title: string;
             verify: components["schemas"]["WorkflowVerificationPlanType2"];
         };
+        WorkflowReviewPolicyDecision: {
+            complexity: string;
+            decision: string;
+            /** Format: date-time */
+            evaluatedAt: string;
+            facts: components["schemas"]["WorkflowReviewRiskFacts"];
+            policyVersion: string;
+            reasons: string[];
+        };
+        WorkflowReviewRiskFacts: {
+            acceptanceCriteriaEmpty: boolean;
+            changedFileCount: number;
+            changedFilePaths: string[];
+            hasExactContentCheckForSoleChangedFile: boolean;
+            priorWorkProviderAttempts: number;
+            verifyCommandCount: number;
+            verifyFileCheckCount: number;
+        };
         WorkflowRunDetailView: {
             plan?: components["schemas"]["WorkflowPlanView"];
             run: components["schemas"]["WorkflowRunView"];
@@ -3311,6 +3329,7 @@ export interface components {
             nextAction?: string;
             /** Format: int64 */
             ordinal: number;
+            reviewPolicy?: components["schemas"]["WorkflowReviewPolicyDecision"];
             reviewRunId?: string;
             reviewer?: string;
             sessionId?: string;
@@ -3390,8 +3409,17 @@ export interface components {
             postFingerprint: string;
             preFingerprint: string;
             reviewedFingerprint: string;
+            scope?: components["schemas"]["WorkflowVerifyScopeDecision"];
+            scopeAppliedTransforms?: string[];
             targetKey: string;
             version: string;
+        };
+        WorkflowVerifyScopeDecision: {
+            changedFiles: string[];
+            packageDir?: string;
+            policyVersion: string;
+            reasons: string[];
+            scope: string;
         };
         WorkspaceFileResponse: {
             additions: number;

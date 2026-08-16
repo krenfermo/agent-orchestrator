@@ -76,16 +76,37 @@ func newTestRuntime(chunkSize int) (*Runtime, *fakeRunner) {
 }
 
 // countCalls returns how many of fr's recorded calls invoked the given tmux
-// subcommand (args[0]), e.g. "display-message" for pane cwd verification
-// probes.
+// subcommand, e.g. "display-message" for pane cwd verification probes. Every
+// call is prefixed with `-L <socket>` (see Runtime.run), so the subcommand is
+// looked up past that prefix via subcommandOf.
 func countCalls(fr *fakeRunner, subcommand string) int {
 	n := 0
 	for _, c := range fr.calls {
-		if len(c.args) > 0 && c.args[0] == subcommand {
+		if subcommandOf(c.args) == subcommand {
 			n++
 		}
 	}
 	return n
+}
+
+// subcommandOf returns a recorded call's tmux subcommand, skipping the
+// leading `-L <socket>` every call carries (see Runtime.run).
+func subcommandOf(args []string) string {
+	if len(args) >= 2 && args[0] == "-L" {
+		args = args[2:]
+	}
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
+}
+
+// srv prepends the default test socket's `-L <socket>` prefix that every
+// real tmux invocation carries (see Runtime.run), so expectations built from
+// the commands.go arg builders (which return bare subcommand args) match
+// what the fakeRunner actually records.
+func srv(args []string) []string {
+	return append([]string{"-L", defaultSocket}, args...)
 }
 
 // -- Options / New tests --
@@ -296,8 +317,11 @@ func TestCreateIssuesNewSessionAndStatusOff(t *testing.T) {
 	}
 
 	// Call 0: new-session
-	if got := fr.calls[0].args[0]; got != "new-session" {
+	if got := subcommandOf(fr.calls[0].args); got != "new-session" {
 		t.Fatalf("call[0] = %q, want new-session", got)
+	}
+	if got := fr.calls[0].args[:2]; !reflect.DeepEqual(got, []string{"-L", defaultSocket}) {
+		t.Fatalf("call[0] server prefix = %v, want -L %s", got, defaultSocket)
 	}
 	// Check -s <id>, -c <cwd> are present.
 	joined := strings.Join(fr.calls[0].args, " ")
@@ -313,28 +337,28 @@ func TestCreateIssuesNewSessionAndStatusOff(t *testing.T) {
 	}
 
 	// Call 1: verify pane cwd.
-	if got, want := fr.calls[1].args, paneCurrentPathArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[1].args, srv(paneCurrentPathArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[1] = %#v, want %#v", got, want)
 	}
 
 	// Call 2: set-option status off (plain target, pane-targeting does not use =).
-	if got, want := fr.calls[2].args, setStatusOffArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[2].args, srv(setStatusOffArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[2] = %#v, want %#v", got, want)
 	}
 
 	// Call 3: set-option mouse on (enables wheel-scroll of the pane).
-	if got, want := fr.calls[3].args, setMouseOnArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[3].args, srv(setMouseOnArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[3] = %#v, want %#v", got, want)
 	}
 
 	// Call 4: set-option window-size largest (multi-client sizing, see
 	// setWindowSizeLargestArgs).
-	if got, want := fr.calls[4].args, setWindowSizeLargestArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[4].args, srv(setWindowSizeLargestArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[4] = %#v, want %#v", got, want)
 	}
 
 	// Call 5: has-session (IsAlive, uses exact-match target =sess-1).
-	if got, want := fr.calls[5].args, hasSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[5].args, srv(hasSessionArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[5] = %#v, want %#v", got, want)
 	}
 }
@@ -555,7 +579,7 @@ func TestCreateDestroysAndReturnsErrorWhenNotAlive(t *testing.T) {
 	}
 	sawHasSession := false
 	for _, c := range fr3.calls {
-		if len(c.args) > 0 && c.args[0] == "has-session" {
+		if subcommandOf(c.args) == "has-session" {
 			sawHasSession = true
 		}
 	}
@@ -565,7 +589,7 @@ func TestCreateDestroysAndReturnsErrorWhenNotAlive(t *testing.T) {
 	// Verify Destroy was called (kill-session).
 	hasKill := false
 	for _, c := range fr3.calls {
-		if len(c.args) > 0 && c.args[0] == "kill-session" {
+		if subcommandOf(c.args) == "kill-session" {
 			hasKill = true
 		}
 	}
@@ -587,10 +611,10 @@ type fakeRunnerSelectiveErr struct {
 
 func (f *fakeRunnerSelectiveErr) Run(_ context.Context, env []string, name string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, runnerCall{env: append([]string(nil), env...), name: name, args: append([]string(nil), args...)})
-	if len(args) > 0 && args[0] == f.exitErrOn {
+	if subcommandOf(args) == f.exitErrOn {
 		return f.errOutput, &exec.ExitError{}
 	}
-	if len(args) > 0 && args[0] == "display-message" {
+	if subcommandOf(args) == "display-message" {
 		return []byte("/tmp/ws\n"), nil
 	}
 	return nil, nil
@@ -642,11 +666,11 @@ func TestRestartRespawnsExistingPaneAndPreservesHandle(t *testing.T) {
 	if len(fr.calls) != 2 {
 		t.Fatalf("calls = %d, want respawn + liveness probe", len(fr.calls))
 	}
-	if args := fr.calls[0].args; len(args) < 6 || args[0] != "respawn-pane" || args[1] != "-k" || args[3] != "sess-1:0.0" || args[5] != "/tmp/ws" {
+	if args := fr.calls[0].args; len(args) < 8 || args[0] != "-L" || args[2] != "respawn-pane" || args[3] != "-k" || args[5] != "sess-1:0.0" || args[7] != "/tmp/ws" {
 		t.Fatalf("respawn args = %#v", args)
 	}
-	if args := fr.calls[1].args; !reflect.DeepEqual(args, hasSessionArgs("sess-1")) {
-		t.Fatalf("liveness args = %#v, want %#v", args, hasSessionArgs("sess-1"))
+	if args := fr.calls[1].args; !reflect.DeepEqual(args, srv(hasSessionArgs("sess-1"))) {
+		t.Fatalf("liveness args = %#v, want %#v", args, srv(hasSessionArgs("sess-1")))
 	}
 }
 
@@ -677,7 +701,7 @@ func TestDestroyIsIdempotentWhenSessionMissing(t *testing.T) {
 	if err := r.Destroy(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
-	if len(fr.calls) != 2 || fr.calls[0].args[0] != "list-panes" || fr.calls[1].args[0] != "kill-session" {
+	if len(fr.calls) != 2 || subcommandOf(fr.calls[0].args) != "list-panes" || subcommandOf(fr.calls[1].args) != "kill-session" {
 		t.Fatalf("calls = %#v, want list-panes then kill-session", fr.calls)
 	}
 }
@@ -711,10 +735,10 @@ func TestDestroyArgs(t *testing.T) {
 	}
 	// list-panes discovers pane sessions; kill-session (exact-match target
 	// =<id>) tears the session down.
-	if got, want := fr.calls[0].args, listPanePIDsArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[0].args, srv(listPanePIDsArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("list-panes args = %#v, want %#v", got, want)
 	}
-	if got, want := fr.calls[1].args, killSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[1].args, srv(killSessionArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("destroy args = %#v, want %#v", got, want)
 	}
 }
@@ -849,7 +873,7 @@ func TestIsAliveReturnsTrueOnExitZero(t *testing.T) {
 	if !alive {
 		t.Fatal("alive = false, want true")
 	}
-	if got, want := fr.calls[0].args, hasSessionArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[0].args, srv(hasSessionArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("has-session args = %#v, want %#v", got, want)
 	}
 }
@@ -928,16 +952,16 @@ func TestSendMessageChunksAndSendsEnter(t *testing.T) {
 	if len(fr.calls) != 4 {
 		t.Fatalf("calls = %d, want 4 (3 chunks + Enter)", len(fr.calls))
 	}
-	if got, want := fr.calls[0].args, sendKeysLiteralArgs("sess-1", "hello"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[0].args, srv(sendKeysLiteralArgs("sess-1", "hello")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("chunk 1 args = %#v, want %#v", got, want)
 	}
-	if got, want := fr.calls[1].args, sendKeysLiteralArgs("sess-1", "世"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[1].args, srv(sendKeysLiteralArgs("sess-1", "世")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("chunk 2 args = %#v, want %#v", got, want)
 	}
-	if got, want := fr.calls[2].args, sendKeysLiteralArgs("sess-1", "界"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[2].args, srv(sendKeysLiteralArgs("sess-1", "界")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("chunk 3 args = %#v, want %#v", got, want)
 	}
-	if got, want := fr.calls[3].args, sendEnterArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[3].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Enter args = %#v, want %#v", got, want)
 	}
 }
@@ -948,8 +972,8 @@ func TestSendMessageUsesLiteralFlag(t *testing.T) {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	// First call must use -l so "Enter" is sent literally, not as a key binding.
-	if fr.calls[0].args[3] != "-l" {
-		t.Fatalf("send-keys args[3] = %q, want -l", fr.calls[0].args[3])
+	if fr.calls[0].args[5] != "-l" {
+		t.Fatalf("send-keys args[5] = %q, want -l", fr.calls[0].args[5])
 	}
 }
 
@@ -985,7 +1009,7 @@ func TestSendMessageDelaysBeforeEnter(t *testing.T) {
 	if len(fr.calls) != 2 {
 		t.Fatalf("calls = %d, want 2 (chunk + Enter)", len(fr.calls))
 	}
-	if got, want := fr.calls[1].args, sendEnterArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[1].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Enter args = %#v, want %#v", got, want)
 	}
 
@@ -1003,7 +1027,7 @@ func TestSendMessageDelaysBeforeEnter(t *testing.T) {
 	if len(frNudge.calls) != 1 {
 		t.Fatalf("nudge calls = %d, want 1 (Enter only)", len(frNudge.calls))
 	}
-	if got, want := frNudge.calls[0].args, sendEnterArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := frNudge.calls[0].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("nudge Enter args = %#v, want %#v", got, want)
 	}
 }
@@ -1029,7 +1053,7 @@ func TestSendMessageEnterSurvivesCallerCancel(t *testing.T) {
 	if len(fr.calls) != 2 {
 		t.Fatalf("calls = %d, want 2 (chunk + Enter despite the caller cancel after the paste)", len(fr.calls))
 	}
-	if got, want := fr.calls[1].args, sendEnterArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[1].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Enter args = %#v, want %#v", got, want)
 	}
 }
@@ -1064,10 +1088,10 @@ func TestSendMessageRemainingChunksSurviveCallerCancel(t *testing.T) {
 	if len(fr.calls) != 3 {
 		t.Fatalf("calls = %d, want 3 (two chunks + Enter)", len(fr.calls))
 	}
-	if got, want := fr.calls[1].args, sendKeysLiteralArgs("sess-1", "world"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[1].args, srv(sendKeysLiteralArgs("sess-1", "world")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("chunk 2 args = %#v, want %#v", got, want)
 	}
-	if got, want := fr.calls[2].args, sendEnterArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[2].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Enter args = %#v, want %#v", got, want)
 	}
 }
@@ -1105,7 +1129,7 @@ func TestInterruptSendsCtrlC(t *testing.T) {
 	if err := r.Interrupt(context.Background(), ports.RuntimeHandle{ID: "sess-1"}); err != nil {
 		t.Fatalf("Interrupt: %v", err)
 	}
-	if got, want := fr.calls[0].args, sendInterruptArgs("sess-1"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[0].args, srv(sendInterruptArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("interrupt args = %#v, want %#v", got, want)
 	}
 }
@@ -1118,7 +1142,7 @@ func TestSendInputSendsEscapeWithoutEnter(t *testing.T) {
 	if len(fr.calls) != 1 {
 		t.Fatalf("calls = %d, want 1", len(fr.calls))
 	}
-	if got, want := fr.calls[0].args, sendKeysLiteralArgs("sess-1", "\x1b"); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[0].args, srv(sendKeysLiteralArgs("sess-1", "\x1b")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("escape args = %#v, want %#v", got, want)
 	}
 }
@@ -1167,7 +1191,7 @@ func TestGetOutputArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetOutput: %v", err)
 	}
-	if got, want := fr.calls[0].args, capturePaneArgs("sess-1", 10); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[0].args, srv(capturePaneArgs("sess-1", 10)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("capture-pane args = %#v, want %#v", got, want)
 	}
 }
@@ -1183,7 +1207,7 @@ func TestGetStyledOutputPreservesCaptureMode(t *testing.T) {
 	if !strings.Contains(out, "\x1b[2m") {
 		t.Fatalf("styled output lost SGR sequence: %q", out)
 	}
-	if got, want := fr.calls[0].args, capturePaneStyledArgs("sess-1", 10); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[0].args, srv(capturePaneStyledArgs("sess-1", 10)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("capture-pane args = %#v, want %#v", got, want)
 	}
 }
@@ -1196,7 +1220,7 @@ func TestAttachCommandReturnsExpectedArgv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AttachCommand: %v", err)
 	}
-	want := []string{"/usr/bin/tmux", "-u", "-T", "RGB", "attach-session", "-t", "sess-1"}
+	want := []string{"/usr/bin/tmux", "-L", defaultSocket, "-u", "-T", "RGB", "attach-session", "-t", "sess-1"}
 	if !reflect.DeepEqual(argv, want) {
 		t.Fatalf("argv = %#v, want %#v", argv, want)
 	}

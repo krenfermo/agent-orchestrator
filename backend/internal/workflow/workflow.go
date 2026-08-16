@@ -240,6 +240,12 @@ type StepDetail struct {
 	// is truncated here, not persisted: workflow_checkpoints only ever store
 	// the review_run_id reference, never a copy of the body.
 	Review *ReviewSummary
+	// ReviewPolicy is populated for a review step whose review_policy_decision
+	// checkpoint exists (Checkpoint 8I) — for REQUIRED decisions this sits
+	// alongside Review; for SKIPPED decisions Review stays nil (no
+	// review_run was ever created) and this is the only durable record of
+	// why. Read live at GetRun time, mirroring Review's own read pattern.
+	ReviewPolicy *ReviewPolicyDecision
 }
 
 // ReviewSummary is a read-time-only projection of a review step's review_run
@@ -406,21 +412,27 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 			cpPtr = &cp
 		}
 		var reviewSummary *ReviewSummary
-		if step.Kind == domain.WorkflowStepReview && step.ReviewRunID != nil && c.reviewRuns != nil {
-			if rr, found, rrErr := c.reviewRuns.GetReviewRun(ctx, *step.ReviewRunID); rrErr == nil && found {
-				body := rr.Body
-				if len(body) > reviewFindingsSummaryMaxLen {
-					body = body[:reviewFindingsSummaryMaxLen]
-				}
-				reviewSummary = &ReviewSummary{
-					Harness:         rr.Harness,
-					Verdict:         rr.Verdict,
-					Target:          rr.TargetSHA,
-					FindingsSummary: body,
+		var reviewPolicy *ReviewPolicyDecision
+		if step.Kind == domain.WorkflowStepReview {
+			if step.ReviewRunID != nil && c.reviewRuns != nil {
+				if rr, found, rrErr := c.reviewRuns.GetReviewRun(ctx, *step.ReviewRunID); rrErr == nil && found {
+					body := rr.Body
+					if len(body) > reviewFindingsSummaryMaxLen {
+						body = body[:reviewFindingsSummaryMaxLen]
+					}
+					reviewSummary = &ReviewSummary{
+						Harness:         rr.Harness,
+						Verdict:         rr.Verdict,
+						Target:          rr.TargetSHA,
+						FindingsSummary: body,
+					}
 				}
 			}
+			if decision, ok := c.reviewPolicyDecisionForStep(ctx, runID, step.ID); ok {
+				reviewPolicy = &decision
+			}
 		}
-		detail.Steps = append(detail.Steps, StepDetail{Step: step, Attempts: attempts, LatestCheckpoint: cpPtr, Review: reviewSummary})
+		detail.Steps = append(detail.Steps, StepDetail{Step: step, Attempts: attempts, LatestCheckpoint: cpPtr, Review: reviewSummary, ReviewPolicy: reviewPolicy})
 	}
 
 	if checkpoints, cperr := c.store.ListWorkflowCheckpoints(ctx, runID); cperr == nil {

@@ -9118,6 +9118,58 @@ components:
       - acceptanceCriteria
       - verify
       type: object
+    WorkflowReviewPolicyDecision:
+      properties:
+        complexity:
+          type: string
+        decision:
+          type: string
+        evaluatedAt:
+          format: date-time
+          type: string
+        facts:
+          $ref: '#/components/schemas/WorkflowReviewRiskFacts'
+        policyVersion:
+          type: string
+        reasons:
+          items:
+            type: string
+          type: array
+      required:
+      - policyVersion
+      - decision
+      - reasons
+      - facts
+      - complexity
+      - evaluatedAt
+      type: object
+    WorkflowReviewRiskFacts:
+      properties:
+        acceptanceCriteriaEmpty:
+          type: boolean
+        changedFileCount:
+          type: integer
+        changedFilePaths:
+          items:
+            type: string
+          type: array
+        hasExactContentCheckForSoleChangedFile:
+          type: boolean
+        priorWorkProviderAttempts:
+          type: integer
+        verifyCommandCount:
+          type: integer
+        verifyFileCheckCount:
+          type: integer
+      required:
+      - changedFilePaths
+      - changedFileCount
+      - acceptanceCriteriaEmpty
+      - priorWorkProviderAttempts
+      - verifyCommandCount
+      - verifyFileCheckCount
+      - hasExactContentCheckForSoleChangedFile
+      type: object
     WorkflowRunDetailView:
       properties:
         plan:
@@ -9227,6 +9279,8 @@ components:
         ordinal:
           format: int64
           type: integer
+        reviewPolicy:
+          $ref: '#/components/schemas/WorkflowReviewPolicyDecision'
         reviewRunId:
           type: string
         reviewer:
@@ -9440,6 +9494,12 @@ components:
           type: string
         reviewedFingerprint:
           type: string
+        scope:
+          $ref: '#/components/schemas/WorkflowVerifyScopeDecision'
+        scopeAppliedTransforms:
+          items:
+            type: string
+          type: array
         targetKey:
           type: string
         version:
@@ -9452,6 +9512,28 @@ components:
       - postFingerprint
       - checks
       - passed
+      type: object
+    WorkflowVerifyScopeDecision:
+      properties:
+        changedFiles:
+          items:
+            type: string
+          type: array
+        packageDir:
+          type: string
+        policyVersion:
+          type: string
+        reasons:
+          items:
+            type: string
+          type: array
+        scope:
+          type: string
+      required:
+      - policyVersion
+      - scope
+      - reasons
+      - changedFiles
       type: object
     WorkspaceFileResponse:
       properties:
