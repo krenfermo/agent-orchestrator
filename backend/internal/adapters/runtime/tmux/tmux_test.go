@@ -181,6 +181,126 @@ func TestExecRunnerFallsBackWhenTempDirMissing(t *testing.T) {
 	}
 }
 
+// -- Checkpoint 8I.2: tmux server env sanitization --
+
+// TestSanitizeInheritedEnv_DropsNestedAgentVarsPreservesOthers is the direct
+// unit test for sanitizeInheritedEnv's policy: drop exactly
+// nestedAgentEnvVars, keep everything else (including a var whose name merely
+// contains "CLAUDE" as a substring but isn't one of the denylisted names).
+func TestSanitizeInheritedEnv_DropsNestedAgentVarsPreservesOthers(t *testing.T) {
+	in := []string{
+		"PATH=/usr/bin",
+		"HOME=/Users/dev",
+		"CLAUDECODE=1",
+		"CLAUDE_CODE_CHILD_SESSION=abc123",
+		"CLAUDE_CODE_ENTRYPOINT=cli",
+		"CLAUDE_CODE_SESSION_ID=sess-1",
+		"CLAUDE_CODE_MESSAGING_SOCKET=/tmp/sock",
+		"CLAUDE_CODE_MESSAGING_TOKEN=secret-token",
+		"CLAUDE_CODE_EXECPATH=/usr/local/bin/claude",
+		"CLAUDE_PID=4242",
+		"CLAUDE_EFFORT=high",
+		"CLAUDE_DESKTOP_INSTALLED=1", // superficially similar name, not denylisted
+		"USER=dev",
+	}
+	got := sanitizeInheritedEnv(in)
+
+	wantDropped := []string{
+		"CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT",
+		"CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET",
+		"CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_EXECPATH", "CLAUDE_PID", "CLAUDE_EFFORT",
+	}
+	for _, name := range wantDropped {
+		for _, kv := range got {
+			if strings.HasPrefix(kv, name+"=") {
+				t.Fatalf("sanitizeInheritedEnv kept denylisted %s, want it dropped; got %v", name, got)
+			}
+		}
+	}
+	wantKept := []string{"PATH=/usr/bin", "HOME=/Users/dev", "USER=dev", "CLAUDE_DESKTOP_INSTALLED=1"}
+	for _, kv := range wantKept {
+		found := false
+		for _, g := range got {
+			if g == kv {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("sanitizeInheritedEnv dropped %q, want it preserved; got %v", kv, got)
+		}
+	}
+	if len(got) != len(in)-len(wantDropped) {
+		t.Fatalf("sanitizeInheritedEnv kept %d vars, want %d (dropped exactly the denylist)", len(got), len(in)-len(wantDropped))
+	}
+}
+
+// TestExecRunnerRun_DropsNestedAgentEnvVars is the real-subprocess regression
+// test for Checkpoint 8I.1/8I.2: a var like CLAUDE_CODE_CHILD_SESSION present
+// in the calling process's own environment (e.g. because AO's daemon was
+// itself started from inside another Claude Code agent's shell) must not
+// reach the tmux CLI child process — since the very first such call may be
+// the one that auto-starts AO's tmux server, and that call's environment
+// becomes the server's permanent ambient environment for every session and
+// pane it later spawns.
+func TestExecRunnerRun_DropsNestedAgentEnvVars(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_CHILD_SESSION", "test-contamination")
+	t.Setenv("AO_AGENT_TEST_MARKER", "still-here")
+
+	out, err := (execRunner{}).Run(context.Background(), nil, "sh", "-c", "env")
+	if err != nil {
+		t.Fatalf("execRunner.Run: %v", err)
+	}
+	got := string(out)
+	if strings.Contains(got, "CLAUDE_CODE_CHILD_SESSION") {
+		t.Fatalf("execRunner.Run leaked CLAUDE_CODE_CHILD_SESSION into the tmux CLI child process env: %s", got)
+	}
+	if !strings.Contains(got, "AO_AGENT_TEST_MARKER=still-here") {
+		t.Fatalf("execRunner.Run dropped an unrelated env var it should have preserved: %s", got)
+	}
+}
+
+// TestContaminatedFromShowEnvironment covers the drift-detection parser
+// against tmux's real `show-environment -g` output shape: "NAME=value" for
+// set vars, "-NAME" for a var tmux is tracking as explicitly unset.
+func TestContaminatedFromShowEnvironment(t *testing.T) {
+	output := "PATH=/usr/bin\nCLAUDE_CODE_CHILD_SESSION=abc123\n-CLAUDECODE\nHOME=/Users/dev\n"
+	got := contaminatedFromShowEnvironment(output, nestedAgentEnvVars)
+	want := []string{"CLAUDE_CODE_CHILD_SESSION"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("contaminatedFromShowEnvironment = %v, want %v (an unset '-NAME' marker is not contamination)", got, want)
+	}
+}
+
+// TestContaminatedEnvVars_NoServerYet covers Runtime.ContaminatedEnvVars's
+// documented "no server for this socket" case: tmux show-environment errors
+// when there is nothing to show, and that must read as "nothing found", not
+// propagate as a caller-visible failure.
+func TestContaminatedEnvVars_NoServerYet(t *testing.T) {
+	rt, fr := newTestRuntime(0)
+	fr.err = errors.New("no server running on ...")
+	if got := rt.ContaminatedEnvVars(context.Background()); got != nil {
+		t.Fatalf("ContaminatedEnvVars = %v, want nil when the server doesn't exist yet", got)
+	}
+}
+
+// TestContaminatedEnvVars_ReportsExistingDrift covers the documented,
+// intentionally non-destructive half of drift detection: an already-running
+// server (started before a sanitized AO build, or by an unpatched AO
+// instance) that already carries a nested-agent var is reported, not
+// silently ignored — Runtime never auto-restarts an active server to fix it.
+func TestContaminatedEnvVars_ReportsExistingDrift(t *testing.T) {
+	rt, fr := newTestRuntime(0)
+	fr.outputs = [][]byte{[]byte("PATH=/usr/bin\nCLAUDE_CODE_CHILD_SESSION=leaked\n")}
+	got := rt.ContaminatedEnvVars(context.Background())
+	if len(got) != 1 || got[0] != "CLAUDE_CODE_CHILD_SESSION" {
+		t.Fatalf("ContaminatedEnvVars = %v, want [CLAUDE_CODE_CHILD_SESSION]", got)
+	}
+	if len(fr.calls) != 1 || subcommandOf(fr.calls[0].args) != "show-environment" {
+		t.Fatalf("ContaminatedEnvVars issued %v, want a single show-environment call", fr.calls)
+	}
+}
+
 // -- command builder tests --
 
 func TestCommandBuilders(t *testing.T) {

@@ -49,14 +49,19 @@ type workflowReviewerRuntime interface {
 // session pane in the daemon already uses (workflowReviewerRuntime above) —
 // not a new or more permissive mechanism. PATH pinning for the reviewer's
 // bare `ao` command reuses session_manager's own exported HookPATH/
-// AugmentRuntimePATHForLaunchBinary helpers, the same ones
-// review/launcher.go itself calls.
+// EnsureAOShim/AugmentRuntimePATHForLaunchBinary helpers — the same ones
+// review/launcher.go itself calls, not a separate re-implementation
+// (Checkpoint 8I.2 closed a gap where this launcher had HookPATH but not the
+// EnsureAOShim fallback, so a daemon binary not literally named "ao" left
+// `ao review submit` unresolvable here even though review/launcher.go's
+// equivalent path already handled it).
 type workflowReviewerLauncher struct {
-	reviewers ports.ReviewerResolver
-	runtime   workflowReviewerRuntime
-	dataDir   string
-	runFile   string
-	auth      reviewerAgentAuth
+	reviewers  ports.ReviewerResolver
+	runtime    workflowReviewerRuntime
+	dataDir    string
+	runFile    string
+	auth       reviewerAgentAuth
+	executable func() (string, error) // defaults to os.Executable when nil; injectable for tests
 }
 
 var _ workflowcore.ReviewerLauncher = (*workflowReviewerLauncher)(nil)
@@ -175,8 +180,35 @@ func (l *workflowReviewerLauncher) runtimeEnv(ctx context.Context, req workflowc
 	if strings.TrimSpace(l.runFile) != "" {
 		env["AO_RUN_FILE"] = l.runFile
 	}
-	if path, err := sessionmanager.HookPATH(os.Executable, os.Getenv, env); err == nil {
+	executable := l.executable
+	if executable == nil {
+		executable = os.Executable
+	}
+	// HookPATH now always returns a usable PATH (base/inherited PATH plus
+	// required system dirs) once the daemon's own executable path resolves at
+	// all — err here means that resolution itself failed, not merely that the
+	// binary isn't named "ao" (see HookPATH's doc comment). Previously this
+	// silently left PATH unset on either failure mode, which could collapse a
+	// reviewer pane's PATH down to nothing but its own agent binary's
+	// directory and break that agent CLI's own auth lookup (Checkpoint 8I.1).
+	path, pinned, err := sessionmanager.HookPATH(executable, os.Getenv, env)
+	if err != nil {
+		env["PATH"] = sessionmanager.EnsureSystemPathDirs(env["PATH"])
+	} else {
 		env["PATH"] = path
+		if !pinned {
+			// The daemon binary isn't named "ao" — the reviewer prompt tells
+			// Claude to run `ao review submit ...` verbatim, so without a real
+			// `ao` on PATH that command fails with "command not found" and the
+			// reviewer has to self-correct onto an absolute path (Checkpoint
+			// 8I.2's residual gap). EnsureAOShim is the same mechanism
+			// review/launcher.go uses for its own reviewer pane: a tiny shim
+			// script that execs the resolved daemon binary, prepended on top of
+			// the already-good PATH above rather than replacing it.
+			if shimDir, shimErr := sessionmanager.EnsureAOShim(l.dataDir, executable); shimErr == nil {
+				env["PATH"] = sessionmanager.PrependPathDir(shimDir, env["PATH"])
+			}
+		}
 	}
 	sessionmanager.AugmentRuntimePATHForLaunchBinary(ctx, env, argv, exec.LookPath)
 	return env

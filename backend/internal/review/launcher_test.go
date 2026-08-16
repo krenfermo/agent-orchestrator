@@ -112,10 +112,25 @@ func TestLauncherSpawnCreatesAOShimWhenExecutableIsNotNamedAO(t *testing.T) {
 		t.Fatalf("Spawn: %v", err)
 	}
 
+	// Checkpoint 8I.2: not being named "ao" no longer collapses PATH — the
+	// shim dir is added on top of the still-good HookPATH result (executable
+	// dir, adapter PATH, and required system dirs), not in place of it.
 	shimDir := filepath.Join(dataDir, "reviewer-runtime", "bin")
 	parts := strings.Split(rt.createCfg.Env["PATH"], string(os.PathListSeparator))
-	if len(parts) < 2 || parts[0] != shimDir || parts[1] != "/reviewer/bin" {
-		t.Fatalf("reviewer PATH = %q, want shim dir before adapter PATH", rt.createCfg.Env["PATH"])
+	if len(parts) < 3 || parts[0] != shimDir || parts[1] != filepath.Dir(exe) || parts[2] != "/reviewer/bin" {
+		t.Fatalf("reviewer PATH = %q, want shim dir, then executable dir, then adapter PATH", rt.createCfg.Env["PATH"])
+	}
+	for _, want := range []string{"/usr/bin", "/bin"} {
+		found := false
+		for _, p := range parts {
+			if p == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("reviewer PATH = %q, want it to still include required system dir %q", rt.createCfg.Env["PATH"], want)
+		}
 	}
 	shimPath := filepath.Join(shimDir, "ao")
 	if runtime.GOOS == "windows" {
@@ -130,19 +145,19 @@ func TestLauncherSpawnCreatesAOShimWhenExecutableIsNotNamedAO(t *testing.T) {
 	}
 }
 
-func TestLauncherSpawnWarnsWhenPATHPinAndShimFail(t *testing.T) {
+// TestLauncherSpawnWarnsWhenPATHPinFails covers the now-rare case where the
+// daemon's own executable path cannot be resolved at all (HookPATH's only
+// remaining error condition post-8I.2 — a mismatched binary name is no
+// longer an error, see TestLauncherSpawnCreatesAOShimWhenExecutableIsNotNamedAO).
+// PATH must still end up usable (required system dirs), not unset.
+func TestLauncherSpawnWarnsWhenPATHPinFails(t *testing.T) {
 	reviewer := &fakeReviewer{env: map[string]string{"PATH": "/reviewer/bin"}}
 	rt := &fakeRuntime{}
-	calls := 0
 	l := NewLauncher(
 		fakeReviewerResolver{reviewer: reviewer, ok: true},
 		rt,
 		t.TempDir(),
 		WithExecutable(func() (string, error) {
-			calls++
-			if calls == 1 {
-				return filepath.Join(t.TempDir(), "ao-dev-daemon"), nil
-			}
 			return "", errors.New("executable unavailable")
 		}),
 	)
@@ -153,12 +168,49 @@ func TestLauncherSpawnWarnsWhenPATHPinAndShimFail(t *testing.T) {
 	if !rt.created {
 		t.Fatal("runtime.Create was not called")
 	}
-	if rt.createCfg.Env["PATH"] != "/reviewer/bin" {
-		t.Fatalf("PATH = %q, want original reviewer PATH", rt.createCfg.Env["PATH"])
+	want := "/reviewer/bin" + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin"
+	if rt.createCfg.Env["PATH"] != want {
+		t.Fatalf("PATH = %q, want %q (original reviewer PATH plus required system dirs)", rt.createCfg.Env["PATH"], want)
 	}
 	warning := rt.createCfg.Env[EnvAOCommandWarning]
-	if !strings.Contains(warning, "PATH pin failed") || !strings.Contains(warning, "AO shim fallback failed") || !strings.Contains(warning, "executable unavailable") {
-		t.Fatalf("%s = %q, want combined PATH/shim warning", EnvAOCommandWarning, warning)
+	if !strings.Contains(warning, "PATH pin failed") || !strings.Contains(warning, "executable unavailable") {
+		t.Fatalf("%s = %q, want PATH-pin-failed warning", EnvAOCommandWarning, warning)
+	}
+}
+
+// TestLauncherSpawnWarnsWhenShimFallbackFails covers: executable resolves
+// fine (so HookPATH succeeds and PATH stays usable) but is not named "ao",
+// and the shim-directory fallback for fixing `ao` hook resolution itself
+// fails (e.g. an unwritable data dir). PATH must still carry the good
+// HookPATH result rather than being lost.
+func TestLauncherSpawnWarnsWhenShimFallbackFails(t *testing.T) {
+	reviewer := &fakeReviewer{env: map[string]string{"PATH": "/reviewer/bin"}}
+	rt := &fakeRuntime{}
+	exe := filepath.Join(t.TempDir(), "ao-dev-daemon")
+	dataDir := t.TempDir()
+	// Pre-create "reviewer-runtime" as a regular file so ensureAOShimDir's
+	// MkdirAll(dataDir/reviewer-runtime/bin) fails, without disturbing the
+	// separate dataDir/prompts path the launcher also needs.
+	if err := os.WriteFile(filepath.Join(dataDir, "reviewer-runtime"), []byte("not a dir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := NewLauncher(
+		fakeReviewerResolver{reviewer: reviewer, ok: true},
+		rt,
+		dataDir,
+		WithExecutable(func() (string, error) { return exe, nil }),
+	)
+
+	if _, err := l.Spawn(context.Background(), launchSpec()); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	want := filepath.Dir(exe) + string(os.PathListSeparator) + "/reviewer/bin" + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin"
+	if rt.createCfg.Env["PATH"] != want {
+		t.Fatalf("PATH = %q, want %q (HookPATH result preserved despite shim failure)", rt.createCfg.Env["PATH"], want)
+	}
+	warning := rt.createCfg.Env[EnvAOCommandWarning]
+	if !strings.Contains(warning, "AO shim fallback failed") {
+		t.Fatalf("%s = %q, want AO-shim-fallback-failed warning", EnvAOCommandWarning, warning)
 	}
 }
 

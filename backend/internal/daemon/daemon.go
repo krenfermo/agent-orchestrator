@@ -386,11 +386,12 @@ func RunWithConfig(cfg config.Config) error {
 		return fmt.Errorf("workflow reviewer resolver: %w", err)
 	}
 	workflowReviewerLauncher := &workflowReviewerLauncher{
-		reviewers: workflowReviewers,
-		runtime:   runtimeAdapter,
-		dataDir:   cfg.DataDir,
-		runFile:   cfg.RunFilePath,
-		auth:      reviewerAgentAuth{agents: agents},
+		reviewers:  workflowReviewers,
+		runtime:    runtimeAdapter,
+		dataDir:    cfg.DataDir,
+		runFile:    cfg.RunFilePath,
+		auth:       reviewerAgentAuth{agents: agents},
+		executable: os.Executable,
 	}
 	workflowCoordinator, workflowSvc := startWorkflows(store, rawSessionMgr, workspaceObserver, workflowReviewerLauncher, log)
 	if reconcileErr := workflowCoordinator.Reconcile(ctx); reconcileErr != nil {

@@ -3285,13 +3285,17 @@ func (m *Manager) runtimeEnv(id domain.SessionID, project domain.ProjectID, issu
 	env[EnvBrowserCapability] = ""
 	env[EnvBrowserRuntimeToken] = ""
 	env[EnvBrowserRuntimeTokenStdin] = ""
-	path, err := HookPATH(m.executable, os.Getenv, projectEnv)
+	path, pinned, err := HookPATH(m.executable, os.Getenv, projectEnv)
 	if err != nil {
 		m.logger.Warn("session PATH not pinned to the daemon binary; `ao hooks` callbacks may resolve to a different ao and activity tracking will stall",
 			"session", id, "error", err)
 		return env
 	}
 	env["PATH"] = path
+	if !pinned {
+		m.logger.Warn("session PATH pin not applied: daemon executable is not named the expected hook binary name; `ao hooks` callbacks may resolve to a different ao and activity tracking will stall (PATH still includes required system and inherited directories)",
+			"session", id, "hookBinaryName", hookBinaryName)
+	}
 	return env
 }
 
@@ -3327,34 +3331,69 @@ func (m *Manager) persistBrowserCapabilityVerifier(ctx context.Context, rec doma
 	return rec, nil
 }
 
-// HookPATH builds the PATH value pinned into a spawned session: the daemon
-// executable's directory prepended to the base PATH (the project's PATH
-// override when set, else the daemon's inherited PATH — matching what the
-// runtime would have exported anyway). An error means the pin cannot be
-// applied: the executable is unresolvable, or is not named "ao", in which case
-// prepending its directory would not change what `ao` resolves to. Exported so
-// the reviewer launcher can pin its pane's PATH the same way.
-func HookPATH(executable func() (string, error), getenv func(string) string, projectEnv map[string]string) (string, error) {
+// RequiredSystemPathDirs are directories a spawned session or reviewer
+// process's PATH must always keep reachable, regardless of how its base PATH
+// was assembled: shells, coreutils, and OS credential-helper binaries live
+// here (e.g. macOS's `security`, which Claude Code's own login check shells
+// out to). A PATH that loses these doesn't fail loudly — the agent CLI
+// degrades into misleading states like a false "Not logged in" even though
+// the real credentials are fine (Checkpoint 8I.1). Deliberately just the two
+// directories every supported OS actually needs, not a broad list.
+var RequiredSystemPathDirs = []string{"/usr/bin", "/bin"}
+
+// EnsureSystemPathDirs appends any of RequiredSystemPathDirs missing from
+// path, preserving path's existing directories and their order/precedence.
+// Safe to call on an already-complete PATH (no-op) or an empty one (returns
+// just the required dirs, so a caller building PATH from scratch never ends
+// up with only a single narrow, project- or binary-specific directory).
+func EnsureSystemPathDirs(path string) string {
+	var parts []string
+	if path != "" {
+		parts = strings.Split(path, string(os.PathListSeparator))
+	}
+	for _, dir := range RequiredSystemPathDirs {
+		if !containsPathDir(parts, dir) {
+			parts = append(parts, dir)
+		}
+	}
+	return strings.Join(parts, string(os.PathListSeparator))
+}
+
+// HookPATH builds the PATH value for a spawned session or reviewer pane: the
+// daemon executable's own directory prepended to the base PATH (the
+// project's PATH override when set, else the caller's inherited PATH —
+// matching what the runtime would have exported anyway), with
+// RequiredSystemPathDirs guaranteed present. The returned pinned flag is true
+// only when the resolved executable is actually named hookBinaryName ("ao"):
+// only then does prepending its directory make the bare `ao` used by
+// workspace hook commands resolve back to this daemon. When pinned is false,
+// the PATH is still fully usable (base PATH plus system dirs) — it just does
+// not fix `ao hooks` resolution, which callers should surface as a
+// diagnostic warning rather than degrade the whole PATH over (that
+// degradation, not the naming mismatch itself, is what caused Checkpoint
+// 8I.1's reviewer processes to fail with a false "Not logged in"). err is
+// reserved for genuine failures: the daemon's own executable path could not
+// be resolved at all.
+func HookPATH(executable func() (string, error), getenv func(string) string, projectEnv map[string]string) (path string, pinned bool, err error) {
 	exe, err := executable()
 	if err != nil {
-		return "", fmt.Errorf("resolve daemon executable: %w", err)
+		return "", false, fmt.Errorf("resolve daemon executable: %w", err)
 	}
 	name := filepath.Base(exe)
 	if runtime.GOOS == "windows" {
 		name = strings.TrimSuffix(strings.ToLower(name), ".exe")
 	}
-	if name != hookBinaryName {
-		return "", fmt.Errorf("daemon executable %s is not named %q", exe, hookBinaryName)
-	}
+	pinned = name == hookBinaryName
 	base := projectEnv["PATH"]
 	if base == "" {
 		base = getenv("PATH")
 	}
 	dir := filepath.Dir(exe)
-	if base == "" {
-		return dir, nil
+	path = dir
+	if base != "" {
+		path = dir + string(os.PathListSeparator) + base
 	}
-	return dir + string(os.PathListSeparator) + base, nil
+	return EnsureSystemPathDirs(path), pinned, nil
 }
 
 // provisionWorkspace applies the project's per-workspace setup after the

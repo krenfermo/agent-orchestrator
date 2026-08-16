@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -531,65 +530,33 @@ func (l *agentLauncher) runtimeEnv(ctx context.Context, spec LaunchSpec, argv []
 	if strings.TrimSpace(l.runFile) != "" {
 		env[EnvRunFile] = l.runFile
 	}
-	path, err := sessionmanager.HookPATH(l.executable, os.Getenv, env)
-	if err == nil {
-		env["PATH"] = path
-	} else if shimDir, shimErr := l.ensureAOShimDir(); shimErr == nil {
-		env["PATH"] = prependPathDir(shimDir, env["PATH"])
+	path, pinned, err := sessionmanager.HookPATH(l.executable, os.Getenv, env)
+	if err != nil {
+		// HookPATH itself failed (the daemon's own executable path could not be
+		// resolved at all) — extremely rare. Keep whatever PATH the base env
+		// already had rather than losing it, but still guarantee system dirs so
+		// the reviewer's own agent CLI (Claude/Codex) keeps working.
+		env["PATH"] = sessionmanager.EnsureSystemPathDirs(env["PATH"])
+		env[EnvAOCommandWarning] = fmt.Sprintf("PATH pin failed: %v", err)
 	} else {
-		env[EnvAOCommandWarning] = fmt.Sprintf("PATH pin failed: %v; AO shim fallback failed: %v", err, shimErr)
+		env["PATH"] = path
+		if !pinned {
+			// The daemon binary isn't named "ao", so HookPATH's prepended
+			// directory doesn't make the bare `ao` in review guidance resolve to
+			// it. Add a real `ao` shim on top of the already-good PATH (which
+			// still has the base/system dirs) rather than replacing PATH with
+			// just the shim dir — that replacement is what previously collapsed
+			// reviewer PATH down to nothing but one narrow directory and broke
+			// Claude Code's own keychain/auth lookup (Checkpoint 8I.1).
+			if shimDir, shimErr := sessionmanager.EnsureAOShim(l.dataDir, l.executable); shimErr == nil {
+				env["PATH"] = sessionmanager.PrependPathDir(shimDir, env["PATH"])
+			} else {
+				env[EnvAOCommandWarning] = fmt.Sprintf("AO shim fallback failed: %v", shimErr)
+			}
+		}
 	}
 	sessionmanager.AugmentRuntimePATHForLaunchBinary(ctx, env, argv, exec.LookPath)
 	return env
-}
-
-func (l *agentLauncher) ensureAOShimDir() (string, error) {
-	if strings.TrimSpace(l.dataDir) == "" {
-		return "", fmt.Errorf("reviewer AO shim data directory is required")
-	}
-	exe, err := l.executable()
-	if err != nil {
-		return "", fmt.Errorf("resolve AO executable: %w", err)
-	}
-	if !filepath.IsAbs(exe) {
-		exe, err = filepath.Abs(exe)
-		if err != nil {
-			return "", fmt.Errorf("make AO executable absolute: %w", err)
-		}
-	}
-	shimDir := filepath.Join(l.dataDir, "reviewer-runtime", "bin")
-	if err := os.MkdirAll(shimDir, 0o700); err != nil {
-		return "", fmt.Errorf("create reviewer AO shim directory: %w", err)
-	}
-	shimPath := filepath.Join(shimDir, "ao")
-	if runtime.GOOS == "windows" {
-		shimPath += ".cmd"
-	}
-	if err := os.WriteFile(shimPath, []byte(aoShimScript(exe)), 0o600); err != nil {
-		return "", fmt.Errorf("write reviewer AO shim: %w", err)
-	}
-	if err := os.Chmod(shimPath, 0o700); err != nil { // #nosec G302 -- the reviewer shim must be executable by the AO user.
-		return "", fmt.Errorf("mark reviewer AO shim executable: %w", err)
-	}
-	return shimDir, nil
-}
-
-func aoShimScript(executable string) string {
-	if runtime.GOOS == "windows" {
-		return "@echo off\r\n\"" + executable + "\" %*\r\n"
-	}
-	return "#!/bin/sh\nexec " + shellQuote(executable) + ` "$@"` + "\n"
-}
-
-func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
-}
-
-func prependPathDir(dir, path string) string {
-	if strings.TrimSpace(path) == "" {
-		return dir
-	}
-	return dir + string(os.PathListSeparator) + path
 }
 
 func (l *agentLauncher) Notify(ctx context.Context, handleID string, spec LaunchSpec) error {

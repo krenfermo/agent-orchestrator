@@ -4514,7 +4514,7 @@ func pathPinManager(executable func() (string, error)) (*Manager, *fakeStore, *f
 // kills activity tracking).
 func TestSpawnAndRestore_PinHookPATHToDaemonBinary(t *testing.T) {
 	daemonExe := filepath.Join(t.TempDir(), "ao")
-	want := filepath.Dir(daemonExe) + string(os.PathListSeparator) + "/usr/bin"
+	want := filepath.Dir(daemonExe) + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin"
 	executable := func() (string, error) { return daemonExe, nil }
 
 	cases := []struct {
@@ -4552,33 +4552,66 @@ func TestSpawnAndRestore_PinHookPATHToDaemonBinary(t *testing.T) {
 }
 
 // TestSpawn_HookPATHPinUnavailable asserts the degraded path is loud, not
-// silent: when the daemon executable cannot anchor `ao` resolution, PATH is
-// left to the runtime's inherited default and a warning is logged.
+// silent, for a genuinely unresolvable daemon executable: PATH is left to
+// the runtime's inherited default and a warning is logged.
 func TestSpawn_HookPATHPinUnavailable(t *testing.T) {
-	cases := []struct {
-		name       string
-		executable func() (string, error)
-	}{
-		{"executable unresolvable", func() (string, error) { return "", errors.New("no exe") }},
-		{"executable not named ao", func() (string, error) { return "/opt/aod/ao-daemon", nil }},
+	m, _, rt, logBuf := pathPinManager(func() (string, error) { return "", errors.New("no exe") })
+	if _, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker}); err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			m, _, rt, logBuf := pathPinManager(tc.executable)
-			if _, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker}); err != nil {
-				t.Fatal(err)
-			}
-			if got, ok := rt.lastCfg.Env["PATH"]; ok {
-				t.Fatalf("runtime env PATH = %q, want unset when the pin cannot be applied", got)
-			}
-			if !strings.Contains(logBuf.String(), "not pinned") {
-				t.Fatalf("expected a 'not pinned' warning in the log, got %q", logBuf.String())
-			}
-		})
+	if got, ok := rt.lastCfg.Env["PATH"]; ok {
+		t.Fatalf("runtime env PATH = %q, want unset when the pin cannot be applied", got)
+	}
+	if !strings.Contains(logBuf.String(), "not pinned") {
+		t.Fatalf("expected a 'not pinned' warning in the log, got %q", logBuf.String())
+	}
+}
+
+// TestSpawn_HookPATHNotPinnedStaysUsable covers Checkpoint 8I.2: a daemon
+// executable not named "ao" can't anchor `ao` hook resolution, but PATH must
+// still be a fully usable base-plus-system-dirs value, not collapse to
+// nothing. (Checkpoint 8I.1 hit exactly this: HookPATH used to hard-error
+// here, callers left PATH unset/degraded, and a reviewer pane's PATH
+// collapsed down to a single narrow directory, breaking that agent CLI's own
+// auth lookup even though credentials were fine.)
+func TestSpawn_HookPATHNotPinnedStaysUsable(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	m, _, rt, logBuf := pathPinManager(func() (string, error) { return "/opt/aod/ao-daemon", nil })
+	if _, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker}); err != nil {
+		t.Fatal(err)
+	}
+	want := "/opt/aod" + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin"
+	if got := rt.lastCfg.Env["PATH"]; got != want {
+		t.Fatalf("runtime env PATH = %q, want %q", got, want)
+	}
+	if !strings.Contains(logBuf.String(), "PATH pin not applied") {
+		t.Fatalf("expected a 'PATH pin not applied' warning in the log, got %q", logBuf.String())
 	}
 }
 
 // TestSpawn_ProjectPATHIsPinBase asserts a project's PATH override survives the
+// TestSpawn_HookPATHDiagnosticsDoNotLogEnvValues guards against a regression
+// where the "PATH pin not applied" diagnostic (or any HookPATH-adjacent log
+// line) leaks the actual PATH/env content — which could include a
+// messaging-token-style secret, exactly the kind of value nestedAgentEnvVars
+// exists to keep out of AO's own spawned processes in the first place.
+// Structured log fields are fine (session id, the expected binary name); the
+// PATH value itself must never appear.
+func TestSpawn_HookPATHDiagnosticsDoNotLogEnvValues(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin/super-secret-project-path-marker")
+	m, _, _, logBuf := pathPinManager(func() (string, error) { return "/opt/aod/ao-daemon", nil })
+	if _, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker}); err != nil {
+		t.Fatal(err)
+	}
+	logged := logBuf.String()
+	if !strings.Contains(logged, "PATH pin not applied") {
+		t.Fatalf("expected a 'PATH pin not applied' warning in the log, got %q", logged)
+	}
+	if strings.Contains(logged, "super-secret-project-path-marker") {
+		t.Fatalf("HookPATH diagnostic leaked the PATH value into the log: %q", logged)
+	}
+}
+
 // pin as its base rather than being clobbered or clobbering: the daemon dir
 // still comes first.
 func TestSpawn_ProjectPATHIsPinBase(t *testing.T) {
@@ -4591,7 +4624,7 @@ func TestSpawn_ProjectPATHIsPinBase(t *testing.T) {
 	if _, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker}); err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Dir(daemonExe) + string(os.PathListSeparator) + "/proj/bin"
+	want := filepath.Dir(daemonExe) + string(os.PathListSeparator) + "/proj/bin" + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin"
 	if got := rt.lastCfg.Env["PATH"]; got != want {
 		t.Fatalf("runtime env PATH = %q, want %q", got, want)
 	}
@@ -4620,7 +4653,7 @@ func TestSpawnAndRestore_PrependsResolvedBinaryAndNodeDirsToRuntimePATH(t *testi
 			t.Fatal(err)
 		}
 	}
-	want := strings.Join([]string{binDir, nodeDir, filepath.Dir(daemonExe), "/usr/bin"}, string(os.PathListSeparator))
+	want := strings.Join([]string{binDir, nodeDir, filepath.Dir(daemonExe), "/usr/bin", "/bin"}, string(os.PathListSeparator))
 
 	for _, operation := range []string{"spawn", "restore"} {
 		t.Run(operation, func(t *testing.T) {
@@ -4693,7 +4726,7 @@ func TestSpawn_DoesNotAddNodeRuntimeForNativeBinary(t *testing.T) {
 	if nodeLookups != 0 {
 		t.Fatalf("node LookPath calls = %d, want 0 for native binary", nodeLookups)
 	}
-	want := strings.Join([]string{binDir, "/ao/bin", "/usr/bin"}, string(os.PathListSeparator))
+	want := strings.Join([]string{binDir, "/ao/bin", "/usr/bin", "/bin"}, string(os.PathListSeparator))
 	if got := rt.lastCfg.Env["PATH"]; got != want {
 		t.Fatalf("runtime env PATH = %q, want %q", got, want)
 	}

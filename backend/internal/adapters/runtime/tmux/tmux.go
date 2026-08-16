@@ -213,11 +213,65 @@ func sessionsHaveProcesses(ctx context.Context, pids []int) bool {
 	return false
 }
 
+// nestedAgentEnvVars are environment variables that mark the current process
+// as itself running inside an already-active Claude Code agent session
+// (CLAUDECODE/CLAUDE_CODE_*) or otherwise identify that parent agent process
+// (CLAUDE_PID, CLAUDE_EFFORT). tmux's server is a persistent process that
+// inherits and keeps the environment of whoever's `tmux -L <socket>` call
+// first started it, for the server's entire lifetime — every later session
+// and pane spawned on it inherits that same ambient environment, regardless
+// of which later process asked for the new session/pane. If AO's daemon is
+// itself started from inside another agent's shell (as happens routinely
+// during development, or when one agent supervises another), these vars leak
+// into AO's own isolated tmux server and from there into every worker and
+// reviewer pane it ever spawns, misidentifying independent reviewer
+// processes as nested child sessions of the parent agent with no standalone
+// auth (Checkpoint 8I.1/8I.2). Deliberately narrow and evidence-based rather
+// than a broad deny-list: every entry here was observed leaking during that
+// investigation. Everything else in the inherited environment (PATH, HOME,
+// USER, locale, credentials helpers, etc.) is preserved unchanged — sessions
+// still need a normal, working shell environment to run real agent CLIs.
+var nestedAgentEnvVars = []string{
+	"CLAUDECODE",
+	"CLAUDE_CODE_ENTRYPOINT",
+	"CLAUDE_CODE_SESSION_ID",
+	"CLAUDE_CODE_CHILD_SESSION",
+	"CLAUDE_CODE_MESSAGING_SOCKET",
+	"CLAUDE_CODE_MESSAGING_TOKEN",
+	"CLAUDE_CODE_EXECPATH",
+	"CLAUDE_PID",
+	"CLAUDE_EFFORT",
+}
+
+// sanitizeInheritedEnv drops nestedAgentEnvVars from a copy of environ,
+// leaving every other variable untouched. Applied to every tmux CLI
+// invocation (see execRunner.Run) since the very first one may be the call
+// that auto-starts AO's tmux server, and that call's environment becomes the
+// server's permanent ambient environment.
+func sanitizeInheritedEnv(environ []string) []string {
+	deny := make(map[string]struct{}, len(nestedAgentEnvVars))
+	for _, name := range nestedAgentEnvVars {
+		deny[name] = struct{}{}
+	}
+	out := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		name := kv
+		if idx := strings.IndexByte(kv, '='); idx >= 0 {
+			name = kv[:idx]
+		}
+		if _, denied := deny[name]; denied {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 type execRunner struct{}
 
 func (execRunner) Run(ctx context.Context, env []string, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Env = append(append([]string(nil), os.Environ()...), env...)
+	cmd.Env = append(sanitizeInheritedEnv(os.Environ()), env...)
 	// Run from a stable directory, not whatever the daemon process's cwd happens
 	// to be. The first tmux CLI call auto-starts tmux's persistent server, which
 	// inherits ITS launching process's cwd and keeps it for the server's entire
@@ -370,6 +424,53 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: session %s exited before ready", id)
 	}
 	return handle, nil
+}
+
+// ContaminatedEnvVars best-effort inspects this Runtime's tmux server's
+// global environment (the environment captured from whoever's `tmux -L
+// <socket>` call first started it — see sanitizeInheritedEnv) for any of
+// nestedAgentEnvVars, and returns the names found. It never modifies the
+// server: a server that was already started before a sanitized AO build ran
+// (or by an unpatched AO instance) keeps its contaminated environment for
+// its whole life — only a full `tmux -L <socket> kill-server` clears it, and
+// this Runtime does not do that on its own. Callers (e.g. daemon startup
+// diagnostics) can use this to log a one-time warning suggesting a manual
+// kill-server rather than silently running degraded. An empty result also
+// covers the common "no server for this socket yet" case: tmux's own
+// show-environment error in that case is treated as "nothing found", not a
+// caller-visible failure.
+func (r *Runtime) ContaminatedEnvVars(ctx context.Context) []string {
+	out, err := r.run(ctx, showGlobalEnvironmentArgs()...)
+	if err != nil {
+		return nil
+	}
+	return contaminatedFromShowEnvironment(string(out), nestedAgentEnvVars)
+}
+
+// contaminatedFromShowEnvironment parses `tmux show-environment -g` output
+// (one "NAME=value" or "-NAME" — tmux's marker for an unset-but-tracked var —
+// per line) and returns which of names are present and set to a non-empty
+// value.
+func contaminatedFromShowEnvironment(output string, names []string) []string {
+	want := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		want[name] = struct{}{}
+	}
+	var found []string
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "-") {
+			continue
+		}
+		name := line
+		if idx := strings.IndexByte(line, '='); idx >= 0 {
+			name = line[:idx]
+		}
+		if _, ok := want[name]; ok {
+			found = append(found, name)
+		}
+	}
+	return found
 }
 
 // Restart replaces the command in an existing pane while preserving the tmux

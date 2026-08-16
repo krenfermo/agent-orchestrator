@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -82,6 +83,7 @@ func TestHookPATH(t *testing.T) {
 		daemonPATH string
 		projectEnv map[string]string
 		want       string
+		wantPinned bool
 		wantErr    bool
 	}{
 		{
@@ -89,18 +91,24 @@ func TestHookPATH(t *testing.T) {
 			executable: exeOK,
 			daemonPATH: "/usr/bin" + sep + "/bin",
 			want:       daemonDir + sep + "/usr/bin" + sep + "/bin",
+			wantPinned: true,
 		},
 		{
 			name:       "project PATH override is the base",
 			executable: exeOK,
 			daemonPATH: "/usr/bin",
 			projectEnv: map[string]string{"PATH": "/proj/bin"},
-			want:       daemonDir + sep + "/proj/bin",
+			want:       daemonDir + sep + "/proj/bin" + sep + "/usr/bin" + sep + "/bin",
+			wantPinned: true,
 		},
 		{
-			name:       "empty base PATH yields the daemon dir alone",
+			// Required system dirs are appended even when the base PATH was
+			// empty, so a caller building PATH from scratch never ends up with
+			// only the daemon's own directory (Checkpoint 8I.2).
+			name:       "empty base PATH still yields required system dirs",
 			executable: exeOK,
-			want:       daemonDir,
+			want:       daemonDir + sep + "/usr/bin" + sep + "/bin",
+			wantPinned: true,
 		},
 		{
 			name:       "unresolvable executable fails",
@@ -110,11 +118,18 @@ func TestHookPATH(t *testing.T) {
 		},
 		{
 			// A daemon binary not named "ao" cannot anchor `ao` resolution by
-			// having its directory prepended, so the pin must be refused.
-			name:       "executable not named ao fails",
+			// having its directory prepended, so the pin is reported as not
+			// applied (pinned=false) — but PATH itself must stay fully usable
+			// (base PATH plus required system dirs), never collapse to nothing.
+			// This is the exact fragility Checkpoint 8I.1 hit: HookPATH used to
+			// hard-error here, and callers degraded PATH down to a single
+			// narrow directory, breaking the reviewer agent CLI's own auth
+			// lookup even though credentials were fine.
+			name:       "executable not named ao is not pinned but PATH stays usable",
 			executable: func() (string, error) { return filepath.Join("/opt", "aod", "ao-daemon"), nil },
 			daemonPATH: "/usr/bin",
-			wantErr:    true,
+			want:       filepath.Join("/opt", "aod") + sep + "/usr/bin" + sep + "/bin",
+			wantPinned: false,
 		},
 	}
 	for _, tc := range cases {
@@ -125,7 +140,7 @@ func TestHookPATH(t *testing.T) {
 				}
 				return ""
 			}
-			got, err := HookPATH(tc.executable, getenv, tc.projectEnv)
+			got, pinned, err := HookPATH(tc.executable, getenv, tc.projectEnv)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("HookPATH = %q, want error", got)
@@ -137,6 +152,48 @@ func TestHookPATH(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("HookPATH = %q, want %q", got, tc.want)
+			}
+			if pinned != tc.wantPinned {
+				t.Fatalf("HookPATH pinned = %v, want %v", pinned, tc.wantPinned)
+			}
+		})
+	}
+}
+
+// TestHookPATH_PreservesInheritedAgentDirs is a proxy for "real agent CLIs
+// (Claude Code, Codex) stay resolvable": HookPATH must never drop a
+// directory that was already on the inherited/base PATH, regardless of
+// whether the daemon executable happens to be named "ao". A typical dev
+// machine has those installed under something like ~/.local/bin or
+// /opt/homebrew/bin, which is exactly the kind of entry Checkpoint 8I.1's
+// PATH-collapse bug silently lost.
+func TestHookPATH_PreservesInheritedAgentDirs(t *testing.T) {
+	claudeDir := "/Users/dev/.local/bin"
+	codexDir := "/opt/homebrew/bin"
+	inherited := claudeDir + string(os.PathListSeparator) + codexDir
+	getenv := func(key string) string {
+		if key == "PATH" {
+			return inherited
+		}
+		return ""
+	}
+
+	for _, tc := range []struct {
+		name       string
+		executable func() (string, error)
+	}{
+		{"named ao", func() (string, error) { return filepath.Join("/opt", "aod", "ao"), nil }},
+		{"not named ao", func() (string, error) { return filepath.Join("/opt", "aod", "ao-daemon"), nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, err := HookPATH(tc.executable, getenv, nil)
+			if err != nil {
+				t.Fatalf("HookPATH: %v", err)
+			}
+			for _, dir := range []string{claudeDir, codexDir} {
+				if !strings.Contains(got, dir) {
+					t.Fatalf("HookPATH = %q, want it to still contain agent install dir %q", got, dir)
+				}
 			}
 		})
 	}

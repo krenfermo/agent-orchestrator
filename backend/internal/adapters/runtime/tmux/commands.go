@@ -27,6 +27,15 @@ func respawnPaneArgs(id, cwd, shellPath, launchCmd string) []string {
 	}
 }
 
+// showGlobalEnvironmentArgs lists the tmux server's global environment — the
+// environment captured from whoever's `tmux -L <socket>` call first started
+// the server, which every session/pane it later spawns inherits. Used only
+// for best-effort drift detection (Runtime.ContaminatedEnvVars), never to
+// mutate a running server.
+func showGlobalEnvironmentArgs() []string {
+	return []string{"show-environment", "-g"}
+}
+
 // setStatusOffArgs hides the tmux status bar for the given session.
 // set-option uses pane-targeting syntax which does not accept the `=` prefix,
 // so we pass the session name directly.
