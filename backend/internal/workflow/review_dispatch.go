@@ -165,6 +165,13 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 	if run.State.Terminal() || reviewStep.State.Terminal() {
 		return reviewStep, nil
 	}
+	// Checkpoint 8K-A: never launch/re-launch a reviewer while this step has
+	// an unresolved question open.
+	if open, err := c.hasOpenQuestion(ctx, run.ID, &reviewStep.ID); err != nil {
+		return reviewStep, err
+	} else if open {
+		return reviewStep, nil
+	}
 	if c.reviewerLauncher == nil || c.reviewRuns == nil {
 		// No launcher/review-store wired (e.g. a unit test exercising only
 		// the durable foundation or 8B's work-step dispatch). Nothing to do.

@@ -45,6 +45,13 @@ func (c *Coordinator) dispatchFixStep(ctx stdctx.Context, run domain.WorkflowRun
 	if run.State.Terminal() || fixStep.State.Terminal() {
 		return fixStep, nil
 	}
+	// Checkpoint 8K-A: never send fix findings into a session paused on an
+	// unresolved question.
+	if open, err := c.hasOpenQuestion(ctx, run.ID, &fixStep.ID); err != nil {
+		return fixStep, err
+	} else if open {
+		return fixStep, nil
+	}
 	if c.messageSender == nil {
 		return fixStep, nil
 	}

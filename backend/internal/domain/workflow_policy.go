@@ -23,6 +23,16 @@ type WorkflowPolicy struct {
 	// configured reviewer harness; it exists now so the budget field is not
 	// scattered in a later checkpoint.
 	MaxReviewProviderAttempts int `json:"maxReviewProviderAttempts"`
+	// MaxAutoAnsweredQuestionsPerStep bounds how many captured questions on
+	// a single step may be auto-answered by the policy resolver
+	// (Checkpoint 8K-A) before AO stops trusting the auto path for that step
+	// and forces state=human_required regardless of what the classifier
+	// said. 8K-A has no second-LLM resolver loop yet, so this budget cannot
+	// be exhausted by a resolver retry storm today — but a worker can still
+	// pathologically re-ask the same policy-resolvable question after every
+	// restart/checkpoint, so the loop-safety net exists from the start
+	// rather than being added reactively in a later checkpoint.
+	MaxAutoAnsweredQuestionsPerStep int `json:"maxAutoAnsweredQuestionsPerStep"`
 }
 
 // DefaultWorkflowPolicy is the fixed v1 policy every Checkpoint 8D run is
@@ -30,9 +40,10 @@ type WorkflowPolicy struct {
 // per-run; nothing in this checkpoint does.
 func DefaultWorkflowPolicy() WorkflowPolicy {
 	return WorkflowPolicy{
-		Version:                   "v1",
-		MaxFixCycles:              3,
-		MaxWorkProviderAttempts:   3,
-		MaxReviewProviderAttempts: 3,
+		Version:                         "v1",
+		MaxFixCycles:                    3,
+		MaxWorkProviderAttempts:         3,
+		MaxReviewProviderAttempts:       3,
+		MaxAutoAnsweredQuestionsPerStep: 5,
 	}
 }

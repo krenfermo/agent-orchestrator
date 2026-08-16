@@ -147,6 +147,16 @@ type Deps struct {
 	// durably switch the session, and is surfaced as needs_attention instead.
 	Switcher AgentSwitcher
 
+	// QuestionsStore and PaneReader back Checkpoint 8K-A's durable question
+	// detection/classification/policy-resolution (questions_wiring.go).
+	// Both optional: a nil QuestionsStore means detection, delivery,
+	// dispatch guards, and cancel-cascade are all no-ops (same convention
+	// as every other optional dependency here); a nil PaneReader with a
+	// non-nil QuestionsStore still delivers already-answered questions
+	// (restart recovery) but never attempts new detection.
+	QuestionsStore QuestionsStore
+	PaneReader     PaneReader
+
 	// Clock and NewID are injectable for deterministic tests.
 	Clock func() time.Time
 	NewID func() string
@@ -183,6 +193,11 @@ type Coordinator struct {
 
 	// switcher backs Checkpoint 8H's live-session failover. Optional.
 	switcher AgentSwitcher
+
+	// questionsStore and paneReader back Checkpoint 8K-A's durable question
+	// handling. Both optional.
+	questionsStore QuestionsStore
+	paneReader     PaneReader
 }
 
 // New wires a Coordinator from its dependencies, defaulting the clock and id source.
@@ -211,6 +226,8 @@ func New(d Deps) *Coordinator {
 		planner:               d.Planner,
 		plannerContextBuilder: d.PlannerContextBuilder,
 		switcher:              d.Switcher,
+		questionsStore:        d.QuestionsStore,
+		paneReader:            d.PaneReader,
 		clock:                 clock,
 		newID:                 newID,
 	}
@@ -387,6 +404,15 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 		}
 	}
 
+	// Checkpoint 8K-A: durable question detection + restart-recovery
+	// delivery sweep, read-time-derived exactly like observeWorkStep above —
+	// runs before the review<->fix cascade so a freshly detected/answered
+	// question's dispatch guards (dispatch.go, fix_dispatch.go,
+	// review_dispatch.go) see up-to-date state within this same call.
+	if err := c.reconcileQuestions(ctx, run, steps); err != nil {
+		return RunDetail{}, err
+	}
+
 	// Checkpoint 8D: the automatic review<->fix progression cascade —
 	// opportunistically observes a running review/fix step and dispatches
 	// the next eligible cycle within this same call (see advanceReviewFixCycle's
@@ -442,6 +468,20 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 			}
 		}
 	}
+
+	// Checkpoint 8K-A: an open question always wins over any checkpoint's
+	// recorded NextAction — the run is not truly progressing toward that
+	// next_action until the question is resolved. Derived at read time
+	// only, never persisted: the moment the question is answered+delivered
+	// it drops out of ListOpenWorkflowQuestionsByRun and this override
+	// disappears on its own on the very next GetRun call, no second manual
+	// step required.
+	if c.questionsStore != nil {
+		if open, oerr := c.questionsStore.ListOpenWorkflowQuestionsByRun(ctx, runID); oerr == nil && len(open) > 0 {
+			detail.NextAction = nextActionForOpenQuestion(open[0])
+		}
+	}
+
 	return detail, nil
 }
 
@@ -681,6 +721,17 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 			}); err != nil {
 				return RunDetail{}, err
 			}
+		}
+	}
+
+	// Checkpoint 8K-A: cancelling a run also cancels any open questions —
+	// no resolver call, no delivery attempt follows. Cancelled is terminal
+	// for a question just like for a step; the delivery sweep only ever
+	// considers state=answered, so a cancelled question is naturally
+	// excluded without any extra guard there.
+	if c.questionsStore != nil {
+		if _, err := c.questionsStore.CancelOpenWorkflowQuestionsByRun(ctx, runID); err != nil {
+			return RunDetail{}, err
 		}
 	}
 

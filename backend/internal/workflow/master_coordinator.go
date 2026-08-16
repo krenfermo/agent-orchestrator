@@ -371,6 +371,13 @@ func (c *Coordinator) reconcileMasterTasks(ctx stdctx.Context, run domain.Workfl
 			_, _ = c.planStore.UpdateWorkflowTaskState(ctx, task.ID, domain.WorkflowTaskBlocked, domain.WorkflowTaskEligible, c.clock())
 			task.State = domain.WorkflowTaskEligible
 		}
+		// Checkpoint 8K-A: never dispatch the next master task while the
+		// parent run itself has an unresolved question open.
+		if open, err := c.hasOpenQuestion(ctx, run.ID, nil); err != nil {
+			return err
+		} else if open {
+			return nil
+		}
 		return c.dispatchMasterTask(ctx, run, *task)
 	}
 	return nil

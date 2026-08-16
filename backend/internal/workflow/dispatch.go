@@ -76,6 +76,13 @@ func (c *Coordinator) dispatchWorkStep(ctx stdctx.Context, run domain.WorkflowRu
 	if run.State.Terminal() || step.State.Terminal() {
 		return step, nil
 	}
+	// Checkpoint 8K-A: an unresolved question on this step means the worker
+	// is paused on a decision — never dispatch (or re-dispatch) into that.
+	if open, err := c.hasOpenQuestion(ctx, run.ID, &step.ID); err != nil {
+		return step, err
+	} else if open {
+		return step, nil
+	}
 	// Primary, cheapest guard: a session is already durably associated.
 	if step.SessionID != nil {
 		return step, nil

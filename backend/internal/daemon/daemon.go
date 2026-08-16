@@ -37,14 +37,16 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/push"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
-	environmentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/environment"
 	browsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/browser"
+	capacitysvc "github.com/aoagents/agent-orchestrator/backend/internal/service/capacity"
 	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	devimportsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/devimport"
+	environmentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/environment"
 	importsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/importer"
 	notificationsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/notification"
 	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
+	questionssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/questions"
 	settingssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/settings"
 	usagesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/usage"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillassets"
@@ -393,7 +395,7 @@ func RunWithConfig(cfg config.Config) error {
 		auth:       reviewerAgentAuth{agents: agents},
 		executable: os.Executable,
 	}
-	workflowCoordinator, workflowSvc := startWorkflows(store, rawSessionMgr, workspaceObserver, workflowReviewerLauncher, log)
+	workflowCoordinator, workflowSvc := startWorkflows(store, rawSessionMgr, workspaceObserver, workflowReviewerLauncher, runtimeAdapter, log)
 	if reconcileErr := workflowCoordinator.Reconcile(ctx); reconcileErr != nil {
 		log.Error("reconcile workflow runs on boot failed", "err", reconcileErr)
 	}
@@ -462,6 +464,8 @@ func RunWithConfig(cfg config.Config) error {
 		Activity:           lcStack.LCM,
 		UsageHooks:         usageCollector,
 		UsageSummary:       usagesvc.NewSummaryReader(store),
+		Capacity:           capacitysvc.NewReader(store),
+		Questions:          &questionssvc.AnswerService{Store: store, Runs: store, Sender: rawSessionMgr},
 		Telemetry:          telemetrySink,
 		Mobile:             mc,
 		DevImport: devimportsvc.New(devimportsvc.Deps{

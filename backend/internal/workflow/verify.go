@@ -157,6 +157,13 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 	if run.State.Terminal() || reviewStep.State != domain.WorkflowStepCompleted || verifyStep.State.Terminal() || c.verifier == nil || c.workspaceFacts == nil || c.reviewRuns == nil {
 		return run, verifyStep, nil
 	}
+	// Checkpoint 8K-A: never start verification while this step (or the
+	// run) has an unresolved question open.
+	if open, err := c.hasOpenQuestion(ctx, run.ID, &verifyStep.ID); err != nil {
+		return run, verifyStep, err
+	} else if open {
+		return run, verifyStep, nil
+	}
 	workCP, hasCP, err := c.store.GetLatestWorkflowCheckpointByStep(ctx, workStep.ID)
 	if err != nil {
 		return run, verifyStep, err

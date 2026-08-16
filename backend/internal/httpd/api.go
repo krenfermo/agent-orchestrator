@@ -29,19 +29,27 @@ const minimumSwitchAgentRequestTimeout = 6 * time.Minute
 
 // APIDeps bundles every service the API layer's controllers depend on.
 type APIDeps struct {
-	Agents             controllers.AgentCatalog
-	Projects           projectsvc.Manager
-	Environment        controllers.EnvironmentStatusProvider
-	Sessions           controllers.SessionService
-	Activity           controllers.ActivityRecorder
-	UsageHooks         controllers.UsageHookRecorder
-	UsageSummary       controllers.UsageSummaryService
-	PRs                prsvc.ActionManager
-	Reviews            reviewsvc.Manager
+	Agents       controllers.AgentCatalog
+	Projects     projectsvc.Manager
+	Environment  controllers.EnvironmentStatusProvider
+	Sessions     controllers.SessionService
+	Activity     controllers.ActivityRecorder
+	UsageHooks   controllers.UsageHookRecorder
+	UsageSummary controllers.UsageSummaryService
+	// Capacity backs Checkpoint 8J's read-only capacity/quota view. Optional
+	// like the other 8H/8J surfaces; nil answers 501.
+	Capacity controllers.CapacityService
+	PRs      prsvc.ActionManager
+	Reviews  reviewsvc.Manager
 	// Workflows is nil until wired; the controller then answers 501, matching
 	// the other optional surfaces. Checkpoint 8A: durable foundation only, no
 	// execution.
-	Workflows          workflowsvc.Manager
+	Workflows workflowsvc.Manager
+	// Questions backs Checkpoint 8K-A's durable question detection/answer
+	// API. Optional: nil leaves the /questions routes and the run-detail
+	// Questions field both answering 501/absent, matching the other
+	// optional surfaces here.
+	Questions          controllers.WorkflowQuestionsService
 	Notifications      controllers.NotificationService
 	NotificationStream controllers.NotificationStream
 	Push               controllers.PushRegistry
@@ -107,6 +115,7 @@ type API struct {
 	environment   *controllers.EnvironmentController
 	sessions      *controllers.SessionsController
 	usage         *controllers.UsageController
+	capacity      *controllers.CapacityController
 	prs           *controllers.PRsController
 	reviews       *controllers.ReviewsController
 	notifications *controllers.NotificationsController
@@ -145,6 +154,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			Capabilities:  deps.SessionCapabilities,
 		},
 		usage:         &controllers.UsageController{Svc: deps.UsageSummary},
+		capacity:      &controllers.CapacityController{Svc: deps.Capacity},
 		prs:           &controllers.PRsController{Svc: deps.PRs},
 		reviews:       &controllers.ReviewsController{Svc: deps.Reviews},
 		notifications: &controllers.NotificationsController{Svc: deps.Notifications, Stream: deps.NotificationStream},
@@ -155,7 +165,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		settings:      &controllers.SettingsController{Svc: deps.Settings},
 		dev:           &controllers.DevController{Import: deps.DevImport},
 		browser:       &controllers.BrowserController{Svc: deps.Browser},
-		workflows:     &controllers.WorkflowsController{Svc: deps.Workflows},
+		workflows:     &controllers.WorkflowsController{Svc: deps.Workflows, UsageReader: deps.UsageSummary, QuestionsReader: deps.Questions},
 		events:        &EventsController{Source: deps.CDC, Live: deps.Events},
 	}
 }
@@ -184,6 +194,7 @@ func (a *API) Register(root chi.Router) {
 			a.environment.Register(r)
 			a.sessions.Register(r)
 			a.usage.Register(r)
+			a.capacity.Register(r)
 			a.prs.Register(r)
 			a.reviews.Register(r)
 			a.notifications.Register(r)

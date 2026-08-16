@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -131,6 +132,16 @@ type WorkflowRunDetailView struct {
 	Steps []WorkflowStepView `json:"steps"`
 	Plan  *WorkflowPlanView  `json:"plan,omitempty"`
 	Tasks []WorkflowTaskView `json:"tasks,omitempty"`
+	// Usage is Checkpoint 8J's usage/telemetry/session-refresh section. Nil
+	// only when the controller has no UsageReader wired (headless/test
+	// configurations without a usage summary service) — otherwise always
+	// present, with per-field null/"unknown" markers rather than omission.
+	Usage *WorkflowUsageResponse `json:"usage,omitempty"`
+	// Questions is Checkpoint 8K-A's durable question list (any state, most
+	// recent last) — omitted entirely when the controller has no
+	// QuestionsReader wired, empty (not omitted) when wired but the run has
+	// never had a question.
+	Questions []WorkflowQuestionResponse `json:"questions,omitempty"`
 }
 
 type WorkflowPlanView struct {
@@ -181,7 +192,7 @@ func workflowRunView(run domain.WorkflowRun, nextAction string) WorkflowRunView 
 	}
 }
 
-func workflowRunDetailView(detail workflowcore.RunDetail) WorkflowRunDetailView {
+func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail workflowcore.RunDetail) WorkflowRunDetailView {
 	steps := make([]WorkflowStepView, 0, len(detail.Steps))
 	for _, sd := range detail.Steps {
 		step := sd.Step
@@ -291,12 +302,29 @@ func workflowRunDetailView(detail workflowcore.RunDetail) WorkflowRunDetailView 
 		}
 		view.Tasks = append(view.Tasks, WorkflowTaskView{ID: task.PlanStepID, Number: task.Ordinal, Title: task.Title, Description: task.Description, Dependencies: deps, AcceptanceCriteria: criteria, Verify: verify, State: task.State, ExecutionWorkflowID: execID})
 	}
+	if c.UsageReader != nil {
+		usage := workflowUsageResponse(BuildWorkflowUsageView(ctx, detail, c.UsageReader))
+		view.Usage = &usage
+	}
+	if c.QuestionsReader != nil {
+		if qs, err := c.QuestionsReader.ListByRun(ctx, detail.Run.ID); err == nil {
+			view.Questions = workflowQuestionResponses(qs)
+		}
+	}
 	return view
 }
 
 // WorkflowsController owns the /workflows routes. A nil Svc returns 501.
 type WorkflowsController struct {
 	Svc workflowsvc.Manager
+	// UsageReader backs Checkpoint 8J's Usage section. Optional: nil leaves
+	// WorkflowRunDetailView.Usage unset rather than failing the request, so
+	// a headless/test daemon without usage wiring keeps working unchanged.
+	UsageReader SessionUsageLookup
+	// QuestionsReader backs Checkpoint 8K-A's Questions section, embedded
+	// into every run-detail response the same way UsageReader is. Optional:
+	// nil leaves WorkflowRunDetailView.Questions unset.
+	QuestionsReader WorkflowQuestionsService
 }
 
 // Register mounts the workflow routes on the supplied router.
@@ -311,6 +339,7 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	r.Get("/workflows/{workflowId}/plan", c.get)
 	r.Post("/workflows/{workflowId}/plan/approve", c.approvePlan)
 	r.Post("/workflows/{workflowId}/plan/reject", c.rejectPlan)
+	(&WorkflowQuestionsController{Svc: c.QuestionsReader}).Register(r)
 }
 
 func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
@@ -347,7 +376,7 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusCreated, WorkflowRunResponse{Workflow: workflowRunDetailView(detail)})
+	envelope.WriteJSON(w, http.StatusCreated, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
 }
 
 func (c *WorkflowsController) generatePlan(w http.ResponseWriter, r *http.Request) {
@@ -365,7 +394,7 @@ func (c *WorkflowsController) generatePlan(w http.ResponseWriter, r *http.Reques
 		writeWorkflowError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: workflowRunDetailView(detail)})
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
 }
 func (c *WorkflowsController) approvePlan(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
@@ -382,7 +411,7 @@ func (c *WorkflowsController) approvePlan(w http.ResponseWriter, r *http.Request
 		writeWorkflowError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: workflowRunDetailView(detail)})
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
 }
 func (c *WorkflowsController) rejectPlan(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
@@ -399,7 +428,7 @@ func (c *WorkflowsController) rejectPlan(w http.ResponseWriter, r *http.Request)
 		writeWorkflowError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: workflowRunDetailView(detail)})
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
 }
 
 func (c *WorkflowsController) get(w http.ResponseWriter, r *http.Request) {
@@ -412,7 +441,7 @@ func (c *WorkflowsController) get(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: workflowRunDetailView(detail)})
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
 }
 
 func (c *WorkflowsController) list(w http.ResponseWriter, r *http.Request) {
@@ -443,7 +472,7 @@ func (c *WorkflowsController) cancel(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: workflowRunDetailView(detail)})
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
 }
 
 func (c *WorkflowsController) start(w http.ResponseWriter, r *http.Request) {
@@ -456,7 +485,7 @@ func (c *WorkflowsController) start(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: workflowRunDetailView(detail)})
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
 }
 
 func (c *WorkflowsController) continueRun(w http.ResponseWriter, r *http.Request) {
@@ -469,7 +498,7 @@ func (c *WorkflowsController) continueRun(w http.ResponseWriter, r *http.Request
 		writeWorkflowError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: workflowRunDetailView(detail)})
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
 }
 
 func writeWorkflowError(w http.ResponseWriter, r *http.Request, err error) {

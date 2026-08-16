@@ -334,6 +334,31 @@ paths:
       summary: Check whether the desktop browser runtime is connected for a session
       tags:
       - browser
+  /api/v1/capacity:
+    get:
+      operationId: listCapacity
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersListCapacityResponse'
+          description: OK
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: List Checkpoint 8J capacity/quota snapshots per known harness
+      tags:
+      - capacity
   /api/v1/dev/import-projects:
     post:
       operationId: runDevImportProjects
@@ -5291,6 +5316,132 @@ paths:
       summary: Reject and cancel a master plan
       tags:
       - workflows
+  /api/v1/workflows/{workflowId}/questions:
+    get:
+      operationId: listWorkflowQuestions
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListWorkflowQuestionsResponse'
+          description: OK
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: List durable questions (Checkpoint 8K-A) captured for a workflow run
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/questions/{questionId}:
+    get:
+      operationId: getWorkflowQuestion
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      - description: Workflow question identifier.
+        in: path
+        name: questionId
+        required: true
+        schema:
+          description: Workflow question identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowQuestionResponseBody'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Get one durable question captured for a workflow run
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/questions/{questionId}/answer:
+    post:
+      operationId: answerWorkflowQuestion
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      - description: Workflow question identifier.
+        in: path
+        name: questionId
+        required: true
+        schema:
+          description: Workflow question identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnswerWorkflowQuestionRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowQuestionResponseBody'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unprocessable Entity
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Submit a human answer for a question that is awaiting one (Checkpoint
+        8K-A)
+      tags:
+      - workflows
   /api/v1/workflows/{workflowId}/start:
     post:
       operationId: startWorkflowRun
@@ -5554,6 +5705,19 @@ components:
       required:
       - switch
       type: object
+    AnswerWorkflowQuestionRequest:
+      properties:
+        choiceId:
+          description: One of the question's structured choice ids.
+          type:
+          - "null"
+          - string
+        customText:
+          description: Free-text human answer, when no structured choice applies.
+          type:
+          - "null"
+          - string
+      type: object
     AttachmentInput:
       properties:
         data:
@@ -5720,6 +5884,93 @@ components:
         disabled:
           type: boolean
       type: object
+    ControllersCapacitySnapshotResponse:
+      properties:
+        certainty:
+          enum:
+          - actual
+          - inferred
+          - unknown
+          type: string
+        detectedAt:
+          type:
+          - "null"
+          - string
+        harness:
+          type: string
+        model:
+          type:
+          - "null"
+          - string
+        provider:
+          type: string
+        reason:
+          type: string
+        resetAt:
+          type:
+          - "null"
+          - string
+        state:
+          enum:
+          - available
+          - limited
+          - cooldown
+          - unavailable
+          - unknown
+          type: string
+      required:
+      - harness
+      - state
+      - detectedAt
+      - resetAt
+      - certainty
+      type: object
+    ControllersListCapacityResponse:
+      properties:
+        capacity:
+          items:
+            $ref: '#/components/schemas/ControllersCapacitySnapshotResponse'
+          type: array
+      required:
+      - capacity
+      type: object
+    ControllersRoleUsageResponse:
+      properties:
+        completedAt:
+          type:
+          - "null"
+          - string
+        durationMs:
+          type:
+          - "null"
+          - integer
+        harness:
+          type: string
+        model:
+          type: string
+        provider:
+          type: string
+        role:
+          type: string
+        sessionId:
+          type: string
+        startedAt:
+          type:
+          - "null"
+          - string
+        stepKind:
+          type: string
+        usage:
+          $ref: '#/components/schemas/SessionUsageResponse'
+        verifyChecks:
+          type:
+          - "null"
+          - integer
+      required:
+      - role
+      - stepKind
+      - usage
+      type: object
     ControllersSecurePairingStatus:
       properties:
         active:
@@ -5740,6 +5991,20 @@ components:
       - active
       - host
       - port
+      - reason
+      type: object
+    ControllersSessionRefreshAdvisoryResponse:
+      properties:
+        reason:
+          type: string
+        recommendation:
+          type: string
+        signals:
+          items:
+            type: string
+          type: array
+      required:
+      - recommendation
       - reason
       type: object
     ControllersSessionView:
@@ -5885,6 +6150,116 @@ components:
           type: boolean
       required:
       - enabled
+      type: object
+    ControllersTaskCheckpointSummaryResponse:
+      properties:
+        acceptanceCriteria:
+          items:
+            type: string
+          type: array
+        activeErrors:
+          items:
+            type: string
+          type: array
+        architecturalFacts:
+          items:
+            type: string
+          type: array
+        currentFingerprint:
+          type: string
+        decisions:
+          items:
+            type: string
+          type: array
+        filesChanged:
+          items:
+            type: string
+          type: array
+        latestReviewFindings:
+          type: string
+        nextAction:
+          type: string
+        objective:
+          type: string
+        relevantFiles:
+          items:
+            type: string
+          type: array
+        task:
+          type: string
+        tests:
+          items:
+            type: string
+          type: array
+      required:
+      - objective
+      type: object
+    ControllersTaskUsefulWorkMetricsResponse:
+      properties:
+        attempts:
+          format: int64
+          type: integer
+        cachedTokens:
+          type:
+          - "null"
+          - integer
+        durationMs:
+          type:
+          - "null"
+          - integer
+        fixCycles:
+          format: int64
+          type: integer
+        inputTokens:
+          type:
+          - "null"
+          - integer
+        outputTokens:
+          type:
+          - "null"
+          - integer
+        reviewRuns:
+          format: int64
+          type: integer
+        reviewsSkipped:
+          type: boolean
+        tokensCertainty:
+          type: string
+        verifyCheckCount:
+          type:
+          - "null"
+          - integer
+        verifyDurationMs:
+          type:
+          - "null"
+          - integer
+      required:
+      - attempts
+      - reviewRuns
+      - fixCycles
+      - reviewsSkipped
+      - inputTokens
+      - outputTokens
+      - cachedTokens
+      - tokensCertainty
+      type: object
+    ControllersWorkflowUsageResponse:
+      properties:
+        advisory:
+          $ref: '#/components/schemas/ControllersSessionRefreshAdvisoryResponse'
+        checkpoint:
+          $ref: '#/components/schemas/ControllersTaskCheckpointSummaryResponse'
+        metrics:
+          $ref: '#/components/schemas/ControllersTaskUsefulWorkMetricsResponse'
+        roles:
+          items:
+            $ref: '#/components/schemas/ControllersRoleUsageResponse'
+          type: array
+      required:
+      - roles
+      - metrics
+      - advisory
+      - checkpoint
       type: object
     ConversationAccountPayload:
       properties:
@@ -7014,6 +7389,15 @@ components:
           type: array
       required:
       - shellTerminals
+      type: object
+    ListWorkflowQuestionsResponse:
+      properties:
+        questions:
+          items:
+            $ref: '#/components/schemas/WorkflowQuestionResponse'
+          type: array
+      required:
+      - questions
       type: object
     ListWorkflowsResponse:
       properties:
@@ -9118,6 +9502,96 @@ components:
       - acceptanceCriteria
       - verify
       type: object
+    WorkflowQuestionChoiceResponse:
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+      required:
+      - id
+      - label
+      type: object
+    WorkflowQuestionResponse:
+      properties:
+        answerSource:
+          enum:
+          - ""
+          - policy
+          - human
+          type: string
+        answerText:
+          type: string
+        answeredAt:
+          type:
+          - "null"
+          - string
+        askingHarness:
+          type: string
+        askingRole:
+          type: string
+        certainty:
+          enum:
+          - actual
+          - inferred
+          - unknown
+          type: string
+        classification:
+          enum:
+          - policy_resolvable
+          - auto_resolvable
+          - human_required
+          - ambiguous
+          type: string
+        classificationReason:
+          type: string
+        createdAt:
+          type: string
+        delivered:
+          type: boolean
+        deliveredAt:
+          type:
+          - "null"
+          - string
+        id:
+          type: string
+        questionText:
+          type: string
+        sessionId:
+          type: string
+        state:
+          enum:
+          - pending
+          - resolving
+          - answered
+          - human_required
+          - cancelled
+          type: string
+        structuredChoices:
+          items:
+            $ref: '#/components/schemas/WorkflowQuestionChoiceResponse'
+          type: array
+        workflowRunId:
+          type: string
+        workflowStepId:
+          type: string
+      required:
+      - id
+      - workflowRunId
+      - questionText
+      - certainty
+      - classification
+      - state
+      - createdAt
+      - delivered
+      type: object
+    WorkflowQuestionResponseBody:
+      properties:
+        question:
+          $ref: '#/components/schemas/WorkflowQuestionResponse'
+      required:
+      - question
+      type: object
     WorkflowReviewPolicyDecision:
       properties:
         complexity:
@@ -9174,6 +9648,10 @@ components:
       properties:
         plan:
           $ref: '#/components/schemas/WorkflowPlanView'
+        questions:
+          items:
+            $ref: '#/components/schemas/WorkflowQuestionResponse'
+          type: array
         run:
           $ref: '#/components/schemas/WorkflowRunView'
         steps:
@@ -9184,6 +9662,8 @@ components:
           items:
             $ref: '#/components/schemas/WorkflowTaskView'
           type: array
+        usage:
+          $ref: '#/components/schemas/ControllersWorkflowUsageResponse'
       required:
       - run
       - steps

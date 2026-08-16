@@ -592,6 +592,33 @@ type WorkflowPlan struct {
 	RejectedAt           sql.NullTime
 }
 
+type WorkflowQuestion struct {
+	ID                   string
+	WorkflowRunID        string
+	WorkflowStepID       sql.NullString
+	WorkflowAttemptID    sql.NullString
+	SessionID            sql.NullString
+	AskingHarness        sql.NullString
+	AskingRole           sql.NullString
+	Fingerprint          string
+	QuestionText         string
+	StructuredChoices    sql.NullString
+	CaptureProvider      sql.NullString
+	CaptureParserVersion sql.NullString
+	CaptureRangeLines    sql.NullInt64
+	Certainty            sql.NullString
+	Classification       sql.NullString
+	ClassificationReason sql.NullString
+	State                sql.NullString
+	CreatedAt            time.Time
+	AnsweredAt           sql.NullTime
+	AnswerSource         sql.NullString
+	AnswerText           sql.NullString
+	AnswerReference      sql.NullString
+	Delivered            int64
+	DeliveredAt          sql.NullTime
+}
+
 type WorkflowRun struct {
 	ID               string
 	ProjectID        domain.ProjectID

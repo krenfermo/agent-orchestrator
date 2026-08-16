@@ -318,26 +318,32 @@ var schemaNames = map[string]string{
 	"ControllersSubmitReviewItem":      "SubmitReviewItem",
 	"ControllersSubmitReviewInput":     "SubmitReviewInput",
 	// httpd/controllers — workflow wire envelopes
-	"ControllersCreateWorkflowRunRequest":    "CreateWorkflowRunRequest",
-	"ControllersWorkflowAttemptView":         "WorkflowAttemptView",
-	"ControllersWorkflowStepView":            "WorkflowStepView",
-	"ControllersWorkflowVerificationPlan":    "WorkflowVerificationPlan",
-	"ControllersWorkflowVerificationCommand": "WorkflowVerificationCommand",
-	"ControllersWorkflowVerificationFile":    "WorkflowVerificationFile",
-	"WorkflowVerifyResult":                   "WorkflowVerifyResult",
-	"WorkflowVerifyCheckResult":              "WorkflowVerifyCheckResult",
-	"ControllersWorkflowRunView":             "WorkflowRunView",
-	"ControllersWorkflowRunDetailView":       "WorkflowRunDetailView",
-	"ControllersWorkflowPlanView":            "WorkflowPlanView",
-	"ControllersWorkflowTaskView":            "WorkflowTaskView",
-	"WorkflowMasterPlan":                     "WorkflowMasterPlan",
-	"WorkflowPlannedStep":                    "WorkflowPlannedStep",
-	"WorkflowPlanValidation":                 "WorkflowPlanValidation",
-	"ControllersWorkflowRunResponse":         "WorkflowRunResponse",
-	"ControllersListWorkflowsResponse":       "ListWorkflowsResponse",
-	"ControllersWorkflowProjectIDParam":      "WorkflowProjectIDParam",
-	"ControllersWorkflowIDParam":             "WorkflowIDParam",
-	"ControllersListWorkflowsQuery":          "ListWorkflowsQuery",
+	"ControllersCreateWorkflowRunRequest":       "CreateWorkflowRunRequest",
+	"ControllersWorkflowAttemptView":            "WorkflowAttemptView",
+	"ControllersWorkflowStepView":               "WorkflowStepView",
+	"ControllersWorkflowVerificationPlan":       "WorkflowVerificationPlan",
+	"ControllersWorkflowVerificationCommand":    "WorkflowVerificationCommand",
+	"ControllersWorkflowVerificationFile":       "WorkflowVerificationFile",
+	"WorkflowVerifyResult":                      "WorkflowVerifyResult",
+	"WorkflowVerifyCheckResult":                 "WorkflowVerifyCheckResult",
+	"ControllersWorkflowRunView":                "WorkflowRunView",
+	"ControllersWorkflowRunDetailView":          "WorkflowRunDetailView",
+	"ControllersWorkflowPlanView":               "WorkflowPlanView",
+	"ControllersWorkflowTaskView":               "WorkflowTaskView",
+	"WorkflowMasterPlan":                        "WorkflowMasterPlan",
+	"WorkflowPlannedStep":                       "WorkflowPlannedStep",
+	"WorkflowPlanValidation":                    "WorkflowPlanValidation",
+	"ControllersWorkflowRunResponse":            "WorkflowRunResponse",
+	"ControllersListWorkflowsResponse":          "ListWorkflowsResponse",
+	"ControllersWorkflowProjectIDParam":         "WorkflowProjectIDParam",
+	"ControllersWorkflowIDParam":                "WorkflowIDParam",
+	"ControllersListWorkflowsQuery":             "ListWorkflowsQuery",
+	"ControllersWorkflowQuestionChoiceResponse": "WorkflowQuestionChoiceResponse",
+	"ControllersWorkflowQuestionResponse":       "WorkflowQuestionResponse",
+	"ControllersListWorkflowQuestionsResponse":  "ListWorkflowQuestionsResponse",
+	"ControllersWorkflowQuestionResponseBody":   "WorkflowQuestionResponseBody",
+	"ControllersAnswerWorkflowQuestionRequest":  "AnswerWorkflowQuestionRequest",
+	"ControllersWorkflowQuestionIDParam":        "WorkflowQuestionIDParam",
 	// domain review entities
 	"DomainReviewRun":     "ReviewRun",
 	"ReviewPRReviewState": "PRReviewState",
@@ -461,6 +467,7 @@ func operations() []operation {
 	ops = append(ops, reviewOperations()...)
 	ops = append(ops, notificationOperations()...)
 	ops = append(ops, usageOperations()...)
+	ops = append(ops, capacityOperations()...)
 	ops = append(ops, pushOperations()...)
 	ops = append(ops, importOperations()...)
 	ops = append(ops, devOperations()...)
@@ -546,6 +553,38 @@ func workflowOperations() []operation {
 		{method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/plan", id: "getWorkflowPlan", tag: "workflows", summary: "Get a durable master plan and planned tasks", pathParams: []any{controllers.WorkflowIDParam{}}, resps: []respUnit{{http.StatusOK, controllers.WorkflowRunResponse{}}, {http.StatusNotFound, envelope.APIError{}}}},
 		{method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/plan/approve", id: "approveWorkflowPlan", tag: "workflows", summary: "Approve a validated plan and dispatch the first eligible task", pathParams: []any{controllers.WorkflowIDParam{}}, resps: []respUnit{{http.StatusOK, controllers.WorkflowRunResponse{}}, {http.StatusConflict, envelope.APIError{}}, {http.StatusUnprocessableEntity, envelope.APIError{}}}},
 		{method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/plan/reject", id: "rejectWorkflowPlan", tag: "workflows", summary: "Reject and cancel a master plan", pathParams: []any{controllers.WorkflowIDParam{}}, resps: []respUnit{{http.StatusOK, controllers.WorkflowRunResponse{}}, {http.StatusConflict, envelope.APIError{}}}},
+		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/questions", id: "listWorkflowQuestions", tag: "workflows",
+			summary:    "List durable questions (Checkpoint 8K-A) captured for a workflow run",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListWorkflowQuestionsResponse{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/questions/{questionId}", id: "getWorkflowQuestion", tag: "workflows",
+			summary:    "Get one durable question captured for a workflow run",
+			pathParams: []any{controllers.WorkflowQuestionIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowQuestionResponseBody{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/questions/{questionId}/answer", id: "answerWorkflowQuestion", tag: "workflows",
+			summary:    "Submit a human answer for a question that is awaiting one (Checkpoint 8K-A)",
+			pathParams: []any{controllers.WorkflowQuestionIDParam{}},
+			reqBody:    controllers.AnswerWorkflowQuestionRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowQuestionResponseBody{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
 	}
 }
 
@@ -586,6 +625,20 @@ func browserOperations() []operation {
 type conversationSnapshotQuery struct {
 	BeforeSequence *int64 `query:"beforeSequence,omitempty" minimum:"1" description:"Read items older than this conversation sequence. Omit for the newest page."`
 	Limit          *int64 `query:"limit,omitempty" minimum:"1" maximum:"500" description:"Maximum combined messages and activities to return. Defaults to 200."`
+}
+
+func capacityOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodGet, path: "/api/v1/capacity", id: "listCapacity", tag: "capacity",
+			summary: "List Checkpoint 8J capacity/quota snapshots per known harness",
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListCapacityResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
 }
 
 func usageOperations() []operation {
