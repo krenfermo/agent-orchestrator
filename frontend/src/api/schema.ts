@@ -123,6 +123,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/capacity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Checkpoint 8J capacity/quota snapshots per known harness */
+        get: operations["listCapacity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/dev/import-projects": {
         parameters: {
             query?: never;
@@ -1823,6 +1840,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflowId}/questions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List durable questions (Checkpoint 8K-A) captured for a workflow run */
+        get: operations["listWorkflowQuestions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/questions/{questionId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get one durable question captured for a workflow run */
+        get: operations["getWorkflowQuestion"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/questions/{questionId}/answer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Submit a human answer for a question that is awaiting one (Checkpoint 8K-A) */
+        post: operations["answerWorkflowQuestion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workflows/{workflowId}/start": {
         parameters: {
             query?: never;
@@ -1927,6 +1995,12 @@ export interface components {
         AgentSwitchResponse: {
             switch: components["schemas"]["AgentSwitch"];
         };
+        AnswerWorkflowQuestionRequest: {
+            /** @description One of the question's structured choice ids. */
+            choiceId?: null | string;
+            /** @description Free-text human answer, when no structured choice applies. */
+            customText?: null | string;
+        };
         AttachmentInput: {
             data: string;
             mimeType?: string;
@@ -1994,6 +2068,34 @@ export interface components {
         ContainerReapConfig: {
             disabled?: boolean;
         };
+        ControllersCapacitySnapshotResponse: {
+            /** @enum {string} */
+            certainty: "actual" | "inferred" | "unknown";
+            detectedAt: null | string;
+            harness: string;
+            model?: null | string;
+            provider?: string;
+            reason?: string;
+            resetAt: null | string;
+            /** @enum {string} */
+            state: "available" | "limited" | "cooldown" | "unavailable" | "unknown";
+        };
+        ControllersListCapacityResponse: {
+            capacity: components["schemas"]["ControllersCapacitySnapshotResponse"][];
+        };
+        ControllersRoleUsageResponse: {
+            completedAt?: null | string;
+            durationMs?: null | number;
+            harness?: string;
+            model?: string;
+            provider?: string;
+            role: string;
+            sessionId?: string;
+            startedAt?: null | string;
+            stepKind: string;
+            usage: components["schemas"]["SessionUsageResponse"];
+            verifyChecks?: null | number;
+        };
         ControllersSecurePairingStatus: {
             active: boolean;
             available: boolean;
@@ -2001,6 +2103,11 @@ export interface components {
             host: string;
             port: number;
             reason: string;
+        };
+        ControllersSessionRefreshAdvisoryResponse: {
+            reason: string;
+            recommendation: string;
+            signals?: string[];
         };
         ControllersSessionView: {
             activity: components["schemas"]["DomainActivity"];
@@ -2042,6 +2149,42 @@ export interface components {
         };
         ControllersSetSessionAutoReviewRequest: {
             enabled: boolean;
+        };
+        ControllersTaskCheckpointSummaryResponse: {
+            acceptanceCriteria?: string[];
+            activeErrors?: string[];
+            architecturalFacts?: string[];
+            currentFingerprint?: string;
+            decisions?: string[];
+            filesChanged?: string[];
+            latestReviewFindings?: string;
+            nextAction?: string;
+            objective: string;
+            relevantFiles?: string[];
+            task?: string;
+            tests?: string[];
+        };
+        ControllersTaskUsefulWorkMetricsResponse: {
+            /** Format: int64 */
+            attempts: number;
+            cachedTokens: null | number;
+            durationMs?: null | number;
+            /** Format: int64 */
+            fixCycles: number;
+            inputTokens: null | number;
+            outputTokens: null | number;
+            /** Format: int64 */
+            reviewRuns: number;
+            reviewsSkipped: boolean;
+            tokensCertainty: string;
+            verifyCheckCount?: null | number;
+            verifyDurationMs?: null | number;
+        };
+        ControllersWorkflowUsageResponse: {
+            advisory: components["schemas"]["ControllersSessionRefreshAdvisoryResponse"];
+            checkpoint: components["schemas"]["ControllersTaskCheckpointSummaryResponse"];
+            metrics: components["schemas"]["ControllersTaskUsefulWorkMetricsResponse"];
+            roles: components["schemas"]["ControllersRoleUsageResponse"][];
         };
         ConversationAccountPayload: {
             authMode?: string;
@@ -2461,6 +2604,9 @@ export interface components {
         };
         ListShellTerminalsResponse: {
             shellTerminals: components["schemas"]["ShellTerminalResponse"][];
+        };
+        ListWorkflowQuestionsResponse: {
+            questions: components["schemas"]["WorkflowQuestionResponse"][];
         };
         ListWorkflowsResponse: {
             workflows: components["schemas"]["WorkflowRunView"][];
@@ -3269,6 +3415,37 @@ export interface components {
             title: string;
             verify: components["schemas"]["WorkflowVerificationPlanType2"];
         };
+        WorkflowQuestionChoiceResponse: {
+            id: string;
+            label: string;
+        };
+        WorkflowQuestionResponse: {
+            /** @enum {string} */
+            answerSource?: "" | "policy" | "human";
+            answerText?: string;
+            answeredAt?: null | string;
+            askingHarness?: string;
+            askingRole?: string;
+            /** @enum {string} */
+            certainty: "actual" | "inferred" | "unknown";
+            /** @enum {string} */
+            classification: "policy_resolvable" | "auto_resolvable" | "human_required" | "ambiguous";
+            classificationReason?: string;
+            createdAt: string;
+            delivered: boolean;
+            deliveredAt?: null | string;
+            id: string;
+            questionText: string;
+            sessionId?: string;
+            /** @enum {string} */
+            state: "pending" | "resolving" | "answered" | "human_required" | "cancelled";
+            structuredChoices?: components["schemas"]["WorkflowQuestionChoiceResponse"][];
+            workflowRunId: string;
+            workflowStepId?: string;
+        };
+        WorkflowQuestionResponseBody: {
+            question: components["schemas"]["WorkflowQuestionResponse"];
+        };
         WorkflowReviewPolicyDecision: {
             complexity: string;
             decision: string;
@@ -3289,9 +3466,11 @@ export interface components {
         };
         WorkflowRunDetailView: {
             plan?: components["schemas"]["WorkflowPlanView"];
+            questions?: components["schemas"]["WorkflowQuestionResponse"][];
             run: components["schemas"]["WorkflowRunView"];
             steps: components["schemas"]["WorkflowStepView"][];
             tasks?: components["schemas"]["WorkflowTaskView"][];
+            usage?: components["schemas"]["ControllersWorkflowUsageResponse"];
         };
         WorkflowRunResponse: {
             workflow: components["schemas"]["WorkflowRunDetailView"];
@@ -3863,6 +4042,44 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listCapacity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersListCapacityResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -10156,6 +10373,146 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listWorkflowQuestions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListWorkflowQuestionsResponse"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowQuestion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+                /** @description Workflow question identifier. */
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowQuestionResponseBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    answerWorkflowQuestion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+                /** @description Workflow question identifier. */
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnswerWorkflowQuestionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowQuestionResponseBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -2,6 +2,8 @@ import { Link, createFileRoute } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import { useWorkflowRun, workflowRunIsTerminal } from "../hooks/useWorkflowRun";
 import { WorkflowVerifyDetails } from "../components/workflow-verify-details";
+import { WorkflowUsageSection } from "../components/workflow-usage-section";
+import { WorkflowQuestionsSection } from "../components/workflow-questions-section";
 
 export const Route = createFileRoute("/_shell/workflows/$workflowId")({
 	component: WorkflowRunRoute,
@@ -32,6 +34,8 @@ function WorkflowRunRoute() {
 		rejectPlan,
 		rejectingPlan,
 		rejectPlanError,
+		answerQuestion,
+		answeringQuestion,
 	} = useWorkflowRun(workflowId);
 
 	if (isLoading && !workflow) {
@@ -330,6 +334,12 @@ function WorkflowRunRoute() {
 					</div>
 				))}
 			</div>
+
+			{workflow.questions && workflow.questions.length > 0 && (
+				<WorkflowQuestionsSection questions={workflow.questions} onAnswer={answerQuestion} answering={answeringQuestion} />
+			)}
+
+			{workflow.usage && <WorkflowUsageSection usage={workflow.usage} />}
 		</div>
 	);
 }

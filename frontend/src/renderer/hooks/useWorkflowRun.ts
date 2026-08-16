@@ -5,6 +5,7 @@ import { workflowRunsQueryKey } from "./useWorkflowRuns";
 
 export type WorkflowRunDetailView = components["schemas"]["WorkflowRunDetailView"];
 export type WorkflowRunState = components["schemas"]["WorkflowRunView"]["state"];
+export type WorkflowQuestionResponse = components["schemas"]["WorkflowQuestionResponse"];
 
 const terminalStates = new Set<WorkflowRunState>(["completed", "failed", "cancelled"]);
 
@@ -102,6 +103,25 @@ export function useWorkflowRun(workflowId: string | undefined) {
 	const approvePlan = planMutation("/api/v1/workflows/{workflowId}/plan/approve");
 	const rejectPlan = planMutation("/api/v1/workflows/{workflowId}/plan/reject");
 
+	// Checkpoint 8K-A: submits a human answer for a question in
+	// human_required state. Exactly one of choiceId/customText is sent —
+	// the answer button/form below enforces that before calling this.
+	const answerQuestion = useMutation({
+		mutationFn: async ({ questionId, choiceId, customText }: { questionId: string; choiceId?: string; customText?: string }) => {
+			if (!workflowId) throw new Error("workflow id is required");
+			const { data, error } = await apiClient.POST("/api/v1/workflows/{workflowId}/questions/{questionId}/answer", {
+				params: { path: { workflowId, questionId } },
+				body: { choiceId, customText },
+			});
+			if (error) throw error;
+			return data.question;
+		},
+		onSuccess: () => {
+			if (!workflowId) return;
+			void queryClient.invalidateQueries({ queryKey: workflowRunQueryKey(workflowId) });
+		},
+	});
+
 	return {
 		workflow: query.data,
 		isLoading: query.isLoading,
@@ -124,6 +144,9 @@ export function useWorkflowRun(workflowId: string | undefined) {
 		rejectPlan: rejectPlan.mutateAsync,
 		rejectingPlan: rejectPlan.isPending,
 		rejectPlanError: rejectPlan.error ? apiErrorMessage(rejectPlan.error) : undefined,
+		answerQuestion: answerQuestion.mutateAsync,
+		answeringQuestion: answerQuestion.isPending,
+		answerQuestionError: answerQuestion.error ? apiErrorMessage(answerQuestion.error) : undefined,
 	};
 }
 

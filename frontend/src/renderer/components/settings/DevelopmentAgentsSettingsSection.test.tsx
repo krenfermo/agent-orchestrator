@@ -1,12 +1,19 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DevelopmentAgentsSettingsSection } from "./DevelopmentAgentsSettingsSection";
 import type { EnvironmentStatus } from "../../hooks/useEnvironmentStatus";
 
-const { useEnvironmentStatusMock } = vi.hoisted(() => ({ useEnvironmentStatusMock: vi.fn() }));
+const { useEnvironmentStatusMock, useCapacityMock } = vi.hoisted(() => ({
+	useEnvironmentStatusMock: vi.fn(),
+	useCapacityMock: vi.fn(),
+}));
 
 vi.mock("../../hooks/useEnvironmentStatus", () => ({
 	useEnvironmentStatus: useEnvironmentStatusMock,
+}));
+
+vi.mock("../../hooks/useCapacity", () => ({
+	useCapacity: useCapacityMock,
 }));
 
 function baseStatus(overrides: Partial<EnvironmentStatus> = {}): EnvironmentStatus {
@@ -21,6 +28,10 @@ function baseStatus(overrides: Partial<EnvironmentStatus> = {}): EnvironmentStat
 }
 
 describe("DevelopmentAgentsSettingsSection", () => {
+	beforeEach(() => {
+		useCapacityMock.mockReturnValue({ capacity: undefined, isLoading: false, error: undefined });
+	});
+
 	it("shows Not installed when a binary was not resolved", () => {
 		useEnvironmentStatusMock.mockReturnValue({ status: baseStatus(), isLoading: false, error: undefined, refetch: vi.fn() });
 		render(<DevelopmentAgentsSettingsSection />);
@@ -84,5 +95,21 @@ describe("DevelopmentAgentsSettingsSection", () => {
 		});
 		const { container } = render(<DevelopmentAgentsSettingsSection />);
 		expect(container.textContent ?? "").not.toMatch(/sk-[A-Za-z0-9]{20,}|gh[oprsu]_[A-Za-z0-9]{20,}/);
+	});
+
+	it("shows a real capacity snapshot's state and detected time, and 'Unknown' when no reset was recorded", () => {
+		useEnvironmentStatusMock.mockReturnValue({ status: baseStatus(), isLoading: false, error: undefined, refetch: vi.fn() });
+		useCapacityMock.mockReturnValue({
+			capacity: [
+				{ harness: "codex", provider: "openai", state: "cooldown", detectedAt: "2026-01-01T00:00:00Z", resetAt: null, reason: "rate_limited (inferred)", certainty: "actual" },
+				{ harness: "claude-code", provider: "anthropic", state: "unknown", detectedAt: null, resetAt: null, certainty: "unknown" },
+			],
+			isLoading: false,
+			error: undefined,
+		});
+		render(<DevelopmentAgentsSettingsSection />);
+		expect(screen.getByText("cooldown")).toBeInTheDocument();
+		expect(screen.getAllByText("unknown")).not.toHaveLength(0);
+		expect(screen.getAllByText("Unknown").length).toBeGreaterThan(0);
 	});
 });
