@@ -1671,6 +1671,47 @@ paths:
       summary: Unpair this phone from the daemon, removing it from the roster
       tags:
       - push
+  /api/v1/questions/pending:
+    get:
+      operationId: listPendingDecisions
+      parameters:
+      - description: Filter to one or more of human_required, resolving, waiting_for_capacity.
+          Omit for the default (human_required + resolving).
+        in: query
+        name: state
+        schema:
+          description: Filter to one or more of human_required, resolving, waiting_for_capacity.
+            Omit for the default (human_required + resolving).
+          enum:
+          - human_required
+          - resolving
+          - waiting_for_capacity
+          items:
+            type: string
+          type: array
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListWorkflowQuestionsResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: List open/in-flight questions across all workflow runs (Checkpoint
+        8K-B pass 3's global Pending Decisions inbox)
+      tags:
+      - decisions
   /api/v1/reviews/{reviewSessionID}/activity:
     post:
       operationId: setReviewActivity
@@ -1818,6 +1859,66 @@ paths:
       summary: Spawn a new agent session
       tags:
       - sessions
+  /api/v1/sessions/{resolverSessionId}/decisions/resolve:
+    post:
+      operationId: resolveDecision
+      parameters:
+      - description: Decision Resolver session identifier baked into the resolver's
+          launch prompt.
+        in: path
+        name: resolverSessionId
+        required: true
+        schema:
+          description: Decision Resolver session identifier baked into the resolver's
+            launch prompt.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersResolveDecisionRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersResolveDecisionResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unprocessable Entity
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Record a cross-provider Decision Resolver's result for one auto_resolvable
+        question (Checkpoint 8K-B)
+      tags:
+      - decisions
   /api/v1/sessions/{sessionId}:
     get:
       operationId: getSession
@@ -5925,6 +6026,44 @@ components:
       - resetAt
       - certainty
       type: object
+    ControllersDecisionsUsageResponse:
+      properties:
+        humanRequired:
+          format: int64
+          type: integer
+        policyResolved:
+          format: int64
+          type: integer
+        questionsAsked:
+          format: int64
+          type: integer
+        resolverDurationMs:
+          type:
+          - "null"
+          - integer
+        resolverFailed:
+          format: int64
+          type: integer
+        resolverProvider:
+          type: string
+        reusedDecision:
+          type:
+          - "null"
+          - integer
+        technicalResolved:
+          format: int64
+          type: integer
+        waitingForCapacity:
+          format: int64
+          type: integer
+      required:
+      - questionsAsked
+      - policyResolved
+      - technicalResolved
+      - humanRequired
+      - resolverFailed
+      - waitingForCapacity
+      type: object
     ControllersListCapacityResponse:
       properties:
         capacity:
@@ -5933,6 +6072,45 @@ components:
           type: array
       required:
       - capacity
+      type: object
+    ControllersResolveDecisionRequest:
+      properties:
+        answer:
+          description: The resolver's answer. Required unless requiresHuman is true.
+          type: string
+        certainty:
+          description: Required when answer is set.
+          enum:
+          - ""
+          - actual
+          - inferred
+          - unknown
+          type: string
+        evidenceReferences:
+          description: Bounded list of evidence references (file paths / line ranges),
+            never a transcript. Max 10, 500 chars each.
+          items:
+            type: string
+          type: array
+        reasonSummary:
+          description: Short reason summary, capped.
+          type: string
+        requiresHuman:
+          description: True when the resolver could not determine a safe answer.
+          type: boolean
+        runId:
+          description: Resolution run id (workflow_question_resolutions.id) this result
+            is for.
+          type: string
+      required:
+      - runId
+      type: object
+    ControllersResolveDecisionResponse:
+      properties:
+        resolution:
+          $ref: '#/components/schemas/ControllersWorkflowQuestionResolutionResponse'
+      required:
+      - resolution
       type: object
     ControllersRoleUsageResponse:
       properties:
@@ -6243,12 +6421,68 @@ components:
       - cachedTokens
       - tokensCertainty
       type: object
+    ControllersWorkflowQuestionResolutionResponse:
+      properties:
+        answer:
+          type: string
+        certainty:
+          enum:
+          - ""
+          - actual
+          - inferred
+          - unknown
+          type: string
+        completedAt:
+          type:
+          - "null"
+          - string
+        createdAt:
+          type: string
+        evidenceReferences:
+          items:
+            type: string
+          type: array
+        id:
+          type: string
+        reasonSummary:
+          type: string
+        requiresHuman:
+          type: boolean
+        resolverHarness:
+          type: string
+        resolverSessionId:
+          type: string
+        status:
+          enum:
+          - pending
+          - running
+          - complete
+          - failed
+          - cancelled
+          type: string
+        updatedAt:
+          type: string
+        workflowQuestionId:
+          type: string
+        workflowRunId:
+          type: string
+      required:
+      - id
+      - workflowQuestionId
+      - workflowRunId
+      - status
+      - requiresHuman
+      - createdAt
+      - updatedAt
+      type: object
     ControllersWorkflowUsageResponse:
       properties:
         advisory:
           $ref: '#/components/schemas/ControllersSessionRefreshAdvisoryResponse'
         checkpoint:
           $ref: '#/components/schemas/ControllersTaskCheckpointSummaryResponse'
+        decisions:
+          $ref: '#/components/schemas/ControllersDecisionsUsageResponse'
         metrics:
           $ref: '#/components/schemas/ControllersTaskUsefulWorkMetricsResponse'
         roles:
@@ -6260,6 +6494,7 @@ components:
       - metrics
       - advisory
       - checkpoint
+      - decisions
       type: object
     ConversationAccountPayload:
       properties:
@@ -9519,6 +9754,7 @@ components:
           - ""
           - policy
           - human
+          - resolver
           type: string
         answerText:
           type: string
@@ -9556,6 +9792,18 @@ components:
         id:
           type: string
         questionText:
+          type: string
+        resolverAdvisoryAnswer:
+          type: string
+        resolverEvidenceReferences:
+          items:
+            type: string
+          type: array
+        resolverHarness:
+          type: string
+        resolverProvider:
+          type: string
+        resolverReasonSummary:
           type: string
         sessionId:
           type: string

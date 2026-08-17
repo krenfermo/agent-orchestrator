@@ -395,7 +395,21 @@ func RunWithConfig(cfg config.Config) error {
 		auth:       reviewerAgentAuth{agents: agents},
 		executable: os.Executable,
 	}
-	workflowCoordinator, workflowSvc := startWorkflows(store, rawSessionMgr, workspaceObserver, workflowReviewerLauncher, runtimeAdapter, log)
+	// Checkpoint 8K-B pass 2: the cross-provider Decision Resolver launcher.
+	// Unlike workflowReviewerLauncher, this resolves through the SAME
+	// per-session agent registry (agents) session_manager itself uses for
+	// ordinary worker spawns — a resolver session is a plain read-only
+	// worker-agent invocation, not a review pass, so it never needs the
+	// reviewer registry/PR-centric prompt workaround workflowReviewerLauncher
+	// documents.
+	decisionResolverLauncher := &decisionResolverLauncher{
+		agents:     agents,
+		runtime:    runtimeAdapter,
+		dataDir:    cfg.DataDir,
+		runFile:    cfg.RunFilePath,
+		executable: os.Executable,
+	}
+	workflowCoordinator, workflowSvc := startWorkflows(store, rawSessionMgr, workspaceObserver, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, log)
 	if reconcileErr := workflowCoordinator.Reconcile(ctx); reconcileErr != nil {
 		log.Error("reconcile workflow runs on boot failed", "err", reconcileErr)
 	}
@@ -466,6 +480,7 @@ func RunWithConfig(cfg config.Config) error {
 		UsageSummary:       usagesvc.NewSummaryReader(store),
 		Capacity:           capacitysvc.NewReader(store),
 		Questions:          &questionssvc.AnswerService{Store: store, Runs: store, Sender: rawSessionMgr},
+		Decisions:          &questionssvc.ResolverAnswerService{Store: store},
 		Telemetry:          telemetrySink,
 		Mobile:             mc,
 		DevImport: devimportsvc.New(devimportsvc.Deps{

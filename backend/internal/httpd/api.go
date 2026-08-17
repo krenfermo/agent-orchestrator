@@ -49,7 +49,11 @@ type APIDeps struct {
 	// API. Optional: nil leaves the /questions routes and the run-detail
 	// Questions field both answering 501/absent, matching the other
 	// optional surfaces here.
-	Questions          controllers.WorkflowQuestionsService
+	Questions controllers.WorkflowQuestionsService
+	// Decisions backs Checkpoint 8K-B pass 2's cross-provider Decision
+	// Resolver callback (`ao decision resolve`). Optional: nil leaves the
+	// /decisions route answering 501, matching Questions' own convention.
+	Decisions          controllers.DecisionsService
 	Notifications      controllers.NotificationService
 	NotificationStream controllers.NotificationStream
 	Push               controllers.PushRegistry
@@ -118,6 +122,7 @@ type API struct {
 	capacity      *controllers.CapacityController
 	prs           *controllers.PRsController
 	reviews       *controllers.ReviewsController
+	decisions     *controllers.DecisionsController
 	notifications *controllers.NotificationsController
 	push          *controllers.PushController
 	imports       *controllers.ImportController
@@ -157,6 +162,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		capacity:      &controllers.CapacityController{Svc: deps.Capacity},
 		prs:           &controllers.PRsController{Svc: deps.PRs},
 		reviews:       &controllers.ReviewsController{Svc: deps.Reviews},
+		decisions:     &controllers.DecisionsController{Svc: deps.Decisions},
 		notifications: &controllers.NotificationsController{Svc: deps.Notifications, Stream: deps.NotificationStream},
 		push:          &controllers.PushController{Registry: deps.Push},
 		imports:       &controllers.ImportController{Svc: deps.Import},
@@ -197,6 +203,7 @@ func (a *API) Register(root chi.Router) {
 			a.capacity.Register(r)
 			a.prs.Register(r)
 			a.reviews.Register(r)
+			a.decisions.Register(r)
 			a.notifications.Register(r)
 			a.push.Register(r)
 			a.imports.Register(r)

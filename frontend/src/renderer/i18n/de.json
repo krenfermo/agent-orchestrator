@@ -1268,5 +1268,15 @@
 	"shell.workflowsSelectProjectPlaceholder": "Projekt auswählen",
 	"shell.workflowsMasterPlan": "Masterplan",
 	"shell.workflowsDependsOn": "Abhängig von: {{dependencies}}",
-	"shell.workflowsExecutionWorkflow": "Ausführungs-Workflow"
+	"shell.workflowsExecutionWorkflow": "Ausführungs-Workflow",
+	"shell.workflowQuestions.state.waiting_for_capacity": "Wartet auf Kapazität",
+	"shell.workflowQuestions.resolverAttempt": "Resolver-Versuch: {{harness}}",
+	"shell.workflowQuestions.resolverAdvisoryTitle": "Resolver konnte nicht sicher entscheiden",
+	"shell.workflowQuestions.resolverAdvisoryDisclaimer": "Dies ist ein unverbindlicher Hinweis des anbieterübergreifenden Resolvers, keine getroffene Entscheidung. Bitte prüfen und unten beantworten.",
+	"shell.decisions.navLabel": "Ausstehende Entscheidungen",
+	"shell.decisions.title": "Ausstehende Entscheidungen",
+	"shell.decisions.subtitle": "Fragen, die auf dich oder einen Resolver warten – über alle Workflow-Läufe hinweg.",
+	"shell.decisions.loading": "Wird geladen…",
+	"shell.decisions.viewRun": "Lauf anzeigen",
+	"shell.decisions.empty": "Keine ausstehenden Entscheidungen."
 }

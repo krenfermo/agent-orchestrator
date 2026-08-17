@@ -19,6 +19,14 @@ const (
 	WorkflowRoleReviewer  WorkflowRole = "reviewer"
 	WorkflowRoleFixWorker WorkflowRole = "fix_worker"
 	WorkflowRoleVerify    WorkflowRole = "verify"
+	// WorkflowRoleDecisionResolver is the role recorded for a Checkpoint
+	// 8K-B Decision Resolver attempt: a read-only opposite-provider session
+	// spawned to answer an auto_resolvable question. Unlike the roles
+	// above, it is not derived from WorkflowStepKind via RoleForStepKind —
+	// a resolver attempt is not a workflow step, it is recorded per-attempt
+	// directly on the workflow_question_resolutions row (pass 2). Added
+	// here in pass 1 only as the enum constant; nothing emits it yet.
+	WorkflowRoleDecisionResolver WorkflowRole = "decision_resolver"
 )
 
 // RoleForStepKind maps a workflow step kind to the role that ran it. "advance"

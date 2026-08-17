@@ -12,14 +12,16 @@ RETURNING id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id
           asking_harness, asking_role, fingerprint, question_text, structured_choices,
           capture_provider, capture_parser_version, capture_range_lines,
           certainty, classification, classification_reason, state, created_at,
-          answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at;
+          answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
+          resolving_run_id;
 
 -- name: GetWorkflowQuestionByFingerprint :one
 SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        asking_harness, asking_role, fingerprint, question_text, structured_choices,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
-       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at
+       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
+       resolving_run_id
 FROM workflow_questions
 WHERE fingerprint = ?;
 
@@ -28,7 +30,8 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        asking_harness, asking_role, fingerprint, question_text, structured_choices,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
-       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at
+       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
+       resolving_run_id
 FROM workflow_questions
 WHERE id = ?;
 
@@ -40,7 +43,8 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        asking_harness, asking_role, fingerprint, question_text, structured_choices,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
-       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at
+       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
+       resolving_run_id
 FROM workflow_questions
 WHERE workflow_run_id = ? AND state IN ('pending', 'human_required')
 ORDER BY created_at;
@@ -50,7 +54,8 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        asking_harness, asking_role, fingerprint, question_text, structured_choices,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
-       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at
+       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
+       resolving_run_id
 FROM workflow_questions
 WHERE workflow_run_id = ?
 ORDER BY created_at;
@@ -76,7 +81,8 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        asking_harness, asking_role, fingerprint, question_text, structured_choices,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
-       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at
+       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
+       resolving_run_id
 FROM workflow_questions
 WHERE workflow_run_id = ? AND state = 'answered' AND delivered = 0;
 
@@ -84,3 +90,13 @@ WHERE workflow_run_id = ? AND state = 'answered' AND delivered = 0;
 UPDATE workflow_questions
 SET state = 'cancelled'
 WHERE workflow_run_id = ? AND state IN ('pending', 'human_required');
+
+-- name: SetWorkflowQuestionResolvingRunID :execrows
+-- Checkpoint 8K-B (pass 1): points a question at its currently in-flight
+-- resolution attempt (workflow_question_resolutions.id), or clears the
+-- pointer (NULL) once the attempt is no longer current. No CAS guard here:
+-- the resolution row's own status/partial-unique-index is what prevents two
+-- concurrent running attempts; this pointer is just "which one is current".
+UPDATE workflow_questions
+SET resolving_run_id = ?
+WHERE id = ?;

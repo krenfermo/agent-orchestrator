@@ -119,6 +119,8 @@ var legacyActorlessUserCLICommands = map[string]struct{}{
 	"ao browser uncheck":        {},
 	"ao browser unhighlight":    {},
 	"ao browser wait":           {},
+	"ao decision":               {},
+	"ao decision resolve":       {},
 	"ao dev":                    {},
 	"ao dev import-projects":    {},
 	"ao doctor":                 {},

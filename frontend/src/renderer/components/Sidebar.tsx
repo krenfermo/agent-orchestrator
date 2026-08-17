@@ -10,6 +10,7 @@ import {
 	FolderOpen,
 	LogIn,
 	LogOut,
+	MessageCircleQuestion,
 	MoreVertical,
 	Pencil,
 	Pin,
@@ -148,6 +149,7 @@ function useSelection() {
 		goGlobalSettings: () => openGlobalSettings(),
 		goSettings: (projectId: string) => openProjectSettings(projectId),
 		goWorkflows: () => void navigate({ to: "/workflows" }),
+		goDecisions: () => void navigate({ to: "/decisions" }),
 		goProject: (projectId: string) => void navigate({ to: "/projects/$projectId", params: { projectId } }),
 		goSession: (projectId: string, sessionId: string) =>
 			void navigate({ to: "/projects/$projectId/sessions/$sessionId", params: { projectId, sessionId } }),
@@ -438,6 +440,19 @@ export function Sidebar({
 						<span className="tracking-tight">{t("shell.workflows")}</span>
 					</button>
 					<button
+						aria-label={t("shell.decisions.navLabel")}
+						className={cn(
+							NAV_ROW_CLASS,
+							"flex h-[42px] w-full items-center text-left [&_svg]:size-icon-md [&_svg]:shrink-0",
+						)}
+						onClick={() => selection.goDecisions()}
+						tabIndex={isCollapsed ? -1 : 0}
+						type="button"
+					>
+						<MessageCircleQuestion aria-hidden="true" />
+						<span className="tracking-tight">{t("shell.decisions.navLabel")}</span>
+					</button>
+					<button
 						aria-label={t("shell.settings")}
 						className={cn(
 							NAV_ROW_CLASS,
@@ -470,6 +485,20 @@ export function Sidebar({
 							</button>
 						</TooltipTrigger>
 						<TooltipContent side="right">{t("shell.workflows")}</TooltipContent>
+					</Tooltip>
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<button
+								aria-label={t("shell.decisions.navLabel")}
+								className="grid size-control-board place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-interactive-hover hover:text-foreground [&_svg]:size-icon-base"
+								onClick={() => selection.goDecisions()}
+								tabIndex={isCollapsed ? 0 : -1}
+								type="button"
+							>
+								<MessageCircleQuestion aria-hidden="true" />
+							</button>
+						</TooltipTrigger>
+						<TooltipContent side="right">{t("shell.decisions.navLabel")}</TooltipContent>
 					</Tooltip>
 					<Tooltip>
 						<TooltipTrigger asChild>

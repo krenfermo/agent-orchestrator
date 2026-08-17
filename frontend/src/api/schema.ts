@@ -673,6 +673,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/questions/pending": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List open/in-flight questions across all workflow runs (Checkpoint 8K-B pass 3's global Pending Decisions inbox) */
+        get: operations["listPendingDecisions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/reviews/{reviewSessionID}/activity": {
         parameters: {
             query?: never;
@@ -702,6 +719,23 @@ export interface paths {
         put?: never;
         /** Spawn a new agent session */
         post: operations["spawnSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{resolverSessionId}/decisions/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Record a cross-provider Decision Resolver's result for one auto_resolvable question (Checkpoint 8K-B) */
+        post: operations["resolveDecision"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2080,8 +2114,45 @@ export interface components {
             /** @enum {string} */
             state: "available" | "limited" | "cooldown" | "unavailable" | "unknown";
         };
+        ControllersDecisionsUsageResponse: {
+            /** Format: int64 */
+            humanRequired: number;
+            /** Format: int64 */
+            policyResolved: number;
+            /** Format: int64 */
+            questionsAsked: number;
+            resolverDurationMs?: null | number;
+            /** Format: int64 */
+            resolverFailed: number;
+            resolverProvider?: string;
+            reusedDecision?: null | number;
+            /** Format: int64 */
+            technicalResolved: number;
+            /** Format: int64 */
+            waitingForCapacity: number;
+        };
         ControllersListCapacityResponse: {
             capacity: components["schemas"]["ControllersCapacitySnapshotResponse"][];
+        };
+        ControllersResolveDecisionRequest: {
+            /** @description The resolver's answer. Required unless requiresHuman is true. */
+            answer?: string;
+            /**
+             * @description Required when answer is set.
+             * @enum {string}
+             */
+            certainty?: "" | "actual" | "inferred" | "unknown";
+            /** @description Bounded list of evidence references (file paths / line ranges), never a transcript. Max 10, 500 chars each. */
+            evidenceReferences?: string[];
+            /** @description Short reason summary, capped. */
+            reasonSummary?: string;
+            /** @description True when the resolver could not determine a safe answer. */
+            requiresHuman?: boolean;
+            /** @description Resolution run id (workflow_question_resolutions.id) this result is for. */
+            runId: string;
+        };
+        ControllersResolveDecisionResponse: {
+            resolution: components["schemas"]["ControllersWorkflowQuestionResolutionResponse"];
         };
         ControllersRoleUsageResponse: {
             completedAt?: null | string;
@@ -2180,9 +2251,28 @@ export interface components {
             verifyCheckCount?: null | number;
             verifyDurationMs?: null | number;
         };
+        ControllersWorkflowQuestionResolutionResponse: {
+            answer?: string;
+            /** @enum {string} */
+            certainty?: "" | "actual" | "inferred" | "unknown";
+            completedAt?: null | string;
+            createdAt: string;
+            evidenceReferences?: string[];
+            id: string;
+            reasonSummary?: string;
+            requiresHuman: boolean;
+            resolverHarness?: string;
+            resolverSessionId?: string;
+            /** @enum {string} */
+            status: "pending" | "running" | "complete" | "failed" | "cancelled";
+            updatedAt: string;
+            workflowQuestionId: string;
+            workflowRunId: string;
+        };
         ControllersWorkflowUsageResponse: {
             advisory: components["schemas"]["ControllersSessionRefreshAdvisoryResponse"];
             checkpoint: components["schemas"]["ControllersTaskCheckpointSummaryResponse"];
+            decisions: components["schemas"]["ControllersDecisionsUsageResponse"];
             metrics: components["schemas"]["ControllersTaskUsefulWorkMetricsResponse"];
             roles: components["schemas"]["ControllersRoleUsageResponse"][];
         };
@@ -3421,7 +3511,7 @@ export interface components {
         };
         WorkflowQuestionResponse: {
             /** @enum {string} */
-            answerSource?: "" | "policy" | "human";
+            answerSource?: "" | "policy" | "human" | "resolver";
             answerText?: string;
             answeredAt?: null | string;
             askingHarness?: string;
@@ -3436,6 +3526,11 @@ export interface components {
             deliveredAt?: null | string;
             id: string;
             questionText: string;
+            resolverAdvisoryAnswer?: string;
+            resolverEvidenceReferences?: string[];
+            resolverHarness?: string;
+            resolverProvider?: string;
+            resolverReasonSummary?: string;
             sessionId?: string;
             /** @enum {string} */
             state: "pending" | "resolving" | "answered" | "human_required" | "cancelled";
@@ -5833,6 +5928,47 @@ export interface operations {
             };
         };
     };
+    listPendingDecisions: {
+        parameters: {
+            query?: {
+                /** @description Filter to one or more of human_required, resolving, waiting_for_capacity. Omit for the default (human_required + resolving). */
+                state?: "human_required" | "resolving" | "waiting_for_capacity";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListWorkflowQuestionsResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     setReviewActivity: {
         parameters: {
             query?: never;
@@ -5985,6 +6121,78 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    resolveDecision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Decision Resolver session identifier baked into the resolver's launch prompt. */
+                resolverSessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersResolveDecisionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersResolveDecisionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
                 headers: {
                     [name: string]: unknown;
                 };

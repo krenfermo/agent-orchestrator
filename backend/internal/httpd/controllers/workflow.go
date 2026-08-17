@@ -302,14 +302,26 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 		}
 		view.Tasks = append(view.Tasks, WorkflowTaskView{ID: task.PlanStepID, Number: task.Ordinal, Title: task.Title, Description: task.Description, Dependencies: deps, AcceptanceCriteria: criteria, Verify: verify, State: task.State, ExecutionWorkflowID: execID})
 	}
-	if c.UsageReader != nil {
-		usage := workflowUsageResponse(BuildWorkflowUsageView(ctx, detail, c.UsageReader))
-		view.Usage = &usage
-	}
+	var questionsForRun []domain.WorkflowQuestion
 	if c.QuestionsReader != nil {
 		if qs, err := c.QuestionsReader.ListByRun(ctx, detail.Run.ID); err == nil {
-			view.Questions = workflowQuestionResponses(qs)
+			questionsForRun = qs
+			view.Questions = enrichedQuestionResponses(ctx, c.QuestionsReader, qs)
 		}
+	}
+	if c.UsageReader != nil {
+		usageView := BuildWorkflowUsageView(ctx, detail, c.UsageReader)
+		if c.QuestionsReader != nil {
+			// Checkpoint 8K-B pass 3: Decisions telemetry is derived
+			// read-time from the same questions list plus every resolution
+			// attempt ever recorded for this run — no new store reads
+			// beyond what QuestionsReader already exposes.
+			if resolutions, err := c.QuestionsReader.ListResolutionsByRun(ctx, detail.Run.ID); err == nil {
+				usageView.Decisions = BuildDecisionsUsageView(questionsForRun, resolutions)
+			}
+		}
+		usage := workflowUsageResponse(usageView)
+		view.Usage = &usage
 	}
 	return view
 }

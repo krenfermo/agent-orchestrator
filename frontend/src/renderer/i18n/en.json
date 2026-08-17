@@ -1250,5 +1250,15 @@
 	"shell.workflowsSelectProjectPlaceholder": "Select a project",
 	"shell.workflowsMasterPlan": "Master Plan",
 	"shell.workflowsDependsOn": "Depends on: {{dependencies}}",
-	"shell.workflowsExecutionWorkflow": "Execution workflow"
+	"shell.workflowsExecutionWorkflow": "Execution workflow",
+	"shell.workflowQuestions.state.waiting_for_capacity": "Waiting for capacity",
+	"shell.workflowQuestions.resolverAttempt": "Resolver attempt: {{harness}}",
+	"shell.workflowQuestions.resolverAdvisoryTitle": "Resolver could not determine safely",
+	"shell.workflowQuestions.resolverAdvisoryDisclaimer": "This is a non-binding advisory from the cross-provider resolver, not a delivered decision. Review it and answer below.",
+	"shell.decisions.navLabel": "Pending Decisions",
+	"shell.decisions.title": "Pending Decisions",
+	"shell.decisions.subtitle": "Questions waiting on you or a resolver, across every workflow run.",
+	"shell.decisions.loading": "Loading…",
+	"shell.decisions.viewRun": "View run",
+	"shell.decisions.empty": "No pending decisions."
 }

@@ -465,6 +465,7 @@ func operations() []operation {
 	ops = append(ops, sessionOperations()...)
 	ops = append(ops, prOperations()...)
 	ops = append(ops, reviewOperations()...)
+	ops = append(ops, decisionOperations()...)
 	ops = append(ops, notificationOperations()...)
 	ops = append(ops, usageOperations()...)
 	ops = append(ops, capacityOperations()...)
@@ -559,6 +560,16 @@ func workflowOperations() []operation {
 			pathParams: []any{controllers.WorkflowIDParam{}},
 			resps: []respUnit{
 				{http.StatusOK, controllers.ListWorkflowQuestionsResponse{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/questions/pending", id: "listPendingDecisions", tag: "decisions",
+			summary:    "List open/in-flight questions across all workflow runs (Checkpoint 8K-B pass 3's global Pending Decisions inbox)",
+			pathParams: []any{controllers.PendingDecisionsQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListWorkflowQuestionsResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
 		},
@@ -1354,6 +1365,28 @@ func reviewOperations() []operation {
 
 type eventsQuery struct {
 	After *int64 `query:"after,omitempty" minimum:"0" description:"Replay events with seq greater than this cursor. When omitted, clients may send Last-Event-ID instead."`
+}
+
+// decisionOperations declares Checkpoint 8K-B pass 2's resolver-callback
+// route. Must stay 1:1 with DecisionsController.Register — TestRouteSpecParity
+// fails the build otherwise.
+func decisionOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/sessions/{resolverSessionId}/decisions/resolve", id: "resolveDecision", tag: "decisions",
+			summary:    "Record a cross-provider Decision Resolver's result for one auto_resolvable question (Checkpoint 8K-B)",
+			pathParams: []any{controllers.ResolverSessionIDParam{}},
+			reqBody:    controllers.ResolveDecisionRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ResolveDecisionResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
 }
 
 func eventOperations() []operation {

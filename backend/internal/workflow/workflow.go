@@ -157,6 +157,14 @@ type Deps struct {
 	QuestionsStore QuestionsStore
 	PaneReader     PaneReader
 
+	// DecisionResolverLauncher backs Checkpoint 8K-B pass 2's cross-provider
+	// Decision Resolver dispatch (decision_resolver_wiring.go). Optional: a
+	// nil launcher means dispatchDecisionResolver always reports
+	// "waiting_for_capacity: resolver unavailable" and never launches a
+	// session — same nil-safe-optional convention as every other dependency
+	// here (e.g. ReviewerLauncher).
+	DecisionResolverLauncher DecisionResolverLauncher
+
 	// Clock and NewID are injectable for deterministic tests.
 	Clock func() time.Time
 	NewID func() string
@@ -198,6 +206,10 @@ type Coordinator struct {
 	// handling. Both optional.
 	questionsStore QuestionsStore
 	paneReader     PaneReader
+
+	// decisionResolverLauncher backs Checkpoint 8K-B pass 2's resolver
+	// dispatch. Optional.
+	decisionResolverLauncher DecisionResolverLauncher
 }
 
 // New wires a Coordinator from its dependencies, defaulting the clock and id source.
@@ -211,25 +223,26 @@ func New(d Deps) *Coordinator {
 		newID = uuid.NewString
 	}
 	return &Coordinator{
-		store:                 d.Store,
-		projects:              d.Projects,
-		sessions:              d.Sessions,
-		reviewRuns:            d.ReviewRuns,
-		log:                   d.Logger,
-		spawner:               d.Spawner,
-		sessionFacts:          d.SessionFacts,
-		workspaceFacts:        d.WorkspaceFacts,
-		reviewerLauncher:      d.ReviewerLauncher,
-		messageSender:         d.MessageSender,
-		verifier:              d.Verifier,
-		planStore:             func() masterPlanStore { s, _ := d.Store.(masterPlanStore); return s }(),
-		planner:               d.Planner,
-		plannerContextBuilder: d.PlannerContextBuilder,
-		switcher:              d.Switcher,
-		questionsStore:        d.QuestionsStore,
-		paneReader:            d.PaneReader,
-		clock:                 clock,
-		newID:                 newID,
+		store:                    d.Store,
+		projects:                 d.Projects,
+		sessions:                 d.Sessions,
+		reviewRuns:               d.ReviewRuns,
+		log:                      d.Logger,
+		spawner:                  d.Spawner,
+		sessionFacts:             d.SessionFacts,
+		workspaceFacts:           d.WorkspaceFacts,
+		reviewerLauncher:         d.ReviewerLauncher,
+		messageSender:            d.MessageSender,
+		verifier:                 d.Verifier,
+		planStore:                func() masterPlanStore { s, _ := d.Store.(masterPlanStore); return s }(),
+		planner:                  d.Planner,
+		plannerContextBuilder:    d.PlannerContextBuilder,
+		switcher:                 d.Switcher,
+		questionsStore:           d.QuestionsStore,
+		paneReader:               d.PaneReader,
+		decisionResolverLauncher: d.DecisionResolverLauncher,
+		clock:                    clock,
+		newID:                    newID,
 	}
 }
 
@@ -409,7 +422,8 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 	// runs before the review<->fix cascade so a freshly detected/answered
 	// question's dispatch guards (dispatch.go, fix_dispatch.go,
 	// review_dispatch.go) see up-to-date state within this same call.
-	if err := c.reconcileQuestions(ctx, run, steps); err != nil {
+	waitingForCapacity, err := c.reconcileQuestions(ctx, run, steps)
+	if err != nil {
 		return RunDetail{}, err
 	}
 
@@ -479,6 +493,14 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 	if c.questionsStore != nil {
 		if open, oerr := c.questionsStore.ListOpenWorkflowQuestionsByRun(ctx, runID); oerr == nil && len(open) > 0 {
 			detail.NextAction = nextActionForOpenQuestion(open[0])
+		} else if waitingForCapacity != "" {
+			// Checkpoint 8K-B: a resolving question stuck on provider
+			// capacity only wins the NextAction slot when no higher-priority
+			// pending/human_required question override already applies —
+			// "an open question always wins" (8K-A's own framing) extends
+			// naturally to "an open question always wins over a capacity
+			// wait" here.
+			detail.NextAction = waitingForCapacity
 		}
 	}
 
@@ -730,6 +752,26 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 	// considers state=answered, so a cancelled question is naturally
 	// excluded without any extra guard there.
 	if c.questionsStore != nil {
+		// Checkpoint 8K-B: also force any still-resolving question to
+		// cancelled and stop trusting its in-flight resolution attempt —
+		// CancelOpenWorkflowQuestionsByRun only ever touched
+		// pending/human_required, so state=resolving needs its own pass
+		// here. No resolver-launch, no delivery follows either transition.
+		if all, err := c.questionsStore.ListWorkflowQuestionsByRun(ctx, runID); err != nil {
+			return RunDetail{}, err
+		} else {
+			for _, q := range all {
+				if q.State != domain.QuestionStateResolving {
+					continue
+				}
+				if _, err := c.questionsStore.CancelRunningResolutionsByQuestion(ctx, string(q.ID), now); err != nil {
+					return RunDetail{}, err
+				}
+				if _, err := c.questionsStore.TransitionWorkflowQuestionState(ctx, string(q.ID), domain.QuestionStateResolving, domain.QuestionStateCancelled, "workflow run cancelled", now); err != nil {
+					return RunDetail{}, err
+				}
+			}
+		}
 		if _, err := c.questionsStore.CancelOpenWorkflowQuestionsByRun(ctx, runID); err != nil {
 			return RunDetail{}, err
 		}

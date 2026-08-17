@@ -70,5 +70,14 @@ func deliveryMessage(q domain.WorkflowQuestion) string {
 	if q.AnswerSource != nil {
 		source = string(*q.AnswerSource)
 	}
+	// Checkpoint 8K-B: a resolver-produced answer gets a slightly more
+	// descriptive source label than the bare enum value, per the checkpoint's
+	// delivery-format requirement — evidence references live on the
+	// workflow_question_resolutions row, not on WorkflowQuestion itself, so
+	// they are not included here; pass 3's UI is expected to surface them
+	// alongside the resolution row directly instead.
+	if source == string(domain.AnswerSourceResolver) {
+		source = "technical resolver (cross-provider)"
+	}
 	return fmt.Sprintf("Decision:\n%s\n\nSource: %s\n\nContinue the current task using this decision.", q.AnswerText, source)
 }

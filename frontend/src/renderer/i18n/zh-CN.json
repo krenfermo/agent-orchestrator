@@ -1250,5 +1250,15 @@
 	"shell.workflowsSelectProjectPlaceholder": "选择一个项目",
 	"shell.workflowsMasterPlan": "主计划",
 	"shell.workflowsDependsOn": "依赖于：{{dependencies}}",
-	"shell.workflowsExecutionWorkflow": "执行工作流"
+	"shell.workflowsExecutionWorkflow": "执行工作流",
+	"shell.workflowQuestions.state.waiting_for_capacity": "等待可用容量",
+	"shell.workflowQuestions.resolverAttempt": "解析器尝试:{{harness}}",
+	"shell.workflowQuestions.resolverAdvisoryTitle": "解析器无法安全地做出判断",
+	"shell.workflowQuestions.resolverAdvisoryDisclaimer": "这是跨提供商解析器给出的非约束性建议,而非最终交付的决定。请审阅后在下方作答。",
+	"shell.decisions.navLabel": "待处理决策",
+	"shell.decisions.title": "待处理决策",
+	"shell.decisions.subtitle": "所有工作流运行中等待您或解析器处理的问题。",
+	"shell.decisions.loading": "加载中…",
+	"shell.decisions.viewRun": "查看运行",
+	"shell.decisions.empty": "没有待处理的决策。"
 }

@@ -617,6 +617,25 @@ type WorkflowQuestion struct {
 	AnswerReference      sql.NullString
 	Delivered            int64
 	DeliveredAt          sql.NullTime
+	ResolvingRunID       sql.NullString
+}
+
+type WorkflowQuestionResolution struct {
+	ID                 string
+	WorkflowQuestionID string
+	WorkflowRunID      string
+	AskingSessionID    sql.NullString
+	ResolverHarness    string
+	ResolverSessionID  sql.NullString
+	Status             string
+	Answer             sql.NullString
+	ReasonSummary      sql.NullString
+	EvidenceReferences sql.NullString
+	Certainty          sql.NullString
+	RequiresHuman      int64
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	CompletedAt        sql.NullTime
 }
 
 type WorkflowRun struct {

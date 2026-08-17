@@ -59,6 +59,25 @@ type TaskCheckpointSummaryResponse struct {
 	NextAction           string   `json:"nextAction,omitempty"`
 }
 
+// DecisionsUsageResponse is Checkpoint 8K-B pass 3's Decision Resolver
+// telemetry section. See DecisionsUsageView's doc comment for which fields
+// are plain counts (always present, 0 is a real fact) versus which follow
+// the "unknown != 0" rule (omitted/null when not observable).
+type DecisionsUsageResponse struct {
+	QuestionsAsked     int64  `json:"questionsAsked"`
+	PolicyResolved     int64  `json:"policyResolved"`
+	TechnicalResolved  int64  `json:"technicalResolved"`
+	HumanRequired      int64  `json:"humanRequired"`
+	ResolverFailed     int64  `json:"resolverFailed"`
+	WaitingForCapacity int64  `json:"waitingForCapacity"`
+	ResolverProvider   string `json:"resolverProvider,omitempty"`
+	ResolverDurationMS *int64 `json:"resolverDurationMs,omitempty"`
+	// ReusedDecision is always null on the wire in this pass: see
+	// DecisionsUsageView's doc comment for why it is not yet observable
+	// read-time without a new column (deferred, no new migration this pass).
+	ReusedDecision *int64 `json:"reusedDecision,omitempty"`
+}
+
 // WorkflowUsageResponse is the full Checkpoint 8J usage section embedded in
 // a workflow run detail response.
 type WorkflowUsageResponse struct {
@@ -66,6 +85,7 @@ type WorkflowUsageResponse struct {
 	Metrics    TaskUsefulWorkMetricsResponse  `json:"metrics"`
 	Advisory   SessionRefreshAdvisoryResponse `json:"advisory"`
 	Checkpoint TaskCheckpointSummaryResponse  `json:"checkpoint"`
+	Decisions  DecisionsUsageResponse         `json:"decisions"`
 }
 
 func workflowUsageResponse(v WorkflowUsageView) WorkflowUsageResponse {
@@ -118,6 +138,13 @@ func workflowUsageResponse(v WorkflowUsageView) WorkflowUsageResponse {
 			Decisions: v.Checkpoint.Decisions, Tests: v.Checkpoint.Tests,
 			LatestReviewFindings: v.Checkpoint.LatestReviewFindings, ActiveErrors: v.Checkpoint.ActiveErrors,
 			CurrentFingerprint: v.Checkpoint.CurrentFingerprint, NextAction: v.Checkpoint.NextAction,
+		},
+		Decisions: DecisionsUsageResponse{
+			QuestionsAsked: v.Decisions.QuestionsAsked, PolicyResolved: v.Decisions.PolicyResolved,
+			TechnicalResolved: v.Decisions.TechnicalResolved, HumanRequired: v.Decisions.HumanRequired,
+			ResolverFailed: v.Decisions.ResolverFailed, WaitingForCapacity: v.Decisions.WaitingForCapacity,
+			ResolverProvider: v.Decisions.ResolverProvider, ResolverDurationMS: v.Decisions.ResolverDurationMS,
+			ReusedDecision: v.Decisions.ReusedDecision,
 		},
 	}
 }

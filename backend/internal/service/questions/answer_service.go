@@ -28,6 +28,18 @@ type APIStore interface {
 	DeliveryStore
 	GetWorkflowQuestion(ctx context.Context, id string) (domain.WorkflowQuestion, bool, error)
 	ListWorkflowQuestionsByRun(ctx context.Context, runID string) ([]domain.WorkflowQuestion, error)
+	// ListPendingWorkflowQuestions backs Checkpoint 8K-B pass 3's global
+	// "Pending Decisions" inbox: every open/in-flight question across ALL
+	// runs, optionally filtered to the given states.
+	ListPendingWorkflowQuestions(ctx context.Context, states []string) ([]domain.WorkflowQuestion, error)
+	// GetCurrentResolutionForQuestion backs pass 3's per-question resolver
+	// enrichment (resolver harness/advisory), following the question's
+	// resolving_run_id pointer. Returns ok=false, no error, when the
+	// question has never had a resolution attempt.
+	GetCurrentResolutionForQuestion(ctx context.Context, questionID string) (domain.WorkflowQuestionResolution, bool, error)
+	// ListWorkflowQuestionResolutionsByRun backs pass 3's Decisions
+	// telemetry section: every resolution attempt ever recorded for a run.
+	ListWorkflowQuestionResolutionsByRun(ctx context.Context, runID string) ([]domain.WorkflowQuestionResolution, error)
 }
 
 // RunLookup is the narrow run-read contract AnswerService needs to reject
@@ -60,6 +72,25 @@ func (s *AnswerService) now() time.Time {
 // first — the run-detail embedding and the list endpoint both use this.
 func (s *AnswerService) ListByRun(ctx context.Context, runID string) ([]domain.WorkflowQuestion, error) {
 	return s.Store.ListWorkflowQuestionsByRun(ctx, runID)
+}
+
+// ListPending returns every open/in-flight question across all runs
+// (Checkpoint 8K-B pass 3's global inbox), optionally filtered to states.
+func (s *AnswerService) ListPending(ctx context.Context, states []string) ([]domain.WorkflowQuestion, error) {
+	return s.Store.ListPendingWorkflowQuestions(ctx, states)
+}
+
+// GetResolution returns the current Decision Resolver attempt for a
+// question, if any (Checkpoint 8K-B pass 3's per-question resolver
+// enrichment). ok=false, no error, when the question has never had one.
+func (s *AnswerService) GetResolution(ctx context.Context, questionID string) (domain.WorkflowQuestionResolution, bool, error) {
+	return s.Store.GetCurrentResolutionForQuestion(ctx, questionID)
+}
+
+// ListResolutionsByRun returns every Decision Resolver attempt ever
+// recorded for a run (Checkpoint 8K-B pass 3's telemetry source).
+func (s *AnswerService) ListResolutionsByRun(ctx context.Context, runID string) ([]domain.WorkflowQuestionResolution, error) {
+	return s.Store.ListWorkflowQuestionResolutionsByRun(ctx, runID)
 }
 
 // Get fetches a single question and verifies it belongs to runID.

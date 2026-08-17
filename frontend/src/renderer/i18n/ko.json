@@ -1268,5 +1268,15 @@
 	"shell.workflowsSelectProjectPlaceholder": "프로젝트 선택",
 	"shell.workflowsMasterPlan": "마스터 플랜",
 	"shell.workflowsDependsOn": "종속 항목: {{dependencies}}",
-	"shell.workflowsExecutionWorkflow": "실행 워크플로"
+	"shell.workflowsExecutionWorkflow": "실행 워크플로",
+	"shell.workflowQuestions.state.waiting_for_capacity": "용량 대기 중",
+	"shell.workflowQuestions.resolverAttempt": "리졸버 시도: {{harness}}",
+	"shell.workflowQuestions.resolverAdvisoryTitle": "리졸버가 안전하게 판단하지 못했습니다",
+	"shell.workflowQuestions.resolverAdvisoryDisclaimer": "이것은 크로스 프로바이더 리졸버의 참고용 권고 사항이며 확정된 결정이 아닙니다. 검토 후 아래에서 답변하세요.",
+	"shell.decisions.navLabel": "대기 중인 결정",
+	"shell.decisions.title": "대기 중인 결정",
+	"shell.decisions.subtitle": "모든 워크플로 실행에서 사용자 또는 리졸버의 응답을 기다리는 질문입니다.",
+	"shell.decisions.loading": "불러오는 중…",
+	"shell.decisions.viewRun": "실행 보기",
+	"shell.decisions.empty": "대기 중인 결정이 없습니다."
 }

@@ -74,4 +74,67 @@ describe("WorkflowQuestionsSection", () => {
 		expect(screen.queryByRole("button", { name: "Yes" })).not.toBeInTheDocument();
 		expect(screen.getByText("No — use branch feature/x.")).toBeInTheDocument();
 	});
+
+	it("renders the auto_resolvable classification badge", () => {
+		const question = baseQuestion({ classification: "auto_resolvable", state: "resolving" });
+		render(<WorkflowQuestionsSection questions={[question]} onAnswer={vi.fn()} answering={false} />);
+
+		expect(screen.getByText("Auto-resolvable")).toBeInTheDocument();
+	});
+
+	it("renders 'Resolving' when a resolver attempt is dispatched (state=resolving with a resolverHarness)", () => {
+		const question = baseQuestion({
+			classification: "auto_resolvable",
+			state: "resolving",
+			resolverHarness: "codex",
+			resolverProvider: "openai",
+		});
+		render(<WorkflowQuestionsSection questions={[question]} onAnswer={vi.fn()} answering={false} />);
+
+		expect(screen.getByText("Resolving")).toBeInTheDocument();
+	});
+
+	it("renders 'Waiting for capacity' when resolving with no resolver dispatched yet", () => {
+		const question = baseQuestion({ classification: "auto_resolvable", state: "resolving" });
+		render(<WorkflowQuestionsSection questions={[question]} onAnswer={vi.fn()} answering={false} />);
+
+		expect(screen.getByText("Waiting for capacity")).toBeInTheDocument();
+	});
+
+	it("renders the resolver advisory in a visually distinct block, never as a delivered answer", () => {
+		const question = baseQuestion({
+			classification: "auto_resolvable",
+			state: "human_required",
+			resolverHarness: "codex",
+			resolverProvider: "openai",
+			resolverReasonSummary: "could not verify against the test suite",
+			resolverAdvisoryAnswer: "Probably 8s, but unverified.",
+		});
+		render(<WorkflowQuestionsSection questions={[question]} onAnswer={vi.fn()} answering={false} />);
+
+		// The advisory disclaimer and text render...
+		expect(screen.getByText("Resolver could not determine safely")).toBeInTheDocument();
+		expect(screen.getByText("Probably 8s, but unverified.")).toBeInTheDocument();
+		// ...but this question was never actually answered, so no "Answered"
+		// block (and no answerText) exists anywhere in the DOM.
+		expect(screen.queryByText("Answered")).not.toBeInTheDocument();
+	});
+
+	it("does not render the advisory block for a question the resolver answered successfully (requiresHuman=false)", () => {
+		const question = baseQuestion({
+			classification: "auto_resolvable",
+			state: "answered",
+			answerSource: "resolver",
+			answerText: "Use the existing formatHelper in internal/foo.",
+			resolverHarness: "codex",
+			resolverProvider: "openai",
+		});
+		render(<WorkflowQuestionsSection questions={[question]} onAnswer={vi.fn()} answering={false} />);
+
+		// "Answered" appears twice by design (the state badge and the answer
+		// block's own heading) — assert both, plus the delivered answer text.
+		expect(screen.getAllByText("Answered").length).toBe(2);
+		expect(screen.getByText("Use the existing formatHelper in internal/foo.")).toBeInTheDocument();
+		expect(screen.queryByText("Resolver could not determine safely")).not.toBeInTheDocument();
+	});
 });

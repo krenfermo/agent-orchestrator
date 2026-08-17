@@ -101,7 +101,24 @@ func Detect(ctx context.Context, store Store, parser ports.QuestionPaneParser, i
 		WorktreePath:    in.WorktreePath,
 		MaxAutoAnswered: in.MaxAutoAnswered,
 	}
-	if classification == domain.QuestionClassificationPolicyResolvable && stepIDStr != "" {
+	// Checkpoint 8K-B pass 2 budget-sharing decision: auto_resolvable now
+	// also computes PolicyAnsweredCount (previously only policy_resolvable
+	// did — a gap that left the auto_resolvable branch of ResolveState's
+	// budget check permanently 0-vs-0, i.e. never enforced). The intended
+	// design (per ClassifyContext.PolicyAnsweredCount's doc comment, and the
+	// recommendation left there in pass 1) is a single shared count across
+	// answer_source IN ('policy','resolver'); the backing query
+	// (queries/workflow_questions.sql's CountPolicyAnsweredWorkflowQuestionsByStep)
+	// still filters strictly answer_source='policy' because widening its
+	// WHERE clause reproducibly triggered a sqlc v1.31.1 SQL-codegen
+	// corruption bug specific to this query file (see the store-level note
+	// on Store.TransitionWorkflowQuestionState for the same bug hit
+	// elsewhere in this file). Until that is worked around, both
+	// classifications draw against this policy-only count as a
+	// conservative stand-in — strictly safer than the prior "auto_resolvable
+	// budget never enforced" gap, though not yet a true shared count with
+	// resolver-answered questions. Flagged for pass 3.
+	if (classification == domain.QuestionClassificationPolicyResolvable || classification == domain.QuestionClassificationAutoResolvable) && stepIDStr != "" {
 		count, err := store.CountPolicyAnsweredWorkflowQuestionsByStep(ctx, stepIDStr)
 		if err != nil {
 			return DetectResult{}, err

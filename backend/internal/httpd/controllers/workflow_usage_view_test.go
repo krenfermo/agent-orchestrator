@@ -343,6 +343,67 @@ func TestCapacityController_Headless(t *testing.T) {
 	}
 }
 
+// TestBuildDecisionsUsageView covers Checkpoint 8K-B pass 3's telemetry
+// counters: plain counts are always present (0 is real, not fabricated),
+// resolverProvider/resolverDurationMs follow "unknown != 0" and stay
+// unset/nil when no resolution exists to derive them from, and
+// waiting_for_capacity is derived from state=resolving with no dispatched
+// attempt (ResolvingRunID nil) — the same fact
+// reconcileDecisionResolvers itself derives.
+func TestBuildDecisionsUsageView(t *testing.T) {
+	completed := time.Date(2026, time.August, 16, 12, 5, 0, 0, time.UTC)
+	created := completed.Add(-90 * time.Second)
+	policySource := domain.AnswerSourcePolicy
+	resolverSource := domain.AnswerSourceResolver
+	resID := domain.WorkflowQuestionResolutionID("res-1")
+
+	qs := []domain.WorkflowQuestion{
+		{ID: "q-1", State: domain.QuestionStateAnswered, AnswerSource: &policySource},
+		{ID: "q-2", State: domain.QuestionStateAnswered, AnswerSource: &resolverSource, ResolvingRunID: &resID},
+		{ID: "q-3", State: domain.QuestionStateHumanRequired},
+		{ID: "q-4", State: domain.QuestionStateResolving}, // waiting_for_capacity: no ResolvingRunID yet
+		{ID: "q-5", State: domain.QuestionStateResolving, ResolvingRunID: &resID},
+	}
+	resolutions := []domain.WorkflowQuestionResolution{
+		{ID: resID, ResolverHarness: domain.HarnessCodex, Status: domain.ResolutionStatusComplete, CreatedAt: created, CompletedAt: &completed},
+	}
+
+	v := controllers.BuildDecisionsUsageView(qs, resolutions)
+	if v.QuestionsAsked != 5 {
+		t.Fatalf("QuestionsAsked = %d, want 5", v.QuestionsAsked)
+	}
+	if v.PolicyResolved != 1 {
+		t.Fatalf("PolicyResolved = %d, want 1", v.PolicyResolved)
+	}
+	if v.TechnicalResolved != 1 {
+		t.Fatalf("TechnicalResolved = %d, want 1", v.TechnicalResolved)
+	}
+	if v.HumanRequired != 1 {
+		t.Fatalf("HumanRequired = %d, want 1", v.HumanRequired)
+	}
+	if v.WaitingForCapacity != 1 {
+		t.Fatalf("WaitingForCapacity = %d, want 1", v.WaitingForCapacity)
+	}
+	if v.ResolverFailed != 0 {
+		t.Fatalf("ResolverFailed = %d, want 0", v.ResolverFailed)
+	}
+	if v.ResolverProvider != "openai" {
+		t.Fatalf("ResolverProvider = %q, want openai (derived from HarnessCodex)", v.ResolverProvider)
+	}
+	if v.ResolverDurationMS == nil || *v.ResolverDurationMS != 90000 {
+		t.Fatalf("ResolverDurationMS = %v, want 90000 (90s)", v.ResolverDurationMS)
+	}
+	if v.ReusedDecision != nil {
+		t.Fatalf("ReusedDecision must stay nil (not observable read-time this pass), got %v", v.ReusedDecision)
+	}
+
+	// No questions at all: zero counts (real fact), no provider/duration.
+	empty := controllers.BuildDecisionsUsageView(nil, nil)
+	if empty.QuestionsAsked != 0 || empty.ResolverProvider != "" || empty.ResolverDurationMS != nil {
+		t.Fatalf("empty view = %+v, want all-zero counts and unset provider/duration", empty)
+	}
+}
+
 func newWorkflowTestServerWithDeps(t *testing.T, log *slog.Logger, deps httpd.APIDeps) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(httpd.NewRouterWithControl(config.Config{}, log, nil, deps, httpd.ControlDeps{}))

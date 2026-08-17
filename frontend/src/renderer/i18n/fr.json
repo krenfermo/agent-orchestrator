@@ -1283,5 +1283,15 @@
 	"shell.workflowsSelectProjectPlaceholder": "Sélectionner un projet",
 	"shell.workflowsMasterPlan": "Plan directeur",
 	"shell.workflowsDependsOn": "Dépend de : {{dependencies}}",
-	"shell.workflowsExecutionWorkflow": "Workflow d'exécution"
+	"shell.workflowsExecutionWorkflow": "Workflow d'exécution",
+	"shell.workflowQuestions.state.waiting_for_capacity": "En attente de capacité",
+	"shell.workflowQuestions.resolverAttempt": "Tentative du résolveur : {{harness}}",
+	"shell.workflowQuestions.resolverAdvisoryTitle": "Le résolveur n'a pas pu déterminer une réponse sûre",
+	"shell.workflowQuestions.resolverAdvisoryDisclaimer": "Il s'agit d'un avis non contraignant du résolveur multi-fournisseur, pas d'une décision livrée. Vérifiez-le et répondez ci-dessous.",
+	"shell.decisions.navLabel": "Décisions en attente",
+	"shell.decisions.title": "Décisions en attente",
+	"shell.decisions.subtitle": "Questions en attente de vous ou d'un résolveur, tous les runs de workflow confondus.",
+	"shell.decisions.loading": "Chargement…",
+	"shell.decisions.viewRun": "Voir le run",
+	"shell.decisions.empty": "Aucune décision en attente."
 }

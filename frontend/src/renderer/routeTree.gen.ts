@@ -14,6 +14,7 @@ import { Route as ShellIndexRouteImport } from './routes/_shell.index'
 import { Route as ShellWorkflowsRouteImport } from './routes/_shell.workflows'
 import { Route as ShellTerminalsRouteImport } from './routes/_shell.terminals'
 import { Route as ShellSettingsRouteImport } from './routes/_shell.settings'
+import { Route as ShellDecisionsRouteImport } from './routes/_shell.decisions'
 import { Route as ShellWorkflowsWorkflowIdRouteImport } from './routes/_shell.workflows.$workflowId'
 import { Route as ShellSessionsSessionIdRouteImport } from './routes/_shell.sessions.$sessionId'
 import { Route as ShellProjectsProjectIdRouteImport } from './routes/_shell.projects.$projectId'
@@ -42,6 +43,11 @@ const ShellTerminalsRoute = ShellTerminalsRouteImport.update({
 const ShellSettingsRoute = ShellSettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
+  getParentRoute: () => ShellRoute,
+} as any)
+const ShellDecisionsRoute = ShellDecisionsRouteImport.update({
+  id: '/decisions',
+  path: '/decisions',
   getParentRoute: () => ShellRoute,
 } as any)
 const ShellWorkflowsWorkflowIdRoute =
@@ -75,6 +81,7 @@ const ShellProjectsProjectIdSessionsSessionIdRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof ShellIndexRoute
+  '/decisions': typeof ShellDecisionsRoute
   '/settings': typeof ShellSettingsRoute
   '/terminals': typeof ShellTerminalsRoute
   '/workflows': typeof ShellWorkflowsRouteWithChildren
@@ -85,6 +92,7 @@ export interface FileRoutesByFullPath {
   '/projects/$projectId/sessions/$sessionId': typeof ShellProjectsProjectIdSessionsSessionIdRoute
 }
 export interface FileRoutesByTo {
+  '/decisions': typeof ShellDecisionsRoute
   '/settings': typeof ShellSettingsRoute
   '/terminals': typeof ShellTerminalsRoute
   '/workflows': typeof ShellWorkflowsRouteWithChildren
@@ -98,6 +106,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_shell': typeof ShellRouteWithChildren
+  '/_shell/decisions': typeof ShellDecisionsRoute
   '/_shell/settings': typeof ShellSettingsRoute
   '/_shell/terminals': typeof ShellTerminalsRoute
   '/_shell/workflows': typeof ShellWorkflowsRouteWithChildren
@@ -112,6 +121,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/decisions'
     | '/settings'
     | '/terminals'
     | '/workflows'
@@ -122,6 +132,7 @@ export interface FileRouteTypes {
     | '/projects/$projectId/sessions/$sessionId'
   fileRoutesByTo: FileRoutesByTo
   to:
+    | '/decisions'
     | '/settings'
     | '/terminals'
     | '/workflows'
@@ -134,6 +145,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/_shell'
+    | '/_shell/decisions'
     | '/_shell/settings'
     | '/_shell/terminals'
     | '/_shell/workflows'
@@ -184,6 +196,13 @@ declare module '@tanstack/react-router' {
       path: '/settings'
       fullPath: '/settings'
       preLoaderRoute: typeof ShellSettingsRouteImport
+      parentRoute: typeof ShellRoute
+    }
+    '/_shell/decisions': {
+      id: '/_shell/decisions'
+      path: '/decisions'
+      fullPath: '/decisions'
+      preLoaderRoute: typeof ShellDecisionsRouteImport
       parentRoute: typeof ShellRoute
     }
     '/_shell/workflows/$workflowId': {
@@ -237,6 +256,7 @@ const ShellWorkflowsRouteWithChildren = ShellWorkflowsRoute._addFileChildren(
 )
 
 interface ShellRouteChildren {
+  ShellDecisionsRoute: typeof ShellDecisionsRoute
   ShellSettingsRoute: typeof ShellSettingsRoute
   ShellTerminalsRoute: typeof ShellTerminalsRoute
   ShellWorkflowsRoute: typeof ShellWorkflowsRouteWithChildren
@@ -248,6 +268,7 @@ interface ShellRouteChildren {
 }
 
 const ShellRouteChildren: ShellRouteChildren = {
+  ShellDecisionsRoute: ShellDecisionsRoute,
   ShellSettingsRoute: ShellSettingsRoute,
   ShellTerminalsRoute: ShellTerminalsRoute,
   ShellWorkflowsRoute: ShellWorkflowsRouteWithChildren,

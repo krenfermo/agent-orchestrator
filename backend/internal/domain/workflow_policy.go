@@ -33,6 +33,18 @@ type WorkflowPolicy struct {
 	// restart/checkpoint, so the loop-safety net exists from the start
 	// rather than being added reactively in a later checkpoint.
 	MaxAutoAnsweredQuestionsPerStep int `json:"maxAutoAnsweredQuestionsPerStep"`
+	// AllowSameProviderResolver controls whether the Checkpoint 8K-B
+	// Decision Resolver may fall back to spawning a resolver session from
+	// the *same* provider that asked the question, when the preferred
+	// (opposite) provider's harness is unavailable. Default false: a
+	// same-provider resolver answering its own asking provider's question
+	// carries a self-review/self-answer ambiguity risk distinct from
+	// MaxAutoAnsweredQuestionsPerStep's loop-safety concern — the resolver
+	// may share the same blind spots or mistaken assumptions that produced
+	// the question in the first place, so this fallback is opt-in rather
+	// than the default "always resolve somehow" behavior. Read by pass 2's
+	// provider-selection logic; unused by any pass-1 code path.
+	AllowSameProviderResolver bool `json:"allowSameProviderResolver"`
 }
 
 // DefaultWorkflowPolicy is the fixed v1 policy every Checkpoint 8D run is

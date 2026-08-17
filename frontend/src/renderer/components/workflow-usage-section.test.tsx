@@ -31,6 +31,14 @@ describe("WorkflowUsageSection", () => {
 			},
 			advisory: { recommendation: "REUSE", reason: "fresh session, no fix cycles", signals: ["session created for this task's own work step"] },
 			checkpoint: { objective: "ship the thing" },
+			decisions: {
+				questionsAsked: 0,
+				policyResolved: 0,
+				technicalResolved: 0,
+				humanRequired: 0,
+				resolverFailed: 0,
+				waitingForCapacity: 0,
+			},
 		};
 
 		render(<WorkflowUsageSection usage={usage} />);
@@ -66,6 +74,14 @@ describe("WorkflowUsageSection", () => {
 			},
 			advisory: { recommendation: "CONSIDER_COMPACTION", reason: "one fix cycle has run", signals: [] },
 			checkpoint: { objective: "ship the thing" },
+			decisions: {
+				questionsAsked: 0,
+				policyResolved: 0,
+				technicalResolved: 0,
+				humanRequired: 0,
+				resolverFailed: 0,
+				waitingForCapacity: 0,
+			},
 		};
 
 		render(<WorkflowUsageSection usage={usage} />);

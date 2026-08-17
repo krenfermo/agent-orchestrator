@@ -28,6 +28,15 @@ type WorkflowQuestionsService interface {
 	ListByRun(ctx context.Context, runID string) ([]domain.WorkflowQuestion, error)
 	Get(ctx context.Context, runID, questionID string) (domain.WorkflowQuestion, error)
 	Answer(ctx context.Context, runID, questionID string, choiceID, customText *string) (domain.WorkflowQuestion, error)
+	// ListPending backs Checkpoint 8K-B pass 3's global "Pending Decisions"
+	// inbox: every open/in-flight question across ALL runs, optionally
+	// filtered to the given states.
+	ListPending(ctx context.Context, states []string) ([]domain.WorkflowQuestion, error)
+	// GetResolution returns the current Decision Resolver attempt for a
+	// question, if any (pass 3's resolver-field enrichment).
+	GetResolution(ctx context.Context, questionID string) (domain.WorkflowQuestionResolution, bool, error)
+	// ListResolutionsByRun backs pass 3's Decisions telemetry section.
+	ListResolutionsByRun(ctx context.Context, runID string) ([]domain.WorkflowQuestionResolution, error)
 }
 
 // WorkflowQuestionsController owns the /workflows/{workflowId}/questions
@@ -42,6 +51,7 @@ func (c *WorkflowQuestionsController) Register(r chi.Router) {
 	r.Get("/workflows/{workflowId}/questions", c.list)
 	r.Get("/workflows/{workflowId}/questions/{questionId}", c.get)
 	r.Post("/workflows/{workflowId}/questions/{questionId}/answer", c.answer)
+	r.Get("/questions/pending", c.pending)
 }
 
 func (c *WorkflowQuestionsController) list(w http.ResponseWriter, r *http.Request) {
@@ -55,7 +65,7 @@ func (c *WorkflowQuestionsController) list(w http.ResponseWriter, r *http.Reques
 		writeWorkflowQuestionError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, ListWorkflowQuestionsResponse{Questions: workflowQuestionResponses(qs)})
+	envelope.WriteJSON(w, http.StatusOK, ListWorkflowQuestionsResponse{Questions: enrichedQuestionResponses(r.Context(), c.Svc, qs)})
 }
 
 func (c *WorkflowQuestionsController) get(w http.ResponseWriter, r *http.Request) {
@@ -70,7 +80,87 @@ func (c *WorkflowQuestionsController) get(w http.ResponseWriter, r *http.Request
 		writeWorkflowQuestionError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, WorkflowQuestionResponseBody{Question: workflowQuestionResponse(q)})
+	envelope.WriteJSON(w, http.StatusOK, WorkflowQuestionResponseBody{Question: enrichedQuestionResponse(r.Context(), c.Svc, q)})
+}
+
+// pendingDecisionsAllowedStates is Checkpoint 8K-B pass 3's fixed filter
+// vocabulary for GET /questions/pending's ?state= query param. Mirrors the
+// three states surfaced on the global inbox: human_required and resolving
+// are real persisted QuestionState values; waiting_for_capacity is not a
+// persisted state (a resolving question with no dispatched resolution
+// attempt yet — see ResolvingRunID) but is accepted here as an alias for
+// resolving so a caller filtering the inbox down to "stuck on capacity"
+// doesn't need to know that implementation detail.
+var pendingDecisionsAllowedStates = map[string]string{
+	"human_required":       "human_required",
+	"resolving":            "resolving",
+	"waiting_for_capacity": "resolving",
+}
+
+func (c *WorkflowQuestionsController) pending(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/questions/pending")
+		return
+	}
+	var states []string
+	seen := map[string]bool{}
+	for _, raw := range r.URL.Query()["state"] {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		mapped, ok := pendingDecisionsAllowedStates[raw]
+		if !ok {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_STATE_FILTER",
+				"state must be one of human_required, resolving, waiting_for_capacity", nil)
+			return
+		}
+		if !seen[mapped] {
+			seen[mapped] = true
+			states = append(states, mapped)
+		}
+	}
+	qs, err := c.Svc.ListPending(r.Context(), states)
+	if err != nil {
+		writeWorkflowQuestionError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, ListWorkflowQuestionsResponse{Questions: enrichedQuestionResponses(r.Context(), c.Svc, qs)})
+}
+
+// resolutionGetter is the narrow read contract enrichedQuestionResponses
+// needs — satisfied by WorkflowQuestionsService (both
+// WorkflowQuestionsController.Svc and WorkflowsController.QuestionsReader
+// share this exact interface, so both call sites reuse the same enrichment
+// helper rather than duplicating it).
+type resolutionGetter interface {
+	GetResolution(ctx context.Context, questionID string) (domain.WorkflowQuestionResolution, bool, error)
+}
+
+// enrichedQuestionResponses/enrichedQuestionResponse attach resolver fields
+// to each question that could plausibly have a resolution row (see
+// resolverEnrichmentEligible), fetched via GetResolution. Best-effort: a
+// lookup error leaves that one question's resolver fields unset rather than
+// failing the whole request — the base question data is still correct and
+// more valuable than a 500.
+func enrichedQuestionResponses(ctx context.Context, svc resolutionGetter, qs []domain.WorkflowQuestion) []WorkflowQuestionResponse {
+	out := make([]WorkflowQuestionResponse, 0, len(qs))
+	for _, q := range qs {
+		out = append(out, enrichedQuestionResponse(ctx, svc, q))
+	}
+	return out
+}
+
+func enrichedQuestionResponse(ctx context.Context, svc resolutionGetter, q domain.WorkflowQuestion) WorkflowQuestionResponse {
+	out := workflowQuestionResponse(q)
+	if svc == nil || !resolverEnrichmentEligible(q) {
+		return out
+	}
+	resolution, found, err := svc.GetResolution(ctx, string(q.ID))
+	if err != nil {
+		return out
+	}
+	return applyResolverEnrichment(out, resolution, found)
 }
 
 // AnswerWorkflowQuestionRequest is the body of

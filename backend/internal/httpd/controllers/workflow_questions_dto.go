@@ -30,16 +30,41 @@ type WorkflowQuestionResponse struct {
 	State                string                           `json:"state" enum:"pending,resolving,answered,human_required,cancelled"`
 	CreatedAt            string                           `json:"createdAt"`
 	AnsweredAt           *string                          `json:"answeredAt,omitempty"`
-	AnswerSource         string                           `json:"answerSource,omitempty" enum:",policy,human"`
+	AnswerSource         string                           `json:"answerSource,omitempty" enum:",policy,human,resolver"`
 	AnswerText           string                           `json:"answerText,omitempty"`
 	Delivered            bool                             `json:"delivered"`
 	DeliveredAt          *string                          `json:"deliveredAt,omitempty"`
+
+	// The fields below surface Checkpoint 8K-B's cross-provider Decision
+	// Resolver (pass 3), when a resolution attempt exists for this
+	// question. ResolverHarness/ResolverProvider/ResolverReasonSummary/
+	// ResolverEvidenceReferences describe the attempt itself and are safe
+	// to show regardless of outcome. AdvisoryAnswer is set ONLY when the
+	// resolver completed with requiresHuman=true (it could not determine a
+	// safe answer) — it is the resolver's non-binding advisory, NEVER a
+	// delivered decision, and must never be confused with AnswerText
+	// (which is only ever set once the question is actually answered).
+	ResolverHarness            string   `json:"resolverHarness,omitempty"`
+	ResolverProvider           string   `json:"resolverProvider,omitempty"`
+	ResolverReasonSummary      string   `json:"resolverReasonSummary,omitempty"`
+	ResolverEvidenceReferences []string `json:"resolverEvidenceReferences,omitempty"`
+	ResolverAdvisoryAnswer     string   `json:"resolverAdvisoryAnswer,omitempty"`
 }
 
 // ListWorkflowQuestionsResponse is the body of
-// GET /api/v1/workflows/{workflowId}/questions.
+// GET /api/v1/workflows/{workflowId}/questions and, reused as-is, of
+// GET /api/v1/questions/pending (Checkpoint 8K-B pass 3's global inbox).
 type ListWorkflowQuestionsResponse struct {
 	Questions []WorkflowQuestionResponse `json:"questions"`
+}
+
+// PendingDecisionsQuery is the query-param container for
+// GET /api/v1/questions/pending. State may repeat (?state=a&state=b) to
+// filter to more than one of human_required/resolving/waiting_for_capacity;
+// omitted entirely, the endpoint defaults to human_required+resolving (see
+// ListPendingWorkflowQuestions's doc comment).
+type PendingDecisionsQuery struct {
+	State []string `query:"state,omitempty" enum:"human_required,resolving,waiting_for_capacity" description:"Filter to one or more of human_required, resolving, waiting_for_capacity. Omit for the default (human_required + resolving)."`
 }
 
 // WorkflowQuestionResponseBody is the body of the single-question GET and
@@ -84,6 +109,36 @@ func workflowQuestionResponse(q domain.WorkflowQuestion) WorkflowQuestionRespons
 		out.StructuredChoices = append(out.StructuredChoices, WorkflowQuestionChoiceResponse{ID: c.ID, Label: c.Label})
 	}
 	return out
+}
+
+// applyResolverEnrichment attaches Checkpoint 8K-B pass 3's resolver fields
+// to an already-built WorkflowQuestionResponse from that question's current
+// resolution attempt, if any. Never sets ResolverAdvisoryAnswer unless
+// resolution.RequiresHuman is true — see WorkflowQuestionResponse's doc
+// comment for why that distinction must never blur.
+func applyResolverEnrichment(out WorkflowQuestionResponse, resolution domain.WorkflowQuestionResolution, found bool) WorkflowQuestionResponse {
+	if !found {
+		return out
+	}
+	out.ResolverHarness = string(resolution.ResolverHarness)
+	out.ResolverProvider = string(domain.ProviderForHarness(resolution.ResolverHarness))
+	out.ResolverReasonSummary = resolution.ReasonSummary
+	out.ResolverEvidenceReferences = resolution.EvidenceReferences
+	if resolution.RequiresHuman {
+		out.ResolverAdvisoryAnswer = resolution.Answer
+	}
+	return out
+}
+
+// resolverEnrichmentEligible reports whether a question could have a
+// resolution worth fetching: only questions that are (or were) in the
+// resolving/human_required lifecycle ever get a workflow_question_resolutions
+// row (see dispatchDecisionResolver / observeResolutionStep in
+// internal/workflow). Skipping the lookup for every other question avoids
+// an unnecessary store round-trip on the common case (policy/human answered
+// questions, pending questions never routed through the resolver).
+func resolverEnrichmentEligible(q domain.WorkflowQuestion) bool {
+	return q.ResolvingRunID != nil
 }
 
 func workflowQuestionResponses(qs []domain.WorkflowQuestion) []WorkflowQuestionResponse {

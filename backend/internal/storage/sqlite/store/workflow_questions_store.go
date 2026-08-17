@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -98,6 +99,72 @@ func (s *Store) ListWorkflowQuestionsByRun(ctx context.Context, runID string) ([
 	return workflowQuestionsFromRows(rows)
 }
 
+// ListPendingWorkflowQuestions returns every open/in-flight question across
+// ALL runs (no run-id filter), optionally restricted to the given states.
+// Checkpoint 8K-B pass 3's global "Pending Decisions" inbox source. An empty
+// states slice defaults to the inbox's three states
+// (human_required/resolving/waiting_for_capacity is a NextAction, not a
+// persisted state, so "resolving" covers it here — see
+// pendingDecisionsDefaultStates's doc comment at the call site).
+//
+// Hand-written raw SQL against the read connection, mirroring
+// TransitionWorkflowQuestionState's documented exception: this file
+// (workflow_questions.sql) has a reproduced sqlc v1.31.1 codegen bug, so
+// pass 2 established the precedent of hand-writing new queries here rather
+// than risking silent corruption by adding to the generated file. A plain
+// multi-state SELECT is exactly the shape that bug has been seen to corrupt
+// (see workflow_question_resolutions.sql's own from-scratch repro), so this
+// follows the same precedent rather than trying sqlc again.
+func (s *Store) ListPendingWorkflowQuestions(ctx context.Context, states []string) ([]domain.WorkflowQuestion, error) {
+	if len(states) == 0 {
+		states = []string{string(domain.QuestionStateHumanRequired), string(domain.QuestionStateResolving)}
+	}
+	placeholders := make([]string, len(states))
+	args := make([]any, len(states))
+	for i, st := range states {
+		placeholders[i] = "?"
+		args[i] = st
+	}
+	query := `SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
+       asking_harness, asking_role, fingerprint, question_text, structured_choices,
+       capture_provider, capture_parser_version, capture_range_lines,
+       certainty, classification, classification_reason, state, created_at,
+       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
+       resolving_run_id
+FROM workflow_questions
+WHERE state IN (` + strings.Join(placeholders, ",") + `)
+ORDER BY created_at`
+	rows, err := s.readDB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list pending workflow questions: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]domain.WorkflowQuestion, 0)
+	for rows.Next() {
+		var r gen.WorkflowQuestion
+		if err := rows.Scan(
+			&r.ID, &r.WorkflowRunID, &r.WorkflowStepID, &r.WorkflowAttemptID, &r.SessionID,
+			&r.AskingHarness, &r.AskingRole, &r.Fingerprint, &r.QuestionText, &r.StructuredChoices,
+			&r.CaptureProvider, &r.CaptureParserVersion, &r.CaptureRangeLines,
+			&r.Certainty, &r.Classification, &r.ClassificationReason, &r.State, &r.CreatedAt,
+			&r.AnsweredAt, &r.AnswerSource, &r.AnswerText, &r.AnswerReference, &r.Delivered, &r.DeliveredAt,
+			&r.ResolvingRunID,
+		); err != nil {
+			return nil, fmt.Errorf("scan pending workflow question: %w", err)
+		}
+		q, derr := workflowQuestionFromRow(r)
+		if derr != nil {
+			return nil, derr
+		}
+		out = append(out, q)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list pending workflow questions: %w", err)
+	}
+	return out, nil
+}
+
 // CountPolicyAnsweredWorkflowQuestionsByStep backs the
 // MaxAutoAnsweredQuestionsPerStep budget guard.
 func (s *Store) CountPolicyAnsweredWorkflowQuestionsByStep(ctx context.Context, stepID string) (int64, error) {
@@ -169,6 +236,63 @@ func (s *Store) CancelOpenWorkflowQuestionsByRun(ctx context.Context, runID stri
 		return 0, fmt.Errorf("cancel open workflow questions for run %s: %w", runID, err)
 	}
 	return n, nil
+}
+
+// SetWorkflowQuestionResolvingRunID points a question at its currently
+// in-flight Decision Resolver attempt (Checkpoint 8K-B, pass 1), or clears
+// the pointer when runID is nil. No CAS guard: the resolution row's own
+// status plus the partial unique index on workflow_question_resolutions is
+// what prevents two concurrent running attempts; this pointer only records
+// which attempt is current.
+func (s *Store) SetWorkflowQuestionResolvingRunID(ctx context.Context, questionID string, runID *string) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	n, err := s.qw.SetWorkflowQuestionResolvingRunID(ctx, gen.SetWorkflowQuestionResolvingRunIDParams{
+		ResolvingRunID: stringPtrToNullString(runID),
+		ID:             questionID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("set resolving_run_id for workflow question %s: %w", questionID, err)
+	}
+	return n > 0, nil
+}
+
+// TransitionWorkflowQuestionState applies a CAS-style state-only transition
+// (Checkpoint 8K-B, pass 2): the update only applies if the row is currently
+// in expectedState, mirroring AnswerWorkflowQuestion's compare-and-swap
+// pattern exactly — but WITHOUT touching answered_at/answer_source/
+// answer_text/answer_reference, since forcing resolving -> human_required
+// (resolver failed/stale/requires_human) or any open/resolving state ->
+// cancelled is never an "answer" and must never look like one on the row.
+//
+// This is a hand-written parameterized statement executed directly against
+// the write connection rather than a generated sqlc query. sqlc v1.31.1 has
+// a reproducible SQLite-codegen bug in this exact file: a CAS-style
+// UPDATE ... SET <col> = ?, ... WHERE id = ? AND <col> = ? query (any
+// combination of plain "?", numbered "?N", or sqlc.arg(...) tried) either
+// silently truncates its final placeholder out of the generated raw SQL
+// string constant, or hard-fails to parse — verified via an isolated
+// single-query repro that generates the identical query text correctly on
+// its own, so the corruption is specific to this query coexisting with the
+// rest of this file's queries, not the query shape itself. Given a choice
+// between shipping a state-transition query nobody can safely verify wasn't
+// silently corrupted, and a few hand-written lines using the store's
+// existing writeDB/writeMu, this is the safer, explicit exception.
+func (s *Store) TransitionWorkflowQuestionState(ctx context.Context, id string, expected, next domain.QuestionState, reason string, now time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	res, err := s.writeDB.ExecContext(ctx,
+		`UPDATE workflow_questions SET state = ?, classification_reason = ? WHERE id = ? AND state = ?`,
+		string(next), reason, id, string(expected),
+	)
+	if err != nil {
+		return false, fmt.Errorf("transition workflow question %s state: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("transition workflow question %s state: %w", id, err)
+	}
+	return n > 0, nil
 }
 
 func marshalChoices(choices []domain.QuestionChoice) (sql.NullString, error) {
@@ -245,6 +369,11 @@ func workflowQuestionFromRow(r gen.WorkflowQuestion) (domain.WorkflowQuestion, e
 		v := domain.AnswerSource(r.AnswerSource.String)
 		answerSource = &v
 	}
+	var resolvingRunID *domain.WorkflowQuestionResolutionID
+	if r.ResolvingRunID.Valid {
+		v := domain.WorkflowQuestionResolutionID(r.ResolvingRunID.String)
+		resolvingRunID = &v
+	}
 
 	return domain.WorkflowQuestion{
 		ID:                   domain.WorkflowQuestionID(r.ID),
@@ -271,5 +400,6 @@ func workflowQuestionFromRow(r gen.WorkflowQuestion) (domain.WorkflowQuestion, e
 		AnswerReference:      r.AnswerReference.String,
 		Delivered:            r.Delivered != 0,
 		DeliveredAt:          nullTimeToTimePtr(r.DeliveredAt),
+		ResolvingRunID:       resolvingRunID,
 	}, nil
 }

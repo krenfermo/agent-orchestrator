@@ -15,7 +15,7 @@ function translate(t: TFunction, key: string): string {
 	return untypedT(key);
 }
 
-type WorkflowQuestionResponse = components["schemas"]["WorkflowQuestionResponse"];
+export type WorkflowQuestionResponse = components["schemas"]["WorkflowQuestionResponse"];
 
 const CLASSIFICATION_KEYS: Record<string, string> = {
 	policy_resolvable: "shell.workflowQuestions.classification.policy_resolvable",
@@ -37,7 +37,24 @@ const STATE_KEYS: Record<string, string> = {
 	answered: "shell.workflowQuestions.state.answered",
 	human_required: "shell.workflowQuestions.state.human_required",
 	cancelled: "shell.workflowQuestions.state.cancelled",
+	// Not a persisted QuestionState — see effectiveStateKey below. Included
+	// here so the badge label lookup stays a single table.
+	waiting_for_capacity: "shell.workflowQuestions.state.waiting_for_capacity",
 };
+
+/**
+ * effectiveStateKey folds Checkpoint 8K-B's read-time-derived
+ * "waiting_for_capacity" signal into the same badge STATE_KEYS uses for a
+ * real persisted QuestionState. A question is "waiting_for_capacity" when
+ * it is state=resolving but has no resolver attempt dispatched yet (no
+ * resolverHarness on the wire) — the same fact
+ * reconcileDecisionResolvers/dispatchDecisionResolver derive server-side
+ * (decision_resolver_wiring.go) when every usable provider is unavailable.
+ */
+function effectiveStateKey(question: WorkflowQuestionResponse): string {
+	if (question.state === "resolving" && !question.resolverHarness) return "waiting_for_capacity";
+	return question.state;
+}
 
 function ageText(t: TFunction, createdAt: string): string {
 	const createdMs = Date.parse(createdAt);
@@ -51,13 +68,20 @@ function ageText(t: TFunction, createdAt: string): string {
 	return t("shell.workflowQuestions.ageDays", { count: days });
 }
 
-interface QuestionCardProps {
+export interface QuestionCardProps {
 	question: WorkflowQuestionResponse;
 	onAnswer: (args: { questionId: string; choiceId?: string; customText?: string }) => Promise<unknown>;
 	answering: boolean;
 }
 
-function QuestionCard({ question, onAnswer, answering }: QuestionCardProps) {
+/**
+ * QuestionCard is one stacked, mobile-first question card. Exported so
+ * Checkpoint 8K-B pass 3's global "Pending Decisions" inbox
+ * (routes/_shell.decisions.tsx) reuses it verbatim instead of duplicating
+ * the classification/state badges, answer form, and resolver
+ * advisory-vs-answered distinction.
+ */
+export function QuestionCard({ question, onAnswer, answering }: QuestionCardProps) {
 	const { t } = useTranslation();
 	const [customText, setCustomText] = useState("");
 	const [submittingChoice, setSubmittingChoice] = useState<string | null>(null);
@@ -96,7 +120,9 @@ function QuestionCard({ question, onAnswer, answering }: QuestionCardProps) {
 				<Badge variant={CLASSIFICATION_BADGE_VARIANT[question.classification] ?? "neutral"}>
 					{translate(t, CLASSIFICATION_KEYS[question.classification] ?? question.classification)}
 				</Badge>
-				<Badge variant="outline">{translate(t, STATE_KEYS[question.state] ?? question.state)}</Badge>
+				<Badge variant="outline">
+					{translate(t, STATE_KEYS[effectiveStateKey(question)] ?? question.state)}
+				</Badge>
 				<span className="text-xs text-muted-foreground">{ageText(t, question.createdAt)}</span>
 				{question.askingHarness && <span className="text-xs text-muted-foreground">{question.askingHarness}</span>}
 			</div>
@@ -116,6 +142,30 @@ function QuestionCard({ question, onAnswer, answering }: QuestionCardProps) {
 							{t("shell.workflowQuestions.answerSource", { source: question.answerSource })}
 						</p>
 					)}
+				</div>
+			)}
+
+			{/* Resolver attempt metadata: safe to show regardless of outcome
+			    (harness/provider/reason/evidence). Visually a quieter, plain-text
+			    footnote — never styled like the "Answered" block above. */}
+			{question.resolverHarness && (
+				<div className="text-xs text-muted-foreground">
+					{t("shell.workflowQuestions.resolverAttempt", {
+						harness: question.resolverProvider || question.resolverHarness,
+					})}
+					{question.resolverReasonSummary ? ` — ${question.resolverReasonSummary}` : ""}
+				</div>
+			)}
+
+			{/* Resolver ADVISORY: only ever set when the resolver escalated
+			    (requiresHuman=true). Deliberately a distinct dashed-border amber
+			    block, never the solid bg-muted "Answered" styling above — this
+			    must never be mistaken for a delivered decision. */}
+			{question.resolverAdvisoryAnswer && (
+				<div className="rounded border border-dashed border-warning/40 bg-warning/10 p-2 text-xs">
+					<div className="font-medium text-warning">{t("shell.workflowQuestions.resolverAdvisoryTitle")}</div>
+					<p className="mt-1 text-muted-foreground">{t("shell.workflowQuestions.resolverAdvisoryDisclaimer")}</p>
+					<p className="mt-1 italic text-muted-foreground">{question.resolverAdvisoryAnswer}</p>
 				</div>
 			)}
 

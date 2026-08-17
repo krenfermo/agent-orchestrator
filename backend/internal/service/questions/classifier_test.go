@@ -61,6 +61,48 @@ func TestClassify(t *testing.T) {
 			certainty: domain.QuestionCertaintyInferred,
 			wantClass: domain.QuestionClassificationAmbiguous,
 		},
+		{
+			name:      "which existing helper should I use",
+			text:      "Which existing helper function should I use to format timestamps?",
+			certainty: domain.QuestionCertaintyInferred,
+			wantClass: domain.QuestionClassificationAutoResolvable,
+		},
+		{
+			name:      "which of these modules should I use",
+			text:      "Which of these modules should I use for retries?",
+			certainty: domain.QuestionCertaintyInferred,
+			wantClass: domain.QuestionClassificationAutoResolvable,
+		},
+		{
+			name:      "is there already a helper for X",
+			text:      "Is there already a helper for parsing this response?",
+			certainty: domain.QuestionCertaintyInferred,
+			wantClass: domain.QuestionClassificationAutoResolvable,
+		},
+		{
+			name:      "does a function already exist",
+			text:      "Does a function already exist for retrying failed requests?",
+			certainty: domain.QuestionCertaintyInferred,
+			wantClass: domain.QuestionClassificationAutoResolvable,
+		},
+		{
+			name:      "which pattern already implements",
+			text:      "Which pattern already implements request retries in this repo?",
+			certainty: domain.QuestionCertaintyInferred,
+			wantClass: domain.QuestionClassificationAutoResolvable,
+		},
+		{
+			name:      "preference question does not match discovery shape",
+			text:      "Which of these two naming schemes do you prefer for the new config field?",
+			certainty: domain.QuestionCertaintyInferred,
+			wantClass: domain.QuestionClassificationAmbiguous,
+		},
+		{
+			name:      "business choice does not match discovery shape",
+			text:      "Should we support both light and dark themes at launch?",
+			certainty: domain.QuestionCertaintyInferred,
+			wantClass: domain.QuestionClassificationAmbiguous,
+		},
 	}
 
 	for _, tc := range cases {
@@ -105,6 +147,18 @@ func TestResolveState(t *testing.T) {
 			name:      "ambiguous escalates to human required",
 			class:     domain.QuestionClassificationAmbiguous,
 			budget:    ClassifyContext{MaxAutoAnswered: 5},
+			wantState: domain.QuestionStateHumanRequired,
+		},
+		{
+			name:      "auto resolvable within budget resolves",
+			class:     domain.QuestionClassificationAutoResolvable,
+			budget:    ClassifyContext{PolicyAnsweredCount: 1, MaxAutoAnswered: 5},
+			wantState: domain.QuestionStateResolving,
+		},
+		{
+			name:      "auto resolvable but budget exhausted",
+			class:     domain.QuestionClassificationAutoResolvable,
+			budget:    ClassifyContext{PolicyAnsweredCount: 5, MaxAutoAnswered: 5},
 			wantState: domain.QuestionStateHumanRequired,
 		},
 	}

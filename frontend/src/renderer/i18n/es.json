@@ -1283,5 +1283,15 @@
 	"shell.workflowsSelectProjectPlaceholder": "Selecciona un proyecto",
 	"shell.workflowsMasterPlan": "Plan maestro",
 	"shell.workflowsDependsOn": "Depende de: {{dependencies}}",
-	"shell.workflowsExecutionWorkflow": "Flujo de ejecución"
+	"shell.workflowsExecutionWorkflow": "Flujo de ejecución",
+	"shell.workflowQuestions.state.waiting_for_capacity": "Esperando capacidad",
+	"shell.workflowQuestions.resolverAttempt": "Intento del resolutor: {{harness}}",
+	"shell.workflowQuestions.resolverAdvisoryTitle": "El resolutor no pudo determinarlo con seguridad",
+	"shell.workflowQuestions.resolverAdvisoryDisclaimer": "Esto es un aviso no vinculante del resolutor multiproveedor, no una decisión entregada. Revísalo y responde abajo.",
+	"shell.decisions.navLabel": "Decisiones pendientes",
+	"shell.decisions.title": "Decisiones pendientes",
+	"shell.decisions.subtitle": "Preguntas que esperan tu respuesta o la de un resolutor, en todas las ejecuciones de flujo de trabajo.",
+	"shell.decisions.loading": "Cargando…",
+	"shell.decisions.viewRun": "Ver ejecución",
+	"shell.decisions.empty": "No hay decisiones pendientes."
 }

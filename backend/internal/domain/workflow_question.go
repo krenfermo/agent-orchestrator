@@ -132,12 +132,21 @@ const (
 	// AnswerSourceHuman means the answer was submitted by a human through
 	// the answer API.
 	AnswerSourceHuman AnswerSource = "human"
+	// AnswerSourceResolver means the answer was produced by the
+	// cross-provider Decision Resolver (Checkpoint 8K-B): a read-only
+	// session of the *other* provider than the one that asked, answering
+	// from repo evidence rather than policy-stored facts or a human. Not
+	// emitted by any 8K-A/8K-B-pass-1 code path yet — the resolver
+	// dispatch/callback machinery lands in pass 2 — but reserved here so
+	// the enum (and, if it ever gains a CHECK constraint) doesn't need a
+	// second migration once it is.
+	AnswerSourceResolver AnswerSource = "resolver"
 )
 
 // Valid reports whether an answer source value is persistable.
 func (s AnswerSource) Valid() bool {
 	switch s {
-	case AnswerSourcePolicy, AnswerSourceHuman:
+	case AnswerSourcePolicy, AnswerSourceHuman, AnswerSourceResolver:
 		return true
 	default:
 		return false
@@ -182,4 +191,9 @@ type WorkflowQuestion struct {
 	AnswerReference      string
 	Delivered            bool
 	DeliveredAt          *time.Time
+	// ResolvingRunID points at the currently in-flight (or most recently
+	// current) Decision Resolver attempt for this question (Checkpoint
+	// 8K-B, pass 1: column added, nothing writes it yet). Nil when no
+	// resolution attempt has ever been recorded for this question.
+	ResolvingRunID *WorkflowQuestionResolutionID
 }

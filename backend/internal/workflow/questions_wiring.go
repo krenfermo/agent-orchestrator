@@ -23,6 +23,29 @@ type QuestionsStore interface {
 	questions.DeliveryStore
 	ListOpenWorkflowQuestionsByRun(ctx stdctx.Context, runID string) ([]domain.WorkflowQuestion, error)
 	CancelOpenWorkflowQuestionsByRun(ctx stdctx.Context, runID string) (int64, error)
+
+	// ListWorkflowQuestionsByRun (all states, any time) backs Checkpoint
+	// 8K-B pass 2's resolving-question scan (decision_resolver_wiring.go)
+	// and the widened dispatch-guard check in hasOpenQuestion below — reused
+	// rather than adding a second narrower query, since *store.Store already
+	// exposes it for the human-answer API (service/questions/answer_service.go).
+	ListWorkflowQuestionsByRun(ctx stdctx.Context, runID string) ([]domain.WorkflowQuestion, error)
+	// SetWorkflowQuestionResolvingRunID and TransitionWorkflowQuestionState
+	// back Checkpoint 8K-B pass 2's resolver dispatch/observe wiring
+	// (decision_resolver_wiring.go).
+	SetWorkflowQuestionResolvingRunID(ctx stdctx.Context, questionID string, runID *string) (bool, error)
+	TransitionWorkflowQuestionState(ctx stdctx.Context, id string, expected, next domain.QuestionState, reason string, now time.Time) (bool, error)
+
+	// Resolution-attempt CRUD (Checkpoint 8K-B, pass 1 store methods, wired
+	// into the reconcile loop by pass 2): *store.Store already implements
+	// every one of these against workflow_question_resolutions.
+	InsertWorkflowQuestionResolution(ctx stdctx.Context, r domain.WorkflowQuestionResolution) (domain.WorkflowQuestionResolution, error)
+	GetWorkflowQuestionResolution(ctx stdctx.Context, id string) (domain.WorkflowQuestionResolution, bool, error)
+	GetCurrentResolutionForQuestion(ctx stdctx.Context, questionID string) (domain.WorkflowQuestionResolution, bool, error)
+	TransitionResolutionStatus(ctx stdctx.Context, id string, expectedStatus, newStatus domain.ResolutionStatus, answer, reasonSummary string, evidenceReferences []string, certainty *domain.QuestionCertainty, requiresHuman bool, updatedAt time.Time, completedAt *time.Time) (bool, error)
+	SetResolutionResolverSessionID(ctx stdctx.Context, id string, resolverSessionID string) (bool, error)
+	ListRunningResolutions(ctx stdctx.Context) ([]domain.WorkflowQuestionResolution, error)
+	CancelRunningResolutionsByQuestion(ctx stdctx.Context, questionID string, at time.Time) (int64, error)
 }
 
 // PaneReader is the bounded pane-text capture path Checkpoint 8K-A's
@@ -70,36 +93,56 @@ var questionHarnessParsers = map[domain.AgentHarness]ports.QuestionPaneParser{
 // session is currently waiting_input/blocked AND has no open question yet
 // for that step — never a continuous poll regardless of activity state,
 // and never a re-scrape once an open question already exists.
-func (c *Coordinator) reconcileQuestions(ctx stdctx.Context, run domain.WorkflowRun, steps []domain.WorkflowStep) error {
+// reconcileQuestions returns a non-empty nextAction only for Checkpoint
+// 8K-B's read-time-derived "waiting_for_capacity" override (see
+// reconcileDecisionResolvers); the pre-existing "waiting_for_decision"
+// override for a pending/human_required question is still derived
+// separately by the caller (GetRun) via ListOpenWorkflowQuestionsByRun,
+// unchanged from 8K-A.
+func (c *Coordinator) reconcileQuestions(ctx stdctx.Context, run domain.WorkflowRun, steps []domain.WorkflowStep) (string, error) {
 	if c.questionsStore == nil {
-		return nil
+		return "", nil
 	}
 	now := c.clock()
 
 	if c.messageSender != nil {
 		if _, err := questions.DeliverAnswered(ctx, c.questionsStore, questionMessageSender{c.messageSender}, run.ID, now); err != nil {
-			return err
+			return "", err
 		}
 	}
 
-	if run.State.Terminal() || c.sessionFacts == nil || c.paneReader == nil {
-		return nil
+	// Detection runs BEFORE resolver dispatch/observe below so a question
+	// freshly captured this same call (auto_resolvable -> state=resolving)
+	// is eligible for dispatch within the same GetRun/Reconcile pass,
+	// matching the responsiveness convention the policy-resolvable path
+	// already established (answered+delivered synchronously within one
+	// call) — never a second poll cycle's worth of extra latency just to
+	// notice a question that was just inserted.
+	if !run.State.Terminal() && c.sessionFacts != nil && c.paneReader != nil {
+		for _, step := range steps {
+			if step.State.Terminal() || step.SessionID == nil || *step.SessionID == "" {
+				continue
+			}
+			switch step.Kind {
+			case domain.WorkflowStepWork, domain.WorkflowStepFix, domain.WorkflowStepReview:
+			default:
+				continue
+			}
+			if err := c.detectQuestionForStep(ctx, run, step, now); err != nil {
+				return "", err
+			}
+		}
 	}
 
-	for _, step := range steps {
-		if step.State.Terminal() || step.SessionID == nil || *step.SessionID == "" {
-			continue
-		}
-		switch step.Kind {
-		case domain.WorkflowStepWork, domain.WorkflowStepFix, domain.WorkflowStepReview:
-		default:
-			continue
-		}
-		if err := c.detectQuestionForStep(ctx, run, step, now); err != nil {
-			return err
-		}
+	// Checkpoint 8K-B pass 2: dispatch/observe resolving-state questions
+	// regardless of whether sessionFacts/paneReader are wired — resolver
+	// dispatch/observation never needs a live pane capture, only already-
+	// persisted question/resolution rows.
+	waitingForCapacity, err := c.reconcileDecisionResolvers(ctx, run, now)
+	if err != nil {
+		return "", err
 	}
-	return nil
+	return waitingForCapacity, nil
 }
 
 // detectQuestionForStep captures, parses, classifies, and (if
@@ -117,15 +160,16 @@ func (c *Coordinator) detectQuestionForStep(ctx stdctx.Context, run domain.Workf
 		return nil
 	}
 
-	open, err := c.questionsStore.ListOpenWorkflowQuestionsByRun(ctx, run.ID)
-	if err != nil {
+	// Widened (Checkpoint 8K-B) to also skip re-scraping while a
+	// state=resolving question is already open for this step — mirrors
+	// hasOpenQuestion's own widening, kept as a direct local check here
+	// (rather than calling hasOpenQuestion) so the "don't re-scrape" and
+	// "block dispatch" concerns stay independently readable, same as before.
+	stepIDStrForGuard := step.ID
+	if open, err := c.hasOpenQuestion(ctx, run.ID, &stepIDStrForGuard); err != nil {
 		return err
-	}
-	for _, q := range open {
-		if q.WorkflowStepID != nil && string(*q.WorkflowStepID) == step.ID {
-			// Already has an open question for this step: don't re-scrape.
-			return nil
-		}
+	} else if open {
+		return nil
 	}
 
 	handle := ports.RuntimeHandle{ID: sess.Metadata.RuntimeHandleID}
@@ -140,9 +184,22 @@ func (c *Coordinator) detectQuestionForStep(ctx stdctx.Context, run domain.Workf
 	harness := sess.Harness
 	parser := questionHarnessParsers[harness]
 
-	var branch, worktreePath string
+	var branch, worktreePath, workspaceFingerprint string
 	if cp, hasCP, cerr := c.store.GetLatestWorkflowCheckpointByStep(ctx, step.ID); cerr == nil && hasCP {
 		branch, worktreePath = cp.Branch, cp.WorktreePath
+		// Checkpoint 8K-B: thread the workspace fingerprint into the
+		// question fingerprint so the same question text under a genuinely
+		// different diff is a NEW question, not a dedup no-op — reusing the
+		// step's own latest checkpoint (already loaded above for
+		// branch/worktreePath) rather than a fresh ObserveWorkspace shell-out,
+		// which detectQuestionForStep must not add (this is a best-effort
+		// poll-time hot path, not a dispatch decision). FingerprintAfter is
+		// the freshest observed state; FingerprintBefore covers the window
+		// before the step's own work has produced one yet.
+		workspaceFingerprint = cp.FingerprintAfter
+		if workspaceFingerprint == "" {
+			workspaceFingerprint = cp.FingerprintBefore
+		}
 	}
 
 	policy := policyForRun(run)
@@ -150,19 +207,20 @@ func (c *Coordinator) detectQuestionForStep(ctx stdctx.Context, run domain.Workf
 	newID := c.newID
 
 	res, err := questions.Detect(ctx, c.questionsStore, parser, questions.DetectInput{
-		RunID:                  domain.WorkflowRunID(run.ID),
-		StepID:                 &stepID,
-		SessionID:              &sessionID,
-		AskingHarness:          harness,
-		AskingRole:             string(step.Kind),
-		PaneText:               paneText,
-		CaptureProvider:        "tmux",
-		PolicyVersionAtCapture: run.PolicyVersion,
-		Branch:                 branch,
-		WorktreePath:           worktreePath,
-		MaxAutoAnswered:        policy.MaxAutoAnsweredQuestionsPerStep,
-		Now:                    now,
-		NewID:                  func() string { return "wfq-" + newID() },
+		RunID:                         domain.WorkflowRunID(run.ID),
+		StepID:                        &stepID,
+		SessionID:                     &sessionID,
+		AskingHarness:                 harness,
+		AskingRole:                    string(step.Kind),
+		PaneText:                      paneText,
+		CaptureProvider:               "tmux",
+		PolicyVersionAtCapture:        run.PolicyVersion,
+		WorkspaceFingerprintAtCapture: workspaceFingerprint,
+		Branch:                        branch,
+		WorktreePath:                  worktreePath,
+		MaxAutoAnswered:               policy.MaxAutoAnsweredQuestionsPerStep,
+		Now:                           now,
+		NewID:                         func() string { return "wfq-" + newID() },
 	})
 	if err != nil {
 		return err
@@ -176,22 +234,34 @@ func (c *Coordinator) detectQuestionForStep(ctx stdctx.Context, run domain.Workf
 	return nil
 }
 
-// hasOpenQuestion reports whether an unresolved (pending/human_required)
-// question exists — scoped to one step when stepID is non-nil, or to the
+// hasOpenQuestion reports whether an unresolved question exists — open
+// (pending/human_required) OR, as of Checkpoint 8K-B pass 2, still
+// state=resolving (a Decision Resolver attempt in flight or awaiting
+// provider capacity) — scoped to one step when stepID is non-nil, or to the
 // whole run when stepID is nil (used by the master-task dispatch guard,
 // which dispatches at the parent-run level, not a single step).
+//
+// Widened from ListOpenWorkflowQuestionsByRun (pending/human_required only)
+// to ListWorkflowQuestionsByRun (all states, filtered here) rather than
+// adding a second narrow SQL query for a third state value — every other
+// dispatch call site already goes through this single centralized guard, so
+// widening it here is enough (per this checkpoint's brief: "extend it there,
+// do not touch each of the four/five individual dispatch call sites again").
 func (c *Coordinator) hasOpenQuestion(ctx stdctx.Context, runID string, stepID *string) (bool, error) {
 	if c.questionsStore == nil {
 		return false, nil
 	}
-	open, err := c.questionsStore.ListOpenWorkflowQuestionsByRun(ctx, runID)
+	all, err := c.questionsStore.ListWorkflowQuestionsByRun(ctx, runID)
 	if err != nil {
 		return false, err
 	}
-	if stepID == nil {
-		return len(open) > 0, nil
-	}
-	for _, q := range open {
+	for _, q := range all {
+		if !q.State.Open() && q.State != domain.QuestionStateResolving {
+			continue
+		}
+		if stepID == nil {
+			return true, nil
+		}
 		if q.WorkflowStepID != nil && *q.WorkflowStepID == domain.WorkflowStepID(*stepID) {
 			return true, nil
 		}

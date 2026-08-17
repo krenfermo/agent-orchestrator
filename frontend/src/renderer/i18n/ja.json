@@ -1268,5 +1268,15 @@
 	"shell.workflowsSelectProjectPlaceholder": "プロジェクトを選択",
 	"shell.workflowsMasterPlan": "マスタープラン",
 	"shell.workflowsDependsOn": "依存先: {{dependencies}}",
-	"shell.workflowsExecutionWorkflow": "実行ワークフロー"
+	"shell.workflowsExecutionWorkflow": "実行ワークフロー",
+	"shell.workflowQuestions.state.waiting_for_capacity": "キャパシティ待ち",
+	"shell.workflowQuestions.resolverAttempt": "リゾルバーの試行: {{harness}}",
+	"shell.workflowQuestions.resolverAdvisoryTitle": "リゾルバーは安全に判断できませんでした",
+	"shell.workflowQuestions.resolverAdvisoryDisclaimer": "これはクロスプロバイダーのリゾルバーによる拘束力のない参考情報であり、確定した決定ではありません。内容を確認の上、以下で回答してください。",
+	"shell.decisions.navLabel": "保留中の判断",
+	"shell.decisions.title": "保留中の判断",
+	"shell.decisions.subtitle": "すべてのワークフロー実行にわたり、あなたまたはリゾルバーの対応を待っている質問です。",
+	"shell.decisions.loading": "読み込み中…",
+	"shell.decisions.viewRun": "実行を表示",
+	"shell.decisions.empty": "保留中の判断はありません。"
 }

@@ -30,6 +30,9 @@ type fakeQuestionsService struct {
 	lastCustomText *string
 	answerErr      error
 	answerResult   domain.WorkflowQuestion
+
+	resolution      domain.WorkflowQuestionResolution
+	resolutionFound bool
 }
 
 func (f *fakeQuestionsService) ListByRun(_ context.Context, runID string) ([]domain.WorkflowQuestion, error) {
@@ -49,6 +52,42 @@ func (f *fakeQuestionsService) Get(_ context.Context, runID, questionID string) 
 		}
 	}
 	return domain.WorkflowQuestion{}, questions.ErrNotFound
+}
+
+func (f *fakeQuestionsService) ListPending(_ context.Context, states []string) ([]domain.WorkflowQuestion, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	allowed := map[string]bool{}
+	for _, s := range states {
+		allowed[s] = true
+	}
+	var out []domain.WorkflowQuestion
+	for _, qs := range f.byRun {
+		for _, q := range qs {
+			if len(allowed) == 0 {
+				if q.State == domain.QuestionStateHumanRequired || q.State == domain.QuestionStateResolving {
+					out = append(out, q)
+				}
+				continue
+			}
+			if allowed[string(q.State)] {
+				out = append(out, q)
+			}
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeQuestionsService) GetResolution(_ context.Context, _ string) (domain.WorkflowQuestionResolution, bool, error) {
+	return f.resolution, f.resolutionFound, nil
+}
+
+func (f *fakeQuestionsService) ListResolutionsByRun(_ context.Context, _ string) ([]domain.WorkflowQuestionResolution, error) {
+	if !f.resolutionFound {
+		return nil, nil
+	}
+	return []domain.WorkflowQuestionResolution{f.resolution}, nil
 }
 
 func (f *fakeQuestionsService) Answer(_ context.Context, runID, questionID string, choiceID, customText *string) (domain.WorkflowQuestion, error) {
@@ -92,6 +131,87 @@ func TestWorkflowQuestions_ListHappyPath(t *testing.T) {
 	}
 	if len(out.Questions) != 1 || out.Questions[0].ID != "q-1" {
 		t.Fatalf("unexpected questions: %+v", out.Questions)
+	}
+}
+
+func TestWorkflowQuestions_PendingAcrossRuns(t *testing.T) {
+	svc := &fakeQuestionsService{byRun: map[string][]domain.WorkflowQuestion{
+		"wf-1": {
+			{ID: "q-1", WorkflowRunID: "wf-1", State: domain.QuestionStateHumanRequired},
+			{ID: "q-2", WorkflowRunID: "wf-1", State: domain.QuestionStateAnswered},
+		},
+		"wf-2": {
+			{ID: "q-3", WorkflowRunID: "wf-2", State: domain.QuestionStateResolving},
+		},
+	}}
+	srv := newQuestionsTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, "GET", "/api/v1/questions/pending", "")
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	var out struct {
+		Questions []struct {
+			ID string `json:"id"`
+		} `json:"questions"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, body)
+	}
+	if len(out.Questions) != 2 {
+		t.Fatalf("expected 2 pending questions across runs (q-1 human_required, q-3 resolving), got %+v", out.Questions)
+	}
+}
+
+func TestWorkflowQuestions_PendingInvalidStateFilter400(t *testing.T) {
+	svc := &fakeQuestionsService{byRun: map[string][]domain.WorkflowQuestion{}}
+	srv := newQuestionsTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, "GET", "/api/v1/questions/pending?state=not_a_real_state", "")
+	if status != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400", status, body)
+	}
+}
+
+func TestWorkflowQuestions_ResolverAdvisoryNeverConfusedWithAnswer(t *testing.T) {
+	resolvingRunID := domain.WorkflowQuestionResolutionID("wqr-1")
+	svc := &fakeQuestionsService{
+		byRun: map[string][]domain.WorkflowQuestion{
+			"wf-1": {{
+				ID: "q-1", WorkflowRunID: "wf-1", State: domain.QuestionStateHumanRequired,
+				Classification: domain.QuestionClassificationAutoResolvable, ResolvingRunID: &resolvingRunID,
+			}},
+		},
+		resolution: domain.WorkflowQuestionResolution{
+			ID: resolvingRunID, ResolverHarness: domain.HarnessCodex,
+			RequiresHuman: true, Answer: "resolver's best guess, not a decision", ReasonSummary: "could not verify against tests",
+		},
+		resolutionFound: true,
+	}
+	srv := newQuestionsTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, "GET", "/api/v1/workflows/wf-1/questions/q-1", "")
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	var out struct {
+		Question struct {
+			AnswerText             string `json:"answerText"`
+			ResolverHarness        string `json:"resolverHarness"`
+			ResolverAdvisoryAnswer string `json:"resolverAdvisoryAnswer"`
+		} `json:"question"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, body)
+	}
+	if out.Question.AnswerText != "" {
+		t.Fatalf("AnswerText must stay empty for a human_required question, got %q", out.Question.AnswerText)
+	}
+	if out.Question.ResolverAdvisoryAnswer != "resolver's best guess, not a decision" {
+		t.Fatalf("expected resolver advisory answer surfaced separately, got %+v", out.Question)
+	}
+	if out.Question.ResolverHarness != "codex" {
+		t.Fatalf("expected resolverHarness=codex, got %+v", out.Question)
 	}
 }
 

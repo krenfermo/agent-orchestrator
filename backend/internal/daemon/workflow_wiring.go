@@ -42,7 +42,7 @@ func (w workflowAgentSwitcher) SwitchAgent(ctx context.Context, id domain.Sessio
 // plus the thin API-facing service. It does not start any background
 // goroutine — progress is derived at read time (GetRun) and at boot
 // (Reconcile), never polled by a scheduler.
-func startWorkflows(store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service) {
+func startWorkflows(store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {
 		plannerBinary = "claude"
@@ -52,22 +52,23 @@ func startWorkflows(store *sqlite.Store, sessionMgr *sessionmanager.Manager, wor
 		plannerModel = "sonnet"
 	}
 	coordinator := workflowcore.New(workflowcore.Deps{
-		Store:                 store,
-		Projects:              store,
-		Sessions:              store,
-		ReviewRuns:            store,
-		Spawner:               sessionMgr,
-		SessionFacts:          store,
-		WorkspaceFacts:        workspace,
-		ReviewerLauncher:      reviewerLauncher,
-		MessageSender:         sessionMgr,
-		Verifier:              workflowVerifyRunner{},
-		Planner:               plannercommand.Planner{Binary: plannerBinary, Model: plannerModel, Timeout: 3 * time.Minute},
-		PlannerContextBuilder: plannercommand.ContextBuilder{},
-		Switcher:              workflowAgentSwitcher{mgr: sessionMgr},
-		QuestionsStore:        store,
-		PaneReader:            paneReader,
-		Logger:                log,
+		Store:                    store,
+		Projects:                 store,
+		Sessions:                 store,
+		ReviewRuns:               store,
+		Spawner:                  sessionMgr,
+		SessionFacts:             store,
+		WorkspaceFacts:           workspace,
+		ReviewerLauncher:         reviewerLauncher,
+		MessageSender:            sessionMgr,
+		Verifier:                 workflowVerifyRunner{},
+		Planner:                  plannercommand.Planner{Binary: plannerBinary, Model: plannerModel, Timeout: 3 * time.Minute},
+		PlannerContextBuilder:    plannercommand.ContextBuilder{},
+		Switcher:                 workflowAgentSwitcher{mgr: sessionMgr},
+		QuestionsStore:           store,
+		PaneReader:               paneReader,
+		DecisionResolverLauncher: decisionResolverLauncher,
+		Logger:                   log,
 	})
 	return coordinator, workflowsvc.New(coordinator)
 }

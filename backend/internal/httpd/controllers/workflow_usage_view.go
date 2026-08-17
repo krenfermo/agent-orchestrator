@@ -43,6 +43,102 @@ type WorkflowUsageView struct {
 	Metrics    domain.TaskUsefulWorkMetrics
 	Advisory   domain.SessionRefreshAdvisory
 	Checkpoint domain.TaskCheckpointSummary
+	// Decisions is Checkpoint 8K-B pass 3's read-time-derived Decision
+	// Resolver telemetry, built from workflow_questions +
+	// workflow_question_resolutions. Zero value (all counts 0, no
+	// provider/duration) when the run has no questions at all — never
+	// omitted, since "zero questions asked" is a real, knowable fact,
+	// unlike token counts (see DecisionsUsageView's own doc comment for
+	// which of its fields follow the opposite "unknown != 0" rule).
+	Decisions DecisionsUsageView
+}
+
+// DecisionsUsageView is Checkpoint 8K-B pass 3's telemetry section: derived
+// entirely read-time from already-persisted workflow_questions and
+// workflow_question_resolutions rows, no new write-time instrumentation.
+//
+// QuestionsAsked/PolicyResolved/TechnicalResolved/HumanRequired/
+// ResolverFailed/WaitingForCapacity are plain row counts — always truly
+// knowable (0 is a real fact, not a fabrication) so they are never pointers.
+// ResolverProvider and ResolverDurationMS follow the OPPOSITE "unknown !=
+// 0" rule: nil/"" when no resolution row exists to derive them from, never
+// a fabricated empty/zero. ResolverDurationMS sums CompletedAt-CreatedAt
+// across every COMPLETE resolution attempt in the run (both auto-resolved
+// and requires_human outcomes) that has a CompletedAt.
+//
+// ReusedDecision is deliberately always nil: whether a captured question
+// hit InsertWorkflowQuestion's fingerprint-dedup no-op path (see
+// detector.go's DetectResult.Inserted) is a per-call, in-memory fact that
+// is NOT persisted anywhere on the workflow_questions row itself, so it
+// cannot be reconstructed read-time from the current schema without adding
+// a new column — out of scope for this pass (no new migrations). Left nil
+// rather than fabricated as 0, consistent with the rest of this view's
+// "unknown != 0" fields.
+type DecisionsUsageView struct {
+	QuestionsAsked     int64
+	PolicyResolved     int64
+	TechnicalResolved  int64
+	HumanRequired      int64
+	ResolverFailed     int64
+	WaitingForCapacity int64
+	ResolverProvider   string
+	ResolverDurationMS *int64
+	ReusedDecision     *int64
+}
+
+// BuildDecisionsUsageView derives Checkpoint 8K-B pass 3's telemetry
+// section from a run's already-fetched questions and resolutions — no new
+// store reads beyond what the caller already performed for the Questions
+// section and this view.
+func BuildDecisionsUsageView(qs []domain.WorkflowQuestion, resolutions []domain.WorkflowQuestionResolution) DecisionsUsageView {
+	var v DecisionsUsageView
+	v.QuestionsAsked = int64(len(qs))
+	for _, q := range qs {
+		if q.AnswerSource != nil {
+			switch *q.AnswerSource {
+			case domain.AnswerSourcePolicy:
+				v.PolicyResolved++
+			case domain.AnswerSourceResolver:
+				v.TechnicalResolved++
+			}
+		}
+		if q.State == domain.QuestionStateHumanRequired {
+			v.HumanRequired++
+		}
+		if q.State == domain.QuestionStateResolving && q.ResolvingRunID == nil {
+			// Mirrors reconcileDecisionResolvers' own read-time
+			// "waiting_for_capacity" derivation (decision_resolver_wiring.go):
+			// resolving with no dispatched attempt yet means every usable
+			// provider was unavailable on the last reconcile pass.
+			v.WaitingForCapacity++
+		}
+	}
+
+	var totalDuration time.Duration
+	var haveDuration bool
+	var latestResolverHarness domain.AgentHarness
+	var latestCreatedAt time.Time
+	for _, r := range resolutions {
+		if r.Status == domain.ResolutionStatusFailed {
+			v.ResolverFailed++
+		}
+		if r.CompletedAt != nil {
+			totalDuration += r.CompletedAt.Sub(r.CreatedAt)
+			haveDuration = true
+		}
+		if r.ResolverHarness != "" && r.CreatedAt.After(latestCreatedAt) {
+			latestCreatedAt = r.CreatedAt
+			latestResolverHarness = r.ResolverHarness
+		}
+	}
+	if latestResolverHarness != "" {
+		v.ResolverProvider = domain.ProviderForHarness(latestResolverHarness)
+	}
+	if haveDuration {
+		ms := totalDuration.Milliseconds()
+		v.ResolverDurationMS = &ms
+	}
+	return v
 }
 
 // BuildWorkflowUsageView is the pure, deterministic entry point: given an

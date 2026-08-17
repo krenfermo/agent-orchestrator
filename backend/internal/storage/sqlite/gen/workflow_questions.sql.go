@@ -75,7 +75,8 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        asking_harness, asking_role, fingerprint, question_text, structured_choices,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
-       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at
+       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
+       resolving_run_id
 FROM workflow_questions
 WHERE id = ?
 `
@@ -108,6 +109,7 @@ func (q *Queries) GetWorkflowQuestion(ctx context.Context, id string) (WorkflowQ
 		&i.AnswerReference,
 		&i.Delivered,
 		&i.DeliveredAt,
+		&i.ResolvingRunID,
 	)
 	return i, err
 }
@@ -117,7 +119,8 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        asking_harness, asking_role, fingerprint, question_text, structured_choices,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
-       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at
+       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
+       resolving_run_id
 FROM workflow_questions
 WHERE fingerprint = ?
 `
@@ -150,6 +153,7 @@ func (q *Queries) GetWorkflowQuestionByFingerprint(ctx context.Context, fingerpr
 		&i.AnswerReference,
 		&i.Delivered,
 		&i.DeliveredAt,
+		&i.ResolvingRunID,
 	)
 	return i, err
 }
@@ -165,7 +169,8 @@ RETURNING id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id
           asking_harness, asking_role, fingerprint, question_text, structured_choices,
           capture_provider, capture_parser_version, capture_range_lines,
           certainty, classification, classification_reason, state, created_at,
-          answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at
+          answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
+          resolving_run_id
 `
 
 type InsertWorkflowQuestionParams struct {
@@ -239,6 +244,7 @@ func (q *Queries) InsertWorkflowQuestion(ctx context.Context, arg InsertWorkflow
 		&i.AnswerReference,
 		&i.Delivered,
 		&i.DeliveredAt,
+		&i.ResolvingRunID,
 	)
 	return i, err
 }
@@ -248,7 +254,8 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        asking_harness, asking_role, fingerprint, question_text, structured_choices,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
-       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at
+       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
+       resolving_run_id
 FROM workflow_questions
 WHERE workflow_run_id = ? AND state IN ('pending', 'human_required')
 ORDER BY created_at
@@ -291,6 +298,7 @@ func (q *Queries) ListOpenWorkflowQuestionsByRun(ctx context.Context, workflowRu
 			&i.AnswerReference,
 			&i.Delivered,
 			&i.DeliveredAt,
+			&i.ResolvingRunID,
 		); err != nil {
 			return nil, err
 		}
@@ -310,7 +318,8 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        asking_harness, asking_role, fingerprint, question_text, structured_choices,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
-       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at
+       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
+       resolving_run_id
 FROM workflow_questions
 WHERE workflow_run_id = ? AND state = 'answered' AND delivered = 0
 `
@@ -350,6 +359,7 @@ func (q *Queries) ListUndeliveredAnsweredWorkflowQuestions(ctx context.Context, 
 			&i.AnswerReference,
 			&i.Delivered,
 			&i.DeliveredAt,
+			&i.ResolvingRunID,
 		); err != nil {
 			return nil, err
 		}
@@ -369,7 +379,8 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        asking_harness, asking_role, fingerprint, question_text, structured_choices,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
-       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at
+       answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
+       resolving_run_id
 FROM workflow_questions
 WHERE workflow_run_id = ?
 ORDER BY created_at
@@ -409,6 +420,7 @@ func (q *Queries) ListWorkflowQuestionsByRun(ctx context.Context, workflowRunID 
 			&i.AnswerReference,
 			&i.Delivered,
 			&i.DeliveredAt,
+			&i.ResolvingRunID,
 		); err != nil {
 			return nil, err
 		}
@@ -436,6 +448,30 @@ type MarkWorkflowQuestionDeliveredParams struct {
 
 func (q *Queries) MarkWorkflowQuestionDelivered(ctx context.Context, arg MarkWorkflowQuestionDeliveredParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, markWorkflowQuestionDelivered, arg.DeliveredAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const setWorkflowQuestionResolvingRunID = `-- name: SetWorkflowQuestionResolvingRunID :execrows
+UPDATE workflow_questions
+SET resolving_run_id = ?
+WHERE id = ?
+`
+
+type SetWorkflowQuestionResolvingRunIDParams struct {
+	ResolvingRunID sql.NullString
+	ID             string
+}
+
+// Checkpoint 8K-B (pass 1): points a question at its currently in-flight
+// resolution attempt (workflow_question_resolutions.id), or clears the
+// pointer (NULL) once the attempt is no longer current. No CAS guard here:
+// the resolution row's own status/partial-unique-index is what prevents two
+// concurrent running attempts; this pointer is just "which one is current".
+func (q *Queries) SetWorkflowQuestionResolvingRunID(ctx context.Context, arg SetWorkflowQuestionResolvingRunIDParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setWorkflowQuestionResolvingRunID, arg.ResolvingRunID, arg.ID)
 	if err != nil {
 		return 0, err
 	}
