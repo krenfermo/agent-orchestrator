@@ -50,6 +50,11 @@ type Scheduler interface {
 // wake was scheduled for — it just asks the coordinator to re-evaluate.
 type Resumer interface {
 	ContinueRun(ctx context.Context, runID string) (workflow.RunDetail, error)
+	// MarkCapacityRetryExhausted is called when a wake's retry budget runs
+	// out with capacity still unavailable (checkpoint item 26): the run
+	// moves to an explicit, observable state instead of staying silently
+	// parked in Waiting with no further wake ever scheduled.
+	MarkCapacityRetryExhausted(ctx context.Context, runID string, reason string) error
 }
 
 // Config holds the externally-tunable knobs for a Poller. Every field is
@@ -183,6 +188,9 @@ func (p *Poller) RunDueOnce(ctx context.Context) (int, error) {
 			}
 			if res.BudgetExhausted {
 				p.logger.Warn("wakepoller: wake budget exhausted, giving up", "wake", sch.ID, "run", sch.WorkflowRunID, "reason", sch.Reason, "attempts", res.AttemptCount)
+				if merr := p.resumer.MarkCapacityRetryExhausted(ctx, string(sch.WorkflowRunID), string(sch.Reason)); merr != nil {
+					p.logger.Warn("wakepoller: mark capacity retry exhausted failed", "wake", sch.ID, "run", sch.WorkflowRunID, "err", merr)
+				}
 			} else {
 				p.logger.Info("wakepoller: wake rescheduled after transient error", "wake", sch.ID, "run", sch.WorkflowRunID, "reason", sch.Reason, "nextScheduledAt", res.NextScheduledAt, "err", resumeErr)
 			}

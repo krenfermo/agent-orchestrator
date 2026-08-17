@@ -394,13 +394,16 @@ func TestReportWorkStepProviderFailure_SwitchNoteCarriesContextPackNotTranscript
 		if !ok {
 			t.Fatalf("session_lifecycle_decision checkpoint did not decode: %+v", cp)
 		}
-		if decision.Action != domain.LifecycleNewSession {
+		// Checkpoint 8N.1: the work step's own initial dispatch now also
+		// records a NewSession session_lifecycle_decision checkpoint
+		// (reason task_boundary, no session existing yet — see
+		// applyWorkLifecycleDecision), so this loop must specifically match
+		// the provider_switch reason rather than assume every NewSession
+		// checkpoint on the run belongs to the failover event.
+		if decision.Action != domain.LifecycleNewSession || len(decision.Reasons) != 1 || decision.Reasons[0] != domain.LifecycleReasonProviderSwitch {
 			continue
 		}
 		found = true
-		if len(decision.Reasons) != 1 || decision.Reasons[0] != domain.LifecycleReasonProviderSwitch {
-			t.Fatalf("reasons = %v, want [provider_switch]", decision.Reasons)
-		}
 		if pack == nil {
 			t.Fatalf("expected a context pack attached to the provider_switch decision")
 		}

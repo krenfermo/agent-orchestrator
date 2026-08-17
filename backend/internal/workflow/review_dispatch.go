@@ -397,6 +397,15 @@ func (c *Coordinator) dispatchReviewFromPending(
 	harness domain.ReviewerHarness,
 ) (domain.WorkflowStep, error) {
 	now := c.clock()
+	// Checkpoint 8N.1: same fix as dispatchFromPending (dispatch.go) — a
+	// successful (non-waiting) review dispatch decision means capacity is
+	// genuinely back, so a run parked in Waiting must move to Running here.
+	if run.State == domain.WorkflowRunWaiting {
+		if _, err := c.store.UpdateWorkflowRunState(ctx, run.ID, domain.WorkflowRunWaiting, domain.WorkflowRunRunning, now); err != nil {
+			return reviewStep, err
+		}
+		run.State = domain.WorkflowRunRunning
+	}
 	if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, domain.WorkflowOutboxPending, domain.WorkflowOutboxDispatched, now, ""); err != nil {
 		return reviewStep, err
 	}

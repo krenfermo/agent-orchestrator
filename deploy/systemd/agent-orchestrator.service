@@ -1,0 +1,55 @@
+[Unit]
+Description=Agent Orchestrator (AO) headless web server
+Documentation=https://github.com/aoagents/agent-orchestrator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ao
+Group=ao
+
+# EnvironmentFile carries AO_DATA_DIR, AO_PROJECT_ROOTS, AO_TMUX_SOCKET, PATH,
+# HOME. See deploy/env/ao.env.example.
+EnvironmentFile=/etc/agent-orchestrator/ao.env
+
+WorkingDirectory=/opt/agent-orchestrator
+
+# --host is intentionally omitted: AO always binds 127.0.0.1
+# (config.LoopbackHost) and refuses any other value. Remote access is added
+# by the reverse proxy in deploy/caddy/Caddyfile.example, never here.
+ExecStart=/opt/agent-orchestrator/bin/ao server \
+    --port 3001 \
+    --data-dir /var/lib/agent-orchestrator/data \
+    --web-root /opt/agent-orchestrator/web
+
+# Graceful shutdown: ao server's foreground run loop treats SIGTERM the same
+# as SIGINT (Ctrl-C) — daemon.RunWithConfig's existing graceful
+# shutdown/recovery path. Give in-flight workflow polling and tmux detach
+# time to settle before SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# --- Hardening (least privilege; ao owns only its own data/repo trees) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/agent-orchestrator /home/ao
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# Codex/Claude/gh/tmux/git are ordinary child processes of this unit; they
+# inherit cgroup, PATH, and HOME from it and are reaped by systemd on stop.
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

@@ -146,6 +146,22 @@ func (c *Coordinator) dispatchFromPending(ctx stdctx.Context, run domain.Workflo
 	}
 
 	now := c.clock()
+	// Checkpoint 8N.1: a successful (non-waiting) dispatch decision means
+	// capacity genuinely came back — if the run was parked in Waiting (either
+	// from a prior capacity wait on this exact step, or from this run's own
+	// markRunWaitingForCapacity call on an earlier attempt), it must move
+	// back to Running here, at the single point that actually knows dispatch
+	// succeeded. Before this fix nothing ever wrote Running back once a run
+	// left it (confirmed: StartRun is the only other UpdateWorkflowRunState
+	// call site that ever sets Running), so a wake-driven redispatch left
+	// run.State stuck at Waiting in the DB even though the step was, in
+	// fact, running again.
+	if run.State == domain.WorkflowRunWaiting {
+		if _, err := c.store.UpdateWorkflowRunState(ctx, run.ID, domain.WorkflowRunWaiting, domain.WorkflowRunRunning, now); err != nil {
+			return step, err
+		}
+		run.State = domain.WorkflowRunRunning
+	}
 	if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, domain.WorkflowOutboxPending, domain.WorkflowOutboxDispatched, now, ""); err != nil {
 		return step, err
 	}
@@ -162,7 +178,38 @@ func (c *Coordinator) dispatchFromPending(ctx stdctx.Context, run domain.Workflo
 		step.State = domain.WorkflowStepRunning
 	}
 
+	prompt = c.applyWorkLifecycleDecision(ctx, run, step, prompt)
 	return c.attemptWorkHarness(ctx, run, step, entry, prompt, decision.SelectedHarness, 1)
+}
+
+// applyWorkLifecycleDecision is dispatchFromPending's Checkpoint 8N.1
+// counterpart to cascade.go's applyFixLifecycleDecision: the single
+// outbox-idempotency-guarded point reached exactly once per real work-step
+// dispatch (whether this is the step's very first attempt or a wake-driven
+// redispatch after a capacity wait) — never invoked speculatively on a mere
+// poll, matching that function's own convention.
+//
+// A work step that reaches dispatchFromPending never has a session yet (the
+// SessionID-nil guard earlier in dispatchWorkStep already returns early
+// otherwise — see that function's doc comment), so
+// CurrentSessionID is always empty here and DecideSessionLifecycle's own
+// first, most certain rule ("no current session -> NEW_SESSION") always
+// wins. That is not a limitation of this call: it is the same reasoning
+// applied explicitly and durably-recorded rather than left implicit in
+// "well, Spawn always creates a new session" — a capacity wake never gets to
+// silently skip the policy just because a session happens not to exist yet.
+// The REUSE/COMPACT branches this policy can produce are exercised by the
+// fix-cycle path (cascade.go), which is reached by the exact same
+// wake-driven ContinueRun cascade once a work step has a live session.
+func (c *Coordinator) applyWorkLifecycleDecision(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, prompt string) string {
+	attempts, _ := c.store.ListWorkflowAttempts(ctx, step.ID)
+	decision := DecideSessionLifecycle(SessionLifecycleRequest{
+		Role: domain.WorkflowRoleWorker, CurrentSessionID: "",
+		SessionHealth: domain.SessionHealthUnknown, AttemptCount: len(attempts), Policy: policyForRun(run),
+	})
+	stepID := step.ID
+	_ = c.persistSessionLifecycleDecision(ctx, run, &stepID, decision, nil)
+	return prompt
 }
 
 // markRunWaitingForCapacity is Checkpoint 8L's read-time-derivable
@@ -191,14 +238,86 @@ func (c *Coordinator) markRunWaitingForCapacity(ctx stdctx.Context, run domain.W
 // don't invent failures" convention (compare recordAgentHealthFailure's own
 // best-effort, non-fatal write).
 func (c *Coordinator) scheduleCapacityWake(ctx stdctx.Context, run domain.WorkflowRun, step *domain.WorkflowStep, kind domain.WorkflowStepKind, harness string) {
-	if c.wakeScheduler == nil {
-		return
-	}
 	reason := wake.ReasonWorkerCapacity
 	if kind == domain.WorkflowStepReview {
 		reason = wake.ReasonReviewerCapacity
 	}
+	var stepID *domain.WorkflowStepID
+	if step != nil {
+		id := domain.WorkflowStepID(step.ID)
+		stepID = &id
+	}
+	c.scheduleWake(ctx, run, stepID, reason, harness)
+}
 
+// scheduleQuestionResolverCapacityWake is decision_resolver_wiring.go's
+// counterpart to scheduleCapacityWake, for the one capacity-wait producer
+// that is not a work/review step: an AUTO_RESOLVABLE question whose resolver
+// currently has no usable provider. q.WorkflowStepID (the worker step that
+// asked the question, if any) is used as the wake's step scope purely so a
+// worker step and a question tied to it don't collide on the same
+// idempotency key as a plain run-scoped wake would; the harness is left
+// empty since selectDecisionResolverProvider's "no provider available"
+// outcome (unlike a single harness's own recorded cooldown) has no single
+// harness to look up a known reset for.
+func (c *Coordinator) scheduleQuestionResolverCapacityWake(ctx stdctx.Context, run domain.WorkflowRun, q domain.WorkflowQuestion) {
+	c.scheduleWake(ctx, run, q.WorkflowStepID, wake.ReasonQuestionResolverCapacity, "")
+}
+
+// MarkCapacityRetryExhausted is Checkpoint 8N.1's explicit, observable
+// terminal-for-now outcome when a wake's own retry budget
+// (WakePolicy.MaxAttempts) has been exhausted with capacity still
+// unavailable: rather than leaving a run silently parked in Waiting forever
+// with no further wake ever firing (checkpoint brief §26: "no loop
+// infinito... workflow queda en estado conservador explícito"), the run
+// moves to NeedsAttention with a checkpoint recording exactly why, using the
+// existing domain.WorkflowErrorCapacityExhausted class rather than inventing
+// a new one. Called by the wake poller (wakepoller.Poller.RunDueOnce), never
+// by Schedule/Fail themselves, since only the poller — not the wake package,
+// which is deliberately Coordinator-agnostic — knows which run a budget-
+// exhausted wake belonged to and is allowed to mutate workflow state. A run
+// no longer Waiting (already recovered by some other path, or already
+// terminal) is left untouched: this is a best-effort, idempotent nudge, not
+// a state machine transition that must always apply.
+func (c *Coordinator) MarkCapacityRetryExhausted(ctx stdctx.Context, runID string, reason string) error {
+	run, ok, err := c.store.GetWorkflowRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if !ok || run.State != domain.WorkflowRunWaiting {
+		return nil
+	}
+	now := c.clock()
+	if _, err := c.store.UpdateWorkflowRunState(ctx, runID, domain.WorkflowRunWaiting, domain.WorkflowRunNeedsAttention, now); err != nil {
+		return err
+	}
+	_, err = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+		ID:            "wfc-" + c.newID(),
+		WorkflowRunID: runID,
+		ProjectID:     run.ProjectID,
+		NextAction: fmt.Sprintf(
+			"capacity_retry_exhausted: %s — wake retry budget exhausted with capacity still unavailable; a human must decide whether to wait longer, switch provider, or cancel",
+			reason,
+		),
+		DurablePhase:   string(domain.WorkflowErrorCapacityExhausted),
+		PayloadVersion: "v1",
+		RetryState:     "{}",
+		CreatedAt:      now,
+	})
+	return err
+}
+
+// scheduleWake is the common body shared by every Checkpoint 8N capacity-wait
+// producer: it persists a durable wake so a daemon poller can resume the run
+// automatically. Never fails the caller: a nil wakeScheduler or a scheduling
+// error only means no automatic wake gets scheduled — the run still
+// correctly enters/stays in its waiting state either way, matching this
+// codebase's "observers don't invent failures" convention (compare
+// recordAgentHealthFailure's own best-effort, non-fatal write).
+func (c *Coordinator) scheduleWake(ctx stdctx.Context, run domain.WorkflowRun, stepID *domain.WorkflowStepID, reason wake.Reason, harness string) {
+	if c.wakeScheduler == nil {
+		return
+	}
 	// Checkpoint 8N: never fabricate known_reset_at. Only a real, recorded
 	// AgentHealthEvent.CooldownUntil for the harness that was just attempted
 	// counts as a known reset; today's failover.go/health.go recording path
@@ -210,12 +329,6 @@ func (c *Coordinator) scheduleCapacityWake(ctx stdctx.Context, run domain.Workfl
 		if health, err := c.agentHealth(ctx, domain.AgentHarness(harness)); err == nil {
 			knownResetAt = health.CooldownUntil
 		}
-	}
-
-	var stepID *domain.WorkflowStepID
-	if step != nil {
-		id := domain.WorkflowStepID(step.ID)
-		stepID = &id
 	}
 
 	sch, err := c.wakeScheduler.Schedule(ctx, domain.WorkflowRunID(run.ID), stepID, reason, knownResetAt)

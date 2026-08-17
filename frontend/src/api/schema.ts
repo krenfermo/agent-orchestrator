@@ -3627,12 +3627,17 @@ export interface components {
             createdAt: string;
             id: string;
             nextAction?: string;
+            /** Format: date-time */
+            nextWakeAt?: null | string;
             objective: string;
             projectId: string;
             /** @enum {string} */
             state: "pending" | "running" | "waiting" | "needs_attention" | "completed" | "failed" | "cancelled";
             /** Format: date-time */
             updatedAt: string;
+            waitReason?: string;
+            /** Format: int64 */
+            wakeAttemptCount?: number;
         };
         WorkflowStepView: {
             assignedHarness?: string;

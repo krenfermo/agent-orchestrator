@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workflow/wake"
 )
 
 func (c *Coordinator) CreateObjectiveRun(ctx stdctx.Context, projectID, objective string, mode domain.WorkflowPlanApprovalMode) (RunDetail, error) {
@@ -100,6 +101,16 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 	}
 	response, err := c.planner.Generate(ctx, PlannerRequest{Objective: run.Objective, Project: project, Context: contextValue, MaxSteps: MaxPlanSteps})
 	if err != nil {
+		// Checkpoint 8N.1: a capacity/rate-limit-shaped planner failure must
+		// never be treated the same as a real permanent failure (parse
+		// error, planner binary missing, etc.) — reusing the SAME
+		// provider-neutral classifier every worker/reviewer dispatch already
+		// uses (failure_classifier.go), rather than re-deriving planner-
+		// specific substring rules that could drift from it.
+		cls := classifyProviderFailure(err)
+		if cls.Eligible && (cls.Class == domain.WorkflowErrorRateLimited || cls.Class == domain.WorkflowErrorCapacityExhausted || cls.Class == domain.WorkflowErrorTransient) {
+			return c.parkPlanForCapacity(ctx, run, err)
+		}
 		class := "planner_start_failed"
 		lower := strings.ToLower(err.Error())
 		if strings.Contains(lower, "timeout") {
@@ -184,6 +195,44 @@ func (c *Coordinator) finalizeGeneratedPlan(ctx stdctx.Context, run domain.Workf
 	if len(steps) > 0 && steps[0].State == domain.WorkflowStepRunning {
 		_, _ = c.store.UpdateWorkflowStepState(ctx, steps[0].ID, domain.WorkflowStepRunning, domain.WorkflowStepWaiting, now)
 	}
+	return c.GetRun(ctx, run.ID)
+}
+
+// parkPlanForCapacity is Checkpoint 8N.1's planner counterpart to
+// dispatch.go's markRunWaitingForCapacity: a capacity/rate-limit-shaped
+// planner failure must never permanently invalidate the plan (failPlan's
+// WorkflowPlanInvalid is terminal — GeneratePlan's own status switch treats
+// it as a no-op forever after). Instead the plan command is reset to
+// WorkflowPlanPending (the same "nothing attempted yet" state GeneratePlan's
+// switch falls through to actual generation on), so the exact same
+// GeneratePlan call this function was itself invoked from is what a later
+// retry re-enters — no second, parallel "resume planning" code path. The run
+// itself is deliberately left in WorkflowRunPending (untouched): several
+// other places in this file gate on run.State == Pending
+// (finalizeGeneratedPlan, failPlan), and flipping it to Waiting here would
+// desync those checks from a state this checkpoint did not audit closely
+// enough to change safely. Observability instead comes from the durable wake
+// itself (NextWakeAt/WaitReason, surfaced by GetRun once wired — see
+// scheduleWake) and this checkpoint, not from run.State.
+func (c *Coordinator) parkPlanForCapacity(ctx stdctx.Context, run domain.WorkflowRun, cause error) (RunDetail, error) {
+	now := c.clock()
+	validation, _ := json.Marshal(PlanValidation{Valid: false, Errors: []string{"waiting_for_capacity: " + cause.Error()}})
+	// command_status must reset to idle (not failed): StartWorkflowPlanCommand
+	// — the exact call the next GeneratePlan retry makes — only CAS-arms from
+	// status=pending AND command_status IN (idle, pending); leaving it at
+	// failed would permanently ErrPlanLocked every retry.
+	_, _ = c.planStore.FinishWorkflowPlan(ctx, run.ID, domain.WorkflowPlanPending, domain.WorkflowPlanCommandIdle, string(validation), "", "planner_capacity", now)
+	_, _ = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+		ID:             "wfc-" + c.newID(),
+		WorkflowRunID:  run.ID,
+		ProjectID:      run.ProjectID,
+		NextAction:     "waiting_for_capacity: planner unavailable (" + cause.Error() + ") — will retry automatically once capacity recovers",
+		DurablePhase:   "planner_capacity_wait",
+		PayloadVersion: "v1",
+		RetryState:     "{}",
+		CreatedAt:      now,
+	})
+	c.scheduleWake(ctx, run, nil, wake.ReasonPlannerCapacity, "")
 	return c.GetRun(ctx, run.ID)
 }
 

@@ -124,6 +124,15 @@ type WorkflowRunView struct {
 	// NextAction is the run's last-known next action across all its steps'
 	// checkpoints (e.g. "start_review"), informational only (Checkpoint 8B).
 	NextAction string `json:"nextAction,omitempty"`
+	// NextWakeAt/WaitReason/WakeAttemptCount are Checkpoint 8N.1's minimal
+	// telemetry surface for a durable capacity wait: the soonest scheduled
+	// automatic retry, why the run is waiting, and how many times this exact
+	// wait has already retried. All zero-value (NextWakeAt nil, WaitReason
+	// "", WakeAttemptCount 0) when no wake is currently open for this run —
+	// never a fabricated estimate.
+	NextWakeAt       *time.Time `json:"nextWakeAt,omitempty"`
+	WaitReason       string     `json:"waitReason,omitempty"`
+	WakeAttemptCount int64      `json:"wakeAttemptCount,omitempty"`
 }
 
 // WorkflowRunDetailView is a workflow run plus its steps and their attempts.
@@ -282,7 +291,11 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 			ReviewPolicy:    sd.ReviewPolicy,
 		})
 	}
-	view := WorkflowRunDetailView{Run: workflowRunView(detail.Run, detail.NextAction), Steps: steps}
+	runView := workflowRunView(detail.Run, detail.NextAction)
+	runView.NextWakeAt = detail.NextWakeAt
+	runView.WaitReason = detail.WaitReason
+	runView.WakeAttemptCount = detail.WakeAttemptCount
+	view := WorkflowRunDetailView{Run: runView, Steps: steps}
 	if detail.Plan != nil {
 		pv := WorkflowPlanView{Status: detail.Plan.Status, ApprovalMode: detail.Plan.ApprovalMode, Provider: detail.Plan.Provider, Model: detail.Plan.Model, PromptContextVersion: detail.Plan.PromptContextVersion, PlanHash: detail.Plan.PlanHash, ErrorClass: detail.Plan.ErrorClass}
 		var generated workflowcore.MasterPlan

@@ -48,8 +48,22 @@ func (c *Coordinator) reconcileDecisionResolvers(ctx stdctx.Context, run domain.
 			if derr != nil {
 				return "", derr
 			}
-			if nextAction != "" && waitingForCapacity == "" {
-				waitingForCapacity = nextAction
+			if nextAction != "" {
+				// Checkpoint 8N.1: before this fix, a resolver capacity wait
+				// was purely read-time-derived (this whole function is only
+				// ever reached via GetRun, including ContinueRun's own
+				// trailing GetRun call) — the only thing that ever retried
+				// dispatchDecisionResolver was another GetRun, i.e. a
+				// browser polling the UI. That is exactly the dependency
+				// Checkpoint 8N.1 must remove: schedule a durable
+				// question_resolver_capacity wake here so the daemon poller
+				// retries it unattended, with GetRun's own opportunistic
+				// retry-on-read staying as a harmless idempotent bonus path
+				// rather than the only mechanism.
+				c.scheduleQuestionResolverCapacityWake(ctx, run, q)
+				if waitingForCapacity == "" {
+					waitingForCapacity = nextAction
+				}
 			}
 			continue
 		}

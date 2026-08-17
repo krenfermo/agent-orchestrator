@@ -1,0 +1,41 @@
+# AO staging reverse proxy (Caddy).
+# Copy to /etc/caddy/Caddyfile, fill in the placeholders, then:
+#   sudo caddy validate --config /etc/caddy/Caddyfile
+#   sudo systemctl reload caddy
+#
+# Why Caddy over nginx for this checkpoint: automatic ACME TLS (Let's
+# Encrypt/ZeroSSL) and certificate renewal with zero extra tooling (no
+# certbot timer to babysit), and `basicauth` is a one-line built-in — nginx
+# needs `htpasswd` plus a separate cron/systemd-timer renewal story to reach
+# the same place. Either is a legitimate choice; Caddy has less staging
+# surface to get wrong. See docs/deployment/hetzner-staging.md section 12.
+
+# Replace with your real staging hostname. A bare IP cannot get a Let's
+# Encrypt certificate — see docs/deployment/hetzner-staging.md section 13
+# for the no-domain-yet fallback.
+staging.example.com {
+	# Staging web auth: reverse-proxy HTTP Basic Auth in front of AO's
+	# unauthenticated loopback listener (AO itself stays 127.0.0.1-only and
+	# unauthenticated per AGENTS.md's hard rule — see docs/adr/0001).
+	# Generate the hash with: caddy hash-password --plaintext '<password>'
+	# Never commit the real hash; this is a placeholder.
+	basicauth /* {
+		ao_operator $2a$14$REPLACE_WITH_REAL_BCRYPT_HASH_FROM_caddy_hash-password
+	}
+
+	reverse_proxy 127.0.0.1:3001 {
+		# AO's SSE (workflow event stream) and /mux WebSocket both need the
+		# proxy to keep the connection open rather than buffering it.
+		flush_interval -1
+	}
+
+	encode gzip
+
+	log {
+		output file /var/log/agent-orchestrator/caddy-access.log
+		format json
+	}
+}
+
+# Optional: redirect bare HTTP to HTTPS is automatic in Caddy for any site
+# block with a hostname (not an IP) — no separate :80 block is needed.

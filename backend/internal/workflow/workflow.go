@@ -300,6 +300,10 @@ type RunDetail struct {
 	// zero-value when not applicable, never a fabricated estimate.
 	NextWakeAt *time.Time
 	WaitReason string
+	// WakeAttemptCount mirrors the same wake row's AttemptCount — how many
+	// times this exact capacity wait has already retried (checkpoint brief
+	// §15's "Attempt: N"). 0 when no wake is open.
+	WakeAttemptCount int64
 }
 
 // SessionLifecycleAuditEntry is one durable session-lifecycle decision plus
@@ -580,6 +584,7 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 			at := next.ScheduledAt
 			detail.NextWakeAt = &at
 			detail.WaitReason = string(next.Reason)
+			detail.WakeAttemptCount = next.AttemptCount
 		}
 	}
 
@@ -706,6 +711,18 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		return RunDetail{}, fmt.Errorf("%w: workflow run %q is already %s", ErrAlreadyTerminal, runID, run.State)
 	}
 
+	// Checkpoint 8N.1: a master run parked mid-planning by parkPlanForCapacity
+	// (plan.Status reset to Pending, exactly the state GeneratePlan's own
+	// status switch falls through to actual generation on) has no work/review
+	// step yet — the lookup below would wrongly reject it as ErrInvalid. Retry
+	// planning through the exact same GeneratePlan entry point a human-driven
+	// retry uses, rather than a second parallel resume path.
+	if c.planStore != nil {
+		if plan, isMaster, perr := c.planStore.GetWorkflowPlan(ctx, runID); perr == nil && isMaster && plan.Status == domain.WorkflowPlanPending {
+			return c.GeneratePlan(ctx, runID)
+		}
+	}
+
 	steps, err := c.store.ListWorkflowSteps(ctx, runID)
 	if err != nil {
 		return RunDetail{}, err
@@ -723,14 +740,33 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		return RunDetail{}, fmt.Errorf("%w: workflow run %q is missing its work/review step", ErrInvalid, runID)
 	}
 
-	if workStep.State == domain.WorkflowStepRunning {
-		updated, err := c.observeWorkStep(ctx, run, *workStep)
+	// Checkpoint 8N.1: a work step parked at Ready (never dispatched — the
+	// capacity-wait case, see markRunWaitingForCapacity) must be re-entered
+	// into dispatchWorkStep here, exactly like Reconcile already does at boot
+	// (recovery.go). Before this fix, ContinueRun only ever observed an
+	// already-Running work step, so a wake firing for ReasonWorkerCapacity
+	// resumed nothing: the durable wake fired, claimed, and completed, but
+	// the parked step was never actually redispatched until the next daemon
+	// restart's Reconcile pass happened to sweep it up.
+	if workStep.State == domain.WorkflowStepReady || workStep.State == domain.WorkflowStepRunning {
+		prompt := promptForRun(run, steps)
+		updated, err := c.dispatchWorkStep(ctx, run, *workStep, prompt)
 		if err != nil {
 			return RunDetail{}, err
 		}
 		*workStep = updated
 		if refreshed, ok2, rerr := c.store.GetWorkflowRun(ctx, runID); rerr == nil && ok2 {
 			run = refreshed
+		}
+		if updated.State == domain.WorkflowStepRunning {
+			observed, err := c.observeWorkStep(ctx, run, updated)
+			if err != nil {
+				return RunDetail{}, err
+			}
+			*workStep = observed
+			if refreshed, ok2, rerr := c.store.GetWorkflowRun(ctx, runID); rerr == nil && ok2 {
+				run = refreshed
+			}
 		}
 	}
 

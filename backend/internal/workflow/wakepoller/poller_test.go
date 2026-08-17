@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/sqlitetest"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 	"github.com/aoagents/agent-orchestrator/backend/internal/workflow/wake"
@@ -18,15 +19,17 @@ import (
 // drives real time forward explicitly instead of sleeping.
 type fakeClock struct{ t time.Time }
 
-func (c *fakeClock) now() time.Time    { return c.t }
+func (c *fakeClock) now() time.Time          { return c.t }
 func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
 
 // fakeResumer is a scripted double for wakepoller.Resumer: each test controls
 // exactly what ContinueRun returns per call via next, and records every runID
 // it was invoked with so tests can assert "exactly once" claims.
 type fakeResumer struct {
-	next  func(callN int) error
-	calls []string
+	next             func(callN int) error
+	calls            []string
+	exhaustedCalls   []string
+	exhaustedReasons []string
 }
 
 func (f *fakeResumer) ContinueRun(_ context.Context, runID string) (workflowcore.RunDetail, error) {
@@ -36,6 +39,12 @@ func (f *fakeResumer) ContinueRun(_ context.Context, runID string) (workflowcore
 		err = f.next(len(f.calls))
 	}
 	return workflowcore.RunDetail{}, err
+}
+
+func (f *fakeResumer) MarkCapacityRetryExhausted(_ context.Context, runID string, reason string) error {
+	f.exhaustedCalls = append(f.exhaustedCalls, runID)
+	f.exhaustedReasons = append(f.exhaustedReasons, reason)
+	return nil
 }
 
 func newIDSeq() func() string {
@@ -294,6 +303,108 @@ func TestPoller_TerminalRunCompletesNoReschedule(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("expected no further claims for a terminal run, got %d", n)
+	}
+}
+
+// TestPoller_BudgetExhaustionStopsRetryingAndMarksRunExplicitly is
+// checkpoint test-matrix item 26: capacity stays unavailable through every
+// retry until wake.Policy.MaxAttempts is exhausted. This drives the SAME
+// production RunDueOnce loop repeatedly (never Scheduler.Fail called
+// directly) to prove the whole poller-level loop — not just Fail's own unit
+// behavior — stops safely: no infinite reschedule loop, and the run is
+// moved to an explicit, observable state (MarkCapacityRetryExhausted) rather
+// than left silently parked in Waiting forever.
+func TestPoller_BudgetExhaustionStopsRetryingAndMarksRunExplicitly(t *testing.T) {
+	store := sqlitetest.MustOpen(t)
+	clk := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	policy := domain.DefaultWakePolicy()
+	policy.MaxAttempts = 3
+	sched := wake.New(store, clk.now, newIDSeq(), wake.Config{Policy: policy})
+	errCapacity := errors.New("provider still at capacity")
+	resumer := &fakeResumer{next: func(int) error { return errCapacity }}
+	poller := wakepoller.New(sched, resumer, wakepoller.Config{})
+	ctx := context.Background()
+
+	if _, err := sched.Schedule(ctx, "wf-1", nil, wake.ReasonWorkerCapacity, nil); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+
+	for cycle := 0; cycle < policy.MaxAttempts; cycle++ {
+		next, err := sched.NextForRun(ctx, "wf-1")
+		if err != nil || next == nil {
+			t.Fatalf("cycle %d: expected an open wake, got %+v err=%v", cycle, next, err)
+		}
+		clk.advance(next.ScheduledAt.Sub(clk.now()) + time.Second)
+		n, err := poller.RunDueOnce(ctx)
+		if err != nil {
+			t.Fatalf("cycle %d: RunDueOnce: %v", cycle, err)
+		}
+		if n != 1 {
+			t.Fatalf("cycle %d: expected exactly 1 claim, got %d", cycle, n)
+		}
+	}
+
+	// No infinite loop: after MaxAttempts, the wake is gone (cancelled by
+	// Scheduler.Fail's own budget check), not rescheduled again.
+	final, err := sched.NextForRun(ctx, "wf-1")
+	if err != nil {
+		t.Fatalf("final NextForRun: %v", err)
+	}
+	if final != nil {
+		t.Fatalf("expected no open wake left after budget exhaustion, got %+v", final)
+	}
+	clk.advance(24 * time.Hour)
+	n, err := poller.RunDueOnce(ctx)
+	if err != nil {
+		t.Fatalf("RunDueOnce after exhaustion: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("claimed after exhaustion = %d, want 0 (no infinite retry loop)", n)
+	}
+
+	// The run must be moved to an explicit, observable state exactly once —
+	// not left silently parked, and not marked repeatedly.
+	if len(resumer.exhaustedCalls) != 1 || resumer.exhaustedCalls[0] != "wf-1" {
+		t.Fatalf("expected MarkCapacityRetryExhausted called exactly once for wf-1, got %v", resumer.exhaustedCalls)
+	}
+	if resumer.exhaustedReasons[0] != string(wake.ReasonWorkerCapacity) {
+		t.Fatalf("exhausted reason = %q, want %q", resumer.exhaustedReasons[0], wake.ReasonWorkerCapacity)
+	}
+}
+
+// TestPoller_HeadlessProgressionNoGETOrContinueRunCall is an explicit,
+// self-documenting proof of checkpoint item L: progress through a full
+// capacity-wait-then-recover cycle never requires an HTTP GET or a manual
+// ContinueRun call — only RunDueOnce, the same primitive the daemon's
+// background ticker calls (wakepoller/poller.go's loop). This test's
+// Resumer never touches the network or any HTTP router at all; it is a pure
+// Go function, proving the mechanism has no browser/polling dependency by
+// construction, not merely by absence of a browser in the test.
+func TestPoller_HeadlessProgressionNoGETOrContinueRunCall(t *testing.T) {
+	store := sqlitetest.MustOpen(t)
+	clk := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	sched := wake.New(store, clk.now, newIDSeq(), wake.Config{})
+	resumed := false
+	resumer := &fakeResumer{next: func(int) error { resumed = true; return nil }}
+	poller := wakepoller.New(sched, resumer, wakepoller.Config{})
+	ctx := context.Background()
+
+	reset := clk.now().Add(10 * time.Minute)
+	if _, err := sched.Schedule(ctx, "wf-1", nil, wake.ReasonWorkerCapacity, &reset); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	if resumed {
+		t.Fatalf("resumer must not fire before the wake is due")
+	}
+	clk.advance(11 * time.Minute)
+	// The daemon's production Start(ctx) loop calls exactly this method on
+	// its own ticker — no server, no HTTP client, no GET involved anywhere
+	// in this test.
+	if _, err := poller.RunDueOnce(ctx); err != nil {
+		t.Fatalf("RunDueOnce: %v", err)
+	}
+	if !resumed {
+		t.Fatalf("expected the poller to have resumed the run via RunDueOnce alone")
 	}
 }
 

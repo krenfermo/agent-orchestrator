@@ -4,6 +4,7 @@ import { useWorkflowRun, workflowRunIsTerminal } from "../hooks/useWorkflowRun";
 import { WorkflowVerifyDetails } from "../components/workflow-verify-details";
 import { WorkflowUsageSection } from "../components/workflow-usage-section";
 import { WorkflowQuestionsSection } from "../components/workflow-questions-section";
+import { WorkflowCapacityWaitBanner } from "../components/workflow-capacity-wait-banner";
 
 export const Route = createFileRoute("/_shell/workflows/$workflowId")({
 	component: WorkflowRunRoute,
@@ -63,6 +64,7 @@ function WorkflowRunRoute() {
 					{t("shell.workflowsCompletedVerified")}
 				</div>
 			)}
+			<WorkflowCapacityWaitBanner run={workflow.run} />
 			<div className="flex flex-col gap-1">
 				<h1 className="text-lg font-semibold">{workflow.run.objective}</h1>
 				<p className="text-sm text-muted-foreground">
