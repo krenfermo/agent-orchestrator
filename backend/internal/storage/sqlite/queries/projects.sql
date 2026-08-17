@@ -22,18 +22,18 @@ ON CONFLICT (id) DO UPDATE SET
     kind = excluded.kind;
 
 -- name: GetProject :one
-SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind
+SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id
 FROM projects WHERE id = ?;
 
 -- name: ListProjects :many
-SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind
+SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id
 FROM projects WHERE archived_at IS NULL ORDER BY id;
 
 -- name: CountProjectsIncludingArchived :one
 SELECT COUNT(*) FROM projects;
 
 -- name: FindProjectByPath :one
-SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind
+SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id
 FROM projects WHERE path = ? AND archived_at IS NULL;
 
 -- name: UpdateProjectSettings :execrows

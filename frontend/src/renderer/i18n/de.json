@@ -1353,5 +1353,11 @@
 	"shell.decisions.subtitle": "Fragen, die auf dich oder einen Resolver warten – über alle Workflow-Läufe hinweg.",
 	"shell.decisions.loading": "Wird geladen…",
 	"shell.decisions.viewRun": "Lauf anzeigen",
-	"shell.decisions.empty": "Keine ausstehenden Entscheidungen."
+	"shell.decisions.empty": "Keine ausstehenden Entscheidungen.",
+	"auth.login.title": "Anmelden",
+	"auth.login.description": "Geben Sie Ihre Anmeldedaten ein, um fortzufahren.",
+	"auth.login.usernameOrEmailLabel": "Benutzername oder E-Mail",
+	"auth.login.passwordLabel": "Passwort",
+	"auth.login.submit": "Anmelden",
+	"auth.login.submitting": "Anmeldung läuft…"
 }

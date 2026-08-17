@@ -210,6 +210,94 @@ paths:
       summary: Refresh the cached local agent adapter catalog
       tags:
       - agents
+  /api/v1/auth/login:
+    post:
+      operationId: login
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersLoginRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersLoginResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Authenticate with username/email + password and receive a session cookie
+      tags:
+      - auth
+  /api/v1/auth/logout:
+    post:
+      operationId: logout
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersLogoutResponse'
+          description: OK
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Revoke the current session and clear the session cookie
+      tags:
+      - auth
+  /api/v1/auth/me:
+    get:
+      operationId: getCurrentUser
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersMeResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Resolve the current identity: a real session, trusted-local mode''s
+        synthesized admin, or no_user'
+      tags:
+      - auth
   /api/v1/browser/commands:
     post:
       operationId: executeBrowserCommand
@@ -6073,6 +6161,43 @@ components:
       required:
       - capacity
       type: object
+    ControllersLoginRequest:
+      properties:
+        password:
+          type: string
+        usernameOrEmail:
+          type: string
+      required:
+      - usernameOrEmail
+      - password
+      type: object
+    ControllersLoginResponse:
+      properties:
+        user:
+          $ref: '#/components/schemas/ControllersUserView'
+      required:
+      - user
+      type: object
+    ControllersLogoutResponse:
+      properties:
+        ok:
+          type: boolean
+      required:
+      - ok
+      type: object
+    ControllersMeResponse:
+      properties:
+        status:
+          enum:
+          - authenticated
+          - trusted-local
+          - no_user
+          type: string
+        user:
+          $ref: '#/components/schemas/ControllersUserView'
+      required:
+      - status
+      type: object
     ControllersResolveDecisionRequest:
       properties:
         answer:
@@ -6509,6 +6634,28 @@ components:
       - outputTokens
       - cachedTokens
       - tokensCertainty
+      type: object
+    ControllersUserView:
+      properties:
+        displayName:
+          type: string
+        email:
+          type: string
+        id:
+          type: string
+        status:
+          enum:
+          - active
+          - disabled
+          type: string
+        username:
+          type: string
+      required:
+      - id
+      - displayName
+      - email
+      - username
+      - status
       type: object
     ControllersWorkflowIntegrationStateView:
       properties:
@@ -10523,3 +10670,6 @@ tags:
   name: browser
 - description: Durable workflow runs (Checkpoint 8A structure only — no execution)
   name: workflows
+- description: User identity, login/logout sessions, and current-user resolution (Checkpoint
+    8P-A)
+  name: auth

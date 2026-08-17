@@ -15,6 +15,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/presence"
+	authsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/authsvc"
 	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 	reviewsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/review"
@@ -80,6 +81,20 @@ type APIDeps struct {
 	// DeviceRoster and DeviceLive back the desktop-only mobile device roster.
 	DeviceRoster controllers.DeviceRoster
 	DeviceLive   controllers.LiveSet
+
+	// Auth backs Checkpoint 8P-A's /auth/login, /auth/logout, /auth/me
+	// routes and the identity-resolving middleware. Optional: nil leaves the
+	// auth routes answering 501 and the identity middleware resolving no
+	// user for every request (server-side ownership checks then behave as
+	// if AO_TRUSTED_LOCAL_MODE were off, since there is nothing to resolve
+	// to), matching the other optional-surface conventions here.
+	Auth authsvc.Manager
+	// ProjectOwnership/WorkflowOwnership back Checkpoint 8P-A's minimal
+	// ownership scoping on the projects/workflows controllers. Optional:
+	// nil disables scoping entirely (pre-8P-A behavior). Both are satisfied
+	// by the same *sqlite/store.Store the rest of the daemon already uses.
+	ProjectOwnership  controllers.OwnershipStore
+	WorkflowOwnership controllers.WorkflowOwnershipStore
 }
 
 // normalizeAPIDeps closes the Presence/DeviceLive duplication trap structurally.
@@ -133,6 +148,7 @@ type API struct {
 	browser       *controllers.BrowserController
 	workflows     *controllers.WorkflowsController
 	events        *EventsController
+	auth          *controllers.AuthController
 }
 
 // NewAPI constructs the API surface from its dependencies. cfg carries the
@@ -146,7 +162,9 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			Catalog: deps.Agents,
 		},
 		projects: &controllers.ProjectsController{
-			Mgr: deps.Projects,
+			Mgr:          deps.Projects,
+			Ownership:    deps.ProjectOwnership,
+			TrustedLocal: cfg.TrustedLocalMode,
 		},
 		environment: &controllers.EnvironmentController{
 			Svc: deps.Environment,
@@ -171,8 +189,15 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		settings:      &controllers.SettingsController{Svc: deps.Settings},
 		dev:           &controllers.DevController{Import: deps.DevImport},
 		browser:       &controllers.BrowserController{Svc: deps.Browser},
-		workflows:     &controllers.WorkflowsController{Svc: deps.Workflows, UsageReader: deps.UsageSummary, QuestionsReader: deps.Questions},
-		events:        &EventsController{Source: deps.CDC, Live: deps.Events},
+		workflows: &controllers.WorkflowsController{
+			Svc:             deps.Workflows,
+			UsageReader:     deps.UsageSummary,
+			QuestionsReader: deps.Questions,
+			Ownership:       deps.WorkflowOwnership,
+			TrustedLocal:    cfg.TrustedLocalMode,
+		},
+		events: &EventsController{Source: deps.CDC, Live: deps.Events},
+		auth:   &controllers.AuthController{Mgr: deps.Auth, TrustedLocal: cfg.TrustedLocalMode},
 	}
 }
 
@@ -213,6 +238,7 @@ func (a *API) Register(root chi.Router) {
 			a.dev.Register(r)
 			a.browser.Register(r)
 			a.workflows.Register(r)
+			a.auth.Register(r)
 			// Sibling REST controllers plug in here.
 		})
 		// Agent switching synchronously collects a handoff, starts the target,

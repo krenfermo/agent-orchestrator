@@ -152,6 +152,17 @@ type Config struct {
 	// process spawned inside a registered project's worktree can still read
 	// wherever the OS lets it.
 	AllowedProjectRoots []string
+	// TrustedLocalMode gates Checkpoint 8P-A's application-identity layer.
+	// Default true preserves today's zero-friction single-user desktop UX: a
+	// request with no session cookie resolves automatically to the bootstrap
+	// admin identity, and no login screen appears. Set to false (the
+	// staging/multi-user target) to require a real login: a request with no
+	// valid session then resolves to no user, and owner-scoped endpoints
+	// return 401. This never affects the primary loopback listener's network
+	// trust (still unauthenticated by design, see AGENTS.md) — it only
+	// controls how the non-rejecting identity middleware resolves an
+	// application-level "current user".
+	TrustedLocalMode bool
 	// TmuxSocket names the isolated tmux server (`tmux -L <TmuxSocket>`) the
 	// tmux runtime (Darwin/Linux) issues every session command against, so AO
 	// never shares — and never touches — the operator's own default tmux
@@ -195,16 +206,18 @@ func (c Config) Addr() string {
 //	                     project registration/browsing/cloning (default: unrestricted)
 //	AO_TMUX_SOCKET       isolated tmux server name (Darwin/Linux only)
 //	                     (default: derived from DataDir, e.g. "ao-<hash>")
+//	AO_TRUSTED_LOCAL_MODE  application-identity trust mode off|on (default on)
 //
 // The bind host is not configurable: the daemon is loopback-only by design.
 func Load() (Config, error) {
 	cfg := Config{
-		Host:            LoopbackHost,
-		Port:            DefaultPort,
-		RequestTimeout:  DefaultRequestTimeout,
-		ShutdownTimeout: DefaultShutdownTimeout,
-		Agent:           DefaultAgent,
-		AllowedOrigins:  DefaultAllowedOrigins,
+		Host:             LoopbackHost,
+		Port:             DefaultPort,
+		RequestTimeout:   DefaultRequestTimeout,
+		ShutdownTimeout:  DefaultShutdownTimeout,
+		Agent:            DefaultAgent,
+		AllowedOrigins:   DefaultAllowedOrigins,
+		TrustedLocalMode: true,
 		Telemetry: TelemetryConfig{
 			Remote:      TelemetryRemoteOff,
 			PostHogHost: DefaultTelemetryPostHogHost,
@@ -330,6 +343,14 @@ func Load() (Config, error) {
 			return Config{}, err
 		}
 		cfg.AllowedProjectRoots = roots
+	}
+
+	if raw := os.Getenv("AO_TRUSTED_LOCAL_MODE"); raw != "" {
+		v, err := parseToggleEnv("AO_TRUSTED_LOCAL_MODE", raw)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.TrustedLocalMode = v
 	}
 
 	runFile, err := resolveRunFilePath()

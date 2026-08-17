@@ -1368,5 +1368,11 @@
 	"shell.decisions.subtitle": "Questions en attente de vous ou d'un résolveur, tous les runs de workflow confondus.",
 	"shell.decisions.loading": "Chargement…",
 	"shell.decisions.viewRun": "Voir le run",
-	"shell.decisions.empty": "Aucune décision en attente."
+	"shell.decisions.empty": "Aucune décision en attente.",
+	"auth.login.title": "Se connecter",
+	"auth.login.description": "Entrez vos identifiants pour continuer.",
+	"auth.login.usernameOrEmailLabel": "Nom d'utilisateur ou e-mail",
+	"auth.login.passwordLabel": "Mot de passe",
+	"auth.login.submit": "Se connecter",
+	"auth.login.submitting": "Connexion…"
 }

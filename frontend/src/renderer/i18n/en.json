@@ -1335,5 +1335,11 @@
 	"shell.decisions.subtitle": "Questions waiting on you or a resolver, across every workflow run.",
 	"shell.decisions.loading": "Loading…",
 	"shell.decisions.viewRun": "View run",
-	"shell.decisions.empty": "No pending decisions."
+	"shell.decisions.empty": "No pending decisions.",
+	"auth.login.title": "Sign in",
+	"auth.login.description": "Enter your credentials to continue.",
+	"auth.login.usernameOrEmailLabel": "Username or email",
+	"auth.login.passwordLabel": "Password",
+	"auth.login.submit": "Sign in",
+	"auth.login.submitting": "Signing in…"
 }

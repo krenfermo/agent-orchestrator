@@ -1368,5 +1368,11 @@
 	"shell.decisions.subtitle": "Preguntas que esperan tu respuesta o la de un resolutor, en todas las ejecuciones de flujo de trabajo.",
 	"shell.decisions.loading": "Cargando…",
 	"shell.decisions.viewRun": "Ver ejecución",
-	"shell.decisions.empty": "No hay decisiones pendientes."
+	"shell.decisions.empty": "No hay decisiones pendientes.",
+	"auth.login.title": "Iniciar sesión",
+	"auth.login.description": "Introduce tus credenciales para continuar.",
+	"auth.login.usernameOrEmailLabel": "Usuario o correo electrónico",
+	"auth.login.passwordLabel": "Contraseña",
+	"auth.login.submit": "Iniciar sesión",
+	"auth.login.submitting": "Iniciando sesión…"
 }

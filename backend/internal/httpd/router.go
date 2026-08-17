@@ -3,6 +3,7 @@
 package httpd
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net"
@@ -17,8 +18,10 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
@@ -57,6 +60,7 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	r.Use(recoverTelemetry(log, deps.Telemetry))
 	r.Use(corsMiddleware(cfg.AllowedOrigins))
 	r.Use(previewOriginMiddleware(api.sessions))
+	r.Use(identity.Middleware(deps.Auth, cfg.TrustedLocalMode, bootstrapAdminResolver(deps.Auth)))
 
 	// JSON envelopes for unmatched routes / methods — chi's defaults are
 	// text/plain, which would break consumers that parse every response as
@@ -77,6 +81,30 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	api.Register(r)
 
 	return r
+}
+
+// bootstrapAdminResolver adapts authsvc.Manager.BootstrapAdmin to the plain
+// func the identity middleware and AuthController.me both use to synthesize
+// trusted-local mode's identity. A nil mgr (Auth never wired) always reports
+// no user, matching every other optional-surface convention.
+func bootstrapAdminResolver(mgr authIdentitySource) func(ctx context.Context) (domain.User, bool) {
+	return func(ctx context.Context) (domain.User, bool) {
+		if mgr == nil {
+			return domain.User{}, false
+		}
+		u, ok, err := mgr.BootstrapAdmin(ctx)
+		if err != nil {
+			return domain.User{}, false
+		}
+		return u, ok
+	}
+}
+
+// authIdentitySource is the subset of authsvc.Manager bootstrapAdminResolver
+// needs, kept narrow so this file doesn't have to import the service package
+// just for one method.
+type authIdentitySource interface {
+	BootstrapAdmin(ctx context.Context) (domain.User, bool, error)
 }
 
 func previewOriginMiddleware(sessions *controllers.SessionsController) func(http.Handler) http.Handler {

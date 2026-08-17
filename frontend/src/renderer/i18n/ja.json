@@ -1353,5 +1353,11 @@
 	"shell.decisions.subtitle": "すべてのワークフロー実行にわたり、あなたまたはリゾルバーの対応を待っている質問です。",
 	"shell.decisions.loading": "読み込み中…",
 	"shell.decisions.viewRun": "実行を表示",
-	"shell.decisions.empty": "保留中の判断はありません。"
+	"shell.decisions.empty": "保留中の判断はありません。",
+	"auth.login.title": "サインイン",
+	"auth.login.description": "続行するには認証情報を入力してください。",
+	"auth.login.usernameOrEmailLabel": "ユーザー名またはメール",
+	"auth.login.passwordLabel": "パスワード",
+	"auth.login.submit": "サインイン",
+	"auth.login.submitting": "サインイン中…"
 }

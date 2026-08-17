@@ -37,6 +37,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/push"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
+	authsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/authsvc"
 	browsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/browser"
 	capacitysvc "github.com/aoagents/agent-orchestrator/backend/internal/service/capacity"
 	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
@@ -124,6 +125,29 @@ func RunWithConfig(cfg config.Config) error {
 	// Non-fatal: the skill is an enhancement over `ao --help`, not required.
 	if err := skillassets.Install(cfg.DataDir); err != nil {
 		log.Warn("install using-ao skill", "err", err)
+	}
+
+	// Checkpoint 8P-A: application identity. authMgr is wired into every
+	// daemon boot (not gated on AO_TRUSTED_LOCAL_MODE) so login/logout/me
+	// and the identity middleware always have somewhere real to resolve
+	// against; TrustedLocalMode only changes how the middleware/controller
+	// behave when NO session cookie is present. Bootstrap runs every boot
+	// but only acts once (zero rows in users): it creates the admin from
+	// AO_BOOTSTRAP_ADMIN_EMAIL/AO_BOOTSTRAP_ADMIN_PASSWORD when set, and
+	// backfills any pre-existing NULL project/workflow-run owner to that
+	// admin so nothing is silently orphaned. Never hard-fails startup.
+	authMgr := authsvc.New(store, nil)
+	bootstrapResult, err := authMgr.Bootstrap(context.Background(), os.Getenv("AO_BOOTSTRAP_ADMIN_EMAIL"), os.Getenv("AO_BOOTSTRAP_ADMIN_PASSWORD"))
+	if err != nil {
+		log.Warn("bootstrap admin setup failed", "err", err)
+	} else if bootstrapResult.Created {
+		log.Info("created bootstrap admin user",
+			"userId", bootstrapResult.AdminID,
+			"backfilledProjects", bootstrapResult.BackfilledProjects,
+			"backfilledWorkflowRuns", bootstrapResult.BackfilledWorkflowRuns,
+		)
+	} else if bootstrapResult.Skipped {
+		log.Warn("no admin user exists yet; set AO_BOOTSTRAP_ADMIN_EMAIL and AO_BOOTSTRAP_ADMIN_PASSWORD and restart to create one")
 	}
 
 	telemetrySink := newTelemetrySink(cfg, store, log)
@@ -499,6 +523,9 @@ func RunWithConfig(cfg config.Config) error {
 		Browser:             browserService,
 		PreviewServer:       managedPreview,
 		SessionCapabilities: browserAuthority,
+		Auth:                authMgr,
+		ProjectOwnership:    store,
+		WorkflowOwnership:   store,
 	})
 	if err != nil {
 		stop()

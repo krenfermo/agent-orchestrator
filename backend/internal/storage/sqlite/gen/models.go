@@ -76,6 +76,16 @@ type AppSetting struct {
 	UpdatedAt          time.Time
 }
 
+type AuthSession struct {
+	ID         string
+	UserID     domain.UserID
+	TokenHash  string
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	LastSeenAt time.Time
+	RevokedAt  sql.NullTime
+}
+
 type ChangeLog struct {
 	Seq       int64
 	ProjectID domain.ProjectID
@@ -333,6 +343,7 @@ type Project struct {
 	ArchivedAt    sql.NullTime
 	Config        sql.NullString
 	Kind          string
+	OwnerUserID   *domain.UserID
 }
 
 type Review struct {
@@ -522,6 +533,17 @@ type UsageSource struct {
 	UpdatedAt       time.Time
 }
 
+type User struct {
+	ID           domain.UserID
+	DisplayName  string
+	Email        string
+	Username     string
+	PasswordHash string
+	Status       domain.UserStatus
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 type WorkflowAttempt struct {
 	ID             string
 	WorkflowStepID string
@@ -651,6 +673,7 @@ type WorkflowRun struct {
 	CancelledAt      sql.NullTime
 	ParentWorkflowID sql.NullString
 	PlannedTaskID    sql.NullString
+	UserID           *domain.UserID
 }
 
 type WorkflowStep struct {

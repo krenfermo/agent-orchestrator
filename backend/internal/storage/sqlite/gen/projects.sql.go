@@ -42,7 +42,7 @@ func (q *Queries) CountProjectsIncludingArchived(ctx context.Context) (int64, er
 }
 
 const findProjectByPath = `-- name: FindProjectByPath :one
-SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind
+SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id
 FROM projects WHERE path = ? AND archived_at IS NULL
 `
 
@@ -58,12 +58,13 @@ func (q *Queries) FindProjectByPath(ctx context.Context, path string) (Project, 
 		&i.ArchivedAt,
 		&i.Config,
 		&i.Kind,
+		&i.OwnerUserID,
 	)
 	return i, err
 }
 
 const getProject = `-- name: GetProject :one
-SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind
+SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id
 FROM projects WHERE id = ?
 `
 
@@ -79,12 +80,13 @@ func (q *Queries) GetProject(ctx context.Context, id domain.ProjectID) (Project,
 		&i.ArchivedAt,
 		&i.Config,
 		&i.Kind,
+		&i.OwnerUserID,
 	)
 	return i, err
 }
 
 const listProjects = `-- name: ListProjects :many
-SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind
+SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id
 FROM projects WHERE archived_at IS NULL ORDER BY id
 `
 
@@ -106,6 +108,7 @@ func (q *Queries) ListProjects(ctx context.Context) ([]Project, error) {
 			&i.ArchivedAt,
 			&i.Config,
 			&i.Kind,
+			&i.OwnerUserID,
 		); err != nil {
 			return nil, err
 		}

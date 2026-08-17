@@ -1368,5 +1368,11 @@
 	"shell.decisions.subtitle": "Perguntas aguardando você ou um resolvedor, em todas as execuções de workflow.",
 	"shell.decisions.loading": "Carregando…",
 	"shell.decisions.viewRun": "Ver execução",
-	"shell.decisions.empty": "Nenhuma decisão pendente."
+	"shell.decisions.empty": "Nenhuma decisão pendente.",
+	"auth.login.title": "Entrar",
+	"auth.login.description": "Insira suas credenciais para continuar.",
+	"auth.login.usernameOrEmailLabel": "Usuário ou e-mail",
+	"auth.login.passwordLabel": "Senha",
+	"auth.login.submit": "Entrar",
+	"auth.login.submitting": "Entrando…"
 }

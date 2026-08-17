@@ -13,9 +13,18 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 )
+
+// WorkflowOwnershipStore backs Checkpoint 8P-A's minimal workflow-run
+// ownership scoping — see OwnershipStore's own doc comment in projects.go
+// for the same reasoning applied to workflow runs.
+type WorkflowOwnershipStore interface {
+	GetWorkflowRunOwner(ctx context.Context, id string) (*domain.UserID, error)
+	SetWorkflowRunOwner(ctx context.Context, id string, owner domain.UserID) (bool, error)
+}
 
 // WorkflowProjectIDParam is the {projectId} path parameter for the
 // project-scoped workflow-run creation route.
@@ -374,6 +383,36 @@ type WorkflowsController struct {
 	// into every run-detail response the same way UsageReader is. Optional:
 	// nil leaves WorkflowRunDetailView.Questions unset.
 	QuestionsReader WorkflowQuestionsService
+	// Ownership backs Checkpoint 8P-A's ownership scoping. Nil preserves
+	// pre-8P-A unscoped behavior exactly.
+	Ownership WorkflowOwnershipStore
+	// TrustedLocal mirrors config.Config.TrustedLocalMode; scoping is only
+	// enforced when this is false — see ProjectsController's own field for
+	// the identical reasoning.
+	TrustedLocal bool
+}
+
+func (c *WorkflowsController) scopingEnforced() bool {
+	return !c.TrustedLocal && c.Ownership != nil
+}
+
+func (c *WorkflowsController) stampOwner(r *http.Request, id string) {
+	if c.Ownership == nil {
+		return
+	}
+	user, ok := identity.FromContext(r.Context())
+	if !ok {
+		return
+	}
+	_, _ = c.Ownership.SetWorkflowRunOwner(r.Context(), id, user.ID)
+}
+
+func (c *WorkflowsController) runVisible(ctx context.Context, id string, current domain.UserID) bool {
+	owner, err := c.Ownership.GetWorkflowRunOwner(ctx, id)
+	if err != nil {
+		return false
+	}
+	return !(owner != nil && *owner != current)
 }
 
 // Register mounts the workflow routes on the supplied router.
@@ -425,6 +464,7 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowError(w, r, err)
 		return
 	}
+	c.stampOwner(r, detail.Run.ID)
 	envelope.WriteJSON(w, http.StatusCreated, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
 }
 
@@ -485,7 +525,19 @@ func (c *WorkflowsController) get(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/workflows/{workflowId}")
 		return
 	}
-	detail, err := c.Svc.GetRun(r.Context(), chi.URLParam(r, "workflowId"))
+	workflowID := chi.URLParam(r, "workflowId")
+	if c.scopingEnforced() {
+		user, err := identity.Require(r)
+		if err != nil {
+			envelope.WriteError(w, r, err)
+			return
+		}
+		if !c.runVisible(r.Context(), workflowID, user.ID) {
+			envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "WORKFLOW_NOT_FOUND", "workflow run not found", nil)
+			return
+		}
+	}
+	detail, err := c.Svc.GetRun(r.Context(), workflowID)
 	if err != nil {
 		writeWorkflowError(w, r, err)
 		return
@@ -503,6 +555,20 @@ func (c *WorkflowsController) list(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeWorkflowError(w, r, err)
 		return
+	}
+	if c.scopingEnforced() {
+		user, err := identity.Require(r)
+		if err != nil {
+			envelope.WriteError(w, r, err)
+			return
+		}
+		visible := make([]domain.WorkflowRun, 0, len(runs))
+		for _, run := range runs {
+			if c.runVisible(r.Context(), run.ID, user.ID) {
+				visible = append(visible, run)
+			}
+		}
+		runs = visible
 	}
 	views := make([]WorkflowRunView, 0, len(runs))
 	for _, run := range runs {

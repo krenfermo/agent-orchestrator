@@ -1353,5 +1353,11 @@
 	"shell.decisions.subtitle": "모든 워크플로 실행에서 사용자 또는 리졸버의 응답을 기다리는 질문입니다.",
 	"shell.decisions.loading": "불러오는 중…",
 	"shell.decisions.viewRun": "실행 보기",
-	"shell.decisions.empty": "대기 중인 결정이 없습니다."
+	"shell.decisions.empty": "대기 중인 결정이 없습니다.",
+	"auth.login.title": "로그인",
+	"auth.login.description": "계속하려면 자격 증명을 입력하세요.",
+	"auth.login.usernameOrEmailLabel": "사용자 이름 또는 이메일",
+	"auth.login.passwordLabel": "비밀번호",
+	"auth.login.submit": "로그인",
+	"auth.login.submitting": "로그인 중…"
 }

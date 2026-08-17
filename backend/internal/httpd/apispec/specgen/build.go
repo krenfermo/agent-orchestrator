@@ -83,6 +83,8 @@ func Build() ([]byte, error) {
 			"Target-isolated desktop browser runtime (loopback only)"),
 		*(&openapi31.Tag{Name: "workflows"}).WithDescription(
 			"Durable workflow runs (Checkpoint 8A structure only — no execution)"),
+		*(&openapi31.Tag{Name: "auth"}).WithDescription(
+			"User identity, login/logout sessions, and current-user resolution (Checkpoint 8P-A)"),
 	}
 
 	for _, op := range operations() {
@@ -477,7 +479,46 @@ func operations() []operation {
 	ops = append(ops, browserOperations()...)
 	ops = append(ops, shellTerminalOperations()...)
 	ops = append(ops, workflowOperations()...)
+	ops = append(ops, authOperations()...)
 	return ops
+}
+
+// authOperations declares the /auth operations (Checkpoint 8P-A). Must stay
+// 1:1 with the routes AuthController.Register mounts (enforced by the
+// parity test).
+func authOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/auth/login", id: "login", tag: "auth",
+			summary: "Authenticate with username/email + password and receive a session cookie",
+			reqBody: controllers.LoginRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.LoginResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/auth/logout", id: "logout", tag: "auth",
+			summary:         "Revoke the current session and clear the session cookie",
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.LogoutResponse{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/auth/me", id: "getCurrentUser", tag: "auth",
+			summary: "Resolve the current identity: a real session, trusted-local mode's synthesized admin, or no_user",
+			resps: []respUnit{
+				{http.StatusOK, controllers.MeResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
 }
 
 // workflowOperations declares the /workflows operations (Checkpoint 8A). Must

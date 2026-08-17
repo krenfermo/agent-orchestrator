@@ -1335,5 +1335,11 @@
 	"shell.decisions.subtitle": "所有工作流运行中等待您或解析器处理的问题。",
 	"shell.decisions.loading": "加载中…",
 	"shell.decisions.viewRun": "查看运行",
-	"shell.decisions.empty": "没有待处理的决策。"
+	"shell.decisions.empty": "没有待处理的决策。",
+	"auth.login.title": "登录",
+	"auth.login.description": "请输入您的凭据以继续。",
+	"auth.login.usernameOrEmailLabel": "用户名或邮箱",
+	"auth.login.passwordLabel": "密码",
+	"auth.login.submit": "登录",
+	"auth.login.submitting": "正在登录…"
 }

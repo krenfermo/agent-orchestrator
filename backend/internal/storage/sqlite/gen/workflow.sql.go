@@ -145,7 +145,7 @@ func (q *Queries) GetWorkflowOutboxByIdempotencyKey(ctx context.Context, idempot
 
 const getWorkflowRun = `-- name: GetWorkflowRun :one
 SELECT id, project_id, objective, state, policy_version, policy_snapshot,
-       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id, user_id
 FROM workflow_runs
 WHERE id = ?
 `
@@ -166,6 +166,7 @@ func (q *Queries) GetWorkflowRun(ctx context.Context, id string) (WorkflowRun, e
 		&i.CancelledAt,
 		&i.ParentWorkflowID,
 		&i.PlannedTaskID,
+		&i.UserID,
 	)
 	return i, err
 }
@@ -412,7 +413,7 @@ INSERT INTO workflow_runs (
     created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
 RETURNING id, project_id, objective, state, policy_version, policy_snapshot,
-          created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
+          created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id, user_id
 `
 
 type InsertWorkflowRunParams struct {
@@ -455,6 +456,7 @@ func (q *Queries) InsertWorkflowRun(ctx context.Context, arg InsertWorkflowRunPa
 		&i.CancelledAt,
 		&i.ParentWorkflowID,
 		&i.PlannedTaskID,
+		&i.UserID,
 	)
 	return i, err
 }
@@ -516,7 +518,7 @@ func (q *Queries) InsertWorkflowStep(ctx context.Context, arg InsertWorkflowStep
 
 const listNonTerminalWorkflowRuns = `-- name: ListNonTerminalWorkflowRuns :many
 SELECT id, project_id, objective, state, policy_version, policy_snapshot,
-       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id, user_id
 FROM workflow_runs
 WHERE state NOT IN ('completed', 'failed', 'cancelled')
 ORDER BY created_at
@@ -544,6 +546,7 @@ func (q *Queries) ListNonTerminalWorkflowRuns(ctx context.Context) ([]WorkflowRu
 			&i.CancelledAt,
 			&i.ParentWorkflowID,
 			&i.PlannedTaskID,
+			&i.UserID,
 		); err != nil {
 			return nil, err
 		}
@@ -699,7 +702,7 @@ func (q *Queries) ListWorkflowOutboxByRun(ctx context.Context, workflowRunID str
 
 const listWorkflowRuns = `-- name: ListWorkflowRuns :many
 SELECT id, project_id, objective, state, policy_version, policy_snapshot,
-       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id, user_id
 FROM workflow_runs
 WHERE parent_workflow_id IS NULL
 ORDER BY created_at DESC, id DESC
@@ -727,6 +730,7 @@ func (q *Queries) ListWorkflowRuns(ctx context.Context) ([]WorkflowRun, error) {
 			&i.CancelledAt,
 			&i.ParentWorkflowID,
 			&i.PlannedTaskID,
+			&i.UserID,
 		); err != nil {
 			return nil, err
 		}
@@ -743,7 +747,7 @@ func (q *Queries) ListWorkflowRuns(ctx context.Context) ([]WorkflowRun, error) {
 
 const listWorkflowRunsByProject = `-- name: ListWorkflowRunsByProject :many
 SELECT id, project_id, objective, state, policy_version, policy_snapshot,
-       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id, user_id
 FROM workflow_runs
 WHERE project_id = ? AND parent_workflow_id IS NULL
 ORDER BY created_at DESC, id DESC
@@ -771,6 +775,7 @@ func (q *Queries) ListWorkflowRunsByProject(ctx context.Context, projectID domai
 			&i.CancelledAt,
 			&i.ParentWorkflowID,
 			&i.PlannedTaskID,
+			&i.UserID,
 		); err != nil {
 			return nil, err
 		}

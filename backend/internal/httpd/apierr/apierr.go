@@ -22,6 +22,12 @@ const (
 	KindConflict
 	// KindForbidden is an authenticated ownership failure; it maps to 403.
 	KindForbidden
+	// KindUnauthorized is a missing/invalid credential or session — the
+	// caller was never authenticated at all, as opposed to KindForbidden's
+	// "authenticated but not allowed to act on this resource". Maps to 401.
+	// Checkpoint 8P-A: login failures and RequireUser's "no session
+	// resolved" both use this, never KindForbidden.
+	KindUnauthorized
 )
 
 // Error is the structured error every service returns. Code is a stable machine
@@ -65,6 +71,11 @@ func Conflict(code, message string, details map[string]any) *Error {
 // Forbidden is a 403-class ownership failure.
 func Forbidden(code, message string) *Error {
 	return New(KindForbidden, code, message, nil)
+}
+
+// Unauthorized is a 401-class missing/invalid credential or session.
+func Unauthorized(code, message string) *Error {
+	return New(KindUnauthorized, code, message, nil)
 }
 
 // Internal is a 500-class error.
