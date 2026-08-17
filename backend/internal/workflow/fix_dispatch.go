@@ -129,6 +129,11 @@ func (c *Coordinator) dispatchFixFromPending(
 		fixStep.State = domain.WorkflowStepRunning
 	}
 
+	// Checkpoint 8M §12/§27: apply the session lifecycle decision (and
+	// persist it) right here — the single outbox-idempotency-guarded point
+	// reached exactly once per real cycle dispatch, never once per poll.
+	prompt = c.applyFixLifecycleDecision(ctx, run, fixStep, reviewRun, cycleNumber, prompt)
+
 	if err := c.messageSender.Send(ctx, reviewRun.SessionID, prompt, nil); err != nil {
 		return c.recordFixDispatchFailure(ctx, run, fixStep, entry, domain.WorkflowErrorPromptDeliveryFailed, err)
 	}
@@ -150,7 +155,22 @@ func (c *Coordinator) recordFixDispatchSuccess(
 		return fixStep, err
 	}
 	if int64(len(attempts)) < int64(cycleNumber) {
-		if _, err := c.store.CreateWorkflowAttempt(ctx, "wfa-"+c.newID(), fixStep.ID, "codex", "", now); err != nil {
+		// Checkpoint 8L: the fix message is delivered into the SAME live
+		// worker session (Send targets reviewRun.SessionID, the worker's
+		// session — never a new one), so the fix attempt's harness must
+		// reflect whichever harness ExecutionRouter actually selected for
+		// that worker, not a hardcoded literal. Before 8L the worker was
+		// always Codex so a literal "codex" here happened to be correct;
+		// now that the worker can be claude-code, the literal must be
+		// replaced with the work step's own last recorded attempt harness
+		// (same lookup reviewerHarnessForStep already uses).
+		fixHarness := "codex"
+		if workAttempts, werr := c.store.ListWorkflowAttempts(ctx, workStep.ID); werr == nil && len(workAttempts) > 0 {
+			if h := workAttempts[len(workAttempts)-1].Harness; h != "" {
+				fixHarness = h
+			}
+		}
+		if _, err := c.store.CreateWorkflowAttempt(ctx, "wfa-"+c.newID(), fixStep.ID, fixHarness, "", now); err != nil {
 			return fixStep, err
 		}
 	}

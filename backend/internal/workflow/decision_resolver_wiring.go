@@ -78,10 +78,14 @@ func (c *Coordinator) dispatchDecisionResolver(ctx stdctx.Context, run domain.Wo
 		return "waiting_for_capacity: resolver unavailable", nil
 	}
 
-	var branch, worktreePath string
+	var branch, worktreePath, fingerprint string
 	if q.WorkflowStepID != nil {
 		if cp, hasCP, cerr := c.store.GetLatestWorkflowCheckpointByStep(ctx, string(*q.WorkflowStepID)); cerr == nil && hasCP {
 			branch, worktreePath = cp.Branch, cp.WorktreePath
+			fingerprint = cp.FingerprintAfter
+			if fingerprint == "" {
+				fingerprint = cp.FingerprintBefore
+			}
 		}
 	}
 	if worktreePath == "" {
@@ -115,16 +119,36 @@ func (c *Coordinator) dispatchDecisionResolver(ctx stdctx.Context, run domain.Wo
 		return "", err
 	}
 
+	// Checkpoint 8M §9: the decision resolver's own minimal-evidence context
+	// pack — objective/acceptance criteria/fingerprint, reusing
+	// BuildTaskCheckpointSummary now that it lives in this same package (see
+	// task_checkpoint_summary.go's doc comment: this was previously blocked
+	// by an import cycle through httpd/controllers, resolved by moving the
+	// builder here in this checkpoint). No worker transcript, never a new
+	// fetch beyond the plan artifact this dispatch already needs.
+	var acceptanceCriteria []string
+	var contextPackText string
+	if artifact, aerr := c.planArtifactForRun(ctx, run); aerr == nil {
+		acceptanceCriteria = artifact.AcceptanceCriteria
+		facts := BuildTaskCheckpointSummary(TaskCheckpointSummaryInput{
+			Detail: RunDetail{Run: run}, Artifact: &artifact,
+		})
+		facts.CurrentFingerprint = fingerprint
+		contextPackText = RenderContextPackForRole(BuildSessionContextPack(domain.WorkflowRoleDecisionResolver, facts))
+	}
+
 	prompt := BuildDecisionResolverPrompt(DecisionResolverPromptInput{
-		Objective:         run.Objective,
-		QuestionText:      q.QuestionText,
-		Choices:           q.StructuredChoices,
-		Branch:            branch,
-		WorktreePath:      worktreePath,
-		PolicyVersion:     run.PolicyVersion,
-		AllowSameProvider: selection.SameProvider,
-		ResolverSessionID: string(resolverSessionID),
-		ResolutionRunID:   resolutionID,
+		Objective:          run.Objective,
+		AcceptanceCriteria: acceptanceCriteria,
+		QuestionText:       q.QuestionText,
+		Choices:            q.StructuredChoices,
+		Branch:             branch,
+		WorktreePath:       worktreePath,
+		PolicyVersion:      run.PolicyVersion,
+		AllowSameProvider:  selection.SameProvider,
+		ResolverSessionID:  string(resolverSessionID),
+		ResolutionRunID:    resolutionID,
+		ContextPack:        contextPackText,
 	})
 
 	// Record the resolver's identity (transition to running, set

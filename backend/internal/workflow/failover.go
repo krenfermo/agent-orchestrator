@@ -220,9 +220,30 @@ func (c *Coordinator) ReportWorkStepProviderFailure(ctx stdctx.Context, runID, s
 	}
 
 	idemKey := fmt.Sprintf("workflow-step-failover:%s:attempt%d:%s-to-%s", step.ID, current.AttemptNumber, currentHarness, fallback)
+	note := fmt.Sprintf("workflow: work step %s provider failover (%s)", step.ID, classification.Class)
+	// Checkpoint 8M §11: enrich the switch note with a compact, fact-only
+	// SessionContextPack — never the source provider's transcript — reusing
+	// 8H's own bounded/idempotent Note->UserNote handoff path unchanged
+	// (agent_switching.go already bounds/fingerprints this exact field; no
+	// second handoff mechanism is built here).
+	decision := DecideSessionLifecycle(SessionLifecycleRequest{
+		Role: domain.WorkflowRoleWorker, CurrentSessionID: string(*step.SessionID),
+		SessionHealth: domain.SessionHealthRunning, ProviderSwitch: true, Policy: policyForRun(run),
+	})
+	decision.ToSessionID = string(*step.SessionID)
+	var pack *domain.SessionContextPack
+	if artifact, aerr := c.planArtifactForRun(ctx, run); aerr == nil {
+		facts := BuildTaskCheckpointSummary(TaskCheckpointSummaryInput{Detail: RunDetail{Run: run}, Artifact: &artifact})
+		built := BuildSessionContextPack(domain.WorkflowRoleWorker, facts)
+		pack = &built
+		decision.ContextPackHash = built.ContentHash()
+		note = note + "\n\n" + RenderContextPackForRole(built)
+	}
+	_ = c.persistSessionLifecycleDecision(ctx, run, nil, decision, pack)
+
 	sw, err := c.switcher.SwitchAgent(ctx, domain.SessionID(*step.SessionID), AgentSwitchRequest{
 		TargetHarness:  fallback,
-		Note:           fmt.Sprintf("workflow: work step %s provider failover (%s)", step.ID, classification.Class),
+		Note:           note,
 		IdempotencyKey: idemKey,
 	})
 	if err != nil {

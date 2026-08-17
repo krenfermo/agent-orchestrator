@@ -126,46 +126,5 @@ func stepByKind(detail workflowcore.RunDetail, kind domain.WorkflowStepKind) (wo
 // content: every field here is either copied verbatim from an existing
 // column or a short deterministic derivation of one.
 func BuildTaskCheckpointSummary(detail workflowcore.RunDetail) domain.TaskCheckpointSummary {
-	summary := domain.TaskCheckpointSummary{Objective: detail.Run.Objective, NextAction: detail.NextAction}
-
-	for _, task := range detail.Tasks {
-		if task.ExecutionRunID != nil && *task.ExecutionRunID == detail.Run.ID {
-			summary.Task = task.Title
-			var criteria []string
-			_ = json.Unmarshal([]byte(task.AcceptanceCriteriaJSON), &criteria)
-			summary.AcceptanceCriteria = criteria
-			break
-		}
-	}
-
-	var latestCheckpoint *domain.WorkflowCheckpoint
-	for _, sd := range detail.Steps {
-		if sd.LatestCheckpoint != nil && (latestCheckpoint == nil || sd.LatestCheckpoint.CreatedAt.After(latestCheckpoint.CreatedAt)) {
-			latestCheckpoint = sd.LatestCheckpoint
-		}
-		if sd.Step.Kind == domain.WorkflowStepReview && sd.Review != nil && sd.Review.FindingsSummary != "" {
-			summary.LatestReviewFindings = sd.Review.FindingsSummary
-		}
-		if sd.Step.Kind == domain.WorkflowStepVerify {
-			if result := extractVerifyResult(sd); result != nil && !result.Passed {
-				for _, check := range result.Checks {
-					if !check.Passed {
-						summary.ActiveErrors = append(summary.ActiveErrors, check.Label+": "+check.FailureReason)
-					}
-				}
-			}
-		}
-		for _, a := range sd.Attempts {
-			if a.Outcome == domain.WorkflowAttemptFailed && a.ErrorClass != "" {
-				summary.ActiveErrors = append(summary.ActiveErrors, string(sd.Step.Kind)+" attempt "+itoa(a.AttemptNumber)+": "+string(a.ErrorClass))
-			}
-		}
-	}
-	if latestCheckpoint != nil {
-		summary.CurrentFingerprint = latestCheckpoint.FingerprintAfter
-		if summary.CurrentFingerprint == "" {
-			summary.CurrentFingerprint = latestCheckpoint.FingerprintBefore
-		}
-	}
-	return summary
+	return workflowcore.BuildTaskCheckpointSummary(workflowcore.TaskCheckpointSummaryInput{Detail: detail})
 }

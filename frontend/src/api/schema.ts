@@ -2189,6 +2189,29 @@ export interface components {
             port: number;
             reason: string;
         };
+        ControllersSessionLifecycleDecisionResponse: {
+            action: string;
+            contextPackHash?: string;
+            createdAt?: string;
+            fromSessionId?: string;
+            policyVersion: string;
+            reasons: string[];
+            role?: string;
+            toSessionId?: string;
+        };
+        ControllersSessionLifecycleUsageResponse: {
+            /** Format: int64 */
+            contextPacksCreated: number;
+            decisions?: components["schemas"]["ControllersSessionLifecycleDecisionResponse"][];
+            /** Format: int64 */
+            sessionSwitches: number;
+            /** Format: int64 */
+            sessionsCompacted: number;
+            /** Format: int64 */
+            sessionsCreated: number;
+            /** Format: int64 */
+            sessionsReused: number;
+        };
         ControllersSessionRefreshAdvisoryResponse: {
             reason: string;
             recommendation: string;
@@ -2290,6 +2313,7 @@ export interface components {
             metrics: components["schemas"]["ControllersTaskUsefulWorkMetricsResponse"];
             roles: components["schemas"]["ControllersRoleUsageResponse"][];
             routing?: components["schemas"]["ControllersRoutingUsageResponse"][];
+            sessionLifecycle: components["schemas"]["ControllersSessionLifecycleUsageResponse"];
         };
         ConversationAccountPayload: {
             authMode?: string;

@@ -256,6 +256,21 @@ type RunDetail struct {
 	NextAction string
 	Plan       *domain.WorkflowPlanRecord
 	Tasks      []domain.WorkflowTask
+	// SessionLifecycle is Checkpoint 8M's audit trail of every
+	// session_lifecycle_decision checkpoint recorded for this run (task-
+	// boundary/provider-switch/fix-compact decisions), in the same order
+	// ListWorkflowCheckpoints returns them. Run-level, not per-step — see
+	// session_context_pack.go's persistSessionLifecycleDecision doc comment
+	// for why these are deliberately not tied to a WorkflowStepID.
+	SessionLifecycle []SessionLifecycleAuditEntry
+}
+
+// SessionLifecycleAuditEntry is one durable session-lifecycle decision plus
+// the context pack it produced (if any) and when it was recorded.
+type SessionLifecycleAuditEntry struct {
+	Decision    domain.SessionLifecycleDecision
+	ContextPack *domain.SessionContextPack
+	CreatedAt   time.Time
 }
 
 // StepDetail is one workflow step plus its recorded attempts and latest
@@ -488,6 +503,13 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 		for _, cp := range checkpoints {
 			if cp.NextAction != "" {
 				detail.NextAction = cp.NextAction
+			}
+			if cp.DurablePhase == sessionLifecycleDurablePhase {
+				if rec, ok := decodeSessionLifecycleRecord(cp.RetryState); ok {
+					detail.SessionLifecycle = append(detail.SessionLifecycle, SessionLifecycleAuditEntry{
+						Decision: rec.Decision, ContextPack: rec.ContextPack, CreatedAt: cp.CreatedAt,
+					})
+				}
 			}
 		}
 	}

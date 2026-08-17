@@ -71,6 +71,36 @@ func TestRuntimeEnvClearsDaemonBrowserRuntimeSecrets(t *testing.T) {
 	}
 }
 
+// TestRuntimeEnvAppliesAOShimForRenamedBinary is Checkpoint 8M §16's
+// regression test for the gap 8L.1's real E2E discovered: a worker session
+// whose daemon binary is not literally named "ao" (HookPATH's pin only
+// works for that exact name) used to leave PATH degraded — every worker
+// hook callback (`ao hooks ...`) resolved to "command not found". Mirrors
+// the exact fallback workflow_reviewer_launcher.go/decision_resolver_launcher.go
+// already apply for their own launches.
+func TestRuntimeEnvAppliesAOShimForRenamedBinary(t *testing.T) {
+	dataDir := t.TempDir()
+	renamed := filepath.Join(dataDir, "renamed-daemon-binary")
+	manager := &Manager{
+		dataDir:    dataDir,
+		executable: func() (string, error) { return renamed, nil },
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	env := manager.runtimeEnv("mer-1", "mer", "", nil)
+
+	shimDir := filepath.Join(dataDir, "reviewer-runtime", "bin")
+	if !strings.Contains(env["PATH"], shimDir) {
+		t.Fatalf("PATH = %q, want it to include the AO shim directory %q", env["PATH"], shimDir)
+	}
+	shimPath := filepath.Join(shimDir, "ao")
+	if runtime.GOOS == "windows" {
+		shimPath += ".cmd"
+	}
+	if _, err := os.Stat(shimPath); err != nil {
+		t.Fatalf("AO shim not created at %q: %v", shimPath, err)
+	}
+}
+
 func TestHookPATH(t *testing.T) {
 	sep := string(os.PathListSeparator)
 	daemonExe := filepath.Join("/opt", "aod", "ao")

@@ -57,6 +57,52 @@ type WorkflowUsageView struct {
 	// (e.g. a run created before 8L, or a step kind ExecutionRouter does not
 	// route) is simply absent from the slice.
 	Routing []RoutingUsageView
+	// SessionLifecycle is Checkpoint 8M's read-time-derived audit trail,
+	// built directly from RunDetail.SessionLifecycle — no new store call.
+	SessionLifecycle SessionLifecycleUsageView
+}
+
+// SessionLifecycleUsageView is Checkpoint 8M's telemetry section: plain
+// counts (always knowable — 0 is a real fact) plus the individual decisions,
+// each carrying its own role/reasons/context-pack hash for the frontend
+// audit panel. Durations follow 8J's "never fabricate" rule: a decision has
+// no duration of its own (it's an instantaneous policy evaluation), so none
+// is invented here — only the underlying role's own duration (already on
+// RoleUsageView) is ever shown as a real number.
+type SessionLifecycleUsageView struct {
+	SessionsCreated     int64
+	SessionsReused      int64
+	SessionsCompacted   int64
+	ContextPacksCreated int64
+	SessionSwitches     int64
+	Decisions           []workflowcore.SessionLifecycleAuditEntry
+}
+
+// BuildSessionLifecycleUsageView derives Checkpoint 8M's telemetry section
+// from a run's already-fetched SessionLifecycle audit trail — no new store
+// reads.
+func BuildSessionLifecycleUsageView(entries []workflowcore.SessionLifecycleAuditEntry) SessionLifecycleUsageView {
+	v := SessionLifecycleUsageView{Decisions: entries}
+	for _, e := range entries {
+		switch e.Decision.Action {
+		case domain.LifecycleReuse:
+			v.SessionsReused++
+		case domain.LifecycleCompact:
+			v.SessionsCompacted++
+		case domain.LifecycleNewSession:
+			v.SessionsCreated++
+		}
+		if e.ContextPack != nil {
+			v.ContextPacksCreated++
+		}
+		for _, r := range e.Decision.Reasons {
+			if r == domain.LifecycleReasonProviderSwitch {
+				v.SessionSwitches++
+				break
+			}
+		}
+	}
+	return v
 }
 
 // RoutingUsageView is one step's Checkpoint 8L routing telemetry, derived
@@ -264,11 +310,12 @@ func BuildWorkflowUsageView(ctx context.Context, detail workflowcore.RunDetail, 
 	}
 
 	return WorkflowUsageView{
-		Roles:      roles,
-		Metrics:    metrics,
-		Advisory:   BuildSessionRefreshAdvisory(detail, fixCycles),
-		Checkpoint: BuildTaskCheckpointSummary(detail),
-		Routing:    routing,
+		Roles:            roles,
+		Metrics:          metrics,
+		Advisory:         BuildSessionRefreshAdvisory(detail, fixCycles),
+		Checkpoint:       BuildTaskCheckpointSummary(detail),
+		Routing:          routing,
+		SessionLifecycle: BuildSessionLifecycleUsageView(detail.SessionLifecycle),
 	}
 }
 

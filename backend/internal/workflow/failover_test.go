@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -345,5 +346,66 @@ func TestReportWorkStepProviderFailure_SwitchRejectedNeedsAttention(t *testing.T
 	run, _, _ := store.GetWorkflowRun(ctx, created.Run.ID)
 	if run.State != domain.WorkflowRunNeedsAttention {
 		t.Fatalf("run state = %q, want needs_attention", run.State)
+	}
+}
+
+// TestReportWorkStepProviderFailure_SwitchNoteCarriesContextPackNotTranscript
+// covers Checkpoint 8M §11: a provider switch's Note must carry a fact-only
+// SessionContextPack (objective at minimum), never a raw transcript, and a
+// session_lifecycle_decision checkpoint (provider_switch reason) must be
+// durably recorded for the run.
+func TestReportWorkStepProviderFailure_SwitchNoteCarriesContextPackNotTranscript(t *testing.T) {
+	spawner := &harnessAwareSpawner{}
+	switcher := newFakeSwitcher(domain.HarnessCodex)
+	c, store, _ := newCoordinatorWithSwitcher(spawner, switcher)
+	ctx := context.Background()
+
+	created, _ := c.CreateRun(ctx, "proj-1", "ship the distinctive thing")
+	detail, err := c.StartRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	work := workStepFrom(detail)
+
+	if _, err := c.ReportWorkStepProviderFailure(ctx, created.Run.ID, work.Step.ID, errRateLimited); err != nil {
+		t.Fatalf("ReportWorkStepProviderFailure: %v", err)
+	}
+	if len(switcher.calls) != 1 {
+		t.Fatalf("switcher calls = %d, want 1", len(switcher.calls))
+	}
+	note := switcher.calls[0].Note
+	if !strings.Contains(note, "ship the distinctive thing") {
+		t.Fatalf("switch note missing objective fact:\n%s", note)
+	}
+	if !strings.Contains(note, "SessionContextPack") {
+		t.Fatalf("switch note missing SessionContextPack marker:\n%s", note)
+	}
+
+	cps, err := store.ListWorkflowCheckpoints(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("ListWorkflowCheckpoints: %v", err)
+	}
+	found := false
+	for _, cp := range cps {
+		if cp.DurablePhase != "session_lifecycle_decision" {
+			continue
+		}
+		decision, pack, ok := workflowcore.DecodeSessionLifecycleDecisionForTest(cp.RetryState)
+		if !ok {
+			t.Fatalf("session_lifecycle_decision checkpoint did not decode: %+v", cp)
+		}
+		if decision.Action != domain.LifecycleNewSession {
+			continue
+		}
+		found = true
+		if len(decision.Reasons) != 1 || decision.Reasons[0] != domain.LifecycleReasonProviderSwitch {
+			t.Fatalf("reasons = %v, want [provider_switch]", decision.Reasons)
+		}
+		if pack == nil {
+			t.Fatalf("expected a context pack attached to the provider_switch decision")
+		}
+	}
+	if !found {
+		t.Fatalf("no provider_switch session_lifecycle_decision checkpoint found among %d checkpoints", len(cps))
 	}
 }

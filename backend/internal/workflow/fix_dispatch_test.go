@@ -104,8 +104,15 @@ func TestChangesRequestedDispatchesFixExactlyOnceReusingSession(t *testing.T) {
 	if err != nil || len(attempts) != 1 {
 		t.Fatalf("fix step attempts = %+v, err=%v, want exactly 1", attempts, err)
 	}
-	if attempts[0].AttemptNumber != 1 || attempts[0].Harness != "codex" {
-		t.Fatalf("fix attempt = %+v, want attempt_number=1 harness=codex", attempts[0])
+	// Checkpoint 8L: the fix attempt's harness must reflect whichever
+	// harness ExecutionRouter actually selected for the worker (this
+	// no-verification-plan "ship the thing" objective classifies as normal
+	// complexity, whose default preference is claude-code), never a
+	// hardcoded literal — the fix message is delivered into that SAME live
+	// session, so mislabeling it here would misattribute fix-cycle usage
+	// telemetry to the wrong provider.
+	if attempts[0].AttemptNumber != 1 || attempts[0].Harness != "claude-code" {
+		t.Fatalf("fix attempt = %+v, want attempt_number=1 harness=claude-code", attempts[0])
 	}
 	if sender.calls != 1 {
 		t.Fatalf("MessageSender.Send calls = %d, want exactly 1", sender.calls)
@@ -266,6 +273,50 @@ func TestFixCycleChangedFingerprintDispatchesNextReview(t *testing.T) {
 		t.Fatalf("InsertReviewRun calls after repeated GetRun = %d, want still 2", reviewRuns.insertCalls)
 	}
 }
+
+// TestFixAttemptHarnessTracksActualWorkerHarness is Checkpoint 8L.1's real-
+// E2E-discovered regression test: recordFixDispatchSuccess used to hardcode
+// the fix attempt's harness as the literal "codex" (correct only by
+// accident before 8L, when the worker was always Codex). This forces a
+// trivial-complexity plan (worker prefers Codex under the default policy —
+// see worker_routing.go) so the harness under test is still Codex, proving
+// the fix path derives it from the work step's actual last attempt rather
+// than from any hardcoded assumption in either direction.
+func TestFixAttemptHarnessTracksActualWorkerHarness(t *testing.T) {
+	sessionFacts := newFakeSessionFacts()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
+	workspaceFacts := &fakeWorkspaceFacts{}
+	reviewRuns := newFakeReviewRuns()
+	launcher := &fakeReviewerLauncher{}
+	sender := &fakeMessageSender{}
+	c, store, clk := newCoordinatorWithFix(spawner, sessionFacts, workspaceFacts, reviewRuns, launcher, sender)
+	ctx := context.Background()
+
+	// A single exact-content file check biases pre-dispatch complexity to
+	// trivial (see worker_routing.go's plannedComplexityFacts), so the
+	// default policy prefers Codex for this run's worker.
+	created, err := c.CreateRun(ctx, "proj-1", "ship the thing", workflowcore.VerificationPlan{
+		Files: []workflowcore.VerificationFileCheck{{Path: "trivial.txt", Exists: true, ExactContent: strPtr("trivial\n")}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	got := driveToChangesRequested(t, c, store, clk, sessionFacts, workspaceFacts, reviewRuns, created.Run.ID)
+
+	work := workStepFrom(got)
+	workAttempts, err := store.ListWorkflowAttempts(ctx, work.Step.ID)
+	if err != nil || len(workAttempts) == 0 || workAttempts[len(workAttempts)-1].Harness != "codex" {
+		t.Fatalf("work attempts = %+v, err=%v, want the worker to have routed to codex (trivial complexity)", workAttempts, err)
+	}
+
+	fix := fixStepFrom(got)
+	fixAttempts, err := store.ListWorkflowAttempts(ctx, fix.Step.ID)
+	if err != nil || len(fixAttempts) != 1 || fixAttempts[0].Harness != "codex" {
+		t.Fatalf("fix attempts = %+v, err=%v, want exactly 1 with harness=codex (matching the actual worker)", fixAttempts, err)
+	}
+}
+
+func strPtr(s string) *string { return &s }
 
 // Test 7: approved after a fix cycle produces next_action="verify" (reached
 // via cycle 2).
@@ -593,5 +644,126 @@ func TestContinueRunSingleCallDispatchesReviewFromCompletedWork(t *testing.T) {
 	}
 	if launcher.launchCalls != 1 {
 		t.Fatalf("launch calls = %d, want exactly 1", launcher.launchCalls)
+	}
+}
+
+// TestFixLifecycleDecisionPersistedExactlyOnceAcrossRepeatedPolls covers
+// Checkpoint 8M test requirement #4/#12: a fix cycle's session_lifecycle_decision
+// checkpoint (REUSE — fix loop keeps reusing the same session by default) is
+// recorded exactly once for a given cycle even though maybeDispatchFix can
+// be re-entered on every GetRun poll — see fix_dispatch.go's doc comment on
+// why the decision is applied inside dispatchFixFromPending, the single
+// outbox-idempotency-guarded call site, not in cascade.go's maybeDispatchFix.
+func TestFixLifecycleDecisionPersistedExactlyOnceAcrossRepeatedPolls(t *testing.T) {
+	sessionFacts := newFakeSessionFacts()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
+	workspaceFacts := &fakeWorkspaceFacts{}
+	reviewRuns := newFakeReviewRuns()
+	launcher := &fakeReviewerLauncher{}
+	sender := &fakeMessageSender{}
+	c, store, clk := newCoordinatorWithFix(spawner, sessionFacts, workspaceFacts, reviewRuns, launcher, sender)
+	ctx := context.Background()
+
+	created, err := c.CreateRun(ctx, "proj-1", "ship the thing")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	driveToChangesRequested(t, c, store, clk, sessionFacts, workspaceFacts, reviewRuns, created.Run.ID)
+	if sender.calls != 1 {
+		t.Fatalf("sender calls after first fix dispatch = %d, want 1", sender.calls)
+	}
+
+	// Simulate the frontend's repeated 2s poll: several more GetRun calls
+	// with nothing new to observe.
+	for i := 0; i < 3; i++ {
+		if _, err := c.GetRun(ctx, created.Run.ID); err != nil {
+			t.Fatalf("GetRun poll %d: %v", i, err)
+		}
+	}
+	if sender.calls != 1 {
+		t.Fatalf("sender calls after repeated polling = %d, want still 1 (no duplicate fix message)", sender.calls)
+	}
+
+	cps, err := store.ListWorkflowCheckpoints(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("ListWorkflowCheckpoints: %v", err)
+	}
+	lifecycleCount := 0
+	for _, cp := range cps {
+		if cp.DurablePhase != "session_lifecycle_decision" {
+			continue
+		}
+		decision, _, ok := workflowcore.DecodeSessionLifecycleDecisionForTest(cp.RetryState)
+		if !ok {
+			t.Fatalf("session_lifecycle_decision checkpoint did not decode: %+v", cp)
+		}
+		if decision.Role == domain.WorkflowRoleFixWorker {
+			lifecycleCount++
+			if decision.Action != domain.LifecycleReuse {
+				t.Fatalf("fix lifecycle decision action = %q, want reuse", decision.Action)
+			}
+		}
+	}
+	if lifecycleCount != 1 {
+		t.Fatalf("fix_worker session_lifecycle_decision checkpoints = %d, want exactly 1 despite repeated polling", lifecycleCount)
+	}
+}
+
+// TestFixLifecycleSurvivesRestartNoDuplicateDispatch covers Checkpoint 8M
+// test requirement #13: a fix cycle's lifecycle decision/context pack is
+// durable — a fresh Coordinator over the same store (the exact "restart"
+// pattern failover_test.go/recovery_boundaries_test.go already use) must
+// not re-dispatch the fix message or record a second lifecycle decision.
+func TestFixLifecycleSurvivesRestartNoDuplicateDispatch(t *testing.T) {
+	sessionFacts := newFakeSessionFacts()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
+	workspaceFacts := &fakeWorkspaceFacts{}
+	reviewRuns := newFakeReviewRuns()
+	launcher := &fakeReviewerLauncher{}
+	sender1 := &fakeMessageSender{}
+	c1, store, clk := newCoordinatorWithFix(spawner, sessionFacts, workspaceFacts, reviewRuns, launcher, sender1)
+	ctx := context.Background()
+
+	created, err := c1.CreateRun(ctx, "proj-1", "ship the thing")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	driveToChangesRequested(t, c1, store, clk, sessionFacts, workspaceFacts, reviewRuns, created.Run.ID)
+	if sender1.calls != 1 {
+		t.Fatalf("sender1 calls = %d, want 1", sender1.calls)
+	}
+
+	// Simulate a daemon restart: a fresh Coordinator over the same durable
+	// store, with its own fresh MessageSender (a real restart loses no
+	// in-memory state that matters — everything the fix cycle needs is
+	// already durable).
+	sender2 := &fakeMessageSender{}
+	c2 := workflowcore.New(workflowcore.Deps{
+		Store: store, Spawner: spawner, SessionFacts: sessionFacts, WorkspaceFacts: workspaceFacts,
+		ReviewRuns: reviewRuns, ReviewerLauncher: launcher, MessageSender: sender2, Clock: clk.Now,
+		NewID: func() string { return "restart-id" },
+	})
+	if _, err := c2.GetRun(ctx, created.Run.ID); err != nil {
+		t.Fatalf("GetRun after restart: %v", err)
+	}
+	if sender2.calls != 0 {
+		t.Fatalf("sender2 calls = %d, want 0 (no duplicate fix dispatch after restart)", sender2.calls)
+	}
+
+	cps, err := store.ListWorkflowCheckpoints(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("ListWorkflowCheckpoints: %v", err)
+	}
+	lifecycleCount := 0
+	for _, cp := range cps {
+		if cp.DurablePhase != "session_lifecycle_decision" {
+			continue
+		}
+		if decision, _, ok := workflowcore.DecodeSessionLifecycleDecisionForTest(cp.RetryState); ok && decision.Role == domain.WorkflowRoleFixWorker {
+			lifecycleCount++
+		}
+	}
+	if lifecycleCount != 1 {
+		t.Fatalf("fix_worker session_lifecycle_decision checkpoints after restart = %d, want still exactly 1", lifecycleCount)
 	}
 }

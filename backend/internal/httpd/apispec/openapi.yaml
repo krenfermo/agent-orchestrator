@@ -6207,6 +6207,59 @@ components:
       - port
       - reason
       type: object
+    ControllersSessionLifecycleDecisionResponse:
+      properties:
+        action:
+          type: string
+        contextPackHash:
+          type: string
+        createdAt:
+          type: string
+        fromSessionId:
+          type: string
+        policyVersion:
+          type: string
+        reasons:
+          items:
+            type: string
+          type: array
+        role:
+          type: string
+        toSessionId:
+          type: string
+      required:
+      - action
+      - reasons
+      - policyVersion
+      type: object
+    ControllersSessionLifecycleUsageResponse:
+      properties:
+        contextPacksCreated:
+          format: int64
+          type: integer
+        decisions:
+          items:
+            $ref: '#/components/schemas/ControllersSessionLifecycleDecisionResponse'
+          type: array
+        sessionSwitches:
+          format: int64
+          type: integer
+        sessionsCompacted:
+          format: int64
+          type: integer
+        sessionsCreated:
+          format: int64
+          type: integer
+        sessionsReused:
+          format: int64
+          type: integer
+      required:
+      - sessionsCreated
+      - sessionsReused
+      - sessionsCompacted
+      - contextPacksCreated
+      - sessionSwitches
+      type: object
     ControllersSessionRefreshAdvisoryResponse:
       properties:
         reason:
@@ -6529,12 +6582,15 @@ components:
           items:
             $ref: '#/components/schemas/ControllersRoutingUsageResponse'
           type: array
+        sessionLifecycle:
+          $ref: '#/components/schemas/ControllersSessionLifecycleUsageResponse'
       required:
       - roles
       - metrics
       - advisory
       - checkpoint
       - decisions
+      - sessionLifecycle
       type: object
     ConversationAccountPayload:
       properties:

@@ -177,7 +177,60 @@ func (c *Coordinator) maybeDispatchFix(ctx stdctx.Context, run domain.WorkflowRu
 		Findings:           reviewRun.Body,
 		CycleNumber:        cycleCount,
 	})
+
+	// Checkpoint 8M §12/§27: the lifecycle decision itself is applied inside
+	// dispatchFixFromPending, not here — maybeDispatchFix can be re-entered
+	// on every GetRun poll for the same cycle (before its outbox entry ever
+	// reaches "pending"), while dispatchFixFromPending is reached exactly
+	// once per cycle (guarded by the outbox idempotency key). Computing/
+	// persisting the decision here would create a duplicate checkpoint per
+	// poll instead of exactly one per real dispatch.
 	return c.dispatchFixStep(ctx, run, workStep, fixStep, reviewRun, cycleCount, prompt)
+}
+
+// applyFixLifecycleDecision evaluates SessionLifecyclePolicy for the fix
+// role, persists the decision for audit, and — only when it says COMPACT —
+// prepends a compact SessionContextPack recap to the fix prompt so the
+// reused session gets a fresh fact anchor instead of relying purely on
+// accumulated conversation state across many cycles. Never changes which
+// session receives the prompt.
+func (c *Coordinator) applyFixLifecycleDecision(ctx stdctx.Context, run domain.WorkflowRun, fixStep domain.WorkflowStep, reviewRun domain.ReviewRun, cycleCount int, prompt string) string {
+	health := domain.SessionHealthUnknown
+	if c.sessionFacts != nil {
+		rec, found, err := c.sessionFacts.GetSession(ctx, reviewRun.SessionID)
+		if err == nil {
+			health = sessionHealthFromFacts(rec, found)
+		}
+	}
+	decision := DecideSessionLifecycle(SessionLifecycleRequest{
+		Role: domain.WorkflowRoleFixWorker, CurrentSessionID: string(reviewRun.SessionID),
+		SessionHealth: health, FixCycleCount: cycleCount, Policy: policyForRun(run),
+	})
+	decision.ToSessionID = string(reviewRun.SessionID)
+
+	var pack *domain.SessionContextPack
+	if decision.Action == domain.LifecycleCompact {
+		artifact, err := c.planArtifactForRun(ctx, run)
+		if err == nil {
+			facts := BuildTaskCheckpointSummary(TaskCheckpointSummaryInput{
+				Detail: RunDetail{Run: run}, Artifact: &artifact,
+			})
+			facts.LatestReviewFindings = reviewRun.Body
+			built := BuildSessionContextPack(domain.WorkflowRoleFixWorker, facts)
+			pack = &built
+			decision.ContextPackHash = built.ContentHash()
+			prompt = RenderContextPackForRole(built) + "\n\n" + prompt
+		}
+	}
+	// Deliberately NOT associated with fixStep.ID: several read paths
+	// (dispatchReviewStep's cycle-N+1 branch, verify_scope_policy.go) rely
+	// on "the latest checkpoint for this exact step" meaning a specific
+	// durable phase (fix_dispatched) with FingerprintBefore/After set. A
+	// second checkpoint for the same step at the same simulated clock tick
+	// would tie on CreatedAt and could shadow it — the run-level record is
+	// enough for lifecycle audit without risking that collision.
+	_ = c.persistSessionLifecycleDecision(ctx, run, nil, decision, pack)
+	return prompt
 }
 
 // planArtifactForRun re-reads the plan step's already-persisted

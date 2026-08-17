@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -298,6 +299,13 @@ func TestDecisionResolver_EndToEnd_DetectDispatchCallbackDeliver(t *testing.T) {
 	launcher.onLaunch = func(req workflowcore.DecisionResolverLaunchRequest) {
 		if req.Prompt == "" {
 			t.Fatalf("resolver was launched with no context pack/prompt")
+		}
+		// Checkpoint 8M §9: the decision resolver's prompt carries a
+		// rendered SessionContextPack (minimal evidence), not just the
+		// bare question — see decision_resolver_wiring.go's ContextPack
+		// field.
+		if !strings.Contains(req.Prompt, "SessionContextPack") {
+			t.Fatalf("resolver prompt missing SessionContextPack block:\n%s", req.Prompt)
 		}
 		payload := map[string]any{
 			"runId":              req.ResolutionID,

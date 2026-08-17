@@ -396,12 +396,37 @@ func (c *Coordinator) dispatchMasterTask(ctx stdctx.Context, parent domain.Workf
 	_ = json.Unmarshal([]byte(task.AcceptanceCriteriaJSON), &criteria)
 	_ = json.Unmarshal([]byte(task.VerifyJSON), &verify)
 	objective := task.Title + "\n\n" + task.Description
+
+	// Checkpoint 8M §13: task N+1 never inherits task N's session/
+	// transcript — it gets a compact, fact-only recap of each already-
+	// completed dependency task instead, threaded through the exact same
+	// objective text that already flows into BuildPlanArtifact/
+	// BuildWorkStepPrompt (no second prompt-assembly path).
+	var depPack *domain.SessionContextPack
+	if allTasks, tasksErr := c.planStore.ListWorkflowTasks(ctx, parent.ID); tasksErr == nil {
+		if depBlock, pack, blockErr := c.priorTaskContextBlock(ctx, allTasks, task); blockErr == nil && depBlock != "" {
+			objective = objective + "\n\n" + depBlock
+			depPack = pack
+		}
+	}
+
 	artifact := BuildPlanArtifact(parent.ProjectID, objective, policyVersionV1, verify)
 	artifact.AcceptanceCriteria = criteria
 	parentID, taskID := parent.ID, task.ID
 	child, err := c.createSingleTaskRun(ctx, parent.ProjectID, objective, &parentID, &taskID, verify)
 	if err != nil {
 		return err
+	}
+	if len(task.Dependencies) > 0 {
+		decision := domain.SessionLifecycleDecision{
+			Action: domain.LifecycleNewSession, Role: domain.WorkflowRoleWorker,
+			Reasons: []domain.SessionLifecycleReason{domain.LifecycleReasonTaskBoundary},
+			PolicyVersion: domain.SessionLifecyclePolicyVersion,
+		}
+		if depPack != nil {
+			decision.ContextPackHash = depPack.ContentHash()
+		}
+		_ = c.persistSessionLifecycleDecision(ctx, child.Run, nil, decision, depPack)
 	}
 	// Replace the deterministic generic criteria with the planner's accepted criteria.
 	for _, s := range child.Steps {

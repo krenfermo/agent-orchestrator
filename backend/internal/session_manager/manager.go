@@ -3293,8 +3293,21 @@ func (m *Manager) runtimeEnv(id domain.SessionID, project domain.ProjectID, issu
 	}
 	env["PATH"] = path
 	if !pinned {
-		m.logger.Warn("session PATH pin not applied: daemon executable is not named the expected hook binary name; `ao hooks` callbacks may resolve to a different ao and activity tracking will stall (PATH still includes required system and inherited directories)",
-			"session", id, "hookBinaryName", hookBinaryName)
+		// Checkpoint 8M §16: mirror the exact fallback the reviewer/
+		// decision-resolver launchers already use (workflow_reviewer_launcher.go,
+		// decision_resolver_launcher.go) instead of leaving worker sessions
+		// degraded — a renamed daemon binary previously left `ao` (and thus
+		// every hook callback, including `ao review submit`/activity
+		// tracking) unresolvable inside a worker's own shell. EnsureAOShim
+		// installs a tiny shim script that execs the resolved daemon binary
+		// under the expected name; prepended on top of the already-good PATH
+		// above, never replacing it.
+		if shimDir, shimErr := EnsureAOShim(m.dataDir, m.executable); shimErr == nil {
+			env["PATH"] = PrependPathDir(shimDir, env["PATH"])
+		} else {
+			m.logger.Warn("session PATH pin not applied and AO shim could not be created: daemon executable is not named the expected hook binary name; `ao hooks` callbacks may resolve to a different ao and activity tracking will stall (PATH still includes required system and inherited directories)",
+				"session", id, "hookBinaryName", hookBinaryName, "shimError", shimErr)
+		}
 	}
 	return env
 }

@@ -39,6 +39,13 @@ describe("WorkflowUsageSection", () => {
 				resolverFailed: 0,
 				waitingForCapacity: 0,
 			},
+			sessionLifecycle: {
+				sessionsCreated: 0,
+				sessionsReused: 0,
+				sessionsCompacted: 0,
+				contextPacksCreated: 0,
+				sessionSwitches: 0,
+			},
 		};
 
 		render(<WorkflowUsageSection usage={usage} />);
@@ -81,6 +88,13 @@ describe("WorkflowUsageSection", () => {
 				humanRequired: 0,
 				resolverFailed: 0,
 				waitingForCapacity: 0,
+			},
+			sessionLifecycle: {
+				sessionsCreated: 0,
+				sessionsReused: 0,
+				sessionsCompacted: 0,
+				contextPacksCreated: 0,
+				sessionSwitches: 0,
 			},
 		};
 

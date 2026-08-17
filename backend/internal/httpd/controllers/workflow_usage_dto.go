@@ -96,15 +96,43 @@ type RoutingUsageResponse struct {
 	CapacityStateAtDecision map[string]string `json:"capacityStateAtDecision,omitempty"`
 }
 
+// SessionLifecycleDecisionResponse is one Checkpoint 8M lifecycle decision
+// on the wire — action/reasons/policy version plus the session ids and
+// optional context-pack hash/role, mirroring RoutingUsageResponse's shape.
+// Never includes the context pack's own content (only its hash): the pack
+// itself is facts derived from data the frontend already has access to via
+// Checkpoint/Decisions/Routing, not a new blob to ship over the wire.
+type SessionLifecycleDecisionResponse struct {
+	Action          string   `json:"action"`
+	Reasons         []string `json:"reasons"`
+	PolicyVersion   string   `json:"policyVersion"`
+	Role            string   `json:"role,omitempty"`
+	FromSessionID   string   `json:"fromSessionId,omitempty"`
+	ToSessionID     string   `json:"toSessionId,omitempty"`
+	ContextPackHash string   `json:"contextPackHash,omitempty"`
+	CreatedAt       string   `json:"createdAt,omitempty"`
+}
+
+// SessionLifecycleUsageResponse is Checkpoint 8M's telemetry section.
+type SessionLifecycleUsageResponse struct {
+	SessionsCreated     int64                              `json:"sessionsCreated"`
+	SessionsReused      int64                              `json:"sessionsReused"`
+	SessionsCompacted   int64                              `json:"sessionsCompacted"`
+	ContextPacksCreated int64                              `json:"contextPacksCreated"`
+	SessionSwitches     int64                              `json:"sessionSwitches"`
+	Decisions           []SessionLifecycleDecisionResponse `json:"decisions,omitempty"`
+}
+
 // WorkflowUsageResponse is the full Checkpoint 8J usage section embedded in
 // a workflow run detail response.
 type WorkflowUsageResponse struct {
-	Roles      []RoleUsageResponse            `json:"roles"`
-	Metrics    TaskUsefulWorkMetricsResponse  `json:"metrics"`
-	Advisory   SessionRefreshAdvisoryResponse `json:"advisory"`
-	Checkpoint TaskCheckpointSummaryResponse  `json:"checkpoint"`
-	Decisions  DecisionsUsageResponse         `json:"decisions"`
-	Routing    []RoutingUsageResponse         `json:"routing,omitempty"`
+	Roles            []RoleUsageResponse            `json:"roles"`
+	Metrics          TaskUsefulWorkMetricsResponse  `json:"metrics"`
+	Advisory         SessionRefreshAdvisoryResponse `json:"advisory"`
+	Checkpoint       TaskCheckpointSummaryResponse  `json:"checkpoint"`
+	Decisions        DecisionsUsageResponse         `json:"decisions"`
+	Routing          []RoutingUsageResponse         `json:"routing,omitempty"`
+	SessionLifecycle SessionLifecycleUsageResponse  `json:"sessionLifecycle"`
 }
 
 func workflowUsageResponse(v WorkflowUsageView) WorkflowUsageResponse {
@@ -165,8 +193,34 @@ func workflowUsageResponse(v WorkflowUsageView) WorkflowUsageResponse {
 			ResolverProvider: v.Decisions.ResolverProvider, ResolverDurationMS: v.Decisions.ResolverDurationMS,
 			ReusedDecision: v.Decisions.ReusedDecision,
 		},
-		Routing: routingUsageResponses(v.Routing),
+		Routing:          routingUsageResponses(v.Routing),
+		SessionLifecycle: sessionLifecycleUsageResponse(v.SessionLifecycle),
 	}
+}
+
+func sessionLifecycleUsageResponse(v SessionLifecycleUsageView) SessionLifecycleUsageResponse {
+	out := SessionLifecycleUsageResponse{
+		SessionsCreated: v.SessionsCreated, SessionsReused: v.SessionsReused,
+		SessionsCompacted: v.SessionsCompacted, ContextPacksCreated: v.ContextPacksCreated,
+		SessionSwitches: v.SessionSwitches,
+	}
+	for _, e := range v.Decisions {
+		d := e.Decision
+		reasons := make([]string, len(d.Reasons))
+		for i, r := range d.Reasons {
+			reasons[i] = string(r)
+		}
+		var createdAt string
+		if !e.CreatedAt.IsZero() {
+			createdAt = e.CreatedAt.Format(rfc3339Milli)
+		}
+		out.Decisions = append(out.Decisions, SessionLifecycleDecisionResponse{
+			Action: string(d.Action), Reasons: reasons, PolicyVersion: d.PolicyVersion,
+			Role: string(d.Role), FromSessionID: d.FromSessionID, ToSessionID: d.ToSessionID,
+			ContextPackHash: d.ContextPackHash, CreatedAt: createdAt,
+		})
+	}
+	return out
 }
 
 func routingUsageResponses(rs []RoutingUsageView) []RoutingUsageResponse {

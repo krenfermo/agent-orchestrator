@@ -15,6 +15,7 @@ function translate(t: TFunction, key: string): string {
 type WorkflowUsageResponse = components["schemas"]["ControllersWorkflowUsageResponse"];
 type RoleUsageResponse = components["schemas"]["ControllersRoleUsageResponse"];
 type RoutingUsageResponse = components["schemas"]["ControllersRoutingUsageResponse"];
+type SessionLifecycleDecisionResponse = components["schemas"]["ControllersSessionLifecycleDecisionResponse"];
 
 function durationText(ms: number | null | undefined, unknown: string): string {
 	if (ms === null || ms === undefined) return unknown;
@@ -102,6 +103,57 @@ function RoutingRow({ routing }: { routing: RoutingUsageResponse }) {
 	);
 }
 
+const LIFECYCLE_ACTION_KEYS: Record<string, string> = {
+	reuse: "shell.workflowUsage.lifecycle.action.reuse",
+	compact: "shell.workflowUsage.lifecycle.action.compact",
+	new_session: "shell.workflowUsage.lifecycle.action.new_session",
+	unknown: "shell.workflowUsage.lifecycle.action.unknown",
+};
+
+function SessionLifecycleRow({ decision }: { decision: SessionLifecycleDecisionResponse }) {
+	const { t } = useTranslation();
+	const label = translate(t, LIFECYCLE_ACTION_KEYS[decision.action] ?? decision.action);
+	return (
+		<div className="rounded border border-border p-2 text-xs">
+			<div className="flex items-center justify-between font-medium">
+				<span>{label}</span>
+				{decision.role && <span className="text-muted-foreground">{decision.role}</span>}
+			</div>
+			{(decision.fromSessionId || decision.toSessionId) && (
+				<dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-muted-foreground">
+					{decision.fromSessionId && (
+						<>
+							<dt>{t("shell.workflowUsage.lifecycle.fromSession")}</dt>
+							<dd>{decision.fromSessionId}</dd>
+						</>
+					)}
+					{decision.toSessionId && decision.toSessionId !== decision.fromSessionId && (
+						<>
+							<dt>{t("shell.workflowUsage.lifecycle.toSession")}</dt>
+							<dd>{decision.toSessionId}</dd>
+						</>
+					)}
+					{decision.contextPackHash && (
+						<>
+							<dt>{t("shell.workflowUsage.lifecycle.contextPackHash")}</dt>
+							<dd className="truncate" title={decision.contextPackHash}>
+								{decision.contextPackHash.slice(0, 12)}
+							</dd>
+						</>
+					)}
+				</dl>
+			)}
+			{decision.reasons && decision.reasons.length > 0 && (
+				<ul className="mt-1 list-disc pl-4 text-muted-foreground">
+					{decision.reasons.map((reason) => (
+						<li key={reason}>{translate(t, `shell.workflowUsage.lifecycle.reason.${reason}`)}</li>
+					))}
+				</ul>
+			)}
+		</div>
+	);
+}
+
 /**
  * WorkflowUsageSection is Checkpoint 8J's minimal dashboard addition: per-
  * role provider/model/duration/usage, task-level metrics, and the
@@ -129,6 +181,29 @@ export function WorkflowUsageSection({ usage }: { usage: WorkflowUsageResponse }
 					<div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
 						{usage.routing.map((routing) => (
 							<RoutingRow key={`${routing.role}-${routing.stepKind}`} routing={routing} />
+						))}
+					</div>
+				</div>
+			)}
+
+			{usage.sessionLifecycle && usage.sessionLifecycle.decisions && usage.sessionLifecycle.decisions.length > 0 && (
+				<div className="flex flex-col gap-2">
+					<h3 className="text-xs font-medium text-muted-foreground">{t("shell.workflowUsage.lifecycle.title")}</h3>
+					<dl className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-xs text-muted-foreground sm:grid-cols-5">
+						<dt>{t("shell.workflowUsage.lifecycle.sessionsCreated")}</dt>
+						<dd>{usage.sessionLifecycle.sessionsCreated}</dd>
+						<dt>{t("shell.workflowUsage.lifecycle.sessionsReused")}</dt>
+						<dd>{usage.sessionLifecycle.sessionsReused}</dd>
+						<dt>{t("shell.workflowUsage.lifecycle.sessionsCompacted")}</dt>
+						<dd>{usage.sessionLifecycle.sessionsCompacted}</dd>
+						<dt>{t("shell.workflowUsage.lifecycle.contextPacksCreated")}</dt>
+						<dd>{usage.sessionLifecycle.contextPacksCreated}</dd>
+						<dt>{t("shell.workflowUsage.lifecycle.sessionSwitches")}</dt>
+						<dd>{usage.sessionLifecycle.sessionSwitches}</dd>
+					</dl>
+					<div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+						{usage.sessionLifecycle.decisions.map((decision, i) => (
+							<SessionLifecycleRow key={`${decision.action}-${decision.role}-${decision.createdAt ?? i}`} decision={decision} />
 						))}
 					</div>
 				</div>

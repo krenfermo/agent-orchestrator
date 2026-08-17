@@ -22,6 +22,12 @@ type DecisionResolverPromptInput struct {
 	AllowSameProvider  bool
 	ResolverSessionID  string
 	ResolutionRunID    string
+	// ContextPack is Checkpoint 8M's optional rendered SessionContextPack
+	// (decision_resolver role) — minimal-evidence facts (fingerprint, any
+	// prior decisions/tests already recorded), never a transcript. Empty
+	// when the caller could not build one (e.g. no plan artifact yet); the
+	// prompt remains fully usable without it.
+	ContextPack string
 }
 
 // BuildDecisionResolverPrompt deterministically builds the text handed to
@@ -33,14 +39,12 @@ type DecisionResolverPromptInput struct {
 // asking session was working in — everything already durable in RunDetail
 // and the workflow_questions row. It deliberately never includes a
 // transcript or the asking session's chain-of-thought (none is ever
-// captured by this checkpoint in the first place). A fuller context pack
-// (RelevantFiles/FilesChanged/ArchitecturalFacts on
-// controllers.TaskCheckpointSummary) is left for pass 3 — see this
-// checkpoint's final report for the gap; workflow cannot import
-// httpd/controllers to reuse BuildTaskCheckpointSummary directly (that
-// package already imports workflow, so the reverse import would cycle), so
-// this function ports the same "derive from already-durable facts, never
-// invent" discipline locally instead of literally calling it.
+// captured by this checkpoint in the first place). Checkpoint 8M adds an
+// optional richer ContextPack field (fingerprint, any prior decisions/tests
+// already recorded) built from BuildTaskCheckpointSummary — the import-cycle
+// blocker this comment used to describe (workflow couldn't reuse
+// controllers' summary builder) is resolved by that builder now living in
+// this same package (task_checkpoint_summary.go).
 //
 // Both identifiers below (ResolverSessionID, ResolutionRunID) are baked into
 // the prompt text by the daemon, mirroring BuildReviewPrompt's
@@ -70,6 +74,10 @@ func BuildDecisionResolverPrompt(in DecisionResolverPromptInput) string {
 			"question. Answer only from objective repo evidence, not from any assumption about what " +
 			"the asking session intended.\n"
 	}
+	contextPackBlock := ""
+	if in.ContextPack != "" {
+		contextPackBlock = "\n" + in.ContextPack + "\n"
+	}
 
 	return fmt.Sprintf(`You are a read-only Decision Resolver for one question raised by another AO-managed
 worker session (Checkpoint 8K-B). You are a DIFFERENT provider/session than the one that
@@ -82,7 +90,7 @@ Acceptance criteria for the run's work: %s
 Branch: %s
 Worktree path (already your current checkout — do not clone or fetch elsewhere): %s
 Policy version at capture: %s
-
+%s
 The question you must resolve:
 %s
 
@@ -116,6 +124,7 @@ Where <reference> is a short pointer to the evidence you used (e.g. a file path,
 path plus line range) — never a full file dump or transcript.`,
 		sameProviderNote,
 		in.Objective, criteria, in.Branch, in.WorktreePath, in.PolicyVersion,
+		contextPackBlock,
 		strings.TrimSpace(in.QuestionText), choices,
 		in.ResolverSessionID, in.ResolutionRunID,
 		in.ResolverSessionID, in.ResolutionRunID,
