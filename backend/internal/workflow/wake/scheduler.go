@@ -78,6 +78,7 @@ type Schedule struct {
 // *sqlite.Store's Checkpoint 8N methods (workflow_wake_store.go); tests use
 // a fake.
 type Store interface {
+	GetWorkflowWakeScheduleByIdempotencyKey(ctx context.Context, idempotencyKey string) (store.WorkflowWakeSchedule, bool, error)
 	UpsertWorkflowWakeSchedule(ctx context.Context, sch store.WorkflowWakeSchedule) (store.WorkflowWakeSchedule, error)
 	ListDueWorkflowWakeSchedules(ctx context.Context, now, claimLeaseCutoff time.Time, limit int) ([]store.WorkflowWakeSchedule, error)
 	ClaimWorkflowWakeSchedule(ctx context.Context, id, expectedStatus, claimant string, at time.Time) (bool, error)
@@ -144,13 +145,14 @@ func idempotencyKey(runID domain.WorkflowRunID, stepID *domain.WorkflowStepID, r
 // Schedule idempotently upserts a wake for (runID, stepID, reason): if a
 // wake for this exact scope is already pending/claimed, it is rescheduled
 // in place (attempt_count increments) rather than duplicated; otherwise a
-// new row is created. priorAttempts is accepted for API-compatibility with
-// callers that already know an attempt count, but the store layer's own
-// upsert is the source of truth for AttemptCount (see
-// store.UpsertWorkflowWakeSchedule's doc comment) — it is not used to
-// compute the returned Schedule's AttemptCount, avoiding a race between two
-// callers each independently guessing the next attempt number.
-func (s *Scheduler) Schedule(ctx context.Context, runID domain.WorkflowRunID, stepID *domain.WorkflowStepID, reason Reason, knownResetAt *time.Time, priorAttempts int) (Schedule, error) {
+// new row is created. The backoff delay is computed from the existing row's
+// own current AttemptCount (read fresh from the store by idempotency key),
+// never from a caller-supplied guess — a caller re-parking on the same scope
+// has no reliable way to know how many times this exact wake has already
+// backed off, and trusting a wrong guess (e.g. always 0) would silently
+// prevent unknown-reset backoff from ever growing. A brand-new scope (no
+// existing row) starts at attempt 0, same as before.
+func (s *Scheduler) Schedule(ctx context.Context, runID domain.WorkflowRunID, stepID *domain.WorkflowStepID, reason Reason, knownResetAt *time.Time) (Schedule, error) {
 	if runID == "" {
 		return Schedule{}, errors.New("wake: workflow run id is required")
 	}
@@ -158,7 +160,14 @@ func (s *Scheduler) Schedule(ctx context.Context, runID domain.WorkflowRunID, st
 		return Schedule{}, errors.New("wake: reason is required")
 	}
 	now := s.clock()
-	scheduledAt, _ := computeScheduledAt(now, knownResetAt, priorAttempts, s.effectivePolicy(), s.rng)
+	key := idempotencyKey(runID, stepID, reason)
+	attempt := 0
+	if existing, ok, err := s.store.GetWorkflowWakeScheduleByIdempotencyKey(ctx, key); err != nil {
+		return Schedule{}, fmt.Errorf("lookup existing wake schedule for run %s: %w", runID, err)
+	} else if ok && (existing.Status == string(StatusPending) || existing.Status == string(StatusClaimed)) {
+		attempt = int(existing.AttemptCount)
+	}
+	scheduledAt, _ := computeScheduledAt(now, knownResetAt, attempt, s.effectivePolicy(), s.rng)
 
 	var stepIDStr *string
 	if stepID != nil {
@@ -171,7 +180,7 @@ func (s *Scheduler) Schedule(ctx context.Context, runID domain.WorkflowRunID, st
 		WorkflowRunID:  string(runID),
 		WorkflowStepID: stepIDStr,
 		Reason:         string(reason),
-		IdempotencyKey: idempotencyKey(runID, stepID, reason),
+		IdempotencyKey: key,
 		ScheduledAt:    scheduledAt,
 		KnownResetAt:   knownResetAt,
 		CreatedAt:      now,

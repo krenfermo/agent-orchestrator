@@ -107,7 +107,7 @@ type masterPlanStore interface {
 // recorded (run/step move to Waiting) but no wake is ever scheduled — same
 // nil-safe-optional convention as every other Deps field here.
 type WakeScheduler interface {
-	Schedule(ctx stdctx.Context, runID domain.WorkflowRunID, stepID *domain.WorkflowStepID, reason wake.Reason, knownResetAt *time.Time, priorAttempts int) (wake.Schedule, error)
+	Schedule(ctx stdctx.Context, runID domain.WorkflowRunID, stepID *domain.WorkflowStepID, reason wake.Reason, knownResetAt *time.Time) (wake.Schedule, error)
 	CancelAllForRun(ctx stdctx.Context, runID domain.WorkflowRunID) (int, error)
 	NextForRun(ctx stdctx.Context, runID domain.WorkflowRunID) (*wake.Schedule, error)
 }
@@ -853,6 +853,21 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 		}
 		if _, err := c.questionsStore.CancelOpenWorkflowQuestionsByRun(ctx, runID); err != nil {
 			return RunDetail{}, err
+		}
+	}
+
+	// Checkpoint 8N: cancelling a run must also cancel any durable wake still
+	// pending/claimed for it — otherwise a wake scheduled before the cancel
+	// would later fire and redispatch a run that no longer exists in an
+	// active state. Best-effort like scheduleCapacityWake's own writes: a nil
+	// wakeScheduler or a cancellation error never fails CancelRun itself, it
+	// just means a stray wake might still be sitting in the table (the
+	// poller's ContinueRun call on it is idempotent and will hit
+	// ErrAlreadyTerminal, so at worst it is a wasted claim, never a wrong
+	// dispatch).
+	if c.wakeScheduler != nil {
+		if _, werr := c.wakeScheduler.CancelAllForRun(ctx, domain.WorkflowRunID(runID)); werr != nil && c.log != nil {
+			c.log.Warn("workflow: cancel wake schedules failed", "run", runID, "err", werr)
 		}
 	}
 

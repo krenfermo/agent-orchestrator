@@ -21,6 +21,15 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{rows: map[string]store.WorkflowWakeSchedule{}}
 }
 
+func (f *fakeStore) GetWorkflowWakeScheduleByIdempotencyKey(_ context.Context, idempotencyKey string) (store.WorkflowWakeSchedule, bool, error) {
+	for _, r := range f.rows {
+		if r.IdempotencyKey == idempotencyKey {
+			return r, true, nil
+		}
+	}
+	return store.WorkflowWakeSchedule{}, false, nil
+}
+
 func (f *fakeStore) UpsertWorkflowWakeSchedule(_ context.Context, sch store.WorkflowWakeSchedule) (store.WorkflowWakeSchedule, error) {
 	for _, r := range f.rows {
 		if r.IdempotencyKey == sch.IdempotencyKey && (r.Status == "pending" || r.Status == "claimed") {
@@ -193,7 +202,7 @@ func TestScheduler_IdempotentUpsert(t *testing.T) {
 	runID := domain.WorkflowRunID("wf-1")
 	stepID := domain.WorkflowStepID("wfs-1")
 
-	first, err := sched.Schedule(ctx, runID, &stepID, ReasonWorkerCapacity, nil, 0)
+	first, err := sched.Schedule(ctx, runID, &stepID, ReasonWorkerCapacity, nil)
 	if err != nil {
 		t.Fatalf("first schedule: %v", err)
 	}
@@ -201,7 +210,7 @@ func TestScheduler_IdempotentUpsert(t *testing.T) {
 		t.Fatalf("expected 1 row after first schedule, got %d", len(fs.rows))
 	}
 
-	second, err := sched.Schedule(ctx, runID, &stepID, ReasonWorkerCapacity, nil, 1)
+	second, err := sched.Schedule(ctx, runID, &stepID, ReasonWorkerCapacity, nil)
 	if err != nil {
 		t.Fatalf("second schedule: %v", err)
 	}
@@ -225,7 +234,7 @@ func TestScheduler_ClaimDue_OnlyDueRows(t *testing.T) {
 	// Due now: force scheduled_at to now (Schedule's own backoff always adds
 	// InitialBackoffSeconds, so simulate "time has passed" by rewriting the
 	// row directly, same as advancing a fake clock past scheduled_at would).
-	due, err := sched.Schedule(ctx, "wf-1", nil, ReasonReviewerCapacity, nil, 0)
+	due, err := sched.Schedule(ctx, "wf-1", nil, ReasonReviewerCapacity, nil)
 	if err != nil {
 		t.Fatalf("schedule due: %v", err)
 	}
@@ -235,7 +244,7 @@ func TestScheduler_ClaimDue_OnlyDueRows(t *testing.T) {
 
 	// Not due yet: schedule far in the future by using a known reset.
 	future := now.Add(time.Hour)
-	if _, err := sched.Schedule(ctx, "wf-2", nil, ReasonWorkerCapacity, &future, 0); err != nil {
+	if _, err := sched.Schedule(ctx, "wf-2", nil, ReasonWorkerCapacity, &future); err != nil {
 		t.Fatalf("schedule future: %v", err)
 	}
 
@@ -270,7 +279,7 @@ func TestScheduler_FailReschedulesUntilBudgetExhausted(t *testing.T) {
 	sched.cfg.Policy = cfg
 	ctx := context.Background()
 
-	sch, err := sched.Schedule(ctx, "wf-1", nil, ReasonWorkerCapacity, nil, 0)
+	sch, err := sched.Schedule(ctx, "wf-1", nil, ReasonWorkerCapacity, nil)
 	if err != nil {
 		t.Fatalf("schedule: %v", err)
 	}
@@ -297,19 +306,51 @@ func TestScheduler_FailReschedulesUntilBudgetExhausted(t *testing.T) {
 	}
 }
 
+// TestScheduler_ScheduleBackoffGrowsOnRepeatedUnknownReset proves Schedule
+// reads the existing row's real AttemptCount (not a hardcoded 0) when a
+// caller re-parks on the same idempotency-key scope with an unknown reset:
+// each successive call must produce a strictly later scheduled_at than the
+// last, up to the policy's cap.
+func TestScheduler_ScheduleBackoffGrowsOnRepeatedUnknownReset(t *testing.T) {
+	fs := newFakeStore()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	sched := newTestScheduler(fs, now)
+	ctx := context.Background()
+
+	first, err := sched.Schedule(ctx, "wf-1", nil, ReasonWorkerCapacity, nil)
+	if err != nil {
+		t.Fatalf("first schedule: %v", err)
+	}
+	second, err := sched.Schedule(ctx, "wf-1", nil, ReasonWorkerCapacity, nil)
+	if err != nil {
+		t.Fatalf("second schedule: %v", err)
+	}
+	third, err := sched.Schedule(ctx, "wf-1", nil, ReasonWorkerCapacity, nil)
+	if err != nil {
+		t.Fatalf("third schedule: %v", err)
+	}
+
+	if !second.ScheduledAt.After(first.ScheduledAt) {
+		t.Fatalf("expected second scheduled_at (%v) after first (%v) — backoff did not grow", second.ScheduledAt, first.ScheduledAt)
+	}
+	if !third.ScheduledAt.After(second.ScheduledAt) {
+		t.Fatalf("expected third scheduled_at (%v) after second (%v) — backoff did not grow", third.ScheduledAt, second.ScheduledAt)
+	}
+}
+
 func TestScheduler_CancelAllForRun(t *testing.T) {
 	fs := newFakeStore()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	sched := newTestScheduler(fs, now)
 	ctx := context.Background()
 
-	if _, err := sched.Schedule(ctx, "wf-1", nil, ReasonWorkerCapacity, nil, 0); err != nil {
+	if _, err := sched.Schedule(ctx, "wf-1", nil, ReasonWorkerCapacity, nil); err != nil {
 		t.Fatalf("schedule: %v", err)
 	}
-	if _, err := sched.Schedule(ctx, "wf-1", nil, ReasonReviewerCapacity, nil, 0); err != nil {
+	if _, err := sched.Schedule(ctx, "wf-1", nil, ReasonReviewerCapacity, nil); err != nil {
 		t.Fatalf("schedule: %v", err)
 	}
-	if _, err := sched.Schedule(ctx, "wf-2", nil, ReasonWorkerCapacity, nil, 0); err != nil {
+	if _, err := sched.Schedule(ctx, "wf-2", nil, ReasonWorkerCapacity, nil); err != nil {
 		t.Fatalf("schedule: %v", err)
 	}
 

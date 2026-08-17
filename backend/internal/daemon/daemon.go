@@ -52,6 +52,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillassets"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workflow/wakepoller"
 )
 
 // Run starts the daemon and blocks until it exits. SIGINT/SIGTERM drive
@@ -409,10 +410,15 @@ func RunWithConfig(cfg config.Config) error {
 		runFile:    cfg.RunFilePath,
 		executable: os.Executable,
 	}
-	workflowCoordinator, workflowSvc := startWorkflows(store, rawSessionMgr, workspaceObserver, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, log)
+	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(store, rawSessionMgr, workspaceObserver, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, log)
 	if reconcileErr := workflowCoordinator.Reconcile(ctx); reconcileErr != nil {
 		log.Error("reconcile workflow runs on boot failed", "err", reconcileErr)
 	}
+	// Checkpoint 8N.1: the daemon-level poller that claims due wakes and
+	// resumes their runs automatically — see workflow/wakepoller's own doc
+	// comment for why this is a separate package from wake.Scheduler itself.
+	wakePoller := wakepoller.New(wakeScheduler, workflowCoordinator, wakepoller.Config{Logger: log})
+	lcStack.wakePollerDone = wakePoller.Start(ctx)
 	autoReview := autoreview.New(store, reviewSvc, autoreview.Config{Logger: log})
 	lcStack.autoReviewDone = autoReview.Start(ctx)
 	// Push-device registry: persisted phones that receive OS push notifications.

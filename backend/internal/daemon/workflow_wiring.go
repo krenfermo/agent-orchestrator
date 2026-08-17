@@ -6,6 +6,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/google/uuid"
+
 	plannercommand "github.com/aoagents/agent-orchestrator/backend/internal/adapters/planner/command"
 	workspacerouter "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/router"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -13,6 +15,7 @@ import (
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workflow/wake"
 )
 
 // workflowAgentSwitcher adapts *session_manager.Manager.SwitchAgent — the
@@ -42,7 +45,7 @@ func (w workflowAgentSwitcher) SwitchAgent(ctx context.Context, id domain.Sessio
 // plus the thin API-facing service. It does not start any background
 // goroutine — progress is derived at read time (GetRun) and at boot
 // (Reconcile), never polled by a scheduler.
-func startWorkflows(store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service) {
+func startWorkflows(store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {
 		plannerBinary = "claude"
@@ -51,6 +54,11 @@ func startWorkflows(store *sqlite.Store, sessionMgr *sessionmanager.Manager, wor
 	if plannerModel == "" {
 		plannerModel = "sonnet"
 	}
+	// Checkpoint 8N: the durable wake-up scheduler backing automatic
+	// capacity-wait resumption (see backend/internal/workflow/wakepoller for
+	// the daemon-level poller that actually claims and fires these). Real
+	// clock/id source — deterministic fakes are only for tests.
+	wakeScheduler := wake.New(store, nil, uuid.NewString, wake.Config{Policy: domain.DefaultWakePolicy()})
 	coordinator := workflowcore.New(workflowcore.Deps{
 		Store:                    store,
 		Projects:                 store,
@@ -68,7 +76,8 @@ func startWorkflows(store *sqlite.Store, sessionMgr *sessionmanager.Manager, wor
 		QuestionsStore:           store,
 		PaneReader:               paneReader,
 		DecisionResolverLauncher: decisionResolverLauncher,
+		WakeScheduler:            wakeScheduler,
 		Logger:                   log,
 	})
-	return coordinator, workflowsvc.New(coordinator)
+	return coordinator, workflowsvc.New(coordinator), wakeScheduler
 }

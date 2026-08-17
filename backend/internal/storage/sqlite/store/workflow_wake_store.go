@@ -111,6 +111,22 @@ func (s *Store) insertWorkflowWakeSchedule(ctx context.Context, sch WorkflowWake
 	return workflowWakeScheduleFromRow(row), nil
 }
 
+// GetWorkflowWakeScheduleByIdempotencyKey returns the wake schedule row for
+// an exact idempotency key, if one exists. Used by wake.Scheduler.Schedule to
+// read a wake's real current AttemptCount before computing its next backoff
+// delay, rather than trusting a caller-supplied attempt number that can
+// drift from the store's own count.
+func (s *Store) GetWorkflowWakeScheduleByIdempotencyKey(ctx context.Context, idempotencyKey string) (WorkflowWakeSchedule, bool, error) {
+	row, err := s.qr.GetWorkflowWakeScheduleByIdempotencyKey(ctx, idempotencyKey)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return WorkflowWakeSchedule{}, false, nil
+		}
+		return WorkflowWakeSchedule{}, false, fmt.Errorf("get workflow wake schedule by idempotency key %s: %w", idempotencyKey, err)
+	}
+	return workflowWakeScheduleFromRow(row), true, nil
+}
+
 // ListDueWorkflowWakeSchedules returns every pending wake whose scheduled_at
 // has passed, plus any claimed wake whose claim lease (claimLeaseCutoff) has
 // expired — a prior claimant crashed mid-fire. Sorted by ScheduledAt in Go

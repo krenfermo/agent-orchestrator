@@ -8,6 +8,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workflow/wake"
 )
 
 // Spawner is the narrow session-creation write path workflow reuses. It is
@@ -217,7 +218,7 @@ func (c *Coordinator) scheduleCapacityWake(ctx stdctx.Context, run domain.Workfl
 		stepID = &id
 	}
 
-	sch, err := c.wakeScheduler.Schedule(ctx, domain.WorkflowRunID(run.ID), stepID, reason, knownResetAt, 0)
+	sch, err := c.wakeScheduler.Schedule(ctx, domain.WorkflowRunID(run.ID), stepID, reason, knownResetAt)
 	if err != nil {
 		if c.log != nil {
 			c.log.Warn("workflow: wake schedule failed", "run", run.ID, "reason", reason, "err", err)

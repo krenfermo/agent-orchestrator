@@ -109,6 +109,7 @@ var shippedMigrations = map[int64]string{
 	103: "0103_agent_health_events.sql",
 	104: "0104_workflow_questions.sql",
 	105: "0105_workflow_question_resolutions.sql",
+	106: "0106_workflow_wake_schedules.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they
