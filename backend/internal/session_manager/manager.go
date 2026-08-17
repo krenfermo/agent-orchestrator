@@ -271,6 +271,11 @@ type Store interface {
 	// Kill and successful RestoreAll must remove these rows to prevent
 	// resurrecting sessions the user intentionally terminated.
 	DeleteSessionWorktrees(ctx context.Context, id domain.SessionID) error
+	// SetSessionOwner stamps a spawned session's owner (Checkpoint 8P-B.1),
+	// best-effort -- see Spawn's call site. Returns false if the session id
+	// doesn't exist (never expected right after CreateSession, but treated
+	// as non-fatal regardless).
+	SetSessionOwner(ctx context.Context, id domain.SessionID, owner domain.UserID) (bool, error)
 }
 
 // Manager coordinates internal session spawn, restore, kill, and cleanup over
@@ -694,6 +699,15 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: create: %w", err)
 	}
 	id := rec.ID
+	// Checkpoint 8P-B.1: best-effort ownership stamp. Never fails spawn --
+	// the session already exists; a stamping failure just leaves it
+	// unowned (same "unowned is a valid state" convention as projects/
+	// workflow_runs, see 0111's migration doc comment).
+	if cfg.Owner != "" {
+		if _, serr := m.store.SetSessionOwner(ctx, id, cfg.Owner); serr != nil && m.logger != nil {
+			m.logger.Warn("could not stamp session owner", "session", id, "owner", cfg.Owner, "error", serr)
+		}
+	}
 	systemPromptFile, err := m.prepareSystemPromptFile(id, cfg.Harness, systemPrompt)
 	if err != nil {
 		m.rollbackSpawnSeedRow(ctx, id)
@@ -769,6 +783,13 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	if err != nil {
 		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, true)
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: browser capability: %w", id, err)
+	}
+	// Checkpoint 8P-B.1: applied last, after every other env source, so a
+	// resolved workflow owner's isolated runtime-home always wins. A no-op
+	// when cfg.RuntimeEnv is nil (unresolved owner, or caller predates this
+	// checkpoint) -- preserves prior behavior exactly.
+	for k, v := range cfg.RuntimeEnv {
+		env[k] = v
 	}
 	rec, err = m.persistBrowserCapabilityVerifier(ctx, rec, browserCapabilityVerifier)
 	if err != nil {

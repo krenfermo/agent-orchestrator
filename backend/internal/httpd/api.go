@@ -18,6 +18,7 @@ import (
 	authsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/authsvc"
 	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
+	providerprofilesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providerprofile"
 	reviewsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/review"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
 )
@@ -95,6 +96,18 @@ type APIDeps struct {
 	// by the same *sqlite/store.Store the rest of the daemon already uses.
 	ProjectOwnership  controllers.OwnershipStore
 	WorkflowOwnership controllers.WorkflowOwnershipStore
+
+	// ProviderProfiles backs Checkpoint 8P-B's per-user provider connection
+	// surface. Optional: nil leaves the /provider-profiles and
+	// /providers/registry routes answering 501, matching the other
+	// optional-surface conventions here.
+	ProviderProfiles providerprofilesvc.Manager
+
+	// SessionOwnership backs Checkpoint 8P-B.1's minimal session ownership
+	// scoping (get/send only -- see SessionsController's doc comment).
+	// Optional: nil disables scoping entirely, matching
+	// ProjectOwnership/WorkflowOwnership's own convention.
+	SessionOwnership controllers.SessionOwnershipStore
 }
 
 // normalizeAPIDeps closes the Presence/DeviceLive duplication trap structurally.
@@ -127,28 +140,29 @@ func normalizeAPIDeps(deps APIDeps, log *slog.Logger) APIDeps {
 // API owns one controller per resource and is the single Register call the
 // router invokes to mount the /api/v1 surface.
 type API struct {
-	cfg           config.Config
-	deps          APIDeps
-	agents        *controllers.AgentsController
-	projects      *controllers.ProjectsController
-	environment   *controllers.EnvironmentController
-	sessions      *controllers.SessionsController
-	usage         *controllers.UsageController
-	capacity      *controllers.CapacityController
-	prs           *controllers.PRsController
-	reviews       *controllers.ReviewsController
-	decisions     *controllers.DecisionsController
-	notifications *controllers.NotificationsController
-	push          *controllers.PushController
-	imports       *controllers.ImportController
-	shellTerms    *controllers.ShellTerminalsController
-	conversations *controllers.ConversationsController
-	settings      *controllers.SettingsController
-	dev           *controllers.DevController
-	browser       *controllers.BrowserController
-	workflows     *controllers.WorkflowsController
-	events        *EventsController
-	auth          *controllers.AuthController
+	cfg              config.Config
+	deps             APIDeps
+	agents           *controllers.AgentsController
+	projects         *controllers.ProjectsController
+	environment      *controllers.EnvironmentController
+	sessions         *controllers.SessionsController
+	usage            *controllers.UsageController
+	capacity         *controllers.CapacityController
+	prs              *controllers.PRsController
+	reviews          *controllers.ReviewsController
+	decisions        *controllers.DecisionsController
+	notifications    *controllers.NotificationsController
+	push             *controllers.PushController
+	imports          *controllers.ImportController
+	shellTerms       *controllers.ShellTerminalsController
+	conversations    *controllers.ConversationsController
+	settings         *controllers.SettingsController
+	dev              *controllers.DevController
+	browser          *controllers.BrowserController
+	workflows        *controllers.WorkflowsController
+	events           *EventsController
+	auth             *controllers.AuthController
+	providerProfiles *controllers.ProviderProfilesController
 }
 
 // NewAPI constructs the API surface from its dependencies. cfg carries the
@@ -175,6 +189,8 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			Usage:         deps.UsageHooks,
 			PreviewServer: deps.PreviewServer,
 			Capabilities:  deps.SessionCapabilities,
+			Ownership:     deps.SessionOwnership,
+			TrustedLocal:  cfg.TrustedLocalMode,
 		},
 		usage:         &controllers.UsageController{Svc: deps.UsageSummary},
 		capacity:      &controllers.CapacityController{Svc: deps.Capacity},
@@ -196,8 +212,9 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			Ownership:       deps.WorkflowOwnership,
 			TrustedLocal:    cfg.TrustedLocalMode,
 		},
-		events: &EventsController{Source: deps.CDC, Live: deps.Events},
-		auth:   &controllers.AuthController{Mgr: deps.Auth, TrustedLocal: cfg.TrustedLocalMode},
+		events:           &EventsController{Source: deps.CDC, Live: deps.Events},
+		auth:             &controllers.AuthController{Mgr: deps.Auth, TrustedLocal: cfg.TrustedLocalMode},
+		providerProfiles: &controllers.ProviderProfilesController{Mgr: deps.ProviderProfiles},
 	}
 }
 
@@ -239,6 +256,7 @@ func (a *API) Register(root chi.Router) {
 			a.browser.Register(r)
 			a.workflows.Register(r)
 			a.auth.Register(r)
+			a.providerProfiles.Register(r)
 			// Sibling REST controllers plug in here.
 		})
 		// Agent switching synchronously collects a handoff, starts the target,

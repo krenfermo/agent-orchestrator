@@ -66,6 +66,11 @@ type ReviewerLaunchRequest struct {
 	WorkspacePath   string
 	Prompt          string
 	SystemPrompt    string
+	// RuntimeEnv overrides subprocess env for the reviewer process
+	// (Checkpoint 8P-B.1) -- the workflow run owner's isolated
+	// runtime-home, resolved once by Coordinator.resolveRuntimeEnv. Nil
+	// preserves pre-8P-B.1 behavior exactly.
+	RuntimeEnv map[string]string
 }
 
 // ReviewerLaunchResult is the runtime handle created for a reviewer launch.
@@ -487,6 +492,10 @@ func (c *Coordinator) dispatchReviewFromPending(
 	if err := c.reviewerLauncher.Preflight(ctx, harness, worktreePath); err != nil {
 		return c.recordReviewDispatchFailure(ctx, run, reviewStep, entry, domain.WorkflowErrorReviewerLaunchFailed, fmt.Errorf("reviewer preflight: %w", err))
 	}
+	runtimeEnv, _, err := c.resolveRuntimeEnv(ctx, run.ID, domain.AgentHarness(harness))
+	if err != nil {
+		return c.recordReviewDispatchFailure(ctx, run, reviewStep, entry, classifyProviderFailure(err).Class, err)
+	}
 	launch, err := c.reviewerLauncher.Launch(ctx, ReviewerLaunchRequest{
 		Harness:         harness,
 		WorkerSessionID: sessionID,
@@ -495,6 +504,7 @@ func (c *Coordinator) dispatchReviewFromPending(
 		RunID:           reviewRunID,
 		WorkspacePath:   worktreePath,
 		Prompt:          prompt,
+		RuntimeEnv:      runtimeEnv,
 	})
 	if err != nil {
 		return c.recordReviewDispatchFailure(ctx, run, reviewStep, entry, domain.WorkflowErrorReviewerLaunchFailed, fmt.Errorf("launch reviewer: %w", err))

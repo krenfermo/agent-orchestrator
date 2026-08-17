@@ -89,6 +89,13 @@ sql:
               import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
               type: "UserID"
               pointer: true
+          # Checkpoint 8P-B.1: same nullable-owner shape as
+          # projects.owner_user_id/workflow_runs.user_id above.
+          - column: "sessions.owner_user_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "UserID"
+              pointer: true
           - column: "users.id"
             go_type:
               import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"

@@ -1,30 +1,63 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DevelopmentAgentsSettingsSection } from "./DevelopmentAgentsSettingsSection";
-import type { EnvironmentStatus } from "../../hooks/useEnvironmentStatus";
+import type { ProviderDescriptor, ProviderProfile } from "../../hooks/useProviderProfiles";
 
-const { useEnvironmentStatusMock, useCapacityMock } = vi.hoisted(() => ({
-	useEnvironmentStatusMock: vi.fn(),
+const { useProviderProfilesMock, useCapacityMock } = vi.hoisted(() => ({
+	useProviderProfilesMock: vi.fn(),
 	useCapacityMock: vi.fn(),
 }));
 
-vi.mock("../../hooks/useEnvironmentStatus", () => ({
-	useEnvironmentStatus: useEnvironmentStatusMock,
+vi.mock("../../hooks/useProviderProfiles", () => ({
+	useProviderProfiles: useProviderProfilesMock,
 }));
 
 vi.mock("../../hooks/useCapacity", () => ({
 	useCapacity: useCapacityMock,
 }));
 
-function baseStatus(overrides: Partial<EnvironmentStatus> = {}): EnvironmentStatus {
+function descriptor(overrides: Partial<ProviderDescriptor> = {}): ProviderDescriptor {
 	return {
-		codex: { id: "codex", installed: false, authState: "unknown", source: "unknown", lastCheckedAt: "2026-01-01T00:00:00Z" },
-		claude: { id: "claude-code", installed: false, authState: "unknown", source: "unknown", lastCheckedAt: "2026-01-01T00:00:00Z" },
-		github: { installed: false, authState: "unknown", lastCheckedAt: "2026-01-01T00:00:00Z" },
-		projects: { count: 0 },
-		readiness: { codex: "unavailable", claude: "unavailable", github: "unavailable", projects: "unavailable", headless: "ready", overall: "setup_required" },
+		provider: "anthropic",
+		harness: "claude-code",
+		displayName: "Claude Code",
+		capabilities: ["worker", "planner"],
+		authMethods: ["cli_bootstrap"],
+		models: ["sonnet", "opus"],
+		available: true,
 		...overrides,
-	} as EnvironmentStatus;
+	} as ProviderDescriptor;
+}
+
+function profile(overrides: Partial<ProviderProfile> = {}): ProviderProfile {
+	return {
+		id: "prof-1",
+		provider: "anthropic",
+		harness: "claude-code",
+		displayName: "Claude Code",
+		enabled: true,
+		authState: "unknown",
+		authMethod: "cli_bootstrap",
+		capabilities: ["worker", "planner"],
+		createdAt: "2026-01-01T00:00:00Z",
+		updatedAt: "2026-01-01T00:00:00Z",
+		...overrides,
+	} as ProviderProfile;
+}
+
+function baseHook(overrides: Partial<ReturnType<typeof useProviderProfilesMock>> = {}) {
+	return {
+		registry: [descriptor()],
+		profiles: [],
+		isLoading: false,
+		error: undefined,
+		createProfile: vi.fn(),
+		connect: vi.fn(),
+		disconnect: vi.fn(),
+		test: vi.fn(),
+		setEnabled: vi.fn(),
+		...overrides,
+	};
 }
 
 describe("DevelopmentAgentsSettingsSection", () => {
@@ -32,84 +65,65 @@ describe("DevelopmentAgentsSettingsSection", () => {
 		useCapacityMock.mockReturnValue({ capacity: undefined, isLoading: false, error: undefined });
 	});
 
-	it("shows Not installed when a binary was not resolved", () => {
-		useEnvironmentStatusMock.mockReturnValue({ status: baseStatus(), isLoading: false, error: undefined, refetch: vi.fn() });
-		render(<DevelopmentAgentsSettingsSection />);
-		expect(screen.getAllByText("Not installed")).toHaveLength(2);
-	});
-
-	it("shows Installed + Authenticated for a probed, authorized agent, with binary path and version", () => {
-		useEnvironmentStatusMock.mockReturnValue({
-			status: baseStatus({
-				codex: {
-					id: "codex",
-					installed: true,
-					binaryPath: "/usr/local/bin/codex",
-					version: "codex-cli 1.2.3",
-					authState: "authorized",
-					source: "unknown",
-					lastCheckedAt: "2026-01-01T00:00:00Z",
-				},
+	it("renders a card per registry entry, not a hardcoded pair", () => {
+		useProviderProfilesMock.mockReturnValue(
+			baseHook({
+				registry: [
+					descriptor({ provider: "anthropic", harness: "claude-code", displayName: "Claude Code" }),
+					descriptor({ provider: "openai", harness: "codex", displayName: "Codex" }),
+					descriptor({ provider: "minimax", harness: "minimax", displayName: "MiniMax", available: false, unavailable: "no adapter yet", authMethods: ["unsupported"], capabilities: [] }),
+				],
 			}),
-			isLoading: false,
-			error: undefined,
-			refetch: vi.fn(),
-		});
+		);
 		render(<DevelopmentAgentsSettingsSection />);
-		expect(screen.getByText("Installed")).toBeInTheDocument();
-		expect(screen.getByText("Authenticated")).toBeInTheDocument();
-		expect(screen.getByText("/usr/local/bin/codex")).toBeInTheDocument();
-		expect(screen.getByText("codex-cli 1.2.3")).toBeInTheDocument();
+		expect(screen.getByText("Claude Code")).toBeInTheDocument();
+		expect(screen.getByText("Codex")).toBeInTheDocument();
+		expect(screen.getByText("MiniMax")).toBeInTheDocument();
 	});
 
-	it("never renders unknown auth as authenticated", () => {
-		useEnvironmentStatusMock.mockReturnValue({
-			status: baseStatus({
-				claude: { id: "claude-code", installed: true, binaryPath: "/usr/local/bin/claude", authState: "unknown", source: "unknown", lastCheckedAt: "2026-01-01T00:00:00Z" },
+	it("shows an unsupported provider honestly, without a Connect action", () => {
+		useProviderProfilesMock.mockReturnValue(
+			baseHook({
+				registry: [descriptor({ provider: "minimax", harness: "minimax", displayName: "MiniMax", available: false, unavailable: "no MiniMax adapter is implemented in this codebase yet", authMethods: ["unsupported"], capabilities: [] })],
 			}),
-			isLoading: false,
-			error: undefined,
-			refetch: vi.fn(),
-		});
+		);
 		render(<DevelopmentAgentsSettingsSection />);
-		expect(screen.queryByText("Authenticated")).not.toBeInTheDocument();
-		expect(screen.getAllByText("Unknown").length).toBeGreaterThan(0);
+		expect(screen.getByText("Unsupported")).toBeInTheDocument();
+		expect(screen.getByText("no MiniMax adapter is implemented in this codebase yet")).toBeInTheDocument();
+		expect(screen.queryByText("Connect")).not.toBeInTheDocument();
 	});
 
-	it("never renders a token-shaped string anywhere in the DOM", () => {
-		useEnvironmentStatusMock.mockReturnValue({
-			status: baseStatus({
-				codex: {
-					id: "codex",
-					installed: true,
-					binaryPath: "/usr/local/bin/codex",
-					version: "codex-cli 1.2.3",
-					authState: "authorized",
-					source: "unknown",
-					lastCheckedAt: "2026-01-01T00:00:00Z",
-				},
-			}),
-			isLoading: false,
-			error: undefined,
-			refetch: vi.fn(),
-		});
-		const { container } = render(<DevelopmentAgentsSettingsSection />);
-		expect(container.textContent ?? "").not.toMatch(/sk-[A-Za-z0-9]{20,}|gh[oprsu]_[A-Za-z0-9]{20,}/);
+	it("shows Not connected for a registry entry with no profile yet", () => {
+		useProviderProfilesMock.mockReturnValue(baseHook({ registry: [descriptor()], profiles: [] }));
+		render(<DevelopmentAgentsSettingsSection />);
+		expect(screen.getByText("Not connected")).toBeInTheDocument();
+		expect(screen.getByText("Connect")).toBeInTheDocument();
 	});
 
-	it("shows a real capacity snapshot's state and detected time, and 'Unknown' when no reset was recorded", () => {
-		useEnvironmentStatusMock.mockReturnValue({ status: baseStatus(), isLoading: false, error: undefined, refetch: vi.fn() });
-		useCapacityMock.mockReturnValue({
-			capacity: [
-				{ harness: "codex", provider: "openai", state: "cooldown", detectedAt: "2026-01-01T00:00:00Z", resetAt: null, reason: "rate_limited (inferred)", certainty: "actual" },
-				{ harness: "claude-code", provider: "anthropic", state: "unknown", detectedAt: null, resetAt: null, certainty: "unknown" },
-			],
-			isLoading: false,
-			error: undefined,
-		});
+	it("shows Connected for a profile with authState authenticated", () => {
+		useProviderProfilesMock.mockReturnValue(baseHook({ registry: [descriptor()], profiles: [profile({ authState: "authenticated" })] }));
 		render(<DevelopmentAgentsSettingsSection />);
-		expect(screen.getByText("cooldown")).toBeInTheDocument();
-		expect(screen.getAllByText("unknown")).not.toHaveLength(0);
-		expect(screen.getAllByText("Unknown").length).toBeGreaterThan(0);
+		expect(screen.getByText("Connected")).toBeInTheDocument();
+	});
+
+	it("targets the correct profile id when testing a connection", () => {
+		const testMock = vi.fn().mockResolvedValue({ ok: true, message: "authenticated" });
+		useProviderProfilesMock.mockReturnValue(
+			baseHook({ registry: [descriptor()], profiles: [profile({ id: "prof-xyz" })], test: testMock }),
+		);
+		render(<DevelopmentAgentsSettingsSection />);
+		fireEvent.click(screen.getByText("Test connection"));
+		expect(testMock).toHaveBeenCalledWith("prof-xyz");
+	});
+
+	it("creates then connects a profile for a provider with none yet", async () => {
+		const createMock = vi.fn().mockResolvedValue(profile({ id: "prof-new" }));
+		const connectMock = vi.fn().mockResolvedValue(profile({ id: "prof-new" }));
+		useProviderProfilesMock.mockReturnValue(
+			baseHook({ registry: [descriptor()], profiles: [], createProfile: createMock, connect: connectMock }),
+		);
+		render(<DevelopmentAgentsSettingsSection />);
+		fireEvent.click(screen.getByText("Connect"));
+		await vi.waitFor(() => expect(connectMock).toHaveBeenCalledWith("prof-new"));
 	});
 });

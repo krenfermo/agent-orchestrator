@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -50,6 +51,14 @@ Conservative repository context:
 	}
 	cmd := exec.CommandContext(callCtx, p.Binary, "--print", "--output-format", "json", "--json-schema", schema, "--tools", "", "--permission-mode", "plan", "--no-session-persistence", "--model", model, prompt)
 	cmd.Dir = req.Project.Path
+	// Checkpoint 8P-B.1: before this checkpoint the planner subprocess
+	// silently inherited the daemon's own real environment (Go's exec.Cmd
+	// default with Env left nil) -- the starkest of the five launch-path
+	// gaps this checkpoint closes. req.RuntimeEnv (nil unless a workflow
+	// owner with a connected profile was resolved) overrides on top of the
+	// real inherited env, same override-wins convention as every other
+	// launch path.
+	cmd.Env = mergeEnv(os.Environ(), req.RuntimeEnv)
 	b, err := cmd.CombinedOutput()
 	if err != nil {
 		if callCtx.Err() != nil {
@@ -76,4 +85,23 @@ Conservative repository context:
 		return workflowcore.PlannerResponse{}, fmt.Errorf("planner parse plan: %w", err)
 	}
 	return workflowcore.PlannerResponse{Plan: plan, Provider: "anthropic", Model: model}, nil
+}
+
+// mergeEnv overlays overrides onto base ("KEY=VALUE" pairs), overrides
+// winning on key collision. Never mutates process-global env.
+func mergeEnv(base []string, overrides map[string]string) []string {
+	out := make([]string, 0, len(base)+len(overrides))
+	for _, kv := range base {
+		key, _, ok := strings.Cut(kv, "=")
+		if ok {
+			if _, override := overrides[key]; override {
+				continue
+			}
+		}
+		out = append(out, kv)
+	}
+	for k, v := range overrides {
+		out = append(out, k+"="+v)
+	}
+	return out
 }

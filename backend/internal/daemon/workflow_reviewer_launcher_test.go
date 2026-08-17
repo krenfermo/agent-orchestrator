@@ -53,6 +53,30 @@ func TestWorkflowReviewerLauncherRuntimeEnvSetsPythonDontWriteBytecode(t *testin
 	}
 }
 
+// TestWorkflowReviewerLauncherRuntimeEnvAppliesIsolatedRuntimeHomeLast is
+// Checkpoint 8P-B.1's reviewer-isolation proof: req.RuntimeEnv must win
+// over every other env source (PATH pin/shim included), and a nil
+// RuntimeEnv (unresolved owner) must be a pure no-op.
+func TestWorkflowReviewerLauncherRuntimeEnvAppliesIsolatedRuntimeHomeLast(t *testing.T) {
+	l := &workflowReviewerLauncher{dataDir: t.TempDir(), executable: func() (string, error) { return "/usr/local/bin/ao", nil }}
+	req := workflowcore.ReviewerLaunchRequest{
+		ReviewID: "rev-1", Harness: domain.ReviewerClaudeCode,
+		RuntimeEnv: map[string]string{"HOME": "/ao/users/user-a/runtime-home", "CLAUDE_CONFIG_DIR": "/ao/users/user-a/providers/claude-code"},
+	}
+	env := l.runtimeEnv(context.Background(), req, nil, map[string]string{"HOME": "/real/host/home"})
+	if env["HOME"] != "/ao/users/user-a/runtime-home" {
+		t.Fatalf("isolated HOME did not win: %q", env["HOME"])
+	}
+	if env["CLAUDE_CONFIG_DIR"] != "/ao/users/user-a/providers/claude-code" {
+		t.Fatalf("isolated CLAUDE_CONFIG_DIR missing: %q", env["CLAUDE_CONFIG_DIR"])
+	}
+
+	noOverride := l.runtimeEnv(context.Background(), workflowcore.ReviewerLaunchRequest{ReviewID: "rev-1", Harness: domain.ReviewerClaudeCode}, nil, nil)
+	if _, ok := noOverride["CLAUDE_CONFIG_DIR"]; ok {
+		t.Fatalf("nil RuntimeEnv must not fabricate a CLAUDE_CONFIG_DIR: %v", noOverride)
+	}
+}
+
 type fakeReviewerResolver struct {
 	adapter *fakeReviewerAdapter
 }

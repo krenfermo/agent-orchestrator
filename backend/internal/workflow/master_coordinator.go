@@ -99,7 +99,15 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 	if len(steps) > 0 && steps[0].State == domain.WorkflowStepReady {
 		_, _ = c.store.UpdateWorkflowStepState(ctx, steps[0].ID, domain.WorkflowStepReady, domain.WorkflowStepRunning, c.clock())
 	}
-	response, err := c.planner.Generate(ctx, PlannerRequest{Objective: run.Objective, Project: project, Context: contextValue, MaxSteps: MaxPlanSteps})
+	// Checkpoint 8P-B.1: the planner is always Claude Code today (see
+	// command.Planner.Descriptor's hardcoded "anthropic" provider) --
+	// resolve against that harness rather than inventing a per-planner
+	// provider-selection mechanism 8P-C hasn't built yet.
+	runtimeEnv, _, err := c.resolveRuntimeEnv(ctx, run.ID, domain.HarnessClaudeCode)
+	if err != nil {
+		return c.failPlan(ctx, run, "planner_start_failed", err)
+	}
+	response, err := c.planner.Generate(ctx, PlannerRequest{Objective: run.Objective, Project: project, Context: contextValue, MaxSteps: MaxPlanSteps, RuntimeEnv: runtimeEnv})
 	if err != nil {
 		// Checkpoint 8N.1: a capacity/rate-limit-shaped planner failure must
 		// never be treated the same as a real permanent failure (parse
@@ -489,7 +497,7 @@ func (c *Coordinator) dispatchMasterTask(ctx stdctx.Context, parent domain.Workf
 	if len(task.Dependencies) > 0 {
 		decision := domain.SessionLifecycleDecision{
 			Action: domain.LifecycleNewSession, Role: domain.WorkflowRoleWorker,
-			Reasons: []domain.SessionLifecycleReason{domain.LifecycleReasonTaskBoundary},
+			Reasons:       []domain.SessionLifecycleReason{domain.LifecycleReasonTaskBoundary},
 			PolicyVersion: domain.SessionLifecyclePolicyVersion,
 		}
 		if depPack != nil {

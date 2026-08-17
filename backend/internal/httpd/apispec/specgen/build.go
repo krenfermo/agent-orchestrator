@@ -480,7 +480,105 @@ func operations() []operation {
 	ops = append(ops, shellTerminalOperations()...)
 	ops = append(ops, workflowOperations()...)
 	ops = append(ops, authOperations()...)
+	ops = append(ops, providerProfileOperations()...)
 	return ops
+}
+
+// providerProfileOperations declares the /provider-profiles and
+// /providers/registry operations (Checkpoint 8P-B). Must stay 1:1 with the
+// routes ProviderProfilesController.Register mounts (enforced by the parity
+// test).
+func providerProfileOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodGet, path: "/api/v1/providers/registry", id: "getProviderRegistry", tag: "provider-profiles",
+			summary: "List every provider AO knows about, with its declared capabilities/auth methods",
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProviderRegistryResponse{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/provider-profiles", id: "listProviderProfiles", tag: "provider-profiles",
+			summary: "List the current user's provider profiles",
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListProviderProfilesResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/provider-profiles", id: "createProviderProfile", tag: "provider-profiles",
+			summary: "Create a provider profile owned by the current user",
+			reqBody: controllers.CreateProviderProfileRequest{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.ProviderProfileResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/provider-profiles/{id}", id: "getProviderProfile", tag: "provider-profiles",
+			summary:    "Get one of the current user's provider profiles",
+			pathParams: []any{controllers.ProviderProfileIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProviderProfileResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPatch, path: "/api/v1/provider-profiles/{id}", id: "updateProviderProfile", tag: "provider-profiles",
+			summary:    "Update a provider profile's display name, enabled state, or default model",
+			pathParams: []any{controllers.ProviderProfileIDParam{}},
+			reqBody:    controllers.UpdateProviderProfileRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProviderProfileResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/provider-profiles/{id}/connect", id: "connectProviderProfile", tag: "provider-profiles",
+			summary:         "Prepare the profile owner's isolated runtime-home and refresh its cached auth state",
+			pathParams:      []any{controllers.ProviderProfileIDParam{}},
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProviderProfileResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/provider-profiles/{id}/disconnect", id: "disconnectProviderProfile", tag: "provider-profiles",
+			summary:         "Clear AO's cached belief that this profile is authenticated",
+			pathParams:      []any{controllers.ProviderProfileIDParam{}},
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProviderProfileResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/provider-profiles/{id}/test", id: "testProviderProfile", tag: "provider-profiles",
+			summary:         "Run a connection test against the profile owner's isolated runtime-home",
+			pathParams:      []any{controllers.ProviderProfileIDParam{}},
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.TestProviderProfileResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
 }
 
 // authOperations declares the /auth operations (Checkpoint 8P-A). Must stay

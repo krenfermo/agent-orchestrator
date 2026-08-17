@@ -99,3 +99,27 @@ func (s *Store) ListWorkflowRunIDsByOwner(ctx context.Context, owner domain.User
 	}
 	return ids, nil
 }
+
+// GetSessionOwner returns the session's owner_user_id, which is nil for a
+// session that predates ownership (Checkpoint 8P-B.1) or was spawned while
+// no owner could be resolved.
+func (s *Store) GetSessionOwner(ctx context.Context, id domain.SessionID) (*domain.UserID, error) {
+	owner, err := s.qr.GetSessionOwner(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("get session owner %s: %w", id, err)
+	}
+	return owner, nil
+}
+
+// SetSessionOwner stamps a session's owner_user_id. Returns false if the
+// session id doesn't exist.
+func (s *Store) SetSessionOwner(ctx context.Context, id domain.SessionID, owner domain.UserID) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	n, err := s.qw.SetSessionOwner(ctx, gen.SetSessionOwnerParams{OwnerUserID: &owner, ID: id})
+	if err != nil {
+		return false, fmt.Errorf("set session owner %s: %w", id, err)
+	}
+	return n > 0, nil
+}

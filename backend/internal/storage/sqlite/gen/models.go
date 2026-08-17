@@ -346,6 +346,22 @@ type Project struct {
 	OwnerUserID   *domain.UserID
 }
 
+type ProviderProfile struct {
+	ID               string
+	UserID           string
+	Provider         string
+	Harness          string
+	DisplayName      string
+	Enabled          int64
+	AuthState        string
+	AuthMethod       string
+	DefaultModel     sql.NullString
+	Capabilities     string
+	SecretCiphertext []byte
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
 type Review struct {
 	ID               string
 	SessionID        domain.SessionID
@@ -416,6 +432,7 @@ type Session struct {
 	NativeTranscriptPath      string
 	AutoInjectCI              bool
 	AutoReviewEnabled         bool
+	OwnerUserID               *domain.UserID
 }
 
 type SessionCleanupFact struct {

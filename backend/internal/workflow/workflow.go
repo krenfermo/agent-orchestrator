@@ -189,6 +189,13 @@ type Deps struct {
 	// Clock and NewID are injectable for deterministic tests.
 	Clock func() time.Time
 	NewID func() string
+
+	// RuntimeIsolation backs Checkpoint 8P-B.1's per-user provider
+	// credential isolation: every dispatch site (worker, reviewer, planner,
+	// decision resolver) resolves the workflow owner's isolated runtime
+	// env through this single dependency before launching. Optional: nil
+	// preserves pre-8P-B.1 behavior exactly.
+	RuntimeIsolation RuntimeIsolation
 }
 
 // Coordinator is the core workflow durable-foundation engine.
@@ -235,6 +242,10 @@ type Coordinator struct {
 	// wakeScheduler backs Checkpoint 8N's durable wake-up scheduler.
 	// Optional.
 	wakeScheduler WakeScheduler
+
+	// runtimeIsolation backs Checkpoint 8P-B.1's per-user provider
+	// credential isolation. Optional.
+	runtimeIsolation RuntimeIsolation
 }
 
 // New wires a Coordinator from its dependencies, defaulting the clock and id source.
@@ -267,6 +278,7 @@ func New(d Deps) *Coordinator {
 		paneReader:               d.PaneReader,
 		decisionResolverLauncher: d.DecisionResolverLauncher,
 		wakeScheduler:            d.WakeScheduler,
+		runtimeIsolation:         d.RuntimeIsolation,
 		clock:                    clock,
 		newID:                    newID,
 	}

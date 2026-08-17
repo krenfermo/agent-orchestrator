@@ -9,6 +9,13 @@ import (
 // ErrSessionNotFound reports an observation for an unknown session id.
 var ErrSessionNotFound = errors.New("session not found")
 
+// ErrProviderProfileRequired reports that a workflow's owner has no
+// enabled ProviderProfile for the harness a launch needs (Checkpoint
+// 8P-B.1). Like ErrChatAuthRequired, this is a configuration/security
+// condition, never auto-retried and never treated as capacity/transient
+// failure -- see workflow/failure_classifier.go.
+var ErrProviderProfileRequired = errors.New("provider profile required: connect this provider in Settings → Agents & Models")
+
 // SpawnConfig is the request to start a new session: which project/issue, which
 // agent harness, and the branch/prompt the agent launches with.
 type SpawnConfig struct {
@@ -56,6 +63,19 @@ type SpawnConfig struct {
 	// consume inline binary data). Any file type is accepted except for
 	// explicitly blocked types (e.g., SVG for security reasons).
 	Attachments []SpawnAttachment
+
+	// RuntimeEnv overrides subprocess env vars for the launched provider
+	// process (Checkpoint 8P-B.1) -- e.g. HOME/CLAUDE_CONFIG_DIR/CODEX_HOME
+	// pinned to the workflow owner's isolated runtime-home. Nil preserves
+	// pre-8P-B.1 behavior exactly (daemon's own real environment). Applied
+	// last, after every other env source, so it always wins.
+	RuntimeEnv map[string]string
+
+	// Owner is the resolved workflow-run owner, when known (Checkpoint
+	// 8P-B.1). Empty means unresolved/unowned; best-effort stamped onto the
+	// created session for later ownership checks, never trusted as-is from
+	// a client -- callers must resolve it from durable ownership data.
+	Owner domain.UserID
 }
 
 // SpawnAttachment is a single file attached to a spawn request. Data holds the

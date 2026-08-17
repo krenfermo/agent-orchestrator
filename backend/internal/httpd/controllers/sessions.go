@@ -24,6 +24,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	previewutil "github.com/aoagents/agent-orchestrator/backend/internal/preview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/previewserver"
@@ -147,6 +148,61 @@ type SessionsController struct {
 	Usage         UsageHookRecorder
 	PreviewServer ManagedPreviewServer
 	Capabilities  SessionCapabilityValidator
+	// Ownership and TrustedLocal back Checkpoint 8P-B.1's session ownership
+	// scoping, mirroring ProjectsController's OwnershipStore/TrustedLocal
+	// convention exactly: nil Ownership or TrustedLocal true disables
+	// scoping entirely, which is what every pre-8P-B.1 configuration (no
+	// Ownership wired) keeps behaving like. Only get/send are scoped today
+	// -- see the doc comment on scopingEnforced below for why this is a
+	// deliberately partial, not exhaustive, closure of session ownership.
+	Ownership    SessionOwnershipStore
+	TrustedLocal bool
+}
+
+// SessionOwnershipStore backs Checkpoint 8P-B.1's minimal session
+// ownership scoping, narrow like ProjectsController's OwnershipStore.
+type SessionOwnershipStore interface {
+	GetSessionOwner(ctx context.Context, id domain.SessionID) (*domain.UserID, error)
+}
+
+// scopingEnforced mirrors ProjectsController's own helper (see
+// projects.go) exactly.
+func (c *SessionsController) scopingEnforced() bool {
+	return !c.TrustedLocal && c.Ownership != nil
+}
+
+// sessionAccessAllowed enforces Checkpoint 8P-B.1's session ownership scoping
+// for one request, writing the locked 404 envelope (never 403 -- existence
+// must not leak, same convention as ProjectsController) and returning false
+// when the caller isn't the session's owner. Returns true immediately
+// (no-op) when scoping isn't enforced (trusted-local mode, or Ownership not
+// wired), or a user isn't required to be authenticated.
+func (c *SessionsController) sessionAccessAllowed(w http.ResponseWriter, r *http.Request) bool {
+	if !c.scopingEnforced() {
+		return true
+	}
+	user, err := identity.Require(r)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return false
+	}
+	if !c.sessionVisible(r.Context(), sessionID(r), user.ID) {
+		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "SESSION_NOT_FOUND", "session not found", nil)
+		return false
+	}
+	return true
+}
+
+// sessionVisible mirrors ProjectsController.projectVisible: an unowned
+// session (nil owner -- predates 8P-B.1, or spawned while no owner could
+// be resolved) stays visible to everyone; only a session with a DIFFERENT
+// explicit owner is hidden. A lookup error fails closed to "not visible".
+func (c *SessionsController) sessionVisible(ctx context.Context, id domain.SessionID, current domain.UserID) bool {
+	owner, err := c.Ownership.GetSessionOwner(ctx, id)
+	if err != nil {
+		return false
+	}
+	return !(owner != nil && *owner != current)
 }
 
 // Register mounts the session routes on the supplied router.
@@ -384,6 +440,9 @@ func decodeSpawnAttachments(in []AttachmentInput) ([]ports.SpawnAttachment, *att
 func (c *SessionsController) get(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	sess, err := c.Svc.Get(r.Context(), sessionID(r))
@@ -1237,6 +1296,9 @@ func (c *SessionsController) cleanup(w http.ResponseWriter, r *http.Request) {
 func (c *SessionsController) send(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/send")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxSendBodyBytes)

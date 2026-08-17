@@ -59,6 +59,13 @@ type PlannerRequest struct {
 	Project   domain.ProjectRecord
 	Context   PlannerContext
 	MaxSteps  int
+	// RuntimeEnv overrides subprocess env for the planner process
+	// (Checkpoint 8P-B.1) -- the workflow run owner's isolated
+	// runtime-home, resolved once by Coordinator.resolveRuntimeEnv. Nil
+	// preserves pre-8P-B.1 behavior exactly (the planner subprocess
+	// inherited the daemon's real, unmodified environment before this
+	// checkpoint).
+	RuntimeEnv map[string]string
 }
 type PlannerResponse struct {
 	Plan     MasterPlan

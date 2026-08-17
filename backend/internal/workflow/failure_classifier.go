@@ -70,6 +70,13 @@ func classifyProviderFailure(err error) ProviderFailureClassification {
 		// authentication state — conservatively not failover-eligible either
 		// (a human needs to resolve the credential), always needs_attention.
 		return ProviderFailureClassification{Class: domain.WorkflowErrorAuth, Certainty: CertaintyActual, Eligible: false}
+	case errors.Is(err, ports.ErrProviderProfileRequired):
+		// Checkpoint 8P-B.1: the workflow owner has no connected provider
+		// profile for this harness. Same treatment as ErrChatAuthRequired --
+		// a configuration/security gap a human must resolve (connect the
+		// provider), never auto-retried, never failover-eligible (the
+		// fallback harness is no more likely to have a profile).
+		return ProviderFailureClassification{Class: domain.WorkflowErrorAuth, Certainty: CertaintyActual, Eligible: false}
 	}
 
 	text := strings.ToLower(err.Error())

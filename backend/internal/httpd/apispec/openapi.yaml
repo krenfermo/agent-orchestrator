@@ -1564,6 +1564,295 @@ paths:
       summary: Initialize a selected folder as a Git repository with an initial commit
       tags:
       - projects
+  /api/v1/provider-profiles:
+    get:
+      operationId: listProviderProfiles
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersListProviderProfilesResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: List the current user's provider profiles
+      tags:
+      - provider-profiles
+    post:
+      operationId: createProviderProfile
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersCreateProviderProfileRequest'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersProviderProfileResponse'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Create a provider profile owned by the current user
+      tags:
+      - provider-profiles
+  /api/v1/provider-profiles/{id}:
+    get:
+      operationId: getProviderProfile
+      parameters:
+      - description: Provider profile identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Provider profile identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersProviderProfileResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Get one of the current user's provider profiles
+      tags:
+      - provider-profiles
+    patch:
+      operationId: updateProviderProfile
+      parameters:
+      - description: Provider profile identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Provider profile identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersUpdateProviderProfileRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersProviderProfileResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Update a provider profile's display name, enabled state, or default
+        model
+      tags:
+      - provider-profiles
+  /api/v1/provider-profiles/{id}/connect:
+    post:
+      operationId: connectProviderProfile
+      parameters:
+      - description: Provider profile identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Provider profile identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersProviderProfileResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Prepare the profile owner's isolated runtime-home and refresh its cached
+        auth state
+      tags:
+      - provider-profiles
+  /api/v1/provider-profiles/{id}/disconnect:
+    post:
+      operationId: disconnectProviderProfile
+      parameters:
+      - description: Provider profile identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Provider profile identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersProviderProfileResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Clear AO's cached belief that this profile is authenticated
+      tags:
+      - provider-profiles
+  /api/v1/provider-profiles/{id}/test:
+    post:
+      operationId: testProviderProfile
+      parameters:
+      - description: Provider profile identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Provider profile identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersTestProviderProfileResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Run a connection test against the profile owner's isolated runtime-home
+      tags:
+      - provider-profiles
+  /api/v1/providers/registry:
+    get:
+      operationId: getProviderRegistry
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersProviderRegistryResponse'
+          description: OK
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: List every provider AO knows about, with its declared capabilities/auth
+        methods
+      tags:
+      - provider-profiles
   /api/v1/prs/{id}/merge:
     post:
       operationId: mergePR
@@ -6114,6 +6403,21 @@ components:
       - resetAt
       - certainty
       type: object
+    ControllersCreateProviderProfileRequest:
+      properties:
+        defaultModel:
+          type: string
+        displayName:
+          type: string
+        harness:
+          type: string
+        provider:
+          type: string
+      required:
+      - provider
+      - harness
+      - displayName
+      type: object
     ControllersDecisionsUsageResponse:
       properties:
         humanRequired:
@@ -6161,6 +6465,15 @@ components:
       required:
       - capacity
       type: object
+    ControllersListProviderProfilesResponse:
+      properties:
+        profiles:
+          items:
+            $ref: '#/components/schemas/ControllersProviderProfileView'
+          type: array
+      required:
+      - profiles
+      type: object
     ControllersLoginRequest:
       properties:
         password:
@@ -6197,6 +6510,105 @@ components:
           $ref: '#/components/schemas/ControllersUserView'
       required:
       - status
+      type: object
+    ControllersProviderDescriptorView:
+      properties:
+        authMethods:
+          items:
+            type: string
+          type: array
+        available:
+          type: boolean
+        capabilities:
+          items:
+            type: string
+          type: array
+        displayName:
+          type: string
+        harness:
+          type: string
+        models:
+          items:
+            type: string
+          type: array
+        provider:
+          type: string
+        unavailable:
+          type: string
+      required:
+      - provider
+      - harness
+      - displayName
+      - capabilities
+      - authMethods
+      - models
+      - available
+      type: object
+    ControllersProviderProfileResponse:
+      properties:
+        profile:
+          $ref: '#/components/schemas/ControllersProviderProfileView'
+      required:
+      - profile
+      type: object
+    ControllersProviderProfileView:
+      properties:
+        authMethod:
+          enum:
+          - browser_oauth
+          - device_flow
+          - cli_bootstrap
+          - api_key
+          - external_login
+          - unsupported
+          type: string
+        authState:
+          enum:
+          - unknown
+          - authenticated
+          - unauthenticated
+          - error
+          type: string
+        capabilities:
+          items:
+            type: string
+          type: array
+        createdAt:
+          type: string
+        defaultModel:
+          type: string
+        displayName:
+          type: string
+        enabled:
+          type: boolean
+        harness:
+          type: string
+        id:
+          type: string
+        provider:
+          type: string
+        updatedAt:
+          type: string
+      required:
+      - id
+      - provider
+      - harness
+      - displayName
+      - enabled
+      - authState
+      - authMethod
+      - capabilities
+      - createdAt
+      - updatedAt
+      type: object
+    ControllersProviderRegistryResponse:
+      properties:
+        providers:
+          items:
+            $ref: '#/components/schemas/ControllersProviderDescriptorView'
+          type: array
+      required:
+      - providers
       type: object
     ControllersResolveDecisionRequest:
       properties:
@@ -6634,6 +7046,31 @@ components:
       - outputTokens
       - cachedTokens
       - tokensCertainty
+      type: object
+    ControllersTestProviderProfileResponse:
+      properties:
+        message:
+          type: string
+        ok:
+          type: boolean
+        profile:
+          $ref: '#/components/schemas/ControllersProviderProfileView'
+      required:
+      - profile
+      - ok
+      - message
+      type: object
+    ControllersUpdateProviderProfileRequest:
+      properties:
+        defaultModel:
+          type: string
+        displayName:
+          type: string
+        enabled:
+          type: boolean
+      required:
+      - displayName
+      - enabled
       type: object
     ControllersUserView:
       properties:

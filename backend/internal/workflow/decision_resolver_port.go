@@ -28,6 +28,11 @@ type DecisionResolverLaunchRequest struct {
 	WorkspacePath     string
 	Prompt            string
 	SystemPrompt      string
+	// RuntimeEnv overrides subprocess env for the resolver process
+	// (Checkpoint 8P-B.1) -- the workflow run owner's isolated
+	// runtime-home, resolved once by Coordinator.resolveRuntimeEnv. Nil
+	// preserves pre-8P-B.1 behavior exactly.
+	RuntimeEnv map[string]string
 }
 
 // DecisionResolverLaunchResult is the runtime handle created for a resolver

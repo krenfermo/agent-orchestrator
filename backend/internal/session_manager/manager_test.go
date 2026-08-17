@@ -152,6 +152,9 @@ func (f *fakeStore) DeleteSessionWorktrees(_ context.Context, id domain.SessionI
 	delete(f.worktrees, id)
 	return nil
 }
+func (f *fakeStore) SetSessionOwner(_ context.Context, _ domain.SessionID, _ domain.UserID) (bool, error) {
+	return true, nil
+}
 
 type fakeLCM struct {
 	store     *fakeStore

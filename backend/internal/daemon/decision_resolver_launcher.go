@@ -89,7 +89,7 @@ func (l *decisionResolverLauncher) Preflight(ctx context.Context, harness domain
 	if !ok {
 		return fmt.Errorf("no agent adapter for harness %q", harness)
 	}
-	argv, err := l.buildArgv(ctx, agent, harness, "preflight-only", "", workspacePath)
+	argv, err := l.buildArgv(ctx, agent, harness, "preflight-only", "", workspacePath, nil)
 	if err != nil {
 		return fmt.Errorf("resolver command: %w", err)
 	}
@@ -114,7 +114,7 @@ func (l *decisionResolverLauncher) Launch(ctx context.Context, req workflowcore.
 	if req.ResolverSessionID == "" {
 		return workflowcore.DecisionResolverLaunchResult{}, fmt.Errorf("resolver session id is required")
 	}
-	argv, err := l.buildArgv(ctx, agent, req.Harness, string(req.ResolverSessionID), req.Prompt, req.WorkspacePath)
+	argv, err := l.buildArgv(ctx, agent, req.Harness, string(req.ResolverSessionID), req.Prompt, req.WorkspacePath, req.RuntimeEnv)
 	if err != nil {
 		return workflowcore.DecisionResolverLaunchResult{}, fmt.Errorf("resolver command: %w", err)
 	}
@@ -139,7 +139,7 @@ func (l *decisionResolverLauncher) Launch(ctx context.Context, req workflowcore.
 // agent adapter's own GetLaunchCommand (Permissions=Auto, the resolver's own
 // read-only tool allowlist for Claude Code), then, for Codex, inserts the
 // same real OS-level `--sandbox read-only` flag the reviewer adapter uses.
-func (l *decisionResolverLauncher) buildArgv(ctx context.Context, agent ports.Agent, harness domain.AgentHarness, sessionID, prompt, workspacePath string) ([]string, error) {
+func (l *decisionResolverLauncher) buildArgv(ctx context.Context, agent ports.Agent, harness domain.AgentHarness, sessionID, prompt, workspacePath string, runtimeEnv map[string]string) ([]string, error) {
 	argv, err := agent.GetLaunchCommand(ctx, ports.LaunchConfig{
 		SessionID:       sessionID,
 		WorkspacePath:   workspacePath,
@@ -152,7 +152,7 @@ func (l *decisionResolverLauncher) buildArgv(ctx context.Context, agent ports.Ag
 		return nil, err
 	}
 	if harness == domain.HarnessCodex {
-		extra, err := decisionResolverCodexReadOnlyArgs()
+		extra, err := decisionResolverCodexReadOnlyArgs(runtimeEnv)
 		if err != nil {
 			return nil, err
 		}
@@ -165,14 +165,21 @@ func (l *decisionResolverLauncher) buildArgv(ctx context.Context, agent ports.Ag
 // adapters/reviewer/codex.codexReadOnlyArgs exactly: real OS-level read-only
 // sandboxing plus the AO location env passthrough a shell command inside the
 // sandbox needs to resolve `ao decision resolve`.
-func decisionResolverCodexReadOnlyArgs() ([]string, error) {
+func decisionResolverCodexReadOnlyArgs(runtimeEnv map[string]string) ([]string, error) {
 	extra := []string{"--sandbox", "read-only"}
 	values := map[string]string{
 		"AO_PORT":     os.Getenv("AO_PORT"),
 		"AO_DATA_DIR": os.Getenv("AO_DATA_DIR"),
 		"AO_RUN_FILE": os.Getenv("AO_RUN_FILE"),
+		// Checkpoint 8P-B.1: CODEX_HOME must survive codex's own
+		// `--sandbox read-only` shell environment policy the same way
+		// AO_DATA_DIR does above, or an isolated runtime-home resolved for
+		// this launch would be silently dropped once the sandbox strips
+		// the ambient environment.
+		"CODEX_HOME": runtimeEnv["CODEX_HOME"],
 	}
-	for _, name := range []string{"AO_PORT", "AO_DATA_DIR", "AO_RUN_FILE"} {
+	names := []string{"AO_PORT", "AO_DATA_DIR", "AO_RUN_FILE", "CODEX_HOME"}
+	for _, name := range names {
 		value := values[name]
 		if value == "" {
 			continue
@@ -232,5 +239,14 @@ func (l *decisionResolverLauncher) runtimeEnv(ctx context.Context, req workflowc
 		}
 	}
 	sessionmanager.AugmentRuntimePATHForLaunchBinary(ctx, env, argv, exec.LookPath)
+	// Checkpoint 8P-B.1: applied last so the workflow owner's isolated
+	// runtime-home always wins. For Codex, buildArgv's
+	// decisionResolverCodexReadOnlyArgs already threads CODEX_HOME through
+	// the sandbox's own shell_environment_policy separately -- this also
+	// sets it (and HOME/CLAUDE_CONFIG_DIR/etc.) directly on RuntimeConfig.Env
+	// for every harness, sandboxed or not.
+	for k, v := range req.RuntimeEnv {
+		env[k] = v
+	}
 	return env
 }

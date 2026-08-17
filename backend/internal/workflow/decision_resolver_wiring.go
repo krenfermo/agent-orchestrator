@@ -184,6 +184,10 @@ func (c *Coordinator) dispatchDecisionResolver(ctx stdctx.Context, run domain.Wo
 	if err := c.decisionResolverLauncher.Preflight(ctx, selection.Harness, worktreePath); err != nil {
 		return c.recordResolutionFailure(ctx, resolutionID, fmt.Errorf("resolver preflight: %w", err), now)
 	}
+	runtimeEnv, _, err := c.resolveRuntimeEnv(ctx, run.ID, selection.Harness)
+	if err != nil {
+		return c.recordResolutionFailure(ctx, resolutionID, err, now)
+	}
 	if _, err := c.decisionResolverLauncher.Launch(ctx, DecisionResolverLaunchRequest{
 		Harness:           selection.Harness,
 		AskingSessionID:   derefSessionID(askingSessionID),
@@ -192,6 +196,7 @@ func (c *Coordinator) dispatchDecisionResolver(ctx stdctx.Context, run domain.Wo
 		ResolverSessionID: resolverSessionID,
 		WorkspacePath:     worktreePath,
 		Prompt:            prompt,
+		RuntimeEnv:        runtimeEnv,
 	}); err != nil {
 		return c.recordResolutionFailure(ctx, resolutionID, fmt.Errorf("launch resolver: %w", err), now)
 	}

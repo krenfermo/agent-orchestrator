@@ -47,6 +47,7 @@ import (
 	notificationsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/notification"
 	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
+	providerprofilesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providerprofile"
 	questionssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/questions"
 	settingssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/settings"
 	usagesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/usage"
@@ -58,6 +59,12 @@ import (
 
 // Run starts the daemon and blocks until it exits. SIGINT/SIGTERM drive
 // graceful shutdown through the HTTP server and background workers.
+// staticDataDir adapts a fixed AO_DATA_DIR string to
+// providerprofilesvc.DataDirer.
+type staticDataDir string
+
+func (d staticDataDir) DataDir() string { return string(d) }
+
 func Run() error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -434,7 +441,7 @@ func RunWithConfig(cfg config.Config) error {
 		runFile:    cfg.RunFilePath,
 		executable: os.Executable,
 	}
-	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(store, rawSessionMgr, workspaceObserver, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, log)
+	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, rawSessionMgr, workspaceObserver, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, log)
 	if reconcileErr := workflowCoordinator.Reconcile(ctx); reconcileErr != nil {
 		log.Error("reconcile workflow runs on boot failed", "err", reconcileErr)
 	}
@@ -526,6 +533,12 @@ func RunWithConfig(cfg config.Config) error {
 		Auth:                authMgr,
 		ProjectOwnership:    store,
 		WorkflowOwnership:   store,
+		SessionOwnership:    store,
+		ProviderProfiles: &providerprofilesvc.Service{
+			Store:   store,
+			Prober:  providerprofilesvc.CLIProber{},
+			DataDir: staticDataDir(cfg.DataDir),
+		},
 	})
 	if err != nil {
 		stop()

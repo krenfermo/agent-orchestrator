@@ -20,6 +20,17 @@ type Spawner interface {
 	Spawn(ctx stdctx.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error)
 }
 
+// RuntimeIsolation resolves a workflow run's owner-scoped provider
+// subprocess env (Checkpoint 8P-B.1) -- the single canonical
+// implementation every dispatch site (worker, reviewer, planner, decision
+// resolver) calls, rather than each re-deriving owner/profile lookup
+// itself. See providerruntime.Resolver for the concrete implementation.
+// Optional: nil means every dispatch site behaves exactly as it did before
+// this checkpoint (no env override, never blocks).
+type RuntimeIsolation interface {
+	Resolve(ctx stdctx.Context, runID string, harness domain.AgentHarness) (env map[string]string, owner domain.UserID, err error)
+}
+
 // SessionFacts is the narrow read path workflow uses to observe worker
 // progress and detect an already-spawned session by natural key, without
 // ever writing to sessions.
@@ -354,6 +365,16 @@ func (c *Coordinator) scheduleWake(ctx stdctx.Context, run domain.WorkflowRun, s
 // polling, so a mid-uptime Spawn failure has no other opportunity to retry
 // before the checkpoint's own attempt budget would otherwise go unused.
 func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, entry domain.WorkflowOutboxEntry, prompt string, harness domain.AgentHarness, attemptNumber int) (domain.WorkflowStep, error) {
+	runtimeEnv, owner, err := c.resolveRuntimeEnv(ctx, run.ID, harness)
+	if err != nil {
+		classification := classifyProviderFailure(err)
+		now := c.clock()
+		c.recordAgentHealthFailure(ctx, harness, classification, now)
+		if aerr := c.recordWorkAttemptFailure(ctx, step.ID, harness, classification.Class, now); aerr != nil {
+			return step, aerr
+		}
+		return c.recordDispatchFailure(ctx, run, step, entry, classification.Class, err)
+	}
 	rec, _, _, err := c.spawner.Spawn(ctx, ports.SpawnConfig{
 		ProjectID:   domain.ProjectID(run.ProjectID),
 		Kind:        domain.KindWorker,
@@ -362,6 +383,8 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 		Prompt:      prompt,
 		DisplayName: workDisplayName(run.Objective),
 		BaseRef:     c.masterTaskBaseRef(ctx, run),
+		RuntimeEnv:  runtimeEnv,
+		Owner:       owner,
 	})
 	if err != nil {
 		classification := classifyProviderFailure(err)
@@ -385,6 +408,18 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 	}
 	c.recordAgentHealthSuccess(ctx, harness, c.clock())
 	return c.recordDispatchSuccess(ctx, run, step, entry, rec)
+}
+
+// resolveRuntimeEnv is the single call site every dispatcher (worker,
+// reviewer, planner, decision resolver) uses to derive the workflow
+// owner's isolated provider subprocess env (Checkpoint 8P-B.1). A nil
+// runtimeIsolation (not yet wired) is a permanent, unconditional no-op --
+// exactly today's pre-8P-B.1 behavior.
+func (c *Coordinator) resolveRuntimeEnv(ctx stdctx.Context, runID string, harness domain.AgentHarness) (map[string]string, domain.UserID, error) {
+	if c.runtimeIsolation == nil {
+		return nil, "", nil
+	}
+	return c.runtimeIsolation.Resolve(ctx, runID, harness)
 }
 
 // recordWorkAttemptFailure appends a terminal, failed workflow_attempts row

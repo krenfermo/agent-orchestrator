@@ -52,6 +52,21 @@ func (q *Queries) GetProjectOwner(ctx context.Context, id domain.ProjectID) (*do
 	return owner_user_id, err
 }
 
+const getSessionOwner = `-- name: GetSessionOwner :one
+
+SELECT owner_user_id FROM sessions WHERE id = ?
+`
+
+// Checkpoint 8P-B.1: same narrow pattern for sessions.owner_user_id
+// (0111). Stamped best-effort at spawn time from the workflow run's
+// already-resolved owner; never trusted from client input.
+func (q *Queries) GetSessionOwner(ctx context.Context, id domain.SessionID) (*domain.UserID, error) {
+	row := q.db.QueryRowContext(ctx, getSessionOwner, id)
+	var owner_user_id *domain.UserID
+	err := row.Scan(&owner_user_id)
+	return owner_user_id, err
+}
+
 const getWorkflowRunOwner = `-- name: GetWorkflowRunOwner :one
 SELECT user_id FROM workflow_runs WHERE id = ?
 `
@@ -128,6 +143,23 @@ type SetProjectOwnerParams struct {
 
 func (q *Queries) SetProjectOwner(ctx context.Context, arg SetProjectOwnerParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, setProjectOwner, arg.OwnerUserID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const setSessionOwner = `-- name: SetSessionOwner :execrows
+UPDATE sessions SET owner_user_id = ? WHERE id = ?
+`
+
+type SetSessionOwnerParams struct {
+	OwnerUserID *domain.UserID
+	ID          domain.SessionID
+}
+
+func (q *Queries) SetSessionOwner(ctx context.Context, arg SetSessionOwnerParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setSessionOwner, arg.OwnerUserID, arg.ID)
 	if err != nil {
 		return 0, err
 	}

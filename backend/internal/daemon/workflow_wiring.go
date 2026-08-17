@@ -10,7 +10,9 @@ import (
 
 	plannercommand "github.com/aoagents/agent-orchestrator/backend/internal/adapters/planner/command"
 	workspacerouter "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/router"
+	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/providerruntime"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
@@ -45,7 +47,7 @@ func (w workflowAgentSwitcher) SwitchAgent(ctx context.Context, id domain.Sessio
 // plus the thin API-facing service. It does not start any background
 // goroutine — progress is derived at read time (GetRun) and at boot
 // (Reconcile), never polled by a scheduler.
-func startWorkflows(store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
+func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {
 		plannerBinary = "claude"
@@ -59,6 +61,17 @@ func startWorkflows(store *sqlite.Store, sessionMgr *sessionmanager.Manager, wor
 	// the daemon-level poller that actually claims and fires these). Real
 	// clock/id source — deterministic fakes are only for tests.
 	wakeScheduler := wake.New(store, nil, uuid.NewString, wake.Config{Policy: domain.DefaultWakePolicy()})
+	// Checkpoint 8P-B.1: the single canonical owner/env resolver every
+	// dispatch site (worker, reviewer, planner, decision resolver) below
+	// calls through workflowcore.Deps.RuntimeIsolation -- see
+	// providerruntime.Resolver's doc comment for the trusted-local
+	// compatibility behavior.
+	runtimeIsolation := &providerruntime.Resolver{
+		Owners:       store,
+		Profiles:     store,
+		DataDir:      cfg.DataDir,
+		TrustedLocal: cfg.TrustedLocalMode,
+	}
 	coordinator := workflowcore.New(workflowcore.Deps{
 		Store:                    store,
 		Projects:                 store,
@@ -78,6 +91,7 @@ func startWorkflows(store *sqlite.Store, sessionMgr *sessionmanager.Manager, wor
 		DecisionResolverLauncher: decisionResolverLauncher,
 		WakeScheduler:            wakeScheduler,
 		Logger:                   log,
+		RuntimeIsolation:         runtimeIsolation,
 	})
 	return coordinator, workflowsvc.New(coordinator), wakeScheduler
 }

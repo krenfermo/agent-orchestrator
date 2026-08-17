@@ -35,10 +35,14 @@ type fakeSpawner struct {
 	rec   domain.SessionRecord
 	err   error
 	facts *fakeSessionFacts
+	// lastCfg captures the most recent Spawn call's full config (Checkpoint
+	// 8P-B.1 tests assert on cfg.RuntimeEnv/cfg.Owner here).
+	lastCfg ports.SpawnConfig
 }
 
 func (f *fakeSpawner) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
 	f.calls++
+	f.lastCfg = cfg
 	if f.err != nil {
 		return domain.SessionRecord{}, 0, 0, f.err
 	}

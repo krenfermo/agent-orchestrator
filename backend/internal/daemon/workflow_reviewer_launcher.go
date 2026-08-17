@@ -215,5 +215,11 @@ func (l *workflowReviewerLauncher) runtimeEnv(ctx context.Context, req workflowc
 		}
 	}
 	sessionmanager.AugmentRuntimePATHForLaunchBinary(ctx, env, argv, exec.LookPath)
+	// Checkpoint 8P-B.1: applied last, after every other env source (PATH
+	// pin/shim included), so the workflow owner's isolated runtime-home
+	// always wins. Nil req.RuntimeEnv is a no-op.
+	for k, v := range req.RuntimeEnv {
+		env[k] = v
+	}
 	return env
 }

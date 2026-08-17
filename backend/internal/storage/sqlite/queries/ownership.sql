@@ -27,3 +27,13 @@ UPDATE workflow_runs SET user_id = ? WHERE user_id IS NULL;
 
 -- name: ListWorkflowRunIDsByOwner :many
 SELECT id FROM workflow_runs WHERE user_id = ?;
+
+-- Checkpoint 8P-B.1: same narrow pattern for sessions.owner_user_id
+-- (0111). Stamped best-effort at spawn time from the workflow run's
+-- already-resolved owner; never trusted from client input.
+
+-- name: GetSessionOwner :one
+SELECT owner_user_id FROM sessions WHERE id = ?;
+
+-- name: SetSessionOwner :execrows
+UPDATE sessions SET owner_user_id = ? WHERE id = ?;

@@ -173,6 +173,46 @@ func TestDecisionResolverLauncher_CodexReadOnlySandbox(t *testing.T) {
 	}
 }
 
+// TestDecisionResolverLauncher_RuntimeEnvIsolatesOwner is Checkpoint
+// 8P-B.1's decision-resolver isolation proof: req.RuntimeEnv must reach
+// the final RuntimeConfig.Env, AND, for Codex specifically, CODEX_HOME
+// must also survive via the sandbox's own shell_environment_policy flags
+// (a plain RuntimeConfig.Env override alone would be silently dropped once
+// --sandbox read-only strips the ambient environment).
+func TestDecisionResolverLauncher_RuntimeEnvIsolatesOwner(t *testing.T) {
+	codexAgent := &fakeResolverAgent{argv: []string{"codex", "exec", "--", "the prompt"}}
+	l := &decisionResolverLauncher{
+		agents:  &fakeResolverAgentResolver{byHarness: map[domain.AgentHarness]*fakeResolverAgent{domain.HarnessCodex: codexAgent}},
+		runtime: &fakeResolverRuntime{},
+		dataDir: t.TempDir(),
+	}
+	req := workflowcore.DecisionResolverLaunchRequest{
+		Harness:           domain.HarnessCodex,
+		ResolverSessionID: "decision-resolver-wqr-3",
+		WorkspacePath:     "/ws/wf",
+		Prompt:            "resolve this question read-only",
+		RuntimeEnv:        map[string]string{"HOME": "/ao/users/user-a/runtime-home", "CODEX_HOME": "/ao/users/user-a/providers/codex"},
+	}
+	if _, err := l.Launch(context.Background(), req); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	runtime := l.runtime.(*fakeResolverRuntime)
+	if runtime.lastCfg.Env["HOME"] != "/ao/users/user-a/runtime-home" {
+		t.Fatalf("RuntimeConfig.Env[HOME] = %q, want isolated runtime-home", runtime.lastCfg.Env["HOME"])
+	}
+	argv := runtime.lastCfg.Argv
+	found := false
+	for i, a := range argv {
+		if a == "-c" && i+1 < len(argv) && argv[i+1] == `shell_environment_policy.set.CODEX_HOME="/ao/users/user-a/providers/codex"` {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("codex argv missing CODEX_HOME sandbox passthrough: %v", argv)
+	}
+}
+
 // TestDecisionResolverLauncher_RuntimeSessionIDMatchesResolverIdentity
 // asserts the runtime pane is created under the SAME deterministic
 // ResolverSessionID baked into the prompt by the coordinator — the resolver
