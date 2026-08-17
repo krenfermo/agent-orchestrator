@@ -284,6 +284,13 @@ func (c *Coordinator) getMasterRun(ctx stdctx.Context, run domain.WorkflowRun, s
 	if summary, err := c.buildIntegrationSummary(ctx, run.ID); err == nil {
 		detail.IntegrationState = summary
 	}
+	if c.wakeScheduler != nil {
+		if next, werr := c.wakeScheduler.NextForRun(ctx, domain.WorkflowRunID(run.ID)); werr == nil && next != nil {
+			at := next.ScheduledAt
+			detail.NextWakeAt = &at
+			detail.WaitReason = string(next.Reason)
+		}
+	}
 	return detail, nil
 }
 

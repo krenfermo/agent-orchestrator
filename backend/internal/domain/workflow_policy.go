@@ -54,6 +54,12 @@ type WorkflowPolicy struct {
 	// zero value; callers must use EffectiveRoutingPolicy, never read
 	// Routing directly.
 	Routing RoutingPolicy `json:"routing,omitempty"`
+	// Wake is Checkpoint 8N's durable wake-up scheduler policy: how a
+	// waiting run/step is rescheduled to be retried automatically. Embedded
+	// the same way Routing is; a policy snapshot decoded from before 8N has
+	// this at its zero value — callers must use EffectiveWakePolicy, never
+	// read Wake directly.
+	Wake WakePolicy `json:"wake,omitempty"`
 }
 
 // EffectiveRoutingPolicy returns p.Routing, falling back to
@@ -67,6 +73,17 @@ func (p WorkflowPolicy) EffectiveRoutingPolicy() RoutingPolicy {
 	return DefaultRoutingPolicy()
 }
 
+// EffectiveWakePolicy returns p.Wake, falling back to DefaultWakePolicy()
+// when the snapshot predates Checkpoint 8N (zero Version). Mirrors
+// EffectiveRoutingPolicy's own forward-compatible zero-value fallback
+// pattern exactly.
+func (p WorkflowPolicy) EffectiveWakePolicy() WakePolicy {
+	if p.Wake.Version != "" {
+		return p.Wake
+	}
+	return DefaultWakePolicy()
+}
+
 // DefaultWorkflowPolicy is the fixed v1 policy every Checkpoint 8D run is
 // seeded with. A later checkpoint may make this configurable per-project or
 // per-run; nothing in this checkpoint does.
@@ -78,5 +95,6 @@ func DefaultWorkflowPolicy() WorkflowPolicy {
 		MaxReviewProviderAttempts:       3,
 		MaxAutoAnsweredQuestionsPerStep: 5,
 		Routing:                         DefaultRoutingPolicy(),
+		Wake:                            DefaultWakePolicy(),
 	}
 }

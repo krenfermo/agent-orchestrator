@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workflow/wake"
 )
 
 // ErrInvalid and ErrNotFound let the transport layer map failures to 422/404.
@@ -98,6 +99,19 @@ type masterPlanStore interface {
 	RejectWorkflowPlan(ctx stdctx.Context, runID string, now time.Time) (bool, error)
 }
 
+// WakeScheduler is the narrow interface Checkpoint 8N's wake.Scheduler
+// satisfies. Coordinator depends on this interface (not *wake.Scheduler
+// directly) so unit tests can substitute a fake in-memory implementation,
+// mirroring every other optional Deps field's own narrow-interface
+// convention. Optional: a nil WakeScheduler means a capacity wait is
+// recorded (run/step move to Waiting) but no wake is ever scheduled — same
+// nil-safe-optional convention as every other Deps field here.
+type WakeScheduler interface {
+	Schedule(ctx stdctx.Context, runID domain.WorkflowRunID, stepID *domain.WorkflowStepID, reason wake.Reason, knownResetAt *time.Time, priorAttempts int) (wake.Schedule, error)
+	CancelAllForRun(ctx stdctx.Context, runID domain.WorkflowRunID) (int, error)
+	NextForRun(ctx stdctx.Context, runID domain.WorkflowRunID) (*wake.Schedule, error)
+}
+
 // Projects resolves the project a run belongs to.
 type Projects interface {
 	GetProject(ctx stdctx.Context, id string) (domain.ProjectRecord, bool, error)
@@ -165,6 +179,13 @@ type Deps struct {
 	// here (e.g. ReviewerLauncher).
 	DecisionResolverLauncher DecisionResolverLauncher
 
+	// WakeScheduler backs Checkpoint 8N's durable wake-up scheduler: when a
+	// run/step enters a capacity wait, Coordinator asks WakeScheduler to
+	// persist a wake so a daemon-level poller can resume it automatically.
+	// Optional: nil means capacity waits are recorded exactly as before 8N,
+	// just with no automatic wake scheduled (a human must still intervene).
+	WakeScheduler WakeScheduler
+
 	// Clock and NewID are injectable for deterministic tests.
 	Clock func() time.Time
 	NewID func() string
@@ -210,6 +231,10 @@ type Coordinator struct {
 	// decisionResolverLauncher backs Checkpoint 8K-B pass 2's resolver
 	// dispatch. Optional.
 	decisionResolverLauncher DecisionResolverLauncher
+
+	// wakeScheduler backs Checkpoint 8N's durable wake-up scheduler.
+	// Optional.
+	wakeScheduler WakeScheduler
 }
 
 // New wires a Coordinator from its dependencies, defaulting the clock and id source.
@@ -241,6 +266,7 @@ func New(d Deps) *Coordinator {
 		questionsStore:           d.QuestionsStore,
 		paneReader:               d.PaneReader,
 		decisionResolverLauncher: d.DecisionResolverLauncher,
+		wakeScheduler:            d.WakeScheduler,
 		clock:                    clock,
 		newID:                    newID,
 	}
@@ -267,6 +293,13 @@ type RunDetail struct {
 	// summary — populated only for master runs (Plan != nil). Nil for a
 	// non-master run or a master run whose plan hasn't been approved yet.
 	IntegrationState *MasterIntegrationSummary
+	// NextWakeAt/WaitReason are Checkpoint 8N's read-time surfacing of the
+	// soonest still-open durable wake for this run (see
+	// wake.Scheduler.NextForRun) — populated only when wakeScheduler is
+	// configured and a wake is currently pending/claimed for this run. Both
+	// zero-value when not applicable, never a fabricated estimate.
+	NextWakeAt *time.Time
+	WaitReason string
 }
 
 // SessionLifecycleAuditEntry is one durable session-lifecycle decision plus
@@ -536,6 +569,17 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 			// naturally to "an open question always wins over a capacity
 			// wait" here.
 			detail.NextAction = waitingForCapacity
+		}
+	}
+
+	// Checkpoint 8N: surface the soonest still-open durable wake for this
+	// run, read live exactly like Routing/ReviewPolicy above — never
+	// persisted onto RunDetail beyond this one call.
+	if c.wakeScheduler != nil {
+		if next, werr := c.wakeScheduler.NextForRun(ctx, domain.WorkflowRunID(runID)); werr == nil && next != nil {
+			at := next.ScheduledAt
+			detail.NextWakeAt = &at
+			detail.WaitReason = string(next.Reason)
 		}
 	}
 

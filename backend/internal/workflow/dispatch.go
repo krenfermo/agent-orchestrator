@@ -176,7 +176,57 @@ func (c *Coordinator) markRunWaitingForCapacity(ctx stdctx.Context, run domain.W
 			return step, err
 		}
 	}
+	c.scheduleCapacityWake(ctx, run, &step, step.Kind, step.AssignedHarness)
 	return step, nil
+}
+
+// scheduleCapacityWake is Checkpoint 8N's single shared hook for persisting
+// a durable wake whenever a run/step parks on provider capacity — called
+// from markRunWaitingForCapacity (worker/reviewer waits) and from
+// decision_resolver_wiring.go's dispatchDecisionResolver (question-resolver
+// waits). Never fails the caller: a nil wakeScheduler or a scheduling error
+// only means no automatic wake gets scheduled — the run still correctly
+// enters/stays in Waiting either way, matching this codebase's "observers
+// don't invent failures" convention (compare recordAgentHealthFailure's own
+// best-effort, non-fatal write).
+func (c *Coordinator) scheduleCapacityWake(ctx stdctx.Context, run domain.WorkflowRun, step *domain.WorkflowStep, kind domain.WorkflowStepKind, harness string) {
+	if c.wakeScheduler == nil {
+		return
+	}
+	reason := wake.ReasonWorkerCapacity
+	if kind == domain.WorkflowStepReview {
+		reason = wake.ReasonReviewerCapacity
+	}
+
+	// Checkpoint 8N: never fabricate known_reset_at. Only a real, recorded
+	// AgentHealthEvent.CooldownUntil for the harness that was just attempted
+	// counts as a known reset; today's failover.go/health.go recording path
+	// does not populate CooldownUntil for workflow's TUI worker sessions (see
+	// health.go's own doc comment), so this will be nil in practice — that
+	// is expected and correct, not a bug.
+	var knownResetAt *time.Time
+	if harness != "" {
+		if health, err := c.agentHealth(ctx, domain.AgentHarness(harness)); err == nil {
+			knownResetAt = health.CooldownUntil
+		}
+	}
+
+	var stepID *domain.WorkflowStepID
+	if step != nil {
+		id := domain.WorkflowStepID(step.ID)
+		stepID = &id
+	}
+
+	sch, err := c.wakeScheduler.Schedule(ctx, domain.WorkflowRunID(run.ID), stepID, reason, knownResetAt, 0)
+	if err != nil {
+		if c.log != nil {
+			c.log.Warn("workflow: wake schedule failed", "run", run.ID, "reason", reason, "err", err)
+		}
+		return
+	}
+	if c.log != nil {
+		c.log.Info("workflow: wake scheduled", "run", run.ID, "reason", reason, "scheduledAt", sch.ScheduledAt, "attempt", sch.AttemptCount)
+	}
 }
 
 // attemptWorkHarness tries one provider for one work-step dispatch attempt

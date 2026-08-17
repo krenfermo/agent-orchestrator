@@ -691,6 +691,25 @@ type WorkflowTaskDependency struct {
 	DependsOnTaskID string
 }
 
+type WorkflowWakeSchedule struct {
+	ID             string
+	WorkflowRunID  string
+	WorkflowStepID sql.NullString
+	Reason         string
+	Status         string
+	IdempotencyKey string
+	ScheduledAt    time.Time
+	KnownResetAt   sql.NullTime
+	AttemptCount   int64
+	ClaimedBy      sql.NullString
+	ClaimedAt      sql.NullTime
+	CompletedAt    sql.NullTime
+	CancelledAt    sql.NullTime
+	LastError      string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
 type WorkspaceRepo struct {
 	ProjectID     domain.ProjectID
 	Name          string
