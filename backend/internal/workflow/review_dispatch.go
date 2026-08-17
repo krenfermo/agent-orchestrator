@@ -10,10 +10,11 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
-// reviewHarness is the only reviewer harness Checkpoint 8C dispatches: the
-// real Claude Code reviewer adapter. Not user-configurable in this
-// checkpoint — a future checkpoint may widen this.
-const reviewHarness = domain.ReviewerClaudeCode
+// reviewHarness was Checkpoint 8C's single hardcoded reviewer harness.
+// Checkpoint 8L replaces it with a per-step dynamic choice from
+// ExecutionRouter (see reviewerHarnessForStep in routing_dispatch.go):
+// cross-provider from whichever harness actually implemented the work step,
+// reused stably across all of that step's review/fix cycles.
 
 // ReviewRuns is the narrow review-schema read/write surface workflow reuses
 // (Checkpoints 8A/8C). *sqlite.Store satisfies it in production, backed by
@@ -119,7 +120,7 @@ func reviewStepOutboxIdempotencyKey(stepID string, cycleNumber int) string {
 // representar iteraciones, no columnas fix1/fix2/fix3"). Callers derive the
 // actual next/current cycle number from this count per their own call site's
 // semantics (see dispatchReviewStep and cascade.go's maybeDispatchFix).
-func (c *Coordinator) completedReviewCycles(ctx stdctx.Context, sessionID domain.SessionID) (int, error) {
+func (c *Coordinator) completedReviewCycles(ctx stdctx.Context, sessionID domain.SessionID, harness domain.ReviewerHarness) (int, error) {
 	if c.reviewRuns == nil {
 		return 0, nil
 	}
@@ -129,20 +130,20 @@ func (c *Coordinator) completedReviewCycles(ctx stdctx.Context, sessionID domain
 	}
 	count := 0
 	for _, r := range runs {
-		if r.Harness == reviewHarness {
+		if r.Harness == harness {
 			count++
 		}
 	}
 	return count, nil
 }
 
-func reviewPayloadJSON(workStepID, reviewStepID, workerSessionID, targetSHA string, cycleNumber int) string {
+func reviewPayloadJSON(workStepID, reviewStepID, workerSessionID, targetSHA string, harness domain.ReviewerHarness, cycleNumber int) string {
 	b, _ := json.Marshal(map[string]any{
 		"workStepId":      workStepID,
 		"reviewStepId":    reviewStepID,
 		"workerSessionId": workerSessionID,
 		"targetSha":       targetSHA,
-		"harness":         string(reviewHarness),
+		"harness":         string(harness),
 		"cycle":           cycleNumber,
 	})
 	return string(b)
@@ -324,7 +325,18 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		return reviewStep, nil
 	}
 
-	completedCycles, err := c.completedReviewCycles(ctx, domain.SessionID(sessionID))
+	// Checkpoint 8L: resolve the reviewer harness before touching the outbox
+	// — see reviewerHarnessForStep's doc comment for why this must be stable
+	// across cycles and only routed fresh on cycle 1.
+	harness, ok, err := c.reviewerHarnessForStep(ctx, run, workStep, reviewStep, domain.SessionID(sessionID), workCP)
+	if err != nil {
+		return reviewStep, err
+	}
+	if !ok {
+		return c.markRunWaitingForCapacity(ctx, run, reviewStep)
+	}
+
+	completedCycles, err := c.completedReviewCycles(ctx, domain.SessionID(sessionID), harness)
 	if err != nil {
 		return reviewStep, err
 	}
@@ -354,7 +366,7 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		WorkflowStepID: &reviewStep.ID,
 		IdempotencyKey: reviewStepOutboxIdempotencyKey(reviewStep.ID, cycleNumber),
 		CommandType:    domain.WorkflowOutboxTriggerReview,
-		Payload:        reviewPayloadJSON(workStep.ID, reviewStep.ID, sessionID, targetSHA, cycleNumber),
+		Payload:        reviewPayloadJSON(workStep.ID, reviewStep.ID, sessionID, targetSHA, harness, cycleNumber),
 		CreatedAt:      now,
 	})
 	if err != nil {
@@ -363,11 +375,11 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 
 	switch entry.Status {
 	case domain.WorkflowOutboxPending:
-		return c.dispatchReviewFromPending(ctx, run, reviewStep, entry, sessionID, branch, worktreePath, baseSHA, targetSHA)
+		return c.dispatchReviewFromPending(ctx, run, reviewStep, entry, sessionID, branch, worktreePath, baseSHA, targetSHA, harness)
 	case domain.WorkflowOutboxDispatched, domain.WorkflowOutboxAcknowledged:
 		// Dispatched: a previous attempt got at least as far as "about to
 		// launch," but we don't durably know if the launch itself completed.
-		return c.adoptReviewOrMarkAmbiguous(ctx, run, reviewStep, entry, sessionID, targetSHA)
+		return c.adoptReviewOrMarkAmbiguous(ctx, run, reviewStep, entry, sessionID, targetSHA, harness)
 	case domain.WorkflowOutboxFailed:
 		// Already durably recorded as failed; no auto-retry.
 		return reviewStep, nil
@@ -382,6 +394,7 @@ func (c *Coordinator) dispatchReviewFromPending(
 	reviewStep domain.WorkflowStep,
 	entry domain.WorkflowOutboxEntry,
 	workerSessionID, branch, worktreePath, baseSHA, targetSHA string,
+	harness domain.ReviewerHarness,
 ) (domain.WorkflowStep, error) {
 	now := c.clock()
 	if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, domain.WorkflowOutboxPending, domain.WorkflowOutboxDispatched, now, ""); err != nil {
@@ -405,7 +418,7 @@ func (c *Coordinator) dispatchReviewFromPending(
 	}
 
 	sessionID := domain.SessionID(workerSessionID)
-	reviewRow, err := c.ensureReviewRow(ctx, sessionID, domain.ProjectID(run.ProjectID))
+	reviewRow, err := c.ensureReviewRow(ctx, sessionID, domain.ProjectID(run.ProjectID), harness)
 	if err != nil {
 		return c.recordReviewDispatchFailure(ctx, run, reviewStep, entry, domain.WorkflowErrorReviewerLaunchFailed, err)
 	}
@@ -416,7 +429,7 @@ func (c *Coordinator) dispatchReviewFromPending(
 		ReviewID:      reviewRow.ID,
 		SessionID:     sessionID,
 		BatchID:       c.newID(),
-		Harness:       reviewHarness,
+		Harness:       harness,
 		TriggerSource: domain.ReviewTriggerManual,
 		PRURL:         "",
 		TargetSHA:     targetSHA,
@@ -441,7 +454,7 @@ func (c *Coordinator) dispatchReviewFromPending(
 	}
 	if err := c.reviewRuns.InsertReviewRun(ctx, reviewRun); err != nil {
 		if errors.Is(err, domain.ErrDuplicateReviewRun) {
-			existing, ok, getErr := c.reviewRuns.GetReviewRunBySessionPRSHAAndHarness(ctx, sessionID, "", targetSHA, reviewHarness)
+			existing, ok, getErr := c.reviewRuns.GetReviewRunBySessionPRSHAAndHarness(ctx, sessionID, "", targetSHA, harness)
 			if getErr != nil {
 				return c.recordReviewDispatchFailure(ctx, run, reviewStep, entry, domain.WorkflowErrorReviewerLaunchFailed, getErr)
 			}
@@ -462,11 +475,11 @@ func (c *Coordinator) dispatchReviewFromPending(
 		ReviewRunID:     reviewRunID,
 	})
 
-	if err := c.reviewerLauncher.Preflight(ctx, reviewHarness, worktreePath); err != nil {
+	if err := c.reviewerLauncher.Preflight(ctx, harness, worktreePath); err != nil {
 		return c.recordReviewDispatchFailure(ctx, run, reviewStep, entry, domain.WorkflowErrorReviewerLaunchFailed, fmt.Errorf("reviewer preflight: %w", err))
 	}
 	launch, err := c.reviewerLauncher.Launch(ctx, ReviewerLaunchRequest{
-		Harness:         reviewHarness,
+		Harness:         harness,
 		WorkerSessionID: sessionID,
 		ProjectID:       domain.ProjectID(run.ProjectID),
 		ReviewID:        reviewRow.ID,
@@ -487,9 +500,9 @@ func (c *Coordinator) dispatchReviewFromPending(
 // fresh row. No reviewer handle/agent-session id is known yet at this point
 // (workflow always launches a brand-new pane per review step; there is no
 // resumable prior pane the way a repeat internal/review.Trigger call has).
-func (c *Coordinator) ensureReviewRow(ctx stdctx.Context, sessionID domain.SessionID, projectID domain.ProjectID) (domain.Review, error) {
+func (c *Coordinator) ensureReviewRow(ctx stdctx.Context, sessionID domain.SessionID, projectID domain.ProjectID, harness domain.ReviewerHarness) (domain.Review, error) {
 	now := c.clock()
-	existing, ok, err := c.reviewRuns.GetReviewBySessionAndHarness(ctx, sessionID, reviewHarness)
+	existing, ok, err := c.reviewRuns.GetReviewBySessionAndHarness(ctx, sessionID, harness)
 	if err != nil {
 		return domain.Review{}, err
 	}
@@ -497,7 +510,7 @@ func (c *Coordinator) ensureReviewRow(ctx stdctx.Context, sessionID domain.Sessi
 		ID:        c.newID(),
 		SessionID: sessionID,
 		ProjectID: projectID,
-		Harness:   reviewHarness,
+		Harness:   harness,
 		PRURL:     "",
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -519,8 +532,8 @@ func (c *Coordinator) ensureReviewRow(ctx stdctx.Context, sessionID domain.Sessi
 // launches a second reviewer. A natural-key match (session+harness+empty
 // PR+target SHA) is real evidence and is adopted; anything else is surfaced
 // as ambiguous rather than silently resolved ("nunca asumir éxito").
-func (c *Coordinator) adoptReviewOrMarkAmbiguous(ctx stdctx.Context, run domain.WorkflowRun, reviewStep domain.WorkflowStep, entry domain.WorkflowOutboxEntry, workerSessionID, targetSHA string) (domain.WorkflowStep, error) {
-	existing, ok, err := c.reviewRuns.GetReviewRunBySessionPRSHAAndHarness(ctx, domain.SessionID(workerSessionID), "", targetSHA, reviewHarness)
+func (c *Coordinator) adoptReviewOrMarkAmbiguous(ctx stdctx.Context, run domain.WorkflowRun, reviewStep domain.WorkflowStep, entry domain.WorkflowOutboxEntry, workerSessionID, targetSHA string, harness domain.ReviewerHarness) (domain.WorkflowStep, error) {
+	existing, ok, err := c.reviewRuns.GetReviewRunBySessionPRSHAAndHarness(ctx, domain.SessionID(workerSessionID), "", targetSHA, harness)
 	if err != nil {
 		return reviewStep, err
 	}

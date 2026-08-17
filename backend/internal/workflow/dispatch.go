@@ -125,6 +125,20 @@ func (c *Coordinator) dispatchWorkStep(ctx stdctx.Context, run domain.WorkflowRu
 }
 
 func (c *Coordinator) dispatchFromPending(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, entry domain.WorkflowOutboxEntry, prompt string) (domain.WorkflowStep, error) {
+	// Checkpoint 8L: pick the initial worker harness via ExecutionRouter
+	// BEFORE touching the outbox CAS, so a waiting_for_capacity decision
+	// leaves the entry Pending — the next boot Reconcile/StartRun call
+	// re-evaluates routing against fresh capacity rather than getting stuck
+	// "dispatched" with nothing actually spawned (checkpoint brief §13: "No
+	// failure. No duplicate dispatch.").
+	decision, err := c.routeWorkerDispatch(ctx, run, step, 1)
+	if err != nil {
+		return step, err
+	}
+	if decision.Waiting {
+		return c.markRunWaitingForCapacity(ctx, run, step)
+	}
+
 	now := c.clock()
 	if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, domain.WorkflowOutboxPending, domain.WorkflowOutboxDispatched, now, ""); err != nil {
 		return step, err
@@ -142,7 +156,22 @@ func (c *Coordinator) dispatchFromPending(ctx stdctx.Context, run domain.Workflo
 		step.State = domain.WorkflowStepRunning
 	}
 
-	return c.attemptWorkHarness(ctx, run, step, entry, prompt, domain.HarnessCodex, 1)
+	return c.attemptWorkHarness(ctx, run, step, entry, prompt, decision.SelectedHarness, 1)
+}
+
+// markRunWaitingForCapacity is Checkpoint 8L's read-time-derivable
+// waiting_for_capacity representation (checkpoint brief §13): the run moves
+// to WorkflowRunWaiting (never needs_attention, never a synthetic failure),
+// the step and outbox entry are left untouched so no duplicate dispatch is
+// possible, and the routing_decision checkpoint already persisted by
+// routeWorkerDispatch is what explains which providers were considered.
+func (c *Coordinator) markRunWaitingForCapacity(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep) (domain.WorkflowStep, error) {
+	if run.State == domain.WorkflowRunRunning {
+		if _, err := c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunWaiting, c.clock()); err != nil {
+			return step, err
+		}
+	}
+	return step, nil
 }
 
 // attemptWorkHarness tries one provider for one work-step dispatch attempt
@@ -173,7 +202,7 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 		if aerr := c.recordWorkAttemptFailure(ctx, step.ID, harness, classification.Class, now); aerr != nil {
 			return step, aerr
 		}
-		if fallback, ok := c.selectFallbackForWork(ctx, run, harness, attemptNumber, classification); ok {
+		if fallback, ok := c.selectFallbackForWork(ctx, run, step.ID, harness, attemptNumber, classification); ok {
 			if c.log != nil {
 				c.log.Warn("workflow: work step failing over to fallback harness", "step", step.ID, "from", harness, "to", fallback, "class", classification.Class)
 			}

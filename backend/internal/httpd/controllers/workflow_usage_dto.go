@@ -78,6 +78,24 @@ type DecisionsUsageResponse struct {
 	ReusedDecision *int64 `json:"reusedDecision,omitempty"`
 }
 
+// RoutingUsageResponse is one step's Checkpoint 8L ExecutionRouter decision
+// on the wire — reason codes, policy version, preferred/selected harness and
+// the capacity snapshot consulted, so the frontend can compare e.g.
+// Claude-worker/Codex-reviewer vs Codex-worker/Claude-reviewer runs without
+// any cost claim.
+type RoutingUsageResponse struct {
+	Role                    string            `json:"role"`
+	StepKind                string            `json:"stepKind"`
+	PreferredHarness        string            `json:"preferredHarness,omitempty"`
+	SelectedHarness         string            `json:"selectedHarness,omitempty"`
+	FallbackOrder           []string          `json:"fallbackOrder,omitempty"`
+	FallbackUsed            bool              `json:"fallbackUsed"`
+	ReasonCodes             []string          `json:"reasonCodes"`
+	PolicyVersion           string            `json:"policyVersion"`
+	Waiting                 bool              `json:"waiting"`
+	CapacityStateAtDecision map[string]string `json:"capacityStateAtDecision,omitempty"`
+}
+
 // WorkflowUsageResponse is the full Checkpoint 8J usage section embedded in
 // a workflow run detail response.
 type WorkflowUsageResponse struct {
@@ -86,6 +104,7 @@ type WorkflowUsageResponse struct {
 	Advisory   SessionRefreshAdvisoryResponse `json:"advisory"`
 	Checkpoint TaskCheckpointSummaryResponse  `json:"checkpoint"`
 	Decisions  DecisionsUsageResponse         `json:"decisions"`
+	Routing    []RoutingUsageResponse         `json:"routing,omitempty"`
 }
 
 func workflowUsageResponse(v WorkflowUsageView) WorkflowUsageResponse {
@@ -146,7 +165,41 @@ func workflowUsageResponse(v WorkflowUsageView) WorkflowUsageResponse {
 			ResolverProvider: v.Decisions.ResolverProvider, ResolverDurationMS: v.Decisions.ResolverDurationMS,
 			ReusedDecision: v.Decisions.ReusedDecision,
 		},
+		Routing: routingUsageResponses(v.Routing),
 	}
+}
+
+func routingUsageResponses(rs []RoutingUsageView) []RoutingUsageResponse {
+	if len(rs) == 0 {
+		return nil
+	}
+	out := make([]RoutingUsageResponse, 0, len(rs))
+	for _, r := range rs {
+		d := r.RoutingDecision
+		reasons := make([]string, len(d.ReasonCodes))
+		for i, rc := range d.ReasonCodes {
+			reasons[i] = string(rc)
+		}
+		fallback := make([]string, len(d.FallbackOrder))
+		for i, h := range d.FallbackOrder {
+			fallback[i] = string(h)
+		}
+		var capacity map[string]string
+		if len(r.CapacityStateAtDecision) > 0 {
+			capacity = make(map[string]string, len(r.CapacityStateAtDecision))
+			for h, s := range r.CapacityStateAtDecision {
+				capacity[string(h)] = string(s)
+			}
+		}
+		out = append(out, RoutingUsageResponse{
+			Role: string(r.Role), StepKind: string(r.StepKind),
+			PreferredHarness: string(d.PreferredHarness), SelectedHarness: string(d.SelectedHarness),
+			FallbackOrder: fallback, FallbackUsed: r.FallbackUsed,
+			ReasonCodes: reasons, PolicyVersion: d.PolicyVersion, Waiting: d.Waiting,
+			CapacityStateAtDecision: capacity,
+		})
+	}
+	return out
 }
 
 const rfc3339Milli = "2006-01-02T15:04:05.000Z07:00"

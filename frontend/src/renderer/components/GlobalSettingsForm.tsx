@@ -6,6 +6,7 @@ import { EnvironmentSettingsSection } from "./settings/EnvironmentSettingsSectio
 import { GeneralSettingsSection } from "./settings/GeneralSettingsSection";
 import { ProjectsSettingsSection } from "./settings/ProjectsSettingsSection";
 import { ReportProblemDialog } from "./settings/ReportProblemDialog";
+import { RoutingPolicySettingsSection } from "./settings/RoutingPolicySettingsSection";
 import { SettingsLinkRow } from "./settings/SettingsRow";
 import { SettingsSection } from "./settings/SettingsSection";
 import { SourceControlSettingsSection } from "./settings/SourceControlSettingsSection";
@@ -57,6 +58,7 @@ export function GlobalSettingsForm({
 							/>
 						</SettingsSection>
 						<EfficiencyPolicySettingsSection />
+						<RoutingPolicySettingsSection />
 					</>
 				)}
 				{(section === "all" || section === "environment") && (

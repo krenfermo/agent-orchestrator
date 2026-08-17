@@ -108,6 +108,24 @@ const (
 	CapacityUnknown     CapacityState = "unknown"
 )
 
+// CapacityStateFromHealth is the single canonical AgentHealthState ->
+// CapacityState mapping (Checkpoint 8J/8L), reused by both
+// service/capacity's read model and workflow's ExecutionRouter so the two
+// never drift into two different vocabularies for the same underlying
+// agent_health_events fact.
+func CapacityStateFromHealth(s AgentHealthState) CapacityState {
+	switch s {
+	case AgentHealthAvailable:
+		return CapacityAvailable
+	case AgentHealthCooldown:
+		return CapacityCooldown
+	case AgentHealthUnavailable:
+		return CapacityUnavailable
+	default:
+		return CapacityUnknown
+	}
+}
+
 // CapacitySnapshot is the read-model exposed to Settings/dashboard consumers.
 // DetectedAt/ResetAt/Reason are populated only when a real agent_health_events
 // row exists; ResetAt stays nil whenever 8H itself never recorded a reset

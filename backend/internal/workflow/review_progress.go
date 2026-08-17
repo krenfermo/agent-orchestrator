@@ -85,7 +85,7 @@ func (c *Coordinator) observeReviewStep(ctx stdctx.Context, run domain.WorkflowR
 			if c.reviewRuns != nil {
 				if runs, err := c.reviewRuns.ListReviewRunsBySession(ctx, reviewRun.SessionID); err == nil {
 					for _, r := range runs {
-						if r.Harness == reviewHarness {
+						if r.Harness == reviewRun.Harness {
 							cycleCount++
 						}
 					}

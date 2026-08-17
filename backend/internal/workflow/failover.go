@@ -29,15 +29,17 @@ type AgentSwitcher interface {
 	SwitchAgent(ctx stdctx.Context, id domain.SessionID, cfg AgentSwitchRequest) (domain.AgentSwitch, error)
 }
 
-// workFallbackHarness is Checkpoint 8H §7's fixed V1 fallback order for work
-// dispatch: Codex preferred, Claude Code fallback. No reverse direction and
-// no fallback beyond one hop — widening this is explicitly out of scope
-// ("no implementes fallback reviewer a Codex", "no uses múltiples cuentas").
+// workFallbackHarness is the work-dispatch fallback order: one hop to the
+// opposite provider, no fallback beyond that and no third provider
+// ("no uses múltiples cuentas"). Checkpoint 8H originally fixed this
+// Codex-only-preferred/Claude-only-fallback; Checkpoint 8L's
+// ExecutionRouter can now select Claude Code as the *preferred* worker for
+// normal/high-risk complexity, so this reactive mid-session failover path
+// must be able to fail over in either direction too — it reuses the same
+// oppositeHarness table reviewer/decision-resolver routing already uses
+// (checkpoint brief §18: "Do NOT create a second failover implementation").
 func workFallbackHarness(current domain.AgentHarness) (domain.AgentHarness, bool) {
-	if current == domain.HarnessCodex {
-		return domain.HarnessClaudeCode, true
-	}
-	return "", false
+	return oppositeHarness(current)
 }
 
 // effectiveMaxWorkProviderAttempts reads the policy's work-attempt budget,
@@ -62,10 +64,15 @@ func effectiveMaxReviewProviderAttempts(p domain.WorkflowPolicy) int {
 // selectFallbackForWork decides whether a work-step dispatch failure should
 // fail over to a different harness (Checkpoint 8H §4/§8): the failure class
 // must be failover-eligible, the step must still be within its policy
-// attempt budget, a fallback harness must exist for V1's fixed order, and
-// that fallback harness must not itself be in a durable
-// unavailable/cooldown state.
-func (c *Coordinator) selectFallbackForWork(ctx stdctx.Context, run domain.WorkflowRun, harness domain.AgentHarness, attemptNumber int, cls ProviderFailureClassification) (domain.AgentHarness, bool) {
+// attempt budget, a fallback harness must exist for V1's fixed order, that
+// fallback harness must not itself be in a durable unavailable/cooldown
+// state, and — since Checkpoint 8L made workFallbackHarness bidirectional —
+// the fallback harness must not already have a prior attempt recorded on
+// this exact step. Without that last guard, two harnesses that are both
+// durably "cooldown but no CooldownUntil" (Available()==true per 8H's own
+// unknown-reset rule) would ping-pong indefinitely across duplicate failure
+// reports instead of terminating after one hop.
+func (c *Coordinator) selectFallbackForWork(ctx stdctx.Context, run domain.WorkflowRun, stepID string, harness domain.AgentHarness, attemptNumber int, cls ProviderFailureClassification) (domain.AgentHarness, bool) {
 	if !cls.Eligible {
 		return "", false
 	}
@@ -75,6 +82,13 @@ func (c *Coordinator) selectFallbackForWork(ctx stdctx.Context, run domain.Workf
 	fallback, ok := workFallbackHarness(harness)
 	if !ok {
 		return "", false
+	}
+	if attempts, err := c.store.ListWorkflowAttempts(ctx, stepID); err == nil {
+		for _, a := range attempts {
+			if domain.AgentHarness(a.Harness) == fallback {
+				return "", false
+			}
+		}
 	}
 	if health, err := c.agentHealth(ctx, fallback); err == nil && !health.Available(c.clock()) {
 		return "", false
@@ -197,7 +211,7 @@ func (c *Coordinator) ReportWorkStepProviderFailure(ctx stdctx.Context, runID, s
 	now := c.clock()
 	c.recordAgentHealthFailure(ctx, currentHarness, classification, now)
 
-	fallback, eligible := c.selectFallbackForWork(ctx, run, currentHarness, int(current.AttemptNumber), classification)
+	fallback, eligible := c.selectFallbackForWork(ctx, run, step.ID, currentHarness, int(current.AttemptNumber), classification)
 	if !eligible {
 		return c.failLiveWorkAttempt(ctx, run, step, current, classification, "not eligible for automatic failover, or budget/health exhausted", now)
 	}

@@ -155,7 +155,7 @@ func (c *Coordinator) maybeDispatchFix(ctx stdctx.Context, run domain.WorkflowRu
 		return fixStep, err
 	}
 	for _, r := range runs {
-		if r.Harness == reviewHarness {
+		if r.Harness == reviewRun.Harness {
 			cycleCount++
 		}
 	}

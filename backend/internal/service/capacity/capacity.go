@@ -74,14 +74,5 @@ func snapshotFrom(h domain.AgentHarness, ev domain.AgentHealthEvent, ok bool) do
 }
 
 func capacityStateFrom(s domain.AgentHealthState) domain.CapacityState {
-	switch s {
-	case domain.AgentHealthAvailable:
-		return domain.CapacityAvailable
-	case domain.AgentHealthCooldown:
-		return domain.CapacityCooldown
-	case domain.AgentHealthUnavailable:
-		return domain.CapacityUnavailable
-	default:
-		return domain.CapacityUnknown
-	}
+	return domain.CapacityStateFromHealth(s)
 }

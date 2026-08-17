@@ -45,6 +45,26 @@ type WorkflowPolicy struct {
 	// than the default "always resolve somehow" behavior. Read by pass 2's
 	// provider-selection logic; unused by any pass-1 code path.
 	AllowSameProviderResolver bool `json:"allowSameProviderResolver"`
+	// Routing is Checkpoint 8L's ExecutionRouter policy: per-role/complexity
+	// harness preference and cross-provider review independence. Embedded in
+	// WorkflowPolicy (rather than a second top-level snapshot) so every run's
+	// single policy_snapshot column continues to be the one place a run's
+	// full decision-making configuration is persisted and versioned
+	// together. A policy snapshot decoded from before 8L has this at its
+	// zero value; callers must use EffectiveRoutingPolicy, never read
+	// Routing directly.
+	Routing RoutingPolicy `json:"routing,omitempty"`
+}
+
+// EffectiveRoutingPolicy returns p.Routing, falling back to
+// DefaultRoutingPolicy() when the snapshot predates Checkpoint 8L (zero
+// Version). Mirrors effectiveMaxWorkProviderAttempts's own
+// forward-compatible zero-value fallback pattern.
+func (p WorkflowPolicy) EffectiveRoutingPolicy() RoutingPolicy {
+	if p.Routing.Version != "" {
+		return p.Routing
+	}
+	return DefaultRoutingPolicy()
 }
 
 // DefaultWorkflowPolicy is the fixed v1 policy every Checkpoint 8D run is
@@ -57,5 +77,6 @@ func DefaultWorkflowPolicy() WorkflowPolicy {
 		MaxWorkProviderAttempts:         3,
 		MaxReviewProviderAttempts:       3,
 		MaxAutoAnsweredQuestionsPerStep: 5,
+		Routing:                         DefaultRoutingPolicy(),
 	}
 }

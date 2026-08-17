@@ -276,6 +276,11 @@ type StepDetail struct {
 	// review_run was ever created) and this is the only durable record of
 	// why. Read live at GetRun time, mirroring Review's own read pattern.
 	ReviewPolicy *ReviewPolicyDecision
+	// Routing is Checkpoint 8L's ExecutionRouter decision for this step's
+	// role (worker/reviewer/planner), populated whenever a routing_decision
+	// checkpoint exists for it — read live, mirroring ReviewPolicy's own
+	// pattern.
+	Routing *domain.RoutingDecision
 }
 
 // ReviewSummary is a read-time-only projection of a review step's review_run
@@ -472,7 +477,11 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 				reviewPolicy = &decision
 			}
 		}
-		detail.Steps = append(detail.Steps, StepDetail{Step: step, Attempts: attempts, LatestCheckpoint: cpPtr, Review: reviewSummary, ReviewPolicy: reviewPolicy})
+		var routing *domain.RoutingDecision
+		if decision, ok := c.routingDecisionForStep(ctx, runID, step.ID); ok {
+			routing = &decision
+		}
+		detail.Steps = append(detail.Steps, StepDetail{Step: step, Attempts: attempts, LatestCheckpoint: cpPtr, Review: reviewSummary, ReviewPolicy: reviewPolicy, Routing: routing})
 	}
 
 	if checkpoints, cperr := c.store.ListWorkflowCheckpoints(ctx, runID); cperr == nil {

@@ -2167,6 +2167,20 @@ export interface components {
             usage: components["schemas"]["SessionUsageResponse"];
             verifyChecks?: null | number;
         };
+        ControllersRoutingUsageResponse: {
+            capacityStateAtDecision?: {
+                [key: string]: string;
+            };
+            fallbackOrder?: string[];
+            fallbackUsed: boolean;
+            policyVersion: string;
+            preferredHarness?: string;
+            reasonCodes: string[];
+            role: string;
+            selectedHarness?: string;
+            stepKind: string;
+            waiting: boolean;
+        };
         ControllersSecurePairingStatus: {
             active: boolean;
             available: boolean;
@@ -2275,6 +2289,7 @@ export interface components {
             decisions: components["schemas"]["ControllersDecisionsUsageResponse"];
             metrics: components["schemas"]["ControllersTaskUsefulWorkMetricsResponse"];
             roles: components["schemas"]["ControllersRoleUsageResponse"][];
+            routing?: components["schemas"]["ControllersRoutingUsageResponse"][];
         };
         ConversationAccountPayload: {
             authMode?: string;

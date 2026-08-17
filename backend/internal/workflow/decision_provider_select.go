@@ -7,20 +7,14 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
-// decisionResolverPreferredHarness is Checkpoint 8K-B's fixed cross-provider
-// preference table: claude-code asks -> codex resolves, codex asks ->
-// claude-code resolves. No reverse-of-workFallbackHarness reuse (that table
-// is Codex-preferred -> Claude-fallback for WORK dispatch, a different
-// concern with a different fixed order) and no third provider.
+// decisionResolverPreferredHarness is Checkpoint 8K-B's cross-provider
+// preference: claude-code asks -> codex resolves, codex asks -> claude-code
+// resolves. Checkpoint 8L extracts this exact table into execution_router.go's
+// oppositeHarness so reviewer routing and the decision resolver share one
+// mapping instead of two independently-hardcoded ones (checkpoint brief
+// §11: "No dupliques provider-selection logic").
 func decisionResolverPreferredHarness(asking domain.AgentHarness) (domain.AgentHarness, bool) {
-	switch asking {
-	case domain.HarnessClaudeCode:
-		return domain.HarnessCodex, true
-	case domain.HarnessCodex:
-		return domain.HarnessClaudeCode, true
-	default:
-		return "", false
-	}
+	return oppositeHarness(asking)
 }
 
 // DecisionProviderSelection is the outcome of selectDecisionResolverProvider:

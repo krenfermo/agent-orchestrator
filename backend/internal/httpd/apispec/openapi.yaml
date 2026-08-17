@@ -6149,6 +6149,42 @@ components:
       - stepKind
       - usage
       type: object
+    ControllersRoutingUsageResponse:
+      properties:
+        capacityStateAtDecision:
+          additionalProperties:
+            type: string
+          type: object
+        fallbackOrder:
+          items:
+            type: string
+          type: array
+        fallbackUsed:
+          type: boolean
+        policyVersion:
+          type: string
+        preferredHarness:
+          type: string
+        reasonCodes:
+          items:
+            type: string
+          type: array
+        role:
+          type: string
+        selectedHarness:
+          type: string
+        stepKind:
+          type: string
+        waiting:
+          type: boolean
+      required:
+      - role
+      - stepKind
+      - fallbackUsed
+      - reasonCodes
+      - policyVersion
+      - waiting
+      type: object
     ControllersSecurePairingStatus:
       properties:
         active:
@@ -6488,6 +6524,10 @@ components:
         roles:
           items:
             $ref: '#/components/schemas/ControllersRoleUsageResponse'
+          type: array
+        routing:
+          items:
+            $ref: '#/components/schemas/ControllersRoutingUsageResponse'
           type: array
       required:
       - roles

@@ -90,13 +90,17 @@ func newCoordinatorWithSwitcher(spawner workflowcore.Spawner, switcher workflowc
 
 var errRateLimited = errors.New("codex: 429 Too Many Requests, rate limit exceeded")
 
-// TestWorkDispatch_CodexRateLimitFailsOverToClaude covers Checkpoint 8H test
-// requirement #4: a Codex eligible failure selects Claude, in one
-// synchronous dispatch — the Codex attempt is recorded failed (never
-// deleted), a second attempt is recorded for claude-code, and the step ends
-// up with a live session on the fallback harness.
-func TestWorkDispatch_CodexRateLimitFailsOverToClaude(t *testing.T) {
-	spawner := &harnessAwareSpawner{failHarness: domain.HarnessCodex, failErr: errRateLimited}
+// TestWorkDispatch_ClaudeRateLimitFailsOverToCodex covers Checkpoint 8H test
+// requirement #4 under Checkpoint 8L's ExecutionRouter default policy: a
+// no-verification-plan "ship the thing" objective classifies as normal
+// complexity, whose default worker preference is claude-code (checkpoint
+// brief §7), so the initial dispatch now targets Claude first. A Claude
+// eligible failure selects Codex, in one synchronous dispatch — the Claude
+// attempt is recorded failed (never deleted), a second attempt is recorded
+// for codex, and the step ends up with a live session on the fallback
+// harness.
+func TestWorkDispatch_ClaudeRateLimitFailsOverToCodex(t *testing.T) {
+	spawner := &harnessAwareSpawner{failHarness: domain.HarnessClaudeCode, failErr: errRateLimited}
 	c, store, _ := newCoordinatorWithSwitcher(spawner, nil)
 	ctx := context.Background()
 
@@ -124,16 +128,16 @@ func TestWorkDispatch_CodexRateLimitFailsOverToClaude(t *testing.T) {
 		t.Fatalf("ListWorkflowAttempts: %v", err)
 	}
 	if len(attempts) != 2 {
-		t.Fatalf("attempts = %+v, want exactly 2 (codex failed, claude-code succeeded)", attempts)
+		t.Fatalf("attempts = %+v, want exactly 2 (claude-code failed, codex succeeded)", attempts)
 	}
-	if attempts[0].Harness != "codex" || attempts[0].Outcome != domain.WorkflowAttemptFailed || attempts[0].ErrorClass != domain.WorkflowErrorRateLimited {
-		t.Fatalf("attempt 1 = %+v, want codex/failed/rate_limited", attempts[0])
+	if attempts[0].Harness != "claude-code" || attempts[0].Outcome != domain.WorkflowAttemptFailed || attempts[0].ErrorClass != domain.WorkflowErrorRateLimited {
+		t.Fatalf("attempt 1 = %+v, want claude-code/failed/rate_limited", attempts[0])
 	}
-	if attempts[1].Harness != "claude-code" || attempts[1].Outcome != "" {
-		t.Fatalf("attempt 2 = %+v, want claude-code/running(no outcome yet)", attempts[1])
+	if attempts[1].Harness != "codex" || attempts[1].Outcome != "" {
+		t.Fatalf("attempt 2 = %+v, want codex/running(no outcome yet)", attempts[1])
 	}
-	if len(spawner.calls) != 2 || spawner.calls[0] != domain.HarnessCodex || spawner.calls[1] != domain.HarnessClaudeCode {
-		t.Fatalf("spawner calls = %v, want [codex claude-code]", spawner.calls)
+	if len(spawner.calls) != 2 || spawner.calls[0] != domain.HarnessClaudeCode || spawner.calls[1] != domain.HarnessCodex {
+		t.Fatalf("spawner calls = %v, want [claude-code codex]", spawner.calls)
 	}
 }
 
@@ -142,7 +146,7 @@ func TestWorkDispatch_CodexRateLimitFailsOverToClaude(t *testing.T) {
 // unclassified generic error) must never trigger automatic failover — only
 // one Spawn call, step fails, run needs attention.
 func TestWorkDispatch_NonEligibleFailureDoesNotFailOver(t *testing.T) {
-	spawner := &harnessAwareSpawner{failHarness: domain.HarnessCodex, failErr: errors.New("some internal bug")}
+	spawner := &harnessAwareSpawner{failHarness: domain.HarnessClaudeCode, failErr: errors.New("some internal bug")}
 	c, store, _ := newCoordinatorWithSwitcher(spawner, nil)
 	ctx := context.Background()
 
@@ -168,11 +172,13 @@ func TestWorkDispatch_NonEligibleFailureDoesNotFailOver(t *testing.T) {
 }
 
 // TestWorkDispatch_BudgetExhaustionStopsFailover covers test requirements
-// #10/#11: with MaxWorkProviderAttempts=1, a Codex failure must not attempt
+// #10/#11 under Checkpoint 8L's default worker preference (claude-code for
+// normal complexity, since this fixture's objective has no verification
+// plan): with MaxWorkProviderAttempts=1, a Claude failure must not attempt
 // any fallback even though one would otherwise be eligible — the budget is
 // enforced before the fallback harness is even chosen.
 func TestWorkDispatch_BudgetExhaustionStopsFailover(t *testing.T) {
-	spawner := &harnessAwareSpawner{failHarness: domain.HarnessCodex, failErr: errRateLimited}
+	spawner := &harnessAwareSpawner{failHarness: domain.HarnessClaudeCode, failErr: errRateLimited}
 	c, store, _ := newCoordinatorWithSwitcher(spawner, nil)
 	ctx := context.Background()
 
@@ -200,20 +206,21 @@ func TestWorkDispatch_BudgetExhaustionStopsFailover(t *testing.T) {
 	}
 	work := workStepFrom(detail)
 	attempts, _ := store.ListWorkflowAttempts(ctx, work.Step.ID)
-	if len(attempts) != 1 || attempts[0].Harness != "codex" {
-		t.Fatalf("attempts = %+v, want exactly 1 codex attempt", attempts)
+	if len(attempts) != 1 || attempts[0].Harness != "claude-code" {
+		t.Fatalf("attempts = %+v, want exactly 1 claude-code attempt", attempts)
 	}
 }
 
 // TestReportWorkStepProviderFailure_LiveSessionSwitchesAgent covers test
-// requirements #8/#9/#18: a live-session provider failure uses the reused
-// session_manager.SwitchAgent path (via the fakeSwitcher), the Codex attempt
-// is preserved (not deleted), a new attempt is opened for Claude, and the
-// same session id is reused (worktree/branch/session identity preserved —
-// no second session is spawned).
+// requirements #8/#9/#18 under Checkpoint 8L's default worker preference
+// (claude-code for normal complexity): a live-session provider failure uses
+// the reused session_manager.SwitchAgent path (via the fakeSwitcher), the
+// Claude attempt is preserved (not deleted), a new attempt is opened for
+// Codex, and the same session id is reused (worktree/branch/session
+// identity preserved — no second session is spawned).
 func TestReportWorkStepProviderFailure_LiveSessionSwitchesAgent(t *testing.T) {
 	spawner := &harnessAwareSpawner{}
-	switcher := newFakeSwitcher(domain.HarnessClaudeCode)
+	switcher := newFakeSwitcher(domain.HarnessCodex)
 	c, store, clk := newCoordinatorWithSwitcher(spawner, switcher)
 	ctx := context.Background()
 
@@ -224,7 +231,7 @@ func TestReportWorkStepProviderFailure_LiveSessionSwitchesAgent(t *testing.T) {
 	}
 	work := workStepFrom(detail)
 	if work.Step.SessionID == nil {
-		t.Fatalf("expected a live session after a successful codex spawn")
+		t.Fatalf("expected a live session after a successful claude-code spawn")
 	}
 	liveSessionID := *work.Step.SessionID
 
@@ -236,8 +243,8 @@ func TestReportWorkStepProviderFailure_LiveSessionSwitchesAgent(t *testing.T) {
 	if updated.SessionID == nil || *updated.SessionID != liveSessionID {
 		t.Fatalf("session id changed after failover: got %v, want unchanged %q (worktree/session identity must be preserved)", updated.SessionID, liveSessionID)
 	}
-	if len(switcher.calls) != 1 || switcher.calls[0].TargetHarness != domain.HarnessClaudeCode {
-		t.Fatalf("switcher calls = %+v, want exactly one call targeting claude-code", switcher.calls)
+	if len(switcher.calls) != 1 || switcher.calls[0].TargetHarness != domain.HarnessCodex {
+		t.Fatalf("switcher calls = %+v, want exactly one call targeting codex", switcher.calls)
 	}
 
 	attempts, err := store.ListWorkflowAttempts(ctx, work.Step.ID)
@@ -245,13 +252,13 @@ func TestReportWorkStepProviderFailure_LiveSessionSwitchesAgent(t *testing.T) {
 		t.Fatalf("ListWorkflowAttempts: %v", err)
 	}
 	if len(attempts) != 2 {
-		t.Fatalf("attempts = %+v, want exactly 2 (codex preserved, claude-code opened)", attempts)
+		t.Fatalf("attempts = %+v, want exactly 2 (claude-code preserved, codex opened)", attempts)
 	}
-	if attempts[0].Harness != "codex" || attempts[0].Outcome != domain.WorkflowAttemptFailed || attempts[0].ErrorClass != domain.WorkflowErrorRateLimited {
+	if attempts[0].Harness != "claude-code" || attempts[0].Outcome != domain.WorkflowAttemptFailed || attempts[0].ErrorClass != domain.WorkflowErrorRateLimited {
 		t.Fatalf("attempt 1 (must be preserved) = %+v", attempts[0])
 	}
-	if attempts[1].Harness != "claude-code" {
-		t.Fatalf("attempt 2 = %+v, want harness claude-code", attempts[1])
+	if attempts[1].Harness != "codex" {
+		t.Fatalf("attempt 2 = %+v, want harness codex", attempts[1])
 	}
 }
 

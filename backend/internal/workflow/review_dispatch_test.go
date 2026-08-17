@@ -233,9 +233,12 @@ func TestContinueRunNoOpBeforeWorkCompletes(t *testing.T) {
 	}
 }
 
-// Test: review is created exactly once, harness is claude-code, and repeated
-// ContinueRun calls are idempotent (no duplicate review_run, no duplicate
-// reviewer launch).
+// Test: review is created exactly once, harness is codex (Checkpoint 8L:
+// ExecutionRouter's default cross-provider reviewer independence — the
+// worker for this normal-complexity "ship the thing" objective routes to
+// claude-code by default, so the reviewer routes to the opposite provider,
+// codex), and repeated ContinueRun calls are idempotent (no duplicate
+// review_run, no duplicate reviewer launch).
 func TestContinueRunDispatchesReviewExactlyOnceAndIdempotent(t *testing.T) {
 	sessionFacts := newFakeSessionFacts()
 	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
@@ -272,8 +275,8 @@ func TestContinueRunDispatchesReviewExactlyOnceAndIdempotent(t *testing.T) {
 	if !ok {
 		t.Fatalf("review run %s not found", *review.Step.ReviewRunID)
 	}
-	if run.Harness != domain.ReviewerClaudeCode {
-		t.Fatalf("review run harness = %q, want claude-code", run.Harness)
+	if run.Harness != domain.ReviewerCodex {
+		t.Fatalf("review run harness = %q, want codex", run.Harness)
 	}
 	if run.AutoInjectReview {
 		t.Fatalf("review run AutoInjectReview = true, want false (no-fix-loop guardrail)")

@@ -51,6 +51,24 @@ type WorkflowUsageView struct {
 	// unlike token counts (see DecisionsUsageView's own doc comment for
 	// which of its fields follow the opposite "unknown != 0" rule).
 	Decisions DecisionsUsageView
+	// Routing is Checkpoint 8L's per-role ExecutionRouter telemetry, one
+	// entry per step that has a persisted routing_decision checkpoint. Nil
+	// entries are never fabricated: a step with no routing decision yet
+	// (e.g. a run created before 8L, or a step kind ExecutionRouter does not
+	// route) is simply absent from the slice.
+	Routing []RoutingUsageView
+}
+
+// RoutingUsageView is one step's Checkpoint 8L routing telemetry, derived
+// read-time from that step's routing_decision checkpoint — no new
+// instrumentation beyond what routeWorkerDispatch/routeReviewerDispatch
+// already persist.
+type RoutingUsageView struct {
+	Role                    domain.WorkflowRole
+	StepKind                domain.WorkflowStepKind
+	RoutingDecision         domain.RoutingDecision
+	CapacityStateAtDecision map[domain.AgentHarness]domain.CapacityState
+	FallbackUsed            bool
 }
 
 // DecisionsUsageView is Checkpoint 8K-B pass 3's telemetry section: derived
@@ -148,6 +166,7 @@ func BuildDecisionsUsageView(qs []domain.WorkflowQuestion, resolutions []domain.
 // UsageKnown=false, not zero.
 func BuildWorkflowUsageView(ctx context.Context, detail workflowcore.RunDetail, lookup SessionUsageLookup) WorkflowUsageView {
 	roles := make([]RoleUsageView, 0, len(detail.Steps))
+	var routing []RoutingUsageView
 	var attempts, reviewRuns, fixCycles int64
 	var reviewsSkipped bool
 	var verifyDuration *time.Duration
@@ -203,6 +222,13 @@ func BuildWorkflowUsageView(ctx context.Context, detail workflowcore.RunDetail, 
 				haveDuration = true
 			}
 		}
+		if sd.Routing != nil {
+			fallbackUsed := sd.Routing.SelectedHarness != "" && sd.Routing.SelectedHarness != sd.Routing.PreferredHarness
+			routing = append(routing, RoutingUsageView{
+				Role: role, StepKind: sd.Step.Kind, RoutingDecision: *sd.Routing,
+				CapacityStateAtDecision: sd.Routing.CapacityStateAtDecision, FallbackUsed: fallbackUsed,
+			})
+		}
 		if sd.Step.Kind == domain.WorkflowStepVerify {
 			if checks := verifyCheckCount(sd); checks != nil {
 				verifyChecks = checks
@@ -242,6 +268,7 @@ func BuildWorkflowUsageView(ctx context.Context, detail workflowcore.RunDetail, 
 		Metrics:    metrics,
 		Advisory:   BuildSessionRefreshAdvisory(detail, fixCycles),
 		Checkpoint: BuildTaskCheckpointSummary(detail),
+		Routing:    routing,
 	}
 }
 

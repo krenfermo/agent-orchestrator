@@ -81,11 +81,18 @@ func TestClassifyProviderFailure_NilError(t *testing.T) {
 }
 
 func TestWorkFallbackHarness(t *testing.T) {
+	// Checkpoint 8L: ExecutionRouter can prefer Claude Code as the initial
+	// worker for normal/high-risk complexity, so the reactive fallback path
+	// must work in both directions (checkpoint brief §18), not just
+	// Codex->Claude as fixed in 8H.
 	if fb, ok := workFallbackHarness(domain.HarnessCodex); !ok || fb != domain.HarnessClaudeCode {
 		t.Fatalf("codex fallback = %q,%v, want claude-code,true", fb, ok)
 	}
-	if _, ok := workFallbackHarness(domain.HarnessClaudeCode); ok {
-		t.Fatalf("claude-code must have no further V1 fallback")
+	if fb, ok := workFallbackHarness(domain.HarnessClaudeCode); !ok || fb != domain.HarnessCodex {
+		t.Fatalf("claude-code fallback = %q,%v, want codex,true", fb, ok)
+	}
+	if _, ok := workFallbackHarness(domain.AgentHarness("aider")); ok {
+		t.Fatalf("unknown harness must have no V1 fallback")
 	}
 }
 
