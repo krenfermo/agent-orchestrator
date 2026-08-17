@@ -281,6 +281,9 @@ func (c *Coordinator) getMasterRun(ctx stdctx.Context, run domain.WorkflowRun, s
 		attempts, _ := c.store.ListWorkflowAttempts(ctx, step.ID)
 		detail.Steps = append(detail.Steps, StepDetail{Step: step, Attempts: attempts})
 	}
+	if summary, err := c.buildIntegrationSummary(ctx, run.ID); err == nil {
+		detail.IntegrationState = summary
+	}
 	return detail, nil
 }
 
@@ -333,6 +336,16 @@ func (c *Coordinator) reconcileMasterTasks(ctx stdctx.Context, run domain.Workfl
 			}
 		}
 		if child.Run.State == domain.WorkflowRunCompleted {
+			// Checkpoint 8M.1: materialize this task's verified worktree
+			// content into the master run's integration ref BEFORE marking
+			// it completed, so a crash between the two never lets a task
+			// count as "done" without its code actually being propagated.
+			if err := c.promoteTaskToIntegration(ctx, run, *task, child); err != nil {
+				if run.State == domain.WorkflowRunRunning {
+					_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, c.clock())
+				}
+				return nil
+			}
 			_, _ = c.planStore.UpdateWorkflowTaskState(ctx, task.ID, domain.WorkflowTaskRunning, domain.WorkflowTaskCompleted, c.clock())
 			completed[task.ID] = true
 			active = false

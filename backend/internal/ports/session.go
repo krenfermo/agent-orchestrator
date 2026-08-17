@@ -26,7 +26,16 @@ type SpawnConfig struct {
 	Kind         domain.SessionKind
 	Harness      domain.AgentHarness
 	Branch       string
-	Prompt       string
+	// BaseRef overrides the project's default branch as the base a new
+	// session's worktree is created from. Empty keeps the existing
+	// project-default-branch behavior. Used by the master workflow
+	// (Checkpoint 8M.1) to base task N+1's worktree on the integration state
+	// containing every previously completed dependency task, instead of the
+	// project's default branch — the mechanism that lets task N+1 physically
+	// see task N's verified code. Accepts anything git can resolve as a ref
+	// (a branch name or a full ref path like refs/ao/workflows/<id>/integration).
+	BaseRef string
+	Prompt  string
 	// AgentConfig overrides the resolved project/role agent config for this
 	// single spawn. Empty fields keep the project defaults.
 	AgentConfig AgentConfig

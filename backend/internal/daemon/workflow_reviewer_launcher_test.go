@@ -37,6 +37,22 @@ func (f *fakeReviewerAdapter) ReviewMessage(_ context.Context, _ ports.ReviewInv
 	return "", nil
 }
 
+// Regression (Checkpoint 8M.1 §20): reviewer tool execution (e.g. pytest run
+// read-only during review) must default to PYTHONDONTWRITEBYTECODE=1, and a
+// reviewer adapter's own env must still be able to override it.
+func TestWorkflowReviewerLauncherRuntimeEnvSetsPythonDontWriteBytecode(t *testing.T) {
+	l := &workflowReviewerLauncher{dataDir: t.TempDir(), executable: func() (string, error) { return "/usr/local/bin/ao", nil }}
+	env := l.runtimeEnv(context.Background(), workflowcore.ReviewerLaunchRequest{ReviewID: "rev-1", Harness: domain.ReviewerClaudeCode}, nil, nil)
+	if env["PYTHONDONTWRITEBYTECODE"] != "1" {
+		t.Fatalf("expected PYTHONDONTWRITEBYTECODE=1, got %q", env["PYTHONDONTWRITEBYTECODE"])
+	}
+
+	overridden := l.runtimeEnv(context.Background(), workflowcore.ReviewerLaunchRequest{ReviewID: "rev-1", Harness: domain.ReviewerClaudeCode}, nil, map[string]string{"PYTHONDONTWRITEBYTECODE": "0"})
+	if overridden["PYTHONDONTWRITEBYTECODE"] != "0" {
+		t.Fatalf("expected adapter-supplied env to override the default, got %q", overridden["PYTHONDONTWRITEBYTECODE"])
+	}
+}
+
 type fakeReviewerResolver struct {
 	adapter *fakeReviewerAdapter
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"time"
 
@@ -23,6 +24,20 @@ func (workflowVerifyRunner) Run(ctx context.Context, req workflowcore.VerifyComm
 	defer cancel()
 	cmd := aoprocess.CommandContext(commandCtx, req.Command, req.Args...)
 	cmd.Dir = req.Directory
+	// Checkpoint 8M.1: skip Python's .pyc bytecode cache for Verify commands.
+	// A no-op for non-Python commands; for Python it stops __pycache__ from
+	// ever being generated, closing the E2E-observed false
+	// verify_workspace_changed failure mode at the source.
+	env := append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1")
+	if req.Directory != "" {
+		// os/exec only auto-derives PWD from Dir when Env is left nil (see
+		// exec.Cmd's own doc comment on Dir); setting Env explicitly here
+		// opts out of that, so it must be replicated by hand or a command
+		// like `pwd` would report the physical (symlink-resolved) directory
+		// instead of the logical one callers passed in.
+		env = append(env, "PWD="+req.Directory)
+	}
+	cmd.Env = env
 	stdout, stderr := &tailBuffer{limit: verifyOutputTailLimit}, &tailBuffer{limit: verifyOutputTailLimit}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr

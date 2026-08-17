@@ -142,6 +142,20 @@ type WorkflowRunDetailView struct {
 	// QuestionsReader wired, empty (not omitted) when wired but the run has
 	// never had a question.
 	Questions []WorkflowQuestionResponse `json:"questions,omitempty"`
+	// IntegrationState is Checkpoint 8M.1's git integration summary — present
+	// only for master runs (Plan != nil).
+	IntegrationState *WorkflowIntegrationStateView `json:"integrationState,omitempty"`
+}
+
+// WorkflowIntegrationStateView is Checkpoint 8M.1's read-only surface of
+// workflowcore.MasterIntegrationSummary.
+type WorkflowIntegrationStateView struct {
+	RefName         string `json:"refName"`
+	CurrentSHA      string `json:"currentSha,omitempty"`
+	TasksIntegrated int    `json:"tasksIntegrated"`
+	LatestTaskID    string `json:"latestTaskId,omitempty"`
+	Status          string `json:"status"`
+	ErrorClass      string `json:"errorClass,omitempty"`
 }
 
 type WorkflowPlanView struct {
@@ -280,6 +294,16 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 			pv.Validation = &validation
 		}
 		view.Plan = &pv
+	}
+	if detail.IntegrationState != nil {
+		view.IntegrationState = &WorkflowIntegrationStateView{
+			RefName:         detail.IntegrationState.RefName,
+			CurrentSHA:      detail.IntegrationState.CurrentSHA,
+			TasksIntegrated: detail.IntegrationState.TasksIntegrated,
+			LatestTaskID:    detail.IntegrationState.LatestTaskID,
+			Status:          detail.IntegrationState.Status,
+			ErrorClass:      detail.IntegrationState.ErrorClass,
+		}
 	}
 	planIDByTask := map[string]string{}
 	for _, task := range detail.Tasks {

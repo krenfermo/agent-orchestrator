@@ -6510,6 +6510,25 @@ components:
       - cachedTokens
       - tokensCertainty
       type: object
+    ControllersWorkflowIntegrationStateView:
+      properties:
+        currentSha:
+          type: string
+        errorClass:
+          type: string
+        latestTaskId:
+          type: string
+        refName:
+          type: string
+        status:
+          type: string
+        tasksIntegrated:
+          type: integer
+      required:
+      - refName
+      - tasksIntegrated
+      - status
+      type: object
     ControllersWorkflowQuestionResolutionResponse:
       properties:
         answer:
@@ -9990,6 +10009,8 @@ components:
       type: object
     WorkflowRunDetailView:
       properties:
+        integrationState:
+          $ref: '#/components/schemas/ControllersWorkflowIntegrationStateView'
         plan:
           $ref: '#/components/schemas/WorkflowPlanView'
         questions:

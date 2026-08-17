@@ -167,7 +167,11 @@ func (l *workflowReviewerLauncher) Launch(ctx context.Context, req workflowcore.
 }
 
 func (l *workflowReviewerLauncher) runtimeEnv(ctx context.Context, req workflowcore.ReviewerLaunchRequest, argv []string, base map[string]string) map[string]string {
-	env := make(map[string]string, len(base)+3)
+	env := make(map[string]string, len(base)+4)
+	// Checkpoint 8M.1: skip Python's .pyc bytecode cache for reviewer tool
+	// execution (e.g. pytest run read-only during review). base can still
+	// override this per-adapter below.
+	env["PYTHONDONTWRITEBYTECODE"] = "1"
 	for k, v := range base {
 		env[k] = v
 	}

@@ -896,6 +896,14 @@ func (m *Manager) createSessionWorkspace(ctx context.Context, project domain.Pro
 		if projectKind == domain.ProjectKindScratch {
 			baseBranch = ""
 		}
+		// BaseRef (Checkpoint 8M.1) overrides the project default so a master
+		// workflow task's worktree can be based on the accumulated
+		// integration state of its dependencies instead. Only single-repo
+		// (non-workspace-kind) projects are supported for 8M.1; the
+		// workspace-kind branch below deliberately never applies it.
+		if cfg.BaseRef != "" {
+			baseBranch = cfg.BaseRef
+		}
 		ws, err := m.workspace.Create(ctx, ports.WorkspaceConfig{
 			ProjectID:     cfg.ProjectID,
 			SessionID:     id,
@@ -3262,7 +3270,13 @@ func workspaceRepoList(repos []domain.WorkspaceRepoRecord) string {
 // the AO-internal vars last so they always win (a project cannot override
 // AO_SESSION_ID and friends).
 func spawnEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueID, dataDir string, projectEnv map[string]string) map[string]string {
-	env := make(map[string]string, len(projectEnv)+4)
+	env := make(map[string]string, len(projectEnv)+5)
+	// Checkpoint 8M.1: skip Python's .pyc bytecode cache for every worker
+	// session. A no-op for non-Python projects/languages; for Python it stops
+	// __pycache__ from ever being generated in the first place, which is
+	// strictly safer than filtering it out after the fact. projectEnv can
+	// still override this per-project below.
+	env["PYTHONDONTWRITEBYTECODE"] = "1"
 	for k, v := range projectEnv {
 		env[k] = v
 	}

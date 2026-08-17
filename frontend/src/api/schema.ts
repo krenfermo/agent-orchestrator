@@ -2288,6 +2288,14 @@ export interface components {
             verifyCheckCount?: null | number;
             verifyDurationMs?: null | number;
         };
+        ControllersWorkflowIntegrationStateView: {
+            currentSha?: string;
+            errorClass?: string;
+            latestTaskId?: string;
+            refName: string;
+            status: string;
+            tasksIntegrated: number;
+        };
         ControllersWorkflowQuestionResolutionResponse: {
             answer?: string;
             /** @enum {string} */
@@ -3599,6 +3607,7 @@ export interface components {
             verifyFileCheckCount: number;
         };
         WorkflowRunDetailView: {
+            integrationState?: components["schemas"]["ControllersWorkflowIntegrationStateView"];
             plan?: components["schemas"]["WorkflowPlanView"];
             questions?: components["schemas"]["WorkflowQuestionResponse"][];
             run: components["schemas"]["WorkflowRunView"];

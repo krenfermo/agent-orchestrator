@@ -204,6 +204,17 @@ type Workspace interface {
 	// present are skipped. Owning this here keeps git/process execution inside the
 	// workspace adapter rather than leaking into callers.
 	AddExclude(ctx context.Context, info WorkspaceInfo, patterns ...string) error
+	// MaterializeIntegrationCommit captures the worktree's current tracked
+	// and untracked state (respecting .gitignore, plus excludePatterns for
+	// known ephemeral artifacts) into a commit object under ref, parented on
+	// parentSHA (empty for the first commit on that ref), stamped with AO's
+	// own git identity — never the ambient user's — and WITHOUT mutating the
+	// working tree or the real index, matching StashUncommitted's
+	// plumbing-only approach (Checkpoint 8M.1). write-tree runs first: if the
+	// resulting tree is identical to parentSHA's tree, no new commit object
+	// is created and reused=true is returned with the existing head. Never
+	// pushes or touches any remote; ref is local-only under refs/ao/*.
+	MaterializeIntegrationCommit(ctx context.Context, info WorkspaceInfo, ref, parentSHA, message string, excludePatterns []string) (commitSHA, treeSHA string, reused bool, err error)
 }
 
 // WorkspaceObserver is an optional read-only capability implemented by

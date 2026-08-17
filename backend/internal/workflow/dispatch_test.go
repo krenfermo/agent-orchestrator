@@ -91,6 +91,10 @@ type fakeWorkspaceFacts struct {
 	calls int
 }
 
+func (f *fakeWorkspaceFacts) MaterializeIntegrationCommit(_ context.Context, _ ports.WorkspaceInfo, _, _, _ string, _ []string) (string, string, bool, error) {
+	return "", "", false, nil
+}
+
 func (f *fakeWorkspaceFacts) ObserveWorkspace(_ context.Context, _ ports.WorkspaceInfo) (ports.WorkspaceObservation, error) {
 	f.calls++
 	if f.err != nil {

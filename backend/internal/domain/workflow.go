@@ -259,6 +259,14 @@ const (
 	// Distinct from WorkflowErrorAgentStartFailed: this is a specific, typed
 	// signal, not a catch-all.
 	WorkflowErrorBinaryMissing WorkflowErrorClass = "binary_missing"
+	// WorkflowErrorIntegrationFailed means a master workflow task passed
+	// review+verify (the promotion gate) but AO's own internal integration
+	// commit could not be materialized (Checkpoint 8M.1) — e.g. the git
+	// plumbing step failed, or the project is a multi-repo workspace-kind
+	// project (unsupported for 8M.1 V1). The task is deliberately NOT marked
+	// completed when this fires: its worktree stays intact for diagnosis and
+	// the master run surfaces needs_attention with this as next_action.
+	WorkflowErrorIntegrationFailed WorkflowErrorClass = "integration_failed"
 )
 
 // Valid reports whether an error class is persistable. The empty value is
@@ -274,7 +282,8 @@ func (c WorkflowErrorClass) Valid() bool {
 		WorkflowErrorVerifyCommandFailed, WorkflowErrorVerifyTimeout,
 		WorkflowErrorVerifyEnvironment, WorkflowErrorVerifyArtifactMissing,
 		WorkflowErrorVerifyArtifactMismatch, WorkflowErrorVerifyWorkspaceChanged,
-		WorkflowErrorVerifyAmbiguous, WorkflowErrorCapacityExhausted, WorkflowErrorBinaryMissing:
+		WorkflowErrorVerifyAmbiguous, WorkflowErrorCapacityExhausted, WorkflowErrorBinaryMissing,
+		WorkflowErrorIntegrationFailed:
 		return true
 	default:
 		return false

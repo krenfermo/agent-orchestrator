@@ -62,6 +62,9 @@ func (w *recordingWorkspace) ForceDestroy(_ context.Context, info ports.Workspac
 	w.lastInfo = info
 	return nil
 }
+func (w *recordingWorkspace) MaterializeIntegrationCommit(_ context.Context, _ ports.WorkspaceInfo, _, _, _ string, _ []string) (string, string, bool, error) {
+	return "", "", false, nil
+}
 func (w *recordingWorkspace) StashUncommitted(_ context.Context, info ports.WorkspaceInfo) (string, error) {
 	w.stashCalls++
 	w.lastInfo = info

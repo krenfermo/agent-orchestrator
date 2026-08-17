@@ -48,6 +48,9 @@ func WorkspaceFingerprint(obs ports.WorkspaceObservation) string {
 
 	changes := make([]string, 0, len(obs.Changes))
 	for _, ch := range obs.Changes {
+		if IsEphemeralArtifactPath(ch.Path) {
+			continue
+		}
 		changes = append(changes, ch.Path+":"+ch.Status+":"+contentHash(obs.Path, ch.Path))
 	}
 	sort.Strings(changes)
@@ -58,6 +61,73 @@ func WorkspaceFingerprint(obs ports.WorkspaceObservation) string {
 	canonical := strings.Join(lines, "\n")
 	sum := sha256.Sum256([]byte(canonical))
 	return hex.EncodeToString(sum[:])
+}
+
+// ephemeralArtifactDirs and ephemeralArtifactFilePatterns are Checkpoint
+// 8M.1's WorkspaceFingerprintPolicy: a minimal, explicit list of runtime
+// cache/output paths that tooling (mainly Python) commonly leaves behind
+// even in repos whose own .gitignore doesn't happen to cover them. git
+// status already excludes anything .gitignore DOES cover (no --ignored flag
+// is ever passed — see ObserveWorkspace), so this list only closes the gap
+// git itself can't: cache artifacts that are untracked, not ignored, and
+// carry no semantic meaning about the task's actual work. Deliberately
+// short — see docs/plans and the 8M.1 checkpoint brief for the exact
+// candidate list; do not grow this ad hoc.
+var (
+	ephemeralArtifactDirs = []string{
+		"__pycache__", ".pytest_cache", "htmlcov", ".mypy_cache", ".ruff_cache", ".pyright",
+	}
+	ephemeralArtifactFileSuffixes = []string{".pyc", ".pyo"}
+	ephemeralArtifactFileExact    = map[string]bool{".coverage": true}
+	ephemeralArtifactFilePrefix   = ".coverage."
+)
+
+// IsEphemeralArtifactPath reports whether path (as reported by git status,
+// forward-slash separated and relative to the worktree root) is a known
+// ephemeral runtime artifact rather than a relevant source/config change.
+// Matching is by path segment/basename, never a bare substring match, so a
+// real file that merely contains one of these words in a longer name (e.g.
+// "mypycache_report.py") is never mistaken for the cache directory itself.
+func IsEphemeralArtifactPath(path string) bool {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	for _, seg := range segments {
+		for _, dir := range ephemeralArtifactDirs {
+			if seg == dir {
+				return true
+			}
+		}
+	}
+	base := segments[len(segments)-1]
+	if ephemeralArtifactFileExact[base] {
+		return true
+	}
+	if strings.HasPrefix(base, ephemeralArtifactFilePrefix) {
+		return true
+	}
+	for _, suffix := range ephemeralArtifactFileSuffixes {
+		if strings.HasSuffix(base, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// EphemeralArtifactExcludePatterns returns the same ephemeral-artifact
+// pattern list IsEphemeralArtifactPath matches against, as glob/segment
+// patterns a caller outside this package (the gitworktree adapter's
+// MaterializeIntegrationCommit) can apply directly — one policy list, two
+// consumers, per Checkpoint 8M.1: fingerprinting here, and excluding these
+// same artifacts from the internal integration commit.
+func EphemeralArtifactExcludePatterns() []string {
+	patterns := append([]string{}, ephemeralArtifactDirs...)
+	for _, suffix := range ephemeralArtifactFileSuffixes {
+		patterns = append(patterns, "*"+suffix)
+	}
+	for name := range ephemeralArtifactFileExact {
+		patterns = append(patterns, name)
+	}
+	patterns = append(patterns, ephemeralArtifactFilePrefix+"*")
+	return patterns
 }
 
 // contentHash reads path (relative to worktreePath, exactly as reported by

@@ -128,6 +128,36 @@ func ignoredCountArgs(worktree string) []string {
 	return []string{"-C", worktree, "status", "--ignored", "--porcelain"}
 }
 
+// lsFilesTempIndexArgs lists every path staged in the index. GIT_INDEX_FILE
+// must be set in the command's environment to scope this to a temp index.
+func lsFilesTempIndexArgs(worktree string) []string {
+	return []string{"-C", worktree, "ls-files"}
+}
+
+// updateIndexForceRemoveTempIndexArgs unstages the given paths from the temp
+// index without touching the working tree. GIT_INDEX_FILE must be set.
+func updateIndexForceRemoveTempIndexArgs(worktree string, paths []string) []string {
+	args := []string{"-C", worktree, "update-index", "--force-remove", "--"}
+	return append(args, paths...)
+}
+
+// revParseTreeArgs resolves ref's tree SHA (empty output, no error, if ref
+// doesn't exist — --quiet --verify never fails the process for a missing ref).
+func revParseTreeArgs(worktree, ref string) []string {
+	return []string{"-C", worktree, "rev-parse", "--verify", "--quiet", ref + "^{tree}"}
+}
+
+// updateRefCASArgs creates or moves ref to newSHA. When oldSHA is non-empty,
+// git performs a compare-and-swap: the update fails if ref's current value
+// isn't exactly oldSHA.
+func updateRefCASArgs(worktree, ref, newSHA, oldSHA string) []string {
+	args := []string{"-C", worktree, "update-ref", ref, newSHA}
+	if oldSHA != "" {
+		args = append(args, oldSHA)
+	}
+	return args
+}
+
 func baseRefCandidates(branch, defaultBranch string) []string {
 	candidates := []string{"origin/" + branch}
 	if strings.Contains(defaultBranch, "/") {

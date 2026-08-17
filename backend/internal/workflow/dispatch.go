@@ -31,6 +31,11 @@ type SessionFacts interface {
 // worktree state (current HEAD SHA, dirty state) without caching staleness.
 type WorkspaceFacts interface {
 	ObserveWorkspace(ctx stdctx.Context, info ports.WorkspaceInfo) (ports.WorkspaceObservation, error)
+	// MaterializeIntegrationCommit backs Checkpoint 8M.1's master task git
+	// state propagation (master_integration.go). Every production
+	// WorkspaceFacts value already implements this (it's ports.Workspace),
+	// so this only widens the interface workflow depends on, not the wiring.
+	MaterializeIntegrationCommit(ctx stdctx.Context, info ports.WorkspaceInfo, ref, parentSHA, message string, excludePatterns []string) (commitSHA, treeSHA string, reused bool, err error)
 }
 
 // workStepIssueID is the durable natural key correlating a workflow work
@@ -192,6 +197,7 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 		IssueID:     workStepIssueID(step.ID),
 		Prompt:      prompt,
 		DisplayName: workDisplayName(run.Objective),
+		BaseRef:     c.masterTaskBaseRef(ctx, run),
 	})
 	if err != nil {
 		classification := classifyProviderFailure(err)

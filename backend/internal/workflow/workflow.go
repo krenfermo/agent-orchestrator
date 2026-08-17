@@ -263,6 +263,10 @@ type RunDetail struct {
 	// session_context_pack.go's persistSessionLifecycleDecision doc comment
 	// for why these are deliberately not tied to a WorkflowStepID.
 	SessionLifecycle []SessionLifecycleAuditEntry
+	// IntegrationState is Checkpoint 8M.1's live-derived git integration
+	// summary — populated only for master runs (Plan != nil). Nil for a
+	// non-master run or a master run whose plan hasn't been approved yet.
+	IntegrationState *MasterIntegrationSummary
 }
 
 // SessionLifecycleAuditEntry is one durable session-lifecycle decision plus

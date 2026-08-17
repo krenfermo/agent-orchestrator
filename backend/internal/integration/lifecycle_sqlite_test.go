@@ -97,6 +97,9 @@ func (s *stubWorkspace) Restore(ctx context.Context, cfg ports.WorkspaceConfig) 
 	return s.Create(ctx, cfg)
 }
 func (s *stubWorkspace) ForceDestroy(context.Context, ports.WorkspaceInfo) error { return nil }
+func (s *stubWorkspace) MaterializeIntegrationCommit(_ context.Context, _ ports.WorkspaceInfo, _, _, _ string, _ []string) (string, string, bool, error) {
+	return "", "", false, nil
+}
 func (s *stubWorkspace) StashUncommitted(_ context.Context, _ ports.WorkspaceInfo) (string, error) {
 	return "", nil
 }

@@ -113,6 +113,16 @@ func (w *Workspace) AddExclude(ctx context.Context, info ports.WorkspaceInfo, pa
 	return adapter.AddExclude(ctx, info, patterns...)
 }
 
+// MaterializeIntegrationCommit delegates internal integration-commit creation
+// to the project-appropriate workspace adapter.
+func (w *Workspace) MaterializeIntegrationCommit(ctx context.Context, info ports.WorkspaceInfo, ref, parentSHA, message string, excludePatterns []string) (string, string, bool, error) {
+	adapter, err := w.adapterForProject(ctx, info.ProjectID)
+	if err != nil {
+		return "", "", false, err
+	}
+	return adapter.MaterializeIntegrationCommit(ctx, info, ref, parentSHA, message, excludePatterns)
+}
+
 // ObserveWorkspace delegates the read-only handoff snapshot to the selected
 // project adapter. Adapters that cannot observe state return a clear error
 // instead of fabricating repository facts.

@@ -39,6 +39,10 @@ type sequenceWorkspaceFacts struct {
 	calls        int
 }
 
+func (f *sequenceWorkspaceFacts) MaterializeIntegrationCommit(_ context.Context, _ ports.WorkspaceInfo, _, _, _ string, _ []string) (string, string, bool, error) {
+	return "", "", false, nil
+}
+
 func (f *sequenceWorkspaceFacts) ObserveWorkspace(_ context.Context, _ ports.WorkspaceInfo) (ports.WorkspaceObservation, error) {
 	i := f.calls
 	f.calls++

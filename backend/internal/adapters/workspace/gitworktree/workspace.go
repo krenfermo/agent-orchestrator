@@ -470,6 +470,152 @@ func (w *Workspace) StashUncommitted(ctx context.Context, info ports.WorkspaceIn
 	return ref, nil
 }
 
+// MaterializeIntegrationCommit captures the worktree's current tracked and
+// untracked state into a commit object under ref, using the exact same
+// temp-index plumbing as StashUncommitted (GIT_INDEX_FILE-scoped `add -A`,
+// which already respects .gitignore, then write-tree/commit-tree/update-ref)
+// so it never mutates the real working tree or index. Two additions beyond
+// StashUncommitted: paths matching excludePatterns are force-removed from the
+// temp index before write-tree (Checkpoint 8M.1 hygiene — cache artifacts
+// never enter the integration commit even when a target repo's own
+// .gitignore doesn't cover them), and the commit is stamped with AO's own
+// git identity via per-command env, never the ambient user's.
+//
+// write-tree runs before commit-tree so a no-op promotion (content identical
+// to parentSHA's tree) is detected cheaply and returns reused=true with no
+// new commit object — this is what keeps repeated/restarted promotion calls
+// idempotent without any additional locking.
+func (w *Workspace) MaterializeIntegrationCommit(ctx context.Context, info ports.WorkspaceInfo, ref, parentSHA, message string, excludePatterns []string) (string, string, bool, error) {
+	if info.Path == "" {
+		return "", "", false, fmt.Errorf("%w: empty path", ErrUnsafePath)
+	}
+	if ref == "" {
+		return "", "", false, errors.New("gitworktree: ref is required for MaterializeIntegrationCommit")
+	}
+	repo, err := w.repoPathForInfo(info)
+	if err != nil {
+		return "", "", false, err
+	}
+	path, err := w.validateManagedPath(info.Path)
+	if err != nil {
+		return "", "", false, err
+	}
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", "", false, fmt.Errorf("gitworktree: stale worktree %q: %w", path, ports.ErrWorkspaceStale)
+		}
+		return "", "", false, fmt.Errorf("gitworktree: stat worktree %q: %w", path, err)
+	}
+	records, err := w.listRecords(ctx, repo)
+	if err != nil {
+		return "", "", false, err
+	}
+	if _, ok := findWorktree(records, path); !ok {
+		return "", "", false, fmt.Errorf("gitworktree: worktree %q is not registered: %w", path, ports.ErrWorkspaceStale)
+	}
+
+	tmpIdx, err := os.CreateTemp("", "ao-integration-idx-*")
+	if err != nil {
+		return "", "", false, fmt.Errorf("gitworktree: reserve temp index path: %w", err)
+	}
+	tmpIdxPath := tmpIdx.Name()
+	_ = tmpIdx.Close()
+	_ = os.Remove(tmpIdxPath)
+	defer func() { _ = os.Remove(tmpIdxPath) }()
+
+	addCmd := exec.CommandContext(ctx, w.binary, addAllTempIndexArgs(path)...)
+	addCmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+tmpIdxPath)
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		return "", "", false, commandError{args: append([]string{w.binary}, addAllTempIndexArgs(path)...), output: string(out), err: err}
+	}
+
+	if len(excludePatterns) > 0 {
+		lsCmd := exec.CommandContext(ctx, w.binary, lsFilesTempIndexArgs(path)...)
+		lsCmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+tmpIdxPath)
+		lsOut, err := lsCmd.CombinedOutput()
+		if err != nil {
+			return "", "", false, commandError{args: append([]string{w.binary}, lsFilesTempIndexArgs(path)...), output: string(lsOut), err: err}
+		}
+		var excluded []string
+		for _, line := range strings.Split(strings.TrimRight(string(lsOut), "\n"), "\n") {
+			if line == "" {
+				continue
+			}
+			if matchesEphemeralPattern(line, excludePatterns) {
+				excluded = append(excluded, line)
+			}
+		}
+		if len(excluded) > 0 {
+			rmArgs := updateIndexForceRemoveTempIndexArgs(path, excluded)
+			rmCmd := exec.CommandContext(ctx, w.binary, rmArgs...)
+			rmCmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+tmpIdxPath)
+			if out, err := rmCmd.CombinedOutput(); err != nil {
+				return "", "", false, commandError{args: append([]string{w.binary}, rmArgs...), output: string(out), err: err}
+			}
+		}
+	}
+
+	writeTreeCmd := exec.CommandContext(ctx, w.binary, writeTreeArgs(path)...)
+	writeTreeCmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+tmpIdxPath)
+	treeOut, err := writeTreeCmd.CombinedOutput()
+	if err != nil {
+		return "", "", false, commandError{args: append([]string{w.binary}, writeTreeArgs(path)...), output: string(treeOut), err: err}
+	}
+	treeSHA := strings.TrimSpace(string(treeOut))
+
+	if parentSHA != "" {
+		parentTreeOut, err := w.run(ctx, w.binary, revParseTreeArgs(path, parentSHA)...)
+		if err == nil {
+			parentTreeSHA := strings.TrimSpace(string(parentTreeOut))
+			if parentTreeSHA != "" && parentTreeSHA == treeSHA {
+				return parentSHA, treeSHA, true, nil
+			}
+		}
+	}
+
+	commitCmd := exec.CommandContext(ctx, w.binary, commitTreeArgs(path, treeSHA, parentSHA, message)...)
+	commitCmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Agent Orchestrator", "GIT_AUTHOR_EMAIL=ao@local",
+		"GIT_COMMITTER_NAME=Agent Orchestrator", "GIT_COMMITTER_EMAIL=ao@local",
+	)
+	commitOut, err := commitCmd.CombinedOutput()
+	if err != nil {
+		return "", "", false, commandError{args: append([]string{w.binary}, commitTreeArgs(path, treeSHA, parentSHA, message)...), output: string(commitOut), err: err}
+	}
+	commitSHA := strings.TrimSpace(string(commitOut))
+
+	oldSHA := ""
+	if existing, err := w.run(ctx, w.binary, revParseVerifyArgs(path, ref)...); err == nil {
+		oldSHA = strings.TrimSpace(string(existing))
+	}
+	if _, err := w.run(ctx, w.binary, updateRefCASArgs(path, ref, commitSHA, oldSHA)...); err != nil {
+		return "", "", false, fmt.Errorf("gitworktree: update-ref %q: %w", ref, err)
+	}
+	return commitSHA, treeSHA, false, nil
+}
+
+// matchesEphemeralPattern reports whether path matches any pattern: a bare
+// name (e.g. "__pycache__", ".pytest_cache") matches a full path segment;
+// a glob (e.g. "*.pyc", ".coverage.*") matches path's basename.
+func matchesEphemeralPattern(path string, patterns []string) bool {
+	segments := strings.Split(path, "/")
+	base := segments[len(segments)-1]
+	for _, p := range patterns {
+		if strings.Contains(p, "*") {
+			if ok, _ := filepath.Match(p, base); ok {
+				return true
+			}
+			continue
+		}
+		for _, seg := range segments {
+			if seg == p {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func isNotGitRepositoryError(err error) bool {
 	return strings.Contains(err.Error(), "not a git repository")
 }

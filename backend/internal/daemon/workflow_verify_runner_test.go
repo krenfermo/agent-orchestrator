@@ -21,6 +21,19 @@ func TestWorkflowVerifyRunnerUsesRequestedDirectory(t *testing.T) {
 	}
 }
 
+// Regression (Checkpoint 8M.1 §19): Verify commands must run with
+// PYTHONDONTWRITEBYTECODE=1 so Python never leaves __pycache__ behind,
+// closing the E2E-observed false verify_workspace_changed failure mode.
+func TestWorkflowVerifyRunnerSetsPythonDontWriteBytecode(t *testing.T) {
+	got, err := (workflowVerifyRunner{}).Run(context.Background(), workflowcore.VerifyCommandRequest{Command: "env", Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.StdoutTail, "PYTHONDONTWRITEBYTECODE=1") {
+		t.Fatalf("expected PYTHONDONTWRITEBYTECODE=1 in verify command environment, got: %q", got.StdoutTail)
+	}
+}
+
 func TestWorkflowVerifyRunnerRejectsUnsafeCommands(t *testing.T) {
 	for _, tc := range []struct {
 		name string

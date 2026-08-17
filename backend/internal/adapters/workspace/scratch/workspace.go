@@ -114,6 +114,12 @@ func (w *Workspace) AddExclude(context.Context, ports.WorkspaceInfo, ...string) 
 	return nil
 }
 
+// MaterializeIntegrationCommit is a no-op for scratch because there is no
+// git object store to commit into.
+func (w *Workspace) MaterializeIntegrationCommit(context.Context, ports.WorkspaceInfo, string, string, string, []string) (string, string, bool, error) {
+	return "", "", false, errors.New("scratch workspace: integration commits are not supported")
+}
+
 // ObserveWorkspace validates the managed path and returns a path-only
 // observation. Scratch projects intentionally have no fabricated Git facts.
 func (w *Workspace) ObserveWorkspace(_ context.Context, info ports.WorkspaceInfo) (ports.WorkspaceObservation, error) {

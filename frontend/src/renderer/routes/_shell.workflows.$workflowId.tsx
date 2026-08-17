@@ -177,8 +177,33 @@ function WorkflowRunRoute() {
 									{t("shell.workflowsExecutionWorkflow")}
 								</Link>
 							)}
+							{workflow.integrationState?.currentSha && task.state === "completed" && (
+								<p className="mt-2 text-xs text-muted-foreground">
+									{t("shell.workflowsBasedOnIntegrationRevision", { sha: workflow.integrationState.currentSha.slice(0, 12) })}
+								</p>
+							)}
 						</article>
 					))}
+				</section>
+			)}
+
+			{workflow.integrationState && (
+				<section className="flex flex-col gap-2 rounded-lg border border-border p-3">
+					<h2 className="text-sm font-semibold">{t("shell.workflowsIntegrationState")}</h2>
+					<dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs text-muted-foreground">
+						<dt>{t("shell.workflowsIntegrationRevision")}</dt>
+						<dd>{workflow.integrationState.currentSha ? workflow.integrationState.currentSha.slice(0, 12) : "—"}</dd>
+						<dt>{t("shell.workflowsTasksIntegrated")}</dt>
+						<dd>{workflow.integrationState.tasksIntegrated}</dd>
+						{workflow.integrationState.latestTaskId && (
+							<>
+								<dt>{t("shell.workflowsLatestIntegratedTask")}</dt>
+								<dd>{workflow.integrationState.latestTaskId}</dd>
+							</>
+						)}
+						<dt>{t("shell.workflowsIntegrationStatus")}</dt>
+						<dd>{workflow.integrationState.status}{workflow.integrationState.errorClass ? ` · ${workflow.integrationState.errorClass}` : ""}</dd>
+					</dl>
 				</section>
 			)}
 
