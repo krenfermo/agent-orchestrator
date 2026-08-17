@@ -22,6 +22,7 @@ import (
 	activityobserver "github.com/aoagents/agent-orchestrator/backend/internal/observe/activity"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/reaper"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/providerruntime"
 	reviewcore "github.com/aoagents/agent-orchestrator/backend/internal/review"
 	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	reviewsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/review"
@@ -206,6 +207,18 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		BrowserCapabilities: browserCapabilities,
 		DataDir:             cfg.DataDir,
 		Logger:              log,
+		// Checkpoint 8P-B.2: relaunch/restore re-derives the same isolated
+		// runtime env a fresh Spawn would have used, from the session's own
+		// persisted owner -- same policy as workflow_wiring.go's resolver
+		// (same construction args, functionally identical, kept as a
+		// separate instance here since this wiring runs before the
+		// workflow coordinator exists).
+		RuntimeIsolation: &providerruntime.Resolver{
+			Owners:       store,
+			Profiles:     store,
+			DataDir:      cfg.DataDir,
+			TrustedLocal: cfg.TrustedLocalMode,
+		},
 	})
 	scmProvider := newMultiSCMProvider(cfg.GitLab, log)
 	// Build the multi-tracker dispatching to both GitHub and GitLab. The

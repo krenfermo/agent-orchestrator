@@ -24,7 +24,6 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
-	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	previewutil "github.com/aoagents/agent-orchestrator/backend/internal/preview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/previewserver"
@@ -148,61 +147,34 @@ type SessionsController struct {
 	Usage         UsageHookRecorder
 	PreviewServer ManagedPreviewServer
 	Capabilities  SessionCapabilityValidator
-	// Ownership and TrustedLocal back Checkpoint 8P-B.1's session ownership
-	// scoping, mirroring ProjectsController's OwnershipStore/TrustedLocal
-	// convention exactly: nil Ownership or TrustedLocal true disables
+	// Ownership and TrustedLocal back Checkpoint 8P-B.1/8P-B.2's session
+	// ownership scoping. nil Ownership or TrustedLocal true disables
 	// scoping entirely, which is what every pre-8P-B.1 configuration (no
-	// Ownership wired) keeps behaving like. Only get/send are scoped today
-	// -- see the doc comment on scopingEnforced below for why this is a
-	// deliberately partial, not exhaustive, closure of session ownership.
+	// Ownership wired) keeps behaving like. Every handler that reads or
+	// mutates one specific session's content/control calls
+	// sessionAccessAllowed, which delegates to the shared
+	// controllers.AuthorizeSessionAccess boundary -- see session_authz.go.
 	Ownership    SessionOwnershipStore
 	TrustedLocal bool
 }
 
-// SessionOwnershipStore backs Checkpoint 8P-B.1's minimal session
-// ownership scoping, narrow like ProjectsController's OwnershipStore.
-type SessionOwnershipStore interface {
-	GetSessionOwner(ctx context.Context, id domain.SessionID) (*domain.UserID, error)
+// scoping adapts this controller's two ownership fields into the shared
+// SessionScoping value AuthorizeSessionAccess expects.
+func (c *SessionsController) scoping() SessionScoping {
+	return SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal}
 }
 
-// scopingEnforced mirrors ProjectsController's own helper (see
-// projects.go) exactly.
-func (c *SessionsController) scopingEnforced() bool {
-	return !c.TrustedLocal && c.Ownership != nil
-}
-
-// sessionAccessAllowed enforces Checkpoint 8P-B.1's session ownership scoping
-// for one request, writing the locked 404 envelope (never 403 -- existence
-// must not leak, same convention as ProjectsController) and returning false
-// when the caller isn't the session's owner. Returns true immediately
-// (no-op) when scoping isn't enforced (trusted-local mode, or Ownership not
-// wired), or a user isn't required to be authenticated.
+// sessionAccessAllowed is this controller's call site for the canonical
+// session authorization boundary (Checkpoint 8P-B.2) -- see
+// controllers.AuthorizeSessionAccess's doc comment for the full contract.
 func (c *SessionsController) sessionAccessAllowed(w http.ResponseWriter, r *http.Request) bool {
-	if !c.scopingEnforced() {
-		return true
-	}
-	user, err := identity.Require(r)
-	if err != nil {
-		envelope.WriteError(w, r, err)
-		return false
-	}
-	if !c.sessionVisible(r.Context(), sessionID(r), user.ID) {
-		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "SESSION_NOT_FOUND", "session not found", nil)
-		return false
-	}
-	return true
+	return AuthorizeSessionAccess(w, r, c.scoping(), sessionID(r))
 }
 
-// sessionVisible mirrors ProjectsController.projectVisible: an unowned
-// session (nil owner -- predates 8P-B.1, or spawned while no owner could
-// be resolved) stays visible to everyone; only a session with a DIFFERENT
-// explicit owner is hidden. A lookup error fails closed to "not visible".
-func (c *SessionsController) sessionVisible(ctx context.Context, id domain.SessionID, current domain.UserID) bool {
-	owner, err := c.Ownership.GetSessionOwner(ctx, id)
-	if err != nil {
-		return false
-	}
-	return !(owner != nil && *owner != current)
+// sessionAccessAllowedFor is sessionAccessAllowed for a route whose id
+// path param isn't named "sessionId" (e.g. /orchestrators/{id}).
+func (c *SessionsController) sessionAccessAllowedFor(w http.ResponseWriter, r *http.Request, id domain.SessionID) bool {
+	return AuthorizeSessionAccess(w, r, c.scoping(), id)
 }
 
 // Register mounts the session routes on the supplied router.
@@ -458,6 +430,9 @@ func (c *SessionsController) preview(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/preview")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	sess, err := c.Svc.Get(r.Context(), sessionID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -479,6 +454,9 @@ func (c *SessionsController) preview(w http.ResponseWriter, r *http.Request) {
 func (c *SessionsController) previewFile(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/preview/files/*")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	sess, err := c.Svc.Get(r.Context(), sessionID(r))
@@ -510,6 +488,12 @@ func (c *SessionsController) PreviewOrigin(w http.ResponseWriter, r *http.Reques
 	}
 	if c.Svc == nil {
 		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "PREVIEW_NOT_FOUND", "Preview not found", nil)
+		return true
+	}
+	// Checkpoint 8P-B.2: PreviewOrigin runs after identity.Middleware (see
+	// router.go's ordering doc comment) so this now sees a resolved
+	// identity; deny before ever reading the session or serving a byte.
+	if !c.sessionAccessAllowedFor(w, r, id) {
 		return true
 	}
 	sess, err := c.Svc.Get(r.Context(), id)
@@ -588,6 +572,9 @@ func (c *SessionsController) listWorkspaceFiles(w http.ResponseWriter, r *http.R
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/workspace/files")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	files, err := c.Svc.ListWorkspaceFiles(r.Context(), sessionID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -599,6 +586,9 @@ func (c *SessionsController) listWorkspaceFiles(w http.ResponseWriter, r *http.R
 func (c *SessionsController) getWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/workspace/file")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	relPath := strings.TrimSpace(r.URL.Query().Get("path"))
@@ -617,6 +607,9 @@ func (c *SessionsController) getWorkspaceFile(w http.ResponseWriter, r *http.Req
 func (c *SessionsController) streamWorkspaceChanges(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/workspace/events")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	flusher, ok := w.(http.Flusher)
@@ -688,6 +681,9 @@ func (c *SessionsController) setPreview(w http.ResponseWriter, r *http.Request) 
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/preview")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	var in SetSessionPreviewRequest
 	if err := decodeJSON(r, &in); err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
@@ -750,6 +746,9 @@ func (c *SessionsController) clearPreview(w http.ResponseWriter, r *http.Request
 		apispec.NotImplemented(w, r, "DELETE", "/api/v1/sessions/{sessionId}/preview")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	updated, err := c.Svc.SetPreview(r.Context(), sessionID(r), "")
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -763,6 +762,9 @@ func (c *SessionsController) previewServerStatus(w http.ResponseWriter, r *http.
 		apispec.NotImplemented(w, r, http.MethodGet, "/api/v1/sessions/{sessionId}/preview/server")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	if !c.authorizePreviewServer(w, r) {
 		return
 	}
@@ -772,6 +774,9 @@ func (c *SessionsController) previewServerStatus(w http.ResponseWriter, r *http.
 func (c *SessionsController) startPreviewServer(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil || c.PreviewServer == nil || c.Capabilities == nil {
 		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/sessions/{sessionId}/preview/server")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	var in StartPreviewServerRequest
@@ -821,6 +826,9 @@ func (c *SessionsController) startPreviewServer(w http.ResponseWriter, r *http.R
 func (c *SessionsController) stopPreviewServer(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil || c.PreviewServer == nil || c.Capabilities == nil {
 		apispec.NotImplemented(w, r, http.MethodDelete, "/api/v1/sessions/{sessionId}/preview/server")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	if !c.authorizePreviewServer(w, r) {
@@ -927,6 +935,9 @@ func (c *SessionsController) listPRs(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/pr")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	prs, err := c.Svc.ListPRSummaries(r.Context(), sessionID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -938,6 +949,9 @@ func (c *SessionsController) listPRs(w http.ResponseWriter, r *http.Request) {
 func (c *SessionsController) claimPR(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/pr/claim")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	var in ClaimPRRequest
@@ -966,6 +980,9 @@ func (c *SessionsController) rename(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "PATCH", "/api/v1/sessions/{sessionId}")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	var in RenameSessionRequest
 	if err := decodeJSON(r, &in); err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
@@ -986,6 +1003,9 @@ func (c *SessionsController) rename(w http.ResponseWriter, r *http.Request) {
 func (c *SessionsController) setMergePolicy(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "PATCH", "/api/v1/sessions/{sessionId}/merge-policy")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	var in SetSessionMergePolicyRequest
@@ -1011,6 +1031,9 @@ func (c *SessionsController) setAutoInjectReviewPolicy(w http.ResponseWriter, r 
 		apispec.NotImplemented(w, r, "PATCH", "/api/v1/sessions/{sessionId}/auto-inject-review")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	var in SetSessionAutoInjectReviewRequest
 	if err := decodeJSON(r, &in); err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
@@ -1032,6 +1055,9 @@ func (c *SessionsController) setAutoInjectReviewPolicy(w http.ResponseWriter, r 
 func (c *SessionsController) setAutoInjectCIPolicy(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "PATCH", "/api/v1/sessions/{sessionId}/auto-inject-ci")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	// Decode through a pointer so an omitted required field remains distinct
@@ -1068,6 +1094,9 @@ func (c *SessionsController) setReviewer(w http.ResponseWriter, r *http.Request)
 		apispec.NotImplemented(w, r, "PUT", "/api/v1/sessions/{sessionId}/reviewer")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	var in SetSessionReviewerRequest
 	if err := decodeJSON(r, &in); err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
@@ -1084,6 +1113,9 @@ func (c *SessionsController) setReviewer(w http.ResponseWriter, r *http.Request)
 func (c *SessionsController) setAutoReview(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "PUT", "/api/v1/sessions/{sessionId}/auto-review")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	var in SetSessionAutoReviewRequest
@@ -1108,6 +1140,9 @@ func (c *SessionsController) restore(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/restore")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	out, err := c.Svc.Restore(r.Context(), sessionID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -1119,6 +1154,9 @@ func (c *SessionsController) restore(w http.ResponseWriter, r *http.Request) {
 func (c *SessionsController) pin(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/pin")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	sess, err := c.Svc.Pin(r.Context(), sessionID(r))
@@ -1134,6 +1172,9 @@ func (c *SessionsController) unpin(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "DELETE", "/api/v1/sessions/{sessionId}/pin")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	sess, err := c.Svc.Unpin(r.Context(), sessionID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -1145,6 +1186,9 @@ func (c *SessionsController) unpin(w http.ResponseWriter, r *http.Request) {
 func (c *SessionsController) resumeAgent(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/resume-agent")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	out, err := c.Svc.ResumeAgent(r.Context(), sessionID(r))
@@ -1163,6 +1207,9 @@ func (c *SessionsController) resumeAgent(w http.ResponseWriter, r *http.Request)
 func (c *SessionsController) switchAgent(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/switch-agent")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	var in SwitchAgentRequest
@@ -1202,6 +1249,9 @@ func (c *SessionsController) listAgentSwitches(w http.ResponseWriter, r *http.Re
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/agent-switches")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	switches, err := c.Svc.ListAgentSwitches(r.Context(), sessionID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -1213,6 +1263,9 @@ func (c *SessionsController) listAgentSwitches(w http.ResponseWriter, r *http.Re
 func (c *SessionsController) submitAgentHandoff(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/agent-switches/{switchId}/handoff")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxAgentHandoffBodyBytes)
@@ -1249,6 +1302,9 @@ func (c *SessionsController) kill(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/kill")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	freed, err := c.Svc.Kill(r.Context(), sessionID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -1266,6 +1322,9 @@ func (c *SessionsController) kill(w http.ResponseWriter, r *http.Request) {
 func (c *SessionsController) rollback(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/rollback")
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	out, err := c.Svc.RollbackSpawn(r.Context(), sessionID(r))
@@ -1546,6 +1605,9 @@ func (c *SessionsController) listOrchestrators(w http.ResponseWriter, r *http.Re
 func (c *SessionsController) getOrchestrator(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/orchestrators/{id}")
+		return
+	}
+	if !c.sessionAccessAllowedFor(w, r, orchestratorID(r)) {
 		return
 	}
 	sess, err := c.Svc.Get(r.Context(), orchestratorID(r))

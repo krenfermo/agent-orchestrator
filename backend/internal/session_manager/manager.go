@@ -276,6 +276,13 @@ type Store interface {
 	// doesn't exist (never expected right after CreateSession, but treated
 	// as non-fatal regardless).
 	SetSessionOwner(ctx context.Context, id domain.SessionID, owner domain.UserID) (bool, error)
+	// GetSessionOwner resolves a session's persisted owner (Checkpoint
+	// 8P-B.2) so relaunch/restore paths can re-derive the same isolated
+	// runtime env a fresh Spawn would have used, without depending on the
+	// workflow run that originally created it (which may no longer be the
+	// authoritative source, or may not exist for a manually spawned
+	// session). Nil return means unowned -- see runtime_home.go.
+	GetSessionOwner(ctx context.Context, id domain.SessionID) (*domain.UserID, error)
 }
 
 // Manager coordinates internal session spawn, restore, kill, and cleanup over
@@ -305,6 +312,9 @@ type Manager struct {
 	browserCapabilities BrowserCapabilityIssuer
 	dataDir             string
 	clock               func() time.Time
+	// runtimeIsolation backs Checkpoint 8P-B.2's relaunch isolation.
+	// Optional.
+	runtimeIsolation RelaunchRuntimeIsolation
 	// openTranscriptFile is os.Open in production. The narrow seam lets tests
 	// deterministically prove that a post-stop transcript read failure falls
 	// back without advertising the provider path.
@@ -562,6 +572,22 @@ type Deps struct {
 	// Logger receives spawn-time diagnostics (e.g. when the session PATH
 	// cannot be pinned to the daemon binary). Nil defaults to slog.Default().
 	Logger *slog.Logger
+	// RuntimeIsolation backs Checkpoint 8P-B.2's relaunch isolation: given
+	// a session's persisted owner (from Store.GetSessionOwner) and its
+	// harness, it re-derives the same isolated provider runtime env a
+	// fresh Spawn would have used, or blocks with
+	// ports.ErrProviderProfileRequired if the owner's profile for that
+	// harness is now missing/disabled. Optional: nil preserves pre-8P-B.2
+	// behavior exactly (relaunch/restore never touches env at all).
+	RuntimeIsolation RelaunchRuntimeIsolation
+}
+
+// RelaunchRuntimeIsolation is session_manager's narrow view of
+// providerruntime.Resolver.ResolveForOwner -- defined here (the consumer),
+// not in the providerruntime package, so this package doesn't need to
+// import it just for one method signature.
+type RelaunchRuntimeIsolation interface {
+	ResolveForOwner(ctx context.Context, owner domain.UserID, harness domain.AgentHarness) (map[string]string, error)
 }
 
 // New builds a Session Manager from its dependencies, defaulting the clock to
@@ -580,6 +606,7 @@ func New(d Deps) *Manager {
 		browserCapabilities:          d.BrowserCapabilities,
 		dataDir:                      d.DataDir,
 		clock:                        d.Clock,
+		runtimeIsolation:             d.RuntimeIsolation,
 		openTranscriptFile:           os.Open,
 		lookPath:                     d.LookPath,
 		executable:                   d.Executable,
@@ -1690,6 +1717,28 @@ func (m *Manager) relaunchSessionWithPolicy(ctx context.Context, operation strin
 	rec, err = m.persistBrowserCapabilityVerifier(ctx, rec, browserCapabilityVerifier)
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("%s %s: persist browser capability: %w", operation, rec.ID, err)
+	}
+	// Checkpoint 8P-B.2: re-derive the same isolated runtime env a fresh
+	// Spawn would have used, from the session's own persisted owner --
+	// never the workflow run (which may no longer exist or apply), never
+	// a daemon-global fallback. Applied last, after every other env
+	// source, so it always wins; a no-op when runtimeIsolation/store isn't
+	// wired or the session predates ownership (nil owner).
+	if m.runtimeIsolation != nil {
+		owner, ownerErr := m.store.GetSessionOwner(ctx, rec.ID)
+		if ownerErr != nil {
+			return RestoreResult{}, fmt.Errorf("%s %s: resolve session owner: %w", operation, rec.ID, ownerErr)
+		}
+		if owner != nil {
+			relaunchEnv, envErr := m.runtimeIsolation.ResolveForOwner(ctx, *owner, rec.Harness)
+			if envErr != nil {
+				m.cleanupSystemPromptDir(rec.ID)
+				return RestoreResult{}, fmt.Errorf("%s %s: %w", operation, rec.ID, envErr)
+			}
+			for k, v := range relaunchEnv {
+				env[k] = v
+			}
+		}
 	}
 	m.augmentAgentRuntimeEnv(agent, env)
 	if err := m.prepareWorkspace(ctx, agent, rec.ID, ws.Path, systemPrompt, systemPromptFile, agentConfig, env); err != nil {

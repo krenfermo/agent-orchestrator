@@ -41,6 +41,10 @@ type fakeStore struct {
 	// sharedLog, when non-nil, receives an ordered call entry for each
 	// UpsertSessionWorktree invocation so ordering tests can compare across fakes.
 	sharedLog *[]string
+	// owners models the sessions.owner_user_id column (Checkpoint 8P-B.1/
+	// 8P-B.2) so relaunch-isolation tests can assert the persisted owner
+	// survives a restore/resume, not just the initial Spawn.
+	owners map[domain.SessionID]domain.UserID
 }
 
 func newFakeStore() *fakeStore {
@@ -152,8 +156,19 @@ func (f *fakeStore) DeleteSessionWorktrees(_ context.Context, id domain.SessionI
 	delete(f.worktrees, id)
 	return nil
 }
-func (f *fakeStore) SetSessionOwner(_ context.Context, _ domain.SessionID, _ domain.UserID) (bool, error) {
+func (f *fakeStore) SetSessionOwner(_ context.Context, id domain.SessionID, owner domain.UserID) (bool, error) {
+	if f.owners == nil {
+		f.owners = map[domain.SessionID]domain.UserID{}
+	}
+	f.owners[id] = owner
 	return true, nil
+}
+func (f *fakeStore) GetSessionOwner(_ context.Context, id domain.SessionID) (*domain.UserID, error) {
+	owner, ok := f.owners[id]
+	if !ok {
+		return nil, nil
+	}
+	return &owner, nil
 }
 
 type fakeLCM struct {

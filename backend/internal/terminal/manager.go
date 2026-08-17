@@ -63,6 +63,13 @@ type Manager struct {
 	inputLeaseMu sync.RWMutex
 	inputLease   sessionguard.InputLease
 
+	// attachAuthorizer gates every terminal open (Checkpoint 8P-B.2): nil
+	// (never wired, or a build without application-user identity at all)
+	// is a permanent no-op -- every attach is allowed, exactly as before
+	// this checkpoint. See SetAttachAuthorizer.
+	attachAuthorizerMu sync.RWMutex
+	attachAuthorizer   func(ctx context.Context, id string) bool
+
 	// inputMu makes BeginInputDrain atomic with pane writes. Once a drain returns,
 	// every write that began before it has finished and every later write is
 	// refused until the matching release runs.
@@ -103,6 +110,29 @@ func (m *Manager) SetSessionInputLease(lease sessionguard.InputLease) {
 	m.inputLeaseMu.Lock()
 	m.inputLease = lease
 	m.inputLeaseMu.Unlock()
+}
+
+// SetAttachAuthorizer late-binds the per-terminal-id attach authorization
+// check (Checkpoint 8P-B.2), mirroring SetSessionInputLease's late-binding
+// pattern: httpd wires this after the Manager exists, using the WS
+// connection's own request context (which already carries the resolved
+// identity.Middleware identity -- see internal/httpd/terminal_mux.go) and
+// the shared SessionOwnershipStore. fn returning false denies the attach
+// before any PTY is joined and before any output byte is sent.
+func (m *Manager) SetAttachAuthorizer(fn func(ctx context.Context, id string) bool) {
+	m.attachAuthorizerMu.Lock()
+	m.attachAuthorizer = fn
+	m.attachAuthorizerMu.Unlock()
+}
+
+func (m *Manager) authorizeAttach(ctx context.Context, id string) bool {
+	m.attachAuthorizerMu.RLock()
+	fn := m.attachAuthorizer
+	m.attachAuthorizerMu.RUnlock()
+	if fn == nil {
+		return true
+	}
+	return fn(ctx, id)
 }
 
 func (m *Manager) acquireSessionInput(id string) (func(), bool) {
@@ -336,6 +366,7 @@ func (m *Manager) Serve(ctx context.Context, conn wsConn) {
 
 	c := &connState{
 		mgr:    m,
+		ctx:    ctx,
 		conn:   conn,
 		cancel: cancel,
 		out:    make(chan serverMsg, defaultWriteBuffer),
@@ -361,6 +392,7 @@ func (m *Manager) Serve(ctx context.Context, conn wsConn) {
 // connState is the per-connection mutable state.
 type connState struct {
 	mgr    *Manager
+	ctx    context.Context
 	conn   wsConn
 	cancel context.CancelFunc
 	out    chan serverMsg
@@ -420,6 +452,14 @@ func (c *connState) handleTerminal(msg clientMsg) {
 func (c *connState) openTerminal(id string, rows, cols uint16, role string) {
 	if id == "" {
 		c.enqueue(serverMsg{Ch: chTerminal, Type: msgError, Error: "missing terminal id"})
+		return
+	}
+	// Checkpoint 8P-B.2: authorize before touching tmux/runtime at all --
+	// no PTY is joined, no pane output byte is ever sent, and the denial
+	// message deliberately does not distinguish "not yours" from "doesn't
+	// exist" (existence must not leak over this channel either).
+	if !c.mgr.authorizeAttach(c.ctx, id) {
+		c.enqueue(serverMsg{Ch: chTerminal, ID: id, Type: msgError, Error: "session not found"})
 		return
 	}
 	c.mu.Lock()

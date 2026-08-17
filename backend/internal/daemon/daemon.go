@@ -27,6 +27,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/notify"
 	usagepipeline "github.com/aoagents/agent-orchestrator/backend/internal/observe/usage"
@@ -188,6 +189,30 @@ func RunWithConfig(cfg config.Config) error {
 	managedPreview := previewserver.New(log, cfg.DataDir)
 	termMgr := terminal.NewManager(runtimeAdapter, cdcPipe.Broadcaster, log)
 	defer termMgr.Close()
+	// Checkpoint 8P-B.2: the /mux WebSocket bypasses SessionsController
+	// entirely (a client supplies the terminal/pane id only after the
+	// connection upgrades, not via a REST path param), so it needs its own
+	// authorization boundary rather than inheriting SessionsController's.
+	// r.Context() at WS-accept time already carries identity.Middleware's
+	// resolved identity (identity.Middleware runs before mountTerminalMux
+	// in router.go), so this closure only needs to read it back and check
+	// ownership -- same semantics as controllers.AuthorizeSessionAccess,
+	// deliberately not importing httpd/controllers here to keep daemon's
+	// dependency direction one-way.
+	termMgr.SetAttachAuthorizer(func(ctx context.Context, id string) bool {
+		if cfg.TrustedLocalMode {
+			return true
+		}
+		user, ok := identity.FromContext(ctx)
+		if !ok {
+			return false
+		}
+		owner, err := store.GetSessionOwner(ctx, domain.SessionID(id))
+		if err != nil || owner == nil || *owner != user.ID {
+			return false
+		}
+		return true
+	})
 
 	// The agent messenger sends validated user input to the session's live
 	// runtime pane. Keep this path small until durable inbox semantics are needed.

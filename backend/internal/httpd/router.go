@@ -59,8 +59,14 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	r.Use(requestLogger(log, deps.Telemetry))
 	r.Use(recoverTelemetry(log, deps.Telemetry))
 	r.Use(corsMiddleware(cfg.AllowedOrigins))
-	r.Use(previewOriginMiddleware(api.sessions))
+	// Checkpoint 8P-B.2: identity resolves BEFORE the preview-origin check
+	// (order matters -- swapped from an earlier pre-identity placement) so
+	// PreviewOrigin can enforce session ownership instead of running as a
+	// structurally pre-auth bypass. identity.Middleware only reads/attaches
+	// identity to the request context; it never rejects or redirects, so
+	// this reorder has no effect on any other route.
 	r.Use(identity.Middleware(deps.Auth, cfg.TrustedLocalMode, bootstrapAdminResolver(deps.Auth)))
+	r.Use(previewOriginMiddleware(api.sessions))
 
 	// JSON envelopes for unmatched routes / methods — chi's defaults are
 	// text/plain, which would break consumers that parse every response as

@@ -14,15 +14,19 @@ import (
 // an embedded spawner (or a custom attachFn closure); IsAlive is scriptable.
 // attachErr makes Attach fail.
 type fakeSource struct {
-	spawner   *fakeSpawner
-	attachFn  func(ctx context.Context, rows, cols uint16) (ports.Stream, error)
-	mu        sync.Mutex
-	alive     bool
-	aliveErr  error
-	attachErr error
+	spawner     *fakeSpawner
+	attachFn    func(ctx context.Context, rows, cols uint16) (ports.Stream, error)
+	mu          sync.Mutex
+	alive       bool
+	aliveErr    error
+	attachErr   error
+	attachCalls int
 }
 
 func (f *fakeSource) Attach(ctx context.Context, _ ports.RuntimeHandle, rows, cols uint16) (ports.Stream, error) {
+	f.mu.Lock()
+	f.attachCalls++
+	f.mu.Unlock()
 	if f.attachErr != nil {
 		return nil, f.attachErr
 	}
@@ -52,6 +56,12 @@ func (f *fakeSource) setAliveResult(v bool, err error) {
 	f.alive = v
 	f.aliveErr = err
 	f.mu.Unlock()
+}
+
+func (f *fakeSource) getAttachCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.attachCalls
 }
 
 // fakePTY is a scripted ports.Stream: Read drains the out channel, Write

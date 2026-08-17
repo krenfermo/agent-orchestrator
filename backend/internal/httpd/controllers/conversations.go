@@ -57,28 +57,59 @@ type pagedConversationService interface {
 // even by calling these URLs directly. UI visibility is not the boundary.
 type ConversationsController struct {
 	Svc ConversationService
+	// Ownership and TrustedLocal back Checkpoint 8P-B.2's session
+	// ownership scoping -- the entire conversation surface (send, resolve
+	// approvals, interrupt, steer, edit/rollback turns, ...) is per-session
+	// control, so every route here is gated by the same shared
+	// AuthorizeSessionAccess boundary SessionsController uses, applied as
+	// one router-group middleware rather than duplicated per handler.
+	Ownership    SessionOwnershipStore
+	TrustedLocal bool
 }
 
-// Register mounts the conversation routes under a session.
+func (c *ConversationsController) scoping() SessionScoping {
+	return SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal}
+}
+
+// requireSessionAccess is this controller's session-authorization
+// middleware, applied once to every /sessions/{sessionId}/conversation/...
+// route below.
+func (c *ConversationsController) requireSessionAccess(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !AuthorizeSessionAccess(w, r, c.scoping(), sessionID(r)) {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Register mounts the conversation routes under a session. Each route is
+// wrapped individually with r.With(...) (not a nested r.Route("/sessions/
+// {sessionId}", ...) sub-mount) -- chi does not cleanly share a dynamic
+// path segment node across two controllers registered at the same mount
+// point when one of them owns it via a nested Route/sub-router, which
+// shadowed SessionsController's own flat GET/PATCH /sessions/{sessionId}
+// routes when first tried here.
 func (c *ConversationsController) Register(r chi.Router) {
-	r.Get("/sessions/{sessionId}/conversation", c.snapshot)
-	r.Post("/sessions/{sessionId}/conversation/messages", c.send)
-	r.Post("/sessions/{sessionId}/conversation/approvals/{requestId}/resolve", c.resolve)
-	r.Post("/sessions/{sessionId}/conversation/inputs/{requestId}/resolve", c.resolveInput)
-	r.Post("/sessions/{sessionId}/conversation/interrupt", c.interrupt)
-	r.Post("/sessions/{sessionId}/conversation/steer", c.steer)
-	r.Post("/sessions/{sessionId}/conversation/turns/{turnId}/steer", c.promoteQueuedTurn)
-	r.Post("/sessions/{sessionId}/conversation/compact", c.compact)
-	r.Get("/sessions/{sessionId}/conversation/models", c.models)
-	r.Get("/sessions/{sessionId}/conversation/config-options", c.configOptions)
-	r.Patch("/sessions/{sessionId}/conversation/config-options/{configId}", c.setConfigOption)
-	r.Get("/sessions/{sessionId}/conversation/skills", c.skills)
-	r.Patch("/sessions/{sessionId}/conversation/settings", c.setSettings)
-	r.Post("/sessions/{sessionId}/conversation/turns/{turnId}/rollback", c.rollback)
-	r.Post("/sessions/{sessionId}/conversation/turns/{turnId}/edit", c.editMessage)
-	r.Post("/sessions/{sessionId}/conversation/branches/{branchId}/activate", c.activateBranch)
-	r.Put("/sessions/{sessionId}/conversation/title", c.setTitle)
-	r.Post("/sessions/{sessionId}/conversation/mcp/reload", c.reloadMCPServers)
+	sr := r.With(c.requireSessionAccess)
+	sr.Get("/sessions/{sessionId}/conversation", c.snapshot)
+	sr.Post("/sessions/{sessionId}/conversation/messages", c.send)
+	sr.Post("/sessions/{sessionId}/conversation/approvals/{requestId}/resolve", c.resolve)
+	sr.Post("/sessions/{sessionId}/conversation/inputs/{requestId}/resolve", c.resolveInput)
+	sr.Post("/sessions/{sessionId}/conversation/interrupt", c.interrupt)
+	sr.Post("/sessions/{sessionId}/conversation/steer", c.steer)
+	sr.Post("/sessions/{sessionId}/conversation/turns/{turnId}/steer", c.promoteQueuedTurn)
+	sr.Post("/sessions/{sessionId}/conversation/compact", c.compact)
+	sr.Get("/sessions/{sessionId}/conversation/models", c.models)
+	sr.Get("/sessions/{sessionId}/conversation/config-options", c.configOptions)
+	sr.Patch("/sessions/{sessionId}/conversation/config-options/{configId}", c.setConfigOption)
+	sr.Get("/sessions/{sessionId}/conversation/skills", c.skills)
+	sr.Patch("/sessions/{sessionId}/conversation/settings", c.setSettings)
+	sr.Post("/sessions/{sessionId}/conversation/turns/{turnId}/rollback", c.rollback)
+	sr.Post("/sessions/{sessionId}/conversation/turns/{turnId}/edit", c.editMessage)
+	sr.Post("/sessions/{sessionId}/conversation/branches/{branchId}/activate", c.activateBranch)
+	sr.Put("/sessions/{sessionId}/conversation/title", c.setTitle)
+	sr.Post("/sessions/{sessionId}/conversation/mcp/reload", c.reloadMCPServers)
 }
 
 func (c *ConversationsController) editMessage(w http.ResponseWriter, r *http.Request) {

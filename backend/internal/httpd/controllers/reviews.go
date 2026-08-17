@@ -91,18 +91,44 @@ type SubmitReviewInput struct {
 // ReviewsController owns the session-scoped /reviews routes. A nil Svc returns 501.
 type ReviewsController struct {
 	Svc reviewsvc.Manager
+	// Ownership and TrustedLocal back Checkpoint 8P-B.2's session
+	// ownership scoping, applied to every /sessions/{sessionId}/reviews/...
+	// route (trigger/cancel/kill/restore/switch a reviewer process bound
+	// to the session, submit results). /reviews/{reviewSessionID}/activity
+	// is deliberately NOT scoped -- like SessionsController's own
+	// /activity route, it is the reviewer subprocess's own hook callback,
+	// not a browser-authenticated request, so gating it on a session
+	// cookie would break every real reviewer run in multi-user mode (see
+	// AGENTS.md's internal-vs-external-authorization split, Checkpoint
+	// 8P-B.2 §16).
+	Ownership    SessionOwnershipStore
+	TrustedLocal bool
+}
+
+func (c *ReviewsController) scoping() SessionScoping {
+	return SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal}
+}
+
+func (c *ReviewsController) requireSessionAccess(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !AuthorizeSessionAccess(w, r, c.scoping(), sessionID(r)) {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Register mounts the review routes on the supplied router.
 func (c *ReviewsController) Register(r chi.Router) {
 	r.Post("/reviews/{reviewSessionID}/activity", c.activity)
-	r.Get("/sessions/{sessionId}/reviews", c.list)
-	r.Post("/sessions/{sessionId}/reviews/trigger", c.trigger)
-	r.Post("/sessions/{sessionId}/reviews/cancel", c.cancel)
-	r.Post("/sessions/{sessionId}/reviews/kill", c.kill)
-	r.Post("/sessions/{sessionId}/reviews/restore", c.restore)
-	r.Post("/sessions/{sessionId}/reviews/switch", c.switchReviewer)
-	r.Post("/sessions/{sessionId}/reviews/submit", c.submit)
+	sr := r.With(c.requireSessionAccess)
+	sr.Get("/sessions/{sessionId}/reviews", c.list)
+	sr.Post("/sessions/{sessionId}/reviews/trigger", c.trigger)
+	sr.Post("/sessions/{sessionId}/reviews/cancel", c.cancel)
+	sr.Post("/sessions/{sessionId}/reviews/kill", c.kill)
+	sr.Post("/sessions/{sessionId}/reviews/restore", c.restore)
+	sr.Post("/sessions/{sessionId}/reviews/switch", c.switchReviewer)
+	sr.Post("/sessions/{sessionId}/reviews/submit", c.submit)
 }
 
 func (c *ReviewsController) activity(w http.ResponseWriter, r *http.Request) {

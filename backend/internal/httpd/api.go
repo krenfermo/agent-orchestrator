@@ -103,10 +103,11 @@ type APIDeps struct {
 	// optional-surface conventions here.
 	ProviderProfiles providerprofilesvc.Manager
 
-	// SessionOwnership backs Checkpoint 8P-B.1's minimal session ownership
-	// scoping (get/send only -- see SessionsController's doc comment).
-	// Optional: nil disables scoping entirely, matching
-	// ProjectOwnership/WorkflowOwnership's own convention.
+	// SessionOwnership backs Checkpoint 8P-B.1/8P-B.2's session ownership
+	// scoping, shared by SessionsController, ConversationsController,
+	// ReviewsController, and UsageController's per-session read -- see
+	// controllers.AuthorizeSessionAccess. Optional: nil disables scoping
+	// entirely, matching ProjectOwnership/WorkflowOwnership's convention.
 	SessionOwnership controllers.SessionOwnershipStore
 }
 
@@ -192,19 +193,31 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			Ownership:     deps.SessionOwnership,
 			TrustedLocal:  cfg.TrustedLocalMode,
 		},
-		usage:         &controllers.UsageController{Svc: deps.UsageSummary},
-		capacity:      &controllers.CapacityController{Svc: deps.Capacity},
-		prs:           &controllers.PRsController{Svc: deps.PRs},
-		reviews:       &controllers.ReviewsController{Svc: deps.Reviews},
+		usage: &controllers.UsageController{
+			Svc:          deps.UsageSummary,
+			Ownership:    deps.SessionOwnership,
+			TrustedLocal: cfg.TrustedLocalMode,
+		},
+		capacity: &controllers.CapacityController{Svc: deps.Capacity},
+		prs:      &controllers.PRsController{Svc: deps.PRs},
+		reviews: &controllers.ReviewsController{
+			Svc:          deps.Reviews,
+			Ownership:    deps.SessionOwnership,
+			TrustedLocal: cfg.TrustedLocalMode,
+		},
 		decisions:     &controllers.DecisionsController{Svc: deps.Decisions},
 		notifications: &controllers.NotificationsController{Svc: deps.Notifications, Stream: deps.NotificationStream},
 		push:          &controllers.PushController{Registry: deps.Push},
 		imports:       &controllers.ImportController{Svc: deps.Import},
 		shellTerms:    &controllers.ShellTerminalsController{Svc: deps.ShellTerminals},
-		conversations: &controllers.ConversationsController{Svc: deps.Conversations},
-		settings:      &controllers.SettingsController{Svc: deps.Settings},
-		dev:           &controllers.DevController{Import: deps.DevImport},
-		browser:       &controllers.BrowserController{Svc: deps.Browser},
+		conversations: &controllers.ConversationsController{
+			Svc:          deps.Conversations,
+			Ownership:    deps.SessionOwnership,
+			TrustedLocal: cfg.TrustedLocalMode,
+		},
+		settings: &controllers.SettingsController{Svc: deps.Settings},
+		dev:      &controllers.DevController{Import: deps.DevImport},
+		browser:  &controllers.BrowserController{Svc: deps.Browser},
 		workflows: &controllers.WorkflowsController{
 			Svc:             deps.Workflows,
 			UsageReader:     deps.UsageSummary,

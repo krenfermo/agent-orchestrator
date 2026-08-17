@@ -66,25 +66,38 @@ func (r *Resolver) Resolve(ctx context.Context, runID string, harness domain.Age
 		// checkpoint.
 		return nil, "", nil
 	}
-	owner = *ownerPtr
+	env, err = r.ResolveForOwner(ctx, *ownerPtr, harness)
+	return env, *ownerPtr, err
+}
 
-	profile, ok, err := r.matchingProfile(ctx, owner, harness)
+// ResolveForOwner is Resolve's shared policy step, factored out so a
+// caller that already has an owner from a different durable source (e.g.
+// session_manager's relaunch path, which uses the session's own persisted
+// owner_user_id rather than re-deriving it from a workflow run -- see
+// Checkpoint 8P-B.2 §10/§11) reuses the exact same match-profile/build-env/
+// block decision, instead of re-implementing it. A non-nil error is always
+// ports.ErrProviderProfileRequired (or a durable lookup failure) and means:
+// do not launch.
+func (r *Resolver) ResolveForOwner(ctx context.Context, owner domain.UserID, harness domain.AgentHarness) (map[string]string, error) {
+	if r == nil || owner == "" {
+		return nil, nil
+	}
+	_, ok, err := r.matchingProfile(ctx, owner, harness)
 	if err != nil {
-		return nil, owner, fmt.Errorf("providerruntime: list provider profiles: %w", err)
+		return nil, fmt.Errorf("providerruntime: list provider profiles: %w", err)
 	}
 	if !ok {
 		if r.TrustedLocal {
-			return nil, owner, nil
+			return nil, nil
 		}
-		return nil, owner, ports.ErrProviderProfileRequired
+		return nil, ports.ErrProviderProfileRequired
 	}
-	_ = profile
 
 	home, err := runtimehome.Prepare(r.DataDir, owner)
 	if err != nil {
-		return nil, owner, fmt.Errorf("providerruntime: prepare runtime-home: %w", err)
+		return nil, fmt.Errorf("providerruntime: prepare runtime-home: %w", err)
 	}
-	return home.SubprocessEnv(), owner, nil
+	return home.SubprocessEnv(), nil
 }
 
 func (r *Resolver) matchingProfile(ctx context.Context, owner domain.UserID, harness domain.AgentHarness) (domain.ProviderProfile, bool, error) {

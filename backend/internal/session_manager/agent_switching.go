@@ -740,6 +740,27 @@ func (m *Manager) prepareTargetActivation(ctx context.Context, store ports.Agent
 	}
 	config := effectiveAgentConfig(rec.Kind, project.Config)
 	env := m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
+	// Checkpoint 8P-B.2 §13: a provider switch (Claude<->Codex, ...) keeps
+	// the SAME session row/id (runtimeCfg.SessionID below is the original
+	// id, never a new one) and must launch the target harness under the
+	// SAME owner's isolated runtime-home -- re-derived here against the
+	// TARGET harness specifically, since the source and target harness can
+	// require different provider profiles (e.g. Claude's vs Codex's).
+	if m.runtimeIsolation != nil {
+		owner, ownerErr := m.store.GetSessionOwner(ctx, rec.ID)
+		if ownerErr != nil {
+			return preparedTargetActivation{}, fmt.Errorf("resolve session owner: %w", ownerErr)
+		}
+		if owner != nil {
+			switchEnv, envErr := m.runtimeIsolation.ResolveForOwner(ctx, *owner, harness)
+			if envErr != nil {
+				return preparedTargetActivation{}, fmt.Errorf("target runtime env: %w", envErr)
+			}
+			for k, v := range switchEnv {
+				env[k] = v
+			}
+		}
+	}
 	m.augmentAgentRuntimeEnv(agent, env)
 	configDir, err := nativeConfigDir(ctx, agent, env)
 	if err != nil {

@@ -23,6 +23,9 @@ func (c *SessionsController) stageAttachments(w http.ResponseWriter, r *http.Req
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/attachments")
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxSpawnBodyBytes)
 
 	var in StageSessionAttachmentsRequest

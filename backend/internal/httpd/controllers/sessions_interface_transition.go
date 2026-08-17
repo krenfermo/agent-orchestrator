@@ -32,6 +32,9 @@ func (c *SessionsController) interfaceTransitionStatus(w http.ResponseWriter, r 
 		apispec.NotImplemented(w, r, http.MethodGet, interfaceTransitionPath)
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	status, err := service.InterfaceTransitionStatus(r.Context(), sessionID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -54,6 +57,9 @@ func (c *SessionsController) startInterfaceTransition(w http.ResponseWriter, r *
 		apispec.NotImplemented(w, r, http.MethodPost, interfaceTransitionPath)
 		return
 	}
+	if !c.sessionAccessAllowed(w, r) {
+		return
+	}
 	var in StartSessionInterfaceTransitionRequest
 	if err := decodeJSON(r, &in); err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
@@ -73,6 +79,9 @@ func (c *SessionsController) cancelInterfaceTransition(w http.ResponseWriter, r 
 	service, ok := c.interfaceTransitionService()
 	if !ok {
 		apispec.NotImplemented(w, r, http.MethodDelete, interfaceTransitionPath)
+		return
+	}
+	if !c.sessionAccessAllowed(w, r) {
 		return
 	}
 	if err := service.CancelInterfaceTransition(r.Context(), sessionID(r)); err != nil {

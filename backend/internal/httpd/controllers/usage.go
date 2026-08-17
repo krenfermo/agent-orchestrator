@@ -20,6 +20,12 @@ type UsageSummaryService interface {
 // UsageController owns compact dashboard usage routes.
 type UsageController struct {
 	Svc UsageSummaryService
+	// Ownership and TrustedLocal back Checkpoint 8P-B.2's session
+	// ownership scoping for the per-session usage read below. listSessions
+	// is not scoped -- it's a list-all route, not addressed to one
+	// session.
+	Ownership    SessionOwnershipStore
+	TrustedLocal bool
 }
 
 // Register mounts usage routes on the supplied router.
@@ -50,6 +56,9 @@ func (c *UsageController) listSessions(w http.ResponseWriter, r *http.Request) {
 func (c *UsageController) getSession(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/usage/sessions/{sessionId}")
+		return
+	}
+	if !AuthorizeSessionAccess(w, r, SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal}, sessionID(r)) {
 		return
 	}
 	summary, err := c.Svc.Get(r.Context(), domain.SessionID(chi.URLParam(r, "sessionId")))
