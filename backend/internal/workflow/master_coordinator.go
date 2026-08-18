@@ -103,7 +103,7 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 	// command.Planner.Descriptor's hardcoded "anthropic" provider) --
 	// resolve against that harness rather than inventing a per-planner
 	// provider-selection mechanism 8P-C hasn't built yet.
-	runtimeEnv, _, err := c.resolveRuntimeEnv(ctx, run.ID, domain.HarnessClaudeCode)
+	runtimeEnv, _, _, err := c.resolveRuntimeEnv(ctx, run.ID, domain.HarnessClaudeCode)
 	if err != nil {
 		return c.failPlan(ctx, run, "planner_start_failed", err)
 	}
@@ -465,6 +465,17 @@ func (c *Coordinator) dispatchMasterTask(ctx stdctx.Context, parent domain.Workf
 		return err
 	} else if ok {
 		_, _ = c.planStore.SetWorkflowTaskExecutionRun(ctx, task.ID, id, c.clock())
+		// Checkpoint 8P-C.1: re-entering this branch means either a normal
+		// re-dispatch (StartRun is idempotent) or restart recovery after a
+		// crash between the child's creation and its owner stamp below --
+		// re-stamp unconditionally (idempotent) so a NULL-owned child from
+		// that crash window is healed before StartRun is ever called again.
+		if perr := c.stampChildOwnership(ctx, id, parent); perr != nil {
+			return perr
+		}
+		if perr := c.requireChildOwnershipForDispatch(ctx, id, parent); perr != nil {
+			return perr
+		}
 		_, err = c.StartRun(ctx, id)
 		return err
 	}
@@ -494,6 +505,21 @@ func (c *Coordinator) dispatchMasterTask(ctx stdctx.Context, parent domain.Workf
 	if err != nil {
 		return err
 	}
+	// Checkpoint 8P-C.1: stamp the child's durable owner from the parent's
+	// own owner immediately after creation -- see stampChildOwnership's doc
+	// comment for why a crash in the window between these two writes is
+	// safely healed by the FindWorkflowRunByPlannedTask recovery branch
+	// above, rather than needing a single atomic transaction.
+	if perr := c.stampChildOwnership(ctx, child.Run.ID, parent); perr != nil {
+		return perr
+	}
+	// Checkpoint 8P-C: a master task's child run inherits the SAME frozen
+	// execution policy the parent objective was created with -- never
+	// re-derived from the (possibly since-changed) live policy, matching
+	// "no recalcules historia con policy futura" for Routing/Wake.
+	if perr := c.inheritExecutionPolicySnapshot(ctx, child.Run.ID, parent); perr != nil {
+		return perr
+	}
 	if len(task.Dependencies) > 0 {
 		decision := domain.SessionLifecycleDecision{
 			Action: domain.LifecycleNewSession, Role: domain.WorkflowRoleWorker,
@@ -514,6 +540,9 @@ func (c *Coordinator) dispatchMasterTask(ctx stdctx.Context, parent domain.Workf
 	}
 	if _, err := c.planStore.SetWorkflowTaskExecutionRun(ctx, task.ID, child.Run.ID, c.clock()); err != nil {
 		return err
+	}
+	if perr := c.requireChildOwnershipForDispatch(ctx, child.Run.ID, parent); perr != nil {
+		return perr
 	}
 	_, err = c.StartRun(ctx, child.Run.ID)
 	return err

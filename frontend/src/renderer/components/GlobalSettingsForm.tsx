@@ -3,10 +3,10 @@ import { useTranslation } from "react-i18next";
 import { DevelopmentAgentsSettingsSection } from "./settings/DevelopmentAgentsSettingsSection";
 import { EfficiencyPolicySettingsSection } from "./settings/EfficiencyPolicySettingsSection";
 import { EnvironmentSettingsSection } from "./settings/EnvironmentSettingsSection";
+import { ExecutionPolicySettingsSection } from "./settings/ExecutionPolicySettingsSection";
 import { GeneralSettingsSection } from "./settings/GeneralSettingsSection";
 import { ProjectsSettingsSection } from "./settings/ProjectsSettingsSection";
 import { ReportProblemDialog } from "./settings/ReportProblemDialog";
-import { RoutingPolicySettingsSection } from "./settings/RoutingPolicySettingsSection";
 import { SessionLifecyclePolicySettingsSection } from "./settings/SessionLifecyclePolicySettingsSection";
 import { SettingsLinkRow } from "./settings/SettingsRow";
 import { SettingsSection } from "./settings/SettingsSection";
@@ -59,7 +59,7 @@ export function GlobalSettingsForm({
 							/>
 						</SettingsSection>
 						<EfficiencyPolicySettingsSection />
-						<RoutingPolicySettingsSection />
+						<ExecutionPolicySettingsSection />
 						<SessionLifecyclePolicySettingsSection />
 					</>
 				)}

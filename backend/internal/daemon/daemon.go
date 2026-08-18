@@ -48,6 +48,7 @@ import (
 	notificationsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/notification"
 	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
+	executionpolicysvc "github.com/aoagents/agent-orchestrator/backend/internal/service/executionpolicy"
 	providerprofilesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providerprofile"
 	questionssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/questions"
 	settingssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/settings"
@@ -564,6 +565,7 @@ func RunWithConfig(cfg config.Config) error {
 			Prober:  providerprofilesvc.CLIProber{},
 			DataDir: staticDataDir(cfg.DataDir),
 		},
+		ExecutionPolicy: &executionpolicysvc.Service{Store: store},
 	})
 	if err != nil {
 		stop()

@@ -34,7 +34,7 @@ func userPtr(id string) *domain.UserID {
 
 func TestResolver_NilOwners_NoOp(t *testing.T) {
 	r := &Resolver{}
-	env, owner, err := r.Resolve(context.Background(), "run-1", domain.HarnessClaudeCode)
+	env, owner, _, err := r.Resolve(context.Background(), "run-1", domain.HarnessClaudeCode)
 	if err != nil || env != nil || owner != "" {
 		t.Fatalf("expected no-op, got env=%v owner=%v err=%v", env, owner, err)
 	}
@@ -42,7 +42,7 @@ func TestResolver_NilOwners_NoOp(t *testing.T) {
 
 func TestResolver_UnownedRun_NoOp(t *testing.T) {
 	r := &Resolver{Owners: fakeOwners{owner: nil}}
-	env, owner, err := r.Resolve(context.Background(), "run-1", domain.HarnessClaudeCode)
+	env, owner, _, err := r.Resolve(context.Background(), "run-1", domain.HarnessClaudeCode)
 	if err != nil || env != nil || owner != "" {
 		t.Fatalf("expected no-op for unowned run, got env=%v owner=%v err=%v", env, owner, err)
 	}
@@ -55,7 +55,7 @@ func TestResolver_NoMatchingProfile_TrustedLocal_NoOp(t *testing.T) {
 		TrustedLocal: true,
 		DataDir:      t.TempDir(),
 	}
-	env, owner, err := r.Resolve(context.Background(), "run-1", domain.HarnessClaudeCode)
+	env, owner, _, err := r.Resolve(context.Background(), "run-1", domain.HarnessClaudeCode)
 	if err != nil {
 		t.Fatalf("trusted-local with no profile must not block: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestResolver_NoMatchingProfile_MultiUser_Blocked(t *testing.T) {
 		TrustedLocal: false,
 		DataDir:      t.TempDir(),
 	}
-	_, owner, err := r.Resolve(context.Background(), "run-1", domain.HarnessClaudeCode)
+	_, owner, _, err := r.Resolve(context.Background(), "run-1", domain.HarnessClaudeCode)
 	if !errors.Is(err, ports.ErrProviderProfileRequired) {
 		t.Fatalf("expected ErrProviderProfileRequired, got %v", err)
 	}
@@ -92,7 +92,7 @@ func TestResolver_MatchingEnabledProfile_IsolatesEnv(t *testing.T) {
 		TrustedLocal: false,
 		DataDir:      t.TempDir(),
 	}
-	env, owner, err := r.Resolve(context.Background(), "run-1", domain.HarnessClaudeCode)
+	env, owner, _, err := r.Resolve(context.Background(), "run-1", domain.HarnessClaudeCode)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestResolver_DisabledProfile_TreatedAsNoMatch(t *testing.T) {
 		TrustedLocal: false,
 		DataDir:      t.TempDir(),
 	}
-	_, _, err := r.Resolve(context.Background(), "run-1", domain.HarnessClaudeCode)
+	_, _, _, err := r.Resolve(context.Background(), "run-1", domain.HarnessClaudeCode)
 	if !errors.Is(err, ports.ErrProviderProfileRequired) {
 		t.Fatalf("a disabled profile must not count as a match: %v", err)
 	}
@@ -128,11 +128,11 @@ func TestResolver_TwoUsers_DistinctEnv(t *testing.T) {
 	rA := &Resolver{Owners: fakeOwners{owner: userPtr("user-a")}, Profiles: fakeProfiles{profiles: profiles}, DataDir: dataDir}
 	rB := &Resolver{Owners: fakeOwners{owner: userPtr("user-b")}, Profiles: fakeProfiles{profiles: profiles}, DataDir: dataDir}
 
-	envA, _, err := rA.Resolve(context.Background(), "run-a", domain.HarnessClaudeCode)
+	envA, _, _, err := rA.Resolve(context.Background(), "run-a", domain.HarnessClaudeCode)
 	if err != nil {
 		t.Fatalf("resolve A: %v", err)
 	}
-	envB, _, err := rB.Resolve(context.Background(), "run-b", domain.HarnessClaudeCode)
+	envB, _, _, err := rB.Resolve(context.Background(), "run-b", domain.HarnessClaudeCode)
 	if err != nil {
 		t.Fatalf("resolve B: %v", err)
 	}

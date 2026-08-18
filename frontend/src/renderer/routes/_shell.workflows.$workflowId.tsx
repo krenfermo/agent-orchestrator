@@ -1,10 +1,12 @@
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import { useWorkflowRun, workflowRunIsTerminal } from "../hooks/useWorkflowRun";
+import { useChildTaskRouting } from "../hooks/useChildTaskRouting";
 import { WorkflowVerifyDetails } from "../components/workflow-verify-details";
 import { WorkflowUsageSection } from "../components/workflow-usage-section";
 import { WorkflowQuestionsSection } from "../components/workflow-questions-section";
 import { WorkflowCapacityWaitBanner } from "../components/workflow-capacity-wait-banner";
+import { WorkflowRoutingSummary } from "../components/workflow-routing-summary";
 
 export const Route = createFileRoute("/_shell/workflows/$workflowId")({
 	component: WorkflowRunRoute,
@@ -48,6 +50,12 @@ function WorkflowRunRoute() {
 	if (!workflow) {
 		return <p className="p-6 text-sm text-muted-foreground">{t("shell.workflowsNotFound")}</p>;
 	}
+
+	// Checkpoint 8P-C.1 §17: compact per-task "which provider actually ran
+	// this" label, sourced from each child run's own persisted routing
+	// decision -- not a new dashboard, just a label next to the task title.
+	const childTaskIds = (workflow.tasks ?? []).map((task) => task.executionWorkflowId).filter((id): id is string => Boolean(id));
+	const childTaskRouting = useChildTaskRouting(childTaskIds);
 
 	const nonTerminal = !workflowRunIsTerminal(workflow.run.state);
 	const isPending = workflow.run.state === "pending";
@@ -157,7 +165,16 @@ function WorkflowRunRoute() {
 						<article className="rounded-lg border border-border p-3" key={task.id}>
 							<div className="flex items-center justify-between gap-3">
 								<h3 className="font-medium">{task.number}. {task.title}</h3>
-								<span className="text-xs text-muted-foreground">{task.state}</span>
+								<span className="flex items-center gap-2 text-xs text-muted-foreground">
+									{task.executionWorkflowId && childTaskRouting[task.executionWorkflowId] && (
+										<span>
+											→ {childTaskRouting[task.executionWorkflowId]?.selectedLabel}
+											{childTaskRouting[task.executionWorkflowId]?.fallbackUsed &&
+												` (${t("shell.routingFallbackTag", "fallback")})`}
+										</span>
+									)}
+									<span>{task.state}</span>
+								</span>
 							</div>
 							<p className="mt-1 text-sm text-muted-foreground">{task.description}</p>
 							{task.dependencies.length > 0 && (
@@ -337,6 +354,7 @@ function WorkflowRunRoute() {
 								)}
 							</dl>
 						)}
+						{step.routing && <WorkflowRoutingSummary routing={step.routing} />}
 						{step.kind === "verify" && step.verification && <WorkflowVerifyDetails result={step.verification} />}
 						{step.attempts.length > 0 && (
 							<ul className="mt-2 flex flex-col gap-1 border-t border-border pt-2">

@@ -453,8 +453,15 @@ func (s *Store) GetUsageSessionIncomplete(ctx context.Context, sessionID domain.
 
 // ListCompactSessionUsage returns sessions with observed usage in one grouped
 // read. projectID optionally limits the rows to one dashboard board.
-func (s *Store) ListCompactSessionUsage(ctx context.Context, projectID domain.ProjectID) ([]domain.CompactSessionUsage, error) {
-	rows, err := s.qr.ListCompactSessionUsage(ctx, projectID)
+// ownerUserID (Checkpoint 8P-C), when non-nil, restricts results to
+// exactly that owner's own sessions -- nil preserves pre-8P-C unscoped
+// behavior (trusted-local / no identity resolved).
+func (s *Store) ListCompactSessionUsage(ctx context.Context, projectID domain.ProjectID, ownerUserID *domain.UserID) ([]domain.CompactSessionUsage, error) {
+	var owner any
+	if ownerUserID != nil {
+		owner = string(*ownerUserID)
+	}
+	rows, err := s.qr.ListCompactSessionUsage(ctx, gen.ListCompactSessionUsageParams{ProjectID: projectID, OwnerUserID: owner})
 	if err != nil {
 		return nil, fmt.Errorf("list compact session usage for project %s: %w", projectID, err)
 	}

@@ -49,25 +49,27 @@ type Resolver struct {
 }
 
 // Resolve returns the env overrides to apply for a workflow-run-owned
-// launch of harness, and the resolved owner (empty if unresolved/unowned).
-// A non-nil error is always ports.ErrProviderProfileRequired (or a durable
+// launch of harness, the resolved owner (empty if unresolved/unowned), and
+// the matched ProviderProfileID (Checkpoint 8P-C; empty if unresolved or no
+// profile matched -- e.g. trusted-local with no profile configured). A
+// non-nil error is always ports.ErrProviderProfileRequired (or a durable
 // lookup failure) and means: do not launch.
-func (r *Resolver) Resolve(ctx context.Context, runID string, harness domain.AgentHarness) (env map[string]string, owner domain.UserID, err error) {
+func (r *Resolver) Resolve(ctx context.Context, runID string, harness domain.AgentHarness) (env map[string]string, owner domain.UserID, profileID domain.ProviderProfileID, err error) {
 	if r == nil || r.Owners == nil {
-		return nil, "", nil
+		return nil, "", "", nil
 	}
 	ownerPtr, err := r.Owners.GetWorkflowRunOwner(ctx, runID)
 	if err != nil {
-		return nil, "", fmt.Errorf("providerruntime: resolve workflow run owner: %w", err)
+		return nil, "", "", fmt.Errorf("providerruntime: resolve workflow run owner: %w", err)
 	}
 	if ownerPtr == nil {
 		// Unowned run (predates ownership, or created while no user was
 		// resolved) -- nothing to scope to; behave exactly as before this
 		// checkpoint.
-		return nil, "", nil
+		return nil, "", "", nil
 	}
-	env, err = r.ResolveForOwner(ctx, *ownerPtr, harness)
-	return env, *ownerPtr, err
+	env, profileID, err = r.ResolveForOwner(ctx, *ownerPtr, harness)
+	return env, *ownerPtr, profileID, err
 }
 
 // ResolveForOwner is Resolve's shared policy step, factored out so a
@@ -78,26 +80,26 @@ func (r *Resolver) Resolve(ctx context.Context, runID string, harness domain.Age
 // block decision, instead of re-implementing it. A non-nil error is always
 // ports.ErrProviderProfileRequired (or a durable lookup failure) and means:
 // do not launch.
-func (r *Resolver) ResolveForOwner(ctx context.Context, owner domain.UserID, harness domain.AgentHarness) (map[string]string, error) {
+func (r *Resolver) ResolveForOwner(ctx context.Context, owner domain.UserID, harness domain.AgentHarness) (map[string]string, domain.ProviderProfileID, error) {
 	if r == nil || owner == "" {
-		return nil, nil
+		return nil, "", nil
 	}
-	_, ok, err := r.matchingProfile(ctx, owner, harness)
+	profile, ok, err := r.matchingProfile(ctx, owner, harness)
 	if err != nil {
-		return nil, fmt.Errorf("providerruntime: list provider profiles: %w", err)
+		return nil, "", fmt.Errorf("providerruntime: list provider profiles: %w", err)
 	}
 	if !ok {
 		if r.TrustedLocal {
-			return nil, nil
+			return nil, "", nil
 		}
-		return nil, ports.ErrProviderProfileRequired
+		return nil, "", ports.ErrProviderProfileRequired
 	}
 
 	home, err := runtimehome.Prepare(r.DataDir, owner)
 	if err != nil {
-		return nil, fmt.Errorf("providerruntime: prepare runtime-home: %w", err)
+		return nil, "", fmt.Errorf("providerruntime: prepare runtime-home: %w", err)
 	}
-	return home.SubprocessEnv(), nil
+	return home.SubprocessEnv(), profile.ID, nil
 }
 
 func (r *Resolver) matchingProfile(ctx context.Context, owner domain.UserID, harness domain.AgentHarness) (domain.ProviderProfile, bool, error) {

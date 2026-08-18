@@ -259,6 +259,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/execution-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get the current user's execution/routing policy (or the bootstrap default if none is stored) */
+        get: operations["getExecutionPolicy"];
+        /** Replace the current user's execution/routing policy */
+        put: operations["putExecutionPolicy"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/import": {
         parameters: {
             query?: never;
@@ -2292,6 +2310,21 @@ export interface components {
             /** Format: int64 */
             waitingForCapacity: number;
         };
+        ControllersExecutionPolicyResponse: {
+            policy: components["schemas"]["ControllersExecutionPolicyView"];
+        };
+        ControllersExecutionPolicyView: {
+            autonomousMode: boolean;
+            decisionResolverPriority: string[];
+            /** @enum {string} */
+            fallbackBehavior: "use_next_available" | "wait_for_preferred";
+            plannerPriority: string[];
+            /** @enum {string} */
+            reviewIndependence: "require_different_provider" | "allow_same_provider_fallback";
+            reviewerPriority: string[];
+            updatedAt?: string;
+            workerPriority: string[];
+        };
         ControllersListCapacityResponse: {
             capacity: components["schemas"]["ControllersCapacitySnapshotResponse"][];
         };
@@ -2344,6 +2377,15 @@ export interface components {
         ControllersProviderRegistryResponse: {
             providers: components["schemas"]["ControllersProviderDescriptorView"][];
         };
+        ControllersPutExecutionPolicyRequest: {
+            autonomousMode: boolean;
+            decisionResolverPriority: string[];
+            fallbackBehavior: string;
+            plannerPriority: string[];
+            reviewIndependence: string;
+            reviewerPriority: string[];
+            workerPriority: string[];
+        };
         ControllersResolveDecisionRequest: {
             /** @description The resolver's answer. Required unless requiresHuman is true. */
             answer?: string;
@@ -2376,6 +2418,29 @@ export interface components {
             stepKind: string;
             usage: components["schemas"]["SessionUsageResponse"];
             verifyChecks?: null | number;
+        };
+        ControllersRoutingDecisionView: {
+            capacityByProfile?: {
+                [key: string]: string;
+            };
+            complexity?: string;
+            fallbackProfiles?: components["schemas"]["ControllersRoutingProfileView"][];
+            fallbackUsed: boolean;
+            policyVersion?: string;
+            preferredHarness?: string;
+            preferredProfile?: components["schemas"]["ControllersRoutingProfileView"];
+            reasonCodes?: string[];
+            role: string;
+            selectedHarness?: string;
+            selectedProfile?: components["schemas"]["ControllersRoutingProfileView"];
+            waiting: boolean;
+        };
+        ControllersRoutingProfileView: {
+            displayName: string;
+            harness: string;
+            id: string;
+            model?: string;
+            provider: string;
         };
         ControllersRoutingUsageResponse: {
             capacityStateAtDecision?: {
@@ -3887,6 +3952,7 @@ export interface components {
             reviewPolicy?: components["schemas"]["WorkflowReviewPolicyDecision"];
             reviewRunId?: string;
             reviewer?: string;
+            routing?: components["schemas"]["ControllersRoutingDecisionView"];
             sessionId?: string;
             /** @enum {string} */
             state: "pending" | "ready" | "running" | "waiting" | "completed" | "failed" | "cancelled";
@@ -4742,6 +4808,104 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getExecutionPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersExecutionPolicyResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    putExecutionPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersPutExecutionPolicyRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersExecutionPolicyResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

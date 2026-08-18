@@ -492,7 +492,7 @@ func (c *Coordinator) dispatchReviewFromPending(
 	if err := c.reviewerLauncher.Preflight(ctx, harness, worktreePath); err != nil {
 		return c.recordReviewDispatchFailure(ctx, run, reviewStep, entry, domain.WorkflowErrorReviewerLaunchFailed, fmt.Errorf("reviewer preflight: %w", err))
 	}
-	runtimeEnv, _, err := c.resolveRuntimeEnv(ctx, run.ID, domain.AgentHarness(harness))
+	runtimeEnv, _, _, err := c.resolveRuntimeEnv(ctx, run.ID, domain.AgentHarness(harness))
 	if err != nil {
 		return c.recordReviewDispatchFailure(ctx, run, reviewStep, entry, classifyProviderFailure(err).Class, err)
 	}

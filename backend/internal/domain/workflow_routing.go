@@ -24,6 +24,14 @@ const (
 	RoutingReasonWaitingForCapacity          RoutingReason = "waiting_for_capacity"
 	RoutingReasonPlannerPolicy               RoutingReason = "planner_policy"
 	RoutingReasonSameProviderFallbackAllowed RoutingReason = "same_provider_fallback_allowed"
+
+	// Checkpoint 8P-C's UserExecutionPolicy-driven reason codes (checkpoint
+	// brief §23).
+	RoutingReasonUserPreferredProvider RoutingReason = "user_preferred_provider"
+	RoutingReasonProviderDisabled      RoutingReason = "provider_disabled"
+	RoutingReasonProfileNotConnected   RoutingReason = "profile_not_connected"
+	RoutingReasonCapabilityMissing     RoutingReason = "capability_missing"
+	RoutingReasonUnsupportedProvider   RoutingReason = "unsupported_provider"
 )
 
 // Valid reports whether a reason code is part of the closed V1 enum —
@@ -41,7 +49,12 @@ func (r RoutingReason) Valid() bool {
 		RoutingReasonOnlyEligibleProvider,
 		RoutingReasonWaitingForCapacity,
 		RoutingReasonPlannerPolicy,
-		RoutingReasonSameProviderFallbackAllowed:
+		RoutingReasonSameProviderFallbackAllowed,
+		RoutingReasonUserPreferredProvider,
+		RoutingReasonProviderDisabled,
+		RoutingReasonProfileNotConnected,
+		RoutingReasonCapabilityMissing,
+		RoutingReasonUnsupportedProvider:
 		return true
 	default:
 		return false
@@ -100,13 +113,22 @@ func DefaultRoutingPolicy() RoutingPolicy {
 // harness string, so an attempt can always answer "why this provider" after
 // the fact.
 type RoutingDecision struct {
-	Role                    WorkflowRole                   `json:"role"`
-	Complexity              string                         `json:"complexity,omitempty"`
-	PreferredHarness        AgentHarness                   `json:"preferredHarness"`
-	SelectedHarness         AgentHarness                   `json:"selectedHarness,omitempty"`
-	FallbackOrder           []AgentHarness                 `json:"fallbackOrder,omitempty"`
-	ReasonCodes             []RoutingReason                `json:"reasonCodes"`
-	PolicyVersion           string                         `json:"policyVersion"`
-	Waiting                 bool                           `json:"waiting"`
-	CapacityStateAtDecision map[AgentHarness]CapacityState `json:"capacityStateAtDecision,omitempty"`
+	Role             WorkflowRole    `json:"role"`
+	Complexity       string          `json:"complexity,omitempty"`
+	PreferredHarness AgentHarness    `json:"preferredHarness"`
+	SelectedHarness  AgentHarness    `json:"selectedHarness,omitempty"`
+	FallbackOrder    []AgentHarness  `json:"fallbackOrder,omitempty"`
+	ReasonCodes      []RoutingReason `json:"reasonCodes"`
+	PolicyVersion    string          `json:"policyVersion"`
+	Waiting          bool            `json:"waiting"`
+	// PreferredProfileID/SelectedProfileID (Checkpoint 8P-C) are the exact
+	// ProviderProfile the decision preferred/selected, not just its harness
+	// -- required so capacity/usage facts and the frontend routing
+	// explanation (checkpoint brief §24) can point at the specific
+	// connection used, not merely "which provider family".
+	PreferredProfileID      ProviderProfileID                   `json:"preferredProfileId,omitempty"`
+	SelectedProfileID       ProviderProfileID                   `json:"selectedProfileId,omitempty"`
+	FallbackProfileOrder    []ProviderProfileID                 `json:"fallbackProfileOrder,omitempty"`
+	CapacityStateAtDecision map[AgentHarness]CapacityState      `json:"capacityStateAtDecision,omitempty"`
+	CapacityStateByProfile  map[ProviderProfileID]CapacityState `json:"capacityStateByProfile,omitempty"`
 }

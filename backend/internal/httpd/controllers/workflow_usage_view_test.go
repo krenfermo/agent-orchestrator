@@ -24,7 +24,7 @@ type fakeSessionUsageLookup struct {
 	err  error
 }
 
-func (f *fakeSessionUsageLookup) ListCompact(_ context.Context, _ domain.ProjectID) ([]domain.CompactSessionUsage, error) {
+func (f *fakeSessionUsageLookup) ListCompact(_ context.Context, _ domain.ProjectID, _ *domain.UserID) ([]domain.CompactSessionUsage, error) {
 	return nil, nil
 }
 

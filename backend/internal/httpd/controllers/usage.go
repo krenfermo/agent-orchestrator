@@ -9,11 +9,12 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 )
 
 // UsageSummaryService is the controller-facing compact usage read contract.
 type UsageSummaryService interface {
-	ListCompact(context.Context, domain.ProjectID) ([]domain.CompactSessionUsage, error)
+	ListCompact(context.Context, domain.ProjectID, *domain.UserID) ([]domain.CompactSessionUsage, error)
 	Get(context.Context, domain.SessionID) (domain.SessionUsageSummary, error)
 }
 
@@ -21,9 +22,9 @@ type UsageSummaryService interface {
 type UsageController struct {
 	Svc UsageSummaryService
 	// Ownership and TrustedLocal back Checkpoint 8P-B.2's session
-	// ownership scoping for the per-session usage read below. listSessions
-	// is not scoped -- it's a list-all route, not addressed to one
-	// session.
+	// ownership scoping for the per-session usage read below, and
+	// Checkpoint 8P-C's scoping of listSessions to the caller's own
+	// sessions (never another user's usage/session summaries).
 	Ownership    SessionOwnershipStore
 	TrustedLocal bool
 }
@@ -39,7 +40,13 @@ func (c *UsageController) listSessions(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/usage/sessions")
 		return
 	}
-	items, err := c.Svc.ListCompact(r.Context(), domain.ProjectID(r.URL.Query().Get("projectId")))
+	var ownerUserID *domain.UserID
+	if !c.TrustedLocal && c.Ownership != nil {
+		if user, ok := identity.FromContext(r.Context()); ok {
+			ownerUserID = &user.ID
+		}
+	}
+	items, err := c.Svc.ListCompact(r.Context(), domain.ProjectID(r.URL.Query().Get("projectId")), ownerUserID)
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return

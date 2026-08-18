@@ -10,7 +10,7 @@ import (
 
 type usageSummaryStore interface {
 	GetSession(context.Context, domain.SessionID) (domain.SessionRecord, bool, error)
-	ListCompactSessionUsage(context.Context, domain.ProjectID) ([]domain.CompactSessionUsage, error)
+	ListCompactSessionUsage(context.Context, domain.ProjectID, *domain.UserID) ([]domain.CompactSessionUsage, error)
 	ListUsageModelAggregates(context.Context, domain.SessionID) ([]domain.UsageModelAggregate, error)
 	GetUsageSessionIncomplete(context.Context, domain.SessionID) (bool, error)
 }
@@ -21,12 +21,14 @@ type SummaryReader struct{ store usageSummaryStore }
 // NewSummaryReader constructs a token-usage summary reader.
 func NewSummaryReader(store usageSummaryStore) *SummaryReader { return &SummaryReader{store: store} }
 
-// ListCompact returns one batch suitable for dashboard cards.
-func (r *SummaryReader) ListCompact(ctx context.Context, projectID domain.ProjectID) ([]domain.CompactSessionUsage, error) {
+// ListCompact returns one batch suitable for dashboard cards. ownerUserID
+// (Checkpoint 8P-C), when non-nil, scopes results to that owner's own
+// sessions only.
+func (r *SummaryReader) ListCompact(ctx context.Context, projectID domain.ProjectID, ownerUserID *domain.UserID) ([]domain.CompactSessionUsage, error) {
 	if r == nil || r.store == nil {
 		return nil, fmt.Errorf("usage summary store is unavailable")
 	}
-	return r.store.ListCompactSessionUsage(ctx, projectID)
+	return r.store.ListCompactSessionUsage(ctx, projectID, ownerUserID)
 }
 
 // Get returns detailed token telemetry for one session.

@@ -36,8 +36,13 @@ func ProviderDescriptors() []domain.ProviderAdapterDescriptor {
 			Provider:    "openai",
 			Harness:     domain.HarnessCodex,
 			DisplayName: "Codex",
+			// CapabilityPlanner is deliberately absent (Checkpoint 8P-C §21
+			// audit): the only wired Planner implementation
+			// (adapters/planner/command.Planner, see daemon/workflow_wiring.go)
+			// unconditionally shells out to the `claude` CLI -- there is no
+			// per-harness/Codex planner adapter today, so Codex must never be
+			// selectable for the planner role until one exists.
 			Capabilities: []domain.ProviderCapability{
-				domain.CapabilityPlanner,
 				domain.CapabilityWorker,
 				domain.CapabilityReviewer,
 				domain.CapabilityDecisionResolver,

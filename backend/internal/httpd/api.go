@@ -18,6 +18,7 @@ import (
 	authsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/authsvc"
 	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
+	executionpolicysvc "github.com/aoagents/agent-orchestrator/backend/internal/service/executionpolicy"
 	providerprofilesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providerprofile"
 	reviewsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/review"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
@@ -103,6 +104,11 @@ type APIDeps struct {
 	// optional-surface conventions here.
 	ProviderProfiles providerprofilesvc.Manager
 
+	// ExecutionPolicy backs Checkpoint 8P-C's per-user configurable
+	// routing surface. Optional: nil leaves /execution-policy answering
+	// 501, matching ProviderProfiles' own optional-surface convention.
+	ExecutionPolicy executionpolicysvc.Manager
+
 	// SessionOwnership backs Checkpoint 8P-B.1/8P-B.2's session ownership
 	// scoping, shared by SessionsController, ConversationsController,
 	// ReviewsController, and UsageController's per-session read -- see
@@ -164,6 +170,7 @@ type API struct {
 	events           *EventsController
 	auth             *controllers.AuthController
 	providerProfiles *controllers.ProviderProfilesController
+	executionPolicy  *controllers.ExecutionPolicyController
 }
 
 // NewAPI constructs the API surface from its dependencies. cfg carries the
@@ -219,15 +226,17 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		dev:      &controllers.DevController{Import: deps.DevImport},
 		browser:  &controllers.BrowserController{Svc: deps.Browser},
 		workflows: &controllers.WorkflowsController{
-			Svc:             deps.Workflows,
-			UsageReader:     deps.UsageSummary,
-			QuestionsReader: deps.Questions,
-			Ownership:       deps.WorkflowOwnership,
-			TrustedLocal:    cfg.TrustedLocalMode,
+			Svc:              deps.Workflows,
+			UsageReader:      deps.UsageSummary,
+			QuestionsReader:  deps.Questions,
+			Ownership:        deps.WorkflowOwnership,
+			TrustedLocal:     cfg.TrustedLocalMode,
+			ProviderProfiles: deps.ProviderProfiles,
 		},
 		events:           &EventsController{Source: deps.CDC, Live: deps.Events},
 		auth:             &controllers.AuthController{Mgr: deps.Auth, TrustedLocal: cfg.TrustedLocalMode},
 		providerProfiles: &controllers.ProviderProfilesController{Mgr: deps.ProviderProfiles},
+		executionPolicy:  &controllers.ExecutionPolicyController{Mgr: deps.ExecutionPolicy},
 	}
 }
 
@@ -270,6 +279,7 @@ func (a *API) Register(root chi.Router) {
 			a.workflows.Register(r)
 			a.auth.Register(r)
 			a.providerProfiles.Register(r)
+			a.executionPolicy.Register(r)
 			// Sibling REST controllers plug in here.
 		})
 		// Agent switching synchronously collects a handoff, starts the target,

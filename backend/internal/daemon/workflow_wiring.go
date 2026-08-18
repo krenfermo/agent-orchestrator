@@ -92,6 +92,15 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		WakeScheduler:            wakeScheduler,
 		Logger:                   log,
 		RuntimeIsolation:         runtimeIsolation,
+		// Checkpoint 8P-C: routing now walks the workflow owner's own
+		// UserExecutionPolicy over their own ProviderProfiles instead of a
+		// fixed Claude<->Codex table. TrustedLocal mirrors the same
+		// desktop-compatibility flag providerruntime.Resolver above already
+		// uses, so a bootstrap admin with no configured profiles yet keeps
+		// working exactly as before this checkpoint.
+		ProviderProfiles:  store,
+		ExecutionPolicies: store,
+		TrustedLocal:      cfg.TrustedLocalMode,
 	})
 	return coordinator, workflowsvc.New(coordinator), wakeScheduler
 }

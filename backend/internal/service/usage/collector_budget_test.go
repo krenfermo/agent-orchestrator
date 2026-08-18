@@ -132,7 +132,7 @@ func TestCollectorCodexBudgetCountsLogicalIDsAndAllowsExistingGenerations(t *tes
 		t.Fatal("partial binding made the admitted child source unwatchable")
 	}
 	reader := NewSummaryReader(fixture.store)
-	compact, err := reader.ListCompact(ctx, fixture.session.ProjectID)
+	compact, err := reader.ListCompact(ctx, fixture.session.ProjectID, nil)
 	if err != nil || len(compact) != 0 {
 		t.Fatalf("zero-usage compact summary=%+v err=%v, want no card metric", compact, err)
 	}
@@ -423,7 +423,7 @@ func testCollectorCodexBudgetFinalizationWaitsThenPersistsPartialAcrossRestart(t
 	assertCodexBudgetMarker(t, store, session.ID, domain.UsageBindingPartial)
 
 	reader := NewSummaryReader(store)
-	compact, err := reader.ListCompact(ctx, session.ProjectID)
+	compact, err := reader.ListCompact(ctx, session.ProjectID, nil)
 	if err != nil || len(compact) != 1 {
 		t.Fatalf("compact=%+v err=%v", compact, err)
 	}

@@ -14,20 +14,91 @@ import (
 )
 
 const getLatestAgentHealthEvent = `-- name: GetLatestAgentHealthEvent :one
-SELECT id, harness, state, reason, failure_class, cooldown_until,
+SELECT id, harness, user_id, provider_profile_id, state, reason, failure_class, cooldown_until,
        consecutive_failures, created_at
 FROM agent_health_events
-WHERE harness = ?
+WHERE harness = ? AND user_id IS NULL AND provider_profile_id IS NULL
 ORDER BY created_at DESC, id DESC
 LIMIT 1
 `
 
-func (q *Queries) GetLatestAgentHealthEvent(ctx context.Context, harness string) (AgentHealthEvent, error) {
+type GetLatestAgentHealthEventRow struct {
+	ID                  string
+	Harness             string
+	UserID              sql.NullString
+	ProviderProfileID   sql.NullString
+	State               string
+	Reason              string
+	FailureClass        string
+	CooldownUntil       sql.NullTime
+	ConsecutiveFailures int64
+	CreatedAt           time.Time
+}
+
+// Legacy/global read: the latest TRULY UNSCOPED event for a harness (both
+// user_id and provider_profile_id NULL) -- never a scoped row belonging to
+// ANY user. This is what keeps one user's scoped health fact from leaking
+// into another user's (or the pre-8P-C global dashboard's) read when their
+// own scoped lookup misses; see healthScope's precedence-rule doc comment.
+func (q *Queries) GetLatestAgentHealthEvent(ctx context.Context, harness string) (GetLatestAgentHealthEventRow, error) {
 	row := q.db.QueryRowContext(ctx, getLatestAgentHealthEvent, harness)
-	var i AgentHealthEvent
+	var i GetLatestAgentHealthEventRow
 	err := row.Scan(
 		&i.ID,
 		&i.Harness,
+		&i.UserID,
+		&i.ProviderProfileID,
+		&i.State,
+		&i.Reason,
+		&i.FailureClass,
+		&i.CooldownUntil,
+		&i.ConsecutiveFailures,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getLatestAgentHealthEventScoped = `-- name: GetLatestAgentHealthEventScoped :one
+SELECT id, harness, user_id, provider_profile_id, state, reason, failure_class, cooldown_until,
+       consecutive_failures, created_at
+FROM agent_health_events
+WHERE harness = ? AND user_id = ? AND provider_profile_id = ?
+ORDER BY created_at DESC, id DESC
+LIMIT 1
+`
+
+type GetLatestAgentHealthEventScopedParams struct {
+	Harness           string
+	UserID            sql.NullString
+	ProviderProfileID sql.NullString
+}
+
+type GetLatestAgentHealthEventScopedRow struct {
+	ID                  string
+	Harness             string
+	UserID              sql.NullString
+	ProviderProfileID   sql.NullString
+	State               string
+	Reason              string
+	FailureClass        string
+	CooldownUntil       sql.NullTime
+	ConsecutiveFailures int64
+	CreatedAt           time.Time
+}
+
+// Checkpoint 8P-C: the most specific health fact for one user's exact
+// provider profile. Never matches another user's/profile's rows, and never
+// matches a legacy/global row (user_id/provider_profile_id NULL) -- that
+// fallback is an explicit, separate step in Go (service/capacity), not a
+// SQL COALESCE, so the precedence is auditable in one place.
+func (q *Queries) GetLatestAgentHealthEventScoped(ctx context.Context, arg GetLatestAgentHealthEventScopedParams) (GetLatestAgentHealthEventScopedRow, error) {
+	row := q.db.QueryRowContext(ctx, getLatestAgentHealthEventScoped, arg.Harness, arg.UserID, arg.ProviderProfileID)
+	var i GetLatestAgentHealthEventScopedRow
+	err := row.Scan(
+		&i.ID,
+		&i.Harness,
+		&i.UserID,
+		&i.ProviderProfileID,
 		&i.State,
 		&i.Reason,
 		&i.FailureClass,
@@ -203,16 +274,31 @@ func (q *Queries) GetWorkflowStep(ctx context.Context, id string) (WorkflowStep,
 
 const insertAgentHealthEvent = `-- name: InsertAgentHealthEvent :one
 INSERT INTO agent_health_events (
-    id, harness, state, reason, failure_class, cooldown_until,
+    id, harness, user_id, provider_profile_id, state, reason, failure_class, cooldown_until,
     consecutive_failures, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id, harness, state, reason, failure_class, cooldown_until,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, harness, user_id, provider_profile_id, state, reason, failure_class, cooldown_until,
           consecutive_failures, created_at
 `
 
 type InsertAgentHealthEventParams struct {
 	ID                  string
 	Harness             string
+	UserID              sql.NullString
+	ProviderProfileID   sql.NullString
+	State               string
+	Reason              string
+	FailureClass        string
+	CooldownUntil       sql.NullTime
+	ConsecutiveFailures int64
+	CreatedAt           time.Time
+}
+
+type InsertAgentHealthEventRow struct {
+	ID                  string
+	Harness             string
+	UserID              sql.NullString
+	ProviderProfileID   sql.NullString
 	State               string
 	Reason              string
 	FailureClass        string
@@ -223,10 +309,15 @@ type InsertAgentHealthEventParams struct {
 
 // Checkpoint 8H: append-only durable fact about one harness's dispatch
 // outcome. Never updated; GetLatestAgentHealthEvent derives current health.
-func (q *Queries) InsertAgentHealthEvent(ctx context.Context, arg InsertAgentHealthEventParams) (AgentHealthEvent, error) {
+// user_id/provider_profile_id (Checkpoint 8P-C) are nullable: empty for an
+// unowned run / trusted-local dispatch with no matched profile, in which
+// case the event is a "legacy/global" fact (see GetLatestAgentHealthEvent).
+func (q *Queries) InsertAgentHealthEvent(ctx context.Context, arg InsertAgentHealthEventParams) (InsertAgentHealthEventRow, error) {
 	row := q.db.QueryRowContext(ctx, insertAgentHealthEvent,
 		arg.ID,
 		arg.Harness,
+		arg.UserID,
+		arg.ProviderProfileID,
 		arg.State,
 		arg.Reason,
 		arg.FailureClass,
@@ -234,10 +325,12 @@ func (q *Queries) InsertAgentHealthEvent(ctx context.Context, arg InsertAgentHea
 		arg.ConsecutiveFailures,
 		arg.CreatedAt,
 	)
-	var i AgentHealthEvent
+	var i InsertAgentHealthEventRow
 	err := row.Scan(
 		&i.ID,
 		&i.Harness,
+		&i.UserID,
+		&i.ProviderProfileID,
 		&i.State,
 		&i.Reason,
 		&i.FailureClass,
@@ -932,6 +1025,30 @@ func (q *Queries) UpdateWorkflowOutboxStatus(ctx context.Context, arg UpdateWork
 		arg.ID,
 		arg.ExpectedStatus,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const updateWorkflowRunPolicySnapshot = `-- name: UpdateWorkflowRunPolicySnapshot :execrows
+UPDATE workflow_runs
+SET policy_snapshot = ?1, updated_at = ?2
+WHERE id = ?3
+`
+
+type UpdateWorkflowRunPolicySnapshotParams struct {
+	PolicySnapshot string
+	UpdatedAt      time.Time
+	ID             string
+}
+
+// Checkpoint 8P-C: writes the run's policy_snapshot exactly once, right
+// after creation, to embed the workflow owner's execution policy (their
+// ProviderProfile priority order at that moment) -- never touched again
+// afterwards, so a later Settings edit cannot reroute an in-flight run.
+func (q *Queries) UpdateWorkflowRunPolicySnapshot(ctx context.Context, arg UpdateWorkflowRunPolicySnapshotParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateWorkflowRunPolicySnapshot, arg.PolicySnapshot, arg.UpdatedAt, arg.ID)
 	if err != nil {
 		return 0, err
 	}

@@ -17,7 +17,7 @@ type usageSummaryStoreStub struct {
 	calls      [4]int
 }
 
-func (s *usageSummaryStoreStub) ListCompactSessionUsage(_ context.Context, id domain.ProjectID) ([]domain.CompactSessionUsage, error) {
+func (s *usageSummaryStoreStub) ListCompactSessionUsage(_ context.Context, id domain.ProjectID, _ *domain.UserID) ([]domain.CompactSessionUsage, error) {
 	s.projectID, s.calls[0] = id, s.calls[0]+1
 	return s.rows, nil
 }
@@ -40,7 +40,7 @@ func TestSummaryReaderListCompactUsesOneBatchRead(t *testing.T) {
 		{SessionID: "used", TotalTokens: 120},
 		{SessionID: "incomplete", TotalTokens: 60, Incomplete: true},
 	}}
-	got, err := NewSummaryReader(store).ListCompact(context.Background(), "reverb")
+	got, err := NewSummaryReader(store).ListCompact(context.Background(), "reverb", nil)
 	mustNoError(t, err)
 	if store.calls[0] != 1 || store.projectID != "reverb" || len(got) != 3 {
 		t.Fatalf("read=%d project=%q items=%+v", store.calls[0], store.projectID, got)

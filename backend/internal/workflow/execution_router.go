@@ -6,68 +6,53 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
-// knownRoutingHarnesses is V1's fixed two-provider universe (checkpoint
-// brief §3/§11: "no un tercer proveedor"). ExecutionRouter never considers a
-// harness outside this set.
-var knownRoutingHarnesses = []domain.AgentHarness{domain.HarnessCodex, domain.HarnessClaudeCode}
-
-// oppositeHarness is the single shared cross-provider mapping table
-// (checkpoint brief §4/§11: "No dupliques provider-selection logic"):
-// Codex<->Claude Code, no third provider. Worker fallback (failover.go),
-// reviewer routing and the 8K-B decision resolver all consult this one
-// function rather than each keeping its own hardcoded table.
-func oppositeHarness(h domain.AgentHarness) (domain.AgentHarness, bool) {
-	switch h {
-	case domain.HarnessClaudeCode:
-		return domain.HarnessCodex, true
-	case domain.HarnessCodex:
-		return domain.HarnessClaudeCode, true
-	default:
-		return "", false
-	}
-}
-
-// reviewerHarnessFromAgentHarness bridges ExecutionRouter's AgentHarness
-// vocabulary (worker/routing) to domain.ReviewerHarness (the reviewer
-// registry's own vocabulary, ports.ReviewerResolver) for the two harnesses
-// ExecutionRouter V1 ever selects as reviewer. Falls back to Claude Code —
-// the only reviewer 8C originally supported — for anything else, never a
-// zero value.
-func reviewerHarnessFromAgentHarness(h domain.AgentHarness) domain.ReviewerHarness {
-	if h == domain.HarnessCodex {
-		return domain.ReviewerCodex
-	}
-	return domain.ReviewerClaudeCode
-}
-
-// RoutingRequest is ExecutionRouter's pure input (checkpoint brief §4):
-// every fact a routing decision may consult, gathered by the caller from
-// already-durable state. RouteExecution itself performs no IO, so the same
-// request always produces the same decision.
+// RoutingRequest is ExecutionRouter's pure input (Checkpoint 8P-C rewrite of
+// 8L's fixed two-provider version): every fact a routing decision may
+// consult, gathered by the caller from already-durable state. RouteExecution
+// itself performs no IO, so the same request always produces the same
+// decision.
+//
+// The fixed Claude<->Codex universe (knownRoutingHarnesses/oppositeHarness)
+// is gone: routing now walks the caller's domain.UserExecutionPolicy
+// priority lists over their own EligibleProfiles, so adding a new provider
+// only ever requires a real adapter + a ProviderProfile, never a router
+// source change (checkpoint brief §19).
 type RoutingRequest struct {
 	Role domain.WorkflowRole
-	// Complexity is consulted for the worker role (which preference tier
-	// applies) and the reviewer role (whether same-provider fallback may
-	// ever be considered — never for high-risk). Ignored for planner.
+	// Complexity is recorded on the decision for explainability/telemetry
+	// only. It no longer selects a different priority list on its own
+	// (checkpoint brief §17: user order must never be silently overridden by
+	// a complexity heuristic) -- a future policy may reintroduce
+	// complexity-based ordering explicitly, but nothing in V1 does.
 	Complexity TaskComplexity
-	// CurrentImplementer is the harness whose work is being reviewed
-	// (reviewer/decision-resolver role); empty for planner/worker.
-	CurrentImplementer       domain.AgentHarness
-	PreviousAttempts         int
-	PreviousProviderFailures []domain.AgentHarness
-	// Capacity is a snapshot of every known harness's CapacityState, taken
-	// once by the caller (via the same agentHealth/capacity.Reader source
-	// 8H/8J already use) so RouteExecution stays pure/deterministic.
-	Capacity map[domain.AgentHarness]domain.CapacityState
-	Policy   domain.RoutingPolicy
+	// CurrentImplementerProvider is the provider family (e.g. "anthropic",
+	// "openai") of the profile whose work is being reviewed (reviewer/
+	// decision-resolver role only). Comparing providers rather than exact
+	// profile IDs matches independence's real intent: a different profile of
+	// the SAME provider is not independent.
+	CurrentImplementerProvider string
+	Policy                     domain.ExecutionPolicySnapshot
+	// EligibleProfiles is the caller-precomputed set of the workflow owner's
+	// own profiles that are enabled, connected, and advertise the role's
+	// required capability (domain.EligibleProfiles) -- router only consults
+	// capacity beyond this, never re-derives ownership/capability itself.
+	EligibleProfiles map[domain.ProviderProfileID]domain.ProviderProfile
+	// IneligibleReasons explains, for a priority-list entry NOT present in
+	// EligibleProfiles, exactly why (provider_disabled/profile_not_connected/
+	// capability_missing/unsupported_provider) -- used only to produce an
+	// accurate reason code when the single most-preferred entry is the one
+	// filtered out; entries beyond the first are silently skipped the same
+	// way an unavailable one is.
+	IneligibleReasons map[domain.ProviderProfileID]domain.RoutingReason
+	Capacity          map[domain.ProviderProfileID]domain.CapacityState
 }
 
-// capacityEligible reports whether state permits dispatch (checkpoint brief
-// §12): available/unknown are eligible, limited/cooldown/unavailable are
-// not. Unknown defaults to eligible ("elegible conservadoramente si
-// instalado/autenticado salvo fallo activo") — RouteExecution has no probe
-// of its own, so an unrecorded harness is treated the same way
-// domain.AgentHealth.Available already treats AgentHealthUnknown.
+// capacityEligible reports whether state permits dispatch: available/unknown
+// are eligible, limited/cooldown/unavailable are not. Unknown defaults to
+// eligible ("elegible conservadoramente si instalado/autenticado salvo fallo
+// activo") — RouteExecution has no probe of its own, so an unrecorded
+// profile is treated the same way domain.AgentHealth.Available already
+// treats AgentHealthUnknown.
 func capacityEligible(state domain.CapacityState) bool {
 	switch state {
 	case domain.CapacityAvailable, domain.CapacityUnknown:
@@ -84,37 +69,24 @@ func capacityReason(state domain.CapacityState) domain.RoutingReason {
 	return domain.RoutingReasonProviderUnavailable
 }
 
-// RouteExecution is Checkpoint 8L's pure, deterministic V1 routing
-// decision. It never calls an LLM, never performs IO and never mutates
-// state — callers gather RoutingRequest's facts first (complexity estimate,
-// capacity snapshot, policy) and persist the returned RoutingDecision
-// themselves.
+// RouteExecution is Checkpoint 8P-C's pure, deterministic routing decision.
+// It never calls an LLM, never performs IO and never mutates state —
+// callers gather RoutingRequest's facts first (eligible profiles, capacity
+// snapshot, the caller's live/default UserExecutionPolicy) and persist the
+// returned RoutingDecision themselves.
 func RouteExecution(req RoutingRequest) domain.RoutingDecision {
-	policy := req.Policy
-	if policy.Version == "" {
-		policy = domain.DefaultRoutingPolicy()
-	}
 	decision := domain.RoutingDecision{
-		Role:                    req.Role,
-		Complexity:              string(req.Complexity),
-		PolicyVersion:           domain.RoutingPolicyVersion,
-		CapacityStateAtDecision: req.Capacity,
+		Role:                   req.Role,
+		Complexity:             string(req.Complexity),
+		PolicyVersion:          domain.UserExecutionPolicyVersion,
+		CapacityStateByProfile: req.Capacity,
 	}
-
+	priority := req.Policy.PriorityFor(req.Role)
 	switch req.Role {
-	case domain.WorkflowRolePlanner:
-		return routePlanner(decision, policy.PlannerPreference, req.Capacity)
-	case domain.WorkflowRoleWorker, domain.WorkflowRoleFixWorker:
-		preferred := policy.NormalWorkerPreference
-		switch req.Complexity {
-		case ComplexityTrivial:
-			preferred = policy.TrivialWorkerPreference
-		case ComplexityHighRisk:
-			preferred = policy.HighRiskWorkerPreference
-		}
-		return routeWorker(decision, preferred, req.Capacity)
+	case domain.WorkflowRolePlanner, domain.WorkflowRoleWorker, domain.WorkflowRoleFixWorker:
+		return routeByPriority(decision, priority, req)
 	case domain.WorkflowRoleReviewer, domain.WorkflowRoleDecisionResolver:
-		return routeCrossProvider(decision, req.CurrentImplementer, req.Complexity, req.Capacity, policy)
+		return routeCrossProvider(decision, priority, req)
 	default:
 		decision.Waiting = true
 		decision.ReasonCodes = []domain.RoutingReason{domain.RoutingReasonWaitingForCapacity}
@@ -122,102 +94,129 @@ func RouteExecution(req RoutingRequest) domain.RoutingDecision {
 	}
 }
 
-// routePlanner has no fallback: only one planner adapter is wired today
-// (checkpoint brief §10 — "Si no existe soporte seguro: waiting_for_capacity"),
-// so an unavailable preferred planner harness always waits, never guesses a
-// second implementation.
-func routePlanner(decision domain.RoutingDecision, preferred domain.AgentHarness, capacity map[domain.AgentHarness]domain.CapacityState) domain.RoutingDecision {
-	decision.PreferredHarness = preferred
-	if capacityEligible(capacity[preferred]) {
-		decision.SelectedHarness = preferred
-		decision.ReasonCodes = []domain.RoutingReason{domain.RoutingReasonPlannerPolicy}
-		return decision
-	}
-	decision.Waiting = true
-	decision.ReasonCodes = []domain.RoutingReason{
-		domain.RoutingReasonPlannerPolicy,
-		domain.RoutingReasonPreferredUnavailable,
-		capacityReason(capacity[preferred]),
-		domain.RoutingReasonWaitingForCapacity,
-	}
-	return decision
-}
-
-// routeWorker applies checkpoint brief §7's worker fallback rule: preferred
-// harness by complexity tier, falling back to the opposite provider (V1's
-// only other known harness) when the preferred one is not capacity-eligible,
-// and waiting_for_capacity — never needs_attention — when neither is.
-func routeWorker(decision domain.RoutingDecision, preferred domain.AgentHarness, capacity map[domain.AgentHarness]domain.CapacityState) domain.RoutingDecision {
-	decision.PreferredHarness = preferred
-	fallback, hasFallback := oppositeHarness(preferred)
-	if hasFallback {
-		decision.FallbackOrder = []domain.AgentHarness{fallback}
-	}
-	if capacityEligible(capacity[preferred]) {
-		decision.SelectedHarness = preferred
-		decision.ReasonCodes = []domain.RoutingReason{domain.RoutingReasonPreferredForComplexity}
-		return decision
-	}
-	reasons := []domain.RoutingReason{domain.RoutingReasonPreferredUnavailable, capacityReason(capacity[preferred])}
-	if hasFallback && capacityEligible(capacity[fallback]) {
-		decision.SelectedHarness = fallback
-		decision.ReasonCodes = append(reasons, domain.RoutingReasonFallbackSelected)
-		return decision
-	}
-	decision.Waiting = true
-	decision.ReasonCodes = append(reasons, domain.RoutingReasonWaitingForCapacity)
-	return decision
-}
-
-// routeCrossProvider applies checkpoint brief §8/§11's independence rule for
-// both the reviewer role and the 8K-B decision-resolver role: prefer the
-// opposite provider from whoever implemented/asked. A same-provider
-// fallback is only ever considered when the policy explicitly allows it AND
-// the task is not high-risk (checkpoint brief §8: "NO usar same-provider
-// reviewer automáticamente para high-risk" is a hard rule policy cannot
-// relax). Absent that opt-in, an unavailable opposite provider waits.
-func routeCrossProvider(decision domain.RoutingDecision, implementer domain.AgentHarness, complexity TaskComplexity, capacity map[domain.AgentHarness]domain.CapacityState, policy domain.RoutingPolicy) domain.RoutingDecision {
-	preferred, ok := oppositeHarness(implementer)
-	if !ok {
+// routeByPriority applies the planner/worker rule: walk the role's priority
+// list in order, selecting the first entry that is both eligible (owned,
+// enabled, connected, capable) and capacity-eligible.
+// domain.FallbackWaitForPreferred stops at the first eligible-but-
+// capacity-blocked entry rather than silently walking to the next one
+// (checkpoint brief §2: "Codex sólo cuando Claude no sea elegible" is an
+// opt-in behavior, not the only one).
+func routeByPriority(decision domain.RoutingDecision, priority []domain.ProviderProfileID, req RoutingRequest) domain.RoutingDecision {
+	if len(priority) == 0 {
 		decision.Waiting = true
 		decision.ReasonCodes = []domain.RoutingReason{domain.RoutingReasonWaitingForCapacity}
 		return decision
 	}
-	decision.PreferredHarness = preferred
-	if capacityEligible(capacity[preferred]) {
-		decision.SelectedHarness = preferred
-		decision.ReasonCodes = []domain.RoutingReason{domain.RoutingReasonCrossProviderReview, domain.RoutingReasonReviewIndependenceRequired}
-		return decision
+	decision.PreferredProfileID = priority[0]
+	if p, ok := req.EligibleProfiles[priority[0]]; ok {
+		decision.PreferredHarness = p.Harness
 	}
-	reasons := []domain.RoutingReason{
-		domain.RoutingReasonReviewIndependenceRequired,
-		domain.RoutingReasonPreferredUnavailable,
-		capacityReason(capacity[preferred]),
-	}
-	allowSameProvider := policy.AllowSameProviderReviewFallbackForNormal && complexity != ComplexityHighRisk
-	if allowSameProvider && capacityEligible(capacity[implementer]) {
-		decision.FallbackOrder = []domain.AgentHarness{implementer}
-		decision.SelectedHarness = implementer
-		decision.ReasonCodes = append(reasons, domain.RoutingReasonSameProviderFallbackAllowed)
+	for i, id := range priority {
+		profile, ok := req.EligibleProfiles[id]
+		if !ok {
+			continue
+		}
+		if !capacityEligible(req.Capacity[id]) {
+			if req.Policy.FallbackBehavior == domain.FallbackWaitForPreferred {
+				break
+			}
+			continue
+		}
+		decision.SelectedProfileID = id
+		decision.SelectedHarness = profile.Harness
+		if i == 0 {
+			decision.ReasonCodes = []domain.RoutingReason{domain.RoutingReasonUserPreferredProvider}
+		} else {
+			decision.FallbackProfileOrder = append([]domain.ProviderProfileID{}, priority[1:i+1]...)
+			decision.ReasonCodes = []domain.RoutingReason{domain.RoutingReasonPreferredUnavailable, domain.RoutingReasonFallbackSelected}
+		}
 		return decision
 	}
 	decision.Waiting = true
-	decision.ReasonCodes = append(reasons, domain.RoutingReasonWaitingForCapacity)
+	decision.ReasonCodes = append(preferredIneligibilityReasons(priority[0], req), domain.RoutingReasonWaitingForCapacity)
 	return decision
 }
 
-// routingCapacitySnapshot builds RoutingRequest.Capacity from the exact same
-// agentHealth source 8H/8K-B already query (never a second capacity query
-// path) for every V1 known harness.
-func (c *Coordinator) routingCapacitySnapshot(ctx stdctx.Context) map[domain.AgentHarness]domain.CapacityState {
-	snapshot := make(map[domain.AgentHarness]domain.CapacityState, len(knownRoutingHarnesses))
-	for _, h := range knownRoutingHarnesses {
-		health, err := c.agentHealth(ctx, h)
-		if err != nil {
-			snapshot[h] = domain.CapacityUnknown
+// preferredIneligibilityReasons explains why the single most-preferred
+// priority entry was not selected, for the waiting decision's reason trail.
+func preferredIneligibilityReasons(preferred domain.ProviderProfileID, req RoutingRequest) []domain.RoutingReason {
+	if reason, ok := req.IneligibleReasons[preferred]; ok {
+		return []domain.RoutingReason{reason}
+	}
+	if _, ok := req.EligibleProfiles[preferred]; ok {
+		return []domain.RoutingReason{domain.RoutingReasonPreferredUnavailable, capacityReason(req.Capacity[preferred])}
+	}
+	return nil
+}
+
+// routeCrossProvider applies the reviewer/decision-resolver independence
+// rule: prefer the highest-priority profile whose provider differs from
+// CurrentImplementerProvider. domain.ReviewIndependenceAllowSameProviderFallback
+// only ever applies for non-high-risk complexity — high-risk independence
+// can never be relaxed by policy, mirroring 8L's original hard rule
+// ("NO usar same-provider reviewer automáticamente para high-risk").
+func routeCrossProvider(decision domain.RoutingDecision, priority []domain.ProviderProfileID, req RoutingRequest) domain.RoutingDecision {
+	if len(priority) == 0 {
+		decision.Waiting = true
+		decision.ReasonCodes = []domain.RoutingReason{domain.RoutingReasonWaitingForCapacity}
+		return decision
+	}
+	decision.PreferredProfileID = priority[0]
+	if p, ok := req.EligibleProfiles[priority[0]]; ok {
+		decision.PreferredHarness = p.Harness
+	}
+	independent := func(p domain.ProviderProfile) bool { return p.Provider != req.CurrentImplementerProvider }
+	if sel, ok := selectFromPriority(priority, req, independent); ok {
+		decision.SelectedProfileID = sel.ID
+		decision.SelectedHarness = sel.Harness
+		decision.ReasonCodes = []domain.RoutingReason{domain.RoutingReasonCrossProviderReview, domain.RoutingReasonReviewIndependenceRequired}
+		return decision
+	}
+	allowSameProvider := req.Policy.ReviewIndependence == domain.ReviewIndependenceAllowSameProviderFallback && req.Complexity != ComplexityHighRisk
+	if allowSameProvider {
+		any := func(domain.ProviderProfile) bool { return true }
+		if sel, ok := selectFromPriority(priority, req, any); ok {
+			decision.SelectedProfileID = sel.ID
+			decision.SelectedHarness = sel.Harness
+			decision.ReasonCodes = []domain.RoutingReason{domain.RoutingReasonReviewIndependenceRequired, domain.RoutingReasonPreferredUnavailable, domain.RoutingReasonSameProviderFallbackAllowed}
+			return decision
+		}
+	}
+	decision.Waiting = true
+	decision.ReasonCodes = []domain.RoutingReason{domain.RoutingReasonReviewIndependenceRequired, domain.RoutingReasonWaitingForCapacity}
+	return decision
+}
+
+// selectFromPriority walks priority in order, returning the first entry
+// that is eligible, passes allow, and is capacity-eligible.
+func selectFromPriority(priority []domain.ProviderProfileID, req RoutingRequest, allow func(domain.ProviderProfile) bool) (domain.ProviderProfile, bool) {
+	for _, id := range priority {
+		p, ok := req.EligibleProfiles[id]
+		if !ok || !allow(p) {
 			continue
 		}
-		snapshot[h] = domain.CapacityStateFromHealth(health.State)
+		if capacityEligible(req.Capacity[id]) {
+			return p, true
+		}
+	}
+	return domain.ProviderProfile{}, false
+}
+
+// capacitySnapshotForProfiles builds a profile-keyed capacity snapshot
+// (Checkpoint 8P-C) from the exact same agentHealth source 8H/8J already
+// use, scoped to (userID, profileID) so one user's cooldown/outage can never
+// appear in another user's routing decision (see health.go's precedence
+// rule). A profile with no recorded scoped event yet reports
+// domain.CapacityUnknown — never a fabricated "available".
+func (c *Coordinator) capacitySnapshotForProfiles(ctx stdctx.Context, userID domain.UserID, profiles map[domain.ProviderProfileID]domain.ProviderProfile) map[domain.ProviderProfileID]domain.CapacityState {
+	snapshot := make(map[domain.ProviderProfileID]domain.CapacityState, len(profiles))
+	for id, p := range profiles {
+		health, err := c.agentHealth(ctx, p.Harness, healthScope{userID: userID, profileID: id})
+		if err != nil {
+			snapshot[id] = domain.CapacityUnknown
+			continue
+		}
+		snapshot[id] = domain.CapacityStateFromHealth(health.State)
 	}
 	return snapshot
 }

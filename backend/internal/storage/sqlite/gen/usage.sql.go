@@ -537,9 +537,15 @@ JOIN usage_bindings ub ON ub.id = mue.binding_id
 JOIN sessions s ON s.id = ub.session_id
 LEFT JOIN usage_session_integrity integrity ON integrity.session_id = ub.session_id
 WHERE (?1 = '' OR s.project_id = ?1)
+  AND (?2 IS NULL OR s.owner_user_id = ?2)
 GROUP BY ub.session_id
 ORDER BY s.project_id, s.num
 `
+
+type ListCompactSessionUsageParams struct {
+	ProjectID   interface{}
+	OwnerUserID interface{}
+}
 
 type ListCompactSessionUsageRow struct {
 	SessionID   domain.SessionID
@@ -547,8 +553,13 @@ type ListCompactSessionUsageRow struct {
 	Incomplete  int64
 }
 
-func (q *Queries) ListCompactSessionUsage(ctx context.Context, projectID interface{}) ([]ListCompactSessionUsageRow, error) {
-	rows, err := q.db.QueryContext(ctx, listCompactSessionUsage, projectID)
+// owner_user_id (Checkpoint 8P-C): NULL means "no ownership scoping"
+// (trusted-local / pre-8P-B session); a non-NULL value restricts results to
+// exactly that owner's own sessions, via the same sessions.owner_user_id
+// column session/project/workflow ownership already scope by -- so User A's
+// usage query structurally cannot return User B's rows.
+func (q *Queries) ListCompactSessionUsage(ctx context.Context, arg ListCompactSessionUsageParams) ([]ListCompactSessionUsageRow, error) {
+	rows, err := q.db.QueryContext(ctx, listCompactSessionUsage, arg.ProjectID, arg.OwnerUserID)
 	if err != nil {
 		return nil, err
 	}

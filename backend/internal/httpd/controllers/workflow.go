@@ -14,6 +14,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
+	providerprofilesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providerprofile"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 )
@@ -118,6 +119,88 @@ type WorkflowStepView struct {
 	// policy skipped" from "Claude approved" rather than inferring it from
 	// the absence of Reviewer/Verdict.
 	ReviewPolicy *workflowcore.ReviewPolicyDecision `json:"reviewPolicy,omitempty"`
+	// Routing surfaces Checkpoint 8P-C.1's persisted ExecutionRouter
+	// decision for this step (worker/reviewer/planner/decision-resolver
+	// roles) -- read back verbatim from the routing_decision checkpoint
+	// already written at dispatch time, never recomputed for display. Nil
+	// for a step kind that never routes (e.g. verify/advance) or one that
+	// hasn't dispatched yet.
+	Routing *RoutingDecisionView `json:"routing,omitempty"`
+}
+
+// RoutingProfileView is safe, display-only metadata for a provider profile
+// referenced by a routing decision (Checkpoint 8P-C.1 §15) -- never a
+// runtime-home path, credential, or secret ciphertext. Nil when the
+// decision predates profile-level routing (harness-only) or the profile
+// could no longer be resolved for the run's owner.
+type RoutingProfileView struct {
+	ID          string `json:"id"`
+	Provider    string `json:"provider"`
+	Harness     string `json:"harness"`
+	DisplayName string `json:"displayName"`
+	Model       string `json:"model,omitempty"`
+}
+
+// RoutingDecisionView is the wire shape of a domain.RoutingDecision
+// (Checkpoint 8P-C.1 §14). Only fields actually persisted/derivable are
+// populated -- an unknown value stays omitted, never fabricated.
+type RoutingDecisionView struct {
+	Role              string               `json:"role"`
+	Complexity        string               `json:"complexity,omitempty"`
+	PreferredHarness  string               `json:"preferredHarness,omitempty"`
+	SelectedHarness   string               `json:"selectedHarness,omitempty"`
+	PreferredProfile  *RoutingProfileView  `json:"preferredProfile,omitempty"`
+	SelectedProfile   *RoutingProfileView  `json:"selectedProfile,omitempty"`
+	FallbackProfiles  []RoutingProfileView `json:"fallbackProfiles,omitempty"`
+	FallbackUsed      bool                 `json:"fallbackUsed"`
+	Waiting           bool                 `json:"waiting"`
+	ReasonCodes       []string             `json:"reasonCodes,omitempty"`
+	PolicyVersion     string               `json:"policyVersion,omitempty"`
+	CapacityByProfile map[string]string    `json:"capacityByProfile,omitempty"`
+}
+
+func routingDecisionView(d domain.RoutingDecision, profiles map[domain.ProviderProfileID]domain.ProviderProfile) *RoutingDecisionView {
+	view := &RoutingDecisionView{
+		Role:             string(d.Role),
+		Complexity:       d.Complexity,
+		PreferredHarness: string(d.PreferredHarness),
+		SelectedHarness:  string(d.SelectedHarness),
+		Waiting:          d.Waiting,
+		PolicyVersion:    d.PolicyVersion,
+	}
+	for _, r := range d.ReasonCodes {
+		view.ReasonCodes = append(view.ReasonCodes, string(r))
+	}
+	if d.PreferredProfileID != "" {
+		view.PreferredProfile = routingProfileView(d.PreferredProfileID, profiles)
+	}
+	if d.SelectedProfileID != "" {
+		view.SelectedProfile = routingProfileView(d.SelectedProfileID, profiles)
+		view.FallbackUsed = d.PreferredProfileID != "" && d.SelectedProfileID != d.PreferredProfileID
+	}
+	for _, id := range d.FallbackProfileOrder {
+		if p := routingProfileView(id, profiles); p != nil {
+			view.FallbackProfiles = append(view.FallbackProfiles, *p)
+		}
+	}
+	if len(d.CapacityStateByProfile) > 0 {
+		view.CapacityByProfile = make(map[string]string, len(d.CapacityStateByProfile))
+		for id, state := range d.CapacityStateByProfile {
+			view.CapacityByProfile[string(id)] = string(state)
+		}
+	}
+	return view
+}
+
+func routingProfileView(id domain.ProviderProfileID, profiles map[domain.ProviderProfileID]domain.ProviderProfile) *RoutingProfileView {
+	p, ok := profiles[id]
+	if !ok {
+		return nil
+	}
+	return &RoutingProfileView{
+		ID: string(p.ID), Provider: p.Provider, Harness: string(p.Harness),
+		DisplayName: p.DisplayName, Model: p.DefaultModel,
+	}
 }
 
 // WorkflowRunView is a workflow run summary (no step/attempt fan-out).
@@ -225,6 +308,22 @@ func workflowRunView(run domain.WorkflowRun, nextAction string) WorkflowRunView 
 }
 
 func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail workflowcore.RunDetail) WorkflowRunDetailView {
+	// Checkpoint 8P-C.1: resolve the run owner's provider profiles ONCE
+	// (never per-step) for routing-decision display metadata. Unresolvable
+	// (no Ownership/ProviderProfiles wired, run unowned, or the lookup
+	// fails) simply means every RoutingDecisionView surfaces harness/reason
+	// data with no *Profile display fields -- never blocks the response.
+	var ownedProfiles map[domain.ProviderProfileID]domain.ProviderProfile
+	if c.Ownership != nil && c.ProviderProfiles != nil {
+		if owner, err := c.Ownership.GetWorkflowRunOwner(ctx, detail.Run.ID); err == nil && owner != nil {
+			if profiles, err := c.ProviderProfiles.List(ctx, *owner); err == nil {
+				ownedProfiles = make(map[domain.ProviderProfileID]domain.ProviderProfile, len(profiles))
+				for _, p := range profiles {
+					ownedProfiles[p.ID] = p
+				}
+			}
+		}
+	}
 	steps := make([]WorkflowStepView, 0, len(detail.Steps))
 	for _, sd := range detail.Steps {
 		step := sd.Step
@@ -275,6 +374,10 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 			target = sd.Review.Target
 			findings = sd.Review.FindingsSummary
 		}
+		var routing *RoutingDecisionView
+		if sd.Routing != nil {
+			routing = routingDecisionView(*sd.Routing, ownedProfiles)
+		}
 		steps = append(steps, WorkflowStepView{
 			ID:              step.ID,
 			Kind:            step.Kind,
@@ -298,6 +401,7 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 			FindingsSummary: findings,
 			Verification:    verification,
 			ReviewPolicy:    sd.ReviewPolicy,
+			Routing:         routing,
 		})
 	}
 	runView := workflowRunView(detail.Run, detail.NextAction)
@@ -390,6 +494,11 @@ type WorkflowsController struct {
 	// enforced when this is false — see ProjectsController's own field for
 	// the identical reasoning.
 	TrustedLocal bool
+	// ProviderProfiles backs Checkpoint 8P-C.1's routing-decision profile
+	// display metadata (safe fields only -- see RoutingProfileView). Nil
+	// leaves every StepDetail.Routing.*Profile field unset; the raw
+	// harness/reason-code fields still surface.
+	ProviderProfiles providerprofilesvc.Manager
 }
 
 func (c *WorkflowsController) scopingEnforced() bool {
@@ -405,6 +514,14 @@ func (c *WorkflowsController) stampOwner(r *http.Request, id string) {
 		return
 	}
 	_, _ = c.Ownership.SetWorkflowRunOwner(r.Context(), id, user.ID)
+	// Checkpoint 8P-C: embed the caller's execution policy into the
+	// just-created run's policy snapshot, using the same resolved identity
+	// stampOwner just used -- never a second identity lookup. Optional
+	// (type-asserted): a Svc predating 8P-C simply skips this, leaving the
+	// run on its default policy_snapshot exactly as before.
+	if applier, ok := c.Svc.(workflowsvc.ExecutionPolicyApplier); ok {
+		_ = applier.ApplyExecutionPolicySnapshot(r.Context(), id, user.ID)
+	}
 }
 
 func (c *WorkflowsController) runVisible(ctx context.Context, id string, current domain.UserID) bool {
@@ -427,7 +544,7 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	r.Get("/workflows/{workflowId}/plan", c.get)
 	r.Post("/workflows/{workflowId}/plan/approve", c.approvePlan)
 	r.Post("/workflows/{workflowId}/plan/reject", c.rejectPlan)
-	(&WorkflowQuestionsController{Svc: c.QuestionsReader}).Register(r)
+	(&WorkflowQuestionsController{Svc: c.QuestionsReader, Ownership: c.Ownership, TrustedLocal: c.TrustedLocal}).Register(r)
 }
 
 func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {

@@ -567,6 +567,74 @@ paths:
       summary: Stream CDC events with durable replay
       tags:
       - events
+  /api/v1/execution-policy:
+    get:
+      operationId: getExecutionPolicy
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersExecutionPolicyResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Get the current user's execution/routing policy (or the bootstrap default
+        if none is stored)
+      tags:
+      - execution-policy
+    put:
+      operationId: putExecutionPolicy
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersPutExecutionPolicyRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersExecutionPolicyResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Replace the current user's execution/routing policy
+      tags:
+      - execution-policy
   /api/v1/import:
     get:
       operationId: getImportStatus
@@ -6456,6 +6524,54 @@ components:
       - resolverFailed
       - waitingForCapacity
       type: object
+    ControllersExecutionPolicyResponse:
+      properties:
+        policy:
+          $ref: '#/components/schemas/ControllersExecutionPolicyView'
+      required:
+      - policy
+      type: object
+    ControllersExecutionPolicyView:
+      properties:
+        autonomousMode:
+          type: boolean
+        decisionResolverPriority:
+          items:
+            type: string
+          type: array
+        fallbackBehavior:
+          enum:
+          - use_next_available
+          - wait_for_preferred
+          type: string
+        plannerPriority:
+          items:
+            type: string
+          type: array
+        reviewIndependence:
+          enum:
+          - require_different_provider
+          - allow_same_provider_fallback
+          type: string
+        reviewerPriority:
+          items:
+            type: string
+          type: array
+        updatedAt:
+          type: string
+        workerPriority:
+          items:
+            type: string
+          type: array
+      required:
+      - autonomousMode
+      - plannerPriority
+      - workerPriority
+      - reviewerPriority
+      - decisionResolverPriority
+      - fallbackBehavior
+      - reviewIndependence
+      type: object
     ControllersListCapacityResponse:
       properties:
         capacity:
@@ -6610,6 +6726,39 @@ components:
       required:
       - providers
       type: object
+    ControllersPutExecutionPolicyRequest:
+      properties:
+        autonomousMode:
+          type: boolean
+        decisionResolverPriority:
+          items:
+            type: string
+          type: array
+        fallbackBehavior:
+          type: string
+        plannerPriority:
+          items:
+            type: string
+          type: array
+        reviewIndependence:
+          type: string
+        reviewerPriority:
+          items:
+            type: string
+          type: array
+        workerPriority:
+          items:
+            type: string
+          type: array
+      required:
+      - autonomousMode
+      - plannerPriority
+      - workerPriority
+      - reviewerPriority
+      - decisionResolverPriority
+      - fallbackBehavior
+      - reviewIndependence
+      type: object
     ControllersResolveDecisionRequest:
       properties:
         answer:
@@ -6685,6 +6834,61 @@ components:
       - role
       - stepKind
       - usage
+      type: object
+    ControllersRoutingDecisionView:
+      properties:
+        capacityByProfile:
+          additionalProperties:
+            type: string
+          type: object
+        complexity:
+          type: string
+        fallbackProfiles:
+          items:
+            $ref: '#/components/schemas/ControllersRoutingProfileView'
+          type: array
+        fallbackUsed:
+          type: boolean
+        policyVersion:
+          type: string
+        preferredHarness:
+          type: string
+        preferredProfile:
+          $ref: '#/components/schemas/ControllersRoutingProfileView'
+        reasonCodes:
+          items:
+            type: string
+          type: array
+        role:
+          type: string
+        selectedHarness:
+          type: string
+        selectedProfile:
+          $ref: '#/components/schemas/ControllersRoutingProfileView'
+        waiting:
+          type: boolean
+      required:
+      - role
+      - fallbackUsed
+      - waiting
+      type: object
+    ControllersRoutingProfileView:
+      properties:
+        displayName:
+          type: string
+        harness:
+          type: string
+        id:
+          type: string
+        model:
+          type: string
+        provider:
+          type: string
+      required:
+      - id
+      - provider
+      - harness
+      - displayName
       type: object
     ControllersRoutingUsageResponse:
       properties:
@@ -10724,6 +10928,8 @@ components:
           type: string
         reviewer:
           type: string
+        routing:
+          $ref: '#/components/schemas/ControllersRoutingDecisionView'
         sessionId:
           type: string
         state:

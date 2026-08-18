@@ -21,6 +21,8 @@ type AgentHealthEvent struct {
 	CooldownUntil       sql.NullTime
 	ConsecutiveFailures int64
 	CreatedAt           time.Time
+	UserID              sql.NullString
+	ProviderProfileID   sql.NullString
 }
 
 type AgentModelCatalog struct {
@@ -559,6 +561,21 @@ type User struct {
 	Status       domain.UserStatus
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+type UserExecutionPolicy struct {
+	ID                       string
+	UserID                   string
+	Version                  string
+	AutonomousMode           int64
+	PlannerPriority          string
+	WorkerPriority           string
+	ReviewerPriority         string
+	DecisionResolverPriority string
+	FallbackBehavior         string
+	ReviewIndependence       string
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
 }
 
 type WorkflowAttempt struct {

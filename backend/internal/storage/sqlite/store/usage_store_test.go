@@ -742,7 +742,7 @@ func TestListCompactSessionUsageAggregatesAndFiltersByProject(t *testing.T) {
 		t.Fatalf("complete replacement binding: %v", err)
 	}
 
-	got, err := s.ListCompactSessionUsage(ctx, "usage")
+	got, err := s.ListCompactSessionUsage(ctx, "usage", nil)
 	mustNoError(t, err, "list compact usage")
 	if len(got) != 1 || got[0].SessionID != usageSession.ID {
 		t.Fatalf("filtered rows = %+v, want only %s (not %s)", got, usageSession.ID, otherSession.ID)
@@ -751,7 +751,7 @@ func TestListCompactSessionUsageAggregatesAndFiltersByProject(t *testing.T) {
 	if row.TotalTokens != 180 || row.Incomplete {
 		t.Fatalf("aggregate = %+v", row)
 	}
-	all, err := s.ListCompactSessionUsage(ctx, "")
+	all, err := s.ListCompactSessionUsage(ctx, "", nil)
 	mustNoError(t, err, "list all compact usage")
 	if len(all) != 1 {
 		t.Fatalf("all rows = %d, want only sessions with usage", len(all))
@@ -806,7 +806,7 @@ func TestListCompactSessionUsageSeparatesRetriesFromIntegrityFailures(t *testing
 		t.Fatalf("mark integrity failure: %v", err)
 	}
 
-	rows, err := s.ListCompactSessionUsage(ctx, transientSession.ProjectID)
+	rows, err := s.ListCompactSessionUsage(ctx, transientSession.ProjectID, nil)
 	mustNoError(t, err)
 	bySession := make(map[domain.SessionID]domain.CompactSessionUsage, len(rows))
 	for _, row := range rows {
@@ -883,7 +883,7 @@ func TestUsageSessionAggregatesParentChildAndMultipleBindingsExactlyOnce(t *test
 		t.Fatalf("model aggregates = %+v, want input=180 output=35 events=3", models)
 	}
 
-	compact, err := s.ListCompactSessionUsage(ctx, sess.ProjectID)
+	compact, err := s.ListCompactSessionUsage(ctx, sess.ProjectID, nil)
 	mustNoError(t, err, "list compact usage")
 	if len(compact) != 1 {
 		t.Fatalf("compact rows = %+v, want one", compact)

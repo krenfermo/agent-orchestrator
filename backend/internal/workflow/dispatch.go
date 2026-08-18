@@ -27,8 +27,12 @@ type Spawner interface {
 // itself. See providerruntime.Resolver for the concrete implementation.
 // Optional: nil means every dispatch site behaves exactly as it did before
 // this checkpoint (no env override, never blocks).
+// Checkpoint 8P-C extends Resolve's return with the matched
+// domain.ProviderProfileID (empty if unresolved/no profile matched), so
+// capacity/health scoping (workflow/health.go) and routing both key off the
+// exact same resolution instead of re-deriving owner/profile independently.
 type RuntimeIsolation interface {
-	Resolve(ctx stdctx.Context, runID string, harness domain.AgentHarness) (env map[string]string, owner domain.UserID, err error)
+	Resolve(ctx stdctx.Context, runID string, harness domain.AgentHarness) (env map[string]string, owner domain.UserID, profileID domain.ProviderProfileID, err error)
 }
 
 // SessionFacts is the narrow read path workflow uses to observe worker
@@ -337,7 +341,8 @@ func (c *Coordinator) scheduleWake(ctx stdctx.Context, run domain.WorkflowRun, s
 	// is expected and correct, not a bug.
 	var knownResetAt *time.Time
 	if harness != "" {
-		if health, err := c.agentHealth(ctx, domain.AgentHarness(harness)); err == nil {
+		_, owner, profileID, _ := c.resolveRuntimeEnv(ctx, run.ID, domain.AgentHarness(harness))
+		if health, err := c.agentHealth(ctx, domain.AgentHarness(harness), healthScope{userID: owner, profileID: profileID}); err == nil {
 			knownResetAt = health.CooldownUntil
 		}
 	}
@@ -365,11 +370,12 @@ func (c *Coordinator) scheduleWake(ctx stdctx.Context, run domain.WorkflowRun, s
 // polling, so a mid-uptime Spawn failure has no other opportunity to retry
 // before the checkpoint's own attempt budget would otherwise go unused.
 func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, entry domain.WorkflowOutboxEntry, prompt string, harness domain.AgentHarness, attemptNumber int) (domain.WorkflowStep, error) {
-	runtimeEnv, owner, err := c.resolveRuntimeEnv(ctx, run.ID, harness)
+	runtimeEnv, owner, profileID, err := c.resolveRuntimeEnv(ctx, run.ID, harness)
+	scope := healthScope{userID: owner, profileID: profileID}
 	if err != nil {
 		classification := classifyProviderFailure(err)
 		now := c.clock()
-		c.recordAgentHealthFailure(ctx, harness, classification, now)
+		c.recordAgentHealthFailure(ctx, harness, scope, classification, now)
 		if aerr := c.recordWorkAttemptFailure(ctx, step.ID, harness, classification.Class, now); aerr != nil {
 			return step, aerr
 		}
@@ -389,7 +395,7 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 	if err != nil {
 		classification := classifyProviderFailure(err)
 		now := c.clock()
-		c.recordAgentHealthFailure(ctx, harness, classification, now)
+		c.recordAgentHealthFailure(ctx, harness, scope, classification, now)
 		// Always record this attempt's failure first — audit history, never
 		// deleted or overwritten, regardless of whether a fallback follows.
 		if aerr := c.recordWorkAttemptFailure(ctx, step.ID, harness, classification.Class, now); aerr != nil {
@@ -406,7 +412,7 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 	if attemptNumber > 1 && c.log != nil {
 		c.log.Info("workflow: work step provider failover succeeded", "step", step.ID, "harness", harness, "attempt", attemptNumber)
 	}
-	c.recordAgentHealthSuccess(ctx, harness, c.clock())
+	c.recordAgentHealthSuccess(ctx, harness, scope, c.clock())
 	return c.recordDispatchSuccess(ctx, run, step, entry, rec)
 }
 
@@ -415,9 +421,9 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 // owner's isolated provider subprocess env (Checkpoint 8P-B.1). A nil
 // runtimeIsolation (not yet wired) is a permanent, unconditional no-op --
 // exactly today's pre-8P-B.1 behavior.
-func (c *Coordinator) resolveRuntimeEnv(ctx stdctx.Context, runID string, harness domain.AgentHarness) (map[string]string, domain.UserID, error) {
+func (c *Coordinator) resolveRuntimeEnv(ctx stdctx.Context, runID string, harness domain.AgentHarness) (map[string]string, domain.UserID, domain.ProviderProfileID, error) {
 	if c.runtimeIsolation == nil {
-		return nil, "", nil
+		return nil, "", "", nil
 	}
 	return c.runtimeIsolation.Resolve(ctx, runID, harness)
 }

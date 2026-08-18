@@ -33,6 +33,15 @@ FROM workflow_runs
 WHERE state NOT IN ('completed', 'failed', 'cancelled')
 ORDER BY created_at;
 
+-- name: UpdateWorkflowRunPolicySnapshot :execrows
+-- Checkpoint 8P-C: writes the run's policy_snapshot exactly once, right
+-- after creation, to embed the workflow owner's execution policy (their
+-- ProviderProfile priority order at that moment) -- never touched again
+-- afterwards, so a later Settings edit cannot reroute an in-flight run.
+UPDATE workflow_runs
+SET policy_snapshot = sqlc.arg(policy_snapshot), updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id);
+
 -- name: UpdateWorkflowRunState :execrows
 UPDATE workflow_runs
 SET state = sqlc.arg(state), updated_at = sqlc.arg(updated_at),
@@ -207,17 +216,38 @@ WHERE id = sqlc.arg(id);
 -- name: InsertAgentHealthEvent :one
 -- Checkpoint 8H: append-only durable fact about one harness's dispatch
 -- outcome. Never updated; GetLatestAgentHealthEvent derives current health.
+-- user_id/provider_profile_id (Checkpoint 8P-C) are nullable: empty for an
+-- unowned run / trusted-local dispatch with no matched profile, in which
+-- case the event is a "legacy/global" fact (see GetLatestAgentHealthEvent).
 INSERT INTO agent_health_events (
-    id, harness, state, reason, failure_class, cooldown_until,
+    id, harness, user_id, provider_profile_id, state, reason, failure_class, cooldown_until,
     consecutive_failures, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id, harness, state, reason, failure_class, cooldown_until,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, harness, user_id, provider_profile_id, state, reason, failure_class, cooldown_until,
           consecutive_failures, created_at;
 
 -- name: GetLatestAgentHealthEvent :one
-SELECT id, harness, state, reason, failure_class, cooldown_until,
+-- Legacy/global read: the latest TRULY UNSCOPED event for a harness (both
+-- user_id and provider_profile_id NULL) -- never a scoped row belonging to
+-- ANY user. This is what keeps one user's scoped health fact from leaking
+-- into another user's (or the pre-8P-C global dashboard's) read when their
+-- own scoped lookup misses; see healthScope's precedence-rule doc comment.
+SELECT id, harness, user_id, provider_profile_id, state, reason, failure_class, cooldown_until,
        consecutive_failures, created_at
 FROM agent_health_events
-WHERE harness = ?
+WHERE harness = ? AND user_id IS NULL AND provider_profile_id IS NULL
+ORDER BY created_at DESC, id DESC
+LIMIT 1;
+
+-- name: GetLatestAgentHealthEventScoped :one
+-- Checkpoint 8P-C: the most specific health fact for one user's exact
+-- provider profile. Never matches another user's/profile's rows, and never
+-- matches a legacy/global row (user_id/provider_profile_id NULL) -- that
+-- fallback is an explicit, separate step in Go (service/capacity), not a
+-- SQL COALESCE, so the precedence is auditable in one place.
+SELECT id, harness, user_id, provider_profile_id, state, reason, failure_class, cooldown_until,
+       consecutive_failures, created_at
+FROM agent_health_events
+WHERE harness = ? AND user_id = ? AND provider_profile_id = ?
 ORDER BY created_at DESC, id DESC
 LIMIT 1;

@@ -481,6 +481,7 @@ func operations() []operation {
 	ops = append(ops, workflowOperations()...)
 	ops = append(ops, authOperations()...)
 	ops = append(ops, providerProfileOperations()...)
+	ops = append(ops, executionPolicyOperations()...)
 	return ops
 }
 
@@ -573,6 +574,35 @@ func providerProfileOperations() []operation {
 			optionalReqBody: true,
 			resps: []respUnit{
 				{http.StatusOK, controllers.TestProviderProfileResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
+}
+
+// executionPolicyOperations declares the /execution-policy operations
+// (Checkpoint 8P-C). Must stay 1:1 with the routes
+// ExecutionPolicyController.Register mounts (enforced by the parity test).
+func executionPolicyOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodGet, path: "/api/v1/execution-policy", id: "getExecutionPolicy", tag: "execution-policy",
+			summary: "Get the current user's execution/routing policy (or the bootstrap default if none is stored)",
+			resps: []respUnit{
+				{http.StatusOK, controllers.ExecutionPolicyResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPut, path: "/api/v1/execution-policy", id: "putExecutionPolicy", tag: "execution-policy",
+			summary: "Replace the current user's execution/routing policy",
+			reqBody: controllers.PutExecutionPolicyRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ExecutionPolicyResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusUnauthorized, envelope.APIError{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusNotImplemented, envelope.APIError{}},

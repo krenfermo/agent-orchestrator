@@ -373,6 +373,11 @@ SELECT CAST(COALESCE((
 ), 0) AS INTEGER);
 
 -- name: ListCompactSessionUsage :many
+-- owner_user_id (Checkpoint 8P-C): NULL means "no ownership scoping"
+-- (trusted-local / pre-8P-B session); a non-NULL value restricts results to
+-- exactly that owner's own sessions, via the same sessions.owner_user_id
+-- column session/project/workflow ownership already scope by -- so User A's
+-- usage query structurally cannot return User B's rows.
 SELECT
     ub.session_id,
     CAST(SUM(mue.input_tokens + mue.output_tokens) AS INTEGER) AS total_tokens,
@@ -382,5 +387,6 @@ JOIN usage_bindings ub ON ub.id = mue.binding_id
 JOIN sessions s ON s.id = ub.session_id
 LEFT JOIN usage_session_integrity integrity ON integrity.session_id = ub.session_id
 WHERE (sqlc.arg(project_id) = '' OR s.project_id = sqlc.arg(project_id))
+  AND (sqlc.narg(owner_user_id) IS NULL OR s.owner_user_id = sqlc.narg(owner_user_id))
 GROUP BY ub.session_id
 ORDER BY s.project_id, s.num;

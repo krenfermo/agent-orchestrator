@@ -78,6 +78,36 @@ func newDecisionResolverFixture(t *testing.T, paneText string, launcher workflow
 	return coord, store, sessionFacts, sender, clock
 }
 
+// newDecisionResolverFixtureWithProfiles mirrors newDecisionResolverFixture
+// but additionally wires ProviderProfiles/ExecutionPolicies to the same real
+// store (Checkpoint 8P-C), so a test can exercise real policy-driven
+// same-provider-fallback behavior instead of the legacy-compatibility
+// two-harness default every other fixture in this file relies on.
+func newDecisionResolverFixtureWithProfiles(t *testing.T, paneText string, launcher workflowcore.DecisionResolverLauncher) (*workflowcore.Coordinator, *sqlite.Store, *fakeClock) {
+	t.Helper()
+	store := sqlitetest.MustOpen(t)
+	ctx := context.Background()
+	if err := store.UpsertProject(ctx, domain.ProjectRecord{ID: "p", Path: t.TempDir(), RegisteredAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	clock := &fakeClock{t: time.Date(2026, time.August, 16, 9, 0, 0, 0, time.UTC)}
+	paneReader := &fakePaneReader{text: paneText}
+
+	coord := workflowcore.New(workflowcore.Deps{
+		Store:                    store,
+		Projects:                 store,
+		SessionFacts:             newFakeSessionFacts(),
+		QuestionsStore:           store,
+		PaneReader:               paneReader,
+		MessageSender:            &fakeMessageSender{},
+		DecisionResolverLauncher: launcher,
+		ProviderProfiles:         store,
+		ExecutionPolicies:        store,
+		Clock:                    clock.Now,
+	})
+	return coord, store, clock
+}
+
 func autoResolvableDiscoveryPaneText() string {
 	return "Which existing helper should I use for retrying HTTP calls?\n" +
 		"❯ 1. httputil.Retry\n" +
@@ -244,16 +274,55 @@ func TestDecisionProviderSelect_PreferredUnavailableNoSameProviderWaitsForCapaci
 	}
 }
 
+// TestDecisionProviderSelect_PreferredUnavailableSameProviderAllowedFallsBack
+// proves the Checkpoint 8P-C replacement for the old per-run
+// WorkflowPolicy.AllowSameProviderResolver knob: a user's own
+// UserExecutionPolicy.ReviewIndependence=allow_same_provider_fallback lets
+// the decision resolver fall back to the SAME provider that asked when no
+// independent one is capacity-eligible.
 func TestDecisionProviderSelect_PreferredUnavailableSameProviderAllowedFallsBack(t *testing.T) {
 	launcher := &fakeDecisionResolverLauncher{}
-	coord, store, _, _, clock := newDecisionResolverFixture(t, "", launcher)
+	coord, store, clock := newDecisionResolverFixtureWithProfiles(t, "", launcher)
 	ctx := context.Background()
 
-	run, stepID := seedRunWithPolicy(t, ctx, store, `{"version":"v1","maxFixCycles":3,"allowSameProviderResolver":true}`)
+	userID := domain.UserID("user-" + t.Name())
+	if _, err := store.InsertUser(ctx, domain.User{ID: userID, DisplayName: "Test User", Email: t.Name() + "@example.com", Status: domain.UserStatusActive, CreatedAt: clock.Now(), UpdatedAt: clock.Now()}); err != nil {
+		t.Fatalf("InsertUser: %v", err)
+	}
+	claudeProfile, err := store.InsertProviderProfile(ctx, domain.ProviderProfile{
+		ID: domain.ProviderProfileID("profile-claude-" + t.Name()), UserID: userID, Provider: "anthropic", Harness: domain.HarnessClaudeCode,
+		DisplayName: "Claude", Enabled: true, AuthState: domain.ProviderAuthStateAuthenticated, AuthMethod: domain.AuthMethodCLIBootstrap,
+		Capabilities: []domain.ProviderCapability{domain.CapabilityDecisionResolver}, CreatedAt: clock.Now(), UpdatedAt: clock.Now(),
+	})
+	if err != nil {
+		t.Fatalf("InsertProviderProfile claude: %v", err)
+	}
+	codexProfile, err := store.InsertProviderProfile(ctx, domain.ProviderProfile{
+		ID: domain.ProviderProfileID("profile-codex-" + t.Name()), UserID: userID, Provider: "openai", Harness: domain.HarnessCodex,
+		DisplayName: "Codex", Enabled: true, AuthState: domain.ProviderAuthStateAuthenticated, AuthMethod: domain.AuthMethodCLIBootstrap,
+		Capabilities: []domain.ProviderCapability{domain.CapabilityDecisionResolver}, CreatedAt: clock.Now(), UpdatedAt: clock.Now(),
+	})
+	if err != nil {
+		t.Fatalf("InsertProviderProfile codex: %v", err)
+	}
+	if _, err := store.UpsertUserExecutionPolicy(ctx, domain.UserExecutionPolicy{
+		ID: domain.UserExecutionPolicyID("policy-" + t.Name()), UserID: userID, Version: domain.UserExecutionPolicyVersion,
+		DecisionResolverPriority: []domain.ProviderProfileID{codexProfile.ID, claudeProfile.ID},
+		FallbackBehavior:         domain.FallbackUseNextAvailable,
+		ReviewIndependence:       domain.ReviewIndependenceAllowSameProviderFallback,
+		CreatedAt:                clock.Now(), UpdatedAt: clock.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertUserExecutionPolicy: %v", err)
+	}
+
+	run, stepID := seedRunWithPolicy(t, ctx, store, `{"version":"v1","maxFixCycles":3}`)
+	if _, err := store.SetWorkflowRunOwner(ctx, run.ID, userID); err != nil {
+		t.Fatalf("SetWorkflowRunOwner: %v", err)
+	}
 	seedResolvingQuestion(t, ctx, store, run.ID, stepID, domain.HarnessClaudeCode)
 
 	if _, err := store.RecordAgentHealthEvent(ctx, domain.AgentHealthEvent{
-		ID: "ahe-1", Harness: domain.HarnessCodex, State: domain.AgentHealthUnavailable, Reason: "test", CreatedAt: clock.Now(),
+		ID: "ahe-1", Harness: domain.HarnessCodex, UserID: userID, ProviderProfileID: codexProfile.ID, State: domain.AgentHealthUnavailable, Reason: "test", CreatedAt: clock.Now(),
 	}); err != nil {
 		t.Fatalf("RecordAgentHealthEvent: %v", err)
 	}

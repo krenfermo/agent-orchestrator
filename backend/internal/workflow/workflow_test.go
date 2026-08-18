@@ -24,24 +24,36 @@ type fakeStore struct {
 	// healthEvents backs Checkpoint 8H's minimal agent health, append-only
 	// per harness, oldest first (mirrors agent_health_events).
 	healthEvents map[string][]domain.AgentHealthEvent
+	// scopedHealthEvents backs Checkpoint 8P-C's per-(user,profile) health,
+	// keyed by "harness|userID|profileID".
+	scopedHealthEvents map[string][]domain.AgentHealthEvent
+	// owners backs Checkpoint 8P-C's runOwner lookup (mirrors
+	// GetWorkflowRunOwner). nil/missing entry means unowned.
+	owners map[string]domain.UserID
 
 	seq int
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		runs:         map[string]domain.WorkflowRun{},
-		steps:        map[string][]domain.WorkflowStep{},
-		attempts:     map[string][]domain.WorkflowAttempt{},
-		checkpoints:  map[string][]domain.WorkflowCheckpoint{},
-		outbox:       map[string]domain.WorkflowOutboxEntry{},
-		healthEvents: map[string][]domain.AgentHealthEvent{},
+		runs:               map[string]domain.WorkflowRun{},
+		steps:              map[string][]domain.WorkflowStep{},
+		attempts:           map[string][]domain.WorkflowAttempt{},
+		checkpoints:        map[string][]domain.WorkflowCheckpoint{},
+		outbox:             map[string]domain.WorkflowOutboxEntry{},
+		healthEvents:       map[string][]domain.AgentHealthEvent{},
+		scopedHealthEvents: map[string][]domain.AgentHealthEvent{},
+		owners:             map[string]domain.UserID{},
 	}
 }
 
 func (f *fakeStore) RecordAgentHealthEvent(_ context.Context, ev domain.AgentHealthEvent) (domain.AgentHealthEvent, error) {
 	key := string(ev.Harness)
 	f.healthEvents[key] = append(f.healthEvents[key], ev)
+	if ev.UserID != "" && ev.ProviderProfileID != "" {
+		scopedKey := string(ev.Harness) + "|" + string(ev.UserID) + "|" + string(ev.ProviderProfileID)
+		f.scopedHealthEvents[scopedKey] = append(f.scopedHealthEvents[scopedKey], ev)
+	}
 	return ev, nil
 }
 
@@ -51,6 +63,42 @@ func (f *fakeStore) GetAgentHealth(_ context.Context, harness domain.AgentHarnes
 		return domain.AgentHealthEvent{}, false, nil
 	}
 	return list[len(list)-1], true, nil
+}
+
+func (f *fakeStore) GetAgentHealthScoped(_ context.Context, harness domain.AgentHarness, userID domain.UserID, profileID domain.ProviderProfileID) (domain.AgentHealthEvent, bool, error) {
+	key := string(harness) + "|" + string(userID) + "|" + string(profileID)
+	list := f.scopedHealthEvents[key]
+	if len(list) == 0 {
+		return domain.AgentHealthEvent{}, false, nil
+	}
+	return list[len(list)-1], true, nil
+}
+
+func (f *fakeStore) GetWorkflowRunOwner(_ context.Context, id string) (*domain.UserID, error) {
+	owner, ok := f.owners[id]
+	if !ok {
+		return nil, nil
+	}
+	return &owner, nil
+}
+
+func (f *fakeStore) SetWorkflowRunOwner(_ context.Context, id string, owner domain.UserID) (bool, error) {
+	if _, ok := f.runs[id]; !ok {
+		return false, nil
+	}
+	f.owners[id] = owner
+	return true, nil
+}
+
+func (f *fakeStore) UpdateWorkflowRunPolicySnapshot(_ context.Context, id, policySnapshot string, now time.Time) (bool, error) {
+	run, ok := f.runs[id]
+	if !ok {
+		return false, nil
+	}
+	run.PolicySnapshot = policySnapshot
+	run.UpdatedAt = now
+	f.runs[id] = run
+	return true, nil
 }
 
 func (f *fakeStore) CreateWorkflowRun(_ context.Context, run domain.WorkflowRun, steps []domain.WorkflowStep) (domain.WorkflowRun, []domain.WorkflowStep, error) {

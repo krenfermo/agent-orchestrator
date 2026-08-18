@@ -37,14 +37,13 @@ func (c *Coordinator) reconcileDecisionResolvers(ctx stdctx.Context, run domain.
 	if err != nil {
 		return "", err
 	}
-	policy := policyForRun(run)
 	waitingForCapacity := ""
 	for _, q := range questions {
 		if q.State != domain.QuestionStateResolving {
 			continue
 		}
 		if q.ResolvingRunID == nil {
-			nextAction, derr := c.dispatchDecisionResolver(ctx, run, q, policy, now)
+			nextAction, derr := c.dispatchDecisionResolver(ctx, run, q, now)
 			if derr != nil {
 				return "", derr
 			}
@@ -80,11 +79,11 @@ func (c *Coordinator) reconcileDecisionResolvers(ctx stdctx.Context, run domain.
 // usable (per selectDecisionResolverProvider), it makes no changes and
 // returns the "waiting_for_capacity" NextAction string — the question stays
 // at state=resolving and dispatch is retried on the next reconcile pass.
-func (c *Coordinator) dispatchDecisionResolver(ctx stdctx.Context, run domain.WorkflowRun, q domain.WorkflowQuestion, policy domain.WorkflowPolicy, now time.Time) (string, error) {
+func (c *Coordinator) dispatchDecisionResolver(ctx stdctx.Context, run domain.WorkflowRun, q domain.WorkflowQuestion, now time.Time) (string, error) {
 	if c.decisionResolverLauncher == nil {
 		return "waiting_for_capacity: resolver unavailable (no launcher configured)", nil
 	}
-	selection, err := c.selectDecisionResolverProvider(ctx, q.AskingHarness, policy, now)
+	selection, err := c.selectDecisionResolverProvider(ctx, run, q.AskingHarness, now)
 	if err != nil {
 		return "", err
 	}
@@ -184,7 +183,7 @@ func (c *Coordinator) dispatchDecisionResolver(ctx stdctx.Context, run domain.Wo
 	if err := c.decisionResolverLauncher.Preflight(ctx, selection.Harness, worktreePath); err != nil {
 		return c.recordResolutionFailure(ctx, resolutionID, fmt.Errorf("resolver preflight: %w", err), now)
 	}
-	runtimeEnv, _, err := c.resolveRuntimeEnv(ctx, run.ID, selection.Harness)
+	runtimeEnv, _, _, err := c.resolveRuntimeEnv(ctx, run.ID, selection.Harness)
 	if err != nil {
 		return c.recordResolutionFailure(ctx, resolutionID, err, now)
 	}

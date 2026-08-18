@@ -19,15 +19,15 @@ type fakeRelaunchIsolation struct {
 	}
 }
 
-func (f *fakeRelaunchIsolation) ResolveForOwner(_ context.Context, owner domain.UserID, harness domain.AgentHarness) (map[string]string, error) {
+func (f *fakeRelaunchIsolation) ResolveForOwner(_ context.Context, owner domain.UserID, harness domain.AgentHarness) (map[string]string, domain.ProviderProfileID, error) {
 	f.calls = append(f.calls, struct {
 		owner   domain.UserID
 		harness domain.AgentHarness
 	}{owner, harness})
 	if f.err != nil {
-		return nil, f.err
+		return nil, "", f.err
 	}
-	return f.env, nil
+	return f.env, "", nil
 }
 
 // TestRestore_ReDerivesIsolatedRuntimeEnvFromPersistedOwner is Checkpoint

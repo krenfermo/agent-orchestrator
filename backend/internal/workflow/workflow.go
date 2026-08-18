@@ -82,6 +82,27 @@ type Store interface {
 	// GetAgentHealth derives current health from the latest one.
 	RecordAgentHealthEvent(ctx stdctx.Context, ev domain.AgentHealthEvent) (domain.AgentHealthEvent, error)
 	GetAgentHealth(ctx stdctx.Context, harness domain.AgentHarness) (domain.AgentHealthEvent, bool, error)
+	// GetAgentHealthScoped is Checkpoint 8P-C's per-(user,profile) health
+	// read -- see healthScope's doc comment for the precedence rule against
+	// GetAgentHealth's legacy/global rows.
+	GetAgentHealthScoped(ctx stdctx.Context, harness domain.AgentHarness, userID domain.UserID, profileID domain.ProviderProfileID) (domain.AgentHealthEvent, bool, error)
+
+	// GetWorkflowRunOwner backs Checkpoint 8P-C's routing (RouteExecution
+	// needs the run owner before it knows which harness it will even pick,
+	// so it can't wait for resolveRuntimeEnv's harness-scoped lookup).
+	// Satisfied by the same store.Store method providerruntime.Resolver and
+	// httpd's ownership scoping already use -- no second ownership lookup
+	// implementation. Returns (nil, nil) for an unowned/pre-8P-A run.
+	GetWorkflowRunOwner(ctx stdctx.Context, id string) (*domain.UserID, error)
+
+	// SetWorkflowRunOwner backs Checkpoint 8P-C.1's durable child-run
+	// ownership propagation (stampChildOwnership below). Idempotent:
+	// re-stamping the same owner on recovery is always safe.
+	SetWorkflowRunOwner(ctx stdctx.Context, id string, owner domain.UserID) (bool, error)
+
+	// UpdateWorkflowRunPolicySnapshot backs Checkpoint 8P-C's run-creation
+	// execution-policy embedding (ApplyExecutionPolicySnapshot below).
+	UpdateWorkflowRunPolicySnapshot(ctx stdctx.Context, id, policySnapshot string, now time.Time) (bool, error)
 }
 
 type masterPlanStore interface {
@@ -196,6 +217,35 @@ type Deps struct {
 	// env through this single dependency before launching. Optional: nil
 	// preserves pre-8P-B.1 behavior exactly.
 	RuntimeIsolation RuntimeIsolation
+
+	// ProviderProfiles and ExecutionPolicies back Checkpoint 8P-C's
+	// user-configurable routing: RouteExecution walks the owner's own
+	// profiles under their own priority policy instead of a fixed
+	// Claude<->Codex table. Both optional: nil makes every routing decision
+	// resolve to domain.DefaultUserExecutionPolicy with no owned profiles,
+	// i.e. always waiting -- never a silent hardcoded fallback.
+	ProviderProfiles  ProviderProfiles
+	ExecutionPolicies ExecutionPolicies
+	// TrustedLocal mirrors config.Config.TrustedLocalMode (Checkpoint 8P-C):
+	// when true, a workflow owner with zero configured ProviderProfile rows
+	// falls back to legacy/global compatibility profiles instead of waiting
+	// forever -- the same desktop-upgrade compatibility
+	// providerruntime.Resolver.TrustedLocal already grants runtime-env
+	// resolution. Multi-user mode (false) never applies this: zero owned
+	// profiles there correctly waits (checkpoint brief §18).
+	TrustedLocal bool
+}
+
+// ProviderProfiles lists a user's owned provider profiles (Checkpoint
+// 8P-C). Satisfied by *storage/sqlite/store.Store.
+type ProviderProfiles interface {
+	ListProviderProfilesByUser(ctx stdctx.Context, userID domain.UserID) ([]domain.ProviderProfile, error)
+}
+
+// ExecutionPolicies reads a user's stored routing policy (Checkpoint
+// 8P-C). Satisfied by *storage/sqlite/store.Store.
+type ExecutionPolicies interface {
+	GetUserExecutionPolicyByUser(ctx stdctx.Context, userID domain.UserID) (domain.UserExecutionPolicy, bool, error)
 }
 
 // Coordinator is the core workflow durable-foundation engine.
@@ -246,6 +296,12 @@ type Coordinator struct {
 	// runtimeIsolation backs Checkpoint 8P-B.1's per-user provider
 	// credential isolation. Optional.
 	runtimeIsolation RuntimeIsolation
+
+	// providerProfiles and executionPolicies back Checkpoint 8P-C's
+	// user-configurable routing. Both optional.
+	providerProfiles  ProviderProfiles
+	executionPolicies ExecutionPolicies
+	trustedLocal      bool
 }
 
 // New wires a Coordinator from its dependencies, defaulting the clock and id source.
@@ -279,6 +335,9 @@ func New(d Deps) *Coordinator {
 		decisionResolverLauncher: d.DecisionResolverLauncher,
 		wakeScheduler:            d.WakeScheduler,
 		runtimeIsolation:         d.RuntimeIsolation,
+		providerProfiles:         d.ProviderProfiles,
+		executionPolicies:        d.ExecutionPolicies,
+		trustedLocal:             d.TrustedLocal,
 		clock:                    clock,
 		newID:                    newID,
 	}

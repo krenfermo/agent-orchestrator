@@ -60,6 +60,65 @@ type WorkflowPolicy struct {
 	// this at its zero value — callers must use EffectiveWakePolicy, never
 	// read Wake directly.
 	Wake WakePolicy `json:"wake,omitempty"`
+	// Execution is Checkpoint 8P-C's UserExecutionPolicy snapshot: the
+	// workflow owner's priority lists (as of run creation), fallback
+	// behavior, review independence and autonomy flag, embedded the same
+	// way Routing/Wake are so a later Settings edit never changes an
+	// in-flight run's routing (checkpoint brief §9/§10). Only stable
+	// ProviderProfileID references are stored -- never credentials. Current
+	// profile eligibility (enabled/connected/capability) is always re-checked
+	// live at dispatch time regardless of what the snapshot captured -- a
+	// disabled/deleted profile referenced here is simply skipped, never
+	// force-used (checkpoint brief §10).
+	Execution ExecutionPolicySnapshot `json:"execution,omitempty"`
+}
+
+// ExecutionPolicySnapshot is the run-creation-time copy of a
+// UserExecutionPolicy embedded into WorkflowPolicy (Checkpoint 8P-C). A
+// distinct type from UserExecutionPolicy (rather than reusing it directly)
+// because a snapshot has no ID/UserID/CreatedAt/UpdatedAt of its own -- it is
+// a frozen value, not a referenceable row.
+type ExecutionPolicySnapshot struct {
+	Version                   string               `json:"version"`
+	AutonomousMode            bool                 `json:"autonomousMode"`
+	PlannerPriority           []ProviderProfileID  `json:"plannerPriority"`
+	WorkerPriority            []ProviderProfileID  `json:"workerPriority"`
+	ReviewerPriority          []ProviderProfileID  `json:"reviewerPriority"`
+	DecisionResolverPriority  []ProviderProfileID  `json:"decisionResolverPriority"`
+	FallbackBehavior          FallbackBehavior     `json:"fallbackBehavior"`
+	ReviewIndependence        ReviewIndependence   `json:"reviewIndependence"`
+}
+
+// ExecutionPolicySnapshotFrom captures a point-in-time copy of a
+// UserExecutionPolicy for embedding into a workflow run's policy snapshot.
+func ExecutionPolicySnapshotFrom(p UserExecutionPolicy) ExecutionPolicySnapshot {
+	return ExecutionPolicySnapshot{
+		Version:                  p.Version,
+		AutonomousMode:           p.AutonomousMode,
+		PlannerPriority:          p.PlannerPriority,
+		WorkerPriority:           p.WorkerPriority,
+		ReviewerPriority:         p.ReviewerPriority,
+		DecisionResolverPriority: p.DecisionResolverPriority,
+		FallbackBehavior:         p.FallbackBehavior,
+		ReviewIndependence:       p.ReviewIndependence,
+	}
+}
+
+// PriorityFor mirrors UserExecutionPolicy.PriorityFor for the frozen
+// snapshot shape, so routing code can treat both the same way.
+func (s ExecutionPolicySnapshot) PriorityFor(role WorkflowRole) []ProviderProfileID {
+	switch role {
+	case WorkflowRolePlanner:
+		return s.PlannerPriority
+	case WorkflowRoleWorker, WorkflowRoleFixWorker:
+		return s.WorkerPriority
+	case WorkflowRoleReviewer:
+		return s.ReviewerPriority
+	case WorkflowRoleDecisionResolver:
+		return s.DecisionResolverPriority
+	default:
+		return nil
+	}
 }
 
 // EffectiveRoutingPolicy returns p.Routing, falling back to
@@ -71,6 +130,25 @@ func (p WorkflowPolicy) EffectiveRoutingPolicy() RoutingPolicy {
 		return p.Routing
 	}
 	return DefaultRoutingPolicy()
+}
+
+// EffectiveExecutionPolicy returns p.Execution, or a policy with empty
+// priority lists (sane fallback/independence defaults, no profiles) when
+// the snapshot predates Checkpoint 8P-C (zero Version) -- the caller
+// (workflow.routingInputsForRole) recognizes an empty priority list as "no
+// frozen preference recorded" and falls back to
+// domain.DefaultUserExecutionPolicy built fresh from the owner's live
+// profiles, exactly the same forward-compatible pattern
+// EffectiveRoutingPolicy/EffectiveWakePolicy already use.
+func (p WorkflowPolicy) EffectiveExecutionPolicy() ExecutionPolicySnapshot {
+	if p.Execution.Version != "" {
+		return p.Execution
+	}
+	return ExecutionPolicySnapshot{
+		Version:            UserExecutionPolicyVersion,
+		FallbackBehavior:   FallbackUseNextAvailable,
+		ReviewIndependence: ReviewIndependenceRequireDifferentProvider,
+	}
 }
 
 // EffectiveWakePolicy returns p.Wake, falling back to DefaultWakePolicy()

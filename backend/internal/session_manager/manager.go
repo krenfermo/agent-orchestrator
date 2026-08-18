@@ -587,7 +587,7 @@ type Deps struct {
 // not in the providerruntime package, so this package doesn't need to
 // import it just for one method signature.
 type RelaunchRuntimeIsolation interface {
-	ResolveForOwner(ctx context.Context, owner domain.UserID, harness domain.AgentHarness) (map[string]string, error)
+	ResolveForOwner(ctx context.Context, owner domain.UserID, harness domain.AgentHarness) (map[string]string, domain.ProviderProfileID, error)
 }
 
 // New builds a Session Manager from its dependencies, defaulting the clock to
@@ -1730,7 +1730,7 @@ func (m *Manager) relaunchSessionWithPolicy(ctx context.Context, operation strin
 			return RestoreResult{}, fmt.Errorf("%s %s: resolve session owner: %w", operation, rec.ID, ownerErr)
 		}
 		if owner != nil {
-			relaunchEnv, envErr := m.runtimeIsolation.ResolveForOwner(ctx, *owner, rec.Harness)
+			relaunchEnv, _, envErr := m.runtimeIsolation.ResolveForOwner(ctx, *owner, rec.Harness)
 			if envErr != nil {
 				m.cleanupSystemPromptDir(rec.ID)
 				return RestoreResult{}, fmt.Errorf("%s %s: %w", operation, rec.ID, envErr)

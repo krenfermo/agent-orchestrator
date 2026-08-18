@@ -752,7 +752,7 @@ func (m *Manager) prepareTargetActivation(ctx context.Context, store ports.Agent
 			return preparedTargetActivation{}, fmt.Errorf("resolve session owner: %w", ownerErr)
 		}
 		if owner != nil {
-			switchEnv, envErr := m.runtimeIsolation.ResolveForOwner(ctx, *owner, harness)
+			switchEnv, _, envErr := m.runtimeIsolation.ResolveForOwner(ctx, *owner, harness)
 			if envErr != nil {
 				return preparedTargetActivation{}, fmt.Errorf("target runtime env: %w", envErr)
 			}

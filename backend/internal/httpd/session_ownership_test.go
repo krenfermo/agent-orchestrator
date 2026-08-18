@@ -216,7 +216,7 @@ type panicSessionService struct {
 
 type panicUsageSummaryService struct{}
 
-func (panicUsageSummaryService) ListCompact(context.Context, domain.ProjectID) ([]domain.CompactSessionUsage, error) {
+func (panicUsageSummaryService) ListCompact(context.Context, domain.ProjectID, *domain.UserID) ([]domain.CompactSessionUsage, error) {
 	panic("must not be called for a denied request")
 }
 func (panicUsageSummaryService) Get(context.Context, domain.SessionID) (domain.SessionUsageSummary, error) {

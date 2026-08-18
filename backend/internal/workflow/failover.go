@@ -29,17 +29,41 @@ type AgentSwitcher interface {
 	SwitchAgent(ctx stdctx.Context, id domain.SessionID, cfg AgentSwitchRequest) (domain.AgentSwitch, error)
 }
 
-// workFallbackHarness is the work-dispatch fallback order: one hop to the
-// opposite provider, no fallback beyond that and no third provider
-// ("no uses múltiples cuentas"). Checkpoint 8H originally fixed this
-// Codex-only-preferred/Claude-only-fallback; Checkpoint 8L's
-// ExecutionRouter can now select Claude Code as the *preferred* worker for
-// normal/high-risk complexity, so this reactive mid-session failover path
-// must be able to fail over in either direction too — it reuses the same
-// oppositeHarness table reviewer/decision-resolver routing already uses
-// (checkpoint brief §18: "Do NOT create a second failover implementation").
-func workFallbackHarness(current domain.AgentHarness) (domain.AgentHarness, bool) {
-	return oppositeHarness(current)
+// workFallbackHarness (Checkpoint 8P-C) picks the next harness in the
+// workflow owner's own WorkerPriority list after current, restricted to
+// profiles that are eligible (owned, enabled, connected, worker-capable)
+// and currently capacity-eligible -- replacing 8L's fixed
+// Codex<->Claude-only oppositeHarness table with an arbitrary-length,
+// user-ordered walk. domain.FallbackWaitForPreferred never substitutes a
+// lower-priority profile here either, matching RouteExecution's own rule.
+func (c *Coordinator) workFallbackHarness(ctx stdctx.Context, run domain.WorkflowRun, current domain.AgentHarness) (domain.AgentHarness, bool) {
+	owner := c.runOwner(ctx, run.ID)
+	snapshot := policyForRun(run).EffectiveExecutionPolicy()
+	policy, eligible, _, capacity := c.routingInputsForRole(ctx, owner, domain.WorkflowRoleWorker, snapshot)
+	if policy.FallbackBehavior == domain.FallbackWaitForPreferred {
+		return "", false
+	}
+	priority := policy.WorkerPriority
+	pastCurrent := false
+	for _, id := range priority {
+		profile, ok := eligible[id]
+		if !ok {
+			continue
+		}
+		if !pastCurrent {
+			if profile.Harness == current {
+				pastCurrent = true
+			}
+			continue
+		}
+		if profile.Harness == current {
+			continue
+		}
+		if capacityEligible(capacity[id]) {
+			return profile.Harness, true
+		}
+	}
+	return "", false
 }
 
 // effectiveMaxWorkProviderAttempts reads the policy's work-attempt budget,
@@ -79,7 +103,7 @@ func (c *Coordinator) selectFallbackForWork(ctx stdctx.Context, run domain.Workf
 	if attemptNumber >= effectiveMaxWorkProviderAttempts(policyForRun(run)) {
 		return "", false
 	}
-	fallback, ok := workFallbackHarness(harness)
+	fallback, ok := c.workFallbackHarness(ctx, run, harness)
 	if !ok {
 		return "", false
 	}
@@ -90,7 +114,8 @@ func (c *Coordinator) selectFallbackForWork(ctx stdctx.Context, run domain.Workf
 			}
 		}
 	}
-	if health, err := c.agentHealth(ctx, fallback); err == nil && !health.Available(c.clock()) {
+	_, owner, profileID, _ := c.resolveRuntimeEnv(ctx, run.ID, fallback)
+	if health, err := c.agentHealth(ctx, fallback, healthScope{userID: owner, profileID: profileID}); err == nil && !health.Available(c.clock()) {
 		return "", false
 	}
 	return fallback, true
@@ -209,7 +234,8 @@ func (c *Coordinator) ReportWorkStepProviderFailure(ctx stdctx.Context, runID, s
 
 	classification := classifyProviderFailure(cause)
 	now := c.clock()
-	c.recordAgentHealthFailure(ctx, currentHarness, classification, now)
+	_, curOwner, curProfileID, _ := c.resolveRuntimeEnv(ctx, run.ID, currentHarness)
+	c.recordAgentHealthFailure(ctx, currentHarness, healthScope{userID: curOwner, profileID: curProfileID}, classification, now)
 
 	fallback, eligible := c.selectFallbackForWork(ctx, run, step.ID, currentHarness, int(current.AttemptNumber), classification)
 	if !eligible {
@@ -269,7 +295,8 @@ func (c *Coordinator) ReportWorkStepProviderFailure(ctx stdctx.Context, runID, s
 	if _, err := c.store.CreateWorkflowAttempt(ctx, "wfa-"+c.newID(), step.ID, string(fallback), "", now); err != nil {
 		return step, err
 	}
-	c.recordAgentHealthSuccess(ctx, fallback, now)
+	_, fbOwner, fbProfileID, _ := c.resolveRuntimeEnv(ctx, run.ID, fallback)
+	c.recordAgentHealthSuccess(ctx, fallback, healthScope{userID: fbOwner, profileID: fbProfileID}, now)
 
 	stepID2 := step.ID
 	sid := string(*step.SessionID)

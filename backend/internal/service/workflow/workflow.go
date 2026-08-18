@@ -50,6 +50,15 @@ type PlannerManager interface {
 	RejectPlan(ctx context.Context, runID string) (workflowcore.RunDetail, error)
 }
 
+// ExecutionPolicyApplier is Checkpoint 8P-C's optional post-creation step:
+// embed the caller's execution policy into a just-created run's policy
+// snapshot. Optional (type-asserted by the controller, mirroring
+// PlannerManager) so a Manager implementation/test double that predates
+// 8P-C keeps compiling unchanged.
+type ExecutionPolicyApplier interface {
+	ApplyExecutionPolicySnapshot(ctx context.Context, runID string, userID domain.UserID) error
+}
+
 // Service is the API-facing workflow service. It delegates to the core coordinator.
 type Service struct {
 	coordinator *workflowcore.Coordinator
@@ -69,6 +78,11 @@ func (s *Service) CreateRun(ctx context.Context, projectID, objective string, ve
 
 func (s *Service) CreateObjectiveRun(ctx context.Context, projectID, objective string, mode domain.WorkflowPlanApprovalMode) (workflowcore.RunDetail, error) {
 	return s.coordinator.CreateObjectiveRun(ctx, projectID, objective, mode)
+}
+
+// ApplyExecutionPolicySnapshot implements ExecutionPolicyApplier.
+func (s *Service) ApplyExecutionPolicySnapshot(ctx context.Context, runID string, userID domain.UserID) error {
+	return s.coordinator.ApplyExecutionPolicySnapshot(ctx, runID, userID)
 }
 func (s *Service) GeneratePlan(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
 	return s.coordinator.GeneratePlan(ctx, runID)

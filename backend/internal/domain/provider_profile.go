@@ -77,6 +77,72 @@ type ProviderProfile struct {
 	UpdatedAt        time.Time
 }
 
+// RequiredCapability returns the ProviderCapability a role needs to route
+// through a profile at all (Checkpoint 8P-C §6), and false for a role that
+// never routes through a provider (e.g. WorkflowRoleVerify).
+func RequiredCapability(role WorkflowRole) (ProviderCapability, bool) {
+	switch role {
+	case WorkflowRolePlanner:
+		return CapabilityPlanner, true
+	case WorkflowRoleWorker, WorkflowRoleFixWorker:
+		return CapabilityWorker, true
+	case WorkflowRoleReviewer:
+		return CapabilityReviewer, true
+	case WorkflowRoleDecisionResolver:
+		return CapabilityDecisionResolver, true
+	default:
+		return "", false
+	}
+}
+
+// EligibleProfiles is Checkpoint 8P-C's pure (no IO) eligibility filter: a
+// profile only ever becomes routable if it is enabled, its cached auth state
+// is authenticated, its provider's adapter is actually implemented
+// (descriptor.Available -- rules out MiniMax), and it advertises the role's
+// required capability. Returns both the eligible set and, for every
+// filtered-out profile, the specific reason it was excluded (so a routing
+// decision that lands on an ineligible most-preferred entry can explain
+// exactly why, per the closed RoutingReason enum) -- never a bare "not
+// eligible".
+func EligibleProfiles(profiles []ProviderProfile, descriptors []ProviderAdapterDescriptor, capability ProviderCapability) (eligible map[ProviderProfileID]ProviderProfile, ineligible map[ProviderProfileID]RoutingReason) {
+	byKey := make(map[string]ProviderAdapterDescriptor, len(descriptors))
+	for _, d := range descriptors {
+		byKey[d.Provider+"|"+string(d.Harness)] = d
+	}
+	eligible = make(map[ProviderProfileID]ProviderProfile)
+	ineligible = make(map[ProviderProfileID]RoutingReason)
+	for _, p := range profiles {
+		desc, ok := byKey[p.Provider+"|"+string(p.Harness)]
+		if !ok || !desc.Available {
+			ineligible[p.ID] = RoutingReasonUnsupportedProvider
+			continue
+		}
+		if !p.Enabled {
+			ineligible[p.ID] = RoutingReasonProviderDisabled
+			continue
+		}
+		if p.AuthState != ProviderAuthStateAuthenticated {
+			ineligible[p.ID] = RoutingReasonProfileNotConnected
+			continue
+		}
+		if !hasCapability(p.Capabilities, capability) {
+			ineligible[p.ID] = RoutingReasonCapabilityMissing
+			continue
+		}
+		eligible[p.ID] = p
+	}
+	return eligible, ineligible
+}
+
+func hasCapability(caps []ProviderCapability, capability ProviderCapability) bool {
+	for _, c := range caps {
+		if c == capability {
+			return true
+		}
+	}
+	return false
+}
+
 // ProviderAdapterDescriptor is the provider-neutral, non-user-scoped
 // description of what a provider adapter supports. It comes from the
 // registry (adapters/agent/registry), not from storage -- it describes code

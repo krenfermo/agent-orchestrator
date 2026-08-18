@@ -126,6 +126,25 @@ func (s *Store) ListNonTerminalWorkflowRuns(ctx context.Context) ([]domain.Workf
 // UpdateWorkflowRunState compare-and-swaps a workflow run's state. A false
 // result means the expected state no longer matched (already advanced by
 // another caller, or already terminal).
+// UpdateWorkflowRunPolicySnapshot overwrites a run's policy_snapshot
+// (Checkpoint 8P-C: embedding the owner's execution policy right after
+// creation). Callers must only ever call this once, immediately after
+// CreateWorkflowRun -- routing relies on the snapshot never changing again
+// for the lifetime of the run.
+func (s *Store) UpdateWorkflowRunPolicySnapshot(ctx context.Context, id, policySnapshot string, now time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.UpdateWorkflowRunPolicySnapshot(ctx, gen.UpdateWorkflowRunPolicySnapshotParams{
+		PolicySnapshot: policySnapshot,
+		UpdatedAt:      now,
+		ID:             id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("update workflow run %s policy snapshot: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
 func (s *Store) UpdateWorkflowRunState(
 	ctx context.Context,
 	id string,
@@ -592,6 +611,8 @@ func (s *Store) RecordAgentHealthEvent(ctx context.Context, ev domain.AgentHealt
 	row, err := s.qw.InsertAgentHealthEvent(ctx, gen.InsertAgentHealthEventParams{
 		ID:                  ev.ID,
 		Harness:             string(ev.Harness),
+		UserID:              userIDToNullString(ev.UserID),
+		ProviderProfileID:   profileIDToNullString(ev.ProviderProfileID),
 		State:               string(ev.State),
 		Reason:              ev.Reason,
 		FailureClass:        string(ev.FailureClass),
@@ -602,11 +623,14 @@ func (s *Store) RecordAgentHealthEvent(ctx context.Context, ev domain.AgentHealt
 	if err != nil {
 		return domain.AgentHealthEvent{}, fmt.Errorf("insert agent health event for harness %s: %w", ev.Harness, err)
 	}
-	return agentHealthEventFromRow(row), nil
+	return agentHealthEventFromRow(agentHealthEventRow(row)), nil
 }
 
-// GetAgentHealth returns the latest recorded health event for a harness,
-// ok=false if none has ever been recorded (domain.AgentHealthUnknown).
+// GetAgentHealth returns the latest legacy/global recorded health event for
+// a harness (ignoring any user/profile scope), ok=false if none has ever
+// been recorded (domain.AgentHealthUnknown). Used directly by trusted-local
+// mode; service/capacity's precedence rule also calls this as an explicit
+// fallback when GetAgentHealthScoped finds nothing.
 func (s *Store) GetAgentHealth(ctx context.Context, harness domain.AgentHarness) (domain.AgentHealthEvent, bool, error) {
 	row, err := s.qr.GetLatestAgentHealthEvent(ctx, string(harness))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -615,13 +639,64 @@ func (s *Store) GetAgentHealth(ctx context.Context, harness domain.AgentHarness)
 	if err != nil {
 		return domain.AgentHealthEvent{}, false, fmt.Errorf("get latest agent health event for harness %s: %w", harness, err)
 	}
-	return agentHealthEventFromRow(row), true, nil
+	return agentHealthEventFromRow(agentHealthEventRow(row)), true, nil
 }
 
-func agentHealthEventFromRow(r gen.AgentHealthEvent) domain.AgentHealthEvent {
+// GetAgentHealthScoped returns the latest health event recorded for the
+// exact (harness, userID, profileID) triple -- never a legacy/global row,
+// never another user's or another profile's row. ok=false means no scoped
+// event exists yet for this connection (Checkpoint 8P-C).
+func (s *Store) GetAgentHealthScoped(ctx context.Context, harness domain.AgentHarness, userID domain.UserID, profileID domain.ProviderProfileID) (domain.AgentHealthEvent, bool, error) {
+	row, err := s.qr.GetLatestAgentHealthEventScoped(ctx, gen.GetLatestAgentHealthEventScopedParams{
+		Harness:           string(harness),
+		UserID:            userIDToNullString(userID),
+		ProviderProfileID: profileIDToNullString(profileID),
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.AgentHealthEvent{}, false, nil
+	}
+	if err != nil {
+		return domain.AgentHealthEvent{}, false, fmt.Errorf("get scoped agent health event for harness %s: %w", harness, err)
+	}
+	return agentHealthEventFromRow(agentHealthEventRow(row)), true, nil
+}
+
+func userIDToNullString(id domain.UserID) sql.NullString {
+	if id == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: string(id), Valid: true}
+}
+
+func profileIDToNullString(id domain.ProviderProfileID) sql.NullString {
+	if id == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: string(id), Valid: true}
+}
+
+// agentHealthEventRow is the shape shared by every generated agent_health_events
+// row type (Insert/GetLatest/GetLatestScoped each get their own sqlc row
+// struct despite selecting the same columns).
+type agentHealthEventRow struct {
+	ID                  string
+	Harness             string
+	UserID              sql.NullString
+	ProviderProfileID   sql.NullString
+	State               string
+	Reason              string
+	FailureClass        string
+	CooldownUntil       sql.NullTime
+	ConsecutiveFailures int64
+	CreatedAt           time.Time
+}
+
+func agentHealthEventFromRow(r agentHealthEventRow) domain.AgentHealthEvent {
 	return domain.AgentHealthEvent{
 		ID:                  r.ID,
 		Harness:             domain.AgentHarness(r.Harness),
+		UserID:              domain.UserID(r.UserID.String),
+		ProviderProfileID:   domain.ProviderProfileID(r.ProviderProfileID.String),
 		State:               domain.AgentHealthState(r.State),
 		Reason:              r.Reason,
 		FailureClass:        domain.WorkflowErrorClass(r.FailureClass),

@@ -115,6 +115,8 @@ var shippedMigrations = map[int64]string{
 	109: "0109_project_workflow_ownership.sql",
 	110: "0110_provider_profiles.sql",
 	111: "0111_session_ownership.sql",
+	112: "0112_execution_policies.sql",
+	113: "0113_agent_health_provider_profile_scope.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

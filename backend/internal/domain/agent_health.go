@@ -42,9 +42,18 @@ func (s AgentHealthState) Valid() bool {
 // AgentHealthEvent is one append-only durable fact about a harness's
 // dispatch outcome (Checkpoint 8H). Never updated; the current AgentHealth
 // for a harness is derived by reading the latest event for it.
+//
+// UserID/ProviderProfileID (Checkpoint 8P-C) scope an event to the exact
+// owner+connection that produced it. Both are empty for events recorded
+// before 8P-C, or for an unowned run/trusted-local dispatch with no matched
+// profile -- these "legacy/global" rows remain readable as a compatibility
+// fallback (see service/capacity's precedence rule) but a scoped row for the
+// same user+profile+harness always takes precedence over them.
 type AgentHealthEvent struct {
 	ID                  string
 	Harness             AgentHarness
+	UserID              UserID
+	ProviderProfileID   ProviderProfileID
 	State               AgentHealthState
 	Reason              string
 	FailureClass        WorkflowErrorClass

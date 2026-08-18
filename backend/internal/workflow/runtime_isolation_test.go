@@ -13,15 +13,16 @@ import (
 
 // fakeRuntimeIsolation is a hand-rolled fake for workflowcore.RuntimeIsolation.
 type fakeRuntimeIsolation struct {
-	env   map[string]string
-	owner domain.UserID
-	err   error
-	calls int
+	env       map[string]string
+	owner     domain.UserID
+	profileID domain.ProviderProfileID
+	err       error
+	calls     int
 }
 
-func (f *fakeRuntimeIsolation) Resolve(_ context.Context, _ string, _ domain.AgentHarness) (map[string]string, domain.UserID, error) {
+func (f *fakeRuntimeIsolation) Resolve(_ context.Context, _ string, _ domain.AgentHarness) (map[string]string, domain.UserID, domain.ProviderProfileID, error) {
 	f.calls++
-	return f.env, f.owner, f.err
+	return f.env, f.owner, f.profileID, f.err
 }
 
 func newCoordinatorWithRuntimeIsolation(spawner workflowcore.Spawner, isolation workflowcore.RuntimeIsolation) (*workflowcore.Coordinator, *fakeStore) {

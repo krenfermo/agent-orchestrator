@@ -277,11 +277,13 @@ func TestFixCycleChangedFingerprintDispatchesNextReview(t *testing.T) {
 // TestFixAttemptHarnessTracksActualWorkerHarness is Checkpoint 8L.1's real-
 // E2E-discovered regression test: recordFixDispatchSuccess used to hardcode
 // the fix attempt's harness as the literal "codex" (correct only by
-// accident before 8L, when the worker was always Codex). This forces a
-// trivial-complexity plan (worker prefers Codex under the default policy —
-// see worker_routing.go) so the harness under test is still Codex, proving
-// the fix path derives it from the work step's actual last attempt rather
-// than from any hardcoded assumption in either direction.
+// accident before 8L, when the worker was always Codex). Checkpoint 8P-C's
+// legacy/trusted-local compatibility default (domain.DefaultUserExecutionPolicy)
+// prefers Claude Code first for every complexity tier (no more hardcoded
+// trivial-prefers-Codex rule — see checkpoint brief §17), so this run's
+// worker routes to Claude Code; the test still proves the fix path derives
+// its harness from the work step's actual last attempt rather than from any
+// hardcoded assumption in either direction.
 func TestFixAttemptHarnessTracksActualWorkerHarness(t *testing.T) {
 	sessionFacts := newFakeSessionFacts()
 	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
@@ -305,14 +307,14 @@ func TestFixAttemptHarnessTracksActualWorkerHarness(t *testing.T) {
 
 	work := workStepFrom(got)
 	workAttempts, err := store.ListWorkflowAttempts(ctx, work.Step.ID)
-	if err != nil || len(workAttempts) == 0 || workAttempts[len(workAttempts)-1].Harness != "codex" {
-		t.Fatalf("work attempts = %+v, err=%v, want the worker to have routed to codex (trivial complexity)", workAttempts, err)
+	if err != nil || len(workAttempts) == 0 || workAttempts[len(workAttempts)-1].Harness != "claude-code" {
+		t.Fatalf("work attempts = %+v, err=%v, want the worker to have routed to claude-code (legacy-compat default)", workAttempts, err)
 	}
 
 	fix := fixStepFrom(got)
 	fixAttempts, err := store.ListWorkflowAttempts(ctx, fix.Step.ID)
-	if err != nil || len(fixAttempts) != 1 || fixAttempts[0].Harness != "codex" {
-		t.Fatalf("fix attempts = %+v, err=%v, want exactly 1 with harness=codex (matching the actual worker)", fixAttempts, err)
+	if err != nil || len(fixAttempts) != 1 || fixAttempts[0].Harness != "claude-code" {
+		t.Fatalf("fix attempts = %+v, err=%v, want exactly 1 with harness=claude-code (matching the actual worker)", fixAttempts, err)
 	}
 }
 

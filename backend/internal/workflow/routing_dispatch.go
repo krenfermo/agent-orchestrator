@@ -90,6 +90,21 @@ func (c *Coordinator) routingDecisionForStep(ctx stdctx.Context, runID, stepID s
 	return decodeRoutingDecision(latest.RetryState)
 }
 
+// reviewerHarnessFromAgentHarness bridges ExecutionRouter's AgentHarness
+// vocabulary (worker/routing) to domain.ReviewerHarness (the reviewer
+// registry's own vocabulary, ports.ReviewerResolver). The two vocabularies
+// share ids for every harness that serves both roles (Checkpoint 8P-C: no
+// longer a fixed two-entry table), falling back to
+// domain.FallbackReviewerHarness only for a selected harness the reviewer
+// registry doesn't recognize at all -- never a zero value.
+func reviewerHarnessFromAgentHarness(h domain.AgentHarness) domain.ReviewerHarness {
+	rh := domain.ReviewerHarness(h)
+	if rh.IsKnown() {
+		return rh
+	}
+	return domain.FallbackReviewerHarness
+}
+
 // routeWorkerDispatch is dispatch.go's single entry point into
 // ExecutionRouter for the initial worker-harness choice (checkpoint brief
 // §7). It estimates complexity from the step's own PlanArtifact (pre-dispatch,
@@ -104,15 +119,17 @@ func (c *Coordinator) routeWorkerDispatch(ctx stdctx.Context, run domain.Workflo
 		artifact = BuildPlanArtifact(run.ProjectID, run.Objective, run.PolicyVersion)
 	}
 	complexity := EstimateWorkerComplexity(artifact, priorAttempts)
-	capacity := c.routingCapacitySnapshot(ctx)
-	policy := policyForRun(run).EffectiveRoutingPolicy()
+	owner := c.runOwner(ctx, run.ID)
+	snapshot := policyForRun(run).EffectiveExecutionPolicy()
+	policy, eligible, ineligible, capacity := c.routingInputsForRole(ctx, owner, domain.WorkflowRoleWorker, snapshot)
 
 	decision := RouteExecution(RoutingRequest{
-		Role:             domain.WorkflowRoleWorker,
-		Complexity:       complexity,
-		PreviousAttempts: priorAttempts,
-		Capacity:         capacity,
-		Policy:           policy,
+		Role:              domain.WorkflowRoleWorker,
+		Complexity:        complexity,
+		Policy:            policy,
+		EligibleProfiles:  eligible,
+		IneligibleReasons: ineligible,
+		Capacity:          capacity,
 	})
 	stepID := step.ID
 	if perr := c.persistRoutingDecision(ctx, run, &stepID, decision); perr != nil {
@@ -178,15 +195,18 @@ func (c *Coordinator) reviewerHarnessForStep(ctx stdctx.Context, run domain.Work
 // ExecutionRouter for reviewer selection (checkpoint brief §8/§9):
 // cross-provider independent from the worker's actual implementing harness.
 func (c *Coordinator) routeReviewerDispatch(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, implementer domain.AgentHarness, complexity TaskComplexity) (domain.RoutingDecision, error) {
-	capacity := c.routingCapacitySnapshot(ctx)
-	policy := policyForRun(run).EffectiveRoutingPolicy()
+	owner := c.runOwner(ctx, run.ID)
+	snapshot := policyForRun(run).EffectiveExecutionPolicy()
+	policy, eligible, ineligible, capacity := c.routingInputsForRole(ctx, owner, domain.WorkflowRoleReviewer, snapshot)
 
 	decision := RouteExecution(RoutingRequest{
-		Role:               domain.WorkflowRoleReviewer,
-		Complexity:         complexity,
-		CurrentImplementer: implementer,
-		Capacity:           capacity,
-		Policy:             policy,
+		Role:                       domain.WorkflowRoleReviewer,
+		Complexity:                 complexity,
+		CurrentImplementerProvider: domain.ProviderForHarness(implementer),
+		Policy:                     policy,
+		EligibleProfiles:           eligible,
+		IneligibleReasons:          ineligible,
+		Capacity:                   capacity,
 	})
 	stepID := step.ID
 	if err := c.persistRoutingDecision(ctx, run, &stepID, decision); err != nil {
