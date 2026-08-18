@@ -53,6 +53,19 @@ type ReviewRuns interface {
 	// exposes (backend/internal/storage/sqlite/store/review_store.go),
 	// reused unmodified through this same narrow port.
 	ListReviewRunsBySession(ctx stdctx.Context, id domain.SessionID) ([]domain.ReviewRun, error)
+
+	// CancelRunningReviewRunsBySessionAndHarness backs Checkpoint 8P-D.3's
+	// mid-session reviewer-capacity stall recovery: when a reviewer's own
+	// session goes idle/exits without ever calling `ao review submit` (no
+	// verdict), the still-"running" review_run must be closed out durably
+	// (never silently forgotten, never left to eventually time out via
+	// reviewStalenessThreshold) so reviewerHarnessForStep can route a fresh
+	// cycle — to a fallback provider if policy allows one, or back to the
+	// same one once capacity recovers. CAS-guarded in SQL on
+	// status='running' AND verdict='' (see review.sql), so it can never
+	// clobber a verdict that actually landed in the same instant. Same
+	// store method internal/review already exposes.
+	CancelRunningReviewRunsBySessionAndHarness(ctx stdctx.Context, id domain.SessionID, harness domain.ReviewerHarness, body string) (int64, error)
 }
 
 // ReviewerLaunchRequest is workflow's request to actually start a reviewer
@@ -114,8 +127,17 @@ type ReviewerLauncher interface {
 // specific so a second review cycle for the same step gets its own outbox
 // row (and thus its own single-flight guard) instead of colliding with
 // cycle 1's already-acknowledged entry.
-func reviewStepOutboxIdempotencyKey(stepID string, cycleNumber int) string {
-	return "workflow-step-review:" + stepID + ":cycle" + strconv.Itoa(cycleNumber)
+func reviewStepOutboxIdempotencyKey(stepID string, cycleNumber int, harness domain.ReviewerHarness) string {
+	// Checkpoint 8P-D.3: harness is part of the key (not just stepID+cycle)
+	// because completedReviewCycles/cycleNumber is computed per-harness —
+	// once a capacity-driven fallback can change harness mid-step
+	// (reviewerHarnessForStep skipping a cancelled run), a fresh harness
+	// restarts that harness's own cycle count at 1, which would otherwise
+	// collide with cycle 1's original (different-harness) idempotency key
+	// and silently re-adopt the old, already-terminal outbox entry instead
+	// of dispatching the fallback. Harness never changes across cycles
+	// outside that path, so this is a no-op for every other existing case.
+	return "workflow-step-review:" + stepID + ":cycle" + strconv.Itoa(cycleNumber) + ":" + string(harness)
 }
 
 // completedReviewCycles returns the count of Claude-Code review_runs already
@@ -295,35 +317,71 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		}
 
 	case domain.WorkflowStepWaiting:
-		// Cycle N+1 (Checkpoint 8D): only eligible once the fix step has
-		// delivered AND observed a genuinely new workspace fingerprint for
-		// THIS review step's cycle. fixStep.State == waiting with a
-		// non-empty FingerprintAfter on its latest checkpoint is that fact.
-		if fixStep.State != domain.WorkflowStepWaiting {
-			return reviewStep, nil
-		}
-		fixCP, hasFixCP, err := c.store.GetLatestWorkflowCheckpointByStep(ctx, fixStep.ID)
-		if err != nil {
-			return reviewStep, err
-		}
-		if !hasFixCP || fixCP.FingerprintAfter == "" {
-			return reviewStep, nil
-		}
-		// Idempotency: never re-review a fingerprint already reviewed by the
-		// step's current review_run (covers a repeated GetRun/Reconcile call
-		// landing after this cycle's review_run already exists, before the
-		// outbox row above resolves to acknowledged).
-		if reviewStep.ReviewRunID != nil {
-			existing, ok, err := c.reviewRuns.GetReviewRun(ctx, *reviewStep.ReviewRunID)
+		if fixStep.State == domain.WorkflowStepWaiting {
+			// Cycle N+1 (Checkpoint 8D): only eligible once the fix step has
+			// delivered AND observed a genuinely new workspace fingerprint
+			// for THIS review step's cycle. fixStep.State == waiting with a
+			// non-empty FingerprintAfter on its latest checkpoint is that
+			// fact.
+			fixCP, hasFixCP, err := c.store.GetLatestWorkflowCheckpointByStep(ctx, fixStep.ID)
 			if err != nil {
 				return reviewStep, err
 			}
-			if ok && existing.TargetSHA == fixCP.FingerprintAfter {
+			if !hasFixCP || fixCP.FingerprintAfter == "" {
 				return reviewStep, nil
 			}
+			// Idempotency: never re-review a fingerprint already reviewed by
+			// the step's current review_run (covers a repeated
+			// GetRun/Reconcile call landing after this cycle's review_run
+			// already exists, before the outbox row above resolves to
+			// acknowledged).
+			if reviewStep.ReviewRunID != nil {
+				existing, ok, err := c.reviewRuns.GetReviewRun(ctx, *reviewStep.ReviewRunID)
+				if err != nil {
+					return reviewStep, err
+				}
+				if ok && existing.TargetSHA == fixCP.FingerprintAfter {
+					return reviewStep, nil
+				}
+			}
+			targetSHA = fixCP.FingerprintAfter
+			baseSHA = fixCP.FingerprintBefore
+		} else {
+			// Checkpoint 8P-D.3: a review step can also rest at "waiting"
+			// after handleReviewerCapacityStall closes out a reviewer
+			// session that went idle mid-review with no verdict — no
+			// workspace change happened, so there is nothing for the
+			// fixStep-based gate above to observe. Recognize this distinct
+			// resting state via reviewStep.ReviewRunID's own review_run
+			// having been durably CANCELLED (written only by
+			// handleReviewerCapacityStall/CancelRunningReviewRunsBySession-
+			// AndHarness) rather than a checkpoint DurablePhase: a Waiting
+			// decision from routeReviewerDispatch below (no eligible
+			// fallback yet) persists its OWN "routing_decision" checkpoint
+			// on every retry attempt, which would overwrite any
+			// checkpoint-phase-based marker before the real recovery wake
+			// ever fires — the review_run's own terminal status is the one
+			// fact that survives every intermediate no-op retry unchanged.
+			// Re-reviews the SAME target, unchanged — this is a provider
+			// retry, not a new fix cycle.
+			if reviewStep.ReviewRunID == nil {
+				return reviewStep, nil
+			}
+			priorRun, ok, err := c.reviewRuns.GetReviewRun(ctx, *reviewStep.ReviewRunID)
+			if err != nil {
+				return reviewStep, err
+			}
+			if !ok || priorRun.Status != domain.ReviewRunCancelled {
+				return reviewStep, nil
+			}
+			targetSHA = priorRun.TargetSHA
+			if targetSHA == "" {
+				targetSHA = workCP.FingerprintAfter
+			}
+			if targetSHA == "" {
+				targetSHA = workCP.HeadSHA
+			}
 		}
-		targetSHA = fixCP.FingerprintAfter
-		baseSHA = fixCP.FingerprintBefore
 
 	default:
 		// terminal: nothing to dispatch from here.
@@ -369,7 +427,7 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		ID:             "wfo-" + c.newID(),
 		WorkflowRunID:  run.ID,
 		WorkflowStepID: &reviewStep.ID,
-		IdempotencyKey: reviewStepOutboxIdempotencyKey(reviewStep.ID, cycleNumber),
+		IdempotencyKey: reviewStepOutboxIdempotencyKey(reviewStep.ID, cycleNumber, harness),
 		CommandType:    domain.WorkflowOutboxTriggerReview,
 		Payload:        reviewPayloadJSON(workStep.ID, reviewStep.ID, sessionID, targetSHA, harness, cycleNumber),
 		CreatedAt:      now,

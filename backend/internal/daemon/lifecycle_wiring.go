@@ -206,6 +206,7 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		Browser:             browserLifecycle,
 		BrowserCapabilities: browserCapabilities,
 		DataDir:             cfg.DataDir,
+		RunFilePath:         cfg.RunFilePath,
 		Logger:              log,
 		// Checkpoint 8P-B.2: relaunch/restore re-derives the same isolated
 		// runtime env a fresh Spawn would have used, from the session's own

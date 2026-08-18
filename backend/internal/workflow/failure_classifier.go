@@ -83,7 +83,7 @@ func classifyProviderFailure(err error) ProviderFailureClassification {
 	switch {
 	case containsAny(text, "rate limit", "rate-limit", "ratelimited", "429", "too many requests"):
 		return ProviderFailureClassification{Class: domain.WorkflowErrorRateLimited, Certainty: CertaintyInferred, Eligible: true}
-	case containsAny(text, "capacity", "overloaded", "no capacity", "quota exceeded"):
+	case containsAny(text, "capacity", "overloaded", "no capacity", "quota exceeded", "usage limit", "usage_limit_exceeded"):
 		return ProviderFailureClassification{Class: domain.WorkflowErrorCapacityExhausted, Certainty: CertaintyInferred, Eligible: true}
 	case containsAny(text, "unauthorized", "not logged in", "logged out", "authentication", "auth failed", "401", "403"):
 		return ProviderFailureClassification{Class: domain.WorkflowErrorAuth, Certainty: CertaintyInferred, Eligible: false}

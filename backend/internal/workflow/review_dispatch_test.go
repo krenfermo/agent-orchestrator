@@ -3,6 +3,7 @@ package workflow_test
 import (
 	"context"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -87,6 +88,9 @@ func (f *fakeReviewRuns) GetReviewRunBySessionPRSHAAndHarness(_ context.Context,
 }
 
 // ListReviewRunsBySession backs Checkpoint 8D's cycle-number derivation.
+// Sorted newest-first, matching the real store's `ORDER BY created_at DESC`
+// (review.sql) — Checkpoint 8P-D.3's reviewerHarnessForStep relies on that
+// ordering to find the most recent non-cancelled cycle.
 func (f *fakeReviewRuns) ListReviewRunsBySession(_ context.Context, id domain.SessionID) ([]domain.ReviewRun, error) {
 	var out []domain.ReviewRun
 	for _, r := range f.runs {
@@ -94,7 +98,24 @@ func (f *fakeReviewRuns) ListReviewRunsBySession(_ context.Context, id domain.Se
 			out = append(out, r)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out, nil
+}
+
+// CancelRunningReviewRunsBySessionAndHarness backs Checkpoint 8P-D.3's
+// reviewer-capacity stall recovery, mirroring the real store's CAS guard
+// (status='running' AND verdict='').
+func (f *fakeReviewRuns) CancelRunningReviewRunsBySessionAndHarness(_ context.Context, id domain.SessionID, harness domain.ReviewerHarness, body string) (int64, error) {
+	var n int64
+	for rid, r := range f.runs {
+		if r.SessionID == id && r.Harness == harness && r.Status == domain.ReviewRunRunning && r.Verdict == "" {
+			r.Status = domain.ReviewRunCancelled
+			r.Body = body
+			f.runs[rid] = r
+			n++
+		}
+	}
+	return n, nil
 }
 
 // fakeMessageSender is a hand-rolled fake for workflowcore.MessageSender (no
@@ -514,6 +535,74 @@ func TestReviewStillRunningFreshStaysRunning(t *testing.T) {
 	}
 	if final.Run.State == domain.WorkflowRunNeedsAttention {
 		t.Fatalf("run state = %q, want not needs_attention while review is genuinely fresh", final.Run.State)
+	}
+}
+
+// TestReviewerCapacityStall_ScopedAgentHealthEvent is Checkpoint 8P-D.3's
+// per-(user,profile) isolation proof: a reviewer capacity stall recorded for
+// one user's connection must land under that exact (harness,user,profile)
+// key and must never appear under any other user's key, mirroring
+// TestCapacityScope_CrossUserIsolation's own proof for the underlying
+// primitive — this test instead proves handleReviewerCapacityStall (the new
+// caller) actually threads resolveRuntimeEnv's scope through, using
+// fakeStore's real scoped/legacy key separation (workflow_test.go) rather
+// than re-testing the primitive itself.
+func TestReviewerCapacityStall_ScopedAgentHealthEvent(t *testing.T) {
+	sessionFacts := newFakeSessionFacts()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
+	workspaceFacts := &fakeWorkspaceFacts{}
+	reviewRuns := newFakeReviewRuns()
+	launcher := &fakeReviewerLauncher{}
+	store := newFakeStore()
+	clk := &fakeClock{t: time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)}
+	var idSeq int
+	owner, profileID := domain.UserID("user-a"), domain.ProviderProfileID("profile-a-codex")
+	c := workflowcore.New(workflowcore.Deps{
+		Store: store, Spawner: spawner, SessionFacts: sessionFacts, WorkspaceFacts: workspaceFacts,
+		ReviewRuns: reviewRuns, ReviewerLauncher: launcher, Clock: clk.Now,
+		RuntimeIsolation: &fakeRuntimeIsolation{owner: owner, profileID: profileID},
+		NewID:            func() string { idSeq++; return fmt.Sprintf("id%d", idSeq) },
+	})
+	ctx := context.Background()
+
+	created, err := c.CreateRun(ctx, "proj-1", "ship the thing")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	completeWorkStep(t, c, store, clk, sessionFacts, workspaceFacts, created.Run.ID)
+	got, err := c.ContinueRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("ContinueRun: %v", err)
+	}
+	review := reviewStepFrom(got)
+	if review.Step.ReviewRunID == nil {
+		t.Fatalf("review step has no review_run_id after dispatch")
+	}
+	sessionID := domain.SessionID(*workStepFrom(got).Step.SessionID)
+
+	clk.Advance(1 * time.Second)
+	sessionFacts.put(domain.SessionRecord{
+		ID: sessionID, ProjectID: "proj-1",
+		Activity: domain.Activity{State: domain.ActivityIdle, LastActivityAt: clk.Now()}, IsTerminated: false,
+		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/wf", Branch: "ao/wf"},
+	})
+	clk.Advance(25 * time.Second) // past reviewerStallGrace (20s), nowhere near reviewStalenessThreshold
+
+	if _, err := c.GetRun(ctx, created.Run.ID); err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+
+	scopedA, ok, err := store.GetAgentHealthScoped(ctx, domain.HarnessCodex, owner, profileID)
+	if err != nil || !ok {
+		t.Fatalf("GetAgentHealthScoped(user-a): ok=%v err=%v", ok, err)
+	}
+	if scopedA.State != domain.AgentHealthCooldown || scopedA.FailureClass != domain.WorkflowErrorCapacityExhausted {
+		t.Fatalf("scoped health for user-a = %+v, want cooldown/capacity_exhausted", scopedA)
+	}
+
+	// A different user's identical (harness) connection must never see it.
+	if _, ok, err := store.GetAgentHealthScoped(ctx, domain.HarnessCodex, "user-b", "profile-b-codex"); err != nil || ok {
+		t.Fatalf("GetAgentHealthScoped(user-b): ok=%v err=%v, want not found (never leaked from user-a)", ok, err)
 	}
 }
 

@@ -56,6 +56,24 @@ func TestClassifyProviderFailure_InferredRateLimit(t *testing.T) {
 	}
 }
 
+// TestClassifyProviderFailure_UsageLimitIsCapacity is Checkpoint 8P-D.3's
+// regression for the real phrasing a Codex usage-limit hit actually used
+// (Checkpoint 8P-D.2's evidence): "You've hit your usage limit..." and the
+// CLI's own `codex_error_info: "usage_limit_exceeded"` field, neither of
+// which the pre-existing "quota exceeded" phrase matched.
+func TestClassifyProviderFailure_UsageLimitIsCapacity(t *testing.T) {
+	cases := []string{
+		"You've hit your usage limit. Upgrade to Pro or try again at Aug 20th, 2026 1:30 PM.",
+		`codex_error_info: "usage_limit_exceeded"`,
+	}
+	for _, msg := range cases {
+		got := classifyProviderFailure(errors.New(msg))
+		if got.Class != domain.WorkflowErrorCapacityExhausted || got.Certainty != CertaintyInferred || !got.Eligible {
+			t.Fatalf("classifyProviderFailure(%q) = %+v, want capacity_exhausted/inferred/eligible", msg, got)
+		}
+	}
+}
+
 // TestClassifyProviderFailure_UnknownStaysUnknown covers test requirement #2:
 // an untyped, unrecognized error must classify with CertaintyUnknown and
 // Eligible=false — it must never be silently treated as a provider failure

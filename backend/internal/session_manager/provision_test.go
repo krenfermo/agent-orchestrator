@@ -21,7 +21,7 @@ func (f fixedBrowserCapability) Issue(_ domain.SessionID) (string, string, error
 }
 
 func TestSpawnEnvProjectVarsCannotOverrideInternal(t *testing.T) {
-	env := spawnEnv("mer-1", "mer", "issue-9", "/data", map[string]string{
+	env := spawnEnv("mer-1", "mer", "issue-9", "/data", "/data/running.json", map[string]string{
 		"FOO":        "bar",
 		EnvSessionID: "hacked", // a project must not override AO-internal vars
 		EnvProjectID: "hacked",
@@ -37,9 +37,39 @@ func TestSpawnEnvProjectVarsCannotOverrideInternal(t *testing.T) {
 	}
 }
 
+// TestSpawnEnvExportsRunFilePath is 8P-D.2's regression test for the exact
+// sequence that produced a false-early verify_workspace_changed in a real
+// autonomous run: the daemon was started with an AO_RUN_FILE override that
+// didn't live under AO_DATA_DIR, spawnEnv exported only AO_DATA_DIR, so every
+// `ao hooks claude-code ...` callback from inside the worker session hit
+// "AO daemon is not running" (resolveRunFilePath falls back to the default
+// ~/.ao/running.json, which the running daemon never wrote) — activity state
+// never left its idle default, and the coordinator's git-status fallback
+// (evaluateWorkStepProgress) called the work step complete while Claude Code
+// was still mid-task, freezing an incomplete reviewed fingerprint. Exporting
+// AO_RUN_FILE removes the guesswork the hook subprocess otherwise has to do.
+func TestSpawnEnvExportsRunFilePath(t *testing.T) {
+	env := spawnEnv("mer-1", "mer", "issue-9", "/data", "/private/tmp/ao-manual-test/data/running.json", nil)
+	if got := env[EnvRunFile]; got != "/private/tmp/ao-manual-test/data/running.json" {
+		t.Fatalf("AO_RUN_FILE = %q, want the daemon's resolved run-file path", got)
+	}
+}
+
+// TestSpawnEnvOmitsRunFileWhenUnset preserves pre-8P-D.2 behavior when the
+// daemon wiring leaves RunFilePath unset (e.g. an older test double): no
+// empty AO_RUN_FILE is exported, so a spawned agent falls back to its own
+// default resolution instead of being pointed at an empty path.
+func TestSpawnEnvOmitsRunFileWhenUnset(t *testing.T) {
+	env := spawnEnv("mer-1", "mer", "issue-9", "/data", "", nil)
+	if _, ok := env[EnvRunFile]; ok {
+		t.Fatalf("AO_RUN_FILE should be absent when runFilePath is empty, got %q", env[EnvRunFile])
+	}
+}
+
 func TestRuntimeEnvInjectsBrowserCapability(t *testing.T) {
 	manager := &Manager{
 		dataDir:             "/data",
+		runFilePath:         "/data/running.json",
 		browserCapabilities: fixedBrowserCapability("capability-1"),
 		executable:          func() (string, error) { return filepath.Join("/opt", "aod", "ao"), nil },
 		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -53,6 +83,9 @@ func TestRuntimeEnvInjectsBrowserCapability(t *testing.T) {
 	}
 	if verifier != "verifier-1" {
 		t.Fatalf("verifier = %q", verifier)
+	}
+	if env[EnvRunFile] != "/data/running.json" {
+		t.Fatalf("%s = %q, want the manager's runFilePath threaded through runtimeEnv", EnvRunFile, env[EnvRunFile])
 	}
 }
 

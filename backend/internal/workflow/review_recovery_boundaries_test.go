@@ -116,7 +116,7 @@ func TestReviewRecoveryBoundaryB_DispatchedOutboxAdoptsFoundReviewRunWithoutRela
 		Harness: domain.ReviewerClaudeCode, PRURL: "", TargetSHA: expectedTargetSHA,
 		Status: domain.ReviewRunRunning, Verdict: domain.VerdictNone, CreatedAt: clk.Now(),
 	}
-	outboxKey := "workflow-step-review:" + reviewStepID + ":cycle1"
+	outboxKey := "workflow-step-review:" + reviewStepID + ":cycle1:claude-code" // Checkpoint 8P-D.3: idempotency key now includes harness
 	store.outbox[outboxKey] = domain.WorkflowOutboxEntry{
 		ID: "wfo-preexisting-review", WorkflowRunID: created.Run.ID, WorkflowStepID: &reviewStepID,
 		IdempotencyKey: outboxKey, CommandType: domain.WorkflowOutboxTriggerReview,
@@ -173,7 +173,7 @@ func TestReviewRecoveryAmbiguous_DispatchedNoReviewRunFoundNeedsAttention(t *tes
 			reviewStepID = s.ID
 		}
 	}
-	outboxKey := "workflow-step-review:" + reviewStepID + ":cycle1"
+	outboxKey := "workflow-step-review:" + reviewStepID + ":cycle1:codex" // Checkpoint 8P-D.3: idempotency key now includes harness
 	store.outbox[outboxKey] = domain.WorkflowOutboxEntry{
 		ID: "wfo-preexisting-review-2", WorkflowRunID: created.Run.ID, WorkflowStepID: &reviewStepID,
 		IdempotencyKey: outboxKey, CommandType: domain.WorkflowOutboxTriggerReview,

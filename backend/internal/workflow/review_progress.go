@@ -17,6 +17,31 @@ import (
 // longer confident, ask for attention," never as "assume success."
 const reviewStalenessThreshold = 30 * time.Minute
 
+// reviewerStallGrace is Checkpoint 8P-D.3's much tighter bound: how long a
+// review run may sit "running" with its underlying reviewer session already
+// idle/exited before that is treated as a stall worth acting on, instead of
+// silently waiting out the full 30-minute reviewStalenessThreshold. Real
+// evidence (Checkpoint 8P-D.2's fresh smoke run) showed a reviewer hitting a
+// provider usage-limit mid-review: its own session went idle (the CLI's Stop
+// hook fired) within seconds without ever calling `ao review submit`, but
+// nothing distinguished that from "still genuinely working" for the next 30
+// minutes. This grace only guards against the opposite race — checking
+// activity state immediately after dispatch, before the reviewer's own first
+// hook has even landed, would misread the WORKER's leftover idle state (from
+// before the reviewer was launched into the same session) as an instant
+// stall. Real reviewer hook latency observed was ~3s; this is deliberately
+// generous relative to that, not to the 30-minute threshold it replaces.
+const reviewerStallGrace = 20 * time.Second
+
+// reviewCapacityRetryDurablePhase marks a WorkflowCheckpoint written only by
+// handleReviewerCapacityStall: the review step is resting at "waiting" with
+// no fix cycle involved (no workspace change happened), purely because a
+// prior reviewer session stalled without a verdict. dispatchReviewStep's
+// WorkflowStepWaiting case checks for this exact phase to distinguish a
+// capacity retry from a real fix-cycle N+1 (which instead requires
+// fixStep.State == waiting with a fresh fingerprint).
+const reviewCapacityRetryDurablePhase = "review_capacity_retry"
+
 // observeReviewStep is the single fact-based review-step evaluation function,
 // used both by GetRun (opportunistic observation) and by boot Reconcile,
 // mirroring observeWorkStep's split of pure decision vs. store-touching
@@ -50,7 +75,16 @@ func (c *Coordinator) observeReviewStep(ctx stdctx.Context, run domain.WorkflowR
 		if cperr != nil {
 			return step, cperr
 		}
-		if hasCP && now.Sub(latestCP.CreatedAt) > reviewStalenessThreshold {
+		elapsed := time.Duration(0)
+		if hasCP {
+			elapsed = now.Sub(latestCP.CreatedAt)
+		}
+		if hasCP && elapsed > reviewerStallGrace {
+			if stalled := c.reviewerSessionStalled(ctx, reviewRun, latestCP.CreatedAt); stalled {
+				return c.handleReviewerCapacityStall(ctx, run, step, reviewRun, now)
+			}
+		}
+		if hasCP && elapsed > reviewStalenessThreshold {
 			return c.recordReviewOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunNeedsAttention,
 				"ambiguous_review_state: review has been running longer than expected with no verdict", "", domain.WorkflowErrorAmbiguousWorkerState)
 		}
@@ -198,5 +232,122 @@ func (c *Coordinator) recordReviewOutcome(
 		}
 	}
 
+	return step, nil
+}
+
+// reviewerSessionStalled reports whether reviewRun's underlying AO session
+// has gone idle or exited while reviewRun itself is still durably "running"
+// with no verdict — the real, observable signature of a reviewer whose turn
+// ended (the CLI's own Stop/exit hook fired) without ever reaching
+// `ao review submit` (Checkpoint 8P-D.2's real evidence: a Codex reviewer
+// that hit a provider usage limit mid-review). A nil sessionFacts port, a
+// lookup miss, or any error is treated as "cannot tell" (false), never as
+// evidence of a stall — this only ever shortens the wait, it must never
+// invent one.
+//
+// dispatchedAt is this review cycle's own dispatch checkpoint time. Review
+// reuses the WORKER's existing session rather than spawning a new one, so
+// right after dispatch the session's Activity can still read as Idle purely
+// as the worker's own leftover state from before the reviewer ever started —
+// requiring Activity.LastActivityAt to be strictly after dispatchedAt is what
+// tells a fresh, reviewer-caused idle signal apart from that stale leftover
+// (a fixed grace period alone cannot: a reviewer harness with no hook support
+// at all would never update LastActivityAt regardless of how long the grace
+// window is, and correctly never triggers this path). IsTerminated is
+// unconditional — a session cannot un-terminate, so no freshness check
+// applies there.
+func (c *Coordinator) reviewerSessionStalled(ctx stdctx.Context, reviewRun domain.ReviewRun, dispatchedAt time.Time) bool {
+	if c.sessionFacts == nil || reviewRun.SessionID == "" {
+		return false
+	}
+	sess, found, err := c.sessionFacts.GetSession(ctx, reviewRun.SessionID)
+	if err != nil || !found {
+		return false
+	}
+	if sess.IsTerminated {
+		return true
+	}
+	if !sess.Activity.LastActivityAt.After(dispatchedAt) {
+		return false
+	}
+	switch sess.Activity.State {
+	case domain.ActivityIdle, domain.ActivityExited:
+		return true
+	default:
+		return false
+	}
+}
+
+// handleReviewerCapacityStall is Checkpoint 8P-D.3's response to a reviewer
+// session that stalled without ever producing a verdict: it is classified as
+// a provider capacity signal (the real evidence available — an idle turn
+// with no submit — is exactly what a mid-review usage-limit/rate-limit hit
+// looks like from AO's side, and treating it any other way would either
+// silently wait out reviewStalenessThreshold or misfire needs_attention for
+// a transient, self-recovering condition), recorded as a durable, scoped
+// AgentHealthEvent so it never counts against a different user's or
+// profile's connection, and the stalled review_run is closed out (never left
+// "running" forever, never left to imply an approved verdict from the
+// model's own prose — see Codex's own transcript in the 8P-D.2 evidence,
+// which said "approved" in text while never calling submit).
+//
+// This deliberately does NOT hand-pick a fallback reviewer itself: resting
+// the step at "waiting" and letting dispatchReviewStep's normal cascade
+// re-enter (cascade.go's advanceReviewFixCycle step 4, same call) means
+// reviewerHarnessForStep/routeReviewerDispatch/RouteExecution — the same
+// machinery that already implements the frozen UserExecutionPolicy's
+// FallbackBehavior/ReviewIndependence rules for every other dispatch —
+// naturally either selects an eligible independent fallback (seeing this
+// call's own just-recorded cooldown) or returns Waiting=true, which
+// dispatchReviewStep already turns into markRunWaitingForCapacity's durable
+// reviewer_capacity wake. No new fallback-selection logic to duplicate or
+// drift from the dispatch-time path.
+func (c *Coordinator) handleReviewerCapacityStall(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, reviewRun domain.ReviewRun, now time.Time) (domain.WorkflowStep, error) {
+	harness := domain.AgentHarness(reviewRun.Harness)
+	_, owner, profileID, _ := c.resolveRuntimeEnv(ctx, run.ID, harness)
+	scope := healthScope{userID: owner, profileID: profileID}
+	classification := ProviderFailureClassification{Class: domain.WorkflowErrorCapacityExhausted, Certainty: CertaintyInferred, Eligible: true}
+	c.recordAgentHealthFailure(ctx, harness, scope, classification, now)
+
+	if c.reviewRuns != nil {
+		_, _ = c.reviewRuns.CancelRunningReviewRunsBySessionAndHarness(ctx, reviewRun.SessionID, reviewRun.Harness,
+			"reviewer_capacity: session went idle with no verdict after dispatch — treated as provider capacity exhaustion, never fabricated as an approved verdict from pane text")
+	}
+
+	if domain.ValidWorkflowStepTransition(step.State, domain.WorkflowStepWaiting) {
+		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, step.State, domain.WorkflowStepWaiting, now); err != nil {
+			return step, err
+		}
+		step.State = domain.WorkflowStepWaiting
+	}
+	if domain.ValidWorkflowRunTransition(run.State, domain.WorkflowRunWaiting) {
+		if _, err := c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunWaiting, now); err != nil {
+			return step, err
+		}
+	}
+
+	// reviewStep.ReviewRunID intentionally keeps pointing at the just-
+	// cancelled review_run: reviewerHarnessForStep already skips cancelled
+	// runs when picking the next cycle's harness, and
+	// recordReviewDispatchSuccess unconditionally overwrites this field the
+	// moment the retry actually dispatches — nothing here needs to clear it,
+	// and maybeDispatchFix's own Verdict!=ChangesRequested guard already
+	// makes it a safe no-op against the cancelled (empty-verdict) run in the
+	// meantime.
+	stepID := step.ID
+	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+		ID:                "wfc-" + c.newID(),
+		WorkflowRunID:     run.ID,
+		WorkflowStepID:    &stepID,
+		ProjectID:         run.ProjectID,
+		FingerprintBefore: reviewRun.TargetSHA,
+		NextAction:        "retry_review: reviewer session stalled without a verdict, retrying per execution policy",
+		DurablePhase:      reviewCapacityRetryDurablePhase,
+		PayloadVersion:    "v1",
+		RetryState:        "{}",
+		CreatedAt:         now,
+	}); err != nil {
+		return step, err
+	}
 	return step, nil
 }

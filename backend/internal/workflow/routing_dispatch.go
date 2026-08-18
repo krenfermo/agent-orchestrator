@@ -154,8 +154,21 @@ func (c *Coordinator) reviewerHarnessForStep(ctx stdctx.Context, run domain.Work
 		if err != nil {
 			return "", false, err
 		}
-		if len(runs) > 0 {
-			return runs[0].Harness, true, nil
+		// ListReviewRunsBySession orders newest-first, so this walk finds the
+		// most recent cycle that actually ran. Checkpoint 8P-D.3: a run
+		// cancelled before ever producing a verdict (e.g.
+		// handleReviewerCapacityStall closing out a session that went idle
+		// mid-review with no submit) never established this step's reviewer
+		// identity — skipping it lets a capacity-driven cancellation route
+		// fresh (to a fallback provider, or back to the same one once
+		// capacity recovers) instead of being locked onto the exhausted
+		// harness forever. A run that reached a real verdict, or is still
+		// genuinely in flight, still locks in stably exactly as before.
+		for _, r := range runs {
+			if r.Status == domain.ReviewRunCancelled {
+				continue
+			}
+			return r.Harness, true, nil
 		}
 	}
 

@@ -600,3 +600,200 @@ func TestHumanRequiredQuestion_NeverSchedulesWake(t *testing.T) {
 		t.Fatalf("expected zero wakes for a human_required question, got %+v", next)
 	}
 }
+
+// TestReviewerCapacityStall_MidSessionDetectsAndRecovers is Checkpoint
+// 8P-D.3's regression for the real failure Checkpoint 8P-D.2 surfaced: a
+// reviewer session that dispatches fine, then goes idle (its own CLI turn
+// ends) without ever calling `ao review submit` — the exact signature a
+// mid-review provider usage-limit hit leaves behind (confirmed from the real
+// Codex transcript: a text "approved" opinion, but the submit tool call
+// itself was blocked by the exhausted quota, so review_run.status never left
+// "running"). This proves: (1) it is detected promptly (grace-window
+// seconds, never reviewStalenessThreshold's 30 minutes), (2) the stalled
+// review_run is durably closed out with its verdict still empty — never
+// fabricated as approved from the model's own prose, (3) a scoped
+// AgentHealthEvent lands the harness in cooldown, (4) with no eligible
+// independent fallback (only codex/claude-code exist, claude-code is the
+// implementer), the run parks in Waiting behind a durable reviewer_capacity
+// wake rather than needs_attention, and (5) once capacity recovers, the
+// headless poller alone (no GetRun/ContinueRun) redispatches exactly once
+// more — a fresh review_run, not a duplicate/zombie reviewer.
+func TestReviewerCapacityStall_MidSessionDetectsAndRecovers(t *testing.T) {
+	store := sqlitetest.MustOpen(t)
+	ctx := context.Background()
+	if err := store.UpsertProject(ctx, domain.ProjectRecord{ID: "proj-1", Path: t.TempDir(), RegisteredAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	clk := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	spawner := &wakeTestSpawner{store: store}
+	workspaceFacts := &fakeWorkspaceFacts{}
+	launcher := &fakeReviewerLauncher{}
+	wakeSched := wake.New(store, clk.Now, wakeIntIDSeq("wk"), wake.Config{})
+	coord := workflowcore.New(workflowcore.Deps{
+		Store:            store,
+		Projects:         store,
+		Spawner:          spawner,
+		SessionFacts:     store,
+		WorkspaceFacts:   workspaceFacts,
+		ReviewRuns:       store,
+		ReviewerLauncher: launcher,
+		WakeScheduler:    wakeSched,
+		Clock:            clk.Now,
+		NewID:            wakeIntIDSeq("id"),
+	})
+
+	created, err := coord.CreateRun(ctx, "proj-1", "ship the thing")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	detail, err := coord.StartRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	work := workStepFrom(detail)
+	if work.Step.SessionID == nil {
+		t.Fatalf("expected the work step to dispatch")
+	}
+	workerSessionID := domain.SessionID(*work.Step.SessionID)
+	workspaceFacts.obs.Dirty = true
+
+	clk.Advance(10 * time.Second)
+	got, err := coord.ContinueRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("ContinueRun: %v", err)
+	}
+	review := reviewStepFrom(got)
+	if review.Step.State != domain.WorkflowStepRunning {
+		t.Fatalf("review step state = %q, want running", review.Step.State)
+	}
+	if launcher.launchCalls != 1 {
+		t.Fatalf("launcher calls = %d, want exactly 1 (real dispatch, no pre-existing cooldown)", launcher.launchCalls)
+	}
+	if review.Step.ReviewRunID == nil {
+		t.Fatalf("review step has no review_run_id after dispatch")
+	}
+	originalRunID := *review.Step.ReviewRunID
+	originalRun, ok, err := store.GetReviewRun(ctx, originalRunID)
+	if err != nil || !ok {
+		t.Fatalf("GetReviewRun(%s): ok=%v err=%v", originalRunID, ok, err)
+	}
+	if originalRun.Harness != domain.ReviewerCodex {
+		t.Fatalf("reviewer harness = %q, want codex (cross-provider from the claude-code worker)", originalRun.Harness)
+	}
+
+	// Simulate the reviewer's own session going idle with no verdict, the
+	// real signature a usage-limit hit leaves behind — its Stop hook fires
+	// (turn ended), but `ao review submit` never lands. Fetch-then-write
+	// through the real activity-signal path (not a raw column poke) so this
+	// exercises the exact same CAS-guarded update production hooks use.
+	sess, found, err := store.GetSession(ctx, workerSessionID)
+	if err != nil || !found {
+		t.Fatalf("GetSession(%s): found=%v err=%v", workerSessionID, found, err)
+	}
+	clk.Advance(1 * time.Second)
+	sess.Activity = domain.Activity{State: domain.ActivityIdle, LastActivityAt: clk.Now()}
+	sess.UpdatedAt = clk.Now()
+	if _, err := store.UpdateSessionFromActivitySignal(ctx, sess); err != nil {
+		t.Fatalf("UpdateSessionFromActivitySignal: %v", err)
+	}
+
+	// Well past reviewerStallGrace, nowhere near reviewStalenessThreshold.
+	clk.Advance(25 * time.Second)
+	got, err = coord.GetRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+
+	// The original review_run must be closed out, verdict still empty —
+	// never fabricated as approved from the model's own text.
+	closed, ok, err := store.GetReviewRun(ctx, originalRunID)
+	if err != nil || !ok {
+		t.Fatalf("GetReviewRun(%s) after stall: ok=%v err=%v", originalRunID, ok, err)
+	}
+	if closed.Status != domain.ReviewRunCancelled {
+		t.Fatalf("stalled review_run status = %q, want cancelled", closed.Status)
+	}
+	if closed.Verdict != domain.VerdictNone {
+		t.Fatalf("stalled review_run verdict = %q, want empty (never fabricated)", closed.Verdict)
+	}
+
+	// A scoped capacity signal landed for codex, in cooldown.
+	health, ok, err := store.GetAgentHealth(ctx, domain.HarnessCodex)
+	if err != nil || !ok {
+		t.Fatalf("GetAgentHealth(codex): ok=%v err=%v", ok, err)
+	}
+	if health.State != domain.AgentHealthCooldown {
+		t.Fatalf("codex health state = %q, want cooldown", health.State)
+	}
+	if health.FailureClass != domain.WorkflowErrorCapacityExhausted {
+		t.Fatalf("codex health failure class = %q, want capacity_exhausted", health.FailureClass)
+	}
+
+	// No eligible independent fallback exists (claude-code is the
+	// implementer's own provider) — the run parks in Waiting, never
+	// needs_attention, and never the 30-minute blind wait.
+	if got.Run.State != domain.WorkflowRunWaiting {
+		t.Fatalf("run state = %q, want waiting (never needs_attention for a capacity signal)", got.Run.State)
+	}
+	if reviewStepFrom(got).Step.State != domain.WorkflowStepWaiting {
+		t.Fatalf("review step state = %q, want waiting", reviewStepFrom(got).Step.State)
+	}
+
+	next, err := wakeSched.NextForRun(ctx, domain.WorkflowRunID(created.Run.ID))
+	if err != nil || next == nil {
+		t.Fatalf("expected a durable reviewer_capacity wake, got %+v err=%v", next, err)
+	}
+	if next.Reason != wake.ReasonReviewerCapacity {
+		t.Fatalf("wake reason = %q, want reviewer_capacity", next.Reason)
+	}
+
+	// Capacity recovers; only the headless poller (no GetRun/ContinueRun)
+	// drives the retry from here.
+	if _, err := store.RecordAgentHealthEvent(ctx, domain.AgentHealthEvent{
+		ID: "ahe-recovered", Harness: domain.HarnessCodex, State: domain.AgentHealthAvailable,
+		Reason: "recovered", CreatedAt: clk.Now(),
+	}); err != nil {
+		t.Fatalf("RecordAgentHealthEvent(recovered): %v", err)
+	}
+
+	policy := domain.DefaultWakePolicy()
+	clk.Advance(time.Duration(policy.InitialBackoffSeconds+policy.JitterSeconds+5) * time.Second)
+	poller := wakepoller.New(wakeSched, coord, wakepoller.Config{Clock: clk.Now})
+	n, err := poller.RunDueOnce(ctx)
+	if err != nil {
+		t.Fatalf("RunDueOnce: %v", err)
+	}
+	t.Logf("RunDueOnce claimed %d wake(s)", n)
+	if launcher.launchCalls != 2 {
+		t.Fatalf("launcher calls = %d, want exactly 2 (one real retry, no duplicate/zombie reviewer)", launcher.launchCalls)
+	}
+
+	runs, err := store.ListReviewRunsBySession(ctx, workerSessionID)
+	if err != nil {
+		t.Fatalf("ListReviewRunsBySession: %v", err)
+	}
+	var running, cancelled int
+	for _, r := range runs {
+		switch r.Status {
+		case domain.ReviewRunRunning:
+			running++
+		case domain.ReviewRunCancelled:
+			cancelled++
+		}
+	}
+	if running != 1 || cancelled != 1 {
+		t.Fatalf("review_run rows: running=%d cancelled=%d, want exactly 1 and 1 (no duplicate live reviewer)", running, cancelled)
+	}
+
+	final, err := coord.GetRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("GetRun (final): %v", err)
+	}
+	if reviewStepFrom(final).Step.State != domain.WorkflowStepRunning {
+		t.Fatalf("review step state = %q, want running again after recovery", reviewStepFrom(final).Step.State)
+	}
+	if final.Run.State != domain.WorkflowRunRunning {
+		t.Fatalf("run state = %q, want running again after recovery", final.Run.State)
+	}
+}

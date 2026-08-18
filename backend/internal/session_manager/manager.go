@@ -142,6 +142,16 @@ const (
 	EnvSupervisedProcess = "AO_SUPERVISED_PROCESS"
 	// EnvDataDir tells a spawned agent's AO hook commands where the store lives.
 	EnvDataDir = "AO_DATA_DIR"
+	// EnvRunFile tells a spawned agent's `ao hooks`/`ao review` callbacks
+	// where running.json lives. Checkpoint 8P-D.2: resolveRunFilePath and
+	// resolveDataDir are independent env lookups (AO_RUN_FILE vs
+	// AO_DATA_DIR) — a daemon started with an explicit AO_RUN_FILE override
+	// that doesn't sit under AO_DATA_DIR left every hook callback unable to
+	// find the daemon (falling back to the default ~/.ao/running.json,
+	// which the running daemon never wrote), silently stalling activity
+	// tracking for the whole session. Exporting the daemon's own resolved
+	// run-file path removes the guesswork.
+	EnvRunFile = "AO_RUN_FILE"
 	// EnvBrowserCapability proves ownership of the session's browser target.
 	EnvBrowserCapability = "AO_BROWSER_CAPABILITY"
 	// EnvBrowserRuntimeToken must never be inherited by a worker. It authenticates
@@ -311,6 +321,12 @@ type Manager struct {
 	browser             BrowserLifecycle
 	browserCapabilities BrowserCapabilityIssuer
 	dataDir             string
+	// runFilePath is exported to spawned agents as AO_RUN_FILE so their
+	// `ao hooks`/`ao review` callbacks resolve the same daemon regardless of
+	// whether the daemon's own AO_RUN_FILE was overridden independently of
+	// AO_DATA_DIR. Empty means the spawned agent falls back to the default
+	// resolution (~/.ao/running.json), matching pre-8P-D.2 behavior.
+	runFilePath         string
 	clock               func() time.Time
 	// runtimeIsolation backs Checkpoint 8P-B.2's relaunch isolation.
 	// Optional.
@@ -558,7 +574,12 @@ type Deps struct {
 	// DataDir is exported to spawned agents as AO_DATA_DIR so their hook
 	// commands can open the same store.
 	DataDir string
-	Clock   func() time.Time
+	// RunFilePath is exported to spawned agents as AO_RUN_FILE so their
+	// `ao hooks`/`ao review` callbacks can find this daemon's running.json
+	// even when it was started with an AO_RUN_FILE override. Optional: empty
+	// leaves the spawned agent's own default resolution unchanged.
+	RunFilePath string
+	Clock       func() time.Time
 	// LookPath overrides exec.LookPath for the pre-launch agent-binary check.
 	// Production wiring leaves this nil and the manager defaults to
 	// exec.LookPath; tests inject a stub so they need not seed real binaries.
@@ -605,6 +626,7 @@ func New(d Deps) *Manager {
 		browser:                      d.Browser,
 		browserCapabilities:          d.BrowserCapabilities,
 		dataDir:                      d.DataDir,
+		runFilePath:                  d.RunFilePath,
 		clock:                        d.Clock,
 		runtimeIsolation:             d.RuntimeIsolation,
 		openTranscriptFile:           os.Open,
@@ -3339,8 +3361,8 @@ func workspaceRepoList(repos []domain.WorkspaceRepoRecord) string {
 // spawnEnv builds the runtime environment: the per-project env vars first, then
 // the AO-internal vars last so they always win (a project cannot override
 // AO_SESSION_ID and friends).
-func spawnEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueID, dataDir string, projectEnv map[string]string) map[string]string {
-	env := make(map[string]string, len(projectEnv)+5)
+func spawnEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueID, dataDir, runFilePath string, projectEnv map[string]string) map[string]string {
+	env := make(map[string]string, len(projectEnv)+6)
 	// Checkpoint 8M.1: skip Python's .pyc bytecode cache for every worker
 	// session. A no-op for non-Python projects/languages; for Python it stops
 	// __pycache__ from ever being generated in the first place, which is
@@ -3354,6 +3376,9 @@ func spawnEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueI
 	env[EnvProjectID] = string(project)
 	env[EnvIssueID] = string(issue)
 	env[EnvDataDir] = dataDir
+	if runFilePath != "" {
+		env[EnvRunFile] = runFilePath
+	}
 	return env
 }
 
@@ -3365,7 +3390,7 @@ func spawnEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueI
 // When the pin cannot be applied the inherited PATH is kept and a warning is
 // logged so the degradation isn't silent.
 func (m *Manager) runtimeEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueID, projectEnv map[string]string) map[string]string {
-	env := spawnEnv(id, project, issue, m.dataDir, projectEnv)
+	env := spawnEnv(id, project, issue, m.dataDir, m.runFilePath, projectEnv)
 	env[EnvBrowserCapability] = ""
 	env[EnvBrowserRuntimeToken] = ""
 	env[EnvBrowserRuntimeTokenStdin] = ""
@@ -3661,7 +3686,7 @@ func (m *Manager) cleanupAgentWorkspace(ctx context.Context, rec domain.SessionR
 	if !cleansWorkspace {
 		return
 	}
-	env := spawnEnv(rec.ID, rec.ProjectID, rec.IssueID, m.dataDir, nil)
+	env := spawnEnv(rec.ID, rec.ProjectID, rec.IssueID, m.dataDir, m.runFilePath, nil)
 	if project, err := m.loadProject(ctx, rec.ProjectID); err == nil {
 		env = m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
 	} else {
