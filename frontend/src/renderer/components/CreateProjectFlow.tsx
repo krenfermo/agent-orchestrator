@@ -52,14 +52,46 @@ export function CreateProjectFlow({
 	const [isInitializing, setIsInitializing] = useState(false);
 	const [repositorySetup, setRepositorySetup] = useState<"NOT_A_GIT_REPO" | "PROJECT_UNBORN" | null>(null);
 	const [repositorySetupWarning, setRepositorySetupWarning] = useState<string | null>(null);
+	const [manualPath, setManualPath] = useState("");
 
 	const hasModePicker = mode === "choose";
 	const isBusy = isChoosingPath || isCreating || isInitializing;
+	// The Electron preload bridge is the only thing that can show a native OS
+	// folder picker and read Git metadata off-thread via scanImportFolder. In a
+	// browser context (npm run dev:web, or the LAN "Connect Mobile" web client)
+	// window.ao is never injected, so aoBridge.app.chooseDirectory silently
+	// resolves null and the flow below would otherwise dead-end with no visible
+	// change. Fall back to a manual path field wired straight to the server-side
+	// validation in POST /api/v1/projects instead.
+	const hasNativeFolderPicker = typeof window !== "undefined" && Boolean(window.ao);
 
 	const openFolderStep = (kind: ProjectKind) => {
+		if (!hasNativeFolderPicker) {
+			setError(null);
+			setValidationScan(null);
+			setRepositorySetup(null);
+			setRepositorySetupWarning(null);
+			setSelectedKind(kind);
+			setManualPath("");
+			setModePickerOpen(false);
+			setFolderPickerOpen(true);
+			return;
+		}
 		// Keep the selector mounted behind the native picker. Closing it first
 		// exposes a blank compositor frame on Windows before Explorer takes focus.
 		void chooseDirectory(kind);
+	};
+
+	const submitManualPath = () => {
+		const trimmed = manualPath.trim();
+		if (!trimmed) return;
+		setError(null);
+		setValidationScan(null);
+		setRepositorySetup(null);
+		setRepositorySetupWarning(null);
+		setModePickerOpen(false);
+		setSelectedPath(trimmed);
+		setFolderPickerOpen(false);
 	};
 
 	const chooseDirectory = async (kind: ProjectKind) => {
@@ -147,7 +179,7 @@ export function CreateProjectFlow({
 			if (selectedKind === "single_repo" && isRepositorySetupRecoveryCode(code)) setRepositorySetup(code);
 			setError(message);
 			if (hasModePicker) {
-				if (shouldScanCreateFailure(message)) {
+				if (hasNativeFolderPicker && shouldScanCreateFailure(message)) {
 					try {
 						const scan = await aoBridge.app.scanImportFolder({
 							path: selectedPath,
@@ -209,12 +241,17 @@ export function CreateProjectFlow({
 					<CreateProjectFolderDialog
 						disabled={isBusy}
 						error={error}
+						hasNativeFolderPicker={hasNativeFolderPicker}
 						kind={selectedKind}
+						manualPath={manualPath}
+						onManualPathChange={setManualPath}
+						onManualPathSubmit={submitManualPath}
 						open={folderPickerOpen}
 						scan={validationScan}
 						onBack={() => {
 							setError(null);
 							setValidationScan(null);
+							setManualPath("");
 							setFolderPickerOpen(false);
 							if (!embedded) {
 								window.requestAnimationFrame(() => setModePickerOpen(true));
@@ -227,6 +264,7 @@ export function CreateProjectFlow({
 								if (!open) {
 									setError(null);
 									setValidationScan(null);
+									setManualPath("");
 								}
 							}
 						}}
@@ -379,18 +417,26 @@ function ImportModePicker({
 function CreateProjectFolderDialog({
 	disabled,
 	error,
+	hasNativeFolderPicker,
 	kind,
+	manualPath,
 	onBack,
 	onChooseFolder,
+	onManualPathChange,
+	onManualPathSubmit,
 	onOpenChange,
 	open,
 	scan,
 }: {
 	disabled: boolean;
 	error: string | null;
+	hasNativeFolderPicker: boolean;
 	kind: ProjectKind;
+	manualPath: string;
 	onBack: () => void;
 	onChooseFolder: () => void;
+	onManualPathChange: (value: string) => void;
+	onManualPathSubmit: () => void;
 	onOpenChange: (open: boolean) => void;
 	open: boolean;
 	scan: ImportFolderScan | null;
@@ -404,7 +450,9 @@ function CreateProjectFolderDialog({
 			? t("createProject.footerResolve", { count: failedRepos.length })
 			: hasScan
 				? t("createProject.footerReview")
-				: t("createProject.footerChoose");
+				: hasNativeFolderPicker
+					? t("createProject.footerChoose")
+					: t("createProject.footerManualPath");
 	return (
 		<Dialog.Root open={open} onOpenChange={onOpenChange}>
 			<Dialog.Portal>
@@ -492,7 +540,7 @@ function CreateProjectFolderDialog({
 									</div>
 								)}
 							</div>
-						) : (
+						) : hasNativeFolderPicker ? (
 							<button
 								type="button"
 								className="flex min-h-[132px] w-full flex-col items-center justify-center rounded-lg border border-dashed border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)] p-6 text-center transition-colors hover:bg-[var(--color-bg-import-card-hover)] disabled:pointer-events-none disabled:opacity-50 sm:min-h-[160px]"
@@ -509,6 +557,41 @@ function CreateProjectFolderDialog({
 									{isWorkspace ? t("createProject.pickerWorkspaceHint") : t("createProject.pickerProjectHint")}
 								</span>
 							</button>
+						) : (
+							<form
+								className="flex flex-col gap-3 rounded-lg border border-dashed border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)] p-4"
+								onSubmit={(event) => {
+									event.preventDefault();
+									onManualPathSubmit();
+								}}
+							>
+								<label className="text-[13px] font-semibold text-[var(--color-text-import-title)]" htmlFor="manual-import-path">
+									{isWorkspace ? t("createProject.manualWorkspacePathLabel") : t("createProject.manualProjectPathLabel")}
+								</label>
+								<span id="manual-import-path-hint" className="-mt-2 text-[12px] text-[var(--color-text-import-muted)]">
+									{t("createProject.manualPathHint")}
+								</span>
+								<input
+									id="manual-import-path"
+									aria-describedby="manual-import-path-hint"
+									autoFocus
+									className="w-full rounded-md border border-[var(--color-border-import-modal)] bg-[var(--color-bg-settings-input)] px-3 py-2 font-mono text-[13px] text-[var(--color-text-import-title)] outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+									disabled={disabled}
+									onChange={(event) => onManualPathChange(event.target.value)}
+									placeholder="/Users/you/code/my-repo"
+									spellCheck={false}
+									value={manualPath}
+								/>
+								<Button
+									type="submit"
+									variant="primary"
+									size="sm"
+									className="self-start"
+									disabled={disabled || !manualPath.trim()}
+								>
+									{t("createProject.useThisPath")}
+								</Button>
+							</form>
 						)}
 						{error && !hasScan && (
 							<div
