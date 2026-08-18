@@ -226,7 +226,7 @@ func stampOwnerAndApplyPolicy(t *testing.T, fx *autonomousFixture, runID string,
 	if _, err := fx.store.SetWorkflowRunOwner(ctx, runID, userID); err != nil {
 		t.Fatalf("SetWorkflowRunOwner: %v", err)
 	}
-	if err := fx.coord.ApplyExecutionPolicySnapshot(ctx, runID, userID); err != nil {
+	if err := fx.coord.ApplyExecutionPolicySnapshot(ctx, runID, userID, nil); err != nil {
 		t.Fatalf("ApplyExecutionPolicySnapshot: %v", err)
 	}
 }

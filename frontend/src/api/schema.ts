@@ -2848,6 +2848,8 @@ export interface components {
             totalTokens: number;
         };
         CreateWorkflowRunRequest: {
+            /** @description Explicit per-run autonomous/manual override; omit to inherit the caller's execution policy. */
+            autonomous?: null | boolean;
             /** @description Generate a provider-neutral master plan before execution. */
             masterPlan?: boolean;
             /** @description The workflow run's objective. */

@@ -274,7 +274,15 @@ export function orchestratorHealth(workspace: WorkspaceSummary, restarting = fal
 	}
 	const orchestrator = newestActiveOrchestrator(workspace.sessions);
 	if (!orchestrator) {
-		return { state: "missing", message: "No orchestrator is running for this project." };
+		// Checkpoint 8P-D.1: this is the legacy per-project "orchestrator
+		// session" feature (a dedicated chat session that spawns new task
+		// sessions for you) -- a distinct, older mechanism from autonomous
+		// master-plan workflow runs, which the daemon's own wake
+		// scheduler/poller drives with no session involved at all. Worded
+		// explicitly as a session so it is never misread as "your autonomous
+		// workflow isn't progressing" -- a workflow can be actively running
+		// with this warning correctly showing at the same time.
+		return { state: "missing", message: "No orchestrator session is running for this project. Workflow runs are unaffected." };
 	}
 	if (orchestratorNeedsRestart(workspace, orchestrator)) {
 		return {

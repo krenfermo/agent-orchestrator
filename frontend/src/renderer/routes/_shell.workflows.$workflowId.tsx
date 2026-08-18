@@ -42,8 +42,17 @@ function statusLabelText(t: TranslateFn, label: NonNullable<ReturnType<typeof us
 }
 
 function WorkflowRunRoute() {
-	const { t } = useTranslation();
 	const { workflowId } = Route.useParams();
+	return <WorkflowRunView workflowId={workflowId} />;
+}
+
+// Exported separately from the route wiring above so tests can render this
+// component directly (with a mocked apiClient + real QueryClientProvider)
+// without also having to stand up a TanStack Router route match --
+// Checkpoint 8P-D.1's regression test for the "Something went wrong!"
+// crash renders THIS.
+export function WorkflowRunView({ workflowId }: { workflowId: string }) {
+	const { t } = useTranslation();
 	const {
 		workflow,
 		isLoading,
@@ -70,6 +79,17 @@ function WorkflowRunRoute() {
 		answeringQuestion,
 	} = useWorkflowRun(workflowId);
 
+	// React Rules of Hooks: these must run on every render, including the
+	// loading/error/not-found renders below, or the hook count changes
+	// between the "no data yet" render and the "data arrived" render and
+	// React throws (minified error #310) the moment a real network
+	// round-trip separates those two renders -- reproduced via the actual
+	// running app, not just synchronous-mock unit tests, in Checkpoint
+	// 8P-D.1.
+	const childTaskIds = (workflow?.tasks ?? []).map((task) => task.executionWorkflowId).filter((id): id is string => Boolean(id));
+	const childTaskRouting = useChildTaskRouting(childTaskIds);
+	const statusLabel = useWorkflowStatusLabel(workflow);
+
 	if (isLoading && !workflow) {
 		return <p className="p-6 text-sm text-muted-foreground">{t("shell.workflowsLoading")}</p>;
 	}
@@ -79,13 +99,6 @@ function WorkflowRunRoute() {
 	if (!workflow) {
 		return <p className="p-6 text-sm text-muted-foreground">{t("shell.workflowsNotFound")}</p>;
 	}
-
-	// Checkpoint 8P-C.1 §17: compact per-task "which provider actually ran
-	// this" label, sourced from each child run's own persisted routing
-	// decision -- not a new dashboard, just a label next to the task title.
-	const childTaskIds = (workflow.tasks ?? []).map((task) => task.executionWorkflowId).filter((id): id is string => Boolean(id));
-	const childTaskRouting = useChildTaskRouting(childTaskIds);
-	const statusLabel = useWorkflowStatusLabel(workflow);
 
 	const nonTerminal = !workflowRunIsTerminal(workflow.run.state);
 	const isPending = workflow.run.state === "pending";

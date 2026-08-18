@@ -8004,6 +8004,12 @@ components:
       type: object
     CreateWorkflowRunRequest:
       properties:
+        autonomous:
+          description: Explicit per-run autonomous/manual override; omit to inherit
+            the caller's execution policy.
+          type:
+          - "null"
+          - boolean
         masterPlan:
           description: Generate a provider-neutral master plan before execution.
           type: boolean

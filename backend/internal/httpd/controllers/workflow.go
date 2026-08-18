@@ -49,6 +49,14 @@ type CreateWorkflowRunRequest struct {
 	Verification     WorkflowVerificationPlan        `json:"verification,omitempty"`
 	MasterPlan       bool                            `json:"masterPlan,omitempty" description:"Generate a provider-neutral master plan before execution."`
 	PlanApprovalMode domain.WorkflowPlanApprovalMode `json:"planApprovalMode,omitempty" enum:"manual,auto"`
+	// Autonomous is Checkpoint 8P-D.1's explicit per-run Manual/Autonomous
+	// choice, made in the create-workflow UI rather than only inferred from
+	// the caller's global UserExecutionPolicy.AutonomousMode setting. Nil
+	// (field omitted) preserves the pre-8P-D.1 behavior of inheriting
+	// whatever the caller's stored/default execution policy says. Non-nil
+	// overrides AutonomousMode in this run's own frozen policy snapshot only
+	// -- it never writes back to the caller's stored UserExecutionPolicy.
+	Autonomous *bool `json:"autonomous,omitempty" description:"Explicit per-run autonomous/manual override; omit to inherit the caller's execution policy."`
 }
 
 type WorkflowVerificationPlan struct {
@@ -527,7 +535,7 @@ func (c *WorkflowsController) scopingEnforced() bool {
 	return !c.TrustedLocal && c.Ownership != nil
 }
 
-func (c *WorkflowsController) stampOwner(r *http.Request, id string) {
+func (c *WorkflowsController) stampOwner(r *http.Request, id string, autonomousOverride *bool) {
 	if c.Ownership == nil {
 		return
 	}
@@ -540,9 +548,12 @@ func (c *WorkflowsController) stampOwner(r *http.Request, id string) {
 	// just-created run's policy snapshot, using the same resolved identity
 	// stampOwner just used -- never a second identity lookup. Optional
 	// (type-asserted): a Svc predating 8P-C simply skips this, leaving the
-	// run on its default policy_snapshot exactly as before.
+	// run on its default policy_snapshot exactly as before. Checkpoint
+	// 8P-D.1: autonomousOverride carries the create request's explicit
+	// per-run Manual/Autonomous choice (nil when the request omitted it, in
+	// which case the caller's stored/default policy applies unchanged).
 	if applier, ok := c.Svc.(workflowsvc.ExecutionPolicyApplier); ok {
-		_ = applier.ApplyExecutionPolicySnapshot(r.Context(), id, user.ID)
+		_ = applier.ApplyExecutionPolicySnapshot(r.Context(), id, user.ID, autonomousOverride)
 	}
 }
 
@@ -603,7 +614,17 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowError(w, r, err)
 		return
 	}
-	c.stampOwner(r, detail.Run.ID)
+	c.stampOwner(r, detail.Run.ID, in.Autonomous)
+	// Re-fetch after stampOwner: it just wrote the caller's (possibly
+	// per-run-overridden) execution policy into this run's policy_snapshot
+	// and may have scheduled an autonomous-kickoff wake -- `detail` above
+	// was read before that write, so returning it as-is would hand the
+	// client a response whose executionMode/nextWakeAt/waitReason are one
+	// write behind the row this same request just produced (caught in
+	// Checkpoint 8P-D.1's real create-an-autonomous-run smoke test).
+	if refreshed, refreshErr := c.Svc.GetRun(r.Context(), detail.Run.ID); refreshErr == nil {
+		detail = refreshed
+	}
 	envelope.WriteJSON(w, http.StatusCreated, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
 }
 

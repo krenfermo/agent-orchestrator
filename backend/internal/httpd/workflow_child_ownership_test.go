@@ -169,3 +169,85 @@ func getWorkflowDetail(t *testing.T, client *http.Client, baseURL, id string, co
 	}
 	return out.Workflow
 }
+
+// TestCreateWorkflowRunAutonomousOverrideReflectedImmediately is Checkpoint
+// 8P-D.1's regression test for a bug caught during the real create-an-
+// autonomous-run smoke test: the create handler built its response from the
+// RunDetail returned by CreateObjectiveRun, which is read BEFORE stampOwner
+// embeds the caller's (possibly request-overridden) execution policy into
+// the row's policy_snapshot. The immediate POST response therefore showed
+// executionMode="manual" even when the request explicitly asked for
+// autonomous=true and the row itself was correctly written as autonomous
+// one write later -- only visible on a subsequent GET, never on create
+// itself. This asserts the create response already reflects the
+// post-stamp value, matching what a client reads a moment later.
+func TestCreateWorkflowRunAutonomousOverrideReflectedImmediately(t *testing.T) {
+	store := sqlitetest.MustOpen(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := store.UpsertProject(ctx, domain.ProjectRecord{ID: "p", Path: t.TempDir(), RegisteredAt: now}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	authMgr := authsvc.New(store, func() time.Time { return time.Now().UTC() })
+	coord := workflowcore.New(workflowcore.Deps{
+		Store: store, Projects: store,
+		Planner: &staticPlannerHTTP{plan: twoStepMasterPlanHTTP()}, PlannerContextBuilder: staticContextHTTP{},
+		ProviderProfiles: store, ExecutionPolicies: store,
+		QuestionsStore: store,
+		Clock:          func() time.Time { return time.Now().UTC() },
+	})
+	profileSvc := &providerprofile.Service{Store: store, DataDir: fixedDataDir(t.TempDir())}
+	policySvc := &executionpolicy.Service{Store: store}
+
+	cfg := config.Config{TrustedLocalMode: false}
+	deps := APIDeps{
+		Auth: authMgr, Workflows: workflowsvc.New(coord),
+		ProjectOwnership: store, WorkflowOwnership: store,
+		ProviderProfiles: profileSvc, ExecutionPolicy: policySvc,
+	}
+	router := NewRouterWithControl(cfg, discardLogger(), nil, deps, ControlDeps{})
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	if _, err := authMgr.CreateUser(t.Context(), authsvc.CreateUserInput{Email: "auto@example.com", Username: "auto", Password: "correct-horse-auto"}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	client := &http.Client{}
+	_, cookie := loginOK(t, srv.URL, "auto@example.com", "correct-horse-auto")
+
+	// The caller's stored execution policy defaults to manual (never saved);
+	// the per-run "autonomous": true override must still win, and the
+	// create response itself -- not just a later GET -- must show it.
+	createBody, _ := json.Marshal(map[string]any{
+		"objective": "Build users", "masterPlan": true, "planApprovalMode": "manual", "autonomous": true,
+	})
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/projects/p/workflows", strings.NewReader(string(createBody)))
+	if err != nil {
+		t.Fatalf("build create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("create workflow: %v", err)
+	}
+	defer resp.Body.Close()
+	var created struct {
+		Workflow struct {
+			Run struct {
+				ID            string `json:"id"`
+				ExecutionMode string `json:"executionMode"`
+			} `json:"run"`
+		} `json:"workflow"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create workflow: status=%d", resp.StatusCode)
+	}
+	if created.Workflow.Run.ExecutionMode != "autonomous" {
+		t.Fatalf("create response executionMode = %q, want %q (stale pre-stampOwner snapshot)", created.Workflow.Run.ExecutionMode, "autonomous")
+	}
+}

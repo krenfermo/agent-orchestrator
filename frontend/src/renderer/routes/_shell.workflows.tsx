@@ -35,11 +35,19 @@ export function WorkflowsList() {
 	const { t } = useTranslation();
 	const { runs, isLoading, error, createRun, creating, createError } = useWorkflowRuns();
 	const { projects, isLoading: projectsLoading } = useProjectsList();
-	const { policy: executionPolicy } = useExecutionPolicy();
-	const autonomous = executionPolicy?.autonomousMode ?? false;
+	const { policy: executionPolicy, isLoading: policyLoading } = useExecutionPolicy();
 	const openGlobalSettings = useUiStore((state) => state.openGlobalSettings);
 	const [projectId, setProjectId] = useState(initialProjectIdFromSearch);
 	const [objective, setObjective] = useState("");
+	// Checkpoint 8P-D.1: the create-workflow UI must let the user
+	// deliberately pick Manual vs Autonomous for THIS run -- it must not be
+	// an invisible consequence of the caller's global Settings →
+	// Execution Policy toggle. `autonomousChoice` starts undefined so the
+	// radio defaults to whatever the caller's stored policy says once it
+	// loads, but any explicit click always wins from then on.
+	const [autonomousChoice, setAutonomousChoice] = useState<boolean | undefined>(undefined);
+	const autonomousDefault = executionPolicy?.autonomousMode ?? false;
+	const autonomous = autonomousChoice ?? autonomousDefault;
 
 	// The preselected project from a deep link may not (yet) be in the loaded
 	// list; keep the select controlled either way, it just shows no match.
@@ -48,7 +56,7 @@ export function WorkflowsList() {
 	const onSubmit = (event: React.FormEvent) => {
 		event.preventDefault();
 		if (!projectId.trim() || !objective.trim()) return;
-		void createRun({ projectId: projectId.trim(), objective: objective.trim() }).then(() => {
+		void createRun({ projectId: projectId.trim(), objective: objective.trim(), autonomous }).then(() => {
 			setObjective("");
 		});
 	};
@@ -102,18 +110,31 @@ export function WorkflowsList() {
 							value={objective}
 						/>
 					</label>
-					<div className="rounded border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-						<span className="font-medium text-foreground">
-							{autonomous
-								? t("shell.workflowsModeAutonomousLabel")
-								: t("shell.workflowsModeManualLabel")}
-						</span>
-						<p className="mt-0.5">
-							{autonomous
-								? t("shell.workflowsModeAutonomousExplainer")
-								: t("shell.workflowsModeManualExplainer")}
-						</p>
-					</div>
+					<fieldset className="flex flex-col gap-2" disabled={policyLoading}>
+						<legend className="text-sm">{t("shell.workflowsMode")}</legend>
+						{([false, true] as const).map((value) => (
+							<label
+								className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
+									autonomous === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
+								}`}
+								key={String(value)}
+							>
+								<span className="flex items-center gap-2 font-medium text-foreground">
+									<input
+										checked={autonomous === value}
+										name="workflow-execution-mode"
+										onChange={() => setAutonomousChoice(value)}
+										type="radio"
+										value={String(value)}
+									/>
+									{value ? t("shell.workflowsModeAutonomousLabel") : t("shell.workflowsModeManualLabel")}
+								</span>
+								<span className="pl-5 text-muted-foreground">
+									{value ? t("shell.workflowsModeAutonomousExplainer") : t("shell.workflowsModeManualExplainer")}
+								</span>
+							</label>
+						))}
+					</fieldset>
 					<button
 						className="mt-1 self-start rounded bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50"
 						disabled={creating || !projectId.trim() || !objective.trim()}

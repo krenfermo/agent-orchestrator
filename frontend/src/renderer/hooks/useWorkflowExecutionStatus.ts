@@ -50,10 +50,12 @@ function useActiveChildSteps(executionWorkflowId: string | undefined) {
  * eligible), in which case callers should fall back to the existing
  * nextAction text.
  */
-export function useWorkflowStatusLabel(workflow: WorkflowRunDetailView): WorkflowStatusLabel {
-	const tasks = workflow.tasks ?? [];
+export function useWorkflowStatusLabel(workflow: WorkflowRunDetailView | undefined): WorkflowStatusLabel {
+	const tasks = workflow?.tasks ?? [];
 	const runningTask = tasks.find((task) => task.state === "running");
 	const activeChildSteps = useActiveChildSteps(runningTask?.executionWorkflowId);
+
+	if (!workflow) return undefined;
 
 	const hasHumanRequiredQuestion = (workflow.questions ?? []).some((q) => q.state === "human_required");
 	if (hasHumanRequiredQuestion) return "waiting_for_decision";

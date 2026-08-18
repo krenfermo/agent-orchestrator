@@ -56,7 +56,7 @@ type PlannerManager interface {
 // PlannerManager) so a Manager implementation/test double that predates
 // 8P-C keeps compiling unchanged.
 type ExecutionPolicyApplier interface {
-	ApplyExecutionPolicySnapshot(ctx context.Context, runID string, userID domain.UserID) error
+	ApplyExecutionPolicySnapshot(ctx context.Context, runID string, userID domain.UserID, autonomousOverride *bool) error
 }
 
 // Service is the API-facing workflow service. It delegates to the core coordinator.
@@ -81,8 +81,8 @@ func (s *Service) CreateObjectiveRun(ctx context.Context, projectID, objective s
 }
 
 // ApplyExecutionPolicySnapshot implements ExecutionPolicyApplier.
-func (s *Service) ApplyExecutionPolicySnapshot(ctx context.Context, runID string, userID domain.UserID) error {
-	return s.coordinator.ApplyExecutionPolicySnapshot(ctx, runID, userID)
+func (s *Service) ApplyExecutionPolicySnapshot(ctx context.Context, runID string, userID domain.UserID, autonomousOverride *bool) error {
+	return s.coordinator.ApplyExecutionPolicySnapshot(ctx, runID, userID, autonomousOverride)
 }
 func (s *Service) GeneratePlan(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
 	return s.coordinator.GeneratePlan(ctx, runID)

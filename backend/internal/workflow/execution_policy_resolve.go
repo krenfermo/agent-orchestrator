@@ -110,7 +110,15 @@ func (c *Coordinator) executionPolicyForSnapshot(ctx stdctx.Context, userID doma
 // parameter. A no-op (returns nil) if the run doesn't exist or userID is
 // empty (unowned/trusted-local-without-identity creation), leaving the
 // run's default policy_snapshot exactly as CreateRun already wrote it.
-func (c *Coordinator) ApplyExecutionPolicySnapshot(ctx stdctx.Context, runID string, userID domain.UserID) error {
+//
+// autonomousOverride is Checkpoint 8P-D.1's explicit per-run Manual/
+// Autonomous choice from the create-workflow UI: nil inherits the caller's
+// stored/default UserExecutionPolicy unchanged (pre-8P-D.1 behavior);
+// non-nil overrides AutonomousMode in THIS run's frozen snapshot only --
+// the caller's stored UserExecutionPolicy is never mutated by a per-run
+// choice, so a later run with no override still gets the caller's real
+// default back.
+func (c *Coordinator) ApplyExecutionPolicySnapshot(ctx stdctx.Context, runID string, userID domain.UserID, autonomousOverride *bool) error {
 	if userID == "" {
 		return nil
 	}
@@ -122,7 +130,11 @@ func (c *Coordinator) ApplyExecutionPolicySnapshot(ctx stdctx.Context, runID str
 		return nil
 	}
 	policy := policyForRun(run)
-	policy.Execution = c.executionPolicyForSnapshot(ctx, userID)
+	execution := c.executionPolicyForSnapshot(ctx, userID)
+	if autonomousOverride != nil {
+		execution.AutonomousMode = *autonomousOverride
+	}
+	policy.Execution = execution
 	snapshotJSON, err := json.Marshal(policy)
 	if err != nil {
 		return err

@@ -28,10 +28,15 @@ export function useWorkflowRuns(projectId?: string) {
 	});
 
 	const create = useMutation({
-		mutationFn: async (input: { projectId: string; objective: string }) => {
+		mutationFn: async (input: { projectId: string; objective: string; autonomous: boolean }) => {
 			const { data, error } = await apiClient.POST("/api/v1/projects/{projectId}/workflows", {
 				params: { path: { projectId: input.projectId } },
-				body: { objective: input.objective, masterPlan: true, planApprovalMode: "manual" },
+				body: {
+					objective: input.objective,
+					masterPlan: true,
+					planApprovalMode: input.autonomous ? "auto" : "manual",
+					autonomous: input.autonomous,
+				},
 			});
 			if (error) throw error;
 			return data.workflow;
