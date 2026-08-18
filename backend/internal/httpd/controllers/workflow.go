@@ -225,6 +225,10 @@ type WorkflowRunView struct {
 	NextWakeAt       *time.Time `json:"nextWakeAt,omitempty"`
 	WaitReason       string     `json:"waitReason,omitempty"`
 	WakeAttemptCount int64      `json:"wakeAttemptCount,omitempty"`
+	// ExecutionMode is Checkpoint 8P-D's read-only surface of this run's
+	// frozen execution policy snapshot: "autonomous" or "manual", decided at
+	// run creation time and never re-derived from a later Settings change.
+	ExecutionMode string `json:"executionMode" enum:"autonomous,manual"`
 }
 
 // WorkflowRunDetailView is a workflow run plus its steps and their attempts.
@@ -295,16 +299,34 @@ type ListWorkflowsResponse struct {
 
 func workflowRunView(run domain.WorkflowRun, nextAction string) WorkflowRunView {
 	return WorkflowRunView{
-		ID:          run.ID,
-		ProjectID:   run.ProjectID,
-		Objective:   run.Objective,
-		State:       run.State,
-		CreatedAt:   run.CreatedAt,
-		UpdatedAt:   run.UpdatedAt,
-		CompletedAt: run.CompletedAt,
-		CancelledAt: run.CancelledAt,
-		NextAction:  nextAction,
+		ID:            run.ID,
+		ProjectID:     run.ProjectID,
+		Objective:     run.Objective,
+		State:         run.State,
+		CreatedAt:     run.CreatedAt,
+		UpdatedAt:     run.UpdatedAt,
+		CompletedAt:   run.CompletedAt,
+		CancelledAt:   run.CancelledAt,
+		NextAction:    nextAction,
+		ExecutionMode: executionModeForRun(run),
 	}
+}
+
+// executionModeForRun decodes a run's durable policy_snapshot to surface
+// Checkpoint 8P-D's frozen AutonomousMode flag as a stable "autonomous"/
+// "manual" string, without exposing the rest of the internal policy
+// snapshot shape over the API. Mirrors workflowcore's own
+// policyForRun/DefaultWorkflowPolicy fallback: an empty/unparseable/pre-8P-C
+// snapshot defaults to "manual", matching the safe-default requirement that
+// AutonomousMode's own zero value is false.
+func executionModeForRun(run domain.WorkflowRun) string {
+	if run.PolicySnapshot != "" && run.PolicySnapshot != "{}" {
+		var p domain.WorkflowPolicy
+		if err := json.Unmarshal([]byte(run.PolicySnapshot), &p); err == nil && p.Execution.AutonomousMode {
+			return "autonomous"
+		}
+	}
+	return "manual"
 }
 
 func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail workflowcore.RunDetail) WorkflowRunDetailView {

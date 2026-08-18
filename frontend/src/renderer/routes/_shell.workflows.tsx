@@ -1,6 +1,7 @@
 import { createFileRoute, Link, Outlet, useMatchRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useExecutionPolicy } from "../hooks/useExecutionPolicy";
 import { useProjectsList } from "../hooks/useProjectsList";
 import { useWorkflowRuns } from "../hooks/useWorkflowRuns";
 import { useUiStore } from "../stores/ui-store";
@@ -34,6 +35,8 @@ export function WorkflowsList() {
 	const { t } = useTranslation();
 	const { runs, isLoading, error, createRun, creating, createError } = useWorkflowRuns();
 	const { projects, isLoading: projectsLoading } = useProjectsList();
+	const { policy: executionPolicy } = useExecutionPolicy();
+	const autonomous = executionPolicy?.autonomousMode ?? false;
 	const openGlobalSettings = useUiStore((state) => state.openGlobalSettings);
 	const [projectId, setProjectId] = useState(initialProjectIdFromSearch);
 	const [objective, setObjective] = useState("");
@@ -99,6 +102,18 @@ export function WorkflowsList() {
 							value={objective}
 						/>
 					</label>
+					<div className="rounded border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+						<span className="font-medium text-foreground">
+							{autonomous
+								? t("shell.workflowsModeAutonomousLabel")
+								: t("shell.workflowsModeManualLabel")}
+						</span>
+						<p className="mt-0.5">
+							{autonomous
+								? t("shell.workflowsModeAutonomousExplainer")
+								: t("shell.workflowsModeManualExplainer")}
+						</p>
+					</div>
 					<button
 						className="mt-1 self-start rounded bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50"
 						disabled={creating || !projectId.trim() || !objective.trim()}

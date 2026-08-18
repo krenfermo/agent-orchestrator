@@ -25,6 +25,10 @@ WHERE workflow_run_id = ? AND status = 'running' AND command_status IN ('running
 UPDATE workflow_plans SET status = 'approved', approved_at = ?, updated_at = ?
 WHERE workflow_run_id = ? AND status = 'validated';
 
+-- name: SetWorkflowPlanApprovalMode :execrows
+UPDATE workflow_plans SET approval_mode = ?, updated_at = ?
+WHERE workflow_run_id = ? AND status != 'approved';
+
 -- name: RejectWorkflowPlan :execrows
 UPDATE workflow_plans SET status = 'rejected', rejected_at = ?, updated_at = ?
 WHERE workflow_run_id = ? AND status IN ('pending','validated','invalid');

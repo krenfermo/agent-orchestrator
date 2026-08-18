@@ -304,6 +304,25 @@ func (q *Queries) RejectWorkflowPlan(ctx context.Context, arg RejectWorkflowPlan
 	return result.RowsAffected()
 }
 
+const setWorkflowPlanApprovalMode = `-- name: SetWorkflowPlanApprovalMode :execrows
+UPDATE workflow_plans SET approval_mode = ?, updated_at = ?
+WHERE workflow_run_id = ? AND status != 'approved'
+`
+
+type SetWorkflowPlanApprovalModeParams struct {
+	ApprovalMode  string
+	UpdatedAt     time.Time
+	WorkflowRunID string
+}
+
+func (q *Queries) SetWorkflowPlanApprovalMode(ctx context.Context, arg SetWorkflowPlanApprovalModeParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setWorkflowPlanApprovalMode, arg.ApprovalMode, arg.UpdatedAt, arg.WorkflowRunID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const setWorkflowTaskExecutionRun = `-- name: SetWorkflowTaskExecutionRun :execrows
 UPDATE workflow_tasks SET execution_run_id = ?, state = 'running', updated_at = ?
 WHERE id = ? AND execution_run_id IS NULL AND state = 'eligible'

@@ -10,6 +10,7 @@ function baseRun(overrides: Partial<WorkflowRunView>): WorkflowRunView {
 		state: "waiting",
 		createdAt: new Date().toISOString(),
 		updatedAt: new Date().toISOString(),
+		executionMode: "manual",
 		...overrides,
 	};
 }

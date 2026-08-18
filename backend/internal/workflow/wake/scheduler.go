@@ -43,6 +43,16 @@ const (
 	// of scope) — the value exists so the enum is complete, not because
 	// anything schedules it today.
 	ReasonPlannerCapacity Reason = "planner_capacity"
+	// ReasonAutonomousProgress is Checkpoint 8P-D's headless progression
+	// heartbeat for a master/objective run under AutonomousMode: scheduled
+	// (a) once as a kickoff right after the run's frozen execution policy
+	// snapshot is applied, if the plan hasn't been generated yet, and
+	// (b) re-scheduled by reconcileMasterTasks after every reconcile pass
+	// while the run is non-terminal, not NeedsAttention, and not blocked on
+	// a HUMAN_REQUIRED question — so the daemon poller alone keeps driving
+	// planning/approval/task-dispatch/review/fix/verify/integration forward
+	// without any browser GET.
+	ReasonAutonomousProgress Reason = "autonomous_progress"
 )
 
 // Status is the fixed vocabulary of a wake schedule's lifecycle state,

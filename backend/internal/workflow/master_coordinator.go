@@ -193,7 +193,21 @@ func (c *Coordinator) finalizeGeneratedPlan(ctx stdctx.Context, run domain.Workf
 	if _, err := c.planStore.FinishWorkflowPlan(ctx, run.ID, domain.WorkflowPlanValidated, domain.WorkflowPlanCommandCompleted, string(validationJSON), hash, "", now); err != nil {
 		return RunDetail{}, err
 	}
-	if record.ApprovalMode == domain.WorkflowPlanApprovalAuto {
+	// Checkpoint 8P-D: a valid plan auto-approves either because the client
+	// explicitly requested approval_mode=auto (pre-existing behavior,
+	// unchanged) OR because the run's frozen execution policy snapshot says
+	// AutonomousMode=true. The safety gate is identical either way --
+	// NormalizeAndValidatePlan already ran unconditionally above and an
+	// invalid plan already returned early -- only the trigger differs. When
+	// policy (not the client) is what decided it, persist that explicitly so
+	// plan.approvalMode=="auto" is an honest, inspectable approval source
+	// distinguishable from a human/manual approval, rather than silently
+	// approving while leaving the record saying "manual".
+	autonomous := policyForRun(run).Execution.AutonomousMode
+	if record.ApprovalMode == domain.WorkflowPlanApprovalAuto || autonomous {
+		if autonomous && record.ApprovalMode != domain.WorkflowPlanApprovalAuto {
+			_, _ = c.planStore.SetWorkflowPlanApprovalMode(ctx, run.ID, domain.WorkflowPlanApprovalAuto, now)
+		}
 		return c.ApprovePlan(ctx, run.ID)
 	}
 	if run.State == domain.WorkflowRunPending {
@@ -351,7 +365,57 @@ func (c *Coordinator) getMasterRun(ctx stdctx.Context, run domain.WorkflowRun, s
 	return detail, nil
 }
 
+// reconcileMasterTasks is the read-time master-task reconcile loop (called
+// from getMasterRun on every GetRun, and from Reconcile at boot). Checkpoint
+// 8P-D wraps the actual reconcile pass so that, regardless of which branch it
+// took, a still-progressing autonomous run always leaves behind a fresh
+// headless-progression wake -- see maybeScheduleAutonomousHeartbeat.
 func (c *Coordinator) reconcileMasterTasks(ctx stdctx.Context, run domain.WorkflowRun) error {
+	err := c.reconcileMasterTasksOnce(ctx, run)
+	c.maybeScheduleAutonomousHeartbeat(ctx, run.ID)
+	return err
+}
+
+// maybeScheduleAutonomousHeartbeat re-schedules Checkpoint 8P-D's
+// ReasonAutonomousProgress wake after a reconcile pass, so the daemon poller
+// alone keeps calling ContinueRun/GetRun on this master run until it either
+// reaches a terminal state, needs human attention, or is genuinely blocked on
+// a HUMAN_REQUIRED question -- at which point it deliberately stops
+// rescheduling itself (no busy loop, and no point polling a run that is
+// waiting on a human; the existing answer-question path is what re-enters
+// reconcileMasterTasks and therefore reschedules this heartbeat again once
+// unblocked). Best-effort: reads fresh state itself rather than trusting the
+// caller's possibly-stale run value, and never fails/propagates an error --
+// matches scheduleCapacityWake's own "observers don't invent failures"
+// convention.
+func (c *Coordinator) maybeScheduleAutonomousHeartbeat(ctx stdctx.Context, runID string) {
+	if c.wakeScheduler == nil {
+		return
+	}
+	run, ok, err := c.store.GetWorkflowRun(ctx, runID)
+	if err != nil || !ok {
+		return
+	}
+	if run.State.Terminal() || run.State == domain.WorkflowRunNeedsAttention {
+		return
+	}
+	if !policyForRun(run).Execution.AutonomousMode {
+		return
+	}
+	if c.questionsStore != nil {
+		questions, qerr := c.questionsStore.ListWorkflowQuestionsByRun(ctx, runID)
+		if qerr == nil {
+			for _, q := range questions {
+				if q.State == domain.QuestionStateHumanRequired {
+					return
+				}
+			}
+		}
+	}
+	c.scheduleWake(ctx, run, nil, wake.ReasonAutonomousProgress, "")
+}
+
+func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.WorkflowRun) error {
 	tasks, err := c.planStore.ListWorkflowTasks(ctx, run.ID)
 	if err != nil {
 		return err

@@ -3918,6 +3918,8 @@ export interface components {
             completedAt?: null | string;
             /** Format: date-time */
             createdAt: string;
+            /** @enum {string} */
+            executionMode: "autonomous" | "manual";
             id: string;
             nextAction?: string;
             /** Format: date-time */

@@ -143,6 +143,19 @@ func (s *Store) ApproveWorkflowPlan(ctx context.Context, runID string, now time.
 	return n > 0, err
 }
 
+// SetWorkflowPlanApprovalMode flips a plan's approval mode after creation --
+// used by Checkpoint 8P-D so an autonomous-policy-triggered auto-approval
+// leaves an honest, inspectable record (approval_mode="auto") even when the
+// plan was originally created with the client's requested "manual". Guarded
+// to never touch an already-approved plan, matching ApproveWorkflowPlan's own
+// CAS discipline.
+func (s *Store) SetWorkflowPlanApprovalMode(ctx context.Context, runID string, mode domain.WorkflowPlanApprovalMode, now time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	n, err := s.qw.SetWorkflowPlanApprovalMode(ctx, gen.SetWorkflowPlanApprovalModeParams{ApprovalMode: string(mode), UpdatedAt: now, WorkflowRunID: runID})
+	return n > 0, err
+}
+
 func (s *Store) RejectWorkflowPlan(ctx context.Context, runID string, now time.Time) (bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()

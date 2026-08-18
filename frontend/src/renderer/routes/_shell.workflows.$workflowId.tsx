@@ -1,6 +1,7 @@
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import { useWorkflowRun, workflowRunIsTerminal } from "../hooks/useWorkflowRun";
+import { useWorkflowStatusLabel } from "../hooks/useWorkflowExecutionStatus";
 import { useChildTaskRouting } from "../hooks/useChildTaskRouting";
 import { WorkflowVerifyDetails } from "../components/workflow-verify-details";
 import { WorkflowUsageSection } from "../components/workflow-usage-section";
@@ -11,6 +12,34 @@ import { WorkflowRoutingSummary } from "../components/workflow-routing-summary";
 export const Route = createFileRoute("/_shell/workflows/$workflowId")({
 	component: WorkflowRunRoute,
 });
+
+type TranslateFn = (key: string, opts?: Record<string, unknown>) => string;
+
+function statusLabelText(t: TranslateFn, label: NonNullable<ReturnType<typeof useWorkflowStatusLabel>>): string {
+	if (typeof label === "object") {
+		return t("shell.workflowsStatusExecutingTask", { current: label.current, total: label.total });
+	}
+	switch (label) {
+		case "planning":
+			return t("shell.workflowsStatusPlanning");
+		case "reviewing":
+			return t("shell.workflowsStatusReviewing");
+		case "applying_fixes":
+			return t("shell.workflowsStatusApplyingFixes");
+		case "verifying":
+			return t("shell.workflowsStatusVerifying");
+		case "waiting_for_capacity":
+			return t("shell.workflowsStatusWaitingForCapacity");
+		case "waiting_for_decision":
+			return t("shell.workflowsStatusWaitingForDecision");
+		case "needs_attention":
+			return t("shell.workflowsStatusNeedsAttention");
+		case "completed":
+			return t("shell.workflowsStatusCompleted");
+		default:
+			return "";
+	}
+}
 
 function WorkflowRunRoute() {
 	const { t } = useTranslation();
@@ -56,6 +85,7 @@ function WorkflowRunRoute() {
 	// decision -- not a new dashboard, just a label next to the task title.
 	const childTaskIds = (workflow.tasks ?? []).map((task) => task.executionWorkflowId).filter((id): id is string => Boolean(id));
 	const childTaskRouting = useChildTaskRouting(childTaskIds);
+	const statusLabel = useWorkflowStatusLabel(workflow);
 
 	const nonTerminal = !workflowRunIsTerminal(workflow.run.state);
 	const isPending = workflow.run.state === "pending";
@@ -77,6 +107,13 @@ function WorkflowRunRoute() {
 				<h1 className="text-lg font-semibold">{workflow.run.objective}</h1>
 				<p className="text-sm text-muted-foreground">
 					{t("shell.workflowsRunHeader", { projectId: workflow.run.projectId, state: workflow.run.state })}
+				</p>
+				<p className="text-sm text-muted-foreground">
+					{t("shell.workflowsMode")}:{" "}
+					{workflow.run.executionMode === "autonomous"
+						? t("shell.workflowsModeAutonomous")
+						: t("shell.workflowsModeManual")}
+					{statusLabel && <> · {statusLabelText(t as TranslateFn, statusLabel)}</>}
 				</p>
 				{workflow.run.nextAction && (
 					<p className="text-sm text-muted-foreground">
@@ -115,6 +152,10 @@ function WorkflowRunRoute() {
 						{approvePlanError && <p className="mt-1 text-sm text-destructive">{approvePlanError}</p>}
 					</div>
 				)}
+				{workflow.plan?.approvalMode === "auto" &&
+					(workflow.plan.status === "approved" || workflow.plan.status === "validated") && (
+						<span className="text-sm text-muted-foreground">{t("shell.workflowsPlanAutoApproved")}</span>
+					)}
 				{workflow.plan && workflow.plan.status !== "approved" && workflow.plan.status !== "rejected" && (
 					<div>
 						<button className="rounded border border-border px-3 py-1.5 text-sm disabled:opacity-50" disabled={rejectingPlan} onClick={() => void rejectPlan()} type="button">

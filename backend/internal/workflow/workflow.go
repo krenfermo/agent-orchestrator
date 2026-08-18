@@ -118,6 +118,7 @@ type masterPlanStore interface {
 	FindWorkflowRunByPlannedTask(ctx stdctx.Context, taskID string) (string, bool, error)
 	ApproveWorkflowPlan(ctx stdctx.Context, runID string, now time.Time) (bool, error)
 	RejectWorkflowPlan(ctx stdctx.Context, runID string, now time.Time) (bool, error)
+	SetWorkflowPlanApprovalMode(ctx stdctx.Context, runID string, mode domain.WorkflowPlanApprovalMode, now time.Time) (bool, error)
 }
 
 // WakeScheduler is the narrow interface Checkpoint 8N's wake.Scheduler
@@ -782,15 +783,25 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		return RunDetail{}, fmt.Errorf("%w: workflow run %q is already %s", ErrAlreadyTerminal, runID, run.State)
 	}
 
-	// Checkpoint 8N.1: a master run parked mid-planning by parkPlanForCapacity
-	// (plan.Status reset to Pending, exactly the state GeneratePlan's own
-	// status switch falls through to actual generation on) has no work/review
-	// step yet — the lookup below would wrongly reject it as ErrInvalid. Retry
-	// planning through the exact same GeneratePlan entry point a human-driven
-	// retry uses, rather than a second parallel resume path.
+	// Checkpoint 8N.1/8P-D: a master/objective run never has its own
+	// work/review step (only a single "plan" step) — the lookup below would
+	// wrongly reject it as ErrInvalid at any plan stage past Pending. A run
+	// parked mid-planning by parkPlanForCapacity (plan.Status reset to
+	// Pending, exactly the state GeneratePlan's own status switch falls
+	// through to actual generation on) retries through the exact same
+	// GeneratePlan entry point a human-driven retry uses. Any other plan
+	// stage (Validated-awaiting-approval, Approved-with-tasks-in-flight)
+	// delegates entirely to GetRun, whose getMasterRun/reconcileMasterTasks
+	// path already knows how to advance task dispatch/review/fix/verify/
+	// integration — this is what makes ContinueRun (the wakepoller's only
+	// entry point, see wakepoller.Resumer) a valid headless resume call for a
+	// master run at any stage, not just the Pending one.
 	if c.planStore != nil {
-		if plan, isMaster, perr := c.planStore.GetWorkflowPlan(ctx, runID); perr == nil && isMaster && plan.Status == domain.WorkflowPlanPending {
-			return c.GeneratePlan(ctx, runID)
+		if plan, isMaster, perr := c.planStore.GetWorkflowPlan(ctx, runID); perr == nil && isMaster {
+			if plan.Status == domain.WorkflowPlanPending {
+				return c.GeneratePlan(ctx, runID)
+			}
+			return c.GetRun(ctx, runID)
 		}
 	}
 

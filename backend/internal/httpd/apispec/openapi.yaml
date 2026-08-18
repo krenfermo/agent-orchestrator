@@ -10843,6 +10843,11 @@ components:
         createdAt:
           format: date-time
           type: string
+        executionMode:
+          enum:
+          - autonomous
+          - manual
+          type: string
         id:
           type: string
         nextAction:
@@ -10881,6 +10886,7 @@ components:
       - state
       - createdAt
       - updatedAt
+      - executionMode
       type: object
     WorkflowStepView:
       properties:

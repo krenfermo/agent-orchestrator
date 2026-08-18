@@ -62,6 +62,16 @@ func (c *Coordinator) Reconcile(ctx stdctx.Context) error {
 				return planErr
 			} else if master {
 				switch {
+				case plan.Status == domain.WorkflowPlanPending:
+					// Checkpoint 8P-D: heal the narrow crash window between a
+					// master run's creation and maybeKickoffAutonomousPlanning's
+					// wake write -- if that write never landed (daemon died
+					// mid-request) an autonomous objective would otherwise sit
+					// at Pending forever with no wake and no browser ever
+					// opening it. Schedule (idempotently) re-ensures the
+					// kickoff wake exists; a no-op for manual-mode runs or ones
+					// that already have it.
+					c.maybeKickoffAutonomousPlanning(ctx, run, policyForRun(run).Execution)
 				case plan.Status == domain.WorkflowPlanRunning && plan.CommandStatus == domain.WorkflowPlanCommandResponded:
 					if _, err := c.finalizeGeneratedPlan(ctx, run, plan); err != nil {
 						return err

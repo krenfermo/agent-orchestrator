@@ -6,6 +6,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/registry"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workflow/wake"
 )
 
 // runOwner resolves a workflow run's owner, or "" for an unowned/pre-8P-A
@@ -126,8 +127,36 @@ func (c *Coordinator) ApplyExecutionPolicySnapshot(ctx stdctx.Context, runID str
 	if err != nil {
 		return err
 	}
-	_, err = c.store.UpdateWorkflowRunPolicySnapshot(ctx, runID, string(snapshotJSON), c.clock())
-	return err
+	if _, err := c.store.UpdateWorkflowRunPolicySnapshot(ctx, runID, string(snapshotJSON), c.clock()); err != nil {
+		return err
+	}
+	c.maybeKickoffAutonomousPlanning(ctx, run, policy.Execution)
+	return nil
+}
+
+// maybeKickoffAutonomousPlanning is Checkpoint 8P-D's auto-planner-start:
+// called once, synchronously, right after a master/objective run's frozen
+// execution policy snapshot is written (still inside the original HTTP
+// create request, but this only persists a durable wake row -- it never
+// invokes the planner itself, so the request never waits on Planner/agent
+// work). If the run is a master-plan run whose plan has not been generated
+// yet (Status == Pending) and the just-applied snapshot says
+// AutonomousMode == true, it schedules the same ReasonAutonomousProgress
+// wake reconcileMasterTasks re-schedules later -- the daemon poller then
+// calls ContinueRun, which (see workflow.go's ContinueRun) resolves a
+// Pending-plan master run straight into GeneratePlan. Best-effort and
+// idempotent (Schedule upserts by idempotency key): a nil wakeScheduler, a
+// non-master run, a manual-mode run, or an already-generated plan are all
+// silent no-ops.
+func (c *Coordinator) maybeKickoffAutonomousPlanning(ctx stdctx.Context, run domain.WorkflowRun, execution domain.ExecutionPolicySnapshot) {
+	if !execution.AutonomousMode || c.planStore == nil || c.wakeScheduler == nil {
+		return
+	}
+	plan, isMaster, err := c.planStore.GetWorkflowPlan(ctx, run.ID)
+	if err != nil || !isMaster || plan.Status != domain.WorkflowPlanPending {
+		return
+	}
+	c.scheduleWake(ctx, run, nil, wake.ReasonAutonomousProgress, "")
 }
 
 // inheritExecutionPolicySnapshot copies parent's already-frozen execution
