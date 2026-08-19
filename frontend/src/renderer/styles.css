@@ -265,6 +265,8 @@
 	--color-success-bright: var(--color-success-bright);
 	--color-warning: var(--bridge-warning);
 	--color-error: var(--bridge-danger);
+	--color-provider-anthropic: var(--bridge-provider-anthropic);
+	--color-provider-openai: var(--bridge-provider-openai);
 	--color-status-working: var(--bridge-status-working);
 	--color-status-needs-you: var(--bridge-status-needs-you);
 	--color-status-in-review: var(--bridge-status-in-review);

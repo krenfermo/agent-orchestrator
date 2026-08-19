@@ -50,6 +50,12 @@ const (
 	ProviderAuthStateAuthenticated   ProviderAuthState = "authenticated"
 	ProviderAuthStateUnauthenticated ProviderAuthState = "unauthenticated"
 	ProviderAuthStateError           ProviderAuthState = "error"
+	// ProviderAuthStateNotInstalled means the probe could not even resolve
+	// the provider's CLI binary on this AO instance -- distinct from
+	// ProviderAuthStateUnknown (binary present, but auth state couldn't be
+	// determined) so the UI never conflates "not installed" with "logged
+	// out but installed".
+	ProviderAuthStateNotInstalled ProviderAuthState = "not_installed"
 )
 
 // ProviderProfile is one user's connection to one provider/harness pair.

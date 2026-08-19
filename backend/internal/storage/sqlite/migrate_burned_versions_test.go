@@ -118,6 +118,7 @@ var shippedMigrations = map[int64]string{
 	112: "0112_execution_policies.sql",
 	113: "0113_agent_health_provider_profile_scope.sql",
 	114: "0114_workflow_wake_autonomous_progress.sql",
+	115: "0115_provider_profile_not_installed_state.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

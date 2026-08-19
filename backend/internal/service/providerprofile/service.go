@@ -230,7 +230,7 @@ func (s *Service) Test(ctx context.Context, userID domain.UserID, id domain.Prov
 	return TestResult{
 		AuthState: profile.AuthState,
 		OK:        profile.AuthState == domain.ProviderAuthStateAuthenticated,
-		Message:   testMessage(profile.AuthState),
+		Message:   testMessage(profile.DisplayName, profile.AuthState),
 	}, nil
 }
 
@@ -277,15 +277,20 @@ func (s *Service) refreshAuthState(ctx context.Context, userID domain.UserID, id
 	return s.Get(ctx, userID, id)
 }
 
-func testMessage(state domain.ProviderAuthState) string {
+// testMessage produces the human-readable Message returned alongside a
+// TestResult. It never includes credential material, tokens, or filesystem
+// paths -- only the classified auth state and generic remediation text.
+func testMessage(displayName string, state domain.ProviderAuthState) string {
 	switch state {
 	case domain.ProviderAuthStateAuthenticated:
-		return "authenticated"
+		return displayName + " is authenticated and ready for AO workflows."
 	case domain.ProviderAuthStateUnauthenticated:
-		return "not authenticated -- run the provider's own login inside a session for this profile"
+		return displayName + " is installed, but this AO user is not authenticated. Run the provider's own login inside a session for this profile, then test again."
+	case domain.ProviderAuthStateNotInstalled:
+		return displayName + " is not installed on this AO instance."
 	case domain.ProviderAuthStateError:
-		return "auth probe failed"
+		return "The connection test for " + displayName + " failed unexpectedly. Try again."
 	default:
-		return "authentication state unknown"
+		return displayName + "'s authentication state could not be determined."
 	}
 }

@@ -2363,7 +2363,7 @@ export interface components {
             /** @enum {string} */
             authMethod: "browser_oauth" | "device_flow" | "cli_bootstrap" | "api_key" | "external_login" | "unsupported";
             /** @enum {string} */
-            authState: "unknown" | "authenticated" | "unauthenticated" | "error";
+            authState: "unknown" | "authenticated" | "unauthenticated" | "error" | "not_installed";
             capabilities: string[];
             createdAt: string;
             defaultModel?: string;

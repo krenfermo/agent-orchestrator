@@ -282,7 +282,10 @@ export function orchestratorHealth(workspace: WorkspaceSummary, restarting = fal
 		// explicitly as a session so it is never misread as "your autonomous
 		// workflow isn't progressing" -- a workflow can be actively running
 		// with this warning correctly showing at the same time.
-		return { state: "missing", message: "No orchestrator session is running for this project. Workflow runs are unaffected." };
+		return {
+			state: "missing",
+			message: "No interactive orchestrator session is running for this project. Autonomous workflow runs are unaffected.",
+		};
 	}
 	if (orchestratorNeedsRestart(workspace, orchestrator)) {
 		return {

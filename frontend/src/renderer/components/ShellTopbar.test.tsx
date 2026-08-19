@@ -216,7 +216,7 @@ describe("ShellTopbar status pill", () => {
 		expect(localActions.contains(screen.getByRole("button", { name: "Switch agent" }))).toBe(true);
 		expect(localActions.contains(screen.getByRole("button", { name: "Switch to chat UI" }))).toBe(true);
 		expect(localActions.contains(screen.getByRole("button", { name: "Kill session" }))).toBe(true);
-		expect(localActions.contains(screen.getByRole("button", { name: "Open orchestrator" }))).toBe(false);
+		expect(localActions.contains(screen.getByRole("button", { name: "Open interactive orchestrator" }))).toBe(false);
 	});
 
 	it.each([
@@ -286,7 +286,7 @@ describe("ShellTopbar orchestrator actions", () => {
 			"",
 		);
 
-		const button = screen.getByRole("button", { name: `Orchestrator, ${label}` });
+		const button = screen.getByRole("button", { name: `Interactive orchestrator, ${label}` });
 		const indicator = button.querySelector("span.size-dot-sm") as HTMLElement;
 		expect(indicator).toHaveAttribute("aria-hidden", "true");
 		expect(indicator).toHaveClass(tone);
@@ -345,7 +345,7 @@ describe("ShellTopbar orchestrator actions", () => {
 			</QueryClientProvider>,
 		);
 
-		await userEvent.click(screen.getByRole("button", { name: "Open orchestrator" }));
+		await userEvent.click(screen.getByRole("button", { name: "Open interactive orchestrator" }));
 
 		expect(useUiStore.getState().settingsModal).toEqual({ scope: "project", projectId: "proj-1" });
 		expect(navigateMock).not.toHaveBeenCalled();

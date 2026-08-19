@@ -187,6 +187,15 @@ export function CreateProjectAgentSheet({
 								: t("createProject.projectAgents")
 						}
 					/>
+					{/* Checkpoint 8P-E.1 Phase 12: this picker selects agents for the
+					    legacy per-project interactive session (chat + orchestrator), a
+					    distinct mechanism from autonomous workflow ProviderProfiles
+					    (Settings → Development Agents). Said explicitly so an
+					    unconfigured entry here is never mistaken for a configured
+					    autonomous-workflow provider. */}
+					<p className="px-(--size-import-dialog-padding) pt-3 text-xs text-[var(--color-text-agents-sheet-description)]">
+						{t("createProject.interactiveAgentNote")}
+					</p>
 					<ProjectSetupFormView
 						agentControls={{
 							worker: (

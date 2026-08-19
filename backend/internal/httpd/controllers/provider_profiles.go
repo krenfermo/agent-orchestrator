@@ -28,7 +28,7 @@ type ProviderProfileView struct {
 	Harness      string   `json:"harness"`
 	DisplayName  string   `json:"displayName"`
 	Enabled      bool     `json:"enabled"`
-	AuthState    string   `json:"authState" enum:"unknown,authenticated,unauthenticated,error"`
+	AuthState    string   `json:"authState" enum:"unknown,authenticated,unauthenticated,error,not_installed"`
 	AuthMethod   string   `json:"authMethod" enum:"browser_oauth,device_flow,cli_bootstrap,api_key,external_login,unsupported"`
 	DefaultModel string   `json:"defaultModel,omitempty"`
 	Capabilities []string `json:"capabilities"`

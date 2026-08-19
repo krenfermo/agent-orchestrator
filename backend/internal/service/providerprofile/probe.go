@@ -46,7 +46,7 @@ func (CLIProber) Probe(ctx context.Context, harness domain.AgentHarness, env run
 func probeClaudeCode(ctx context.Context, env runtimehome.Environment) (domain.ProviderAuthState, error) {
 	binary, err := claudecode.ResolveClaudeBinary(ctx)
 	if err != nil {
-		return domain.ProviderAuthStateUnknown, nil //nolint:nilerr // binary absence is advisory, not an error
+		return domain.ProviderAuthStateNotInstalled, nil //nolint:nilerr // binary absence is advisory, not an error
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -57,7 +57,7 @@ func probeClaudeCode(ctx context.Context, env runtimehome.Environment) (domain.P
 func probeCodex(ctx context.Context, env runtimehome.Environment) (domain.ProviderAuthState, error) {
 	binary, err := codex.ResolveCodexBinary(ctx)
 	if err != nil {
-		return domain.ProviderAuthStateUnknown, nil //nolint:nilerr // binary absence is advisory, not an error
+		return domain.ProviderAuthStateNotInstalled, nil //nolint:nilerr // binary absence is advisory, not an error
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()

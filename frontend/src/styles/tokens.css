@@ -110,6 +110,12 @@
 	--color-accent-strong: var(--primary);
 	--color-danger-strong: var(--destructive);
 
+	/* Provider brand identity (presentational only — see providerVisualIdentity
+	   in frontend/src/renderer/lib/provider-visual-identity.ts). Restrained,
+	   never used for semantic success/error/warning meaning. */
+	--color-provider-anthropic: #c96442;
+	--color-provider-openai: #4ade80;
+
 	/* Board lane signals, matched to the landing hero's board preview. */
 	--color-status-working: #60a5fa;
 	--color-status-needs-you: #fb923c;
@@ -579,6 +585,8 @@
 	--bridge-warning: var(--color-warning);
 	--bridge-danger: var(--color-danger);
 	--bridge-danger-strong: var(--color-danger-strong);
+	--bridge-provider-anthropic: var(--color-provider-anthropic);
+	--bridge-provider-openai: var(--color-provider-openai);
 	--bridge-status-working: var(--color-status-working);
 	--bridge-status-needs-you: var(--color-status-needs-you);
 	--bridge-status-in-review: var(--color-status-in-review);
@@ -706,6 +714,11 @@
 	--color-accent-dim: var(--chart-1);
 	--color-accent-strong: var(--primary);
 	--color-danger-strong: var(--destructive);
+
+	/* Provider brand identity — deepened slightly so it holds contrast on a
+	   light canvas, same restrained-presentational-only role as dark. */
+	--color-provider-anthropic: #b3542f;
+	--color-provider-openai: #16a34a;
 
 	/* Same lane hues as dark, deepened so they hold contrast on a light canvas. */
 	--color-status-working: #2563eb;

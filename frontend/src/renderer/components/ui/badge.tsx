@@ -2,7 +2,7 @@
 import * as React from "react";
 import { cn } from "../../lib/utils";
 
-type BadgeVariant = "neutral" | "outline" | "accent" | "success" | "warning" | "error";
+export type BadgeVariant = "neutral" | "outline" | "accent" | "success" | "warning" | "error";
 
 export function Badge({
 	className,

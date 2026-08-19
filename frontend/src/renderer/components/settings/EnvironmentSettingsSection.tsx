@@ -17,6 +17,7 @@ export function EnvironmentSettingsSection({ titleHidden }: { titleHidden?: bool
 
 	return (
 		<SettingsSection title={t("settings.environment")} sectionId="environment" titleHidden={titleHidden} grouped>
+			<p className="px-(--size-settings-row-padding) text-xs text-settings-muted">{t("settings.environment.hostLevelNote")}</p>
 			<div className="settings-row-bar h-auto min-h-(--size-settings-row) flex-wrap gap-2">
 				<span className="min-w-0 flex-1 text-sm leading-5 text-settings-label">
 					{status

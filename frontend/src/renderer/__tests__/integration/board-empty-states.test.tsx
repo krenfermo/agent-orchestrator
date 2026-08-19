@@ -228,7 +228,7 @@ describe("project board with no sessions", () => {
 
 		expect(await screen.findByText("No worker sessions yet")).toBeInTheDocument();
 		// Board header + empty state each offer the pair; the orchestrator is primary in both.
-		expect(screen.getAllByRole("button", { name: "Spawn Orchestrator" }).length).toBeGreaterThan(0);
+		expect(screen.getAllByRole("button", { name: "Start Interactive Orchestrator" }).length).toBeGreaterThan(0);
 		expect(screen.getAllByRole("button", { name: "New task" }).length).toBeGreaterThan(0);
 		expect(screen.queryByText("Import to Agent Orchestrator")).not.toBeInTheDocument();
 		expect(columnCount()).toBe(0);
@@ -240,7 +240,7 @@ describe("project board with no sessions", () => {
 		renderBoard(<SessionsBoard projectId="proj-1" />);
 
 		await screen.findByText("No worker sessions yet");
-		const [spawnButton] = screen.getAllByRole("button", { name: "Spawn Orchestrator" });
+		const [spawnButton] = screen.getAllByRole("button", { name: "Start Interactive Orchestrator" });
 		await userEvent.click(spawnButton);
 
 		expect(await screen.findByText(/branch is already checked out/)).toBeInTheDocument();
@@ -255,7 +255,7 @@ describe("project board with no sessions", () => {
 		renderBoard(<SessionsBoard projectId="proj-1" />);
 
 		await screen.findByText("No worker sessions yet");
-		const [spawnButton] = screen.getAllByRole("button", { name: "Spawn Orchestrator" });
+		const [spawnButton] = screen.getAllByRole("button", { name: "Start Interactive Orchestrator" });
 		await userEvent.click(spawnButton);
 		await userEvent.click(await screen.findByRole("button", { name: "Create as Terminal UI" }));
 
@@ -269,7 +269,7 @@ describe("project board with no sessions", () => {
 		renderBoard(<SessionsBoard projectId="proj-1" />);
 
 		await screen.findByText("No worker sessions yet");
-		const [spawnButton] = screen.getAllByRole("button", { name: "Spawn Orchestrator" });
+		const [spawnButton] = screen.getAllByRole("button", { name: "Start Interactive Orchestrator" });
 		await userEvent.click(spawnButton);
 
 		expect(useUiStore.getState().settingsModal).toEqual({ scope: "project", projectId: "proj-1" });
@@ -303,7 +303,7 @@ describe("project board with no sessions", () => {
 		renderBoard(<SessionsBoard projectId="proj-1" />);
 
 		await screen.findByText(/Project added, but orchestrator did not start/);
-		const [spawnButton] = screen.getAllByRole("button", { name: "Spawn Orchestrator" });
+		const [spawnButton] = screen.getAllByRole("button", { name: "Start Interactive Orchestrator" });
 		await userEvent.click(spawnButton);
 
 		await waitFor(() =>
@@ -359,7 +359,7 @@ describe("project board with no sessions", () => {
 		const { rerender } = renderBoard(<SessionsBoard projectId="proj-1" />);
 
 		await screen.findByText("No worker sessions yet");
-		const [spawnButton] = screen.getAllByRole("button", { name: "Spawn Orchestrator" });
+		const [spawnButton] = screen.getAllByRole("button", { name: "Start Interactive Orchestrator" });
 		await userEvent.click(spawnButton);
 		await screen.findByText(/branch is already checked out/);
 

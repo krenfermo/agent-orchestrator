@@ -6684,6 +6684,7 @@ components:
           - authenticated
           - unauthenticated
           - error
+          - not_installed
           type: string
         capabilities:
           items:
