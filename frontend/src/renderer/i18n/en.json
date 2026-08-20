@@ -781,6 +781,8 @@
 	"shell.killingSession": "Killing session",
 	"shell.laneSummaryAria": "{{primary}} / {{secondary}} lane summary",
 	"shell.mergedSessions": "Merged sessions",
+	"shell.devSandbox": "dev sandbox",
+	"shell.devSandboxDataDir": "Isolated dev data — {{dataDir}}",
 	"shell.newProject": "New project",
 	"shell.newSession": "New session",
 	"shell.newTask": "New task",

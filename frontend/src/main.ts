@@ -75,7 +75,7 @@ import {
 	showCloudSignInFailure,
 } from "./main/cloud-auth";
 import { DEFAULT_POSTHOG_HOST, DEFAULT_POSTHOG_PROJECT_KEY } from "./shared/posthog-config";
-import { buildTelemetryBootstrap } from "./shared/telemetry";
+import { buildTelemetryBootstrap, defaultDataDir } from "./shared/telemetry";
 import { createBrowserViewHost, type BrowserViewHost } from "./main/browser-view-host";
 import { createWindowComposition, type WindowComposition } from "./main/window-composition";
 import { AgentBrowserRuntime } from "./main/agent-browser-runtime";
@@ -1460,6 +1460,15 @@ async function restartDaemon(): Promise<DaemonStatus> {
 	}
 	return startDaemonForRestart();
 }
+
+// Lets the renderer show an explicit "dev sandbox" indicator instead of
+// silently querying ~/.ao/dev/data while the user believes they're on the
+// real ~/.ao/data install. See CLAUDE.md "IMPORTANT PRODUCT RULE".
+ipcMain.handle("daemon:getEnvInfo", () => ({
+	isDevSandbox: isDev,
+	dataDir: defaultDataDir(process.platform, daemonEnv(), os.homedir()),
+	runFile: runFilePath(),
+}));
 
 ipcMain.handle("daemon:getStatus", () => refreshDaemonStatus());
 ipcMain.handle("daemon:start", () => startDaemon());

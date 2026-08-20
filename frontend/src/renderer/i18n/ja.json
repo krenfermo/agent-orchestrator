@@ -771,6 +771,8 @@
 	"shell.killingSession": "セッションを強制終了中",
 	"shell.laneSummaryAria": "{{primary}} / {{secondary}} レーンの概要",
 	"shell.mergedSessions": "マージ済みセッション",
+	"shell.devSandbox": "開発サンドボックス",
+	"shell.devSandboxDataDir": "分離された開発用データ — {{dataDir}}",
 	"shell.newProject": "新しいプロジェクト",
 	"shell.newSession": "新しいセッション",
 	"shell.newTask": "新しいタスク",

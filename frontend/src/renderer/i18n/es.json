@@ -782,6 +782,8 @@
 	"shell.killingSession": "Deteniendo sesión",
 	"shell.laneSummaryAria": "Resumen de carril {{primary}} / {{secondary}}",
 	"shell.mergedSessions": "Sesiones fusionadas",
+	"shell.devSandbox": "sandbox de dev",
+	"shell.devSandboxDataDir": "Datos de desarrollo aislados — {{dataDir}}",
 	"shell.newProject": "Nuevo proyecto",
 	"shell.newSession": "Nueva sesión",
 	"shell.newTask": "Nueva tarea",

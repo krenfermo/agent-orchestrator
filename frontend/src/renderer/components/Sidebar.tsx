@@ -36,6 +36,7 @@ import {
 import { getAgentActivityView } from "../lib/session-presentation";
 import { aoBridge } from "../lib/bridge";
 import { useCommandPaletteEnabled } from "../hooks/useCommandPaletteEnabled";
+import { useDevSandboxInfo } from "../hooks/useDevSandboxInfo";
 import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import { usePinSession, useUnpinSession } from "../hooks/usePinSession";
 import { spawnOrchestrator } from "../lib/spawn-orchestrator";
@@ -226,6 +227,7 @@ export function Sidebar({
 		staleTime: Infinity,
 	});
 	const isNightly = typeof appVersion === "string" && appVersion.includes("-nightly.");
+	const { isDevSandbox, dataDir } = useDevSandboxInfo();
 
 	// agent-orchestrator's sidebar resize: drag the right edge (200-420px,
 	// persisted), double-click to reset to 240px. Drives --ao-sidebar-w on :root,
@@ -316,6 +318,18 @@ export function Sidebar({
 						<span className="sidebar-expanded-chrome shrink-0 rounded-full bg-purple-subtle px-1.5 py-0.5 text-micro font-semibold leading-none text-purple-accent group-data-[collapsible=icon]:hidden">
 							{t("shell.nightly")}
 						</span>
+					)}
+					{isDevSandbox && (
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<span className="sidebar-expanded-chrome shrink-0 rounded-full bg-warning/15 px-1.5 py-0.5 text-micro font-semibold leading-none text-warning group-data-[collapsible=icon]:hidden">
+									{t("shell.devSandbox")}
+								</span>
+							</TooltipTrigger>
+							<TooltipContent side="bottom">
+								{t("shell.devSandboxDataDir", { dataDir: dataDir ?? "?" })}
+							</TooltipContent>
+						</Tooltip>
 					)}
 				</div>
 			</SidebarHeader>

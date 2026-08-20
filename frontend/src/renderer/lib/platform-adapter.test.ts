@@ -25,6 +25,7 @@ describe("platform adapter", () => {
 		window.ao = {
 			...window.ao!,
 			daemon: {
+				getEnvInfo: vi.fn().mockResolvedValue({ isDevSandbox: false, dataDir: null, runFile: null }),
 				getStatus: vi.fn().mockResolvedValue({ state: "ready", port: 4123 }),
 				start: vi.fn(), stop: vi.fn(), restart: vi.fn(), onStatus: vi.fn(() => () => undefined),
 			},

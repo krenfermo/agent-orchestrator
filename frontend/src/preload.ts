@@ -202,6 +202,12 @@ const api = {
 		readText: () => ipcRenderer.invoke("clipboard:readText") as Promise<string>,
 	},
 	daemon: {
+		getEnvInfo: () =>
+			ipcRenderer.invoke("daemon:getEnvInfo") as Promise<{
+				isDevSandbox: boolean;
+				dataDir: string | null;
+				runFile: string | null;
+			}>,
 		getStatus: () => ipcRenderer.invoke("daemon:getStatus") as Promise<DaemonStatus>,
 		start: () => ipcRenderer.invoke("daemon:start") as Promise<DaemonStatus>,
 		stop: () => ipcRenderer.invoke("daemon:stop") as Promise<DaemonStatus>,

@@ -782,6 +782,8 @@
 	"shell.killingSession": "Encerrando sessão",
 	"shell.laneSummaryAria": "Resumo da coluna {{primary}} / {{secondary}}",
 	"shell.mergedSessions": "Sessões mescladas",
+	"shell.devSandbox": "sandbox de dev",
+	"shell.devSandboxDataDir": "Dados de desenvolvimento isolados — {{dataDir}}",
 	"shell.newProject": "Novo projeto",
 	"shell.newSession": "Nova sessão",
 	"shell.newTask": "Nova tarefa",

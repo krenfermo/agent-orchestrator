@@ -51,6 +51,7 @@ export const aoBridge: AoBridge =
 			readText: async () => (navigator.clipboard?.readText ? navigator.clipboard.readText() : ""),
 		},
 		daemon: {
+			getEnvInfo: async () => ({ isDevSandbox: false, dataDir: null, runFile: null }),
 			getStatus: async () => ({
 				state: "stopped",
 				message: "Electron preload is not available in browser preview.",

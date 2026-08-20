@@ -771,6 +771,8 @@
 	"shell.killingSession": "Sitzung wird beendet",
 	"shell.laneSummaryAria": "{{primary}} / {{secondary}} Spaltenübersicht",
 	"shell.mergedSessions": "Gemergte Sitzungen",
+	"shell.devSandbox": "Dev-Sandbox",
+	"shell.devSandboxDataDir": "Isolierte Entwicklungsdaten — {{dataDir}}",
 	"shell.newProject": "Neues Projekt",
 	"shell.newSession": "Neue Sitzung",
 	"shell.newTask": "Neue Aufgabe",

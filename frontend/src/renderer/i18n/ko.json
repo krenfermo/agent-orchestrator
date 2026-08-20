@@ -771,6 +771,8 @@
 	"shell.killingSession": "세션 강제 종료 중",
 	"shell.laneSummaryAria": "{{primary}} / {{secondary}} 레인 요약",
 	"shell.mergedSessions": "병합된 세션",
+	"shell.devSandbox": "개발 샌드박스",
+	"shell.devSandboxDataDir": "격리된 개발 데이터 — {{dataDir}}",
 	"shell.newProject": "새 프로젝트",
 	"shell.newSession": "새 세션",
 	"shell.newTask": "새 작업",

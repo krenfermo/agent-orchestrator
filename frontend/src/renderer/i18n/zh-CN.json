@@ -755,6 +755,8 @@
 	"shell.killingSession": "正在结束会话",
 	"shell.laneSummaryAria": "{{primary}} / {{secondary}} 泳道摘要",
 	"shell.mergedSessions": "已合并会话",
+	"shell.devSandbox": "开发沙盒",
+	"shell.devSandboxDataDir": "隔离的开发数据 — {{dataDir}}",
 	"shell.newProject": "新建项目",
 	"shell.newSession": "新建会话",
 	"shell.newTask": "新建任务",
