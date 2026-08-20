@@ -73,17 +73,22 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		TrustedLocal: cfg.TrustedLocalMode,
 	}
 	coordinator := workflowcore.New(workflowcore.Deps{
-		Store:                    store,
-		Projects:                 store,
-		Sessions:                 store,
-		ReviewRuns:               store,
-		Spawner:                  sessionMgr,
-		SessionFacts:             store,
-		WorkspaceFacts:           workspace,
-		ReviewerLauncher:         reviewerLauncher,
-		MessageSender:            sessionMgr,
-		Verifier:                 workflowVerifyRunner{},
-		Planner:                  plannercommand.Planner{Binary: plannerBinary, Model: plannerModel, Timeout: 3 * time.Minute},
+		Store:            store,
+		Projects:         store,
+		Sessions:         store,
+		ReviewRuns:       store,
+		Spawner:          sessionMgr,
+		SessionFacts:     store,
+		WorkspaceFacts:   workspace,
+		ReviewerLauncher: reviewerLauncher,
+		MessageSender:    sessionMgr,
+		Verifier:         workflowVerifyRunner{},
+		// Checkpoint 8P-E.10: Timeout is the floor every call gets; MaxTimeout
+		// bounds how far the adapter's own size-proportional scaling
+		// (scaledTimeout) may stretch it for a large MEDUSA-class objective +
+		// repository context payload. Neither value is a blind global bump --
+		// small objectives still finish (or time out) inside 3 minutes.
+		Planner:                  plannercommand.Planner{Binary: plannerBinary, Model: plannerModel, Timeout: 3 * time.Minute, MaxTimeout: 12 * time.Minute},
 		PlannerContextBuilder:    plannercommand.ContextBuilder{},
 		Switcher:                 workflowAgentSwitcher{mgr: sessionMgr},
 		QuestionsStore:           store,

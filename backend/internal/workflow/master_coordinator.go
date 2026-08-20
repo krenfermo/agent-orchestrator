@@ -3,10 +3,12 @@ package workflow
 import (
 	stdctx "context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/workflow/wake"
 )
 
@@ -119,11 +121,18 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 		if cls.Eligible && (cls.Class == domain.WorkflowErrorRateLimited || cls.Class == domain.WorkflowErrorCapacityExhausted || cls.Class == domain.WorkflowErrorTransient) {
 			return c.parkPlanForCapacity(ctx, run, err)
 		}
+		// Checkpoint 8P-E.10: classify by the adapter's typed sentinels
+		// (errors.Is), not by substring-matching err.Error() -- the prior
+		// "timeout"/"parse" text search could misfire if an objective's own
+		// text happened to contain either word, and silently swallowed any
+		// provider plain-text error the adapter had appended for
+		// diagnostics (now covered above by classifyProviderFailure, since
+		// the adapter embeds that text in the wrapped error message).
 		class := "planner_start_failed"
-		lower := strings.ToLower(err.Error())
-		if strings.Contains(lower, "timeout") {
+		switch {
+		case errors.Is(err, ports.ErrPlannerTimeout):
 			class = "planner_timeout"
-		} else if strings.Contains(lower, "parse") {
+		case errors.Is(err, ports.ErrPlannerOutputMalformed):
 			class = "planner_parse_failed"
 		}
 		return c.failPlan(ctx, run, class, err)

@@ -3,19 +3,65 @@ package command
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 )
+
+// defaultTimeout is the floor every planner call gets regardless of prompt
+// size -- unchanged from the pre-8P-E.10 fixed timeout, so a small objective
+// times out no later than it always has.
+const defaultTimeout = 3 * time.Minute
+
+// defaultMaxTimeout bounds how far scaledTimeout will stretch the deadline
+// for a large prompt+context payload (Checkpoint 8P-E.10). This is a bound,
+// not a blind global bump: small objectives still get defaultTimeout.
+const defaultMaxTimeout = 12 * time.Minute
+
+// bytesPerExtraMinute is the scaling factor behind scaledTimeout: every full
+// multiple of this many bytes of prompt+context payload earns the call one
+// more minute, up to MaxTimeout. Chosen conservatively -- MEDUSA-sized
+// prompts (tens of KB of objective text plus repository context) land well
+// inside a handful of extra minutes rather than saturating the cap on
+// ordinary objectives.
+const bytesPerExtraMinute = 40 * 1024
+
+// maxParseRetries is how many additional attempts (beyond the first) the
+// adapter makes when the planner subprocess itself succeeds (no timeout, no
+// exec error) but its stdout could not be turned into a plan envelope. A
+// single retry is enough to absorb a one-off flake (e.g. a transient stray
+// line mixed into stdout) without masking a genuinely broken invocation --
+// see Generate's retry loop for why timeouts and command failures are never
+// retried here.
+const maxParseRetries = 1
+
+const parseRetryBackoff = 500 * time.Millisecond
+
+// outputSnippetLimit bounds how much of a failed subprocess's raw output is
+// embedded in the returned error. Enough to carry a provider's plain-text
+// error message (rate-limit/auth banners are short) without ever logging a
+// full malformed plan body.
+const outputSnippetLimit = 500
 
 type Planner struct {
 	Binary  string
 	Model   string
 	Timeout time.Duration
+	// MaxTimeout bounds scaledTimeout's expansion for large payloads. Zero
+	// (the common case, set once in wiring) defaults to defaultMaxTimeout.
+	MaxTimeout time.Duration
+
+	// runCommand executes the planner subprocess and returns its combined
+	// stdout+stderr. Nil (the production default) runs the real binary via
+	// exec.CommandContext; tests inject a fake to exercise timeout scaling,
+	// envelope extraction, and retry behavior without a real CLI.
+	runCommand func(ctx context.Context, binary string, args []string, dir string, env []string) ([]byte, error)
 }
 
 func (p Planner) Descriptor() (string, string) {
@@ -26,16 +72,34 @@ func (p Planner) Descriptor() (string, string) {
 	return "anthropic", model
 }
 
+// scaledTimeout grows the base timeout by one minute per bytesPerExtraMinute
+// of payload, capped at max. Checkpoint 8P-E.10: MEDUSA-class prompts were
+// timing out at a flat 3 minutes regardless of size; rather than raising that
+// constant for every objective (a blind global bump the checkpoint
+// explicitly rejects), only payloads large enough to plausibly need more
+// processing time get more of it.
+func scaledTimeout(base, max time.Duration, payloadSize int) time.Duration {
+	if base <= 0 {
+		base = defaultTimeout
+	}
+	if max <= 0 {
+		max = defaultMaxTimeout
+	}
+	if max < base {
+		max = base
+	}
+	extra := time.Duration(payloadSize/bytesPerExtraMinute) * time.Minute
+	t := base + extra
+	if t > max {
+		t = max
+	}
+	return t
+}
+
 func (p Planner) Generate(ctx context.Context, req workflowcore.PlannerRequest) (workflowcore.PlannerResponse, error) {
 	if p.Binary == "" {
 		return workflowcore.PlannerResponse{}, fmt.Errorf("planner binary is required")
 	}
-	timeout := p.Timeout
-	if timeout <= 0 {
-		timeout = 3 * time.Minute
-	}
-	callCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	contextJSON, _ := json.Marshal(req.Context)
 	prompt := fmt.Sprintf(`Act only as a software master planner. You cannot use tools, edit files, run commands, commit, push, or claim work is complete.
 Decompose the objective into small, independently verifiable implementation units. Preserve a simple dependency DAG and no more than %d steps; for a small objective prefer 2-4 substantial steps and do not plan work already present in the repository context. Every step must require a durable code, test, or documentation change; never create a verification-only step, and instead include final checks in the last implementation step. Every step needs concrete acceptance criteria and safe structured verification checks. Verification commands are executable plus argument arrays, never shell snippets. Do not use shells, destructive commands, deployment tools, git mutation commands, absolute paths, or paths outside the workspace.
@@ -49,8 +113,161 @@ Conservative repository context:
 	if model == "" {
 		model = "sonnet"
 	}
-	cmd := exec.CommandContext(callCtx, p.Binary, "--print", "--output-format", "json", "--json-schema", schema, "--tools", "", "--permission-mode", "plan", "--no-session-persistence", "--model", model, prompt)
-	cmd.Dir = req.Project.Path
+	args := []string{"--print", "--output-format", "json", "--json-schema", schema, "--tools", "", "--permission-mode", "plan", "--no-session-persistence", "--model", model, prompt}
+	env := mergeEnv(os.Environ(), req.RuntimeEnv)
+	timeout := scaledTimeout(p.Timeout, p.MaxTimeout, len(prompt)+len(contextJSON))
+
+	var lastErr error
+	for attempt := 0; attempt <= maxParseRetries; attempt++ {
+		if attempt > 0 {
+			// Only reached for a parse-classified failure (see below) --
+			// never for a timeout or a subprocess/exec error, both of which
+			// return immediately. A fresh per-attempt deadline of the full
+			// scaled timeout is deliberate: a flaky single-line stdout glitch
+			// on attempt 1 says nothing about how long attempt 2 will take.
+			select {
+			case <-ctx.Done():
+				return workflowcore.PlannerResponse{}, lastErr
+			case <-time.After(parseRetryBackoff):
+			}
+		}
+		plan, provider, respModel, err := p.attempt(ctx, args, req.Project.Path, env, timeout, model)
+		if err == nil {
+			return workflowcore.PlannerResponse{Plan: plan, Provider: provider, Model: respModel}, nil
+		}
+		if !errors.Is(err, ports.ErrPlannerOutputMalformed) {
+			// Timeout, missing binary, non-zero exit, etc. -- never worth
+			// retrying blind: a slow provider stays slow, a missing binary
+			// stays missing, and a real permission/capacity error should
+			// surface to master_coordinator's classifier immediately rather
+			// than being delayed behind a doomed retry.
+			return workflowcore.PlannerResponse{}, err
+		}
+		lastErr = err
+	}
+	return workflowcore.PlannerResponse{}, lastErr
+}
+
+// attempt runs exactly one planner subprocess invocation and parses its
+// output. Split out of Generate so the bounded retry loop above has a single
+// place that decides whether an error is retry-eligible.
+func (p Planner) attempt(ctx context.Context, args []string, dir string, env []string, timeout time.Duration, model string) (workflowcore.MasterPlan, string, string, error) {
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	run := p.runCommand
+	if run == nil {
+		run = runRealCommand
+	}
+	b, err := run(callCtx, p.Binary, args, dir, env)
+	if err != nil {
+		if callCtx.Err() != nil {
+			return workflowcore.MasterPlan{}, "", "", fmt.Errorf("planner timeout: %w: %w", ports.ErrPlannerTimeout, callCtx.Err())
+		}
+		return workflowcore.MasterPlan{}, "", "", fmt.Errorf("planner command: %w: %s", err, strings.TrimSpace(snippet(b, outputSnippetLimit)))
+	}
+
+	envelope, envErr := extractEnvelope(b)
+	if envErr != nil {
+		return workflowcore.MasterPlan{}, "", "", fmt.Errorf("planner parse envelope: %w: %w: output=%q", ports.ErrPlannerOutputMalformed, envErr, snippet(b, outputSnippetLimit))
+	}
+	raw := envelope.StructuredOutput
+	if len(raw) == 0 && envelope.Result != "" {
+		raw = []byte(envelope.Result)
+	}
+	if len(raw) == 0 {
+		return workflowcore.MasterPlan{}, "", "", fmt.Errorf("planner output missing structured plan: %w: output=%q", ports.ErrPlannerOutputMalformed, snippet(b, outputSnippetLimit))
+	}
+	var plan workflowcore.MasterPlan
+	if err := json.Unmarshal(raw, &plan); err != nil {
+		return workflowcore.MasterPlan{}, "", "", fmt.Errorf("planner parse plan: %w: %w: output=%q", ports.ErrPlannerOutputMalformed, err, snippet(raw, outputSnippetLimit))
+	}
+	return plan, "anthropic", model, nil
+}
+
+type plannerEnvelope struct {
+	StructuredOutput json.RawMessage `json:"structured_output"`
+	Result           string          `json:"result"`
+}
+
+// extractEnvelope parses the planner subprocess's combined output into its
+// JSON envelope (Checkpoint 8P-E.10). The CLI is expected to print exactly
+// one JSON object, but production evidence (MEDUSA workflow runs) showed
+// occasional non-JSON leading/trailing text -- e.g. a stray banner or
+// warning line -- surrounding an otherwise well-formed envelope. The fast
+// path tries the raw bytes first; only on failure does it fall back to
+// extracting the first balanced top-level `{...}` object and retrying, so a
+// genuinely malformed body (no valid JSON object anywhere, or a truncated
+// one) still fails loudly instead of being coerced into something plausible.
+func extractEnvelope(b []byte) (plannerEnvelope, error) {
+	var envelope plannerEnvelope
+	if err := json.Unmarshal(b, &envelope); err == nil {
+		return envelope, nil
+	}
+	obj, ok := firstBalancedJSONObject(b)
+	if !ok {
+		return plannerEnvelope{}, fmt.Errorf("no JSON object found in output")
+	}
+	if err := json.Unmarshal(obj, &envelope); err != nil {
+		return plannerEnvelope{}, err
+	}
+	return envelope, nil
+}
+
+// firstBalancedJSONObject scans b for the first top-level `{...}` object,
+// respecting string literals and escapes so braces inside string values
+// (e.g. a step's description) never throw off the match. ok=false means no
+// balanced object was found -- e.g. truncated output or no '{' at all.
+func firstBalancedJSONObject(b []byte) ([]byte, bool) {
+	start := -1
+	depth := 0
+	inString := false
+	escaped := false
+	for i, c := range b {
+		if start == -1 {
+			if c == '{' {
+				start = i
+				depth = 1
+			}
+			continue
+		}
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return b[start : i+1], true
+			}
+		}
+	}
+	return nil, false
+}
+
+func snippet(b []byte, limit int) string {
+	s := strings.TrimSpace(string(b))
+	if len(s) > limit {
+		return s[:limit] + "…"
+	}
+	return s
+}
+
+func runRealCommand(ctx context.Context, binary string, args []string, dir string, env []string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Dir = dir
 	// Checkpoint 8P-B.1: before this checkpoint the planner subprocess
 	// silently inherited the daemon's own real environment (Go's exec.Cmd
 	// default with Env left nil) -- the starkest of the five launch-path
@@ -58,33 +275,8 @@ Conservative repository context:
 	// owner with a connected profile was resolved) overrides on top of the
 	// real inherited env, same override-wins convention as every other
 	// launch path.
-	cmd.Env = mergeEnv(os.Environ(), req.RuntimeEnv)
-	b, err := cmd.CombinedOutput()
-	if err != nil {
-		if callCtx.Err() != nil {
-			return workflowcore.PlannerResponse{}, fmt.Errorf("planner timeout: %w", callCtx.Err())
-		}
-		return workflowcore.PlannerResponse{}, fmt.Errorf("planner command: %w: %s", err, strings.TrimSpace(string(b)))
-	}
-	var envelope struct {
-		StructuredOutput json.RawMessage `json:"structured_output"`
-		Result           string          `json:"result"`
-	}
-	if err := json.Unmarshal(b, &envelope); err != nil {
-		return workflowcore.PlannerResponse{}, fmt.Errorf("planner parse envelope: %w", err)
-	}
-	raw := envelope.StructuredOutput
-	if len(raw) == 0 && envelope.Result != "" {
-		raw = []byte(envelope.Result)
-	}
-	var plan workflowcore.MasterPlan
-	if len(raw) == 0 {
-		return workflowcore.PlannerResponse{}, fmt.Errorf("planner output missing structured plan")
-	}
-	if err := json.Unmarshal(raw, &plan); err != nil {
-		return workflowcore.PlannerResponse{}, fmt.Errorf("planner parse plan: %w", err)
-	}
-	return workflowcore.PlannerResponse{Plan: plan, Provider: "anthropic", Model: model}, nil
+	cmd.Env = env
+	return cmd.CombinedOutput()
 }
 
 // mergeEnv overlays overrides onto base ("KEY=VALUE" pairs), overrides

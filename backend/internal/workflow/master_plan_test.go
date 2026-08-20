@@ -3,11 +3,14 @@ package workflow_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/sqlitetest"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 )
@@ -206,5 +209,98 @@ func TestPlannerRecoveryRunningIsAmbiguousButRespondedFinalizes(t *testing.T) {
 				t.Fatalf("plan=%s tasks=%d", detail.Plan.Status, len(detail.Tasks))
 			}
 		})
+	}
+}
+
+// failingPlanner is a workflow.Planner test double that always returns a
+// fixed error, letting Checkpoint 8P-E.10's coordinator-level classification
+// tests below control exactly which sentinel (if any) the planner adapter
+// would have wrapped, without spinning up a real subprocess.
+type failingPlanner struct{ err error }
+
+func (p failingPlanner) Generate(context.Context, workflowcore.PlannerRequest) (workflowcore.PlannerResponse, error) {
+	return workflowcore.PlannerResponse{}, p.err
+}
+func (p failingPlanner) Descriptor() (string, string) { return "fake", "fake-v1" }
+
+// medusaSizedObjective mirrors the size of the real MEDUSA workflow prompts
+// that motivated Checkpoint 8P-E.10 -- tens of KB of detailed requirements
+// text -- so the classification regression tests below exercise the same
+// payload shape that produced the original planner_timeout /
+// planner_parse_failed incidents, not a toy one-line objective.
+func medusaSizedObjective() string {
+	return strings.Repeat("CHECKPOINT 8P-E.10 PLANNER ROBUSTNESS FOR LONG AUTONOMOUS WORKFLOWS: decompose this large, detailed objective into small independently verifiable units with concrete acceptance criteria and safe structured verification checks. ", 400)
+}
+
+func newFailingMasterFixture(t *testing.T, plannerErr error) (*workflowcore.Coordinator, string) {
+	t.Helper()
+	store := sqlitetest.MustOpen(t)
+	ctx := context.Background()
+	project := domain.ProjectRecord{ID: "p", Path: t.TempDir(), RegisteredAt: time.Now().UTC()}
+	if err := store.UpsertProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	c := workflowcore.New(workflowcore.Deps{Store: store, Projects: store, Planner: failingPlanner{err: plannerErr}, PlannerContextBuilder: staticContext{}})
+	created, err := c.CreateObjectiveRun(ctx, "p", medusaSizedObjective(), domain.WorkflowPlanApprovalManual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, created.Run.ID
+}
+
+// TestGeneratePlan_LongPromptPlannerTimeout_ClassifiesAsPlannerTimeout is the
+// regression test for the real MEDUSA workflow evidence that motivated
+// Checkpoint 8P-E.10: a planner call for a long, detailed objective timing
+// out with error_class=planner_timeout, validation_json {"valid":false,...}.
+func TestGeneratePlan_LongPromptPlannerTimeout_ClassifiesAsPlannerTimeout(t *testing.T) {
+	c, runID := newFailingMasterFixture(t, fmt.Errorf("planner timeout: %w: context deadline exceeded", ports.ErrPlannerTimeout))
+	detail, err := c.GeneratePlan(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Plan.Status != domain.WorkflowPlanInvalid || detail.Plan.ErrorClass != "planner_timeout" {
+		t.Fatalf("plan=%+v", detail.Plan)
+	}
+	if detail.Run.State != domain.WorkflowRunNeedsAttention {
+		t.Fatalf("run state=%s", detail.Run.State)
+	}
+}
+
+// TestGeneratePlan_LongPromptPlannerParseFailure_ClassifiesAsPlannerParseFailed
+// is the regression test for the second real MEDUSA incident: the planner
+// subprocess exiting successfully but its stdout not parsing into a plan
+// envelope (validation error "invalid character 'I' looking for beginning of
+// value"), classified as error_class=planner_parse_failed.
+func TestGeneratePlan_LongPromptPlannerParseFailure_ClassifiesAsPlannerParseFailed(t *testing.T) {
+	c, runID := newFailingMasterFixture(t, fmt.Errorf("planner parse envelope: %w: invalid character 'I' looking for beginning of value", ports.ErrPlannerOutputMalformed))
+	detail, err := c.GeneratePlan(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Plan.Status != domain.WorkflowPlanInvalid || detail.Plan.ErrorClass != "planner_parse_failed" {
+		t.Fatalf("plan=%+v", detail.Plan)
+	}
+	if detail.Run.State != domain.WorkflowRunNeedsAttention {
+		t.Fatalf("run state=%s", detail.Run.State)
+	}
+}
+
+// TestGeneratePlan_ClassificationIsSentinelBased_NotObjectiveTextSubstring is
+// the regression test for the classification bug the sentinel-based rewrite
+// fixed: before Checkpoint 8P-E.10, GeneratePlan classified planner failures
+// by substring-matching err.Error() for "timeout"/"parse", so an unrelated
+// planner failure could be misclassified purely because the workflow's own
+// (long, detailed) objective text happened to contain those words. This
+// objective's medusaSizedObjective() text does not contain "timeout" or
+// "parse", but a truly generic failure must still land on the conservative
+// default class regardless of objective content.
+func TestGeneratePlan_ClassificationIsSentinelBased_NotObjectiveTextSubstring(t *testing.T) {
+	c, runID := newFailingMasterFixture(t, errors.New("planner exited with an unrecognized internal error"))
+	detail, err := c.GeneratePlan(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Plan.ErrorClass != "planner_start_failed" {
+		t.Fatalf("generic unclassified failure must default to planner_start_failed, got %q", detail.Plan.ErrorClass)
 	}
 }
