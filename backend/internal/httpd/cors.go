@@ -52,6 +52,12 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 
 			h := w.Header()
 			h.Set("Access-Control-Allow-Origin", origin)
+			// Auth uses an HttpOnly session cookie, so every browser request carries
+			// credentials: "include". Without this header Chromium's CORS credentialed-
+			// request check discards the response client-side (a network-level fetch
+			// failure, not a visible 4xx/5xx) even though the daemon answered normally —
+			// origin is never "*" here, so this cannot widen the allowlist above.
+			h.Set("Access-Control-Allow-Credentials", "true")
 
 			if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
 				h.Set("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")

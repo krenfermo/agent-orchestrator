@@ -10,6 +10,7 @@ import { providerVisualIdentity } from "../../lib/provider-visual-identity";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
+import { ProviderSetupDialog } from "./ProviderSetupDialog";
 import { SettingsRow } from "./SettingsRow";
 import { SettingsSection } from "./SettingsSection";
 import { Badge, type BadgeVariant } from "../ui/badge";
@@ -30,7 +31,7 @@ import { Badge, type BadgeVariant } from "../ui/badge";
  */
 export function DevelopmentAgentsSettingsSection({ titleHidden }: { titleHidden?: boolean } = {}) {
 	const { t } = useTranslation();
-	const { registry, profiles, isLoading, error, createProfile, connect, disconnect, test, setEnabled } = useProviderProfiles();
+	const { registry, profiles, isLoading, error, createProfile, disconnect, test, setEnabled } = useProviderProfiles();
 	const { capacity } = useCapacity();
 	const capacityFor = (harness: string) => capacity?.find((c) => c.harness === harness);
 
@@ -49,7 +50,6 @@ export function DevelopmentAgentsSettingsSection({ titleHidden }: { titleHidden?
 						profile={profile}
 						capacity={capacityFor(descriptor.harness)}
 						onCreate={() => createProfile({ provider: descriptor.provider, harness: descriptor.harness, displayName: descriptor.displayName })}
-						onConnect={(id) => connect(id)}
 						onDisconnect={(id) => disconnect(id)}
 						onTest={(id) => test(id)}
 						onSetEnabled={(id, enabled) => (profile ? setEnabled({ id, profile, enabled }) : undefined)}
@@ -76,7 +76,6 @@ function ProviderCard({
 	profile,
 	capacity,
 	onCreate,
-	onConnect,
 	onDisconnect,
 	onTest,
 	onSetEnabled,
@@ -85,7 +84,6 @@ function ProviderCard({
 	profile?: ProviderProfile;
 	capacity?: CapacitySnapshot;
 	onCreate: () => Promise<ProviderProfile>;
-	onConnect: (id: string) => Promise<ProviderProfile>;
 	onDisconnect: (id: string) => Promise<ProviderProfile>;
 	onTest: (id: string) => Promise<{ ok: boolean; message: string }>;
 	onSetEnabled: (id: string, enabled: boolean) => Promise<ProviderProfile> | undefined;
@@ -94,6 +92,9 @@ function ProviderCard({
 	const [busyAction, setBusyAction] = useState<"connect" | "test" | "disconnect" | "enable" | undefined>();
 	const [actionError, setActionError] = useState<string | undefined>();
 	const [lastResult, setLastResult] = useState<LastResult>(undefined);
+	// Checkpoint 8P-E.8.4: set while the guided "Connect <Provider>" dialog is
+	// open for this card's profile. Undefined means the dialog is closed.
+	const [setupProfile, setSetupProfile] = useState<{ id: string; displayName: string } | undefined>(undefined);
 	const busy = busyAction !== undefined;
 
 	const identity = providerVisualIdentity(descriptor.provider);
@@ -116,6 +117,27 @@ function ProviderCard({
 		} finally {
 			setBusyAction(undefined);
 		}
+	};
+
+	// Checkpoint 8P-E.8.4: Connect no longer calls the /connect probe directly --
+	// it opens the guided setup dialog, creating a profile first if this
+	// provider has none yet. The dialog itself is what refreshes auth state
+	// (it polls Test Connection), so no result is recorded here.
+	const handleConnectClick = async () => {
+		setActionError(undefined);
+		let id = profile?.id;
+		if (!id) {
+			setBusyAction("connect");
+			try {
+				id = (await onCreate()).id;
+			} catch (err) {
+				setActionError(apiErrorMessage(err));
+				setBusyAction(undefined);
+				return;
+			}
+			setBusyAction(undefined);
+		}
+		setSetupProfile({ id, displayName: descriptor.displayName });
 	};
 
 	const capabilityLabel = (capability: string) => t(`settings.agents.capability.${capability}`, capability);
@@ -179,48 +201,55 @@ function ProviderCard({
 						/>
 					</div>
 				)}
-				{descriptor.available &&
-					(profile ? (
-						<>
-							<Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void runAction("test", () => onTest(profile.id))}>
-								{busyAction === "test" ? (
-									<>
-										<Loader2 className="size-icon-sm animate-spin" aria-hidden="true" />
-										{t("settings.agents.testing")}
-									</>
-								) : (
-									t("settings.agents.testConnection")
-								)}
-							</Button>
-							<Button
-								type="button"
-								variant="outline"
-								size="sm"
-								disabled={busy}
-								onClick={() => void runAction("disconnect", () => onDisconnect(profile.id))}
-							>
-								{t("settings.agents.disconnect")}
-							</Button>
-						</>
-					) : (
-						<Button
-							type="button"
-							variant="outline"
-							size="sm"
-							disabled={busy}
-							onClick={() => void runAction("connect", async () => onConnect((await onCreate()).id))}
-						>
-							{busyAction === "connect" ? (
+				{descriptor.available && (!profile || status.account !== "connected") && (
+					<Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void handleConnectClick()}>
+						{busyAction === "connect" ? (
+							<>
+								<Loader2 className="size-icon-sm animate-spin" aria-hidden="true" />
+								{t("settings.agents.testing")}
+							</>
+						) : profile ? (
+							t("settings.agents.connectAccount")
+						) : (
+							t("settings.agents.connect")
+						)}
+					</Button>
+				)}
+				{descriptor.available && profile && (
+					<>
+						<Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void runAction("test", () => onTest(profile.id))}>
+							{busyAction === "test" ? (
 								<>
 									<Loader2 className="size-icon-sm animate-spin" aria-hidden="true" />
 									{t("settings.agents.testing")}
 								</>
 							) : (
-								t("settings.agents.connect")
+								t("settings.agents.testConnection")
 							)}
 						</Button>
-					))}
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							disabled={busy}
+							onClick={() => void runAction("disconnect", () => onDisconnect(profile.id))}
+						>
+							{t("settings.agents.disconnect")}
+						</Button>
+					</>
+				)}
 			</div>
+
+			{setupProfile && (
+				<ProviderSetupDialog
+					profileId={setupProfile.id}
+					displayName={setupProfile.displayName}
+					open
+					onOpenChange={(next) => {
+						if (!next) setSetupProfile(undefined);
+					}}
+				/>
+			)}
 
 			{!descriptor.available && descriptor.unavailable && (
 				<p className="px-(--size-settings-row-padding) text-xs text-settings-muted">{descriptor.unavailable}</p>

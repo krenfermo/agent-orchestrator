@@ -44,12 +44,13 @@ import (
 	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	devimportsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/devimport"
 	environmentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/environment"
+	executionpolicysvc "github.com/aoagents/agent-orchestrator/backend/internal/service/executionpolicy"
 	importsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/importer"
 	notificationsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/notification"
 	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
-	executionpolicysvc "github.com/aoagents/agent-orchestrator/backend/internal/service/executionpolicy"
 	providerprofilesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providerprofile"
+	providersetupsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providersetup"
 	questionssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/questions"
 	settingssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/settings"
 	usagesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/usage"
@@ -528,6 +529,22 @@ func RunWithConfig(cfg config.Config) error {
 		go dispatcher.Run(ctx)
 	}
 
+	// Shared between APIDeps.ProviderProfiles and providersetup.Service
+	// (Checkpoint 8P-E.8.4): both need the same Prober/DataDir-scoped Get,
+	// and constructing it twice would let the two surfaces silently drift.
+	providerProfilesSvc := &providerprofilesvc.Service{
+		Store:   store,
+		Prober:  providerprofilesvc.CLIProber{},
+		DataDir: staticDataDir(cfg.DataDir),
+	}
+	providerSetupSvc := &providersetupsvc.Service{
+		Profiles:  providerProfilesSvc,
+		Terminals: providerSetupTerminals{shellTermSvc},
+		Launcher:  providersetupsvc.CLILauncher{},
+		Prober:    providerprofilesvc.CLIProber{},
+		DataDir:   staticDataDir(cfg.DataDir),
+	}
+
 	srv, err := httpd.NewWithDeps(cfg, log, termMgr, httpd.APIDeps{
 		Projects:           projectSvc,
 		Agents:             agentSvc,
@@ -570,12 +587,9 @@ func RunWithConfig(cfg config.Config) error {
 		ProjectOwnership:    store,
 		WorkflowOwnership:   store,
 		SessionOwnership:    store,
-		ProviderProfiles: &providerprofilesvc.Service{
-			Store:   store,
-			Prober:  providerprofilesvc.CLIProber{},
-			DataDir: staticDataDir(cfg.DataDir),
-		},
-		ExecutionPolicy: &executionpolicysvc.Service{Store: store},
+		ProviderProfiles:    providerProfilesSvc,
+		ProviderSetup:       providerSetupSvc,
+		ExecutionPolicy:     &executionpolicysvc.Service{Store: store},
 	})
 	if err != nil {
 		stop()

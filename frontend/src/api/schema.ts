@@ -812,6 +812,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/provider-profiles/{id}/setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start a guided setup terminal running the provider's own login flow inside the owner's isolated runtime-home (Checkpoint 8P-E.8.4) */
+        post: operations["startProviderProfileSetup"];
+        /** Stop a profile's live guided setup terminal, if any */
+        delete: operations["stopProviderProfileSetup"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/provider-profiles/{id}/test": {
         parameters: {
             query?: never;
@@ -2632,6 +2650,10 @@ export interface components {
         };
         ControllersSetupStatusResponse: {
             setupRequired: boolean;
+        };
+        ControllersStartProviderSetupResponse: {
+            handleId: string;
+            instructions: string;
         };
         ControllersTaskCheckpointSummaryResponse: {
             acceptanceCriteria?: string[];
@@ -6878,6 +6900,113 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ControllersProviderProfileResponse"];
                 };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    startProviderProfileSetup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Provider profile identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersStartProviderSetupResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    stopProviderProfileSetup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Provider profile identifier. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Unauthorized */
             401: {

@@ -2047,6 +2047,86 @@ paths:
       summary: Clear AO's cached belief that this profile is authenticated
       tags:
       - provider-profiles
+  /api/v1/provider-profiles/{id}/setup:
+    delete:
+      operationId: stopProviderProfileSetup
+      parameters:
+      - description: Provider profile identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Provider profile identifier.
+          type: string
+      responses:
+        "204":
+          description: No Content
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Stop a profile's live guided setup terminal, if any
+      tags:
+      - provider-profiles
+    post:
+      operationId: startProviderProfileSetup
+      parameters:
+      - description: Provider profile identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Provider profile identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersStartProviderSetupResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Start a guided setup terminal running the provider's own login flow
+        inside the owner's isolated runtime-home (Checkpoint 8P-E.8.4)
+      tags:
+      - provider-profiles
   /api/v1/provider-profiles/{id}/test:
     post:
       operationId: testProviderProfile
@@ -7381,6 +7461,16 @@ components:
           type: boolean
       required:
       - setupRequired
+      type: object
+    ControllersStartProviderSetupResponse:
+      properties:
+        handleId:
+          type: string
+        instructions:
+          type: string
+      required:
+      - handleId
+      - instructions
       type: object
     ControllersTaskCheckpointSummaryResponse:
       properties:

@@ -228,32 +228,80 @@ func (s *Service) OpenShellTerminal(ctx context.Context, in OpenShellTerminalInp
 		return ShellTerminal{}, apierr.Internal("SHELL_TERMINAL_NO_SHELL",
 			"Could not determine a shell to launch. Set SHELL (macOS/Linux) or ComSpec (Windows).")
 	}
+	// The resolved project, not the requested one: a session-scoped open
+	// that named no project still belongs to the session's project, and
+	// persisting "" there would leave the row unattributable on the board.
+	return s.createAndPersist(ctx, createParams{
+		WorkingDir: workingDir,
+		Argv:       argv,
+		Title:      shellTerminalTitle(workingDir),
+		ProjectID:  projectID,
+		SessionID:  in.SessionID,
+	})
+}
+
+// OpenProviderSetupTerminal opens a PTY whose Argv/Env are decided entirely by
+// the caller rather than resolved from a login shell — used by
+// providersetup.Service to run a provider CLI's own login flow directly
+// inside the profile owner's isolated runtime-home (Checkpoint 8P-E.8.4).
+// Unlike OpenShellTerminal, Argv/Env here are never client-supplied: the only
+// caller is providersetup, which computes them server-side from
+// runtimehome.Environment and never accepts them over HTTP. The terminal is
+// unattributed to any project/session (both are set to "" on the row) since a
+// provider setup terminal belongs to the user, not to a workspace.
+func (s *Service) OpenProviderSetupTerminal(ctx context.Context, workingDir string, argv []string, env map[string]string, title string) (ShellTerminal, error) {
+	if len(argv) == 0 {
+		return ShellTerminal{}, apierr.Internal("SHELL_TERMINAL_NO_ARGV", "no argv given for provider setup terminal")
+	}
+	return s.createAndPersist(ctx, createParams{
+		WorkingDir: workingDir,
+		Argv:       argv,
+		Env:        env,
+		Title:      title,
+	})
+}
+
+// createParams is the shared input to createAndPersist -- see its doc for why
+// this is factored out of OpenShellTerminal.
+type createParams struct {
+	WorkingDir string
+	Argv       []string
+	Env        map[string]string
+	Title      string
+	ProjectID  domain.ProjectID
+	SessionID  domain.SessionID
+}
+
+// createAndPersist is the common tail of every way to open a shell-terminal
+// PTY: mint a handle id, spawn the runtime, and persist the row -- rolling
+// the runtime back if the persist fails, so a stored row always names a PTY
+// that actually exists (otherwise a restart would try to re-attach to a
+// handle that was never spawned).
+func (s *Service) createAndPersist(ctx context.Context, p createParams) (ShellTerminal, error) {
 	handleID, err := s.newHandleID()
 	if err != nil {
 		return ShellTerminal{}, fmt.Errorf("open shell terminal: handle id: %w", err)
 	}
 
-	// SessionID is the runtime adapters' name for "what to call this PTY"; it
-	// is not a session row and no sessions record is ever created. The
-	// shellterm- prefix keeps the two namespaces disjoint.
+	// SessionID here is the runtime adapters' name for "what to call this
+	// PTY"; it is not a sessions-table row and no sessions record is ever
+	// created. The shellterm- prefix keeps the two namespaces disjoint.
 	handle, err := s.runtime.Create(ctx, ports.RuntimeConfig{
 		SessionID:     domain.SessionID(handleID),
-		WorkspacePath: workingDir,
-		Argv:          argv,
+		WorkspacePath: p.WorkingDir,
+		Argv:          p.Argv,
+		Env:           p.Env,
 	})
 	if err != nil {
 		return ShellTerminal{}, fmt.Errorf("open shell terminal %s: runtime: %w", handleID, err)
 	}
 
 	rec := ShellTerminalRecord{
-		HandleID: handle.ID,
-		// The resolved project, not the requested one: a session-scoped open
-		// that named no project still belongs to the session's project, and
-		// persisting "" there would leave the row unattributable on the board.
-		ProjectID:  projectID,
-		SessionID:  in.SessionID,
-		WorkingDir: workingDir,
-		Title:      shellTerminalTitle(workingDir),
+		HandleID:   handle.ID,
+		ProjectID:  p.ProjectID,
+		SessionID:  p.SessionID,
+		WorkingDir: p.WorkingDir,
+		Title:      p.Title,
 		AppRunID:   s.appRunID,
 		CreatedAt:  s.now().UTC(),
 	}
@@ -267,7 +315,7 @@ func (s *Service) OpenShellTerminal(ctx context.Context, in OpenShellTerminalInp
 		return ShellTerminal{}, fmt.Errorf("open shell terminal %s: persist: %w", handle.ID, err)
 	}
 
-	s.log.Info("shell terminal opened", "handleId", handle.ID, "workingDir", workingDir)
+	s.log.Info("shell terminal opened", "handleId", handle.ID, "workingDir", p.WorkingDir)
 	return shellTerminalFromRecord(rec), nil
 }
 

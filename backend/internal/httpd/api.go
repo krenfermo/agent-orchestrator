@@ -16,10 +16,11 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/presence"
 	authsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/authsvc"
+	executionpolicysvc "github.com/aoagents/agent-orchestrator/backend/internal/service/executionpolicy"
 	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
-	executionpolicysvc "github.com/aoagents/agent-orchestrator/backend/internal/service/executionpolicy"
 	providerprofilesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providerprofile"
+	providersetupsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providersetup"
 	reviewsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/review"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
 )
@@ -103,6 +104,11 @@ type APIDeps struct {
 	// /providers/registry routes answering 501, matching the other
 	// optional-surface conventions here.
 	ProviderProfiles providerprofilesvc.Manager
+
+	// ProviderSetup backs Checkpoint 8P-E.8.4's zero-terminal guided setup
+	// surface (POST/DELETE /provider-profiles/{id}/setup). Optional: nil
+	// leaves those two routes answering 501, independent of ProviderProfiles.
+	ProviderSetup providersetupsvc.Manager
 
 	// ExecutionPolicy backs Checkpoint 8P-C's per-user configurable
 	// routing surface. Optional: nil leaves /execution-policy answering
@@ -235,7 +241,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		},
 		events:           &EventsController{Source: deps.CDC, Live: deps.Events},
 		auth:             &controllers.AuthController{Mgr: deps.Auth, TrustedLocal: cfg.TrustedLocalMode},
-		providerProfiles: &controllers.ProviderProfilesController{Mgr: deps.ProviderProfiles},
+		providerProfiles: &controllers.ProviderProfilesController{Mgr: deps.ProviderProfiles, Setup: deps.ProviderSetup},
 		executionPolicy:  &controllers.ExecutionPolicyController{Mgr: deps.ExecutionPolicy},
 	}
 }

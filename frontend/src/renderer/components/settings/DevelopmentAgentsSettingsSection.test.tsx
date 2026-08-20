@@ -16,6 +16,16 @@ vi.mock("../../hooks/useCapacity", () => ({
 	useCapacity: useCapacityMock,
 }));
 
+// ProviderSetupDialog owns its own terminal/query wiring (covered by its own
+// test file) -- here we only need to see which profile it was opened for.
+vi.mock("./ProviderSetupDialog", () => ({
+	ProviderSetupDialog: ({ profileId, displayName }: { profileId: string; displayName: string }) => (
+		<div data-testid="provider-setup-dialog">
+			{displayName}:{profileId}
+		</div>
+	),
+}));
+
 function descriptor(overrides: Partial<ProviderDescriptor> = {}): ProviderDescriptor {
 	return {
 		provider: "anthropic",
@@ -185,15 +195,22 @@ describe("DevelopmentAgentsSettingsSection", () => {
 		expect(screen.getByText("Decision resolver", { exact: false })).toBeInTheDocument();
 	});
 
-	it("creates then connects a profile for a provider with none yet", async () => {
+	it("creates a profile then opens the guided setup dialog for a provider with none yet", async () => {
 		const createMock = vi.fn().mockResolvedValue(profile({ id: "prof-new" }));
-		const connectMock = vi.fn().mockResolvedValue(profile({ id: "prof-new" }));
-		useProviderProfilesMock.mockReturnValue(
-			baseHook({ registry: [descriptor()], profiles: [], createProfile: createMock, connect: connectMock }),
-		);
+		useProviderProfilesMock.mockReturnValue(baseHook({ registry: [descriptor()], profiles: [], createProfile: createMock }));
 		render(<DevelopmentAgentsSettingsSection />);
 		fireEvent.click(screen.getByText("Connect"));
-		await vi.waitFor(() => expect(connectMock).toHaveBeenCalledWith("prof-new"));
+		await vi.waitFor(() => expect(createMock).toHaveBeenCalled());
+		expect(await screen.findByTestId("provider-setup-dialog")).toHaveTextContent("Claude Code:prof-new");
+	});
+
+	it("opens the guided setup dialog directly (no re-create) for an existing but unauthenticated profile", async () => {
+		useProviderProfilesMock.mockReturnValue(
+			baseHook({ registry: [descriptor()], profiles: [profile({ id: "prof-1", authState: "unauthenticated" })] }),
+		);
+		render(<DevelopmentAgentsSettingsSection />);
+		fireEvent.click(screen.getByText("Connect account"));
+		expect(await screen.findByTestId("provider-setup-dialog")).toHaveTextContent("Claude Code:prof-1");
 	});
 
 	it("calls disconnect with the profile id", () => {

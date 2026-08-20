@@ -10,6 +10,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 	providerprofilesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providerprofile"
+	providersetupsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providersetup"
 )
 
 // ProviderProfileIDParam is the {id} path parameter for provider-profile routes.
@@ -127,13 +128,26 @@ type TestProviderProfileResponse struct {
 	Message string              `json:"message"`
 }
 
+// StartProviderSetupResponse is the body of a successful
+// POST /api/v1/provider-profiles/{id}/setup. HandleID lets the frontend
+// attach to the setup terminal over the existing terminal WebSocket mux --
+// nothing else about the launch (Argv, Env, credentials) ever reaches the
+// wire (Checkpoint 8P-E.8.4 Phase 8).
+type StartProviderSetupResponse struct {
+	HandleID     string `json:"handleId"`
+	Instructions string `json:"instructions"`
+}
+
 // ProviderProfilesController owns the /provider-profiles and
-// /providers/registry routes (Checkpoint 8P-B). Every handler resolves the
-// current user via identity.Require and passes it explicitly into Mgr --
+// /providers/registry routes (Checkpoint 8P-B), plus the guided-setup
+// surface added by Checkpoint 8P-E.8.4. Every handler resolves the current
+// user via identity.Require and passes it explicitly into Mgr/Setup --
 // this controller never trusts a user id from the request body/path/query.
-// A nil Mgr keeps routes registered but answers OpenAPI-backed 501s.
+// A nil Mgr keeps routes registered but answers OpenAPI-backed 501s; a nil
+// Setup does the same for just the setup routes, independent of Mgr.
 type ProviderProfilesController struct {
-	Mgr providerprofilesvc.Manager
+	Mgr   providerprofilesvc.Manager
+	Setup providersetupsvc.Manager
 }
 
 // Register mounts the provider-profile routes on the supplied router.
@@ -146,6 +160,46 @@ func (c *ProviderProfilesController) Register(r chi.Router) {
 	r.Post("/provider-profiles/{id}/connect", c.connect)
 	r.Post("/provider-profiles/{id}/disconnect", c.disconnect)
 	r.Post("/provider-profiles/{id}/test", c.test)
+	r.Post("/provider-profiles/{id}/setup", c.startSetup)
+	r.Delete("/provider-profiles/{id}/setup", c.stopSetup)
+}
+
+func (c *ProviderProfilesController) startSetup(w http.ResponseWriter, r *http.Request) {
+	if c.Setup == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/provider-profiles/{id}/setup")
+		return
+	}
+	user, err := identity.Require(r)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	sess, err := c.Setup.Start(r.Context(), user.ID, providerProfileID(r))
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, StartProviderSetupResponse{
+		HandleID:     sess.HandleID,
+		Instructions: sess.Instructions,
+	})
+}
+
+func (c *ProviderProfilesController) stopSetup(w http.ResponseWriter, r *http.Request) {
+	if c.Setup == nil {
+		apispec.NotImplemented(w, r, http.MethodDelete, "/api/v1/provider-profiles/{id}/setup")
+		return
+	}
+	user, err := identity.Require(r)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	if err := c.Setup.Stop(r.Context(), user.ID, providerProfileID(r)); err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (c *ProviderProfilesController) registry(w http.ResponseWriter, r *http.Request) {

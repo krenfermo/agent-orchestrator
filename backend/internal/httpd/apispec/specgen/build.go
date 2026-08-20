@@ -579,6 +579,30 @@ func providerProfileOperations() []operation {
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
 		},
+		{
+			method: http.MethodPost, path: "/api/v1/provider-profiles/{id}/setup", id: "startProviderProfileSetup", tag: "provider-profiles",
+			summary:         "Start a guided setup terminal running the provider's own login flow inside the owner's isolated runtime-home (Checkpoint 8P-E.8.4)",
+			pathParams:      []any{controllers.ProviderProfileIDParam{}},
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.StartProviderSetupResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/provider-profiles/{id}/setup", id: "stopProviderProfileSetup", tag: "provider-profiles",
+			summary:    "Stop a profile's live guided setup terminal, if any",
+			pathParams: []any{controllers.ProviderProfileIDParam{}},
+			resps: []respUnit{
+				{http.StatusNoContent, nil},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
 	}
 }
 

@@ -1,6 +1,7 @@
 package httpd
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,8 +10,10 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	authsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/authsvc"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/providerprofile"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/providersetup"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/sqlitetest"
 )
 
@@ -109,6 +112,112 @@ func createProfile(t *testing.T, client *http.Client, baseURL string, cookie *ht
 		t.Fatal("create profile: empty id")
 	}
 	return out.Profile.ID
+}
+
+// stubTerminals is a minimal providersetup.Terminals fake for HTTP-level
+// tests: it never touches a real PTY, just records what it was asked to
+// open/close so the test can assert on it.
+type stubTerminals struct {
+	opened []string
+	closed []string
+}
+
+func (s *stubTerminals) OpenProviderSetupTerminal(ctx context.Context, workingDir string, argv []string, env map[string]string, title string) (providersetup.ShellTerminal, error) {
+	handleID := "handle-" + workingDir
+	s.opened = append(s.opened, handleID)
+	return providersetup.ShellTerminal{HandleID: handleID}, nil
+}
+
+func (s *stubTerminals) CloseShellTerminal(ctx context.Context, handleID string) error {
+	s.closed = append(s.closed, handleID)
+	return nil
+}
+
+type stubLauncher struct{}
+
+func (stubLauncher) Launch(ctx context.Context, harness domain.AgentHarness) ([]string, string, error) {
+	return []string{"claude"}, "Run /login.", nil
+}
+
+// TestProviderSetupOwnershipAndShape covers Checkpoint 8P-E.8.4 Phase 8/9/10:
+// the setup/stop routes must be ownership-scoped exactly like every other
+// provider-profile route (404, not 403, for another user's id), a client
+// can never influence Argv/Env for the launched terminal (the request body
+// is never decoded at all by these handlers), and the response never carries
+// anything beyond a handle id and instructions text.
+func TestProviderSetupOwnershipAndShape(t *testing.T) {
+	store := sqlitetest.MustOpen(t)
+	authMgr := authsvc.New(store, func() time.Time { return time.Now().UTC() })
+	profiles := &providerprofile.Service{Store: store, DataDir: fixedDataDir(t.TempDir())}
+	terminals := &stubTerminals{}
+	setup := &providersetup.Service{
+		Profiles:  profiles,
+		Terminals: terminals,
+		Launcher:  stubLauncher{},
+		DataDir:   fixedDataDir(t.TempDir()),
+	}
+
+	cfg := config.Config{TrustedLocalMode: false}
+	deps := APIDeps{Auth: authMgr, ProviderProfiles: profiles, ProviderSetup: setup}
+	router := NewRouterWithControl(cfg, discardLogger(), nil, deps, ControlDeps{})
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	if _, err := authMgr.CreateUser(t.Context(), authsvc.CreateUserInput{Email: "alice@example.com", Username: "alice", Password: "correct-horse-a"}); err != nil {
+		t.Fatalf("create user A: %v", err)
+	}
+	if _, err := authMgr.CreateUser(t.Context(), authsvc.CreateUserInput{Email: "bob@example.com", Username: "bob", Password: "correct-horse-b"}); err != nil {
+		t.Fatalf("create user B: %v", err)
+	}
+
+	client := &http.Client{}
+	_, cookieA := loginOK(t, srv.URL, "alice@example.com", "correct-horse-a")
+	_, cookieB := loginOK(t, srv.URL, "bob@example.com", "correct-horse-b")
+	profA := createProfile(t, client, srv.URL, cookieA)
+
+	// --- B cannot start or stop A's setup terminal ---
+	assertStatusMethod(t, client, http.MethodPost, srv.URL+"/api/v1/provider-profiles/"+profA+"/setup", cookieB,
+		strings.NewReader(`{"env":{"HOME":"/etc/passwd"},"argv":["rm","-rf","/"]}`), http.StatusNotFound)
+	assertStatusMethod(t, client, http.MethodDelete, srv.URL+"/api/v1/provider-profiles/"+profA+"/setup", cookieB, nil, http.StatusNotFound)
+	if len(terminals.opened) != 0 {
+		t.Fatalf("expected no terminal opened for another user's profile, opened=%v", terminals.opened)
+	}
+
+	// --- A can start its own setup terminal; a malicious body is ignored
+	// entirely (the handler never decodes a request body for this route) ---
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/provider-profiles/"+profA+"/setup",
+		strings.NewReader(`{"env":{"HOME":"/etc/passwd"},"argv":["rm","-rf","/"]}`))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookieA)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("start setup: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("start setup: status = %d", resp.StatusCode)
+	}
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+	for key := range out {
+		if key != "handleId" && key != "instructions" {
+			t.Fatalf("start setup response leaked unexpected field %q: %v", key, out)
+		}
+	}
+	if out["handleId"] == "" || out["handleId"] == nil {
+		t.Fatal("expected a non-empty handleId")
+	}
+
+	// --- A can stop its own setup terminal ---
+	assertStatusMethod(t, client, http.MethodDelete, srv.URL+"/api/v1/provider-profiles/"+profA+"/setup", cookieA, nil, http.StatusNoContent)
+	if len(terminals.closed) == 0 {
+		t.Fatal("expected the terminal to have been closed")
+	}
 }
 
 func assertStatusMethod(t *testing.T, client *http.Client, method, url string, cookie *http.Cookie, body *strings.Reader, want int) {
