@@ -99,6 +99,12 @@ func (r *Reviewer) ReviewCommand(ctx context.Context, inv ports.ReviewInvocation
 // PreLaunch runs reviewer-specific preflight. For Claude Code this installs the
 // selected reviewer's hooks and records the worker checkout as trusted before
 // the headless reviewer pane starts.
+//
+// Env is forwarded to the underlying worker adapter's own PreLaunch
+// (Checkpoint 8P-E.3.1) so the trust record lands in the same isolated
+// CLAUDE_CONFIG_DIR the reviewer subprocess itself will read — exactly the
+// same resolveClaudeConfigPath fix 8P-E.3 made for worker launches, reused
+// unmodified rather than re-derived here.
 func (r *Reviewer) PreLaunch(ctx context.Context, inv ports.ReviewInvocation) error {
 	if hooks, ok := r.agent.(interface {
 		GetAgentHooks(context.Context, ports.WorkspaceHookConfig) error
@@ -116,6 +122,7 @@ func (r *Reviewer) PreLaunch(ctx context.Context, inv ports.ReviewInvocation) er
 	return pl.PreLaunch(ctx, ports.LaunchConfig{
 		SessionID:     workeragent.SessionUUID(inv.ReviewerID),
 		WorkspacePath: inv.WorkspacePath,
+		Env:           inv.Env,
 	})
 }
 

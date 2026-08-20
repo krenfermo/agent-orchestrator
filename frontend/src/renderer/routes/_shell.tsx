@@ -45,6 +45,7 @@ import {
 import { useUiStore } from "../stores/ui-store";
 import { useAuthStore } from "../stores/auth-store";
 import { LoginScreen } from "../components/LoginScreen";
+import { SignupScreen } from "../components/SignupScreen";
 import { matchesRendererShortcut } from "../stores/keybindings-store";
 import { sessionIsActive, toProjectKind, type WorkspaceSummary } from "../types/workspace";
 import type { components } from "../../api/schema";
@@ -57,6 +58,7 @@ export const Route = createFileRoute("/_shell")({
 	loader: async ({ context }) => {
 		await refreshDaemonStatus().catch(() => undefined);
 		void useAuthStore.getState().load();
+		void useAuthStore.getState().checkSetup();
 		if (!usesPreviewWorkspaceData && !hasTrustedApiBaseUrl()) return;
 		return context.queryClient.ensureQueryData(workspaceQueryOptions);
 	},
@@ -94,13 +96,14 @@ const shellTopbarHiddenByPlatform = hidesShellTopbar();
 function ShellLayout() {
 	// Reports how many agents this install has available, once per launch.
 	useAgentInventoryTelemetry();
-	// Checkpoint 8P-A: the login screen renders in place of the shell only
-	// when a real session is required and absent. "trusted-local" (today's
-	// default desktop UX) and "loading"/"no_user" all fall through to the
-	// normal shell unchanged — the loader kicked off auth-store's load()
-	// without blocking navigation, so this starts as "loading" and updates
-	// once resolved.
+	// Checkpoint 8P-A/8P-E.8: the login (or, first-run, signup) screen renders
+	// in place of the shell only when a real session is required and absent.
+	// "trusted-local" (today's default desktop UX) and "loading"/"no_user"
+	// all fall through to the normal shell unchanged — the loader kicked off
+	// auth-store's load()/checkSetup() without blocking navigation, so these
+	// start as "loading"/null and update once resolved.
 	const authStatus = useAuthStore((state) => state.status);
+	const setupRequired = useAuthStore((state) => state.setupRequired);
 	const navigate = useNavigate();
 	const matchRoute = useMatchRoute();
 	const queryClient = useQueryClient();
@@ -661,7 +664,7 @@ function ShellLayout() {
 	);
 
 	if (authStatus === "unauthenticated") {
-		return <LoginScreen />;
+		return setupRequired ? <SignupScreen /> : <LoginScreen />;
 	}
 
 	return (

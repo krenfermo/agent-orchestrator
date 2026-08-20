@@ -142,12 +142,20 @@ func (f *fakeProjectManager) Remove(context.Context, domain.ProjectID) (projects
 	return projectsvc.RemoveResult{}, nil
 }
 
-func (f *fakeProjectManager) ListAllowedRootEntries(context.Context, string) ([]projectsvc.BrowseEntry, error) {
-	return nil, nil
+func (f *fakeProjectManager) ListAllowedRootEntries(context.Context, string) (projectsvc.BrowseResult, error) {
+	return projectsvc.BrowseResult{}, nil
 }
 
 func (f *fakeProjectManager) CloneFromGitHub(_ context.Context, in projectsvc.CloneInput) (projectsvc.Project, error) {
 	return projectsvc.Project{ID: "cloned", Path: in.Repo}, nil
+}
+
+func (f *fakeProjectManager) TestRepoConnection(context.Context, domain.ProjectID, string) (projectsvc.ConnectionTestResult, error) {
+	return projectsvc.ConnectionTestResult{}, nil
+}
+
+func (f *fakeProjectManager) RefreshWorkspaceRepos(_ context.Context, id domain.ProjectID) (projectsvc.Project, error) {
+	return projectsvc.Project{ID: id}, nil
 }
 
 // startDriftTestDaemon stands up the real router+controllers backed by the

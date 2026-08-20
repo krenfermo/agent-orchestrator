@@ -47,14 +47,26 @@ type Manager interface {
 	// managed workspaces.
 	Remove(ctx context.Context, id domain.ProjectID) (RemoveResult, error)
 
-	// ListAllowedRootEntries lists the immediate subdirectories of relPath
-	// under the configured allowed project roots, for the web "register
-	// existing repository" browse UX.
-	ListAllowedRootEntries(ctx context.Context, relPath string) ([]BrowseEntry, error)
+	// ListAllowedRootEntries lists directory entries for the web Import
+	// Project/Workspace folder-browser UX (Checkpoint 8P-E.4): path is
+	// empty for the top level, or an absolute directory previously
+	// returned as some entry's own Path.
+	ListAllowedRootEntries(ctx context.Context, path string) (BrowseResult, error)
 
 	// CloneFromGitHub clones a repository into the first allowed project root
 	// and registers it.
 	CloneFromGitHub(ctx context.Context, in CloneInput) (Project, error)
+
+	// TestRepoConnection runs a non-destructive `git ls-remote` probe against
+	// a project's root repo (repoName == "") or a named workspace child repo,
+	// using that repository's own existing Git configuration.
+	TestRepoConnection(ctx context.Context, id domain.ProjectID, repoName string) (ConnectionTestResult, error)
+
+	// RefreshWorkspaceRepos re-detects a workspace project's child
+	// repositories from disk, correcting stale per-repo metadata (e.g. a
+	// DefaultBranch captured before the repo was checked out onto a
+	// different branch).
+	RefreshWorkspaceRepos(ctx context.Context, id domain.ProjectID) (Project, error)
 }
 
 // SessionTeardowner is the narrow session-service surface project removal
@@ -761,7 +773,8 @@ func (m *Service) projectFromRow(row domain.ProjectRecord) Project {
 		Name:          displayName(row),
 		Kind:          kind,
 		Path:          row.Path,
-		Repo:          row.RepoOriginURL,
+		Repo:          sanitizeRemoteURL(row.RepoOriginURL),
+		Transport:     classifyTransport(row.RepoOriginURL),
 		DefaultBranch: defaultBranch,
 		Agent:         string(m.defaultHarness),
 	}

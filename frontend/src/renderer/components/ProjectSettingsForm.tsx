@@ -6,6 +6,8 @@ import {
 	ProjectSettingsSection,
 	ProjectWorkflowSettingsView,
 	validateProjectSettings,
+	type RepoConnectivityRow,
+	type RepoConnectivityTestState,
 } from "@aoagents/product-ui";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -162,6 +164,62 @@ function SettingsBody({
 		}));
 	const effectiveIntakeRepo = form.intakeRepo.trim() || deriveGitHubRepo(project.repo);
 	const reviewerWarning = reviewerTrustWarning(form.reviewerHarness);
+
+	const [connectivityResults, setConnectivityResults] = useState<
+		Record<string, { state: RepoConnectivityTestState; message?: string }>
+	>({});
+	const testConnectionMutation = useMutation({
+		mutationFn: async (repo: string) => {
+			const { data, error } = await apiClient.POST("/api/v1/projects/{id}/repo-connection-test", {
+				params: { path: { id: projectId } },
+				body: { repo },
+			});
+			if (error) throw new Error(apiErrorMessage(error));
+			return { repo, result: data.result };
+		},
+		onMutate: (repo) => {
+			setConnectivityResults((prev) => ({ ...prev, [repo]: { state: "testing" } }));
+		},
+		onSuccess: ({ repo, result }) => {
+			setConnectivityResults((prev) => ({
+				...prev,
+				[repo]: { state: result.status === "ok" ? "ok" : "error", message: result.message },
+			}));
+		},
+		onError: (err, repo) => {
+			setConnectivityResults((prev) => ({
+				...prev,
+				[repo]: { state: "error", message: err instanceof Error ? err.message : String(err) },
+			}));
+		},
+	});
+	const repoConnectivity: RepoConnectivityRow[] =
+		project.kind === "workspace"
+			? [
+					{
+						key: "",
+						name: project.name || project.id,
+						branch: form.defaultBranch,
+						remote: project.repo || undefined,
+						transport: project.transport,
+						testState: connectivityResults[""]?.state ?? "idle",
+						testMessage: connectivityResults[""]?.message,
+						onTest: () => testConnectionMutation.mutate(""),
+					},
+					...(project.workspaceRepos ?? [])
+						.filter((repo) => repo.gitStatus !== "needs_init")
+						.map((repo) => ({
+							key: repo.name,
+							name: repo.name,
+							branch: repo.defaultBranch || form.defaultBranch,
+							remote: repo.repo || undefined,
+							transport: repo.transport,
+							testState: connectivityResults[repo.name]?.state ?? "idle",
+							testMessage: connectivityResults[repo.name]?.message,
+							onTest: () => testConnectionMutation.mutate(repo.name),
+						})),
+				]
+			: [];
 
 	const mutation = useMutation({
 		mutationFn: async () => {
@@ -464,6 +522,7 @@ function SettingsBody({
 								prefix={form.sessionPrefix}
 								onBranchChange={(defaultBranch) => setForm((f) => ({ ...f, defaultBranch }))}
 								onPrefixChange={(sessionPrefix) => setForm((f) => ({ ...f, sessionPrefix }))}
+								repoConnectivity={repoConnectivity}
 								labels={{
 									worktrees: t("settings.project.worktrees"),
 									defaultBranch: t("settings.project.defaultBranch"),
@@ -476,6 +535,13 @@ function SettingsBody({
 									editSessionPrefix: t("settings.field.edit", {
 										label: t("settings.project.sessionPrefix"),
 									}),
+									repositoryConnectivity: t("settings.project.repositoryConnectivity"),
+									repositoryConnectivityNote: t("settings.project.repositoryConnectivityNote"),
+									testConnection: t("settings.project.testConnection"),
+									testing: t("settings.project.testingConnection"),
+									connectionOk: t("settings.project.connectionOk"),
+									connectionError: t("settings.project.connectionError"),
+									noRemote: t("settings.project.noRemote"),
 								}}
 								reviewerControl={
 									<ReviewerSelect

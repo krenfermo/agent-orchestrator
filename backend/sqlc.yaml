@@ -104,6 +104,10 @@ sql:
             go_type:
               import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
               type: "UserStatus"
+          - column: "users.role"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "UserRole"
           - column: "auth_sessions.id"
             go_type: "string"
           - column: "auth_sessions.user_id"

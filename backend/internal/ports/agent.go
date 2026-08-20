@@ -373,6 +373,16 @@ type LaunchConfig struct {
 	SystemPrompt     string
 	SystemPromptFile string
 	WorkspacePath    string
+	// Env is the fully-resolved environment the spawned subprocess will run
+	// with (HOME/CLAUDE_CONFIG_DIR/etc. — see runtimehome.Environment),
+	// wired through for adapters whose PreLaunch step must write into the
+	// same isolated per-user config location the launched process itself
+	// will read (Checkpoint 8P-E.3: writing trust records into the daemon's
+	// own os.UserHomeDir() instead of this env's CLAUDE_CONFIG_DIR left the
+	// record invisible to the actual worker, which blocked forever on
+	// Claude Code's interactive trust prompt). May be nil for callers that
+	// have no per-user isolated environment to offer.
+	Env map[string]string
 }
 
 // WorkspaceHookConfig carries inputs needed to install workspace-local agent hooks.

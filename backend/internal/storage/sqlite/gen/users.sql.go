@@ -12,6 +12,17 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
+const countOwners = `-- name: CountOwners :one
+SELECT COUNT(*) FROM users WHERE role = 'owner'
+`
+
+func (q *Queries) CountOwners(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countOwners)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countUsers = `-- name: CountUsers :one
 SELECT COUNT(*) FROM users
 `
@@ -24,7 +35,7 @@ func (q *Queries) CountUsers(ctx context.Context) (int64, error) {
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, display_name, email, username, password_hash, status, created_at, updated_at
+SELECT id, display_name, email, username, password_hash, status, role, created_at, updated_at
 FROM users WHERE email = ?
 `
 
@@ -38,6 +49,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.Username,
 		&i.PasswordHash,
 		&i.Status,
+		&i.Role,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -45,7 +57,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, display_name, email, username, password_hash, status, created_at, updated_at
+SELECT id, display_name, email, username, password_hash, status, role, created_at, updated_at
 FROM users WHERE id = ?
 `
 
@@ -59,6 +71,7 @@ func (q *Queries) GetUserByID(ctx context.Context, id domain.UserID) (User, erro
 		&i.Username,
 		&i.PasswordHash,
 		&i.Status,
+		&i.Role,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -66,7 +79,7 @@ func (q *Queries) GetUserByID(ctx context.Context, id domain.UserID) (User, erro
 }
 
 const getUserByUsername = `-- name: GetUserByUsername :one
-SELECT id, display_name, email, username, password_hash, status, created_at, updated_at
+SELECT id, display_name, email, username, password_hash, status, role, created_at, updated_at
 FROM users WHERE username = ?
 `
 
@@ -80,6 +93,7 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (User,
 		&i.Username,
 		&i.PasswordHash,
 		&i.Status,
+		&i.Role,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -88,9 +102,9 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (User,
 
 const insertUser = `-- name: InsertUser :one
 
-INSERT INTO users (id, display_name, email, username, password_hash, status, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id, display_name, email, username, password_hash, status, created_at, updated_at
+INSERT INTO users (id, display_name, email, username, password_hash, status, role, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, display_name, email, username, password_hash, status, role, created_at, updated_at
 `
 
 type InsertUserParams struct {
@@ -100,6 +114,7 @@ type InsertUserParams struct {
 	Username     string
 	PasswordHash string
 	Status       domain.UserStatus
+	Role         domain.UserRole
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
@@ -117,6 +132,7 @@ func (q *Queries) InsertUser(ctx context.Context, arg InsertUserParams) (User, e
 		arg.Username,
 		arg.PasswordHash,
 		arg.Status,
+		arg.Role,
 		arg.CreatedAt,
 		arg.UpdatedAt,
 	)
@@ -128,6 +144,7 @@ func (q *Queries) InsertUser(ctx context.Context, arg InsertUserParams) (User, e
 		&i.Username,
 		&i.PasswordHash,
 		&i.Status,
+		&i.Role,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -135,7 +152,7 @@ func (q *Queries) InsertUser(ctx context.Context, arg InsertUserParams) (User, e
 }
 
 const listUsers = `-- name: ListUsers :many
-SELECT id, display_name, email, username, password_hash, status, created_at, updated_at
+SELECT id, display_name, email, username, password_hash, status, role, created_at, updated_at
 FROM users
 `
 
@@ -155,6 +172,7 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 			&i.Username,
 			&i.PasswordHash,
 			&i.Status,
+			&i.Role,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -183,6 +201,24 @@ type UpdateUserPasswordHashParams struct {
 
 func (q *Queries) UpdateUserPasswordHash(ctx context.Context, arg UpdateUserPasswordHashParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, updateUserPasswordHash, arg.PasswordHash, arg.UpdatedAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const updateUserRole = `-- name: UpdateUserRole :execrows
+UPDATE users SET role = ?, updated_at = ? WHERE id = ?
+`
+
+type UpdateUserRoleParams struct {
+	Role      domain.UserRole
+	UpdatedAt time.Time
+	ID        domain.UserID
+}
+
+func (q *Queries) UpdateUserRole(ctx context.Context, arg UpdateUserRoleParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateUserRole, arg.Role, arg.UpdatedAt, arg.ID)
 	if err != nil {
 		return 0, err
 	}

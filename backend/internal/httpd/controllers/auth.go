@@ -24,6 +24,7 @@ type UserView struct {
 	Email       string `json:"email"`
 	Username    string `json:"username"`
 	Status      string `json:"status" enum:"active,disabled"`
+	Role        string `json:"role" enum:"owner,member"`
 }
 
 func userView(u domain.User) UserView {
@@ -33,7 +34,33 @@ func userView(u domain.User) UserView {
 		Email:       u.Email,
 		Username:    u.Username,
 		Status:      string(u.Status),
+		Role:        string(u.Role),
 	}
+}
+
+// SetupStatusResponse is the body of GET /api/v1/auth/setup-status.
+type SetupStatusResponse struct {
+	SetupRequired bool `json:"setupRequired"`
+}
+
+// RegisterRequest is the body of POST /api/v1/auth/register. Only usable
+// while SetupStatusResponse.SetupRequired is true — see AuthController.register.
+type RegisterRequest struct {
+	DisplayName string `json:"displayName"`
+	Email       string `json:"email"`
+	Password    string `json:"password"`
+}
+
+// AdminResetPasswordRequest is the body of the loopback-only
+// POST /api/v1/auth/admin/reset-password.
+type AdminResetPasswordRequest struct {
+	Email       string `json:"email"`
+	NewPassword string `json:"newPassword"`
+}
+
+// AdminResetPasswordResponse is the body of a successful admin reset-password call.
+type AdminResetPasswordResponse struct {
+	OK bool `json:"ok"`
 }
 
 // LoginRequest is the body of POST /api/v1/auth/login.
@@ -79,6 +106,9 @@ func (c *AuthController) Register(r chi.Router) {
 	r.Post("/auth/login", c.login)
 	r.Post("/auth/logout", c.logout)
 	r.Get("/auth/me", c.me)
+	r.Get("/auth/setup-status", c.setupStatus)
+	r.Post("/auth/register", c.register)
+	r.Post("/auth/admin/reset-password", c.adminResetPassword)
 }
 
 func (c *AuthController) login(w http.ResponseWriter, r *http.Request) {
@@ -139,6 +169,76 @@ func (c *AuthController) me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	envelope.WriteAPIError(w, r, http.StatusUnauthorized, "unauthorized", "NOT_AUTHENTICATED", "authentication required", nil)
+}
+
+func (c *AuthController) setupStatus(w http.ResponseWriter, r *http.Request) {
+	if c.Mgr == nil {
+		apispec.NotImplemented(w, r, http.MethodGet, "/api/v1/auth/setup-status")
+		return
+	}
+	required, err := c.Mgr.SetupRequired(r.Context())
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, SetupStatusResponse{SetupRequired: required})
+}
+
+// register creates the installation's first (owner) account. Only usable
+// while zero users exist — authsvc.RegisterFirstUser rejects any call after
+// the first succeeds, whether from a genuine second attempt or a concurrent
+// racer, via the ux_users_single_owner unique index.
+func (c *AuthController) register(w http.ResponseWriter, r *http.Request) {
+	if c.Mgr == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/auth/register")
+		return
+	}
+	var in RegisterRequest
+	if err := decodeJSONStrict(r, &in); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	u, err := c.Mgr.RegisterFirstUser(r.Context(), authsvc.CreateUserInput{
+		DisplayName: in.DisplayName,
+		Email:       in.Email,
+		Username:    in.Email,
+		Password:    in.Password,
+	})
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	raw, sess, err := c.Mgr.CreateSession(r.Context(), u.ID)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	setSessionCookie(w, r, raw, sess.ExpiresAt)
+	envelope.WriteJSON(w, http.StatusOK, LoginResponse{User: userView(u)})
+}
+
+// adminResetPassword lets the local machine operator reset a known account's
+// password without a session — the recovery path for "I forgot my
+// password and have no other account to sign in with." Mounted under
+// /api/v1/auth/admin, which lan_listener.go's lanControlBlockedPrefixes
+// makes unreachable over the LAN listener: this only ever answers on the
+// loopback listener, the same trust boundary AO_BOOTSTRAP_ADMIN_* env vars
+// already rely on.
+func (c *AuthController) adminResetPassword(w http.ResponseWriter, r *http.Request) {
+	if c.Mgr == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/auth/admin/reset-password")
+		return
+	}
+	var in AdminResetPasswordRequest
+	if err := decodeJSONStrict(r, &in); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	if err := c.Mgr.ResetPassword(r.Context(), in.Email, in.NewPassword); err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, AdminResetPasswordResponse{OK: true})
 }
 
 // loginSourceKey identifies the caller for login-lockout throttling — the

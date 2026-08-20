@@ -210,6 +210,44 @@ paths:
       summary: Refresh the cached local agent adapter catalog
       tags:
       - agents
+  /api/v1/auth/admin/reset-password:
+    post:
+      operationId: adminResetPassword
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersAdminResetPasswordRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersAdminResetPasswordResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Loopback-only local recovery: reset a known account''s password without
+        a session'
+      tags:
+      - auth
   /api/v1/auth/login:
     post:
       operationId: login
@@ -296,6 +334,64 @@ paths:
           description: Not Implemented
       summary: 'Resolve the current identity: a real session, trusted-local mode''s
         synthesized admin, or no_user'
+      tags:
+      - auth
+  /api/v1/auth/register:
+    post:
+      operationId: registerFirstUser
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersRegisterRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersLoginResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Create the installation's first (owner) account and sign in — rejected
+        once an owner already exists
+      tags:
+      - auth
+  /api/v1/auth/setup-status:
+    get:
+      operationId: getAuthSetupStatus
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersSetupStatusResponse'
+          description: OK
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Report whether the installation has zero users yet (first-run signup
+        should be offered)
       tags:
       - auth
   /api/v1/browser/commands:
@@ -1465,6 +1561,92 @@ paths:
       summary: Replace a project's per-project config
       tags:
       - projects
+  /api/v1/projects/{id}/repo-connection-test:
+    post:
+      operationId: testRepoConnection
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersTestRepoConnectionRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersTestRepoConnectionResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Run a non-destructive git ls-remote probe against a project's root
+        repo or a named workspace child repo
+      tags:
+      - projects
+  /api/v1/projects/{id}/workspace-repos/refresh:
+    post:
+      operationId: refreshWorkspaceRepos
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Re-detect a workspace project's child repositories from disk, correcting
+        stale per-repo metadata
+      tags:
+      - projects
   /api/v1/projects/{projectId}/workflows:
     post:
       operationId: createWorkflowRun
@@ -1520,13 +1702,15 @@ paths:
     get:
       operationId: browseProjectRoot
       parameters:
-      - description: Directory path, relative to an allowed project root, to list.
-          Empty lists the root itself.
+      - description: Absolute directory path, previously returned as an entry's own
+          path, to list. Empty lists the top level (the configured allowed roots,
+          or their contents directly when only one root is configured).
         in: query
         name: path
         schema:
-          description: Directory path, relative to an allowed project root, to list.
-            Empty lists the root itself.
+          description: Absolute directory path, previously returned as an entry's
+            own path, to list. Empty lists the top level (the configured allowed roots,
+            or their contents directly when only one root is configured).
           type: string
       responses:
         "200":
@@ -1553,8 +1737,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/APIError'
           description: Internal Server Error
-      summary: List the immediate subdirectories of a path under the configured allowed
-        project roots
+      summary: List the immediate subdirectories of an absolute path under the configured
+        allowed project roots (or the home directory when none are configured), for
+        the web folder-browser UX
       tags:
       - projects
   /api/v1/projects/clone:
@@ -6430,6 +6615,23 @@ components:
         disabled:
           type: boolean
       type: object
+    ControllersAdminResetPasswordRequest:
+      properties:
+        email:
+          type: string
+        newPassword:
+          type: string
+      required:
+      - email
+      - newPassword
+      type: object
+    ControllersAdminResetPasswordResponse:
+      properties:
+        ok:
+          type: boolean
+      required:
+      - ok
+      type: object
     ControllersCapacitySnapshotResponse:
       properties:
         certainty:
@@ -6759,6 +6961,19 @@ components:
       - decisionResolverPriority
       - fallbackBehavior
       - reviewIndependence
+      type: object
+    ControllersRegisterRequest:
+      properties:
+        displayName:
+          type: string
+        email:
+          type: string
+        password:
+          type: string
+      required:
+      - displayName
+      - email
+      - password
       type: object
     ControllersResolveDecisionRequest:
       properties:
@@ -7160,6 +7375,13 @@ components:
       required:
       - enabled
       type: object
+    ControllersSetupStatusResponse:
+      properties:
+        setupRequired:
+          type: boolean
+      required:
+      - setupRequired
+      type: object
     ControllersTaskCheckpointSummaryResponse:
       properties:
         acceptanceCriteria:
@@ -7265,6 +7487,18 @@ components:
       - ok
       - message
       type: object
+    ControllersTestRepoConnectionRequest:
+      properties:
+        repo:
+          type: string
+      type: object
+    ControllersTestRepoConnectionResponse:
+      properties:
+        result:
+          $ref: '#/components/schemas/ProjectConnectionTestResult'
+      required:
+      - result
+      type: object
     ControllersUpdateProviderProfileRequest:
       properties:
         defaultModel:
@@ -7285,6 +7519,11 @@ components:
           type: string
         id:
           type: string
+        role:
+          enum:
+          - owner
+          - member
+          type: string
         status:
           enum:
           - active
@@ -7298,6 +7537,7 @@ components:
       - email
       - username
       - status
+      - role
       type: object
     ControllersWorkflowIntegrationStateView:
       properties:
@@ -8911,6 +9151,12 @@ components:
           type: string
         repo:
           type: string
+        transport:
+          enum:
+          - https
+          - ssh
+          - unknown
+          type: string
         workspaceRepos:
           items:
             $ref: '#/components/schemas/WorkspaceRepo'
@@ -8997,6 +9243,21 @@ components:
           $ref: '#/components/schemas/TrackerIntakeConfig'
         worker:
           $ref: '#/components/schemas/RoleOverride'
+      type: object
+    ProjectConnectionTestResult:
+      properties:
+        latencyMs:
+          format: int64
+          type: integer
+        message:
+          type: string
+        status:
+          enum:
+          - ok
+          - error
+          type: string
+      required:
+      - status
       type: object
     ProjectGetResponse:
       properties:
@@ -11284,6 +11545,8 @@ components:
       type: object
     WorkspaceRepo:
       properties:
+        defaultBranch:
+          type: string
         gitStatus:
           type: string
         name:
@@ -11291,6 +11554,12 @@ components:
         relativePath:
           type: string
         repo:
+          type: string
+        transport:
+          enum:
+          - https
+          - ssh
+          - unknown
           type: string
       required:
       - name

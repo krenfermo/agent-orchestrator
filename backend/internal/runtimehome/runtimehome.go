@@ -76,6 +76,7 @@ func Prepare(dataDir string, userID domain.UserID) (Environment, error) {
 			return Environment{}, err
 		}
 	}
+	ensureIsolatedKeychain(env)
 	return env, nil
 }
 

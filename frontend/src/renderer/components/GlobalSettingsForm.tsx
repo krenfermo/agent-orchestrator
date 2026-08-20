@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { AccountSettingsSection } from "./settings/AccountSettingsSection";
 import { DevelopmentAgentsSettingsSection } from "./settings/DevelopmentAgentsSettingsSection";
 import { EfficiencyPolicySettingsSection } from "./settings/EfficiencyPolicySettingsSection";
 import { EnvironmentSettingsSection } from "./settings/EnvironmentSettingsSection";
@@ -20,6 +21,7 @@ export type GlobalSettingsSection =
 	| "sourceControl"
 	| "projects"
 	| "updates"
+	| "account"
 	| "help"
 	| "all";
 
@@ -76,6 +78,9 @@ export function GlobalSettingsForm({
 					<ProjectsSettingsSection titleHidden={leadingTitleHidden} />
 				)}
 				{(section === "all" || section === "updates") && <UpdatesSection titleHidden={leadingTitleHidden} />}
+				{(section === "all" || section === "account") && (
+					<AccountSettingsSection titleHidden={leadingTitleHidden} />
+				)}
 				{(section === "all" || section === "help") && (
 					<SettingsSection title={t("settings.getHelp")} titleHidden={leadingTitleHidden} grouped>
 						<SettingsLinkRow label={t("settings.reportProblem")} onClick={() => setReportProblemOpen(true)} />

@@ -640,6 +640,20 @@ export function ProjectAgentsSettingsView({
 	);
 }
 
+export type RepoConnectivityTestState = "idle" | "testing" | "ok" | "error";
+
+export type RepoConnectivityRow = {
+	/** Stable identity for the row: "" for the project's own root repo, else the workspace child's name. */
+	key: string;
+	name: string;
+	branch: string;
+	remote?: string;
+	transport?: "https" | "ssh" | "unknown";
+	testState: RepoConnectivityTestState;
+	testMessage?: string;
+	onTest: () => void;
+};
+
 export function ProjectWorkflowSettingsView({
 	branch,
 	icons,
@@ -647,11 +661,12 @@ export function ProjectWorkflowSettingsView({
 	onBranchChange,
 	onPrefixChange,
 	prefix,
+	repoConnectivity,
 	reviewerControl,
 	reviewerWarning,
 }: {
 	branch: string;
-	icons?: Partial<Record<"branch" | "edit" | "prefix" | "reviewer", ReactNode>>;
+	icons?: Partial<Record<"branch" | "edit" | "prefix" | "reviewer" | "workspaceRepo", ReactNode>>;
 	labels: {
 		worktrees: string;
 		defaultBranch: string;
@@ -660,10 +675,19 @@ export function ProjectWorkflowSettingsView({
 		defaultReviewer: string;
 		editDefaultBranch: string;
 		editSessionPrefix: string;
+		repositoryConnectivity?: string;
+		repositoryConnectivityNote?: string;
+		testConnection?: string;
+		testing?: string;
+		connectionOk?: string;
+		connectionError?: string;
+		noRemote?: string;
 	};
 	onBranchChange: (value: string) => void;
 	onPrefixChange: (value: string) => void;
 	prefix: string;
+	/** One row per real Git repository — the project root plus any workspace children. */
+	repoConnectivity?: RepoConnectivityRow[];
 	reviewerControl: ReactNode;
 	reviewerWarning?: string | null;
 }) {
@@ -691,6 +715,54 @@ export function ProjectWorkflowSettingsView({
 					onChange={onPrefixChange}
 				/>
 			</ProjectSettingsSection>
+			{repoConnectivity && repoConnectivity.length > 0 && (
+				<ProjectSettingsSection title={labels.repositoryConnectivity ?? "Repository connectivity"} grouped>
+					{repoConnectivity.map((repo) => (
+						<div key={repo.key} className="settings-row-bar flex-col items-stretch gap-1 py-2">
+							<div className="flex items-center gap-(--size-settings-row-icon-gap)">
+								{icons?.workspaceRepo}
+								<span className="whitespace-nowrap text-sm leading-5 text-settings-label">{repo.name}</span>
+								<span className="settings-row-value text-xs">{repo.branch || branch || "—"}</span>
+								{repo.transport && repo.transport !== "unknown" && (
+									<span className="rounded-full border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-settings-muted">
+										{repo.transport}
+									</span>
+								)}
+							</div>
+							{repo.remote && (
+								<span className="truncate px-1 text-xs text-settings-muted" title={repo.remote}>
+									{repo.remote}
+								</span>
+							)}
+							<div className="flex items-center gap-2 px-1">
+								<button
+									type="button"
+									className="settings-option-trigger text-xs disabled:pointer-events-none disabled:opacity-50"
+									onClick={repo.onTest}
+									disabled={repo.testState === "testing" || !repo.remote}
+								>
+									{repo.testState === "testing" ? (labels.testing ?? "Testing…") : (labels.testConnection ?? "Test connection")}
+								</button>
+								{repo.testState === "ok" && (
+									<span className="text-xs text-success">{labels.connectionOk ?? "Connected"}</span>
+								)}
+								{repo.testState === "error" && (
+									<span className="text-xs text-error" title={repo.testMessage}>
+										{labels.connectionError ?? "Not reachable"}
+										{repo.testMessage ? ` — ${repo.testMessage}` : ""}
+									</span>
+								)}
+								{!repo.remote && (
+									<span className="text-xs text-settings-muted">{labels.noRemote ?? "No remote configured"}</span>
+								)}
+							</div>
+						</div>
+					))}
+					{labels.repositoryConnectivityNote && (
+						<p className="px-1 text-xs text-settings-muted">{labels.repositoryConnectivityNote}</p>
+					)}
+				</ProjectSettingsSection>
+			)}
 			<ProjectSettingsSection title={labels.reviewers} grouped>
 				<ProjectSettingsRow icon={icons?.reviewer} label={labels.defaultReviewer}>
 					{reviewerControl}

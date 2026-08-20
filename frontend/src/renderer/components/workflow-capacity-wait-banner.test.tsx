@@ -49,4 +49,17 @@ describe("WorkflowCapacityWaitBanner", () => {
 		);
 		expect(screen.getByText("some_future_reason")).toBeInTheDocument();
 	});
+
+	// Checkpoint 8P-E.3: a real autonomous run showed "Waiting for capacity"
+	// while a routine autonomous_progress heartbeat was pending and Claude's
+	// own health record said available/dispatch-succeeded -- the banner must
+	// not render for this reason even though nextWakeAt is set.
+	it("renders nothing for a routine autonomous_progress heartbeat wake", () => {
+		const { container } = render(
+			<WorkflowCapacityWaitBanner
+				run={baseRun({ waitReason: "autonomous_progress", nextWakeAt: "2026-01-01T00:05:00.000Z", wakeAttemptCount: 69 })}
+			/>,
+		);
+		expect(container).toBeEmptyDOMElement();
+	});
 });

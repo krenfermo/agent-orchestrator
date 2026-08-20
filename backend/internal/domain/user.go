@@ -18,6 +18,21 @@ const (
 	UserStatusDisabled UserStatus = "disabled"
 )
 
+// UserRole distinguishes the installation owner from ordinary members
+// (Checkpoint 8P-E.8). Exactly one active row may ever hold UserRoleOwner --
+// enforced by the users(role) WHERE role='owner' partial unique index, not
+// by application code -- so "the owner" is a durable, race-safe concept
+// instead of the "earliest-created active user" heuristic 8P-A used.
+type UserRole string
+
+const (
+	// UserRoleOwner is the installation owner/admin: the account created by
+	// Bootstrap (env vars) or RegisterFirstUser (in-product first-run flow).
+	UserRoleOwner UserRole = "owner"
+	// UserRoleMember is every other account.
+	UserRoleMember UserRole = "member"
+)
+
 // User is the durable identity record a resolved session belongs to.
 //
 // PasswordHash must never be exposed in any JSON-serializable DTO -- it is
@@ -31,6 +46,7 @@ type User struct {
 	Username     string
 	PasswordHash string
 	Status       UserStatus
+	Role         UserRole
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }

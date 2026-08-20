@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -62,6 +63,77 @@ func TestProjectsAPI_Browse(t *testing.T) {
 	if len(got.Entries) != 1 || got.Entries[0].Name != "repo-a" || !got.Entries[0].IsGitRepo {
 		t.Fatalf("Entries = %+v", got.Entries)
 	}
+}
+
+// TestProjectsAPI_Browse_DrillsIntoSubdirectory is Checkpoint 8P-E.4's
+// end-to-end navigation proof over real HTTP: feeding an entry's own Path
+// back as the next request's path query param lists that subdirectory's
+// children, not the root's again -- real folder-by-folder navigation.
+func TestProjectsAPI_Browse_DrillsIntoSubdirectory(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "parent", "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srv := newTestServerWithRoots(t, []string{root}, nil)
+
+	body, status, _ := doRequest(t, srv, "GET", "/api/v1/projects/browse", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET browse (top) = %d, want 200; body=%s", status, body)
+	}
+	var top projectsvc.BrowseResult
+	mustJSON(t, body, &top)
+	if len(top.Entries) != 1 || top.Entries[0].Name != "parent" {
+		t.Fatalf("top entries = %+v, want exactly one %q entry", top.Entries, "parent")
+	}
+
+	body, status, _ = doRequest(t, srv, "GET", "/api/v1/projects/browse?path="+url.QueryEscape(top.Entries[0].Path), "")
+	if status != http.StatusOK {
+		t.Fatalf("GET browse (child) = %d, want 200; body=%s", status, body)
+	}
+	var nested projectsvc.BrowseResult
+	mustJSON(t, body, &nested)
+	if len(nested.Entries) != 1 || nested.Entries[0].Name != "child" {
+		t.Fatalf("nested entries = %+v, want exactly one %q entry", nested.Entries, "child")
+	}
+}
+
+// TestProjectsAPI_Browse_MultipleRootsListedAtTopLevel proves the "Allowed
+// locations" list over real HTTP: with more than one AO_PROJECT_ROOTS entry
+// configured, the top-level browse response lists the roots themselves.
+func TestProjectsAPI_Browse_MultipleRootsListedAtTopLevel(t *testing.T) {
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	srv := newTestServerWithRoots(t, []string{rootA, rootB}, nil)
+
+	body, status, _ := doRequest(t, srv, "GET", "/api/v1/projects/browse", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET browse = %d, want 200; body=%s", status, body)
+	}
+	var got projectsvc.BrowseResult
+	mustJSON(t, body, &got)
+	if len(got.Entries) != 2 {
+		t.Fatalf("Entries = %+v, want exactly the 2 configured roots", got.Entries)
+	}
+}
+
+func TestProjectsAPI_Browse_RejectsSymlinkEscape(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "allowed")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(parent, "outside")
+	if err := os.Mkdir(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	srv := newTestServerWithRoots(t, []string{root}, nil)
+
+	body, status, _ := doRequest(t, srv, "GET", "/api/v1/projects/browse?path="+url.QueryEscape(link), "")
+	assertErrorCode(t, body, status, http.StatusBadRequest, "PATH_OUTSIDE_ALLOWED_ROOTS")
 }
 
 func TestProjectsAPI_Browse_RejectsTraversal(t *testing.T) {

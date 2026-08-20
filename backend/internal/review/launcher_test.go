@@ -19,6 +19,8 @@ type fakeReviewer struct {
 	gotInv           ports.ReviewInvocation
 	workingDirectory string
 	env              map[string]string
+	preLaunchInv     ports.ReviewInvocation
+	preLaunchCalls   int
 }
 
 func (f *fakeReviewer) ReviewCommand(_ context.Context, inv ports.ReviewInvocation) (ports.ReviewCommandSpec, error) {
@@ -28,6 +30,37 @@ func (f *fakeReviewer) ReviewCommand(_ context.Context, inv ports.ReviewInvocati
 func (f *fakeReviewer) ReviewMessage(_ context.Context, inv ports.ReviewInvocation) (string, error) {
 	f.gotInv = inv
 	return inv.Prompt, nil
+}
+
+// PreLaunch makes fakeReviewer satisfy preLaunchReviewer so tests can
+// assert on the ReviewInvocation (in particular Env) the launcher builds
+// before a reviewer pane starts (Checkpoint 8P-E.3.1).
+func (f *fakeReviewer) PreLaunch(_ context.Context, inv ports.ReviewInvocation) error {
+	f.preLaunchInv = inv
+	f.preLaunchCalls++
+	return nil
+}
+
+// fakeSessionOwnerLookup is a hand-rolled fake for sessionOwnerLookup.
+type fakeSessionOwnerLookup struct {
+	owners map[domain.SessionID]domain.UserID
+}
+
+func (f fakeSessionOwnerLookup) GetSessionOwner(_ context.Context, id domain.SessionID) (*domain.UserID, error) {
+	owner, ok := f.owners[id]
+	if !ok {
+		return nil, nil
+	}
+	return &owner, nil
+}
+
+// fakeRuntimeEnvResolver is a hand-rolled fake for runtimeEnvResolver.
+type fakeRuntimeEnvResolver struct {
+	env map[string]string
+}
+
+func (f fakeRuntimeEnvResolver) ResolveForOwner(_ context.Context, _ domain.UserID, _ domain.AgentHarness) (map[string]string, domain.ProviderProfileID, error) {
+	return f.env, "", nil
 }
 
 func TestLauncherSpawnEnvCannotOverrideWorkerContext(t *testing.T) {
@@ -71,6 +104,66 @@ func TestLauncherSpawnEnvCannotOverrideWorkerContext(t *testing.T) {
 	}
 	if rt.createCfg.Env[EnvRunFile] != runFile {
 		t.Fatalf("%s = %q, want %q", EnvRunFile, rt.createCfg.Env[EnvRunFile], runFile)
+	}
+}
+
+// TestLauncherSpawnAppliesOwnerIsolatedRuntimeEnv is Checkpoint 8P-E.3.1's
+// core regression: with WithOwnerRuntimeEnv wired, the worker session's own
+// owner resolves an isolated env that (a) reaches PreLaunch (so a Claude
+// reviewer's trust record lands in the isolated CLAUDE_CONFIG_DIR, not the
+// daemon host's own config) and (b) reaches the actual runtime pane's env
+// (so the reviewer subprocess that later reads that config is the same
+// isolated one) -- and that it wins over whatever the adapter/PATH-pinning
+// logic would otherwise set.
+func TestLauncherSpawnAppliesOwnerIsolatedRuntimeEnv(t *testing.T) {
+	reviewer := &fakeReviewer{}
+	rt := &fakeRuntime{}
+	owners := fakeSessionOwnerLookup{owners: map[domain.SessionID]domain.UserID{"mer-1": "user-1"}}
+	isolatedEnv := map[string]string{
+		"HOME":              "/isolated/users/user-1/runtime-home",
+		"CLAUDE_CONFIG_DIR": "/isolated/users/user-1/providers/claude-code",
+	}
+	resolver := fakeRuntimeEnvResolver{env: isolatedEnv}
+	l := NewLauncher(fakeReviewerResolver{reviewer: reviewer, ok: true}, rt, t.TempDir(),
+		WithOwnerRuntimeEnv(owners, resolver))
+
+	if _, err := l.Spawn(context.Background(), launchSpec()); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	if reviewer.preLaunchCalls != 1 {
+		t.Fatalf("PreLaunch calls = %d, want 1", reviewer.preLaunchCalls)
+	}
+	if reviewer.preLaunchInv.Env["CLAUDE_CONFIG_DIR"] != isolatedEnv["CLAUDE_CONFIG_DIR"] {
+		t.Fatalf("PreLaunch Env = %#v, want isolated CLAUDE_CONFIG_DIR", reviewer.preLaunchInv.Env)
+	}
+	if rt.createCfg.Env["HOME"] != isolatedEnv["HOME"] {
+		t.Fatalf("runtime pane Env[HOME] = %q, want isolated %q", rt.createCfg.Env["HOME"], isolatedEnv["HOME"])
+	}
+	if rt.createCfg.Env["CLAUDE_CONFIG_DIR"] != isolatedEnv["CLAUDE_CONFIG_DIR"] {
+		t.Fatalf("runtime pane Env[CLAUDE_CONFIG_DIR] = %q, want isolated %q", rt.createCfg.Env["CLAUDE_CONFIG_DIR"], isolatedEnv["CLAUDE_CONFIG_DIR"])
+	}
+}
+
+// TestLauncherSpawnWithoutOwnerRuntimeEnvOptionLeavesEnvUnresolved proves
+// worker/reviewer behavior for every existing caller that does not opt into
+// WithOwnerRuntimeEnv is byte-for-byte unchanged by Checkpoint 8P-E.3.1: no
+// isolation dependency wired means resolveOwnerRuntimeEnv is a permanent
+// no-op, exactly like providerruntime.Resolver's own nil-Owners convention.
+func TestLauncherSpawnWithoutOwnerRuntimeEnvOptionLeavesEnvUnresolved(t *testing.T) {
+	reviewer := &fakeReviewer{}
+	rt := &fakeRuntime{}
+	l := NewLauncher(fakeReviewerResolver{reviewer: reviewer, ok: true}, rt, t.TempDir())
+
+	if _, err := l.Spawn(context.Background(), launchSpec()); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	if reviewer.preLaunchInv.Env != nil {
+		t.Fatalf("PreLaunch Env = %#v, want nil (no isolation dependency wired)", reviewer.preLaunchInv.Env)
+	}
+	if _, ok := rt.createCfg.Env["CLAUDE_CONFIG_DIR"]; ok {
+		t.Fatalf("runtime pane Env unexpectedly carries CLAUDE_CONFIG_DIR: %#v", rt.createCfg.Env)
 	}
 }
 

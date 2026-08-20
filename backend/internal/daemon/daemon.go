@@ -159,6 +159,16 @@ func RunWithConfig(cfg config.Config) error {
 		log.Warn("no admin user exists yet; set AO_BOOTSTRAP_ADMIN_EMAIL and AO_BOOTSTRAP_ADMIN_PASSWORD and restart to create one")
 	}
 
+	// Checkpoint 8P-E.8.1: promotes a lone pre-8P-E.8 user (created before
+	// the role column existed, backfilled to 'member' by migration 0116) to
+	// owner. A no-op once any owner exists or when zero/multiple users
+	// exist. Never hard-fails startup.
+	if promoted, err := authMgr.EnsureOwnerExists(context.Background()); err != nil {
+		log.Warn("ensure-owner-exists check failed", "err", err)
+	} else if promoted {
+		log.Info("promoted sole pre-existing user to installation owner")
+	}
+
 	telemetrySink := newTelemetrySink(cfg, store, log)
 	defer func() { _ = telemetrySink.Close(context.Background()) }()
 	telemetrySink.Emit(context.Background(), ports.TelemetryEvent{

@@ -14,6 +14,22 @@ import (
 // keyed off the work step's latest checkpoint timestamp.
 const observationThrottle = 3 * time.Second
 
+// workStepFirstSignalTimeout bounds how long a work step may sit idle with
+// FirstSignalAt unset before AO gives up waiting for the worker to ever
+// start (Checkpoint 8P-E.3). Without this, a worker whose process launched
+// but never progressed past its own startup (e.g. stuck at an interactive
+// prompt, a launch error masked by an otherwise-successful Spawn, or an
+// unauthenticated provider) leaves the work step "running" and the
+// autonomous heartbeat rescheduling itself forever (maybeScheduleAutonomousHeartbeat
+// only stops once the run reaches a terminal or needs_attention state).
+// Sized well above the wake scheduler's own backoff cadence (WakePolicy's
+// InitialBackoffSeconds=60, MaxBackoffSeconds=1800 — see
+// domain/workflow_wake_policy.go) so a normal, merely-slow CLI cold start
+// (model warmup, network, hook install) is never mistaken for a stuck
+// worker, while still reaching a deterministic failure state in bounded
+// time rather than polling indefinitely.
+const workStepFirstSignalTimeout = 10 * time.Minute
+
 // WorkerProgress is a workflow-internal interpretation label for a work
 // step's Codex worker. It exists purely to make the conservative completion
 // rule below legible and testable; it is never persisted (no sessions column,
@@ -59,6 +75,8 @@ func evaluateWorkStepProgress(
 	workspaceAvailable bool,
 	obs ports.WorkspaceObservation,
 	baseSHA string,
+	now time.Time,
+	dispatchedAt time.Time,
 ) WorkStepDecision {
 	// hasWorkEvidence checks the AO guardrail prompt explicitly tells the
 	// worker not to commit/push/merge (Checkpoint 8B §4), so real, verifiable
@@ -109,12 +127,11 @@ func evaluateWorkStepProgress(
 			NextAction: "worker awaiting input/blocked — needs human attention",
 		}
 	case domain.ActivityIdle:
-		if !workspaceAvailable {
-			// Insufficient fresh evidence this call; wait for a future call
-			// once the throttle window has elapsed. Not an error.
-			return WorkStepDecision{Progress: WorkerIdle, NoChange: true}
-		}
-		if hasWorkEvidence() {
+		// Real, git-verified work evidence always wins, regardless of
+		// FirstSignalAt: a worker can (and often does) finish its turn and go
+		// idle before AO ever observes an intermediate hook signal, and that
+		// is still a genuinely completed task, not a stuck startup.
+		if workspaceAvailable && hasWorkEvidence() {
 			return WorkStepDecision{
 				Progress:   WorkerResultAvailable,
 				NextStep:   domain.WorkflowStepCompleted,
@@ -126,8 +143,32 @@ func evaluateWorkStepProgress(
 		// callback. In particular, this window can span a daemon restart while
 		// the agent is already working. Without a signal or workspace evidence,
 		// idle is only an initialization default—not proof the worker finished.
+		// It is also not proof the worker will *ever* start: a Spawn() that
+		// returns success only proves the runtime process launched, not that
+		// the agent progressed past its own startup (Checkpoint 8P-E.3 found a
+		// real worker stuck at Claude Code's interactive "do you trust this
+		// folder?" prompt, which never fires a hook and never produces
+		// FirstSignalAt). Past workStepFirstSignalTimeout since dispatch, treat
+		// that absence itself as evidence of a startup failure rather than
+		// waiting forever — checked ahead of the workspaceAvailable gate below
+		// because a worker that never started will also never produce fresh
+		// workspace evidence, so waiting on that would wait forever too.
 		if session.FirstSignalAt.IsZero() {
+			if !dispatchedAt.IsZero() && now.Sub(dispatchedAt) > workStepFirstSignalTimeout {
+				return WorkStepDecision{
+					Progress:   WorkerFailed,
+					NextStep:   domain.WorkflowStepFailed,
+					NextRun:    domain.WorkflowRunNeedsAttention,
+					NextAction: "worker produced no first signal within " + workStepFirstSignalTimeout.String() + " of dispatch — startup likely failed (e.g. blocked on an interactive prompt, auth, or a launch error)",
+					ErrorClass: domain.WorkflowErrorAgentStartFailed,
+				}
+			}
 			return WorkStepDecision{Progress: WorkerCreated, NoChange: true}
+		}
+		if !workspaceAvailable {
+			// Insufficient fresh evidence this call; wait for a future call
+			// once the throttle window has elapsed. Not an error.
+			return WorkStepDecision{Progress: WorkerIdle, NoChange: true}
 		}
 		return WorkStepDecision{
 			Progress:   WorkerIdle,
@@ -167,6 +208,11 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 	if err != nil {
 		return step, err
 	}
+
+	var dispatchedAt time.Time
+	if latestAttempt, hasAttempt, aerr := c.store.GetLatestWorkflowAttempt(ctx, step.ID); aerr == nil && hasAttempt {
+		dispatchedAt = latestAttempt.StartedAt
+	}
 	baseSHA := ""
 	if hasCP {
 		baseSHA = latestCP.BaseSHA
@@ -192,7 +238,7 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 		}
 	}
 
-	decision := evaluateWorkStepProgress(found, sess, workspaceAvailable, obs, baseSHA)
+	decision := evaluateWorkStepProgress(found, sess, workspaceAvailable, obs, baseSHA, now, dispatchedAt)
 	if decision.NoChange {
 		return step, nil
 	}

@@ -257,7 +257,18 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		Projects: store,
 		Launcher: reviewcore.NewLauncher(reviewers, runtime, cfg.DataDir,
 			reviewcore.WithRunFilePath(cfg.RunFilePath),
-			reviewcore.WithAgentAuth(reviewerAgentAuth{agents: agents})),
+			reviewcore.WithAgentAuth(reviewerAgentAuth{agents: agents}),
+			// Checkpoint 8P-E.3.1: same per-user isolation policy as this
+			// wiring's own session_manager.Deps.RuntimeIsolation above (same
+			// construction args, functionally identical, kept as a separate
+			// instance for the same reason: this launcher has no workflow
+			// coordinator to share one with).
+			reviewcore.WithOwnerRuntimeEnv(store, &providerruntime.Resolver{
+				Owners:       store,
+				Profiles:     store,
+				DataDir:      cfg.DataDir,
+				TrustedLocal: cfg.TrustedLocalMode,
+			})),
 	})
 	reviewSvc := reviewsvc.New(reviewEngine, store,
 		reviewsvc.WithLifecycleReducer(lcm),

@@ -365,6 +365,164 @@ func TestDispatchFailureRecordsFailedAttemptAndNeedsAttention(t *testing.T) {
 	}
 }
 
+// TestWorkerNeverSignalsEventuallyFailsWithoutDoubleDispatch is Checkpoint
+// 8P-E.3's real-topology regression: a real browser-driven autonomous run
+// (provider profile authenticated, Spawn() returning success, health
+// recorded available/dispatch-succeeded) reproduced a worker whose runtime
+// process launched but never got past its own startup — no FirstSignalAt,
+// ever — leaving the work step "running" and the master's autonomous
+// heartbeat rescheduling itself forever (69 attempts and counting) while the
+// UI misreported "Waiting for capacity". This proves the fixed contract:
+// before the startup grace period elapses, AO keeps waiting (no false
+// failure for an ordinarily-slow cold start, no duplicate Spawn); after it
+// elapses, the step deterministically fails as agent_start_failed and the
+// run reaches needs_attention — never staying stuck, never spawning a
+// second worker to "retry" on its own.
+func TestWorkerNeverSignalsEventuallyFailsWithoutDoubleDispatch(t *testing.T) {
+	facts := newFakeSessionFacts()
+	spawner := &fakeSpawner{
+		rec:   domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}},
+		facts: facts,
+	}
+	c, store, clk := newCoordinatorFull(spawner, facts, &fakeWorkspaceFacts{})
+	ctx := context.Background()
+
+	created, err := c.CreateRun(ctx, "proj-1", "ship the thing")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	detail, err := c.StartRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	if spawner.calls != 1 {
+		t.Fatalf("spawner calls after dispatch = %d, want 1", spawner.calls)
+	}
+	work := workStepFrom(detail)
+	sessionID := domain.SessionID(*work.Step.SessionID)
+
+	// The real runtime process launched (Spawn succeeded) but never
+	// progressed past its own startup: idle, no FirstSignalAt, exactly what
+	// the stuck ao-autonomous-test-2 session showed.
+	facts.put(domain.SessionRecord{
+		ID:       sessionID,
+		Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"},
+	})
+
+	// Still within the startup grace period: no verdict yet, and critically
+	// no second worker gets spawned to "retry" a merely-slow cold start.
+	clk.Advance(2 * time.Minute)
+	got, err := c.GetRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("GetRun (within grace): %v", err)
+	}
+	if workStepFrom(got).Step.State != domain.WorkflowStepRunning {
+		t.Fatalf("work step state within grace = %q, want still running", workStepFrom(got).Step.State)
+	}
+	if got.Run.State == domain.WorkflowRunNeedsAttention {
+		t.Fatalf("run reached needs_attention before the startup grace period elapsed")
+	}
+	if spawner.calls != 1 {
+		t.Fatalf("spawner calls within grace = %d, want still 1 (no duplicate worker)", spawner.calls)
+	}
+
+	// Past the startup grace period with FirstSignalAt still unset: AO must
+	// stop waiting and reach a deterministic, non-capacity failure state.
+	clk.Advance(9 * time.Minute)
+	got, err = c.GetRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("GetRun (past grace): %v", err)
+	}
+	if got.Run.State != domain.WorkflowRunNeedsAttention {
+		t.Fatalf("run state past grace = %q, want needs_attention", got.Run.State)
+	}
+	work = workStepFrom(got)
+	if work.Step.State != domain.WorkflowStepFailed {
+		t.Fatalf("work step state past grace = %q, want failed", work.Step.State)
+	}
+	attempts, err := store.ListWorkflowAttempts(ctx, work.Step.ID)
+	if err != nil || len(attempts) != 1 {
+		t.Fatalf("attempts = %+v, err=%v, want exactly 1 (no duplicate dispatch)", attempts, err)
+	}
+	if attempts[0].Outcome != domain.WorkflowAttemptFailed || attempts[0].ErrorClass != domain.WorkflowErrorAgentStartFailed {
+		t.Fatalf("attempt = %+v, want failed/agent_start_failed (not capacity_exhausted or any other class)", attempts[0])
+	}
+	if spawner.calls != 1 {
+		t.Fatalf("spawner calls past grace = %d, want still 1 (never a second worker spawned to self-retry)", spawner.calls)
+	}
+
+	// A further GetRun (the daemon poller re-entering a still-non-terminal
+	// run) must not spawn again either: the run is needs_attention, which is
+	// exactly the state maybeScheduleAutonomousHeartbeat treats as "stop
+	// rescheduling" -- proving the fix also bounds the wake-explosion this
+	// checkpoint found (69 attempts and climbing on the real run).
+	clk.Advance(time.Hour)
+	if _, err := c.GetRun(ctx, created.Run.ID); err != nil {
+		t.Fatalf("GetRun (later poll): %v", err)
+	}
+	if spawner.calls != 1 {
+		t.Fatalf("spawner calls after a later poll = %d, want still 1", spawner.calls)
+	}
+}
+
+// TestWorkerWithFirstSignalNeverForceFailedByStartupTimeout is the
+// successful-path counterpart to
+// TestWorkerNeverSignalsEventuallyFailsWithoutDoubleDispatch: once the
+// worker actually produces a first signal and real work evidence lands, it
+// completes normally — the startup-grace failure never applies once
+// FirstSignalAt is set, however long the task subsequently runs.
+func TestWorkerWithFirstSignalNeverForceFailedByStartupTimeout(t *testing.T) {
+	facts := newFakeSessionFacts()
+	spawner := &fakeSpawner{
+		rec:   domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}},
+		facts: facts,
+	}
+	workspaceFacts := &fakeWorkspaceFacts{obs: ports.WorkspaceObservation{HeadSHA: "new-sha"}}
+	c, _, clk := newCoordinatorFull(spawner, facts, workspaceFacts)
+	ctx := context.Background()
+
+	created, err := c.CreateRun(ctx, "proj-1", "ship the thing")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	detail, err := c.StartRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	sessionID := domain.SessionID(*workStepFrom(detail).Step.SessionID)
+
+	// The worker actually started (a hook fired, FirstSignalAt populated),
+	// went idle, and left real, git-verified work behind.
+	facts.put(domain.SessionRecord{
+		ID:            sessionID,
+		Activity:      domain.Activity{State: domain.ActivityIdle},
+		Metadata:      domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"},
+		FirstSignalAt: clk.Now(),
+	})
+
+	// Advance well past workStepFirstSignalTimeout: a worker that genuinely
+	// started must never be force-failed by the startup-grace check just
+	// because the call happens to land long after dispatch.
+	clk.Advance(time.Hour)
+	got, err := c.GetRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	work := workStepFrom(got)
+	if work.Step.State != domain.WorkflowStepCompleted {
+		t.Fatalf("work step state = %q, want completed (real work evidence, FirstSignalAt was set)", work.Step.State)
+	}
+	for _, a := range work.Attempts {
+		if a.ErrorClass == domain.WorkflowErrorAgentStartFailed {
+			t.Fatalf("attempt wrongly classified agent_start_failed despite a real first signal: %+v", a)
+		}
+	}
+	if spawner.calls != 1 {
+		t.Fatalf("spawner calls = %d, want 1", spawner.calls)
+	}
+}
+
 // Ambiguous branch 1: outbox found "dispatched" but the natural-key session
 // lookup finds nothing at all -> waiting/needs_attention, never a silent
 // success, never a second Spawn call.

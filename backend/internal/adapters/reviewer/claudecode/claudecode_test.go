@@ -2,10 +2,14 @@ package claudecode
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	workeragent "github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/claudecode"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
@@ -103,6 +107,81 @@ func TestPreLaunchInstallsSelectedReviewerHooksAndTrustsWorkspace(t *testing.T) 
 	}
 	if len(agent.prelaunch) != 1 || agent.prelaunch[0].WorkspacePath != "/ws/w1" || agent.prelaunch[0].SessionID == "" {
 		t.Fatalf("prelaunch = %#v, want trusted workspace with pinned session id", agent.prelaunch)
+	}
+}
+
+// TestPreLaunchForwardsIsolatedEnvToWorkerAdapter is Checkpoint 8P-E.3.1's
+// regression: the reviewer's PreLaunch must forward ReviewInvocation.Env
+// through to the underlying worker adapter's own PreLaunch unchanged, since
+// that Env (when set) is what makes the worker adapter's
+// resolveClaudeConfigPath (Checkpoint 8P-E.3) resolve the isolated
+// CLAUDE_CONFIG_DIR instead of the daemon's own home directory.
+func TestPreLaunchForwardsIsolatedEnvToWorkerAdapter(t *testing.T) {
+	agent := &captureAgent{}
+	r := &Reviewer{agent: agent}
+	isolatedEnv := map[string]string{"CLAUDE_CONFIG_DIR": "/isolated/users/u1/providers/claude-code"}
+
+	if err := r.PreLaunch(context.Background(), ports.ReviewInvocation{
+		ReviewerID:    "review-w1",
+		WorkspacePath: "/ws/w1",
+		Env:           isolatedEnv,
+	}); err != nil {
+		t.Fatalf("PreLaunch: %v", err)
+	}
+	if len(agent.prelaunch) != 1 {
+		t.Fatalf("prelaunch calls = %d, want 1", len(agent.prelaunch))
+	}
+	if agent.prelaunch[0].Env["CLAUDE_CONFIG_DIR"] != isolatedEnv["CLAUDE_CONFIG_DIR"] {
+		t.Fatalf("worker adapter PreLaunch Env = %#v, want isolated CLAUDE_CONFIG_DIR forwarded", agent.prelaunch[0].Env)
+	}
+}
+
+// TestPreLaunchWithIsolatedEnvTrustsWorkspaceWithoutMutatingHostConfig is
+// Checkpoint 8P-E.3.1's end-to-end regression, exercising the real reviewer
+// wrapper over the real worker adapter (no captureAgent stub): with an
+// isolated CLAUDE_CONFIG_DIR set, the trust record must land there, and the
+// daemon host's own ~/.claude.json (simulated via $HOME) must never be
+// created or touched. Reproduces, for reviewers, the exact worker-side proof
+// Checkpoint 8P-E.3 already established.
+func TestPreLaunchWithIsolatedEnvTrustsWorkspaceWithoutMutatingHostConfig(t *testing.T) {
+	hostHome := t.TempDir()
+	t.Setenv("HOME", hostHome)
+	isolatedConfigDir := filepath.Join(t.TempDir(), "providers", "claude-code")
+	// Production always has this directory in place before PreLaunch runs
+	// (runtimehome.Prepare creates it as part of the isolated runtime-home);
+	// replicate that here rather than relying on PreLaunch to create it.
+	if err := os.MkdirAll(isolatedConfigDir, 0o700); err != nil {
+		t.Fatalf("mkdir isolated config dir: %v", err)
+	}
+	workspace := filepath.Join(t.TempDir(), "worktree")
+
+	r := &Reviewer{agent: workeragent.New()}
+	if err := r.PreLaunch(context.Background(), ports.ReviewInvocation{
+		ReviewerID:    "review-w1",
+		WorkspacePath: workspace,
+		Env:           map[string]string{"CLAUDE_CONFIG_DIR": isolatedConfigDir},
+	}); err != nil {
+		t.Fatalf("PreLaunch: %v", err)
+	}
+
+	hostConfigPath := filepath.Join(hostHome, ".claude.json")
+	if _, err := os.Stat(hostConfigPath); !os.IsNotExist(err) {
+		t.Fatalf("host ~/.claude.json must not be created/mutated, stat err = %v", err)
+	}
+
+	isolatedConfigPath := filepath.Join(isolatedConfigDir, ".claude.json")
+	raw, err := os.ReadFile(isolatedConfigPath)
+	if err != nil {
+		t.Fatalf("read isolated config: %v", err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatalf("unmarshal isolated config: %v", err)
+	}
+	projects, _ := root["projects"].(map[string]any)
+	entry, _ := projects[workspace].(map[string]any)
+	if entry["hasTrustDialogAccepted"] != true {
+		t.Fatalf("isolated config trust entry = %#v, want hasTrustDialogAccepted=true for %s", entry, workspace)
 	}
 }
 

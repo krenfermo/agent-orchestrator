@@ -46,6 +46,19 @@ type ProjectResponse struct {
 	Project projectsvc.Project `json:"project"`
 }
 
+// TestRepoConnectionRequest is the body of POST
+// /projects/{id}/repo-connection-test: Repo empty tests the project's own
+// root repo; a workspace project may instead name one of its registered
+// child repos.
+type TestRepoConnectionRequest struct {
+	Repo string `json:"repo,omitempty"`
+}
+
+// TestRepoConnectionResponse wraps the outcome of a single connectivity probe.
+type TestRepoConnectionResponse struct {
+	Result projectsvc.ConnectionTestResult `json:"result"`
+}
+
 // GetProjectResponse is the { status, project } body of GET /projects/{id},
 // where project is oneOf Project|Degraded discriminated by status.
 type GetProjectResponse struct {
@@ -918,7 +931,7 @@ type BrowseProjectRootResponse = projectsvc.BrowseResult
 
 // BrowseProjectRootQuery is the query string accepted by GET /api/v1/projects/browse.
 type BrowseProjectRootQuery struct {
-	Path string `query:"path,omitempty" description:"Directory path, relative to an allowed project root, to list. Empty lists the root itself."`
+	Path string `query:"path,omitempty" description:"Absolute directory path, previously returned as an entry's own path, to list. Empty lists the top level (the configured allowed roots, or their contents directly when only one root is configured)."`
 }
 
 // AgentModelsQuery scopes a model catalog to a project where providers may be

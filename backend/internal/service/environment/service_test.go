@@ -48,10 +48,16 @@ func (f *fakeProjects) SetConfig(context.Context, domain.ProjectID, projectsvc.S
 func (f *fakeProjects) Remove(context.Context, domain.ProjectID) (projectsvc.RemoveResult, error) {
 	return projectsvc.RemoveResult{}, errors.New("not implemented")
 }
-func (f *fakeProjects) ListAllowedRootEntries(context.Context, string) ([]projectsvc.BrowseEntry, error) {
-	return nil, errors.New("not implemented")
+func (f *fakeProjects) ListAllowedRootEntries(context.Context, string) (projectsvc.BrowseResult, error) {
+	return projectsvc.BrowseResult{}, errors.New("not implemented")
 }
 func (f *fakeProjects) CloneFromGitHub(context.Context, projectsvc.CloneInput) (projectsvc.Project, error) {
+	return projectsvc.Project{}, errors.New("not implemented")
+}
+func (f *fakeProjects) TestRepoConnection(context.Context, domain.ProjectID, string) (projectsvc.ConnectionTestResult, error) {
+	return projectsvc.ConnectionTestResult{}, errors.New("not implemented")
+}
+func (f *fakeProjects) RefreshWorkspaceRepos(context.Context, domain.ProjectID) (projectsvc.Project, error) {
 	return projectsvc.Project{}, errors.New("not implemented")
 }
 

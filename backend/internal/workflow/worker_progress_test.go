@@ -23,6 +23,8 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 		}
 	}
 
+	fixedNow := time.Date(2026, 8, 19, 20, 0, 0, 0, time.UTC)
+
 	cases := []struct {
 		name               string
 		sessionFound       bool
@@ -30,6 +32,8 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 		workspaceAvailable bool
 		obs                ports.WorkspaceObservation
 		baseSHA            string
+		now                time.Time
+		dispatchedAt       time.Time
 		wantNoChange       bool
 		wantStep           domain.WorkflowStepState
 		wantRun            domain.WorkflowRunState
@@ -118,6 +122,30 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 			workspaceAvailable: false,
 			wantNoChange:       true,
 		},
+		// Checkpoint 8P-E.3: a real autonomous run reproduced a worker whose
+		// Spawn() succeeded but the process never got past its own startup
+		// (found stuck at Claude Code's interactive trust prompt), so
+		// FirstSignalAt never populated and the work step polled forever.
+		{
+			name:               "idle, no first signal, still within startup grace -> no change",
+			sessionFound:       true,
+			session:            domain.SessionRecord{ID: "sess-1", Activity: domain.Activity{State: domain.ActivityIdle}},
+			workspaceAvailable: false,
+			now:                fixedNow,
+			dispatchedAt:       fixedNow.Add(-1 * time.Minute),
+			wantNoChange:       true,
+		},
+		{
+			name:               "idle, no first signal, startup grace exceeded -> failed, agent_start_failed",
+			sessionFound:       true,
+			session:            domain.SessionRecord{ID: "sess-1", Activity: domain.Activity{State: domain.ActivityIdle}},
+			workspaceAvailable: false,
+			now:                fixedNow,
+			dispatchedAt:       fixedNow.Add(-(workStepFirstSignalTimeout + time.Minute)),
+			wantStep:           domain.WorkflowStepFailed,
+			wantRun:            domain.WorkflowRunNeedsAttention,
+			wantErrorClass:     domain.WorkflowErrorAgentStartFailed,
+		},
 		// Regression: discovered by the real Codex E2E run. The guardrail
 		// prompt tells the worker not to commit/push/merge, so a genuinely
 		// completed task commonly leaves an untracked/dirty file rather than a
@@ -168,7 +196,11 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := evaluateWorkStepProgress(tc.sessionFound, tc.session, tc.workspaceAvailable, tc.obs, tc.baseSHA)
+			now := tc.now
+			if now.IsZero() {
+				now = fixedNow
+			}
+			got := evaluateWorkStepProgress(tc.sessionFound, tc.session, tc.workspaceAvailable, tc.obs, tc.baseSHA, now, tc.dispatchedAt)
 			if got.NoChange != tc.wantNoChange {
 				t.Fatalf("NoChange = %v, want %v", got.NoChange, tc.wantNoChange)
 			}

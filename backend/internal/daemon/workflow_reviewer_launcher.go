@@ -123,6 +123,13 @@ func (l *workflowReviewerLauncher) Launch(ctx context.Context, req workflowcore.
 		RunFilePath:     l.runFile,
 		Prompt:          req.Prompt,
 		SystemPrompt:    req.SystemPrompt,
+		// Checkpoint 8P-E.3.1: the same isolated per-user runtime env (8P-B.1)
+		// already resolved into req.RuntimeEnv below for the runtime pane
+		// itself must also reach PreLaunch, or a Claude reviewer's trust
+		// record lands in a config file the isolated subprocess never reads
+		// -- the exact bug 8P-E.3 fixed for workers, reproduced here for
+		// reviewers.
+		Env: req.RuntimeEnv,
 	}
 	// Mirror internal/review's own launcher exactly (launcher.go's
 	// launchReviewerTerminalWithMode): PreLaunch is an optional capability

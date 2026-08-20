@@ -64,6 +64,63 @@ func (c *ProjectsController) Register(r chi.Router) {
 	r.Put("/projects/{id}", c.updateSettings)
 	r.Put("/projects/{id}/config", c.setConfig)
 	r.Delete("/projects/{id}", c.remove)
+	r.Post("/projects/{id}/repo-connection-test", c.testRepoConnection)
+	r.Post("/projects/{id}/workspace-repos/refresh", c.refreshWorkspaceRepos)
+}
+
+func (c *ProjectsController) testRepoConnection(w http.ResponseWriter, r *http.Request) {
+	if c.Mgr == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/projects/{id}/repo-connection-test")
+		return
+	}
+	id := projectID(r)
+	if c.scopingEnforced() {
+		user, err := identity.Require(r)
+		if err != nil {
+			envelope.WriteError(w, r, err)
+			return
+		}
+		if !c.projectVisible(r.Context(), id, user.ID) {
+			envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "PROJECT_NOT_FOUND", "project not found", nil)
+			return
+		}
+	}
+	var in TestRepoConnectionRequest
+	if err := decodeJSONStrict(r, &in); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	result, err := c.Mgr.TestRepoConnection(r.Context(), id, in.Repo)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, TestRepoConnectionResponse{Result: result})
+}
+
+func (c *ProjectsController) refreshWorkspaceRepos(w http.ResponseWriter, r *http.Request) {
+	if c.Mgr == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/projects/{id}/workspace-repos/refresh")
+		return
+	}
+	id := projectID(r)
+	if c.scopingEnforced() {
+		user, err := identity.Require(r)
+		if err != nil {
+			envelope.WriteError(w, r, err)
+			return
+		}
+		if !c.projectVisible(r.Context(), id, user.ID) {
+			envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "PROJECT_NOT_FOUND", "project not found", nil)
+			return
+		}
+	}
+	p, err := c.Mgr.RefreshWorkspaceRepos(r.Context(), id)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, ProjectResponse{Project: p})
 }
 
 func (c *ProjectsController) list(w http.ResponseWriter, r *http.Request) {
@@ -132,15 +189,15 @@ func (c *ProjectsController) browse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := r.URL.Query().Get("path")
-	entries, err := c.Mgr.ListAllowedRootEntries(r.Context(), path)
+	result, err := c.Mgr.ListAllowedRootEntries(r.Context(), path)
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
 	}
-	if entries == nil {
-		entries = []projectsvc.BrowseEntry{}
+	if result.Entries == nil {
+		result.Entries = []projectsvc.BrowseEntry{}
 	}
-	envelope.WriteJSON(w, http.StatusOK, projectsvc.BrowseResult{Path: path, Entries: entries})
+	envelope.WriteJSON(w, http.StatusOK, result)
 }
 
 func (c *ProjectsController) clone(w http.ResponseWriter, r *http.Request) {

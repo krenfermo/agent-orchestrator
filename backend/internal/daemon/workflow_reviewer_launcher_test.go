@@ -23,6 +23,8 @@ type fakeReviewerAdapter struct {
 	lastInvocation ports.ReviewInvocation
 	cmd            ports.ReviewCommandSpec
 	err            error
+	preLaunchInv   ports.ReviewInvocation
+	preLaunchCalls int
 }
 
 func (f *fakeReviewerAdapter) ReviewCommand(_ context.Context, inv ports.ReviewInvocation) (ports.ReviewCommandSpec, error) {
@@ -35,6 +37,16 @@ func (f *fakeReviewerAdapter) ReviewCommand(_ context.Context, inv ports.ReviewI
 
 func (f *fakeReviewerAdapter) ReviewMessage(_ context.Context, _ ports.ReviewInvocation) (string, error) {
 	return "", nil
+}
+
+// PreLaunch makes fakeReviewerAdapter satisfy the launcher's optional
+// preLaunchReviewer capability so tests can assert on the ReviewInvocation
+// (in particular Env) built before a workflow reviewer pane starts
+// (Checkpoint 8P-E.3.1).
+func (f *fakeReviewerAdapter) PreLaunch(_ context.Context, inv ports.ReviewInvocation) error {
+	f.preLaunchInv = inv
+	f.preLaunchCalls++
+	return nil
 }
 
 // Regression (Checkpoint 8M.1 §20): reviewer tool execution (e.g. pytest run
@@ -140,6 +152,42 @@ func TestWorkflowReviewerLauncherReusesAdapterCommandUnmodified(t *testing.T) {
 	}
 	if adapter.lastInvocation.Prompt == "" {
 		t.Fatalf("adapter was not given the workflow-owned prompt")
+	}
+}
+
+// TestWorkflowReviewerLauncherForwardsRuntimeEnvToPreLaunch is Checkpoint
+// 8P-E.3.1's regression: req.RuntimeEnv (Checkpoint 8P-B.1's resolved
+// per-user isolated env) must reach the reviewer adapter's PreLaunch, not
+// just the runtime pane's own env -- otherwise a Claude reviewer's trust
+// record lands in a config file the isolated subprocess never reads (the
+// exact bug 8P-E.3 fixed for workers).
+func TestWorkflowReviewerLauncherForwardsRuntimeEnvToPreLaunch(t *testing.T) {
+	adapter := &fakeReviewerAdapter{cmd: ports.ReviewCommandSpec{Argv: []string{"claude"}}}
+	l := &workflowReviewerLauncher{
+		reviewers: &fakeReviewerResolver{adapter: adapter},
+		runtime:   &fakeWorkflowReviewerRuntime{},
+		dataDir:   t.TempDir(),
+	}
+	isolatedEnv := map[string]string{"CLAUDE_CONFIG_DIR": "/ao/users/user-a/providers/claude-code"}
+
+	if _, err := l.Launch(context.Background(), workflowcore.ReviewerLaunchRequest{
+		Harness:         domain.ReviewerClaudeCode,
+		WorkerSessionID: "sess-1",
+		ProjectID:       "proj-1",
+		ReviewID:        "review-1",
+		RunID:           "run-1",
+		WorkspacePath:   "/ws/wf",
+		Prompt:          "review this worktree",
+		RuntimeEnv:      isolatedEnv,
+	}); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	if adapter.preLaunchCalls != 1 {
+		t.Fatalf("PreLaunch calls = %d, want 1", adapter.preLaunchCalls)
+	}
+	if adapter.preLaunchInv.Env["CLAUDE_CONFIG_DIR"] != isolatedEnv["CLAUDE_CONFIG_DIR"] {
+		t.Fatalf("PreLaunch Env = %#v, want isolated CLAUDE_CONFIG_DIR forwarded", adapter.preLaunchInv.Env)
 	}
 }
 

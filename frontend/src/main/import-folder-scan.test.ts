@@ -156,7 +156,7 @@ describe("scanImportFolder", () => {
 		expect(scan.repos).toHaveLength(2);
 	});
 
-	it("surfaces non-git child folders as needsGitInit in workspace mode", async () => {
+	it("excludes plain non-git child folders from the workspace repo list", async () => {
 		const root = await tempDir();
 		const parent = path.join(root, "workspace");
 		await mkdir(parent);
@@ -168,16 +168,9 @@ describe("scanImportFolder", () => {
 		});
 
 		expect(scan.setupWarning).toBeUndefined();
-		expect(scan.repos).toHaveLength(2);
-		const docs = scan.repos.find((r) => r.name === "docs");
-		expect(docs).toEqual(
-			expect.objectContaining({
-				name: "docs",
-				status: "ok",
-				needsGitInit: true,
-				hasRemote: false,
-			}),
-		);
+		expect(scan.repos).toHaveLength(1);
+		expect(scan.repos.find((r) => r.name === "docs")).toBeUndefined();
+		expect(scan.repos[0]).toEqual(expect.objectContaining({ name: "api" }));
 	});
 
 	it("reports folders inside AO-managed worktrees before offering setup", async () => {

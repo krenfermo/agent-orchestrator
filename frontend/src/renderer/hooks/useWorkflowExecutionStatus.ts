@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiClient, hasTrustedApiBaseUrl } from "../lib/api-client";
+import { isCapacityWaitReason } from "../lib/workflow-wake-reason";
 import { workflowRunQueryKey, type WorkflowRunDetailView } from "./useWorkflowRun";
 
 export type WorkflowStatusLabel =
@@ -61,7 +62,12 @@ export function useWorkflowStatusLabel(workflow: WorkflowRunDetailView | undefin
 	if (hasHumanRequiredQuestion) return "waiting_for_decision";
 	if (workflow.run.state === "needs_attention") return "needs_attention";
 	if (workflow.run.state === "completed") return "completed";
-	if (workflow.run.waitReason) return "waiting_for_capacity";
+	// A generic autonomous_progress heartbeat is not a capacity wait -- it is
+	// the routine re-poll that keeps a healthy autonomous run moving. Only an
+	// actual capacity/rate-limit-shaped reason should surface this label; any
+	// other pending wake falls through to the plan/task-based derivation
+	// below.
+	if (isCapacityWaitReason(workflow.run.waitReason)) return "waiting_for_capacity";
 	if (!workflow.plan) return undefined;
 
 	if (workflow.plan.status === "pending" || workflow.plan.status === "running" || workflow.plan.status === "validated") {

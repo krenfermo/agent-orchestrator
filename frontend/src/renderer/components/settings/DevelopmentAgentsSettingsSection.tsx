@@ -124,15 +124,25 @@ function ProviderCard({
 	const effectiveModel = profile?.defaultModel || descriptor.models?.[0];
 	const modelDisplay = effectiveModel ?? t("settings.agents.modelSelectedAtRuntime");
 
+	// A harness with no recorded Checkpoint 8H health event reports
+	// state "unknown" -- that's honest (AO has never observed a
+	// capacity-limited event for it), but bare "Unknown" reads as broken
+	// when the profile is actually connected and has simply never hit a
+	// limit yet. Distinguish that case in copy only: never fabricate a
+	// percentage or an "Available" state neither 8H nor the provider's own
+	// CLI actually reported.
 	const capacityDisplay = (() => {
-		if (!capacity) return t("settings.agents.capacityUnknown");
-		switch (capacity.state) {
+		const state = capacity?.state;
+		if (!state || state === "unknown") {
+			return status.account === "connected" ? t("settings.agents.capacityUnknownConnected") : t("settings.agents.capacityUnknown");
+		}
+		switch (state) {
 			case "available":
 				return t("settings.agents.capacityAvailable");
 			case "limited":
 				return t("settings.agents.capacityLimited");
 			case "cooldown":
-				return capacity.resetAt
+				return capacity?.resetAt
 					? t("settings.agents.capacityCooldown", { time: new Date(capacity.resetAt).toLocaleString() })
 					: t("settings.agents.capacityLimited");
 			case "unavailable":

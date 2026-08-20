@@ -89,6 +89,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/admin/reset-password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Loopback-only local recovery: reset a known account's password without a session */
+        post: operations["adminResetPassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/login": {
         parameters: {
             query?: never;
@@ -132,6 +149,40 @@ export interface paths {
         };
         /** Resolve the current identity: a real session, trusted-local mode's synthesized admin, or no_user */
         get: operations["getCurrentUser"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/register": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create the installation's first (owner) account and sign in — rejected once an owner already exists */
+        post: operations["registerFirstUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/setup-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Report whether the installation has zero users yet (first-run signup should be offered) */
+        get: operations["getAuthSetupStatus"];
         put?: never;
         post?: never;
         delete?: never;
@@ -589,6 +640,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/repo-connection-test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run a non-destructive git ls-remote probe against a project's root repo or a named workspace child repo */
+        post: operations["testRepoConnection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workspace-repos/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Re-detect a workspace project's child repositories from disk, correcting stale per-repo metadata */
+        post: operations["refreshWorkspaceRepos"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{projectId}/workflows": {
         parameters: {
             query?: never;
@@ -613,7 +698,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List the immediate subdirectories of a path under the configured allowed project roots */
+        /** List the immediate subdirectories of an absolute path under the configured allowed project roots (or the home directory when none are configured), for the web folder-browser UX */
         get: operations["browseProjectRoot"];
         put?: never;
         post?: never;
@@ -2275,6 +2360,13 @@ export interface components {
         ContainerReapConfig: {
             disabled?: boolean;
         };
+        ControllersAdminResetPasswordRequest: {
+            email: string;
+            newPassword: string;
+        };
+        ControllersAdminResetPasswordResponse: {
+            ok: boolean;
+        };
         ControllersCapacitySnapshotResponse: {
             /** @enum {string} */
             certainty: "actual" | "inferred" | "unknown";
@@ -2385,6 +2477,11 @@ export interface components {
             reviewIndependence: string;
             reviewerPriority: string[];
             workerPriority: string[];
+        };
+        ControllersRegisterRequest: {
+            displayName: string;
+            email: string;
+            password: string;
         };
         ControllersResolveDecisionRequest: {
             /** @description The resolver's answer. Required unless requiresHuman is true. */
@@ -2533,6 +2630,9 @@ export interface components {
         ControllersSetSessionAutoReviewRequest: {
             enabled: boolean;
         };
+        ControllersSetupStatusResponse: {
+            setupRequired: boolean;
+        };
         ControllersTaskCheckpointSummaryResponse: {
             acceptanceCriteria?: string[];
             activeErrors?: string[];
@@ -2568,6 +2668,12 @@ export interface components {
             ok: boolean;
             profile: components["schemas"]["ControllersProviderProfileView"];
         };
+        ControllersTestRepoConnectionRequest: {
+            repo?: string;
+        };
+        ControllersTestRepoConnectionResponse: {
+            result: components["schemas"]["ProjectConnectionTestResult"];
+        };
         ControllersUpdateProviderProfileRequest: {
             defaultModel?: string;
             displayName: string;
@@ -2577,6 +2683,8 @@ export interface components {
             displayName: string;
             email: string;
             id: string;
+            /** @enum {string} */
+            role: "owner" | "member";
             /** @enum {string} */
             status: "active" | "disabled";
             username: string;
@@ -3192,6 +3300,8 @@ export interface components {
             name: string;
             path: string;
             repo: string;
+            /** @enum {string} */
+            transport?: "https" | "ssh" | "unknown";
             workspaceRepos?: components["schemas"]["WorkspaceRepo"][];
         };
         ProjectBrowseEntry: {
@@ -3224,6 +3334,13 @@ export interface components {
             symlinks?: string[];
             trackerIntake?: components["schemas"]["TrackerIntakeConfig"];
             worker?: components["schemas"]["RoleOverride"];
+        };
+        ProjectConnectionTestResult: {
+            /** Format: int64 */
+            latencyMs?: number;
+            message?: string;
+            /** @enum {string} */
+            status: "ok" | "error";
         };
         ProjectGetResponse: {
             project: components["schemas"]["ProjectOrDegraded"];
@@ -4079,10 +4196,13 @@ export interface components {
             status: "unmodified" | "modified" | "added" | "deleted" | "renamed";
         };
         WorkspaceRepo: {
+            defaultBranch?: string;
             gitStatus?: string;
             name: string;
             relativePath: string;
             repo: string;
+            /** @enum {string} */
+            transport?: "https" | "ssh" | "unknown";
         };
     };
     responses: never;
@@ -4345,6 +4465,57 @@ export interface operations {
             };
         };
     };
+    adminResetPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersAdminResetPasswordRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersAdminResetPasswordResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     login: {
         parameters: {
             query?: never;
@@ -4459,6 +4630,86 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    registerFirstUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersRegisterRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersLoginResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getAuthSetupStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersSetupStatusResponse"];
                 };
             };
             /** @description Not Implemented */
@@ -6036,6 +6287,110 @@ export interface operations {
             };
         };
     };
+    testRepoConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersTestRepoConnectionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersTestRepoConnectionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    refreshWorkspaceRepos: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     createWorkflowRun: {
         parameters: {
             query?: never;
@@ -6102,7 +6457,7 @@ export interface operations {
     browseProjectRoot: {
         parameters: {
             query?: {
-                /** @description Directory path, relative to an allowed project root, to list. Empty lists the root itself. */
+                /** @description Absolute directory path, previously returned as an entry's own path, to list. Empty lists the top level (the configured allowed roots, or their contents directly when only one root is configured). */
                 path?: string;
             };
             header?: never;

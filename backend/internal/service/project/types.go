@@ -28,6 +28,10 @@ type Project struct {
 	Kind           domain.ProjectKind    `json:"kind" enum:"single_repo,workspace,scratch"`
 	Path           string                `json:"path"`
 	Repo           string                `json:"repo"`
+	// Transport is the root repo's remote transport, classified from Repo:
+	// "https", "ssh", or "unknown" (no remote, or a local path). Empty when
+	// Repo is empty.
+	Transport      string                `json:"transport,omitempty" enum:"https,ssh,unknown"`
 	DefaultBranch  string                `json:"defaultBranch"`
 	Agent          string                `json:"agent,omitempty"`
 	Config         *domain.ProjectConfig `json:"config,omitempty"`
@@ -48,5 +52,14 @@ type WorkspaceRepo struct {
 	Name         string `json:"name"`
 	RelativePath string `json:"relativePath"`
 	Repo         string `json:"repo"`
+	// Transport is Repo's remote transport, classified the same way as
+	// Project.Transport.
+	Transport    string `json:"transport,omitempty" enum:"https,ssh,unknown"`
 	GitStatus    string `json:"gitStatus,omitempty"`
+	// DefaultBranch is this repo's own base branch — the branch autonomous
+	// worker worktrees for this repo are created from. Detected from the
+	// child repo's checked-out branch at registration time; independent of
+	// the project-level DefaultBranch fallback used by single-repo projects
+	// and by any child that has no branch of its own (GitStatusNeedsInit).
+	DefaultBranch string `json:"defaultBranch,omitempty"`
 }

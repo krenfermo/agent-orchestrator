@@ -10,6 +10,7 @@ import {
 	RefreshCw,
 	Settings2,
 	TriangleAlert,
+	UserCircle,
 	X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -65,6 +66,7 @@ export function SettingsDialog() {
 		{ id: "sourceControl", label: "Source Control", icon: Link2 },
 		{ id: "projects", label: "Projects", icon: FolderGit2 },
 		{ id: "updates", label: t("settings.updates"), icon: RefreshCw },
+		{ id: "account", label: t("settings.account"), icon: UserCircle },
 		{ id: "help", label: t("settings.help"), icon: CircleHelp },
 	];
 

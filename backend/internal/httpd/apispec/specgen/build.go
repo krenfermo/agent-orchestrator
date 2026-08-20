@@ -646,6 +646,36 @@ func authOperations() []operation {
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
 		},
+		{
+			method: http.MethodGet, path: "/api/v1/auth/setup-status", id: "getAuthSetupStatus", tag: "auth",
+			summary: "Report whether the installation has zero users yet (first-run signup should be offered)",
+			resps: []respUnit{
+				{http.StatusOK, controllers.SetupStatusResponse{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/auth/register", id: "registerFirstUser", tag: "auth",
+			summary: "Create the installation's first (owner) account and sign in — rejected once an owner already exists",
+			reqBody: controllers.RegisterRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.LoginResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/auth/admin/reset-password", id: "adminResetPassword", tag: "auth",
+			summary: "Loopback-only local recovery: reset a known account's password without a session",
+			reqBody: controllers.AdminResetPasswordRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.AdminResetPasswordResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
 	}
 }
 
@@ -1633,7 +1663,7 @@ func projectOperations() []operation {
 		},
 		{
 			method: http.MethodGet, path: "/api/v1/projects/browse", id: "browseProjectRoot", tag: "projects",
-			summary:    "List the immediate subdirectories of a path under the configured allowed project roots",
+			summary:    "List the immediate subdirectories of an absolute path under the configured allowed project roots (or the home directory when none are configured), for the web folder-browser UX",
 			pathParams: []any{controllers.BrowseProjectRootQuery{}},
 			resps: []respUnit{
 				{http.StatusOK, controllers.BrowseProjectRootResponse{}},
@@ -1692,6 +1722,29 @@ func projectOperations() []operation {
 			pathParams: []any{controllers.ProjectIDParam{}},
 			resps: []respUnit{
 				{http.StatusOK, projectsvc.RemoveResult{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/repo-connection-test", id: "testRepoConnection", tag: "projects",
+			summary:    "Run a non-destructive git ls-remote probe against a project's root repo or a named workspace child repo",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			reqBody:    controllers.TestRepoConnectionRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.TestRepoConnectionResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/workspace-repos/refresh", id: "refreshWorkspaceRepos", tag: "projects",
+			summary:    "Re-detect a workspace project's child repositories from disk, correcting stale per-repo metadata",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectResponse{}},
 				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},

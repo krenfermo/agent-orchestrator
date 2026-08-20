@@ -196,9 +196,21 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 // agent would hang at that prompt with no one to answer it.
 //
 // An AO worktree is derived from the repo the user is already running
-// AO in, so it is inherently trusted. PreLaunch records that trust in
-// ~/.claude.json before launch, additively and atomically, so it cannot
-// clobber a concurrently-running Claude instance's config.
+// AO in, so it is inherently trusted. PreLaunch records that trust before
+// launch, additively and atomically, so it cannot clobber a concurrently-
+// running Claude instance's config.
+//
+// The trust record must land in the same config file the spawned process
+// will itself read. When cfg.Env carries an isolated per-user
+// CLAUDE_CONFIG_DIR (Checkpoint 8P-B's per-user runtime-home isolation),
+// that always wins over the daemon's own ~/.claude.json — Claude Code
+// honors CLAUDE_CONFIG_DIR when set, and the daemon process's own
+// os.UserHomeDir() is a different filesystem location than the isolated
+// HOME/CLAUDE_CONFIG_DIR exported to the subprocess. Writing to the wrong
+// file leaves the trust record invisible to the actual worker, which
+// blocks forever at the interactive prompt (Checkpoint 8P-E.3: reproduced
+// via a real autonomous run whose worker sat at this exact dialog with no
+// first signal, ever, for hours).
 func (p *Plugin) PreLaunch(ctx context.Context, cfg ports.LaunchConfig) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -206,11 +218,22 @@ func (p *Plugin) PreLaunch(ctx context.Context, cfg ports.LaunchConfig) error {
 	if cfg.WorkspacePath == "" {
 		return nil
 	}
-	cfgPath, err := claudeConfigPath()
+	cfgPath, err := resolveClaudeConfigPath(cfg.Env)
 	if err != nil {
 		return err
 	}
 	return ensureWorkspaceTrusted(cfgPath, cfg.WorkspacePath)
+}
+
+// resolveClaudeConfigPath returns the config file PreLaunch must write the
+// trust record into: env's isolated CLAUDE_CONFIG_DIR when present (see
+// PreLaunch), otherwise the daemon's own ~/.claude.json for callers with no
+// per-user isolated environment to offer (preserves prior behavior).
+func resolveClaudeConfigPath(env map[string]string) (string, error) {
+	if configDir := strings.TrimSpace(env["CLAUDE_CONFIG_DIR"]); configDir != "" {
+		return filepath.Join(configDir, ".claude.json"), nil
+	}
+	return claudeConfigPath()
 }
 
 // GetRestoreCommand rebuilds the argv that continues an existing Claude Code

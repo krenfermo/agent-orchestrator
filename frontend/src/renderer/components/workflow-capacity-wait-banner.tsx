@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import type { components } from "../../api/schema";
+import { isCapacityWaitReason } from "../lib/workflow-wake-reason";
 import { Badge } from "./ui/badge";
 
 export type WorkflowRunView = components["schemas"]["WorkflowRunView"];
@@ -30,7 +31,13 @@ function reasonLabel(t: TFunction, reason: string): string {
  */
 export function WorkflowCapacityWaitBanner({ run }: { run: WorkflowRunView }) {
 	const { t } = useTranslation();
-	if (!run.nextWakeAt) return null;
+	// Checkpoint 8P-E.3: run.nextWakeAt is set for ANY pending durable wake,
+	// including the routine autonomous_progress heartbeat that re-polls a
+	// healthy, still-progressing autonomous run. Rendering "Waiting for
+	// capacity" for that case is misleading -- a real run showed this banner
+	// while Claude's own health record said available/dispatch-succeeded.
+	// Only render when the wake is actually capacity/rate-limit-shaped.
+	if (!run.nextWakeAt || !isCapacityWaitReason(run.waitReason)) return null;
 
 	const nextWakeDate = new Date(run.nextWakeAt);
 	const nextWakeLabel = Number.isNaN(nextWakeDate.getTime()) ? run.nextWakeAt : nextWakeDate.toLocaleString();

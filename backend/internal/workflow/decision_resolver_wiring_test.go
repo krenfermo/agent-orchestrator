@@ -286,7 +286,7 @@ func TestDecisionProviderSelect_PreferredUnavailableSameProviderAllowedFallsBack
 	ctx := context.Background()
 
 	userID := domain.UserID("user-" + t.Name())
-	if _, err := store.InsertUser(ctx, domain.User{ID: userID, DisplayName: "Test User", Email: t.Name() + "@example.com", Status: domain.UserStatusActive, CreatedAt: clock.Now(), UpdatedAt: clock.Now()}); err != nil {
+	if _, err := store.InsertUser(ctx, domain.User{ID: userID, DisplayName: "Test User", Email: t.Name() + "@example.com", Status: domain.UserStatusActive, Role: domain.UserRoleMember, CreatedAt: clock.Now(), UpdatedAt: clock.Now()}); err != nil {
 		t.Fatalf("InsertUser: %v", err)
 	}
 	claudeProfile, err := store.InsertProviderProfile(ctx, domain.ProviderProfile{

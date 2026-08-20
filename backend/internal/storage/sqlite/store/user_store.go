@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/gen"
@@ -24,6 +25,7 @@ func (s *Store) InsertUser(ctx context.Context, u domain.User) (domain.User, err
 		Username:     u.Username,
 		PasswordHash: u.PasswordHash,
 		Status:       u.Status,
+		Role:         u.Role,
 		CreatedAt:    u.CreatedAt,
 		UpdatedAt:    u.UpdatedAt,
 	})
@@ -93,6 +95,52 @@ func (s *Store) ListUsers(ctx context.Context) ([]domain.User, error) {
 	return out, nil
 }
 
+// UpdateUserPasswordHash sets a new bcrypt hash for a user (e.g. the
+// loopback-only admin password-reset path). Returns false if the user id
+// doesn't exist.
+func (s *Store) UpdateUserPasswordHash(ctx context.Context, id domain.UserID, hash string, updatedAt time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	n, err := s.qw.UpdateUserPasswordHash(ctx, gen.UpdateUserPasswordHashParams{
+		PasswordHash: hash,
+		UpdatedAt:    updatedAt,
+		ID:           id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("update user password hash %s: %w", id, err)
+	}
+	return n > 0, nil
+}
+
+// UpdateUserRole sets a user's role. Returns false if the user id doesn't
+// exist. Callers are responsible for the single-owner invariant -- the
+// ux_users_single_owner partial unique index enforces it at the SQL layer.
+func (s *Store) UpdateUserRole(ctx context.Context, id domain.UserID, role domain.UserRole, updatedAt time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	n, err := s.qw.UpdateUserRole(ctx, gen.UpdateUserRoleParams{
+		Role:      role,
+		UpdatedAt: updatedAt,
+		ID:        id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("update user role %s: %w", id, err)
+	}
+	return n > 0, nil
+}
+
+// CountOwners returns how many users currently hold UserRoleOwner -- at most
+// 1, enforced by ux_users_single_owner.
+func (s *Store) CountOwners(ctx context.Context) (int64, error) {
+	n, err := s.qr.CountOwners(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("count owners: %w", err)
+	}
+	return n, nil
+}
+
 func userFromRow(row gen.User) domain.User {
 	return domain.User{
 		ID:           row.ID,
@@ -101,6 +149,7 @@ func userFromRow(row gen.User) domain.User {
 		Username:     row.Username,
 		PasswordHash: row.PasswordHash,
 		Status:       row.Status,
+		Role:         row.Role,
 		CreatedAt:    row.CreatedAt,
 		UpdatedAt:    row.UpdatedAt,
 	}

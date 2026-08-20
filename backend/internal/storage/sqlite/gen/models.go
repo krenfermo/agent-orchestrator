@@ -559,6 +559,7 @@ type User struct {
 	Username     string
 	PasswordHash string
 	Status       domain.UserStatus
+	Role         domain.UserRole
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }

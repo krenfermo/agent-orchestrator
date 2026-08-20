@@ -44,8 +44,9 @@ func TestLANManagerAuthGatesSharedHandler(t *testing.T) {
 }
 
 // TestLANManagerBlocksLoopbackOnlyControlRoutes proves the LAN listener never
-// serves /shutdown, /internal/*, /api/v1/mobile*, /api/v1/dev*, or
-// /api/v1/browser* — even when the request carries a spoofed Host: 127.0.0.1
+// serves /shutdown, /internal/*, /api/v1/mobile*, /api/v1/dev*,
+// /api/v1/browser*, or /api/v1/auth/admin* — even when the request carries a
+// spoofed Host: 127.0.0.1
 // and valid LAN auth, since gating on Host alone (localControlRequest) is what
 // let a LAN client reach these routes.
 func TestLANManagerBlocksLoopbackOnlyControlRoutes(t *testing.T) {
@@ -70,6 +71,7 @@ func TestLANManagerBlocksLoopbackOnlyControlRoutes(t *testing.T) {
 		"/api/v1/dev/import-projects",
 		"/api/v1/browser/status",
 		"/api/v1/sessions/ao-1/preview/server",
+		"/api/v1/auth/admin/reset-password",
 	}
 	for _, path := range blocked {
 		req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d%s", port, path), nil)

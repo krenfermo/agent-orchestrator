@@ -46,7 +46,9 @@ func NewLANManager(handler http.Handler, state *authState, defaultPort int, log 
 // prefixes that must never be reachable through the LAN listener: /shutdown,
 // the telemetry routes under /internal/, and the Connect Mobile control
 // surface under /api/v1/mobile, plus developer maintenance routes under
-// /api/v1/dev. Some routes are gated in the shared router by localControlRequest,
+// /api/v1/dev, plus the local-recovery admin surface under /api/v1/auth/admin
+// (session-less password reset — must stay physically unreachable off this
+// machine). Some routes are gated in the shared router by localControlRequest,
 // which trusts the client-supplied Host header (and RealIP, which trusts
 // X-Forwarded-For/X-Real-IP) — both spoofable by any LAN client. The LAN
 // listener is the one thing a caller cannot spoof: it is the physical socket the
@@ -58,6 +60,7 @@ var lanControlBlockedPrefixes = []string{
 	"/api/v1/mobile",
 	"/api/v1/dev",
 	"/api/v1/browser",
+	"/api/v1/auth/admin",
 }
 
 // lanControlBlock returns 404 for any request whose path is, or is nested

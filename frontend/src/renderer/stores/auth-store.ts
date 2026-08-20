@@ -26,8 +26,15 @@ type AuthState = {
 	user: UserView | null;
 	status: AuthStatus;
 	error: string | null;
+	// Checkpoint 8P-E.8: null until checkSetup() resolves. Orthogonal to
+	// `status` — "unauthenticated" alone doesn't distinguish "no account
+	// exists yet, show Create your account" from "an account exists, show
+	// Sign in"; setupRequired is what makes that call.
+	setupRequired: boolean | null;
 	load: () => Promise<void>;
+	checkSetup: () => Promise<void>;
 	login: (usernameOrEmail: string, password: string) => Promise<boolean>;
+	register: (displayName: string, email: string, password: string) => Promise<boolean>;
 	logout: () => Promise<void>;
 };
 
@@ -37,6 +44,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 	user: null,
 	status: "loading",
 	error: null,
+	setupRequired: null,
 	load: async () => {
 		if (pendingLoad) return pendingLoad;
 		pendingLoad = (async () => {
@@ -67,6 +75,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 			pendingLoad = undefined;
 		}
 	},
+	checkSetup: async () => {
+		try {
+			const { data, error } = await apiClient.GET("/api/v1/auth/setup-status", { credentials: "include" });
+			if (error || !data) {
+				set({ setupRequired: false });
+				return;
+			}
+			set({ setupRequired: data.setupRequired });
+		} catch {
+			set({ setupRequired: false });
+		}
+	},
 	login: async (usernameOrEmail, password) => {
 		set({ error: null });
 		try {
@@ -79,6 +99,24 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 				return false;
 			}
 			set({ user: data.user, status: "authenticated", error: null });
+			return true;
+		} catch {
+			set({ error: "Could not reach the daemon" });
+			return false;
+		}
+	},
+	register: async (displayName, email, password) => {
+		set({ error: null });
+		try {
+			const { data, error } = await apiClient.POST("/api/v1/auth/register", {
+				credentials: "include",
+				body: { displayName, email, password },
+			});
+			if (error || !data) {
+				set({ error: apiErrorMessage(error, "Could not create the account") });
+				return false;
+			}
+			set({ user: data.user, status: "authenticated", setupRequired: false, error: null });
 			return true;
 		} catch {
 			set({ error: "Could not reach the daemon" });

@@ -21,7 +21,7 @@ func seedOwnerAndClaudeProfile(t *testing.T, store *sqlite.Store, userID domain.
 	ctx := context.Background()
 	if _, err := store.InsertUser(ctx, domain.User{
 		ID: userID, DisplayName: string(userID), Email: string(userID) + "@example.com", Username: string(userID),
-		PasswordHash: "x", Status: domain.UserStatusActive, CreatedAt: now, UpdatedAt: now,
+		PasswordHash: "x", Status: domain.UserStatusActive, Role: domain.UserRoleMember, CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("seed user %s: %v", userID, err)
 	}

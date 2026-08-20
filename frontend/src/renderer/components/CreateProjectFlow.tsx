@@ -8,6 +8,7 @@ import { aoBridge } from "../lib/bridge";
 import { cn } from "../lib/utils";
 import type { ProjectKind } from "../types/workspace";
 import { CreateProjectAgentSheet, type CreateProjectAgentSelection } from "./CreateProjectAgentSheet";
+import { ServerFolderBrowser } from "./ServerFolderBrowser";
 import { Button } from "./ui/button";
 
 export type CreateProjectInput = { path: string; asWorkspace?: boolean } & CreateProjectAgentSelection;
@@ -53,6 +54,10 @@ export function CreateProjectFlow({
 	const [repositorySetup, setRepositorySetup] = useState<"NOT_A_GIT_REPO" | "PROJECT_UNBORN" | null>(null);
 	const [repositorySetupWarning, setRepositorySetupWarning] = useState<string | null>(null);
 	const [manualPath, setManualPath] = useState("");
+	// The web (non-Electron) folder step defaults to the graphical
+	// server-side folder browser (Checkpoint 8P-E.4); this only flips to the
+	// advanced manual-path text field when the user explicitly asks for it.
+	const [manualEntryOpen, setManualEntryOpen] = useState(false);
 
 	const hasModePicker = mode === "choose";
 	const isBusy = isChoosingPath || isCreating || isInitializing;
@@ -73,6 +78,7 @@ export function CreateProjectFlow({
 			setRepositorySetupWarning(null);
 			setSelectedKind(kind);
 			setManualPath("");
+			setManualEntryOpen(false);
 			setModePickerOpen(false);
 			setFolderPickerOpen(true);
 			return;
@@ -82,8 +88,13 @@ export function CreateProjectFlow({
 		void chooseDirectory(kind);
 	};
 
-	const submitManualPath = () => {
-		const trimmed = manualPath.trim();
+	// Shared by the graphical server-side folder browser (the primary web
+	// path) and the advanced manual-path fallback: both ultimately hand this
+	// flow an already-resolved absolute path and continue into the same
+	// repository preflight / agent sheet / POST /api/v1/projects flow a
+	// native-picker selection would.
+	const selectResolvedPath = (path: string) => {
+		const trimmed = path.trim();
 		if (!trimmed) return;
 		setError(null);
 		setValidationScan(null);
@@ -93,6 +104,8 @@ export function CreateProjectFlow({
 		setSelectedPath(trimmed);
 		setFolderPickerOpen(false);
 	};
+
+	const submitManualPath = () => selectResolvedPath(manualPath);
 
 	const chooseDirectory = async (kind: ProjectKind) => {
 		setError(null);
@@ -244,6 +257,9 @@ export function CreateProjectFlow({
 						hasNativeFolderPicker={hasNativeFolderPicker}
 						kind={selectedKind}
 						manualPath={manualPath}
+						manualEntryOpen={manualEntryOpen}
+						onToggleManualEntry={() => setManualEntryOpen((v) => !v)}
+						onFolderBrowserSelect={selectResolvedPath}
 						onManualPathChange={setManualPath}
 						onManualPathSubmit={submitManualPath}
 						open={folderPickerOpen}
@@ -252,6 +268,7 @@ export function CreateProjectFlow({
 							setError(null);
 							setValidationScan(null);
 							setManualPath("");
+							setManualEntryOpen(false);
 							setFolderPickerOpen(false);
 							if (!embedded) {
 								window.requestAnimationFrame(() => setModePickerOpen(true));
@@ -265,6 +282,7 @@ export function CreateProjectFlow({
 									setError(null);
 									setValidationScan(null);
 									setManualPath("");
+									setManualEntryOpen(false);
 								}
 							}
 						}}
@@ -420,6 +438,9 @@ function CreateProjectFolderDialog({
 	hasNativeFolderPicker,
 	kind,
 	manualPath,
+	manualEntryOpen,
+	onToggleManualEntry,
+	onFolderBrowserSelect,
 	onBack,
 	onChooseFolder,
 	onManualPathChange,
@@ -433,6 +454,9 @@ function CreateProjectFolderDialog({
 	hasNativeFolderPicker: boolean;
 	kind: ProjectKind;
 	manualPath: string;
+	manualEntryOpen: boolean;
+	onToggleManualEntry: () => void;
+	onFolderBrowserSelect: (path: string) => void;
 	onBack: () => void;
 	onChooseFolder: () => void;
 	onManualPathChange: (value: string) => void;
@@ -452,7 +476,9 @@ function CreateProjectFolderDialog({
 				? t("createProject.footerReview")
 				: hasNativeFolderPicker
 					? t("createProject.footerChoose")
-					: t("createProject.footerManualPath");
+					: manualEntryOpen
+						? t("createProject.footerManualPath")
+						: t("createProject.footerBrowse");
 	return (
 		<Dialog.Root open={open} onOpenChange={onOpenChange}>
 			<Dialog.Portal>
@@ -557,7 +583,7 @@ function CreateProjectFolderDialog({
 									{isWorkspace ? t("createProject.pickerWorkspaceHint") : t("createProject.pickerProjectHint")}
 								</span>
 							</button>
-						) : (
+						) : manualEntryOpen ? (
 							<form
 								className="flex flex-col gap-3 rounded-lg border border-dashed border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)] p-4"
 								onSubmit={(event) => {
@@ -582,16 +608,37 @@ function CreateProjectFolderDialog({
 									spellCheck={false}
 									value={manualPath}
 								/>
-								<Button
-									type="submit"
-									variant="primary"
-									size="sm"
-									className="self-start"
-									disabled={disabled || !manualPath.trim()}
-								>
-									{t("createProject.useThisPath")}
-								</Button>
+								<div className="flex items-center gap-3">
+									<Button
+										type="submit"
+										variant="primary"
+										size="sm"
+										disabled={disabled || !manualPath.trim()}
+									>
+										{t("createProject.useThisPath")}
+									</Button>
+									<button
+										type="button"
+										className="text-[12px] font-medium text-[var(--color-text-import-muted)] underline-offset-2 hover:underline"
+										disabled={disabled}
+										onClick={onToggleManualEntry}
+									>
+										{t("createProject.backToBrowse")}
+									</button>
+								</div>
 							</form>
+						) : (
+							<div className="flex flex-col gap-2">
+								<ServerFolderBrowser disabled={disabled} onUseFolder={onFolderBrowserSelect} />
+								<button
+									type="button"
+									className="self-start text-[12px] font-medium text-[var(--color-text-import-muted)] underline-offset-2 hover:underline"
+									disabled={disabled}
+									onClick={onToggleManualEntry}
+								>
+									{t("createProject.enterPathManually")}
+								</button>
+							</div>
 						)}
 						{error && !hasScan && (
 							<div
