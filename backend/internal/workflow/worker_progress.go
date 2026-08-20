@@ -324,11 +324,33 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 			}
 			outcome := latestAttempt.Outcome
 			errClass := latestAttempt.ErrorClass
-			switch decision.NextStep {
-			case domain.WorkflowStepCompleted:
+			switch {
+			case decision.NextStep == domain.WorkflowStepCompleted:
 				outcome = domain.WorkflowAttemptSucceeded
 				finishedAt = now
-			case domain.WorkflowStepFailed:
+			// A decision carrying an ErrorClass is AO giving up on this
+			// attempt, and that is true even when the step lands on
+			// Waiting rather than a terminal state — the ambiguous-worker
+			// case below is the only such decision today. It must finalize
+			// the attempt for the same reason the terminal cases do:
+			// observeWorkStep's own guard only re-enters while the step is
+			// Running, and nothing resumes a *work* step out of Waiting
+			// (only the plan and verify steps have a waiting->running
+			// caller), so an attempt left with outcome/finished_at unset
+			// here stays unset forever. Before this fix that stranded row
+			// read as still in-flight, and — because
+			// task_checkpoint_summary only surfaces ActiveErrors for
+			// attempts whose outcome is failed — hid the ambiguity from
+			// the UI entirely, leaving the run sitting in needs_attention
+			// with nothing on screen explaining why.
+			//
+			// "failed" is the honest outcome, not a guess about the
+			// worker: the attempt demonstrably did not produce a usable
+			// result, and ErrorClass (ambiguous_worker_state) is what
+			// records that AO could not prove *why*. The outcome enum has
+			// no "ambiguous" member, and leaving it NULL asserts something
+			// stronger and falser — that the attempt is still running.
+			case decision.NextStep == domain.WorkflowStepFailed, decision.ErrorClass != "":
 				outcome = domain.WorkflowAttemptFailed
 				finishedAt = now
 			}

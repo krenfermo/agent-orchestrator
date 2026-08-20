@@ -523,6 +523,85 @@ func TestWorkerWithFirstSignalNeverForceFailedByStartupTimeout(t *testing.T) {
 	}
 }
 
+// TestIdleWorkerWithNoEvidenceFinalizesItsAttempt is the regression test for
+// the attempt-finalization gap found in production run
+// wf-a9b8d51a-3cab-4026-8573-60f8b9759b17 (child of
+// wf-1ee7fcb8-53d0-4c16-8039-fefdcb4909ba). Its DB row read
+// error_class=ambiguous_worker_state with outcome AND finished_at both still
+// NULL: observeWorkStep's idle-with-no-evidence branch lands the step on
+// Waiting rather than a terminal state, so the pre-fix finalization switch
+// (which only matched Completed/Failed) refined the error class but never
+// resolved the attempt. Because observeWorkStep only re-enters while the step
+// is Running and nothing resumes a work step out of Waiting, that left the
+// attempt permanently reading as in-flight — and hid it from the UI, since
+// task_checkpoint_summary only surfaces ActiveErrors for failed attempts.
+func TestIdleWorkerWithNoEvidenceFinalizesItsAttempt(t *testing.T) {
+	facts := newFakeSessionFacts()
+	spawner := &fakeSpawner{
+		rec:   domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}},
+		facts: facts,
+	}
+	// An observable workspace that reports no evidence whatsoever: no new
+	// HEAD, nothing dirty/staged/untracked. This is the real ambiguity —
+	// the worker is alive and signalled, but produced nothing AO can verify.
+	c, store, clk := newCoordinatorFull(spawner, facts, &fakeWorkspaceFacts{})
+	ctx := context.Background()
+
+	created, err := c.CreateRun(ctx, "proj-1", "ship the thing")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	detail, err := c.StartRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	work := workStepFrom(detail)
+	sessionID := domain.SessionID(*work.Step.SessionID)
+
+	// The worker genuinely started (a hook fired, so FirstSignalAt is set —
+	// this is NOT the startup-failure case) and then went idle empty-handed.
+	facts.put(domain.SessionRecord{
+		ID:            sessionID,
+		Activity:      domain.Activity{State: domain.ActivityIdle},
+		Metadata:      domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"},
+		FirstSignalAt: clk.Now(),
+	})
+
+	clk.Advance(time.Minute)
+	got, err := c.GetRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.Run.State != domain.WorkflowRunNeedsAttention {
+		t.Fatalf("run state = %q, want needs_attention", got.Run.State)
+	}
+	work = workStepFrom(got)
+	if work.Step.State != domain.WorkflowStepWaiting {
+		t.Fatalf("work step state = %q, want waiting", work.Step.State)
+	}
+
+	attempts, err := store.ListWorkflowAttempts(ctx, work.Step.ID)
+	if err != nil || len(attempts) != 1 {
+		t.Fatalf("attempts = %+v, err=%v, want exactly 1", attempts, err)
+	}
+	a := attempts[0]
+	if a.ErrorClass != domain.WorkflowErrorAmbiguousWorkerState {
+		t.Fatalf("attempt error class = %q, want ambiguous_worker_state", a.ErrorClass)
+	}
+	// The gap itself: both of these were unset before the fix.
+	if a.Outcome != domain.WorkflowAttemptFailed {
+		t.Fatalf("attempt outcome = %q, want failed — an attempt AO has given up on must not keep reading as in-flight", a.Outcome)
+	}
+	if a.FinishedAt == nil {
+		t.Fatal("attempt finished_at is still NULL — AO stopped observing this attempt, so it must be stamped finished")
+	}
+
+	// Giving up must not silently spawn a replacement worker.
+	if spawner.calls != 1 {
+		t.Fatalf("spawner calls = %d, want 1", spawner.calls)
+	}
+}
+
 // Ambiguous branch 1: outbox found "dispatched" but the natural-key session
 // lookup finds nothing at all -> waiting/needs_attention, never a silent
 // success, never a second Spawn call.
