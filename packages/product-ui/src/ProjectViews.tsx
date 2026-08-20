@@ -654,18 +654,43 @@ export type RepoConnectivityRow = {
 	onTest: () => void;
 };
 
+/** Execution mode of a project: work in a throwaway worktree, or in the repo itself. */
+export type ProjectExecutionMode = "isolated_worktree" | "direct_branch";
+
+/**
+ * One repository a direct-branch project executes in, with the branch it is
+ * configured for and — when a workflow currently owns that repository+branch —
+ * who owns it. `lock` absent means the branch is free, never "unknown".
+ */
+export type ProjectRepositoryExecutionRow = {
+	key: string;
+	name: string;
+	path?: string;
+	branch: string;
+	mode: ProjectExecutionMode;
+	lock?: { workflowRunId: string; sessionId?: string };
+};
+
 export function ProjectWorkflowSettingsView({
 	branch,
+	executionMode,
+	executionModeControl,
+	gitPolicyControls,
 	icons,
 	labels,
 	onBranchChange,
 	onPrefixChange,
 	prefix,
 	repoConnectivity,
+	repositories,
 	reviewerControl,
 	reviewerWarning,
 }: {
 	branch: string;
+	/** Effective execution mode. Omitted keeps the pre-8P-E.11 layout exactly. */
+	executionMode?: ProjectExecutionMode;
+	executionModeControl?: ReactNode;
+	gitPolicyControls?: { localCommit: ReactNode; push: ReactNode; merge?: ReactNode };
 	icons?: Partial<Record<"branch" | "edit" | "prefix" | "reviewer" | "workspaceRepo", ReactNode>>;
 	labels: {
 		worktrees: string;
@@ -682,17 +707,42 @@ export function ProjectWorkflowSettingsView({
 		connectionOk?: string;
 		connectionError?: string;
 		noRemote?: string;
+		execution?: string;
+		executionMode?: string;
+		directBranchNote?: string;
+		sessionPrefixNoGitNote?: string;
+		repositories?: string;
+		repositoryFree?: string;
+		repositoryBusy?: string;
+		gitPolicy?: string;
+		localCommit?: string;
+		push?: string;
+		merge?: string;
+		mergeNotApplicable?: string;
 	};
 	onBranchChange: (value: string) => void;
 	onPrefixChange: (value: string) => void;
 	prefix: string;
 	/** One row per real Git repository — the project root plus any workspace children. */
 	repoConnectivity?: RepoConnectivityRow[];
+	/** Per-repository execution status. Only meaningful in direct-branch mode. */
+	repositories?: ProjectRepositoryExecutionRow[];
 	reviewerControl: ReactNode;
 	reviewerWarning?: string | null;
 }) {
+	const directBranch = executionMode === "direct_branch";
 	return (
 		<>
+			{executionModeControl && (
+				<ProjectSettingsSection title={labels.execution ?? "Execution"} grouped>
+					<ProjectSettingsRow label={labels.executionMode ?? "Execution mode"}>
+						{executionModeControl}
+					</ProjectSettingsRow>
+					{directBranch && labels.directBranchNote && (
+						<p className="px-1 text-xs leading-row text-settings-muted">{labels.directBranchNote}</p>
+					)}
+				</ProjectSettingsSection>
+			)}
 			<ProjectSettingsSection title={labels.worktrees} grouped>
 				<ProjectSettingsInputRow
 					editIcon={icons?.edit}
@@ -714,7 +764,50 @@ export function ProjectWorkflowSettingsView({
 					placeholder="ao"
 					onChange={onPrefixChange}
 				/>
+				{directBranch && labels.sessionPrefixNoGitNote && (
+					<p className="px-1 text-xs leading-row text-settings-muted">{labels.sessionPrefixNoGitNote}</p>
+				)}
 			</ProjectSettingsSection>
+			{directBranch && repositories && repositories.length > 0 && (
+				<ProjectSettingsSection title={labels.repositories ?? "Repositories"} grouped>
+					{repositories.map((repo) => (
+						<div key={repo.key} className="settings-row-bar flex-col items-stretch gap-1 py-2">
+							<div className="flex items-center gap-(--size-settings-row-icon-gap)">
+								{icons?.workspaceRepo}
+								<span className="whitespace-nowrap text-sm leading-5 text-settings-label">{repo.name}</span>
+								<span className="settings-row-value text-xs">{repo.branch || "—"}</span>
+							</div>
+							{repo.path && (
+								<span className="truncate px-1 text-xs text-settings-muted" title={repo.path}>
+									{repo.path}
+								</span>
+							)}
+							<span className={cn("px-1 text-xs", repo.lock ? "text-warning" : "text-settings-muted")}>
+								{repo.lock
+									? `${labels.repositoryBusy ?? "In use by"} ${repo.lock.workflowRunId}`
+									: (labels.repositoryFree ?? "Available")}
+							</span>
+						</div>
+					))}
+				</ProjectSettingsSection>
+			)}
+			{gitPolicyControls && (
+				<ProjectSettingsSection title={labels.gitPolicy ?? "Autonomous git policy"} grouped>
+					<ProjectSettingsRow label={labels.localCommit ?? "Local commits"}>
+						{gitPolicyControls.localCommit}
+					</ProjectSettingsRow>
+					<ProjectSettingsRow label={labels.push ?? "Push"}>{gitPolicyControls.push}</ProjectSettingsRow>
+					{directBranch ? (
+						<p className="px-1 text-xs leading-row text-settings-muted">
+							{labels.mergeNotApplicable ?? "Merge does not apply in direct-branch mode."}
+						</p>
+					) : (
+						gitPolicyControls.merge && (
+							<ProjectSettingsRow label={labels.merge ?? "Merge"}>{gitPolicyControls.merge}</ProjectSettingsRow>
+						)
+					)}
+				</ProjectSettingsSection>
+			)}
 			{repoConnectivity && repoConnectivity.length > 0 && (
 				<ProjectSettingsSection title={labels.repositoryConnectivity ?? "Repository connectivity"} grouped>
 					{repoConnectivity.map((repo) => (

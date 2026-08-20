@@ -10,6 +10,7 @@ import (
 
 	plannercommand "github.com/aoagents/agent-orchestrator/backend/internal/adapters/planner/command"
 	workspacerouter "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/router"
+	"github.com/aoagents/agent-orchestrator/backend/internal/branchlock"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/providerruntime"
@@ -47,7 +48,36 @@ func (w workflowAgentSwitcher) SwitchAgent(ctx context.Context, id domain.Sessio
 // plus the thin API-facing service. It does not start any background
 // goroutine — progress is derived at read time (GetRun) and at boot
 // (Reconcile), never polled by a scheduler.
-func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
+// workflowBranchLocks adapts *branchlock.Manager to workflowcore.BranchLocks.
+// Workflow deliberately depends on its own narrow types rather than importing
+// branchlock, so the request translation lives here in composition-root wiring,
+// exactly like workflowAgentSwitcher above.
+type workflowBranchLocks struct {
+	mgr *branchlock.Manager
+}
+
+func (w workflowBranchLocks) Acquire(ctx context.Context, req workflowcore.BranchLockRequest) ([]domain.BranchLock, error) {
+	return w.mgr.Acquire(ctx, branchlock.AcquireRequest{
+		ProjectID: req.ProjectID,
+		RunID:     req.RunID,
+		StepID:    req.StepID,
+		SessionID: req.SessionID,
+	})
+}
+
+func (w workflowBranchLocks) ReleaseRun(ctx context.Context, runID, reason string) (int64, error) {
+	return w.mgr.ReleaseRun(ctx, runID, reason)
+}
+
+func (w workflowBranchLocks) HeldByRun(ctx context.Context, runID string) ([]domain.BranchLock, error) {
+	return w.mgr.HeldByRun(ctx, runID)
+}
+
+func (w workflowBranchLocks) Renew(ctx context.Context, runID, stepID, sessionID string) {
+	w.mgr.Renew(ctx, runID, stepID, sessionID)
+}
+
+func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {
 		plannerBinary = "claude"
@@ -106,6 +136,12 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		ProviderProfiles:  store,
 		ExecutionPolicies: store,
 		TrustedLocal:      cfg.TrustedLocalMode,
+		// Checkpoint 8P-E.11: direct-branch execution. The workspace router
+		// doubles as the committer -- it already knows which adapter a project
+		// uses, so the autonomous local commit lands in the direct-branch
+		// adapter and is refused for every other mode.
+		BranchLocks:        workflowBranchLocks{mgr: branchLocks},
+		WorkspaceCommitter: workspace,
 	})
 	return coordinator, workflowsvc.New(coordinator), wakeScheduler
 }

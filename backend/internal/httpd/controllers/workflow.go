@@ -237,6 +237,20 @@ type WorkflowRunView struct {
 	// frozen execution policy snapshot: "autonomous" or "manual", decided at
 	// run creation time and never re-derived from a later Settings change.
 	ExecutionMode string `json:"executionMode" enum:"autonomous,manual"`
+	// BranchWait is Checkpoint 8P-E.11's structured waiting_for_branch state
+	// for a direct-branch run queued behind another workflow. Present only
+	// while the run is genuinely waiting on a branch, so the board renders a
+	// real wait or nothing -- never a fabricated "inactive".
+	BranchWait *WorkflowBranchWaitView `json:"branchWait,omitempty"`
+}
+
+// WorkflowBranchWaitView names the branch a run is queued on and the workflow
+// that currently owns it.
+type WorkflowBranchWaitView struct {
+	Branch              string `json:"branch"`
+	RepoPath            string `json:"repoPath,omitempty"`
+	HeldByWorkflowRunID string `json:"heldByWorkflowRunId,omitempty"`
+	HeldBySessionID     string `json:"heldBySessionId,omitempty"`
 }
 
 // WorkflowRunDetailView is a workflow run plus its steps and their attempts.
@@ -438,6 +452,14 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 	runView.NextWakeAt = detail.NextWakeAt
 	runView.WaitReason = detail.WaitReason
 	runView.WakeAttemptCount = detail.WakeAttemptCount
+	if detail.BranchWait != nil {
+		runView.BranchWait = &WorkflowBranchWaitView{
+			Branch:              detail.BranchWait.Branch,
+			RepoPath:            detail.BranchWait.RepoPath,
+			HeldByWorkflowRunID: detail.BranchWait.HeldByWorkflowRunID,
+			HeldBySessionID:     detail.BranchWait.HeldBySessionID,
+		}
+	}
 	view := WorkflowRunDetailView{Run: runView, Steps: steps}
 	if detail.Plan != nil {
 		pv := WorkflowPlanView{Status: detail.Plan.Status, ApprovalMode: detail.Plan.ApprovalMode, Provider: detail.Plan.Provider, Model: detail.Plan.Model, PromptContextVersion: detail.Plan.PromptContextVersion, PlanHash: detail.Plan.PlanHash, ErrorClass: detail.Plan.ErrorClass}

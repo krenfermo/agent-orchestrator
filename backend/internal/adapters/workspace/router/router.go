@@ -17,17 +17,23 @@ type ProjectStore interface {
 
 // Deps configures a workspace router.
 type Deps struct {
-	Git      ports.Workspace
-	Scratch  ports.Workspace
-	Projects ProjectStore
+	Git ports.Workspace
+	// DirectBranch backs projects configured with
+	// domain.ExecutionDirectBranch (Checkpoint 8P-E.11). Optional: when nil,
+	// a direct-branch project fails loudly rather than silently falling back
+	// to creating a worktree the user explicitly opted out of.
+	DirectBranch ports.Workspace
+	Scratch      ports.Workspace
+	Projects     ProjectStore
 }
 
 // Workspace delegates workspace operations to the adapter that matches the
-// session's project kind.
+// session's project kind and configured execution mode.
 type Workspace struct {
-	git      ports.Workspace
-	scratch  ports.Workspace
-	projects ProjectStore
+	git          ports.Workspace
+	directBranch ports.Workspace
+	scratch      ports.Workspace
+	projects     ProjectStore
 }
 
 var _ ports.Workspace = (*Workspace)(nil)
@@ -37,9 +43,10 @@ var _ ports.WorkspaceObserver = (*Workspace)(nil)
 // New returns a router over git and scratch workspace implementations.
 func New(deps Deps) *Workspace {
 	return &Workspace{
-		git:      deps.Git,
-		scratch:  deps.Scratch,
-		projects: deps.Projects,
+		git:          deps.Git,
+		directBranch: deps.DirectBranch,
+		scratch:      deps.Scratch,
+		projects:     deps.Projects,
 	}
 }
 
@@ -139,23 +146,64 @@ func (w *Workspace) ObserveWorkspace(ctx context.Context, info ports.WorkspaceIn
 }
 
 // CreateWorkspaceProject delegates root-as-repo workspace project creation to
-// the git adapter.
+// the project-appropriate adapter.
 func (w *Workspace) CreateWorkspaceProject(ctx context.Context, cfg ports.WorkspaceProjectConfig) (ports.WorkspaceProjectInfo, error) {
-	gitProject, err := w.gitWorkspaceProject()
+	project, err := w.workspaceProjectAdapter(ctx, cfg.ProjectID)
 	if err != nil {
 		return ports.WorkspaceProjectInfo{}, err
 	}
-	return gitProject.CreateWorkspaceProject(ctx, cfg)
+	return project.CreateWorkspaceProject(ctx, cfg)
 }
 
 // DestroyWorkspaceProject delegates root-as-repo workspace project cleanup to
-// the git adapter.
+// the project-appropriate adapter.
 func (w *Workspace) DestroyWorkspaceProject(ctx context.Context, info ports.WorkspaceProjectInfo) error {
-	gitProject, err := w.gitWorkspaceProject()
+	project, err := w.workspaceProjectAdapter(ctx, info.Root.ProjectID)
 	if err != nil {
 		return err
 	}
-	return gitProject.DestroyWorkspaceProject(ctx, info)
+	return project.DestroyWorkspaceProject(ctx, info)
+}
+
+// CommitAll delegates the autonomous local commit to the project-appropriate
+// adapter. Adapters that cannot commit (the worktree adapter, whose sessions
+// commit through the agent on their own branch) report a clear unsupported
+// error rather than silently doing nothing.
+func (w *Workspace) CommitAll(ctx context.Context, info ports.WorkspaceInfo, message string) (string, bool, error) {
+	adapter, err := w.adapterForProject(ctx, info.ProjectID)
+	if err != nil {
+		return "", false, err
+	}
+	committer, ok := adapter.(ports.WorkspaceCommitter)
+	if !ok {
+		return "", false, fmt.Errorf("workspace router: autonomous commit: %w", ports.ErrWorkspaceOperationUnsupported)
+	}
+	return committer.CommitAll(ctx, info, message)
+}
+
+// PreflightRepository delegates the read-only direct-branch safety probe. It is
+// keyed by repository path rather than by project, so it takes the direct-branch
+// adapter directly: the probe only makes sense for that mode.
+func (w *Workspace) PreflightRepository(ctx context.Context, repoPath, branch string) (ports.WorkspacePreflight, error) {
+	if w == nil || w.directBranch == nil {
+		return ports.WorkspacePreflight{}, errors.New("workspace router: direct-branch workspace is not configured")
+	}
+	preflighter, ok := w.directBranch.(ports.WorkspacePreflighter)
+	if !ok {
+		return ports.WorkspacePreflight{}, fmt.Errorf("workspace router: preflight: %w", ports.ErrWorkspaceOperationUnsupported)
+	}
+	return preflighter.PreflightRepository(ctx, repoPath, branch)
+}
+
+func (w *Workspace) workspaceProjectAdapter(ctx context.Context, projectID domain.ProjectID) (ports.WorkspaceProject, error) {
+	adapter, err := w.adapterForProject(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if projectAdapter, ok := adapter.(ports.WorkspaceProject); ok {
+		return projectAdapter, nil
+	}
+	return w.gitWorkspaceProject()
 }
 
 func (w *Workspace) adapterForProject(ctx context.Context, projectID domain.ProjectID) (ports.Workspace, error) {
@@ -172,6 +220,15 @@ func (w *Workspace) adapterForProject(ctx context.Context, projectID domain.Proj
 				return nil, errors.New("workspace router: scratch workspace is not configured")
 			}
 			return w.scratch, nil
+		}
+		// Checkpoint 8P-E.11: a project that opted into direct-branch
+		// execution must never silently get a worktree instead. An
+		// unconfigured direct-branch adapter is an error, not a fallback.
+		if ok && domain.ResolveExecutionMode(project.Kind, project.Config) == domain.ExecutionDirectBranch {
+			if w.directBranch == nil {
+				return nil, errors.New("workspace router: direct-branch workspace is not configured")
+			}
+			return w.directBranch, nil
 		}
 	}
 	if w.git == nil {

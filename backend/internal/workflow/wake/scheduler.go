@@ -53,6 +53,14 @@ const (
 	// planning/approval/task-dispatch/review/fix/verify/integration forward
 	// without any browser GET.
 	ReasonAutonomousProgress Reason = "autonomous_progress"
+	// ReasonBranchLock is Checkpoint 8P-E.11's direct-branch execution wait:
+	// the run is ready to work but another run owns its repository+branch
+	// pair. Unlike every capacity reason above it, the blocker is local and
+	// bounded — the owning run will end — so the wake exists to retry the
+	// acquisition rather than to probe an external provider. known_reset_at
+	// is always nil for it: a lock has no announced release time, and
+	// inventing one would be exactly the fabricated timestamp 0106 forbids.
+	ReasonBranchLock Reason = "branch_lock"
 )
 
 // Status is the fixed vocabulary of a wake schedule's lifecycle state,

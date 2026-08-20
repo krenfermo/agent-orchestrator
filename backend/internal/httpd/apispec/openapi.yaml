@@ -8668,6 +8668,27 @@ components:
       - projects
       - readiness
       type: object
+    GitPolicy:
+      properties:
+        localCommit:
+          enum:
+          - automatic
+          - require_approval
+          - never
+          type: string
+        merge:
+          enum:
+          - automatic
+          - require_approval
+          - never
+          type: string
+        push:
+          enum:
+          - automatic
+          - require_approval
+          - never
+          type: string
+      type: object
     ImportReport:
       properties:
         dryRun:
@@ -9227,6 +9248,11 @@ components:
           $ref: '#/components/schemas/ProjectConfig'
         defaultBranch:
           type: string
+        executionMode:
+          enum:
+          - isolated_worktree
+          - direct_branch
+          type: string
         id:
           type: string
         kind:
@@ -9241,6 +9267,10 @@ components:
           type: string
         repo:
           type: string
+        repositories:
+          items:
+            $ref: '#/components/schemas/ProjectRepositoryExecution'
+          type: array
         transport:
           enum:
           - https
@@ -9258,6 +9288,7 @@ components:
       - path
       - repo
       - defaultBranch
+      - executionMode
       type: object
     ProjectBrowseEntry:
       properties:
@@ -9311,6 +9342,13 @@ components:
           additionalProperties:
             type: string
           type: object
+        executionMode:
+          enum:
+          - isolated_worktree
+          - direct_branch
+          type: string
+        git:
+          $ref: '#/components/schemas/GitPolicy'
         orchestrator:
           $ref: '#/components/schemas/RoleOverride'
         orchestratorRules:
@@ -9366,6 +9404,42 @@ components:
       oneOf:
       - $ref: '#/components/schemas/Project'
       - $ref: '#/components/schemas/DegradedProject'
+      type: object
+    ProjectRepositoryExecution:
+      properties:
+        branch:
+          type: string
+        executionMode:
+          enum:
+          - isolated_worktree
+          - direct_branch
+          type: string
+        lock:
+          $ref: '#/components/schemas/ProjectRepositoryLock'
+        name:
+          type: string
+        path:
+          type: string
+        relativePath:
+          type: string
+      required:
+      - name
+      - path
+      - branch
+      - executionMode
+      type: object
+    ProjectRepositoryLock:
+      properties:
+        acquiredAt:
+          format: date-time
+          type: string
+        sessionId:
+          type: string
+        workflowRunId:
+          type: string
+      required:
+      - workflowRunId
+      - acquiredAt
       type: object
     ProjectResponse:
       properties:
@@ -10917,6 +10991,19 @@ components:
       - attemptNumber
       - startedAt
       type: object
+    WorkflowBranchWaitView:
+      properties:
+        branch:
+          type: string
+        heldBySessionId:
+          type: string
+        heldByWorkflowRunId:
+          type: string
+        repoPath:
+          type: string
+      required:
+      - branch
+      type: object
     WorkflowMasterPlan:
       properties:
         objective:
@@ -11188,6 +11275,8 @@ components:
       type: object
     WorkflowRunView:
       properties:
+        branchWait:
+          $ref: '#/components/schemas/WorkflowBranchWaitView'
         cancelledAt:
           format: date-time
           type:

@@ -217,6 +217,55 @@ type Workspace interface {
 	MaterializeIntegrationCommit(ctx context.Context, info WorkspaceInfo, ref, parentSHA, message string, excludePatterns []string) (commitSHA, treeSHA string, reused bool, err error)
 }
 
+// WorkspaceCommitAuthorName and WorkspaceCommitAuthorEmail are AO's own git
+// identity. Every commit AO authors — the worktree adapter's internal
+// integration commits and the direct-branch adapter's autonomous local commits
+// alike — is stamped with these, never with the ambient user's configured
+// identity, so a repository's history always says plainly which commits a human
+// wrote and which an autonomous run produced.
+const (
+	WorkspaceCommitAuthorName  = "Agent Orchestrator"
+	WorkspaceCommitAuthorEmail = "ao@local"
+)
+
+// WorkspaceCommitter is an optional capability for workspace adapters that can
+// commit the working tree's current state on the branch it is already on
+// (Checkpoint 8P-E.11). It backs the autonomous local commit that concludes a
+// direct-branch workflow when the project's GitPolicy.LocalCommit is automatic.
+// The policy decision is always the caller's; an adapter implementing this
+// interface only performs the commit it is asked for.
+type WorkspaceCommitter interface {
+	// CommitAll stages every tracked and non-ignored untracked change and
+	// commits it with AO's own identity. committed=false with a nil error
+	// means the tree was clean — a normal outcome, never a failure. It never
+	// pushes, never creates a branch, and never touches a remote.
+	CommitAll(ctx context.Context, info WorkspaceInfo, message string) (commitSHA string, committed bool, err error)
+}
+
+// WorkspacePreflighter is an optional read-only capability that answers
+// "is it safe to start an autonomous run against this repository/branch?"
+// without mutating anything. Direct-branch execution consults it before it
+// acquires a branch lock or spawns anything, so a repository holding a human's
+// uncommitted work is surfaced as needs_attention rather than discovered
+// halfway into a run.
+type WorkspacePreflighter interface {
+	PreflightRepository(ctx context.Context, repoPath, branch string) (WorkspacePreflight, error)
+}
+
+// WorkspacePreflight is the result of a read-only direct-branch safety probe.
+type WorkspacePreflight struct {
+	RepoPath string `json:"repoPath"`
+	// ConfiguredBranch is the branch the project/repository configures — the
+	// authoritative one, never a detected fallback.
+	ConfiguredBranch string `json:"configuredBranch"`
+	// CurrentBranch is what is checked out right now; empty for a detached HEAD.
+	CurrentBranch string `json:"currentBranch,omitempty"`
+	HeadSHA       string `json:"headSha,omitempty"`
+	// Dirty reports pre-existing uncommitted changes or untracked files.
+	Dirty   bool              `json:"dirty"`
+	Changes []WorkspaceChange `json:"changes,omitempty"`
+}
+
 // WorkspaceObserver is an optional read-only capability implemented by
 // workspace adapters that can describe the durable state an agent handoff
 // must treat as authoritative. The session manager consumes it before and
@@ -281,6 +330,19 @@ var (
 	// it holds uncommitted changes or untracked files. Teardown is never
 	// forced; callers treat the workspace as intentionally preserved.
 	ErrWorkspaceDirty = errors.New("workspace: uncommitted changes present")
+	// ErrWorkspaceRepositoryDirty reports that a direct-branch run refused to
+	// start because the registered repository already holds uncommitted
+	// changes AO did not create (Checkpoint 8P-E.11). Deliberately distinct
+	// from ErrWorkspaceDirty, which means "teardown refused to delete an
+	// AO-owned worktree": this one means "startup refused to write into a
+	// human's working tree", and callers surface it as a dirty_worktree
+	// needs_attention state rather than as a cleanup skip.
+	ErrWorkspaceRepositoryDirty = errors.New("workspace: repository has pre-existing uncommitted changes")
+	// ErrWorkspaceOperationUnsupported reports that the workspace adapter
+	// selected for a project cannot perform the requested operation at all
+	// (e.g. internal integration commits in direct-branch mode). It is a
+	// permanent configuration mismatch, never a transient failure to retry.
+	ErrWorkspaceOperationUnsupported = errors.New("workspace: operation not supported in this execution mode")
 	// ErrWorkspaceStale reports an AO-managed workspace path no longer points
 	// at a registered git worktree. Replacement paths may skip preservation for
 	// this state after path-safety checks, while real preserve failures remain

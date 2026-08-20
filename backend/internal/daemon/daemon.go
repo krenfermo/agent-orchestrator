@@ -21,6 +21,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/runtime/runtimeselect"
 	"github.com/aoagents/agent-orchestrator/backend/internal/autoreview"
+	"github.com/aoagents/agent-orchestrator/backend/internal/branchlock"
 	"github.com/aoagents/agent-orchestrator/backend/internal/browserruntime"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemon/supervisor"
@@ -338,7 +339,7 @@ func RunWithConfig(cfg config.Config) error {
 	lcStack.LCM.SetSessionInputLease(sessMgr)
 	lcStack.LCM.SetSessionOperationGate(sessMgr)
 	termMgr.SetSessionInputLease(sessMgr)
-	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink, AllowedRoots: cfg.AllowedProjectRoots})
+	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink, AllowedRoots: cfg.AllowedProjectRoots, BranchLocks: store})
 	if err := seedScratchProjectOnBoot(ctx, cfg, projectSvc); err != nil {
 		stop()
 		lcStack.Stop()
@@ -478,7 +479,24 @@ func RunWithConfig(cfg config.Config) error {
 		runFile:    cfg.RunFilePath,
 		executable: os.Executable,
 	}
-	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, rawSessionMgr, workspaceObserver, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, log)
+	// Checkpoint 8P-E.11: durable direct-branch execution locks. The owner
+	// token is this daemon instance's identity -- it is what lets boot
+	// reconciliation tell a lock this instance still owns from one a crashed
+	// predecessor left behind, without ever guessing from timestamps.
+	branchLocks := branchlock.New(branchlock.Deps{
+		Store:      store,
+		Preflight:  workspaceObserver,
+		OwnerToken: uuid.NewString(),
+		NewID:      uuid.NewString,
+		Logger:     log,
+	})
+	// Reconcile branch locks BEFORE workflow recovery: a run that is about to
+	// be resumed must find its own lock adopted rather than contended, and a
+	// run waiting on a branch a crashed run held must find that branch free.
+	if _, blErr := branchLocks.Reconcile(ctx); blErr != nil {
+		log.Error("reconcile branch locks on boot failed", "err", blErr)
+	}
+	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, log)
 	if reconcileErr := workflowCoordinator.Reconcile(ctx); reconcileErr != nil {
 		log.Error("reconcile workflow runs on boot failed", "err", reconcileErr)
 	}

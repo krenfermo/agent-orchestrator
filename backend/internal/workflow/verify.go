@@ -436,6 +436,20 @@ func (c *Coordinator) persistVerifyResult(ctx stdctx.Context, run domain.Workflo
 
 func (c *Coordinator) completeVerifiedRun(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep) (domain.WorkflowRun, domain.WorkflowStep, error) {
 	now := c.clock()
+	// Checkpoint 8P-E.11: the autonomous local commit happens here, between
+	// "verified" and "completed", and while the branch lock is still held --
+	// the only window in which the work is known-good and the repository is
+	// still provably this run's to write. A commit failure fails the run
+	// rather than completing it: reporting a run as completed while its work
+	// sits uncommitted would be exactly the kind of untruthful state this
+	// codebase refuses everywhere else.
+	if err := c.autonomousLocalCommit(ctx, run, step); err != nil {
+		if c.log != nil {
+			c.log.Warn("workflow: autonomous local commit failed", "run", run.ID, "err", err)
+		}
+		return c.failRunOnCommitError(ctx, run, step, err)
+	}
+	defer c.releaseBranchLocks(ctx, run.ID, "workflow run completed")
 	if step.State == domain.WorkflowStepRunning {
 		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, domain.WorkflowStepRunning, domain.WorkflowStepCompleted, now); err != nil {
 			return run, step, err

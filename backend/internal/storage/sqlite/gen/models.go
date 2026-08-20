@@ -88,6 +88,27 @@ type AuthSession struct {
 	RevokedAt  sql.NullTime
 }
 
+type BranchLock struct {
+	ID             string
+	LockKey        string
+	ProjectID      string
+	RepoPath       string
+	RepoName       string
+	Branch         string
+	WorkflowRunID  string
+	WorkflowStepID sql.NullString
+	SessionID      sql.NullString
+	OwnerToken     string
+	State          string
+	BaseSha        string
+	AcquiredAt     time.Time
+	RenewedAt      time.Time
+	ReleasedAt     sql.NullTime
+	ReleaseReason  string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
 type ChangeLog struct {
 	Seq       int64
 	ProjectID domain.ProjectID

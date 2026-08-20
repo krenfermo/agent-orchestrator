@@ -765,7 +765,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 
 	branch := cfg.Branch
 	if branch == "" {
-		branch = DefaultSpawnBranch(id, cfg.Kind, sessionPrefix(project), projectKind, m.dataDir)
+		branch = ProjectSpawnBranch(project, id, cfg.Kind, m.dataDir)
 	}
 	ws, workspaceProject, err := m.createSessionWorkspace(ctx, project, cfg, id, branch)
 	if err != nil {
@@ -971,7 +971,13 @@ func (m *Manager) createSessionWorkspace(ctx context.Context, project domain.Pro
 		// integration state of its dependencies instead. Only single-repo
 		// (non-workspace-kind) projects are supported for 8M.1; the
 		// workspace-kind branch below deliberately never applies it.
-		if cfg.BaseRef != "" {
+		//
+		// Checkpoint 8P-E.11: in direct-branch mode there is no per-task
+		// worktree to base on anything — every task already shares the one
+		// configured branch, so applying a BaseRef here would silently move
+		// the user's checkout off it. The configured branch stays
+		// authoritative.
+		if cfg.BaseRef != "" && domain.ResolveExecutionMode(project.Kind, project.Config) != domain.ExecutionDirectBranch {
 			baseBranch = cfg.BaseRef
 		}
 		ws, err := m.workspace.Create(ctx, ports.WorkspaceConfig{
@@ -3005,6 +3011,30 @@ func defaultSessionBranch(id domain.SessionID, kind domain.SessionKind, prefix, 
 	// branch under a session namespace so sibling PR branches such as
 	// ao/<session>/<topic> remain valid Git refs.
 	return aoBranch(branchNamespace, string(id), "root")
+}
+
+// ProjectSpawnBranch resolves the branch a spawn works on for a project,
+// honoring its execution mode (Checkpoint 8P-E.11).
+//
+// In direct-branch mode the project's configured base branch IS the work
+// branch: AO must never generate an ao/* branch, and the session prefix — which
+// only ever existed to name generated branches and sessions — contributes
+// nothing to git here. In isolated-worktree mode this is exactly the
+// pre-checkpoint DefaultSpawnBranch behavior, unchanged.
+func ProjectSpawnBranch(project domain.ProjectRecord, id domain.SessionID, kind domain.SessionKind, dataDir string) string {
+	if domain.ResolveExecutionMode(project.Kind, project.Config) == domain.ExecutionDirectBranch {
+		return project.Config.WithDefaults().DefaultBranch
+	}
+	return DefaultSpawnBranch(id, kind, sessionPrefix(project), project.Kind.WithDefault(), dataDir)
+}
+
+// ProjectOrchestratorBranch is ProjectSpawnBranch for the canonical project
+// orchestrator session, used by replacement verification.
+func ProjectOrchestratorBranch(project domain.ProjectRecord, dataDir string) string {
+	if domain.ResolveExecutionMode(project.Kind, project.Config) == domain.ExecutionDirectBranch {
+		return project.Config.WithDefaults().DefaultBranch
+	}
+	return DefaultOrchestratorBranch(sessionPrefix(project), dataDir)
 }
 
 // DefaultSpawnBranch returns AO's generated work branch for a spawn. Explicit

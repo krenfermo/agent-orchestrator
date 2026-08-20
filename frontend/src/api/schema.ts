@@ -3098,6 +3098,14 @@ export interface components {
             projects: components["schemas"]["EnvironmentProjectsSummary"];
             readiness: components["schemas"]["EnvironmentReadiness"];
         };
+        GitPolicy: {
+            /** @enum {string} */
+            localCommit?: "automatic" | "require_approval" | "never";
+            /** @enum {string} */
+            merge?: "automatic" | "require_approval" | "never";
+            /** @enum {string} */
+            push?: "automatic" | "require_approval" | "never";
+        };
         ImportReport: {
             dryRun: boolean;
             notes?: string[];
@@ -3316,12 +3324,15 @@ export interface components {
             agent?: string;
             config?: components["schemas"]["ProjectConfig"];
             defaultBranch: string;
+            /** @enum {string} */
+            executionMode: "isolated_worktree" | "direct_branch";
             id: string;
             /** @enum {string} */
             kind: "single_repo" | "workspace" | "scratch";
             name: string;
             path: string;
             repo: string;
+            repositories?: components["schemas"]["ProjectRepositoryExecution"][];
             /** @enum {string} */
             transport?: "https" | "ssh" | "unknown";
             workspaceRepos?: components["schemas"]["WorkspaceRepo"][];
@@ -3348,6 +3359,9 @@ export interface components {
             env?: {
                 [key: string]: string;
             };
+            /** @enum {string} */
+            executionMode?: "isolated_worktree" | "direct_branch";
+            git?: components["schemas"]["GitPolicy"];
             orchestrator?: components["schemas"]["RoleOverride"];
             orchestratorRules?: string;
             postCreate?: string[];
@@ -3370,6 +3384,21 @@ export interface components {
             status: "ok" | "degraded";
         };
         ProjectOrDegraded: components["schemas"]["Project"] | components["schemas"]["DegradedProject"];
+        ProjectRepositoryExecution: {
+            branch: string;
+            /** @enum {string} */
+            executionMode: "isolated_worktree" | "direct_branch";
+            lock?: components["schemas"]["ProjectRepositoryLock"];
+            name: string;
+            path: string;
+            relativePath?: string;
+        };
+        ProjectRepositoryLock: {
+            /** Format: date-time */
+            acquiredAt: string;
+            sessionId?: string;
+            workflowRunId: string;
+        };
         ProjectResponse: {
             project: components["schemas"]["Project"];
         };
@@ -3957,6 +3986,12 @@ export interface components {
             /** Format: date-time */
             startedAt: string;
         };
+        WorkflowBranchWaitView: {
+            branch: string;
+            heldBySessionId?: string;
+            heldByWorkflowRunId?: string;
+            repoPath?: string;
+        };
         WorkflowMasterPlan: {
             objective: string;
             steps: components["schemas"]["WorkflowPlannedStep"][];
@@ -4053,6 +4088,7 @@ export interface components {
             workflow: components["schemas"]["WorkflowRunDetailView"];
         };
         WorkflowRunView: {
+            branchWait?: components["schemas"]["WorkflowBranchWaitView"];
             /** Format: date-time */
             cancelledAt?: null | string;
             /** Format: date-time */

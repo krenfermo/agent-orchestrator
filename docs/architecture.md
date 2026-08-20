@@ -1,11 +1,12 @@
 # Agent Orchestrator Architecture
 
-Agent Orchestrator is a long-running Go daemon that supervises multiple parallel AI coding agent sessions. Every session owns an isolated git worktree and one committed interface mode at a time. A TUI session runs its agent inside a tmux/conpty runtime; a Chat session runs a native protocol controller without an agent terminal runtime. A durable handoff may move a compatible native conversation between them, but both controllers are never live at once. The daemon coordinates both through the same session, lifecycle, workspace, storage, and observation boundaries.
+Agent Orchestrator is a long-running Go daemon that supervises multiple parallel AI coding agent sessions. A session's working tree is decided by its project's **execution mode** (Checkpoint 8P-E.11): in the default `isolated_worktree` mode every session owns an isolated git worktree on a generated `ao/*` branch, while in `direct_branch` mode sessions work in the registered repository itself on its configured branch, serialized by a durable branch lock instead of by physical isolation (see [Execution modes](#execution-modes)). Every session holds one committed interface mode at a time. A TUI session runs its agent inside a tmux/conpty runtime; a Chat session runs a native protocol controller without an agent terminal runtime. A durable handoff may move a compatible native conversation between them, but both controllers are never live at once. The daemon coordinates both through the same session, lifecycle, workspace, storage, and observation boundaries.
 
 ## Table of Contents
 
 - [Mental Model](#mental-model)
 - [System Overview](#system-overview)
+- [Execution modes](#execution-modes)
 - [Core Architectural Principles](#core-architectural-principles)
 - [Component Architecture](#component-architecture)
 - [Data Flows](#data-flows)
@@ -129,6 +130,67 @@ graph TB
 ```
 
 ---
+
+## Execution modes
+
+A project chooses how its sessions materialise a working tree via
+`ProjectConfig.ExecutionMode`. The value is resolved through
+`domain.ResolveExecutionMode(kind, config)`, never read raw: an unset mode means
+`isolated_worktree` (so no project registered before Checkpoint 8P-E.11 changes
+behavior on upgrade), and a scratch project is always `isolated_worktree`
+because it has no repository to work in.
+
+| | `isolated_worktree` (default) | `direct_branch` |
+| --- | --- | --- |
+| Working tree | one `git worktree` per session under `~/.ao/worktrees` | the registered repository itself |
+| Branch | generated `ao/<session>/root` | the project's configured `defaultBranch` |
+| Adapter | `adapters/workspace/gitworktree` | `adapters/workspace/directbranch` |
+| Concurrency | physical isolation | durable branch lock (`branch_locks`) |
+| Cleanup | remove the worktree | nothing to clean up |
+| Session prefix | contributes to the generated branch name | names sessions only; creates no branch |
+
+`adapters/workspace/router` picks the adapter from the project's resolved mode.
+A direct-branch project whose adapter is unconfigured fails loudly rather than
+falling back to the worktree the user opted out of.
+
+### Branch locks
+
+Direct branch removes the isolation that made concurrent workflows safe, so
+mutual exclusion becomes explicit and durable. `internal/branchlock` resolves a
+project into the concrete repository+branch pairs a run will write — one per
+registered repository, so a workspace project's root and children keep
+independent branches and never serialize against each other — and takes all of
+them or none.
+
+Exclusion itself is enforced by SQLite: `branch_locks` carries a partial unique
+index on `(lock_key) WHERE state = 'held'`, so a second holder is a constraint
+violation rather than something application code has to check for. A run that
+loses moves to `waiting` with a `waiting_for_branch` checkpoint naming the
+owning workflow and a durable `branch_lock` wake that resumes it once the branch
+is free. A repository holding a human's uncommitted changes moves the run to
+`needs_attention` with `dirty_worktree` instead — waiting would never resolve it.
+
+Locks are released on completion, cancellation, and by boot reconciliation,
+which decides each held lock from durable workflow state: a lock whose run is
+gone or terminal is released, one whose run is still live is adopted by the new
+daemon instance rather than freed.
+
+### Autonomous git policy
+
+`ProjectConfig.Git` states what an unattended workflow may do to the repository:
+`localCommit`, `push`, and `merge`, each `automatic` / `require_approval` /
+`never`. Defaults are asymmetric on purpose — a local commit is reversible and
+invisible outside the machine, so it defaults to `automatic` and is part of
+normal autonomous completion; push and merge change state other people see, so
+both default to `never`. Merge resolves to a hard `never` in direct-branch mode,
+where there is no separate work branch to merge from.
+
+The autonomous local commit runs between "verified" and "completed", while the
+branch lock is still held — the only window in which the work is known-good and
+the repository is provably the run's to write. A commit failure parks the run in
+`needs_attention` and keeps the lock rather than reporting a completed run whose
+work is uncommitted.
+
 
 ## Core Architectural Principles
 

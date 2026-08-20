@@ -431,6 +431,84 @@ describe("ProjectSettingsForm", () => {
 		expect(reviewerAgent).toHaveTextContent("Claude Code");
 	});
 
+	// Checkpoint 8P-E.11: direct-branch projects surface their execution mode,
+	// their per-repository occupancy, and the autonomous git policy.
+	it("shows direct-branch execution, repository occupancy, and the git policy", async () => {
+		mockProject({
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "git@github.com:acme/project-one.git",
+			defaultBranch: "feat/engineering-control-center",
+			executionMode: "direct_branch",
+			repositories: [
+				{
+					name: "__root__",
+					path: "/repo/project-one",
+					branch: "feat/engineering-control-center",
+					executionMode: "direct_branch",
+					lock: { workflowRunId: "WF-7", acquiredAt: "2026-08-20T12:00:00Z" },
+				},
+			],
+			config: {
+				defaultBranch: "feat/engineering-control-center",
+				executionMode: "direct_branch",
+				git: { localCommit: "automatic", push: "never", merge: "never" },
+				worker: { agent: "codex" },
+				orchestrator: { agent: "claude-code" },
+			},
+		});
+
+		renderSettings("proj-1", undefined, "workflow");
+
+		expect(await screen.findByRole("button", { name: "Execution mode" })).toHaveTextContent("Direct branch");
+		// "Worktrees" would be the wrong heading here: this mode creates none.
+		expect(screen.getByText("Branch")).toBeInTheDocument();
+		expect(screen.queryByText("Worktrees")).not.toBeInTheDocument();
+		// The session prefix keeps existing but must say plainly that it no
+		// longer creates Git branches.
+		expect(screen.getByText(/no longer creates Git branches/i)).toBeInTheDocument();
+		expect(screen.getByText(/Only one modifying workflow can use it at a time/i)).toBeInTheDocument();
+		// Occupancy is truthful: the owning workflow is named, never "inactive".
+		expect(screen.getByText("In use by WF-7")).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "Local commits" })).toHaveTextContent("Automatic");
+		expect(screen.getByRole("button", { name: "Push" })).toHaveTextContent("Never");
+		expect(screen.getByText(/Merge does not apply in direct-branch mode/i)).toBeInTheDocument();
+	});
+
+	it("persists a switch to direct branch together with the git policy", async () => {
+		mockProject({
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "",
+			defaultBranch: "main",
+			config: {
+				defaultBranch: "main",
+				worker: { agent: "codex" },
+				orchestrator: { agent: "claude-code" },
+			},
+		});
+
+		renderSettings("proj-1", undefined, "workflow");
+
+		// An existing project defaults to isolated worktree -- it never silently
+		// changes mode on upgrade.
+		const modeTrigger = await screen.findByRole("button", { name: "Execution mode" });
+		expect(modeTrigger).toHaveTextContent("Isolated worktree");
+		await userEvent.click(modeTrigger);
+		await userEvent.click(await screen.findByRole("menuitem", { name: "Direct branch" }));
+
+		fireEvent.submit(document.getElementById("project-settings-form")!);
+
+		await waitFor(() => expect(putMock).toHaveBeenCalled());
+		const body = putMock.mock.calls.at(-1)?.[1]?.body;
+		expect(body.config.executionMode).toBe("direct_branch");
+		expect(body.config.git).toEqual({ localCommit: "automatic", push: "never", merge: "never" });
+	});
+
 	it("shows the full model catalog again after selecting a model", async () => {
 		getMock.mockImplementation(async (path: string) => {
 			if (path === "/api/v1/agents") return agentCatalogResponse;

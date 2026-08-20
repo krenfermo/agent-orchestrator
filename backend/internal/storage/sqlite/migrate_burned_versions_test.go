@@ -120,6 +120,8 @@ var shippedMigrations = map[int64]string{
 	114: "0114_workflow_wake_autonomous_progress.sql",
 	115: "0115_provider_profile_not_installed_state.sql",
 	116: "0116_users_role.sql",
+	117: "0117_branch_locks.sql",
+	118: "0118_workflow_wake_branch_lock.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

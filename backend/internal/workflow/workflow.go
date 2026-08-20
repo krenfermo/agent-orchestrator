@@ -227,6 +227,15 @@ type Deps struct {
 	// i.e. always waiting -- never a silent hardcoded fallback.
 	ProviderProfiles  ProviderProfiles
 	ExecutionPolicies ExecutionPolicies
+	// BranchLocks and WorkspaceCommitter back Checkpoint 8P-E.11's
+	// direct-branch execution mode: the durable per-repository+branch
+	// execution lock, and the autonomous local commit that concludes a run
+	// whose project policy allows it. Both optional: nil means no run ever
+	// takes a branch lock and no run ever commits on its own -- exactly the
+	// pre-8P-E.11 behavior every isolated-worktree project keeps.
+	BranchLocks        BranchLocks
+	WorkspaceCommitter WorkspaceCommitter
+
 	// TrustedLocal mirrors config.Config.TrustedLocalMode (Checkpoint 8P-C):
 	// when true, a workflow owner with zero configured ProviderProfile rows
 	// falls back to legacy/global compatibility profiles instead of waiting
@@ -303,6 +312,11 @@ type Coordinator struct {
 	providerProfiles  ProviderProfiles
 	executionPolicies ExecutionPolicies
 	trustedLocal      bool
+
+	// branchLocks and workspaceCommitter back Checkpoint 8P-E.11's
+	// direct-branch execution mode. Both optional.
+	branchLocks        BranchLocks
+	workspaceCommitter WorkspaceCommitter
 }
 
 // New wires a Coordinator from its dependencies, defaulting the clock and id source.
@@ -321,6 +335,8 @@ func New(d Deps) *Coordinator {
 		sessions:                 d.Sessions,
 		reviewRuns:               d.ReviewRuns,
 		log:                      d.Logger,
+		branchLocks:              d.BranchLocks,
+		workspaceCommitter:       d.WorkspaceCommitter,
 		spawner:                  d.Spawner,
 		sessionFacts:             d.SessionFacts,
 		workspaceFacts:           d.WorkspaceFacts,
@@ -376,6 +392,13 @@ type RunDetail struct {
 	// times this exact capacity wait has already retried (checkpoint brief
 	// §15's "Attempt: N"). 0 when no wake is open.
 	WakeAttemptCount int64
+	// BranchWait is Checkpoint 8P-E.11's structured waiting_for_branch state:
+	// which branch this direct-branch run is queued on and which workflow
+	// currently owns it. Populated only while the run is actually Waiting and
+	// its most recent waiting_for_branch checkpoint recorded a holder, so the
+	// board shows a real wait or nothing at all — never a fabricated
+	// "inactive".
+	BranchWait *BranchWait
 }
 
 // SessionLifecycleAuditEntry is one durable session-lifecycle decision plus
@@ -657,6 +680,16 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 			detail.NextWakeAt = &at
 			detail.WaitReason = string(next.Reason)
 			detail.WakeAttemptCount = next.AttemptCount
+		}
+	}
+
+	// Checkpoint 8P-E.11: surface the structured branch wait, read the same
+	// live way. Guarded on the run actually being in Waiting so a checkpoint
+	// left over from an earlier, already-resolved wait can never be shown as
+	// a current one.
+	if detail.Run.State == domain.WorkflowRunWaiting {
+		if cps, cperr := c.store.ListWorkflowCheckpoints(ctx, runID); cperr == nil {
+			detail.BranchWait = branchWaitFromCheckpoints(cps)
 		}
 	}
 
@@ -988,6 +1021,13 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 			c.log.Warn("workflow: cancel wake schedules failed", "run", runID, "err", werr)
 		}
 	}
+
+	// Checkpoint 8P-E.11: a cancelled run must release every branch it owns,
+	// so a run waiting on the same repository+branch can proceed immediately
+	// rather than waiting for boot reconciliation to notice. The work already
+	// done stays exactly where it is in the repository -- releasing the lock
+	// gives up ownership, it never reverts anything.
+	c.releaseBranchLocks(ctx, runID, "workflow run cancelled")
 
 	return c.GetRun(ctx, runID)
 }

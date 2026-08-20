@@ -93,6 +93,8 @@ type Service struct {
 	addMu sync.Mutex
 	// cloneRunner executes `gh repo clone`. See Deps.CloneRunner.
 	cloneRunner func(ctx context.Context, args ...string) ([]byte, error)
+	// branchLocks reads direct-branch execution-lock occupancy. Optional.
+	branchLocks BranchLockReader
 }
 
 const maxDisplayNameLen = 20
@@ -115,6 +117,17 @@ type Deps struct {
 	// combined output. Nil uses the real `gh` binary via aoprocess; tests
 	// inject a fake so CloneFromGitHub never shells out.
 	CloneRunner func(ctx context.Context, args ...string) ([]byte, error)
+	// BranchLocks reads direct-branch execution-lock occupancy for the
+	// project detail view (Checkpoint 8P-E.11). Optional: nil simply means no
+	// lock is ever shown, which is always correct for an installation with no
+	// direct-branch projects.
+	BranchLocks BranchLockReader
+}
+
+// BranchLockReader is the read-only occupancy surface the project detail view
+// needs. Satisfied by *storage/sqlite/store.Store.
+type BranchLockReader interface {
+	ListHeldBranchLocksByProject(ctx context.Context, projectID domain.ProjectID) ([]domain.BranchLock, error)
 }
 
 // New returns a project service backed by the given durable store.
@@ -136,6 +149,7 @@ func NewWithDeps(d Deps) *Service {
 		defaultHarness: defaultHarness,
 		allowedRoots:   d.AllowedRoots,
 		cloneRunner:    d.CloneRunner,
+		branchLocks:    d.BranchLocks,
 	}
 	if s.clock == nil {
 		s.clock = time.Now
@@ -187,14 +201,77 @@ func (m *Service) Get(ctx context.Context, id domain.ProjectID) (GetResult, erro
 		return GetResult{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
 	}
 	p := m.projectFromRow(row)
+	var repos []domain.WorkspaceRepoRecord
 	if row.Kind.WithDefault() == domain.ProjectKindWorkspace {
-		repos, err := m.store.ListWorkspaceRepos(ctx, row.ID)
+		repos, err = m.store.ListWorkspaceRepos(ctx, row.ID)
 		if err != nil {
 			return GetResult{}, apierr.Internal("PROJECT_LOAD_FAILED", "Failed to load workspace repositories")
 		}
 		p.WorkspaceRepos = workspaceReposFromRecords(repos)
 	}
+	// Checkpoint 8P-E.11: the per-repository execution view, including which
+	// workflow currently occupies each repository+branch. Occupancy is a live
+	// read; a failure to load it degrades to "no lock shown" rather than
+	// failing the whole project detail, since it is informational.
+	p.Repositories = m.repositoryExecutions(ctx, row, repos)
 	return GetResult{Status: "ok", Project: &p}, nil
+}
+
+// repositoryExecutions describes every repository a direct-branch project
+// executes in. Each registered repository keeps its own configured branch, so a
+// workspace project reports one row per repository rather than one project-wide
+// branch -- the same boundary the branch locks themselves are keyed on.
+//
+// Isolated-worktree projects report nothing: their sessions get their own
+// worktrees, so there is no shared repository whose occupancy could matter, and
+// inventing rows for them would suggest a constraint that does not exist.
+func (m *Service) repositoryExecutions(ctx context.Context, row domain.ProjectRecord, repos []domain.WorkspaceRepoRecord) []RepositoryExecution {
+	mode := domain.ResolveExecutionMode(row.Kind, row.Config)
+	if mode != domain.ExecutionDirectBranch {
+		return nil
+	}
+	rootBranch := row.Config.WithDefaults().DefaultBranch
+	out := []RepositoryExecution{{
+		Name:          domain.RootWorkspaceRepoName,
+		Path:          row.Path,
+		Branch:        rootBranch,
+		ExecutionMode: mode,
+	}}
+	for _, repo := range repos {
+		if repo.GitStatus.WithDefault() == domain.GitStatusNeedsInit {
+			continue
+		}
+		out = append(out, RepositoryExecution{
+			Name:          repo.Name,
+			RelativePath:  repo.RelativePath,
+			Path:          filepath.Join(row.Path, filepath.FromSlash(repo.RelativePath)),
+			Branch:        repo.DefaultBranch,
+			ExecutionMode: mode,
+		})
+	}
+	if m.branchLocks == nil {
+		return out
+	}
+	held, err := m.branchLocks.ListHeldBranchLocksByProject(ctx, domain.ProjectID(row.ID))
+	if err != nil {
+		return out
+	}
+	byKey := make(map[string]domain.BranchLock, len(held))
+	for _, lock := range held {
+		byKey[lock.LockKey] = lock
+	}
+	for i := range out {
+		lock, ok := byKey[domain.BranchLockKey(out[i].Path, out[i].Branch)]
+		if !ok {
+			continue
+		}
+		out[i].Lock = &RepositoryLock{
+			WorkflowRunID: lock.WorkflowRunID,
+			SessionID:     lock.SessionID,
+			AcquiredAt:    lock.AcquiredAt,
+		}
+	}
+	return out
 }
 
 // Add registers a local git repository as a project.
@@ -777,6 +854,7 @@ func (m *Service) projectFromRow(row domain.ProjectRecord) Project {
 		Transport:     classifyTransport(row.RepoOriginURL),
 		DefaultBranch: defaultBranch,
 		Agent:         string(m.defaultHarness),
+		ExecutionMode: domain.ResolveExecutionMode(row.Kind, row.Config),
 	}
 	p.Config = projectConfigPtr(row.Config)
 	return p

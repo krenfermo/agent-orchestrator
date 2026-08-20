@@ -13,6 +13,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/container/dockerreap"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/runtime/runtimeselect"
+	directbranchworkspace "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/directbranch"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/gitworktree"
 	workspacerouter "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/router"
 	scratchworkspace "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/scratch"
@@ -188,10 +189,22 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 	if err != nil {
 		return nil, nil, nil, nil, nil, fmt.Errorf("scratch session workspace: %w", err)
 	}
+	// Checkpoint 8P-E.11: projects configured for direct-branch execution
+	// work inside their registered repository instead of a managed worktree,
+	// so this adapter deliberately has no ManagedRoot at all -- it resolves
+	// the same project repo paths gitWS does and never writes under the data
+	// dir.
+	directBranchWS, err := directbranchworkspace.New(directbranchworkspace.Options{
+		RepoResolver: projectRepoResolver{store: store},
+	})
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("direct-branch session workspace: %w", err)
+	}
 	ws := workspacerouter.New(workspacerouter.Deps{
-		Git:      gitWS,
-		Scratch:  scratchWS,
-		Projects: store,
+		Git:          gitWS,
+		DirectBranch: directBranchWS,
+		Scratch:      scratchWS,
+		Projects:     store,
 	})
 	mgr := sessionmanager.New(sessionmanager.Deps{
 		Runtime:             runtime,
@@ -437,6 +450,7 @@ func buildAgentResolver(defaultAgent string, log *slog.Logger) (ports.AgentResol
 type projectRepoResolver struct{ store *sqlite.Store }
 
 var _ gitworktree.RepoResolver = projectRepoResolver{}
+var _ directbranchworkspace.RepoResolver = projectRepoResolver{}
 
 func (r projectRepoResolver) RepoPath(projectID domain.ProjectID) (string, error) {
 	rec, ok, err := r.store.GetProject(context.Background(), string(projectID))

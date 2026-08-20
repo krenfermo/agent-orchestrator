@@ -39,6 +39,8 @@ import { SettingsRow } from "./settings/SettingsRow";
 type Project = components["schemas"]["Project"];
 type ProjectConfig = components["schemas"]["ProjectConfig"];
 type TrackerIntakeConfig = components["schemas"]["TrackerIntakeConfig"];
+type ExecutionMode = NonNullable<ProjectConfig["executionMode"]>;
+type GitActionPolicy = NonNullable<NonNullable<ProjectConfig["git"]>["localCommit"]>;
 
 const PERMISSION_MODE_VALUES = ["default", "accept-edits", "auto", "bypass-permissions"] as const;
 
@@ -133,6 +135,10 @@ function SettingsBody({
 		orchestratorMode: config.orchestrator?.agentConfig?.mode ?? config.agentConfig?.mode ?? "",
 		permissions: config.agentConfig?.permissions ?? "",
 		reviewerHarness: config.reviewers?.[0]?.harness ?? "",
+		executionMode: (config.executionMode ?? "isolated_worktree") as ExecutionMode,
+		gitLocalCommit: (config.git?.localCommit ?? "automatic") as GitActionPolicy,
+		gitPush: (config.git?.push ?? "never") as GitActionPolicy,
+		gitMerge: (config.git?.merge ?? "never") as GitActionPolicy,
 		intakeEnabled: intake.enabled ?? false,
 		intakeRepo: intake.repo ?? "",
 		intakeAssignee: intake.assignee ?? "",
@@ -276,6 +282,15 @@ function SettingsBody({
 						}),
 						reviewers: form.reviewerHarness ? [{ harness: form.reviewerHarness }] : undefined,
 						trackerIntake: buildIntake(intakeForm),
+						executionMode: form.executionMode,
+						git: {
+							localCommit: form.gitLocalCommit,
+							push: form.gitPush,
+							// Direct branch has no AO-created work branch to merge, so the
+							// stored value stays "never" rather than pretending a merge
+							// setting is in effect.
+							merge: form.executionMode === "direct_branch" ? "never" : form.gitMerge,
+						},
 					};
 			const { error } = await apiClient.PUT("/api/v1/projects/{id}", {
 				params: { path: { id: projectId } },
@@ -516,6 +531,54 @@ function SettingsBody({
 						<>
 							<ProjectWorkflowSettingsView
 								branch={form.defaultBranch}
+								executionMode={form.executionMode}
+								executionModeControl={
+									<SettingsOptionMenu<ExecutionMode>
+										value={form.executionMode}
+										onChange={(executionMode) => setForm((f) => ({ ...f, executionMode }))}
+										options={[
+											{ value: "direct_branch", label: t("settings.project.executionDirectBranch") },
+											{ value: "isolated_worktree", label: t("settings.project.executionIsolatedWorktree") },
+										]}
+										aria-label={t("settings.project.executionMode")}
+									/>
+								}
+								gitPolicyControls={{
+									localCommit: (
+										<GitPolicySelect
+											value={form.gitLocalCommit}
+											onChange={(gitLocalCommit) => setForm((f) => ({ ...f, gitLocalCommit }))}
+											ariaLabel={t("settings.project.gitLocalCommit")}
+											t={t}
+										/>
+									),
+									push: (
+										<GitPolicySelect
+											value={form.gitPush}
+											onChange={(gitPush) => setForm((f) => ({ ...f, gitPush }))}
+											ariaLabel={t("settings.project.gitPush")}
+											t={t}
+										/>
+									),
+									merge: (
+										<GitPolicySelect
+											value={form.gitMerge}
+											onChange={(gitMerge) => setForm((f) => ({ ...f, gitMerge }))}
+											ariaLabel={t("settings.project.gitMerge")}
+											t={t}
+										/>
+									),
+								}}
+								repositories={(project.repositories ?? []).map((repo) => ({
+									key: repo.name,
+									name: repo.name === "__root__" ? project.name || project.id : repo.name,
+									path: repo.path,
+									branch: repo.branch,
+									mode: repo.executionMode,
+									lock: repo.lock
+										? { workflowRunId: repo.lock.workflowRunId, sessionId: repo.lock.sessionId }
+										: undefined,
+								}))}
 								icons={{
 									edit: <Pencil className="settings-inline-edit-icon" aria-hidden="true" />,
 								}}
@@ -524,7 +587,28 @@ function SettingsBody({
 								onPrefixChange={(sessionPrefix) => setForm((f) => ({ ...f, sessionPrefix }))}
 								repoConnectivity={repoConnectivity}
 								labels={{
-									worktrees: t("settings.project.worktrees"),
+									execution: t("settings.project.execution"),
+									executionMode: t("settings.project.executionMode"),
+									directBranchNote: t("settings.project.directBranchNote"),
+									sessionPrefixNoGitNote:
+										form.executionMode === "direct_branch"
+											? t("settings.project.sessionPrefixNoGitNote")
+											: undefined,
+									repositories: t("settings.project.repositories"),
+									repositoryFree: t("settings.project.repositoryFree"),
+									repositoryBusy: t("settings.project.repositoryBusy"),
+									gitPolicy: t("settings.project.gitPolicy"),
+									localCommit: t("settings.project.gitLocalCommit"),
+									push: t("settings.project.gitPush"),
+									merge: t("settings.project.gitMerge"),
+									mergeNotApplicable: t("settings.project.gitMergeNotApplicable"),
+									// "Worktrees" is the wrong word in direct-branch mode: the
+									// section holds the branch and the session prefix, and that
+									// mode creates no worktree at all.
+									worktrees:
+										form.executionMode === "direct_branch"
+											? t("settings.project.branchSection")
+											: t("settings.project.worktrees"),
 									defaultBranch: t("settings.project.defaultBranch"),
 									sessionPrefix: t("settings.project.sessionPrefix"),
 									reviewers: t("settings.project.reviewers"),
@@ -849,4 +933,34 @@ function buildRoleAgentConfig(
 	if (mode) next.mode = mode;
 	else delete next.mode;
 	return Object.keys(next).length > 0 ? next : undefined;
+}
+
+/**
+ * The three-value autonomy control shared by every git action. A dedicated
+ * component rather than three inline menus so "automatic / ask me / never"
+ * always reads the same way for local commits, pushes, and merges.
+ */
+function GitPolicySelect({
+	ariaLabel,
+	onChange,
+	t,
+	value,
+}: {
+	ariaLabel: string;
+	onChange: (value: GitActionPolicy) => void;
+	t: TFunction;
+	value: GitActionPolicy;
+}) {
+	return (
+		<SettingsOptionMenu<GitActionPolicy>
+			value={value}
+			onChange={onChange}
+			options={[
+				{ value: "automatic", label: t("settings.project.gitPolicyAutomatic") },
+				{ value: "require_approval", label: t("settings.project.gitPolicyRequireApproval") },
+				{ value: "never", label: t("settings.project.gitPolicyNever") },
+			]}
+			aria-label={ariaLabel}
+		/>
+	);
 }

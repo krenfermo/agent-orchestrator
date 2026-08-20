@@ -451,22 +451,11 @@ func (s *Service) verifyOrchestratorReplacement(project domain.ProjectRecord, se
 	if expected := project.Config.Orchestrator.Harness; expected != "" && sess.Harness != expected {
 		return fmt.Errorf("orchestrator replacement verification failed: new session %s uses harness %q, want %q", sess.ID, sess.Harness, expected)
 	}
-	expectedBranch := sessionmanager.DefaultOrchestratorBranch(serviceSessionPrefix(project), s.dataDir)
+	expectedBranch := sessionmanager.ProjectOrchestratorBranch(project, s.dataDir)
 	if sess.Metadata.Branch != "" && sess.Metadata.Branch != expectedBranch {
 		return fmt.Errorf("orchestrator replacement verification failed: new session %s uses branch %q, want %q", sess.ID, sess.Metadata.Branch, expectedBranch)
 	}
 	return nil
-}
-
-func serviceSessionPrefix(project domain.ProjectRecord) string {
-	if p := strings.TrimSpace(project.Config.SessionPrefix); p != "" {
-		return p
-	}
-	id := project.ID
-	if len(id) <= 12 {
-		return id
-	}
-	return id[:12]
 }
 
 func newestSession(sessions []domain.Session) domain.Session {

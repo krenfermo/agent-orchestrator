@@ -197,6 +197,7 @@ var schemaNames = map[string]string{
 	"DomainTrackerIntakeConfig":       "TrackerIntakeConfig",
 	"ControllersTriggerReviewRequest": "TriggerReviewRequest",
 	"DomainContainerReapConfig":       "ContainerReapConfig",
+	"DomainGitPolicy":                 "GitPolicy",
 	"DomainAgentConfig":               "AgentConfig",
 	"DomainRoleOverride":              "RoleOverride",
 	// httpd/controllers (wire envelopes)
@@ -329,6 +330,7 @@ var schemaNames = map[string]string{
 	"WorkflowVerifyResult":                      "WorkflowVerifyResult",
 	"WorkflowVerifyCheckResult":                 "WorkflowVerifyCheckResult",
 	"ControllersWorkflowRunView":                "WorkflowRunView",
+	"ControllersWorkflowBranchWaitView":         "WorkflowBranchWaitView",
 	"ControllersWorkflowRunDetailView":          "WorkflowRunDetailView",
 	"ControllersWorkflowPlanView":               "WorkflowPlanView",
 	"ControllersWorkflowTaskView":               "WorkflowTaskView",

@@ -18,10 +18,23 @@ import (
 // yet exist (tracker/SCM per-project config) are intentionally absent and land in
 // focused follow-up PRs alongside the code that reads them.
 type ProjectConfig struct {
-	// DefaultBranch is the base branch new session worktrees are created from.
+	// DefaultBranch is the base branch new session worktrees are created from,
+	// and — in direct-branch execution mode — the branch AO works on directly
+	// in the registered repository.
 	DefaultBranch string `json:"defaultBranch,omitempty"`
-	// SessionPrefix overrides the displayed session-id prefix.
+	// SessionPrefix overrides the displayed session-id prefix. In
+	// direct-branch mode it names sessions only: it never contributes to a git
+	// branch name, because that mode creates no branch.
 	SessionPrefix string `json:"sessionPrefix,omitempty"`
+
+	// ExecutionMode selects how sessions materialise their working tree
+	// (Checkpoint 8P-E.11). Empty means isolated_worktree, the pre-checkpoint
+	// behavior — an existing project never changes mode on upgrade.
+	ExecutionMode ExecutionMode `json:"executionMode,omitempty" enum:"isolated_worktree,direct_branch"`
+	// Git is the autonomous git policy: what an unattended workflow may do to
+	// the repository without asking. Unset fields fall back to
+	// DefaultGitPolicy (local commit automatic, push and merge never).
+	Git GitPolicy `json:"git,omitempty"`
 
 	// Env are extra environment variables forwarded into worker session
 	// runtimes. AO-internal vars (AO_SESSION, AO_PROJECT_ID, …) always win.
@@ -135,6 +148,36 @@ func (c ProjectConfig) WithDefaults() ProjectConfig {
 	return c
 }
 
+// EffectiveExecutionMode resolves the project's execution mode, defaulting to
+// isolated_worktree for every config written before Checkpoint 8P-E.11.
+// Callers must use this rather than reading ExecutionMode directly, the same
+// convention WorkflowPolicy's Effective* accessors already establish.
+//
+// Scratch projects have no git repository at all, so direct branch is
+// meaningless for them; ProjectConfig alone cannot see the project kind, so
+// the scratch case is resolved by ResolveExecutionMode below.
+func (c ProjectConfig) EffectiveExecutionMode() ExecutionMode {
+	return c.ExecutionMode.WithDefault()
+}
+
+// EffectiveGitPolicy resolves the project's autonomous git policy, filling
+// every action the project left unset.
+func (c ProjectConfig) EffectiveGitPolicy() GitPolicy {
+	return c.Git.WithDefaults()
+}
+
+// ResolveExecutionMode is the single place project kind and configured
+// execution mode are combined. A scratch project is AO-managed plain-directory
+// work with no repository to work directly in, so it is always
+// isolated_worktree regardless of configuration — never a half-supported
+// direct-branch scratch project.
+func ResolveExecutionMode(kind ProjectKind, cfg ProjectConfig) ExecutionMode {
+	if kind.WithDefault() == ProjectKindScratch {
+		return ExecutionIsolatedWorktree
+	}
+	return cfg.EffectiveExecutionMode()
+}
+
 // IsZero reports whether the config carries no settings, so storage can persist
 // SQL NULL and resolution can skip an empty config.
 func (c ProjectConfig) IsZero() bool {
@@ -148,6 +191,12 @@ func (c ProjectConfig) Validate() error {
 		return err
 	}
 	if err := validateNameComponent("sessionPrefix", c.SessionPrefix); err != nil {
+		return err
+	}
+	if !c.ExecutionMode.IsKnown() {
+		return fmt.Errorf("executionMode: unknown mode %q", c.ExecutionMode)
+	}
+	if err := c.Git.Validate(); err != nil {
 		return err
 	}
 	for role, ro := range map[string]RoleOverride{"worker": c.Worker, "orchestrator": c.Orchestrator} {

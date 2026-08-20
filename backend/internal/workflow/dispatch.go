@@ -160,6 +160,19 @@ func (c *Coordinator) dispatchFromPending(ctx stdctx.Context, run domain.Workflo
 		return c.markRunWaitingForCapacity(ctx, run, step)
 	}
 
+	// Checkpoint 8P-E.11: in direct-branch mode the run must own its
+	// repository+branch pair before anything is spawned into it. Like the
+	// capacity check above, this runs BEFORE the outbox CAS, so a run that
+	// has to wait for the branch leaves the entry Pending and the next
+	// wake/reconcile pass re-evaluates it cleanly -- never "dispatched" with
+	// nothing actually spawned. A nil branch-lock dependency, or a project in
+	// isolated-worktree mode, passes straight through.
+	if ok, err := c.ensureBranchLock(ctx, run, step); err != nil {
+		return step, err
+	} else if !ok {
+		return step, nil
+	}
+
 	now := c.clock()
 	// Checkpoint 8N.1: a successful (non-waiting) dispatch decision means
 	// capacity genuinely came back — if the run was parked in Waiting (either
@@ -523,6 +536,14 @@ func (c *Coordinator) recordDispatchSuccess(ctx stdctx.Context, run domain.Workf
 	}
 	sid := string(rec.ID)
 	step.SessionID = &sid
+
+	// Checkpoint 8P-E.11: point any branch lock this run holds at the session
+	// that now occupies it, so "currently used by" can name the live session
+	// and not just the run. Best-effort by construction (Renew never fails a
+	// caller): ownership is decided by lock state, never by heartbeat freshness.
+	if c.branchLocks != nil {
+		c.branchLocks.Renew(ctx, run.ID, step.ID, sid)
+	}
 
 	if entry.Status != domain.WorkflowOutboxAcknowledged {
 		if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, entry.Status, domain.WorkflowOutboxAcknowledged, now, ""); err != nil {
