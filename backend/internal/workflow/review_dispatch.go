@@ -8,7 +8,15 @@ import (
 	"strconv"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
+
+// reviewTargetDurablePhase marks the checkpoint that records which workspace
+// fingerprint a review cycle was actually dispatched against (Checkpoint
+// 8P-E.13A.3). It is written once per review cycle, immediately before the
+// outbox entry for that cycle, so every retry/recovery of the same cycle
+// resolves the identical target.
+const reviewTargetDurablePhase = "review_target_observed"
 
 // reviewHarness was Checkpoint 8C's single hardcoded reviewer harness.
 // Checkpoint 8L replaces it with a per-step dynamic choice from
@@ -245,6 +253,12 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 	branch, worktreePath, baseSHA := workCP.Branch, workCP.WorktreePath, workCP.BaseSHA
 
 	var targetSHA string
+	// firstCycleTarget marks the two branches whose target is derived from the
+	// work step's completion fingerprint rather than from a fix cycle's own
+	// delivered fingerprint. Only those branches re-observe the workspace
+	// below (Checkpoint 8P-E.13A.3): a fix cycle's target is already the
+	// fingerprint the fix step observed moments earlier for this same cycle.
+	firstCycleTarget := false
 	switch reviewStep.State {
 	case domain.WorkflowStepPending:
 		// Cycle 1: the one-off hardcoded "work just completed, unblock
@@ -295,6 +309,7 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		if targetSHA == "" {
 			targetSHA = baseSHA
 		}
+		firstCycleTarget = true
 		if _, err := c.store.UpdateWorkflowStepState(ctx, reviewStep.ID, domain.WorkflowStepPending, domain.WorkflowStepReady, c.clock()); err != nil {
 			return reviewStep, err
 		}
@@ -331,6 +346,7 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		if targetSHA == "" {
 			targetSHA = baseSHA
 		}
+		firstCycleTarget = true
 
 	case domain.WorkflowStepWaiting:
 		if fixStep.State == domain.WorkflowStepWaiting {
@@ -438,6 +454,22 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		}
 	}
 
+	// Checkpoint 8P-E.13A.3: the target must name the workspace the reviewer
+	// is about to READ, not the workspace as it stood when the work step was
+	// observed. Those are the same state only when review dispatch follows
+	// work completion immediately — and it very often does not: a run can sit
+	// in needs_attention, wait on a branch lock, or wait for reviewer capacity
+	// for hours first (in ~/.ao/data, wf-507d9a93 waited 110 minutes). During
+	// that window the repository can move, and the reviewer still reads
+	// whatever is there when it launches. Recording the stale work-completion
+	// fingerprint as target_sha therefore labels the verdict with a state
+	// nobody reviewed, and Verify — which compares the live workspace against
+	// that label — then fails with verify_workspace_changed even though
+	// nothing changed after the reviewer approved.
+	if firstCycleTarget {
+		targetSHA = c.reviewTargetFingerprint(ctx, run, reviewStep, workCP, cycleNumber, targetSHA)
+	}
+
 	now := c.clock()
 	entry, _, err := c.store.EnqueueWorkflowOutboxEntry(ctx, domain.WorkflowOutboxEntry{
 		ID:             "wfo-" + c.newID(),
@@ -465,6 +497,109 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 	default:
 		return reviewStep, nil
 	}
+}
+
+// reviewTargetFingerprint resolves the workspace fingerprint a review cycle is
+// dispatched against: the live workspace as observed right now, recorded
+// durably so every retry and every crash-recovery of the SAME cycle resolves
+// the identical value.
+//
+// Stability across retries is not a nicety here — adoptReviewOrMarkAmbiguous
+// looks the in-flight review_run up by (session, "", target_sha, harness), so a
+// target that drifted between the first dispatch attempt and a recovery attempt
+// would fail to adopt the reviewer already running and park the run in
+// review_dispatch_ambiguous. Hence: observe once, checkpoint it, reuse it.
+//
+// Every failure path falls back to the caller's work-completion fingerprint —
+// the pre-8P-E.13A.3 behavior — because a missing observation must not turn a
+// dispatchable review into an error. It only means the target is as good as it
+// used to be, never worse.
+func (c *Coordinator) reviewTargetFingerprint(ctx stdctx.Context, run domain.WorkflowRun, reviewStep domain.WorkflowStep, workCP domain.WorkflowCheckpoint, cycleNumber int, fallback string) string {
+	if recorded, ok := c.recordedReviewTarget(ctx, run.ID, reviewStep.ID, cycleNumber); ok {
+		return recorded
+	}
+	if c.workspaceFacts == nil || workCP.WorktreePath == "" || workCP.SessionID == nil || *workCP.SessionID == "" {
+		return fallback
+	}
+	obs, err := c.workspaceFacts.ObserveWorkspace(ctx, ports.WorkspaceInfo{
+		Path:      workCP.WorktreePath,
+		Branch:    workCP.Branch,
+		SessionID: domain.SessionID(*workCP.SessionID),
+		ProjectID: domain.ProjectID(run.ProjectID),
+	})
+	if err != nil {
+		return fallback
+	}
+	target := WorkspaceFingerprint(obs)
+	if target == "" {
+		return fallback
+	}
+	stepID := reviewStep.ID
+	stateJSON, _ := json.Marshal(map[string]any{"cycle": cycleNumber})
+	nextAction := "review_target_observed: reviewing the workspace as it stands now"
+	if target != fallback {
+		// Not a failure — the reviewer reads the live workspace either way —
+		// but the drift is worth a durable trace, because "the repository moved
+		// between work completion and review dispatch" is exactly the fact a
+		// human debugging this run will want and could not otherwise recover.
+		nextAction = "review_target_observed: workspace moved since work completed; reviewing its current state"
+	}
+	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+		ID:                "wfc-" + c.newID(),
+		WorkflowRunID:     run.ID,
+		WorkflowStepID:    &stepID,
+		ProjectID:         run.ProjectID,
+		SessionID:         workCP.SessionID,
+		Branch:            workCP.Branch,
+		WorktreePath:      workCP.WorktreePath,
+		HeadSHA:           obs.HeadSHA,
+		FingerprintBefore: fallback,
+		FingerprintAfter:  target,
+		NextAction:        nextAction,
+		DurablePhase:      reviewTargetDurablePhase,
+		PayloadVersion:    "v1",
+		RetryState:        string(stateJSON),
+		CreatedAt:         c.clock(),
+	}); err != nil {
+		// The observation is sound but could not be made durable. Using it
+		// anyway would mean a later retry of this same cycle re-observes and
+		// possibly resolves a different target — the exact instability this
+		// checkpoint exists to prevent. Fall back instead.
+		return fallback
+	}
+	return target
+}
+
+// recordedReviewTarget returns the fingerprint already durably recorded for
+// this review step's given cycle, if any.
+func (c *Coordinator) recordedReviewTarget(ctx stdctx.Context, runID, reviewStepID string, cycleNumber int) (string, bool) {
+	checkpoints, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		return "", false
+	}
+	var latest *domain.WorkflowCheckpoint
+	for i := range checkpoints {
+		cp := &checkpoints[i]
+		if cp.WorkflowStepID == nil || *cp.WorkflowStepID != reviewStepID || cp.DurablePhase != reviewTargetDurablePhase {
+			continue
+		}
+		var state struct {
+			Cycle int `json:"cycle"`
+		}
+		if json.Unmarshal([]byte(cp.RetryState), &state) != nil || state.Cycle != cycleNumber {
+			continue
+		}
+		if cp.FingerprintAfter == "" {
+			continue
+		}
+		if latest == nil || cp.CreatedAt.After(latest.CreatedAt) {
+			latest = cp
+		}
+	}
+	if latest == nil {
+		return "", false
+	}
+	return latest.FingerprintAfter, true
 }
 
 func (c *Coordinator) dispatchReviewFromPending(
