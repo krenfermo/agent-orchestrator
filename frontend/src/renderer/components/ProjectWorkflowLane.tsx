@@ -107,6 +107,10 @@ export function WorkflowBoardCard({ workflow, onOpen }: { workflow: BoardWorkflo
 					.join(" · ")}
 			</p>
 
+			<p className="font-mono text-[10px] text-muted-foreground/70" data-testid="workflow-run-id">
+				{t("board.runId", { runId: workflow.workflowId })}
+			</p>
+
 			{workflow.tasks && workflow.tasks.length > 0 ? <ChildTaskList tasks={workflow.tasks} /> : null}
 		</button>
 	);

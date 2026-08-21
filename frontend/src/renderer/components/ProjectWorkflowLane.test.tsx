@@ -159,6 +159,13 @@ describe("WorkflowBoardCard", () => {
 		expect(checklist.queryByText(/advance/i)).toBeNull();
 	});
 
+	// A diagnostic-only field: shows the run this card is tracking so it can be
+	// cross-referenced against logs, without becoming part of the card's design.
+	it("shows the workflow run id as a read-only diagnostic field", () => {
+		render(<WorkflowBoardCard workflow={boardWorkflow({ workflowId: "wf-diagnostic-123" })} />);
+		expect(screen.getByTestId("workflow-run-id")).toHaveTextContent("wf-diagnostic-123");
+	});
+
 	it("surfaces the wait reason and the scheduled retry for a capacity wait", () => {
 		render(
 			<WorkflowBoardCard
