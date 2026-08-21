@@ -93,6 +93,11 @@ type WorkflowBoardEntryView struct {
 	CurrentTaskOrdinal int64  `json:"currentTaskOrdinal,omitempty"`
 	CurrentTaskTitle   string `json:"currentTaskTitle,omitempty"`
 
+	// BranchWait is the repository+branch this card is queued on, when it is.
+	// A blocked card without it can only say "Blocked"; with it, it can say
+	// which branch, who holds it, and whether anyone has to do anything.
+	BranchWait *WorkflowBranchWaitView `json:"branchWait,omitempty"`
+
 	ReviewCycles int                        `json:"reviewCycles"`
 	Steps        []WorkflowStepProgressView `json:"steps,omitempty"`
 	Tasks        []WorkflowBoardTaskView    `json:"tasks,omitempty"`
@@ -131,6 +136,7 @@ func workflowBoardEntryView(e workflowcore.BoardEntry) WorkflowBoardEntryView {
 		CurrentTaskTitle:   e.Tasks.CurrentTitle,
 		ReviewCycles:       e.ReviewCycles,
 		Steps:              stepProgressViews(e.Steps),
+		BranchWait:         workflowBranchWaitView(e.BranchWait),
 	}
 	for _, t := range e.ChildTasks {
 		view.Tasks = append(view.Tasks, WorkflowBoardTaskView{

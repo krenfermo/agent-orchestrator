@@ -490,13 +490,20 @@ func RunWithConfig(cfg config.Config) error {
 		NewID:      uuid.NewString,
 		Logger:     log,
 	})
+	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, log)
+	// Checkpoint 8P-E.13A: reconciliation can only decide a stopped owner's
+	// lock once it can ask what that stop means, and only the coordinator knows
+	// (branchlock/retention.go). The coordinator needs the lock manager to
+	// exist first, so the classifier is handed over here, after construction
+	// and before the first reconcile pass.
+	branchLocks.SetClassifier(coordinatorLockClassifier{coordinator: workflowCoordinator})
 	// Reconcile branch locks BEFORE workflow recovery: a run that is about to
 	// be resumed must find its own lock adopted rather than contended, and a
-	// run waiting on a branch a crashed run held must find that branch free.
+	// run waiting on a branch a crashed or permanently stopped run held must
+	// find that branch free.
 	if _, blErr := branchLocks.Reconcile(ctx); blErr != nil {
 		log.Error("reconcile branch locks on boot failed", "err", blErr)
 	}
-	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, log)
 	if reconcileErr := workflowCoordinator.Reconcile(ctx); reconcileErr != nil {
 		log.Error("reconcile workflow runs on boot failed", "err", reconcileErr)
 	}

@@ -5,6 +5,7 @@ import { apiClient, apiErrorMessage, hasTrustedApiBaseUrl } from "../lib/api-cli
 export type BoardWorkflow = components["schemas"]["WorkflowBoardEntryView"];
 export type BoardWorkflowTask = components["schemas"]["WorkflowBoardTaskView"];
 export type BoardStepProgress = components["schemas"]["WorkflowStepProgressView"];
+export type BoardBranchWait = components["schemas"]["WorkflowBranchWaitView"];
 export type BoardPhase = BoardWorkflow["phase"];
 
 export function projectBoardQueryKey(projectId: string) {

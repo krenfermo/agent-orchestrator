@@ -78,6 +78,10 @@ type Deps struct {
 	// OwnerToken identifies this daemon instance. Reconcile uses it to tell a
 	// lock this instance owns from one a previous instance left behind.
 	OwnerToken string
+	// Classifier resolves what a needs_attention lock owner's stop means
+	// (Checkpoint 8P-E.13A, retention.go). Optional: with none wired, such an
+	// owner always keeps its lock, exactly as before this checkpoint.
+	Classifier OwnerClassifier
 	NewID      func() string
 	Clock      func() time.Time
 	Logger     *slog.Logger
@@ -88,10 +92,21 @@ type Manager struct {
 	store      Store
 	preflight  Preflighter
 	ownerToken string
+	classifier OwnerClassifier
 	newID      func() string
 	clock      func() time.Time
 	log        *slog.Logger
 }
+
+// SetClassifier wires the owner classifier after construction.
+//
+// Late binding is not an aesthetic choice: the classifier is the workflow
+// coordinator, and the coordinator needs the branch-lock manager to be built
+// first. Rather than split one of them in half, the daemon builds the manager,
+// builds the coordinator with it, and hands the classifier back here before the
+// first reconcile pass. Calling it is optional; not calling it degrades to the
+// conservative "a stopped owner keeps its lock" behavior.
+func (m *Manager) SetClassifier(c OwnerClassifier) { m.classifier = c }
 
 // New builds a Manager.
 func New(deps Deps) *Manager {
@@ -99,6 +114,7 @@ func New(deps Deps) *Manager {
 		store:      deps.Store,
 		preflight:  deps.Preflight,
 		ownerToken: deps.OwnerToken,
+		classifier: deps.Classifier,
 		newID:      deps.NewID,
 		clock:      deps.Clock,
 		log:        deps.Logger,
@@ -349,17 +365,20 @@ type ReconcileResult struct {
 // Reconcile makes branch-lock ownership decidable after a daemon restart.
 //
 // The question a crashed daemon leaves behind is "does this held lock still
-// belong to a live run?", and it is answered from durable workflow state, never
-// from a timestamp heuristic:
+// belong to a run that can still write this branch?", and it is answered from
+// durable workflow state, never from a timestamp heuristic. The policy itself
+// lives in decideRetention (retention.go); this loop only applies it:
 //
-//   - The run no longer exists, or is terminal → the lock is stale and is
-//     released. Nothing will ever resume it, so holding the branch hostage
-//     would be a permanent leak.
-//   - The run is still live and the lock carries a previous instance's owner
-//     token → the lock is legitimate and is adopted by this instance. It is
-//     emphatically not released: the recovered run is about to resume writing
-//     that branch, and freeing it would let a second run start writing it too.
-//   - The run is live and this instance already owns the lock → kept untouched.
+//   - The run no longer exists, or is terminal → stale, released. Nothing will
+//     ever resume it, so holding the branch hostage would be a permanent leak.
+//   - The run is live → legitimate. Adopted if the lock carries a previous
+//     instance's owner token, kept otherwise. It is emphatically not released:
+//     the recovered run is about to resume writing that branch, and freeing it
+//     would let a second run start writing it too.
+//   - The run is stopped in needs_attention → Checkpoint 8P-E.13A's addition.
+//     Kept when AO will resume it by itself or when it left uncommitted work
+//     the branch has to protect; released when it is neither, because a
+//     permanently stopped run must not deadlock a branch forever.
 //
 // Because the held-lock uniqueness constraint lives in the database, no outcome
 // here can produce two owners of the same pair even if reconciliation raced
@@ -372,25 +391,20 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileResult, error) {
 	now := m.clock()
 	var out ReconcileResult
 	for _, lock := range locks {
-		run, ok, err := m.store.GetWorkflowRun(ctx, lock.WorkflowRunID)
-		if err != nil {
-			return out, fmt.Errorf("branch lock: reconcile run %s: %w", lock.WorkflowRunID, err)
+		retention, cerr := m.classifyLock(ctx, lock)
+		if cerr != nil {
+			return out, cerr
 		}
-		switch {
-		case !ok:
-			if _, rerr := m.store.ReleaseBranchLock(ctx, lock.ID, "stale: workflow run no longer exists", now); rerr != nil {
-				return out, rerr
-			}
+		if err := m.apply(ctx, lock, retention, now); err != nil {
+			return out, err
+		}
+		switch retention.Decision {
+		case RetentionRelease:
 			out.Released++
-		case run.State.Terminal():
-			if _, rerr := m.store.ReleaseBranchLock(ctx, lock.ID, "stale: workflow run is "+string(run.State), now); rerr != nil {
-				return out, rerr
+			if m.log != nil {
+				m.log.Info("branchlock: released stale lock", "lock", lock.ID, "run", lock.WorkflowRunID, "branch", lock.Branch, "reason", retention.Reason)
 			}
-			out.Released++
-		case lock.OwnerToken != m.ownerToken:
-			if _, aerr := m.store.AdoptBranchLock(ctx, lock.ID, m.ownerToken, now); aerr != nil {
-				return out, aerr
-			}
+		case RetentionAdopt:
 			out.Adopted++
 		default:
 			out.Kept++

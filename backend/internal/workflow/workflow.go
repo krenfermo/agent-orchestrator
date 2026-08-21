@@ -132,6 +132,10 @@ type WakeScheduler interface {
 	Schedule(ctx stdctx.Context, runID domain.WorkflowRunID, stepID *domain.WorkflowStepID, reason wake.Reason, knownResetAt *time.Time) (wake.Schedule, error)
 	CancelAllForRun(ctx stdctx.Context, runID domain.WorkflowRunID) (int, error)
 	NextForRun(ctx stdctx.Context, runID domain.WorkflowRunID) (*wake.Schedule, error)
+	// WakeNow makes a scope due immediately instead of after a backoff delay,
+	// for the case where the thing it was waiting for demonstrably happened
+	// (Checkpoint 8P-E.13A: a branch lock was released).
+	WakeNow(ctx stdctx.Context, runID domain.WorkflowRunID, stepID *domain.WorkflowStepID, reason wake.Reason) (wake.Schedule, error)
 }
 
 // Projects resolves the project a run belongs to.
@@ -710,6 +714,7 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 	if detail.Run.State == domain.WorkflowRunWaiting {
 		if cps, cperr := c.store.ListWorkflowCheckpoints(ctx, runID); cperr == nil {
 			detail.BranchWait = branchWaitFromCheckpoints(cps)
+			c.enrichBranchWait(ctx, detail.BranchWait)
 		}
 	}
 
@@ -1061,6 +1066,15 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 	// done stays exactly where it is in the repository -- releasing the lock
 	// gives up ownership, it never reverts anything.
 	c.releaseBranchLocks(ctx, runID, "workflow run cancelled")
+
+	// Checkpoint 8P-E.13A: a cancelled child immediately mirrors onto its
+	// parent's task row instead of waiting for the parent's next reconcile
+	// pass. The pass may never come — a master parked in needs_attention BECAUSE
+	// of this child stops its own heartbeat — which is how "cancel the stuck
+	// task" used to leave a master run showing a task that was still running.
+	// Best-effort: the reconcile path still handles it, this only makes it
+	// immediate.
+	c.syncCancelledTask(ctx, run)
 
 	return c.GetRun(ctx, runID)
 }

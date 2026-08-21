@@ -11030,6 +11030,8 @@ components:
           type: string
         attentionReason:
           type: string
+        branchWait:
+          $ref: '#/components/schemas/WorkflowBranchWaitView'
         currentTaskOrdinal:
           format: int64
           type: integer
@@ -11169,9 +11171,23 @@ components:
       type: object
     WorkflowBranchWaitView:
       properties:
+        autoResume:
+          type: boolean
         branch:
           type: string
+        heldByReason:
+          type: string
         heldBySessionId:
+          type: string
+        heldByState:
+          enum:
+          - pending
+          - running
+          - waiting
+          - needs_attention
+          - completed
+          - failed
+          - cancelled
           type: string
         heldByWorkflowRunId:
           type: string

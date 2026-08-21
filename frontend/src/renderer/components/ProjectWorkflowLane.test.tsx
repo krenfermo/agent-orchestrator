@@ -181,4 +181,55 @@ describe("WorkflowBoardCard", () => {
 		expect(screen.getByText(/reviewer_capacity/)).toBeInTheDocument();
 		expect(screen.queryByText(/needs you/i)).toBeNull();
 	});
+	// Checkpoint 8P-E.13A: "Blocked" on its own could mean a branch about to be
+	// handed over or one held by a workflow that stopped hours ago. The card
+	// names the branch, the holder, and which of the two this is.
+	it("names the branch and holder a blocked run is queued on", () => {
+		render(
+			<WorkflowBoardCard
+				workflow={boardWorkflow({
+					phase: "blocked",
+					state: "waiting",
+					attention: "ao_internal",
+					waitReason: "branch_lock",
+					branchWait: {
+						branch: "feat/engineering-control-center",
+						repoPath: "/repos/agent-orchestrator",
+						heldByWorkflowRunId: "wf-3220567f",
+						heldByState: "running",
+						autoResume: true,
+					},
+				})}
+			/>,
+		);
+		const wait = within(screen.getByTestId("workflow-branch-wait"));
+		expect(wait.getByText(/feat\/engineering-control-center/)).toBeInTheDocument();
+		expect(wait.getByText(/wf-3220567f/)).toBeInTheDocument();
+		expect(screen.queryByText(/needs you/i)).toBeNull();
+	});
+
+	// The one case where the queue is genuinely stuck: the holder needs a
+	// decision, so the card says the branch is not coming back on its own —
+	// still without claiming THIS run is the one needing a decision.
+	it("says a branch held by a stopped workflow will not free itself", () => {
+		render(
+			<WorkflowBoardCard
+				workflow={boardWorkflow({
+					phase: "blocked",
+					state: "waiting",
+					attention: "ao_internal",
+					branchWait: {
+						branch: "feat/engineering-control-center",
+						heldByWorkflowRunId: "wf-3220567f",
+						heldByState: "needs_attention",
+						heldByReason: "the owning workflow needs a human decision",
+						autoResume: false,
+					},
+				})}
+			/>,
+		);
+		const wait = within(screen.getByTestId("workflow-branch-wait"));
+		expect(wait.getByText(/continued or cancelled/i)).toBeInTheDocument();
+		expect(screen.queryByText(/needs you/i)).toBeNull();
+	});
 });

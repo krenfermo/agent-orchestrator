@@ -5,6 +5,7 @@ import { AlertTriangle, Check, CircleDot, Circle, Loader2 } from "lucide-react";
 import {
 	needsHumanDecision,
 	useProjectBoard,
+	type BoardBranchWait,
 	type BoardPhase,
 	type BoardStepProgress,
 	type BoardWorkflow,
@@ -95,6 +96,8 @@ export function WorkflowBoardCard({ workflow, onOpen }: { workflow: BoardWorkflo
 
 			{workflow.steps && workflow.steps.length > 0 ? <StepChecklist steps={workflow.steps} /> : null}
 
+			{workflow.branchWait ? <BranchWaitLine wait={workflow.branchWait} /> : null}
+
 			{human ? <HumanDecisionNotice workflow={workflow} /> : <InternalStatusLine workflow={workflow} />}
 
 			<p className="text-xs text-muted-foreground">
@@ -174,6 +177,34 @@ function StepIcon({ state }: { state: BoardStepProgress["state"] }) {
 		default:
 			return <Circle aria-hidden="true" className="size-3.5 text-passive" />;
 	}
+}
+
+/**
+ * The branch a card is queued on (Checkpoint 8P-E.13A).
+ *
+ * "Blocked" alone was never enough: it could mean a branch about to be handed
+ * over by a workflow that is nearly done, or one held by a workflow that
+ * stopped and is waiting on a person. Both rendered identically, and only the
+ * second one is anybody's problem. The daemon resolves which it is
+ * (`autoResume`), so the card can say it.
+ */
+function BranchWaitLine({ wait }: { wait: BoardBranchWait }) {
+	const { t } = useTranslation();
+	const parts = [t("board.branchWaitBranch", { branch: wait.branch })];
+	if (wait.heldByWorkflowRunId) {
+		parts.push(t("board.branchWaitHeldBy", { workflowId: wait.heldByWorkflowRunId }));
+	}
+	return (
+		<div className="flex flex-col gap-0.5" data-testid="workflow-branch-wait">
+			<p className="text-xs text-muted-foreground">{parts.join(" · ")}</p>
+			{wait.repoPath ? (
+				<p className="truncate text-[10px] text-muted-foreground/70" title={wait.repoPath}>
+					{wait.repoPath}
+				</p>
+			) : null}
+			{wait.autoResume ? null : <p className="text-xs text-warning">{t("board.branchWaitBlocked")}</p>}
+		</div>
+	);
 }
 
 /**

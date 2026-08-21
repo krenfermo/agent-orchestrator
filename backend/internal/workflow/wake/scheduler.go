@@ -211,6 +211,49 @@ func (s *Scheduler) Schedule(ctx context.Context, runID domain.WorkflowRunID, st
 	return fromStoreRow(row), nil
 }
 
+// WakeNow schedules (or reschedules in place) a wake for this exact scope to
+// fire on the next poll instead of after a backoff delay.
+//
+// Checkpoint 8P-E.13A: a run queued behind a branch lock parks with an
+// exponentially backing-off branch_lock wake, because when it parked nobody
+// knew when the branch would free. The moment the holder actually releases it,
+// that unknown becomes a fact — and re-using Schedule there would still make
+// the waiter sit out the rest of a delay of up to MaxBackoffSeconds for no
+// reason. WakeNow is that fact expressed: same idempotency key, same row, same
+// claim/complete lifecycle, only due immediately.
+//
+// It deliberately does not reset attempt_count: the store's reschedule
+// increments it either way, and the count is a diagnostic of how often this
+// scope has parked, not a promise about the next delay.
+func (s *Scheduler) WakeNow(ctx context.Context, runID domain.WorkflowRunID, stepID *domain.WorkflowStepID, reason Reason) (Schedule, error) {
+	if runID == "" {
+		return Schedule{}, errors.New("wake: workflow run id is required")
+	}
+	if reason == "" {
+		return Schedule{}, errors.New("wake: reason is required")
+	}
+	now := s.clock()
+	var stepIDStr *string
+	if stepID != nil {
+		v := string(*stepID)
+		stepIDStr = &v
+	}
+	row, err := s.store.UpsertWorkflowWakeSchedule(ctx, store.WorkflowWakeSchedule{
+		ID:             "wfwk-" + s.newID(),
+		WorkflowRunID:  string(runID),
+		WorkflowStepID: stepIDStr,
+		Reason:         string(reason),
+		IdempotencyKey: idempotencyKey(runID, stepID, reason),
+		ScheduledAt:    now,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	})
+	if err != nil {
+		return Schedule{}, fmt.Errorf("wake now for run %s: %w", runID, err)
+	}
+	return fromStoreRow(row), nil
+}
+
 // isFixedCadence reports whether a reason's wake is a heartbeat rather than a
 // retry, and must therefore keep a constant interval instead of backing off.
 //

@@ -77,6 +77,29 @@ func (w workflowBranchLocks) Renew(ctx context.Context, runID, stepID, sessionID
 	w.mgr.Renew(ctx, runID, stepID, sessionID)
 }
 
+func (w workflowBranchLocks) RecoverStale(ctx context.Context, runID string) (int64, error) {
+	return w.mgr.RecoverStale(ctx, runID)
+}
+
+// coordinatorLockClassifier adapts the workflow coordinator to
+// branchlock.OwnerClassifier (Checkpoint 8P-E.13A), translating between the two
+// packages' own mirrored disposition types so neither has to import the other.
+type coordinatorLockClassifier struct {
+	coordinator *workflowcore.Coordinator
+}
+
+func (c coordinatorLockClassifier) ClassifyLockOwner(ctx context.Context, run domain.WorkflowRun) (branchlock.OwnerDisposition, error) {
+	disp, err := c.coordinator.ClassifyLockOwner(ctx, run)
+	if err != nil {
+		return branchlock.OwnerDisposition{}, err
+	}
+	return branchlock.OwnerDisposition{
+		SelfRemediable: disp.SelfRemediable,
+		ProtectsWork:   disp.ProtectsWork,
+		Reason:         disp.Reason,
+	}, nil
+}
+
 func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {

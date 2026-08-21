@@ -29,6 +29,10 @@ type fakeBranchLocks struct {
 	acquires int
 	renewals []string
 	failWith error
+	// staleRuns marks the run ids whose locks RecoverStale should free, and
+	// recoverCalls records who was asked about.
+	staleRuns    map[string]bool
+	recoverCalls []string
 }
 
 type branchTarget struct {
@@ -37,7 +41,12 @@ type branchTarget struct {
 }
 
 func newFakeBranchLocks() *fakeBranchLocks {
-	return &fakeBranchLocks{held: map[string]domain.BranchLock{}, targets: map[domain.ProjectID][]branchTarget{}, dirty: map[string]bool{}}
+	return &fakeBranchLocks{
+		held:      map[string]domain.BranchLock{},
+		targets:   map[domain.ProjectID][]branchTarget{},
+		dirty:     map[string]bool{},
+		staleRuns: map[string]bool{},
+	}
 }
 
 func (f *fakeBranchLocks) Acquire(_ context.Context, req workflowcore.BranchLockRequest) ([]domain.BranchLock, error) {
@@ -105,6 +114,29 @@ func (f *fakeBranchLocks) HeldByRun(_ context.Context, runID string) ([]domain.B
 		}
 	}
 	return out, nil
+}
+
+// RecoverStale releases the locks held by a run the test has marked stale.
+// Deliberately explicit: a fake that decided staleness on its own would be
+// asserting the policy the real branchlock.Manager owns.
+func (f *fakeBranchLocks) RecoverStale(_ context.Context, runID string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recoverCalls = append(f.recoverCalls, runID)
+	if !f.staleRuns[runID] {
+		return 0, nil
+	}
+	var n int64
+	for key, lock := range f.held {
+		if lock.WorkflowRunID == runID {
+			delete(f.held, key)
+			n++
+		}
+	}
+	if n > 0 {
+		f.releases = append(f.releases, runID+": stale")
+	}
+	return n, nil
 }
 
 func (f *fakeBranchLocks) Renew(_ context.Context, runID, stepID, sessionID string) {

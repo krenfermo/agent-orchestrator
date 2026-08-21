@@ -206,6 +206,28 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		return reviewStep, nil
 	}
 
+	// Checkpoint 8P-E.13A: work-completion evidence gates this entire
+	// function, before any lookup that could be mistaken for evidence.
+	//
+	// This guard used to live inside the `pending` case, BELOW the work
+	// checkpoint lookup, and that ordering produced a real dead end in
+	// ~/.ao/data: a child run whose work step was still `ready` because the
+	// repository+branch was locked by another workflow has, by construction,
+	// no work session and no work checkpoint — so the "no session/checkpoint
+	// to review" branch fired and parked the run in needs_attention with
+	// review_dispatch_ambiguous, on a run whose review was simply not due yet.
+	// Nothing was ambiguous: work had not started.
+	//
+	// The invariant, stated once, for every cycle: a review may only be
+	// dispatched from evidence that the work step actually completed. A work
+	// step that is pending/ready/running/waiting (including waiting on a
+	// branch lock) leaves the review step exactly where it is. Only once work
+	// is durably `completed` does a missing session/checkpoint below become
+	// genuine ambiguity worth a human's time.
+	if workStep.State != domain.WorkflowStepCompleted {
+		return reviewStep, nil
+	}
+
 	// The worker session, branch, and worktree path never change across
 	// cycles (Checkpoint 8D reuses the SAME Codex worker session throughout
 	// the loop, never a new Spawn) — always resolved from the work step's
@@ -225,13 +247,10 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 	var targetSHA string
 	switch reviewStep.State {
 	case domain.WorkflowStepPending:
-		// Cycle 1: nothing to review until the work step has completed. This
-		// is the one-off hardcoded "work just completed, unblock review"
-		// edge, not a generic dependency-resolution engine — mirrors
-		// StartRun's plan->work unblock exactly.
-		if workStep.State != domain.WorkflowStepCompleted {
-			return reviewStep, nil
-		}
+		// Cycle 1: the one-off hardcoded "work just completed, unblock
+		// review" edge, not a generic dependency-resolution engine — mirrors
+		// StartRun's plan->work unblock exactly. "Work has completed" is
+		// already proven by the evidence gate above.
 
 		// Checkpoint 8I: ReviewPolicy evaluates exactly once, right here, at
 		// cycle 1 — before any reviewer is ever launched. A later fix cycle
@@ -304,9 +323,6 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 			if decision, ok := decodeReviewPolicyDecision(latestCP.RetryState); ok && decision.Decision == ReviewSkipped {
 				return c.applyReviewPolicySkip(ctx, run, reviewStep)
 			}
-		}
-		if workStep.State != domain.WorkflowStepCompleted {
-			return reviewStep, nil
 		}
 		targetSHA = workCP.FingerprintAfter
 		if targetSHA == "" {

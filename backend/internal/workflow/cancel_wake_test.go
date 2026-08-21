@@ -17,6 +17,9 @@ import (
 type fakeWakeScheduler struct {
 	scheduled       map[string]bool // runID -> has an open (uncancelled) wake
 	cancelledRunIDs []string
+	// wokenNow records the runs told to resume immediately, which is how the
+	// branch-queue tests assert a released branch actually wakes its queue.
+	wokenNow []string
 }
 
 func newFakeWakeScheduler() *fakeWakeScheduler {
@@ -25,6 +28,12 @@ func newFakeWakeScheduler() *fakeWakeScheduler {
 
 func (f *fakeWakeScheduler) Schedule(_ context.Context, runID domain.WorkflowRunID, _ *domain.WorkflowStepID, _ wake.Reason, _ *time.Time) (wake.Schedule, error) {
 	f.scheduled[string(runID)] = true
+	return wake.Schedule{ID: "wfwk-fake", WorkflowRunID: runID}, nil
+}
+
+func (f *fakeWakeScheduler) WakeNow(_ context.Context, runID domain.WorkflowRunID, _ *domain.WorkflowStepID, _ wake.Reason) (wake.Schedule, error) {
+	f.scheduled[string(runID)] = true
+	f.wokenNow = append(f.wokenNow, string(runID))
 	return wake.Schedule{ID: "wfwk-fake", WorkflowRunID: runID}, nil
 }
 

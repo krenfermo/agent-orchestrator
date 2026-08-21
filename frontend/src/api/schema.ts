@@ -4008,6 +4008,7 @@ export interface components {
             attention?: "ao_internal" | "human_decision";
             attentionAction?: string;
             attentionReason?: string;
+            branchWait?: components["schemas"]["WorkflowBranchWaitView"];
             /** Format: int64 */
             currentTaskOrdinal?: number;
             currentTaskTitle?: string;
@@ -4053,8 +4054,12 @@ export interface components {
             workflowId?: string;
         };
         WorkflowBranchWaitView: {
+            autoResume?: boolean;
             branch: string;
+            heldByReason?: string;
             heldBySessionId?: string;
+            /** @enum {string} */
+            heldByState?: "pending" | "running" | "waiting" | "needs_attention" | "completed" | "failed" | "cancelled";
             heldByWorkflowRunId?: string;
             repoPath?: string;
         };

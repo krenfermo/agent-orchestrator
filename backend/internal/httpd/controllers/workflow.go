@@ -265,6 +265,29 @@ type WorkflowBranchWaitView struct {
 	RepoPath            string `json:"repoPath,omitempty"`
 	HeldByWorkflowRunID string `json:"heldByWorkflowRunId,omitempty"`
 	HeldBySessionID     string `json:"heldBySessionId,omitempty"`
+	// HeldByState, HeldByReason and AutoResume are Checkpoint 8P-E.13A's
+	// resolved-at-read-time answer to "is this queue moving?". AutoResume=false
+	// means the branch is held by a workflow that has stopped for a human
+	// decision and is protecting uncommitted work — the one case where a queued
+	// run genuinely needs someone to act on the OTHER workflow.
+	HeldByState  string `json:"heldByState,omitempty" enum:"pending,running,waiting,needs_attention,completed,failed,cancelled"`
+	HeldByReason string `json:"heldByReason,omitempty"`
+	AutoResume   bool   `json:"autoResume,omitempty"`
+}
+
+func workflowBranchWaitView(w *workflowcore.BranchWait) *WorkflowBranchWaitView {
+	if w == nil {
+		return nil
+	}
+	return &WorkflowBranchWaitView{
+		Branch:              w.Branch,
+		RepoPath:            w.RepoPath,
+		HeldByWorkflowRunID: w.HeldByWorkflowRunID,
+		HeldBySessionID:     w.HeldBySessionID,
+		HeldByState:         w.HeldByState,
+		HeldByReason:        w.HeldByReason,
+		AutoResume:          w.AutoResume,
+	}
 }
 
 // WorkflowRunDetailView is a workflow run plus its steps and their attempts.
@@ -466,14 +489,7 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 	runView.NextWakeAt = detail.NextWakeAt
 	runView.WaitReason = detail.WaitReason
 	runView.WakeAttemptCount = detail.WakeAttemptCount
-	if detail.BranchWait != nil {
-		runView.BranchWait = &WorkflowBranchWaitView{
-			Branch:              detail.BranchWait.Branch,
-			RepoPath:            detail.BranchWait.RepoPath,
-			HeldByWorkflowRunID: detail.BranchWait.HeldByWorkflowRunID,
-			HeldBySessionID:     detail.BranchWait.HeldBySessionID,
-		}
-	}
+	runView.BranchWait = workflowBranchWaitView(detail.BranchWait)
 	// Checkpoint 8P-E.12: one derivation, two surfaces. The Board and this
 	// detail view both read workflow.DeriveLifecycle, so a run can never be
 	// "Reviewing" on one screen and "Inactive" on the other.

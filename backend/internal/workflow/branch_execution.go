@@ -23,6 +23,10 @@ type BranchLocks interface {
 	ReleaseRun(ctx stdctx.Context, runID, reason string) (int64, error)
 	HeldByRun(ctx stdctx.Context, runID string) ([]domain.BranchLock, error)
 	Renew(ctx stdctx.Context, runID, stepID, sessionID string)
+	// RecoverStale releases the locks one run holds that it can never use
+	// again (Checkpoint 8P-E.13A). It returns how many it freed, so a caller
+	// blocked by that run knows whether retrying is worth anything.
+	RecoverStale(ctx stdctx.Context, runID string) (int64, error)
 }
 
 // BranchLockRequest mirrors branchlock.AcquireRequest at the workflow
@@ -92,11 +96,23 @@ func (c *Coordinator) ensureBranchLock(ctx stdctx.Context, run domain.WorkflowRu
 	if c.branchLocks == nil {
 		return true, nil
 	}
-	_, err := c.branchLocks.Acquire(ctx, BranchLockRequest{
-		ProjectID: domain.ProjectID(run.ProjectID),
-		RunID:     run.ID,
-		StepID:    step.ID,
-	})
+	acquire := func() error {
+		_, err := c.branchLocks.Acquire(ctx, BranchLockRequest{
+			ProjectID: domain.ProjectID(run.ProjectID),
+			RunID:     run.ID,
+			StepID:    step.ID,
+		})
+		return err
+	}
+	err := acquire()
+	// Checkpoint 8P-E.13A: a conflict is not automatically a wait. The holder
+	// may be a run that stopped permanently and is protecting nothing, in which
+	// case queueing behind it would be queueing forever. Ask once whether the
+	// holder's lock is stale, and if it was reclaimed, take the branch now
+	// rather than parking on an obstacle that no longer exists.
+	if err != nil && classifyBranchLockError(err) == branchLockWaiting && c.recoverStaleBranchLockHolder(ctx, run, err) {
+		err = acquire()
+	}
 	if err == nil {
 		return true, nil
 	}
@@ -205,6 +221,13 @@ func (c *Coordinator) releaseBranchLocks(ctx stdctx.Context, runID, reason strin
 	if c.branchLocks == nil {
 		return
 	}
+	// Read what this run holds BEFORE releasing it: once released, the rows no
+	// longer answer "which branches just became free", and that is exactly the
+	// question the queued runs are waiting on (Checkpoint 8P-E.13A).
+	held, herr := c.branchLocks.HeldByRun(ctx, runID)
+	if herr != nil && c.log != nil {
+		c.log.Warn("workflow: branch lock queue lookup failed", "run", runID, "err", herr)
+	}
 	n, err := c.branchLocks.ReleaseRun(ctx, runID, reason)
 	if err != nil {
 		if c.log != nil {
@@ -214,6 +237,9 @@ func (c *Coordinator) releaseBranchLocks(ctx stdctx.Context, runID, reason strin
 	}
 	if n > 0 && c.log != nil {
 		c.log.Info("workflow: branch locks released", "run", runID, "count", n, "reason", reason)
+	}
+	if n > 0 {
+		c.wakeBranchQueue(ctx, runID, held)
 	}
 }
 
@@ -378,6 +404,24 @@ type BranchWait struct {
 	RepoPath            string `json:"repoPath,omitempty"`
 	HeldByWorkflowRunID string `json:"heldByWorkflowRunId,omitempty"`
 	HeldBySessionID     string `json:"heldBySessionId,omitempty"`
+
+	// The three fields below are Checkpoint 8P-E.13A's read-time enrichment.
+	// They are deliberately NOT part of the persisted checkpoint payload: the
+	// holder's state changes after the wait was recorded, and a stored copy
+	// would be a snapshot of a fact that has since moved. They are resolved
+	// live by enrichBranchWait on every read, or left empty when the holder
+	// cannot be resolved.
+
+	// HeldByState is the owning run's current durable state.
+	HeldByState string `json:"heldByState,omitempty"`
+	// HeldByReason explains why the branch is still held — the difference
+	// between "the holder is working" and "the holder stopped and a person has
+	// to decide", which is the difference between waiting and being stuck.
+	HeldByReason string `json:"heldByReason,omitempty"`
+	// AutoResume reports whether this wait is expected to clear without anyone
+	// doing anything. False means the queue is behind a decision, and the user
+	// is being told so rather than left watching a spinner.
+	AutoResume bool `json:"autoResume,omitempty"`
 }
 
 func branchWaitFromLockError(err error) BranchWait {
@@ -407,15 +451,31 @@ func marshalBranchWait(w BranchWait) string {
 // waiting, so a stale checkpoint from an earlier, already-resolved wait can
 // never be surfaced as a current one.
 func branchWaitFromCheckpoints(cps []domain.WorkflowCheckpoint) *BranchWait {
+	wait, _, ok := latestBranchWait(cps)
+	if !ok {
+		return nil
+	}
+	return &wait
+}
+
+// latestBranchWait returns the newest waiting_for_branch checkpoint's decoded
+// wait state together with the step that parked, so a caller re-scheduling that
+// run's branch wake can address the same scope the original park used.
+func latestBranchWait(cps []domain.WorkflowCheckpoint) (BranchWait, *domain.WorkflowStepID, bool) {
 	for i := len(cps) - 1; i >= 0; i-- {
 		if cps[i].DurablePhase != branchWaitPhase {
 			continue
 		}
 		var wait BranchWait
 		if err := json.Unmarshal([]byte(cps[i].RetryState), &wait); err != nil || wait.Branch == "" {
-			return nil
+			return BranchWait{}, nil, false
 		}
-		return &wait
+		var stepID *domain.WorkflowStepID
+		if cps[i].WorkflowStepID != nil && *cps[i].WorkflowStepID != "" {
+			id := domain.WorkflowStepID(*cps[i].WorkflowStepID)
+			stepID = &id
+		}
+		return wait, stepID, true
 	}
-	return nil
+	return BranchWait{}, nil, false
 }

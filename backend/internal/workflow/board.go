@@ -43,6 +43,10 @@ type BoardEntry struct {
 	ExecutionMode string
 	// ErrorClass is the typed cause on the newest attempt that recorded one.
 	ErrorClass domain.WorkflowErrorClass
+	// BranchWait names the repository+branch this run is queued on, who owns it
+	// and whether the wait clears by itself (Checkpoint 8P-E.13A). Nil unless
+	// the run — or, for a master, its running child — is genuinely queued.
+	BranchWait *BranchWait
 	// ReviewCycles is how many review runs this run's review step has been
 	// through — the cheap, always-available half of Checkpoint 8P-E.12 §9's
 	// token/cost observability. Token totals stay on the run detail endpoint,
@@ -119,6 +123,7 @@ func (c *Coordinator) boardEntry(ctx stdctx.Context, run domain.WorkflowRun) (Bo
 		ExecutionMode: executionModeLabel(run),
 		ErrorClass:    latestErrorClass(detail),
 		ReviewCycles:  reviewCycleCount(detail),
+		BranchWait:    detail.BranchWait,
 	}
 	entry.ActivePhase = entry.Lifecycle.Phase
 	entry.SessionID, entry.Harness, entry.Model = activeAssignment(detail)
@@ -150,6 +155,11 @@ func (c *Coordinator) boardEntry(ctx stdctx.Context, run domain.WorkflowRun) (Bo
 					entry.ActivePhase = childLife.Phase
 					entry.Steps = child.Steps
 					entry.ReviewCycles = reviewCycleCount(childDetail)
+					// A master run has no branch of its own: the branch its
+					// running child is queued on IS what the objective is
+					// waiting for, and saying so is the difference between
+					// "Blocked" and "Blocked on feat/x, held by workflow Y".
+					entry.BranchWait = childDetail.BranchWait
 					if entry.Lifecycle.LastActivityAt.Before(childLife.LastActivityAt) {
 						entry.Lifecycle.LastActivityAt = childLife.LastActivityAt
 					}
@@ -210,6 +220,7 @@ func (c *Coordinator) readOnlyDetail(ctx stdctx.Context, run domain.WorkflowRun)
 		}
 		if run.State == domain.WorkflowRunWaiting {
 			detail.BranchWait = branchWaitFromCheckpoints(cps)
+			c.enrichBranchWait(ctx, detail.BranchWait)
 		}
 	}
 	if c.planStore != nil {

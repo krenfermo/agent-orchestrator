@@ -25,6 +25,11 @@ func (f *recordingWakeScheduler) Schedule(_ context.Context, runID domain.Workfl
 	return wake.Schedule{ID: "wfwk-rec", WorkflowRunID: runID, Reason: reason}, nil
 }
 
+func (f *recordingWakeScheduler) WakeNow(_ context.Context, runID domain.WorkflowRunID, _ *domain.WorkflowStepID, reason wake.Reason) (wake.Schedule, error) {
+	f.reasons = append(f.reasons, reason)
+	return wake.Schedule{ID: "wfwk-rec", WorkflowRunID: runID, Reason: reason}, nil
+}
+
 func (f *recordingWakeScheduler) CancelAllForRun(context.Context, domain.WorkflowRunID) (int, error) {
 	return 0, nil
 }

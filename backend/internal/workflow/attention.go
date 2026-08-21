@@ -381,12 +381,30 @@ func (c *Coordinator) recordAttentionStop(ctx stdctx.Context, run domain.Workflo
 // never GetRun, so it is safe to call from inside the reconcile path GetRun
 // itself drives.
 func (c *Coordinator) stopIsSelfRemediable(ctx stdctx.Context, run domain.WorkflowRun) bool {
+	_, disp, ok := c.stopReason(ctx, run)
+	return ok && disp.SelfRemediable
+}
+
+// stopReason resolves the canonical reason for a stopped run from its durable
+// carriers alone. stopIsSelfRemediable is the boolean view of it; branch-lock
+// retention (branch_lock_recovery.go) needs the reason itself, so it can say
+// which stop is holding a branch rather than merely that one is.
+func (c *Coordinator) stopReason(ctx stdctx.Context, run domain.WorkflowRun) (string, AttentionDisposition, bool) {
 	d := RunDetail{Run: run}
 	cps, err := c.store.ListWorkflowCheckpoints(ctx, run.ID)
 	if err != nil {
-		return false
+		return "", AttentionDisposition{}, false
 	}
 	for _, cp := range cps {
+		// NextAction carries resolveAttentionReason's legacy carrier (the
+		// pre-8P-E.13 "human_attention" literal). Without it, a run stranded by
+		// the old fix-budget code reads as unclassified here while the very
+		// same lookup on the run detail page names it — and branch-lock
+		// retention would then have to guess about a stop AO can actually
+		// explain.
+		if cp.NextAction != "" {
+			d.NextAction = cp.NextAction
+		}
 		if !cp.CreatedAt.Before(d.LatestCheckpointAt) {
 			d.LatestCheckpointPhase = cp.DurablePhase
 			d.LatestCheckpointAt = cp.CreatedAt
@@ -396,11 +414,10 @@ func (c *Coordinator) stopIsSelfRemediable(ctx stdctx.Context, run domain.Workfl
 		for _, s := range steps {
 			attempts, aerr := c.store.ListWorkflowAttempts(ctx, s.ID)
 			if aerr != nil {
-				return false
+				return "", AttentionDisposition{}, false
 			}
 			d.Steps = append(d.Steps, StepDetail{Step: s, Attempts: attempts})
 		}
 	}
-	_, disp, ok := resolveAttentionReason(d)
-	return ok && disp.SelfRemediable
+	return resolveAttentionReason(d)
 }

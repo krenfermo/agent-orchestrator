@@ -36,7 +36,19 @@ export function WorkflowBranchWaitBanner({ run }: { run: WorkflowRunView }) {
 					{wait.repoPath}
 				</p>
 			)}
-			<p className="text-xs text-warning/80">{t("shell.workflowsBranchWaitNote")}</p>
+			{/*
+			 * Checkpoint 8P-E.13A: the holder's own state decides which note is
+			 * true. A wait that clears by itself gets the reassuring one; a
+			 * branch held by a workflow that has stopped for a human decision
+			 * gets told so, because nothing about this run will change until
+			 * that other workflow is continued or cancelled.
+			 */}
+			{wait.heldByReason && <p className="text-xs text-warning/90">{wait.heldByReason}</p>}
+			<p className="text-xs text-warning/80">
+				{wait.autoResume === false && wait.heldByReason
+					? t("board.branchWaitBlocked")
+					: t("shell.workflowsBranchWaitNote")}
+			</p>
 		</div>
 	);
 }
