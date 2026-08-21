@@ -167,7 +167,7 @@ type TaskMetrics = WorkflowUsageResponse["metrics"];
  * replay beyond the cached-token count are NOT measurable from what AO records
  * per session, and are deliberately absent here rather than approximated.
  */
-function processedTokens(metrics: TaskMetrics): number | null {
+export function processedTokens(metrics: TaskMetrics): number | null {
 	if (metrics.tokensCertainty !== "actual") return null;
 	const { inputTokens, outputTokens, cachedTokens } = metrics;
 	if (inputTokens === null || inputTokens === undefined) return null;

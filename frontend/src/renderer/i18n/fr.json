@@ -1521,5 +1521,18 @@
 	"shell.workflowUsage.cachedTokensTotal": "Jetons en cache (total)",
 	"shell.workflowUsage.processedTokensTotal": "Jetons traités (total)",
 	"shell.workflowUsage.tokensNotMeasured": "Les totaux de jetons ne sont pas mesurables pour cette exécution — AO indique Inconnu plutôt qu'un nombre qu'il n'a pas observé.",
-	"shell.workflowUsage.highUsageWarning": "Utilisation élevée : {{total}} jetons traités sur {{cycles}} cycles de revue/correction. Chaque cycle rejoue tout le contexte, donc une longue boucle domine le total."
+	"shell.workflowUsage.highUsageWarning": "Utilisation élevée : {{total}} jetons traités sur {{cycles}} cycles de revue/correction. Chaque cycle rejoue tout le contexte, donc une longue boucle domine le total.",
+	"board.inProgress": "En cours",
+	"board.workingNow": "En train de travailler",
+	"board.activityDetail.planning": "AO génère le plan directeur",
+	"board.activityDetail.running": "AO exécute l'étape de travail",
+	"board.activityDetail.reviewing": "AO relit les modifications",
+	"board.activityDetail.fixing": "AO applique les correctifs de la relecture",
+	"board.activityDetail.verifying": "AO vérifie le résultat",
+	"board.factElapsed": "Temps écoulé",
+	"board.factAgent": "Agent",
+	"board.factBranch": "Branche",
+	"board.factTask": "Tâche",
+	"board.factTokens": "Jetons traités",
+	"board.factUnknown": "Inconnu"
 }

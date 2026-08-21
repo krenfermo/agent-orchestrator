@@ -1521,5 +1521,18 @@
 	"shell.workflowUsage.cachedTokensTotal": "Tokens en caché (total)",
 	"shell.workflowUsage.processedTokensTotal": "Tokens procesados (total)",
 	"shell.workflowUsage.tokensNotMeasured": "Los totales de tokens no son medibles en esta ejecución: AO informa Desconocido en vez de un número que no observó.",
-	"shell.workflowUsage.highUsageWarning": "Uso alto: {{total}} tokens procesados en {{cycles}} ciclos de revisión/corrección. Cada ciclo reenvía todo el contexto, así que un bucle largo domina el total."
+	"shell.workflowUsage.highUsageWarning": "Uso alto: {{total}} tokens procesados en {{cycles}} ciclos de revisión/corrección. Cada ciclo reenvía todo el contexto, así que un bucle largo domina el total.",
+	"board.inProgress": "En curso",
+	"board.workingNow": "Trabajando en este momento",
+	"board.activityDetail.planning": "AO está generando el plan maestro",
+	"board.activityDetail.running": "AO está ejecutando la tarea de trabajo",
+	"board.activityDetail.reviewing": "AO está revisando los cambios",
+	"board.activityDetail.fixing": "AO está aplicando las correcciones de la revisión",
+	"board.activityDetail.verifying": "AO está verificando el resultado",
+	"board.factElapsed": "Tiempo transcurrido",
+	"board.factAgent": "Agente",
+	"board.factBranch": "Rama",
+	"board.factTask": "Tarea",
+	"board.factTokens": "Tokens procesados",
+	"board.factUnknown": "Desconocido"
 }

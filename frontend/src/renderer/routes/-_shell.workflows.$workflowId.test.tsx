@@ -138,4 +138,100 @@ describe("WorkflowRunView", () => {
 		expect(screen.getByText(/Define Product model/)).toBeInTheDocument();
 		expect(screen.queryByText(/something went wrong/i)).not.toBeInTheDocument();
 	});
+	// The header is the second place a user looks after the board card, and it
+	// used to say nothing about whether the run was moving: mode and state
+	// text only. It now carries the same badge, the same single spinner, and
+	// the facts of the phase that is actually executing.
+	it("shows an executing run as executing, with the facts of what it is running", async () => {
+		getMock.mockResolvedValue({
+			data: {
+				workflow: {
+					run: {
+						id: "wf-active",
+						projectId: "proj-1",
+						objective: "Ship the board activity indicator",
+						state: "running",
+						phase: "running",
+						createdAt: new Date(Date.now() - 7 * 60_000).toISOString(),
+						updatedAt: new Date().toISOString(),
+						lastActivityAt: new Date().toISOString(),
+						executionMode: "autonomous",
+					},
+					steps: [
+						{
+							id: "wfs-1",
+							kind: "plan",
+							ordinal: 1,
+							state: "completed",
+							createdAt: "2026-08-17T18:54:01.866Z",
+							updatedAt: "2026-08-17T18:54:01.866Z",
+							attempts: [],
+						},
+						{
+							id: "wfs-2",
+							kind: "work",
+							ordinal: 2,
+							state: "running",
+							branch: "feat/board-activity",
+							createdAt: "2026-08-17T18:54:01.866Z",
+							updatedAt: "2026-08-17T18:54:01.866Z",
+							attempts: [{ id: "att-1", attemptNumber: 1, startedAt: "2026-08-17T18:54:01.866Z", harness: "claude-code" }],
+						},
+					],
+				},
+			},
+			error: undefined,
+		});
+
+		render(<WorkflowRunView workflowId="wf-active" />, { wrapper });
+
+		await waitFor(() => expect(screen.getByText("Ship the board activity indicator")).toBeInTheDocument());
+		expect(screen.getByTestId("workflow-phase-badge")).toHaveTextContent("Running");
+		expect(screen.getByRole("status", { name: "In progress" })).toBeInTheDocument();
+		const panel = screen.getByTestId("workflow-activity-panel");
+		expect(panel).toHaveTextContent("Working right now");
+		expect(panel).toHaveTextContent("7m");
+		expect(panel).toHaveTextContent("claude-code");
+		expect(panel).toHaveTextContent("feat/board-activity");
+		// No usage record on this run: the total stays Unknown rather than 0.
+		expect(panel).toHaveTextContent("Unknown");
+	});
+
+	it("shows a finished run without a spinner or an activity block", async () => {
+		getMock.mockResolvedValue({
+			data: {
+				workflow: {
+					run: {
+						id: "wf-done",
+						projectId: "proj-1",
+						objective: "Already finished",
+						state: "completed",
+						phase: "completed",
+						createdAt: "2026-01-01T00:00:00Z",
+						updatedAt: "2026-01-01T00:10:00Z",
+						executionMode: "autonomous",
+					},
+					steps: [
+						{
+							id: "wfs-1",
+							kind: "verify",
+							ordinal: 1,
+							state: "completed",
+							createdAt: "2026-01-01T00:00:00Z",
+							updatedAt: "2026-01-01T00:10:00Z",
+							attempts: [],
+						},
+					],
+				},
+			},
+			error: undefined,
+		});
+
+		render(<WorkflowRunView workflowId="wf-done" />, { wrapper });
+
+		await waitFor(() => expect(screen.getByText("Already finished")).toBeInTheDocument());
+		expect(screen.getByTestId("workflow-phase-badge")).toHaveTextContent("Completed");
+		expect(screen.queryByTestId("workflow-spinner")).toBeNull();
+		expect(screen.queryByTestId("workflow-activity-panel")).toBeNull();
+	});
 });

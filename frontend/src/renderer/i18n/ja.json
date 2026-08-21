@@ -1506,5 +1506,18 @@
 	"shell.workflowUsage.cachedTokensTotal": "キャッシュされたトークン（合計）",
 	"shell.workflowUsage.processedTokensTotal": "処理されたトークン（合計）",
 	"shell.workflowUsage.tokensNotMeasured": "この実行ではトークン合計を計測できません。AO は観測していない数値ではなく「不明」と表示します。",
-	"shell.workflowUsage.highUsageWarning": "使用量が多い状態です: {{cycles}} 回のレビュー/修正サイクルで {{total}} トークンを処理しました。各サイクルでコンテキスト全体が再送されるため、長いループが合計の大部分を占めます。"
+	"shell.workflowUsage.highUsageWarning": "使用量が多い状態です: {{cycles}} 回のレビュー/修正サイクルで {{total}} トークンを処理しました。各サイクルでコンテキスト全体が再送されるため、長いループが合計の大部分を占めます。",
+	"board.inProgress": "進行中",
+	"board.workingNow": "現在の作業",
+	"board.activityDetail.planning": "AO がマスタープランを生成しています",
+	"board.activityDetail.running": "AO が作業ステップを実行しています",
+	"board.activityDetail.reviewing": "AO が変更をレビューしています",
+	"board.activityDetail.fixing": "AO がレビュー指摘を修正しています",
+	"board.activityDetail.verifying": "AO が結果を検証しています",
+	"board.factElapsed": "経過時間",
+	"board.factAgent": "エージェント",
+	"board.factBranch": "ブランチ",
+	"board.factTask": "タスク",
+	"board.factTokens": "処理済みトークン",
+	"board.factUnknown": "不明"
 }

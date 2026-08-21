@@ -239,4 +239,101 @@ describe("WorkflowBoardCard", () => {
 		expect(wait.getByText(/continued or cancelled/i)).toBeInTheDocument();
 		expect(screen.queryByText(/needs you/i)).toBeNull();
 	});
+	// The whole complaint in one test: a run whose worker session is idle for
+	// the entire review is still live work, and the card has to look like it —
+	// accent, spinner, and a block saying what is happening this second.
+	it("marks an actively progressing run as active even while its worker session is idle", () => {
+		render(
+			<WorkflowBoardCard
+				workflow={boardWorkflow({
+					phase: "reviewing",
+					harness: "claude-code",
+					currentTaskTitle: "Backend backup API",
+					steps: [
+						{ kind: "plan", state: "completed" },
+						{ kind: "work", state: "completed" },
+						{ kind: "review", state: "running" },
+					],
+				})}
+			/>,
+		);
+		expect(screen.getByTestId("workflow-card-wf-1")).toHaveAttribute("data-active", "true");
+		expect(screen.getByTestId("workflow-spinner")).toBeInTheDocument();
+		const panel = screen.getByTestId("workflow-activity-panel");
+		expect(panel).toHaveTextContent("Working right now");
+		expect(panel).toHaveTextContent("AO is reviewing the changes");
+		expect(panel).toHaveTextContent("Backend backup API");
+	});
+
+	it("shows a finished run as done, with no spinner and no activity block", () => {
+		render(
+			<WorkflowBoardCard
+				workflow={boardWorkflow({
+					phase: "completed",
+					state: "completed",
+					steps: [
+						{ kind: "plan", state: "completed" },
+						{ kind: "work", state: "completed" },
+						{ kind: "review", state: "completed" },
+					],
+				})}
+			/>,
+		);
+		expect(screen.getByTestId("workflow-phase-badge")).toHaveTextContent("Completed");
+		expect(screen.queryByTestId("workflow-spinner")).toBeNull();
+		expect(screen.queryByTestId("workflow-activity-panel")).toBeNull();
+		expect(screen.getByTestId("workflow-card-wf-1")).not.toHaveAttribute("data-active");
+		const checklist = within(screen.getByTestId("workflow-step-checklist"));
+		expect(checklist.getAllByText("done")).toHaveLength(3);
+	});
+
+	it("shows a needs_attention run as a warning, never as work in progress", () => {
+		render(
+			<WorkflowBoardCard
+				workflow={boardWorkflow({
+					phase: "needs_attention",
+					state: "needs_attention",
+					attention: "human_decision",
+					attentionReason: "dirty_worktree",
+				})}
+			/>,
+		);
+		expect(screen.getByTestId("workflow-phase-badge")).toHaveTextContent("Needs attention");
+		expect(screen.queryByTestId("workflow-spinner")).toBeNull();
+		expect(screen.queryByTestId("workflow-activity-panel")).toBeNull();
+		expect(screen.getByRole("note").querySelector("svg")).not.toBeNull();
+	});
+
+	it("shows a queued run as neutral: no spinner, no accent, no activity block", () => {
+		render(<WorkflowBoardCard workflow={boardWorkflow({ phase: "queued", state: "pending" })} />);
+		expect(screen.getByTestId("workflow-phase-badge")).toHaveTextContent("Queued");
+		expect(screen.queryByTestId("workflow-spinner")).toBeNull();
+		expect(screen.queryByTestId("workflow-activity-panel")).toBeNull();
+		expect(screen.getByTestId("workflow-card-wf-1")).not.toHaveAttribute("data-active");
+	});
+
+	// Branch ownership is not execution. A run queued behind a lock must be
+	// named as such and must not borrow any of the active treatment.
+	it("says a branch wait is a wait, not work being executed", () => {
+		render(
+			<WorkflowBoardCard
+				workflow={boardWorkflow({
+					phase: "blocked",
+					state: "waiting",
+					attention: "ao_internal",
+					waitReason: "branch_lock",
+					branchWait: {
+						branch: "feat/engineering-control-center",
+						heldByWorkflowRunId: "wf-3220567f",
+						autoResume: true,
+					},
+				})}
+			/>,
+		);
+		const wait = within(screen.getByTestId("workflow-branch-wait"));
+		expect(wait.getByText(/waiting for branch/i)).toBeInTheDocument();
+		expect(screen.queryByTestId("workflow-spinner")).toBeNull();
+		expect(screen.queryByTestId("workflow-activity-panel")).toBeNull();
+		expect(screen.getByTestId("workflow-card-wf-1")).not.toHaveAttribute("data-active");
+	});
 });

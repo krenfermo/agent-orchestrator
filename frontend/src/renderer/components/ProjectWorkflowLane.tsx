@@ -1,31 +1,23 @@
 import { useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
 import { useNavigate } from "@tanstack/react-router";
-import { AlertTriangle, Check, CircleDot, Circle, Loader2 } from "lucide-react";
+import { AlertTriangle, Hourglass } from "lucide-react";
 import {
 	needsHumanDecision,
 	useProjectBoard,
 	type BoardBranchWait,
-	type BoardPhase,
-	type BoardStepProgress,
 	type BoardWorkflow,
 	type BoardWorkflowTask,
 } from "../hooks/useProjectBoard";
 import { formatTimeCompact } from "../lib/format-time";
 import { cn } from "../lib/utils";
-
-/**
- * Looks up a key the type system cannot know statically (a phase, a step kind,
- * a task state) and falls back to the raw value when no translation exists —
- * so a vocabulary the daemon grows before the renderer does shows the real
- * value rather than a dangling key. Mirrors workflow-capacity-wait-banner's
- * own reasonLabel.
- */
-function translate(t: TFunction, key: string, fallback: string): string {
-	const untypedT = t as unknown as (key: string) => string;
-	const label = untypedT(key);
-	return label === key ? fallback : label;
-}
+import {
+	isActivePhase,
+	phaseBorderClass,
+	translateDynamic,
+	WorkflowActivityPanel,
+	WorkflowPhaseBadge,
+	WorkflowStepChecklist,
+} from "./workflow-activity";
 
 /**
  * The project Board's workflow lane.
@@ -76,25 +68,39 @@ export function WorkflowBoardCard({ workflow, onOpen }: { workflow: BoardWorkflo
 	const { t } = useTranslation();
 	const human = needsHumanDecision(workflow);
 	const title = objectiveTitle(workflow.objective);
+	const active = isActivePhase(workflow.phase);
 
 	return (
 		<button
+			// An active card is meant to be findable from across the room: the
+			// accent border and tinted surface are the "which one is moving"
+			// signal, and the phase badge, spinner and activity block below say
+			// which kind of movement it is.
 			className={cn(
 				"flex w-full flex-col gap-2 rounded-lg border bg-surface px-3 py-2.5 text-left transition-colors hover:bg-muted/40",
-				human ? "border-warning" : "border-border",
+				human ? "border-warning" : phaseBorderClass(workflow.phase),
+				active && "bg-status-working/5 shadow-[inset_2px_0_0_0_var(--color-status-working)]",
 			)}
+			data-active={active ? "true" : undefined}
 			data-testid={`workflow-card-${workflow.workflowId}`}
 			onClick={onOpen}
 			type="button"
 		>
 			<div className="flex min-w-0 items-center gap-2">
 				<span className="min-w-0 flex-1 truncate text-sm font-medium">{title}</span>
-				<PhaseBadge phase={workflow.phase} />
+				<WorkflowPhaseBadge phase={workflow.phase} />
 			</div>
 
 			{workflow.tasksTotal > 0 ? <TaskHeadline workflow={workflow} /> : null}
 
-			{workflow.steps && workflow.steps.length > 0 ? <StepChecklist steps={workflow.steps} /> : null}
+			{workflow.steps && workflow.steps.length > 0 ? <WorkflowStepChecklist steps={workflow.steps} /> : null}
+
+			{/* The card footer already carries harness/model/last activity, so the
+			    panel here adds only what is specific to this moment. */}
+			<WorkflowActivityPanel
+				facts={[{ label: t("board.factTask"), value: workflow.currentTaskTitle }]}
+				phase={workflow.phase}
+			/>
 
 			{workflow.branchWait ? <BranchWaitLine wait={workflow.branchWait} /> : null}
 
@@ -145,45 +151,6 @@ function TaskHeadline({ workflow }: { workflow: BoardWorkflow }) {
 }
 
 /**
- * Plan / Work / Review / Fix / Verify, in order, with the state of each.
- * The never-executed `advance` step is already excluded by the daemon, so a
- * completed run reads as complete rather than five of six.
- */
-function StepChecklist({ steps }: { steps: BoardStepProgress[] }) {
-	const { t } = useTranslation();
-	return (
-		<ul className="flex flex-wrap items-center gap-x-3 gap-y-1" data-testid="workflow-step-checklist">
-			{steps.map((step) => (
-				<li className="flex items-center gap-1 text-xs" key={step.kind}>
-					<StepIcon state={step.state} />
-					<span className={step.state === "running" ? "font-medium" : "text-muted-foreground"}>
-						{translate(t, `board.step.${step.kind}`, step.kind)}
-					</span>
-					{/* The icon is decorative; the state has to reach a screen reader as text. */}
-					<span className="sr-only">{translate(t, `board.stepState.${step.state}`, step.state)}</span>
-				</li>
-			))}
-		</ul>
-	);
-}
-
-function StepIcon({ state }: { state: BoardStepProgress["state"] }) {
-	switch (state) {
-		case "completed":
-			return <Check aria-hidden="true" className="size-3.5 text-success" />;
-		case "running":
-			return <Loader2 aria-hidden="true" className="size-3.5 animate-spin text-primary" />;
-		case "waiting":
-		case "ready":
-			return <CircleDot aria-hidden="true" className="size-3.5 text-primary" />;
-		case "failed":
-			return <AlertTriangle aria-hidden="true" className="size-3.5 text-warning" />;
-		default:
-			return <Circle aria-hidden="true" className="size-3.5 text-passive" />;
-	}
-}
-
-/**
  * The branch a card is queued on (Checkpoint 8P-E.13A).
  *
  * "Blocked" alone was never enough: it could mean a branch about to be handed
@@ -199,7 +166,16 @@ function BranchWaitLine({ wait }: { wait: BoardBranchWait }) {
 		parts.push(t("board.branchWaitHeldBy", { workflowId: wait.heldByWorkflowRunId }));
 	}
 	return (
-		<div className="flex flex-col gap-0.5" data-testid="workflow-branch-wait">
+		<div
+			className="flex flex-col gap-0.5 rounded border border-border bg-muted/40 px-2 py-1.5"
+			data-testid="workflow-branch-wait"
+		>
+			{/* Ownership of a branch, not execution: no spinner, no accent, and
+			    its own label, so a queued run never reads as a working one. */}
+			<span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+				<Hourglass aria-hidden="true" className="size-3 shrink-0" />
+				{t("shell.workflowsWaitingForBranch")}
+			</span>
 			<p className="text-xs text-muted-foreground">{parts.join(" · ")}</p>
 			{wait.repoPath ? (
 				<p className="truncate text-[10px] text-muted-foreground/70" title={wait.repoPath}>
@@ -220,7 +196,9 @@ function HumanDecisionNotice({ workflow }: { workflow: BoardWorkflow }) {
 	const { t } = useTranslation();
 	return (
 		<div className="flex flex-col gap-0.5 rounded border border-warning/50 bg-warning/10 px-2 py-1.5" role="note">
-			<span className="text-xs font-semibold uppercase tracking-wide text-warning">
+			<span className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-warning">
+				{/* Icon + word: the state must survive a monochrome reading. */}
+				<AlertTriangle aria-hidden="true" className="size-3.5 shrink-0" />
 				{t("board.needsYou")}
 			</span>
 			{workflow.attentionReason ? (
@@ -261,8 +239,8 @@ function ChildTaskList({ tasks }: { tasks: BoardWorkflowTask[] }) {
 					<span className="min-w-0 flex-1 truncate text-muted-foreground">{task.title}</span>
 					<span className="shrink-0 text-passive">
 						{task.phase
-							? translate(t, `board.phase.${task.phase}`, task.phase)
-							: translate(t, `board.taskState.${task.state}`, task.state)}
+							? translateDynamic(t, `board.phase.${task.phase}`, task.phase)
+							: translateDynamic(t, `board.taskState.${task.state}`, task.state)}
 					</span>
 				</li>
 			))}
@@ -270,41 +248,3 @@ function ChildTaskList({ tasks }: { tasks: BoardWorkflowTask[] }) {
 	);
 }
 
-function PhaseBadge({ phase }: { phase: BoardPhase }) {
-	const { t } = useTranslation();
-	return (
-		<span
-			className={cn(
-				"shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
-				phaseToneClass(phase),
-			)}
-			data-testid="workflow-phase-badge"
-		>
-			{translate(t, `board.phase.${phase}`, phase)}
-		</span>
-	);
-}
-
-function phaseToneClass(phase: BoardPhase): string {
-	switch (phase) {
-		case "needs_attention":
-		case "failed":
-			return "bg-warning/15 text-warning";
-		case "completed":
-			return "bg-success/15 text-success";
-		case "cancelled":
-			return "bg-muted text-muted-foreground";
-		case "waiting":
-		case "waiting_for_capacity":
-		// "retrying" reads as a wait, not a warning: AO hit something it is
-		// allowed to retry, has the retry scheduled, and needs nothing from the
-		// user. Toning it like needs_attention would recreate the false alarm
-		// Checkpoint 8P-E.13 introduced the phase to remove.
-		case "retrying":
-		case "blocked":
-		case "queued":
-			return "bg-muted text-muted-foreground";
-		default:
-			return "bg-primary/15 text-primary";
-	}
-}

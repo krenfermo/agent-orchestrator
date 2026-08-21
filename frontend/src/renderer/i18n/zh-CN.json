@@ -1488,5 +1488,18 @@
 	"shell.workflowUsage.cachedTokensTotal": "缓存 token（总计）",
 	"shell.workflowUsage.processedTokensTotal": "已处理 token（总计）",
 	"shell.workflowUsage.tokensNotMeasured": "本次运行无法测量 token 总量 —— AO 显示“未知”，而不是它并未观测到的数字。",
-	"shell.workflowUsage.highUsageWarning": "用量偏高：在 {{cycles}} 轮评审/修复循环中处理了 {{total}} 个 token。每轮都会重放完整上下文，因此长循环主导了总量。"
+	"shell.workflowUsage.highUsageWarning": "用量偏高：在 {{cycles}} 轮评审/修复循环中处理了 {{total}} 个 token。每轮都会重放完整上下文，因此长循环主导了总量。",
+	"board.inProgress": "进行中",
+	"board.workingNow": "正在进行的工作",
+	"board.activityDetail.planning": "AO 正在生成主计划",
+	"board.activityDetail.running": "AO 正在执行工作步骤",
+	"board.activityDetail.reviewing": "AO 正在审查改动",
+	"board.activityDetail.fixing": "AO 正在应用审查修复",
+	"board.activityDetail.verifying": "AO 正在验证结果",
+	"board.factElapsed": "已用时间",
+	"board.factAgent": "代理",
+	"board.factBranch": "分支",
+	"board.factTask": "任务",
+	"board.factTokens": "已处理 token",
+	"board.factUnknown": "未知"
 }

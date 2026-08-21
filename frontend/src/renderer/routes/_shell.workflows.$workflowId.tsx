@@ -1,5 +1,6 @@
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { useWorkflowRun, workflowRunIsTerminal } from "../hooks/useWorkflowRun";
 import { useWorkflowStatusLabel } from "../hooks/useWorkflowExecutionStatus";
 import { useChildTaskRouting } from "../hooks/useChildTaskRouting";
@@ -9,6 +10,14 @@ import { WorkflowQuestionsSection } from "../components/workflow-questions-secti
 import { WorkflowCapacityWaitBanner } from "../components/workflow-capacity-wait-banner";
 import { WorkflowBranchWaitBanner } from "../components/workflow-branch-wait-banner";
 import { WorkflowRoutingSummary } from "../components/workflow-routing-summary";
+import {
+	translateDynamic,
+	WorkflowActivityPanel,
+	WorkflowPhaseBadge,
+	WorkflowStepIcon,
+} from "../components/workflow-activity";
+import { processedTokens } from "../components/workflow-usage-section";
+import { formatElapsedCompact } from "../lib/format-time";
 
 export const Route = createFileRoute("/_shell/workflows/$workflowId")({
 	component: WorkflowRunRoute,
@@ -109,6 +118,26 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 		workStep?.state === "completed" && (reviewStep?.state === "pending" || reviewStep?.state === "ready"),
 	);
 
+	// Facts for the "working right now" panel. Every one of them is a value the
+	// API already returns for this run -- the harness is read the same way the
+	// work step reads it (latest attempt first, since a failover changes the
+	// harness without changing assignedHarness), and the token total stays
+	// Unknown unless the usage record says the number was actually observed.
+	const activeStep = workflow.steps.find((step) => step.state === "running");
+	const activeAttempts = activeStep?.attempts ?? [];
+	const activeHarness = activeAttempts[activeAttempts.length - 1]?.harness || activeStep?.assignedHarness || undefined;
+	const activeBranch = activeStep?.branch || workStep?.branch || undefined;
+	const observedTokens = workflow.usage ? processedTokens(workflow.usage.metrics) : null;
+	const activityFacts = [
+		{ label: t("board.factElapsed"), value: formatElapsedCompact(workflow.run.createdAt) },
+		{ label: t("board.factAgent"), value: activeHarness },
+		{ label: t("board.factBranch"), value: activeBranch },
+		{
+			label: t("board.factTokens"),
+			value: observedTokens === null ? t("board.factUnknown") : observedTokens.toLocaleString(),
+		},
+	];
+
 	return (
 		// Checkpoint 8P-E.12: the shell gives every route a `min-h-0 flex-1`
 		// box but no vertical scroll of its own, so a workflow with a long
@@ -131,7 +160,13 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 			<WorkflowCapacityWaitBanner run={workflow.run} />
 			<WorkflowBranchWaitBanner run={workflow.run} />
 			<div className="flex flex-col gap-1">
-				<h1 className="text-lg font-semibold">{workflow.run.objective}</h1>
+				<div className="flex items-start gap-2">
+					<h1 className="min-w-0 flex-1 text-lg font-semibold">{workflow.run.objective}</h1>
+					{/* The header's own "what is this run doing" answer: the same
+					    badge (and the same single spinner) the board card uses, so
+					    the two surfaces can never disagree. */}
+					<WorkflowPhaseBadge className="mt-1" phase={workflow.run.phase} />
+				</div>
 				<p className="text-sm text-muted-foreground">
 					{t("shell.workflowsRunHeader", { projectId: workflow.run.projectId, state: workflow.run.state })}
 				</p>
@@ -147,6 +182,11 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 						{t("shell.workflowsNextAction", { nextAction: workflow.run.nextAction })}
 					</p>
 				)}
+				<WorkflowActivityPanel
+					detail={statusLabel ? statusLabelText(t as TranslateFn, statusLabel) || undefined : undefined}
+					facts={activityFacts}
+					phase={workflow.run.phase}
+				/>
 			</div>
 
 			<div className="flex items-center gap-2">
@@ -298,11 +338,14 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				<h2 className="text-sm font-semibold text-muted-foreground">{t("shell.workflowsSteps")}</h2>
 				{workflow.steps.map((step) => (
 					<div className="rounded-lg border border-border p-3" key={step.id}>
-						<div className="flex items-center justify-between">
-							<span className="font-medium">
+						<div className="flex items-center justify-between gap-2">
+							<span className="flex min-w-0 items-center gap-2 font-medium">
+								<WorkflowStepIcon state={step.state} />
 								{step.ordinal}. {step.kind}
 							</span>
-							<span className="text-xs text-muted-foreground">{step.state}</span>
+							<span className="shrink-0 text-xs text-muted-foreground">
+								{translateDynamic(t as TFunction, `board.stepState.${step.state}`, step.state)}
+							</span>
 						</div>
 						{step.kind === "work" && (
 							<dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 border-t border-border pt-2 text-xs text-muted-foreground">

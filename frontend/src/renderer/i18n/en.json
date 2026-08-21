@@ -1536,5 +1536,18 @@
 	"board.stepState.waiting": "waiting",
 	"board.stepState.completed": "done",
 	"board.stepState.failed": "failed",
-	"board.stepState.cancelled": "cancelled"
+	"board.stepState.cancelled": "cancelled",
+	"board.inProgress": "In progress",
+	"board.workingNow": "Working right now",
+	"board.activityDetail.planning": "AO is generating the master plan",
+	"board.activityDetail.running": "AO is running the work step",
+	"board.activityDetail.reviewing": "AO is reviewing the changes",
+	"board.activityDetail.fixing": "AO is applying the review fixes",
+	"board.activityDetail.verifying": "AO is verifying the result",
+	"board.factElapsed": "Elapsed",
+	"board.factAgent": "Agent",
+	"board.factBranch": "Branch",
+	"board.factTask": "Task",
+	"board.factTokens": "Tokens processed",
+	"board.factUnknown": "Unknown"
 }

@@ -1506,5 +1506,18 @@
 	"shell.workflowUsage.cachedTokensTotal": "Zwischengespeicherte Tokens (gesamt)",
 	"shell.workflowUsage.processedTokensTotal": "Verarbeitete Tokens (gesamt)",
 	"shell.workflowUsage.tokensNotMeasured": "Token-Summen sind für diesen Lauf nicht messbar – AO meldet Unbekannt statt einer Zahl, die es nicht beobachtet hat.",
-	"shell.workflowUsage.highUsageWarning": "Hoher Verbrauch: {{total}} Tokens über {{cycles}} Review-/Korrekturzyklen verarbeitet. Jeder Zyklus wiederholt den gesamten Kontext, daher dominiert eine lange Schleife die Summe."
+	"shell.workflowUsage.highUsageWarning": "Hoher Verbrauch: {{total}} Tokens über {{cycles}} Review-/Korrekturzyklen verarbeitet. Jeder Zyklus wiederholt den gesamten Kontext, daher dominiert eine lange Schleife die Summe.",
+	"board.inProgress": "Läuft",
+	"board.workingNow": "Arbeitet gerade",
+	"board.activityDetail.planning": "AO erstellt den Masterplan",
+	"board.activityDetail.running": "AO führt den Arbeitsschritt aus",
+	"board.activityDetail.reviewing": "AO prüft die Änderungen",
+	"board.activityDetail.fixing": "AO wendet die Review-Korrekturen an",
+	"board.activityDetail.verifying": "AO verifiziert das Ergebnis",
+	"board.factElapsed": "Vergangene Zeit",
+	"board.factAgent": "Agent",
+	"board.factBranch": "Branch",
+	"board.factTask": "Aufgabe",
+	"board.factTokens": "Verarbeitete Tokens",
+	"board.factUnknown": "Unbekannt"
 }
