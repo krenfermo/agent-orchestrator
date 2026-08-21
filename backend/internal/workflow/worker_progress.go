@@ -55,6 +55,12 @@ type WorkStepDecision struct {
 	NextRun    domain.WorkflowRunState
 	NextAction string
 	ErrorClass domain.WorkflowErrorClass
+	// AttentionReason is Checkpoint 8P-E.13's canonical name for a stop this
+	// decision is about to cause. Set only when NextRun is needs_attention and
+	// ErrorClass alone would not name the stop — a worker blocked on its own
+	// interactive prompt is not an "error", so it has no error class, and
+	// before this field it reached the Board as an unexplained needs_attention.
+	AttentionReason string
 	// NoChange is true when the facts do not yet justify any transition (e.g.
 	// still actively working, or workspace evidence was throttled/unavailable
 	// this call). The caller must leave step/run state untouched.
@@ -121,10 +127,11 @@ func evaluateWorkStepProgress(
 		return WorkStepDecision{Progress: WorkerActive, NoChange: true}
 	case domain.ActivityWaitingInput, domain.ActivityBlocked:
 		return WorkStepDecision{
-			Progress:   WorkerActive,
-			NextStep:   domain.WorkflowStepWaiting,
-			NextRun:    domain.WorkflowRunNeedsAttention,
-			NextAction: "worker awaiting input/blocked — needs human attention",
+			Progress:        WorkerActive,
+			NextStep:        domain.WorkflowStepWaiting,
+			NextRun:         domain.WorkflowRunNeedsAttention,
+			NextAction:      "worker awaiting input/blocked — needs human attention",
+			AttentionReason: ReasonWorkerBlocked,
 		}
 	case domain.ActivityIdle:
 		// Real, git-verified work evidence always wins, regardless of
@@ -313,6 +320,13 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 		CreatedAt:        now,
 	}); err != nil {
 		return step, err
+	}
+
+	// Checkpoint 8P-E.13: a work observation that stops the run records why in
+	// the canonical vocabulary. The generic "worker_observed_<progress>" phase
+	// written above says what AO was looking at, not what it decided.
+	if decision.NextRun == domain.WorkflowRunNeedsAttention && decision.AttentionReason != "" {
+		c.recordAttentionStop(ctx, run, &stepID, decision.AttentionReason, decision.NextAction)
 	}
 
 	if decision.ErrorClass != "" || decision.NextStep.Terminal() {

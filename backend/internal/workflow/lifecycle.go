@@ -15,7 +15,7 @@ import (
 // and the evaluation order in DerivePhase mirrors its table row for row.
 type Phase string
 
-// The thirteen derived lifecycle phases.
+// The fourteen derived lifecycle phases.
 const (
 	PhaseCancelled          Phase = "cancelled"
 	PhaseFailed             Phase = "failed"
@@ -30,6 +30,13 @@ const (
 	PhaseVerifying          Phase = "verifying"
 	PhaseRunning            Phase = "running"
 	PhaseQueued             Phase = "queued"
+	// PhaseRetrying is Checkpoint 8P-E.13's missing vocabulary: AO has hit a
+	// failure it is allowed to retry, has a bounded retry durably scheduled,
+	// and is neither running nor asking for help. Before this phase existed
+	// every such state had to borrow either "waiting" (which hid the failure)
+	// or "needs_attention" (which invented a human decision) — the planner
+	// timeout misreport this checkpoint exists to end.
+	PhaseRetrying Phase = "retrying"
 )
 
 // Terminal reports whether a phase can never change again.
@@ -102,38 +109,16 @@ type TaskProgress struct {
 	Blocked   int
 	Eligible  int
 	Cancelled int
+	// Failed counts tasks whose child run ended failed/cancelled (Checkpoint
+	// 8P-E.13). A non-zero value is why a master run with no running task is
+	// nonetheless not going to finish.
+	Failed int
 	// CurrentNumber/CurrentTitle/CurrentRunID describe the task currently
 	// running, when one is. CurrentNumber is the task's own
 	// workflow_tasks.ordinal, so "Task 2 of 7" is a fact, not an index.
 	CurrentNumber int64
 	CurrentTitle  string
 	CurrentRunID  string
-}
-
-// humanDecisionReasons maps a durable stop to the remedy a person must apply.
-// Membership in this map is the whole definition of HUMAN_DECISION_REQUIRED for
-// checkpoint-carried stops: a durable_phase absent from it is, by construction,
-// something AO either handles itself or has no advice about.
-var humanDecisionReasons = map[string]string{
-	"dirty_worktree":                        "Commit, stash or discard the local changes in the target repository, then continue this run.",
-	"autonomous_local_commit_failed":        "Resolve the failed local commit in the working repository; the branch stays locked to this run until you do.",
-	"autonomous_local_commit_deferred":      "Approve the local commit, or change the project's local-commit policy.",
-	"worker_dispatch_ambiguous":             "Confirm whether the worker session actually produced work, then continue or cancel this run.",
-	"review_dispatch_ambiguous":             "Confirm the state of the review, then continue or cancel this run.",
-	"fix_dispatch_ambiguous":                "Confirm the state of the fix, then continue or cancel this run.",
-	"work_provider_failure_needs_attention": "Every configured provider attempt failed. Check provider auth/capacity, then continue this run.",
-	"master_integration_promotion_failed":   "Resolve the integration conflict for the completed task, then continue this run.",
-}
-
-// humanDecisionErrorClasses are the attempt-level error classes that mean AO
-// has stopped for good rather than for now. Everything absent from this set —
-// rate_limited, capacity_exhausted, transient, review_changes_requested — is a
-// condition AO retries or fixes on its own.
-var humanDecisionErrorClasses = map[domain.WorkflowErrorClass]string{
-	domain.WorkflowErrorFixBudgetExhausted:   "The review/fix budget is exhausted. Review the remaining findings and decide how to proceed.",
-	domain.WorkflowErrorAuth:                 "Provider authentication failed. Reconnect the provider profile, then continue this run.",
-	domain.WorkflowErrorBinaryMissing:        "The provider CLI is not installed or not on PATH. Install it, then continue this run.",
-	domain.WorkflowErrorAmbiguousWorkerState: "AO could not prove whether the work happened. Inspect the session, then continue or cancel this run.",
 }
 
 // LifecycleInput is everything DeriveLifecycle needs. It is a plain value so the
@@ -161,7 +146,16 @@ func DeriveLifecycle(in LifecycleInput) Lifecycle {
 		LastActivityAt: lastActivity(d),
 	}
 	life.Phase = derivePhase(d)
-	life.Attention, life.AttentionReason, life.AttentionAction = classifyAttention(d, in.Questions, life.Phase)
+	verdict := ClassifyAttention(d, in.Questions, life.Phase)
+	life.Attention, life.AttentionReason, life.AttentionAction = verdict.Attention, verdict.Reason, verdict.Action
+	// Checkpoint 8P-E.13: a self-remediable stop reports the phase of what AO
+	// is actually doing about it (retrying, waiting for capacity, queued behind
+	// a branch) rather than the durable run state's flat "needs_attention".
+	// The run row is unchanged — this is a derivation, exactly like every other
+	// value in this struct.
+	if verdict.Phase != "" {
+		life.Phase = verdict.Phase
+	}
 	return life
 }
 
@@ -202,6 +196,14 @@ func derivePhase(d RunDetail) Phase {
 		case domain.WorkflowPlanPending, domain.WorkflowPlanRunning, domain.WorkflowPlanValidated:
 			if d.WaitReason == string(wake.ReasonPlannerCapacity) {
 				return PhaseWaitingForCapacity
+			}
+			// Checkpoint 8P-E.13: a planner parked by retryPlanOrFail is
+			// reported as retrying, not as the plain "planning" it would
+			// otherwise borrow. Either signal counts, for the same reason the
+			// branch-lock case above accepts either: the wake write is
+			// best-effort, so the checkpoint can exist with no wake row at all.
+			if d.WaitReason == string(wake.ReasonTransientRetry) || d.LatestCheckpointPhase == ReasonPlannerRetryScheduled {
+				return PhaseRetrying
 			}
 			return PhasePlanning
 		}
@@ -282,60 +284,6 @@ func activeStepKind(d RunDetail) domain.WorkflowStepKind {
 		return s.Step.Kind
 	}
 	return ""
-}
-
-// classifyAttention is Phase 2's whole point: it decides whether a stop belongs
-// to the user or to AO.
-//
-// It never infers "human" from the run state alone. A run in needs_attention
-// with no recorded reason is reported as needs_attention with an empty reason —
-// the mapping document's explicit rule against synthesizing one — rather than
-// being escalated into a decision request the user cannot act on.
-func classifyAttention(d RunDetail, questions []domain.WorkflowQuestion, phase Phase) (Attention, string, string) {
-	if phase.Terminal() {
-		return AttentionNone, "", ""
-	}
-
-	// A question classified human_required is the one carrier that outranks the
-	// run state: it is a real, answerable request addressed to the user.
-	for _, q := range questions {
-		if q.State == domain.QuestionStateHumanRequired {
-			return AttentionHuman, "question_human_required", questionAction(q)
-		}
-	}
-
-	if phase != PhaseNeedsAttention {
-		// Everything short of needs_attention that AO is actively handling —
-		// a changes_requested rest, a capacity wait with a scheduled retry, a
-		// branch queue — is internal. It is surfaced so the user can see what
-		// AO is doing, never as a request for help.
-		switch phase {
-		case PhaseWaitingForCapacity, PhaseBlocked:
-			return AttentionInternal, phase.String(), ""
-		case PhaseFixing:
-			return AttentionInternal, "review_changes_requested", ""
-		}
-		return AttentionNone, "", ""
-	}
-
-	reason := d.LatestCheckpointPhase
-	if action, ok := humanDecisionReasons[reason]; ok {
-		return AttentionHuman, reason, action
-	}
-	if class := latestErrorClass(d); class != "" {
-		if action, ok := humanDecisionErrorClasses[class]; ok {
-			return AttentionHuman, string(class), action
-		}
-		// A typed error class AO does not have a remedy for is still the
-		// user's call to make — AO has already stopped.
-		return AttentionHuman, string(class), ""
-	}
-	if reason != "" {
-		return AttentionHuman, reason, ""
-	}
-	// needs_attention with nothing recorded. Truthful, unhelpful, and correct:
-	// see the mapping document's "never synthesize a reason".
-	return AttentionHuman, "", ""
 }
 
 // String renders a phase for reason codes and the wire format.
@@ -420,6 +368,8 @@ func DeriveTaskProgress(tasks []domain.WorkflowTask) TaskProgress {
 			p.Eligible++
 		case domain.WorkflowTaskCancelled:
 			p.Cancelled++
+		case domain.WorkflowTaskFailed:
+			p.Failed++
 		}
 	}
 	return p

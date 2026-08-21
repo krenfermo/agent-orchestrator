@@ -4022,7 +4022,7 @@ export interface components {
             nextWakeAt?: null | string;
             objective: string;
             /** @enum {string} */
-            phase: "queued" | "planning" | "running" | "reviewing" | "fixing" | "verifying" | "waiting" | "waiting_for_capacity" | "blocked" | "needs_attention" | "completed" | "failed" | "cancelled";
+            phase: "queued" | "planning" | "running" | "reviewing" | "fixing" | "verifying" | "waiting" | "waiting_for_capacity" | "retrying" | "blocked" | "needs_attention" | "completed" | "failed" | "cancelled";
             projectId: string;
             reviewCycles: number;
             sessionId?: string;
@@ -4033,6 +4033,7 @@ export interface components {
             tasksBlocked: number;
             tasksCompleted: number;
             tasksEligible: number;
+            tasksFailed: number;
             tasksRunning: number;
             tasksTotal: number;
             waitReason?: string;
@@ -4046,7 +4047,7 @@ export interface components {
             ordinal: number;
             phase?: string;
             /** @enum {string} */
-            state: "blocked" | "eligible" | "running" | "completed" | "cancelled";
+            state: "blocked" | "eligible" | "running" | "completed" | "failed" | "cancelled";
             steps?: components["schemas"]["WorkflowStepProgressView"][];
             title: string;
             workflowId?: string;
@@ -4174,7 +4175,7 @@ export interface components {
             nextWakeAt?: null | string;
             objective: string;
             /** @enum {string} */
-            phase: "queued" | "planning" | "running" | "reviewing" | "fixing" | "verifying" | "waiting" | "waiting_for_capacity" | "blocked" | "needs_attention" | "completed" | "failed" | "cancelled";
+            phase: "queued" | "planning" | "running" | "reviewing" | "fixing" | "verifying" | "waiting" | "waiting_for_capacity" | "retrying" | "blocked" | "needs_attention" | "completed" | "failed" | "cancelled";
             projectId: string;
             /** @enum {string} */
             state: "pending" | "running" | "waiting" | "needs_attention" | "completed" | "failed" | "cancelled";

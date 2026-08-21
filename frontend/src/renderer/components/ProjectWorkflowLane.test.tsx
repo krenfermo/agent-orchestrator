@@ -18,6 +18,7 @@ function boardWorkflow(overrides: Partial<BoardWorkflow> = {}): BoardWorkflow {
 		tasksRunning: 0,
 		tasksBlocked: 0,
 		tasksEligible: 0,
+		tasksFailed: 0,
 		...overrides,
 	};
 }
@@ -90,6 +91,24 @@ describe("WorkflowBoardCard", () => {
 			/>,
 		);
 		expect(screen.getByText(/no recorded reason/i)).toBeInTheDocument();
+	});
+
+	// Checkpoint 8P-E.13: a planner AO is retrying is AO's own problem. The
+	// real MEDUSA objective rendered "Te necesita" for a planner_timeout no
+	// human answer could repair; the card must now read as a wait.
+	it("reads as a wait, not a request, while AO is retrying", () => {
+		render(
+			<WorkflowBoardCard
+				workflow={boardWorkflow({
+					phase: "retrying",
+					state: "pending",
+					attention: "ao_internal",
+					attentionReason: "planner_retry_scheduled",
+				})}
+			/>,
+		);
+		expect(screen.getByTestId("workflow-phase-badge")).toHaveTextContent("Retrying");
+		expect(screen.queryByText(/needs you/i)).toBeNull();
 	});
 
 	it("names the current task and the total for a master run", () => {

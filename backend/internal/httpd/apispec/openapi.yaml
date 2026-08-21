@@ -11066,6 +11066,7 @@ components:
           - verifying
           - waiting
           - waiting_for_capacity
+          - retrying
           - blocked
           - needs_attention
           - completed
@@ -11102,6 +11103,8 @@ components:
           type: integer
         tasksEligible:
           type: integer
+        tasksFailed:
+          type: integer
         tasksRunning:
           type: integer
         tasksTotal:
@@ -11123,6 +11126,7 @@ components:
       - tasksRunning
       - tasksBlocked
       - tasksEligible
+      - tasksFailed
       - reviewCycles
       type: object
     WorkflowBoardResponse:
@@ -11147,6 +11151,7 @@ components:
           - eligible
           - running
           - completed
+          - failed
           - cancelled
           type: string
         steps:
@@ -11499,6 +11504,7 @@ components:
           - verifying
           - waiting
           - waiting_for_capacity
+          - retrying
           - blocked
           - needs_attention
           - completed

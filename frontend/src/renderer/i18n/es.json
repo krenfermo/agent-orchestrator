@@ -1495,6 +1495,7 @@
 	"board.phase.verifying": "Verificando",
 	"board.phase.waiting": "Esperando",
 	"board.phase.waiting_for_capacity": "Esperando capacidad",
+	"board.phase.retrying": "Reintentando",
 	"board.phase.blocked": "Bloqueado",
 	"board.phase.needs_attention": "Necesita atención",
 	"board.phase.completed": "Completado",

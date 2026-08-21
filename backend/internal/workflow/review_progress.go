@@ -65,7 +65,7 @@ func (c *Coordinator) observeReviewStep(ctx stdctx.Context, run domain.WorkflowR
 	if !found {
 		// Defensive: the id we hold does not resolve. Surface ambiguity
 		// rather than guessing.
-		return c.recordReviewOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunNeedsAttention,
+		return c.stopReview(ctx, run, step, ReasonReviewStateAmbiguous,
 			"ambiguous_review_state: review run referenced by this step no longer exists", "", domain.WorkflowErrorAmbiguousWorkerState)
 	}
 
@@ -85,7 +85,7 @@ func (c *Coordinator) observeReviewStep(ctx stdctx.Context, run domain.WorkflowR
 			}
 		}
 		if hasCP && elapsed > reviewStalenessThreshold {
-			return c.recordReviewOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunNeedsAttention,
+			return c.stopReview(ctx, run, step, ReasonReviewStateAmbiguous,
 				"ambiguous_review_state: review has been running longer than expected with no verdict", "", domain.WorkflowErrorAmbiguousWorkerState)
 		}
 		// Still genuinely working (or too fresh to judge): no change.
@@ -139,8 +139,20 @@ func (c *Coordinator) observeReviewStep(ctx stdctx.Context, run domain.WorkflowR
 			// fix cycles the loop MAY run, so `>` is the correct reading and
 			// the two guards now agree exactly.
 			if cycleCount > 0 && cycleCount > policy.MaxFixCycles {
-				return c.recordReviewOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunNeedsAttention,
-					"human_attention", string(reviewRun.Verdict), domain.WorkflowErrorFixBudgetExhausted)
+				// Checkpoint 8P-E.13: this is the exact stop that stranded
+				// wf-3220567f. recordReviewOutcome tried to carry
+				// fix_budget_exhausted on the review step's latest attempt row
+				// — but review dispatch never creates workflow_attempts rows,
+				// so GetLatestWorkflowAttempt found nothing and the class was
+				// silently dropped. The only durable trace left was a
+				// "review_observed" checkpoint, which names what AO was doing,
+				// not why it stopped. stopReview records the canonical reason
+				// as its own checkpoint instead, so the stop is explainable
+				// from durable state alone regardless of whether an attempt row
+				// happens to exist.
+				return c.stopReview(ctx, run, step, ReasonFixBudgetExhausted,
+					fmt.Sprintf("fix_budget_exhausted: the reviewer still requests changes after %d review cycles (max_fix_cycles=%d)", cycleCount, policy.MaxFixCycles),
+					string(reviewRun.Verdict), domain.WorkflowErrorFixBudgetExhausted)
 			}
 			// Within budget: rest at waiting. next_action "fix" is
 			// informational only here — the actual fix dispatch happens from
@@ -153,18 +165,48 @@ func (c *Coordinator) observeReviewStep(ctx stdctx.Context, run domain.WorkflowR
 			// Complete/delivered with an empty/invalid verdict should not
 			// happen given submitOne's own validation, but defend anyway
 			// rather than silently treating it as approved.
-			return c.recordReviewOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunNeedsAttention,
+			return c.stopReview(ctx, run, step, ReasonReviewStateAmbiguous,
 				"ambiguous_review_state: review run completed with no valid verdict", string(reviewRun.Verdict), domain.WorkflowErrorAmbiguousWorkerState)
 		}
 
 	case domain.ReviewRunFailed, domain.ReviewRunCancelled:
-		return c.recordReviewOutcome(ctx, run, step, domain.WorkflowStepFailed, domain.WorkflowRunNeedsAttention,
+		step, err := c.recordReviewOutcome(ctx, run, step, domain.WorkflowStepFailed, domain.WorkflowRunNeedsAttention,
 			fmt.Sprintf("review run ended as %s", reviewRun.Status), string(reviewRun.Verdict), domain.WorkflowErrorReviewerLaunchFailed)
+		if err != nil {
+			return step, err
+		}
+		c.recordAttentionStop(ctx, run, &step.ID, ReasonReviewerLaunchFailed, fmt.Sprintf("review run ended as %s", reviewRun.Status))
+		return step, nil
 
 	default:
 		// Unknown/unspecified status: make no change rather than guess.
 		return step, nil
 	}
+}
+
+// stopReview rests the review step at "waiting", moves the run to
+// needs_attention, and — the part that did not exist before Checkpoint
+// 8P-E.13 — records the canonical reason for the stop as its own durable
+// checkpoint.
+//
+// The review step is deliberately left non-terminal. Whatever the human
+// decides (raise the budget, fix it themselves, cancel), the loop must still
+// be resumable; a "failed" review step would have zero outgoing transitions
+// and would make that impossible forever.
+func (c *Coordinator) stopReview(
+	ctx stdctx.Context,
+	run domain.WorkflowRun,
+	step domain.WorkflowStep,
+	reason, detail, verdict string,
+	errClass domain.WorkflowErrorClass,
+) (domain.WorkflowStep, error) {
+	updated, err := c.recordReviewOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunNeedsAttention,
+		detail, verdict, errClass)
+	if err != nil {
+		return updated, err
+	}
+	c.recordAttentionStop(ctx, run, &updated.ID, reason, detail)
+	return updated, nil
 }
 
 func (c *Coordinator) recordReviewOutcome(

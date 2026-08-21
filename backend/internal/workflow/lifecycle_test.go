@@ -168,16 +168,25 @@ func TestDirtyWorktreeIsHumanDecisionWithAnAction(t *testing.T) {
 	}
 }
 
-// needs_attention with nothing recorded stays truthful and unhelpful rather
-// than acquiring a synthesized reason.
-func TestNeedsAttentionWithNoRecordedReasonSynthesizesNothing(t *testing.T) {
+// needs_attention with nothing recorded never becomes a human decision.
+//
+// Checkpoint 8P-E.12 made this case report AttentionHuman with an empty reason
+// and an empty action, on the reasoning that AO had stopped so it must be the
+// user's turn. Checkpoint 8P-E.13 rejects that: a stop AO cannot even name is
+// not a decision anyone can be asked to make, and rendering it as "Te necesita"
+// with no reason and no action was the dead end the whole checkpoint exists to
+// remove. It is classified ao_internal and labelled honestly instead.
+func TestNeedsAttentionWithNoRecordedReasonIsNotAHumanDecision(t *testing.T) {
 	detail := workflowcore.RunDetail{
 		Run:   domain.WorkflowRun{ID: "wf-1", State: domain.WorkflowRunNeedsAttention},
 		Steps: singleTaskSteps(domain.WorkflowStepReady, domain.WorkflowStepPending, domain.WorkflowStepPending, domain.WorkflowStepPending),
 	}
 	life := workflowcore.DeriveLifecycle(workflowcore.LifecycleInput{Detail: detail})
-	if life.AttentionReason != "" || life.AttentionAction != "" {
-		t.Fatalf("reason=%q action=%q, want both empty", life.AttentionReason, life.AttentionAction)
+	if life.Attention == workflowcore.AttentionHuman {
+		t.Fatalf("attention = human_decision for an unnamed stop; nothing here is answerable")
+	}
+	if life.AttentionAction != "" {
+		t.Fatalf("attentionAction = %q, want empty: AO has no remedy to offer", life.AttentionAction)
 	}
 }
 

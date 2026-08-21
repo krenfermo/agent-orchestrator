@@ -1480,6 +1480,7 @@
 	"board.phase.verifying": "Verifikation läuft",
 	"board.phase.waiting": "Wartet",
 	"board.phase.waiting_for_capacity": "Wartet auf Kapazität",
+	"board.phase.retrying": "Wiederholung",
 	"board.phase.blocked": "Blockiert",
 	"board.phase.needs_attention": "Benötigt Aufmerksamkeit",
 	"board.phase.completed": "Abgeschlossen",

@@ -58,8 +58,20 @@ const (
 	WorkflowTaskEligible  WorkflowTaskState = "eligible"
 	WorkflowTaskRunning   WorkflowTaskState = "running"
 	WorkflowTaskCompleted WorkflowTaskState = "completed"
+	// WorkflowTaskFailed means this task's child run ended in a state it can
+	// never leave (failed or cancelled). Added by Checkpoint 8P-E.13 (migration
+	// 0119): before it existed, a task whose child had failed stayed at
+	// "running" forever, because "running" was the only state left that wasn't
+	// a lie — and a task permanently stuck at "running" is exactly what made a
+	// master run's Board card unreadable.
+	WorkflowTaskFailed    WorkflowTaskState = "failed"
 	WorkflowTaskCancelled WorkflowTaskState = "cancelled"
 )
+
+// Terminal reports whether a task can never change state again.
+func (s WorkflowTaskState) Terminal() bool {
+	return s == WorkflowTaskCompleted || s == WorkflowTaskFailed || s == WorkflowTaskCancelled
+}
 
 type WorkflowTask struct {
 	ID                     string

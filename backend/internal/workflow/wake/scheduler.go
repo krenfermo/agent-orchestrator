@@ -182,7 +182,8 @@ func (s *Scheduler) Schedule(ctx context.Context, runID domain.WorkflowRunID, st
 	attempt := 0
 	if existing, ok, err := s.store.GetWorkflowWakeScheduleByIdempotencyKey(ctx, key); err != nil {
 		return Schedule{}, fmt.Errorf("lookup existing wake schedule for run %s: %w", runID, err)
-	} else if ok && (existing.Status == string(StatusPending) || existing.Status == string(StatusClaimed)) {
+	} else if ok && (existing.Status == string(StatusPending) || existing.Status == string(StatusClaimed)) &&
+		!isFixedCadence(reason) {
 		attempt = int(existing.AttemptCount)
 	}
 	scheduledAt, _ := computeScheduledAt(now, knownResetAt, attempt, s.effectivePolicy(), s.rng)
@@ -208,6 +209,30 @@ func (s *Scheduler) Schedule(ctx context.Context, runID domain.WorkflowRunID, st
 		return Schedule{}, fmt.Errorf("schedule wake for run %s: %w", runID, err)
 	}
 	return fromStoreRow(row), nil
+}
+
+// isFixedCadence reports whether a reason's wake is a heartbeat rather than a
+// retry, and must therefore keep a constant interval instead of backing off.
+//
+// Checkpoint 8P-E.13 Phase 7 found this the hard way. Every wake shared the
+// exponential-backoff path, including ReasonAutonomousProgress — but that wake
+// does not represent "a provider rejected us, wait longer before asking
+// again". It represents "come back and drive this run forward". Because the
+// poller re-schedules it on every cycle while the row is still claimed, its
+// attempt_count climbed once per cycle and its interval doubled with it:
+// 60s, 120s, 240s … capped at MaxBackoffSeconds (30 minutes).
+//
+// A real master run in ~/.ao/data showed attempt_count=9 on its heartbeat, i.e.
+// an autonomous objective advancing roughly one step per half hour. Nothing
+// looked broken — the run was waiting, the wake was pending, every row was
+// honest — it was simply too slow to ever finish. A heartbeat that decays is
+// indistinguishable from a stalled workflow, which is exactly the report this
+// checkpoint exists to answer.
+//
+// Backoff still applies to this reason through Fail (a wake whose firing
+// actually errored), which is the case backoff is genuinely for.
+func isFixedCadence(reason Reason) bool {
+	return reason == ReasonAutonomousProgress
 }
 
 // ClaimDue claims up to limit due wakes (pending and past scheduled_at, or

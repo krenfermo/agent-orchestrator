@@ -128,14 +128,21 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 		// provider plain-text error the adapter had appended for
 		// diagnostics (now covered above by classifyProviderFailure, since
 		// the adapter embeds that text in the wrapped error message).
-		class := "planner_start_failed"
+		//
+		// Checkpoint 8P-E.13 Phase 3: a timeout and a malformed response are
+		// both retryable facts about one attempt, not verdicts about the
+		// objective — and neither is anything a human can repair by answering a
+		// question. They now go through retryPlanOrFail, which retries a bounded
+		// number of times and only then stops. planner_start_failed keeps
+		// failing immediately: it means the planner never ran at all (bad auth,
+		// missing binary), which retrying cannot change.
 		switch {
 		case errors.Is(err, ports.ErrPlannerTimeout):
-			class = "planner_timeout"
+			return c.retryPlanOrFail(ctx, run, "planner_timeout", err)
 		case errors.Is(err, ports.ErrPlannerOutputMalformed):
-			class = "planner_parse_failed"
+			return c.retryPlanOrFail(ctx, run, "planner_parse_failed", err)
 		}
-		return c.failPlan(ctx, run, class, err)
+		return c.failPlan(ctx, run, ReasonPlannerStartFailed, err)
 	}
 	if response.Provider != "" {
 		provider = response.Provider
@@ -267,6 +274,81 @@ func (c *Coordinator) parkPlanForCapacity(ctx stdctx.Context, run domain.Workflo
 	return c.GetRun(ctx, run.ID)
 }
 
+// maxPlannerRetries bounds how many times a timed-out or malformed planner
+// response is retried before AO stops and says so. Deliberately small: a
+// planner that has failed three times in a row is failing for a reason a
+// fourth identical attempt will not discover, and every attempt costs real
+// provider budget.
+//
+// The counter is derived, not stored: retryPlanOrFail counts the run's own
+// durable planner_retry_scheduled checkpoints. That makes the budget survive
+// daemon restarts, Mac sleeps and renderer closes for free, with no new column
+// and no in-memory state that a crash could reset to zero.
+const maxPlannerRetries = 3
+
+// retryPlanOrFail is Checkpoint 8P-E.13 Phase 3's truthful planner-failure
+// semantics.
+//
+// The old behavior called failPlan for every planner_timeout, which marked the
+// plan permanently WorkflowPlanInvalid (GeneratePlan's own status switch treats
+// that as a no-op forever after) and moved the run to needs_attention. The
+// Board then rendered "Te necesita" for a condition no human decision can
+// repair — the MEDUSA misreport this checkpoint exists to end.
+//
+// Within budget it instead reuses parkPlanForCapacity's proven mechanism: reset
+// the plan command to Pending/Idle (the exact state GeneratePlan falls through
+// to real generation on, so the retry re-enters the same code path rather than
+// a parallel one), record a canonical planner_retry_scheduled stop, and let the
+// durable wake bring it back. The run's phase derives to "retrying" and its
+// attention to ao_internal, so nothing interrupts the user.
+//
+// Past budget it hands over to failPlan with ReasonPlannerExhausted — which
+// DOES carry a real human action ("retry planning, simplify the objective, or
+// switch the planner provider"), so the resulting human_decision satisfies the
+// Phase 2 invariant honestly rather than by synthesis.
+func (c *Coordinator) retryPlanOrFail(ctx stdctx.Context, run domain.WorkflowRun, class string, cause error) (RunDetail, error) {
+	attempts := c.plannerRetryCount(ctx, run.ID)
+	if attempts >= maxPlannerRetries {
+		return c.failPlan(ctx, run, ReasonPlannerExhausted, fmt.Errorf("%s after %d retries: %w", class, attempts, cause))
+	}
+
+	now := c.clock()
+	validation, _ := json.Marshal(PlanValidation{Valid: false, Errors: []string{class + ": " + cause.Error()}})
+	// Same CAS-safety reasoning as parkPlanForCapacity: command_status must
+	// reset to idle, not failed, or StartWorkflowPlanCommand permanently
+	// ErrPlanLocks every retry.
+	_, _ = c.planStore.FinishWorkflowPlan(ctx, run.ID, domain.WorkflowPlanPending, domain.WorkflowPlanCommandIdle, string(validation), "", class, now)
+	c.stopPlanningStep(ctx, run.ID)
+	c.recordAttentionStop(ctx, run, nil, ReasonPlannerRetryScheduled, fmt.Sprintf(
+		"%s (retry %d of %d): %s — AO will retry planning automatically, no action needed",
+		class, attempts+1, maxPlannerRetries, cause.Error(),
+	))
+	// transient_retry is the existing wake reason for exactly this shape of
+	// wait (a bounded retry of something that failed once), and its backoff
+	// grows per attempt off the wake row's own attempt_count. No new reason,
+	// no migration.
+	c.scheduleWake(ctx, run, nil, wake.ReasonTransientRetry, "")
+	return c.GetRun(ctx, run.ID)
+}
+
+// plannerRetryCount counts this run's durable planner_retry_scheduled
+// checkpoints — the restart-safe retry budget counter.
+func (c *Coordinator) plannerRetryCount(ctx stdctx.Context, runID string) int {
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		// Cannot read the budget: treat it as exhausted rather than risk an
+		// unbounded retry loop. Conservative in the direction that stops.
+		return maxPlannerRetries
+	}
+	n := 0
+	for _, cp := range cps {
+		if cp.DurablePhase == ReasonPlannerRetryScheduled {
+			n++
+		}
+	}
+	return n
+}
+
 func (c *Coordinator) failPlan(ctx stdctx.Context, run domain.WorkflowRun, class string, cause error) (RunDetail, error) {
 	validation, _ := json.Marshal(PlanValidation{Valid: false, Errors: []string{cause.Error()}})
 	_, _ = c.planStore.FinishWorkflowPlan(ctx, run.ID, domain.WorkflowPlanInvalid, domain.WorkflowPlanCommandFailed, string(validation), "", class, c.clock())
@@ -274,6 +356,10 @@ func (c *Coordinator) failPlan(ctx stdctx.Context, run domain.WorkflowRun, class
 		_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, c.clock())
 	}
 	c.stopPlanningStep(ctx, run.ID)
+	// Checkpoint 8P-E.13: a failed plan records WHY in the canonical
+	// vocabulary, so the Board can name the stop and the action instead of
+	// falling through to an unnamed needs_attention.
+	c.recordAttentionStop(ctx, run, nil, class, cause.Error())
 	detail, getErr := c.GetRun(ctx, run.ID)
 	if getErr != nil {
 		return RunDetail{}, getErr
@@ -364,6 +450,28 @@ func (c *Coordinator) getMasterRun(ctx stdctx.Context, run domain.WorkflowRun, s
 	if summary, err := c.buildIntegrationSummary(ctx, run.ID); err == nil {
 		detail.IntegrationState = summary
 	}
+	// Checkpoint 8P-E.13: a master run needs the same durable attention
+	// carriers a single-task run has had since 8P-E.12. Without these three
+	// reads, DeriveLifecycle saw an empty LatestCheckpointPhase and an empty
+	// question list for every objective run, so ClassifyAttention could never
+	// name a master stop — which is precisely why a planner failure surfaced as
+	// an unexplained "needs attention" on the Board.
+	if cps, cerr := c.store.ListWorkflowCheckpoints(ctx, run.ID); cerr == nil {
+		for _, cp := range cps {
+			if cp.NextAction != "" {
+				detail.NextAction = cp.NextAction
+			}
+			if !cp.CreatedAt.Before(detail.LatestCheckpointAt) {
+				detail.LatestCheckpointPhase = cp.DurablePhase
+				detail.LatestCheckpointAt = cp.CreatedAt
+			}
+		}
+	}
+	if c.questionsStore != nil {
+		if qs, qerr := c.questionsStore.ListWorkflowQuestionsByRun(ctx, run.ID); qerr == nil {
+			detail.Questions = qs
+		}
+	}
 	if c.wakeScheduler != nil {
 		if next, werr := c.wakeScheduler.NextForRun(ctx, domain.WorkflowRunID(run.ID)); werr == nil && next != nil {
 			at := next.ScheduledAt
@@ -405,7 +513,17 @@ func (c *Coordinator) maybeScheduleAutonomousHeartbeat(ctx stdctx.Context, runID
 	if err != nil || !ok {
 		return
 	}
-	if run.State.Terminal() || run.State == domain.WorkflowRunNeedsAttention {
+	if run.State.Terminal() {
+		return
+	}
+	// Checkpoint 8P-E.13 Phase 7: needs_attention used to end the heartbeat
+	// unconditionally, which is how every AO-remediable stop became permanent.
+	// A planner waiting on its own scheduled retry, a review queued behind a
+	// branch lock, a verify-driven fix cycle — all of them park the run in
+	// needs_attention and all of them are things AO finishes by itself, but
+	// with no wake left behind nothing ever called back. Only a stop AO cannot
+	// remediate stops the heartbeat now.
+	if run.State == domain.WorkflowRunNeedsAttention && !c.stopIsSelfRemediable(ctx, run) {
 		return
 	}
 	if !policyForRun(run).Execution.AutonomousMode {
@@ -480,7 +598,13 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 				}
 			}
 		}
-		if child.Run.State == domain.WorkflowRunCompleted {
+		// Checkpoint 8P-E.13 Phase 6: every child outcome now has an explicit
+		// answer for what happens to its task row. Previously only the
+		// completed case did, so a child that failed, was cancelled, or stopped
+		// for attention left its task at "running" indefinitely — the stale
+		// "Task 1 of 7 running" that outlived its child by hours.
+		switch child.Run.State {
+		case domain.WorkflowRunCompleted:
 			// Checkpoint 8M.1: materialize this task's verified worktree
 			// content into the master run's integration ref BEFORE marking
 			// it completed, so a crash between the two never lets a task
@@ -489,15 +613,45 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 				if run.State == domain.WorkflowRunRunning {
 					_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, c.clock())
 				}
+				c.recordAttentionStop(ctx, run, nil, masterIntegrationFailureDurablePhase,
+					fmt.Sprintf("task %d (%s) passed review and verification but could not be integrated: %v", task.Ordinal, task.Title, err))
 				return nil
 			}
 			_, _ = c.planStore.UpdateWorkflowTaskState(ctx, task.ID, domain.WorkflowTaskRunning, domain.WorkflowTaskCompleted, c.clock())
 			completed[task.ID] = true
 			active = false
-		} else if child.Run.State == domain.WorkflowRunNeedsAttention || child.Run.State == domain.WorkflowRunFailed {
+
+		case domain.WorkflowRunFailed:
+			_, _ = c.planStore.UpdateWorkflowTaskState(ctx, task.ID, domain.WorkflowTaskRunning, domain.WorkflowTaskFailed, c.clock())
 			if run.State == domain.WorkflowRunRunning {
 				_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, c.clock())
 			}
+			c.recordAttentionStop(ctx, run, nil, ReasonChildFailed,
+				fmt.Sprintf("task %d (%s) failed — run %s", task.Ordinal, task.Title, child.Run.ID))
+			return nil
+
+		case domain.WorkflowRunCancelled:
+			// A cancelled child is a decision already taken, not a new one to
+			// ask about: mirror it onto the task and let the parent's own
+			// completion accounting below decide what that means for the run.
+			_, _ = c.planStore.UpdateWorkflowTaskState(ctx, task.ID, domain.WorkflowTaskRunning, domain.WorkflowTaskCancelled, c.clock())
+			active = false
+
+		case domain.WorkflowRunNeedsAttention:
+			// The task stays "running": its child is genuinely non-terminal and
+			// may still resume (a self-remediable stop will; a human decision
+			// may). What must not happen is the parent going silent, so mirror
+			// the stop onto the parent only when the child's own stop is one AO
+			// cannot handle itself — otherwise the parent stays running and its
+			// heartbeat keeps driving the child forward.
+			if c.stopIsSelfRemediable(ctx, child.Run) {
+				return nil
+			}
+			if run.State == domain.WorkflowRunRunning {
+				_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, c.clock())
+			}
+			c.recordAttentionStop(ctx, run, nil, ReasonChildNeedsAttention,
+				fmt.Sprintf("task %d (%s) stopped and needs a decision — run %s", task.Ordinal, task.Title, child.Run.ID))
 			return nil
 		}
 	}
@@ -512,7 +666,7 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 	}
 	for i := range tasks {
 		task := &tasks[i]
-		if task.State == domain.WorkflowTaskCompleted || task.State == domain.WorkflowTaskCancelled || task.ExecutionRunID != nil {
+		if task.State.Terminal() || task.ExecutionRunID != nil {
 			continue
 		}
 		eligible := true
@@ -538,7 +692,36 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 		}
 		return c.dispatchMasterTask(ctx, run, *task)
 	}
+
+	// Checkpoint 8P-E.13 Phase 6: nothing is running, nothing completed the
+	// plan, and no task is eligible to dispatch. That is only reachable when a
+	// task ended unsuccessfully and its dependents can therefore never unblock.
+	// Saying so is the whole point — before this, the master run simply sat at
+	// "running" with every remaining task "blocked" and no explanation.
+	if blockedByUnsuccessfulTask(tasks) {
+		if run.State == domain.WorkflowRunRunning {
+			_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, c.clock())
+		}
+		c.recordAttentionStop(ctx, run, nil, ReasonChildFailed,
+			"a task ended without completing, so the tasks depending on it can never become eligible")
+	}
 	return nil
+}
+
+// blockedByUnsuccessfulTask reports whether this plan can no longer make
+// progress on its own: at least one task ended unsuccessfully, and at least one
+// task is still waiting for something that will never arrive.
+func blockedByUnsuccessfulTask(tasks []domain.WorkflowTask) bool {
+	unsuccessful, pending := false, false
+	for _, t := range tasks {
+		switch {
+		case t.State == domain.WorkflowTaskFailed || t.State == domain.WorkflowTaskCancelled:
+			unsuccessful = true
+		case !t.State.Terminal():
+			pending = true
+		}
+	}
+	return unsuccessful && pending
 }
 
 func (c *Coordinator) dispatchMasterTask(ctx stdctx.Context, parent domain.WorkflowRun, task domain.WorkflowTask) error {

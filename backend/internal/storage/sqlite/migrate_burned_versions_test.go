@@ -122,6 +122,7 @@ var shippedMigrations = map[int64]string{
 	116: "0116_users_role.sql",
 	117: "0117_branch_locks.sql",
 	118: "0118_workflow_wake_branch_lock.sql",
+	119: "0119_workflow_task_failed_state.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

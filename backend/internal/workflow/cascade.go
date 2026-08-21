@@ -115,7 +115,35 @@ func (c *Coordinator) advanceReviewFixCycle(ctx stdctx.Context, run domain.Workf
 		}
 	}
 
-	// 5. An approved review is not completion. Execute the structured local
+	// 5. Checkpoint 8P-E.13 Phase 5: a verification that failed repairably and
+	// still has budget parked the run at verify_fix_reentry. Hand those
+	// findings to the fix worker before considering verification again, so the
+	// loop is verify -> fix -> verify rather than a dead end.
+	if !run.State.Terminal() && verifyStep != nil {
+		updated, err := c.maybeDispatchVerifyFix(ctx, run, *workStep, *fixStep, *reviewStep, *verifyStep)
+		if err != nil {
+			return run, err
+		}
+		*fixStep = updated
+		if err := refreshRun(); err != nil {
+			return run, err
+		}
+		// A fix dispatched above is now running; observe it in this same call
+		// so a single poll can carry the cycle as far as the facts allow,
+		// exactly as steps 2-3 do for the review-driven fix.
+		if !run.State.Terminal() && fixStep.State == domain.WorkflowStepRunning {
+			observed, oerr := c.observeFixStep(ctx, run, *fixStep)
+			if oerr != nil {
+				return run, oerr
+			}
+			*fixStep = observed
+			if err := refreshRun(); err != nil {
+				return run, err
+			}
+		}
+	}
+
+	// 6. An approved review is not completion. Execute the structured local
 	// verification target automatically and complete the run only from facts.
 	if !run.State.Terminal() && verifyStep != nil && reviewStep.State == domain.WorkflowStepCompleted {
 		updatedRun, updatedStep, err := c.maybeVerify(ctx, run, *workStep, *reviewStep, *verifyStep)

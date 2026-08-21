@@ -1480,6 +1480,7 @@
 	"board.phase.verifying": "検証中",
 	"board.phase.waiting": "待機中",
 	"board.phase.waiting_for_capacity": "キャパシティ待ち",
+	"board.phase.retrying": "再試行中",
 	"board.phase.blocked": "ブロック中",
 	"board.phase.needs_attention": "要確認",
 	"board.phase.completed": "完了",

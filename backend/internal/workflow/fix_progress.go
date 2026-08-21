@@ -61,8 +61,8 @@ func (c *Coordinator) observeFixStep(ctx stdctx.Context, run domain.WorkflowRun,
 			return c.recordFixOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunWaiting,
 				fp, true, "fix delivered (worker session ended) — awaiting next review cycle", "")
 		}
-		return c.recordFixOutcome(ctx, run, step, domain.WorkflowStepFailed, domain.WorkflowRunNeedsAttention,
-			"", false, "fix worker session terminated with no verifiable change (no dirty, staged, or untracked change, and fingerprint unchanged)",
+		return c.stopFix(ctx, run, step, domain.WorkflowStepFailed, ReasonFixNoVerifiableChange,
+			"fix worker session terminated with no verifiable change (no dirty, staged, or untracked change, and fingerprint unchanged)",
 			domain.WorkflowErrorWorkerTerminatedUnexpectedly)
 	}
 
@@ -70,8 +70,8 @@ func (c *Coordinator) observeFixStep(ctx stdctx.Context, run domain.WorkflowRun,
 	case domain.ActivityActive:
 		return step, nil
 	case domain.ActivityWaitingInput, domain.ActivityBlocked:
-		return c.recordFixOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunNeedsAttention,
-			"", false, "fix worker awaiting input/blocked — needs human attention", "")
+		return c.stopFix(ctx, run, step, domain.WorkflowStepWaiting, ReasonFixWorkerBlocked,
+			"fix worker awaiting input/blocked — needs human attention", "")
 	case domain.ActivityIdle:
 		obs, ok := c.observeFixWorkspace(ctx, sess)
 		if !ok {
@@ -91,11 +91,31 @@ func (c *Coordinator) observeFixStep(ctx stdctx.Context, run domain.WorkflowRun,
 		// Conservative, mirrors evaluateWorkStepProgress's idle+no-evidence
 		// rule exactly: "Codex went idle but did not actually change
 		// anything new" must not silently trigger a new review.
-		return c.recordFixOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunNeedsAttention,
-			"", false, "fix worker idle with no verifiable new change — needs human review", domain.WorkflowErrorAmbiguousWorkerState)
+		return c.stopFix(ctx, run, step, domain.WorkflowStepWaiting, ReasonFixNoVerifiableChange,
+			"fix worker idle with no verifiable new change — needs human review", domain.WorkflowErrorAmbiguousWorkerState)
 	default:
 		return step, nil
 	}
+}
+
+// stopFix is fix observation's counterpart to stopReview: the same
+// recordFixOutcome write it always did, plus Checkpoint 8P-E.13's canonical
+// attention record so the resulting needs_attention can name itself.
+func (c *Coordinator) stopFix(
+	ctx stdctx.Context,
+	run domain.WorkflowRun,
+	step domain.WorkflowStep,
+	nextStep domain.WorkflowStepState,
+	reason, detail string,
+	errClass domain.WorkflowErrorClass,
+) (domain.WorkflowStep, error) {
+	updated, err := c.recordFixOutcome(ctx, run, step, nextStep, domain.WorkflowRunNeedsAttention,
+		"", false, detail, errClass)
+	if err != nil {
+		return updated, err
+	}
+	c.recordAttentionStop(ctx, run, &updated.ID, reason, detail)
+	return updated, nil
 }
 
 func (c *Coordinator) observeFixWorkspace(ctx stdctx.Context, sess domain.SessionRecord) (ports.WorkspaceObservation, bool) {

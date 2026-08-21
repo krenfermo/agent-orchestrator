@@ -601,6 +601,8 @@ func (c *Coordinator) recordDispatchFailure(ctx stdctx.Context, run domain.Workf
 			return step, err
 		}
 	}
+	c.recordAttentionStop(ctx, run, &step.ID, ReasonDispatchFailed,
+		fmt.Sprintf("work dispatch failed (%s): %v", errClass, cause))
 	if c.log != nil {
 		c.log.Warn("workflow: work step dispatch failed", "step", step.ID, "err", cause)
 	}

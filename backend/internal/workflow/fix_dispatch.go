@@ -2,6 +2,7 @@ package workflow
 
 import (
 	stdctx "context"
+	"fmt"
 	"strconv"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -219,6 +220,8 @@ func (c *Coordinator) recordFixDispatchFailure(ctx stdctx.Context, run domain.Wo
 			return fixStep, err
 		}
 	}
+	c.recordAttentionStop(ctx, run, &fixStep.ID, ReasonDispatchFailed,
+		fmt.Sprintf("fix dispatch failed (%s): %v", errClass, cause))
 	if c.log != nil {
 		c.log.Warn("workflow: fix step dispatch failed", "step", fixStep.ID, "err", cause)
 	}

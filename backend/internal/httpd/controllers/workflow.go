@@ -248,7 +248,7 @@ type WorkflowRunView struct {
 	// never disagree about what a run is doing. Phase is the mapping
 	// document's vocabulary; Attention separates a problem AO is still
 	// handling itself from one that genuinely needs the user.
-	Phase           string `json:"phase" enum:"queued,planning,running,reviewing,fixing,verifying,waiting,waiting_for_capacity,blocked,needs_attention,completed,failed,cancelled"`
+	Phase           string `json:"phase" enum:"queued,planning,running,reviewing,fixing,verifying,waiting,waiting_for_capacity,retrying,blocked,needs_attention,completed,failed,cancelled"`
 	Attention       string `json:"attention,omitempty" enum:"ao_internal,human_decision"`
 	AttentionReason string `json:"attentionReason,omitempty"`
 	AttentionAction string `json:"attentionAction,omitempty"`

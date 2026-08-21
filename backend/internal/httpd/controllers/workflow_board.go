@@ -31,7 +31,7 @@ type WorkflowStepProgressView struct {
 type WorkflowBoardTaskView struct {
 	Ordinal int64  `json:"ordinal"`
 	Title   string `json:"title"`
-	State   string `json:"state" enum:"blocked,eligible,running,completed,cancelled"`
+	State   string `json:"state" enum:"blocked,eligible,running,completed,failed,cancelled"`
 	// WorkflowID is the child run executing this task, empty until dispatched.
 	WorkflowID string `json:"workflowId,omitempty"`
 	// Phase is the child run's own derived lifecycle phase. Empty when the task
@@ -56,7 +56,7 @@ type WorkflowBoardEntryView struct {
 	// Phase is the derived lifecycle vocabulary. For a master run with a
 	// running task it is that child's phase, so the card says "Reviewing"
 	// rather than the vaguer, equally true "running".
-	Phase string `json:"phase" enum:"queued,planning,running,reviewing,fixing,verifying,waiting,waiting_for_capacity,blocked,needs_attention,completed,failed,cancelled"`
+	Phase string `json:"phase" enum:"queued,planning,running,reviewing,fixing,verifying,waiting,waiting_for_capacity,retrying,blocked,needs_attention,completed,failed,cancelled"`
 	// Attention separates AO's own recoverable problems from real requests for
 	// a human decision. Empty means neither applies.
 	Attention string `json:"attention,omitempty" enum:"ao_internal,human_decision"`
@@ -84,6 +84,10 @@ type WorkflowBoardEntryView struct {
 	TasksRunning   int `json:"tasksRunning"`
 	TasksBlocked   int `json:"tasksBlocked"`
 	TasksEligible  int `json:"tasksEligible"`
+	// TasksFailed counts tasks whose child run ended failed or cancelled
+	// (Checkpoint 8P-E.13). Non-zero is why a master run with nothing running
+	// is nonetheless not going to finish on its own.
+	TasksFailed int `json:"tasksFailed"`
 	// CurrentTaskOrdinal/CurrentTaskTitle name the running task, so a card can
 	// say "Task 2 of 7 — Backend backup API" from facts.
 	CurrentTaskOrdinal int64  `json:"currentTaskOrdinal,omitempty"`
@@ -122,6 +126,7 @@ func workflowBoardEntryView(e workflowcore.BoardEntry) WorkflowBoardEntryView {
 		TasksRunning:       e.Tasks.Running,
 		TasksBlocked:       e.Tasks.Blocked,
 		TasksEligible:      e.Tasks.Eligible,
+		TasksFailed:        e.Tasks.Failed + e.Tasks.Cancelled,
 		CurrentTaskOrdinal: e.Tasks.CurrentNumber,
 		CurrentTaskTitle:   e.Tasks.CurrentTitle,
 		ReviewCycles:       e.ReviewCycles,

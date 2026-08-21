@@ -3,6 +3,7 @@ package workflow_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -477,8 +478,16 @@ func TestFixBudgetExhaustionStopsAtMaxCyclesAndSurfacesNeedsAttention(t *testing
 	if final.Run.State != domain.WorkflowRunNeedsAttention {
 		t.Fatalf("run state = %q, want needs_attention (budget exhausted)", final.Run.State)
 	}
-	if final.NextAction != "human_attention" {
-		t.Fatalf("next action = %q, want human_attention", final.NextAction)
+	// Checkpoint 8P-E.13: the next_action used to be the bare literal
+	// "human_attention", which named an audience rather than a reason and left
+	// the Board with nothing to say. It now carries the canonical reason and
+	// the numbers behind it, and the reason itself lives in a durable
+	// checkpoint the lifecycle projection can read.
+	if !strings.HasPrefix(final.NextAction, workflowcore.ReasonFixBudgetExhausted+":") {
+		t.Fatalf("next action = %q, want a fix_budget_exhausted explanation", final.NextAction)
+	}
+	if final.LatestCheckpointPhase != workflowcore.ReasonFixBudgetExhausted {
+		t.Fatalf("latest checkpoint phase = %q, want %q", final.LatestCheckpointPhase, workflowcore.ReasonFixBudgetExhausted)
 	}
 	if fixStepFrom(final).Step.State == domain.WorkflowStepFailed {
 		t.Fatalf("fix step must not be failed on budget exhaustion, want it resting at waiting")

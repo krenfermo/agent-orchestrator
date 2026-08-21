@@ -65,10 +65,27 @@ func TestMasterPlanHashIsDeterministicAndStructural(t *testing.T) {
 type staticPlanner struct {
 	plan  workflowcore.MasterPlan
 	calls int
+	// failuresLeft and failErr let a test make the planner fail a bounded
+	// number of times before succeeding (Checkpoint 8P-E.13's retry tests).
+	// A negative failuresLeft means "fail forever".
+	failuresLeft int
+	failErr      error
 }
+
+// failNext makes the next Generate call fail with err, then behave normally.
+func (p *staticPlanner) failNext(err error) { p.failuresLeft, p.failErr = 1, err }
+
+// failAlways makes every Generate call fail with err.
+func (p *staticPlanner) failAlways(err error) { p.failuresLeft, p.failErr = -1, err }
 
 func (p *staticPlanner) Generate(context.Context, workflowcore.PlannerRequest) (workflowcore.PlannerResponse, error) {
 	p.calls++
+	if p.failuresLeft != 0 && p.failErr != nil {
+		if p.failuresLeft > 0 {
+			p.failuresLeft--
+		}
+		return workflowcore.PlannerResponse{}, p.failErr
+	}
 	return workflowcore.PlannerResponse{Plan: p.plan, Provider: "fake", Model: "fake-v1"}, nil
 }
 func (p *staticPlanner) Descriptor() (string, string) { return "fake", "fake-v1" }
@@ -252,17 +269,30 @@ func newFailingMasterFixture(t *testing.T, plannerErr error) (*workflowcore.Coor
 // regression test for the real MEDUSA workflow evidence that motivated
 // Checkpoint 8P-E.10: a planner call for a long, detailed objective timing
 // out with error_class=planner_timeout, validation_json {"valid":false,...}.
+//
+// Checkpoint 8P-E.13 keeps the classification and changes what AO does with
+// it. The FIRST timeout is no longer terminal: the plan is parked back at
+// Pending (retryable) rather than Invalid (permanent), and the run stays out of
+// needs_attention entirely, because nothing a human could answer would repair a
+// timed-out planner. Only the exhausted case stops — see
+// TestGeneratePlan_PlannerTimeoutRetriesThenStopsWithAnActionableReason.
 func TestGeneratePlan_LongPromptPlannerTimeout_ClassifiesAsPlannerTimeout(t *testing.T) {
 	c, runID := newFailingMasterFixture(t, fmt.Errorf("planner timeout: %w: context deadline exceeded", ports.ErrPlannerTimeout))
 	detail, err := c.GeneratePlan(context.Background(), runID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if detail.Plan.Status != domain.WorkflowPlanInvalid || detail.Plan.ErrorClass != "planner_timeout" {
+	if detail.Plan.ErrorClass != "planner_timeout" {
 		t.Fatalf("plan=%+v", detail.Plan)
 	}
-	if detail.Run.State != domain.WorkflowRunNeedsAttention {
-		t.Fatalf("run state=%s", detail.Run.State)
+	if detail.Plan.Status != domain.WorkflowPlanPending {
+		t.Fatalf("plan status=%s, want pending (retryable)", detail.Plan.Status)
+	}
+	if detail.Run.State == domain.WorkflowRunNeedsAttention {
+		t.Fatalf("run state=%s: a first planner timeout must not ask a human for anything", detail.Run.State)
+	}
+	if detail.LatestCheckpointPhase != workflowcore.ReasonPlannerRetryScheduled {
+		t.Fatalf("latest checkpoint phase=%q, want %q", detail.LatestCheckpointPhase, workflowcore.ReasonPlannerRetryScheduled)
 	}
 }
 
@@ -277,11 +307,16 @@ func TestGeneratePlan_LongPromptPlannerParseFailure_ClassifiesAsPlannerParseFail
 	if err != nil {
 		t.Fatal(err)
 	}
-	if detail.Plan.Status != domain.WorkflowPlanInvalid || detail.Plan.ErrorClass != "planner_parse_failed" {
+	if detail.Plan.ErrorClass != "planner_parse_failed" {
 		t.Fatalf("plan=%+v", detail.Plan)
 	}
-	if detail.Run.State != domain.WorkflowRunNeedsAttention {
-		t.Fatalf("run state=%s", detail.Run.State)
+	// Checkpoint 8P-E.13: same reasoning as the timeout case — a malformed
+	// first response is retried, not escalated.
+	if detail.Plan.Status != domain.WorkflowPlanPending {
+		t.Fatalf("plan status=%s, want pending (retryable)", detail.Plan.Status)
+	}
+	if detail.Run.State == domain.WorkflowRunNeedsAttention {
+		t.Fatalf("run state=%s: a first malformed plan must not ask a human for anything", detail.Run.State)
 	}
 }
 

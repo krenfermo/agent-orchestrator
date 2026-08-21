@@ -1495,6 +1495,7 @@
 	"board.phase.verifying": "Vérification en cours",
 	"board.phase.waiting": "En attente",
 	"board.phase.waiting_for_capacity": "En attente de capacité",
+	"board.phase.retrying": "Nouvelle tentative",
 	"board.phase.blocked": "Bloqué",
 	"board.phase.needs_attention": "Nécessite une attention",
 	"board.phase.completed": "Terminé",

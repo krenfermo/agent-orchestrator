@@ -82,6 +82,8 @@ func (c *Coordinator) Reconcile(ctx stdctx.Context) error {
 					if run.State == domain.WorkflowRunPending || run.State == domain.WorkflowRunWaiting || run.State == domain.WorkflowRunRunning {
 						_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, now)
 					}
+					c.recordAttentionStop(ctx, run, nil, ReasonPlannerAmbiguous,
+						"the planner command was in flight when the daemon restarted, and AO cannot prove whether it produced a plan")
 				case plan.Status == domain.WorkflowPlanApproved:
 					if err := c.reconcileMasterTasks(ctx, run); err != nil {
 						return err
@@ -180,6 +182,8 @@ func (c *Coordinator) Reconcile(ctx stdctx.Context) error {
 		if _, err := c.store.UpdateWorkflowRunState(ctx, run.ID, current.State, domain.WorkflowRunNeedsAttention, now); err != nil {
 			return err
 		}
+		c.recordAttentionStop(ctx, current, nil, ReasonRecoveryInterrupted,
+			"a step was mid-execution when the daemon restarted and has no independent fact source to recover from")
 	}
 	return nil
 }

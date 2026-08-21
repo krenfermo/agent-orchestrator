@@ -1510,6 +1510,7 @@
 	"board.phase.verifying": "Verifying",
 	"board.phase.waiting": "Waiting",
 	"board.phase.waiting_for_capacity": "Waiting for capacity",
+	"board.phase.retrying": "Retrying",
 	"board.phase.blocked": "Blocked",
 	"board.phase.needs_attention": "Needs attention",
 	"board.phase.completed": "Completed",

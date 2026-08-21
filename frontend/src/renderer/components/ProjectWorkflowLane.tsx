@@ -257,6 +257,11 @@ function phaseToneClass(phase: BoardPhase): string {
 			return "bg-muted text-muted-foreground";
 		case "waiting":
 		case "waiting_for_capacity":
+		// "retrying" reads as a wait, not a warning: AO hit something it is
+		// allowed to retry, has the retry scheduled, and needs nothing from the
+		// user. Toning it like needs_attention would recreate the false alarm
+		// Checkpoint 8P-E.13 introduced the phase to remove.
+		case "retrying":
 		case "blocked":
 		case "queued":
 			return "bg-muted text-muted-foreground";

@@ -376,3 +376,54 @@ func TestScheduler_CancelAllForRun(t *testing.T) {
 		t.Fatalf("expected wf-2's wake to remain open")
 	}
 }
+
+// TestAutonomousHeartbeatKeepsAFixedCadence is Checkpoint 8P-E.13 Phase 7's
+// regression for a decay that made autonomous runs look stalled without any row
+// ever being wrong.
+//
+// Re-scheduling the heartbeat while its row is still claimed is the normal
+// production path (the poller claims a wake, ContinueRun's reconcile
+// re-schedules it, then Complete no-ops against the now-pending row). Under the
+// shared exponential-backoff rule that incremented attempt_count once per poll
+// cycle, so the interval doubled every cycle up to the 30-minute cap: a real
+// master run in ~/.ao/data had reached attempt_count=9. A retry backs off; a
+// heartbeat must not.
+func TestAutonomousHeartbeatKeepsAFixedCadence(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	fs := newFakeStore()
+	s := newTestScheduler(fs, now)
+	ctx := context.Background()
+	jitter := time.Duration(domain.DefaultWakePolicy().JitterSeconds) * time.Second
+
+	var first time.Duration
+	for cycle := 0; cycle < 6; cycle++ {
+		sch, err := s.Schedule(ctx, "wf-1", nil, ReasonAutonomousProgress, nil)
+		if err != nil {
+			t.Fatalf("cycle %d: Schedule: %v", cycle, err)
+		}
+		delay := sch.ScheduledAt.Sub(now)
+		if cycle == 0 {
+			first = delay
+			continue
+		}
+		// Jitter is additive and bounded, so compare against a window rather
+		// than for exact equality.
+		if delay > first+jitter {
+			t.Fatalf("cycle %d: heartbeat delay grew to %v from %v — the heartbeat is backing off", cycle, delay, first)
+		}
+	}
+
+	// A capacity retry, by contrast, must still back off.
+	prev := time.Duration(0)
+	for cycle := 0; cycle < 3; cycle++ {
+		sch, err := s.Schedule(ctx, "wf-2", nil, ReasonWorkerCapacity, nil)
+		if err != nil {
+			t.Fatalf("capacity cycle %d: Schedule: %v", cycle, err)
+		}
+		delay := sch.ScheduledAt.Sub(now)
+		if cycle > 0 && delay <= prev {
+			t.Fatalf("capacity cycle %d: backoff did not grow (%v after %v)", cycle, delay, prev)
+		}
+		prev = delay
+	}
+}

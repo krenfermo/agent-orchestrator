@@ -206,6 +206,17 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 		}
 	}
 
+	// Checkpoint 8P-E.13 Phase 5: after a verify-driven fix cycle, the approved
+	// review's target SHA is no longer the fingerprint that must be verified —
+	// the fix deliberately changed the worktree. The new target is the
+	// fingerprint the fix actually delivered, taken from the fix step's own
+	// observation checkpoint. Without this the very next verification would
+	// fail with verify_workspace_changed, which is how "fix it and try again"
+	// would have quietly become an infinite, always-failing loop.
+	if delivered, ok := c.verifyTargetAfterFix(ctx, run.ID); ok {
+		reviewed = delivered
+	}
+
 	artifact, err := c.planArtifactForRun(ctx, run)
 	if err != nil {
 		return run, verifyStep, err
@@ -220,7 +231,17 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 		return run, verifyStep, err
 	}
 	if hasAttempt && latest.Model != targetKey {
-		return c.failVerifyWithoutExecution(ctx, run, verifyStep, domain.WorkflowErrorVerifyAmbiguous, "verify target changed after an attempt was created")
+		// A target change is normally the ambiguity this guard exists to
+		// catch — except when AO itself authorized it by running a
+		// verify-driven fix cycle. In that case the prior attempt is simply
+		// finished history for a superseded target, and this cycle gets its own
+		// attempt row (verifyAttemptID is derived from the target key, so the
+		// two can never collide).
+		if !c.verifyTargetAdvancedByFix(ctx, run.ID, latest) {
+			return c.failVerifyWithoutExecution(ctx, run, verifyStep, domain.WorkflowErrorVerifyAmbiguous, "verify target changed after an attempt was created")
+		}
+		hasAttempt = false
+		latest = domain.WorkflowAttempt{}
 	}
 	if hasAttempt && latest.Outcome == "" {
 		if cp, found, cpErr := c.store.GetLatestWorkflowCheckpointByStep(ctx, verifyStep.ID); cpErr != nil {
@@ -378,6 +399,157 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 	return c.completeVerifiedRun(ctx, run, verifyStep)
 }
 
+// verifyTargetAfterFix returns the workspace fingerprint a verify-driven fix
+// cycle delivered, when the run's durable timeline shows one: a
+// verify_fix_reentry checkpoint followed by a fix observation that recorded a
+// new fingerprint. Returns ok=false when no verify-driven fix has happened, so
+// the ordinary path (verify against the approved review's target) is untouched.
+//
+// Reading the timeline rather than storing a "current verify target" column is
+// deliberate: both checkpoints already exist, they are append-only, and
+// deriving from them means a restart in the middle of this cycle recovers the
+// same answer without a migration.
+func (c *Coordinator) verifyTargetAfterFix(ctx stdctx.Context, runID string) (string, bool) {
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		return "", false
+	}
+	var reentryAt time.Time
+	var delivered string
+	var deliveredAt time.Time
+	for _, cp := range cps {
+		switch cp.DurablePhase {
+		case ReasonVerifyFixReentry:
+			if cp.CreatedAt.After(reentryAt) {
+				reentryAt = cp.CreatedAt
+			}
+		case "fix_observed_" + string(domain.WorkflowStepWaiting):
+			if cp.FingerprintAfter != "" && cp.CreatedAt.After(deliveredAt) {
+				delivered, deliveredAt = cp.FingerprintAfter, cp.CreatedAt
+			}
+		}
+	}
+	if reentryAt.IsZero() || delivered == "" || !deliveredAt.After(reentryAt) {
+		return "", false
+	}
+	return delivered, true
+}
+
+// verifyTargetAdvancedByFix reports whether a verify-driven fix cycle was
+// authorized after the given attempt started — the one legitimate reason the
+// verification target may differ from the one that attempt recorded.
+func (c *Coordinator) verifyTargetAdvancedByFix(ctx stdctx.Context, runID string, attempt domain.WorkflowAttempt) bool {
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		return false
+	}
+	for _, cp := range cps {
+		if cp.DurablePhase == ReasonVerifyFixReentry && !cp.CreatedAt.Before(attempt.StartedAt) {
+			return true
+		}
+	}
+	return false
+}
+
+// maybeDispatchVerifyFix is the dispatch half of Phase 5's verify->fix
+// re-entry: when the run's newest verify record is a verify_fix_reentry and the
+// fix step is resting, it sends the failed verification's findings to the same
+// worker session the review/fix loop already uses.
+//
+// It reuses dispatchFixStep unmodified — same outbox idempotency key shape,
+// same attempt-count guard, same session — so a verify-driven fix is not a
+// second, parallel fix mechanism that could drift from the review-driven one.
+// The cycle number is simply the next fix attempt number, which keeps both
+// kinds of fix cycle on one honest counter.
+func (c *Coordinator) maybeDispatchVerifyFix(ctx stdctx.Context, run domain.WorkflowRun, workStep, fixStep, reviewStep, verifyStep domain.WorkflowStep) (domain.WorkflowStep, error) {
+	// A terminally failed verify step is the unrepairable branch's outcome: the
+	// run has already stopped for a reason no fix cycle addresses, and there is
+	// nothing left to re-verify even if a fix landed.
+	if run.State.Terminal() || fixStep.State.Terminal() || verifyStep.State.Terminal() ||
+		c.reviewRuns == nil || reviewStep.ReviewRunID == nil {
+		return fixStep, nil
+	}
+	if fixStep.State != domain.WorkflowStepWaiting && fixStep.State != domain.WorkflowStepPending {
+		return fixStep, nil
+	}
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, run.ID)
+	if err != nil {
+		return fixStep, err
+	}
+	var cp domain.WorkflowCheckpoint
+	var found bool
+	for _, candidate := range cps {
+		if candidate.DurablePhase == ReasonVerifyFixReentry && (!found || candidate.CreatedAt.After(cp.CreatedAt)) {
+			cp, found = candidate, true
+		}
+	}
+	if !found {
+		return fixStep, nil
+	}
+
+	// Idempotency: dispatch at most one fix per re-entry. Keyed on the fix
+	// step's own attempt rows rather than on "is this the newest checkpoint",
+	// so a later checkpoint written by any other observer cannot mask a
+	// re-entry that has not been answered yet — and a re-entry that HAS been
+	// answered can never be answered twice however often this is re-entered.
+	attempts, err := c.store.ListWorkflowAttempts(ctx, fixStep.ID)
+	if err != nil {
+		return fixStep, err
+	}
+	for _, a := range attempts {
+		if !a.StartedAt.Before(cp.CreatedAt) {
+			return fixStep, nil
+		}
+	}
+
+	reviewRun, ok, err := c.reviewRuns.GetReviewRun(ctx, *reviewStep.ReviewRunID)
+	if err != nil || !ok {
+		return fixStep, err
+	}
+
+	var result VerifyResult
+	_ = json.Unmarshal([]byte(cp.RetryState), &result)
+	cycleNumber := len(attempts) + 1
+
+	artifact, err := c.planArtifactForRun(ctx, run)
+	if err != nil {
+		return fixStep, err
+	}
+	prompt := BuildFixPrompt(FixPromptInput{
+		Objective:          run.Objective,
+		AcceptanceCriteria: artifact.AcceptanceCriteria,
+		ReviewRunID:        reviewRun.ID,
+		Findings:           renderVerifyFindings(result),
+		CycleNumber:        cycleNumber,
+	})
+	return c.dispatchFixStep(ctx, run, workStep, fixStep, reviewRun, cycleNumber, prompt)
+}
+
+// renderVerifyFindings turns a failed VerifyResult into the findings text a fix
+// worker receives. It reports only what actually ran and what it printed —
+// never a summary AO invented about why the check failed.
+func renderVerifyFindings(result VerifyResult) string {
+	var b strings.Builder
+	b.WriteString("Local verification failed after your work was approved by review.\n")
+	b.WriteString("Fix the cause so verification passes. Do not change the verification commands.\n")
+	for _, check := range result.Checks {
+		if check.Passed {
+			continue
+		}
+		fmt.Fprintf(&b, "\n- %s (%s)\n  reason: %s\n", check.Label, check.Kind, check.FailureReason)
+		if check.ExitCode != nil {
+			fmt.Fprintf(&b, "  exit code: %d\n", *check.ExitCode)
+		}
+		if check.StdoutTail != "" {
+			fmt.Fprintf(&b, "  stdout tail:\n%s\n", check.StdoutTail)
+		}
+		if check.StderrTail != "" {
+			fmt.Fprintf(&b, "  stderr tail:\n%s\n", check.StderrTail)
+		}
+	}
+	return b.String()
+}
+
 func (c *Coordinator) failVerifyWithoutExecution(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, class domain.WorkflowErrorClass, reason string) (domain.WorkflowRun, domain.WorkflowStep, error) {
 	now := c.clock()
 	attempt, err := c.store.CreateWorkflowAttempt(ctx, "wfa-verify-"+c.newID(), step.ID, "local-verify", "invalid-target", now)
@@ -395,6 +567,49 @@ func (c *Coordinator) failVerifyWithoutExecution(ctx stdctx.Context, run domain.
 	return c.finishVerifyFailure(ctx, run, step, attempt, VerifyResult{Version: verifyResultVersion, ErrorClass: class}, reason)
 }
 
+// repairableVerifyFailure reports whether a verification failure is the kind a
+// fix cycle could plausibly repair — i.e. the checks ran and something in the
+// code was wrong.
+//
+// The excluded classes are excluded on evidence, not caution:
+// verify_environment_error means the checks could not run at all,
+// verify_workspace_changed means the thing under test moved while AO was
+// testing it, and verify_ambiguous means AO cannot say what happened. Sending a
+// worker to "fix" any of those would be asking it to repair something no diff
+// can address.
+func repairableVerifyFailure(class domain.WorkflowErrorClass) bool {
+	switch class {
+	case domain.WorkflowErrorVerifyCommandFailed,
+		domain.WorkflowErrorVerifyTimeout,
+		domain.WorkflowErrorVerifyArtifactMissing,
+		domain.WorkflowErrorVerifyArtifactMismatch:
+		return true
+	default:
+		return false
+	}
+}
+
+// verifyFixCycleCount counts this run's durable verify_fix_reentry
+// checkpoints: how many times a failed verification has already been handed
+// back to a fix worker. Derived from append-only rows, so the bound survives
+// restarts, and it is the loop protection Phase 5 requires — without it a fix
+// that never satisfies the verification command would cycle forever.
+func (c *Coordinator) verifyFixCycleCount(ctx stdctx.Context, runID string) int {
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		// Unreadable budget: treat as exhausted. Conservative in the direction
+		// that stops rather than the direction that loops.
+		return 1 << 30
+	}
+	n := 0
+	for _, cp := range cps {
+		if cp.DurablePhase == ReasonVerifyFixReentry {
+			n++
+		}
+	}
+	return n
+}
+
 func (c *Coordinator) finishVerifyFailure(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, attempt domain.WorkflowAttempt, result VerifyResult, reason string) (domain.WorkflowRun, domain.WorkflowStep, error) {
 	result.Passed = false
 	if len(result.Checks) == 0 && reason != "" {
@@ -405,6 +620,57 @@ func (c *Coordinator) finishVerifyFailure(ctx stdctx.Context, run domain.Workflo
 	}
 	now := c.clock()
 	_ = c.store.UpdateWorkflowAttemptOutcome(ctx, attempt.ID, now, domain.WorkflowAttemptFailed, result.ErrorClass)
+
+	// Checkpoint 8P-E.13 Phase 5 — the debt 8P-E.12 left explicit. A failed
+	// verification used to be the end of the road: the verify step went to
+	// "failed" (terminal, zero outgoing transitions) and the run went to
+	// needs_attention, so a run whose only problem was a failing test could
+	// never continue no matter how much budget it had left. When the failure is
+	// repairable and budget remains, the run instead hands the verify findings
+	// back to the fix worker and re-verifies afterwards.
+	//
+	// The verify step deliberately rests at "waiting", not "failed": "failed" is
+	// terminal for a step, and a terminal verify step would make re-verification
+	// structurally impossible — the exact trap this branch exists to avoid.
+	budget := policyForRun(run).MaxFixCycles
+	used := c.verifyFixCycleCount(ctx, run.ID)
+	if repairableVerifyFailure(result.ErrorClass) && used < budget && c.messageSender != nil {
+		if step.State == domain.WorkflowStepRunning {
+			if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, domain.WorkflowStepRunning, domain.WorkflowStepWaiting, now); err != nil {
+				return run, step, err
+			}
+			step.State = domain.WorkflowStepWaiting
+		}
+		if run.State == domain.WorkflowRunRunning {
+			if _, err := c.store.UpdateWorkflowRunState(ctx, run.ID, domain.WorkflowRunRunning, domain.WorkflowRunWaiting, now); err != nil {
+				return run, step, err
+			}
+			run.State = domain.WorkflowRunWaiting
+		}
+		stepID, attemptID := step.ID, attempt.ID
+		payload, _ := json.Marshal(result)
+		if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+			ID:             "wfc-" + c.newID(),
+			WorkflowRunID:  run.ID,
+			WorkflowStepID: &stepID,
+			AttemptID:      &attemptID,
+			ProjectID:      run.ProjectID,
+			// RetryState carries the full VerifyResult so the fix prompt is
+			// built from the durable record of what actually failed, not from a
+			// value that only existed in this call's memory.
+			RetryState:        string(payload),
+			FingerprintBefore: result.PreFingerprint,
+			NextAction: fmt.Sprintf("fix: verification failed (%s) — handing findings back to the fix worker (cycle %d of %d)",
+				result.ErrorClass, used+1, budget),
+			DurablePhase:   ReasonVerifyFixReentry,
+			PayloadVersion: verifyResultVersion,
+			CreatedAt:      now,
+		}); err != nil {
+			return run, step, err
+		}
+		return run, step, nil
+	}
+
 	if step.State == domain.WorkflowStepRunning {
 		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, domain.WorkflowStepRunning, domain.WorkflowStepFailed, now); err != nil {
 			return run, step, err
@@ -421,6 +687,14 @@ func (c *Coordinator) finishVerifyFailure(ctx stdctx.Context, run domain.Workflo
 		}
 		run.State = domain.WorkflowRunNeedsAttention
 	}
+	// Name the stop in the canonical vocabulary, distinguishing "we tried
+	// everything the budget allows" from "no fix cycle could have helped" —
+	// two different situations with two different remedies.
+	stopReason := ReasonVerifyUnrepairable
+	if repairableVerifyFailure(result.ErrorClass) {
+		stopReason = ReasonVerifyBudgetExhausted
+	}
+	c.recordAttentionStop(ctx, run, &step.ID, stopReason, fmt.Sprintf("verify failed (%s) after %d fix cycles: %s", result.ErrorClass, used, reason))
 	return run, step, nil
 }
 
