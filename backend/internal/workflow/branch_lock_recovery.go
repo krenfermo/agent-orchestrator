@@ -205,6 +205,21 @@ func (c *Coordinator) recoverStaleBranchLockHolder(ctx stdctx.Context, run domai
 //
 // Best-effort throughout, like every other wake write in this package: a run
 // that fails to be woken here is not lost, it is merely slower.
+// waitingOnABranch reports whether a run is in a state a branch release can
+// actually unblock.
+//
+// Waiting is the state the current code parks a branch-queued run in. Checkpoint
+// 8P-E13A.1 adds needs_attention deliberately: rows written before that
+// checkpoint — and any run whose branch wait got misfiled as a stop — are
+// durably parked there, and refusing to wake them means the branch frees while
+// the run that was queued for it stays stopped forever. Waking a run is safe in
+// either state: ContinueRun is idempotent and simply re-evaluates what is
+// dispatchable, and a run whose stop has nothing to do with this branch will
+// find nothing to do and park again.
+func waitingOnABranch(run domain.WorkflowRun) bool {
+	return run.State == domain.WorkflowRunWaiting || run.State == domain.WorkflowRunNeedsAttention
+}
+
 func (c *Coordinator) wakeBranchQueue(ctx stdctx.Context, releasedBy string, freed []domain.BranchLock) {
 	if c.wakeScheduler == nil || len(freed) == 0 {
 		return
@@ -221,7 +236,7 @@ func (c *Coordinator) wakeBranchQueue(ctx stdctx.Context, releasedBy string, fre
 		return
 	}
 	for _, queued := range runs {
-		if queued.ID == releasedBy || queued.State != domain.WorkflowRunWaiting {
+		if queued.ID == releasedBy || !waitingOnABranch(queued) {
 			continue
 		}
 		cps, cerr := c.store.ListWorkflowCheckpoints(ctx, queued.ID)

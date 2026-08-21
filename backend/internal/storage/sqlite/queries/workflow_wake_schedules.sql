@@ -43,6 +43,27 @@ SET status = 'pending', scheduled_at = ?, known_reset_at = ?,
     last_error = ?, updated_at = ?
 WHERE id = ? AND status IN ('pending', 'claimed');
 
+-- name: ReviveWorkflowWakeSchedule :execrows
+-- Checkpoint 8P-E13A.1: bring a FINISHED wake row back for a new wait on the
+-- same scope.
+--
+-- idempotency_key is globally UNIQUE (0106), so the store's original
+-- "existing row is completed/cancelled -> insert a fresh row" branch could
+-- never succeed: it always hit the unique constraint, and the wake was
+-- silently lost. A run whose branch_lock wake had completed once could
+-- therefore never be scheduled again, which is exactly how a queued workflow
+-- stopped resuming on its own. Reviving the row in place keeps one row per
+-- scope, which is what the unique constraint was expressing all along.
+--
+-- attempt_count resets to 0: this is a NEW wait, not another retry of the old
+-- one, and inheriting the finished row's backoff would start it half an hour
+-- late.
+UPDATE workflow_wake_schedules
+SET status = 'pending', scheduled_at = ?, known_reset_at = ?,
+    attempt_count = 0, claimed_by = NULL, claimed_at = NULL,
+    completed_at = NULL, cancelled_at = NULL, last_error = '', updated_at = ?
+WHERE id = ? AND status IN ('completed', 'cancelled');
+
 -- name: ListDueWorkflowWakeSchedules :many
 -- Due set for the daemon poller: pending rows whose scheduled_at has
 -- passed, plus claimed rows whose claim lease has expired (a prior claimant

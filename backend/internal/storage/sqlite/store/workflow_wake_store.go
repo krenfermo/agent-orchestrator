@@ -77,10 +77,42 @@ func (s *Store) UpsertWorkflowWakeSchedule(ctx context.Context, sch WorkflowWake
 			}
 			return workflowWakeScheduleFromRow(row), nil
 		}
-		// Existing row is completed/cancelled: a new wait scope reusing the
-		// same idempotency key starts a fresh row instead of resurrecting a
-		// terminal one.
-		return s.insertWorkflowWakeSchedule(ctx, sch)
+		// Existing row is completed/cancelled: the same scope is waiting
+		// again.
+		//
+		// Checkpoint 8P-E13A.1: this branch used to insert a fresh row, which
+		// could never work — idempotency_key is globally UNIQUE (migration
+		// 0106), so every attempt failed with a constraint violation and the
+		// wake was silently dropped. The effect in the field was severe and
+		// invisible: once a run's branch_lock or autonomous_progress wake had
+		// completed even once, no later wake for that scope could ever be
+		// scheduled again, so the run stopped resuming on its own and only a
+		// human clicking Continue moved it. Reviving the row in place is what
+		// the unique constraint always implied: one row per scope, reused.
+		revived, rerr := s.qw.ReviveWorkflowWakeSchedule(ctx, gen.ReviveWorkflowWakeScheduleParams{
+			ScheduledAt:  sch.ScheduledAt,
+			KnownResetAt: timePtrToNullTime(sch.KnownResetAt),
+			UpdatedAt:    sch.UpdatedAt,
+			ID:           existing.ID,
+		})
+		if rerr != nil {
+			return WorkflowWakeSchedule{}, fmt.Errorf("revive workflow wake schedule %s: %w", existing.ID, rerr)
+		}
+		if revived == 0 {
+			// Lost a race against a concurrent reschedule that moved the row
+			// back to pending/claimed between the read and this write: that
+			// row is already an open wake for this scope, so report it.
+			row, gerr := s.qw.GetWorkflowWakeSchedule(ctx, existing.ID)
+			if gerr != nil {
+				return WorkflowWakeSchedule{}, fmt.Errorf("reload contended workflow wake schedule %s: %w", existing.ID, gerr)
+			}
+			return workflowWakeScheduleFromRow(row), nil
+		}
+		row, gerr := s.qw.GetWorkflowWakeSchedule(ctx, existing.ID)
+		if gerr != nil {
+			return WorkflowWakeSchedule{}, fmt.Errorf("reload revived workflow wake schedule %s: %w", existing.ID, gerr)
+		}
+		return workflowWakeScheduleFromRow(row), nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return WorkflowWakeSchedule{}, fmt.Errorf("lookup workflow wake schedule by idempotency key %s: %w", sch.IdempotencyKey, err)

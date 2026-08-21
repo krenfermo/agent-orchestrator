@@ -73,6 +73,25 @@ func (s *Store) AcquireBranchLock(ctx context.Context, lock domain.BranchLock) (
 	return domain.BranchLock{}, domain.BranchLockConflictError{Holder: holder}
 }
 
+// GetBranchLock returns one lock row by id, held or released.
+//
+// Every other read here filters on state='held', which makes a released lock's
+// own audit trail — released_at and release_reason, the two columns that say a
+// branch was given back and why — unreadable through this package. Checkpoint
+// 8P-E13A.1 needs exactly that: "the lock was released, with a truthful reason"
+// is the property cancellation has to guarantee, and a guarantee nothing can
+// read is a guarantee nothing can check.
+func (s *Store) GetBranchLock(ctx context.Context, id string) (domain.BranchLock, bool, error) {
+	row, err := s.qr.GetBranchLock(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.BranchLock{}, false, nil
+	}
+	if err != nil {
+		return domain.BranchLock{}, false, fmt.Errorf("get branch lock %s: %w", id, err)
+	}
+	return branchLockFromRow(row), true, nil
+}
+
 // GetHeldBranchLock returns the current holder of a repository+branch pair.
 // found=false means the pair is free.
 func (s *Store) GetHeldBranchLock(ctx context.Context, lockKey string) (domain.BranchLock, bool, error) {

@@ -31,6 +31,11 @@ type fakeStore struct {
 	// GetWorkflowRunOwner). nil/missing entry means unowned.
 	owners map[string]domain.UserID
 
+	// listStepsErr injects a storage failure into the step lookup, so a test
+	// can prove what still happens when the bookkeeping AFTER a durable state
+	// transition fails (Checkpoint 8P-E13A.1).
+	listStepsErr error
+
 	seq int
 }
 
@@ -150,6 +155,9 @@ func (f *fakeStore) UpdateWorkflowRunState(_ context.Context, id string, expecte
 }
 
 func (f *fakeStore) ListWorkflowSteps(_ context.Context, runID string) ([]domain.WorkflowStep, error) {
+	if f.listStepsErr != nil {
+		return nil, f.listStepsErr
+	}
 	return append([]domain.WorkflowStep{}, f.steps[runID]...), nil
 }
 

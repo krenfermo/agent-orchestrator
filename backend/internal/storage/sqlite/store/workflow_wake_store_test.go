@@ -135,3 +135,84 @@ func TestWorkflowWakeSchedule_CancelAllForRun(t *testing.T) {
 		t.Fatalf("expected no pending rows left, got %d", len(pending))
 	}
 }
+
+// Checkpoint 8P-E13A.1 regression, found in the field rather than in a test.
+//
+// idempotency_key is globally UNIQUE, so the upsert's "existing row is
+// finished -> insert a fresh row" branch could never succeed: it always failed
+// with a constraint violation, and the caller (scheduleBranchLockWake,
+// maybeScheduleAutonomousHeartbeat) treats a scheduling failure as best-effort
+// and swallows it. The observable result in ~/.ao/data was a queued workflow
+// whose branch_lock wake had completed once and could never be scheduled again
+// — a run that only ever moved when a human clicked Continue.
+func TestWorkflowWakeSchedule_UpsertRevivesAFinishedScope(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
+	seedProject(t, s, "proj-wake-3")
+	if _, _, err := s.CreateWorkflowRun(ctx, sampleWorkflowRun("proj-wake-3", "wake-run-3", now), nil); err != nil {
+		t.Fatalf("create workflow run: %v", err)
+	}
+	const key = "wfwake:wake-run-3:role:branch_lock:branch_lock"
+
+	first, err := s.UpsertWorkflowWakeSchedule(ctx, store.WorkflowWakeSchedule{
+		ID: "wfwk-first", WorkflowRunID: "wake-run-3", Reason: "worker_capacity",
+		IdempotencyKey: key, ScheduledAt: now, CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("first schedule: %v", err)
+	}
+	if _, err := s.ClaimWorkflowWakeSchedule(ctx, first.ID, "pending", "claimant", now); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if _, err := s.CompleteWorkflowWakeSchedule(ctx, first.ID, now.Add(time.Minute)); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	// The same scope waits again. This is the call that used to fail.
+	again, err := s.UpsertWorkflowWakeSchedule(ctx, store.WorkflowWakeSchedule{
+		ID: "wfwk-second", WorkflowRunID: "wake-run-3", Reason: "worker_capacity",
+		IdempotencyKey: key, ScheduledAt: now.Add(2 * time.Minute),
+		CreatedAt: now, UpdatedAt: now.Add(2 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("re-schedule after completion: %v", err)
+	}
+	if again.ID != first.ID {
+		t.Fatalf("revived row id = %q, want the existing scope's row %q", again.ID, first.ID)
+	}
+	if again.Status != "pending" {
+		t.Fatalf("status = %q, want pending: the scope is waiting again", again.Status)
+	}
+	if again.AttemptCount != 0 {
+		t.Fatalf("attempt_count = %d, want 0: a new wait must not inherit the finished one's backoff", again.AttemptCount)
+	}
+	if !again.ScheduledAt.Equal(now.Add(2 * time.Minute)) {
+		t.Fatalf("scheduled_at = %v, want the new wait's time", again.ScheduledAt)
+	}
+
+	due, err := s.ListDueWorkflowWakeSchedules(ctx, now.Add(3*time.Minute), now.Add(-time.Hour), 25)
+	if err != nil {
+		t.Fatalf("list due: %v", err)
+	}
+	if len(due) != 1 || due[0].ID != first.ID {
+		t.Fatalf("due = %+v, want the revived row to actually fire", due)
+	}
+
+	// A cancelled scope revives on the same terms — CancelRun cancels every
+	// wake a run owns, and a later run-level retry must still be schedulable.
+	if _, err := s.CancelWorkflowWakeSchedule(ctx, first.ID, now.Add(4*time.Minute)); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	revivedAgain, err := s.UpsertWorkflowWakeSchedule(ctx, store.WorkflowWakeSchedule{
+		ID: "wfwk-third", WorkflowRunID: "wake-run-3", Reason: "worker_capacity",
+		IdempotencyKey: key, ScheduledAt: now.Add(5 * time.Minute),
+		CreatedAt: now, UpdatedAt: now.Add(5 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("re-schedule after cancellation: %v", err)
+	}
+	if revivedAgain.ID != first.ID || revivedAgain.Status != "pending" {
+		t.Fatalf("revived row = %+v, want the same row back at pending", revivedAgain)
+	}
+}

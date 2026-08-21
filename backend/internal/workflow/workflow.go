@@ -976,6 +976,25 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 		return RunDetail{}, fmt.Errorf("%w: workflow run %q changed while cancelling", ErrInvalid, runID)
 	}
 
+	// Checkpoint 8P-E13A.1: the branch is freed the instant the run is durably
+	// cancelled, before any of the fallible bookkeeping below, and on a defer
+	// so it happens even if that bookkeeping returns an error.
+	//
+	// It used to be the LAST statement in this function. Everything between the
+	// state transition and it — cancelling steps, writing the left-running
+	// session checkpoint, cancelling questions and resolutions, cancelling
+	// wakes — can return an error, and each of those early returns produced the
+	// one state AO must never be in: a run durably `cancelled` while its branch
+	// lock is still `held`, with nothing left running that would ever free it.
+	// Ordering is the fix, not error handling: releasing the lock cannot fail
+	// the cancellation, and the cancellation must not be able to fail the
+	// release. releaseBranchLocks is itself best-effort and idempotent (the
+	// release SQL is CAS'd on state='held'), so running it early costs nothing
+	// and a second pass would be a no-op. The work already done stays exactly
+	// where it is in the repository: releasing the lock gives up ownership, it
+	// never reverts anything.
+	c.releaseBranchLocks(ctx, runID, "workflow run cancelled")
+
 	steps, err := c.store.ListWorkflowSteps(ctx, runID)
 	if err != nil {
 		return RunDetail{}, err
@@ -1059,13 +1078,6 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 			c.log.Warn("workflow: cancel wake schedules failed", "run", runID, "err", werr)
 		}
 	}
-
-	// Checkpoint 8P-E.11: a cancelled run must release every branch it owns,
-	// so a run waiting on the same repository+branch can proceed immediately
-	// rather than waiting for boot reconciliation to notice. The work already
-	// done stays exactly where it is in the repository -- releasing the lock
-	// gives up ownership, it never reverts anything.
-	c.releaseBranchLocks(ctx, runID, "workflow run cancelled")
 
 	// Checkpoint 8P-E.13A: a cancelled child immediately mirrors onto its
 	// parent's task row instead of waiting for the parent's next reconcile

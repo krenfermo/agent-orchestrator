@@ -22,6 +22,7 @@ package workflow_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -59,7 +60,7 @@ func newQueuedBranchCoordinator(t *testing.T, spawner *fakeSpawner, locks *fakeB
 		// this file exists to pin down.
 		ReviewRuns:       newFakeReviewRuns(),
 		ReviewerLauncher: &fakeReviewerLauncher{},
-		Clock:          clk.Now,
+		Clock:            clk.Now,
 		NewID: func() string {
 			idSeq++
 			return fmt.Sprintf("id%d", idSeq)
@@ -369,5 +370,41 @@ func TestCancellingTheHolderWakesTheQueuedRun(t *testing.T) {
 	}
 	if spawner.calls != 2 {
 		t.Fatalf("spawner calls = %d, want the queued run to have dispatched after the release", spawner.calls)
+	}
+}
+
+// Checkpoint 8P-E13A.1: the release cannot be lost to a later failure.
+//
+// releaseBranchLocks used to be the LAST statement of CancelRun, after the step
+// cascade, the left-running-session checkpoint, the question cancellations and
+// the wake cancellations — every one of which can return an error and take the
+// early return. Any of them firing left the run durably `cancelled` with its
+// branch still `held`: the impossible state that has to be repaired by hand,
+// because a cancelled run will never come back to release anything.
+func TestCancelReleasesTheBranchEvenWhenTheRestOfTheCascadeFails(t *testing.T) {
+	locks := newFakeBranchLocks()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: contendedBranch, WorkspacePath: contendedRepo}}}
+	c, store := newQueuedBranchCoordinator(t, spawner, locks, newFakeWakeScheduler())
+	ctx := context.Background()
+
+	holderID := seedStoppedHolder(t, c, store, spawner, workflowcore.ReasonFixBudgetExhausted, true)
+	if held, _ := locks.HeldByRun(ctx, holderID); len(held) != 1 {
+		t.Fatalf("fixture holds %d locks, want 1", len(held))
+	}
+
+	store.listStepsErr = errors.New("storage went away mid-cancel")
+	if _, err := c.CancelRun(ctx, holderID); err == nil {
+		t.Fatal("CancelRun reported success while its cascade failed")
+	}
+
+	run, _, err := store.GetWorkflowRun(ctx, holderID)
+	if err != nil {
+		t.Fatalf("GetWorkflowRun: %v", err)
+	}
+	if run.State != domain.WorkflowRunCancelled {
+		t.Fatalf("run state = %q, want cancelled: the transition landed before the failure", run.State)
+	}
+	if held, _ := locks.HeldByRun(ctx, holderID); len(held) != 0 {
+		t.Fatalf("cancelled run still holds %d branch locks: nothing will ever free them", len(held))
 	}
 }
