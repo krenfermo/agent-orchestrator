@@ -264,9 +264,32 @@ opens and before serving:
   `durable_phase='worker_dispatch_ambiguous'` +
   `error_class='ambiguous_worker_state'` and moves the run to
   `needs_attention`. A still-alive worker correctly stays `running`.
-- **Every other step kind** found `running` is blindly moved to `waiting`, and a
-  `running`/`waiting` parent run to `needs_attention`.
+- **`review` and `fix` steps are explicitly excluded from the generic fallback**
+  (`recovery.go:126-133`). They re-enter `advanceReviewFixCycle(ctx, run, steps,
+  false)` — once per run, not per step — which is the *same* idempotent
+  dispatch/observe cascade `GetRun`/`ContinueRun` drive. A crash mid-review or
+  mid-fix therefore **resumes**; it does not park. `includeCycle1Unblock=false`
+  means a `review` step still `pending`, never explicitly unblocked by a
+  `ContinueRun`, stays untouched by boot recovery.
+- **Only `plan`, `verify` and `advance` steps** found `running` fall through to
+  the blind `running → waiting` move (`recovery.go:135-141`). That path is also
+  the only one that sets `interrupted = true`, so the follow-on
+  `running`/`waiting` run → `needs_attention` fallback fires **only** for those
+  three kinds — never for a run whose `review` or `fix` step was mid-flight.
 - Idempotent: running it twice in a row is a no-op the second time.
+
+> **Contract consequence:** a `review`/`fix` step found `running` at boot is
+> never blind-parked by recovery — it re-enters the same cascade `GetRun`/
+> `ContinueRun` drive. Any `waiting`/`needs_attention` such a run ends up in
+> after `Reconcile` is a **real outcome of that cascade** — a
+> `changes_requested` rest (`cascade.go:70-74`, the trigger for
+> `maybeDispatchFix`), a reviewer capacity stall (§8.8), or an ambiguous
+> review/fix dispatch (§6.3, run → `needs_attention` via
+> `markReviewAmbiguous`/`recordReviewOutcome`) — and must be projected and
+> rendered as such. s2/s4 must **not** treat it as a restart artifact and must
+> **not** special-case "post-restart" at all: the durable rows do not
+> distinguish it, and suppressing `needs_attention` here would hide exactly the
+> ambiguity signal §6.3 and §8.1 require surfacing.
 
 ---
 
@@ -276,14 +299,20 @@ The vocabulary in the brief lists 13 labels. All 13 are mapped below.
 Evaluate **in order** — the first matching row wins. Terminal states are checked
 before waits so a cancelled run never renders as "waiting".
 
+> **This ordering supersedes the current renderer.** `useWorkflowStatusLabel`
+> checks a `human_required` question *ahead of* `needs_attention` and
+> `completed`, so today a completed run with a lingering question renders
+> "waiting for decision"; under this contract it renders `completed`. Adopting
+> the contract ordering is a deliberate behaviour change s4 must make. See §8.4.
+
 | # | UI state | Derived from | Precise condition |
 | --- | --- | --- | --- |
 | 1 | `cancelled` | `workflow_runs.state` | `= 'cancelled'`. `cancelled_at` is the timestamp. |
 | 2 | `failed` | `workflow_runs.state` | `= 'failed'`. Legal but **not written by any current code path** — render it, do not expect it. |
 | 3 | `completed` | `workflow_runs.state` | `= 'completed'`. `completed_at` is the timestamp. Do **not** compute progress from the `advance` step (§8). |
 | 4 | `needs_attention` | `workflow_runs.state` | `= 'needs_attention'`. Reason carriers in §6.3. |
-| 5 | `blocked` | `workflow_wake_schedules.reason` + `workflow_checkpoints` | Run `state='waiting'` **and** the soonest open wake has `reason='branch_lock'`. The structured detail (branch, repo path, holding run/session) is read from the newest checkpoint with `durable_phase='waiting_for_branch'` and cross-checked against `branch_locks` (`state='held'`, matching `lock_key`). Also covers a master run whose only remaining `workflow_tasks` are `state='blocked'` on unmet `workflow_task_dependencies`. **Never** render this as a capacity problem — the blocker is another workflow, not the provider plan. |
-| 6 | `waiting_for_capacity` | `workflow_wake_schedules.reason` | An open (`status IN ('pending','claimed')`) wake exists for the run and its `reason` is **not** in `{autonomous_progress, branch_lock}` — i.e. `capacity_reset`, `capacity_probe`, `transient_retry`, `question_resolver_capacity`, `reviewer_capacity`, `worker_capacity`, `planner_capacity`. This is a **denylist by design** (`frontend/src/renderer/lib/workflow-wake-reason.ts`): a reason added later defaults to reading as a capacity wait rather than going unlabeled. Show `scheduled_at` as "next retry" and `attempt_count` as "Attempt: N"; show a reset time **only** when `known_reset_at` is non-NULL. |
+| 5 | `blocked` | `workflow_wake_schedules.reason` + `workflow_checkpoints` | Run `state='waiting'` **and either** the soonest open wake has `reason='branch_lock'` **or** the newest checkpoint has `durable_phase='waiting_for_branch'`. Accept either signal: `scheduleBranchLockWake` is best-effort (`branch_execution.go:181`), so a nil scheduler or a `Schedule` error leaves the checkpoint with no wake row, and keying on the wake alone would render that run as plain `waiting`. The structured detail (branch, repo path, holding run/session) comes from that checkpoint's `retry_state` (§6.1) and can be cross-checked against `branch_locks` (`state='held'`, matching `lock_key`). Also covers a master run whose only remaining `workflow_tasks` are `state='blocked'` on unmet `workflow_task_dependencies`. **Never** render this as a capacity problem — the blocker is another workflow, not the provider plan. |
+| 6 | `waiting_for_capacity` | `workflow_wake_schedules.reason`, **or** `workflow_checkpoints.durable_phase` | An open (`status IN ('pending','claimed')`) wake exists for the run and its `reason` is **not** in `{autonomous_progress, branch_lock}` — i.e. `capacity_reset`, `capacity_probe`, `transient_retry`, `question_resolver_capacity`, `reviewer_capacity`, `worker_capacity`, `planner_capacity`. This is a **denylist by design** (`frontend/src/renderer/lib/workflow-wake-reason.ts`): a reason added later defaults to reading as a capacity wait rather than going unlabeled. Show `scheduled_at` as "next retry" and `attempt_count` as "Attempt: N"; show a reset time **only** when `known_reset_at` is non-NULL. **Also matches with no wake at all** when the run is `waiting` and the newest checkpoint has `durable_phase='review_capacity_retry'` — a reviewer capacity stall writes that checkpoint but schedules no wake (§8.8). In that case there is no retry time to show: render the capacity wait without a "next retry". |
 | 7 | `waiting` | `workflow_runs.state` | `= 'waiting'` with no open wake, or an open wake with `reason='autonomous_progress'` (the routine heartbeat of a healthy autonomous run — it must never read as a capacity wait). Sub-case **waiting for a decision**: a `workflow_questions` row for the run with `state='human_required'` (or `state='pending'`), which overrides any checkpoint `next_action` at read time. |
 | 8 | `planning` | `workflow_plans.status` | Master run: `status IN ('pending','running','validated')` and the run is not terminal. Single-task run: `workflow_steps` where `kind='plan'` and `state IN ('ready','running')` — rarely observable, the plan step is synchronous. |
 | 9 | `reviewing` | `workflow_steps.kind/state` | The run's (or, for a master run, its active task's child run's) first non-terminal step has `kind='review'`. Verdict facts come from `review_run` via `workflow_steps.review_run_id`. A durable `review_policy_skipped` checkpoint means review was skipped by policy — render that, not "approved". |
@@ -296,7 +325,8 @@ Reference implementation of the derivation that exists today:
 `frontend/src/renderer/hooks/useWorkflowExecutionStatus.ts`
 (`useWorkflowStatusLabel`). It orders the checks as: human-required question →
 `needs_attention` → `completed` → capacity wait → plan status → active child
-step kind → "executing task X of Y".
+step kind → "executing task X of Y". Note the first check: that ordering
+**differs** from the table above and must change — §8.4.
 
 ### 5.1 Step-state → UI, for the per-step timeline
 
@@ -305,7 +335,7 @@ step kind → "executing task X of Y".
 | `pending` | not started, dependency unmet (`depends_on_step_id`) |
 | `ready` | eligible, not dispatched |
 | `running` | active — this is the step that names `reviewing`/`fixing`/`verifying`/`running` above |
-| `waiting` | parked (capacity, ambiguity, or post-restart blind move) |
+| `waiting` | parked. For a `review` step the **common case is a `changes_requested` rest** — the verdict deliberately rests the step here so `maybeDispatchFix` can pick it up (`cascade.go:70-74`); it is not an error state. Otherwise: capacity (§8.8), ambiguity (§6.3), or — for `plan`/`verify`/`advance` only — the post-restart blind move (§4.8). |
 | `completed` / `failed` / `cancelled` | terminal |
 
 ---
@@ -322,13 +352,39 @@ step kind → "executing task X of Y".
 | `workflow_wake_schedules.known_reset_at` | Real provider cooldown, or NULL. **Never fabricate a reset time from this field being NULL.** |
 | `workflow_wake_schedules.status` / `claimed_by` / `claimed_at` | CAS claim + lease. Not user-facing. |
 | `workflow_wake_schedules.last_error` | Last wake-firing error. Diagnostic only. |
-| `workflow_checkpoints.durable_phase` | The structured wait *kind* when there is no wake row: `waiting_for_branch`, `dirty_worktree`, `planner_capacity_wait`, `worker_dispatch_ambiguous`, `review_dispatch_ambiguous`, `fix_dispatch_ambiguous`. |
+| `workflow_checkpoints.durable_phase` | The structured *kind* of the stop. See the partition below — a checkpoint is **not** mutually exclusive with a wake row, but it does not imply one either. |
+| `workflow_checkpoints.retry_state` | The structured detail for the wait. For `waiting_for_branch` it is a marshalled `workflow.BranchWait` — `{branch, repoPath, heldByWorkflowRunId, heldBySessionId}` (struct at `branch_execution.go:376-381`, marshalled into the checkpoint at `:141`, read back by `branchWaitFromCheckpoints` (`:409`) from the **newest** such checkpoint). This is the field s4 renders "Waiting for branch X — currently used by WF-Y" from; never parse `next_action` prose for it. Surfaced as API `WorkflowRunView.branchWait`, and populated only while the run is actually `waiting`, so a stale checkpoint from a resolved wait is never shown as current. |
 | `workflow_checkpoints.next_action` | Human-readable prose for the same wait, prefixed by kind — e.g. `waiting_for_branch: …`, `waiting_for_capacity: planner unavailable (…)`, `waiting_for_decision: <classification> — <question>`. |
 | `workflow_attempts.retry_after` | Per-attempt provider retry hint. |
 
 All three zero-value together (`nextWakeAt` NULL, `waitReason` `""`,
 `wakeAttemptCount` 0) when no wake is open — that is "no scheduled retry", not
-"unknown".
+"unknown". **"No scheduled retry" is not the same as "not waiting"**: five of the
+seven phases below have no wake row, and one of them — `review_capacity_retry` —
+leaves the run genuinely `waiting` while it has none.
+
+#### `durable_phase` partition: which stops pair with a wake
+
+| `durable_phase` | Run lands in | Wake row? | Written by |
+| --- | --- | --- | --- |
+| `waiting_for_branch` | `waiting` | **Yes** — `ReasonBranchLock`, but **best-effort**: a nil scheduler or a `Schedule` error only logs, so the checkpoint can exist alone (§5 row 5 accepts either signal) | `markRunWaitingForBranch` writes both on the same path (`branch_execution.go:118`; the wake call is at `:146`) |
+| `planner_capacity_wait` | stays `pending` (deliberately — several master-plan paths gate on `Pending`) | **Yes** — `ReasonPlannerCapacity` | `parkPlanForCapacity` (`master_coordinator.go:248-267`) |
+| `review_capacity_retry` | `waiting` (step **and** run) | **No** | `handleReviewerCapacityStall` (`review_progress.go:305-353`) — see §8.8 |
+| `dirty_worktree` | `needs_attention` | **No, by design** — "nothing about waiting makes someone's uncommitted changes go away" | `markRunDirtyWorktree` (`branch_execution.go:154`) |
+| `worker_dispatch_ambiguous` | `needs_attention` | **No** | `adoptOrMarkAmbiguous` (`dispatch.go`) |
+| `review_dispatch_ambiguous` | `needs_attention` | **No** | `review_dispatch.go` |
+| `fix_dispatch_ambiguous` | `needs_attention` | **No** | `fix_dispatch.go` |
+
+So: only `waiting_for_branch` and `planner_capacity_wait` are genuine
+wait-with-a-wake kinds. `review_capacity_retry` is a wait **without** one. The
+bottom four rows are `needs_attention` phases, not wait kinds — they are listed
+here because they share the `durable_phase`/`next_action` carriers, and their
+reason-carrier role is documented in §6.3.
+
+A pure capacity wait may also have **no checkpoint at all**:
+`markRunWaitingForCapacity` (`dispatch.go:249-257`) moves the run to `waiting`
+and schedules the wake without writing one. For those, `waitReason` is the only
+signal — which is exactly why §5 row 6 keys on the wake first.
 
 ### 6.2 `error_class`
 
@@ -384,7 +440,8 @@ Plus, when the step's attempt failed, `workflow_attempts.error_class` on the
 latest attempt of the latest step gives the typed cause, and
 `workflow_checkpoints.retry_state` (JSON) carries the structured payload — the
 `VerifyResult` for a verify failure, the routing decision for a routing
-checkpoint, the session-lifecycle record for `session_lifecycle_decision`.
+checkpoint, the session-lifecycle record for `session_lifecycle_decision`, and
+the `BranchWait` struct for `waiting_for_branch` (§6.1).
 
 For a **master** run, `workflow_plans.error_class` and
 `workflow_plans.validation_json` carry planner-side reasons, and
@@ -445,6 +502,24 @@ These are real properties of the engine as it stands, not TODOs invented here.
    from this document.
 4. **`waiting_for_decision` is a sub-case of `waiting`,** not a 14th state. Its
    carrier is `workflow_questions.state='human_required'`.
+   **It also changes precedence.** `useWorkflowStatusLabel`
+   (`frontend/src/renderer/hooks/useWorkflowExecutionStatus.ts:61-64`) checks the
+   human-required question *first*, before `needs_attention` and `completed`:
+
+   ```ts
+   const hasHumanRequiredQuestion = (workflow.questions ?? []).some((q) => q.state === "human_required");
+   if (hasHumanRequiredQuestion) return "waiting_for_decision";
+   if (workflow.run.state === "needs_attention") return "needs_attention";
+   if (workflow.run.state === "completed") return "completed";
+   ```
+
+   §5 puts terminal states and `needs_attention` first instead, so a **completed
+   run with a lingering `human_required` question** renders `waiting_for_decision`
+   today but `completed` under this contract. That is deliberate — a durable
+   terminal run state is a stronger fact than an unanswered question that no
+   longer blocks anything — but it **is** a behaviour change s4 has to make, not
+   a description of current behaviour. If s4 decides the existing ordering is
+   better, change §5 here first so s2 and s4 stay on one contract.
 5. **`integration_failed` is not a valid `workflow_attempts.error_class`.**
    It exists only in Go and on the integration view (§6.2).
 6. **No CDC events.** Every workflow read is a poll. Non-terminal runs refetch
@@ -453,3 +528,26 @@ These are real properties of the engine as it stands, not TODOs invented here.
    live session. The UI must surface the
    `worker_left_running_on_cancel` checkpoint rather than implying the worker
    was killed.
+8. **A reviewer capacity stall parks the run with no wake row.**
+   `handleReviewerCapacityStall` (`review_progress.go:305-353`) records the
+   provider health failure, cancels the `review_run`, moves both the review step
+   and the run to `waiting`, and writes a `review_capacity_retry` checkpoint —
+   but it schedules **no** wake. (Its own comment notes the *next* dispatch
+   attempt would take `markRunWaitingForCapacity`'s `reviewer_capacity` wake
+   path, but that only happens once something re-drives the run.) The durable
+   state is therefore:
+
+   ```
+   workflow_runs.state           = 'waiting'
+   workflow_steps(review).state  = 'waiting'
+   newest durable_phase          = 'review_capacity_retry'
+   workflow_wake_schedules       = (no open row)
+   ```
+
+   Keyed on the wake alone, §5 row 6 could not fire and the run would fall
+   through to plain `waiting` with "no scheduled retry" — while actually being a
+   provider-capacity wait. Row 6 therefore matches this checkpoint too. The
+   residual gap s2/s4 must still handle honestly: **there is no retry time to
+   show**, because there genuinely is none. The run resumes only on the next
+   `GetRun`/`ContinueRun` poll or a boot `Reconcile`. Render the capacity wait
+   without a "next retry"; do not synthesize one.
