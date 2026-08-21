@@ -523,7 +523,12 @@ func (c *Coordinator) maybeScheduleAutonomousHeartbeat(ctx stdctx.Context, runID
 	// needs_attention and all of them are things AO finishes by itself, but
 	// with no wake left behind nothing ever called back. Only a stop AO cannot
 	// remediate stops the heartbeat now.
-	if run.State == domain.WorkflowRunNeedsAttention && !c.stopIsSelfRemediable(ctx, run) {
+	// Checkpoint 8P-E.13A.2 widens Phase 7's rule from "self-remediable" to
+	// "not the user's problem". The third kind of stop — one AO stopped on but
+	// could not name — used to end the heartbeat as hard as an exhausted fix
+	// budget, which is how a run AO had already recovered from stayed silent:
+	// nothing was waiting on a person, and nothing was going to call back.
+	if run.State == domain.WorkflowRunNeedsAttention && c.stopIsHumanOwned(ctx, run) {
 		return
 	}
 	if !policyForRun(run).Execution.AutonomousMode {
@@ -581,7 +586,23 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 		if err != nil {
 			return err
 		}
-		if child.Run.State == domain.WorkflowRunRunning || child.Run.State == domain.WorkflowRunWaiting {
+		// Checkpoint 8P-E.13A.2: needs_attention joins running/waiting here when
+		// the child's stop is not a human decision. A child recovered from a
+		// branch queue can have a completed work step and a still-pending review
+		// step underneath a stale stop, and cycle 1's review unblock only ever
+		// happens through ContinueRun (advanceReviewFixCycle's
+		// includeCycle1Unblock) — so refusing to call it for a needs_attention
+		// child is what left the run permanently one transition short of Review.
+		// A child genuinely waiting on a person is excluded, unchanged.
+		childCanAdvance := child.Run.State == domain.WorkflowRunRunning ||
+			child.Run.State == domain.WorkflowRunWaiting ||
+			(child.Run.State == domain.WorkflowRunNeedsAttention && !c.stopIsHumanOwned(ctx, child.Run))
+		if childCanAdvance {
+			// The child is progressing, so a parent still mirroring an older
+			// stop of this child's is mirroring something that is no longer
+			// true. Clearing it here also restores the parent's own autonomous
+			// heartbeat, which the mirror had stopped.
+			run = c.clearMirroredChildStop(ctx, run)
 			var workDone, reviewPending bool
 			for _, s := range child.Steps {
 				if s.Step.Kind == domain.WorkflowStepWork && s.Step.State == domain.WorkflowStepCompleted {
@@ -644,7 +665,14 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 			// the stop onto the parent only when the child's own stop is one AO
 			// cannot handle itself — otherwise the parent stays running and its
 			// heartbeat keeps driving the child forward.
-			if c.stopIsSelfRemediable(ctx, child.Run) {
+			// Checkpoint 8P-E.13A.2: the test is "is this the user's problem?",
+			// not "is it on a scheduled retry?". A child stopped for a reason AO
+			// could not even name is not a decision anyone can be asked to make
+			// (ClassifyAttention says the same), and mirroring it onto the
+			// parent both showed the user an unactionable card and killed the
+			// parent's heartbeat — the only thing left that could drive the
+			// child out of that state.
+			if !c.stopIsHumanOwned(ctx, child.Run) {
 				return nil
 			}
 			if run.State == domain.WorkflowRunRunning {

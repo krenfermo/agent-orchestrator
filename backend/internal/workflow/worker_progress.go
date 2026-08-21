@@ -262,6 +262,18 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 	}
 	step.State = decision.NextStep
 
+	// Checkpoint 8P-E.13A.2: a decision that moves the run FORWARD (work
+	// completed, so: start the review) cannot be applied on top of a stale
+	// needs_attention — needs_attention -> waiting is not a legal transition,
+	// so the update below would be skipped as a benign race and the run would
+	// stay stopped with a completed work step and a "start_review" checkpoint
+	// under it, which is precisely the deadlock this checkpoint fixes. The
+	// worker having produced git-verified work is itself the proof that
+	// whatever parked the run has been remediated; a stop that is a human
+	// decision is still never cleared (see clearResolvedStop).
+	if decision.NextRun != domain.WorkflowRunNeedsAttention {
+		run = c.clearResolvedStop(ctx, run, "the worker produced verifiable work after the run was parked")
+	}
 	if domain.ValidWorkflowRunTransition(run.State, decision.NextRun) {
 		if _, err := c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, decision.NextRun, now); err != nil {
 			return step, err

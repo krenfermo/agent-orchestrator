@@ -174,6 +174,17 @@ func (c *Coordinator) dispatchFromPending(ctx stdctx.Context, run domain.Workflo
 	}
 
 	now := c.clock()
+	// Checkpoint 8P-E.13A.2: the same argument as 8N.1's below, for the other
+	// state a blocked run can be parked in. A run that reached this line has
+	// passed the capacity check AND holds its branch lock, so whatever stopped
+	// it earlier is demonstrably gone — but if that stop was recorded as
+	// needs_attention (a legacy branch wait, or any stop AO could not name),
+	// nothing here used to write the run row back, and needs_attention is a
+	// one-way street for the forward transitions: only -> running is legal, so
+	// this step's own later completion (-> waiting) would be dropped as an
+	// invalid transition and the run would sit stopped over completed work.
+	// Human decisions are never cleared here (see clearResolvedStop).
+	run = c.clearResolvedStop(ctx, run, "the work step dispatched successfully")
 	// Checkpoint 8N.1: a successful (non-waiting) dispatch decision means
 	// capacity genuinely came back — if the run was parked in Waiting (either
 	// from a prior capacity wait on this exact step, or from this run's own

@@ -372,21 +372,128 @@ func (c *Coordinator) recordAttentionStop(ctx stdctx.Context, run domain.Workflo
 	}
 }
 
-// stopIsSelfRemediable reports whether a run currently parked in
-// needs_attention is one AO can still drive forward by itself — the guard
-// maybeScheduleAutonomousHeartbeat needs so a retryable stop keeps its
-// heartbeat instead of going silent forever.
+// stopIsHumanOwned reports whether a run parked in needs_attention stopped for
+// a reason that names something only a person can do (a HumanAction in the
+// registry above). It is the guard maybeScheduleAutonomousHeartbeat and the
+// master reconcile need: a stop AO owns keeps its heartbeat instead of going
+// silent forever.
 //
 // It reads only the two durable carriers (newest checkpoint, newest attempt),
 // never GetRun, so it is safe to call from inside the reconcile path GetRun
 // itself drives.
-func (c *Coordinator) stopIsSelfRemediable(ctx stdctx.Context, run domain.WorkflowRun) bool {
+//
+// It is deliberately NOT the negation of "self-remediable". There are three
+// kinds of stop, not two: one AO retries by itself, one a person must resolve,
+// and one AO could not name at all (unclassifiedStop). ClassifyAttention
+// already refuses to bill an unnamed stop to the user — it reports
+// AttentionInternal — so the resume machinery must not treat it as a human
+// decision either. Before Checkpoint 8P-E.13A.2 it did, by asking only
+// "is this self-remediable?", and an unnamed stale stop therefore ended
+// autonomy exactly as hard as an exhausted fix budget.
+func (c *Coordinator) stopIsHumanOwned(ctx stdctx.Context, run domain.WorkflowRun) bool {
 	_, disp, ok := c.stopReason(ctx, run)
-	return ok && disp.SelfRemediable
+	return ok && disp.HumanAction != ""
+}
+
+// attentionClearedPhase is the durable phase of the checkpoint clearResolvedStop
+// writes. It is deliberately not a canonical attention reason: it records a
+// resume, not a stop, and a run that stops again always writes its own reason.
+const attentionClearedPhase = "attention_cleared"
+
+// clearResolvedStop un-parks a run whose needs_attention is now stale, and is
+// Checkpoint 8P-E.13A.2's answer to the deadlock this file's vocabulary made
+// visible but did not resolve.
+//
+// The situation it exists for: a run parks in needs_attention on something AO
+// remediates itself (a queued branch, and — for rows written before the branch
+// wait became a Waiting state — any legacy misfiling of the same), AO then
+// genuinely remediates it, and nothing ever writes the run row back. That
+// matters far beyond cosmetics, because needs_attention is not a state the
+// forward transitions can leave: ValidWorkflowRunTransition allows
+// needs_attention -> running only, so observeWorkStep's completion transition
+// (-> waiting) is silently dropped as invalid and the run stays stopped with a
+// completed work step underneath it.
+//
+// The rule is narrow on purpose. Clearing requires BOTH:
+//
+//  1. the caller has just proven forward progress — this function is only ever
+//     called from a site that has already made the dispatch/observation
+//     succeed, never speculatively from a poll; and
+//  2. the recorded stop is not a human decision. A stop with a HumanAction
+//     (fix_budget_exhausted, dirty_worktree, an auth failure, a child that
+//     needs a decision) is left exactly where it is.
+//
+// evidence is the caller's one-line statement of what it proved, recorded on
+// the checkpoint so the resume is auditable rather than a state change nobody
+// can account for afterwards.
+func (c *Coordinator) clearResolvedStop(ctx stdctx.Context, run domain.WorkflowRun, evidence string) domain.WorkflowRun {
+	if run.State != domain.WorkflowRunNeedsAttention {
+		return run
+	}
+	reason, disp, ok := c.stopReason(ctx, run)
+	if ok && disp.HumanAction != "" {
+		return run
+	}
+	if !ok || reason == "" {
+		reason = unclassifiedStop
+	}
+	return c.unparkRun(ctx, run, reason, evidence)
+}
+
+// unparkRun performs the needs_attention -> running write and its audit
+// checkpoint. Split out from clearResolvedStop so clearMirroredChildStop can
+// reuse the exact same write for the one human-owned reason that is a mirror
+// of someone else's state rather than a decision of this run's own.
+func (c *Coordinator) unparkRun(ctx stdctx.Context, run domain.WorkflowRun, reason, evidence string) domain.WorkflowRun {
+	now := c.clock()
+	if _, err := c.store.UpdateWorkflowRunState(ctx, run.ID,
+		domain.WorkflowRunNeedsAttention, domain.WorkflowRunRunning, now); err != nil {
+		if c.log != nil {
+			c.log.Warn("workflow: clearing a resolved stop failed", "run", run.ID, "reason", reason, "err", err)
+		}
+		return run
+	}
+	run.State = domain.WorkflowRunRunning
+	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+		ID:             "wfc-" + c.newID(),
+		WorkflowRunID:  run.ID,
+		ProjectID:      run.ProjectID,
+		NextAction:     "resumed automatically: " + evidence + " (cleared stop: " + reason + ")",
+		DurablePhase:   attentionClearedPhase,
+		PayloadVersion: "v1",
+		RetryState:     "{}",
+		CreatedAt:      now,
+	}); err != nil && c.log != nil {
+		c.log.Warn("workflow: recording a cleared stop failed", "run", run.ID, "reason", reason, "err", err)
+	}
+	return run
+}
+
+// clearMirroredChildStop releases a master run from a stop that was never its
+// own: ReasonChildNeedsAttention is a mirror of a child's state, recorded so
+// the parent does not go silent while its task is stopped. Once that child is
+// demonstrably progressing again the mirrored condition is simply false, and
+// leaving it in place is what kept a recovered child's parent showing
+// "Te necesita" — and, because the mirror is a human-owned reason, killed the
+// parent's own autonomous heartbeat, which is the only thing that drives the
+// child forward.
+//
+// Only the mirror is cleared. A parent stopped for any other reason (a failed
+// integration, an exhausted planner, a child that FAILED) is untouched, and a
+// child that is itself still stopped on a human decision never reaches here.
+func (c *Coordinator) clearMirroredChildStop(ctx stdctx.Context, run domain.WorkflowRun) domain.WorkflowRun {
+	if run.State != domain.WorkflowRunNeedsAttention {
+		return run
+	}
+	reason, _, ok := c.stopReason(ctx, run)
+	if !ok || reason != ReasonChildNeedsAttention {
+		return run
+	}
+	return c.unparkRun(ctx, run, reason, "the task this objective was waiting on resumed")
 }
 
 // stopReason resolves the canonical reason for a stopped run from its durable
-// carriers alone. stopIsSelfRemediable is the boolean view of it; branch-lock
+// carriers alone. stopIsHumanOwned is the boolean view of it; branch-lock
 // retention (branch_lock_recovery.go) needs the reason itself, so it can say
 // which stop is holding a branch rather than merely that one is.
 func (c *Coordinator) stopReason(ctx stdctx.Context, run domain.WorkflowRun) (string, AttentionDisposition, bool) {

@@ -476,6 +476,12 @@ func (c *Coordinator) dispatchReviewFromPending(
 	harness domain.ReviewerHarness,
 ) (domain.WorkflowStep, error) {
 	now := c.clock()
+	// Checkpoint 8P-E.13A.2: same fix as dispatchFromPending (dispatch.go) for
+	// a run parked in needs_attention rather than Waiting — a reviewer that is
+	// actually being launched is proof the run is moving again, so a stale,
+	// non-human stop must not outlive it and report "needs attention" over a
+	// running review.
+	run = c.clearResolvedStop(ctx, run, "the review step dispatched successfully")
 	// Checkpoint 8N.1: same fix as dispatchFromPending (dispatch.go) — a
 	// successful (non-waiting) review dispatch decision means capacity is
 	// genuinely back, so a run parked in Waiting must move to Running here.
