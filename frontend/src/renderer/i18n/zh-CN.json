@@ -1441,6 +1441,8 @@
 	"board.workflows": "工作流",
 	"board.workflowsAria": "该项目的活动工作流",
 	"board.lastActivity": "最后活动 {{time}}",
+	"board.runId": "运行 {{runId}}",
+	"board.runIdLabel": "工作流运行 ID",
 	"board.taskOfTotal": "任务 {{current}} / {{total}}",
 	"board.tasksCompletedOfTotal": "已完成 {{done}} / {{total}} 个任务",
 	"board.needsYou": "需要你处理",

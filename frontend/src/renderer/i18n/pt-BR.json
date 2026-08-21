@@ -1474,6 +1474,8 @@
 	"board.workflows": "Fluxos de trabalho",
 	"board.workflowsAria": "Fluxos de trabalho ativos deste projeto",
 	"board.lastActivity": "Última atividade {{time}}",
+	"board.runId": "Execução {{runId}}",
+	"board.runIdLabel": "ID de execução do fluxo de trabalho",
 	"board.taskOfTotal": "Tarefa {{current}} de {{total}}",
 	"board.tasksCompletedOfTotal": "{{done}} de {{total}} tarefas concluídas",
 	"board.needsYou": "Precisa de você",

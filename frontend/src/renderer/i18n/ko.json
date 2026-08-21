@@ -1459,6 +1459,8 @@
 	"board.workflows": "워크플로",
 	"board.workflowsAria": "이 프로젝트의 활성 워크플로",
 	"board.lastActivity": "마지막 활동 {{time}}",
+	"board.runId": "실행 {{runId}}",
+	"board.runIdLabel": "워크플로 실행 ID",
 	"board.taskOfTotal": "작업 {{current}} / {{total}}",
 	"board.tasksCompletedOfTotal": "{{total}}개 중 {{done}}개 작업 완료",
 	"board.needsYou": "확인 필요",

@@ -1490,6 +1490,7 @@
 	"board.workflowsAria": "Active workflows for this project",
 	"board.lastActivity": "Last activity {{time}}",
 	"board.runId": "Run {{runId}}",
+	"board.runIdLabel": "Workflow run ID",
 	"board.taskOfTotal": "Task {{current}} of {{total}}",
 	"board.tasksCompletedOfTotal": "{{done}} of {{total}} tasks done",
 	"board.needsYou": "Needs you",

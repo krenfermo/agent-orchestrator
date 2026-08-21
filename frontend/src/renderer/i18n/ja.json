@@ -1459,6 +1459,8 @@
 	"board.workflows": "ワークフロー",
 	"board.workflowsAria": "このプロジェクトのアクティブなワークフロー",
 	"board.lastActivity": "最終アクティビティ {{time}}",
+	"board.runId": "実行 {{runId}}",
+	"board.runIdLabel": "ワークフロー実行 ID",
 	"board.taskOfTotal": "タスク {{current}} / {{total}}",
 	"board.tasksCompletedOfTotal": "{{total}} 件中 {{done}} 件のタスクが完了",
 	"board.needsYou": "要対応",

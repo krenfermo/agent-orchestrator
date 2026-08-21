@@ -110,7 +110,11 @@ export function WorkflowBoardCard({ workflow, onOpen }: { workflow: BoardWorkflo
 					.join(" · ")}
 			</p>
 
-			<p className="font-mono text-[10px] text-muted-foreground/70" data-testid="workflow-run-id">
+			<p
+				className="font-mono text-[10px] text-muted-foreground/70"
+				data-testid="workflow-run-id"
+				title={t("board.runIdLabel")}
+			>
 				{t("board.runId", { runId: workflow.workflowId })}
 			</p>
 

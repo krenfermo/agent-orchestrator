@@ -1459,6 +1459,8 @@
 	"board.workflows": "Workflows",
 	"board.workflowsAria": "Aktive Workflows dieses Projekts",
 	"board.lastActivity": "Letzte Aktivität {{time}}",
+	"board.runId": "Lauf {{runId}}",
+	"board.runIdLabel": "Workflow-Lauf-ID",
 	"board.taskOfTotal": "Aufgabe {{current}} von {{total}}",
 	"board.tasksCompletedOfTotal": "{{done}} von {{total}} Aufgaben erledigt",
 	"board.needsYou": "Braucht dich",
