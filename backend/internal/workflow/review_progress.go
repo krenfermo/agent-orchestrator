@@ -126,7 +126,19 @@ func (c *Coordinator) observeReviewStep(ctx stdctx.Context, run domain.WorkflowR
 				}
 			}
 			policy := policyForRun(run)
-			if cycleCount > 0 && cycleCount >= policy.MaxFixCycles {
+			// Checkpoint 8P-E.12: this comparison used to be `>=`, while
+			// maybeDispatchFix's own budget guard (cascade.go) used `>`. With
+			// MaxFixCycles=3 the two disagreed at exactly cycle 3: this
+			// function moved the run to needs_attention with
+			// next_action "human_attention", and the very same cascade call
+			// then dispatched fix cycle 3 anyway — which is legal, since the
+			// policy allows three fix cycles. The run therefore sat in
+			// needs_attention while AO kept working, which is precisely the
+			// "human_attention does not mean the user is needed" report this
+			// checkpoint exists to end. MaxFixCycles is documented as how many
+			// fix cycles the loop MAY run, so `>` is the correct reading and
+			// the two guards now agree exactly.
+			if cycleCount > 0 && cycleCount > policy.MaxFixCycles {
 				return c.recordReviewOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunNeedsAttention,
 					"human_attention", string(reviewRun.Verdict), domain.WorkflowErrorFixBudgetExhausted)
 			}

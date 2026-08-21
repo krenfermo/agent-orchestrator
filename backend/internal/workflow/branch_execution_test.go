@@ -547,3 +547,31 @@ func TestCommitFailureParksTheRunAndKeepsTheBranch(t *testing.T) {
 		t.Fatalf("held = %d, want the branch still locked to this run", len(held))
 	}
 }
+
+// Checkpoint 8P-E.12 §4: a master run's child task must commit and complete on
+// its own exactly like a standalone run. A child that stopped to ask for a
+// commit would strand the whole objective behind a task the user has to nudge
+// by hand — the "AO still makes me type 'commit this'" report.
+func TestChildOfMasterCommitsAndCompletesWithoutAsking(t *testing.T) {
+	locks := newFakeBranchLocks()
+	committer := &fakeCommitter{}
+	c, store, runID := directBranchVerifyFixture(t, domain.GitPolicy{LocalCommit: domain.GitActionAutomatic, Push: domain.GitActionNever}, locks, committer)
+
+	parentID := "wf-master"
+	taskID := "task-2"
+	run := store.runs[runID]
+	run.ParentWorkflowID = &parentID
+	run.PlannedTaskID = &taskID
+	store.runs[runID] = run
+
+	detail, err := c.GetRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if detail.Run.State != domain.WorkflowRunCompleted {
+		t.Fatalf("child run state = %q, want completed", detail.Run.State)
+	}
+	if len(committer.commits) != 1 {
+		t.Fatalf("commits = %#v, want exactly one autonomous local commit on the child run", committer.commits)
+	}
+}

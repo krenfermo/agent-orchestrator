@@ -242,6 +242,20 @@ type WorkflowRunView struct {
 	// while the run is genuinely waiting on a branch, so the board renders a
 	// real wait or nothing -- never a fabricated "inactive".
 	BranchWait *WorkflowBranchWaitView `json:"branchWait,omitempty"`
+	// Phase, Attention, AttentionReason and AttentionAction are Checkpoint
+	// 8P-E.12's derived lifecycle projection, computed by the same
+	// workflow.DeriveLifecycle the project Board uses so the two surfaces can
+	// never disagree about what a run is doing. Phase is the mapping
+	// document's vocabulary; Attention separates a problem AO is still
+	// handling itself from one that genuinely needs the user.
+	Phase           string `json:"phase" enum:"queued,planning,running,reviewing,fixing,verifying,waiting,waiting_for_capacity,blocked,needs_attention,completed,failed,cancelled"`
+	Attention       string `json:"attention,omitempty" enum:"ao_internal,human_decision"`
+	AttentionReason string `json:"attentionReason,omitempty"`
+	AttentionAction string `json:"attentionAction,omitempty"`
+	// LastActivityAt is the workflow's own newest durable timestamp — never the
+	// worker session's activity state, because an idle worker during a review
+	// is not an idle workflow.
+	LastActivityAt time.Time `json:"lastActivityAt"`
 }
 
 // WorkflowBranchWaitView names the branch a run is queued on and the workflow
@@ -460,6 +474,15 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 			HeldBySessionID:     detail.BranchWait.HeldBySessionID,
 		}
 	}
+	// Checkpoint 8P-E.12: one derivation, two surfaces. The Board and this
+	// detail view both read workflow.DeriveLifecycle, so a run can never be
+	// "Reviewing" on one screen and "Inactive" on the other.
+	life := workflowcore.DeriveLifecycle(workflowcore.LifecycleInput{Detail: detail, Questions: detail.Questions})
+	runView.Phase = string(life.Phase)
+	runView.Attention = string(life.Attention)
+	runView.AttentionReason = life.AttentionReason
+	runView.AttentionAction = life.AttentionAction
+	runView.LastActivityAt = life.LastActivityAt
 	view := WorkflowRunDetailView{Run: runView, Steps: steps}
 	if detail.Plan != nil {
 		pv := WorkflowPlanView{Status: detail.Plan.Status, ApprovalMode: detail.Plan.ApprovalMode, Provider: detail.Plan.Provider, Model: detail.Plan.Model, PromptContextVersion: detail.Plan.PromptContextVersion, PlanHash: detail.Plan.PlanHash, ErrorClass: detail.Plan.ErrorClass}
@@ -590,6 +613,7 @@ func (c *WorkflowsController) runVisible(ctx context.Context, id string, current
 // Register mounts the workflow routes on the supplied router.
 func (c *WorkflowsController) Register(r chi.Router) {
 	r.Post("/projects/{projectId}/workflows", c.create)
+	r.Get("/projects/{projectId}/board", c.board)
 	r.Get("/workflows/{workflowId}", c.get)
 	r.Get("/workflows", c.list)
 	r.Post("/workflows/{workflowId}/cancel", c.cancel)

@@ -421,6 +421,14 @@ func (c *Coordinator) maybeScheduleAutonomousHeartbeat(ctx stdctx.Context, runID
 			}
 		}
 	}
+	// Checkpoint 8P-E.12: never add a heartbeat on top of a more specific open
+	// wake. NextForRun surfaces the soonest one, and the heartbeat's short
+	// interval would usually win it — hiding "waiting for reviewer capacity,
+	// next retry 14:02" behind a generic "autonomous progress". The specific
+	// wake already resumes the run, so the heartbeat would buy nothing anyway.
+	if next, err := c.wakeScheduler.NextForRun(ctx, domain.WorkflowRunID(runID)); err == nil && next != nil && next.Reason != wake.ReasonAutonomousProgress {
+		return
+	}
 	c.scheduleWake(ctx, run, nil, wake.ReasonAutonomousProgress, "")
 }
 

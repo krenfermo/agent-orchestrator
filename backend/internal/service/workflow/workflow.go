@@ -5,6 +5,7 @@ package workflow
 
 import (
 	"context"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
@@ -58,6 +59,18 @@ type PlannerManager interface {
 type ExecutionPolicyApplier interface {
 	ApplyExecutionPolicySnapshot(ctx context.Context, runID string, userID domain.UserID, autonomousOverride *bool) error
 }
+
+// BoardReader is Checkpoint 8P-E.12's project Board projection. Optional
+// (type-asserted by the controller, mirroring PlannerManager) so a Manager
+// implementation or test double that predates it keeps compiling unchanged.
+type BoardReader interface {
+	ProjectBoard(ctx context.Context, projectID string, retention time.Duration) ([]workflowcore.BoardEntry, error)
+}
+
+// BoardTerminalRetention is how long a finished run stays on the Board. A run
+// that vanishes the instant it succeeds is indistinguishable from one that
+// never ran, so completion is worth showing for a while.
+const BoardTerminalRetention = 30 * time.Minute
 
 // Service is the API-facing workflow service. It delegates to the core coordinator.
 type Service struct {
@@ -113,6 +126,11 @@ func (s *Service) CancelRun(ctx context.Context, runID string) (workflowcore.Run
 // dispatches its work step's Codex worker (idempotently).
 func (s *Service) StartRun(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
 	return s.coordinator.StartRun(ctx, runID)
+}
+
+// ProjectBoard implements BoardReader.
+func (s *Service) ProjectBoard(ctx context.Context, projectID string, retention time.Duration) ([]workflowcore.BoardEntry, error) {
+	return s.coordinator.ProjectBoard(ctx, projectID, retention)
 }
 
 // ContinueRun dispatches the review step's real Claude reviewer once the

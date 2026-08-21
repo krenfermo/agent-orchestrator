@@ -399,6 +399,19 @@ type RunDetail struct {
 	// board shows a real wait or nothing at all — never a fabricated
 	// "inactive".
 	BranchWait *BranchWait
+	// LatestCheckpointPhase/LatestCheckpointAt are the durable_phase and
+	// created_at of the newest workflow_checkpoints row for this run
+	// (Checkpoint 8P-E.12). They are the machine-readable half of the
+	// needs_attention/wait reason pair the mapping document describes, and the
+	// timestamp the Board reports as "Last activity" — deliberately the
+	// workflow's own last durable act, never the worker session's activity
+	// state, because an idle worker during a review is not an idle workflow.
+	LatestCheckpointPhase string
+	LatestCheckpointAt    time.Time
+	// Questions is the run's durable question list in creation order. Empty
+	// means the run has never asked anything; it is what DeriveLifecycle reads
+	// to decide whether a stop is genuinely the user's to resolve.
+	Questions []domain.WorkflowQuestion
 }
 
 // SessionLifecycleAuditEntry is one durable session-lifecycle decision plus
@@ -640,6 +653,10 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 			if cp.NextAction != "" {
 				detail.NextAction = cp.NextAction
 			}
+			if !cp.CreatedAt.Before(detail.LatestCheckpointAt) {
+				detail.LatestCheckpointPhase = cp.DurablePhase
+				detail.LatestCheckpointAt = cp.CreatedAt
+			}
 			if cp.DurablePhase == sessionLifecycleDurablePhase {
 				if rec, ok := decodeSessionLifecycleRecord(cp.RetryState); ok {
 					detail.SessionLifecycle = append(detail.SessionLifecycle, SessionLifecycleAuditEntry{
@@ -658,6 +675,9 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 	// disappears on its own on the very next GetRun call, no second manual
 	// step required.
 	if c.questionsStore != nil {
+		if all, qerr := c.questionsStore.ListWorkflowQuestionsByRun(ctx, runID); qerr == nil {
+			detail.Questions = all
+		}
 		if open, oerr := c.questionsStore.ListOpenWorkflowQuestionsByRun(ctx, runID); oerr == nil && len(open) > 0 {
 			detail.NextAction = nextActionForOpenQuestion(open[0])
 		} else if waitingForCapacity != "" {
@@ -691,6 +711,19 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 		if cps, cperr := c.store.ListWorkflowCheckpoints(ctx, runID); cperr == nil {
 			detail.BranchWait = branchWaitFromCheckpoints(cps)
 		}
+	}
+
+	// Checkpoint 8P-E.12: a standalone autonomous run needs the same headless
+	// heartbeat a master run has had since 8P-D. Without this, the only thing
+	// driving a single-task run's review->fix->verify cascade was the
+	// renderer's 2s poll, so closing the workflow page silently stalled the
+	// run until the next daemon restart — the "it says Inactive and nothing
+	// ever happens" report this checkpoint exists to fix. A child run of a
+	// master is deliberately excluded: its parent's own heartbeat already
+	// drives it through reconcileMasterTasks, and a second wake would just
+	// double-drive the same cascade.
+	if detail.Run.ParentWorkflowID == nil {
+		c.maybeScheduleAutonomousHeartbeat(ctx, runID)
 	}
 
 	return detail, nil

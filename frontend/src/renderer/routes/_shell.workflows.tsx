@@ -64,7 +64,11 @@ export function WorkflowsList() {
 	const noProjects = !projectsLoading && projects.length === 0;
 
 	return (
-		<div className="mx-auto flex max-w-2xl flex-col gap-6 p-6">
+		// Owns its own vertical scroll for the same reason the detail route
+		// does: the shell hands routes a `min-h-0 flex-1` box with no scroll of
+		// its own, so a long workflow list ran off the bottom of the window.
+		// See that route for why `[&>*]:shrink-0` is required here.
+		<div className="mx-auto flex h-full min-h-0 max-w-2xl flex-col gap-6 overflow-y-auto break-words p-6 [&>*]:shrink-0">
 			<h1 className="text-lg font-semibold">{t("shell.workflows")}</h1>
 
 			{noProjects ? (

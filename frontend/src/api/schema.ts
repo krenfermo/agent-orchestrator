@@ -674,6 +674,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{projectId}/board": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Project Board: every top-level workflow run projected onto the lifecycle vocabulary */
+        get: operations["getProjectBoard"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{projectId}/workflows": {
         parameters: {
             query?: never;
@@ -3986,6 +4003,54 @@ export interface components {
             /** Format: date-time */
             startedAt: string;
         };
+        WorkflowBoardEntryView: {
+            /** @enum {string} */
+            attention?: "ao_internal" | "human_decision";
+            attentionAction?: string;
+            attentionReason?: string;
+            /** Format: int64 */
+            currentTaskOrdinal?: number;
+            currentTaskTitle?: string;
+            errorClass?: string;
+            /** @enum {string} */
+            executionMode: "autonomous" | "manual";
+            harness?: string;
+            /** Format: date-time */
+            lastActivityAt: string;
+            model?: string;
+            /** Format: date-time */
+            nextWakeAt?: null | string;
+            objective: string;
+            /** @enum {string} */
+            phase: "queued" | "planning" | "running" | "reviewing" | "fixing" | "verifying" | "waiting" | "waiting_for_capacity" | "blocked" | "needs_attention" | "completed" | "failed" | "cancelled";
+            projectId: string;
+            reviewCycles: number;
+            sessionId?: string;
+            /** @enum {string} */
+            state: "pending" | "running" | "waiting" | "needs_attention" | "completed" | "failed" | "cancelled";
+            steps?: components["schemas"]["WorkflowStepProgressView"][];
+            tasks?: components["schemas"]["WorkflowBoardTaskView"][];
+            tasksBlocked: number;
+            tasksCompleted: number;
+            tasksEligible: number;
+            tasksRunning: number;
+            tasksTotal: number;
+            waitReason?: string;
+            workflowId: string;
+        };
+        WorkflowBoardResponse: {
+            workflows: components["schemas"]["WorkflowBoardEntryView"][];
+        };
+        WorkflowBoardTaskView: {
+            /** Format: int64 */
+            ordinal: number;
+            phase?: string;
+            /** @enum {string} */
+            state: "blocked" | "eligible" | "running" | "completed" | "cancelled";
+            steps?: components["schemas"]["WorkflowStepProgressView"][];
+            title: string;
+            workflowId?: string;
+        };
         WorkflowBranchWaitView: {
             branch: string;
             heldBySessionId?: string;
@@ -4088,6 +4153,10 @@ export interface components {
             workflow: components["schemas"]["WorkflowRunDetailView"];
         };
         WorkflowRunView: {
+            /** @enum {string} */
+            attention?: "ao_internal" | "human_decision";
+            attentionAction?: string;
+            attentionReason?: string;
             branchWait?: components["schemas"]["WorkflowBranchWaitView"];
             /** Format: date-time */
             cancelledAt?: null | string;
@@ -4098,10 +4167,14 @@ export interface components {
             /** @enum {string} */
             executionMode: "autonomous" | "manual";
             id: string;
+            /** Format: date-time */
+            lastActivityAt: string;
             nextAction?: string;
             /** Format: date-time */
             nextWakeAt?: null | string;
             objective: string;
+            /** @enum {string} */
+            phase: "queued" | "planning" | "running" | "reviewing" | "fixing" | "verifying" | "waiting" | "waiting_for_capacity" | "blocked" | "needs_attention" | "completed" | "failed" | "cancelled";
             projectId: string;
             /** @enum {string} */
             state: "pending" | "running" | "waiting" | "needs_attention" | "completed" | "failed" | "cancelled";
@@ -4110,6 +4183,12 @@ export interface components {
             waitReason?: string;
             /** Format: int64 */
             wakeAttemptCount?: number;
+        };
+        WorkflowStepProgressView: {
+            /** @enum {string} */
+            kind: "plan" | "work" | "review" | "fix" | "verify";
+            /** @enum {string} */
+            state: "pending" | "ready" | "running" | "waiting" | "completed" | "failed" | "cancelled";
         };
         WorkflowStepView: {
             assignedHarness?: string;
@@ -6440,6 +6519,38 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectBoard: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowBoardResponse"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
                 headers: {
                     [name: string]: unknown;
                 };

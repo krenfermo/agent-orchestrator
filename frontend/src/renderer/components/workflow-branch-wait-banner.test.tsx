@@ -12,6 +12,8 @@ function baseRun(overrides: Partial<WorkflowRunView>): WorkflowRunView {
 		createdAt: new Date().toISOString(),
 		updatedAt: new Date().toISOString(),
 		executionMode: "autonomous",
+		phase: "waiting",
+		lastActivityAt: new Date().toISOString(),
 		...overrides,
 	};
 }

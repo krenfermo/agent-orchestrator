@@ -448,6 +448,15 @@ func TestFixBudgetExhaustionStopsAtMaxCyclesAndSurfacesNeedsAttention(t *testing
 				t.Fatalf("cycle %d: fix step state = %q, want running (3rd fix cycle, still within budget)", cycle, fixStepFrom(afterVerdict).Step.State)
 			}
 		}
+		// Checkpoint 8P-E.12: while AO is still dispatching fixes itself, the
+		// run must not be sitting in needs_attention claiming it wants a human.
+		// This used to be false at exactly cycle 3, because observeReviewStep
+		// declared the budget exhausted (>=) one cycle before maybeDispatchFix
+		// refused to spend it (>) — so the run said "human_attention" and then
+		// kept working, which is what made needs_attention meaningless.
+		if afterVerdict.Run.State == domain.WorkflowRunNeedsAttention {
+			t.Fatalf("cycle %d: run state = needs_attention while AO is still dispatching fix cycles within budget", cycle)
+		}
 	}
 
 	// Deliver fix cycle 3 and let review cycle 4 land changes_requested

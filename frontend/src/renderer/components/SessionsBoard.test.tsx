@@ -37,6 +37,10 @@ vi.mock("../hooks/useSessionUsageSummaries", () => ({
 vi.mock("../lib/api-client", () => ({
 	apiClient: { POST: (...args: unknown[]) => postMock(...args) },
 	apiErrorMessage: (_error: unknown, fallback: string) => fallback,
+	// The board now hosts the workflow lane, which reads the project Board
+	// projection. Reporting no trusted base URL keeps that query disabled so
+	// these tests stay about the session grid.
+	hasTrustedApiBaseUrl: () => false,
 }));
 
 vi.mock("../lib/bridge", () => ({

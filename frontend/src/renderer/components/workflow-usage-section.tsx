@@ -154,6 +154,52 @@ function SessionLifecycleRow({ decision }: { decision: SessionLifecycleDecisionR
 	);
 }
 
+type TaskMetrics = WorkflowUsageResponse["metrics"];
+
+/**
+ * Total tokens the providers actually processed for this run: input + output +
+ * the cached input replayed on every turn.
+ *
+ * Returns null — never 0 — unless every component is a real observed value.
+ * A partial sum would read as a smaller number than the truth, which is worse
+ * than admitting the total is unknown. Checkpoint 8P-E.12 §9: this is the one
+ * aggregate today's telemetry supports honestly. Tool-call volume and context
+ * replay beyond the cached-token count are NOT measurable from what AO records
+ * per session, and are deliberately absent here rather than approximated.
+ */
+function processedTokens(metrics: TaskMetrics): number | null {
+	if (metrics.tokensCertainty !== "actual") return null;
+	const { inputTokens, outputTokens, cachedTokens } = metrics;
+	if (inputTokens === null || inputTokens === undefined) return null;
+	if (outputTokens === null || outputTokens === undefined) return null;
+	return inputTokens + outputTokens + (cachedTokens ?? 0);
+}
+
+/**
+ * A display threshold, not a limit: nothing in AO stops or throttles a run
+ * because of it. It exists so a very large number is accompanied by the reason
+ * it got large (long review/fix loops replay the whole context every cycle)
+ * instead of sitting there as an opaque figure the user has to interpret alone.
+ */
+const HIGH_PROCESSED_TOKENS = 2_000_000;
+
+function TokenUsageNotice({ metrics }: { metrics: TaskMetrics }) {
+	const { t } = useTranslation();
+	const total = processedTokens(metrics);
+	if (total === null) {
+		return <p className="mt-2 text-muted-foreground">{t("shell.workflowUsage.tokensNotMeasured")}</p>;
+	}
+	if (total < HIGH_PROCESSED_TOKENS) return null;
+	return (
+		<p className="mt-2 rounded border border-warning/50 bg-warning/10 px-2 py-1.5 text-warning" role="note">
+			{t("shell.workflowUsage.highUsageWarning", {
+				total: total.toLocaleString(),
+				cycles: metrics.fixCycles + metrics.reviewRuns,
+			})}
+		</p>
+	);
+}
+
 /**
  * WorkflowUsageSection is Checkpoint 8J's minimal dashboard addition: per-
  * role provider/model/duration/usage, task-level metrics, and the
@@ -226,7 +272,12 @@ export function WorkflowUsageSection({ usage }: { usage: WorkflowUsageResponse }
 					<dd>{tokenText(usage.metrics.inputTokens)}</dd>
 					<dt>{t("shell.workflowUsage.outputTokensTotal")}</dt>
 					<dd>{tokenText(usage.metrics.outputTokens)}</dd>
+					<dt>{t("shell.workflowUsage.cachedTokensTotal")}</dt>
+					<dd>{tokenText(usage.metrics.cachedTokens)}</dd>
+					<dt>{t("shell.workflowUsage.processedTokensTotal")}</dt>
+					<dd>{tokenText(processedTokens(usage.metrics))}</dd>
 				</dl>
+				<TokenUsageNotice metrics={usage.metrics} />
 			</div>
 
 			<div className="rounded-lg border border-border p-3 text-xs">

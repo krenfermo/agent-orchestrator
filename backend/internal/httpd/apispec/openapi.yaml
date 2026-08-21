@@ -1647,6 +1647,34 @@ paths:
         stale per-repo metadata
       tags:
       - projects
+  /api/v1/projects/{projectId}/board:
+    get:
+      operationId: getProjectBoard
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: projectId
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowBoardResponse'
+          description: OK
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Project Board: every top-level workflow run projected onto the lifecycle
+        vocabulary'
+      tags:
+      - workflows
   /api/v1/projects/{projectId}/workflows:
     post:
       operationId: createWorkflowRun
@@ -10991,6 +11019,149 @@ components:
       - attemptNumber
       - startedAt
       type: object
+    WorkflowBoardEntryView:
+      properties:
+        attention:
+          enum:
+          - ao_internal
+          - human_decision
+          type: string
+        attentionAction:
+          type: string
+        attentionReason:
+          type: string
+        currentTaskOrdinal:
+          format: int64
+          type: integer
+        currentTaskTitle:
+          type: string
+        errorClass:
+          type: string
+        executionMode:
+          enum:
+          - autonomous
+          - manual
+          type: string
+        harness:
+          type: string
+        lastActivityAt:
+          format: date-time
+          type: string
+        model:
+          type: string
+        nextWakeAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        objective:
+          type: string
+        phase:
+          enum:
+          - queued
+          - planning
+          - running
+          - reviewing
+          - fixing
+          - verifying
+          - waiting
+          - waiting_for_capacity
+          - blocked
+          - needs_attention
+          - completed
+          - failed
+          - cancelled
+          type: string
+        projectId:
+          type: string
+        reviewCycles:
+          type: integer
+        sessionId:
+          type: string
+        state:
+          enum:
+          - pending
+          - running
+          - waiting
+          - needs_attention
+          - completed
+          - failed
+          - cancelled
+          type: string
+        steps:
+          items:
+            $ref: '#/components/schemas/WorkflowStepProgressView'
+          type: array
+        tasks:
+          items:
+            $ref: '#/components/schemas/WorkflowBoardTaskView'
+          type: array
+        tasksBlocked:
+          type: integer
+        tasksCompleted:
+          type: integer
+        tasksEligible:
+          type: integer
+        tasksRunning:
+          type: integer
+        tasksTotal:
+          type: integer
+        waitReason:
+          type: string
+        workflowId:
+          type: string
+      required:
+      - workflowId
+      - projectId
+      - objective
+      - state
+      - phase
+      - lastActivityAt
+      - executionMode
+      - tasksTotal
+      - tasksCompleted
+      - tasksRunning
+      - tasksBlocked
+      - tasksEligible
+      - reviewCycles
+      type: object
+    WorkflowBoardResponse:
+      properties:
+        workflows:
+          items:
+            $ref: '#/components/schemas/WorkflowBoardEntryView'
+          type: array
+      required:
+      - workflows
+      type: object
+    WorkflowBoardTaskView:
+      properties:
+        ordinal:
+          format: int64
+          type: integer
+        phase:
+          type: string
+        state:
+          enum:
+          - blocked
+          - eligible
+          - running
+          - completed
+          - cancelled
+          type: string
+        steps:
+          items:
+            $ref: '#/components/schemas/WorkflowStepProgressView'
+          type: array
+        title:
+          type: string
+        workflowId:
+          type: string
+      required:
+      - ordinal
+      - title
+      - state
+      type: object
     WorkflowBranchWaitView:
       properties:
         branch:
@@ -11275,6 +11446,15 @@ components:
       type: object
     WorkflowRunView:
       properties:
+        attention:
+          enum:
+          - ao_internal
+          - human_decision
+          type: string
+        attentionAction:
+          type: string
+        attentionReason:
+          type: string
         branchWait:
           $ref: '#/components/schemas/WorkflowBranchWaitView'
         cancelledAt:
@@ -11297,6 +11477,9 @@ components:
           type: string
         id:
           type: string
+        lastActivityAt:
+          format: date-time
+          type: string
         nextAction:
           type: string
         nextWakeAt:
@@ -11305,6 +11488,22 @@ components:
           - "null"
           - string
         objective:
+          type: string
+        phase:
+          enum:
+          - queued
+          - planning
+          - running
+          - reviewing
+          - fixing
+          - verifying
+          - waiting
+          - waiting_for_capacity
+          - blocked
+          - needs_attention
+          - completed
+          - failed
+          - cancelled
           type: string
         projectId:
           type: string
@@ -11334,6 +11533,32 @@ components:
       - createdAt
       - updatedAt
       - executionMode
+      - phase
+      - lastActivityAt
+      type: object
+    WorkflowStepProgressView:
+      properties:
+        kind:
+          enum:
+          - plan
+          - work
+          - review
+          - fix
+          - verify
+          type: string
+        state:
+          enum:
+          - pending
+          - ready
+          - running
+          - waiting
+          - completed
+          - failed
+          - cancelled
+          type: string
+      required:
+      - kind
+      - state
       type: object
     WorkflowStepView:
       properties:
