@@ -25,6 +25,7 @@
 		"premake": "npm run build:daemon && npm run browser-runtime:prepare && npm run build:acp-runtime",
 		"make": "electron-forge make",
 		"publish": "npm run build:daemon && npm run browser-runtime:prepare && npm run build:acp-runtime && electron-forge publish",
+		"lint": "tsc --noEmit",
 		"typecheck": "tsc --noEmit",
 		"typecheck:e2e": "tsc --noEmit -p tsconfig.e2e.json",
 		"test": "vitest run --config vite.renderer.config.ts",
