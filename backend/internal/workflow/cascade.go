@@ -222,7 +222,7 @@ func (c *Coordinator) maybeDispatchFix(ctx stdctx.Context, run domain.WorkflowRu
 // reused session gets a fresh fact anchor instead of relying purely on
 // accumulated conversation state across many cycles. Never changes which
 // session receives the prompt.
-func (c *Coordinator) applyFixLifecycleDecision(ctx stdctx.Context, run domain.WorkflowRun, fixStep domain.WorkflowStep, reviewRun domain.ReviewRun, cycleCount int, prompt string) string {
+func (c *Coordinator) applyFixLifecycleDecision(ctx stdctx.Context, run domain.WorkflowRun, fixStep domain.WorkflowStep, reviewRun domain.ReviewRun, cycleCount int, prompt string) (string, bool) {
 	health := domain.SessionHealthUnknown
 	if c.sessionFacts != nil {
 		rec, found, err := c.sessionFacts.GetSession(ctx, reviewRun.SessionID)
@@ -237,6 +237,7 @@ func (c *Coordinator) applyFixLifecycleDecision(ctx stdctx.Context, run domain.W
 	decision.ToSessionID = string(reviewRun.SessionID)
 
 	var pack *domain.SessionContextPack
+	contextPackUsed := false
 	if decision.Action == domain.LifecycleCompact {
 		artifact, err := c.planArtifactForRun(ctx, run)
 		if err == nil {
@@ -247,7 +248,17 @@ func (c *Coordinator) applyFixLifecycleDecision(ctx stdctx.Context, run domain.W
 			built := BuildSessionContextPack(domain.WorkflowRoleFixWorker, facts)
 			pack = &built
 			decision.ContextPackHash = built.ContentHash()
-			prompt = RenderContextPackForRole(built) + "\n\n" + prompt
+			// Checkpoint 8P-E.13C: the pack is persisted whole (it is the audit
+			// record of what was handed over), but the block PREPENDED to the
+			// prompt drops the three fields BuildFixPrompt already carries
+			// verbatim — objective, acceptance criteria, and the reviewer's
+			// findings. Sending them twice doubled the largest part of the
+			// payload for no added context, which is exactly what pushed the
+			// fix prompt past the transport's ceiling. Nothing is truncated:
+			// every dropped field is present, in full, further down the same
+			// message.
+			contextPackUsed = true
+			prompt = RenderContextPackForRoleExcluding(built, fixPromptDuplicateFields) + "\n\n" + prompt
 		}
 	}
 	// Deliberately NOT associated with fixStep.ID: several read paths
@@ -258,7 +269,7 @@ func (c *Coordinator) applyFixLifecycleDecision(ctx stdctx.Context, run domain.W
 	// would tie on CreatedAt and could shadow it — the run-level record is
 	// enough for lifecycle audit without risking that collision.
 	_ = c.persistSessionLifecycleDecision(ctx, run, nil, decision, pack)
-	return prompt
+	return prompt, contextPackUsed
 }
 
 // planArtifactForRun re-reads the plan step's already-persisted

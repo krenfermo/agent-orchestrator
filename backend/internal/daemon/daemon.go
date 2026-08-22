@@ -198,7 +198,7 @@ func RunWithConfig(cfg config.Config) error {
 	// attach Stream and liveness; the CDC broadcaster feeds the session-state channel. The manager
 	// is handed to httpd, which mounts it at /mux. Raw PTY bytes never flow
 	// through the CDC change_log -- only session-state events do.
-	runtimeAdapter := runtimeselect.New(log, cfg.TmuxSocket)
+	runtimeAdapter := runtimeselect.New(log, cfg.TmuxSocket, filepath.Join(cfg.DataDir, "tmp"))
 	managedPreview := previewserver.New(log, cfg.DataDir)
 	termMgr := terminal.NewManager(runtimeAdapter, cdcPipe.Broadcaster, log)
 	defer termMgr.Close()

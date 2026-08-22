@@ -115,6 +115,27 @@ func sendKeysLiteralArgs(id, chunk string) []string {
 	return []string{"send-keys", "-t", id, "-l", chunk}
 }
 
+// loadBufferArgs builds args for `tmux load-buffer -b <buffer> <path>`, which
+// reads the file's bytes into a named tmux paste buffer. The payload travels
+// through the filesystem, so the command itself stays small regardless of how
+// large the prompt is (Checkpoint 8P-E.13C).
+func loadBufferArgs(buffer, path string) []string {
+	return []string{"load-buffer", "-b", buffer, path}
+}
+
+// pasteBufferArgs builds args for `tmux paste-buffer -d -b <buffer> -t <id>`,
+// which delivers the buffer's bytes to the pane as input. -d deletes the buffer
+// once pasted, so a prompt never lingers in the tmux server's buffer stack.
+func pasteBufferArgs(buffer, id string) []string {
+	return []string{"paste-buffer", "-d", "-b", buffer, "-t", id}
+}
+
+// deleteBufferArgs builds args for `tmux delete-buffer -b <buffer>`, used to
+// clean up a loaded buffer whose paste never happened.
+func deleteBufferArgs(buffer string) []string {
+	return []string{"delete-buffer", "-b", buffer}
+}
+
 // sendEnterArgs builds args for `tmux send-keys -t <id> Enter` to submit the
 // queued input.
 func sendEnterArgs(id string) []string {

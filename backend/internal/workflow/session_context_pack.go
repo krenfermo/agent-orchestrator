@@ -25,7 +25,50 @@ func BuildSessionContextPack(role domain.WorkflowRole, facts domain.TaskCheckpoi
 // short: this is meant to replace re-sending full history, not to become a
 // new verbose prompt section.
 func RenderContextPackForRole(pack domain.SessionContextPack) string {
+	return RenderContextPackForRoleExcluding(pack, nil)
+}
+
+// ContextPackField names one renderable section of a context pack, so a caller
+// composing the pack with a prompt that ALREADY carries a section verbatim can
+// omit the duplicate instead of sending the same bytes twice (Checkpoint
+// 8P-E.13C). Omission is only ever legitimate when the excluded content is
+// present in full elsewhere in the same message — this is a de-duplication
+// mechanism, never a truncation one.
+type ContextPackField string
+
+const (
+	ContextPackObjective          ContextPackField = "objective"
+	ContextPackAcceptanceCriteria ContextPackField = "acceptanceCriteria"
+	ContextPackReviewFindings     ContextPackField = "latestReviewFindings"
+)
+
+// fixPromptDuplicateFields are the sections BuildFixPrompt already includes
+// verbatim in every fix message.
+var fixPromptDuplicateFields = []ContextPackField{
+	ContextPackObjective, ContextPackAcceptanceCriteria, ContextPackReviewFindings,
+}
+
+// RenderContextPackForRoleExcluding is RenderContextPackForRole with the named
+// sections omitted. Every other fact is rendered unchanged.
+func RenderContextPackForRoleExcluding(pack domain.SessionContextPack, exclude []ContextPackField) string {
 	f := pack.Facts
+	excluded := make(map[ContextPackField]bool, len(exclude))
+	for _, field := range exclude {
+		excluded[field] = true
+	}
+	if excluded[ContextPackObjective] {
+		f.Objective = ""
+	}
+	if excluded[ContextPackAcceptanceCriteria] {
+		f.AcceptanceCriteria = nil
+	}
+	if excluded[ContextPackReviewFindings] {
+		f.LatestReviewFindings = ""
+	}
+	return renderContextPackFacts(pack, f)
+}
+
+func renderContextPackFacts(pack domain.SessionContextPack, f domain.TaskCheckpointSummary) string {
 	var b strings.Builder
 	writeLine := func(label string, v string) {
 		if v == "" {

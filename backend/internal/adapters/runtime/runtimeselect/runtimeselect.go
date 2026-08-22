@@ -37,9 +37,15 @@ var _ Runtime = (*conpty.Runtime)(nil)
 // where conpty has no tmux server to isolate. An empty tmuxSocket still
 // isolates AO from the caller's default tmux server: tmux.New falls back to
 // its own safe default rather than the unnamed default server.
-func New(_ *slog.Logger, tmuxSocket string) Runtime {
+//
+// scratchDir is where the tmux runtime stages transient payload files —
+// oversized prompts on their way into a paste buffer, oversized launch
+// commands on their way into the pane's shell (Checkpoint 8P-E.13C). Callers
+// pass an AO-owned directory (under the data dir) so nothing AO writes lands
+// outside it; empty falls back to the OS temp dir. Ignored on Windows.
+func New(_ *slog.Logger, tmuxSocket, scratchDir string) Runtime {
 	if runtime.GOOS != "windows" {
-		return tmux.New(tmux.Options{Socket: tmuxSocket})
+		return tmux.New(tmux.Options{Socket: tmuxSocket, ScratchDir: scratchDir})
 	}
 	return conpty.New(conpty.Options{})
 }

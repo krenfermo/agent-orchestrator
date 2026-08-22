@@ -2,11 +2,14 @@ package workflow
 
 import (
 	stdctx "context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workflow/wake"
 )
 
 // MessageSender is the narrow existing-session messaging path workflow
@@ -30,8 +33,85 @@ type MessageSender interface {
 // idempotency key for a fix step's send-message command. Cycle-specific for
 // the same reason review dispatch is (design decision 2): a second fix cycle
 // for the same step must get its own outbox row / single-flight guard.
-func fixStepOutboxIdempotencyKey(stepID string, cycleNumber int) string {
-	return "workflow-step-fix:" + stepID + ":cycle" + strconv.Itoa(cycleNumber)
+//
+// Checkpoint 8P-E.13C adds the transport attempt to the key. A dispatch whose
+// transport refused the message outright (ports.ErrPromptUndelivered — nothing
+// reached the agent) is allowed a bounded number of retries, and each retry is
+// genuinely a NEW command rather than a re-run of a failed one. Deriving the
+// attempt from the durable prompt_transport_retry checkpoints keeps the key
+// stable across a restart, so recovery reconstructs the same key rather than
+// inventing a second concurrent delivery.
+func fixStepOutboxIdempotencyKey(stepID string, cycleNumber, transportAttempt int) string {
+	key := "workflow-step-fix:" + stepID + ":cycle" + strconv.Itoa(cycleNumber)
+	if transportAttempt > 0 {
+		key += ":transport" + strconv.Itoa(transportAttempt)
+	}
+	return key
+}
+
+// fixTransportRetryPhase is the durable phase of a bounded, self-remediable
+// prompt-transport retry. It is a canonical attention reason (attention.go) so
+// a run resting on one reads as "retrying", never as a human decision.
+const fixTransportRetryPhase = "prompt_transport_retry"
+
+// maxFixTransportRetries bounds those retries. A transport that refuses three
+// times in a row is not a transient hiccup, and the fourth failure falls
+// through to the ordinary dispatch_failed stop a person can act on.
+const maxFixTransportRetries = 3
+
+// promptDeliveryRecord is Checkpoint 8P-E.13C's prompt-size observability: the
+// facts needed to diagnose a delivery problem from the durable ledger alone.
+// Deliberately NOT the prompt itself — the objective, the acceptance criteria
+// and the reviewer's findings are all already durable elsewhere (the run, the
+// plan artifact, the review run), and copying them here would duplicate exactly
+// the payload whose size is under investigation.
+type promptDeliveryRecord struct {
+	PromptBytes      int                   `json:"promptBytes"`
+	Transport        ports.PromptTransport `json:"transport"`
+	ContextPack      bool                  `json:"contextPack"`
+	CycleNumber      int                   `json:"cycleNumber"`
+	TransportAttempt int                   `json:"transportAttempt,omitempty"`
+	Reason           string                `json:"reason,omitempty"`
+}
+
+func newPromptDeliveryRecord(prompt string, cycleNumber, transportAttempt int, contextPack bool) promptDeliveryRecord {
+	return promptDeliveryRecord{
+		PromptBytes:      len(prompt),
+		Transport:        ports.PromptTransportFor(len(prompt)),
+		ContextPack:      contextPack,
+		CycleNumber:      cycleNumber,
+		TransportAttempt: transportAttempt,
+	}
+}
+
+func (r promptDeliveryRecord) json() string {
+	b, err := json.Marshal(r)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+// fixTransportRetryCount folds the run's ledger into "how many times has this
+// exact fix cycle's prompt been refused by the transport". Durable by
+// construction, so it survives a daemon restart mid-retry.
+func (c *Coordinator) fixTransportRetryCount(ctx stdctx.Context, runID, stepID string, cycleNumber int) int {
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, cp := range cps {
+		if cp.DurablePhase != fixTransportRetryPhase || cp.WorkflowStepID == nil || *cp.WorkflowStepID != stepID {
+			continue
+		}
+		var rec promptDeliveryRecord
+		if json.Unmarshal([]byte(cp.RetryState), &rec) != nil || rec.CycleNumber != cycleNumber {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // dispatchFixStep is Checkpoint 8D's single idempotent dispatch algorithm for
@@ -68,11 +148,12 @@ func (c *Coordinator) dispatchFixStep(ctx stdctx.Context, run domain.WorkflowRun
 	}
 
 	now := c.clock()
+	transportAttempt := c.fixTransportRetryCount(ctx, run.ID, fixStep.ID, cycleNumber)
 	entry, _, err := c.store.EnqueueWorkflowOutboxEntry(ctx, domain.WorkflowOutboxEntry{
 		ID:             "wfo-" + c.newID(),
 		WorkflowRunID:  run.ID,
 		WorkflowStepID: &fixStep.ID,
-		IdempotencyKey: fixStepOutboxIdempotencyKey(fixStep.ID, cycleNumber),
+		IdempotencyKey: fixStepOutboxIdempotencyKey(fixStep.ID, cycleNumber, transportAttempt),
 		CommandType:    domain.WorkflowOutboxSendMessage,
 		Payload:        fixPayloadJSON(fixStep.ID, reviewRun.ID, cycleNumber),
 		CreatedAt:      now,
@@ -83,7 +164,7 @@ func (c *Coordinator) dispatchFixStep(ctx stdctx.Context, run domain.WorkflowRun
 
 	switch entry.Status {
 	case domain.WorkflowOutboxPending:
-		return c.dispatchFixFromPending(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, prompt)
+		return c.dispatchFixFromPending(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt)
 	case domain.WorkflowOutboxDispatched, domain.WorkflowOutboxAcknowledged:
 		// Boundary B: a previous attempt got at least as far as "about to
 		// call Send," but Send has no idempotency key and no reliable
@@ -105,6 +186,7 @@ func (c *Coordinator) dispatchFixFromPending(
 	entry domain.WorkflowOutboxEntry,
 	reviewRun domain.ReviewRun,
 	cycleNumber int,
+	transportAttempt int,
 	prompt string,
 ) (domain.WorkflowStep, error) {
 	now := c.clock()
@@ -133,12 +215,21 @@ func (c *Coordinator) dispatchFixFromPending(
 	// Checkpoint 8M §12/§27: apply the session lifecycle decision (and
 	// persist it) right here — the single outbox-idempotency-guarded point
 	// reached exactly once per real cycle dispatch, never once per poll.
-	prompt = c.applyFixLifecycleDecision(ctx, run, fixStep, reviewRun, cycleNumber, prompt)
+	prompt, contextPack := c.applyFixLifecycleDecision(ctx, run, fixStep, reviewRun, cycleNumber, prompt)
+	delivery := newPromptDeliveryRecord(prompt, cycleNumber, transportAttempt, contextPack)
 
 	if err := c.messageSender.Send(ctx, reviewRun.SessionID, prompt, nil); err != nil {
+		// Checkpoint 8P-E.13C: a transport that refused the message before any
+		// of it reached the agent is a transport problem, not a workflow
+		// verdict. Nothing was delivered, so re-sending is provably safe, and
+		// asking a human to resolve "command too long" was never a decision
+		// anyone could make. Bounded, durable, self-remediable.
+		if errors.Is(err, ports.ErrPromptUndelivered) && transportAttempt < maxFixTransportRetries {
+			return c.recordFixTransportRetry(ctx, run, fixStep, entry, delivery, err)
+		}
 		return c.recordFixDispatchFailure(ctx, run, fixStep, entry, domain.WorkflowErrorPromptDeliveryFailed, err)
 	}
-	return c.recordFixDispatchSuccess(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber)
+	return c.recordFixDispatchSuccess(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, delivery)
 }
 
 func (c *Coordinator) recordFixDispatchSuccess(
@@ -148,6 +239,7 @@ func (c *Coordinator) recordFixDispatchSuccess(
 	entry domain.WorkflowOutboxEntry,
 	reviewRun domain.ReviewRun,
 	cycleNumber int,
+	delivery promptDeliveryRecord,
 ) (domain.WorkflowStep, error) {
 	now := c.clock()
 
@@ -196,10 +288,64 @@ func (c *Coordinator) recordFixDispatchSuccess(
 		NextAction:        "fix_dispatched: awaiting a genuinely new workspace fingerprint",
 		DurablePhase:      "fix_dispatched",
 		PayloadVersion:    "v1",
-		RetryState:        "{}",
-		CreatedAt:         now,
+		// RetryState carries the prompt-delivery facts (size, transport,
+		// whether a context pack was prepended) so a future delivery problem is
+		// diagnosable from the ledger — see promptDeliveryRecord.
+		RetryState: delivery.json(),
+		CreatedAt:  now,
 	}); err != nil {
 		return fixStep, err
+	}
+	return fixStep, nil
+}
+
+// recordFixTransportRetry parks a fix cycle whose prompt the transport refused
+// outright, in a state AO resumes by itself (Checkpoint 8P-E.13C).
+//
+// It is deliberately NOT recordFixDispatchFailure with a friendlier label. The
+// differences are the whole point:
+//
+//   - the step stays non-terminal (waiting, not failed), because a failed step
+//     can never be re-dispatched and this cycle has not been attempted yet in
+//     any sense the agent could observe;
+//   - the run is not moved to needs_attention, because nothing here is a
+//     decision — the previous behavior asked a human to resolve the words
+//     "command too long";
+//   - a durable wake is scheduled, so the retry happens headlessly; and
+//   - the checkpoint carries the delivery facts, so the retry budget is
+//     reconstructible after a restart.
+func (c *Coordinator) recordFixTransportRetry(ctx stdctx.Context, run domain.WorkflowRun, fixStep domain.WorkflowStep, entry domain.WorkflowOutboxEntry, delivery promptDeliveryRecord, cause error) (domain.WorkflowStep, error) {
+	now := c.clock()
+	if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, entry.Status, domain.WorkflowOutboxFailed, now, string(domain.WorkflowErrorPromptDeliveryFailed)); err != nil {
+		return fixStep, err
+	}
+	if fixStep.State == domain.WorkflowStepRunning {
+		if _, err := c.store.UpdateWorkflowStepState(ctx, fixStep.ID, domain.WorkflowStepRunning, domain.WorkflowStepWaiting, now); err != nil {
+			return fixStep, err
+		}
+		fixStep.State = domain.WorkflowStepWaiting
+	}
+	delivery.Reason = cause.Error()
+	stepID := fixStep.ID
+	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+		ID:             "wfc-" + c.newID(),
+		WorkflowRunID:  run.ID,
+		WorkflowStepID: &stepID,
+		ProjectID:      run.ProjectID,
+		NextAction: fmt.Sprintf("prompt_transport_retry: the %d-byte fix prompt was refused before delivery (attempt %d of %d) — AO will re-send it",
+			delivery.PromptBytes, delivery.TransportAttempt+1, maxFixTransportRetries),
+		DurablePhase:   fixTransportRetryPhase,
+		PayloadVersion: "v1",
+		RetryState:     delivery.json(),
+		CreatedAt:      now,
+	}); err != nil {
+		return fixStep, err
+	}
+	wakeStepID := domain.WorkflowStepID(fixStep.ID)
+	c.scheduleWake(ctx, run, &wakeStepID, wake.ReasonTransientRetry, "")
+	if c.log != nil {
+		c.log.Warn("workflow: fix prompt refused before delivery; retrying",
+			"step", fixStep.ID, "bytes", delivery.PromptBytes, "transport", delivery.Transport, "attempt", delivery.TransportAttempt+1, "err", cause)
 	}
 	return fixStep, nil
 }

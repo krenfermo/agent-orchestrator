@@ -23,8 +23,20 @@ import (
 )
 
 const (
-	defaultTimeout    = 5 * time.Second
-	defaultChunkBytes = 16 * 1024
+	defaultTimeout = 5 * time.Second
+	// defaultChunkBytes is the inline send-keys chunk size. It was 16 KB, which
+	// is tmux's ENTIRE per-command imsg budget — so the very first chunk of a
+	// large prompt was rejected with "command too long" (Checkpoint 8P-E.13C).
+	// It is now the same conservative inline budget ports.PromptTransportFor
+	// switches transports at, so nothing that still travels inline can reach
+	// the ceiling.
+	defaultChunkBytes = ports.MaxInlinePromptBytes
+	// maxInlineLaunchCommandBytes is the largest launch command AO will put
+	// inside `tmux new-session` directly. Above it the command body moves into a
+	// sourced script file. Larger than the message budget because a launch
+	// command is mostly AO-generated env/exports whose size is known, and the
+	// same 16 KB frame still has to hold it.
+	maxInlineLaunchCommandBytes = 8 * 1024
 	// defaultEnterDelay mirrors conpty's ptyInputEnterDelay: a pause after pasting
 	// a non-empty message, before the trailing Enter, so a large multiline paste
 	// does not absorb the Enter and leave the prompt unsubmitted (issue #2342).
@@ -64,7 +76,7 @@ type Options struct {
 	Binary     string        // default "tmux" (resolved via exec.LookPath)
 	Shell      string        // default $SHELL else /bin/sh
 	Timeout    time.Duration // default 5s
-	ChunkSize  int           // default 16*1024
+	ChunkSize  int           // default ports.MaxInlinePromptBytes
 	EnterDelay time.Duration // pause after pasting a non-empty message before pressing Enter; default defaultEnterDelay. Conpty already does this (ptyInputEnterDelay); tmux lacked it, so a large multiline paste could absorb the trailing Enter and leave the prompt unsubmitted (issue #2342).
 	ReapGrace  time.Duration // grace between SIGTERM and SIGKILL when reaping a pane's leftover background processes on Destroy; default defaultReapGrace.
 	// Socket names the tmux server (`tmux -L <Socket>`) every operation this
@@ -76,6 +88,13 @@ type Options struct {
 	// AO_DATA_DIR-derived name instead, so distinct AO instances (distinct
 	// data dirs, e.g. two profiles or a test sandbox) get distinct servers.
 	Socket string
+	// ScratchDir is where the runtime stages transient payload files: an
+	// oversized prompt on its way into a tmux paste buffer, and an oversized
+	// launch command on its way into the pane's shell (Checkpoint 8P-E.13C).
+	// Both are written 0600 and removed as soon as tmux has read them. Empty
+	// falls back to the OS temp dir; the daemon passes an AO-owned directory so
+	// these files live under the data dir with everything else AO writes.
+	ScratchDir string
 }
 
 // Runtime runs agent sessions inside tmux sessions, driving them via the tmux
@@ -86,6 +105,7 @@ type Runtime struct {
 	socket       string
 	timeout      time.Duration
 	chunkSize    int
+	scratchDir   string
 	enterDelay   time.Duration
 	reapGrace    time.Duration
 	runner       runner
@@ -357,6 +377,7 @@ func New(opts Options) *Runtime {
 		socket:       socket,
 		timeout:      timeout,
 		chunkSize:    chunkSize,
+		scratchDir:   opts.ScratchDir,
 		enterDelay:   enterDelay,
 		reapGrace:    reapGrace,
 		runner:       execRunner{},
@@ -382,13 +403,38 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 	}
 
 	launchCmd := buildLaunchCommand(cfg)
+	// Checkpoint 8P-E.13C: an agent whose prompt is delivered in its launch
+	// argv (claude-code, codex, and every other adapter defaulting to
+	// PromptDeliveryInCommand) puts the whole prompt inside this one tmux
+	// command — which tmux carries in a single 16 KB imsg frame. A large work
+	// or review prompt would therefore fail the session creation itself, the
+	// same "command too long" the fix path hit. Past the inline budget the
+	// command body moves into a private script the shell sources, so what tmux
+	// receives is a path.
+	removeScript := func() {}
+	if len(launchCmd) > maxInlineLaunchCommandBytes {
+		path, cleanup, err := r.writeLaunchScript(id, launchCmd)
+		if err != nil {
+			return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: stage launch command %s: %w", id, err)
+		}
+		removeScript = cleanup
+		launchCmd = ". " + shellQuote(path)
+	}
 	args := newSessionArgs(id, cfg.WorkspacePath, r.shell, launchCmd)
 	if _, err := r.run(ctx, args...); err != nil {
+		removeScript()
 		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: create session %s: %w", id, err)
 	}
-	if err := r.verifyPaneWorkingDirectory(ctx, id, cfg.WorkspacePath); err != nil {
+	verifyErr := r.verifyPaneWorkingDirectory(ctx, id, cfg.WorkspacePath)
+	// The pane's cwd only becomes the workspace once the shell has executed the
+	// script's leading `cd`, which means it has the file open. Unlinking an open
+	// file leaves the descriptor valid, so removing it here is safe even for a
+	// script the shell has not finished reading — and it means no prompt is left
+	// on disk once the session is running.
+	removeScript()
+	if verifyErr != nil {
 		_ = r.Destroy(context.Background(), ports.RuntimeHandle{ID: id})
-		return ports.RuntimeHandle{}, err
+		return ports.RuntimeHandle{}, verifyErr
 	}
 
 	// Hide the status bar in the embedded terminal: it clutters the view and
@@ -714,6 +760,23 @@ func (r *Runtime) SendMessage(ctx context.Context, handle ports.RuntimeHandle, m
 	}
 	enterCtx := ctx
 	if message != "" {
+		// Checkpoint 8P-E.13C: above the inline budget the payload does not go
+		// into the command at all. tmux carries each command in a single imsg
+		// frame capped at 16 KB, so a large prompt typed inline is rejected
+		// with "command too long" — the exact failure that stranded the fix
+		// step of wf-2261767d. Above that budget the bytes travel through a
+		// private file and a paste buffer instead, which also keeps them out of
+		// argv and away from every quoting layer.
+		if ports.PromptTransportFor(len(message)) == ports.PromptTransportBufferFile {
+			budget := sendCompletionBudget(2, r.timeout, r.enterDelay)
+			pasteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
+			defer cancel()
+			if err := r.sendViaPasteBuffer(ctx, pasteCtx, id, message); err != nil {
+				return err
+			}
+			enterCtx = pasteCtx
+			return r.finishSend(enterCtx, id)
+		}
 		messageChunks := chunks(message, r.chunkSize)
 		sendCtx := ctx
 		var finishCancel context.CancelFunc
@@ -721,6 +784,12 @@ func (r *Runtime) SendMessage(ctx context.Context, handle ports.RuntimeHandle, m
 			if _, err := r.run(sendCtx, sendKeysLiteralArgs(id, chunk)...); err != nil {
 				if finishCancel != nil {
 					finishCancel()
+				}
+				if i == 0 {
+					// Nothing reached the pane: tmux refused the very first
+					// chunk, so a caller may re-send the whole message without
+					// risking a duplicate or a spliced instruction.
+					return fmt.Errorf("tmux runtime: send message %s: %w: %w", id, ports.ErrPromptUndelivered, err)
 				}
 				return fmt.Errorf("tmux runtime: send message %s: %w", id, err)
 			}
@@ -762,6 +831,148 @@ func (r *Runtime) SendMessage(ctx context.Context, handle ports.RuntimeHandle, m
 
 func sendCompletionBudget(chunkCount int, commandTimeout, enterDelay time.Duration) time.Duration {
 	return time.Duration(chunkCount)*commandTimeout + enterDelay
+}
+
+// finishSend performs the paste-settling pause and the submitting Enter shared
+// by both transports. Like the inline path, it is deliberately detached from
+// the caller's cancellation: the payload is already in the pane, and giving up
+// here would strand an unsubmitted draft that a retry would then double-paste.
+func (r *Runtime) finishSend(enterCtx context.Context, id string) error {
+	if r.enterDelay > 0 {
+		select {
+		case <-enterCtx.Done():
+			return enterCtx.Err()
+		case <-time.After(r.enterDelay):
+		}
+	}
+	if _, err := r.run(enterCtx, sendEnterArgs(id)...); err != nil {
+		return fmt.Errorf("tmux runtime: send enter %s: %w", id, err)
+	}
+	return nil
+}
+
+// sendViaPasteBuffer delivers message through a file and a named tmux paste
+// buffer instead of through the command itself (Checkpoint 8P-E.13C).
+//
+// Three properties matter, and each is why this is not just "a bigger chunk":
+//
+//   - Size: the command AO issues names a path, so the prompt's size is bounded
+//     by the filesystem rather than by tmux's 16 KB command frame.
+//   - Fidelity: the bytes go file -> tmux buffer -> pane. They are never a
+//     shell word, never escaped, never quoted, so newlines, quotes, backticks,
+//     $(...) and non-ASCII text arrive exactly as written.
+//   - Exposure: the payload never appears in argv, so it is not visible in
+//     `ps` output or a shell history, and the file itself is created 0600 and
+//     removed as soon as tmux has read it.
+//
+// loadCtx failures happen before any byte reaches the pane and are therefore
+// wrapped with ports.ErrPromptUndelivered so a caller may safely re-send.
+func (r *Runtime) sendViaPasteBuffer(loadCtx, pasteCtx context.Context, id, message string) error {
+	path, cleanup, err := r.writePromptFile(id, message)
+	if err != nil {
+		return fmt.Errorf("tmux runtime: stage message %s: %w: %w", id, ports.ErrPromptUndelivered, err)
+	}
+	defer cleanup()
+
+	buffer := promptBufferName(id)
+	if _, err := r.run(loadCtx, loadBufferArgs(buffer, path)...); err != nil {
+		return fmt.Errorf("tmux runtime: load message buffer %s: %w: %w", id, ports.ErrPromptUndelivered, err)
+	}
+	if _, err := r.run(pasteCtx, pasteBufferArgs(buffer, id)...); err != nil {
+		// The buffer exists but its contents may or may not have reached the
+		// pane. Drop the buffer so it cannot be pasted later by anything else,
+		// and report an ordinary (non-retryable) delivery failure.
+		_, _ = r.run(context.WithoutCancel(pasteCtx), deleteBufferArgs(buffer)...)
+		return fmt.Errorf("tmux runtime: paste message %s: %w", id, err)
+	}
+	return nil
+}
+
+// writePromptFile stages the exact prompt bytes in a private file. The returned
+// cleanup removes it; callers defer it unconditionally, so no prompt outlives
+// its delivery even when tmux fails midway.
+func (r *Runtime) writePromptFile(id, message string) (string, func(), error) {
+	dir, err := r.scratchDirFor("prompts")
+	if err != nil {
+		return "", func() {}, err
+	}
+	f, err := os.CreateTemp(dir, "ao-prompt-"+id+"-*.txt")
+	if err != nil {
+		return "", func() {}, err
+	}
+	path := f.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	// os.CreateTemp already creates 0600; state it anyway so a restrictive
+	// umask is not the only thing standing between a prompt and other users.
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", func() {}, err
+	}
+	if _, err := f.WriteString(message); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", func() {}, err
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	return path, cleanup, nil
+}
+
+// scratchDirFor returns (creating if needed) the directory AO stages transient
+// runtime payloads in. It defaults to the OS temp dir; the daemon passes an
+// AO-owned directory so these files live under the data dir with everything
+// else AO writes.
+func (r *Runtime) scratchDirFor(kind string) (string, error) {
+	base := r.scratchDir
+	if base == "" {
+		return os.TempDir(), nil
+	}
+	dir := filepath.Join(base, kind)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// writeLaunchScript stages an oversized launch command as a shell script the
+// pane's shell sources. Same staging rules as writePromptFile: AO-owned
+// directory, 0600, removed as soon as the shell has opened it.
+func (r *Runtime) writeLaunchScript(id, launchCmd string) (string, func(), error) {
+	dir, err := r.scratchDirFor("launch")
+	if err != nil {
+		return "", func() {}, err
+	}
+	f, err := os.CreateTemp(dir, "ao-launch-"+id+"-*.sh")
+	if err != nil {
+		return "", func() {}, err
+	}
+	path := f.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", func() {}, err
+	}
+	if _, err := f.WriteString(launchCmd + "\n"); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", func() {}, err
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	return path, cleanup, nil
+}
+
+// promptBufferName names the tmux paste buffer a session's prompt is loaded
+// into. Per-session rather than global so two concurrent sends can never paste
+// each other's payload, and always overwritten rather than appended.
+func promptBufferName(id string) string {
+	return "ao-prompt-" + id
 }
 
 // Interrupt sends Ctrl-C to the foreground process without destroying the tmux

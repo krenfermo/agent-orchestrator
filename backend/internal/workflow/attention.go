@@ -59,6 +59,11 @@ const (
 	ReasonReviewCapacityRetry   = reviewCapacityRetryDurablePhase
 	ReasonBranchQueued          = branchWaitPhase
 	ReasonVerifyFixReentry      = "verify_fix_reentry"
+	// ReasonPromptTransportRetry is a fix prompt the terminal transport refused
+	// before any of it reached the agent (Checkpoint 8P-E.13C). AO re-sends it
+	// itself, within a bounded budget; nobody has a decision to make about
+	// "command too long".
+	ReasonPromptTransportRetry = fixTransportRetryPhase
 
 	// Human decisions: AO has genuinely stopped and a person must act.
 	ReasonFixBudgetExhausted      = "fix_budget_exhausted"
@@ -99,6 +104,7 @@ var attentionDispositions = map[string]AttentionDisposition{
 	ReasonReviewCapacityRetry:   {SelfRemediable: true, Phase: PhaseWaitingForCapacity},
 	ReasonBranchQueued:          {SelfRemediable: true, Phase: PhaseBlocked},
 	ReasonVerifyFixReentry:      {SelfRemediable: true, Phase: PhaseFixing},
+	ReasonPromptTransportRetry:  {SelfRemediable: true, Phase: PhaseRetrying},
 
 	// ---- Human decisions ---------------------------------------------------
 	"dirty_worktree": {
