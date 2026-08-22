@@ -61,6 +61,11 @@ type Store interface {
 	GetProject(ctx context.Context, id string) (domain.ProjectRecord, bool, error)
 	ListWorkspaceRepos(ctx context.Context, projectID string) ([]domain.WorkspaceRepoRecord, error)
 	GetWorkflowRun(ctx context.Context, id string) (domain.WorkflowRun, bool, error)
+	// GetSession resolves the owner of a session-owned lock (Checkpoint
+	// 8P-E.14). Reconciliation needs it for exactly the reason it needs
+	// GetWorkflowRun: a lock is only legitimate while its owner can still write
+	// the branch, and for an ordinary task that fact lives on the session row.
+	GetSession(ctx context.Context, id domain.SessionID) (domain.SessionRecord, bool, error)
 }
 
 // Preflighter is the read-only repository probe. Optional: a nil Preflighter
@@ -199,13 +204,26 @@ func newTarget(name, repoPath, branch string) Target {
 	}
 }
 
-// AcquireRequest is one run's request to become the writer of a project's
+// AcquireRequest is one owner's request to become the writer of a project's
 // direct-branch targets.
+//
+// Exactly one of RunID and SessionID identifies the owner (Checkpoint
+// 8P-E.14). An autonomous workflow passes RunID, and SessionID is only the
+// current step's worker; an ordinary task passes SessionID alone and owns the
+// branch as itself. Both forms contend for the same lock keys, which is the
+// whole point: a task and a workflow targeting one repository+branch must
+// serialize rather than both start writing it.
 type AcquireRequest struct {
 	ProjectID domain.ProjectID
 	RunID     string
 	StepID    string
 	SessionID string
+}
+
+// owner returns the identity the acquisition will be recorded under, or "" if
+// the request names neither a run nor a session.
+func (r AcquireRequest) owner() string {
+	return domain.BranchLock{WorkflowRunID: r.RunID, SessionID: r.SessionID}.OwnerKey()
 }
 
 // Acquire takes every lock the project's direct-branch targets require, or none
@@ -235,9 +253,16 @@ func (m *Manager) Acquire(ctx context.Context, req AcquireRequest) ([]domain.Bra
 	if len(targets) == 0 {
 		return nil, nil
 	}
+	// An owner-less acquisition could never be released by run or by session,
+	// and would compare equal to no holder, so it would leak the branch
+	// permanently. Refuse it here rather than writing an unreleasable row.
+	owner := req.owner()
+	if owner == "" {
+		return nil, fmt.Errorf("branch lock: acquire for project %s names neither a workflow run nor a session", req.ProjectID)
+	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Key < targets[j].Key })
 
-	preflights, err := m.preflightAll(ctx, targets, req.RunID)
+	preflights, err := m.preflightAll(ctx, targets, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -270,10 +295,10 @@ func (m *Manager) Acquire(ctx context.Context, req AcquireRequest) ([]domain.Bra
 
 // preflightAll probes every target and refuses the whole acquisition if any
 // repository holds pre-existing uncommitted work. A repository already locked
-// by this same run is exempt: its "dirty" state is this run's own in-progress
-// work, not a human's, and re-entering a run must not block on the changes it
-// itself produced.
-func (m *Manager) preflightAll(ctx context.Context, targets []Target, runID string) (map[string]ports.WorkspacePreflight, error) {
+// by this same owner is exempt: its "dirty" state is that owner's own
+// in-progress work, not a human's, and re-entering must not block on the
+// changes it itself produced.
+func (m *Manager) preflightAll(ctx context.Context, targets []Target, owner string) (map[string]ports.WorkspacePreflight, error) {
 	out := make(map[string]ports.WorkspacePreflight, len(targets))
 	if m.preflight == nil {
 		return out, nil
@@ -292,7 +317,7 @@ func (m *Manager) preflightAll(ctx context.Context, targets []Target, runID stri
 		if herr != nil {
 			return nil, herr
 		}
-		if found && holder.WorkflowRunID == runID {
+		if found && owner != "" && holder.OwnerKey() == owner {
 			continue
 		}
 		dirty = append(dirty, pre)
@@ -353,6 +378,56 @@ func (m *Manager) Renew(ctx context.Context, runID, stepID, sessionID string) {
 // a branch occupied.
 func (m *Manager) ReleaseRun(ctx context.Context, runID, reason string) (int64, error) {
 	return m.store.ReleaseBranchLocksByRun(ctx, runID, reason, m.clock())
+}
+
+// HeldBySession returns the locks one ordinary task session owns in its own
+// right (Checkpoint 8P-E.14). Locks a workflow holds while this session happens
+// to be its current worker are deliberately excluded: they belong to the run,
+// and the run outlives the session.
+//
+// It filters the full held set in Go rather than adding a session-scoped query.
+// The held set is bounded by the number of repositories currently being
+// written, which is a handful even on a busy install, so an index and a
+// migration would buy nothing over one scan.
+func (m *Manager) HeldBySession(ctx context.Context, sessionID string) ([]domain.BranchLock, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, nil
+	}
+	locks, err := m.store.ListHeldBranchLocks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []domain.BranchLock
+	for _, lock := range locks {
+		if lock.SessionOwned() && lock.SessionID == sessionID {
+			out = append(out, lock)
+		}
+	}
+	return out, nil
+}
+
+// ReleaseSession frees every lock a task session owns and reports how many it
+// freed. It is the session-owned counterpart of ReleaseRun and is called from
+// the single termination choke point, so a task that ends any way at all --
+// finished, killed, failed, reaped -- never leaves its branch occupied.
+func (m *Manager) ReleaseSession(ctx context.Context, sessionID, reason string) (int64, error) {
+	locks, err := m.HeldBySession(ctx, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	now := m.clock()
+	var released int64
+	for _, lock := range locks {
+		ok, rerr := m.store.ReleaseBranchLock(ctx, lock.ID, reason, now)
+		if rerr != nil {
+			return released, rerr
+		}
+		if ok {
+			released++
+		}
+	}
+	return released, nil
 }
 
 // ReconcileResult reports what a restart reconciliation decided.

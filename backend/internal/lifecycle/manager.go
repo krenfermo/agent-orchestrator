@@ -137,6 +137,12 @@ func WithContainerReaper(reaper ports.ContainerReaper, projects projectConfigLoa
 	}
 }
 
+// branchLockReleaser frees the direct-branch execution locks a task session
+// owns. Satisfied by *branchlock.Manager.
+type branchLockReleaser interface {
+	ReleaseSession(ctx context.Context, sessionID, reason string) (int64, error)
+}
+
 // WithActiveSteering supplies the adapter-provided active-turn steering
 // capability (see ports.ActiveTurnSteerer). Without it the reducer assumes no
 // harness can be steered mid-turn.
@@ -169,6 +175,8 @@ type Manager struct {
 	projects         projectConfigLoader
 	operationGateMu  sync.RWMutex
 	operationGate    sessionOperationGate
+	branchLocksMu    sync.RWMutex
+	branchLocks      branchLockReleaser
 
 	mu        sync.Mutex
 	window    time.Duration
@@ -239,6 +247,47 @@ func (m *Manager) SetUsageFinalizer(finalizer sessionUsageFinalizer) {
 func (m *Manager) SetSessionInputLease(lease sessionguard.InputLease) {
 	if m.guard != nil {
 		m.guard.SetInputLease(lease)
+	}
+}
+
+// SetBranchLockReleaser wires Checkpoint 8P-E.14's direct-branch execution
+// lock release: MarkTerminated frees every lock the terminated session owns in
+// its own right.
+//
+// It lives here rather than in session_manager for the same reason the
+// container reaper does: MarkTerminated is the one place every terminal path
+// converges — Kill, spawn failure, retire-for-replacement, daemon-shutdown
+// teardown, cleanup, and the PR/issue-driven termination in reactions.go that
+// never touches session_manager at all. Releasing anywhere else would leak the
+// branch on whichever paths that place did not cover.
+//
+// Late-bound because the daemon builds the lifecycle manager before the branch
+// lock manager exists.
+func (m *Manager) SetBranchLockReleaser(releaser branchLockReleaser) {
+	m.branchLocksMu.Lock()
+	m.branchLocks = releaser
+	m.branchLocksMu.Unlock()
+}
+
+// releaseSessionBranchLocks frees the terminated session's own execution locks.
+// Best-effort and never returned: a release failure must not turn a terminated
+// session into an error, and boot reconciliation releases any lock whose owning
+// session is terminated anyway (branchlock/retention.go), so a miss is
+// self-healing rather than a permanently occupied branch.
+func (m *Manager) releaseSessionBranchLocks(ctx context.Context, id domain.SessionID, reason string) {
+	m.branchLocksMu.RLock()
+	releaser := m.branchLocks
+	m.branchLocksMu.RUnlock()
+	if releaser == nil {
+		return
+	}
+	n, err := releaser.ReleaseSession(ctx, string(id), reason)
+	if err != nil {
+		slog.Default().Warn("lifecycle: branch lock release failed", "session", id, "err", err)
+		return
+	}
+	if n > 0 {
+		slog.Default().Info("lifecycle: released session branch locks", "session", id, "count", n, "reason", reason)
 	}
 }
 
@@ -1111,6 +1160,7 @@ func (m *Manager) MarkTerminated(ctx context.Context, id domain.SessionID) error
 			return err
 		}
 		if rec.IsTerminated {
+			m.releaseSessionBranchLocks(ctx, id, "task session terminated")
 			m.reapSessionContainers(ctx, id)
 			return nil
 		}
@@ -1152,6 +1202,7 @@ func (m *Manager) MarkTerminated(ctx context.Context, id domain.SessionID) error
 		}
 		switch outcome {
 		case terminationApplied, terminationAlreadyApplied:
+			m.releaseSessionBranchLocks(ctx, id, "task session terminated")
 			m.reapSessionContainers(ctx, id)
 			return nil
 		case terminationLaunchChanged:

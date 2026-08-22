@@ -82,6 +82,29 @@ func (w workflowBranchLocks) RecoverStale(ctx context.Context, runID string) (in
 	return w.mgr.RecoverStale(ctx, runID)
 }
 
+// sessionBranchLocks adapts *branchlock.Manager to
+// sessionmanager.BranchLocks (Checkpoint 8P-E.14). Same convention as
+// workflowBranchLocks above: the consumer declares its own narrow interface and
+// the translation lives here in composition-root wiring.
+//
+// Note that it is the SAME *branchlock.Manager the workflow coordinator uses,
+// over the same lock_key. That is what makes a task and a workflow contend for
+// one repository+branch rather than each honoring a lock the other cannot see.
+type sessionBranchLocks struct {
+	mgr *branchlock.Manager
+}
+
+func (s sessionBranchLocks) AcquireForSession(ctx context.Context, projectID domain.ProjectID, sessionID domain.SessionID) ([]domain.BranchLock, error) {
+	return s.mgr.Acquire(ctx, branchlock.AcquireRequest{
+		ProjectID: projectID,
+		SessionID: string(sessionID),
+	})
+}
+
+func (s sessionBranchLocks) ReleaseSession(ctx context.Context, sessionID, reason string) (int64, error) {
+	return s.mgr.ReleaseSession(ctx, sessionID, reason)
+}
+
 // coordinatorLockClassifier adapts the workflow coordinator to
 // branchlock.OwnerClassifier (Checkpoint 8P-E.13A), translating between the two
 // packages' own mirrored disposition types so neither has to import the other.

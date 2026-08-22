@@ -170,6 +170,24 @@ surface (`npm run sqlc`, `npm run api`).
 
 ## In flight / not yet a runtime feature
 
+- **Task queue for direct-branch contention**: an ordinary task that cannot take
+  its project's repository+branch execution lock currently **fails fast** with a
+  409 naming the current owner (Checkpoint 8P-E.14). A workflow in the same
+  situation parks in a durable `waiting_for_branch` state and resumes by itself
+  when the lock frees, because a run has an outbox, checkpoints and a wake
+  scheduler to park in; a task has none of those, so the equivalent behavior
+  needs a queued-task subsystem rather than a flag. Still to build: a durable
+  queued-task state, restart recovery for queued tasks, wake-on-lock-release,
+  automatic spawn/resume, and a truthful "Waiting for branch" state on the
+  Board. Failing fast is deliberately the safe interim: the one thing a blocked
+  task must never do is create a derived branch to work around the contention.
+- **Truthful terminal state for a finished task**: session status is derived,
+  never stored (`backend/internal/domain/status.go`), and a direct-branch task
+  that has finished its work has no PR and no activity, so `DeriveStatus` falls
+  through to `idle` — rendered as "Idle"/"Inactivo". That is not wrong, but it
+  is indistinguishable from an abandoned session. A truthful `completed` (and,
+  for isolated mode, a non-PR-derived "ready to merge") requires a durable task
+  outcome fact rather than a UI-only relabel.
 - **Browser automation acceptance**: the runtime implementation is complete.
   AO packages one
   checksum-pinned Vercel `agent-browser` Rust binary and routes a deliberately

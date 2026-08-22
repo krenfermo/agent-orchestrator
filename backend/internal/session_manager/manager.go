@@ -400,6 +400,11 @@ type Manager struct {
 
 	reviewersMu sync.Mutex
 	reviewers   ReviewerTerminator
+
+	// branchLocks is the direct-branch execution lock manager, late-bound for
+	// the same reason shellTerminals is (see SetBranchLocks in branch_lock.go).
+	branchLocksMu sync.Mutex
+	branchLocks   BranchLocks
 }
 
 // latestUserPromptRecorder narrows the post-delivery write to the single fact
@@ -766,6 +771,13 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	branch := cfg.Branch
 	if branch == "" {
 		branch = ProjectSpawnBranch(project, id, cfg.Kind, m.dataDir)
+	}
+	// Checkpoint 8P-E.14: take the direct-branch execution lock before the
+	// workspace adapter checks the branch out in the user's own repository. A
+	// no-op for isolated-worktree projects and for workflow-owned spawns.
+	if err := m.acquireSessionBranchLocks(ctx, cfg, id); err != nil {
+		m.rollbackSpawnSeedRow(ctx, id)
+		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: %w", id, err)
 	}
 	ws, workspaceProject, err := m.createSessionWorkspace(ctx, project, cfg, id, branch)
 	if err != nil {
@@ -1244,6 +1256,10 @@ func (m *Manager) markSpawnFailedTerminatedWithoutWorkspace(ctx context.Context,
 // rows still in seed state; if the row has progressed or the delete itself
 // fails, fall back to parking it terminated so a phantom row never looks live.
 func (m *Manager) rollbackSpawnSeedRow(ctx context.Context, id domain.SessionID) {
+	// Release before the row goes away: once the session is deleted, only boot
+	// reconciliation would ever notice the lock is orphaned, and until then the
+	// branch would stay occupied by a task that no longer exists (8P-E.14).
+	m.releaseSessionBranchLocks(ctx, id, "spawn rolled back")
 	if deleted, err := m.store.DeleteSession(ctx, id); err == nil && deleted {
 		m.cleanupSystemPromptDir(id)
 		return
@@ -3126,6 +3142,7 @@ func promptProjectContext(projectID domain.ProjectID, project domain.ProjectReco
 		Repo:          project.RepoOriginURL,
 		DefaultBranch: cfg.DefaultBranch,
 		Path:          project.Path,
+		DirectBranch:  domain.ResolveExecutionMode(project.Kind, project.Config) == domain.ExecutionDirectBranch,
 	}
 }
 

@@ -881,6 +881,14 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrNotResumable):
 		return apierr.Conflict("SESSION_NOT_RESUMABLE",
 			"This session has no saved agent session or prompt to resume from", nil)
+	// Checkpoint 8P-E.14: both are legitimate, operator-clearable states of a
+	// direct-branch project, not faults, so they surface as 409 with the full
+	// explanation (which branch, who holds it, what to do) rather than as a
+	// generic 500. The manager's message already names the owner.
+	case errors.Is(err, sessionmanager.ErrBranchBusy):
+		return apierr.Conflict("BRANCH_IN_USE", err.Error(), nil)
+	case errors.Is(err, sessionmanager.ErrBranchDirty):
+		return apierr.Conflict("BRANCH_DIRTY", err.Error(), nil)
 	case errors.Is(err, sessionmanager.ErrProjectNotResolvable):
 		return apierr.Invalid("PROJECT_NOT_RESOLVABLE", "Project is not registered or has no repo. Register it with `ao project add`", nil)
 	case errors.Is(err, sessionmanager.ErrUnknownHarness):

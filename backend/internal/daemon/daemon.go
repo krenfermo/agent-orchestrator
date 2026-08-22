@@ -490,6 +490,12 @@ func RunWithConfig(cfg config.Config) error {
 		NewID:      uuid.NewString,
 		Logger:     log,
 	})
+	// Checkpoint 8P-E.14: ordinary tasks take the same locks, over the same
+	// manager, so a task and a workflow targeting one repository+branch
+	// serialize instead of both writing it. Late-bound because the session and
+	// lifecycle managers are built before the lock manager exists.
+	rawSessionMgr.SetBranchLocks(sessionBranchLocks{mgr: branchLocks})
+	lcStack.LCM.SetBranchLockReleaser(branchLocks)
 	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, log)
 	// Checkpoint 8P-E.13A: reconciliation can only decide a stopped owner's
 	// lock once it can ask what that stop means, and only the coordinator knows

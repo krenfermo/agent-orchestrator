@@ -20,6 +20,12 @@ type promptProject struct {
 	Repo          string
 	DefaultBranch string
 	Path          string
+	// DirectBranch reports that the project runs in
+	// domain.ExecutionDirectBranch: DefaultBranch is not a base to branch off,
+	// it is the working branch the agent is already sitting on, inside the
+	// user's own repository, under a durable execution lock (Checkpoint
+	// 8P-E.14). Every branch instruction in this file flips on it.
+	DirectBranch bool
 }
 
 type taskPromptConfig struct {
@@ -81,7 +87,15 @@ func buildSystemPromptText(cfg systemPromptConfig) string {
 		if orchestratorID != "" {
 			sections = append(sections, workerOrchestratorPrompt(orchestratorID))
 		}
-		sections = append(sections, workerMultiPRPrompt(), workerContainerLabelPrompt())
+		// The multi-PR section teaches AO's generated session-branch namespace
+		// convention (ao/<session>/<topic>). In direct-branch mode there is no
+		// generated session branch to hang topics off, and following the
+		// convention would produce exactly the derived branch this mode exists
+		// to avoid, so the section is omitted rather than adapted.
+		if !cfg.Project.DirectBranch {
+			sections = append(sections, workerMultiPRPrompt())
+		}
+		sections = append(sections, workerContainerLabelPrompt())
 		if rules := strings.TrimSpace(cfg.ProjectRules); rules != "" {
 			sections = append(sections, "## Project Rules\n"+rules)
 		}
@@ -232,7 +246,9 @@ func workerSystemPrompt(project promptProject, hasOrchestrator bool) string {
 - Link the provider issue in the PR/MR body when there is one.
 - Include a concise PR/MR summary, tests run, and known risks or follow-ups.
 - Do not force-push or rewrite shared history unless explicitly instructed.`
-	if strings.TrimSpace(project.Repo) == "" {
+	if project.DirectBranch {
+		repoRules = directBranchGitRules(project)
+	} else if strings.TrimSpace(project.Repo) == "" {
 		repoRules = `## Local Git Rules
 
 - Work locally in the assigned workspace.
@@ -275,6 +291,47 @@ Your job is to complete the assigned task in this workspace. Inspect the relevan
 %s`, taskSourceRules, parallelHelpRules, repoRules, projectContextSection(project))
 }
 
+// directBranchGitRules replaces the feature-branch convention for a project in
+// direct-branch mode (Checkpoint 8P-E.14).
+//
+// This block exists because its absence caused a real incident. A task on the
+// agent-orchestrator project, correctly checked out on
+// feat/engineering-control-center in the user's own repository, read the
+// standing rule "Work on a feature branch, not the default branch" together
+// with "Default branch: feat/engineering-control-center" in the project context
+// and did the only consistent thing: it created
+// feat/engineering-control-center-cancel-archive-workflows and committed there.
+// AO's workspace routing had done everything right; the prompt then told the
+// agent to undo it.
+//
+// So the instruction is inverted here, and stated as a prohibition rather than
+// a preference: in this mode the configured branch is not a base to branch off,
+// it is the work branch, and it is the branch AO holds an execution lock on.
+// Work committed anywhere else is outside that lock and outside the task's
+// result.
+func directBranchGitRules(project promptProject) string {
+	branch := strings.TrimSpace(project.DefaultBranch)
+	if branch == "" {
+		branch = "the branch that is currently checked out"
+	} else {
+		branch = "`" + branch + "`"
+	}
+	return `## Git and Branch Rules
+
+This project uses direct-branch execution: you are working inside the user's own
+repository, on the branch AO has already checked out for you. There is no
+throwaway worktree and no generated AO branch.
+
+- Work directly on ` + branch + `. It is already checked out. Treat it as the work branch, not as a base branch.
+- Do NOT create a branch. Do NOT run ` + "`git checkout -b`" + `, ` + "`git switch -c`" + `, or ` + "`git branch`" + `, and do NOT switch to a different branch for any reason.
+- AO holds a durable execution lock on this exact repository and branch pair. Commits you make on any other branch fall outside that lock, are not part of this task's result, and will be left behind.
+- If you believe the work genuinely needs a separate branch, stop and say so instead of creating one. That is a decision for the user, not for this session.
+- Keep commits focused and use conventional commit messages when committing.
+- Other people's uncommitted changes may be present in this repository. Commit only the files your own task touched; never stage unrelated changes.
+- Do not force-push or rewrite shared history unless explicitly instructed.
+- Do not open a PR/MR from this session unless the user explicitly asks: there is no separate feature branch to open one from.`
+}
+
 func workerOrchestratorPrompt(orchestratorID string) string {
 	return fmt.Sprintf(`## Orchestrator Coordination
 
@@ -314,13 +371,21 @@ If this task starts its own Docker containers (a local database, a queue, any ad
 }
 
 func projectContextSection(project promptProject) string {
+	// In direct-branch mode the same value is labelled as the working branch,
+	// not the default branch. "Default branch" is what an agent branches off;
+	// naming it that here is what made the incident in directBranchGitRules
+	// read as an instruction to create a derived branch.
+	branchLabel := "Default branch"
+	if project.DirectBranch {
+		branchLabel = "Working branch (direct-branch execution; do not create or switch branches)"
+	}
 	return fmt.Sprintf(`## Project Context
 
 - Project: %s
 - Name: %s
 - Repository: %s
-- Default branch: %s
-- Path: %s`, project.ID, projectName(project), projectValue(project.Repo), projectValue(project.DefaultBranch), projectValue(project.Path))
+- %s: %s
+- Path: %s`, project.ID, projectName(project), projectValue(project.Repo), branchLabel, projectValue(project.DefaultBranch), projectValue(project.Path))
 }
 
 func projectName(project promptProject) string {

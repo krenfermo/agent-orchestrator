@@ -67,7 +67,13 @@ func (s *Store) AcquireBranchLock(ctx context.Context, lock domain.BranchLock) (
 		return domain.BranchLock{}, fmt.Errorf("acquire branch lock %s: read holder: %w", lock.LockKey, getErr)
 	}
 	holder := branchLockFromRow(held)
-	if holder.WorkflowRunID == lock.WorkflowRunID {
+	// Identity is compared through OwnerKey, never through WorkflowRunID alone
+	// (Checkpoint 8P-E.14). A session-owned lock carries an empty run id, so a
+	// bare run-id comparison would make every session's re-acquire match every
+	// other session's held lock and hand two tasks the same branch. OwnerKey
+	// falls back to the session only when there is no run, and an owner-less
+	// request (empty key) never matches anything.
+	if key := lock.OwnerKey(); key != "" && holder.OwnerKey() == key {
 		return holder, nil
 	}
 	return domain.BranchLock{}, domain.BranchLockConflictError{Holder: holder}

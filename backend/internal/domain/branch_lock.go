@@ -34,12 +34,20 @@ type BranchLockConflictError struct {
 
 func (e BranchLockConflictError) Error() string {
 	return "branch lock: " + e.Holder.Branch + " in " + e.Holder.RepoPath +
-		" is held by workflow " + e.Holder.WorkflowRunID
+		" is held by " + e.Holder.OwnerDescription()
 }
 
 func (e BranchLockConflictError) Unwrap() error { return ErrBranchLockHeld }
 
 // BranchLock is one durable execution lock over a repository+branch pair.
+//
+// Ownership is by workflow run OR by a single session, never by both
+// (Checkpoint 8P-E.14). An autonomous run owns the branch for the whole run,
+// across every session it spawns, so WorkflowRunID is the owner and SessionID
+// is only the current scope. An ordinary task has no run to belong to, so the
+// session itself is the owner and WorkflowRunID is empty. Both kinds compete
+// for the same lock_key, which is what makes a task and a workflow contend for
+// one repository+branch instead of quietly writing over each other.
 type BranchLock struct {
 	ID        string
 	LockKey   string
@@ -68,6 +76,43 @@ type BranchLock struct {
 
 // Held reports whether the lock is currently owned.
 func (l BranchLock) Held() bool { return l.State == BranchLockHeld }
+
+// SessionOwned reports whether an ordinary task session owns this lock rather
+// than an autonomous workflow run (Checkpoint 8P-E.14). It is decided by the
+// absence of a run, not by the presence of a session: a workflow-owned lock
+// also carries a SessionID (the step's current worker), so testing SessionID
+// alone would misclassify every workflow lock.
+func (l BranchLock) SessionOwned() bool {
+	return strings.TrimSpace(l.WorkflowRunID) == "" && strings.TrimSpace(l.SessionID) != ""
+}
+
+// OwnerKey is the identity a release, a renewal, or an idempotent re-acquire
+// must match. Two acquisitions belong to the same owner exactly when their
+// OwnerKeys are equal, which is why this is the one place the run-vs-session
+// distinction is resolved. An empty result means the lock names no owner at
+// all, and must never compare equal to anything.
+func (l BranchLock) OwnerKey() string {
+	if run := strings.TrimSpace(l.WorkflowRunID); run != "" {
+		return "run:" + run
+	}
+	if session := strings.TrimSpace(l.SessionID); session != "" {
+		return "session:" + session
+	}
+	return ""
+}
+
+// OwnerDescription names the holder for a human. It is what a blocked task
+// shows the operator, so it says which workflow or which session to go look at
+// rather than reporting an anonymous "busy".
+func (l BranchLock) OwnerDescription() string {
+	if run := strings.TrimSpace(l.WorkflowRunID); run != "" {
+		return "workflow " + run
+	}
+	if session := strings.TrimSpace(l.SessionID); session != "" {
+		return "task session " + session
+	}
+	return "an unidentified owner"
+}
 
 // branchLockKeySeparator is a unit separator: it cannot appear in a filesystem
 // path or a git branch name, so the composed key is unambiguous.

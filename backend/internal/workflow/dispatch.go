@@ -415,6 +415,10 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 		BaseRef:     c.masterTaskBaseRef(ctx, run),
 		RuntimeEnv:  runtimeEnv,
 		Owner:       owner,
+		// This run already holds the direct-branch execution lock (see
+		// ensureBranchLock above), so the worker session must not try to
+		// acquire it as a task in its own right and queue behind its own run.
+		WorkflowRunID: run.ID,
 	})
 	if err != nil {
 		classification := classifyProviderFailure(err)

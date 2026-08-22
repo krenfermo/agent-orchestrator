@@ -137,8 +137,42 @@ func keepOrAdopt(lock domain.BranchLock, ownerToken, reason string) Retention {
 	return Retention{Decision: RetentionKeep, Reason: reason}
 }
 
-// classifyLock resolves one held lock's owner and applies decideRetention.
+// decideSessionRetention is the retention policy for a lock an ordinary task
+// session owns (Checkpoint 8P-E.14).
+//
+// It answers the same question decideRetention does -- "can this owner still
+// write this branch?" -- against the only durable fact a session has:
+// IsTerminated. There is deliberately no equivalent of the needs_attention
+// branch here, because a task has no run state that could mean "stopped but
+// resumable": a session is either terminated, in which case nothing will ever
+// write through it again, or it is not, in which case it may still be working
+// and its branch must be protected.
+//
+// Note what this does NOT do: it does not release a lock because the session
+// looks idle. An idle session is the normal state of a task between agent
+// turns, and releasing on idleness would hand the branch to a second writer
+// while the first is still mid-task.
+func decideSessionRetention(lock domain.BranchLock, session domain.SessionRecord, found bool, ownerToken string) Retention {
+	switch {
+	case !found:
+		return Retention{Decision: RetentionRelease, Reason: "stale: task session no longer exists"}
+	case session.IsTerminated:
+		return Retention{Decision: RetentionRelease, Reason: "stale: task session is terminated"}
+	default:
+		return keepOrAdopt(lock, ownerToken, "owner is a live task session")
+	}
+}
+
+// classifyLock resolves one held lock's owner and applies the retention policy
+// for that owner kind.
 func (m *Manager) classifyLock(ctx context.Context, lock domain.BranchLock) (Retention, error) {
+	if lock.SessionOwned() {
+		session, ok, err := m.store.GetSession(ctx, domain.SessionID(lock.SessionID))
+		if err != nil {
+			return Retention{}, fmt.Errorf("branch lock: load owner session %s: %w", lock.SessionID, err)
+		}
+		return decideSessionRetention(lock, session, ok, m.ownerToken), nil
+	}
 	run, ok, err := m.store.GetWorkflowRun(ctx, lock.WorkflowRunID)
 	if err != nil {
 		return Retention{}, fmt.Errorf("branch lock: load owner run %s: %w", lock.WorkflowRunID, err)

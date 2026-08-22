@@ -76,6 +76,18 @@ type SpawnConfig struct {
 	// created session for later ownership checks, never trusted as-is from
 	// a client -- callers must resolve it from durable ownership data.
 	Owner domain.UserID
+
+	// WorkflowRunID names the autonomous run this spawn belongs to, when it
+	// belongs to one (Checkpoint 8P-E.14). It exists for exactly one decision:
+	// in direct-branch mode the session manager acquires the repository+branch
+	// execution lock for an ordinary task, but a workflow's worker must not,
+	// because its run already owns that lock and the session would otherwise
+	// contend with the run that spawned it.
+	//
+	// Daemon-internal: it is set by the workflow coordinator from durable run
+	// state and is deliberately absent from the HTTP spawn DTO, so no client
+	// can present itself as a workflow to bypass task branch locking.
+	WorkflowRunID string
 }
 
 // SpawnAttachment is a single file attached to a spawn request. Data holds the
