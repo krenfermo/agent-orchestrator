@@ -1444,4 +1444,27 @@ describe("ProjectSettingsForm", () => {
 		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["project", "proj-1"] });
 		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: workspaceQueryKey });
 	});
+
+	it("shows the reviewer routing note in the agents section", async () => {
+		mockProject({
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "",
+			defaultBranch: "main",
+			config: {
+				worker: { agent: "codex" },
+				orchestrator: { agent: "claude-code" },
+			},
+		});
+
+		renderSettings("proj-1", undefined, "agents");
+
+		expect(
+			await screen.findByText(
+				"Reviewer routing is selected automatically according to policy and provider availability.",
+			),
+		).toBeInTheDocument();
+	});
 });
