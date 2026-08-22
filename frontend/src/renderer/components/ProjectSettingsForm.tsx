@@ -522,6 +522,12 @@ function SettingsBody({
 							missingRequiredAgent ? t("settings.project.agentsRequired") : null
 						}
 					/>
+					<p className="px-1 text-xs leading-row text-settings-muted">
+						{t(
+							"settings.project.reviewerRoutingNote",
+							"Reviewer routing is selected automatically according to policy and provider availability.",
+						)}
+					</p>
 				</>
 			)}
 
