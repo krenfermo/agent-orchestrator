@@ -17,12 +17,22 @@ const (
 	NotificationPRMerged NotificationType = "pr_merged"
 	// NotificationPRClosedUnmerged means a tracked PR closed without merging.
 	NotificationPRClosedUnmerged NotificationType = "pr_closed_unmerged"
+	// NotificationTaskCompleted means an ordinary task session reported that it
+	// finished the work it was given. It is raised from the durable completion
+	// receipt (SessionRecord.TurnCompletedAt) rather than from any generic idle
+	// or stop observation — see lifecycle.turnSucceeded.
+	NotificationTaskCompleted NotificationType = "task_completed"
+	// NotificationWorkflowCompleted means a workflow run reached the terminal
+	// WorkflowRunCompleted state. Workflow terminal states have no outgoing
+	// transitions, so that state change happens exactly once per run.
+	NotificationWorkflowCompleted NotificationType = "workflow_completed"
 )
 
 // Valid reports whether t is one of the v1 notification kinds.
 func (t NotificationType) Valid() bool {
 	switch t {
-	case NotificationNeedsInput, NotificationReadyToMerge, NotificationPRMerged, NotificationPRClosedUnmerged:
+	case NotificationNeedsInput, NotificationReadyToMerge, NotificationPRMerged, NotificationPRClosedUnmerged,
+		NotificationTaskCompleted, NotificationWorkflowCompleted:
 		return true
 	default:
 		return false
@@ -35,6 +45,12 @@ func (t NotificationType) Valid() bool {
 // happened, so they are surfaced once as unseen and never held as unresolved.
 func (t NotificationType) NeedsResolution() bool {
 	return t == NotificationNeedsInput || t == NotificationReadyToMerge
+}
+
+// Completion reports whether t announces that a unit of work finished
+// successfully — the family that opts in to the optional email fan-out.
+func (t NotificationType) Completion() bool {
+	return t == NotificationTaskCompleted || t == NotificationWorkflowCompleted
 }
 
 // NotificationStatus is the seen state for a stored notification. The stored
@@ -88,6 +104,16 @@ type NotificationRecord struct {
 	SessionID SessionID
 	ProjectID ProjectID
 	PRURL     string
+	// WorkflowRunID scopes a run-level notification (workflow_completed) that has
+	// no session behind it. Empty for every session-scoped notification.
+	WorkflowRunID string
+	// DedupeKey names the one real-world EVENT this row reports, so the same
+	// event can never produce a second row — not on a retry, not after a daemon
+	// restart, not when two callers observe the same transition. Unlike the
+	// open-row dedupe index (which only holds while a row is unseen or
+	// unresolved), this is permanent, which is what a terminal "it finished"
+	// fact needs. Empty keeps the pre-existing open-row dedupe behavior.
+	DedupeKey string
 	Type      NotificationType
 	Title     string
 	Body      string
@@ -130,7 +156,13 @@ var (
 
 // Validate checks the required fields and enum values for a stored notification.
 func (r NotificationRecord) Validate() error {
-	if r.SessionID == "" || r.ProjectID == "" || r.Title == "" || r.CreatedAt.IsZero() {
+	if r.ProjectID == "" || r.Title == "" || r.CreatedAt.IsZero() {
+		return ErrInvalidNotificationRecord
+	}
+	// A notification is anchored to either a session or a workflow run. A
+	// workflow run is not a session and has no session to borrow, so requiring
+	// one here would have forced run-level notifications to invent an owner.
+	if r.SessionID == "" && r.WorkflowRunID == "" {
 		return ErrInvalidNotificationRecord
 	}
 	if !r.Type.Valid() {

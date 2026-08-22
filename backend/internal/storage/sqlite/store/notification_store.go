@@ -15,34 +15,44 @@ import (
 )
 
 // CreateNotification inserts one unread notification. It returns created=false
-// when the open dedupe index already has a matching row — open meaning unseen
-// or still unresolved, so a notification the user has already looked at is not
-// re-raised while its underlying issue is unchanged.
+// when a matching row already exists, under either of two dedupe rules.
+//
+// The open rule (unchanged): the open dedupe index already has a row for this
+// session/type/PR — open meaning unseen or still unresolved — so a notification
+// the user has already looked at is not re-raised while its underlying issue is
+// unchanged.
+//
+// The event rule (rec.DedupeKey set): a row already reports this exact event.
+// That one is permanent, not scoped to open rows, because a completion is a
+// terminal fact: reporting it twice after a retry, a restart, or a second
+// observer would be a duplicate no matter how long ago the user read the first.
 func (s *Store) CreateNotification(ctx context.Context, rec domain.NotificationRecord) (domain.NotificationRecord, bool, error) {
 	if err := rec.Validate(); err != nil {
 		return domain.NotificationRecord{}, false, err
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	if existing, ok, err := s.getOpenNotificationByDedupe(ctx, rec); err != nil {
+	if existing, ok, err := s.getDeduplicatedNotification(ctx, rec); err != nil {
 		return domain.NotificationRecord{}, false, err
 	} else if ok {
 		return existing, false, nil
 	}
 	row, err := s.qw.CreateNotification(ctx, gen.CreateNotificationParams{
-		ID:        rec.ID,
-		SessionID: rec.SessionID,
-		ProjectID: rec.ProjectID,
-		PRURL:     rec.PRURL,
-		Type:      rec.Type,
-		Title:     rec.Title,
-		Body:      rec.Body,
-		Status:    rec.Status,
-		CreatedAt: rec.CreatedAt,
+		ID:            rec.ID,
+		SessionID:     nullableSessionID(rec.SessionID),
+		ProjectID:     rec.ProjectID,
+		WorkflowRunID: rec.WorkflowRunID,
+		PRURL:         rec.PRURL,
+		DedupeKey:     rec.DedupeKey,
+		Type:          rec.Type,
+		Title:         rec.Title,
+		Body:          rec.Body,
+		Status:        rec.Status,
+		CreatedAt:     rec.CreatedAt,
 	})
 	if err != nil {
 		if isSQLiteUnique(err) {
-			if existing, ok, lookupErr := s.getOpenNotificationByDedupe(ctx, rec); lookupErr != nil {
+			if existing, ok, lookupErr := s.getDeduplicatedNotification(ctx, rec); lookupErr != nil {
 				return domain.NotificationRecord{}, false, lookupErr
 			} else if ok {
 				return existing, false, nil
@@ -123,7 +133,7 @@ func (s *Store) ResolveSessionNotifications(
 	defer s.writeMu.Unlock()
 	rows, err := s.qw.ResolveSessionNotificationsByType(ctx, gen.ResolveSessionNotificationsByTypeParams{
 		ResolvedAt: nullTime(at),
-		SessionID:  id,
+		SessionID:  nullableSessionID(id),
 		Type:       typ,
 	})
 	if err != nil {
@@ -265,9 +275,33 @@ func (s *Store) MarkAllNotificationsRead(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
+// getDeduplicatedNotification applies whichever dedupe rule this record opts
+// into. An event-keyed record is matched on its event alone: its session or run
+// is already implied by the key, and its "still open" state is irrelevant.
+func (s *Store) getDeduplicatedNotification(ctx context.Context, rec domain.NotificationRecord) (domain.NotificationRecord, bool, error) {
+	if rec.DedupeKey != "" {
+		return s.getNotificationByEventDedupe(ctx, rec)
+	}
+	return s.getOpenNotificationByDedupe(ctx, rec)
+}
+
+func (s *Store) getNotificationByEventDedupe(ctx context.Context, rec domain.NotificationRecord) (domain.NotificationRecord, bool, error) {
+	row, err := s.qw.GetNotificationByEventDedupe(ctx, gen.GetNotificationByEventDedupeParams{
+		Type:      rec.Type,
+		DedupeKey: rec.DedupeKey,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.NotificationRecord{}, false, nil
+	}
+	if err != nil {
+		return domain.NotificationRecord{}, false, fmt.Errorf("lookup notification event dedupe: %w", err)
+	}
+	return notificationFromGen(row), true, nil
+}
+
 func (s *Store) getOpenNotificationByDedupe(ctx context.Context, rec domain.NotificationRecord) (domain.NotificationRecord, bool, error) {
 	row, err := s.qw.GetOpenNotificationByDedupe(ctx, gen.GetOpenNotificationByDedupeParams{
-		SessionID: rec.SessionID,
+		SessionID: string(rec.SessionID),
 		Type:      rec.Type,
 		PRURL:     rec.PRURL,
 	})
@@ -285,18 +319,37 @@ func isSQLiteUnique(err error) bool {
 	return errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE
 }
 
+// nullableSessionID maps AO's "" for absent onto the NULL the notifications
+// table now uses, so a run-level row is stored session-less rather than
+// pointing at a session id that does not exist.
+func nullableSessionID(id domain.SessionID) *domain.SessionID {
+	if id == "" {
+		return nil
+	}
+	return &id
+}
+
+func sessionIDFromNull(id *domain.SessionID) domain.SessionID {
+	if id == nil {
+		return ""
+	}
+	return *id
+}
+
 func notificationFromGen(row gen.Notification) domain.NotificationRecord {
 	return domain.NotificationRecord{
-		ID:         row.ID,
-		SessionID:  row.SessionID,
-		ProjectID:  row.ProjectID,
-		PRURL:      row.PRURL,
-		Type:       row.Type,
-		Title:      row.Title,
-		Body:       row.Body,
-		Status:     row.Status,
-		CreatedAt:  row.CreatedAt,
-		ResolvedAt: timeFromNull(row.ResolvedAt),
+		ID:            row.ID,
+		SessionID:     sessionIDFromNull(row.SessionID),
+		ProjectID:     row.ProjectID,
+		WorkflowRunID: row.WorkflowRunID,
+		DedupeKey:     row.DedupeKey,
+		PRURL:         row.PRURL,
+		Type:          row.Type,
+		Title:         row.Title,
+		Body:          row.Body,
+		Status:        row.Status,
+		CreatedAt:     row.CreatedAt,
+		ResolvedAt:    timeFromNull(row.ResolvedAt),
 	}
 }
 

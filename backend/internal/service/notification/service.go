@@ -159,5 +159,10 @@ func targetForRecord(rec domain.NotificationRecord) Target {
 	if rec.PRURL != "" {
 		return Target{Kind: TargetPR, SessionID: rec.SessionID, PRURL: rec.PRURL}
 	}
+	// A run-level notification has no session to open; naming the run keeps the
+	// target honest instead of handing a client an empty session id.
+	if rec.SessionID == "" && rec.WorkflowRunID != "" {
+		return Target{Kind: TargetWorkflow, WorkflowRunID: rec.WorkflowRunID}
+	}
 	return Target{Kind: TargetSession, SessionID: rec.SessionID}
 }

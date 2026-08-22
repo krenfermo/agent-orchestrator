@@ -1,7 +1,8 @@
 -- name: CreateNotification :one
 INSERT INTO notifications (
-    id, session_id, project_id, pr_url, type, title, body, status, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    id, session_id, project_id, workflow_run_id, pr_url, dedupe_key,
+    type, title, body, status, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
 -- name: ListUnreadNotificationsPage :many
@@ -109,8 +110,19 @@ RETURNING *;
 -- name: GetOpenNotificationByDedupe :one
 SELECT *
 FROM notifications
-WHERE session_id = ?
-  AND type = ?
-  AND pr_url = ?
+WHERE COALESCE(session_id, '') = CAST(sqlc.arg(session_id) AS TEXT)
+  AND type = sqlc.arg(type)
+  AND pr_url = sqlc.arg(pr_url)
+  AND dedupe_key = ''
   AND (status = 'unread' OR resolved_at IS NULL)
+LIMIT 1;
+
+-- The permanent, event-scoped counterpart to GetOpenNotificationByDedupe: it
+-- matches whether or not the row is still open, so one completion event can
+-- never produce a second notification -- not on a retry, not after a restart.
+-- name: GetNotificationByEventDedupe :one
+SELECT *
+FROM notifications
+WHERE type = sqlc.arg(type)
+  AND dedupe_key = CAST(sqlc.arg(dedupe_key) AS TEXT)
 LIMIT 1;

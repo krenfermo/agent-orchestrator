@@ -16,8 +16,9 @@ const SSE_RETRY_MS = 5_000;
 const EVENTSOURCE_CLOSED = 2;
 
 /**
- * Only these two kinds describe something still waiting on the user.
- * `pr_merged` / `pr_closed_unmerged` report something that already happened.
+ * Only these two kinds describe something still waiting on the user. Every
+ * other kind — `pr_merged`, `pr_closed_unmerged`, `task_completed`,
+ * `workflow_completed` — reports something that already happened.
  * Mirrors NotificationType.NeedsResolution on the backend — used here only to
  * keep `unresolvedCount` accurate on the unread/all caches.
  */
@@ -269,7 +270,9 @@ export function keepLatestNotificationsPage(
  *
  * Only `needs_input` is suppressed. PR outcomes (`ready_to_merge`,
  * `pr_merged`, `pr_closed_unmerged`) are not visible in the terminal pane, so
- * they still deserve a toast even for the session in the foreground.
+ * they still deserve a toast even for the session in the foreground. Nor are
+ * completions: `task_completed` is the whole point of stepping away from the
+ * screen, and `workflow_completed` has no terminal pane at all.
  */
 function suppressToastForWatchedSession(
 	notification: NotificationDTO,

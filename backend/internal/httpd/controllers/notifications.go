@@ -210,43 +210,51 @@ func notificationResponses(in []notificationsvc.Notification) []NotificationResp
 
 func notificationResponse(n notificationsvc.Notification) NotificationResponse {
 	return NotificationResponse{
-		ID:         n.ID,
-		SessionID:  string(n.SessionID),
-		ProjectID:  string(n.ProjectID),
-		PRURL:      n.PRURL,
-		Type:       string(n.Type),
-		Title:      n.Title,
-		Body:       n.Body,
-		Status:     string(n.Status),
-		CreatedAt:  n.CreatedAt,
-		ResolvedAt: optionalTime(n.ResolvedAt),
+		ID:            n.ID,
+		SessionID:     string(n.SessionID),
+		ProjectID:     string(n.ProjectID),
+		PRURL:         n.PRURL,
+		WorkflowRunID: n.WorkflowRunID,
+		Type:          string(n.Type),
+		Title:         n.Title,
+		Body:          n.Body,
+		Status:        string(n.Status),
+		CreatedAt:     n.CreatedAt,
+		ResolvedAt:    optionalTime(n.ResolvedAt),
 		Target: NotificationTarget{
-			Kind:      string(n.Target.Kind),
-			SessionID: string(n.Target.SessionID),
-			PRURL:     n.Target.PRURL,
+			Kind:          string(n.Target.Kind),
+			SessionID:     string(n.Target.SessionID),
+			PRURL:         n.Target.PRURL,
+			WorkflowRunID: n.Target.WorkflowRunID,
 		},
 	}
 }
 
 func notificationResponseFromRecord(rec domain.NotificationRecord) NotificationResponse {
 	return NotificationResponse{
-		ID:         rec.ID,
-		SessionID:  string(rec.SessionID),
-		ProjectID:  string(rec.ProjectID),
-		PRURL:      rec.PRURL,
-		Type:       string(rec.Type),
-		Title:      rec.Title,
-		Body:       rec.Body,
-		Status:     string(rec.Status),
-		CreatedAt:  rec.CreatedAt,
-		ResolvedAt: optionalTime(rec.ResolvedAt),
-		Target:     notificationTargetFromRecord(rec),
+		ID:            rec.ID,
+		SessionID:     string(rec.SessionID),
+		ProjectID:     string(rec.ProjectID),
+		PRURL:         rec.PRURL,
+		WorkflowRunID: rec.WorkflowRunID,
+		Type:          string(rec.Type),
+		Title:         rec.Title,
+		Body:          rec.Body,
+		Status:        string(rec.Status),
+		CreatedAt:     rec.CreatedAt,
+		ResolvedAt:    optionalTime(rec.ResolvedAt),
+		Target:        notificationTargetFromRecord(rec),
 	}
 }
 
 func notificationTargetFromRecord(rec domain.NotificationRecord) NotificationTarget {
 	if rec.PRURL != "" {
 		return NotificationTarget{Kind: "pr", SessionID: string(rec.SessionID), PRURL: rec.PRURL}
+	}
+	// A run-level notification has no session to open; naming the run keeps the
+	// target honest instead of handing a client an empty session id.
+	if rec.SessionID == "" && rec.WorkflowRunID != "" {
+		return NotificationTarget{Kind: "workflow", WorkflowRunID: rec.WorkflowRunID}
 	}
 	return NotificationTarget{Kind: "session", SessionID: string(rec.SessionID)}
 }

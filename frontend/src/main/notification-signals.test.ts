@@ -2,7 +2,14 @@
 import { describe, expect, it } from "vitest";
 import { shouldSignalAttention, shouldToast, type NotificationType } from "./notification-signals";
 
-const ALL_TYPES: NotificationType[] = ["needs_input", "ready_to_merge", "pr_merged", "pr_closed_unmerged"];
+const ALL_TYPES: NotificationType[] = [
+	"needs_input",
+	"ready_to_merge",
+	"pr_merged",
+	"pr_closed_unmerged",
+	"task_completed",
+	"workflow_completed",
+];
 
 describe("shouldToast", () => {
 	it("fires a toast for every backend notification type", () => {
@@ -27,6 +34,14 @@ describe("shouldSignalAttention", () => {
 	it("does not bounce/flash for informational PR outcomes", () => {
 		expect(shouldSignalAttention("pr_merged")).toBe(false);
 		expect(shouldSignalAttention("pr_closed_unmerged")).toBe(false);
+	});
+
+	// Finished work is news the toast already delivers. Nothing is waiting on
+	// the user, so bouncing the dock would interrupt with nothing to act on —
+	// and a fleet of tasks finishing would make it constant.
+	it("does not bounce/flash for completions", () => {
+		expect(shouldSignalAttention("task_completed")).toBe(false);
+		expect(shouldSignalAttention("workflow_completed")).toBe(false);
 	});
 
 	it("does not signal for unknown or missing types", () => {

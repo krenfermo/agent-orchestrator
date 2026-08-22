@@ -7,6 +7,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	settingssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/settings"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
+	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
 )
 
 // settingsStore adapts the SQLite store to the settings service's Store.
@@ -24,8 +25,33 @@ func (s settingsStore) GetAppSettings(ctx context.Context) (settingssvc.Snapshot
 	}
 	return settingssvc.Snapshot{
 		DefaultSessionMode: row.DefaultSessionMode,
-		UpdatedAt:          row.UpdatedAt,
+		Email: settingssvc.EmailConfig{
+			Enabled:            row.EmailNotifications.Enabled,
+			Recipient:          row.EmailNotifications.Recipient,
+			Host:               row.EmailNotifications.SMTPHost,
+			Port:               row.EmailNotifications.SMTPPort,
+			Username:           row.EmailNotifications.SMTPUsername,
+			PasswordCiphertext: row.EmailNotifications.SMTPPasswordEncrypted,
+			TLS:                row.EmailNotifications.SMTPTLS,
+		},
+		UpdatedAt: row.UpdatedAt,
 	}, nil
+}
+
+func (s settingsStore) SetEmailNotifications(
+	ctx context.Context,
+	cfg settingssvc.EmailConfig,
+	now time.Time,
+) error {
+	return s.store.SetEmailNotificationSettings(ctx, store.EmailNotificationSettings{
+		Enabled:               cfg.Enabled,
+		Recipient:             cfg.Recipient,
+		SMTPHost:              cfg.Host,
+		SMTPPort:              cfg.Port,
+		SMTPUsername:          cfg.Username,
+		SMTPPasswordEncrypted: cfg.PasswordCiphertext,
+		SMTPTLS:               cfg.TLS,
+	}, now)
 }
 
 func (s settingsStore) SetDefaultSessionMode(

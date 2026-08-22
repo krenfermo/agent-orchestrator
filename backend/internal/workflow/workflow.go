@@ -205,6 +205,11 @@ type Deps struct {
 	// here (e.g. ReviewerLauncher).
 	DecisionResolverLauncher DecisionResolverLauncher
 
+	// Notifications receives the "this workflow run finished" intent when a run
+	// durably enters WorkflowRunCompleted. Optional: nil raises no
+	// notifications and changes nothing else.
+	Notifications NotificationSink
+
 	// WakeScheduler backs Checkpoint 8N's durable wake-up scheduler: when a
 	// run/step enters a capacity wait, Coordinator asks WakeScheduler to
 	// persist a wake so a daemon-level poller can resume it automatically.
@@ -307,6 +312,9 @@ type Coordinator struct {
 	// dispatch. Optional.
 	decisionResolverLauncher DecisionResolverLauncher
 
+	// notifications receives run-completion notification intents. Optional.
+	notifications NotificationSink
+
 	// wakeScheduler backs Checkpoint 8N's durable wake-up scheduler.
 	// Optional.
 	wakeScheduler WakeScheduler
@@ -364,6 +372,7 @@ func New(d Deps) *Coordinator {
 		questionsStore:           d.QuestionsStore,
 		paneReader:               d.PaneReader,
 		decisionResolverLauncher: d.DecisionResolverLauncher,
+		notifications:            d.Notifications,
 		wakeScheduler:            d.WakeScheduler,
 		runtimeIsolation:         d.RuntimeIsolation,
 		providerProfiles:         d.ProviderProfiles,

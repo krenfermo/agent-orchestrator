@@ -735,7 +735,7 @@ func (c *Coordinator) completeVerifiedRun(ctx stdctx.Context, run domain.Workflo
 		run.State = domain.WorkflowRunRunning
 	}
 	if run.State == domain.WorkflowRunRunning {
-		if _, err := c.store.UpdateWorkflowRunState(ctx, run.ID, domain.WorkflowRunRunning, domain.WorkflowRunCompleted, now); err != nil {
+		if _, err := c.completeRun(ctx, run, domain.WorkflowRunRunning); err != nil {
 			return run, step, err
 		}
 		run.State = domain.WorkflowRunCompleted

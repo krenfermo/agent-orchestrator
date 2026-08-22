@@ -695,7 +695,9 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 	}
 	if len(tasks) > 0 && len(completed) == len(tasks) {
 		if run.State == domain.WorkflowRunRunning {
-			_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunCompleted, c.clock())
+			if _, err := c.completeRun(ctx, run, run.State); err != nil {
+				return err
+			}
 		}
 		return nil
 	}

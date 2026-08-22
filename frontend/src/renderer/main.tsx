@@ -29,9 +29,17 @@ if (import.meta.env.DEV) {
 		ready_to_merge: "Ready to merge",
 		pr_merged: "PR merged",
 		pr_closed_unmerged: "PR closed",
+		task_completed: "Task finished",
+		workflow_completed: "Workflow finished",
 	};
 	w.__testNotif = async (
-		type: "needs_input" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" = "needs_input",
+		type:
+			| "needs_input"
+			| "ready_to_merge"
+			| "pr_merged"
+			| "pr_closed_unmerged"
+			| "task_completed"
+			| "workflow_completed" = "needs_input",
 	) => {
 		const key = unreadNotificationsQueryKey;
 		const id = `test-${Date.now()}`;

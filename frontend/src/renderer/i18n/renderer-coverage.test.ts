@@ -43,6 +43,14 @@ const approvedLiterals: Record<string, readonly string[]> = {
 		"Ctrl+/",
 	],
 	"components/settings/ConnectMobileSetup.tsx": ["tailscale ip -4"],
+	// Example addresses and a hostname shown as input placeholders. Translating
+	// them would produce a localized address that is not a real one, which is
+	// worse than leaving the example in the one form every locale reads.
+	"components/settings/EmailNotificationsSettingsSection.tsx": [
+		"you@example.com",
+		"smtp.gmail.com",
+		"you@gmail.com",
+	],
 	"components/settings/UpdatesSection.tsx": ["PR #"],
 };
 

@@ -11,13 +11,17 @@ const (
 	TargetSession TargetKind = "session"
 	// TargetPR navigates to a pull request view.
 	TargetPR TargetKind = "pr"
+	// TargetWorkflow navigates to a workflow run view. Used by run-level
+	// notifications, which have no session to open.
+	TargetWorkflow TargetKind = "workflow"
 )
 
 // Target is the service-facing navigation metadata for a notification.
 type Target struct {
-	Kind      TargetKind
-	SessionID domain.SessionID
-	PRURL     string
+	Kind          TargetKind
+	SessionID     domain.SessionID
+	PRURL         string
+	WorkflowRunID string
 }
 
 // Notification is the dashboard-facing service DTO assembled from a stored row.

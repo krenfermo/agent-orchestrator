@@ -73,9 +73,16 @@ type AgentSwitch struct {
 }
 
 type AppSetting struct {
-	ID                 int64
-	DefaultSessionMode domain.SessionMode
-	UpdatedAt          time.Time
+	ID                        int64
+	DefaultSessionMode        domain.SessionMode
+	UpdatedAt                 time.Time
+	EmailNotificationsEnabled int64
+	EmailRecipient            string
+	SmtpHost                  string
+	SmtpPort                  int64
+	SmtpUsername              string
+	SmtpPasswordEncrypted     string
+	SmtpTls                   string
 }
 
 type AuthSession struct {
@@ -250,16 +257,18 @@ type ModelUsageEvent struct {
 }
 
 type Notification struct {
-	ID         string
-	SessionID  domain.SessionID
-	ProjectID  domain.ProjectID
-	PRURL      string
-	Type       domain.NotificationType
-	Title      string
-	Body       string
-	Status     domain.NotificationStatus
-	CreatedAt  time.Time
-	ResolvedAt sql.NullTime
+	ID            string
+	SessionID     *domain.SessionID
+	ProjectID     domain.ProjectID
+	WorkflowRunID string
+	PRURL         string
+	DedupeKey     string
+	Type          domain.NotificationType
+	Title         string
+	Body          string
+	Status        domain.NotificationStatus
+	CreatedAt     time.Time
+	ResolvedAt    sql.NullTime
 }
 
 type PR struct {

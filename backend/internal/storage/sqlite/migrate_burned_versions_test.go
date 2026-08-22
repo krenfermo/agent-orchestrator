@@ -125,6 +125,8 @@ var shippedMigrations = map[int64]string{
 	119: "0119_workflow_task_failed_state.sql",
 	120: "0120_workflow_run_archive.sql",
 	121: "0121_session_turn_completed.sql",
+	122: "0122_notification_completion.sql",
+	123: "0123_email_notification_settings.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

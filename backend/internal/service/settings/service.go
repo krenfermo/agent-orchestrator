@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/mailer"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
@@ -18,12 +19,39 @@ import (
 type Store interface {
 	GetAppSettings(ctx context.Context) (Snapshot, error)
 	SetDefaultSessionMode(ctx context.Context, mode domain.SessionMode, now time.Time) error
+	SetEmailNotifications(ctx context.Context, cfg EmailConfig, now time.Time) error
 }
 
 // Snapshot is the current preference set.
 type Snapshot struct {
 	DefaultSessionMode domain.SessionMode
+	Email              EmailConfig
 	UpdatedAt          time.Time
+}
+
+// EmailConfig is the durable completion-email configuration. The password is
+// carried as ciphertext at this boundary and everywhere below it; only
+// mailerConfig ever holds the plaintext, and only for the length of one send.
+type EmailConfig struct {
+	Enabled            bool
+	Recipient          string
+	Host               string
+	Port               int
+	Username           string
+	PasswordCiphertext string
+	TLS                string
+}
+
+// SecretBox seals and opens the one credential AO has to be able to read back.
+type SecretBox interface {
+	Seal(plaintext string) (string, error)
+	Open(ciphertext string) (string, error)
+}
+
+// Sender delivers a test email. Narrow on purpose: the settings service knows
+// how to resolve a destination, not how to talk SMTP.
+type Sender interface {
+	Send(cfg mailer.Config, msg mailer.Message) error
 }
 
 // ChatCapability reports which harnesses can run in chat mode, so the UI can warn
@@ -35,9 +63,11 @@ type ChatCapability interface {
 
 // Service reads and writes preferences.
 type Service struct {
-	store Store
-	chat  ChatCapability
-	now   func() time.Time
+	store   Store
+	chat    ChatCapability
+	secrets SecretBox
+	sender  Sender
+	now     func() time.Time
 }
 
 // New builds the service.
@@ -46,6 +76,15 @@ func New(store Store, chat ChatCapability, now func() time.Time) *Service {
 		now = func() time.Time { return time.Now().UTC() }
 	}
 	return &Service{store: store, chat: chat, now: now}
+}
+
+// WithEmail wires the completion-email dependencies. Kept separate from New so
+// every existing caller and test keeps compiling and simply has no email
+// surface, which is also what a build without a secret box should have.
+func (s *Service) WithEmail(secrets SecretBox, sender Sender) *Service {
+	s.secrets = secrets
+	s.sender = sender
+	return s
 }
 
 // Get returns the current preferences.

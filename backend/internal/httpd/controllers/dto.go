@@ -1024,22 +1024,26 @@ type NotificationIDParam struct {
 
 // NotificationTarget is the dashboard navigation target for a notification.
 type NotificationTarget struct {
-	Kind      string `json:"kind" enum:"session,pr"`
-	SessionID string `json:"sessionId"`
-	PRURL     string `json:"prUrl,omitempty"`
+	Kind          string `json:"kind" enum:"session,pr,workflow"`
+	SessionID     string `json:"sessionId"`
+	PRURL         string `json:"prUrl,omitempty"`
+	WorkflowRunID string `json:"workflowRunId,omitempty"`
 }
 
 // NotificationResponse is one stored notification returned by the API.
 type NotificationResponse struct {
-	ID        string    `json:"id"`
-	SessionID string    `json:"sessionId"`
-	ProjectID string    `json:"projectId"`
-	PRURL     string    `json:"prUrl"`
-	Type      string    `json:"type" enum:"needs_input,ready_to_merge,pr_merged,pr_closed_unmerged"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	Status    string    `json:"status" enum:"unread,read" description:"Seen state. unread means the user has not opened the notification panel since it arrived."`
-	CreatedAt time.Time `json:"createdAt"`
+	ID        string `json:"id"`
+	SessionID string `json:"sessionId"`
+	ProjectID string `json:"projectId"`
+	PRURL     string `json:"prUrl"`
+	// WorkflowRunID is set on run-level notifications (workflow_completed),
+	// which have no session behind them.
+	WorkflowRunID string    `json:"workflowRunId,omitempty"`
+	Type          string    `json:"type" enum:"needs_input,ready_to_merge,pr_merged,pr_closed_unmerged,task_completed,workflow_completed"`
+	Title         string    `json:"title"`
+	Body          string    `json:"body"`
+	Status        string    `json:"status" enum:"unread,read" description:"Seen state. unread means the user has not opened the notification panel since it arrived."`
+	CreatedAt     time.Time `json:"createdAt"`
 	// ResolvedAt is set by AO when the underlying issue goes away (the session
 	// received its input, the PR stopped waiting on a merge). Absent means the
 	// issue is still open. There is no user-facing action that sets it.
@@ -1817,6 +1821,51 @@ type SettingsResponse struct {
 // UpdateSessionInterfaceRequest changes the default interface for new sessions.
 type UpdateSessionInterfaceRequest struct {
 	DefaultSessionMode string `json:"defaultSessionMode" enum:"chat,tui"`
+}
+
+// EmailNotificationSettingsResponse is the completion-email configuration.
+//
+// It has no password field, and deliberately never will. The stored SMTP
+// password is write-only across this API: PasswordSet reports that one exists,
+// which is everything a UI needs to render the field, and means the secret
+// cannot leak through a response body, a proxy log, or a support bundle.
+type EmailNotificationSettingsResponse struct {
+	Enabled   bool   `json:"enabled"`
+	Recipient string `json:"recipient"`
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
+	Username  string `json:"username"`
+	TLS       string `json:"tls" enum:"starttls,implicit,none" description:"How the SMTP connection is protected. starttls is the port-587 default (and what Gmail app passwords expect)."`
+	// PasswordSet reports whether a password is stored. The password itself is
+	// never returned.
+	PasswordSet bool `json:"passwordSet"`
+}
+
+// UpdateEmailNotificationSettingsRequest changes the completion-email
+// configuration.
+type UpdateEmailNotificationSettingsRequest struct {
+	Enabled   bool   `json:"enabled"`
+	Recipient string `json:"recipient"`
+	Host      string `json:"host"`
+	Port      int    `json:"port" minimum:"1" maximum:"65535"`
+	Username  string `json:"username"`
+	TLS       string `json:"tls,omitempty" enum:"starttls,implicit,none"`
+	// Password sets a new SMTP password. Omit it to keep the stored one: the
+	// client never receives the current password and so cannot echo it back,
+	// and without this distinction every save from an untouched form would
+	// silently erase the credential. Send "" to clear it deliberately.
+	Password *string `json:"password,omitempty"`
+}
+
+// EmailNotificationSettingsEnvelope is the { emailNotifications } response body.
+type EmailNotificationSettingsEnvelope struct {
+	EmailNotifications EmailNotificationSettingsResponse `json:"emailNotifications"`
+}
+
+// SendTestEmailResponse reports the outcome of a Send test email action.
+type SendTestEmailResponse struct {
+	Sent      bool   `json:"sent"`
+	Recipient string `json:"recipient"`
 }
 
 // capabilityNames lists the abilities a provider has, sorted so a client sees a

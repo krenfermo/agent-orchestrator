@@ -583,6 +583,7 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 		}
 	}
 	var intent *ports.NotificationIntent
+	var completionIntent *ports.NotificationIntent
 	m.mu.Lock()
 	for {
 		pending, ok := m.pendingLaunches[id]
@@ -731,12 +732,18 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 		if metadataChanged || completionChanged || s.Event == "user-prompt-submit" {
 			rec.UpdatedAt = now
 			applied, err := m.store.UpdateSessionFromActivitySignal(ctx, rec)
+			// Captured under the lock, emitted after it: the receipt is only
+			// news when this write is the one that stamped it.
+			completed := completionChanged && !rec.TurnCompletedAt.IsZero()
 			m.mu.Unlock()
 			if err != nil {
 				return err
 			}
 			if !applied {
 				return nil
+			}
+			if completed {
+				m.emitNotification(ctx, taskCompletionIntent(rec))
 			}
 			return m.acknowledgeAgentSwitchTarget(ctx, id, s, now)
 		}
@@ -777,6 +784,15 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 			SessionDisplayName: next.DisplayName,
 		}
 	}
+	// A task that just reported it finished the work it was given. The trigger
+	// is the completion receipt being stamped by THIS write — the same durable
+	// fact the Completed status reads — not a generic idle or stop event, and
+	// not a receipt that was already there. Because the receipt is cleared the
+	// moment work goes back in flight, each finished turn raises this once and
+	// a restart re-reading an unchanged row raises nothing.
+	if completionChanged && !next.TurnCompletedAt.IsZero() {
+		completionIntent = taskCompletionIntent(next)
+	}
 	// Leaving the needs-input family is the user answering: the notification
 	// that pinged them has nothing left to resolve.
 	resolutions := needsInputResolutions(rec, next, now)
@@ -789,8 +805,25 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 		m.emitTelemetry(ctx, ev)
 	}
 	m.emitNotification(ctx, intent)
+	m.emitNotification(ctx, completionIntent)
 	m.resolveNotifications(ctx, resolutions...)
 	return nil
+}
+
+// taskCompletionIntent builds the "this task finished" notification from a
+// session row whose completion receipt was just stamped. The dedupe key is the
+// receipt timestamp itself, so the event it names is one specific finished
+// turn: a later turn on the same session gets its own notification, and a
+// replay of this one gets none.
+func taskCompletionIntent(rec domain.SessionRecord) *ports.NotificationIntent {
+	return &ports.NotificationIntent{
+		Type:               domain.NotificationTaskCompleted,
+		SessionID:          rec.ID,
+		ProjectID:          rec.ProjectID,
+		CreatedAt:          rec.TurnCompletedAt,
+		SessionDisplayName: rec.DisplayName,
+		DedupeKey:          string(rec.ID) + "@" + rec.TurnCompletedAt.UTC().Format(time.RFC3339Nano),
+	}
 }
 
 // stagePendingAgentSwitchNativeMetadata persists provider-assigned startup

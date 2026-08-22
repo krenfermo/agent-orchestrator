@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -47,6 +48,8 @@ type Resolution = ports.NotificationResolution
 type Manager struct {
 	store     Store
 	publisher Publisher
+	emailer   Emailer
+	log       *slog.Logger
 	clock     func() time.Time
 	newID     func() string
 }
@@ -55,13 +58,24 @@ type Manager struct {
 type Deps struct {
 	Store     Store
 	Publisher Publisher
-	Clock     func() time.Time
-	NewID     func() string
+	// Emailer receives newly inserted completion notifications. Optional: nil
+	// means the in-app notification is the only delivery.
+	Emailer Emailer
+	Logger  *slog.Logger
+	Clock   func() time.Time
+	NewID   func() string
 }
 
 // New constructs a write-side notification manager.
 func New(d Deps) *Manager {
-	m := &Manager{store: d.Store, publisher: d.Publisher, clock: d.Clock, newID: d.NewID}
+	m := &Manager{
+		store:     d.Store,
+		publisher: d.Publisher,
+		emailer:   d.Emailer,
+		log:       d.Logger,
+		clock:     d.Clock,
+		newID:     d.NewID,
+	}
 	if m.clock == nil {
 		m.clock = time.Now
 	}
@@ -89,7 +103,13 @@ func (m *Manager) Notify(ctx context.Context, intent Intent) error {
 	if err != nil {
 		return fmt.Errorf("notify store: %w", err)
 	}
-	if !inserted || m.publisher == nil {
+	if !inserted {
+		return nil
+	}
+	// After persistence, so an email is never sent for a row that failed to
+	// store — and only for an INSERT, so the store's dedupe is the email's too.
+	m.fanOutEmail(created)
+	if m.publisher == nil {
 		return nil
 	}
 	if err := m.publisher.Publish(ctx, domain.NotificationEvent{Kind: domain.NotificationCreated, Record: created}); err != nil {

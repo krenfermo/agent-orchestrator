@@ -9,12 +9,23 @@
  */
 
 /** The notification types defined by `backend/internal/domain/notification.go`. */
-export type NotificationType = "needs_input" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged";
+export type NotificationType =
+	| "needs_input"
+	| "ready_to_merge"
+	| "pr_merged"
+	| "pr_closed_unmerged"
+	| "task_completed"
+	| "workflow_completed";
 
 /**
  * Types that warrant an *active* attention signal (macOS dock bounce / Windows &
  * Linux taskbar flash). A merged or closed PR is worth a toast, but should not
  * demand attention as insistently as an agent blocked waiting on the user.
+ *
+ * Completions sit on the toast side of that line for the same reason. Finished
+ * work is news, and the toast delivers it; nothing is waiting on the user, so
+ * bouncing the dock would be an interruption with nothing to act on — and a
+ * fleet of tasks finishing would make it a constant one.
  */
 const ATTENTION_TYPES: ReadonlySet<string> = new Set<NotificationType>(["needs_input", "ready_to_merge"]);
 

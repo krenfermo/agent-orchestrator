@@ -146,7 +146,7 @@ func (c coordinatorLockClassifier) ClassifyLockOwner(ctx context.Context, run do
 	}, nil
 }
 
-func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
+func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, notifications workflowcore.NotificationSink, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {
 		plannerBinary = "claude"
@@ -194,8 +194,12 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		PaneReader:               paneReader,
 		DecisionResolverLauncher: decisionResolverLauncher,
 		WakeScheduler:            wakeScheduler,
-		Logger:                   log,
-		RuntimeIsolation:         runtimeIsolation,
+		// A run that durably reaches the completed state raises one "workflow
+		// finished" notification, on the same write-side producer lifecycle
+		// uses for session notifications.
+		Notifications:    notifications,
+		Logger:           log,
+		RuntimeIsolation: runtimeIsolation,
 		// Checkpoint 8P-C: routing now walks the workflow owner's own
 		// UserExecutionPolicy over their own ProviderProfiles instead of a
 		// fixed Claude<->Codex table. TrustedLocal mirrors the same

@@ -9,17 +9,28 @@ import (
 
 func enrich(intent Intent) (domain.NotificationRecord, error) {
 	rec := domain.NotificationRecord{
-		SessionID: intent.SessionID,
-		ProjectID: intent.ProjectID,
-		PRURL:     strings.TrimSpace(intent.PRURL),
-		Type:      intent.Type,
-		Status:    domain.NotificationUnread,
-		CreatedAt: intent.CreatedAt,
+		SessionID:     intent.SessionID,
+		ProjectID:     intent.ProjectID,
+		WorkflowRunID: strings.TrimSpace(intent.WorkflowRunID),
+		DedupeKey:     strings.TrimSpace(intent.DedupeKey),
+		PRURL:         strings.TrimSpace(intent.PRURL),
+		Type:          intent.Type,
+		Status:        domain.NotificationUnread,
+		CreatedAt:     intent.CreatedAt,
 	}
 	if !intent.Type.Valid() {
 		return domain.NotificationRecord{}, domain.ErrInvalidNotificationType
 	}
-	if intent.Type != domain.NotificationNeedsInput && rec.PRURL == "" {
+	// The PR-outcome family is meaningless without the PR it is about. The two
+	// session/run-scoped families (needs-input, completion) carry no PR at all.
+	if !intent.Type.Completion() && intent.Type != domain.NotificationNeedsInput && rec.PRURL == "" {
+		return domain.NotificationRecord{}, domain.ErrInvalidNotificationRecord
+	}
+	// A completion is a one-off event, and the key naming that event is what
+	// makes it un-duplicatable. Producing one without a key would quietly fall
+	// back to open-row dedupe, which lets a restart re-announce work the user
+	// already saw finish — exactly the failure this family must not have.
+	if intent.Type.Completion() && rec.DedupeKey == "" {
 		return domain.NotificationRecord{}, domain.ErrInvalidNotificationRecord
 	}
 	rec.Title = titleForIntent(intent)
@@ -46,6 +57,10 @@ func titleForIntent(intent Intent) string {
 		return fmt.Sprintf("%s merged", prLabel(intent))
 	case domain.NotificationPRClosedUnmerged:
 		return fmt.Sprintf("%s closed", prLabel(intent))
+	case domain.NotificationTaskCompleted:
+		return fmt.Sprintf("%s finished", sessionLabel(intent))
+	case domain.NotificationWorkflowCompleted:
+		return fmt.Sprintf("%s finished", workflowLabel(intent))
 	default:
 		return "Notification"
 	}
@@ -74,6 +89,10 @@ func bodyForIntent(intent Intent) string {
 			return fmt.Sprintf("%s was closed without merging. Reopen it if this wasn't intended.", title)
 		}
 		return "Closed without merging. Reopen it if this wasn't intended."
+	case domain.NotificationTaskCompleted:
+		return "The task reported that it finished the work it was given."
+	case domain.NotificationWorkflowCompleted:
+		return "Every task in this workflow run completed."
 	default:
 		return ""
 	}
@@ -87,6 +106,18 @@ func sessionLabel(intent Intent) string {
 		return string(intent.SessionID)
 	}
 	return "session"
+}
+
+// workflowLabel prefers the objective a human wrote over the run id nobody
+// recognizes, and falls back to the id rather than to a generic word.
+func workflowLabel(intent Intent) string {
+	if v := strings.TrimSpace(intent.WorkflowObjective); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(intent.WorkflowRunID); v != "" {
+		return "Workflow " + v
+	}
+	return "Workflow"
 }
 
 func prLabel(intent Intent) string {

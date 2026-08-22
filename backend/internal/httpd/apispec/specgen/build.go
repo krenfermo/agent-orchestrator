@@ -961,6 +961,36 @@ func shellTerminalOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodGet, path: "/api/v1/settings/email-notifications", id: "getEmailNotificationSettings", tag: "settings",
+			summary: "Read the completion-email configuration (never the password)",
+			resps: []respUnit{
+				{http.StatusOK, controllers.EmailNotificationSettingsEnvelope{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPatch, path: "/api/v1/settings/email-notifications", id: "updateEmailNotificationSettings", tag: "settings",
+			summary: "Change the completion-email configuration",
+			reqBody: controllers.UpdateEmailNotificationSettingsRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.EmailNotificationSettingsEnvelope{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/settings/email-notifications/test", id: "sendTestEmail", tag: "settings",
+			summary: "Send a test email to the configured recipient",
+			resps: []respUnit{
+				{http.StatusOK, controllers.SendTestEmailResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodGet, path: "/api/v1/sessions/{sessionId}/conversation", id: "getSessionConversation", tag: "conversations",
 			summary:    "Read a chat session's durable conversation",
 			pathParams: []any{controllers.SessionIDParam{}, conversationSnapshotQuery{}},

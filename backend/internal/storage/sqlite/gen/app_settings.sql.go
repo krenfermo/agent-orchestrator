@@ -14,7 +14,7 @@ import (
 
 const getAppSettings = `-- name: GetAppSettings :one
 
-SELECT id, default_session_mode, updated_at FROM app_settings WHERE id = 1
+SELECT id, default_session_mode, updated_at, email_notifications_enabled, email_recipient, smtp_host, smtp_port, smtp_username, smtp_password_encrypted, smtp_tls FROM app_settings WHERE id = 1
 `
 
 // Daemon-owned user preferences. One row, seeded by migration 0042, so a read
@@ -22,7 +22,18 @@ SELECT id, default_session_mode, updated_at FROM app_settings WHERE id = 1
 func (q *Queries) GetAppSettings(ctx context.Context) (AppSetting, error) {
 	row := q.db.QueryRowContext(ctx, getAppSettings)
 	var i AppSetting
-	err := row.Scan(&i.ID, &i.DefaultSessionMode, &i.UpdatedAt)
+	err := row.Scan(
+		&i.ID,
+		&i.DefaultSessionMode,
+		&i.UpdatedAt,
+		&i.EmailNotificationsEnabled,
+		&i.EmailRecipient,
+		&i.SmtpHost,
+		&i.SmtpPort,
+		&i.SmtpUsername,
+		&i.SmtpPasswordEncrypted,
+		&i.SmtpTls,
+	)
 	return i, err
 }
 
@@ -37,5 +48,45 @@ type SetDefaultSessionModeParams struct {
 
 func (q *Queries) SetDefaultSessionMode(ctx context.Context, arg SetDefaultSessionModeParams) error {
 	_, err := q.db.ExecContext(ctx, setDefaultSessionMode, arg.DefaultSessionMode, arg.UpdatedAt)
+	return err
+}
+
+const setEmailNotificationSettings = `-- name: SetEmailNotificationSettings :exec
+UPDATE app_settings
+SET email_notifications_enabled = ?1,
+    email_recipient             = ?2,
+    smtp_host                   = ?3,
+    smtp_port                   = ?4,
+    smtp_username               = ?5,
+    smtp_password_encrypted     = ?6,
+    smtp_tls                    = ?7,
+    updated_at                  = ?8
+WHERE id = 1
+`
+
+type SetEmailNotificationSettingsParams struct {
+	EmailNotificationsEnabled int64
+	EmailRecipient            string
+	SmtpHost                  string
+	SmtpPort                  int64
+	SmtpUsername              string
+	SmtpPasswordEncrypted     string
+	SmtpTls                   string
+	UpdatedAt                 time.Time
+}
+
+// Email notification settings. The password is written pre-encrypted by the
+// Go layer (internal/secretbox); SQLite never sees the plaintext.
+func (q *Queries) SetEmailNotificationSettings(ctx context.Context, arg SetEmailNotificationSettingsParams) error {
+	_, err := q.db.ExecContext(ctx, setEmailNotificationSettings,
+		arg.EmailNotificationsEnabled,
+		arg.EmailRecipient,
+		arg.SmtpHost,
+		arg.SmtpPort,
+		arg.SmtpUsername,
+		arg.SmtpPasswordEncrypted,
+		arg.SmtpTls,
+		arg.UpdatedAt,
+	)
 	return err
 }

@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { AccountSettingsSection } from "./settings/AccountSettingsSection";
 import { DevelopmentAgentsSettingsSection } from "./settings/DevelopmentAgentsSettingsSection";
 import { EfficiencyPolicySettingsSection } from "./settings/EfficiencyPolicySettingsSection";
+import { EmailNotificationsSettingsSection } from "./settings/EmailNotificationsSettingsSection";
 import { EnvironmentSettingsSection } from "./settings/EnvironmentSettingsSection";
 import { ExecutionPolicySettingsSection } from "./settings/ExecutionPolicySettingsSection";
 import { GeneralSettingsSection } from "./settings/GeneralSettingsSection";
@@ -60,6 +61,7 @@ export function GlobalSettingsForm({
 								onClick={() => onOpenKeyboardShortcuts?.()}
 							/>
 						</SettingsSection>
+						<EmailNotificationsSettingsSection />
 						<EfficiencyPolicySettingsSection />
 						<ExecutionPolicySettingsSection />
 						<SessionLifecyclePolicySettingsSection />

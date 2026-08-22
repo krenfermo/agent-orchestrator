@@ -29,6 +29,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
+	"github.com/aoagents/agent-orchestrator/backend/internal/mailer"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/notify"
 	usagepipeline "github.com/aoagents/agent-orchestrator/backend/internal/observe/usage"
@@ -38,6 +39,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/previewserver"
 	"github.com/aoagents/agent-orchestrator/backend/internal/push"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
+	"github.com/aoagents/agent-orchestrator/backend/internal/secretbox"
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
 	authsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/authsvc"
 	browsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/browser"
@@ -233,9 +235,30 @@ func RunWithConfig(cfg config.Config) error {
 	// agent nudges (CI failure, review feedback, merge conflict).
 	messenger := newSessionMessenger(store, runtimeAdapter, log)
 	lifecycleMessenger := newModeAwareMessenger()
+	// The driver registry is the chat capability gate, and Settings reports what
+	// it allows, so it is resolved before both.
+	chatDrivers := chatdriverregistry.Build(log)
 	notificationHub := notify.NewHub()
 	notifier := notificationsvc.New(notificationsvc.Deps{Store: store})
-	notificationWriter := notify.New(notify.Deps{Store: store, Publisher: notificationHub})
+	// Daemon-owned preferences. The store's type is field-compatible with the
+	// service's, adapted in settings_wiring.go so neither package imports the
+	// other. Built here, before the notification writer, because the optional
+	// completion-email fan-out resolves its destination through it.
+	//
+	// The secret box's key file lives beside the database under the AO data
+	// dir, so the SMTP password's encryption key travels with the profile it
+	// belongs to and never lands in an OS-default app-data location.
+	settingsSvc := settingssvc.New(
+		settingsStore{store: store},
+		chatDrivers,
+		func() time.Time { return time.Now().UTC() },
+	).WithEmail(secretbox.New(cfg.DataDir), &mailer.Sender{})
+	notificationWriter := notify.New(notify.Deps{
+		Store:     store,
+		Publisher: notificationHub,
+		Emailer:   settingssvc.NewNotificationEmailer(settingsSvc),
+		Logger:    log,
+	})
 	// Resolution transitions that happened while the daemon was down never
 	// reached lifecycle, so re-check open notifications against the durable
 	// session/PR facts before serving. Best-effort: a failure here only leaves
@@ -268,16 +291,6 @@ func RunWithConfig(cfg config.Config) error {
 	// selected runtime, routed git/scratch workspaces, the per-session agent
 	// resolver (AO_AGENT validated here for compatibility), and the agent
 	// messenger, then mount it on the API.
-	chatDrivers := chatdriverregistry.Build(log)
-
-	// Daemon-owned preferences. The store's type is field-compatible with the
-	// service's, adapted here so neither package imports the other.
-	settingsSvc := settingssvc.New(
-		settingsStore{store: store},
-		chatDrivers,
-		func() time.Time { return time.Now().UTC() },
-	)
-
 	// Chat service. The driver registry is the capability gate: a harness with no
 	// registered driver cannot start in chat mode, so an unsupported request fails
 	// loudly instead of silently becoming a TUI session.
@@ -498,7 +511,7 @@ func RunWithConfig(cfg config.Config) error {
 	// Checkpoint 8P-E.14A: lifecycle drives the same locks at the session's turn
 	// boundaries, through the re-acquire variant (see sessionTurnBranchLocks).
 	lcStack.LCM.SetBranchLocks(sessionTurnBranchLocks{mgr: branchLocks})
-	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, log)
+	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, notificationWriter, log)
 	// Checkpoint 8P-E.13A: reconciliation can only decide a stopped owner's
 	// lock once it can ask what that stop means, and only the coordinator knows
 	// (branchlock/retention.go). The coordinator needs the lock manager to

@@ -7,6 +7,7 @@ import {
 	BellRing,
 	CheckCheck,
 	CircleAlert,
+	CircleCheckBig,
 	GitMerge,
 	GitPullRequestArrow,
 	GitPullRequestClosed,
@@ -14,6 +15,7 @@ import {
 	LoaderCircle,
 	MessageSquareDot,
 	RotateCcw,
+	Workflow,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMarkAllNotificationsReadMutation, useNotificationsQuery } from "../hooks/useNotificationsQuery";
@@ -643,6 +645,10 @@ function notificationIcon(type: string) {
 			return GitMerge;
 		case "pr_closed_unmerged":
 			return GitPullRequestClosed;
+		case "task_completed":
+			return CircleCheckBig;
+		case "workflow_completed":
+			return Workflow;
 		default:
 			return Bell;
 	}
@@ -659,8 +665,15 @@ function notificationIconClass(type: string): string {
 			return "text-success";
 		case "pr_merged":
 			return "text-[#a371f7]";
+		// Both completions read as success. They share the token with
+		// ready_to_merge rather than inventing a colour: the shapes already tell
+		// a finished task from a mergeable PR, and a fifth hue in one list would
+		// stop meaning anything.
 		case "pr_closed_unmerged":
 			return "text-error";
+		case "task_completed":
+		case "workflow_completed":
+			return "text-success";
 		default:
 			return "text-muted-foreground";
 	}
