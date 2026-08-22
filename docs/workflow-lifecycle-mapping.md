@@ -11,7 +11,7 @@ fix it here first, then the code.
 `workflow_wake_schedules`, plus the supporting tables they reference
 (`workflow_tasks`, `workflow_task_dependencies`, `workflow_outbox`,
 `workflow_questions`, `workflow_question_resolutions`, `branch_locks`,
-`review_run`, `sessions`).
+`review_run`, `sessions`, `post_run_qa_runs`).
 
 Everything below is a statement about durable rows. Consistent with AO's
 "persist durable facts, derive display status" rule (`docs/architecture.md`,
@@ -83,6 +83,7 @@ by `0094_workflow.sql` and extended by `0095`–`0102`, `0104`–`0106`, `0109`,
 | `workflow_questions` / `workflow_question_resolutions` | `0104`, `0105` | Durable "the agent is stuck on a question" facts and their resolution attempts. |
 | `branch_locks` | `0117` | Direct-branch mutual exclusion: `(repo_path, branch)` held by one run. |
 | `review_run` / `review` | `0012` (+`0080`, `0092`, `0093`) | The reviewer's own record; `workflow_steps.review_run_id` points here. |
+| `post_run_qa_runs` | `0126` | One pass of the Post-Run QA gate over a task or a whole run: phase, the findings it collected (JSON, with per-finding attribution), the repair cycles it spent against its budget, and the verdict. State model in `backend/internal/postrunqa`. |
 
 > **No CDC.** `0094` deliberately adds no `change_log` trigger for any workflow
 > table (widening `change_log.event_type`'s CHECK would require a full table
@@ -123,6 +124,14 @@ workflow_questions.state     pending | resolving | answered | human_required
 workflow_questions.classification
                              policy_resolvable | auto_resolvable
                              | human_required | ambiguous
+
+post_run_qa_runs.phase       pending | checking | auto_fixing | clean
+                             | needs_attention
+post_run_qa_runs.result      '' (in flight) | clean | needs_attention
+post_run_qa_runs findings[].attribution
+                             new | baseline | ambiguous
+post_run_qa_runs findings[].severity
+                             blocker | major | minor | info
 ```
 
 Run and step transition legality is enforced in Go, not SQL, by

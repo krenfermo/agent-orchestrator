@@ -129,6 +129,7 @@ var shippedMigrations = map[int64]string{
 	123: "0123_email_notification_settings.sql",
 	124: "0124_notification_attention_failure.sql",
 	125: "0125_email_notification_events.sql",
+	126: "0126_post_run_qa_runs.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

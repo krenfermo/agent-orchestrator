@@ -369,6 +369,19 @@ type PRReviewThread struct {
 	UpdatedAt    time.Time
 }
 
+type PostRunQaRun struct {
+	ID               string
+	SubjectKind      string
+	SubjectID        string
+	Phase            string
+	FindingsJson     string
+	RepairCycleCount int64
+	MaxRepairCycles  int64
+	Result           string
+	StartedAt        time.Time
+	CompletedAt      sql.NullTime
+}
+
 type Project struct {
 	ID            domain.ProjectID
 	Path          string
