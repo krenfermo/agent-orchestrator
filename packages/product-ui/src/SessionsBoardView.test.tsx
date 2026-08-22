@@ -29,9 +29,10 @@ const splitLabels: BoardSplitLaneLabels = {
 	columnAria: (label) => `${label} sessions`,
 	countSessions: (count, label) => `${count} ${label} session${count === 1 ? "" : "s"}`,
 	idleWorkingAria: "Idle / Working sessions",
-	laneSummary: (primary, secondary) => `${primary} / ${secondary} lane summary`,
+	laneSummary: (laneLabels) => `${laneLabels.join(" / ")} lane summary`,
 	readyMergedAria: "Ready / Merged sessions",
 	tones: {
+		completed: { countLabel: "completed", label: "Completed", regionLabel: "Completed sessions" },
 		idle: { countLabel: "idle", label: "Idle", regionLabel: "Idle sessions" },
 		working: { countLabel: "working", label: "Working", regionLabel: "Working sessions" },
 		ready: { countLabel: "ready", label: "Ready", regionLabel: "Ready sessions" },
@@ -74,11 +75,13 @@ describe("SessionsBoardView", () => {
 		expect(within(mergeLane).getByLabelText("1 merged session")).toHaveTextContent("1");
 	});
 
-	it("keeps a finished task on the board, in the resting lane", () => {
+	it("puts a finished task in its own completed section, not in idle or ready", () => {
 		const sessions: BoardSessionPresentation[] = [
 			baseSession,
 			{ ...baseSession, id: "done", status: "completed", title: "finished task" },
 			{ ...baseSession, id: "working", status: "working", title: "working task" },
+			{ ...baseSession, id: "ready", status: "mergeable", title: "ready task" },
+			{ ...baseSession, id: "merged", status: "merged", title: "merged task" },
 		];
 		render(
 			<SessionsBoardGridView
@@ -89,10 +92,66 @@ describe("SessionsBoardView", () => {
 			/>,
 		);
 
-		const restingLane = screen.getByRole("region", { name: "Idle sessions" });
-		expect(restingLane).toHaveTextContent("finished task");
-		expect(restingLane).toHaveTextContent("portable task");
-		expect(screen.getByRole("region", { name: "Working sessions" })).not.toHaveTextContent("finished task");
+		const workLane = screen.getByRole("region", { name: "Idle / Working sessions" });
+		expect(workLane).not.toHaveTextContent("finished task");
+		expect(within(workLane).getByRole("region", { name: "Idle sessions" })).toHaveTextContent("portable task");
+		expect(within(workLane).getByRole("region", { name: "Working sessions" })).toHaveTextContent("working task");
+
+		const completedLane = screen.getByRole("region", { name: "Completed sessions" });
+		expect(completedLane).toHaveTextContent("finished task");
+		expect(screen.getByRole("region", { name: "Ready sessions" })).not.toHaveTextContent("finished task");
+		expect(screen.getByRole("region", { name: "Merged sessions" })).not.toHaveTextContent("finished task");
+	});
+
+	it("counts every lane exactly as it renders it", () => {
+		const sessions: BoardSessionPresentation[] = [
+			baseSession,
+			{ ...baseSession, id: "done", status: "completed", title: "finished task" },
+			{ ...baseSession, id: "done-2", status: "completed", title: "another finished task" },
+			{ ...baseSession, id: "working", status: "working", title: "working task" },
+			{ ...baseSession, id: "ready", status: "mergeable", title: "ready task" },
+			{ ...baseSession, id: "merged", status: "merged", title: "merged task" },
+		];
+		render(
+			<SessionsBoardGridView
+				columns={boardAttentionZoneOrder.map((zone) => getAttentionZoneViewForZone(zone))}
+				labels={splitLabels}
+				renderSessionCard={(session) => <div data-testid={`card-${session.id}`}>{session.title}</div>}
+				sessions={sessions}
+			/>,
+		);
+
+		const workLane = screen.getByRole("region", { name: "Idle / Working sessions" });
+		expect(within(workLane).getByLabelText("1 idle session")).toHaveTextContent("1");
+		expect(within(workLane).getByLabelText("1 working session")).toHaveTextContent("1");
+
+		const mergeLane = screen.getByRole("region", { name: "Ready / Merged sessions" });
+		expect(within(mergeLane).getByRole("group")).toHaveAccessibleName("Ready / Completed / Merged lane summary");
+		expect(within(mergeLane).getByLabelText("1 ready session")).toHaveTextContent("1");
+		expect(within(mergeLane).getByLabelText("2 completed sessions")).toHaveTextContent("2");
+		expect(within(mergeLane).getByLabelText("1 merged session")).toHaveTextContent("1");
+		expect(within(mergeLane).getAllByTestId(/^card-/)).toHaveLength(4);
+	});
+
+	it("leaves the ready / merged header alone when nothing is completed", () => {
+		const sessions: BoardSessionPresentation[] = [
+			{ ...baseSession, id: "ready", status: "mergeable", title: "ready task" },
+			{ ...baseSession, id: "merged", status: "merged", title: "merged task" },
+		];
+		render(
+			<SessionsBoardGridView
+				columns={boardAttentionZoneOrder.map((zone) => getAttentionZoneViewForZone(zone))}
+				labels={splitLabels}
+				renderSessionCard={(session) => <div data-testid={`card-${session.id}`}>{session.title}</div>}
+				sessions={sessions}
+			/>,
+		);
+
+		const mergeLane = screen.getByRole("region", { name: "Ready / Merged sessions" });
+		expect(within(mergeLane).getByRole("group")).toHaveAccessibleName("Ready / Merged lane summary");
+		expect(within(mergeLane).queryByLabelText("0 completed sessions")).not.toBeInTheDocument();
+		expect(within(mergeLane).getByRole("region", { name: "Ready sessions" })).toHaveTextContent("ready task");
+		expect(within(mergeLane).getByRole("region", { name: "Merged sessions" })).toHaveTextContent("merged task");
 	});
 
 	it("renders a neutral card with grouped multi-PR, usage, and action presentation", () => {

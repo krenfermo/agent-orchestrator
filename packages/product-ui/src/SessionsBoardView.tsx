@@ -7,7 +7,7 @@ import {
 import type { ExternalLinkComponent } from "./external-link";
 import { ChevronIcon, GitBranchIcon } from "./icons";
 import {
-	attentionZone,
+	boardColumnZone,
 	getAgentActivityView,
 	getSessionStatusView,
 	type AttentionZone,
@@ -50,9 +50,10 @@ export type BoardSplitLaneLabels = {
 	columnAria: (label: string) => string;
 	countSessions: (count: number, label: string) => string;
 	idleWorkingAria: string;
-	laneSummary: (primary: string, secondary: string) => string;
+	laneSummary: (laneLabels: string[]) => string;
 	readyMergedAria: string;
 	tones: {
+		completed: BoardSplitLaneToneLabels;
 		idle: BoardSplitLaneToneLabels;
 		merged: BoardSplitLaneToneLabels;
 		ready: BoardSplitLaneToneLabels;
@@ -83,7 +84,7 @@ export function SessionsBoardGridView<TSession extends BoardSessionPresentation>
 }: SessionsBoardGridViewProps<TSession>) {
 	const byZone = new Map<AttentionZone, TSession[]>();
 	for (const session of sessions) {
-		const zone = attentionZone(session.status);
+		const zone = boardColumnZone(session.status);
 		const sessionsForZone = byZone.get(zone);
 		if (sessionsForZone) sessionsForZone.push(session);
 		else byZone.set(zone, [session]);
@@ -122,42 +123,48 @@ function BoardColumnView<TSession extends BoardSessionPresentation>({
 	sessions: TSession[];
 }) {
 	if (column.zone === "working") {
-		// The primary lane is "not currently working": idle sessions and the
-		// finished ones, each keeping its own badge on the card.
-		const restingStatuses = new Set<SessionStatus>(["idle", "completed"]);
-		const idleSessions = sessions.filter((session) => restingStatuses.has(session.status));
-		const workingSessions = sessions.filter((session) => !restingStatuses.has(session.status));
+		// Idle is "here but not running"; a finished task is not idle and has
+		// left this column entirely (see boardColumnZone).
+		const idleSessions = sessions.filter((session) => session.status === "idle");
+		const workingSessions = sessions.filter((session) => session.status !== "idle");
 		return (
 			<SplitLaneColumnView
 				ariaLabel={labels.idleWorkingAria}
 				countSessions={labels.countSessions}
 				laneSummary={labels.laneSummary}
-				primarySessions={idleSessions}
-				primaryTone={splitLaneTone("idle", labels.tones.idle)}
+				lanes={[
+					{ sessions: idleSessions, tone: splitLaneTone("idle", labels.tones.idle) },
+					{ sessions: workingSessions, tone: splitLaneTone("working", labels.tones.working) },
+				]}
 				renderSessionCard={renderSessionCard}
-				secondarySessions={workingSessions}
-				secondaryTone={splitLaneTone("working", labels.tones.working)}
 				zone="working"
 			/>
 		);
 	}
 	if (column.zone === "merge") {
-		const mergedSessions = sessions
-			.filter((session) => session.status === "merged")
-			.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+		const byNewest = (left: TSession, right: TSession) => right.updatedAt.localeCompare(left.updatedAt);
+		const mergedSessions = sessions.filter((session) => session.status === "merged").sort(byNewest);
+		// A finished ordinary task has no SCM outcome, so it gets its own
+		// section here rather than being counted as ready to merge.
+		const completedSessions = sessions.filter((session) => session.status === "completed").sort(byNewest);
 		const readySessions = sessions
-			.filter((session) => session.status !== "merged")
-			.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+			.filter((session) => session.status !== "merged" && session.status !== "completed")
+			.sort(byNewest);
 		return (
 			<SplitLaneColumnView
 				ariaLabel={labels.readyMergedAria}
 				countSessions={labels.countSessions}
 				laneSummary={labels.laneSummary}
-				primarySessions={readySessions}
-				primaryTone={splitLaneTone("ready", labels.tones.ready)}
+				lanes={[
+					{ sessions: readySessions, tone: splitLaneTone("ready", labels.tones.ready) },
+					{
+						hideWhenEmpty: true,
+						sessions: completedSessions,
+						tone: splitLaneTone("completed", labels.tones.completed),
+					},
+					{ sessions: mergedSessions, tone: splitLaneTone("merged", labels.tones.merged) },
+				]}
 				renderSessionCard={renderSessionCard}
-				secondarySessions={mergedSessions}
-				secondaryTone={splitLaneTone("merged", labels.tones.merged)}
 				zone="merge"
 			/>
 		);
@@ -203,10 +210,16 @@ type SplitLaneTone = BoardSplitLaneToneLabels & {
 };
 
 function splitLaneTone(
-	tone: "idle" | "working" | "ready" | "merged",
+	tone: "idle" | "working" | "ready" | "merged" | "completed",
 	labels: BoardSplitLaneToneLabels,
 ): SplitLaneTone {
 	const styles = {
+		completed: {
+			color: "var(--color-status-ready)",
+			dotClassName: "bg-status-ready",
+			dotGlow: false,
+			titleClassName: "text-status-ready",
+		},
 		idle: {
 			color: "var(--color-status-idle)",
 			dotClassName: "bg-status-idle",
@@ -235,29 +248,34 @@ function splitLaneTone(
 	return { ...labels, ...styles[tone] };
 }
 
+type SplitLaneSection<TSession extends BoardSessionPresentation> = {
+	/** Lanes that only exist when populated stay out of the header entirely. */
+	hideWhenEmpty?: boolean;
+	sessions: TSession[];
+	tone: SplitLaneTone;
+};
+
 function SplitLaneColumnView<TSession extends BoardSessionPresentation>({
 	ariaLabel,
 	countSessions,
 	laneSummary,
-	primarySessions,
-	primaryTone,
+	lanes,
 	renderSessionCard,
-	secondarySessions,
-	secondaryTone,
 	zone,
 }: {
 	ariaLabel: string;
 	countSessions: BoardSplitLaneLabels["countSessions"];
 	laneSummary: BoardSplitLaneLabels["laneSummary"];
-	primarySessions: TSession[];
-	primaryTone: SplitLaneTone;
+	lanes: SplitLaneSection<TSession>[];
 	renderSessionCard: (session: TSession) => ReactNode;
-	secondarySessions: TSession[];
-	secondaryTone: SplitLaneTone;
 	zone: Extract<AttentionZone, "working" | "merge">;
 }) {
-	const showPrimary = primarySessions.length > 0;
-	const showSecondary = secondarySessions.length > 0;
+	// The header counts exactly the lanes the body can render, so a count is
+	// never a promise the column does not keep.
+	const headerLanes = lanes.filter((lane) => !lane.hideWhenEmpty || lane.sessions.length > 0);
+	const [primaryLane, ...remainingLanes] = lanes;
+	const showPrimary = primaryLane.sessions.length > 0;
+	const bodyLanes = remainingLanes.filter((lane) => lane.sessions.length > 0);
 	return (
 		<section
 			aria-label={ariaLabel}
@@ -267,43 +285,56 @@ function SplitLaneColumnView<TSession extends BoardSessionPresentation>({
 		>
 			<div className="flex h-12 shrink-0 items-center gap-2.5 px-4">
 				<div
-					aria-label={laneSummary(primaryTone.label, secondaryTone.label)}
+					aria-label={laneSummary(headerLanes.map((lane) => lane.tone.label))}
 					className="flex min-w-0 items-center gap-2 font-mono text-2xs font-medium uppercase tracking-wide-sm"
 					role="group"
 				>
-					<LaneStatusLabel tone={primaryTone} />
-					<span className="text-passive" aria-hidden="true">/</span>
-					<LaneStatusLabel tone={secondaryTone} />
+					{headerLanes.map((lane, index) => (
+						<Fragment key={lane.tone.countLabel}>
+							{index > 0 ? (
+								<span className="text-passive" aria-hidden="true">/</span>
+							) : null}
+							<LaneStatusLabel tone={lane.tone} />
+						</Fragment>
+					))}
 				</div>
 				<div className="ml-auto flex shrink-0 items-center gap-2 font-mono text-2xs leading-none text-passive">
-					<SessionCount count={primarySessions.length} label={primaryTone.countLabel} format={countSessions} />
-					<span aria-hidden="true">/</span>
-					<SessionCount count={secondarySessions.length} label={secondaryTone.countLabel} format={countSessions} />
+					{headerLanes.map((lane, index) => (
+						<Fragment key={lane.tone.countLabel}>
+							{index > 0 ? <span aria-hidden="true">/</span> : null}
+							<SessionCount
+								count={lane.sessions.length}
+								format={countSessions}
+								label={lane.tone.countLabel}
+							/>
+						</Fragment>
+					))}
 				</div>
 			</div>
 			<div className="board-scrollbar min-h-0 flex-1 overflow-y-auto px-3 pb-3 pt-3">
 				<div className="flex min-h-full flex-col">
 					{showPrimary ? (
 						<div
-							aria-label={primaryTone.regionLabel}
-							className={cn("flex flex-col", showSecondary ? "flex-none pb-3" : "flex-1")}
+							aria-label={primaryLane.tone.regionLabel}
+							className={cn("flex flex-col", bodyLanes.length > 0 ? "flex-none pb-3" : "flex-1")}
 							role="region"
 						>
 							<div className="flex flex-col gap-2.5">
-								{primarySessions.map((session) => (
+								{primaryLane.sessions.map((session) => (
 									<Fragment key={session.id}>{renderSessionCard(session)}</Fragment>
 								))}
 							</div>
 						</div>
 					) : null}
-					{showSecondary ? (
+					{bodyLanes.map((lane, index) => (
 						<SecondaryLaneSection
+							key={lane.tone.countLabel}
 							renderSessionCard={renderSessionCard}
-							sessions={secondarySessions}
-							standalone={!showPrimary}
-							tone={secondaryTone}
+							sessions={lane.sessions}
+							standalone={!showPrimary && index === 0}
+							tone={lane.tone}
 						/>
-					) : null}
+					))}
 				</div>
 			</div>
 		</section>

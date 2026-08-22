@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	attentionZone,
+	boardColumnZone,
 	getAgentActivityView,
 	getAttentionZoneView,
 	getSessionStatusView,
@@ -40,12 +41,22 @@ describe("session presentation", () => {
 		["review_pending", "pending"],
 		["working", "working"],
 		["terminated", "done"],
-		// A finished task is still a live session the user can talk to, so it
-		// stays on the board next to the idle ones rather than dropping into
-		// the terminated zone the board does not render.
+		// A finished task needs nothing from the user, so attention-wise it
+		// rests with the idle ones and never claims to be mergeable.
 		["completed", "working"],
 	] as const)("maps %s to the %s attention zone", (status, zone) => {
 		expect(attentionZone(status)).toBe(zone);
+	});
+
+	it.each([
+		["completed", "merge"],
+		["idle", "working"],
+		["working", "working"],
+		["mergeable", "merge"],
+		["merged", "merge"],
+		["needs_input", "action"],
+	] as const)("places %s in the %s board column", (status, zone) => {
+		expect(boardColumnZone(status)).toBe(zone);
 	});
 
 	it("gives a finished task its own badge instead of reading Idle", () => {

@@ -257,14 +257,24 @@ export function attentionZone(input: SessionStatus | SessionStatusModel): Attent
 			return "pending";
 		case "working":
 		case "idle":
-		// Completed belongs with idle, not with the terminated "done" zone the
-		// board does not render: the task is finished but its session is alive
-		// and answerable, and hiding it would be a worse lie than "Inactive"
-		// was. It lands in the idle lane of the working column, labelled
-		// Completed on the card.
+		// Attention-wise a finished task is at rest, not mergeable: keeping it
+		// out of the "merge" zone stops the palette and tray from urging the
+		// user to merge a task that has no SCM outcome at all. The board places
+		// it separately -- see boardColumnZone.
 		case "completed":
 			return "working";
 	}
+}
+
+/**
+ * Column placement on the board, which is not the same question as attention.
+ * A finished ordinary task is done, so it belongs on the finished side of the
+ * board rather than under "Idle" -- but in its own Completed section, never
+ * relabelled as ready to merge or merged.
+ */
+export function boardColumnZone(input: SessionStatus | SessionStatusModel): AttentionZone {
+	const status = typeof input === "string" ? input : input.status;
+	return status === "completed" ? "merge" : attentionZone(status);
 }
 
 export function getAttentionZoneView(

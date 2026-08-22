@@ -439,10 +439,10 @@ describe("SessionsBoard", () => {
 	});
 
 	// The user-visible half of the finished-task fix: the task that did its
-	// work is labelled Completed on the board instead of Inactive/Idle, and it
-	// is still there to be labelled — it stays in the working column's resting
-	// lane rather than disappearing into the terminated zone.
-	it("labels a finished task Completed and keeps it on the board", () => {
+	// work is labelled Completed on the board, and it sits in the Completed
+	// section of the finished column instead of hiding among the idle ones —
+	// without ever being called ready to merge or merged.
+	it("labels a finished task Completed and files it under Completed, not Idle", () => {
 		workspaceQueryMock.mockReturnValue({
 			data: [
 				workspaceWithSessions([
@@ -470,6 +470,18 @@ describe("SessionsBoard", () => {
 						updatedAt: "2026-01-01T00:00:00Z",
 						prs: [],
 					},
+					{
+						id: "s-working",
+						workspaceId: "p1",
+						workspaceName: "radic",
+						title: "busy-task",
+						provider: "claude-code",
+						branch: "ao/radic-11",
+						status: "working",
+						activity: { state: "active", lastActivityAt: "2026-01-01T00:00:00Z" },
+						updatedAt: "2026-01-01T00:00:00Z",
+						prs: [],
+					},
 				]),
 			],
 			isError: false,
@@ -484,9 +496,21 @@ describe("SessionsBoard", () => {
 		expect(within(completedCard).getByText("Completed").parentElement).toHaveClass("text-status-ready");
 		expect(within(completedCard).queryByText("Idle")).toBeNull();
 
-		const restingLane = screen.getByRole("region", { name: "Idle sessions" });
-		expect(within(restingLane).getByText("finished-task")).toBeInTheDocument();
-		expect(within(restingLane).getByText("quiet-task")).toBeInTheDocument();
+		const workLane = screen.getByRole("region", { name: "Idle / Working sessions" });
+		expect(workLane).not.toHaveTextContent("finished-task");
+		expect(within(workLane).getByRole("region", { name: "Idle sessions" })).toHaveTextContent("quiet-task");
+		expect(within(workLane).getByRole("region", { name: "Working sessions" })).toHaveTextContent("busy-task");
+		expect(within(workLane).getByLabelText("1 idle session")).toHaveTextContent("1");
+		expect(within(workLane).getByLabelText("1 working session")).toHaveTextContent("1");
+
+		const mergeLane = screen.getByRole("region", { name: "Ready to merge / Merged sessions" });
+		const completedRegion = within(mergeLane).getByRole("region", { name: "Completed sessions" });
+		expect(within(completedRegion).getByText("finished-task")).toBeInTheDocument();
+		expect(within(mergeLane).getByLabelText("1 completed session")).toHaveTextContent("1");
+		expect(within(mergeLane).getByLabelText("0 ready to merge sessions")).toHaveTextContent("0");
+		expect(within(mergeLane).getByLabelText("0 merged sessions")).toHaveTextContent("0");
+		expect(within(mergeLane).queryByRole("region", { name: "Ready to merge sessions" })).not.toBeInTheDocument();
+		expect(within(mergeLane).queryByRole("region", { name: "Merged sessions" })).not.toBeInTheDocument();
 	});
 
 	it("places an exited live session in Needs you with an Exited badge", () => {
