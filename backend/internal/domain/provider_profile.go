@@ -140,6 +140,14 @@ func EligibleProfiles(profiles []ProviderProfile, descriptors []ProviderAdapterD
 	return eligible, ineligible
 }
 
+// HasCapability reports whether caps advertises capability. Exported for
+// callers outside EligibleProfiles' role filter that need to check a single
+// non-role capability (e.g. capacity_telemetry before running an active
+// capacity probe).
+func HasCapability(caps []ProviderCapability, capability ProviderCapability) bool {
+	return hasCapability(caps, capability)
+}
+
 func hasCapability(caps []ProviderCapability, capability ProviderCapability) bool {
 	for _, c := range caps {
 		if c == capability {

@@ -32,6 +32,23 @@ const (
 	RoutingReasonProfileNotConnected   RoutingReason = "profile_not_connected"
 	RoutingReasonCapabilityMissing     RoutingReason = "capability_missing"
 	RoutingReasonUnsupportedProvider   RoutingReason = "unsupported_provider"
+
+	// RoutingReasonPolicyPriorityCompleted (Checkpoint 8P-E.13A.4) marks a
+	// decision that selected a profile the user's stored priority list never
+	// mentioned. A priority list is a PREFERENCE ORDER, not an allowlist: a
+	// profile connected after the policy row was written is otherwise
+	// invisible to routing forever, which is exactly how an enabled,
+	// authenticated, reviewer-capable Codex profile could leave a high-risk
+	// independent review deadlocked in waiting_for_capacity. Unlisted
+	// eligible profiles are therefore appended after every listed one (never
+	// reordered ahead of a user preference) and this code records that the
+	// selection came from that tail.
+	RoutingReasonPolicyPriorityCompleted RoutingReason = "policy_priority_completed"
+	// RoutingReasonCapacityProbeIndeterminate marks a decision taken while at
+	// least one eligible profile's active capacity probe could not conclude
+	// (probe unavailable, CLI answered nothing recognizable, or the probe was
+	// throttled after a recent indeterminate attempt).
+	RoutingReasonCapacityProbeIndeterminate RoutingReason = "capacity_probe_indeterminate"
 )
 
 // Valid reports whether a reason code is part of the closed V1 enum —
@@ -54,7 +71,9 @@ func (r RoutingReason) Valid() bool {
 		RoutingReasonProviderDisabled,
 		RoutingReasonProfileNotConnected,
 		RoutingReasonCapabilityMissing,
-		RoutingReasonUnsupportedProvider:
+		RoutingReasonUnsupportedProvider,
+		RoutingReasonPolicyPriorityCompleted,
+		RoutingReasonCapacityProbeIndeterminate:
 		return true
 	default:
 		return false

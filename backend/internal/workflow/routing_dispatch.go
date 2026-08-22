@@ -26,6 +26,23 @@ func (c *Coordinator) persistRoutingDecision(ctx stdctx.Context, run domain.Work
 	if err != nil {
 		return err
 	}
+	// Checkpoint 8P-E.13A.4: a routing decision is durable EVIDENCE, and
+	// evidence is only worth appending when it says something new. Routing is
+	// re-evaluated on every ContinueRun — wake ticks, the autonomous
+	// progression heartbeat, reconcileMasterTasks and plain GetRun-driven
+	// cascades can all land within the same second — so an unchanged wait used
+	// to append an identical row each time (wf-35fd1af0 accumulated 68
+	// byte-identical waiting_for_capacity rows, three of them inside 200ms).
+	// That is an unbounded write loop that also buries the transitions an
+	// operator actually needs to read. Re-persisting is now skipped while the
+	// decision is byte-identical to the newest one already recorded for the
+	// same step; any material change (selection, reason codes, capacity
+	// snapshot, complexity) differs in the payload and is therefore always
+	// written. The wake schedule, not this row, is what keeps the retry
+	// bounded and observable.
+	if c.routingDecisionAlreadyRecorded(ctx, run.ID, stepID, string(payload)) {
+		return nil
+	}
 	nextAction := "routing_selected: " + string(decision.SelectedHarness)
 	if decision.Waiting {
 		nextAction = "waiting_for_capacity: role=" + string(decision.Role)
@@ -42,6 +59,36 @@ func (c *Coordinator) persistRoutingDecision(ctx stdctx.Context, run domain.Work
 		CreatedAt:      c.clock(),
 	})
 	return err
+}
+
+// routingDecisionAlreadyRecorded reports whether the newest routing_decision
+// checkpoint for this run/step scope already carries exactly payload. Uses the
+// same read-back-latest walk routingDecisionForStep does, so dedup and
+// read-back agree on which row is "current". A read error answers false: this
+// is a write-suppression optimization, never a reason to lose evidence.
+func (c *Coordinator) routingDecisionAlreadyRecorded(ctx stdctx.Context, runID string, stepID *string, payload string) bool {
+	checkpoints, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		return false
+	}
+	var latest *domain.WorkflowCheckpoint
+	for i := range checkpoints {
+		cp := &checkpoints[i]
+		if cp.DurablePhase != routingDecisionDurablePhase || !sameStepScope(cp.WorkflowStepID, stepID) {
+			continue
+		}
+		if latest == nil || cp.CreatedAt.After(latest.CreatedAt) {
+			latest = cp
+		}
+	}
+	return latest != nil && latest.RetryState == payload
+}
+
+func sameStepScope(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // decodeRoutingDecision unmarshals a routing_decision checkpoint's

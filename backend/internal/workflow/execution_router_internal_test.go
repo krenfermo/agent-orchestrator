@@ -255,11 +255,21 @@ func TestRouteExecution_NormalReviewerSameProviderFallbackOnlyWhenAllowed(t *tes
 // Test #10: planner has no fallback wired for Codex in the real registry
 // (only Claude Code advertises CapabilityPlanner — see the registry audit),
 // so an ineligible/unavailable planner profile always waits.
+// EligibleProfiles is already capability-filtered by the caller
+// (domain.EligibleProfiles), so the planner-eligible set genuinely contains
+// only the Claude Code profile — the Codex profile advertises worker/reviewer/
+// decision_resolver but not planner. Passing the full two-profile fixture here
+// would state the opposite of what this test is about.
 func TestRouteExecution_PlannerPolicy(t *testing.T) {
+	plannerEligible := func() map[domain.ProviderProfileID]domain.ProviderProfile {
+		p := fixtureProfiles()
+		delete(p, profCodex)
+		return p
+	}
 	d := RouteExecution(RoutingRequest{
 		Role:             domain.WorkflowRolePlanner,
 		Policy:           workerPolicy(profClaude),
-		EligibleProfiles: fixtureProfiles(),
+		EligibleProfiles: plannerEligible(),
 		Capacity:         availableCapacity(),
 	})
 	if d.SelectedHarness != domain.HarnessClaudeCode {
@@ -274,7 +284,7 @@ func TestRouteExecution_PlannerPolicy(t *testing.T) {
 	d2 := RouteExecution(RoutingRequest{
 		Role:             domain.WorkflowRolePlanner,
 		Policy:           workerPolicy(profClaude),
-		EligibleProfiles: fixtureProfiles(),
+		EligibleProfiles: plannerEligible(),
 		Capacity:         capacity,
 	})
 	if !d2.Waiting {
@@ -368,4 +378,196 @@ func TestRouteExecution_IneligibleProfileNeverSelected(t *testing.T) {
 	if d.SelectedHarness != domain.HarnessCodex {
 		t.Fatalf("selected = %q, want codex fallback past the ineligible preferred profile", d.SelectedHarness)
 	}
+}
+
+// --- Checkpoint 8P-E.13A.4 regressions -------------------------------------
+
+// reviewerPolicy is the exact shape of the stored policy that deadlocked
+// wf-35fd1af0 in ~/.ao/data: every priority list names ONLY the Claude Code
+// profile, because it was written before the Codex profile was connected.
+func reviewerPolicy(order ...domain.ProviderProfileID) domain.ExecutionPolicySnapshot {
+	return domain.ExecutionPolicySnapshot{
+		Version:            domain.UserExecutionPolicyVersion,
+		PlannerPriority:    order,
+		WorkerPriority:     order,
+		ReviewerPriority:   order,
+		FallbackBehavior:   domain.FallbackUseNextAvailable,
+		ReviewIndependence: domain.ReviewIndependenceAllowSameProviderFallback,
+	}
+}
+
+// Regression A (real reproduction): an enabled, authenticated, reviewer-capable
+// Codex profile that the stored reviewer_priority never mentions must still be
+// selected for a high-risk independent review of Claude Code's work. Before
+// Checkpoint 8P-E.13A.4 this waited forever: the router walked only the stored
+// list, found nothing independent, and high-risk independence forbade the
+// same-provider fallback.
+func TestRouteExecution_UnlistedEligibleReviewerBreaksHighRiskDeadlock(t *testing.T) {
+	d := RouteExecution(RoutingRequest{
+		Role:                       domain.WorkflowRoleReviewer,
+		Complexity:                 ComplexityHighRisk,
+		CurrentImplementerProvider: "anthropic",
+		Policy:                     reviewerPolicy(profClaude),
+		EligibleProfiles:           fixtureProfiles(),
+		Capacity:                   availableCapacity(),
+	})
+	if d.Waiting {
+		t.Fatalf("decision = %+v, want a selection: the unlisted Codex profile is eligible and available", d)
+	}
+	if d.SelectedProfileID != profCodex || d.SelectedHarness != domain.HarnessCodex {
+		t.Fatalf("selected = %q/%q, want the independent Codex profile", d.SelectedProfileID, d.SelectedHarness)
+	}
+	if !hasReason(d, domain.RoutingReasonPolicyPriorityCompleted) {
+		t.Fatalf("reasons = %v, want policy_priority_completed recorded", d.ReasonCodes)
+	}
+	if !hasReason(d, domain.RoutingReasonReviewIndependenceRequired) {
+		t.Fatalf("reasons = %v, want review_independence_required retained", d.ReasonCodes)
+	}
+}
+
+// Regression B (router half): a probe that turns unknown into available lets
+// the same request proceed. Unknown was already capacity-eligible, so what
+// this pins is that a probed "available" is honored identically — the workflow
+// half (probe actually running, no human action) is
+// TestCapacitySnapshot_ProbesUnknownProfile.
+func TestRouteExecution_ProbedAvailableSelectsCodex(t *testing.T) {
+	capacity := map[domain.ProviderProfileID]domain.CapacityState{
+		profClaude: domain.CapacityAvailable,
+		profCodex:  domain.CapacityAvailable,
+	}
+	d := RouteExecution(RoutingRequest{
+		Role:                       domain.WorkflowRoleReviewer,
+		Complexity:                 ComplexityHighRisk,
+		CurrentImplementerProvider: "anthropic",
+		Policy:                     reviewerPolicy(profClaude),
+		EligibleProfiles:           fixtureProfiles(),
+		Capacity:                   capacity,
+	})
+	if d.SelectedProfileID != profCodex {
+		t.Fatalf("selected = %q, want prof-codex once its capacity is probed available", d.SelectedProfileID)
+	}
+	if hasReason(d, domain.RoutingReasonCapacityProbeIndeterminate) {
+		t.Fatalf("reasons = %v, want no indeterminate marker when every capacity is known", d.ReasonCodes)
+	}
+}
+
+// Regression C: a probe reporting unavailable must WAIT — never dispatch, and
+// never quietly hand high-risk work back to the implementer's own provider.
+func TestRouteExecution_UnavailableIndependentReviewerWaits(t *testing.T) {
+	capacity := map[domain.ProviderProfileID]domain.CapacityState{
+		profClaude: domain.CapacityAvailable,
+		profCodex:  domain.CapacityUnavailable,
+	}
+	d := RouteExecution(RoutingRequest{
+		Role:                       domain.WorkflowRoleReviewer,
+		Complexity:                 ComplexityHighRisk,
+		CurrentImplementerProvider: "anthropic",
+		Policy:                     reviewerPolicy(profClaude),
+		EligibleProfiles:           fixtureProfiles(),
+		Capacity:                   capacity,
+	})
+	if !d.Waiting || d.SelectedHarness != "" {
+		t.Fatalf("decision = %+v, want a wait: the only independent reviewer is unavailable", d)
+	}
+	if hasReason(d, domain.RoutingReasonCapacityProbeIndeterminate) {
+		t.Fatalf("reasons = %v, want no indeterminate marker: the probe concluded unavailable", d.ReasonCodes)
+	}
+}
+
+// Regression D: an indeterminate probe leaves capacity unknown. Unknown stays
+// routable (never downgraded on absence of evidence), but a wait taken while
+// something is still unknown says so truthfully.
+func TestRouteExecution_IndeterminateCapacityIsReportedOnWait(t *testing.T) {
+	capacity := map[domain.ProviderProfileID]domain.CapacityState{
+		profClaude: domain.CapacityAvailable,
+		profCodex:  domain.CapacityUnknown,
+	}
+	routable := RouteExecution(RoutingRequest{
+		Role:                       domain.WorkflowRoleReviewer,
+		Complexity:                 ComplexityHighRisk,
+		CurrentImplementerProvider: "anthropic",
+		Policy:                     reviewerPolicy(profClaude),
+		EligibleProfiles:           fixtureProfiles(),
+		Capacity:                   capacity,
+	})
+	if routable.SelectedProfileID != profCodex {
+		t.Fatalf("selected = %q, want unknown capacity to remain routable", routable.SelectedProfileID)
+	}
+
+	// Same unknown, but nothing independent exists to select: the wait must
+	// carry the indeterminate marker so the operator sees WHY it is waiting.
+	onlyClaude := map[domain.ProviderProfileID]domain.ProviderProfile{
+		profClaude: fixtureProfiles()[profClaude],
+		profCodex:  {ID: profCodex, Provider: "anthropic", Harness: domain.HarnessCodex, Enabled: true},
+	}
+	waiting := RouteExecution(RoutingRequest{
+		Role:                       domain.WorkflowRoleReviewer,
+		Complexity:                 ComplexityHighRisk,
+		CurrentImplementerProvider: "anthropic",
+		Policy:                     reviewerPolicy(profClaude),
+		EligibleProfiles:           onlyClaude,
+		Capacity:                   capacity,
+	})
+	if !waiting.Waiting {
+		t.Fatalf("decision = %+v, want a wait: no independent provider exists", waiting)
+	}
+	if !hasReason(waiting, domain.RoutingReasonCapacityProbeIndeterminate) {
+		t.Fatalf("reasons = %v, want capacity_probe_indeterminate", waiting.ReasonCodes)
+	}
+	for _, r := range waiting.ReasonCodes {
+		if !r.Valid() {
+			t.Fatalf("reason %q is outside the closed enum", r)
+		}
+	}
+}
+
+// Regression E: priority completion must never become a back door around
+// high-risk review independence. Completing the list with a SAME-provider
+// profile still waits.
+func TestRouteExecution_CompletionNeverRelaxesHighRiskIndependence(t *testing.T) {
+	sameProvider := map[domain.ProviderProfileID]domain.ProviderProfile{
+		profClaude: fixtureProfiles()[profClaude],
+		// A second anthropic profile, unlisted: eligible, available, and still
+		// not independent from an anthropic implementer.
+		"prof-claude-2": {ID: "prof-claude-2", Provider: "anthropic", Harness: domain.HarnessClaudeCode, Enabled: true},
+	}
+	d := RouteExecution(RoutingRequest{
+		Role:                       domain.WorkflowRoleReviewer,
+		Complexity:                 ComplexityHighRisk,
+		CurrentImplementerProvider: "anthropic",
+		Policy:                     reviewerPolicy(profClaude),
+		EligibleProfiles:           sameProvider,
+		Capacity: map[domain.ProviderProfileID]domain.CapacityState{
+			profClaude: domain.CapacityAvailable, "prof-claude-2": domain.CapacityAvailable,
+		},
+	})
+	if !d.Waiting || d.SelectedHarness != "" {
+		t.Fatalf("decision = %+v, want a wait: no same-provider reviewer for high-risk work", d)
+	}
+}
+
+// A user's stated order still wins: completion only ever appends.
+func TestRouteExecution_CompletionNeverReordersStatedPreference(t *testing.T) {
+	d := RouteExecution(RoutingRequest{
+		Role:             domain.WorkflowRoleWorker,
+		Complexity:       ComplexityNormal,
+		Policy:           workerPolicy(profClaude),
+		EligibleProfiles: fixtureProfiles(),
+		Capacity:         availableCapacity(),
+	})
+	if d.SelectedProfileID != profClaude {
+		t.Fatalf("selected = %q, want the user's stated first preference", d.SelectedProfileID)
+	}
+	if hasReason(d, domain.RoutingReasonPolicyPriorityCompleted) {
+		t.Fatalf("reasons = %v, want no completion marker when the stated preference was used", d.ReasonCodes)
+	}
+}
+
+func hasReason(d domain.RoutingDecision, want domain.RoutingReason) bool {
+	for _, r := range d.ReasonCodes {
+		if r == want {
+			return true
+		}
+	}
+	return false
 }

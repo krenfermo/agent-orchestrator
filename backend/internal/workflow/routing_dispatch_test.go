@@ -217,3 +217,83 @@ func TestContinueRunDispatchesReview_CodexWorkerRoutesToClaudeReviewer(t *testin
 		t.Fatalf("launch calls = %d, want exactly 1", launcher.launchCalls)
 	}
 }
+
+// TestRoutingDecision_UnchangedWaitIsNotRePersisted is Checkpoint
+// 8P-E.13A.4's checkpoint-spam regression.
+//
+// Routing is re-evaluated on every ContinueRun, and a waiting run is driven by
+// wake ticks, the autonomous progression heartbeat and reconcileMasterTasks
+// alike — several of which can land inside the same second. Each evaluation
+// used to append another byte-identical routing_decision checkpoint: in
+// ~/.ao/data, wf-35fd1af0 accumulated 68 identical waiting_for_capacity rows,
+// three of them within 200ms. An unchanged wait must produce ONE durable
+// record, not an unbounded stream, while any material change still writes.
+func TestRoutingDecision_UnchangedWaitIsNotRePersisted(t *testing.T) {
+	spawner := &harnessAwareSpawner{}
+	c, store, clk := newCoordinatorWithSwitcher(spawner, nil)
+	ctx := context.Background()
+
+	future := clk.Now().Add(time.Hour)
+	for _, h := range []domain.AgentHarness{domain.HarnessCodex, domain.HarnessClaudeCode} {
+		if _, err := store.RecordAgentHealthEvent(ctx, domain.AgentHealthEvent{
+			ID: "ahe-" + string(h), Harness: h, State: domain.AgentHealthCooldown,
+			Reason: "test", CooldownUntil: &future, CreatedAt: clk.Now(),
+		}); err != nil {
+			t.Fatalf("RecordAgentHealthEvent(%s): %v", h, err)
+		}
+	}
+
+	created, err := c.CreateRun(ctx, "proj-1", "ship the thing")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if _, err := c.StartRun(ctx, created.Run.ID); err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+
+	countRoutingCheckpoints := func() int {
+		cps, err := store.ListWorkflowCheckpoints(ctx, created.Run.ID)
+		if err != nil {
+			t.Fatalf("ListWorkflowCheckpoints: %v", err)
+		}
+		n := 0
+		for _, cp := range cps {
+			if cp.NextAction != "" && cp.RetryState != "" {
+				if _, ok := workflowcore.DecodeRoutingDecisionForTest(cp.RetryState); ok {
+					n++
+				}
+			}
+		}
+		return n
+	}
+
+	afterStart := countRoutingCheckpoints()
+	if afterStart == 0 {
+		t.Fatalf("no routing_decision checkpoint recorded by StartRun")
+	}
+
+	// Ten more re-entries with nothing changed: the wait is already on record.
+	for i := 0; i < 10; i++ {
+		if _, err := c.ContinueRun(ctx, created.Run.ID); err != nil {
+			t.Fatalf("ContinueRun #%d: %v", i, err)
+		}
+	}
+	if got := countRoutingCheckpoints(); got != afterStart {
+		t.Fatalf("routing checkpoints = %d after 10 unchanged re-entries, want %d (no duplicates)", got, afterStart)
+	}
+
+	// A material change (capacity recovers, so the decision now SELECTS a
+	// provider instead of waiting) must still be recorded.
+	if _, err := store.RecordAgentHealthEvent(ctx, domain.AgentHealthEvent{
+		ID: "ahe-recovered", Harness: domain.HarnessClaudeCode, State: domain.AgentHealthAvailable,
+		Reason: "recovered", CreatedAt: clk.Now(),
+	}); err != nil {
+		t.Fatalf("RecordAgentHealthEvent(recovered): %v", err)
+	}
+	if _, err := c.ContinueRun(ctx, created.Run.ID); err != nil {
+		t.Fatalf("ContinueRun after recovery: %v", err)
+	}
+	if got := countRoutingCheckpoints(); got <= afterStart {
+		t.Fatalf("routing checkpoints = %d, want a new one recorded for the changed decision", got)
+	}
+}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/capacityprobe"
 	plannercommand "github.com/aoagents/agent-orchestrator/backend/internal/adapters/planner/command"
 	workspacerouter "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/router"
 	"github.com/aoagents/agent-orchestrator/backend/internal/branchlock"
@@ -165,6 +166,11 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		// adapter and is refused for every other mode.
 		BranchLocks:        workflowBranchLocks{mgr: branchLocks},
 		WorkspaceCommitter: workspace,
+		// Checkpoint 8P-E.13A.4: without an active prober, a provider profile
+		// that has never been dispatched to reports CapacityUnknown until a
+		// human happens to run it, which is how an authenticated Codex reviewer
+		// could sit unusable while a high-risk independent review waited.
+		CapacityProber: capacityprobe.New(),
 	})
 	return coordinator, workflowsvc.New(coordinator), wakeScheduler
 }

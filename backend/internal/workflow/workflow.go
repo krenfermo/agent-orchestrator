@@ -248,6 +248,10 @@ type Deps struct {
 	// resolution. Multi-user mode (false) never applies this: zero owned
 	// profiles there correctly waits (checkpoint brief §18).
 	TrustedLocal bool
+
+	// CapacityProber backs Checkpoint 8P-E.13A.4's active capacity probe (see
+	// CapacityProber). Optional.
+	CapacityProber CapacityProber
 }
 
 // ProviderProfiles lists a user's owned provider profiles (Checkpoint
@@ -321,6 +325,12 @@ type Coordinator struct {
 	// direct-branch execution mode. Both optional.
 	branchLocks        BranchLocks
 	workspaceCommitter WorkspaceCommitter
+
+	// capacityProber backs Checkpoint 8P-E.13A.4's ACTIVE capacity probe.
+	// Optional: nil keeps the pre-8P-E.13A.4 purely reactive behavior, where a
+	// never-dispatched profile stays domain.CapacityUnknown.
+	capacityProber CapacityProber
+	probeGate      *capacityProbeGate
 }
 
 // New wires a Coordinator from its dependencies, defaulting the clock and id source.
@@ -359,6 +369,8 @@ func New(d Deps) *Coordinator {
 		providerProfiles:         d.ProviderProfiles,
 		executionPolicies:        d.ExecutionPolicies,
 		trustedLocal:             d.TrustedLocal,
+		capacityProber:           d.CapacityProber,
+		probeGate:                &capacityProbeGate{attempts: make(map[capacityProbeKey]time.Time)},
 		clock:                    clock,
 		newID:                    newID,
 	}
