@@ -19,6 +19,8 @@ var (
 	ErrNotFound        = workflowcore.ErrNotFound
 	ErrAlreadyTerminal = workflowcore.ErrAlreadyTerminal
 	ErrPlanLocked      = workflowcore.ErrPlanLocked
+	// ErrArchiveUnsupported surfaces a store that cannot archive.
+	ErrArchiveUnsupported = workflowcore.ErrArchiveUnsupported
 )
 
 // ListFilter narrows ListRuns. An empty ProjectID means every project.
@@ -66,6 +68,19 @@ type ExecutionPolicyApplier interface {
 type BoardReader interface {
 	ProjectBoard(ctx context.Context, projectID string, retention time.Duration) ([]workflowcore.BoardEntry, error)
 }
+
+// RunArchiver is the cancel-and-archive surface. Optional (type-asserted by
+// the controller, mirroring PlannerManager/BoardReader) so a Manager
+// implementation or test double that predates archiving keeps compiling.
+type RunArchiver interface {
+	CancelAndArchiveRun(ctx context.Context, runID string) (workflowcore.RunDetail, error)
+	ProjectBoardHistory(ctx context.Context, projectID string, limit int) ([]workflowcore.BoardEntry, error)
+}
+
+// BoardHistoryLimit caps one page of the archived view. Archiving is a manual,
+// per-workflow action, so this is a sanity bound on the response size rather
+// than a paging scheme.
+const BoardHistoryLimit = 100
 
 // BoardTerminalRetention is how long a finished run stays on the Board. A run
 // that vanishes the instant it succeeds is indistinguishable from one that
@@ -131,6 +146,19 @@ func (s *Service) StartRun(ctx context.Context, runID string) (workflowcore.RunD
 // ProjectBoard implements BoardReader.
 func (s *Service) ProjectBoard(ctx context.Context, projectID string, retention time.Duration) ([]workflowcore.BoardEntry, error) {
 	return s.coordinator.ProjectBoard(ctx, projectID, retention)
+}
+
+// CancelAndArchiveRun implements RunArchiver: it cancels the run and its
+// non-terminal children through the canonical cancellation lifecycle, then
+// marks the run archived so the active Board stops showing it. Deletes nothing.
+func (s *Service) CancelAndArchiveRun(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
+	return s.coordinator.CancelAndArchiveRun(ctx, runID)
+}
+
+// ProjectBoardHistory implements RunArchiver: the archived ("Mostrar
+// archivados") projection of a project's workflows.
+func (s *Service) ProjectBoardHistory(ctx context.Context, projectID string, limit int) ([]workflowcore.BoardEntry, error) {
+	return s.coordinator.ProjectBoardHistory(ctx, projectID, limit)
 }
 
 // ContinueRun dispatches the review step's real Claude reviewer once the

@@ -691,6 +691,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{projectId}/board/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Archived workflows for a project, newest archive first */
+        get: operations["getProjectBoardHistory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{projectId}/workflows": {
         parameters: {
             query?: never;
@@ -2076,6 +2093,23 @@ export interface paths {
         put?: never;
         /** Cancel a workflow run and its non-terminal steps */
         post: operations["cancelWorkflowRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/cancel-archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel a workflow run, cascade to its child runs, and archive it off the active Board (deletes nothing) */
+        post: operations["cancelAndArchiveWorkflowRun"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4004,6 +4038,8 @@ export interface components {
             startedAt: string;
         };
         WorkflowBoardEntryView: {
+            /** Format: date-time */
+            archivedAt?: null | string;
             /** @enum {string} */
             attention?: "ao_internal" | "human_decision";
             attentionAction?: string;
@@ -4159,6 +4195,8 @@ export interface components {
             workflow: components["schemas"]["WorkflowRunDetailView"];
         };
         WorkflowRunView: {
+            /** Format: date-time */
+            archivedAt?: null | string;
             /** @enum {string} */
             attention?: "ao_internal" | "human_decision";
             attentionAction?: string;
@@ -6535,6 +6573,38 @@ export interface operations {
         };
     };
     getProjectBoard: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowBoardResponse"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectBoardHistory: {
         parameters: {
             query?: never;
             header?: never;
@@ -11970,6 +12040,56 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    cancelAndArchiveWorkflowRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

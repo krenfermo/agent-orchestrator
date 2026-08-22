@@ -361,7 +361,19 @@ type WorkflowRun struct {
 	CancelledAt      *time.Time
 	ParentWorkflowID *string
 	PlannedTaskID    *string
+	// ArchivedAt marks a run the user has moved out of the active Board.
+	//
+	// It is deliberately not a WorkflowRunState: the state vocabulary records
+	// what the workflow did, archiving records whether a human still wants to
+	// see it in the active lane. Nothing about a run's execution changes when
+	// it is archived, and no row is ever deleted -- steps, attempts,
+	// checkpoints, review evidence and usage history stay exactly where they
+	// are and stay queryable.
+	ArchivedAt *time.Time
 }
+
+// Archived reports whether this run has been moved to the Board's history.
+func (r WorkflowRun) Archived() bool { return r.ArchivedAt != nil }
 
 // WorkflowStep is one step in a workflow run's linear chain.
 type WorkflowStep struct {

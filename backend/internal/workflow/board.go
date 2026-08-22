@@ -77,6 +77,9 @@ type BoardChildTask struct {
 // Terminal runs are included only when they finished within retention, so the
 // Board shows a run reaching "Completed" instead of having it vanish the moment
 // it succeeds.
+//
+// Archived runs are excluded outright — see ProjectBoardHistory for the view
+// that reads them back.
 func (c *Coordinator) ProjectBoard(ctx stdctx.Context, projectID string, retention time.Duration) ([]BoardEntry, error) {
 	runs, err := c.store.ListWorkflowRuns(ctx, projectID)
 	if err != nil {
@@ -86,6 +89,12 @@ func (c *Coordinator) ProjectBoard(ctx stdctx.Context, projectID string, retenti
 	entries := make([]BoardEntry, 0, len(runs))
 	for _, run := range runs {
 		if run.ParentWorkflowID != nil {
+			continue
+		}
+		// An archived run is history by explicit human decision. Unlike the
+		// retention rule below it never comes back, and unlike a state filter
+		// it is not derived from anything the workflow itself did.
+		if run.Archived() {
 			continue
 		}
 		if run.State.Terminal() && !terminalWithin(run, cutoff) {

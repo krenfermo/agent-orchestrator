@@ -1,5 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
 import { WorkflowBoardCard } from "./ProjectWorkflowLane";
 import type { BoardWorkflow } from "../hooks/useProjectBoard";
 
@@ -338,5 +339,61 @@ describe("WorkflowBoardCard", () => {
 		expect(screen.queryByTestId("workflow-spinner")).toBeNull();
 		expect(screen.queryByTestId("workflow-activity-panel")).toBeNull();
 		expect(screen.getByTestId("workflow-card-wf-1")).not.toHaveAttribute("data-active");
+	});
+});
+
+describe("WorkflowBoardCard cancel-and-archive", () => {
+	// The action is only offered where it is meaningful. A workflow AO is
+	// actively driving is not stale, and the renderer never offers to retire it.
+	it("offers the action for a stale workflow and withholds it for a running one", () => {
+		const { rerender } = render(
+			<WorkflowBoardCard
+				onArchive={async () => {}}
+				workflow={boardWorkflow({ workflowId: "wf-stale", state: "needs_attention", phase: "needs_attention" })}
+			/>,
+		);
+		expect(screen.getByTestId("workflow-archive-wf-stale")).toBeInTheDocument();
+
+		rerender(
+			<WorkflowBoardCard
+				onArchive={async () => {}}
+				workflow={boardWorkflow({ workflowId: "wf-live", state: "running", phase: "running" })}
+			/>,
+		);
+		expect(screen.queryByTestId("workflow-archive-wf-live")).toBeNull();
+	});
+
+	// The confirmation has to say both halves: execution stops, history stays.
+	it("confirms before archiving and explains that history is preserved", async () => {
+		const user = userEvent.setup();
+		const onArchive = vi.fn().mockResolvedValue(undefined);
+		render(
+			<WorkflowBoardCard
+				onArchive={onArchive}
+				workflow={boardWorkflow({ workflowId: "wf-stale", state: "needs_attention", phase: "needs_attention" })}
+			/>,
+		);
+
+		await user.click(screen.getByTestId("workflow-archive-wf-stale"));
+		const dialog = await screen.findByRole("dialog");
+		expect(within(dialog).getByText(/cancel and archive this workflow\?/i)).toBeInTheDocument();
+		expect(within(dialog).getByText(/nothing is deleted/i)).toBeInTheDocument();
+		expect(onArchive).not.toHaveBeenCalled();
+
+		await user.click(within(dialog).getByRole("button", { name: /cancel and archive/i }));
+		expect(onArchive).toHaveBeenCalledWith("wf-stale");
+	});
+
+	// An archived card is history: it renders, and it offers no way to stop
+	// something that is already stopped.
+	it("never offers the action on an archived card", () => {
+		render(
+			<WorkflowBoardCard
+				archived
+				onArchive={async () => {}}
+				workflow={boardWorkflow({ workflowId: "wf-old", state: "cancelled", phase: "cancelled" })}
+			/>,
+		);
+		expect(screen.queryByTestId("workflow-archive-wf-old")).toBeNull();
 	});
 });

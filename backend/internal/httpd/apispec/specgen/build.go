@@ -767,6 +767,26 @@ func workflowOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/cancel-archive", id: "cancelAndArchiveWorkflowRun", tag: "workflows",
+			summary:    "Cancel a workflow run, cascade to its child runs, and archive it off the active Board (deletes nothing)",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{projectId}/board/history", id: "getProjectBoardHistory", tag: "workflows",
+			summary:    "Archived workflows for a project, newest archive first",
+			pathParams: []any{controllers.ProjectBoardParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowBoardResponse{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/start", id: "startWorkflowRun", tag: "workflows",
 			summary:    "Start a pending workflow run: run its plan step and dispatch its work step's Codex worker",
 			pathParams: []any{controllers.WorkflowIDParam{}},

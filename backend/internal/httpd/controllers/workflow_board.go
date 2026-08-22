@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -98,6 +99,10 @@ type WorkflowBoardEntryView struct {
 	// which branch, who holds it, and whether anyone has to do anything.
 	BranchWait *WorkflowBranchWaitView `json:"branchWait,omitempty"`
 
+	// ArchivedAt is set on a run a human cancelled and archived. Present only
+	// in the archived view; the active board never returns an archived run.
+	ArchivedAt *time.Time `json:"archivedAt,omitempty"`
+
 	ReviewCycles int                        `json:"reviewCycles"`
 	Steps        []WorkflowStepProgressView `json:"steps,omitempty"`
 	Tasks        []WorkflowBoardTaskView    `json:"tasks,omitempty"`
@@ -134,6 +139,7 @@ func workflowBoardEntryView(e workflowcore.BoardEntry) WorkflowBoardEntryView {
 		TasksFailed:        e.Tasks.Failed + e.Tasks.Cancelled,
 		CurrentTaskOrdinal: e.Tasks.CurrentNumber,
 		CurrentTaskTitle:   e.Tasks.CurrentTitle,
+		ArchivedAt:         e.Run.ArchivedAt,
 		ReviewCycles:       e.ReviewCycles,
 		Steps:              stepProgressViews(e.Steps),
 		BranchWait:         workflowBranchWaitView(e.BranchWait),
@@ -162,6 +168,28 @@ func stepProgressViews(steps []workflowcore.StepProgress) []WorkflowStepProgress
 	return out
 }
 
+// boardHistory serves the archived ("Mostrar archivados") projection: the runs
+// a human has cancelled and archived, newest first. Same entry shape as the
+// active board, so history renders with the same card.
+func (c *WorkflowsController) boardHistory(w http.ResponseWriter, r *http.Request) {
+	archiver, ok := c.Svc.(workflowsvc.RunArchiver)
+	if c.Svc == nil || !ok {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/projects/{projectId}/board/history")
+		return
+	}
+	projectID := strings.TrimSpace(chi.URLParam(r, "projectId"))
+	entries, err := archiver.ProjectBoardHistory(r.Context(), projectID, workflowsvc.BoardHistoryLimit)
+	if errors.Is(err, workflowsvc.ErrArchiveUnsupported) {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/projects/{projectId}/board/history")
+		return
+	}
+	if err != nil {
+		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "BOARD_HISTORY_FAILED", err.Error(), nil)
+		return
+	}
+	c.writeBoard(w, r, entries)
+}
+
 // board serves the project Board projection.
 func (c *WorkflowsController) board(w http.ResponseWriter, r *http.Request) {
 	reader, ok := c.Svc.(workflowsvc.BoardReader)
@@ -175,6 +203,13 @@ func (c *WorkflowsController) board(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "BOARD_FAILED", err.Error(), nil)
 		return
 	}
+	c.writeBoard(w, r, entries)
+}
+
+// writeBoard applies ownership scoping and serializes a board projection. The
+// active board and the archived history share it so an archived run can never
+// become visible to a user the active board would have hidden it from.
+func (c *WorkflowsController) writeBoard(w http.ResponseWriter, r *http.Request, entries []workflowcore.BoardEntry) {
 	out := WorkflowBoardResponse{Workflows: make([]WorkflowBoardEntryView, 0, len(entries))}
 	for _, e := range entries {
 		// Ownership scoping mirrors the run-detail route exactly: a run whose

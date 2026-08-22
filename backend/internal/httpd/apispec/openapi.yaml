@@ -1675,6 +1675,33 @@ paths:
         vocabulary'
       tags:
       - workflows
+  /api/v1/projects/{projectId}/board/history:
+    get:
+      operationId: getProjectBoardHistory
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: projectId
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowBoardResponse'
+          description: OK
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Archived workflows for a project, newest archive first
+      tags:
+      - workflows
   /api/v1/projects/{projectId}/workflows:
     post:
       operationId: createWorkflowRun
@@ -5992,6 +6019,46 @@ paths:
                 $ref: '#/components/schemas/APIError'
           description: Not Implemented
       summary: Cancel a workflow run and its non-terminal steps
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/cancel-archive:
+    post:
+      operationId: cancelAndArchiveWorkflowRun
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRunResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unprocessable Entity
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Cancel a workflow run, cascade to its child runs, and archive it off
+        the active Board (deletes nothing)
       tags:
       - workflows
   /api/v1/workflows/{workflowId}/continue:
@@ -11021,6 +11088,11 @@ components:
       type: object
     WorkflowBoardEntryView:
       properties:
+        archivedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
         attention:
           enum:
           - ao_internal
@@ -11467,6 +11539,11 @@ components:
       type: object
     WorkflowRunView:
       properties:
+        archivedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
         attention:
           enum:
           - ao_internal

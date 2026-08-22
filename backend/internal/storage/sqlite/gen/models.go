@@ -730,6 +730,7 @@ type WorkflowRun struct {
 	ParentWorkflowID sql.NullString
 	PlannedTaskID    sql.NullString
 	UserID           *domain.UserID
+	ArchivedAt       sql.NullTime
 }
 
 type WorkflowStep struct {

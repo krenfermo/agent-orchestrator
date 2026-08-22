@@ -13,6 +13,32 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
+const archiveWorkflowRun = `-- name: ArchiveWorkflowRun :execrows
+UPDATE workflow_runs
+SET archived_at = ?1, updated_at = ?2
+WHERE id = ?3
+  AND archived_at IS NULL
+  AND state IN ('completed', 'failed', 'cancelled')
+`
+
+type ArchiveWorkflowRunParams struct {
+	ArchivedAt sql.NullTime
+	UpdatedAt  time.Time
+	ID         string
+}
+
+// Sets the archive marker exactly once. Deliberately CAS'd on
+// archived_at IS NULL so a repeated cancel-and-archive is a no-op that keeps
+// the ORIGINAL archive timestamp instead of bumping it, and on the terminal
+// state set so a still-running workflow can never be hidden from the Board.
+func (q *Queries) ArchiveWorkflowRun(ctx context.Context, arg ArchiveWorkflowRunParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, archiveWorkflowRun, arg.ArchivedAt, arg.UpdatedAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getLatestAgentHealthEvent = `-- name: GetLatestAgentHealthEvent :one
 SELECT id, harness, user_id, provider_profile_id, state, reason, failure_class, cooldown_until,
        consecutive_failures, created_at
@@ -216,7 +242,8 @@ func (q *Queries) GetWorkflowOutboxByIdempotencyKey(ctx context.Context, idempot
 
 const getWorkflowRun = `-- name: GetWorkflowRun :one
 SELECT id, project_id, objective, state, policy_version, policy_snapshot,
-       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id, user_id
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id, user_id,
+       archived_at
 FROM workflow_runs
 WHERE id = ?
 `
@@ -238,6 +265,7 @@ func (q *Queries) GetWorkflowRun(ctx context.Context, id string) (WorkflowRun, e
 		&i.ParentWorkflowID,
 		&i.PlannedTaskID,
 		&i.UserID,
+		&i.ArchivedAt,
 	)
 	return i, err
 }
@@ -506,7 +534,8 @@ INSERT INTO workflow_runs (
     created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
 RETURNING id, project_id, objective, state, policy_version, policy_snapshot,
-          created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id, user_id
+          created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id, user_id,
+          archived_at
 `
 
 type InsertWorkflowRunParams struct {
@@ -550,6 +579,7 @@ func (q *Queries) InsertWorkflowRun(ctx context.Context, arg InsertWorkflowRunPa
 		&i.ParentWorkflowID,
 		&i.PlannedTaskID,
 		&i.UserID,
+		&i.ArchivedAt,
 	)
 	return i, err
 }
@@ -609,9 +639,116 @@ func (q *Queries) InsertWorkflowStep(ctx context.Context, arg InsertWorkflowStep
 	return i, err
 }
 
+const listArchivedWorkflowRunsByProject = `-- name: ListArchivedWorkflowRunsByProject :many
+SELECT id, project_id, objective, state, policy_version, policy_snapshot,
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id, user_id,
+       archived_at
+FROM workflow_runs
+WHERE project_id = ? AND parent_workflow_id IS NULL AND archived_at IS NOT NULL
+ORDER BY archived_at DESC, id DESC
+LIMIT ?
+`
+
+type ListArchivedWorkflowRunsByProjectParams struct {
+	ProjectID domain.ProjectID
+	Limit     int64
+}
+
+// The "Mostrar archivados" history view. Archived runs are never deleted, only
+// moved out of the active Board, so this is a plain newest-first read of them.
+func (q *Queries) ListArchivedWorkflowRunsByProject(ctx context.Context, arg ListArchivedWorkflowRunsByProjectParams) ([]WorkflowRun, error) {
+	rows, err := q.db.QueryContext(ctx, listArchivedWorkflowRunsByProject, arg.ProjectID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []WorkflowRun{}
+	for rows.Next() {
+		var i WorkflowRun
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.Objective,
+			&i.State,
+			&i.PolicyVersion,
+			&i.PolicySnapshot,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CompletedAt,
+			&i.CancelledAt,
+			&i.ParentWorkflowID,
+			&i.PlannedTaskID,
+			&i.UserID,
+			&i.ArchivedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listChildWorkflowRuns = `-- name: ListChildWorkflowRuns :many
+SELECT id, project_id, objective, state, policy_version, policy_snapshot,
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id, user_id,
+       archived_at
+FROM workflow_runs
+WHERE parent_workflow_id = ?
+ORDER BY created_at, id
+`
+
+// Every child run of a master, in creation order. Cancellation cascades over
+// this rather than over workflow_tasks: the parent link is the durable fact
+// that a run belongs to a master, and it exists even for a child whose task row
+// was never updated with its execution run id.
+func (q *Queries) ListChildWorkflowRuns(ctx context.Context, parentWorkflowID sql.NullString) ([]WorkflowRun, error) {
+	rows, err := q.db.QueryContext(ctx, listChildWorkflowRuns, parentWorkflowID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []WorkflowRun{}
+	for rows.Next() {
+		var i WorkflowRun
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.Objective,
+			&i.State,
+			&i.PolicyVersion,
+			&i.PolicySnapshot,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CompletedAt,
+			&i.CancelledAt,
+			&i.ParentWorkflowID,
+			&i.PlannedTaskID,
+			&i.UserID,
+			&i.ArchivedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listNonTerminalWorkflowRuns = `-- name: ListNonTerminalWorkflowRuns :many
 SELECT id, project_id, objective, state, policy_version, policy_snapshot,
-       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id, user_id
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id, user_id,
+       archived_at
 FROM workflow_runs
 WHERE state NOT IN ('completed', 'failed', 'cancelled')
 ORDER BY created_at
@@ -640,6 +777,7 @@ func (q *Queries) ListNonTerminalWorkflowRuns(ctx context.Context) ([]WorkflowRu
 			&i.ParentWorkflowID,
 			&i.PlannedTaskID,
 			&i.UserID,
+			&i.ArchivedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -795,7 +933,8 @@ func (q *Queries) ListWorkflowOutboxByRun(ctx context.Context, workflowRunID str
 
 const listWorkflowRuns = `-- name: ListWorkflowRuns :many
 SELECT id, project_id, objective, state, policy_version, policy_snapshot,
-       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id, user_id
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id, user_id,
+       archived_at
 FROM workflow_runs
 WHERE parent_workflow_id IS NULL
 ORDER BY created_at DESC, id DESC
@@ -824,6 +963,7 @@ func (q *Queries) ListWorkflowRuns(ctx context.Context) ([]WorkflowRun, error) {
 			&i.ParentWorkflowID,
 			&i.PlannedTaskID,
 			&i.UserID,
+			&i.ArchivedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -840,7 +980,8 @@ func (q *Queries) ListWorkflowRuns(ctx context.Context) ([]WorkflowRun, error) {
 
 const listWorkflowRunsByProject = `-- name: ListWorkflowRunsByProject :many
 SELECT id, project_id, objective, state, policy_version, policy_snapshot,
-       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id, user_id
+       created_at, updated_at, completed_at, cancelled_at, parent_workflow_id, planned_task_id, user_id,
+       archived_at
 FROM workflow_runs
 WHERE project_id = ? AND parent_workflow_id IS NULL
 ORDER BY created_at DESC, id DESC
@@ -869,6 +1010,7 @@ func (q *Queries) ListWorkflowRunsByProject(ctx context.Context, projectID domai
 			&i.ParentWorkflowID,
 			&i.PlannedTaskID,
 			&i.UserID,
+			&i.ArchivedAt,
 		); err != nil {
 			return nil, err
 		}

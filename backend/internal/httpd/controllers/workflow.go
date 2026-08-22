@@ -221,6 +221,11 @@ type WorkflowRunView struct {
 	UpdatedAt   time.Time               `json:"updatedAt"`
 	CompletedAt *time.Time              `json:"completedAt,omitempty"`
 	CancelledAt *time.Time              `json:"cancelledAt,omitempty"`
+	// ArchivedAt is set once a human has cancelled and archived the run. It is
+	// a presentation fact, not an execution one: an archived run is absent from
+	// the active Board and present in the archived view, and every one of its
+	// durable rows is retained.
+	ArchivedAt *time.Time `json:"archivedAt,omitempty"`
 	// NextAction is the run's last-known next action across all its steps'
 	// checkpoints (e.g. "start_review"), informational only (Checkpoint 8B).
 	NextAction string `json:"nextAction,omitempty"`
@@ -366,6 +371,7 @@ func workflowRunView(run domain.WorkflowRun, nextAction string) WorkflowRunView 
 		UpdatedAt:     run.UpdatedAt,
 		CompletedAt:   run.CompletedAt,
 		CancelledAt:   run.CancelledAt,
+		ArchivedAt:    run.ArchivedAt,
 		NextAction:    nextAction,
 		ExecutionMode: executionModeForRun(run),
 	}
@@ -633,6 +639,8 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	r.Get("/workflows/{workflowId}", c.get)
 	r.Get("/workflows", c.list)
 	r.Post("/workflows/{workflowId}/cancel", c.cancel)
+	r.Post("/workflows/{workflowId}/cancel-archive", c.cancelAndArchive)
+	r.Get("/projects/{projectId}/board/history", c.boardHistory)
 	r.Post("/workflows/{workflowId}/start", c.start)
 	r.Post("/workflows/{workflowId}/continue", c.continueRun)
 	r.Post("/workflows/{workflowId}/plan/generate", c.generatePlan)
@@ -805,6 +813,34 @@ func (c *WorkflowsController) cancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	detail, err := c.Svc.CancelRun(r.Context(), chi.URLParam(r, "workflowId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+
+// cancelAndArchive stops a workflow (cascading to its children) and moves it
+// off the active Board.
+//
+// Deliberately NOT a DELETE: nothing is removed. The route is a POST on the run
+// because it is a lifecycle command with side effects on child runs, branch
+// locks and wake schedules, and because retrying it must be safe — the
+// underlying operation is idempotent, so a repeated request returns the same
+// 200 rather than a 409.
+func (c *WorkflowsController) cancelAndArchive(w http.ResponseWriter, r *http.Request) {
+	archiver, ok := c.Svc.(workflowsvc.RunArchiver)
+	if c.Svc == nil || !ok {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/cancel-archive")
+		return
+	}
+	detail, err := archiver.CancelAndArchiveRun(r.Context(), chi.URLParam(r, "workflowId"))
+	if errors.Is(err, workflowsvc.ErrArchiveUnsupported) {
+		// The service exposes the action but its store cannot archive: the
+		// same answer as a controller with no archiver wired at all.
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/cancel-archive")
+		return
+	}
 	if err != nil {
 		writeWorkflowError(w, r, err)
 		return

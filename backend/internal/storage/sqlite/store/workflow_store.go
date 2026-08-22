@@ -123,6 +123,61 @@ func (s *Store) ListNonTerminalWorkflowRuns(ctx context.Context) ([]domain.Workf
 	return out, nil
 }
 
+// ListChildWorkflowRuns lists every child run of a master run, in creation
+// order. Cancellation cascades over this: the parent link is the durable
+// "belongs to this master" fact, present even when the master's task row was
+// never stamped with its execution run id.
+func (s *Store) ListChildWorkflowRuns(ctx context.Context, parentRunID string) ([]domain.WorkflowRun, error) {
+	rows, err := s.qr.ListChildWorkflowRuns(ctx, sql.NullString{String: parentRunID, Valid: parentRunID != ""})
+	if err != nil {
+		return nil, fmt.Errorf("list child workflow runs of %s: %w", parentRunID, err)
+	}
+	out := make([]domain.WorkflowRun, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, workflowRunFromRow(row))
+	}
+	return out, nil
+}
+
+// ListArchivedWorkflowRuns lists a project's archived top-level runs, newest
+// archive first. This is the read behind "Mostrar archivados": archiving hides
+// a run from the active Board, it never removes it.
+func (s *Store) ListArchivedWorkflowRuns(ctx context.Context, projectID string, limit int) ([]domain.WorkflowRun, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.qr.ListArchivedWorkflowRunsByProject(ctx, gen.ListArchivedWorkflowRunsByProjectParams{
+		ProjectID: domain.ProjectID(projectID),
+		Limit:     int64(limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list archived workflow runs for project %s: %w", projectID, err)
+	}
+	out := make([]domain.WorkflowRun, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, workflowRunFromRow(row))
+	}
+	return out, nil
+}
+
+// ArchiveWorkflowRun stamps a run's archive marker. Returns false when the run
+// was already archived (the original timestamp is kept, so a retried
+// cancel-and-archive is a genuine no-op) or is not terminal (a still-live
+// workflow can never be hidden from the Board). Never deletes anything.
+func (s *Store) ArchiveWorkflowRun(ctx context.Context, id string, now time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.ArchiveWorkflowRun(ctx, gen.ArchiveWorkflowRunParams{
+		ArchivedAt: sql.NullTime{Time: now, Valid: true},
+		UpdatedAt:  now,
+		ID:         id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("archive workflow run %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
 // UpdateWorkflowRunState compare-and-swaps a workflow run's state. A false
 // result means the expected state no longer matched (already advanced by
 // another caller, or already terminal).
@@ -516,6 +571,7 @@ func workflowRunFromRow(r gen.WorkflowRun) domain.WorkflowRun {
 		CancelledAt:      nullTimeToTimePtr(r.CancelledAt),
 		ParentWorkflowID: nullStringToPtr(r.ParentWorkflowID),
 		PlannedTaskID:    nullStringToPtr(r.PlannedTaskID),
+		ArchivedAt:       nullTimeToTimePtr(r.ArchivedAt),
 	}
 }
 

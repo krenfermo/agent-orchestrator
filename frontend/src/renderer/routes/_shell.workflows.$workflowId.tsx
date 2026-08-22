@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
+import { Archive } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { useWorkflowRun, workflowRunIsTerminal } from "../hooks/useWorkflowRun";
@@ -18,6 +20,9 @@ import {
 } from "../components/workflow-activity";
 import { processedTokens } from "../components/workflow-usage-section";
 import { formatElapsedCompact } from "../lib/format-time";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { canCancelAndArchive, useCancelAndArchiveWorkflow } from "../hooks/useWorkflowArchive";
+import type { components } from "../../api/schema";
 
 export const Route = createFileRoute("/_shell/workflows/$workflowId")({
 	component: WorkflowRunRoute,
@@ -49,6 +54,48 @@ function statusLabelText(t: TranslateFn, label: NonNullable<ReturnType<typeof us
 		default:
 			return "";
 	}
+}
+
+/**
+ * The run detail's own "Cancelar y archivar".
+ *
+ * The same daemon action the Board card triggers: cancel this run and its child
+ * runs through the canonical cancellation lifecycle, release the branch, and
+ * take the card off the active Board — keeping every durable row. Hidden for an
+ * already-archived run (nothing left to archive) and for a run AO is actively
+ * driving, which is plain Cancel's job, not this one.
+ */
+function WorkflowCancelAndArchiveButton({ run }: { run: components["schemas"]["WorkflowRunView"] }) {
+	const { t } = useTranslation();
+	const [open, setOpen] = useState(false);
+	const archive = useCancelAndArchiveWorkflow(run.projectId);
+	if (run.archivedAt || !canCancelAndArchive({ state: run.state })) return null;
+	return (
+		<div>
+			<button
+				className="flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-sm disabled:opacity-50"
+				data-testid="workflow-detail-archive"
+				disabled={archive.isPending}
+				onClick={() => setOpen(true)}
+				type="button"
+			>
+				<Archive aria-hidden="true" className="size-3.5 shrink-0" />
+				{t("board.cancelAndArchive")}
+			</button>
+			{archive.error ? <p className="mt-1 text-sm text-destructive">{archive.error.message}</p> : null}
+			<ConfirmDialog
+				busy={archive.isPending}
+				confirmLabel={t("board.cancelAndArchive")}
+				description={t("board.cancelAndArchiveExplain")}
+				destructive
+				error={archive.error?.message ?? null}
+				onConfirm={() => archive.mutate(run.id, { onSuccess: () => setOpen(false) })}
+				onOpenChange={setOpen}
+				open={open}
+				title={t("board.cancelAndArchiveConfirm")}
+			/>
+		</div>
+	);
 }
 
 function WorkflowRunRoute() {
@@ -257,6 +304,7 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 						{cancelError && <p className="mt-1 text-sm text-destructive">{cancelError}</p>}
 					</div>
 				)}
+				<WorkflowCancelAndArchiveButton run={workflow.run} />
 			</div>
 
 			{workflow.plan && (
