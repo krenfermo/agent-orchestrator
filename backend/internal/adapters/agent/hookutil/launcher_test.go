@@ -239,3 +239,183 @@ func TestIsAOExecutable(t *testing.T) {
 		}
 	}
 }
+
+// writeFakeAOAt writes a stand-in AO binary at exe that appends its arguments
+// to record. Unlike writeFakeAO the record lives wherever the caller wants, so
+// a test can delete the binary's whole directory tree and still read it back.
+func writeFakeAOAt(t *testing.T, exe, record string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(exe), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + ShellQuote(record) + "\nexit 0\n"
+	if err := os.WriteFile(exe, []byte(script), 0o700); err != nil { // #nosec G306 -- test fixture must be executable
+		t.Fatal(err)
+	}
+}
+
+// goBuildExe returns a path shaped exactly like the one `go run` hands the
+// process it starts: <tmp>/go-build<digits>/b001/exe/<name>.
+func goBuildExe(root, name string) string {
+	return filepath.Join(root, "go-build2455361342", "b001", "exe", name)
+}
+
+// TestEnsureLauncherSurvivesEphemeralGoBuildBinaryVanishing reproduces the
+// reported failure: AO started through `go run`, the launcher recorded the
+// temp go-build executable, the temp tree was reaped, and every hook then died
+// with "No such file or directory". The launcher must keep working after the
+// go-build tree is gone.
+func TestEnsureLauncherSurvivesEphemeralGoBuildBinaryVanishing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("/bin/sh hook execution is Unix-only")
+	}
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	record := filepath.Join(root, "argv.txt")
+	buildRoot := filepath.Join(root, "tmp")
+	exe := goBuildExe(buildRoot, "ao")
+	writeFakeAOAt(t, exe, record)
+
+	launcher, err := EnsureLauncherFor(dataDir, func() (string, error) { return exe, nil })
+	if err != nil {
+		t.Fatalf("EnsureLauncherFor: %v", err)
+	}
+
+	// The go-build tree is deleted when the `go run` process exits.
+	if err := os.RemoveAll(buildRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := os.ReadFile(launcher) //nolint:gosec // test-owned path
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(script), exe) {
+		t.Fatalf("launcher persisted the ephemeral go-build path:\n%s", script)
+	}
+	if out, err := runHookCommand(t, ShellQuote(launcher)+" hooks claude-code stop"); err != nil {
+		t.Fatalf("hook failed after the go-build binary vanished: %v\n%s", err, out)
+	}
+	got, err := os.ReadFile(record) //nolint:gosec // test-owned path
+	if err != nil {
+		t.Fatalf("hook did not reach an AO binary: %v", err)
+	}
+	if strings.TrimSpace(string(got)) != "hooks claude-code stop" {
+		t.Fatalf("AO binary received %q, want %q", strings.TrimSpace(string(got)), "hooks claude-code stop")
+	}
+}
+
+// TestEnsureLauncherRepairsStaleEphemeralLauncher covers the heal-on-restart
+// path: a launcher left pointing at a dead go-build binary must be rewritten
+// by the next launch, whether that launch is another `go run` or an installed
+// AO.
+func TestEnsureLauncherRepairsStaleEphemeralLauncher(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("/bin/sh hook execution is Unix-only")
+	}
+	for _, tc := range []struct{ name, secondDir string }{
+		{"restarted through go run", ""},
+		{"restarted as an installed binary", "install"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			dataDir := filepath.Join(root, "data")
+			firstBuild := filepath.Join(root, "tmp-1")
+			firstExe := goBuildExe(firstBuild, "ao")
+			writeFakeAOAt(t, firstExe, filepath.Join(root, "argv-1.txt"))
+			if _, err := EnsureLauncherFor(dataDir, func() (string, error) { return firstExe, nil }); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.RemoveAll(firstBuild); err != nil {
+				t.Fatal(err)
+			}
+
+			record := filepath.Join(root, "argv-2.txt")
+			secondExe := goBuildExe(filepath.Join(root, "tmp-2"), "ao")
+			if tc.secondDir != "" {
+				secondExe = filepath.Join(root, tc.secondDir, "ao")
+			}
+			writeFakeAOAt(t, secondExe, record)
+
+			launcher, err := EnsureLauncherFor(dataDir, func() (string, error) { return secondExe, nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out, err := runHookCommand(t, ShellQuote(launcher)+" hooks claude-code stop"); err != nil {
+				t.Fatalf("repaired hook failed: %v\n%s", err, out)
+			}
+			if _, err := os.Stat(record); err != nil {
+				t.Fatalf("hook did not reach the current binary: %v", err)
+			}
+		})
+	}
+}
+
+// TestEnsureLauncherTargetsStableExecutableDirectly pins the packaged/installed
+// behavior: no copy is made, and the shim execs the real binary so app upgrades
+// stay in charge of it.
+func TestEnsureLauncherTargetsStableExecutableDirectly(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	exe, _ := writeFakeAO(t, filepath.Join(root, "Agent Orchestrator.app", "Contents", "MacOS"))
+
+	launcher, err := EnsureLauncherFor(dataDir, func() (string, error) { return exe, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile(launcher) //nolint:gosec // test-owned path
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(script), exe) {
+		t.Fatalf("launcher does not exec the installed binary %q:\n%s", exe, script)
+	}
+	if FileExists(StableBinaryPath(dataDir)) {
+		t.Fatalf("launcher copied a stable binary it should have referenced in place")
+	}
+}
+
+// TestEnsureLauncherDropsStaleCopyWhenBinaryBecomesStable covers a dev machine
+// that later runs an installed AO: the parked dev copy must not linger.
+func TestEnsureLauncherDropsStaleCopyWhenBinaryBecomesStable(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	devExe := goBuildExe(filepath.Join(root, "tmp"), "ao")
+	writeFakeAOAt(t, devExe, filepath.Join(root, "argv.txt"))
+	if _, err := EnsureLauncherFor(dataDir, func() (string, error) { return devExe, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !FileExists(StableBinaryPath(dataDir)) {
+		t.Fatalf("expected an AO-owned copy of the ephemeral binary at %q", StableBinaryPath(dataDir))
+	}
+
+	installed, _ := writeFakeAO(t, filepath.Join(root, "install"))
+	if _, err := EnsureLauncherFor(dataDir, func() (string, error) { return installed, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if FileExists(StableBinaryPath(dataDir)) {
+		t.Fatalf("stale dev copy survived at %q", StableBinaryPath(dataDir))
+	}
+}
+
+func TestIsEphemeralExecutable(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"/var/folders/9v/x/T/go-build2455361342/b001/exe/ao", true},
+		{"/tmp/go-build123/b001/exe/ao", true},
+		{"/home/dev/.cache/go-build/b042/exe/ao", true},
+		{"/some/where/b001/exe/ao", true},
+		{"", false},
+		{"/opt/ao/bin/ao", false},
+		{"/usr/local/bin/ao", false},
+		{"/Applications/Agent Orchestrator.app/Contents/MacOS/ao", false},
+		{"/Users/dev/go/bin/ao", false},
+		{"/Users/dev/projects/ao/build/exe/ao", false},
+	} {
+		if got := IsEphemeralExecutable(tc.path); got != tc.want {
+			t.Fatalf("IsEphemeralExecutable(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}

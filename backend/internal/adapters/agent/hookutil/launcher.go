@@ -21,10 +21,18 @@ import (
 // AO itself owns and writes. The path points at a tiny shim under the AO data
 // directory rather than at the daemon executable directly, so the command
 // string persisted into a workspace settings file stays stable across daemon
-// upgrades, app-bundle relocation, and `go run` rebuilds (whose executable
-// lives in a temp directory that is deleted when the process exits). Every
-// launch rewrites the shim to exec whatever daemon binary is current, so the
-// stable path always reaches the running AO.
+// upgrades, app-bundle relocation, and rebuilds. Every launch rewrites the
+// shim to exec whatever daemon binary is current, so the stable path always
+// reaches the running AO.
+//
+// The shim's *target* needs the same care. Under `go run`/`go test` the
+// running executable lives in the Go build cache (a temp directory deleted
+// when the process exits), so a shim recording that path degrades into
+// "No such file or directory" the moment AO restarts or exits — a hook that
+// fires afterwards fails with no way back. EnsureLauncher therefore never
+// persists an ephemeral path: it copies such a binary into the AO data
+// directory and targets the copy. A stable, installed executable is still
+// targeted directly.
 const (
 	// LauncherDirName is the AO-owned directory, relative to the data dir,
 	// holding the hook launcher.
@@ -33,6 +41,12 @@ const (
 	// recognized as AO-owned by this name (see hooksjson), so it must match
 	// the name the shim is written under.
 	LauncherBaseName = "ao"
+	// StableBinaryBaseName is the name of the AO-owned copy of the daemon
+	// binary the shim execs when the running executable lives at an ephemeral
+	// path (`go run`, `go test`, any Go build-cache exe directory). It is
+	// deliberately NOT LauncherBaseName: the shim itself occupies that name in
+	// the same directory.
+	StableBinaryBaseName = "ao-bin"
 )
 
 // LauncherName is the shim's file name: bare on Unix, a .cmd batch wrapper on
@@ -44,9 +58,61 @@ func LauncherName() string {
 	return LauncherBaseName
 }
 
+// StableBinaryName is the file name of the AO-owned copy of the daemon binary.
+func StableBinaryName() string {
+	if runtime.GOOS == "windows" {
+		return StableBinaryBaseName + ".exe"
+	}
+	return StableBinaryBaseName
+}
+
 // LauncherDir is the directory EnsureLauncher writes the shim into.
 func LauncherDir(dataDir string) string {
 	return filepath.Join(dataDir, LauncherDirName)
+}
+
+// StableBinaryPath is where EnsureLauncher parks its own copy of an ephemeral
+// daemon binary.
+func StableBinaryPath(dataDir string) string {
+	return filepath.Join(LauncherDir(dataDir), StableBinaryName())
+}
+
+// IsEphemeralExecutable reports whether path names a binary produced into the
+// Go build cache — the layout `go run`/`go test` use, e.g.
+// /var/folders/.../T/go-build2455361342/b001/exe/ao. Such a binary is deleted
+// when the process that ran it exits, so persisting its path into a hook
+// command produces the "No such file or directory" failure this guards
+// against: the hook fires long after the path stopped existing.
+func IsEphemeralExecutable(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(path)), "/")
+	for i, part := range parts {
+		part = strings.ToLower(part)
+		if strings.HasPrefix(part, "go-build") {
+			return true
+		}
+		// The per-action work directory layout inside the build cache:
+		// <root>/b001/exe/<name>.
+		if part == "exe" && i > 0 && isBuildActionDir(parts[i-1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// isBuildActionDir reports whether name is a Go build action directory ("b001").
+func isBuildActionDir(name string) bool {
+	if len(name) < 2 || (name[0] != 'b' && name[0] != 'B') {
+		return false
+	}
+	for _, r := range name[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // EnsureLauncher writes (or refreshes) AO's hook launcher under dataDir and
@@ -98,11 +164,70 @@ func EnsureLauncherFor(dataDir string, executable func() (string, error)) (strin
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return exe, nil //nolint:nilerr // see EnsureLauncher's fallback contract
 	}
+	target := stableTarget(dataDir, exe)
 	path := filepath.Join(dir, LauncherName())
-	if err := AtomicWriteFile(path, []byte(launcherScript(exe)), 0o700); err != nil { // #nosec G302 -- the launcher must be executable by the AO user
+	if err := AtomicWriteFile(path, []byte(launcherScript(target)), 0o700); err != nil { // #nosec G302 -- the launcher must be executable by the AO user
 		return exe, nil //nolint:nilerr // see EnsureLauncher's fallback contract
 	}
 	return path, nil
+}
+
+// stableTarget returns the binary the shim should exec.
+//
+// For an installed or packaged AO the running executable already lives at a
+// stable path, and the shim execs it directly — that keeps hooks reaching the
+// exact binary the user launched, and leaves app upgrades in charge of the
+// file. For a binary at an ephemeral Go build-cache path (`go run`, `go
+// test`), the running executable is deleted the moment AO exits, so AO instead
+// copies it into its own data directory and points the shim at that copy. The
+// hook then keeps working after the temp binary is gone, which is exactly the
+// stale-launcher failure this repairs — and because the shim and the copy are
+// refreshed on every launch, an already-stale launcher heals itself on the
+// next start.
+func stableTarget(dataDir, exe string) string {
+	if !IsEphemeralExecutable(exe) {
+		// A previous dev run may have parked a copy; it is stale now, and the
+		// shim no longer references it.
+		_ = os.Remove(StableBinaryPath(dataDir))
+		return exe
+	}
+	stable := StableBinaryPath(dataDir)
+	if err := copyExecutable(exe, stable); err != nil {
+		// Best effort: a copy left by an earlier launch is still a better
+		// target than a path that will not exist when the hook fires.
+		if IsExecutableFile(stable) {
+			return stable
+		}
+		return exe
+	}
+	return stable
+}
+
+// copyExecutable copies src to dst as an executable file, skipping the copy
+// when dst already holds the same build (same size and modification time).
+// The write goes through AtomicWriteFile so a hook firing mid-copy sees either
+// the old binary or the new one, never a truncated file.
+func copyExecutable(src, dst string) error {
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("stat AO hook executable: %w", err)
+	}
+	if dstInfo, ok := statRegularFile(dst); ok &&
+		dstInfo.Size() == srcInfo.Size() && dstInfo.ModTime().Equal(srcInfo.ModTime()) {
+		return nil
+	}
+	data, err := os.ReadFile(src) //nolint:gosec // src is the running AO executable
+	if err != nil {
+		return fmt.Errorf("read AO hook executable: %w", err)
+	}
+	if err := AtomicWriteFile(dst, data, 0o700); err != nil { // #nosec G302 -- the copy must be executable by the AO user
+		return fmt.Errorf("write AO hook executable copy: %w", err)
+	}
+	// Carry the source mtime so the next launch can skip an identical copy.
+	if err := os.Chtimes(dst, srcInfo.ModTime(), srcInfo.ModTime()); err != nil {
+		return nil //nolint:nilerr // the copy is usable; only the skip-fast path is lost
+	}
+	return nil
 }
 
 // launcherScript is a shim that execs the resolved AO binary with the hook's
