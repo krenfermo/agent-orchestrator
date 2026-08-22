@@ -38,6 +38,16 @@ type Prober interface {
 	Probe(ctx context.Context, harness domain.AgentHarness, env runtimehome.Environment) (domain.ProviderAuthState, error)
 }
 
+// PolicySyncer keeps the owner's stored UserExecutionPolicy priority lists in
+// step with the profiles they actually own (Checkpoint 8P-E.13A.5). Satisfied
+// by *service/executionpolicy.Service. A narrow one-method seam rather than
+// importing that package's Manager wholesale, matching this package's existing
+// DataDirer/Prober convention -- and nil means "not wired", in which case
+// connecting a profile simply leaves the policy alone exactly as before.
+type PolicySyncer interface {
+	SyncPriorities(ctx context.Context, userID domain.UserID) error
+}
+
 // DataDirer supplies AO_DATA_DIR so this service can prepare a user's
 // runtime-home on demand. A narrow single-method seam instead of importing
 // config directly, mirroring reviewgateway's dataDir-string convention.
@@ -90,6 +100,23 @@ type Service struct {
 	DataDir   DataDirer
 	IDFactory func() string
 	Clock     func() time.Time
+	// PolicySync keeps the owner's stored execution policy in step with their
+	// profiles (Checkpoint 8P-E.13A.5). Optional.
+	PolicySync PolicySyncer
+}
+
+// syncPolicy is the single place every profile mutation touches the owner's
+// execution policy. Deliberately best-effort: a profile was already durably
+// created/enabled/re-probed by the time this runs, and failing the caller's
+// request because a downstream policy touch-up failed would be strictly
+// worse than leaving the policy stale (Get repairs it on the next Settings
+// read anyway). Mirrors this package's existing "a nil optional dependency is
+// a silent no-op" convention.
+func (s *Service) syncPolicy(ctx context.Context, userID domain.UserID) {
+	if s.PolicySync == nil {
+		return
+	}
+	_ = s.PolicySync.SyncPriorities(ctx, userID)
 }
 
 var _ Manager = (*Service)(nil)
@@ -171,6 +198,9 @@ func (s *Service) Create(ctx context.Context, userID domain.UserID, in CreateInp
 	if err != nil {
 		return domain.ProviderProfile{}, fmt.Errorf("providerprofile: create: %w", err)
 	}
+	// A newly connected provider must become selectable without the user
+	// having to re-save Settings (Checkpoint 8P-E.13A.5).
+	s.syncPolicy(ctx, userID)
 	return created, nil
 }
 
@@ -205,6 +235,10 @@ func (s *Service) Update(ctx context.Context, userID domain.UserID, id domain.Pr
 	if !ok {
 		return domain.ProviderProfile{}, apierr.NotFound("PROVIDER_PROFILE_NOT_FOUND", "provider profile not found")
 	}
+	// Enabling a previously disabled profile makes it eligible for the first
+	// time; disabling one never removes it from a priority list (out of scope
+	// by design -- see domain.SyncExecutionPolicyPriorities).
+	s.syncPolicy(ctx, userID)
 	return s.Get(ctx, userID, id)
 }
 
@@ -274,6 +308,10 @@ func (s *Service) refreshAuthState(ctx context.Context, userID domain.UserID, id
 	if !ok {
 		return domain.ProviderProfile{}, apierr.NotFound("PROVIDER_PROFILE_NOT_FOUND", "provider profile not found")
 	}
+	// Connect/Test is where a CLI-bootstrap provider usually first becomes
+	// genuinely usable, so it is the most likely moment for a stale policy to
+	// need repairing.
+	s.syncPolicy(ctx, userID)
 	return s.Get(ctx, userID, id)
 }
 

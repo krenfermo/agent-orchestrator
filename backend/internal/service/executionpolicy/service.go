@@ -31,6 +31,10 @@ type Store interface {
 type Manager interface {
 	Get(ctx context.Context, userID domain.UserID) (domain.UserExecutionPolicy, error)
 	Put(ctx context.Context, userID domain.UserID, in PutInput) (domain.UserExecutionPolicy, error)
+	// SyncPriorities is Checkpoint 8P-E.13A.5's stale-policy repair hook,
+	// called by service/providerprofile whenever a profile is connected,
+	// enabled or re-probed. See Service.SyncPriorities.
+	SyncPriorities(ctx context.Context, userID domain.UserID) error
 }
 
 // PutInput is client-supplied input for PUT /api/v1/execution-policy.
@@ -71,6 +75,12 @@ func (s *Service) now() time.Time {
 // (domain.DefaultUserExecutionPolicy) built from their current profiles when
 // none has been saved yet -- the frontend always has something concrete to
 // render/edit, never a bare 404 for "no policy configured".
+//
+// Checkpoint 8P-E.13A.5: a stored policy is repaired before it is returned
+// (syncStored), so simply opening Settings brings an existing installation's
+// priority lists back in step with the profiles it actually owns. This is the
+// self-heal path -- a user who connected Codex months after saving their
+// policy never has to disconnect and reconnect it.
 func (s *Service) Get(ctx context.Context, userID domain.UserID) (domain.UserExecutionPolicy, error) {
 	if userID == "" {
 		return domain.UserExecutionPolicy{}, apierr.Unauthorized("NOT_AUTHENTICATED", "no user resolved")
@@ -78,13 +88,62 @@ func (s *Service) Get(ctx context.Context, userID domain.UserID) (domain.UserExe
 	if p, ok, err := s.Store.GetUserExecutionPolicyByUser(ctx, userID); err != nil {
 		return domain.UserExecutionPolicy{}, fmt.Errorf("executionpolicy: get: %w", err)
 	} else if ok {
-		return p, nil
+		return s.syncStored(ctx, p)
 	}
 	profiles, err := s.Store.ListProviderProfilesByUser(ctx, userID)
 	if err != nil {
 		return domain.UserExecutionPolicy{}, fmt.Errorf("executionpolicy: list profiles for default: %w", err)
 	}
+	// No stored row: DefaultUserExecutionPolicy is already built from the
+	// user's CURRENT profiles, so it can never be stale. Nothing is persisted
+	// here -- reading Settings has never created a policy row, and this
+	// checkpoint does not change that.
 	return domain.DefaultUserExecutionPolicy(userID, profiles), nil
+}
+
+// SyncPriorities repairs userID's STORED policy in place, appending every
+// owned/enabled/capable profile its priority lists do not already mention
+// (domain.SyncExecutionPolicyPriorities holds the rules and the guarantees).
+//
+// A no-op when the user has no stored policy: there is nothing stale to
+// repair, and Get already derives a current default for that case. Callers
+// treat a sync failure as non-fatal -- connecting a provider must still
+// succeed even if its policy touch-up did not (see providerprofile.Service).
+func (s *Service) SyncPriorities(ctx context.Context, userID domain.UserID) error {
+	if userID == "" {
+		return nil
+	}
+	stored, ok, err := s.Store.GetUserExecutionPolicyByUser(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("executionpolicy: sync: get: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	if _, err := s.syncStored(ctx, stored); err != nil {
+		return err
+	}
+	return nil
+}
+
+// syncStored applies the sync to an already-loaded stored policy, persisting
+// it only when something actually changed -- an unchanged policy must not
+// churn updated_at on every Settings read.
+func (s *Service) syncStored(ctx context.Context, stored domain.UserExecutionPolicy) (domain.UserExecutionPolicy, error) {
+	profiles, err := s.Store.ListProviderProfilesByUser(ctx, stored.UserID)
+	if err != nil {
+		return domain.UserExecutionPolicy{}, fmt.Errorf("executionpolicy: sync: list profiles: %w", err)
+	}
+	synced, changed := domain.SyncExecutionPolicyPriorities(stored, profiles, registry.ProviderDescriptors())
+	if !changed {
+		return stored, nil
+	}
+	synced.UpdatedAt = s.now()
+	saved, err := s.Store.UpsertUserExecutionPolicy(ctx, synced)
+	if err != nil {
+		return domain.UserExecutionPolicy{}, fmt.Errorf("executionpolicy: sync: upsert: %w", err)
+	}
+	return saved, nil
 }
 
 // Put validates and upserts userID's policy (Checkpoint 8P-C §14):

@@ -557,10 +557,17 @@ func RunWithConfig(cfg config.Config) error {
 	// Shared between APIDeps.ProviderProfiles and providersetup.Service
 	// (Checkpoint 8P-E.8.4): both need the same Prober/DataDir-scoped Get,
 	// and constructing it twice would let the two surfaces silently drift.
+	// Checkpoint 8P-E.13A.5: connecting/enabling/re-probing a profile keeps
+	// the owner's stored execution policy priority lists in step, so a
+	// provider connected after the policy was first saved does not stay
+	// invisible to Settings. Shared with APIDeps.ExecutionPolicy below so both
+	// surfaces read and repair the same policy through one implementation.
+	executionPolicySvc := &executionpolicysvc.Service{Store: store}
 	providerProfilesSvc := &providerprofilesvc.Service{
-		Store:   store,
-		Prober:  providerprofilesvc.CLIProber{},
-		DataDir: staticDataDir(cfg.DataDir),
+		Store:      store,
+		Prober:     providerprofilesvc.CLIProber{},
+		DataDir:    staticDataDir(cfg.DataDir),
+		PolicySync: executionPolicySvc,
 	}
 	providerSetupSvc := &providersetupsvc.Service{
 		Profiles:  providerProfilesSvc,
@@ -614,7 +621,7 @@ func RunWithConfig(cfg config.Config) error {
 		SessionOwnership:    store,
 		ProviderProfiles:    providerProfilesSvc,
 		ProviderSetup:       providerSetupSvc,
-		ExecutionPolicy:     &executionpolicysvc.Service{Store: store},
+		ExecutionPolicy:     executionPolicySvc,
 	})
 	if err != nil {
 		stop()

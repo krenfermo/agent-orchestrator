@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
 import { apiClient, apiErrorMessage, hasTrustedApiBaseUrl } from "../lib/api-client";
+import { executionPolicyQueryKey } from "./useExecutionPolicy";
 
 export type ProviderDescriptor = components["schemas"]["ControllersProviderDescriptorView"];
 export type ProviderProfile = components["schemas"]["ControllersProviderProfileView"];
@@ -43,7 +44,18 @@ export function useProviderProfiles() {
 		staleTime: 30 * 1000,
 	});
 
-	const invalidateProfiles = () => void queryClient.invalidateQueries({ queryKey: providerProfilesQueryKey });
+	/**
+	 * Checkpoint 8P-E.13A.5: connecting, enabling or re-testing a profile also
+	 * repairs the stored execution policy server-side (its priority lists gain
+	 * the newly usable profile). The cached policy is therefore stale the
+	 * moment any profile mutation succeeds, so it is invalidated alongside the
+	 * profiles themselves — otherwise Execution Policy would keep rendering
+	 * pre-connection priorities for up to its 30s staleTime.
+	 */
+	const invalidateProfiles = () => {
+		void queryClient.invalidateQueries({ queryKey: providerProfilesQueryKey });
+		void queryClient.invalidateQueries({ queryKey: executionPolicyQueryKey });
+	};
 
 	const create = useMutation({
 		mutationFn: async (input: { provider: string; harness: string; displayName: string }) => {
