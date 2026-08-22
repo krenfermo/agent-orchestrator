@@ -50,7 +50,7 @@ func qwenSettingsPath(workspacePath string) string {
 
 // GetAgentHooks installs AO's Qwen Code hooks, preserving user-defined hooks and unrelated settings.
 func (p *Plugin) GetAgentHooks(ctx context.Context, cfg ports.WorkspaceHookConfig) error {
-	return qwenHooks.Install(ctx, cfg.WorkspacePath)
+	return qwenHooks.Install(ctx, cfg.WorkspacePath, cfg.DataDir)
 }
 
 // UninstallHooks removes AO's Qwen Code hooks, leaving user-defined hooks untouched.

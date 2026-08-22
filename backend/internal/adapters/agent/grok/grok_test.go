@@ -444,7 +444,7 @@ func countGrokHookCommand(groups []hooksjson.MatcherGroup, command string) int {
 	count := 0
 	for _, group := range groups {
 		for _, hook := range group.Hooks {
-			if hook.Command == command {
+			if grokHooks.Matches(hook.Command, command) {
 				count++
 			}
 		}
@@ -455,7 +455,7 @@ func countGrokHookCommand(groups []hooksjson.MatcherGroup, command string) int {
 func grokMatcherForCommand(groups []hooksjson.MatcherGroup, command string) *string {
 	for _, group := range groups {
 		for _, hook := range group.Hooks {
-			if hook.Command == command {
+			if grokHooks.Matches(hook.Command, command) {
 				return group.Matcher
 			}
 		}

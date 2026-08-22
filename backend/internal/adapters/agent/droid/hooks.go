@@ -48,7 +48,7 @@ func droidHooksPath(workspacePath string) string {
 
 // GetAgentHooks installs AO's Droid hooks, preserving user-defined hooks.
 func (p *Plugin) GetAgentHooks(ctx context.Context, cfg ports.WorkspaceHookConfig) error {
-	return droidHooks.Install(ctx, cfg.WorkspacePath)
+	return droidHooks.Install(ctx, cfg.WorkspacePath, cfg.DataDir)
 }
 
 // UninstallHooks removes AO's Droid hooks, leaving user-defined hooks untouched.

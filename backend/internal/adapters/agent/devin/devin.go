@@ -136,7 +136,7 @@ func (p *Plugin) PreLaunch(ctx context.Context, cfg ports.LaunchConfig) error {
 
 // GetAgentHooks installs Devin's AO-managed workspace hook configuration.
 func (p *Plugin) GetAgentHooks(ctx context.Context, cfg ports.WorkspaceHookConfig) error {
-	return devinHooks.Install(ctx, cfg.WorkspacePath)
+	return devinHooks.Install(ctx, cfg.WorkspacePath, cfg.DataDir)
 }
 
 // GetRestoreCommand builds `devin [--permission-mode <mode>] -r <agentSessionId>`

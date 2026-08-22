@@ -120,7 +120,7 @@ func (r *Reviewer) ReviewCommand(ctx context.Context, inv ports.ReviewInvocation
 // PreLaunch installs Kimchi's native hooks in the selected review workspace so
 // AO can capture the native conversation id and activity events.
 func (r *Reviewer) PreLaunch(ctx context.Context, inv ports.ReviewInvocation) error {
-	return r.agent.GetAgentHooks(ctx, ports.WorkspaceHookConfig{WorkspacePath: inv.WorkspacePath})
+	return r.agent.GetAgentHooks(ctx, ports.WorkspaceHookConfig{WorkspacePath: inv.WorkspacePath, DataDir: inv.DataDir})
 }
 
 // ReviewMessage returns the centrally-authored task for an existing pane.

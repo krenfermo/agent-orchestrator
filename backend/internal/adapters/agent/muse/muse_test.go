@@ -14,6 +14,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/binaryutil"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/hookutil"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
@@ -337,8 +338,10 @@ func TestManagedHookCommandsRestoreSanitizedAORoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	command := file.Hooks["UserPromptSubmit"][0].Hooks[0].Command
+	launcher := filepath.Join(dataDir, hookutil.LauncherDirName, hookutil.LauncherName())
 	want := "env AO_SESSION_ID='sess-1' AO_DATA_DIR=" + museShellQuote(dataDir) +
-		" AO_RUN_FILE=" + museShellQuote(runFile) + " ao hooks muse user-prompt-submit"
+		" AO_RUN_FILE=" + museShellQuote(runFile) + " " + hookutil.ShellQuote(launcher) +
+		" hooks muse user-prompt-submit"
 	if command != want {
 		t.Fatalf("command = %q, want %q", command, want)
 	}
@@ -379,7 +382,7 @@ func assertMuseManagedHooks(t *testing.T, path string) {
 			t.Fatalf("hooks[%q] = %#v, want one command", nativeEvent, groups)
 		}
 		hook := groups[0].Hooks[0]
-		if hook.Type != "command" || !strings.HasSuffix(hook.Command, " "+museHookCommandPrefix+aoEvent) {
+		if hook.Type != "command" || !strings.HasSuffix(hook.Command, " "+strings.TrimPrefix(museHookCommandPrefix, "ao ")+aoEvent) {
 			t.Fatalf("hooks[%q] = %#v, want AO %q command", nativeEvent, hook, aoEvent)
 		}
 	}

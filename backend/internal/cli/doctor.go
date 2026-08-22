@@ -230,10 +230,13 @@ func checkDataDirWritable(dataDir string) doctorCheck {
 	return doctorCheck{Level: doctorPass, Section: doctorSectionCore, Name: "data-dir-write", Message: "write probe succeeded"}
 }
 
-// checkAOBinary verifies the `ao` that workspace hooks would invoke. Agent
-// adapters install hook commands as a bare `ao hooks <agent> <event>`, so an
-// `ao` earlier on PATH that is not this binary (e.g. a legacy CLI without the
-// hooks command) fails every callback and silently kills activity tracking.
+// checkAOBinary verifies the `ao` that workspace hooks would invoke. Adapters
+// whose hooks are shell scripts still invoke a bare `ao hooks <agent> <event>`,
+// so an `ao` earlier on PATH that is not this binary (e.g. a legacy CLI without
+// the hooks command) fails those callbacks and silently kills activity
+// tracking. Adapters on the shared hooks-file installer no longer depend on
+// PATH at all: they record an absolute AO launcher path (see
+// hookutil.EnsureLauncher).
 // The daemon pins PATH inside the sessions it spawns, so a mismatch here is a
 // warning about every other context (manual runs, foreign panes), not a hard
 // failure.

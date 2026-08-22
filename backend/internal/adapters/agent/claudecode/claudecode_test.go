@@ -581,7 +581,7 @@ func countClaudeHookCommand(groups []hooksjson.MatcherGroup, command string) int
 	count := 0
 	for _, group := range groups {
 		for _, hook := range group.Hooks {
-			if hook.Command == command {
+			if claudeHooks.Matches(hook.Command, command) {
 				count++
 			}
 		}
@@ -594,7 +594,7 @@ func countClaudeHookCommand(groups []hooksjson.MatcherGroup, command string) int
 func matcherForCommand(groups []hooksjson.MatcherGroup, command string) *string {
 	for _, group := range groups {
 		for _, hook := range group.Hooks {
-			if hook.Command == command {
+			if claudeHooks.Matches(hook.Command, command) {
 				return group.Matcher
 			}
 		}

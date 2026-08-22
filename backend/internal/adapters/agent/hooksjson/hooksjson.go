@@ -165,8 +165,10 @@ type Manager struct {
 	// Label prefixes error messages, e.g. "claude-code" or "goose", so the
 	// wrapped error reads "<label>.GetAgentHooks: ...".
 	Label string
-	// CommandPrefix identifies AO-owned hook commands, e.g. "ao hooks goose ".
-	// Install skips commands already present and uninstall/detect match on it.
+	// CommandPrefix identifies AO-owned hook commands in their canonical form,
+	// e.g. "ao hooks goose ". Install writes the command with the executable
+	// resolved to an absolute path instead of the leading bare `ao`;
+	// uninstall/detect recognize both that form and the legacy bare one.
 	CommandPrefix string
 	// Timeout is written into each installed hook entry.
 	Timeout int
@@ -174,6 +176,80 @@ type Manager struct {
 	Path func(workspacePath string) string
 	// Managed is the set of hooks AO installs.
 	Managed []HookSpec
+	// Launcher resolves the absolute path of the AO executable that the
+	// installed hook commands invoke. It defaults to hookutil.EnsureLauncher;
+	// tests override it to pin a path.
+	Launcher func(dataDir string) (string, error)
+}
+
+// aoBinaryName is the leading word of every CommandPrefix ("ao hooks <agent> ").
+// It is stripped to recover the argument prefix that follows the executable,
+// because installed commands name the executable by absolute path instead.
+const aoBinaryName = hookutil.LauncherBaseName
+
+// argsPrefix is CommandPrefix without its leading `ao ` — the arguments every
+// managed hook command passes to the AO CLI, e.g. "hooks claude-code ".
+func (m Manager) argsPrefix() string {
+	return strings.TrimPrefix(m.CommandPrefix, aoBinaryName+" ")
+}
+
+// resolvedPrefix is the command prefix actually written into the hooks file:
+// the absolute, shell-quoted AO launcher followed by the argument prefix. Hook
+// commands must not rely on a bare `ao` because the agent runs them through a
+// non-interactive shell that loads no profile or rc file and therefore has no
+// PATH entry for AO (see hookutil.EnsureLauncher).
+func (m Manager) resolvedPrefix(dataDir string) (string, error) {
+	launcher := m.Launcher
+	if launcher == nil {
+		launcher = hookutil.EnsureLauncher
+	}
+	path, err := launcher(dataDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve AO hook launcher: %w", err)
+	}
+	if strings.TrimSpace(path) == "" {
+		return "", errors.New("resolve AO hook launcher: empty path")
+	}
+	return hookutil.ShellQuote(path) + " " + m.argsPrefix(), nil
+}
+
+// managedAction reports the AO action a hook command invokes and whether AO
+// owns the command at all. It recognizes both the absolute-launcher form
+// installed today and the legacy bare `ao hooks <agent> <event>` form written
+// by older AO versions, so an upgrade replaces the stale entry in place rather
+// than leaving a duplicate that still fails to resolve.
+func (m Manager) managedAction(command string) (string, bool) {
+	word, rest := hookutil.SplitCommandWord(command)
+	if word == "" {
+		return "", false
+	}
+	if !hookutil.IsAOExecutable(word) && !filepath.IsAbs(word) {
+		return "", false
+	}
+	action, ok := strings.CutPrefix(rest, m.argsPrefix())
+	if !ok || action == "" {
+		return "", false
+	}
+	return action, true
+}
+
+// Matches reports whether an installed hook command corresponds to canonical,
+// a command written in the canonical `ao hooks <agent> <event>` form. It exists
+// because Install resolves the leading `ao` to an absolute launcher path, so a
+// literal comparison against the canonical string no longer holds. A canonical
+// value that is not AO-owned (a user's own hook) compares literally.
+func (m Manager) Matches(installed, canonical string) bool {
+	if want, ok := strings.CutPrefix(canonical, m.CommandPrefix); ok {
+		got, owned := m.managedAction(installed)
+		return owned && got == want
+	}
+	return installed == canonical
+}
+
+// owns reports whether AO installed the given hook command.
+func (m Manager) owns(command string) bool {
+	_, ok := m.managedAction(command)
+	return ok
 }
 
 // Install reconciles AO's managed hooks into the workspace's hooks file,
@@ -181,12 +257,16 @@ type Manager struct {
 // moved when its matcher changes and is never duplicated. It also writes a
 // self-ignoring .gitignore covering the hooks file so it does not block
 // worktree teardown.
-func (m Manager) Install(ctx context.Context, workspacePath string) error {
+func (m Manager) Install(ctx context.Context, workspacePath, dataDir string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if strings.TrimSpace(workspacePath) == "" {
 		return fmt.Errorf("%s.GetAgentHooks: WorkspacePath is required", m.Label)
+	}
+	prefix, err := m.resolvedPrefix(dataDir)
+	if err != nil {
+		return fmt.Errorf("%s.GetAgentHooks: %w", m.Label, err)
 	}
 
 	hooksPath := m.Path(workspacePath)
@@ -201,8 +281,12 @@ func (m Manager) Install(ctx context.Context, workspacePath string) error {
 			return fmt.Errorf("%s.GetAgentHooks: %w", m.Label, err)
 		}
 		for _, spec := range specs {
-			entry := HookEntry{Type: "command", Command: spec.Command, Timeout: m.Timeout}
-			groups = reconcileHook(groups, entry, spec.Matcher)
+			action := strings.TrimPrefix(spec.Command, m.CommandPrefix)
+			entry := HookEntry{Type: "command", Command: prefix + action, Timeout: m.Timeout}
+			groups = reconcileHook(groups, entry, spec.Matcher, func(existing string) bool {
+				owned, ok := m.managedAction(existing)
+				return ok && owned == action
+			})
 		}
 		if err := marshalEvent(rawHooks, event, groups); err != nil {
 			return fmt.Errorf("%s.GetAgentHooks: %w", m.Label, err)
@@ -242,7 +326,7 @@ func (m Manager) Uninstall(ctx context.Context, workspacePath string) error {
 		if err := parseEvent(rawHooks, event, &groups); err != nil {
 			return fmt.Errorf("%s.UninstallHooks: %w", m.Label, err)
 		}
-		groups = removeManaged(groups, m.CommandPrefix)
+		groups = removeManaged(groups, m.owns)
 		if err := marshalEvent(rawHooks, event, groups); err != nil {
 			return fmt.Errorf("%s.UninstallHooks: %w", m.Label, err)
 		}
@@ -280,7 +364,7 @@ func (m Manager) AreInstalled(ctx context.Context, workspacePath string) (bool, 
 		}
 		for _, group := range groups {
 			for _, hook := range group.Hooks {
-				if strings.HasPrefix(hook.Command, m.CommandPrefix) {
+				if m.owns(hook.Command) {
 					return true, nil
 				}
 			}
@@ -395,14 +479,14 @@ func marshalEvent(rawHooks map[string]json.RawMessage, event string, groups []Ma
 // current managed entry under its declared matcher. This lets adapter upgrades
 // change a matcher or timeout without leaving stale or duplicate commands,
 // while preserving every unrelated hook in the affected groups.
-func reconcileHook(groups []MatcherGroup, hook HookEntry, matcher *string) []MatcherGroup {
+func reconcileHook(groups []MatcherGroup, hook HookEntry, matcher *string, owned func(string) bool) []MatcherGroup {
 	result := make([]MatcherGroup, 0, len(groups))
 	keptEmptyTarget := false
 	for _, group := range groups {
 		kept := make([]HookEntry, 0, len(group.Hooks))
 		removedManaged := false
 		for _, existing := range group.Hooks {
-			if existing.Command == hook.Command {
+			if owned(existing.Command) {
 				removedManaged = true
 				if hook.Extra == nil {
 					hook.Extra = existing.Extra
@@ -437,15 +521,15 @@ func addHook(groups []MatcherGroup, hook HookEntry, matcher *string) []MatcherGr
 	return append(groups, MatcherGroup{Matcher: matcher, Hooks: []HookEntry{hook}})
 }
 
-// removeManaged strips AO hook entries (matched by command prefix) from every
-// group, dropping any group left without hooks so the event array doesn't
-// accumulate empty matcher objects.
-func removeManaged(groups []MatcherGroup, prefix string) []MatcherGroup {
+// removeManaged strips AO hook entries (matched by owned) from every group,
+// dropping any group left without hooks so the event array doesn't accumulate
+// empty matcher objects.
+func removeManaged(groups []MatcherGroup, owned func(string) bool) []MatcherGroup {
 	result := make([]MatcherGroup, 0, len(groups))
 	for _, group := range groups {
 		kept := make([]HookEntry, 0, len(group.Hooks))
 		for _, hook := range group.Hooks {
-			if !strings.HasPrefix(hook.Command, prefix) {
+			if !owned(hook.Command) {
 				kept = append(kept, hook)
 			}
 		}

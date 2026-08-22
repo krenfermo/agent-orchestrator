@@ -180,7 +180,7 @@ func (p *Plugin) PromptReadinessHints(ctx context.Context, _ ports.LaunchConfig)
 // are compatible, and the installed commands use the Grok harness token so AO
 // persists Grok's native session id under the Grok session.
 func (p *Plugin) GetAgentHooks(ctx context.Context, cfg ports.WorkspaceHookConfig) error {
-	return grokHooks.Install(ctx, cfg.WorkspacePath)
+	return grokHooks.Install(ctx, cfg.WorkspacePath, cfg.DataDir)
 }
 
 // UninstallHooks removes the Claude Code-compatible AO hooks Grok uses.

@@ -24,7 +24,7 @@ type museHooksFile struct {
 	Hooks map[string][]hooksjson.MatcherGroup `json:"hooks"`
 }
 
-func museManagedHooks(cfg ports.WorkspaceHookConfig) map[string][]hooksjson.MatcherGroup {
+func museManagedHooks(cfg ports.WorkspaceHookConfig, launcher string) map[string][]hooksjson.MatcherGroup {
 	// Muse runs background subagents after the main turn has stopped. Their
 	// tool hooks share this managed configuration but do not emit a matching
 	// Stop, so installing PreToolUse/PostToolUse can incorrectly reactivate an
@@ -32,17 +32,17 @@ func museManagedHooks(cfg ports.WorkspaceHookConfig) map[string][]hooksjson.Matc
 	// structured input is a runtime-native TUI control and is detected from its
 	// terminal marker rather than a tool hook.
 	return map[string][]hooksjson.MatcherGroup{
-		"SessionStart":      {museHookGroup(cfg, "session-start")},
-		"UserPromptSubmit":  {museHookGroup(cfg, "user-prompt-submit")},
-		"PermissionRequest": {museHookGroup(cfg, "permission-request")},
-		"Stop":              {museHookGroup(cfg, "stop")},
+		"SessionStart":      {museHookGroup(cfg, launcher, "session-start")},
+		"UserPromptSubmit":  {museHookGroup(cfg, launcher, "user-prompt-submit")},
+		"PermissionRequest": {museHookGroup(cfg, launcher, "permission-request")},
+		"Stop":              {museHookGroup(cfg, launcher, "stop")},
 	}
 }
 
-func museHookGroup(cfg ports.WorkspaceHookConfig, event string) hooksjson.MatcherGroup {
+func museHookGroup(cfg ports.WorkspaceHookConfig, launcher, event string) hooksjson.MatcherGroup {
 	return hooksjson.MatcherGroup{Hooks: []hooksjson.HookEntry{{
 		Type:    "command",
-		Command: museHookCommand(cfg, event),
+		Command: museHookCommand(cfg, launcher, event),
 		Timeout: 5,
 	}}}
 }
@@ -50,7 +50,11 @@ func museHookGroup(cfg ports.WorkspaceHookConfig, event string) hooksjson.Matche
 // Muse sanitizes AO_* variables from hook subprocesses. Put the non-sensitive
 // callback route directly in AO's per-session hook command so the callback can
 // identify its AO session and, in dev mode, the exact daemon that launched it.
-func museHookCommand(cfg ports.WorkspaceHookConfig, event string) string {
+// launcher is the absolute AO executable path the command invokes. Muse runs
+// hook commands through a non-interactive shell that loads no profile or rc
+// file, so a bare `ao` would only resolve when AO happens to be on the
+// inherited PATH (see hookutil.EnsureLauncher).
+func museHookCommand(cfg ports.WorkspaceHookConfig, launcher, event string) string {
 	assignments := []string{
 		"AO_SESSION_ID=" + museShellQuote(strings.TrimSpace(cfg.SessionID)),
 		"AO_DATA_DIR=" + museShellQuote(strings.TrimSpace(cfg.DataDir)),
@@ -58,7 +62,8 @@ func museHookCommand(cfg ports.WorkspaceHookConfig, event string) string {
 	if runFile := strings.TrimSpace(os.Getenv(aoRunFileEnvVar)); runFile != "" {
 		assignments = append(assignments, aoRunFileEnvVar+"="+museShellQuote(runFile))
 	}
-	return "env " + strings.Join(assignments, " ") + " " + museHookCommandPrefix + event
+	args := strings.TrimPrefix(museHookCommandPrefix, "ao ")
+	return "env " + strings.Join(assignments, " ") + " " + hookutil.ShellQuote(launcher) + " " + args + event
 }
 
 func museShellQuote(value string) string {
@@ -76,7 +81,11 @@ func (p *Plugin) GetAgentHooks(ctx context.Context, cfg ports.WorkspaceHookConfi
 	if err != nil {
 		return fmt.Errorf("muse.GetAgentHooks: %w", err)
 	}
-	data, err := json.MarshalIndent(museHooksFile{Hooks: museManagedHooks(cfg)}, "", "  ")
+	launcher, err := hookutil.EnsureLauncher(cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("muse.GetAgentHooks: %w", err)
+	}
+	data, err := json.MarshalIndent(museHooksFile{Hooks: museManagedHooks(cfg, launcher)}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("muse.GetAgentHooks: marshal hooks: %w", err)
 	}

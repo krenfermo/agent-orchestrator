@@ -162,10 +162,13 @@ const (
 	EnvBrowserRuntimeTokenStdin = "AO_BROWSER_RUNTIME_TOKEN_STDIN" //nolint:gosec // Environment variable name, not a credential.
 )
 
-// hookBinaryName is the executable name the workspace hook commands invoke:
-// every agent adapter installs a bare `ao hooks <agent> <event>`. The session
-// PATH pin (hookPATH) only works when the daemon's own executable carries this
-// name, since prepending its directory must change what `ao` resolves to.
+// hookBinaryName is the executable name a bare `ao` must resolve to inside a
+// session: the adapters whose hooks are shell scripts, and the reviewer prompts,
+// still invoke `ao ...` by name. (Adapters on the shared hooks-file installer
+// record an absolute AO launcher path instead and no longer depend on PATH —
+// see hookutil.EnsureLauncher.) The session PATH pin (HookPATH) only works when
+// the daemon's own executable carries this name, since prepending its directory
+// must change what `ao` resolves to.
 const hookBinaryName = "ao"
 
 type lifecycleRecorder interface {
@@ -326,8 +329,8 @@ type Manager struct {
 	// whether the daemon's own AO_RUN_FILE was overridden independently of
 	// AO_DATA_DIR. Empty means the spawned agent falls back to the default
 	// resolution (~/.ao/running.json), matching pre-8P-D.2 behavior.
-	runFilePath         string
-	clock               func() time.Time
+	runFilePath string
+	clock       func() time.Time
 	// runtimeIsolation backs Checkpoint 8P-B.2's relaunch isolation.
 	// Optional.
 	runtimeIsolation RelaunchRuntimeIsolation

@@ -58,7 +58,7 @@ func settingsPath(workspacePath string) string {
 // GetAgentHooks installs AO's Kimchi hooks, preserving user-defined hooks and
 // unrelated settings.
 func (p *Plugin) GetAgentHooks(ctx context.Context, cfg ports.WorkspaceHookConfig) error {
-	return kimchiHooks.Install(ctx, cfg.WorkspacePath)
+	return kimchiHooks.Install(ctx, cfg.WorkspacePath, cfg.DataDir)
 }
 
 // UninstallHooks removes AO's Kimchi hooks, leaving user-defined hooks untouched.

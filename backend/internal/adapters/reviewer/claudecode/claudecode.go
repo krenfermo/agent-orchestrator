@@ -109,7 +109,7 @@ func (r *Reviewer) PreLaunch(ctx context.Context, inv ports.ReviewInvocation) er
 	if hooks, ok := r.agent.(interface {
 		GetAgentHooks(context.Context, ports.WorkspaceHookConfig) error
 	}); ok {
-		if err := hooks.GetAgentHooks(ctx, ports.WorkspaceHookConfig{WorkspacePath: inv.WorkspacePath}); err != nil {
+		if err := hooks.GetAgentHooks(ctx, ports.WorkspaceHookConfig{WorkspacePath: inv.WorkspacePath, DataDir: inv.DataDir}); err != nil {
 			return err
 		}
 	}

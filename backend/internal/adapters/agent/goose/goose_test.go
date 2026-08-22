@@ -590,7 +590,7 @@ func countGooseHookCommand(entries []hooksjson.MatcherGroup, command string) int
 	count := 0
 	for _, entry := range entries {
 		for _, hook := range entry.Hooks {
-			if hook.Command == command {
+			if gooseHooks.Matches(hook.Command, command) {
 				count++
 			}
 		}
