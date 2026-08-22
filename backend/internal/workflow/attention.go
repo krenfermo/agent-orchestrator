@@ -372,6 +372,47 @@ func (c *Coordinator) recordAttentionStop(ctx stdctx.Context, run domain.Workflo
 	}
 }
 
+// recordAttentionStopOnce is recordAttentionStop for a stop a caller may
+// re-derive on every pass (Checkpoint 8P-E.13B).
+//
+// reconcileMasterTasks runs from the READ path — every GetRun, so every board
+// poll — and re-evaluates a completed child's promotion each time. When that
+// promotion fails deterministically, the run's stop is the same stop it already
+// recorded, and writing it again on each poll produced hundreds of identical
+// rows describing one unchanged condition. This records the stop the first
+// time, then stays quiet for as long as nothing about it has changed.
+//
+// The comparison is deliberately against the run's NEWEST checkpoint only, not
+// against the whole ledger: any other durable event landing in between means
+// something did happen, and this stop is then worth recording again as the
+// current state of the run.
+func (c *Coordinator) recordAttentionStopOnce(ctx stdctx.Context, run domain.WorkflowRun, stepID *string, reason, detail string) {
+	if reason == "" {
+		return
+	}
+	if c.attentionStopIsCurrent(ctx, run, reason, detail) {
+		return
+	}
+	c.recordAttentionStop(ctx, run, stepID, reason, detail)
+}
+
+// attentionStopIsCurrent reports whether the run's newest checkpoint already
+// says exactly this. A read error answers "no": failing to read is never a
+// reason to lose a stop record.
+func (c *Coordinator) attentionStopIsCurrent(ctx stdctx.Context, run domain.WorkflowRun, reason, detail string) bool {
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, run.ID)
+	if err != nil || len(cps) == 0 {
+		return false
+	}
+	newest := cps[0]
+	for _, cp := range cps[1:] {
+		if !cp.CreatedAt.Before(newest.CreatedAt) {
+			newest = cp
+		}
+	}
+	return newest.DurablePhase == reason && newest.NextAction == strings.TrimSpace(detail)
+}
+
 // stopIsHumanOwned reports whether a run parked in needs_attention stopped for
 // a reason that names something only a person can do (a HumanAction in the
 // registry above). It is the guard maybeScheduleAutonomousHeartbeat and the
@@ -490,6 +531,22 @@ func (c *Coordinator) clearMirroredChildStop(ctx stdctx.Context, run domain.Work
 		return run
 	}
 	return c.unparkRun(ctx, run, reason, "the task this objective was waiting on resumed")
+}
+
+// clearIntegrationStop releases a master run from an integration failure it has
+// since recovered from (Checkpoint 8P-E.13B). Like clearMirroredChildStop it is
+// only ever called from a site that has just PROVEN the condition is gone — the
+// promotion the stop was about has now succeeded — never speculatively, and it
+// touches exactly one reason: a master stopped for anything else is left alone.
+func (c *Coordinator) clearIntegrationStop(ctx stdctx.Context, run domain.WorkflowRun) domain.WorkflowRun {
+	if run.State != domain.WorkflowRunNeedsAttention {
+		return run
+	}
+	reason, _, ok := c.stopReason(ctx, run)
+	if !ok || reason != masterIntegrationFailureDurablePhase {
+		return run
+	}
+	return c.unparkRun(ctx, run, reason, "the completed task was integrated successfully")
 }
 
 // stopReason resolves the canonical reason for a stopped run from its durable

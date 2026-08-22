@@ -633,11 +633,21 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 			if err := c.promoteTaskToIntegration(ctx, run, *task, child); err != nil {
 				if run.State == domain.WorkflowRunRunning {
 					_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, c.clock())
+					run.State = domain.WorkflowRunNeedsAttention
 				}
-				c.recordAttentionStop(ctx, run, nil, masterIntegrationFailureDurablePhase,
+				// Recorded once per distinct failure, not once per poll: this
+				// path runs on every GetRun, and an integration failure is
+				// normally a permanent condition (Checkpoint 8P-E.13B).
+				c.recordAttentionStopOnce(ctx, run, nil, masterIntegrationFailureDurablePhase,
 					fmt.Sprintf("task %d (%s) passed review and verification but could not be integrated: %v", task.Ordinal, task.Title, err))
 				return nil
 			}
+			// A promotion that succeeds after an earlier failure resolves the
+			// stop it caused. Without this the master would stay parked in
+			// needs_attention on a condition that no longer holds — and, because
+			// an integration failure is a human-owned reason, with no heartbeat
+			// left to dispatch the next task either.
+			run = c.clearIntegrationStop(ctx, run)
 			_, _ = c.planStore.UpdateWorkflowTaskState(ctx, task.ID, domain.WorkflowTaskRunning, domain.WorkflowTaskCompleted, c.clock())
 			completed[task.ID] = true
 			active = false
