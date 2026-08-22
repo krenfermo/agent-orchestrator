@@ -1035,6 +1035,7 @@
 	"status.approved": "승인됨",
 	"status.changes_requested": "변경 요청됨",
 	"status.ci_failed": "CI 실패",
+	"status.completed": "완료",
 	"status.draft": "초안 PR",
 	"status.exited": "종료됨",
 	"status.idle": "유휴",

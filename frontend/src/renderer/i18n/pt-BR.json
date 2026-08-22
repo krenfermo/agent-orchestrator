@@ -1046,6 +1046,7 @@
 	"status.approved": "Aprovado",
 	"status.changes_requested": "Alterações solicitadas",
 	"status.ci_failed": "CI falhou",
+	"status.completed": "Concluído",
 	"status.draft": "PR em rascunho",
 	"status.exited": "Encerrado",
 	"status.idle": "Inativo",

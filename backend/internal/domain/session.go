@@ -100,7 +100,26 @@ type SessionRecord struct {
 	// surfaces as StatusNoSignal after a grace period. Internal fact, not part
 	// of the API read model.
 	FirstSignalAt time.Time `json:"-"`
-	IsTerminated  bool      `json:"isTerminated"`
+	// TurnCompletedAt is when the agent last reported that its turn ENDED with
+	// no work left in flight — the Stop-class hook a harness fires when it has
+	// finished answering, or a Chat driver's turn-completed event. It is the
+	// durable proof that a task did its work, and the only thing that lets a
+	// finished task read Completed instead of Idle once it goes quiet.
+	//
+	// Three properties are load-bearing. It is written from a REPORTED turn
+	// boundary, never from an idle reading, a runtime probe, or a stopped
+	// pane, so "the agent went quiet" and "the agent said it was done" stay
+	// different facts. It is CLEARED when the next turn starts, so the receipt
+	// always describes the current quiet period rather than an older one. And
+	// it is durable and never expires, so the status survives inactivity and a
+	// daemon restart — unlike FirstSignalAt, which is deliberately cleared on
+	// every spawn/restore because it is about the hook pipeline, not the work.
+	//
+	// Zero means "no completion has been reported for the current turn", which
+	// is what every session written before this column existed reads as.
+	// Internal fact, not part of the API read model.
+	TurnCompletedAt time.Time `json:"-"`
+	IsTerminated    bool      `json:"isTerminated"`
 	// TerminateOnPRMerge is a user-controlled lifecycle policy. When enabled,
 	// completing the session's PR set through a merge tears down the session.
 	TerminateOnPRMerge bool            `json:"terminateOnPrMerge"`
@@ -123,7 +142,7 @@ type SessionRecord struct {
 // plus derived display facts. Neither Status nor SCMStatus is persisted.
 type Session struct {
 	SessionRecord
-	Status           SessionStatus `json:"status" enum:"working,pr_open,draft,ci_failed,review_pending,changes_requested,approved,mergeable,merged,needs_input,exited,idle,terminated,no_signal"`
+	Status           SessionStatus `json:"status" enum:"working,pr_open,draft,ci_failed,review_pending,changes_requested,approved,mergeable,merged,needs_input,exited,idle,completed,terminated,no_signal"`
 	SCMStatus        SessionStatus `json:"scmStatus,omitempty" enum:"pr_open,draft,ci_failed,review_pending,changes_requested,approved,mergeable,merged"`
 	TerminalHandleID string        `json:"terminalHandleId,omitempty"`
 	// PRs are the session's attributed pull requests (one session can own many).

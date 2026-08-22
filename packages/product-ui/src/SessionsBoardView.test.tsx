@@ -74,6 +74,27 @@ describe("SessionsBoardView", () => {
 		expect(within(mergeLane).getByLabelText("1 merged session")).toHaveTextContent("1");
 	});
 
+	it("keeps a finished task on the board, in the resting lane", () => {
+		const sessions: BoardSessionPresentation[] = [
+			baseSession,
+			{ ...baseSession, id: "done", status: "completed", title: "finished task" },
+			{ ...baseSession, id: "working", status: "working", title: "working task" },
+		];
+		render(
+			<SessionsBoardGridView
+				columns={boardAttentionZoneOrder.map((zone) => getAttentionZoneViewForZone(zone))}
+				labels={splitLabels}
+				renderSessionCard={(session) => <div data-testid={`card-${session.id}`}>{session.title}</div>}
+				sessions={sessions}
+			/>,
+		);
+
+		const restingLane = screen.getByRole("region", { name: "Idle sessions" });
+		expect(restingLane).toHaveTextContent("finished task");
+		expect(restingLane).toHaveTextContent("portable task");
+		expect(screen.getByRole("region", { name: "Working sessions" })).not.toHaveTextContent("finished task");
+	});
+
 	it("renders a neutral card with grouped multi-PR, usage, and action presentation", () => {
 		const onOpen = vi.fn();
 		render(

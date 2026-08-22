@@ -40,8 +40,23 @@ describe("session presentation", () => {
 		["review_pending", "pending"],
 		["working", "working"],
 		["terminated", "done"],
+		// A finished task is still a live session the user can talk to, so it
+		// stays on the board next to the idle ones rather than dropping into
+		// the terminated zone the board does not render.
+		["completed", "working"],
 	] as const)("maps %s to the %s attention zone", (status, zone) => {
 		expect(attentionZone(status)).toBe(zone);
+	});
+
+	it("gives a finished task its own badge instead of reading Idle", () => {
+		expect(getSessionStatusView("completed")).toEqual({
+			label: "Completed",
+			className: "text-status-ready",
+		});
+		expect(getSessionStatusView("idle").label).toBe("Idle");
+		expect(getSessionStatusView("completed", (key) => `translated:${key}`).label).toBe(
+			"translated:status.completed",
+		);
 	});
 
 	it("keeps lifecycle predicates independent of presentation labels", () => {

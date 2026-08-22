@@ -233,6 +233,7 @@ UPDATE sessions SET
     activity_state = sqlc.arg(activity_state),
     activity_last_at = sqlc.arg(activity_last_at),
     first_signal_at = sqlc.arg(first_signal_at),
+    turn_completed_at = sqlc.arg(turn_completed_at),
     agent_session_id = sqlc.arg(agent_session_id),
     latest_user_prompt = sqlc.arg(latest_user_prompt),
     latest_assistant_update = sqlc.arg(latest_assistant_update),

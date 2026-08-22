@@ -653,6 +653,38 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 		projectID := rec.ProjectID
 		branchLockAction = func() { m.acquireSessionBranchLocks(ctx, projectID, id) }
 	}
+	// The same authoritative boundary is also what proves a task DID the work
+	// it was given, which is the fact the board needs to say "Completed"
+	// instead of "Idle" once the session goes quiet. It is decided from the
+	// raw signal for the same reasons the branch decision above is, and it is
+	// folded into rec here so every write path below carries it.
+	//
+	// Two directions, and both matter. A reported completion stamps the
+	// receipt. Work going back in flight clears it, so the receipt always
+	// describes the CURRENT quiet period: a task that was told to do more, or
+	// that has stopped to ask the user something, is not a finished task, and
+	// must not fall back to Completed if it later goes quiet without saying so
+	// again.
+	//
+	// Tasks only. An orchestrator is a standing conversation partner, not a unit
+	// of work: its turns end all day long and none of them is a task being
+	// finished, so "Completed" would be the wrong word for it and Idle —
+	// waiting for you — remains the right one. The test is against orchestrator
+	// rather than for worker because worker is what an unset kind means, in the
+	// column default and everywhere else.
+	completionChanged := false
+	switch {
+	case turnSucceeded(s) && rec.Kind != domain.KindOrchestrator:
+		if rec.TurnCompletedAt.IsZero() {
+			rec.TurnCompletedAt = timeOr(s.Timestamp, now)
+			completionChanged = true
+		}
+	case s.Valid && s.State.WorkInFlight():
+		if !rec.TurnCompletedAt.IsZero() {
+			rec.TurnCompletedAt = time.Time{}
+			completionChanged = true
+		}
+	}
 	// Event-tagged signals fold through the session's tool-flight state first:
 	// they may be suppressed (state write skipped) by the blocked-precedence
 	// rule, while their tracking side effects still land. Untagged signals
@@ -691,7 +723,12 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	// first to ARRIVE may match the seeded state — e.g. a turn's "active"
 	// POST is lost and its Stop hook lands idle on the idle-seeded row.
 	if sameState && !rec.FirstSignalAt.IsZero() {
-		if metadataChanged || s.Event == "user-prompt-submit" {
+		// completionChanged joins the list because a Stop that lands on an
+		// already-idle row is exactly how a finished task usually reports
+		// itself: the turn's "active" POST may never have arrived, or an
+		// untagged idle beat the Stop to the row. Dropping it here as a
+		// same-state repeat would throw away the only proof the work is done.
+		if metadataChanged || completionChanged || s.Event == "user-prompt-submit" {
 			rec.UpdatedAt = now
 			applied, err := m.store.UpdateSessionFromActivitySignal(ctx, rec)
 			m.mu.Unlock()
@@ -905,6 +942,33 @@ func turnCompleted(s ports.ActivitySignal) bool {
 // moment a task session needs its branch back.
 func turnStarted(s ports.ActivitySignal) bool {
 	return s.Valid && s.Event == "user-prompt-submit" && s.State == domain.ActivityActive
+}
+
+// turnSucceeded reports whether a signal is the agent stating that the work it
+// was given is finished: it answered, it has nothing in flight, and it is
+// waiting for whatever comes next. This is the durable evidence behind the
+// Completed status (SessionRecord.TurnCompletedAt).
+//
+// It is deliberately narrower than turnCompleted, which also covers the ways an
+// agent STOPS EXISTING. session-end, process-exited and chat.controller.stopped
+// are teardown: the process went away, which is a reason to hand the branch
+// back but says nothing about whether the work got done — and each of them
+// lands activity=exited, which the status derivation surfaces as Exited on its
+// own. What remains are the two events a harness emits to say "turn over, I am
+// still here": the Stop-class hook every TUI adapter installs, and the Chat
+// driver's turn-completed projection.
+//
+// The honest limit: a user interrupt also produces a Stop hook, and no harness
+// distinguishes the two on the wire. What AO can prove is that the agent
+// reported the end of its turn rather than merely going quiet, and that is the
+// line this draws. Everything that IS distinguishable — a crash, a kill, a
+// cancellation, a question back to the user, a failing check — is already a
+// different state before the derivation ever reaches Completed.
+func turnSucceeded(s ports.ActivitySignal) bool {
+	if !s.Valid || s.State != domain.ActivityIdle {
+		return false
+	}
+	return s.Event == "stop" || s.Event == "chat.turn.completed"
 }
 
 // applyToolPrecedenceLocked folds an event-tagged activity signal through the

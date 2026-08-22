@@ -934,24 +934,25 @@ UPDATE sessions SET
     activity_state = ?1,
     activity_last_at = ?2,
     first_signal_at = ?3,
-    agent_session_id = ?4,
-    latest_user_prompt = ?5,
-    latest_assistant_update = ?6,
-    native_transcript_path = ?7,
-    updated_at = ?8
-WHERE sessions.id = ?9
+    turn_completed_at = ?4,
+    agent_session_id = ?5,
+    latest_user_prompt = ?6,
+    latest_assistant_update = ?7,
+    native_transcript_path = ?8,
+    updated_at = ?9
+WHERE sessions.id = ?10
   AND sessions.is_terminated = 0
-  AND sessions.harness = ?10
-  AND sessions.session_mode = ?11
+  AND sessions.harness = ?11
+  AND sessions.session_mode = ?12
   AND (
       (
-          ?11 <> 'chat'
-          AND sessions.runtime_launch_id = ?12
+          ?12 <> 'chat'
+          AND sessions.runtime_launch_id = ?13
       )
       OR
       (
-          ?11 = 'chat'
-          AND sessions.controller_generation = ?13
+          ?12 = 'chat'
+          AND sessions.controller_generation = ?14
       )
   )
   AND NOT EXISTS (
@@ -969,6 +970,7 @@ type UpdateSessionFromActivitySignalParams struct {
 	ActivityState                domain.ActivityState
 	ActivityLastAt               time.Time
 	FirstSignalAt                sql.NullTime
+	TurnCompletedAt              sql.NullTime
 	AgentSessionID               string
 	LatestUserPrompt             string
 	LatestAssistantUpdate        string
@@ -991,6 +993,7 @@ func (q *Queries) UpdateSessionFromActivitySignal(ctx context.Context, arg Updat
 		arg.ActivityState,
 		arg.ActivityLastAt,
 		arg.FirstSignalAt,
+		arg.TurnCompletedAt,
 		arg.AgentSessionID,
 		arg.LatestUserPrompt,
 		arg.LatestAssistantUpdate,

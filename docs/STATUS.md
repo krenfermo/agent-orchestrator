@@ -82,6 +82,19 @@ surface (`npm run sqlc`, `npm run api`).
 - Terminal mux over WebSocket (`/mux`): per-client `tmux attach` PTY on
   Darwin/Linux; conpty loopback pty-host on Windows.
 - Lifecycle reducer plus reaper (`internal/observe/reaper`).
+- Truthful terminal state for an ordinary task. A task IS a session, and a task
+  that succeeds stays alive and idle, so "finished" and "never did anything"
+  used to be the same row and both rendered "Idle"/"Inactivo". Lifecycle now
+  records a durable completion receipt (`sessions.turn_completed_at`) when the
+  agent itself reports its turn ended — a Stop-class hook or a Chat driver's
+  turn-completed event — and clears it the moment work is in flight again.
+  `DeriveStatus` turns that receipt into `completed`, ranked below every
+  failure, teardown, attention and pull-request state, so a failed, cancelled or
+  question-asking task can never read as finished. Nothing is inferred from
+  idleness, a stopped runtime or elapsed time, and because the fact is durable
+  the status survives inactivity and daemon restarts. Historical sessions are
+  promoted only where AO already recorded the proof (a session-owned execution
+  lock released because the task's turn ended).
 - Agent adapter platform under `internal/adapters/agent/` (25 adapters) with a
   registry and `ao hooks` activity dispatch.
 - OpenAPI spec generated from Go DTOs; frontend TS types generated from it and
@@ -193,13 +206,11 @@ surface (`npm run sqlc`, `npm run api`).
   the prompt reaches the agent) and a Board state saying the session's branch
   was taken over. The task queue above is the same missing subsystem seen from
   the other end.
-- **Truthful terminal state for a finished task**: session status is derived,
-  never stored (`backend/internal/domain/status.go`), and a direct-branch task
-  that has finished its work has no PR and no activity, so `DeriveStatus` falls
-  through to `idle` — rendered as "Idle"/"Inactivo". That is not wrong, but it
-  is indistinguishable from an abandoned session. A truthful `completed` (and,
-  for isolated mode, a non-PR-derived "ready to merge") requires a durable task
-  outcome fact rather than a UI-only relabel.
+- **A non-PR "ready to merge" for isolated-worktree tasks**: a finished task now
+  reads `completed` from its own durable completion receipt (see Shipped), but
+  in isolated-worktree mode "finished" and "ready for you to take the branch"
+  are still the same word. Distinguishing them needs a durable review/merge
+  readiness fact, not another status derived from the same receipt.
 - **Browser automation acceptance**: the runtime implementation is complete.
   AO packages one
   checksum-pinned Vercel `agent-browser` Rust binary and routes a deliberately

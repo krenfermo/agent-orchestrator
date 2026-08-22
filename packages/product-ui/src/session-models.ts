@@ -12,6 +12,7 @@ export const SESSION_STATUSES = [
 	"exited",
 	"no_signal",
 	"idle",
+	"completed",
 	"terminated",
 	"unknown",
 ] as const;

@@ -438,6 +438,57 @@ describe("SessionsBoard", () => {
 		expect(within(draftCard).getByText("Draft PR").parentElement).toHaveClass("text-status-in-review");
 	});
 
+	// The user-visible half of the finished-task fix: the task that did its
+	// work is labelled Completed on the board instead of Inactive/Idle, and it
+	// is still there to be labelled — it stays in the working column's resting
+	// lane rather than disappearing into the terminated zone.
+	it("labels a finished task Completed and keeps it on the board", () => {
+		workspaceQueryMock.mockReturnValue({
+			data: [
+				workspaceWithSessions([
+					{
+						id: "s-completed",
+						workspaceId: "p1",
+						workspaceName: "radic",
+						title: "finished-task",
+						provider: "claude-code",
+						branch: "ao/radic-9",
+						status: "completed",
+						activity: { state: "idle", lastActivityAt: "2026-01-01T00:00:00Z" },
+						updatedAt: "2026-01-01T00:00:00Z",
+						prs: [],
+					},
+					{
+						id: "s-idle",
+						workspaceId: "p1",
+						workspaceName: "radic",
+						title: "quiet-task",
+						provider: "claude-code",
+						branch: "ao/radic-10",
+						status: "idle",
+						activity: { state: "idle", lastActivityAt: "2026-01-01T00:00:00Z" },
+						updatedAt: "2026-01-01T00:00:00Z",
+						prs: [],
+					},
+				]),
+			],
+			isError: false,
+			isSuccess: true,
+		});
+
+		renderBoard("p1");
+
+		const completedCard = screen
+			.getByText("finished-task")
+			.closest('[data-testid="board-session-card"]') as HTMLElement;
+		expect(within(completedCard).getByText("Completed").parentElement).toHaveClass("text-status-ready");
+		expect(within(completedCard).queryByText("Idle")).toBeNull();
+
+		const restingLane = screen.getByRole("region", { name: "Idle sessions" });
+		expect(within(restingLane).getByText("finished-task")).toBeInTheDocument();
+		expect(within(restingLane).getByText("quiet-task")).toBeInTheDocument();
+	});
+
 	it("places an exited live session in Needs you with an Exited badge", () => {
 		workspaceQueryMock.mockReturnValue({
 			data: [

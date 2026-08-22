@@ -122,8 +122,11 @@ function BoardColumnView<TSession extends BoardSessionPresentation>({
 	sessions: TSession[];
 }) {
 	if (column.zone === "working") {
-		const idleSessions = sessions.filter((session) => session.status === "idle");
-		const workingSessions = sessions.filter((session) => session.status !== "idle");
+		// The primary lane is "not currently working": idle sessions and the
+		// finished ones, each keeping its own badge on the card.
+		const restingStatuses = new Set<SessionStatus>(["idle", "completed"]);
+		const idleSessions = sessions.filter((session) => restingStatuses.has(session.status));
+		const workingSessions = sessions.filter((session) => !restingStatuses.has(session.status));
 		return (
 			<SplitLaneColumnView
 				ariaLabel={labels.idleWorkingAria}

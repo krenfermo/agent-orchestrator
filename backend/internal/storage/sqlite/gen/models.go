@@ -456,6 +456,7 @@ type Session struct {
 	AutoInjectCI              bool
 	AutoReviewEnabled         bool
 	OwnerUserID               *domain.UserID
+	TurnCompletedAt           sql.NullTime
 }
 
 type SessionCleanupFact struct {

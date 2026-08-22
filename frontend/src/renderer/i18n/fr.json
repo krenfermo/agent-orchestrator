@@ -1046,6 +1046,7 @@
 	"status.approved": "Approuvé",
 	"status.changes_requested": "Modifications demandées",
 	"status.ci_failed": "CI en échec",
+	"status.completed": "Terminé",
 	"status.draft": "PR en brouillon",
 	"status.exited": "Terminé",
 	"status.idle": "Inactif",

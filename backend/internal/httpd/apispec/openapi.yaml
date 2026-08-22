@@ -7509,6 +7509,7 @@ components:
           - needs_input
           - exited
           - idle
+          - completed
           - terminated
           - no_signal
           type: string

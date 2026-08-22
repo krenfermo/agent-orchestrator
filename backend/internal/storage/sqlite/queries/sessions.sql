@@ -4,7 +4,7 @@ SELECT COALESCE(MAX(num), 0) + 1 AS next FROM sessions WHERE project_id = ?;
 -- name: InsertSession :exec
 INSERT INTO sessions (
     id, project_id, num, issue_id, kind, harness, reviewer_harness, auto_review_enabled, display_name,
-    activity_state, activity_last_at, first_signal_at, is_terminated,
+    activity_state, activity_last_at, first_signal_at, turn_completed_at, is_terminated,
     branch, workspace_path, workspace_repo_path, diff_base_sha, diff_base_ref, runtime_handle_id,
     runtime_launch_id, agent_session_id, prompt,
     latest_user_prompt, latest_assistant_update, native_transcript_path,
@@ -15,13 +15,13 @@ INSERT INTO sessions (
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 );
 
 -- name: UpdateSession :exec
 UPDATE sessions SET
     issue_id = ?, kind = ?, harness = ?, reviewer_harness = ?, auto_review_enabled = ?, display_name = ?,
-    activity_state = ?, activity_last_at = ?, first_signal_at = ?, is_terminated = ?,
+    activity_state = ?, activity_last_at = ?, first_signal_at = ?, turn_completed_at = ?, is_terminated = ?,
     branch = ?, workspace_path = ?, workspace_repo_path = ?, diff_base_sha = ?, diff_base_ref = ?, runtime_handle_id = ?,
     runtime_launch_id = ?, agent_session_id = ?, prompt = ?,
     latest_user_prompt = ?, latest_assistant_update = ?, native_transcript_path = ?,
@@ -73,7 +73,7 @@ WHERE id = ? AND session_mode = ? AND is_terminated = 0;
 SELECT id, project_id, num, issue_id, kind, harness,
     activity_state, activity_last_at, is_terminated, branch, workspace_path,
     runtime_handle_id, agent_session_id, prompt,
-    created_at, updated_at, display_name, first_signal_at, preview_url,
+    created_at, updated_at, display_name, first_signal_at, turn_completed_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
     reviewer_harness, is_pinned, pinned_at,
@@ -91,7 +91,7 @@ FROM sessions WHERE id = ?;
 SELECT id, project_id, num, issue_id, kind, harness,
     activity_state, activity_last_at, is_terminated, branch, workspace_path,
     runtime_handle_id, agent_session_id, prompt,
-    created_at, updated_at, display_name, first_signal_at, preview_url,
+    created_at, updated_at, display_name, first_signal_at, turn_completed_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
     reviewer_harness, is_pinned, pinned_at,
@@ -103,7 +103,7 @@ FROM sessions WHERE project_id = ? AND issue_id = ? ORDER BY created_at DESC, nu
 SELECT id, project_id, num, issue_id, kind, harness,
     activity_state, activity_last_at, is_terminated, branch, workspace_path,
     runtime_handle_id, agent_session_id, prompt,
-    created_at, updated_at, display_name, first_signal_at, preview_url,
+    created_at, updated_at, display_name, first_signal_at, turn_completed_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
     reviewer_harness, is_pinned, pinned_at,
@@ -115,7 +115,7 @@ FROM sessions WHERE project_id = ? ORDER BY num;
 SELECT id, project_id, num, issue_id, kind, harness,
     activity_state, activity_last_at, is_terminated, branch, workspace_path,
     runtime_handle_id, agent_session_id, prompt,
-    created_at, updated_at, display_name, first_signal_at, preview_url,
+    created_at, updated_at, display_name, first_signal_at, turn_completed_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
     reviewer_harness, is_pinned, pinned_at,

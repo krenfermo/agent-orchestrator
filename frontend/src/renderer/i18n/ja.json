@@ -1035,6 +1035,7 @@
 	"status.approved": "承認済み",
 	"status.changes_requested": "変更リクエストあり",
 	"status.ci_failed": "CI 失敗",
+	"status.completed": "完了",
 	"status.draft": "下書き PR",
 	"status.exited": "終了済み",
 	"status.idle": "アイドル",

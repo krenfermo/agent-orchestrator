@@ -1048,6 +1048,7 @@
 	"status.approved": "Approved",
 	"status.changes_requested": "Changes requested",
 	"status.ci_failed": "CI failed",
+	"status.completed": "Completed",
 	"status.draft": "Draft PR",
 	"status.exited": "Exited",
 	"status.idle": "Idle",

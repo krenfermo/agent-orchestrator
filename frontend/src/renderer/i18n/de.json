@@ -1035,6 +1035,7 @@
 	"status.approved": "Genehmigt",
 	"status.changes_requested": "Änderungen angefordert",
 	"status.ci_failed": "CI fehlgeschlagen",
+	"status.completed": "Abgeschlossen",
 	"status.draft": "Entwurfs-PR",
 	"status.exited": "Beendet",
 	"status.idle": "Inaktiv",

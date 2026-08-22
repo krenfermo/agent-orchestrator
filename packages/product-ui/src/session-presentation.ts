@@ -25,6 +25,7 @@ const englishLabels: Record<SessionPresentationMessageKey, string> = {
 	"activity.unknown": "Unknown",
 	"status.working": "Working",
 	"status.idle": "Idle",
+	"status.completed": "Completed",
 	"status.needs_input": "Input needed",
 	"status.exited": "Exited",
 	"status.no_signal": "No signal",
@@ -135,6 +136,9 @@ export type SessionStatusView = {
 const sessionStatusStyles: Record<SessionStatus, Omit<SessionStatusView, "label">> = {
 	working: { className: "text-status-working" },
 	idle: { className: "text-status-idle" },
+	// A finished task is a good outcome, so it borrows the same "ready" green
+	// the merge-side statuses use rather than idle's grey. No new token.
+	completed: { className: "text-status-ready" },
 	needs_input: { className: "text-status-needs-you" },
 	exited: { className: "text-status-exited" },
 	no_signal: { className: "text-status-unknown" },
@@ -253,6 +257,12 @@ export function attentionZone(input: SessionStatus | SessionStatusModel): Attent
 			return "pending";
 		case "working":
 		case "idle":
+		// Completed belongs with idle, not with the terminated "done" zone the
+		// board does not render: the task is finished but its session is alive
+		// and answerable, and hiding it would be a worse lie than "Inactive"
+		// was. It lands in the idle lane of the working column, labelled
+		// Completed on the card.
+		case "completed":
 			return "working";
 	}
 }

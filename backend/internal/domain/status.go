@@ -18,7 +18,14 @@ const (
 	StatusNeedsInput       SessionStatus = "needs_input"
 	StatusExited           SessionStatus = "exited"
 	StatusIdle             SessionStatus = "idle"
-	StatusTerminated       SessionStatus = "terminated"
+	// StatusCompleted marks a live task whose agent reported that the work it
+	// was given is finished: a durable turn-completion receipt with no newer
+	// turn on top of it. It is the terminal state of the WORK, not of the
+	// session — the session stays alive and answerable, and a new prompt puts
+	// it straight back to working. Never inferred from idleness, from a dead
+	// tmux pane, or from elapsed time; see SessionRecord.TurnCompletedAt.
+	StatusCompleted  SessionStatus = "completed"
+	StatusTerminated SessionStatus = "terminated"
 	// StatusNoSignal marks a live session whose agent has never delivered a
 	// hook callback for the current spawn/restore: AO cannot tell whether the
 	// agent is working or stuck (broken hook pipeline, blocked interactive

@@ -303,6 +303,8 @@ export function statusVisual(t: Theme, status?: string | null): StatusVisual {
 			return { color: t.green, label: "Done" };
 		case "idle":
 			return { color: t.textTertiary, label: "Idle" };
+		case "completed":
+			return { color: t.green, label: "Completed" };
 		// Without these four the wire value leaks into the UI verbatim — the board
 		// was rendering a literal "no_signal". Labels from desktop's
 		// sessionStatusViews so the two apps say the same words.
