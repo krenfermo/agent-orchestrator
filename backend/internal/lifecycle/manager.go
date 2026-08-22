@@ -137,9 +137,20 @@ func WithContainerReaper(reaper ports.ContainerReaper, projects projectConfigLoa
 	}
 }
 
-// branchLockReleaser frees the direct-branch execution locks a task session
-// owns. Satisfied by *branchlock.Manager.
-type branchLockReleaser interface {
+// branchLockCoordinator is the direct-branch execution-lock surface lifecycle
+// drives at a task session's turn boundaries (Checkpoint 8P-E.14A). Satisfied
+// by the daemon's *branchlock.Manager adapter.
+//
+// Both halves are here because both halves are turn-scoped: the release at the
+// end of a turn is only safe if the next turn takes the lock again.
+type branchLockCoordinator interface {
+	// AcquireForSession takes the locks the session's project requires for a
+	// new turn. A no-op for a project that is not in direct-branch mode, for a
+	// session that already holds them, and for a workflow run's current worker.
+	AcquireForSession(ctx context.Context, projectID domain.ProjectID, sessionID domain.SessionID) ([]domain.BranchLock, error)
+	// ReleaseSession frees every lock the session owns in its own right. Locks
+	// a workflow run owns while this session is its worker are not the
+	// session's and are never touched.
 	ReleaseSession(ctx context.Context, sessionID, reason string) (int64, error)
 }
 
@@ -176,7 +187,7 @@ type Manager struct {
 	operationGateMu  sync.RWMutex
 	operationGate    sessionOperationGate
 	branchLocksMu    sync.RWMutex
-	branchLocks      branchLockReleaser
+	branchLocks      branchLockCoordinator
 
 	mu        sync.Mutex
 	window    time.Duration
@@ -250,38 +261,77 @@ func (m *Manager) SetSessionInputLease(lease sessionguard.InputLease) {
 	}
 }
 
-// SetBranchLockReleaser wires Checkpoint 8P-E.14's direct-branch execution
-// lock release: MarkTerminated frees every lock the terminated session owns in
-// its own right.
+// SetBranchLocks wires the direct-branch execution lock into the two places
+// lifecycle owns a task session's ownership of its branch:
 //
-// It lives here rather than in session_manager for the same reason the
-// container reaper does: MarkTerminated is the one place every terminal path
-// converges — Kill, spawn failure, retire-for-replacement, daemon-shutdown
-// teardown, cleanup, and the PR/issue-driven termination in reactions.go that
-// never touches session_manager at all. Releasing anywhere else would leak the
-// branch on whichever paths that place did not cover.
+//   - MarkTerminated frees every lock the terminated session owns.
+//   - Turn boundaries (ApplyActivitySignal) take the lock when a turn starts and
+//     give it back when the turn ends.
+//
+// Both live here rather than in session_manager for the same reason the
+// container reaper does: these are the places every path converges. Termination
+// converges on MarkTerminated — Kill, spawn failure, retire-for-replacement,
+// daemon-shutdown teardown, cleanup, and the PR/issue-driven termination in
+// reactions.go that never touches session_manager at all. Turn boundaries
+// converge on the activity signal, which is reported the same way whether the
+// prompt came from AO or from a human typing straight into the pane.
 //
 // Late-bound because the daemon builds the lifecycle manager before the branch
 // lock manager exists.
-func (m *Manager) SetBranchLockReleaser(releaser branchLockReleaser) {
+func (m *Manager) SetBranchLocks(locks branchLockCoordinator) {
 	m.branchLocksMu.Lock()
-	m.branchLocks = releaser
+	m.branchLocks = locks
 	m.branchLocksMu.Unlock()
 }
 
-// releaseSessionBranchLocks frees the terminated session's own execution locks.
-// Best-effort and never returned: a release failure must not turn a terminated
-// session into an error, and boot reconciliation releases any lock whose owning
-// session is terminated anyway (branchlock/retention.go), so a miss is
-// self-healing rather than a permanently occupied branch.
-func (m *Manager) releaseSessionBranchLocks(ctx context.Context, id domain.SessionID, reason string) {
+func (m *Manager) currentBranchLocks() branchLockCoordinator {
 	m.branchLocksMu.RLock()
-	releaser := m.branchLocks
-	m.branchLocksMu.RUnlock()
-	if releaser == nil {
+	defer m.branchLocksMu.RUnlock()
+	return m.branchLocks
+}
+
+// acquireSessionBranchLocks takes the session's branch for a turn that is
+// starting.
+//
+// Best-effort by construction, and the reason is worth stating plainly: the
+// signal that a turn started is a hook that fires *after* the prompt was
+// submitted, so there is nothing left to refuse. A conflict here means another
+// task or workflow took the branch while this session was idle; AO logs that
+// truthfully and the session keeps running, rather than pretending it owns a
+// branch it does not. The refusal that actually protects the branch is the one
+// at task start (session_manager.acquireSessionBranchLocks), which happens
+// before any agent exists.
+func (m *Manager) acquireSessionBranchLocks(ctx context.Context, projectID domain.ProjectID, id domain.SessionID) {
+	locks := m.currentBranchLocks()
+	if locks == nil {
 		return
 	}
-	n, err := releaser.ReleaseSession(ctx, string(id), reason)
+	acquired, err := locks.AcquireForSession(ctx, projectID, id)
+	if err != nil {
+		slog.Default().Warn(
+			"lifecycle: branch lock acquire at turn start failed; session is working without the execution lock",
+			"session", id, "project", projectID, "err", err,
+		)
+		return
+	}
+	if len(acquired) > 0 {
+		slog.Default().Info("lifecycle: acquired session branch locks for new turn", "session", id, "count", len(acquired))
+	}
+}
+
+// releaseSessionBranchLocks frees a session's own execution locks, at the end
+// of a turn or when the session terminates.
+// Best-effort and never returned: a release failure must not turn a terminated
+// session into an error, and boot reconciliation releases any lock whose owning
+// session is terminated or has no turn in flight anyway
+// (branchlock/retention.go), so a miss is self-healing rather than a
+// permanently occupied branch.
+func (m *Manager) releaseSessionBranchLocks(ctx context.Context, id domain.SessionID, reason string) {
+	locks := m.currentBranchLocks()
+	if locks == nil {
+		return
+	}
+	n, err := locks.ReleaseSession(ctx, string(id), reason)
 	if err != nil {
 		slog.Default().Warn("lifecycle: branch lock release failed", "session", id, "err", err)
 		return
@@ -481,6 +531,17 @@ func (m *Manager) ApplyRuntimeObservation(ctx context.Context, id domain.Session
 // native agent session id carried alongside it. Metadata-only hooks leave the
 // existing activity and first-signal facts untouched.
 func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, s ports.ActivitySignal) error {
+	// Direct-branch execution ownership is turn-scoped (Checkpoint 8P-E.14A),
+	// and this is where a turn is observed to start and end. The action itself
+	// runs after every return path below has released m.mu — it does repository
+	// I/O and a durable write of its own, and must never do either under the
+	// reducer's lock.
+	var branchLockAction func()
+	defer func() {
+		if branchLockAction != nil {
+			branchLockAction()
+		}
+	}()
 	s.AgentSessionID = strings.TrimSpace(s.AgentSessionID)
 	s.LatestUserPrompt = strings.TrimSpace(s.LatestUserPrompt)
 	s.LatestAssistantUpdate = strings.TrimSpace(s.LatestAssistantUpdate)
@@ -574,6 +635,23 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 		(s.State != domain.ActivityActive || s.Event != "user-prompt-submit") {
 		m.mu.Unlock()
 		return nil
+	}
+	// The signal now provably belongs to this session's current launch, so its
+	// turn boundary is authoritative and the branch follows it. This is decided
+	// from the RAW signal, before the tool-precedence fold below: precedence
+	// decides what the displayed state should be, not whether a turn ended, and
+	// a turn-completion event is never suppressed by it anyway (it is a turn
+	// boundary — see isTurnBoundaryEvent). Deciding here also means a repeated
+	// stop on an already-idle row still hands the branch back, instead of being
+	// dropped by the same-state early return.
+	switch {
+	case turnCompleted(s):
+		branchLockAction = func() {
+			m.releaseSessionBranchLocks(ctx, id, "task turn ended ("+s.Event+")")
+		}
+	case turnStarted(s):
+		projectID := rec.ProjectID
+		branchLockAction = func() { m.acquireSessionBranchLocks(ctx, projectID, id) }
 	}
 	// Event-tagged signals fold through the session's tool-flight state first:
 	// they may be suppressed (state write skipped) by the blocked-precedence
@@ -800,6 +878,33 @@ func isPostToolUseEvent(event string) bool {
 func isTurnBoundaryEvent(event string) bool {
 	return event == "user-prompt-submit" || event == "stop" || event == "session-end" ||
 		event == "process-exited" || event == "chat.controller.stopped"
+}
+
+// turnCompleted reports whether a signal is an agent telling AO that its turn
+// is over: a turn-boundary event that leaves no work in flight.
+//
+// Both halves are load-bearing (Checkpoint 8P-E.14A). The event half is what
+// makes this "the agent said it finished" rather than "the agent looks quiet":
+// an untagged idle signal from an old CLI, a runtime probe, or any state write
+// that is not a reported turn boundary is deliberately not a completion, and a
+// task that is merely between tool calls keeps its branch. The state half is
+// what keeps a turn that paused on the user (waiting_input / blocked) mid-turn:
+// a human owes it an answer, the task is still going, and its branch is still
+// its own.
+//
+// user-prompt-submit is a turn boundary too, but of the opposite kind — see
+// turnStarted.
+func turnCompleted(s ports.ActivitySignal) bool {
+	if !s.Valid || s.State.WorkInFlight() {
+		return false
+	}
+	return isTurnBoundaryEvent(s.Event) && s.Event != "user-prompt-submit"
+}
+
+// turnStarted reports whether a signal is an agent beginning a new turn — the
+// moment a task session needs its branch back.
+func turnStarted(s ports.ActivitySignal) bool {
+	return s.Valid && s.Event == "user-prompt-submit" && s.State == domain.ActivityActive
 }
 
 // applyToolPrecedenceLocked folds an event-tagged activity signal through the

@@ -181,6 +181,18 @@ surface (`npm run sqlc`, `npm run api`).
   automatic spawn/resume, and a truthful "Waiting for branch" state on the
   Board. Failing fast is deliberately the safe interim: the one thing a blocked
   task must never do is create a derived branch to work around the contention.
+- **A follow-up turn that loses its branch**: a task session owns its
+  repository+branch for the duration of a turn and gives it back when the turn
+  ends (Checkpoint 8P-E.14A), so a second task may legitimately take that branch
+  while the first sits finished and idle. If the user then sends the first task
+  more work, its turn start finds the branch owned by someone else. AO logs that
+  truthfully and the turn proceeds without the lock, because the signal that a
+  turn started is a hook that fires *after* the prompt was submitted — there is
+  nothing left to refuse, and AO will not silently reroute the work to another
+  branch. Still to build: a refusal at the mediated send/resume paths (before
+  the prompt reaches the agent) and a Board state saying the session's branch
+  was taken over. The task queue above is the same missing subsystem seen from
+  the other end.
 - **Truthful terminal state for a finished task**: session status is derived,
   never stored (`backend/internal/domain/status.go`), and a direct-branch task
   that has finished its work has no PR and no activity, so `DeriveStatus` falls

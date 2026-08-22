@@ -81,6 +81,13 @@ func (m *Manager) currentBranchLocks() BranchLocks {
 // Nothing here needs to undo a successful acquisition on a later spawn failure:
 // every failure after this point funnels through rollbackSpawnSeedRow or
 // MarkTerminated, and both release the session's locks.
+//
+// This is the acquisition that decides whether the task may run at all, and it
+// is the only one that refuses. Ownership after this point is turn-scoped
+// (Checkpoint 8P-E.14A): lifecycle gives the branch back when the agent reports
+// its turn finished and takes it again when the next turn starts, because an
+// ordinary task that completes successfully is never terminated — it goes idle
+// and stays alive — so tying the lock to termination held the branch forever.
 func (m *Manager) acquireSessionBranchLocks(ctx context.Context, cfg ports.SpawnConfig, id domain.SessionID) error {
 	locks := m.currentBranchLocks()
 	if locks == nil || cfg.WorkflowRunID != "" {
@@ -96,8 +103,8 @@ func (m *Manager) acquireSessionBranchLocks(ctx context.Context, cfg ports.Spawn
 // exactly as the workflow's releaseBranchLocks is: turning a completed task
 // into a failed one over lock bookkeeping would be worse than the miss, and
 // boot reconciliation already releases any lock whose owning session is
-// terminated (branchlock/retention.go), so a missed release is self-healing
-// rather than permanent.
+// terminated or has no turn in flight (branchlock/retention.go), so a missed
+// release is self-healing rather than permanent.
 func (m *Manager) releaseSessionBranchLocks(ctx context.Context, id domain.SessionID, reason string) {
 	locks := m.currentBranchLocks()
 	if locks == nil {

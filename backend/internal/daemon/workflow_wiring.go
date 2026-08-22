@@ -105,6 +105,28 @@ func (s sessionBranchLocks) ReleaseSession(ctx context.Context, sessionID, reaso
 	return s.mgr.ReleaseSession(ctx, sessionID, reason)
 }
 
+// sessionTurnBranchLocks adapts *branchlock.Manager to lifecycle's
+// turn-boundary lock surface (Checkpoint 8P-E.14A).
+//
+// It is a second adapter over the same manager rather than a reuse of
+// sessionBranchLocks because the two acquisitions are not the same question.
+// Task start asks "may this task have the branch at all?", and a dirty
+// repository or another owner must refuse it. A turn start asks "is the branch
+// still this session's?", where already holding it, and a workflow run holding
+// it on this session's behalf, are both normal — see
+// branchlock.Manager.ReacquireForSession.
+type sessionTurnBranchLocks struct {
+	mgr *branchlock.Manager
+}
+
+func (s sessionTurnBranchLocks) AcquireForSession(ctx context.Context, projectID domain.ProjectID, sessionID domain.SessionID) ([]domain.BranchLock, error) {
+	return s.mgr.ReacquireForSession(ctx, projectID, string(sessionID))
+}
+
+func (s sessionTurnBranchLocks) ReleaseSession(ctx context.Context, sessionID, reason string) (int64, error) {
+	return s.mgr.ReleaseSession(ctx, sessionID, reason)
+}
+
 // coordinatorLockClassifier adapts the workflow coordinator to
 // branchlock.OwnerClassifier (Checkpoint 8P-E.13A), translating between the two
 // packages' own mirrored disposition types so neither has to import the other.

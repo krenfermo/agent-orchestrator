@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -101,6 +102,22 @@ type Manager struct {
 	newID      func() string
 	clock      func() time.Time
 	log        *slog.Logger
+
+	// lastOwnerMu guards lastOwner.
+	lastOwnerMu sync.Mutex
+	// lastOwner remembers, per lock key, the owner that most recently held it
+	// (Checkpoint 8P-E.14A). It exists for one narrow purpose: a task session's
+	// ownership is now turn-scoped, so between turns the branch is unlocked
+	// while the session's own uncommitted work is still sitting in the working
+	// tree. Without this, the dirty-repository preflight would refuse to give
+	// that session its branch back for its own follow-up turn, blaming it for
+	// changes it made itself.
+	//
+	// Deliberately in memory and deliberately not consulted for anyone else: a
+	// different owner never inherits the exemption, and a daemon restart forgets
+	// it, degrading to the strict "a human must decide about these changes"
+	// refusal. Both are the fail-safe direction.
+	lastOwner map[string]string
 }
 
 // SetClassifier wires the owner classifier after construction.
@@ -123,6 +140,7 @@ func New(deps Deps) *Manager {
 		newID:      deps.NewID,
 		clock:      deps.Clock,
 		log:        deps.Logger,
+		lastOwner:  map[string]string{},
 	}
 	if m.clock == nil {
 		m.clock = time.Now
@@ -288,9 +306,83 @@ func (m *Manager) Acquire(ctx context.Context, req AcquireRequest) ([]domain.Bra
 			m.rollback(ctx, acquired, "rolled back: could not acquire every target lock")
 			return nil, err
 		}
+		m.rememberOwner(target.Key, owner)
 		acquired = append(acquired, lock)
 	}
 	return acquired, nil
+}
+
+// ReacquireForSession takes the locks a task session needs for a new turn
+// (Checkpoint 8P-E.14A).
+//
+// It differs from Acquire in the two ways a turn start differs from a task
+// start:
+//
+//   - It is a no-op when the session already holds every target. A turn start
+//     is reported by a hook on every prompt, and a task that never released
+//     (because its previous turn is still open, or because the project only has
+//     one repository and nothing happened in between) must not pay a preflight
+//     for each one.
+//   - It is a no-op when a workflow run owns the targets and this session is
+//     that run's current worker. The run owns the branch on the worker's behalf;
+//     the worker asking for it in its own name would contend with its own run
+//     and log a conflict on every prompt it submits.
+//
+// Everything else — the dirty preflight, the conflict error, the all-or-nothing
+// acquisition — is Acquire's, unchanged.
+func (m *Manager) ReacquireForSession(ctx context.Context, projectID domain.ProjectID, sessionID string) ([]domain.BranchLock, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, nil
+	}
+	targets, err := m.Targets(ctx, projectID)
+	if err != nil || len(targets) == 0 {
+		return nil, err
+	}
+	owner := domain.BranchLock{SessionID: sessionID}.OwnerKey()
+	alreadyOurs := 0
+	for _, target := range targets {
+		holder, found, herr := m.store.GetHeldBranchLock(ctx, target.Key)
+		if herr != nil {
+			return nil, herr
+		}
+		if !found {
+			continue
+		}
+		if holder.OwnerKey() == owner {
+			alreadyOurs++
+			continue
+		}
+		if !holder.SessionOwned() && holder.SessionID == sessionID {
+			return nil, nil
+		}
+	}
+	if alreadyOurs == len(targets) {
+		return nil, nil
+	}
+	return m.Acquire(ctx, AcquireRequest{ProjectID: projectID, SessionID: sessionID})
+}
+
+// rememberOwner records who last held a lock key, for the turn-boundary dirty
+// exemption in preflightAll.
+func (m *Manager) rememberOwner(lockKey, owner string) {
+	if lockKey == "" || owner == "" {
+		return
+	}
+	m.lastOwnerMu.Lock()
+	m.lastOwner[lockKey] = owner
+	m.lastOwnerMu.Unlock()
+}
+
+// heldLastBy reports whether owner is the most recent holder this daemon
+// instance recorded for lockKey.
+func (m *Manager) heldLastBy(lockKey, owner string) bool {
+	if lockKey == "" || owner == "" {
+		return false
+	}
+	m.lastOwnerMu.Lock()
+	defer m.lastOwnerMu.Unlock()
+	return m.lastOwner[lockKey] == owner
 }
 
 // preflightAll probes every target and refuses the whole acquisition if any
@@ -298,6 +390,13 @@ func (m *Manager) Acquire(ctx context.Context, req AcquireRequest) ([]domain.Bra
 // by this same owner is exempt: its "dirty" state is that owner's own
 // in-progress work, not a human's, and re-entering must not block on the
 // changes it itself produced.
+//
+// The same exemption extends across a turn boundary to an owner that held this
+// exact lock key most recently and gave it back (see Manager.lastOwner): a task
+// session's ownership is turn-scoped now, so its own uncommitted work outlives
+// its lock, and refusing it the branch for its own follow-up turn would blame
+// it for its own changes. Only the immediately previous owner qualifies, so a
+// second task still meets the full refusal.
 func (m *Manager) preflightAll(ctx context.Context, targets []Target, owner string) (map[string]ports.WorkspacePreflight, error) {
 	out := make(map[string]ports.WorkspacePreflight, len(targets))
 	if m.preflight == nil {
@@ -318,6 +417,9 @@ func (m *Manager) preflightAll(ctx context.Context, targets []Target, owner stri
 			return nil, herr
 		}
 		if found && owner != "" && holder.OwnerKey() == owner {
+			continue
+		}
+		if !found && m.heldLastBy(target.Key, owner) {
 			continue
 		}
 		dirty = append(dirty, pre)

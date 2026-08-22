@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/branchlock"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -234,23 +235,69 @@ func TestReconcileReleasesLocksOfTerminatedAndMissingTaskSessions(t *testing.T) 
 	}
 }
 
-// An idle task is the normal state of a session between agent turns.
-// Reconciliation must not mistake it for a dead one and hand its branch away.
-func TestReconcileKeepsAnIdleTaskSessionsLock(t *testing.T) {
-	ctx := context.Background()
-	store := mustOpenDirectProjectStore(t, "proj", "/repos/ao", "main")
-	idle := mustCreateSession(t, store, "proj", false)
+// A task paused on the user is still mid-task: a human owes it an answer, it
+// will resume writing the branch the moment they give it, and reconciliation
+// must not hand that branch to a second writer in the meantime.
+func TestReconcileKeepsALockOfATaskPausedOnTheUser(t *testing.T) {
+	for _, state := range []domain.ActivityState{domain.ActivityActive, domain.ActivityWaitingInput, domain.ActivityBlocked} {
+		t.Run(string(state), func(t *testing.T) {
+			ctx := context.Background()
+			store := mustOpenDirectProjectStore(t, "proj", "/repos/ao", "main")
+			session := mustCreateSessionInState(t, store, "proj", state, false)
 
-	mgr := newManager(t, store, &fakePreflight{}, "owner-1")
-	if _, err := mgr.Acquire(ctx, branchlock.AcquireRequest{ProjectID: "proj", SessionID: string(idle.ID)}); err != nil {
-		t.Fatalf("acquire: %v", err)
+			mgr := newManager(t, store, &fakePreflight{}, "owner-1")
+			if _, err := mgr.Acquire(ctx, branchlock.AcquireRequest{ProjectID: "proj", SessionID: string(session.ID)}); err != nil {
+				t.Fatalf("acquire: %v", err)
+			}
+			res, err := mgr.Reconcile(ctx)
+			if err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			if res.Released != 0 || res.Kept != 1 {
+				t.Fatalf("reconcile = %#v, want the mid-turn task's lock kept", res)
+			}
+		})
 	}
-	res, err := mgr.Reconcile(ctx)
-	if err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	if res.Released != 0 || res.Kept != 1 {
-		t.Fatalf("reconcile = %#v, want the idle task's lock kept", res)
+}
+
+// Checkpoint 8P-E.14A. The incident this fixes: a task finished its work,
+// stayed alive and idle as finished tasks do, and the daemon restarted. The old
+// policy kept any non-terminated session's lock, so the branch stayed occupied
+// by a task that had nothing left to write, and every later task on that branch
+// failed with BRANCH_IN_USE. A session with no turn in flight owns nothing.
+func TestReconcileReleasesLocksOfTaskSessionsWithNoTurnInFlight(t *testing.T) {
+	for _, state := range []domain.ActivityState{domain.ActivityIdle, domain.ActivityExited} {
+		t.Run(string(state), func(t *testing.T) {
+			ctx := context.Background()
+			store := mustOpenDirectProjectStore(t, "proj", "/repos/ao", "main")
+			finished := mustCreateSessionInState(t, store, "proj", state, false)
+
+			mgr := newManager(t, store, &fakePreflight{}, "owner-1")
+			if _, err := mgr.Acquire(ctx, branchlock.AcquireRequest{ProjectID: "proj", SessionID: string(finished.ID)}); err != nil {
+				t.Fatalf("acquire: %v", err)
+			}
+			// A fresh daemon instance, as after the restart in the incident.
+			restarted := newManager(t, store, &fakePreflight{}, "owner-2")
+			res, err := restarted.Reconcile(ctx)
+			if err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			if res.Released != 1 {
+				t.Fatalf("reconcile = %#v, want the finished task's lock released", res)
+			}
+			held, err := store.ListHeldBranchLocks(ctx)
+			if err != nil {
+				t.Fatalf("list held: %v", err)
+			}
+			if len(held) != 0 {
+				t.Fatalf("held = %#v, want the branch free for the next task", held)
+			}
+			// And the branch is genuinely available again, not merely marked so.
+			next := mustCreateSessionInState(t, store, "proj", domain.ActivityActive, false)
+			if _, err := restarted.Acquire(ctx, branchlock.AcquireRequest{ProjectID: "proj", SessionID: string(next.ID)}); err != nil {
+				t.Fatalf("second task acquire: %v", err)
+			}
+		})
 	}
 }
 
@@ -263,7 +310,20 @@ func mustOpenDirectProjectStore(t *testing.T, id, path, branch string) *sqlite.S
 	return store
 }
 
+// mustCreateSession creates a session that is mid-turn (active), which is the
+// state in which a task legitimately owns its branch.
 func mustCreateSession(t *testing.T, store *sqlite.Store, projectID domain.ProjectID, terminated bool) domain.SessionRecord {
+	t.Helper()
+	return mustCreateSessionInState(t, store, projectID, domain.ActivityActive, terminated)
+}
+
+func mustCreateSessionInState(
+	t *testing.T,
+	store *sqlite.Store,
+	projectID domain.ProjectID,
+	state domain.ActivityState,
+	terminated bool,
+) domain.SessionRecord {
 	t.Helper()
 	rec, err := store.CreateSession(context.Background(), domain.SessionRecord{
 		ProjectID: projectID,
@@ -273,11 +333,10 @@ func mustCreateSession(t *testing.T, store *sqlite.Store, projectID domain.Proje
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	if terminated {
-		rec.IsTerminated = true
-		if err := store.UpdateSession(context.Background(), rec); err != nil {
-			t.Fatalf("terminate session: %v", err)
-		}
+	rec.Activity = domain.Activity{State: state, LastActivityAt: time.Now().UTC()}
+	rec.IsTerminated = terminated
+	if err := store.UpdateSession(context.Background(), rec); err != nil {
+		t.Fatalf("update session: %v", err)
 	}
 	return rec
 }

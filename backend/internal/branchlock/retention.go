@@ -141,25 +141,39 @@ func keepOrAdopt(lock domain.BranchLock, ownerToken, reason string) Retention {
 // session owns (Checkpoint 8P-E.14).
 //
 // It answers the same question decideRetention does -- "can this owner still
-// write this branch?" -- against the only durable fact a session has:
-// IsTerminated. There is deliberately no equivalent of the needs_attention
-// branch here, because a task has no run state that could mean "stopped but
-// resumable": a session is either terminated, in which case nothing will ever
-// write through it again, or it is not, in which case it may still be working
-// and its branch must be protected.
+// write this branch?" -- against the two durable facts a session has:
+// IsTerminated and its activity state. There is deliberately no equivalent of
+// the needs_attention branch here, because a task has no run state that could
+// mean "stopped but resumable".
 //
-// Note what this does NOT do: it does not release a lock because the session
-// looks idle. An idle session is the normal state of a task between agent
-// turns, and releasing on idleness would hand the branch to a second writer
-// while the first is still mid-task.
+// Checkpoint 8P-E.14A corrected what "still writing" means for a session. The
+// original policy kept the lock for any session that was not terminated, on the
+// reasoning that a live session may still be mid-task. That reasoning was
+// right about mid-task and wrong about termination: an ordinary task that
+// finishes successfully is never terminated at all -- it goes idle and stays
+// alive so the user can keep talking to it -- so "not terminated" retained the
+// branch forever, which is exactly the incident this checkpoint fixes.
+//
+// The durable fact that separates the two cases is the activity state, and it
+// is the same one the live path releases on: a turn is in flight while the
+// agent is active, or paused on the user inside that turn (waiting_input /
+// blocked), and no turn is in flight once it goes idle or exited. So a session
+// that is mid-task -- including one that has been sitting on a permission
+// dialog for an hour -- keeps its branch, and a session whose turn has ended
+// gives it back. It takes the branch again when its next turn starts.
 func decideSessionRetention(lock domain.BranchLock, session domain.SessionRecord, found bool, ownerToken string) Retention {
 	switch {
 	case !found:
 		return Retention{Decision: RetentionRelease, Reason: "stale: task session no longer exists"}
 	case session.IsTerminated:
 		return Retention{Decision: RetentionRelease, Reason: "stale: task session is terminated"}
+	case session.Activity.State.WorkInFlight():
+		return keepOrAdopt(lock, ownerToken, "owner is a live task session with a turn in flight ("+string(session.Activity.State)+")")
 	default:
-		return keepOrAdopt(lock, ownerToken, "owner is a live task session")
+		return Retention{
+			Decision: RetentionRelease,
+			Reason:   "stale: task session has no turn in flight (" + string(session.Activity.State) + ")",
+		}
 	}
 }
 

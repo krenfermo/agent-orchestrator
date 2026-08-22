@@ -495,7 +495,9 @@ func RunWithConfig(cfg config.Config) error {
 	// serialize instead of both writing it. Late-bound because the session and
 	// lifecycle managers are built before the lock manager exists.
 	rawSessionMgr.SetBranchLocks(sessionBranchLocks{mgr: branchLocks})
-	lcStack.LCM.SetBranchLockReleaser(branchLocks)
+	// Checkpoint 8P-E.14A: lifecycle drives the same locks at the session's turn
+	// boundaries, through the re-acquire variant (see sessionTurnBranchLocks).
+	lcStack.LCM.SetBranchLocks(sessionTurnBranchLocks{mgr: branchLocks})
 	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, log)
 	// Checkpoint 8P-E.13A: reconciliation can only decide a stopped owner's
 	// lock once it can ask what that stop means, and only the coordinator knows
