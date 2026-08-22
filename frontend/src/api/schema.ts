@@ -2506,11 +2506,20 @@ export interface components {
             /** Format: int64 */
             waitingForCapacity: number;
         };
+        ControllersEmailNotificationEventsPayload: {
+            /** @description A task or workflow finished the work it was given. */
+            completed: boolean;
+            /** @description A task or workflow ended without completing. */
+            failed: boolean;
+            /** @description A task or workflow stopped and needs a decision. */
+            needsAttention: boolean;
+        };
         ControllersEmailNotificationSettingsEnvelope: {
             emailNotifications: components["schemas"]["ControllersEmailNotificationSettingsResponse"];
         };
         ControllersEmailNotificationSettingsResponse: {
             enabled: boolean;
+            events: components["schemas"]["ControllersEmailNotificationEventsPayload"];
             host: string;
             passwordSet: boolean;
             port: number;
@@ -2804,6 +2813,7 @@ export interface components {
         };
         ControllersUpdateEmailNotificationSettingsRequest: {
             enabled: boolean;
+            events?: components["schemas"]["ControllersEmailNotificationEventsPayload"];
             host: string;
             password?: null | string;
             port: number;

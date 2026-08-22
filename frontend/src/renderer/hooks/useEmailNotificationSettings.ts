@@ -4,6 +4,7 @@ import { apiClient, apiErrorMessage, hasTrustedApiBaseUrl } from "../lib/api-cli
 
 export type EmailNotificationSettings = components["schemas"]["ControllersEmailNotificationSettingsResponse"];
 export type EmailNotificationTLS = EmailNotificationSettings["tls"];
+export type EmailNotificationEvents = EmailNotificationSettings["events"];
 
 /**
  * The shape the form saves. `password` is deliberately optional: the server
@@ -19,6 +20,12 @@ export type EmailNotificationSettingsInput = {
 	username: string;
 	tls: EmailNotificationTLS;
 	password?: string;
+	/**
+	 * Which events may be emailed. Optional for the same reason `password` is:
+	 * the server reads an absent selection as "keep the stored one", so a client
+	 * that does not send it cannot silently switch three events off.
+	 */
+	events?: EmailNotificationEvents;
 };
 
 export const emailNotificationSettingsQueryKey = ["settings", "email-notifications"] as const;
@@ -30,7 +37,7 @@ async function fetchEmailNotificationSettings(): Promise<EmailNotificationSettin
 }
 
 /**
- * Settings → Completion emails. Daemon-owned rather than renderer-held: the
+ * Settings → Email notifications. Daemon-owned rather than renderer-held: the
  * sender runs in the daemon and a task can finish while no window is open, so
  * a preference kept here would simply never be consulted.
  */

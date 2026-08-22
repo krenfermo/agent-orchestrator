@@ -694,14 +694,23 @@ func (c *Coordinator) dispatchReviewFromPending(
 		return c.recordReviewDispatchFailure(ctx, run, reviewStep, entry, domain.WorkflowErrorReviewerLaunchFailed, err)
 	}
 
+	// The reviewer is told exactly what this task owns and what it does not.
+	// Before this, it received run.Objective under the heading "objective of the
+	// overall run" and no acceptance criteria at all, and so rejected a
+	// correctly-scoped child task for work the plan had assigned to later tasks
+	// — every cycle, until the fix budget ran out. See ReviewTaskScope.
+	scope := c.reviewScopeForRun(ctx, run)
 	prompt := BuildReviewPrompt(ReviewPromptInput{
-		Objective:       run.Objective,
-		WorkerSessionID: workerSessionID,
-		Branch:          branch,
-		WorktreePath:    worktreePath,
-		BaseSHA:         baseSHA,
-		HeadSHA:         targetSHA,
-		ReviewRunID:     reviewRunID,
+		Objective:             run.Objective,
+		AcceptanceCriteria:    scope.AcceptanceCriteria,
+		AvailableDependencies: scope.AvailableDependencies,
+		FuturePlannedTasks:    scope.FuturePlannedTasks,
+		WorkerSessionID:       workerSessionID,
+		Branch:                branch,
+		WorktreePath:          worktreePath,
+		BaseSHA:               baseSHA,
+		HeadSHA:               targetSHA,
+		ReviewRunID:           reviewRunID,
 	})
 
 	if err := c.reviewerLauncher.Preflight(ctx, harness, worktreePath); err != nil {

@@ -35,6 +35,13 @@ type NotificationIntent struct {
 	// WorkflowObjective is the human-written objective of a completed run, used
 	// in place of the run id nobody recognizes.
 	WorkflowObjective string
+	// AttentionReason is the canonical stop reason for the attention family
+	// (workflow.ReasonFixBudgetExhausted and friends). Carried as a plain string
+	// so ports does not depend on the workflow package's vocabulary.
+	AttentionReason string
+	// Detail is the one-line, human-readable account of THIS occurrence — the
+	// same sentence the Board shows next to the stop.
+	Detail string
 }
 
 // NotificationResolution is the lifecycle-to-notification-producer contract for

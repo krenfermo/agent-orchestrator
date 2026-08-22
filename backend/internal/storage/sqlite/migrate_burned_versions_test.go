@@ -127,6 +127,8 @@ var shippedMigrations = map[int64]string{
 	121: "0121_session_turn_completed.sql",
 	122: "0122_notification_completion.sql",
 	123: "0123_email_notification_settings.sql",
+	124: "0124_notification_attention_failure.sql",
+	125: "0125_email_notification_events.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

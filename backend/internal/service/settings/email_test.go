@@ -81,6 +81,9 @@ func configured() EmailConfig {
 		Username:           "someone@gmail.com",
 		PasswordCiphertext: "sealed:" + plaintextPassword,
 		TLS:                "starttls",
+		// All three on, matching the schema default (migration 0125): an install
+		// that already had email enabled keeps receiving every event.
+		Events: EmailEvents{Completed: true, NeedsAttention: true, Failed: true},
 	}
 }
 
@@ -320,5 +323,127 @@ func TestEmailMessageNamesTheFinishedWork(t *testing.T) {
 		if !strings.Contains(msg.Body, want) {
 			t.Fatalf("body missing %q:\n%s", want, msg.Body)
 		}
+	}
+}
+
+// The attention and failure families reach the same mailbox as a completion,
+// under a subject that says which one it is.
+func TestEmailNotificationSendsAttentionAndFailureEvents(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		typ         domain.NotificationType
+		wantSubject string
+	}{
+		{"task needs attention", domain.NotificationTaskNeedsAttention, "[AO] Task needs attention:"},
+		{"workflow needs attention", domain.NotificationWorkflowNeedsAttention, "[AO] Workflow needs attention:"},
+		{"task failed", domain.NotificationTaskFailed, "[AO] Task failed:"},
+		{"workflow failed", domain.NotificationWorkflowFailed, "[AO] Workflow failed:"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := domain.NotificationRecord{
+				ID: "ntf-1", WorkflowRunID: "wf-1", ProjectID: "mer",
+				Type: tc.typ, Title: "build the collector needs your attention",
+				Body: "Reason: fix_budget_exhausted", CreatedAt: time.Now().UTC(),
+			}
+			sender := &fakeSender{}
+			emailer := NewNotificationEmailer(newService(&fakeStore{snapshot: Snapshot{Email: configured()}}, sender))
+			if err := emailer.EmailNotification(context.Background(), rec); err != nil {
+				t.Fatalf("EmailNotification: %v", err)
+			}
+			if len(sender.sent) != 1 {
+				t.Fatalf("sent %d messages, want 1", len(sender.sent))
+			}
+			msg := message(rec)
+			if !strings.HasPrefix(msg.Subject, tc.wantSubject) {
+				t.Fatalf("Subject = %q, want prefix %q", msg.Subject, tc.wantSubject)
+			}
+			if !strings.Contains(msg.Body, "Reason: fix_budget_exhausted") {
+				t.Fatalf("body does not carry why AO stopped:\n%s", msg.Body)
+			}
+		})
+	}
+}
+
+// Turning one event off must silence that event and nothing else — the whole
+// point of the selection is keeping the mail you want.
+func TestEmailNotificationHonorsPerEventSelection(t *testing.T) {
+	cfg := configured()
+	cfg.Events = EmailEvents{Completed: true, NeedsAttention: false, Failed: true}
+	sender := &fakeSender{}
+	emailer := NewNotificationEmailer(newService(&fakeStore{snapshot: Snapshot{Email: cfg}}, sender))
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := emailer.EmailNotification(ctx, domain.NotificationRecord{
+		ID: "ntf-1", WorkflowRunID: "wf-1", ProjectID: "mer",
+		Type: domain.NotificationWorkflowNeedsAttention, Title: "stopped", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("EmailNotification(attention): %v", err)
+	}
+	if len(sender.sent) != 0 {
+		t.Fatalf("sent %d messages for a deselected event", len(sender.sent))
+	}
+
+	if err := emailer.EmailNotification(ctx, domain.NotificationRecord{
+		ID: "ntf-2", WorkflowRunID: "wf-1", ProjectID: "mer",
+		Type: domain.NotificationWorkflowCompleted, Title: "finished", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("EmailNotification(completion): %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("sent %d messages for a selected event, want 1", len(sender.sent))
+	}
+}
+
+// A PR-family notification has no email event behind it and must never be
+// mailed, whatever the selection says.
+func TestEmailNotificationIgnoresNonEmailableTypes(t *testing.T) {
+	sender := &fakeSender{}
+	emailer := NewNotificationEmailer(newService(&fakeStore{snapshot: Snapshot{Email: configured()}}, sender))
+	if err := emailer.EmailNotification(context.Background(), domain.NotificationRecord{
+		ID: "ntf-1", SessionID: "s-1", ProjectID: "mer", PRURL: "https://example.test/pr/1",
+		Type: domain.NotificationReadyToMerge, Title: "PR #1 is ready to merge", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("EmailNotification: %v", err)
+	}
+	if len(sender.sent) != 0 {
+		t.Fatalf("sent %d messages for a non-emailable type", len(sender.sent))
+	}
+}
+
+// A saved form that predates the event selection must not silently clear it.
+func TestSetEmailNotificationsKeepsTheStoredEventSelectionWhenOmitted(t *testing.T) {
+	store := &fakeStore{snapshot: Snapshot{Email: configured()}}
+	svc := newService(store, &fakeSender{})
+	if _, err := svc.SetEmailNotifications(context.Background(), EmailUpdate{
+		Enabled: true, Recipient: "someone@example.com", Host: "smtp.gmail.com",
+		Port: 587, Username: "someone@gmail.com", TLS: "starttls",
+	}); err != nil {
+		t.Fatalf("SetEmailNotifications: %v", err)
+	}
+	if len(store.saved) != 1 {
+		t.Fatalf("saved %d configs, want 1", len(store.saved))
+	}
+	if got := store.saved[0].Events; !got.Completed || !got.NeedsAttention || !got.Failed {
+		t.Fatalf("Events = %+v; an update that named no events cleared the stored selection", got)
+	}
+}
+
+func TestSetEmailNotificationsPersistsAnExplicitEventSelection(t *testing.T) {
+	store := &fakeStore{snapshot: Snapshot{Email: configured()}}
+	svc := newService(store, &fakeSender{})
+	events := EmailEvents{Completed: false, NeedsAttention: true, Failed: true}
+	got, err := svc.SetEmailNotifications(context.Background(), EmailUpdate{
+		Enabled: true, Recipient: "someone@example.com", Host: "smtp.gmail.com",
+		Port: 587, Username: "someone@gmail.com", TLS: "starttls", Events: &events,
+	})
+	if err != nil {
+		t.Fatalf("SetEmailNotifications: %v", err)
+	}
+	if got.Events != events {
+		t.Fatalf("returned Events = %+v, want %+v", got.Events, events)
+	}
+	if store.saved[0].Events != events {
+		t.Fatalf("stored Events = %+v, want %+v", store.saved[0].Events, events)
 	}
 }

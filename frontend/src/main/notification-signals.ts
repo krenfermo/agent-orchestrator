@@ -15,7 +15,11 @@ export type NotificationType =
 	| "pr_merged"
 	| "pr_closed_unmerged"
 	| "task_completed"
-	| "workflow_completed";
+	| "workflow_completed"
+	| "task_needs_attention"
+	| "workflow_needs_attention"
+	| "task_failed"
+	| "workflow_failed";
 
 /**
  * Types that warrant an *active* attention signal (macOS dock bounce / Windows &
@@ -27,7 +31,17 @@ export type NotificationType =
  * bouncing the dock would be an interruption with nothing to act on — and a
  * fleet of tasks finishing would make it a constant one.
  */
-const ATTENTION_TYPES: ReadonlySet<string> = new Set<NotificationType>(["needs_input", "ready_to_merge"]);
+const ATTENTION_TYPES: ReadonlySet<string> = new Set<NotificationType>([
+	"needs_input",
+	"ready_to_merge",
+	// A run that stopped on a decision, or ended without doing the work, is
+	// waiting on the user in exactly the way a blocked agent is: nothing moves
+	// again until they look. That is the whole test this set applies.
+	"task_needs_attention",
+	"workflow_needs_attention",
+	"task_failed",
+	"workflow_failed",
+]);
 
 /** Whether this notification type should bounce the dock / flash the taskbar. */
 export function shouldSignalAttention(type: string | undefined): boolean {

@@ -654,6 +654,13 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 
 		case domain.WorkflowRunFailed:
 			_, _ = c.planStore.UpdateWorkflowTaskState(ctx, task.ID, domain.WorkflowTaskRunning, domain.WorkflowTaskFailed, c.clock())
+			// The task's own terminal failure, reported once for the task and
+			// then again — as the parent's stop — for the workflow it blocks.
+			// This reconcile re-runs on every poll and after every restart; the
+			// notification's dedupe key is what makes that one notification
+			// rather than one per pass.
+			c.notifyRunFailed(ctx, child.Run, fmt.Sprintf(
+				"Task %d (%s) ended without completing.", task.Ordinal, task.Title))
 			if run.State == domain.WorkflowRunRunning {
 				_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, c.clock())
 			}

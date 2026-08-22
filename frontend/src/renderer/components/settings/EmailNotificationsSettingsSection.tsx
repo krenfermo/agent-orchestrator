@@ -16,8 +16,9 @@ import { SettingsSection } from "./SettingsSection";
 type Draft = EmailNotificationSettingsInput;
 
 /**
- * Settings → Completion emails: the optional email that arrives when a task or
- * a workflow finishes.
+ * Settings → Email notifications: the optional email that arrives when a task
+ * or a workflow finishes, stops on something only the user can decide, or ends
+ * without completing.
  *
  * The password field is write-only in both directions. The server never returns
  * the stored password, so this form starts empty even when one is configured
@@ -48,6 +49,7 @@ export function EmailNotificationsSettingsSection({ titleHidden }: { titleHidden
 			port: settings.port,
 			username: settings.username,
 			tls: settings.tls,
+			events: settings.events,
 		});
 	}, [settings]);
 
@@ -70,6 +72,20 @@ export function EmailNotificationsSettingsSection({ titleHidden }: { titleHidden
 		setDraft({ ...draft, ...patch });
 		setStatus(undefined);
 		setSaveError(undefined);
+	};
+
+	// The three event switches always travel together: the server treats an
+	// absent selection as "unchanged", so sending a partial object would be
+	// indistinguishable from sending nothing.
+	const updateEvent = (patch: Partial<NonNullable<Draft["events"]>>) => {
+		update({
+			events: {
+				completed: draft.events?.completed ?? false,
+				needsAttention: draft.events?.needsAttention ?? false,
+				failed: draft.events?.failed ?? false,
+				...patch,
+			},
+		});
 	};
 
 	const persist = async () => {
@@ -187,6 +203,33 @@ export function EmailNotificationsSettingsSection({ titleHidden }: { titleHidden
 					}
 					type="password"
 					value={password}
+				/>
+			</SettingsRow>
+
+			<SettingsRow label={t("settings.emailNotifications.events.completed")}>
+				<Switch
+					aria-label={t("settings.emailNotifications.events.completed")}
+					checked={draft.events?.completed ?? false}
+					disabled={busy}
+					onCheckedChange={(next) => updateEvent({ completed: next })}
+				/>
+			</SettingsRow>
+
+			<SettingsRow label={t("settings.emailNotifications.events.needsAttention")}>
+				<Switch
+					aria-label={t("settings.emailNotifications.events.needsAttention")}
+					checked={draft.events?.needsAttention ?? false}
+					disabled={busy}
+					onCheckedChange={(next) => updateEvent({ needsAttention: next })}
+				/>
+			</SettingsRow>
+
+			<SettingsRow label={t("settings.emailNotifications.events.failed")}>
+				<Switch
+					aria-label={t("settings.emailNotifications.events.failed")}
+					checked={draft.events?.failed ?? false}
+					disabled={busy}
+					onCheckedChange={(next) => updateEvent({ failed: next })}
 				/>
 			</SettingsRow>
 

@@ -33,6 +33,11 @@ func (s settingsStore) GetAppSettings(ctx context.Context) (settingssvc.Snapshot
 			Username:           row.EmailNotifications.SMTPUsername,
 			PasswordCiphertext: row.EmailNotifications.SMTPPasswordEncrypted,
 			TLS:                row.EmailNotifications.SMTPTLS,
+			Events: settingssvc.EmailEvents{
+				Completed:      row.EmailNotifications.OnCompleted,
+				NeedsAttention: row.EmailNotifications.OnNeedsAttention,
+				Failed:         row.EmailNotifications.OnFailed,
+			},
 		},
 		UpdatedAt: row.UpdatedAt,
 	}, nil
@@ -51,6 +56,9 @@ func (s settingsStore) SetEmailNotifications(
 		SMTPUsername:          cfg.Username,
 		SMTPPasswordEncrypted: cfg.PasswordCiphertext,
 		SMTPTLS:               cfg.TLS,
+		OnCompleted:           cfg.Events.Completed,
+		OnNeedsAttention:      cfg.Events.NeedsAttention,
+		OnFailed:              cfg.Events.Failed,
 	}, now)
 }
 

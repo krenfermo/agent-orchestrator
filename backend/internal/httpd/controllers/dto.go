@@ -1839,6 +1839,21 @@ type EmailNotificationSettingsResponse struct {
 	// PasswordSet reports whether a password is stored. The password itself is
 	// never returned.
 	PasswordSet bool `json:"passwordSet"`
+	// Events selects which notification events may be emailed. Every one of them
+	// is subordinate to Enabled.
+	Events EmailNotificationEventsPayload `json:"events"`
+}
+
+// EmailNotificationEventsPayload selects which notification events the email
+// fan-out may send.
+//
+// Coarser than the notification types on purpose: each field covers both the
+// task and the workflow half of its event, because the distinction matters to
+// the Board and not to the person reading the mail.
+type EmailNotificationEventsPayload struct {
+	Completed      bool `json:"completed" description:"A task or workflow finished the work it was given."`
+	NeedsAttention bool `json:"needsAttention" description:"A task or workflow stopped and needs a decision."`
+	Failed         bool `json:"failed" description:"A task or workflow ended without completing."`
 }
 
 // UpdateEmailNotificationSettingsRequest changes the completion-email
@@ -1855,6 +1870,10 @@ type UpdateEmailNotificationSettingsRequest struct {
 	// and without this distinction every save from an untouched form would
 	// silently erase the credential. Send "" to clear it deliberately.
 	Password *string `json:"password,omitempty"`
+	// Events selects which notification events may be emailed. Omit it to keep
+	// the stored selection, for the same reason Password is omittable: a client
+	// that predates the setting must not silently clear all three.
+	Events *EmailNotificationEventsPayload `json:"events,omitempty"`
 }
 
 // EmailNotificationSettingsEnvelope is the { emailNotifications } response body.

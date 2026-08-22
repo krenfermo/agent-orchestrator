@@ -29,8 +29,8 @@ type AppSettings struct {
 	UpdatedAt          time.Time
 }
 
-// EmailNotificationSettings is the stored SMTP destination for completion
-// emails.
+// EmailNotificationSettings is the stored SMTP destination for notification
+// emails, plus which events may use it.
 type EmailNotificationSettings struct {
 	Enabled               bool
 	Recipient             string
@@ -39,6 +39,12 @@ type EmailNotificationSettings struct {
 	SMTPUsername          string
 	SMTPPasswordEncrypted string
 	SMTPTLS               string
+	// OnCompleted/OnNeedsAttention/OnFailed select which events may be emailed.
+	// All three are subordinate to Enabled: the master switch off means no mail
+	// regardless of what is selected here.
+	OnCompleted      bool
+	OnNeedsAttention bool
+	OnFailed         bool
 }
 
 // GetAppSettings reads the preference row.
@@ -59,6 +65,9 @@ func (s *Store) GetAppSettings(ctx context.Context) (AppSettings, error) {
 			SMTPUsername:          row.SmtpUsername,
 			SMTPPasswordEncrypted: row.SmtpPasswordEncrypted,
 			SMTPTLS:               row.SmtpTls,
+			OnCompleted:           row.EmailOnCompleted != 0,
+			OnNeedsAttention:      row.EmailOnNeedsAttention != 0,
+			OnFailed:              row.EmailOnFailed != 0,
 		},
 		UpdatedAt: row.UpdatedAt,
 	}, nil
@@ -74,18 +83,23 @@ func (s *Store) SetEmailNotificationSettings(
 ) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	enabled := int64(0)
-	if cfg.Enabled {
-		enabled = 1
+	flag := func(v bool) int64 {
+		if v {
+			return 1
+		}
+		return 0
 	}
 	if err := s.qw.SetEmailNotificationSettings(ctx, gen.SetEmailNotificationSettingsParams{
-		EmailNotificationsEnabled: enabled,
+		EmailNotificationsEnabled: flag(cfg.Enabled),
 		EmailRecipient:            cfg.Recipient,
 		SmtpHost:                  cfg.SMTPHost,
 		SmtpPort:                  int64(cfg.SMTPPort),
 		SmtpUsername:              cfg.SMTPUsername,
 		SmtpPasswordEncrypted:     cfg.SMTPPasswordEncrypted,
 		SmtpTls:                   cfg.SMTPTLS,
+		EmailOnCompleted:          flag(cfg.OnCompleted),
+		EmailOnNeedsAttention:     flag(cfg.OnNeedsAttention),
+		EmailOnFailed:             flag(cfg.OnFailed),
 		UpdatedAt:                 now,
 	}); err != nil {
 		// Deliberately does not wrap the params: a %v on them would print the

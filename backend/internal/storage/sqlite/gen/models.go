@@ -83,6 +83,9 @@ type AppSetting struct {
 	SmtpUsername              string
 	SmtpPasswordEncrypted     string
 	SmtpTls                   string
+	EmailOnCompleted          int64
+	EmailOnNeedsAttention     int64
+	EmailOnFailed             int64
 }
 
 type AuthSession struct {

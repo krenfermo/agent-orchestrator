@@ -23,6 +23,7 @@ function settings(overrides: Partial<EmailNotificationSettings> = {}): EmailNoti
 		username: "someone@gmail.com",
 		tls: "starttls",
 		passwordSet: true,
+		events: { completed: true, needsAttention: true, failed: true },
 		...overrides,
 	} as EmailNotificationSettings;
 }
@@ -117,11 +118,38 @@ describe("EmailNotificationsSettingsSection", () => {
 		const user = userEvent.setup();
 		render(<EmailNotificationsSettingsSection />);
 
-		await user.click(screen.getByRole("switch", { name: "Send completion emails" }));
+		await user.click(screen.getByRole("switch", { name: "Send email notifications" }));
 		await user.click(screen.getByRole("button", { name: "Save" }));
 
 		await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
 		expect(save.mock.calls[0][0].enabled).toBe(false);
+	});
+
+	// The user can keep the mail they want without giving up the rest, which is
+	// the whole reason the selection exists.
+	it("turns one event off without touching the other two", async () => {
+		const user = userEvent.setup();
+		render(<EmailNotificationsSettingsSection />);
+
+		await user.click(screen.getByRole("switch", { name: "Email when work finishes" }));
+		await user.click(screen.getByRole("button", { name: "Save" }));
+
+		await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+		expect(save.mock.calls[0][0].events).toEqual({ completed: false, needsAttention: true, failed: true });
+	});
+
+	// The three switches always travel together: the server reads an absent
+	// selection as "unchanged", so a partial object would mean nothing at all.
+	it("sends the whole selection when an attention or failure switch changes", async () => {
+		const user = userEvent.setup();
+		render(<EmailNotificationsSettingsSection />);
+
+		await user.click(screen.getByRole("switch", { name: "Email when work needs your attention" }));
+		await user.click(screen.getByRole("switch", { name: "Email when work fails" }));
+		await user.click(screen.getByRole("button", { name: "Save" }));
+
+		await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+		expect(save.mock.calls[0][0].events).toEqual({ completed: true, needsAttention: false, failed: false });
 	});
 
 	// Saving first means the test exercises the settings the user is looking

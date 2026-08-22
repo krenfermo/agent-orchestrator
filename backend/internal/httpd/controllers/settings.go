@@ -72,6 +72,7 @@ func (c *SettingsController) setEmailNotifications(w http.ResponseWriter, r *htt
 		Username:  req.Username,
 		TLS:       req.TLS,
 		Password:  req.Password,
+		Events:    emailEventsUpdate(req.Events),
 	})
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -80,6 +81,19 @@ func (c *SettingsController) setEmailNotifications(w http.ResponseWriter, r *htt
 	envelope.WriteJSON(w, http.StatusOK, EmailNotificationSettingsEnvelope{
 		EmailNotifications: emailSettingsResponse(cfg),
 	})
+}
+
+// emailEventsUpdate keeps the wire's "omitted means unchanged" distinction all
+// the way down to the service, rather than collapsing it into three falses.
+func emailEventsUpdate(payload *EmailNotificationEventsPayload) *settingssvc.EmailEvents {
+	if payload == nil {
+		return nil
+	}
+	return &settingssvc.EmailEvents{
+		Completed:      payload.Completed,
+		NeedsAttention: payload.NeedsAttention,
+		Failed:         payload.Failed,
+	}
 }
 
 // sendTestEmail proves the credentials work while the user is still looking at
@@ -112,6 +126,11 @@ func emailSettingsResponse(cfg settingssvc.EmailSettings) EmailNotificationSetti
 		Username:    cfg.Username,
 		TLS:         string(cfg.TLS),
 		PasswordSet: cfg.PasswordSet,
+		Events: EmailNotificationEventsPayload{
+			Completed:      cfg.Events.Completed,
+			NeedsAttention: cfg.Events.NeedsAttention,
+			Failed:         cfg.Events.Failed,
+		},
 	}
 }
 

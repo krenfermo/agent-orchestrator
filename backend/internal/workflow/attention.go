@@ -376,6 +376,12 @@ func (c *Coordinator) recordAttentionStop(ctx stdctx.Context, run domain.Workflo
 	}); err != nil && c.log != nil {
 		c.log.Warn("workflow: recording attention stop failed", "run", run.ID, "reason", reason, "err", err)
 	}
+	// Human-owned reasons only, and at most one per run and type however often
+	// this is re-entered — see notifyAttentionStop. Unconditional on the write
+	// above for the same reason that write is best-effort: the run row is what
+	// says the run stopped, the checkpoint only says why, and a person is no
+	// less needed when AO failed to write down the explanation.
+	c.notifyAttentionStop(ctx, run, reason, detail)
 }
 
 // recordAttentionStopOnce is recordAttentionStop for a stop a caller may

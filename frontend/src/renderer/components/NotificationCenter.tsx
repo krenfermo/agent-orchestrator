@@ -8,6 +8,7 @@ import {
 	CheckCheck,
 	CircleAlert,
 	CircleCheckBig,
+	CircleX,
 	GitMerge,
 	GitPullRequestArrow,
 	GitPullRequestClosed,
@@ -15,6 +16,7 @@ import {
 	LoaderCircle,
 	MessageSquareDot,
 	RotateCcw,
+	TriangleAlert,
 	Workflow,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -649,6 +651,12 @@ function notificationIcon(type: string) {
 			return CircleCheckBig;
 		case "workflow_completed":
 			return Workflow;
+		case "task_needs_attention":
+		case "workflow_needs_attention":
+			return TriangleAlert;
+		case "task_failed":
+		case "workflow_failed":
+			return CircleX;
 		default:
 			return Bell;
 	}
@@ -674,6 +682,14 @@ function notificationIconClass(type: string): string {
 		case "task_completed":
 		case "workflow_completed":
 			return "text-success";
+		// A stop is amber like needs_input — someone has to act — and a failure
+		// is red like a closed PR: an outcome, and not the one anyone wanted.
+		case "task_needs_attention":
+		case "workflow_needs_attention":
+			return "text-warning";
+		case "task_failed":
+		case "workflow_failed":
+			return "text-error";
 		default:
 			return "text-muted-foreground";
 	}

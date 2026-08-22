@@ -20,6 +20,22 @@ export function notificationVisual(t: Theme, type: string): NotificationVisual {
 			return { icon: "git-merge", color: t.blue, label: "Merged" };
 		case "pr_closed_unmerged":
 			return { icon: "x-circle", color: t.red, label: "Closed" };
+		// The run-level families. `task_completed`/`workflow_completed` were
+		// falling through to the default and rendering their raw type string as
+		// the label; naming them here alongside the two new ones keeps one switch
+		// that is right rather than one that is half right.
+		case "task_completed":
+			return { icon: "bell", color: t.green, label: "Task finished" };
+		case "workflow_completed":
+			return { icon: "bell", color: t.green, label: "Workflow finished" };
+		case "task_needs_attention":
+			return { icon: "bell", color: t.amber, label: "Task needs attention" };
+		case "workflow_needs_attention":
+			return { icon: "bell", color: t.amber, label: "Workflow needs attention" };
+		case "task_failed":
+			return { icon: "x-circle", color: t.red, label: "Task failed" };
+		case "workflow_failed":
+			return { icon: "x-circle", color: t.red, label: "Workflow failed" };
 		default:
 			return { icon: "bell", color: t.textTertiary, label: type || "Notification" };
 	}

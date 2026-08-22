@@ -21,16 +21,18 @@ func enrich(intent Intent) (domain.NotificationRecord, error) {
 	if !intent.Type.Valid() {
 		return domain.NotificationRecord{}, domain.ErrInvalidNotificationType
 	}
-	// The PR-outcome family is meaningless without the PR it is about. The two
-	// session/run-scoped families (needs-input, completion) carry no PR at all.
-	if !intent.Type.Completion() && intent.Type != domain.NotificationNeedsInput && rec.PRURL == "" {
+	// The PR-outcome family is meaningless without the PR it is about. The
+	// session/run-scoped families (needs-input, and every event-keyed family)
+	// carry no PR at all.
+	if !intent.Type.EventKeyed() && intent.Type != domain.NotificationNeedsInput && rec.PRURL == "" {
 		return domain.NotificationRecord{}, domain.ErrInvalidNotificationRecord
 	}
-	// A completion is a one-off event, and the key naming that event is what
-	// makes it un-duplicatable. Producing one without a key would quietly fall
-	// back to open-row dedupe, which lets a restart re-announce work the user
-	// already saw finish — exactly the failure this family must not have.
-	if intent.Type.Completion() && rec.DedupeKey == "" {
+	// An event-keyed notification is a one-off fact, and the key naming that
+	// event is what makes it un-duplicatable. Producing one without a key would
+	// quietly fall back to open-row dedupe, which lets a restart re-announce
+	// something the user already saw — exactly the failure these families must
+	// not have.
+	if intent.Type.EventKeyed() && rec.DedupeKey == "" {
 		return domain.NotificationRecord{}, domain.ErrInvalidNotificationRecord
 	}
 	rec.Title = titleForIntent(intent)
@@ -61,6 +63,14 @@ func titleForIntent(intent Intent) string {
 		return fmt.Sprintf("%s finished", sessionLabel(intent))
 	case domain.NotificationWorkflowCompleted:
 		return fmt.Sprintf("%s finished", workflowLabel(intent))
+	case domain.NotificationTaskNeedsAttention:
+		return fmt.Sprintf("%s needs your attention", taskLabel(intent))
+	case domain.NotificationWorkflowNeedsAttention:
+		return fmt.Sprintf("%s needs your attention", workflowLabel(intent))
+	case domain.NotificationTaskFailed:
+		return fmt.Sprintf("%s failed", taskLabel(intent))
+	case domain.NotificationWorkflowFailed:
+		return fmt.Sprintf("%s failed", workflowLabel(intent))
 	default:
 		return "Notification"
 	}
@@ -93,9 +103,27 @@ func bodyForIntent(intent Intent) string {
 		return "The task reported that it finished the work it was given."
 	case domain.NotificationWorkflowCompleted:
 		return "Every task in this workflow run completed."
+	case domain.NotificationTaskNeedsAttention, domain.NotificationWorkflowNeedsAttention:
+		return stopBody("It stopped and cannot continue without a decision from you.", intent)
+	case domain.NotificationTaskFailed, domain.NotificationWorkflowFailed:
+		return stopBody("It ended without completing the work it was given.", intent)
 	default:
 		return ""
 	}
+}
+
+// stopBody states what happened, then whatever AO can say about why. Both
+// carriers are optional: a stop AO could not name still produces a usable
+// notification rather than none at all.
+func stopBody(lead string, intent Intent) string {
+	body := lead
+	if detail := strings.TrimSpace(intent.Detail); detail != "" {
+		body += "\n\n" + detail
+	}
+	if reason := strings.TrimSpace(intent.AttentionReason); reason != "" {
+		body += "\n\nReason: " + reason
+	}
+	return body
 }
 
 func sessionLabel(intent Intent) string {
@@ -118,6 +146,39 @@ func workflowLabel(intent Intent) string {
 		return "Workflow " + v
 	}
 	return "Workflow"
+}
+
+// taskLabel names a planned task's run the way the Board does: the first line
+// of its objective, which is the planner's task title verbatim — a child run's
+// objective is composed as title, blank line, description, and then a recap of
+// each completed dependency task. Using the whole thing would put several
+// paragraphs in a notification title and an email subject.
+func taskLabel(intent Intent) string {
+	if line := firstLine(intent.WorkflowObjective); line != "" {
+		return line
+	}
+	if v := strings.TrimSpace(intent.WorkflowRunID); v != "" {
+		return "Task " + v
+	}
+	return "Task"
+}
+
+// maxLabelRunes keeps a title readable in a toast, a notification row, and a
+// mail subject line. Planner titles are short; a pasted objective is not.
+const maxLabelRunes = 120
+
+func firstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if runes := []rune(trimmed); len(runes) > maxLabelRunes {
+			return strings.TrimSpace(string(runes[:maxLabelRunes])) + "…"
+		}
+		return trimmed
+	}
+	return ""
 }
 
 func prLabel(intent Intent) string {

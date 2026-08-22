@@ -6993,6 +6993,22 @@ components:
       - resolverFailed
       - waitingForCapacity
       type: object
+    ControllersEmailNotificationEventsPayload:
+      properties:
+        completed:
+          description: A task or workflow finished the work it was given.
+          type: boolean
+        failed:
+          description: A task or workflow ended without completing.
+          type: boolean
+        needsAttention:
+          description: A task or workflow stopped and needs a decision.
+          type: boolean
+      required:
+      - completed
+      - needsAttention
+      - failed
+      type: object
     ControllersEmailNotificationSettingsEnvelope:
       properties:
         emailNotifications:
@@ -7004,6 +7020,8 @@ components:
       properties:
         enabled:
           type: boolean
+        events:
+          $ref: '#/components/schemas/ControllersEmailNotificationEventsPayload'
         host:
           type: string
         passwordSet:
@@ -7030,6 +7048,7 @@ components:
       - username
       - tls
       - passwordSet
+      - events
       type: object
     ControllersExecutionPolicyResponse:
       properties:
@@ -7829,6 +7848,8 @@ components:
       properties:
         enabled:
           type: boolean
+        events:
+          $ref: '#/components/schemas/ControllersEmailNotificationEventsPayload'
         host:
           type: string
         password:

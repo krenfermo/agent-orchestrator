@@ -26,13 +26,29 @@ const (
 	// WorkflowRunCompleted state. Workflow terminal states have no outgoing
 	// transitions, so that state change happens exactly once per run.
 	NotificationWorkflowCompleted NotificationType = "workflow_completed"
+	// NotificationTaskNeedsAttention means a planned task's run stopped on
+	// something only a person can resolve. It is raised from the same durable
+	// record that makes the stop explainable in the UI (the attention
+	// checkpoint), never from a transient observation.
+	NotificationTaskNeedsAttention NotificationType = "task_needs_attention"
+	// NotificationWorkflowNeedsAttention is NotificationTaskNeedsAttention for a
+	// workflow run that is not a planned task's child.
+	NotificationWorkflowNeedsAttention NotificationType = "workflow_needs_attention"
+	// NotificationTaskFailed means a planned task's run reached the terminal
+	// WorkflowRunFailed state: it ended, and it did not do the work.
+	NotificationTaskFailed NotificationType = "task_failed"
+	// NotificationWorkflowFailed is NotificationTaskFailed for a workflow run
+	// that is not a planned task's child.
+	NotificationWorkflowFailed NotificationType = "workflow_failed"
 )
 
 // Valid reports whether t is one of the v1 notification kinds.
 func (t NotificationType) Valid() bool {
 	switch t {
 	case NotificationNeedsInput, NotificationReadyToMerge, NotificationPRMerged, NotificationPRClosedUnmerged,
-		NotificationTaskCompleted, NotificationWorkflowCompleted:
+		NotificationTaskCompleted, NotificationWorkflowCompleted,
+		NotificationTaskNeedsAttention, NotificationWorkflowNeedsAttention,
+		NotificationTaskFailed, NotificationWorkflowFailed:
 		return true
 	default:
 		return false
@@ -48,9 +64,65 @@ func (t NotificationType) NeedsResolution() bool {
 }
 
 // Completion reports whether t announces that a unit of work finished
-// successfully — the family that opts in to the optional email fan-out.
+// successfully.
 func (t NotificationType) Completion() bool {
 	return t == NotificationTaskCompleted || t == NotificationWorkflowCompleted
+}
+
+// Attention reports whether t announces that a unit of work stopped on
+// something only a person can resolve.
+func (t NotificationType) Attention() bool {
+	return t == NotificationTaskNeedsAttention || t == NotificationWorkflowNeedsAttention
+}
+
+// Failure reports whether t announces that a unit of work ended without doing
+// the work.
+func (t NotificationType) Failure() bool {
+	return t == NotificationTaskFailed || t == NotificationWorkflowFailed
+}
+
+// EventKeyed reports whether t names a one-off EVENT rather than a condition
+// that comes and goes.
+//
+// The three event families all share the same two consequences, which is why
+// they share one predicate: each row MUST carry a DedupeKey (enrich rejects one
+// that does not), and that key is deduped permanently rather than only while
+// the row is open. Without it a daemon restart, a retry, or a second observer
+// re-announces something the user already saw — a finished run, a stop they
+// already read, a failure they already handled.
+func (t NotificationType) EventKeyed() bool {
+	return t.Completion() || t.Attention() || t.Failure()
+}
+
+// EmailEvent is the granularity at which a user chooses what AO may email
+// about. It is deliberately coarser than NotificationType: nobody wants to
+// answer "tasks yes, workflows no" three times, and the two halves of each pair
+// always mean the same thing to the person reading the mail.
+type EmailEvent string
+
+const (
+	// EmailEventCompleted covers task_completed and workflow_completed.
+	EmailEventCompleted EmailEvent = "completed"
+	// EmailEventNeedsAttention covers task_needs_attention and
+	// workflow_needs_attention.
+	EmailEventNeedsAttention EmailEvent = "needs_attention"
+	// EmailEventFailed covers task_failed and workflow_failed.
+	EmailEventFailed EmailEvent = "failed"
+)
+
+// EmailEventOf reports which email event a notification type belongs to, and
+// false for the families that have no email fan-out at all.
+func (t NotificationType) EmailEventOf() (EmailEvent, bool) {
+	switch {
+	case t.Completion():
+		return EmailEventCompleted, true
+	case t.Attention():
+		return EmailEventNeedsAttention, true
+	case t.Failure():
+		return EmailEventFailed, true
+	default:
+		return "", false
+	}
 }
 
 // NotificationStatus is the seen state for a stored notification. The stored

@@ -26,6 +26,7 @@ type EmailSettings struct {
 	Username    string
 	TLS         mailer.TLSMode
 	PasswordSet bool
+	Events      EmailEvents
 }
 
 // EmailUpdate is one requested change to the completion-email configuration.
@@ -42,6 +43,11 @@ type EmailUpdate struct {
 	// user did not retype would silently erase the credential. A non-nil
 	// pointer to "" is an explicit clear.
 	Password *string
+	// Events selects which notification events may be emailed. Nil means "leave
+	// the stored selection alone", for the same reason Password is a pointer: a
+	// client that predates the setting must not silently clear all three and
+	// switch off the completion mail the user was already receiving.
+	Events *EmailEvents
 }
 
 // DefaultSMTPPort is the STARTTLS submission port, and what Gmail's app
@@ -159,6 +165,10 @@ func (s *Service) resolveEmailUpdate(current EmailConfig, update EmailUpdate) (E
 		Username:           strings.TrimSpace(update.Username),
 		PasswordCiphertext: current.PasswordCiphertext,
 		TLS:                string(tls),
+		Events:             current.Events,
+	}
+	if update.Events != nil {
+		next.Events = *update.Events
 	}
 	if update.Password != nil {
 		if *update.Password == "" {
@@ -214,5 +224,6 @@ func emailSettingsFrom(cfg EmailConfig) EmailSettings {
 		Username:    cfg.Username,
 		TLS:         tls,
 		PasswordSet: cfg.PasswordCiphertext != "",
+		Events:      cfg.Events,
 	}
 }

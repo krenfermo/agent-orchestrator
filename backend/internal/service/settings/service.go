@@ -40,6 +40,33 @@ type EmailConfig struct {
 	Username           string
 	PasswordCiphertext string
 	TLS                string
+	Events             EmailEvents
+}
+
+// EmailEvents selects which notification events the fan-out may email about.
+//
+// Every field is subordinate to EmailConfig.Enabled: the master switch off
+// means no mail at all, whatever is selected here. Turning individual events
+// off is how a user keeps the one they care about (a run that stopped and needs
+// them) without the ones they do not (every task that finished cleanly).
+type EmailEvents struct {
+	Completed      bool
+	NeedsAttention bool
+	Failed         bool
+}
+
+// Allows reports whether this selection covers the given event.
+func (e EmailEvents) Allows(event domain.EmailEvent) bool {
+	switch event {
+	case domain.EmailEventCompleted:
+		return e.Completed
+	case domain.EmailEventNeedsAttention:
+		return e.NeedsAttention
+	case domain.EmailEventFailed:
+		return e.Failed
+	default:
+		return false
+	}
 }
 
 // SecretBox seals and opens the one credential AO has to be able to read back.
