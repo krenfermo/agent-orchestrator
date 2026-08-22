@@ -66,24 +66,39 @@ func (f *fakeReviewRuns) InsertReviewRun(_ context.Context, run domain.ReviewRun
 		return domain.ErrDuplicateReviewRun
 	}
 	key := naturalKey(run.SessionID, run.PRURL, run.TargetSHA, run.Harness)
-	if _, exists := f.byNaturalKey(key); exists {
+	// Mirrors migration 0014's partial unique index: rows closed out as
+	// "failed" are durable diagnostics, not idempotency winners, so a retry of
+	// the same target after a failed reviewer launch can insert a fresh run.
+	if _, exists := f.byNaturalKey(key, true); exists {
 		return domain.ErrDuplicateReviewRun
 	}
 	f.runs[run.ID] = run
 	return nil
 }
 
-func (f *fakeReviewRuns) byNaturalKey(key string) (domain.ReviewRun, bool) {
+// byNaturalKey returns the newest run matching the natural key, mirroring the
+// real query's `ORDER BY created_at DESC LIMIT 1`. excludeFailed mirrors the
+// unique index's `status != 'failed'` predicate (insert dedupe only).
+func (f *fakeReviewRuns) byNaturalKey(key string, excludeFailed bool) (domain.ReviewRun, bool) {
+	var newest domain.ReviewRun
+	found := false
 	for _, r := range f.runs {
-		if naturalKey(r.SessionID, r.PRURL, r.TargetSHA, r.Harness) == key {
-			return r, true
+		if naturalKey(r.SessionID, r.PRURL, r.TargetSHA, r.Harness) != key {
+			continue
+		}
+		if excludeFailed && r.Status == domain.ReviewRunFailed {
+			continue
+		}
+		if !found || r.CreatedAt.After(newest.CreatedAt) {
+			newest = r
+			found = true
 		}
 	}
-	return domain.ReviewRun{}, false
+	return newest, found
 }
 
 func (f *fakeReviewRuns) GetReviewRunBySessionPRSHAAndHarness(_ context.Context, id domain.SessionID, prURL, targetSHA string, harness domain.ReviewerHarness) (domain.ReviewRun, bool, error) {
-	r, ok := f.byNaturalKey(naturalKey(id, prURL, targetSHA, harness))
+	r, ok := f.byNaturalKey(naturalKey(id, prURL, targetSHA, harness), false)
 	return r, ok, nil
 }
 
@@ -104,7 +119,7 @@ func (f *fakeReviewRuns) ListReviewRunsBySession(_ context.Context, id domain.Se
 
 // CancelRunningReviewRunsBySessionAndHarness backs Checkpoint 8P-D.3's
 // reviewer-capacity stall recovery, mirroring the real store's CAS guard
-// (status='running' AND verdict='').
+// (status='running' AND verdict=”).
 func (f *fakeReviewRuns) CancelRunningReviewRunsBySessionAndHarness(_ context.Context, id domain.SessionID, harness domain.ReviewerHarness, body string) (int64, error) {
 	var n int64
 	for rid, r := range f.runs {
@@ -116,6 +131,23 @@ func (f *fakeReviewRuns) CancelRunningReviewRunsBySessionAndHarness(_ context.Co
 		}
 	}
 	return n, nil
+}
+
+// UpdateReviewRunResult mirrors the real store's CAS guard (status='running'):
+// it is how review_launch_recovery.go closes out a review_run whose reviewer
+// never launched, and it must be a no-op against anything already terminal.
+func (f *fakeReviewRuns) UpdateReviewRunResult(_ context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID string, autoInjectReview bool) (bool, error) {
+	r, ok := f.runs[id]
+	if !ok || r.Status != domain.ReviewRunRunning {
+		return false, nil
+	}
+	r.Status = status
+	r.Verdict = verdict
+	r.Body = body
+	r.GithubReviewID = githubReviewID
+	r.AutoInjectReview = autoInjectReview
+	f.runs[id] = r
+	return true, nil
 }
 
 // fakeMessageSender is a hand-rolled fake for workflowcore.MessageSender (no

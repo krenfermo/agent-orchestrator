@@ -105,7 +105,11 @@ func (c *Coordinator) advanceReviewFixCycle(ctx stdctx.Context, run domain.Workf
 		reviewStep.State == domain.WorkflowStepWaiting ||
 		(includeCycle1Unblock && reviewStep.State == domain.WorkflowStepPending)
 	if !run.State.Terminal() && canDispatchReview {
-		updated, err := c.dispatchReviewStep(ctx, run, *workStep, *fixStep, *reviewStep)
+		// includeCycle1Unblock is exactly "this call is the explicit,
+		// human/API-driven Continue" (only ContinueRun passes true), which is
+		// also the licence dispatchReviewStep needs to re-open a review cycle
+		// whose launch stopped permanently — see its humanResume parameter.
+		updated, err := c.dispatchReviewStep(ctx, run, *workStep, *fixStep, *reviewStep, includeCycle1Unblock)
 		if err != nil {
 			return run, err
 		}

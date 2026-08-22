@@ -74,6 +74,16 @@ type ReviewRuns interface {
 	// clobber a verdict that actually landed in the same instant. Same
 	// store method internal/review already exposes.
 	CancelRunningReviewRunsBySessionAndHarness(ctx stdctx.Context, id domain.SessionID, harness domain.ReviewerHarness, body string) (int64, error)
+
+	// UpdateReviewRunResult closes out ONE review run by id, CAS-guarded in SQL
+	// on status='running' (review.sql). review_launch_recovery.go uses it for
+	// the one case that has no other honest ending: a review_run inserted for a
+	// reviewer whose launch then failed before any reviewer session existed.
+	// Same store method internal/review's own submit path already uses; the
+	// status written here is "failed", which migration 0014 deliberately
+	// excludes from the (session_id, target_sha) unique index so a retry of the
+	// same target can insert a fresh run instead of adopting the dead one.
+	UpdateReviewRunResult(ctx stdctx.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID string, autoInjectReview bool) (bool, error)
 }
 
 // ReviewerLaunchRequest is workflow's request to actually start a reviewer
@@ -165,9 +175,20 @@ func (c *Coordinator) completedReviewCycles(ctx stdctx.Context, sessionID domain
 	}
 	count := 0
 	for _, r := range runs {
-		if r.Harness == harness {
-			count++
+		if r.Harness != harness {
+			continue
 		}
+		// A run closed out as "failed" is a reviewer that never produced
+		// anything — today, only review_launch_recovery.go writes that status,
+		// for a launch that failed before any reviewer session existed. Counting
+		// it as a completed cycle would make every retry of the SAME cycle
+		// compute a higher cycle number, hence a different outbox idempotency
+		// key, hence a second outbox entry dispatching the same review. A failed
+		// launch is not a review cycle; it is an attempt at one.
+		if r.Status == domain.ReviewRunFailed {
+			continue
+		}
+		count++
 	}
 	return count, nil
 }
@@ -197,7 +218,12 @@ func reviewPayloadJSON(workStepID, reviewStepID, workerSessionID, targetSHA stri
 // cycle-specific (reviewStepOutboxIdempotencyKey), so a second call for an
 // already-dispatched cycle always resolves through the
 // dispatched/acknowledged branch below, never re-enters "pending".
-func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.WorkflowRun, workStep, fixStep, reviewStep domain.WorkflowStep) (domain.WorkflowStep, error) {
+// humanResume marks the one call site a person (or the API's Continue) drives
+// explicitly, as opposed to a poll or a boot reconcile. It is the licence to
+// re-open a review cycle whose launch stopped permanently: AO never retries
+// those by itself (an auth failure retried on every 2s poll is a loop, not a
+// recovery), but a human who has just fixed the cause is entitled to one.
+func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.WorkflowRun, workStep, fixStep, reviewStep domain.WorkflowStep, humanResume bool) (domain.WorkflowStep, error) {
 	if run.State.Terminal() || reviewStep.State.Terminal() {
 		return reviewStep, nil
 	}
@@ -349,6 +375,13 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		firstCycleTarget = true
 
 	case domain.WorkflowStepWaiting:
+		// A launch failure AO has already declared permanent (or out of
+		// automatic budget) owns this step until a person acts: without this
+		// guard the fix-cycle branch below would re-attempt the same doomed
+		// launch on every 2s GetRun poll.
+		if rec, ok := c.latestReviewLaunchRecord(ctx, run.ID, reviewStep.ID); ok && !rec.dueForRetry(c.clock()) && !humanResume {
+			return reviewStep, nil
+		}
 		if fixStep.State == domain.WorkflowStepWaiting {
 			// Cycle N+1 (Checkpoint 8D): only eligible once the fix step has
 			// delivered AND observed a genuinely new workspace fingerprint
@@ -378,6 +411,36 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 			}
 			targetSHA = fixCP.FingerprintAfter
 			baseSHA = fixCP.FingerprintBefore
+		} else if rec, isLaunchRetry := c.latestReviewLaunchRecord(ctx, run.ID, reviewStep.ID); isLaunchRetry {
+			// A reviewer launch failed before any reviewer session existed and
+			// rested this step at "waiting" (review_launch_recovery.go). No
+			// workspace change happened and no verdict exists, so neither the
+			// fix-cycle gate above nor the cancelled-run gate below can see it —
+			// the durable launch-failure record is the only fact that describes
+			// this resting state, and it survives every intermediate routing/
+			// target checkpoint a retry pass writes.
+			//
+			// A failure AO classified as retryable resumes automatically here
+			// (the wake it scheduled lands in exactly this branch). One it
+			// classified as permanent, or one that used up its automatic budget,
+			// resumes only when a person asks for it.
+			if !rec.dueForRetry(c.clock()) && !humanResume {
+				return reviewStep, nil
+			}
+			// Re-review the SAME target the failed attempt was dispatched
+			// against — a launch failure changed nothing about the workspace,
+			// and a drifting target would break adoption of an in-flight
+			// reviewer (see reviewTargetFingerprint).
+			targetSHA = rec.TargetSHA
+			if targetSHA == "" {
+				targetSHA = workCP.FingerprintAfter
+			}
+			if targetSHA == "" {
+				targetSHA = workCP.HeadSHA
+			}
+			if targetSHA == "" {
+				targetSHA = baseSHA
+			}
 		} else {
 			// Checkpoint 8P-D.3: a review step can also rest at "waiting"
 			// after handleReviewerCapacityStall closes out a reviewer
@@ -486,13 +549,21 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 
 	switch entry.Status {
 	case domain.WorkflowOutboxPending:
-		return c.dispatchReviewFromPending(ctx, run, reviewStep, entry, sessionID, branch, worktreePath, baseSHA, targetSHA, harness)
+		return c.dispatchReviewFromPending(ctx, run, reviewStep, entry, sessionID, branch, worktreePath, baseSHA, targetSHA, harness, cycleNumber)
 	case domain.WorkflowOutboxDispatched, domain.WorkflowOutboxAcknowledged:
 		// Dispatched: a previous attempt got at least as far as "about to
 		// launch," but we don't durably know if the launch itself completed.
 		return c.adoptReviewOrMarkAmbiguous(ctx, run, reviewStep, entry, sessionID, targetSHA, harness)
 	case domain.WorkflowOutboxFailed:
-		// Already durably recorded as failed; no auto-retry.
+		// Durably failed. Still no auto-retry — but a human-driven Continue on a
+		// run stopped by a reviewer-launch failure re-opens this exact entry
+		// (same idempotency key, no second row) rather than leaving the person
+		// with a button that does nothing, which is what the original incident
+		// left behind.
+		if humanResume && c.resumeReviewLaunchAfterFailure(ctx, run, reviewStep, entry) {
+			entry.Status = domain.WorkflowOutboxPending
+			return c.dispatchReviewFromPending(ctx, run, reviewStep, entry, sessionID, branch, worktreePath, baseSHA, targetSHA, harness, cycleNumber)
+		}
 		return reviewStep, nil
 	default:
 		return reviewStep, nil
@@ -609,6 +680,7 @@ func (c *Coordinator) dispatchReviewFromPending(
 	entry domain.WorkflowOutboxEntry,
 	workerSessionID, branch, worktreePath, baseSHA, targetSHA string,
 	harness domain.ReviewerHarness,
+	cycleNumber int,
 ) (domain.WorkflowStep, error) {
 	now := c.clock()
 	// Checkpoint 8P-E.13A.2: same fix as dispatchFromPending (dispatch.go) for
@@ -636,8 +708,9 @@ func (c *Coordinator) dispatchReviewFromPending(
 	// silently no-op against the DB row (already "dispatched"), leaving the
 	// outbox permanently stuck instead of advancing to acknowledged/failed.
 	entry.Status = domain.WorkflowOutboxDispatched
-	// ready->running (cycle 1, after the pending->ready unblock above) and
-	// waiting->running (cycle N+1, Checkpoint 8D) are both valid transitions.
+	// ready->running (cycle 1, after the pending->ready unblock above),
+	// waiting->running (cycle N+1, Checkpoint 8D) and waiting->running (a
+	// launch-failure retry resting at waiting) are all valid transitions.
 	if reviewStep.State == domain.WorkflowStepReady || reviewStep.State == domain.WorkflowStepWaiting {
 		from := reviewStep.State
 		if _, err := c.store.UpdateWorkflowStepState(ctx, reviewStep.ID, from, domain.WorkflowStepRunning, now); err != nil {
@@ -649,7 +722,7 @@ func (c *Coordinator) dispatchReviewFromPending(
 	sessionID := domain.SessionID(workerSessionID)
 	reviewRow, err := c.ensureReviewRow(ctx, sessionID, domain.ProjectID(run.ProjectID), harness)
 	if err != nil {
-		return c.recordReviewDispatchFailure(ctx, run, reviewStep, entry, domain.WorkflowErrorReviewerLaunchFailed, err)
+		return c.recordReviewLaunchFailure(ctx, run, reviewStep, entry, harness, "", targetSHA, cycleNumber, reviewLaunchStageReviewRow, err)
 	}
 
 	reviewRunID := c.newID()
@@ -685,13 +758,18 @@ func (c *Coordinator) dispatchReviewFromPending(
 		if errors.Is(err, domain.ErrDuplicateReviewRun) {
 			existing, ok, getErr := c.reviewRuns.GetReviewRunBySessionPRSHAAndHarness(ctx, sessionID, "", targetSHA, harness)
 			if getErr != nil {
-				return c.recordReviewDispatchFailure(ctx, run, reviewStep, entry, domain.WorkflowErrorReviewerLaunchFailed, getErr)
+				return c.recordReviewLaunchFailure(ctx, run, reviewStep, entry, harness, "", targetSHA, cycleNumber, reviewLaunchStageReviewRun, getErr)
 			}
-			if ok {
+			// A duplicate that is itself a dead launch attempt (failed, no
+			// verdict) is not evidence of a running reviewer and must never be
+			// adopted as one. In production migration 0014 already excludes
+			// failed rows from the unique index, so this is belt-and-braces
+			// against any other store that does not.
+			if ok && existing.Status != domain.ReviewRunFailed {
 				return c.recordReviewDispatchSuccess(ctx, run, reviewStep, entry, existing, "")
 			}
 		}
-		return c.recordReviewDispatchFailure(ctx, run, reviewStep, entry, domain.WorkflowErrorReviewerLaunchFailed, err)
+		return c.recordReviewLaunchFailure(ctx, run, reviewStep, entry, harness, "", targetSHA, cycleNumber, reviewLaunchStageReviewRun, err)
 	}
 
 	// The reviewer is told exactly what this task owns and what it does not.
@@ -713,12 +791,15 @@ func (c *Coordinator) dispatchReviewFromPending(
 		ReviewRunID:           reviewRunID,
 	})
 
+	// Every failure from here on has already inserted a review_run: reviewRunID
+	// is handed to the recorder so that partial durable state is closed out
+	// rather than left "running" with no reviewer behind it.
 	if err := c.reviewerLauncher.Preflight(ctx, harness, worktreePath); err != nil {
-		return c.recordReviewDispatchFailure(ctx, run, reviewStep, entry, domain.WorkflowErrorReviewerLaunchFailed, fmt.Errorf("reviewer preflight: %w", err))
+		return c.recordReviewLaunchFailure(ctx, run, reviewStep, entry, harness, reviewRunID, targetSHA, cycleNumber, reviewLaunchStagePreflight, fmt.Errorf("reviewer preflight: %w", err))
 	}
 	runtimeEnv, _, _, err := c.resolveRuntimeEnv(ctx, run.ID, domain.AgentHarness(harness))
 	if err != nil {
-		return c.recordReviewDispatchFailure(ctx, run, reviewStep, entry, classifyProviderFailure(err).Class, err)
+		return c.recordReviewLaunchFailure(ctx, run, reviewStep, entry, harness, reviewRunID, targetSHA, cycleNumber, reviewLaunchStageRuntimeEnv, err)
 	}
 	launch, err := c.reviewerLauncher.Launch(ctx, ReviewerLaunchRequest{
 		Harness:         harness,
@@ -731,7 +812,7 @@ func (c *Coordinator) dispatchReviewFromPending(
 		RuntimeEnv:      runtimeEnv,
 	})
 	if err != nil {
-		return c.recordReviewDispatchFailure(ctx, run, reviewStep, entry, domain.WorkflowErrorReviewerLaunchFailed, fmt.Errorf("launch reviewer: %w", err))
+		return c.recordReviewLaunchFailure(ctx, run, reviewStep, entry, harness, reviewRunID, targetSHA, cycleNumber, reviewLaunchStageLaunch, fmt.Errorf("launch reviewer: %w", err))
 	}
 
 	return c.recordReviewDispatchSuccess(ctx, run, reviewStep, entry, reviewRun, launch.HandleID)
@@ -780,8 +861,16 @@ func (c *Coordinator) adoptReviewOrMarkAmbiguous(ctx stdctx.Context, run domain.
 	if err != nil {
 		return reviewStep, err
 	}
-	if ok {
+	// A run closed out as "failed" is the durable record of a reviewer that
+	// never launched (review_launch_recovery.go), so it is not evidence that
+	// this dispatched command succeeded — adopting it would report a reviewer
+	// nobody started ("nunca asumir éxito").
+	if ok && existing.Status != domain.ReviewRunFailed {
 		return c.recordReviewDispatchSuccess(ctx, run, reviewStep, entry, existing, "")
+	}
+	if ok {
+		return c.markReviewAmbiguous(ctx, run, reviewStep,
+			"ambiguous_review_state: the only review run for this dispatched command failed to launch")
 	}
 	return c.markReviewAmbiguous(ctx, run, reviewStep, "ambiguous_review_state: no review run found for dispatched command")
 }
@@ -822,6 +911,11 @@ func (c *Coordinator) markReviewAmbiguous(ctx stdctx.Context, run domain.Workflo
 func (c *Coordinator) recordReviewDispatchSuccess(ctx stdctx.Context, run domain.WorkflowRun, reviewStep domain.WorkflowStep, entry domain.WorkflowOutboxEntry, reviewRun domain.ReviewRun, reviewerHandleID string) (domain.WorkflowStep, error) {
 	now := c.clock()
 
+	// A reviewer is genuinely attached now, so any stop this run was parked on
+	// because a previous launch failed is stale by proof, not by assumption.
+	// Only reviewer-launch reasons are cleared (review_launch_recovery.go).
+	run = c.clearReviewLaunchStop(ctx, run)
+
 	if _, err := c.store.SetWorkflowStepReviewRun(ctx, reviewStep.ID, reviewRun.ID, now); err != nil {
 		return reviewStep, err
 	}
@@ -856,24 +950,10 @@ func (c *Coordinator) recordReviewDispatchSuccess(ctx stdctx.Context, run domain
 	return reviewStep, nil
 }
 
-func (c *Coordinator) recordReviewDispatchFailure(ctx stdctx.Context, run domain.WorkflowRun, reviewStep domain.WorkflowStep, entry domain.WorkflowOutboxEntry, errClass domain.WorkflowErrorClass, cause error) (domain.WorkflowStep, error) {
-	now := c.clock()
-	if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, entry.Status, domain.WorkflowOutboxFailed, now, string(errClass)); err != nil {
-		return reviewStep, err
-	}
-	if reviewStep.State == domain.WorkflowStepRunning {
-		if _, err := c.store.UpdateWorkflowStepState(ctx, reviewStep.ID, domain.WorkflowStepRunning, domain.WorkflowStepFailed, now); err != nil {
-			return reviewStep, err
-		}
-		reviewStep.State = domain.WorkflowStepFailed
-	}
-	if run.State == domain.WorkflowRunRunning || run.State == domain.WorkflowRunWaiting {
-		if _, err := c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, now); err != nil {
-			return reviewStep, err
-		}
-	}
-	if c.log != nil {
-		c.log.Warn("workflow: review step dispatch failed", "step", reviewStep.ID, "err", cause)
-	}
-	return reviewStep, nil
-}
+// recordReviewDispatchFailure used to be the single ending for every reviewer
+// launch failure: outbox failed with the flat "reviewer_launch_failed" class,
+// review step -> failed (terminal, unresumable), run -> needs_attention, the
+// real error only in a log line, and any review_run this attempt had already
+// inserted left at "running" forever. Every one of those is a bug the
+// wf-6d290889 incident hit at once. recordReviewLaunchFailure
+// (review_launch_recovery.go) replaces it for all launch-stage failures.

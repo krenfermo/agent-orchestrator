@@ -64,27 +64,44 @@ const (
 	// itself, within a bounded budget; nobody has a decision to make about
 	// "command too long".
 	ReasonPromptTransportRetry = fixTransportRetryPhase
+	// ReasonReviewerLaunchRetry is a reviewer launch that failed transiently
+	// before any reviewer session existed (review_launch_recovery.go). AO closed
+	// out the partial review_run, scheduled a durable wake and will launch the
+	// reviewer again itself, within a bounded budget — a temporary spawn or
+	// runtime failure is not a decision anyone has to make.
+	ReasonReviewerLaunchRetry = "reviewer_launch_retry"
 
 	// Human decisions: AO has genuinely stopped and a person must act.
-	ReasonFixBudgetExhausted      = "fix_budget_exhausted"
-	ReasonVerifyBudgetExhausted   = "verify_budget_exhausted"
-	ReasonVerifyUnrepairable      = "verify_unrepairable"
-	ReasonReviewStateAmbiguous    = "review_state_ambiguous"
-	ReasonReviewerLaunchFailed    = "reviewer_launch_failed"
-	ReasonFixWorkerBlocked        = "fix_worker_blocked"
-	ReasonFixNoVerifiableChange   = "fix_no_verifiable_change"
-	ReasonPlannerExhausted        = "planner_retries_exhausted"
-	ReasonPlannerStartFailed      = "planner_start_failed"
-	ReasonPlannerPolicyViolation  = "planner_policy_violation"
-	ReasonPlannerAmbiguous        = "planner_ambiguous"
-	ReasonChildNeedsAttention     = "child_needs_attention"
-	ReasonChildFailed             = "child_failed"
-	ReasonRecoveryInterrupted     = "recovery_interrupted"
-	ReasonWorkerDispatchAmbiguous = "worker_dispatch_ambiguous"
-	ReasonWorkerBlocked           = "worker_blocked"
-	ReasonDispatchFailed          = "dispatch_failed"
-	ReasonCapacityRetryExhausted  = string(domain.WorkflowErrorCapacityExhausted)
-	ReasonQuestionHumanRequired   = "question_human_required"
+	ReasonFixBudgetExhausted    = "fix_budget_exhausted"
+	ReasonVerifyBudgetExhausted = "verify_budget_exhausted"
+	ReasonVerifyUnrepairable    = "verify_unrepairable"
+	ReasonReviewStateAmbiguous  = "review_state_ambiguous"
+	ReasonReviewerLaunchFailed  = "reviewer_launch_failed"
+	// The four reasons below are review_launch_recovery.go's precise
+	// replacements for the flat ReasonReviewerLaunchFailed: a reviewer that
+	// could not start because its credentials were rejected, because its CLI is
+	// not installed, because the configuration/policy forbids the launch, and
+	// because every automatic retry of an otherwise transient failure ran out.
+	// Each names a different thing for a person to do, which is the entire
+	// point of the vocabulary in this file.
+	ReasonReviewerAuthInvalid            = "reviewer_auth_invalid"
+	ReasonReviewerBinaryMissing          = "reviewer_binary_missing"
+	ReasonReviewerLaunchUnsupported      = "reviewer_launch_unsupported"
+	ReasonReviewerLaunchRetriesExhausted = "reviewer_launch_retries_exhausted"
+	ReasonFixWorkerBlocked               = "fix_worker_blocked"
+	ReasonFixNoVerifiableChange          = "fix_no_verifiable_change"
+	ReasonPlannerExhausted               = "planner_retries_exhausted"
+	ReasonPlannerStartFailed             = "planner_start_failed"
+	ReasonPlannerPolicyViolation         = "planner_policy_violation"
+	ReasonPlannerAmbiguous               = "planner_ambiguous"
+	ReasonChildNeedsAttention            = "child_needs_attention"
+	ReasonChildFailed                    = "child_failed"
+	ReasonRecoveryInterrupted            = "recovery_interrupted"
+	ReasonWorkerDispatchAmbiguous        = "worker_dispatch_ambiguous"
+	ReasonWorkerBlocked                  = "worker_blocked"
+	ReasonDispatchFailed                 = "dispatch_failed"
+	ReasonCapacityRetryExhausted         = string(domain.WorkflowErrorCapacityExhausted)
+	ReasonQuestionHumanRequired          = "question_human_required"
 
 	// unclassifiedStop is the honest label for a run durably parked in
 	// needs_attention with no canonical reason recorded anywhere — an
@@ -105,6 +122,7 @@ var attentionDispositions = map[string]AttentionDisposition{
 	ReasonBranchQueued:          {SelfRemediable: true, Phase: PhaseBlocked},
 	ReasonVerifyFixReentry:      {SelfRemediable: true, Phase: PhaseFixing},
 	ReasonPromptTransportRetry:  {SelfRemediable: true, Phase: PhaseRetrying},
+	ReasonReviewerLaunchRetry:   {SelfRemediable: true, Phase: PhaseRetrying},
 
 	// ---- Human decisions ---------------------------------------------------
 	"dirty_worktree": {
@@ -145,6 +163,18 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonReviewerLaunchFailed: {
 		HumanAction: "The reviewer could not be launched. Check the reviewer provider's auth and installation, then continue this run.",
+	},
+	ReasonReviewerAuthInvalid: {
+		HumanAction: "The reviewer provider rejected its credentials. Reconnect that provider's profile, then continue this run.",
+	},
+	ReasonReviewerBinaryMissing: {
+		HumanAction: "The reviewer's CLI is not installed or not on PATH. Install it, then continue this run.",
+	},
+	ReasonReviewerLaunchUnsupported: {
+		HumanAction: "The reviewer's configuration is not supported for this launch. Fix the reviewer configuration or the execution policy, then continue this run.",
+	},
+	ReasonReviewerLaunchRetriesExhausted: {
+		HumanAction: "The reviewer failed to launch on every automatic retry. Check the reviewer provider's process/runtime, then continue this run.",
 	},
 	ReasonFixWorkerBlocked: {
 		HumanAction: "The fix worker is waiting on input inside its own session. Answer it in the session, then continue this run.",

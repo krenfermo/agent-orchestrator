@@ -20,14 +20,18 @@ type fakeWakeScheduler struct {
 	// wokenNow records the runs told to resume immediately, which is how the
 	// branch-queue tests assert a released branch actually wakes its queue.
 	wokenNow []string
+	// reasons records every scheduled wake's reason, so a test can assert that
+	// a stop AO says it will retry actually scheduled the retry.
+	reasons []wake.Reason
 }
 
 func newFakeWakeScheduler() *fakeWakeScheduler {
 	return &fakeWakeScheduler{scheduled: map[string]bool{}}
 }
 
-func (f *fakeWakeScheduler) Schedule(_ context.Context, runID domain.WorkflowRunID, _ *domain.WorkflowStepID, _ wake.Reason, _ *time.Time) (wake.Schedule, error) {
+func (f *fakeWakeScheduler) Schedule(_ context.Context, runID domain.WorkflowRunID, _ *domain.WorkflowStepID, reason wake.Reason, _ *time.Time) (wake.Schedule, error) {
 	f.scheduled[string(runID)] = true
+	f.reasons = append(f.reasons, reason)
 	return wake.Schedule{ID: "wfwk-fake", WorkflowRunID: runID}, nil
 }
 
