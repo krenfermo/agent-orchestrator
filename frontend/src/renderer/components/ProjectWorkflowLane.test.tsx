@@ -170,7 +170,10 @@ describe("WorkflowBoardCard", () => {
 	// assistive tech without changing what the card shows.
 	it("names the run id field for hover and assistive tech", () => {
 		render(<WorkflowBoardCard workflow={boardWorkflow({ workflowId: "wf-diagnostic-123" })} />);
-		expect(screen.getByTestId("workflow-run-id")).toHaveAttribute("title", "Workflow run ID");
+		expect(screen.getByTestId("workflow-run-id")).toHaveAttribute(
+			"title",
+			"Autonomous workflow run ID",
+		);
 	});
 
 	it("surfaces the wait reason and the scheduled retry for a capacity wait", () => {
