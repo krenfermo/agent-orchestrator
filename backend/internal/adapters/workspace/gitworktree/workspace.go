@@ -418,14 +418,14 @@ func (w *Workspace) StashUncommitted(ctx context.Context, info ports.WorkspaceIn
 	// Stage all tracked and non-ignored untracked files into the temp index.
 	// GIT_INDEX_FILE overrides the index so the real index is never touched.
 	addCmd := exec.CommandContext(ctx, w.binary, addAllTempIndexArgs(path)...)
-	addCmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+tmpIdxPath)
+	addCmd.Env = gitEnv("GIT_INDEX_FILE=" + tmpIdxPath)
 	if out, err := addCmd.CombinedOutput(); err != nil {
 		return "", commandError{args: append([]string{w.binary}, addAllTempIndexArgs(path)...), output: string(out), err: err}
 	}
 
 	// Write the staged tree to get a tree SHA.
 	writeTreeCmd := exec.CommandContext(ctx, w.binary, writeTreeArgs(path)...)
-	writeTreeCmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+tmpIdxPath)
+	writeTreeCmd.Env = gitEnv("GIT_INDEX_FILE=" + tmpIdxPath)
 	treeOut, err := writeTreeCmd.CombinedOutput()
 	if err != nil {
 		return "", commandError{args: append([]string{w.binary}, writeTreeArgs(path)...), output: string(treeOut), err: err}
@@ -524,14 +524,14 @@ func (w *Workspace) MaterializeIntegrationCommit(ctx context.Context, info ports
 	defer func() { _ = os.Remove(tmpIdxPath) }()
 
 	addCmd := exec.CommandContext(ctx, w.binary, addAllTempIndexArgs(path)...)
-	addCmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+tmpIdxPath)
+	addCmd.Env = gitEnv("GIT_INDEX_FILE=" + tmpIdxPath)
 	if out, err := addCmd.CombinedOutput(); err != nil {
 		return "", "", false, commandError{args: append([]string{w.binary}, addAllTempIndexArgs(path)...), output: string(out), err: err}
 	}
 
 	if len(excludePatterns) > 0 {
 		lsCmd := exec.CommandContext(ctx, w.binary, lsFilesTempIndexArgs(path)...)
-		lsCmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+tmpIdxPath)
+		lsCmd.Env = gitEnv("GIT_INDEX_FILE=" + tmpIdxPath)
 		lsOut, err := lsCmd.CombinedOutput()
 		if err != nil {
 			return "", "", false, commandError{args: append([]string{w.binary}, lsFilesTempIndexArgs(path)...), output: string(lsOut), err: err}
@@ -548,7 +548,7 @@ func (w *Workspace) MaterializeIntegrationCommit(ctx context.Context, info ports
 		if len(excluded) > 0 {
 			rmArgs := updateIndexForceRemoveTempIndexArgs(path, excluded)
 			rmCmd := exec.CommandContext(ctx, w.binary, rmArgs...)
-			rmCmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+tmpIdxPath)
+			rmCmd.Env = gitEnv("GIT_INDEX_FILE=" + tmpIdxPath)
 			if out, err := rmCmd.CombinedOutput(); err != nil {
 				return "", "", false, commandError{args: append([]string{w.binary}, rmArgs...), output: string(out), err: err}
 			}
@@ -556,7 +556,7 @@ func (w *Workspace) MaterializeIntegrationCommit(ctx context.Context, info ports
 	}
 
 	writeTreeCmd := exec.CommandContext(ctx, w.binary, writeTreeArgs(path)...)
-	writeTreeCmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+tmpIdxPath)
+	writeTreeCmd.Env = gitEnv("GIT_INDEX_FILE=" + tmpIdxPath)
 	treeOut, err := writeTreeCmd.CombinedOutput()
 	if err != nil {
 		return "", "", false, commandError{args: append([]string{w.binary}, writeTreeArgs(path)...), output: string(treeOut), err: err}
@@ -574,7 +574,7 @@ func (w *Workspace) MaterializeIntegrationCommit(ctx context.Context, info ports
 	}
 
 	commitCmd := exec.CommandContext(ctx, w.binary, commitTreeArgs(path, treeSHA, parentSHA, message)...)
-	commitCmd.Env = append(os.Environ(),
+	commitCmd.Env = gitEnv(
 		"GIT_AUTHOR_NAME=Agent Orchestrator", "GIT_AUTHOR_EMAIL=ao@local",
 		"GIT_COMMITTER_NAME=Agent Orchestrator", "GIT_COMMITTER_EMAIL=ao@local",
 	)
@@ -843,6 +843,7 @@ func parseObservedWorkspaceCommits(output string) []ports.WorkspaceCommit {
 func (w *Workspace) runCherryPickNoCommit(ctx context.Context, worktree, commitSHA string) error {
 	args := cherryPickNoCommitArgs(worktree, commitSHA)
 	cmd := exec.CommandContext(ctx, w.binary, args...)
+	cmd.Env = gitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return commandError{args: append([]string{w.binary}, args...), output: string(out), err: err}
@@ -1624,6 +1625,7 @@ func moveStrayPathAside(path string) (string, error) {
 
 func runCommand(ctx context.Context, binary string, args ...string) ([]byte, error) {
 	cmd := aoprocess.CommandContext(ctx, binary, args...)
+	cmd.Env = gitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return out, commandError{args: append([]string{binary}, args...), output: string(out), err: err}

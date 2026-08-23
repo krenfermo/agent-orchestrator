@@ -809,6 +809,24 @@ type WorkflowTaskRelationship struct {
 	CreatedAt     time.Time
 }
 
+type WorkflowTaskWorktree struct {
+	TaskID           string
+	WorkflowRunID    string
+	ProjectID        string
+	RepoPath         string
+	WorktreePath     string
+	Branch           string
+	TargetBranch     string
+	BaseSha          string
+	DependenciesJson string
+	ExecutionMode    string
+	State            string
+	Detail           string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	ReleasedAt       sql.NullTime
+}
+
 type WorkflowWakeSchedule struct {
 	ID             string
 	WorkflowRunID  string

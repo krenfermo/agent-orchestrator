@@ -153,6 +153,32 @@ because it has no repository to work in.
 A direct-branch project whose adapter is unconfigured fails loudly rather than
 falling back to the worktree the user opted out of.
 
+### Task worktree lifecycle
+
+`internal/worktree` owns the worktrees a *plan's tasks* run in, as opposed to
+`adapters/workspace/gitworktree`, which owns the one a *session* runs in. A
+multi-task plan asks questions the per-session record cannot answer: which task
+a directory belongs to, which branch the work is ultimately for (never the
+throwaway `ao/*` one), and which commits — the base, plus each dependency's —
+it was cut against. All of those move or disappear, so `Ensure` writes them to
+`workflow_task_worktrees` (one row per task) instead of re-deriving them later.
+
+Two invariants:
+
+- The user's checkout is never disturbed. The manager only adds its own
+  directories, removes ones it created, prunes dead registrations, and reads
+  refs. Its `Git` interface has no checkout/reset/stash/clean method, and the
+  exec implementation refuses any git subcommand outside a read-only +
+  `worktree` allowlist.
+- A `direct_branch` task gets nothing: no directory, no branch, no row, and no
+  git command at all. Its work happens in the user's own repository, and a
+  lifecycle record would assert AO owns something it does not.
+
+`Release` removes the directory but keeps the branch: tearing down a checkout
+must never discard commits, and the released row still names where the work is.
+It does not force, so a worktree holding uncommitted work makes teardown fail
+(recorded as `failed`) rather than deleting an agent's changes.
+
 ### Branch locks
 
 Direct branch removes the isolation that made concurrent workflows safe, so
