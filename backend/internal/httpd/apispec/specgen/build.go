@@ -810,6 +810,59 @@ func workflowOperations() []operation {
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
 		},
+		// Checkpoint 8P-E.18 — the Incident Advisor. Four operations, mirroring
+		// the four routes: the split between proposing and executing is the
+		// authorization boundary, not a REST style choice.
+		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/incident", id: "getWorkflowIncident", tag: "workflows",
+			summary:    "Explain why a stopped workflow run is waiting for a person: the incident, its bounded evidence pack, and any diagnosis with AO's own reading of the proposed action",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.IncidentResponse{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/incident/diagnose", id: "diagnoseWorkflowIncident", tag: "workflows",
+			summary:    "Investigate a stopped run with an isolated, read-only Diagnostic Agent over a bounded evidence pack. Bounded per incident.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusAccepted, controllers.IncidentResponse{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/incident/diagnosis", id: "submitWorkflowIncidentDiagnosis", tag: "workflows",
+			summary:    "Record a Diagnostic Agent's validated classification and proposed action. This endpoint cannot execute anything.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			reqBody:    controllers.IncidentDiagnosisSubmissionBody{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.IncidentResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/incident/execute", id: "executeWorkflowIncidentAction", tag: "workflows",
+			summary:         "Carry out an incident's diagnosed action, after AO's authorization policy and — for anything beyond the ordinary continue path — an explicit human approval",
+			pathParams:      []any{controllers.WorkflowIDParam{}},
+			reqBody:         controllers.ExecuteIncidentRequest{},
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.IncidentResponse{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
 		{method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/plan/generate", id: "generateWorkflowPlan", tag: "workflows", summary: "Generate and deterministically validate a durable master plan", pathParams: []any{controllers.WorkflowIDParam{}}, resps: []respUnit{{http.StatusOK, controllers.WorkflowRunResponse{}}, {http.StatusConflict, envelope.APIError{}}, {http.StatusUnprocessableEntity, envelope.APIError{}}}},
 		{method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/plan", id: "getWorkflowPlan", tag: "workflows", summary: "Get a durable master plan and planned tasks", pathParams: []any{controllers.WorkflowIDParam{}}, resps: []respUnit{{http.StatusOK, controllers.WorkflowRunResponse{}}, {http.StatusNotFound, envelope.APIError{}}}},
 		{method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/plan/approve", id: "approveWorkflowPlan", tag: "workflows", summary: "Approve a validated plan and dispatch the first eligible task", pathParams: []any{controllers.WorkflowIDParam{}}, resps: []respUnit{{http.StatusOK, controllers.WorkflowRunResponse{}}, {http.StatusConflict, envelope.APIError{}}, {http.StatusUnprocessableEntity, envelope.APIError{}}}},

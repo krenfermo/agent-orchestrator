@@ -741,6 +741,15 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	r.Get("/projects/{projectId}/board/history", c.boardHistory)
 	r.Post("/workflows/{workflowId}/start", c.start)
 	r.Post("/workflows/{workflowId}/continue", c.continueRun)
+
+	// Checkpoint 8P-E.18 — the Incident Advisor behind the "¿Qué hago?" control.
+	// Four routes rather than one, because the split IS the authorization
+	// model: proposing and executing must not be reachable through the same
+	// capability. See workflow_incident.go.
+	r.Get("/workflows/{workflowId}/incident", c.getIncident)
+	r.Post("/workflows/{workflowId}/incident/diagnose", c.diagnoseIncident)
+	r.Post("/workflows/{workflowId}/incident/diagnosis", c.submitIncidentDiagnosis)
+	r.Post("/workflows/{workflowId}/incident/execute", c.executeIncidentAction)
 	r.Post("/workflows/{workflowId}/plan/generate", c.generatePlan)
 	r.Get("/workflows/{workflowId}/plan", c.get)
 	r.Post("/workflows/{workflowId}/plan/approve", c.approvePlan)

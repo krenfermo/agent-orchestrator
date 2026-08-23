@@ -2168,6 +2168,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflowId}/incident": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Explain why a stopped workflow run is waiting for a person: the incident, its bounded evidence pack, and any diagnosis with AO's own reading of the proposed action */
+        get: operations["getWorkflowIncident"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/incident/diagnose": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Investigate a stopped run with an isolated, read-only Diagnostic Agent over a bounded evidence pack. Bounded per incident. */
+        post: operations["diagnoseWorkflowIncident"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/incident/diagnosis": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Record a Diagnostic Agent's validated classification and proposed action. This endpoint cannot execute anything. */
+        post: operations["submitWorkflowIncidentDiagnosis"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/incident/execute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Carry out an incident's diagnosed action, after AO's authorization policy and — for anything beyond the ordinary continue path — an explicit human approval */
+        post: operations["executeWorkflowIncidentAction"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workflows/{workflowId}/plan": {
         parameters: {
             query?: never;
@@ -2531,6 +2599,10 @@ export interface components {
             tls: "starttls" | "implicit" | "none";
             username: string;
         };
+        ControllersExecuteIncidentRequest: {
+            approve: boolean;
+            incidentId: string;
+        };
         ControllersExecutionPolicyResponse: {
             policy: components["schemas"]["ControllersExecutionPolicyView"];
         };
@@ -2545,6 +2617,81 @@ export interface components {
             reviewerPriority: string[];
             updatedAt?: string;
             workerPriority: string[];
+        };
+        ControllersIncidentActionSpecBody: {
+            detail?: string;
+            kind: string;
+            reason?: string;
+        };
+        ControllersIncidentActionView: {
+            describe: string;
+            endsWork: boolean;
+            executable: boolean;
+            kind: string;
+            needsApproval: boolean;
+            rationale?: string;
+            refusalReason?: string;
+            risk: string;
+            writesCode: boolean;
+        };
+        ControllersIncidentDiagnosisSubmissionBody: {
+            classification: string;
+            evidence?: string[];
+            incidentId: string;
+            missingEvidence?: string[];
+            options?: components["schemas"]["ControllersIncidentOptionView"][];
+            packDigest: string;
+            proposedAction?: components["schemas"]["ControllersIncidentActionSpecBody"];
+            risk?: string;
+            summary: string;
+            whatHappened?: string;
+            whatIsStuck?: string;
+            whyAOStopped?: string;
+        };
+        ControllersIncidentDiagnosisView: {
+            classification: string;
+            evidence?: string[];
+            missingEvidence?: string[];
+            options?: components["schemas"]["ControllersIncidentOptionView"][];
+            proposedAction?: components["schemas"]["ControllersIncidentActionView"];
+            risk?: string;
+            summary: string;
+            whatHappened?: string;
+            whatIsStuck?: string;
+            whyAOStopped?: string;
+        };
+        ControllersIncidentOptionView: {
+            consequence?: string;
+            detail: string;
+            id: string;
+            label: string;
+        };
+        ControllersIncidentPackView: {
+            bytes: number;
+            digest: string;
+            droppedSections?: string[];
+            estimatedTokens: number;
+            maxBytes: number;
+            sections: string[];
+        };
+        ControllersIncidentResponse: {
+            incident: components["schemas"]["ControllersIncidentView"];
+        };
+        ControllersIncidentView: {
+            canDiagnose: boolean;
+            canExecute: boolean;
+            contextPack?: components["schemas"]["ControllersIncidentPackView"];
+            diagnosesUsed: number;
+            diagnosis?: components["schemas"]["ControllersIncidentDiagnosisView"];
+            id: string;
+            maxDiagnoses: number;
+            maxRepairs: number;
+            repairsUsed: number;
+            runId: string;
+            stale: boolean;
+            state: string;
+            stopDetail?: string;
+            stopReason: string;
         };
         ControllersListCapacityResponse: {
             capacity: components["schemas"]["ControllersCapacitySnapshotResponse"][];
@@ -4164,8 +4311,6 @@ export interface components {
             state: "blocked" | "eligible" | "running" | "completed" | "failed" | "cancelled";
             steps?: components["schemas"]["WorkflowStepProgressView"][];
             title: string;
-            /** @enum {string} */
-            waitReason?: "waiting_for_dependencies" | "waiting_for_write_conflict";
             workflowId?: string;
         };
         WorkflowBranchWaitView: {
@@ -12424,6 +12569,241 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowIncident: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersIncidentResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    diagnoseWorkflowIncident: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersIncidentResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    submitWorkflowIncidentDiagnosis: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersIncidentDiagnosisSubmissionBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersIncidentResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    executeWorkflowIncidentAction: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ControllersExecuteIncidentRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersIncidentResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

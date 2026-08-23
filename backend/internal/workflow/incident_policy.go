@@ -186,3 +186,28 @@ func incidentActionNeedsApproval(class IncidentClass, kind IncidentActionKind) b
 	}
 	return !policy.AutoAuthorized
 }
+
+// DescribeIncidentAction is the API's single source for how an action must be
+// presented and whether it may be offered as a one-click control.
+//
+// It exists so the frontend never re-derives any of this. A UI that inferred
+// "does this need approval" from a classification string would eventually infer
+// it differently from authorizeIncidentAction — and the executor is the one
+// holding the permission, so the two disagreeing means either a button that
+// errors or, far worse, a button that looks safe and is not.
+func DescribeIncidentAction(class IncidentClass, kind IncidentActionKind) (
+	describe, risk string, needsApproval, endsWork, writesCode, executable bool, refusal string,
+) {
+	resolved, policy := lookupIncidentAction(kind)
+	describe, risk = policy.Describe, string(policy.Risk)
+	endsWork, writesCode = policy.EndsWork, policy.WritesCode
+	needsApproval = incidentActionNeedsApproval(class, resolved)
+	if resolved != kind {
+		return describe, risk, needsApproval, endsWork, writesCode, false,
+			"AO does not recognise the proposed action, so it will not run it"
+	}
+	// Ask the real gate, with an approval present, so "executable" means "this
+	// is offerable once approved" rather than "this would run right now".
+	allowed, why := authorizeIncidentAction(class, resolved, "human")
+	return describe, risk, needsApproval, endsWork, writesCode, allowed, why
+}

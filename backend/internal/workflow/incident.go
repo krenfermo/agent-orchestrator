@@ -207,13 +207,17 @@ func isIncidentLedgerPhase(phase string) bool {
 // ---- bounds -----------------------------------------------------------------
 
 const (
-	// maxIncidentDiagnoses bounds Diagnostic Agent runs per incident. A second
-	// opinion is occasionally worth it; a third is a loop.
-	maxIncidentDiagnoses = 2
-	// maxIncidentRepairs bounds Repair Agent runs per incident, hard, at one.
+	// MaxIncidentDiagnoses bounds Diagnostic Agent runs per incident. A second
+	// opinion is occasionally worth it; a third is a loop. Exported so the API
+	// can tell a person "1 of 2 used" instead of letting them discover the
+	// limit by being refused.
+	MaxIncidentDiagnoses = 2
+	maxIncidentDiagnoses = MaxIncidentDiagnoses
+	// MaxIncidentRepairs bounds Repair Agent runs per incident, hard, at one.
 	// A repair that did not work is a new incident with new evidence, not a
 	// retry of a guess.
-	maxIncidentRepairs = 1
+	MaxIncidentRepairs = 1
+	maxIncidentRepairs = MaxIncidentRepairs
 	// maxIncidentActionExecutions bounds executions of an approved action.
 	maxIncidentActionExecutions = 2
 )
