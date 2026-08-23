@@ -757,6 +757,16 @@ func (c *Coordinator) stopReason(ctx stdctx.Context, run domain.WorkflowRun) (st
 		return "", AttentionDisposition{}, false
 	}
 	for _, cp := range cps {
+		// Checkpoint 8P-E.18: the incident ledger describes a stop, it is never
+		// itself one. Its rows are the newest thing on a run the moment anyone
+		// asks "what do I do", so counting them here would rewrite the run's
+		// stop reason to `unclassified_stop` as a side effect of opening the
+		// modal — changing the Board, the incident's own signature, and every
+		// later comparison against it. Skipping them is what keeps asking about
+		// a stop free of consequences for the stop.
+		if isIncidentLedgerPhase(cp.DurablePhase) {
+			continue
+		}
 		// NextAction carries resolveAttentionReason's legacy carrier (the
 		// pre-8P-E.13 "human_attention" literal). Without it, a run stranded by
 		// the old fix-budget code reads as unclassified here while the very

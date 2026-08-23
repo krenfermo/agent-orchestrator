@@ -341,6 +341,9 @@ type fixRecoveryFixture struct {
 	// richer one (see reportingSender). nil means "use sender as-is".
 	senderOverride workflowcore.MessageSender
 	reporting      *reportingSender
+	// incidentAgents installs the Incident Advisor's isolated agents. nil
+	// leaves the Advisor unable to investigate, which is its own tested state.
+	incidentAgents workflowcore.IncidentAgentLauncher
 	runID          string
 	fixStepID      string
 	workSessionID  domain.SessionID
@@ -384,6 +387,7 @@ func (f *fixRecoveryFixture) newCoordinator() *workflowcore.Coordinator {
 		ReviewRuns:       f.reviewRuns,
 		ReviewerLauncher: f.launcher,
 		MessageSender:    f.messageSender(),
+		IncidentAgents:   f.incidentAgents,
 		Clock:            f.clk.Now,
 		NewID: func() string {
 			f.idSeq++

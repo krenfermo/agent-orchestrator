@@ -213,6 +213,7 @@ type Deps struct {
 	// MessageSender backs Checkpoint 8D's fix-step dispatch (fix_dispatch.go):
 	// delivering fix findings to the SAME worker session, never a new Spawn.
 	// Optional: a nil MessageSender means dispatchFixStep is a no-op.
+	IncidentAgents        IncidentAgentLauncher
 	MessageSender         MessageSender
 	Verifier              VerifyRunner
 	Planner               Planner
@@ -332,6 +333,12 @@ type Coordinator struct {
 	// reviewerLauncher backs Checkpoint 8C's review-step dispatch. Optional.
 	reviewerLauncher ReviewerLauncher
 
+	// incidentAgents backs Checkpoint 8P-E.18's Incident Advisor: the isolated
+	// Diagnostic and Repair agents. Optional — without it a stopped run can
+	// still be inspected and explained, it simply cannot be investigated
+	// automatically.
+	incidentAgents IncidentAgentLauncher
+
 	// messageSender backs Checkpoint 8D's fix-step dispatch. Optional.
 	messageSender         MessageSender
 	verifier              VerifyRunner
@@ -402,6 +409,7 @@ func New(d Deps) *Coordinator {
 		sessionFacts:             d.SessionFacts,
 		workspaceFacts:           d.WorkspaceFacts,
 		reviewerLauncher:         d.ReviewerLauncher,
+		incidentAgents:           d.IncidentAgents,
 		messageSender:            d.MessageSender,
 		verifier:                 d.Verifier,
 		planStore:                func() masterPlanStore { s, _ := d.Store.(masterPlanStore); return s }(),
@@ -718,6 +726,11 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 
 	if checkpoints, cperr := c.store.ListWorkflowCheckpoints(ctx, runID); cperr == nil {
 		for _, cp := range checkpoints {
+			// Checkpoint 8P-E.18: incident-ledger rows describe a stop, they are
+			// never one. See isIncidentLedgerPhase.
+			if isIncidentLedgerPhase(cp.DurablePhase) {
+				continue
+			}
 			if cp.NextAction != "" {
 				detail.NextAction = cp.NextAction
 			}

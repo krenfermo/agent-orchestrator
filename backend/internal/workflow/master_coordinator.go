@@ -489,6 +489,11 @@ func (c *Coordinator) getMasterRun(ctx stdctx.Context, run domain.WorkflowRun, s
 	// an unexplained "needs attention" on the Board.
 	if cps, cerr := c.store.ListWorkflowCheckpoints(ctx, run.ID); cerr == nil {
 		for _, cp := range cps {
+			// Checkpoint 8P-E.18: incident-ledger rows describe a stop, they are
+			// never one. See isIncidentLedgerPhase.
+			if isIncidentLedgerPhase(cp.DurablePhase) {
+				continue
+			}
 			if cp.NextAction != "" {
 				detail.NextAction = cp.NextAction
 			}
