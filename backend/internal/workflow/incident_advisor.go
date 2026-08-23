@@ -109,6 +109,15 @@ func (c *Coordinator) OpenIncident(ctx stdctx.Context, runID string) (Incident, 
 		return Incident{}, fmt.Errorf("%w: workflow run %q", ErrNotFound, runID)
 	}
 	if run.State != domain.WorkflowRunNeedsAttention {
+		// The run is no longer stopped, which is the single most common way an
+		// incident's cause ends. Refusing outright here would leave the last
+		// incident open forever with nothing able to close it: this is the read
+		// the modal performs, and OpenIncident is the only entry point it has.
+		// So close what is open, and report it, before saying there is nothing
+		// to talk about.
+		if closed, ok := c.closeOpenIncidentsFor(ctx, run); ok {
+			return closed, nil
+		}
 		return Incident{}, fmt.Errorf("%w: run is %s", ErrIncidentUnavailable, run.State)
 	}
 	reason, disp, ok := c.stopReason(ctx, run)
@@ -655,4 +664,44 @@ func (c *Coordinator) writeIncidentRow(ctx stdctx.Context, run domain.WorkflowRu
 		CreatedAt:      c.clock(),
 	})
 	return err
+}
+
+// closeOpenIncidentsFor closes every still-open incident on a run that is no
+// longer stopped, and returns the newest one so the modal can explain itself
+// instead of showing a conflict.
+//
+// It exists because the most common closure — the run simply recovering — is
+// also the case where OpenIncident's ordinary guard would refuse to look at the
+// incident at all. Bounded by construction: reconcileIncidentClosure declines
+// anything terminal or anything the Advisor itself acted on, so a second pass
+// writes nothing.
+func (c *Coordinator) closeOpenIncidentsFor(ctx stdctx.Context, run domain.WorkflowRun) (Incident, bool) {
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, run.ID)
+	if err != nil {
+		return Incident{}, false
+	}
+	seen := map[string]bool{}
+	var newest Incident
+	found := false
+	for _, cp := range cps {
+		if cp.DurablePhase != incidentOpenedPhase {
+			continue
+		}
+		rec, ok := decodeIncidentRecord(cp)
+		if !ok || seen[rec.IncidentID] {
+			continue
+		}
+		seen[rec.IncidentID] = true
+		inc, ok := foldIncident(rec.IncidentID, cps)
+		if !ok {
+			continue
+		}
+		inc.RunID = run.ID
+		inc = c.reconcileIncidentRepair(ctx, run, inc)
+		inc = c.reconcileIncidentClosure(ctx, run, inc)
+		if !found || inc.UpdatedAt.After(newest.UpdatedAt) {
+			newest, found = inc, true
+		}
+	}
+	return newest, found
 }

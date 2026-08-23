@@ -383,3 +383,36 @@ func (f *advisorFixture) packDigest(t *testing.T) string {
 	t.Fatal("no diagnosis request recorded a pack digest")
 	return ""
 }
+
+// The read the modal performs must be able to close an incident on a run that
+// has recovered — which is the single most common closure and also the case
+// OpenIncident's ordinary guard would otherwise refuse to look at. A real E2E
+// found the modal answering 409 with the incident still open.
+func TestTheModalReadClosesAnIncidentOnARecoveredRun(t *testing.T) {
+	f := newAdvisorFixture(t, workflowcore.ReasonCapacityRetryExhausted, "no capacity")
+	ctx := context.Background()
+	if _, err := f.c.OpenIncident(ctx, f.runID); err != nil {
+		t.Fatalf("OpenIncident: %v", err)
+	}
+	f.unparkRunExternally(t)
+
+	got, err := f.c.OpenIncident(ctx, f.runID)
+	if err != nil {
+		t.Fatalf("OpenIncident on a recovered run: %v", err)
+	}
+	if got.State != workflowcore.IncidentClosed {
+		t.Fatalf("state = %q, want closed", got.State)
+	}
+	if got.ClosureCause == "" {
+		t.Fatal("closed with no recorded cause")
+	}
+	// And repeating the read writes nothing more.
+	for i := 0; i < 3; i++ {
+		if _, err := f.c.OpenIncident(ctx, f.runID); err != nil {
+			t.Fatalf("repeat read: %v", err)
+		}
+	}
+	if n := f.countCheckpointPhase("incident_closed"); n != 1 {
+		t.Fatalf("incident_closed rows = %d, want exactly 1", n)
+	}
+}
