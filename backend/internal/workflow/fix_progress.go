@@ -2,11 +2,80 @@ package workflow
 
 import (
 	stdctx "context"
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
+
+// fixCyclePickupTimeout bounds how long AO waits for a worker session to BEGIN
+// the turn a freshly delivered fix cycle asked for. It mirrors
+// workStepFirstSignalTimeout deliberately, at the same value and for the same
+// reason: both answer "the agent was handed something and has not visibly
+// reacted to it", and the two windows should not disagree about how long that
+// is allowed to take.
+const fixCyclePickupTimeout = 10 * time.Minute
+
+// fixCycleStarted reports whether the worker session produced ANY signal that
+// postdates this cycle's dispatch.
+//
+// This is the fact observeFixStep was missing, and the whole of incident
+// wf-57f90ff2 (2026-08-23). A fix cycle is delivered into a session that has
+// already run earlier cycles, so every activity field on that session row is
+// populated — with the PREVIOUS cycle's values. Cycle 2 was dispatched at
+// 18:43:59Z into a session whose activity_state was `idle`, whose
+// activity_last_at was 18:35:33Z and whose turn_completed_at was 18:35:34Z:
+// all of it the record of cycle 1, which had ended eight minutes earlier.
+// Seventy-six seconds later AO read those stale facts as this cycle's outcome
+// and stopped the run saying "fix worker idle with no verifiable new change".
+// The worker had not gone idle without changing anything; it had never started.
+//
+// The one guard that existed against this, `sess.FirstSignalAt.IsZero()`, only
+// protects a session that has never signalled at all — which a reused worker
+// session, by construction, never is. So from cycle 2 onwards there was no
+// grace period whatsoever, and observationThrottle being three seconds meant
+// the very first poll after a dispatch could end the run.
+//
+// The clocks are compared against the dispatch instant for exactly the reason
+// classifyFixDelivery compares its own against the intent instant: activity
+// that predates the dispatch can never be evidence about it.
+func fixCycleStarted(sess domain.SessionRecord, dispatchedAt time.Time) bool {
+	if dispatchedAt.IsZero() {
+		// No instant to compare against, so this rule has nothing to say.
+		// Missing evidence must never become evidence: answering "started"
+		// leaves every caller with exactly its pre-existing behaviour.
+		return true
+	}
+	return afterInstant(sess.Activity.LastActivityAt, dispatchedAt) ||
+		afterInstant(sess.TurnCompletedAt, dispatchedAt) ||
+		afterInstant(sess.FirstSignalAt, dispatchedAt)
+}
+
+// fixCycleNumberOf reads the cycle number off a dispatch checkpoint's durable
+// delivery record, returning 0 when the checkpoint carries none.
+func fixCycleNumberOf(cp domain.WorkflowCheckpoint) int {
+	var rec promptDeliveryRecord
+	if json.Unmarshal([]byte(cp.RetryState), &rec) != nil {
+		return 0
+	}
+	return rec.CycleNumber
+}
+
+// fixCycleNotStartedDetail renders the stop in terms of what AO can actually
+// prove: the prompt was delivered, and the worker has said nothing since. It
+// deliberately does not claim the worker produced nothing — AO has no evidence
+// about the worker's output, only about its silence.
+func fixCycleNotStartedDetail(cp domain.WorkflowCheckpoint, sessionID string, now time.Time) string {
+	cycle := fixCycleNumberOf(cp)
+	silence := now.Sub(cp.CreatedAt).Round(time.Second)
+	return fmt.Sprintf(
+		"fix cycle %d was delivered to worker session %s %s ago and that session has produced no activity, "+
+			"no turn boundary and no signal since — the worker never started this cycle, so AO has no evidence "+
+			"about what it would have changed",
+		cycle, sessionID, silence)
+}
 
 // observeFixStep is Checkpoint 8D's fact-based fix-step evaluation function,
 // mirroring observeWorkStep's shape and conservatism exactly: it never
@@ -64,6 +133,29 @@ func (c *Coordinator) observeFixStep(ctx stdctx.Context, run domain.WorkflowRun,
 		return c.stopFix(ctx, run, step, domain.WorkflowStepFailed, ReasonFixNoVerifiableChange,
 			"fix worker session terminated with no verifiable change (no dirty, staged, or untracked change, and fingerprint unchanged)",
 			domain.WorkflowErrorWorkerTerminatedUnexpectedly)
+	}
+
+	// Checkpoint 8P-E.16: nothing below may draw a conclusion about what this
+	// fix cycle produced until AO has evidence that the worker actually began
+	// it. See fixCycleStarted — this gate is the whole of incident wf-57f90ff2.
+	if !fixCycleStarted(sess, latestCP.CreatedAt) {
+		// A genuinely new fingerprint always outranks the gate: it is direct
+		// evidence of work, and no activity clock can contradict it.
+		if obs, ok := c.observeFixWorkspace(ctx, sess); ok {
+			if fp := WorkspaceFingerprint(obs); fp != fingerprintBefore {
+				return c.recordFixOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunWaiting,
+					fp, true, "fix delivered — awaiting next review cycle", "")
+			}
+		}
+		if now.Sub(latestCP.CreatedAt) <= fixCyclePickupTimeout {
+			// Still inside the window a worker is allowed to take to pick the
+			// cycle up. Absence of a signal here is not yet a fact about
+			// anything, so record nothing at all.
+			return step, nil
+		}
+		return c.stopFix(ctx, run, step, domain.WorkflowStepWaiting, ReasonFixCycleNotStarted,
+			fixCycleNotStartedDetail(latestCP, *latestCP.SessionID, now),
+			domain.WorkflowErrorAmbiguousWorkerState)
 	}
 
 	switch sess.Activity.State {

@@ -49,6 +49,12 @@ func fixStepOutboxIdempotencyKey(stepID string, cycleNumber, transportAttempt in
 	return key
 }
 
+// fixDispatchedPhase is the durable phase of a completed fix-cycle dispatch:
+// the record that names the session the cycle went to and the workspace
+// fingerprint it was dispatched against. Both the observation path and the
+// re-delivery rule read it, so it has a name rather than a repeated literal.
+const fixDispatchedPhase = "fix_dispatched"
+
 // fixTransportRetryPhase is the durable phase of a bounded, self-remediable
 // prompt-transport retry. It is a canonical attention reason (attention.go) so
 // a run resting on one reads as "retrying", never as a human decision.
@@ -336,7 +342,7 @@ func (c *Coordinator) recordFixDispatchSuccess(
 		ReviewRunID:       &rid,
 		FingerprintBefore: reviewRun.TargetSHA,
 		NextAction:        "fix_dispatched: awaiting a genuinely new workspace fingerprint",
-		DurablePhase:      "fix_dispatched",
+		DurablePhase:      fixDispatchedPhase,
 		PayloadVersion:    "v1",
 		// RetryState carries the prompt-delivery facts (size, transport,
 		// whether a context pack was prepended) so a future delivery problem is

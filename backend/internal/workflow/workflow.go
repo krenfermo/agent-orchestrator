@@ -1015,6 +1015,24 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		}
 	}
 
+	// Checkpoint 8P-E.16: the same person, on the same button, for the one stop
+	// that had no entry point at all — a fix cycle parked because its worker
+	// never started it. resumeUnstartedFixCycle re-derives that evidence now and
+	// re-delivers the same findings to the same session when, and only when, it
+	// still holds. A no-op for every other run, including one stopped on the
+	// same reason whose worker did in fact start. See fix_cycle_resume.go.
+	resumedFix := false
+	if run, resumedFix, err = c.resumeUnstartedFixCycle(ctx, run); err != nil {
+		return RunDetail{}, err
+	}
+	if resumedFix {
+		// The fix step is running again and the run is no longer parked; the
+		// cascade below must see that, not the snapshot read at entry.
+		if steps, err = c.store.ListWorkflowSteps(ctx, runID); err != nil {
+			return RunDetail{}, err
+		}
+	}
+
 	// Checkpoint 8P-E.14C: this is the one place in AO where a terminal
 	// verification failure can be reopened, and it is here rather than in GetRun
 	// or the cascade because THIS call is the person saying "I corrected the

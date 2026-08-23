@@ -132,6 +132,17 @@ const (
 	ReasonReviewerLaunchRetriesExhausted = "reviewer_launch_retries_exhausted"
 	ReasonFixWorkerBlocked               = "fix_worker_blocked"
 	ReasonFixNoVerifiableChange          = "fix_no_verifiable_change"
+	// ReasonFixCycleNotStarted is a fix cycle whose prompt provably reached the
+	// worker session but which the worker never began: no activity, no turn
+	// boundary and no signal postdating the dispatch, for longer than
+	// fixCyclePickupTimeout.
+	//
+	// It is deliberately NOT ReasonFixNoVerifiableChange. That reason asserts
+	// the worker ran and produced nothing — a verdict about the work — and AO
+	// has no evidence for it here. The two need separate names because they
+	// need separate remedies: one is a person reading a diff, the other is a
+	// cycle that has simply not been picked up and can be re-delivered.
+	ReasonFixCycleNotStarted = "fix_cycle_not_started"
 	ReasonPlannerExhausted               = "planner_retries_exhausted"
 	ReasonPlannerStartFailed             = "planner_start_failed"
 	ReasonPlannerPolicyViolation         = "planner_policy_violation"
@@ -254,6 +265,9 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonFixNoVerifiableChange: {
 		HumanAction: "The fix worker finished without changing anything AO can verify. Inspect the worktree, then continue or cancel this run.",
+	},
+	ReasonFixCycleNotStarted: {
+		HumanAction: "The reviewer's findings reached the worker session but the worker never started on them. Check that the session is alive and responsive, then continue this run — AO re-checks its own evidence first and re-delivers the cycle by itself when it can prove that is safe.",
 	},
 	ReasonPlannerExhausted: {
 		Nonrecoverable: true,
