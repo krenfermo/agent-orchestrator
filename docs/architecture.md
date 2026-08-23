@@ -156,7 +156,9 @@ falling back to the worktree the user opted out of.
 ### Task worktree lifecycle
 
 `internal/workspace` owns the worktrees a *plan's tasks* run in, as opposed to
-`adapters/workspace/gitworktree`, which owns the one a *session* runs in. A
+`adapters/workspace/gitworktree`, which owns the one a *session* runs in. It
+decides and records; `internal/worktree` performs — that package holds the only
+git the manager may run. A
 multi-task plan asks questions the per-session record cannot answer: which task
 a directory belongs to, which branch the work is ultimately for (never the
 throwaway `ao/*` one), and which commits — the base, plus each dependency's —
@@ -167,9 +169,10 @@ Two invariants:
 
 - The user's checkout is never disturbed. The manager only adds its own
   directories, removes ones it created, prunes dead registrations, and reads
-  refs. Its `Git` interface has no checkout/reset/stash/clean method, and the
-  exec implementation refuses any git subcommand outside a read-only +
-  `worktree` allowlist.
+  refs. `worktree.Git` has no checkout/reset/stash/clean method, and its exec
+  implementation refuses any git subcommand outside a read-only + `worktree`
+  allowlist — so the property is established by reading one small package
+  rather than by auditing every call site.
 - A `direct_branch` task gets nothing: no directory, no branch, no row, and no
   git command at all. Its work happens in the user's own repository, and a
   lifecycle record would assert AO owns something it does not.

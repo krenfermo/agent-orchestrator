@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/worktree"
 )
 
 func requireGit(t *testing.T) string {
@@ -87,7 +88,7 @@ func newIntegrationManager(t *testing.T, binary string) (*Manager, *fakeStore) {
 	store := newFakeStore()
 	m, err := New(Options{
 		Root:  filepath.Join(t.TempDir(), "ao-worktrees"),
-		Git:   NewExecGit(binary),
+		Git:   worktree.NewExecGit(binary),
 		Store: store,
 		Now:   func() time.Time { return time.Now().UTC() },
 	})

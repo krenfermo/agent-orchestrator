@@ -20,5 +20,5 @@ func (osFS) DirExists(path string) (bool, error) {
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
-	return false, fmt.Errorf("worktree: inspect %q: %w", path, err)
+	return false, fmt.Errorf("workspace: inspect %q: %w", path, err)
 }

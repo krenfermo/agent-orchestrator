@@ -1,4 +1,16 @@
-package workspace
+// Package worktree is the git-worktree operations AO is allowed to perform:
+// resolving refs, adding a worktree, removing one it created, and pruning
+// registrations whose directories are gone.
+//
+// It is split out from internal/workspace, which decides WHICH worktree a task
+// gets and records it, because the two answer different questions and the
+// split is what makes the safety property auditable. Everything that could
+// disturb a user's checkout -- checkout, switch, reset, stash, clean, restore,
+// merge, rebase, pull -- is absent from this package's interface and refused
+// by its runner, so a reviewer can establish "AO cannot touch the primary
+// working tree" by reading one small file rather than by trusting every call
+// site in the lifecycle manager.
+package worktree
 
 import (
 	"context"

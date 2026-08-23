@@ -2,6 +2,11 @@
 // plan's tasks: where they live, what branch they are on, what they were cut
 // from, and what state they are in, durably, for as long as the plan exists.
 //
+// It decides and records; internal/worktree performs. That package holds the
+// only git this one may run, and holds nothing that could disturb a user's
+// checkout, which is what turns the invariant below from an intention into
+// something a reviewer can check in one file.
+//
 // It exists because a task worktree has to be attributable. The pre-existing
 // per-session worktree (internal/adapters/workspace/gitworktree) answers "does
 // this session have a checkout", which is all a single session needs. A plan
@@ -15,9 +20,10 @@
 //
 //   - The user's own checkout is never disturbed. The manager creates and
 //     removes ITS OWN directories and reads refs; it never checks out, resets,
-//     stashes, cleans, or otherwise writes to the primary working tree. The
-//     Git interface has no method that could, which is how the invariant is
-//     kept rather than merely intended.
+//     stashes, cleans, or otherwise writes to the primary working tree.
+//     worktree.Git has no method that could, and its runner refuses any git
+//     subcommand outside a read-only + `worktree` allowlist, which is how the
+//     invariant is kept rather than merely intended.
 //
 //   - A direct_branch task gets nothing at all: no directory, no branch, no
 //     row, and not one git command. Its work happens in the user's repository
@@ -36,6 +42,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/worktree"
 )
 
 // Store is the durable persistence the manager needs. *sqlite.Store satisfies
@@ -54,13 +61,13 @@ type FS interface {
 var (
 	// ErrInvalidRequest means the request could not describe a worktree at
 	// all (missing ids, a branch name git would reject, an unusable path).
-	ErrInvalidRequest = errors.New("worktree: invalid request")
+	ErrInvalidRequest = errors.New("workspace: invalid request")
 	// ErrUnsafePath means the computed worktree path escaped the managed root
 	// or landed inside the user's repository. Both are refusals rather than
 	// corrections: a path that resolved somewhere unexpected means an input
 	// was not what it claimed, and creating a worktree anyway is how a tool
 	// ends up writing into somebody's source tree.
-	ErrUnsafePath = errors.New("worktree: unsafe worktree path")
+	ErrUnsafePath = errors.New("workspace: unsafe worktree path")
 )
 
 // BranchPrefix is the namespace every AO-created task branch lives under. It
@@ -79,7 +86,7 @@ type Options struct {
 	// Root is the directory task worktrees are created under. It must resolve
 	// inside the AO data dir -- never anywhere in the user's repository.
 	Root  string
-	Git   Git
+	Git   worktree.Git
 	Store Store
 	// FS defaults to the real filesystem.
 	FS FS
@@ -90,7 +97,7 @@ type Options struct {
 // Manager creates, records and tears down the AO-owned worktree for a task.
 type Manager struct {
 	root  string
-	git   Git
+	git   worktree.Git
 	store Store
 	fs    FS
 	now   func() time.Time
@@ -99,17 +106,17 @@ type Manager struct {
 // New validates the options and returns a Manager.
 func New(opts Options) (*Manager, error) {
 	if strings.TrimSpace(opts.Root) == "" {
-		return nil, errors.New("worktree: Root is required")
+		return nil, errors.New("workspace: Root is required")
 	}
 	if opts.Git == nil {
-		return nil, errors.New("worktree: Git is required")
+		return nil, errors.New("workspace: Git is required")
 	}
 	if opts.Store == nil {
-		return nil, errors.New("worktree: Store is required")
+		return nil, errors.New("workspace: Store is required")
 	}
 	root, err := filepath.Abs(opts.Root)
 	if err != nil {
-		return nil, fmt.Errorf("worktree: root: %w", err)
+		return nil, fmt.Errorf("workspace: root: %w", err)
 	}
 	fs := opts.FS
 	if fs == nil {
@@ -196,7 +203,7 @@ func (m *Manager) Ensure(ctx context.Context, req Request) (Lease, error) {
 
 	existing, found, err := m.store.GetTaskWorktree(ctx, req.TaskID)
 	if err != nil {
-		return Lease{}, fmt.Errorf("worktree: read record for task %s: %w", req.TaskID, err)
+		return Lease{}, fmt.Errorf("workspace: read record for task %s: %w", req.TaskID, err)
 	}
 	if found && existing.State == domain.TaskWorktreeActive {
 		present, err := m.fs.DirExists(existing.Path)
@@ -244,7 +251,7 @@ func (m *Manager) Ensure(ctx context.Context, req Request) (Lease, error) {
 		rec.CreatedAt = existing.CreatedAt
 	}
 	if err := m.store.UpsertTaskWorktree(ctx, rec); err != nil {
-		return Lease{}, fmt.Errorf("worktree: record task %s: %w", req.TaskID, err)
+		return Lease{}, fmt.Errorf("workspace: record task %s: %w", req.TaskID, err)
 	}
 
 	if err := m.materialise(ctx, req.RepoPath, path, branch, baseSHA); err != nil {
@@ -254,7 +261,7 @@ func (m *Manager) Ensure(ctx context.Context, req Request) (Lease, error) {
 	rec.State = domain.TaskWorktreeActive
 	rec.UpdatedAt = m.now()
 	if err := m.store.UpsertTaskWorktree(ctx, rec); err != nil {
-		return Lease{}, fmt.Errorf("worktree: record task %s active: %w", req.TaskID, err)
+		return Lease{}, fmt.Errorf("workspace: record task %s active: %w", req.TaskID, err)
 	}
 	return Lease{Mode: mode, Isolated: true, Path: path, Record: rec}, nil
 }
@@ -290,7 +297,7 @@ func (m *Manager) materialise(ctx context.Context, repo, path, branch, baseSHA s
 func (m *Manager) Release(ctx context.Context, taskID string) (domain.TaskWorktreeRecord, bool, error) {
 	rec, found, err := m.store.GetTaskWorktree(ctx, taskID)
 	if err != nil {
-		return domain.TaskWorktreeRecord{}, false, fmt.Errorf("worktree: read record for task %s: %w", taskID, err)
+		return domain.TaskWorktreeRecord{}, false, fmt.Errorf("workspace: read record for task %s: %w", taskID, err)
 	}
 	if !found {
 		return domain.TaskWorktreeRecord{}, false, nil
@@ -307,7 +314,7 @@ func (m *Manager) Release(ctx context.Context, taskID string) (domain.TaskWorktr
 	rec.UpdatedAt = now
 	rec.ReleasedAt = &now
 	if err := m.store.UpsertTaskWorktree(ctx, rec); err != nil {
-		return domain.TaskWorktreeRecord{}, false, fmt.Errorf("worktree: record task %s released: %w", taskID, err)
+		return domain.TaskWorktreeRecord{}, false, fmt.Errorf("workspace: record task %s released: %w", taskID, err)
 	}
 	return rec, true, nil
 }
@@ -343,7 +350,7 @@ func (m *Manager) resolveBase(ctx context.Context, repo, ref string) (string, er
 		}
 		lastErr = err
 	}
-	return "", fmt.Errorf("worktree: resolve base %q in %s: %w", ref, repo, lastErr)
+	return "", fmt.Errorf("workspace: resolve base %q in %s: %w", ref, repo, lastErr)
 }
 
 // resolveDependencies pins the commit each dependency task's work sat at.
@@ -366,7 +373,7 @@ func (m *Manager) resolveDependencies(ctx context.Context, req Request, baseSHA 
 		dep := domain.TaskWorktreeDependency{TaskID: depID, SHA: baseSHA}
 		rec, found, err := m.store.GetTaskWorktree(ctx, depID)
 		if err != nil {
-			return nil, fmt.Errorf("worktree: read dependency record %s: %w", depID, err)
+			return nil, fmt.Errorf("workspace: read dependency record %s: %w", depID, err)
 		}
 		if found && rec.Branch != "" {
 			// A dependency branch that has since been deleted is not a reason

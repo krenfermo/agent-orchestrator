@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/worktree"
 )
 
 // fakeStore is an in-memory Store keyed by task, matching the real table's
@@ -95,7 +96,7 @@ type fakeFS struct{ present map[string]bool }
 
 func (f fakeFS) DirExists(path string) (bool, error) { return f.present[path], nil }
 
-func newTestManager(t *testing.T, git Git, store Store, fs FS) *Manager {
+func newTestManager(t *testing.T, git worktree.Git, store Store, fs FS) *Manager {
 	t.Helper()
 	clock := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	m, err := New(Options{
