@@ -1,4 +1,4 @@
-package worktree
+package workspace
 
 import (
 	"context"
@@ -256,5 +256,80 @@ func TestIntegrationReleaseRefusesDirtyWorktree(t *testing.T) {
 	}
 	if got := store.rows["t1"].State; got != domain.TaskWorktreeFailed {
 		t.Fatalf("state = %q, want failed", got)
+	}
+}
+
+// TestWorkspaceIntegrationAddNewBranchRecoversStaleRegistration is this
+// package's regression test for the failure mode the gitworktree adapter's
+// identically-named test guards at the adapter boundary: a git worktree
+// registration that outlives its directory.
+//
+// Real git refuses to add a worktree at a path it still has a registration
+// for ("is a missing but already registered worktree"), and the `-b` form
+// makes it worse -- git creates refs/heads/<branch> BEFORE validating the
+// path, so a failed attempt leaves the branch behind and every retry then
+// dies on "a branch named ... already exists".
+//
+// The manager cannot hit that second failure, and this proves why against
+// real git rather than against a fake that was told to cooperate: it prunes
+// the dead registration first, then adds on the branch that already exists
+// instead of cutting a new one. The prior commit on that branch has to
+// survive -- re-cutting from base would silently discard the task's work,
+// which is the whole reason the recovery picks the existing-branch form.
+func TestWorkspaceIntegrationAddNewBranchRecoversStaleRegistration(t *testing.T) {
+	binary := requireGit(t)
+	repo := setupRepo(t, binary)
+	m, store := newIntegrationManager(t, binary)
+	ctx := context.Background()
+	req := Request{
+		ProjectID: "proj", WorkflowRunID: "wf-1", TaskID: "t1",
+		RepoPath: repo, TargetBranch: "main", Mode: domain.ExecutionIsolatedWorktree,
+	}
+
+	lease, err := m.Ensure(ctx, req)
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(lease.Path, "task.txt"), []byte("agent work\n"), 0o600); err != nil {
+		t.Fatalf("write in worktree: %v", err)
+	}
+	git(t, binary, lease.Path, "add", "task.txt")
+	git(t, binary, lease.Path, "commit", "-m", "task work")
+	taskCommit := git(t, binary, lease.Path, "rev-parse", "HEAD")
+
+	// The #2775 shape: the directory is deleted out of band, the git
+	// registration and AO's row both survive.
+	if err := os.RemoveAll(lease.Path); err != nil {
+		t.Fatalf("remove worktree dir: %v", err)
+	}
+	primary := snapshotPrimary(t, binary, repo)
+
+	recovered, err := m.Ensure(ctx, req)
+	if err != nil {
+		t.Fatalf("ensure over a stale registration: %v", err)
+	}
+	if recovered.Path != lease.Path {
+		t.Fatalf("recovered path = %q, want the original %q", recovered.Path, lease.Path)
+	}
+	if _, err := os.Stat(filepath.Join(recovered.Path, "README.md")); err != nil {
+		t.Fatalf("recovered worktree was not materialised: %v", err)
+	}
+	if got := git(t, binary, recovered.Path, "rev-parse", "--abbrev-ref", "HEAD"); got != "ao/wf-1/t1" {
+		t.Fatalf("recovered worktree branch = %q, want ao/wf-1/t1", got)
+	}
+	// The commit made before the directory vanished is still there: recovery
+	// reused the branch rather than re-cutting it from base.
+	if got := git(t, binary, recovered.Path, "rev-parse", "HEAD"); got != taskCommit {
+		t.Fatalf("recovered HEAD = %s, want the preserved task commit %s", got, taskCommit)
+	}
+	if _, err := os.Stat(filepath.Join(recovered.Path, "task.txt")); err != nil {
+		t.Fatalf("committed work did not come back: %v", err)
+	}
+	if got := store.rows["t1"].State; got != domain.TaskWorktreeActive {
+		t.Fatalf("state after recovery = %q, want active", got)
+	}
+	// Recovery must not have reached into the user's checkout either.
+	if got := snapshotPrimary(t, binary, repo); got != primary {
+		t.Fatalf("primary checkout changed by recovery:\n got %#v\nwant %#v", got, primary)
 	}
 }

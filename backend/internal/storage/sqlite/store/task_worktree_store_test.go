@@ -9,13 +9,13 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
-	"github.com/aoagents/agent-orchestrator/backend/internal/worktree"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workspace"
 )
 
 // The lifecycle manager persists through this Store, so the store must
 // actually satisfy the interface the manager declares. Asserting it here keeps
 // the two from drifting without importing storage into the manager package.
-var _ worktree.Store = (*sqlite.Store)(nil)
+var _ workspace.Store = (*sqlite.Store)(nil)
 
 func seedTaskForWorktree(t *testing.T, s *sqlite.Store, projectID, runID, taskID string, now time.Time) {
 	t.Helper()

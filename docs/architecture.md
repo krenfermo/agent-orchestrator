@@ -155,7 +155,7 @@ falling back to the worktree the user opted out of.
 
 ### Task worktree lifecycle
 
-`internal/worktree` owns the worktrees a *plan's tasks* run in, as opposed to
+`internal/workspace` owns the worktrees a *plan's tasks* run in, as opposed to
 `adapters/workspace/gitworktree`, which owns the one a *session* runs in. A
 multi-task plan asks questions the per-session record cannot answer: which task
 a directory belongs to, which branch the work is ultimately for (never the

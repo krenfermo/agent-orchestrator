@@ -1,4 +1,4 @@
-// Package worktree owns the lifecycle of the git worktrees AO creates for a
+// Package workspace owns the lifecycle of the git worktrees AO creates for a
 // plan's tasks: where they live, what branch they are on, what they were cut
 // from, and what state they are in, durably, for as long as the plan exists.
 //
@@ -23,7 +23,7 @@
 //     row, and not one git command. Its work happens in the user's repository
 //     on the user's branch, which is the entire point of that mode, and a
 //     lifecycle record would be a claim that AO owns something it does not.
-package worktree
+package workspace
 
 import (
 	"context"

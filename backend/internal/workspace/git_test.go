@@ -1,4 +1,4 @@
-package worktree
+package workspace
 
 import (
 	"context"
