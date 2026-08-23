@@ -60,7 +60,10 @@ type BoardChildTask struct {
 	Ordinal int64
 	Title   string
 	State   domain.WorkflowTaskState
-	RunID   string
+	// WaitReason is present for an undispatched blocked task and distinguishes
+	// dependency ordering from a write-set lane conflict.
+	WaitReason string
+	RunID      string
 	// Phase is derived from the child run when one exists. Empty for a task
 	// that has never been dispatched — which is a fact ("not started"), not an
 	// unknown.
@@ -143,6 +146,9 @@ func (c *Coordinator) boardEntry(ctx stdctx.Context, run domain.WorkflowRun) (Bo
 
 	for _, task := range detail.Tasks {
 		child := BoardChildTask{Ordinal: task.Ordinal, Title: task.Title, State: task.State}
+		if scope, err := UnmarshalTaskScope(task.ScopeJSON); err == nil {
+			child.WaitReason = string(scope.WaitingReason)
+		}
 		if task.ExecutionRunID != nil {
 			child.RunID = *task.ExecutionRunID
 			childRun, ok, cerr := c.store.GetWorkflowRun(ctx, child.RunID)

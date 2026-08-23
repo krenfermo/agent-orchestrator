@@ -10,6 +10,25 @@ import (
 // BranchLockState is the durable state of one execution lock.
 type BranchLockState string
 
+// BranchLockOwnershipKind explains which mutable git surface a lock protects.
+// The kind is audit metadata; exclusion remains keyed by the concrete
+// repository+branch so direct writers and integrators cannot overlap, while
+// isolated task branches remain independent.
+type BranchLockOwnershipKind string
+
+const (
+	BranchLockOwnershipDirectBranch      BranchLockOwnershipKind = "direct_branch"
+	BranchLockOwnershipTaskWorkspace     BranchLockOwnershipKind = "isolated_task_workspace"
+	BranchLockOwnershipTargetIntegration BranchLockOwnershipKind = "target_integration"
+)
+
+func (k BranchLockOwnershipKind) WithDefault() BranchLockOwnershipKind {
+	if k == "" {
+		return BranchLockOwnershipDirectBranch
+	}
+	return k
+}
+
 const (
 	// BranchLockHeld means a workflow run is the current writer of the
 	// repository+branch pair.
@@ -60,6 +79,7 @@ type BranchLock struct {
 	// workspace root, otherwise the registered child repo name.
 	RepoName       string
 	Branch         string
+	OwnershipKind  BranchLockOwnershipKind
 	WorkflowRunID  string
 	WorkflowStepID string
 	SessionID      string

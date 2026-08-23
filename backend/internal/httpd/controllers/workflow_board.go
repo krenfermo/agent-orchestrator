@@ -30,9 +30,10 @@ type WorkflowStepProgressView struct {
 
 // WorkflowBoardTaskView is one planned task of a master run.
 type WorkflowBoardTaskView struct {
-	Ordinal int64  `json:"ordinal"`
-	Title   string `json:"title"`
-	State   string `json:"state" enum:"blocked,eligible,running,completed,failed,cancelled"`
+	Ordinal    int64  `json:"ordinal"`
+	Title      string `json:"title"`
+	State      string `json:"state" enum:"blocked,eligible,running,completed,failed,cancelled"`
+	WaitReason string `json:"waitReason,omitempty" enum:"waiting_for_dependencies,waiting_for_write_conflict"`
 	// WorkflowID is the child run executing this task, empty until dispatched.
 	WorkflowID string `json:"workflowId,omitempty"`
 	// Phase is the child run's own derived lifecycle phase. Empty when the task
@@ -149,6 +150,7 @@ func workflowBoardEntryView(e workflowcore.BoardEntry) WorkflowBoardEntryView {
 			Ordinal:    t.Ordinal,
 			Title:      t.Title,
 			State:      string(t.State),
+			WaitReason: t.WaitReason,
 			WorkflowID: t.RunID,
 			Phase:      string(t.Phase),
 			Steps:      stepProgressViews(t.Steps),

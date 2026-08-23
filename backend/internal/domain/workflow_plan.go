@@ -158,6 +158,9 @@ type WorkflowTaskScope struct {
 	// ExecutionStrategy is how this task may be scheduled against its
 	// siblings.
 	ExecutionStrategy WorkflowTaskExecutionStrategy `json:"executionStrategy"`
+	// WaitingReason is the dispatcher's durable explanation for why this task
+	// is currently held. Empty means it has not been evaluated as blocked.
+	WaitingReason WorkflowTaskWaitingReason `json:"waitingReason,omitempty"`
 	// ExecutionMode is the workspace strategy the plan selected for THIS task,
 	// which is not always the project's own setting: a smart-parallel project
 	// downgrades a task whose write set conflicts with a sibling's, or whose
@@ -191,6 +194,13 @@ type WorkflowTaskScope struct {
 	// the waiver meaningful.
 	SafeWriteOverlaps []WorkflowTaskSafeOverlap `json:"safeWriteOverlaps"`
 }
+
+type WorkflowTaskWaitingReason string
+
+const (
+	WorkflowTaskWaitingDependency WorkflowTaskWaitingReason = "waiting_for_dependencies"
+	WorkflowTaskWaitingConflict   WorkflowTaskWaitingReason = "waiting_for_write_conflict"
+)
 
 // WorkflowTaskExecutionDowngrade is the durable record of a task being denied
 // the execution strategy its project configured.

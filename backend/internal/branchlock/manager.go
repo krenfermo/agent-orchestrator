@@ -236,6 +236,12 @@ type AcquireRequest struct {
 	RunID     string
 	StepID    string
 	SessionID string
+	// Kind defaults to direct_branch for backwards compatibility. Isolated
+	// task and integration callers supply the exact concrete target below.
+	Kind     domain.BranchLockOwnershipKind
+	RepoName string
+	RepoPath string
+	Branch   string
 }
 
 // owner returns the identity the acquisition will be recorded under, or "" if
@@ -264,7 +270,21 @@ func (r AcquireRequest) owner() string {
 // this one must wait; a DirtyRepositoryError means a human must act first.
 // Neither is a workflow failure.
 func (m *Manager) Acquire(ctx context.Context, req AcquireRequest) ([]domain.BranchLock, error) {
-	targets, err := m.Targets(ctx, req.ProjectID)
+	kind := req.Kind.WithDefault()
+	var targets []Target
+	var err error
+	if kind == domain.BranchLockOwnershipDirectBranch {
+		targets, err = m.Targets(ctx, req.ProjectID)
+	} else {
+		if strings.TrimSpace(req.RepoPath) == "" || strings.TrimSpace(req.Branch) == "" {
+			return nil, fmt.Errorf("branch lock: %s acquisition requires repo path and branch", kind)
+		}
+		name := req.RepoName
+		if name == "" {
+			name = domain.RootWorkspaceRepoName
+		}
+		targets = []Target{newTarget(name, req.RepoPath, req.Branch)}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +300,13 @@ func (m *Manager) Acquire(ctx context.Context, req AcquireRequest) ([]domain.Bra
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Key < targets[j].Key })
 
-	preflights, err := m.preflightAll(ctx, targets, owner)
+	preflights := map[string]ports.WorkspacePreflight{}
+	// Only direct ownership touches the user's primary worktree and therefore
+	// needs the dirty-worktree gate. Task workspaces are private; integration
+	// ownership protects a ref update rather than editing the primary checkout.
+	if kind == domain.BranchLockOwnershipDirectBranch {
+		preflights, err = m.preflightAll(ctx, targets, owner)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -295,6 +321,7 @@ func (m *Manager) Acquire(ctx context.Context, req AcquireRequest) ([]domain.Bra
 			RepoPath:       target.RepoPath,
 			RepoName:       target.RepoName,
 			Branch:         target.Branch,
+			OwnershipKind:  kind,
 			WorkflowRunID:  req.RunID,
 			WorkflowStepID: req.StepID,
 			SessionID:      req.SessionID,

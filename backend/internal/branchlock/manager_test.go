@@ -500,3 +500,28 @@ func mustAcquireRaw(t *testing.T, store *sqlite.Store, repoPath, branch, runID, 
 		t.Fatalf("raw acquire for %s: %v", runID, err)
 	}
 }
+
+func TestAcquirePersistsNonDirectOwnershipKinds(t *testing.T) {
+	store := sqlitetest.MustOpen(t)
+	mgr := newManager(t, store, &fakePreflight{}, "owner-1")
+	ctx := context.Background()
+	for i, kind := range []domain.BranchLockOwnershipKind{
+		domain.BranchLockOwnershipTaskWorkspace,
+		domain.BranchLockOwnershipTargetIntegration,
+	} {
+		locks, err := mgr.Acquire(ctx, branchlock.AcquireRequest{
+			ProjectID: "proj", RunID: fmt.Sprintf("run-%d", i), Kind: kind,
+			RepoPath: t.TempDir(), Branch: fmt.Sprintf("ao/task-%d", i),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(locks) != 1 || locks[0].OwnershipKind != kind {
+			t.Fatalf("kind %q persisted as %+v", kind, locks)
+		}
+		held, found, err := store.GetHeldBranchLock(ctx, locks[0].LockKey)
+		if err != nil || !found || held.OwnershipKind != kind {
+			t.Fatalf("reloaded kind=%q found=%v err=%v, want %q", held.OwnershipKind, found, err, kind)
+		}
+	}
+}

@@ -608,7 +608,7 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 	// when some child stopped hours ago.
 	run = c.reconcileMirroredChildStop(ctx, run, tasks)
 	completed := map[string]bool{}
-	active := false
+	activeTasks := map[string]bool{}
 	for i := range tasks {
 		task := &tasks[i]
 		if task.State == domain.WorkflowTaskCompleted {
@@ -618,7 +618,7 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 		if task.State != domain.WorkflowTaskRunning {
 			continue
 		}
-		active = true
+		activeTasks[task.ID] = true
 		if task.ExecutionRunID == nil {
 			if id, ok, err := c.planStore.FindWorkflowRunByPlannedTask(ctx, task.ID); err != nil {
 				return err
@@ -702,7 +702,7 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 			// what decides whether a completed task counts as completed.
 			c.recordObservedTaskWriteSet(ctx, *task, child.Run.ID)
 			completed[task.ID] = true
-			active = false
+			delete(activeTasks, task.ID)
 
 		case domain.WorkflowRunFailed:
 			_, _ = c.planStore.UpdateWorkflowTaskState(ctx, task.ID, domain.WorkflowTaskRunning, domain.WorkflowTaskFailed, c.clock())
@@ -725,7 +725,7 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 			// ask about: mirror it onto the task and let the parent's own
 			// completion accounting below decide what that means for the run.
 			_, _ = c.planStore.UpdateWorkflowTaskState(ctx, task.ID, domain.WorkflowTaskRunning, domain.WorkflowTaskCancelled, c.clock())
-			active = false
+			delete(activeTasks, task.ID)
 
 		case domain.WorkflowRunNeedsAttention:
 			// The task stays "running": its child is genuinely non-terminal and
@@ -765,9 +765,22 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 		}
 		return nil
 	}
-	if active {
+	// Direct-branch mode intentionally retains its historical single-writer
+	// dispatch. Worktree modes use the durable DAG/conflict snapshot below and
+	// may fill every currently safe lane in one reconciliation pass.
+	parallelWorktrees := c.projectExecutionMode(ctx, run.ProjectID).SmartParallel()
+	if len(activeTasks) > 0 && !parallelWorktrees {
 		return nil
 	}
+	graph := TaskGraphSnapshot{}
+	if parallelWorktrees {
+		var graphErr error
+		graph, graphErr = c.LoadTaskGraph(ctx, run.ID)
+		if graphErr != nil {
+			return graphErr
+		}
+	}
+	dispatched := false
 	for i := range tasks {
 		task := &tasks[i]
 		if task.State.Terminal() || task.ExecutionRunID != nil {
@@ -781,7 +794,32 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 			}
 		}
 		if !eligible {
+			if err := c.persistTaskWaitingReason(ctx, task, domain.WorkflowTaskWaitingDependency); err != nil {
+				return err
+			}
 			continue
+		}
+		if parallelWorktrees {
+			conflict := false
+			for _, other := range graph.ConflictsFor(task.ID) {
+				if activeTasks[other] {
+					conflict = true
+					break
+				}
+			}
+			if conflict {
+				if err := c.persistTaskWaitingReason(ctx, task, domain.WorkflowTaskWaitingConflict); err != nil {
+					return err
+				}
+				if task.State == domain.WorkflowTaskEligible {
+					_, _ = c.planStore.UpdateWorkflowTaskState(ctx, task.ID, domain.WorkflowTaskEligible, domain.WorkflowTaskBlocked, c.clock())
+					task.State = domain.WorkflowTaskBlocked
+				}
+				continue
+			}
+		}
+		if err := c.persistTaskWaitingReason(ctx, task, ""); err != nil {
+			return err
 		}
 		if task.State == domain.WorkflowTaskBlocked {
 			_, _ = c.planStore.UpdateWorkflowTaskState(ctx, task.ID, domain.WorkflowTaskBlocked, domain.WorkflowTaskEligible, c.clock())
@@ -794,7 +832,17 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 		} else if open {
 			return nil
 		}
-		return c.dispatchMasterTask(ctx, run, *task)
+		if err := c.dispatchMasterTask(ctx, run, *task); err != nil {
+			return err
+		}
+		dispatched = true
+		activeTasks[task.ID] = true
+		if !parallelWorktrees {
+			return nil
+		}
+	}
+	if dispatched {
+		return nil
 	}
 
 	// Checkpoint 8P-E.13 Phase 6: nothing is running, nothing completed the
@@ -809,6 +857,26 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 		c.recordAttentionStop(ctx, run, nil, ReasonChildFailed,
 			"a task ended without completing, so the tasks depending on it can never become eligible")
 	}
+	return nil
+}
+
+func (c *Coordinator) persistTaskWaitingReason(ctx stdctx.Context, task *domain.WorkflowTask, reason domain.WorkflowTaskWaitingReason) error {
+	scope, err := UnmarshalTaskScope(task.ScopeJSON)
+	if err != nil {
+		return err
+	}
+	if scope.WaitingReason == reason {
+		return nil
+	}
+	scope.WaitingReason = reason
+	raw, err := MarshalTaskScope(scope)
+	if err != nil {
+		return err
+	}
+	if _, err = c.planStore.UpdateWorkflowTaskScope(ctx, task.ID, raw, c.clock()); err != nil {
+		return err
+	}
+	task.ScopeJSON = raw
 	return nil
 }
 

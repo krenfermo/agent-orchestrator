@@ -52,6 +52,7 @@ func (s *Store) AcquireBranchLock(ctx context.Context, lock domain.BranchLock) (
 		ReleaseReason:  "",
 		CreatedAt:      lock.AcquiredAt,
 		UpdatedAt:      lock.AcquiredAt,
+		OwnershipKind:  string(lock.OwnershipKind.WithDefault()),
 	})
 	if err == nil {
 		return branchLockFromRow(row), nil
@@ -233,6 +234,7 @@ func branchLockFromRow(r gen.BranchLock) domain.BranchLock {
 		RepoPath:       r.RepoPath,
 		RepoName:       r.RepoName,
 		Branch:         r.Branch,
+		OwnershipKind:  domain.BranchLockOwnershipKind(r.OwnershipKind).WithDefault(),
 		WorkflowRunID:  r.WorkflowRunID,
 		WorkflowStepID: r.WorkflowStepID.String,
 		SessionID:      r.SessionID.String,

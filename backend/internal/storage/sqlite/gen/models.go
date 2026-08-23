@@ -117,6 +117,7 @@ type BranchLock struct {
 	ReleaseReason  string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+	OwnershipKind  string
 }
 
 type ChangeLog struct {

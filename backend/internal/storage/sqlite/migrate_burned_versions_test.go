@@ -132,6 +132,7 @@ var shippedMigrations = map[int64]string{
 	126: "0126_post_run_qa_runs.sql",
 	127: "0127_workflow_task_scope_graph.sql",
 	128: "0128_workflow_task_worktrees.sql",
+	129: "0129_branch_lock_ownership_kind.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they
