@@ -567,3 +567,29 @@ func TestFailedLaunchDoesNotBurnTheIncident(t *testing.T) {
 		t.Fatalf("successful launches = %d, want 1", f.agents.diagnostics)
 	}
 }
+
+// A class-D verdict must survive the fold with its content intact. Its whole
+// value is the evidence it names as missing, and a real E2E found that a
+// refusal was being recorded as a bare state with nothing a person could read.
+func TestRefusedDiagnosisKeepsItsContentForTheModal(t *testing.T) {
+	f := newAdvisorFixture(t, workflowcore.ReasonVerifyUnrepairable, "verify failed for a reason no fix cycle can repair")
+	inc := f.diagnoseWith(t, workflowcore.IncidentDiagnosisSubmission{
+		Class:       workflowcore.IncidentUnsafeOrInsufficient,
+		Summary:     "the verification target is not configured, so nothing can be concluded about the code",
+		WhatIsStuck: "verify, with no structured check to run",
+		Missing:     []string{"the project's verification commands", "any verify output at all"},
+	}, true)
+
+	if inc.State != workflowcore.IncidentRefused {
+		t.Fatalf("state = %q, want refused", inc.State)
+	}
+	if inc.Diagnosis == nil {
+		t.Fatal("a refusal was recorded with no readable content; its missing-evidence list is the whole point")
+	}
+	if inc.Diagnosis.Class != workflowcore.IncidentUnsafeOrInsufficient {
+		t.Fatalf("class = %q, want unsafe_or_insufficient_evidence", inc.Diagnosis.Class)
+	}
+	if len(inc.Diagnosis.Missing) != 2 {
+		t.Fatalf("missing evidence = %v, want both entries preserved", inc.Diagnosis.Missing)
+	}
+}

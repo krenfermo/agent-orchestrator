@@ -477,7 +477,17 @@ func foldIncident(incidentID string, cps []domain.WorkflowCheckpoint) (Incident,
 			if rec.Action != nil && rec.Action.Kind == IncidentActionRepairAgent {
 				inc.Repairs++
 			}
-		case incidentDiagnosedPhase:
+		case incidentDiagnosedPhase, incidentRefusedPhase:
+			// A refusal IS a diagnosis, and folding it as one is load-bearing:
+			// an unsafe/insufficient verdict's whole value is the evidence it
+			// names as missing, and dropping that on the floor would leave the
+			// modal showing a bare "refused" with nothing a person could read.
+			// A refusal written by the EXECUTION path carries no classification
+			// (it is a policy refusal, not an agent's answer), so it must not
+			// overwrite a real one — hence the guard.
+			if rec.Class == "" && inc.Diagnosis != nil {
+				break
+			}
 			inc.Diagnosis = &IncidentDiagnosis{
 				Class: rec.Class, Summary: rec.Summary,
 				WhatHappened: rec.WhatHappened, WhatIsStuck: rec.WhatIsStuck, WhyStopped: rec.WhyStopped,
