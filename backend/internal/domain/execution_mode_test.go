@@ -34,6 +34,39 @@ func TestResolveExecutionModeIgnoresDirectBranchForScratchProjects(t *testing.T)
 	}
 }
 
+// Smart-parallel worktrees is a worktree mode, not a third workspace
+// architecture: every consumer branches on DirectBranch, so it must answer that
+// question exactly the way isolated_worktree does. Only SmartParallel
+// distinguishes the two.
+func TestSmartParallelWorktreesIsAWorktreeMode(t *testing.T) {
+	mode := ExecutionSmartParallelWorktrees
+	if mode.DirectBranch() {
+		t.Fatal("smart_parallel_worktrees reports direct branch; every worktree consumer would take the wrong path")
+	}
+	if !mode.SmartParallel() {
+		t.Fatal("smart_parallel_worktrees does not report smart parallel")
+	}
+	for _, other := range []ExecutionMode{"", ExecutionIsolatedWorktree, ExecutionDirectBranch} {
+		if other.SmartParallel() {
+			t.Fatalf("%q reports smart parallel", other)
+		}
+	}
+	if !mode.IsKnown() {
+		t.Fatal("smart_parallel_worktrees is not a known mode")
+	}
+	if err := (ProjectConfig{ExecutionMode: mode}).Validate(); err != nil {
+		t.Fatalf("smart-parallel config rejected: %v", err)
+	}
+	if got := ResolveExecutionMode(ProjectKindSingleRepo, ProjectConfig{ExecutionMode: mode}); got != mode {
+		t.Fatalf("resolved to %q, want smart_parallel_worktrees", got)
+	}
+	// A scratch project has no repository, so it is isolated_worktree the same
+	// way it is for direct branch.
+	if got := ResolveExecutionMode(ProjectKindScratch, ProjectConfig{ExecutionMode: mode}); got != ExecutionIsolatedWorktree {
+		t.Fatalf("scratch project resolved to %q, want isolated_worktree", got)
+	}
+}
+
 func TestGitPolicyDefaultsAreLocalOnly(t *testing.T) {
 	got := (GitPolicy{}).WithDefaults()
 	if got.LocalCommit != GitActionAutomatic {

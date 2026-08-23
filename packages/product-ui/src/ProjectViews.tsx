@@ -654,8 +654,17 @@ export type RepoConnectivityRow = {
 	onTest: () => void;
 };
 
-/** Execution mode of a project: work in a throwaway worktree, or in the repo itself. */
-export type ProjectExecutionMode = "isolated_worktree" | "direct_branch";
+/**
+ * Execution mode of a project: work in a throwaway worktree, in the repo
+ * itself, or in throwaway worktrees the planner is additionally allowed to run
+ * concurrently for tasks it proved independent. Only `direct_branch` changes
+ * how a workspace is materialised, which is why every check below asks for
+ * exactly that one.
+ */
+export type ProjectExecutionMode =
+	| "isolated_worktree"
+	| "direct_branch"
+	| "smart_parallel_worktrees";
 
 /**
  * One repository a direct-branch project executes in, with the branch it is

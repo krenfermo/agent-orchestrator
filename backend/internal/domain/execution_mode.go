@@ -13,6 +13,15 @@ import "fmt"
 // isolation is pure overhead: AO works in the registered repository itself, on
 // the branch the project (or, for a workspace project, each registered
 // repository) already configures.
+//
+// ExecutionSmartParallelWorktrees is a third, opt-in setting layered on top of
+// the isolated-worktree architecture: the workspace is materialised exactly the
+// way isolated_worktree materialises it, and the only thing that changes is a
+// plan-time decision about which of a master plan's tasks may occupy their own
+// worktree concurrently. It is deliberately NOT a new workspace adapter --
+// every consumer that branches on execution mode asks "is this direct branch?",
+// so a smart-parallel project takes the same worktree path an isolated project
+// always took.
 type ExecutionMode string
 
 const (
@@ -26,6 +35,16 @@ const (
 	// protected by a durable per-repository+branch execution lock instead of
 	// by physical isolation.
 	ExecutionDirectBranch ExecutionMode = "direct_branch"
+	// ExecutionSmartParallelWorktrees materialises workspaces exactly like
+	// ExecutionIsolatedWorktree and additionally lets the planner run a
+	// master plan's independent tasks in their own worktrees at the same
+	// time. Which tasks actually get that is not a property of the setting:
+	// it is decided per task when the plan is accepted, from the task DAG and
+	// the estimated write sets, and a task the classifier cannot prove
+	// independent is downgraded back to a plain isolated worktree (see
+	// workflow.SelectTaskExecutionStrategies). Selecting this mode therefore
+	// grants permission to parallelise, never a guarantee that anything will.
+	ExecutionSmartParallelWorktrees ExecutionMode = "smart_parallel_worktrees"
 )
 
 // WithDefault returns ExecutionIsolatedWorktree when the stored value is empty
@@ -42,7 +61,7 @@ func (m ExecutionMode) WithDefault() ExecutionMode {
 // value is known and means "unset — use the default".
 func (m ExecutionMode) IsKnown() bool {
 	switch m {
-	case "", ExecutionIsolatedWorktree, ExecutionDirectBranch:
+	case "", ExecutionIsolatedWorktree, ExecutionDirectBranch, ExecutionSmartParallelWorktrees:
 		return true
 	default:
 		return false
@@ -53,6 +72,14 @@ func (m ExecutionMode) IsKnown() bool {
 // repository rather than in a per-session worktree.
 func (m ExecutionMode) DirectBranch() bool {
 	return m.WithDefault() == ExecutionDirectBranch
+}
+
+// SmartParallel reports whether the effective mode lets the planner assign
+// independent tasks their own concurrent worktrees. It is the ONLY question
+// that distinguishes smart_parallel_worktrees from isolated_worktree: every
+// other consumer asks DirectBranch and must keep treating the two identically.
+func (m ExecutionMode) SmartParallel() bool {
+	return m.WithDefault() == ExecutionSmartParallelWorktrees
 }
 
 // GitActionPolicy is the autonomy granted to AO for one class of git write

@@ -641,6 +641,7 @@
 	"settings.project.executionMode": "실행 모드",
 	"settings.project.executionDirectBranch": "직접 브랜치",
 	"settings.project.executionIsolatedWorktree": "격리된 워크트리",
+	"settings.project.executionSmartParallelWorktrees": "스마트 병렬 워크트리",
 	"settings.project.directBranchNote": "AO가 등록된 저장소의 이 브랜치에서 직접 작업합니다. 변경 작업을 수행하는 워크플로는 한 번에 하나만 사용할 수 있으며, 나머지는 브랜치가 해제될 때까지 대기합니다. 임시 워크트리나 ao/* 브랜치는 생성되지 않습니다.",
 	"settings.project.sessionPrefixNoGitNote": "직접 브랜치 모드에서 세션 접두사는 세션 이름에만 사용됩니다. 더 이상 Git 브랜치를 만들지 않습니다.",
 	"settings.project.repositories": "저장소",

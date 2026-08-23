@@ -650,6 +650,7 @@
 	"settings.project.executionMode": "Modo de ejecución",
 	"settings.project.executionDirectBranch": "Rama directa",
 	"settings.project.executionIsolatedWorktree": "Worktree aislado",
+	"settings.project.executionSmartParallelWorktrees": "Worktrees paralelos inteligentes",
 	"settings.project.directBranchNote": "AO trabaja directamente en esta rama del repositorio registrado. Solo un workflow que modifique puede usarla a la vez; los demás esperan hasta que quede libre. No se crea ningún worktree temporal ni ninguna rama ao/*.",
 	"settings.project.sessionPrefixNoGitNote": "En modo de rama directa el prefijo de sesión solo nombra sesiones. Ya no crea ramas de Git.",
 	"settings.project.repositories": "Repositorios",

@@ -641,6 +641,7 @@
 	"settings.project.executionMode": "実行モード",
 	"settings.project.executionDirectBranch": "直接ブランチ",
 	"settings.project.executionIsolatedWorktree": "分離ワークツリー",
+	"settings.project.executionSmartParallelWorktrees": "スマート並列ワークツリー",
 	"settings.project.directBranchNote": "AO は登録済みリポジトリのこのブランチで直接作業します。変更を行うワークフローは同時に 1 つだけ使用でき、他は解放されるまで待機します。一時的なワークツリーや ao/* ブランチは作成されません。",
 	"settings.project.sessionPrefixNoGitNote": "直接ブランチモードでは、セッションプレフィックスはセッション名にのみ使われます。Git ブランチは作成されません。",
 	"settings.project.repositories": "リポジトリ",

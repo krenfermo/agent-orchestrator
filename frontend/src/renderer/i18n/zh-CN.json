@@ -623,6 +623,7 @@
 	"settings.project.executionMode": "执行模式",
 	"settings.project.executionDirectBranch": "直接分支",
 	"settings.project.executionIsolatedWorktree": "隔离工作树",
+	"settings.project.executionSmartParallelWorktrees": "智能并行工作树",
 	"settings.project.directBranchNote": "AO 直接在已注册仓库的该分支上工作。同一时间只能有一个会修改内容的工作流使用它，其他工作流会等待其释放。不会创建临时工作树，也不会创建 ao/* 分支。",
 	"settings.project.sessionPrefixNoGitNote": "在直接分支模式下，会话前缀仅用于命名会话，不再创建 Git 分支。",
 	"settings.project.repositories": "仓库",

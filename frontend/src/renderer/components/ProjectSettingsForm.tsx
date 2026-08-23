@@ -545,6 +545,10 @@ function SettingsBody({
 										options={[
 											{ value: "direct_branch", label: t("settings.project.executionDirectBranch") },
 											{ value: "isolated_worktree", label: t("settings.project.executionIsolatedWorktree") },
+											{
+												value: "smart_parallel_worktrees",
+												label: t("settings.project.executionSmartParallelWorktrees"),
+											},
 										]}
 										aria-label={t("settings.project.executionMode")}
 									/>

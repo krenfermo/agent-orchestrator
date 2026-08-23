@@ -9547,6 +9547,7 @@ components:
           enum:
           - isolated_worktree
           - direct_branch
+          - smart_parallel_worktrees
           type: string
         id:
           type: string
@@ -9641,6 +9642,7 @@ components:
           enum:
           - isolated_worktree
           - direct_branch
+          - smart_parallel_worktrees
           type: string
         git:
           $ref: '#/components/schemas/GitPolicy'
@@ -9708,6 +9710,7 @@ components:
           enum:
           - isolated_worktree
           - direct_branch
+          - smart_parallel_worktrees
           type: string
         lock:
           $ref: '#/components/schemas/ProjectRepositoryLock'

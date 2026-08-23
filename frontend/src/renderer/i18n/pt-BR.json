@@ -650,6 +650,7 @@
 	"settings.project.executionMode": "Modo de execução",
 	"settings.project.executionDirectBranch": "Branch direto",
 	"settings.project.executionIsolatedWorktree": "Worktree isolado",
+	"settings.project.executionSmartParallelWorktrees": "Worktrees paralelos inteligentes",
 	"settings.project.directBranchNote": "O AO trabalha diretamente neste branch do repositório registrado. Apenas um workflow que modifica pode usá-lo por vez; os demais aguardam até que fique livre. Nenhum worktree temporário e nenhum branch ao/* é criado.",
 	"settings.project.sessionPrefixNoGitNote": "No modo de branch direto o prefixo de sessão apenas nomeia sessões. Ele não cria mais branches do Git.",
 	"settings.project.repositories": "Repositórios",

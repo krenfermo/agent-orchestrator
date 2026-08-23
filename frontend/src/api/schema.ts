@@ -3453,7 +3453,7 @@ export interface components {
             config?: components["schemas"]["ProjectConfig"];
             defaultBranch: string;
             /** @enum {string} */
-            executionMode: "isolated_worktree" | "direct_branch";
+            executionMode: "isolated_worktree" | "direct_branch" | "smart_parallel_worktrees";
             id: string;
             /** @enum {string} */
             kind: "single_repo" | "workspace" | "scratch";
@@ -3488,7 +3488,7 @@ export interface components {
                 [key: string]: string;
             };
             /** @enum {string} */
-            executionMode?: "isolated_worktree" | "direct_branch";
+            executionMode?: "isolated_worktree" | "direct_branch" | "smart_parallel_worktrees";
             git?: components["schemas"]["GitPolicy"];
             orchestrator?: components["schemas"]["RoleOverride"];
             orchestratorRules?: string;
@@ -3515,7 +3515,7 @@ export interface components {
         ProjectRepositoryExecution: {
             branch: string;
             /** @enum {string} */
-            executionMode: "isolated_worktree" | "direct_branch";
+            executionMode: "isolated_worktree" | "direct_branch" | "smart_parallel_worktrees";
             lock?: components["schemas"]["ProjectRepositoryLock"];
             name: string;
             path: string;

@@ -212,6 +212,11 @@ func (c *Coordinator) finalizeGeneratedPlan(ctx stdctx.Context, run domain.Workf
 		RepoRoots:     repoRootsFromContextManifest(record.ContextManifestJSON),
 		Tasks:         taskScopeInputs(generated, tasks, idByPlan, nil),
 	})
+	// Then pick each task's execution strategy from the project's setting and
+	// the verdicts just classified. For every project except a smart-parallel
+	// one this is a no-op that touches no scope, so an existing plan's stored
+	// scope is byte-for-byte what it was before the selector existed.
+	graph = ApplyTaskExecutionStrategies(c.projectExecutionMode(ctx, run.ProjectID), graph)
 	for i := range tasks {
 		scope, ok := graph.Scopes[tasks[i].ID]
 		if !ok {

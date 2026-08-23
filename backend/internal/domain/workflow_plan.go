@@ -158,6 +158,23 @@ type WorkflowTaskScope struct {
 	// ExecutionStrategy is how this task may be scheduled against its
 	// siblings.
 	ExecutionStrategy WorkflowTaskExecutionStrategy `json:"executionStrategy"`
+	// ExecutionMode is the workspace strategy the plan selected for THIS task,
+	// which is not always the project's own setting: a smart-parallel project
+	// downgrades a task whose write set conflicts with a sibling's, or whose
+	// write set is too uncertain to prove independent, back to a plain
+	// isolated worktree.
+	//
+	// Empty means the plan made no per-task selection and the task simply uses
+	// the project's mode. That is the case for every project configured
+	// isolated_worktree or direct_branch, where all tasks share one mode and
+	// there is nothing to decide -- recording a "selection" there would be
+	// recording a decision nobody made, and would change the stored scope of
+	// every existing plan. Read it through ResolveTaskExecutionMode, never
+	// directly.
+	ExecutionMode ExecutionMode `json:"executionMode,omitempty"`
+	// ExecutionModeDowngrade explains why ExecutionMode is weaker than the
+	// project asked for. Nil when the task got what the project configured.
+	ExecutionModeDowngrade *WorkflowTaskExecutionDowngrade `json:"executionModeDowngrade,omitempty"`
 	// IntegrationDependencies are the sibling task ids whose work must be
 	// integrated before this task's. It is a superset of the task's dependency
 	// edges: an earlier sibling this task probably write-conflicts with is
@@ -173,6 +190,53 @@ type WorkflowTaskScope struct {
 	// marked safe is a probable write conflict, and that default is what makes
 	// the waiver meaningful.
 	SafeWriteOverlaps []WorkflowTaskSafeOverlap `json:"safeWriteOverlaps"`
+}
+
+// WorkflowTaskExecutionDowngrade is the durable record of a task being denied
+// the execution strategy its project configured.
+//
+// It exists because the downgrade is a judgement about text -- an estimated
+// write set, not an observed one -- and a judgement nobody can audit is one
+// nobody can correct. Storing From/To alone would say a task was demoted
+// without saying what the classifier saw; Reason is the stable code a later
+// build can still match on, Detail is the sentence a person reads, and
+// Conflicts names the specific siblings, so the decision can be checked
+// against the plan rather than trusted.
+type WorkflowTaskExecutionDowngrade struct {
+	// PolicyVersion is the selection-policy version that produced this
+	// downgrade (workflow.TaskStrategyPolicyVersion). It is separate from the
+	// scope's own Version because the rules that estimate a write set and the
+	// rules that decide what to do about one can change independently.
+	PolicyVersion string `json:"policyVersion"`
+	// From is the project's configured mode; To is what the task actually got.
+	From ExecutionMode `json:"from"`
+	To   ExecutionMode `json:"to"`
+	// Serial additionally forbids this task from running at the same time as
+	// the siblings in Conflicts. A downgrade to a private worktree removes the
+	// physical collision but not the integration one: two tasks writing the
+	// same file still have to land in some order, so a write-set conflict
+	// demotes all the way to serial while mere uncertainty does not.
+	Serial bool `json:"serial,omitempty"`
+	// Reason is a stable machine-checkable code (see
+	// workflow.TaskStrategyReason).
+	Reason string `json:"reason"`
+	// Detail is the human-readable sentence behind Reason.
+	Detail string `json:"detail"`
+	// Conflicts are the sibling task ids whose write sets this task probably
+	// collides with. Empty for a downgrade caused by uncertainty alone.
+	Conflicts []string `json:"conflicts,omitempty"`
+}
+
+// ResolveTaskExecutionMode returns the execution mode a planned task's work
+// must actually use: the strategy the plan selected for it, or the project's
+// own mode when the plan selected none. Callers must use this rather than
+// reading WorkflowTaskScope.ExecutionMode directly, the same convention
+// ProjectConfig's Effective* accessors already establish.
+func ResolveTaskExecutionMode(project ExecutionMode, scope WorkflowTaskScope) ExecutionMode {
+	if scope.ExecutionMode == "" {
+		return project.WithDefault()
+	}
+	return scope.ExecutionMode
 }
 
 // WorkflowTaskSafeOverlap is one declaration that a write-set overlap with a

@@ -179,23 +179,62 @@ func (c *Coordinator) reclassifyTaskRelationships(ctx stdctx.Context, runID stri
 	if err := c.planStore.ReplaceWorkflowTaskRelationships(ctx, rels); err != nil {
 		return
 	}
+	// Re-select the execution strategies too, against the corrected picture: a
+	// write set the run has now OBSERVED can reveal a conflict the estimate
+	// missed -- which must downgrade both sides -- or clear one it invented,
+	// which must let them back up. Leaving the plan-time verdict in place would
+	// keep scheduling later tasks against text that evidence has since
+	// replaced. For any project except a smart-parallel one this changes
+	// nothing, exactly as it changes nothing at plan time.
+	updated := TaskGraph{Scopes: make(map[string]domain.WorkflowTaskScope, len(tasks)), Relationships: rels}
+	for id, scope := range scopes {
+		if sched, ok := scheduling[id]; ok {
+			scope.ExecutionStrategy = sched.ExecutionStrategy
+			scope.IntegrationDependencies = sched.IntegrationDependencies
+		}
+		updated.Scopes[id] = scope
+	}
+	updated = ApplyTaskExecutionStrategies(c.runExecutionMode(ctx, runID), updated)
 	for _, t := range tasks {
-		sched, ok := scheduling[t.ID]
+		next, ok := updated.Scopes[t.ID]
 		if !ok {
 			continue
 		}
-		scope := scopes[t.ID]
-		if scope.ExecutionStrategy == sched.ExecutionStrategy && equalStrings(scope.IntegrationDependencies, sched.IntegrationDependencies) {
+		raw, err := MarshalTaskScope(next)
+		if err != nil {
 			continue
 		}
-		scope.ExecutionStrategy = sched.ExecutionStrategy
-		scope.IntegrationDependencies = sched.IntegrationDependencies
-		raw, err := MarshalTaskScope(scope)
-		if err != nil {
+		if before, err := MarshalTaskScope(scopes[t.ID]); err == nil && before == raw {
 			continue
 		}
 		_, _ = c.planStore.UpdateWorkflowTaskScope(ctx, t.ID, raw, now)
 	}
+}
+
+// projectExecutionMode resolves a project's configured execution mode for the
+// strategy selector. It is best-effort on purpose: a project that cannot be
+// read must fall back to the default rather than fail a plan, and the default
+// selects nothing, so an unreadable project can never accidentally grant
+// concurrent worktrees.
+func (c *Coordinator) projectExecutionMode(ctx stdctx.Context, projectID string) domain.ExecutionMode {
+	if c.projects == nil || projectID == "" {
+		return domain.ExecutionIsolatedWorktree
+	}
+	project, ok, err := c.projects.GetProject(ctx, projectID)
+	if err != nil || !ok {
+		return domain.ExecutionIsolatedWorktree
+	}
+	return domain.ResolveExecutionMode(project.Kind, project.Config)
+}
+
+// runExecutionMode is projectExecutionMode for a caller that only holds a run
+// id, which is the case on the re-classification path.
+func (c *Coordinator) runExecutionMode(ctx stdctx.Context, runID string) domain.ExecutionMode {
+	run, ok, err := c.store.GetWorkflowRun(ctx, runID)
+	if err != nil || !ok {
+		return domain.ExecutionIsolatedWorktree
+	}
+	return c.projectExecutionMode(ctx, run.ProjectID)
 }
 
 // derivePathFacets splits a path set into the explicit files, the packages
@@ -231,18 +270,6 @@ func subtractStrings(in, remove []string) []string {
 		}
 	}
 	return out
-}
-
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // TaskGraphSnapshot is a master run's persisted task-graph, as scheduling and

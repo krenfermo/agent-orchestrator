@@ -30,7 +30,7 @@ type ProjectConfig struct {
 	// ExecutionMode selects how sessions materialise their working tree
 	// (Checkpoint 8P-E.11). Empty means isolated_worktree, the pre-checkpoint
 	// behavior — an existing project never changes mode on upgrade.
-	ExecutionMode ExecutionMode `json:"executionMode,omitempty" enum:"isolated_worktree,direct_branch"`
+	ExecutionMode ExecutionMode `json:"executionMode,omitempty" enum:"isolated_worktree,direct_branch,smart_parallel_worktrees"`
 	// Git is the autonomous git policy: what an unattended workflow may do to
 	// the repository without asking. Unset fields fall back to
 	// DefaultGitPolicy (local commit automatic, push and merge never).

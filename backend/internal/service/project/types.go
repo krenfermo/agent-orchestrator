@@ -44,7 +44,7 @@ type Project struct {
 	// 8P-E.11), already resolved against project kind -- a scratch project
 	// always reports isolated_worktree regardless of what is configured, so
 	// the UI never has to re-apply that rule.
-	ExecutionMode domain.ExecutionMode `json:"executionMode" enum:"isolated_worktree,direct_branch"`
+	ExecutionMode domain.ExecutionMode `json:"executionMode" enum:"isolated_worktree,direct_branch,smart_parallel_worktrees"`
 	// Repositories describes every real Git repository this project executes
 	// in, with the branch each one is configured for and, in direct-branch
 	// mode, which workflow currently occupies it. Populated for direct-branch
@@ -64,7 +64,7 @@ type RepositoryExecution struct {
 	// Branch is the branch this repository is configured to work on -- the
 	// authoritative one, never a detected fallback.
 	Branch        string               `json:"branch"`
-	ExecutionMode domain.ExecutionMode `json:"executionMode" enum:"isolated_worktree,direct_branch"`
+	ExecutionMode domain.ExecutionMode `json:"executionMode" enum:"isolated_worktree,direct_branch,smart_parallel_worktrees"`
 	// Lock names the workflow currently holding this repository+branch, or
 	// nil when it is free.
 	Lock *RepositoryLock `json:"lock,omitempty"`
