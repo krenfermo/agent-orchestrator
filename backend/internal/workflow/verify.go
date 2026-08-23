@@ -94,6 +94,22 @@ type VerifyResult struct {
 	// distinguishable from the historical one it re-asked, and it is what the
 	// recovery ledger reads to know a generation has been answered.
 	RecoveryGeneration int `json:"recoveryGeneration,omitempty"`
+	// SupersededByFreshReview marks the one failure that is a question rather
+	// than a verdict (Checkpoint 8P-E.14D): a recovery generation discovering that
+	// the approval it holds no longer describes the workspace, and going to get a
+	// fresh one. The failure itself is recorded honestly — it happened, on the
+	// class it happened on — but the recovery ledger must not read it as the
+	// generation's answer, or the generation would close on the question it just
+	// asked. See verifyRecoveryLedger.executed.
+	SupersededByFreshReview bool `json:"supersededByFreshReview,omitempty"`
+	// StopReason, when set, is the canonical attention reason (attention.go)
+	// finishVerifyFailure records instead of deriving one from the error class.
+	// It exists for the failures whose remedy is genuinely different from
+	// "inspect the verification output" — today only the unattributable workspace
+	// drift 8P-E.14D refuses to absorb, whose question is "who changed this
+	// worktree", not "why did the checks fail". Empty everywhere else, which
+	// leaves every pre-existing stop naming itself exactly as it did.
+	StopReason string `json:"stopReason,omitempty"`
 }
 
 func verificationTargetKey(fingerprint string, plan VerificationPlan) string {
@@ -276,10 +292,25 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 	// SAME reviewed target, and nothing else: if the target moved between the
 	// authorization and this execution, the recovery is void rather than
 	// silently re-using an approval that was given for different work.
+	//
+	// Checkpoint 8P-E.14D adds the one exception, and only the one: a review AO
+	// ITSELF asked for, for this same generation and this same verification
+	// target, because the approval it was holding no longer described the
+	// workspace (verify_fresh_review.go). That approval is not a target that
+	// drifted behind AO's back — it is the answer to a question AO asked on the
+	// record — so the recovery's authorized target advances to it, once, durably.
 	recovery, recovering := c.currentVerifyRecovery(ctx, run.ID)
 	if recovering && recovery.ReviewedFingerprint != "" && recovery.ReviewedFingerprint != reviewed {
-		return c.failVerifyWithoutExecution(ctx, run, verifyStep, domain.WorkflowErrorVerifyAmbiguous,
-			"the reviewed target changed after verification recovery was authorized")
+		approval, ok, err := c.authorizeFreshReviewTarget(ctx, run, reviewStep, verifyStep, recovery, reviewed, targetKey)
+		if err != nil {
+			return run, verifyStep, err
+		}
+		if !ok {
+			return c.failVerifyWithoutExecution(ctx, run, verifyStep, domain.WorkflowErrorVerifyAmbiguous,
+				"the reviewed target changed after verification recovery was authorized")
+		}
+		recovery.ReviewedFingerprint = approval.ReviewedFingerprint
+		recovery.TargetKey = approval.TargetKey
 	}
 	recoveryGeneration := 0
 	if recovering {
@@ -391,6 +422,27 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 	result := VerifyResult{Version: verifyResultVersion, TargetKey: targetKey, ReviewedFingerprint: reviewed, PreFingerprint: pre, Checks: []VerifyCheckResult{}}
 	if pre != reviewed {
 		result.ErrorClass = domain.WorkflowErrorVerifyWorkspaceChanged
+		// Checkpoint 8P-E.14D: inside an explicitly authorized recovery, and ONLY
+		// there, a workspace that no longer matches the approval may be a stale
+		// approval rather than untrusted code — AO's own verifier was corrected
+		// between the two, while the worker's uncommitted work was preserved on
+		// purpose. When every fact needed to attribute the difference to this same
+		// task holds, AO re-reviews the current workspace once instead of parking
+		// forever; when it does not, it stops and says precisely which fact failed.
+		// Outside a recovery this branch is not reachable, so an ordinary
+		// verify_workspace_changed is bit-for-bit what it always was.
+		if recovering {
+			led, ledErr := c.verifyRecoveryLedger(ctx, run.ID)
+			if ledErr != nil {
+				return run, verifyStep, ledErr
+			}
+			decision := c.attributableWorkspaceDrift(ctx, run, reviewStep, recovery, led, targetKey, workCP, obs)
+			if decision.allowed {
+				return c.requestFreshReviewForRecovery(ctx, run, reviewStep, verifyStep, latest, result, recovery, workCP, obs)
+			}
+			result.StopReason = ReasonVerifyWorkspaceUnattributable
+			return c.finishVerifyFailure(ctx, run, verifyStep, latest, result, decision.refusal)
+		}
 		return c.finishVerifyFailure(ctx, run, verifyStep, latest, result, "workspace fingerprint no longer matches the approved review target")
 	}
 
@@ -842,6 +894,12 @@ func (c *Coordinator) finishVerifyFailure(ctx stdctx.Context, run domain.Workflo
 	stopReason := ReasonVerifyUnrepairable
 	detail := fmt.Sprintf("verify failed (%s) after %d fix cycles: %s", result.ErrorClass, used, reason)
 	switch {
+	case result.StopReason != "":
+		// A stop the failing site already named precisely. Its detail is that
+		// site's own explanation, which is more specific than anything derivable
+		// from the error class here.
+		stopReason = result.StopReason
+		detail = reason
 	case result.InfraFailure != nil:
 		// Name the infrastructure failure for what it is, so the user is told to
 		// fix the verifier rather than to go read a diff that is not at fault.

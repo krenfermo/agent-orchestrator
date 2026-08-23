@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 )
 
@@ -101,6 +102,90 @@ func TestChildVerifyRecoveryUnblocksItsMasterObjective(t *testing.T) {
 		t.Fatal("task 2 was never dispatched: the parent never advanced past the recovered task")
 	}
 	// The recovered task kept its identity: no duplicate run, no duplicate task.
+	if taskA.ExecutionRunID == nil || *taskA.ExecutionRunID != childID {
+		t.Fatalf("task 1's execution run = %v, want the original %q", taskA.ExecutionRunID, childID)
+	}
+}
+
+// TestChildFreshReviewRecoveryUnblocksItsMasterObjective is the same parent-side
+// property for the drift half of the incident (Checkpoint 8P-E.14D): the child's
+// workspace no longer matches the approval by the time the recovery runs,
+// because the worker's uncommitted work was preserved across AO's own repair.
+//
+// The child must obtain a fresh review of the current workspace and verify THAT,
+// and the objective must carry on from there — still on one human act, still
+// with no touch of the parent.
+func TestChildFreshReviewRecoveryUnblocksItsMasterObjective(t *testing.T) {
+	fx, ctx, masterID := startAutonomousObjective(t, twoTaskDependentPlan())
+	// A commit the approval can be pinned to. Without a HEAD on record AO refuses
+	// to attribute any drift at all, which is the conservative default this test
+	// deliberately steps out of.
+	fx.ws.obs.HeadSHA = "head-before-the-repair"
+	_, childID := dispatchedChild(t, fx, masterID)
+
+	// 1. Same starting point as the test above: AO's verifier cannot run.
+	fx.verifier.err = verifierHostFailure
+	driveUntil(t, fx, 40, func() bool { return runState(t, fx, childID) == domain.WorkflowRunNeedsAttention })
+	driveCycles(t, fx, 10, func(int) {
+		if _, active, ok := activeChildRunID(t, fx, masterID); ok {
+			approveOpenReview(t, fx, active, domain.VerdictApproved)
+		}
+	})
+	if got := runState(t, fx, childID); got != domain.WorkflowRunNeedsAttention {
+		t.Fatalf("child state = %q, want needs_attention", got)
+	}
+	driveUntil(t, fx, 8, func() bool { return mirroredChildStop(t, fx, masterID) })
+	if !mirroredChildStop(t, fx, masterID) {
+		t.Fatal("the parent never mirrored its stopped child")
+	}
+
+	// 2. AO is repaired, and the worker's uncommitted task changes are preserved
+	// across the restart — so the worktree no longer hashes to what review
+	// approved, at the very same commit.
+	fx.verifier.err = nil
+	fx.ws.obs.Changes = append(fx.ws.obs.Changes,
+		ports.WorkspaceChange{Path: "internal/postrunqa/classify.go", Status: " M"})
+
+	// 3. The one human act, on the child alone.
+	if _, err := fx.coord.ContinueRun(ctx, childID); err != nil {
+		t.Fatalf("ContinueRun(child): %v", err)
+	}
+
+	// 4. Everything else is the daemon's own poller, plus the reviewer answering
+	// the fresh question AO asked it.
+	driveCycles(t, fx, 40, func(int) {
+		if _, active, ok := activeChildRunID(t, fx, masterID); ok {
+			approveOpenReview(t, fx, active, domain.VerdictApproved)
+		}
+	})
+
+	if got := countCheckpointPhase(t, fx, childID, "verify_fresh_review_required"); got != 1 {
+		t.Fatalf("child verify_fresh_review_required checkpoints = %d, want exactly 1", got)
+	}
+	if got := countCheckpointPhase(t, fx, childID, "verify_fresh_review_approved"); got != 1 {
+		t.Fatalf("child verify_fresh_review_approved checkpoints = %d, want exactly 1", got)
+	}
+	if got := runState(t, fx, childID); got != domain.WorkflowRunCompleted {
+		t.Fatalf("child state = %q, want completed", got)
+	}
+	if got := childStepState(t, fx, childID, domain.WorkflowStepVerify); got != domain.WorkflowStepCompleted {
+		t.Fatalf("child verify step = %q, want completed", got)
+	}
+	if mirroredChildStop(t, fx, masterID) {
+		t.Fatal("the parent still mirrors child_needs_attention after its child recovered and completed")
+	}
+	master, _, err := fx.store.GetWorkflowRun(ctx, masterID)
+	if err != nil {
+		t.Fatalf("GetWorkflowRun(master): %v", err)
+	}
+	if master.State != domain.WorkflowRunCompleted {
+		t.Fatalf("master state = %q, want completed: the objective never advanced past the recovered task", master.State)
+	}
+	taskA, _ := taskByPlanStepID(t, fx, masterID, "model")
+	taskB, _ := taskByPlanStepID(t, fx, masterID, "tests")
+	if taskB.ExecutionRunID == nil {
+		t.Fatal("task 2 was never dispatched")
+	}
 	if taskA.ExecutionRunID == nil || *taskA.ExecutionRunID != childID {
 		t.Fatalf("task 1's execution run = %v, want the original %q", taskA.ExecutionRunID, childID)
 	}

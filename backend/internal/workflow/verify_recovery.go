@@ -159,7 +159,24 @@ type verifyRecoveryLedger struct {
 	reopened bool
 	// executed means a VerifyResult stamped with `generation` already exists,
 	// i.e. the corrected verifier has already answered for this generation.
+	//
+	// A result flagged SupersededByFreshReview does NOT count: that result is the
+	// generation's own record of "the approval I was holding no longer describes
+	// this workspace", written precisely so the generation can go and get a
+	// better approval. Treating it as the answer would close the generation on
+	// the question it just asked (see verify_fresh_review.go).
 	executed bool
+	// freshReview is the newest fresh-review request for `generation`, and
+	// freshReviewRequested whether there is one at all. Exactly one is ever
+	// allowed per generation — the bound that makes "re-review and try again"
+	// terminating rather than a loop with a reviewer in it.
+	freshReviewRequested bool
+	freshReview          VerifyFreshReviewRecord
+	// freshReviewApproved means maybeVerify has already recorded which
+	// fingerprint the fresh review approved for `generation`. It is what makes
+	// the approval record write-once across any number of polls and restarts.
+	freshReviewApproved bool
+	freshApproval       VerifyFreshReviewRecord
 }
 
 func (c *Coordinator) verifyRecoveryLedger(ctx stdctx.Context, runID string) (verifyRecoveryLedger, error) {
@@ -190,8 +207,19 @@ func (c *Coordinator) verifyRecoveryLedger(ctx stdctx.Context, runID string) (ve
 			}
 		case verifyResultPhase:
 			var res VerifyResult
-			if json.Unmarshal([]byte(cp.RetryState), &res) == nil && res.RecoveryGeneration == led.generation {
+			if json.Unmarshal([]byte(cp.RetryState), &res) == nil &&
+				res.RecoveryGeneration == led.generation && !res.SupersededByFreshReview {
 				led.executed = true
+			}
+		case verifyFreshReviewRequiredPhase:
+			var rec VerifyFreshReviewRecord
+			if json.Unmarshal([]byte(cp.RetryState), &rec) == nil && rec.Generation == led.generation {
+				led.freshReviewRequested, led.freshReview = true, rec
+			}
+		case verifyFreshReviewApprovedPhase:
+			var rec VerifyFreshReviewRecord
+			if json.Unmarshal([]byte(cp.RetryState), &rec) == nil && rec.Generation == led.generation {
+				led.freshReviewApproved, led.freshApproval = true, rec
 			}
 		}
 	}

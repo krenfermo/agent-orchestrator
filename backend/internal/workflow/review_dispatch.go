@@ -382,7 +382,41 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		if rec, ok := c.latestReviewLaunchRecord(ctx, run.ID, reviewStep.ID); ok && !rec.dueForRetry(c.clock()) && !humanResume {
 			return reviewStep, nil
 		}
-		if fixStep.State == domain.WorkflowStepWaiting {
+		// Checkpoint 8P-E.14D: a review step reopened by an authorized verify
+		// recovery rests at "waiting" with an APPROVED review_run underneath it —
+		// a resting state none of the branches below can recognize, because none
+		// of them is looking for "the approval is fine, it is just older than the
+		// code". The durable fresh-review request is the only fact that describes
+		// it, and it is checked FIRST so a fix step left resting at "waiting" by an
+		// earlier cycle cannot claim a dispatch that belongs to the recovery.
+		//
+		// Once served, this falls through: the ordinary fix-driven cycles below
+		// stay reachable, which is exactly what makes a changes_requested verdict
+		// on the fresh review continue into the existing loop instead of into a
+		// second mechanism.
+		freshReview, wantFreshReview := c.pendingFreshReview(ctx, run.ID, reviewStep.ID)
+		if wantFreshReview && reviewStep.ReviewRunID != nil {
+			existing, found, err := c.reviewRuns.GetReviewRun(ctx, *reviewStep.ReviewRunID)
+			if err != nil {
+				return reviewStep, err
+			}
+			// The step already points at a run other than the stale approval: this
+			// generation's fresh review has been dispatched, and dispatching again
+			// would be a second reviewer for one authorization.
+			if found && existing.TargetSHA != freshReview.ApprovedFingerprint {
+				wantFreshReview = false
+			}
+		}
+
+		if wantFreshReview {
+			// Start from the fingerprint verification actually found, and let
+			// reviewTargetFingerprint re-observe and pin the live workspace for
+			// this cycle exactly as every other first-target dispatch does — the
+			// reviewer must read what is there, not what was there.
+			targetSHA = freshReview.CurrentFingerprint
+			baseSHA = freshReview.ApprovedFingerprint
+			firstCycleTarget = true
+		} else if fixStep.State == domain.WorkflowStepWaiting {
 			// Cycle N+1 (Checkpoint 8D): only eligible once the fix step has
 			// delivered AND observed a genuinely new workspace fingerprint
 			// for THIS review step's cycle. fixStep.State == waiting with a

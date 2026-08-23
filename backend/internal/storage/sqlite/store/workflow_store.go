@@ -304,6 +304,33 @@ func (s *Store) ReopenFailedWorkflowStep(ctx context.Context, stepID string, now
 	return rows > 0, nil
 }
 
+// ReopenCompletedWorkflowStep moves a COMPLETED step back to `waiting` and
+// clears its completed_at, so the step's own dispatch path can start one more
+// cycle for it.
+//
+// Same shape and same safety property as ReopenFailedWorkflowStep: the
+// compare-and-swap's expected state is hard-coded (here to `completed`), so the
+// method cannot be pointed at a step in any other state and a second caller
+// matches no row and gets false. `waiting` rather than `ready` because that is
+// the resting state every review-cycle dispatch already starts from. See
+// workflow.Store's doc comment for its single caller and why it is a method of
+// its own rather than a widening of the state machine.
+func (s *Store) ReopenCompletedWorkflowStep(ctx context.Context, stepID string, now time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.UpdateWorkflowStepState(ctx, gen.UpdateWorkflowStepStateParams{
+		State:         domain.WorkflowStepWaiting,
+		UpdatedAt:     now,
+		CompletedAt:   sql.NullTime{},
+		ID:            stepID,
+		ExpectedState: domain.WorkflowStepCompleted,
+	})
+	if err != nil {
+		return false, fmt.Errorf("reopen completed workflow step %s: %w", stepID, err)
+	}
+	return rows > 0, nil
+}
+
 // UpdateWorkflowStepArtifact persists a step's deterministic artifact JSON
 // (e.g. the plan step's PlanArtifact). Not a state transition.
 func (s *Store) UpdateWorkflowStepArtifact(ctx context.Context, stepID, artifactJSON string, now time.Time) (bool, error) {

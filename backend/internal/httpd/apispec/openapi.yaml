@@ -12175,6 +12175,10 @@ components:
           items:
             type: string
           type: array
+        stopReason:
+          type: string
+        supersededByFreshReview:
+          type: boolean
         targetKey:
           type: string
         version:

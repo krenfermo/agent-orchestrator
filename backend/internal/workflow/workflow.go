@@ -74,6 +74,21 @@ type Store interface {
 	// idempotent rather than racy.
 	ReopenFailedWorkflowStep(ctx stdctx.Context, stepID string, now time.Time) (bool, error)
 
+	// ReopenCompletedWorkflowStep moves a COMPLETED step back to `waiting` so its
+	// own dispatch path can run one more cycle for it. It is the second — and
+	// last — write in AO that leaves a terminal step state, and it is narrow for
+	// exactly the same reasons ReopenFailedWorkflowStep is: the compare-and-swap
+	// is hard-coded to expect `completed`, so it can never target a step in any
+	// other state, and ValidWorkflowStepTransition keeps its "terminal states have
+	// zero outgoing transitions" contract unchanged.
+	//
+	// Its only caller is verify_recovery.go's requestFreshReviewForRecovery, which
+	// reopens the REVIEW step of a run already inside an explicitly authorized
+	// verification recovery whose approval no longer describes the workspace. It
+	// reports false when the step was not (or is no longer) completed, which is
+	// what makes repeated calls idempotent rather than racy.
+	ReopenCompletedWorkflowStep(ctx stdctx.Context, stepID string, now time.Time) (bool, error)
+
 	// The methods below back Checkpoint 8B's work-step dispatch/observation.
 	UpdateWorkflowStepArtifact(ctx stdctx.Context, stepID, artifactJSON string, now time.Time) (bool, error)
 	UpdateWorkflowStepSession(ctx stdctx.Context, stepID, sessionID string, now time.Time) (bool, error)

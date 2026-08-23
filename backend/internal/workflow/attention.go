@@ -70,6 +70,12 @@ const (
 	// reviewer again itself, within a bounded budget — a temporary spawn or
 	// runtime failure is not a decision anyone has to make.
 	ReasonReviewerLaunchRetry = "reviewer_launch_retry"
+	// ReasonVerifyFreshReviewRequired is an authorized verification recovery
+	// whose approval no longer describes the workspace (verify_recovery.go). AO
+	// re-asks the reviewer about the workspace as it actually stands and then
+	// verifies THAT, once, by itself — nobody has a decision to make about
+	// "the approval AO is holding is older than the code".
+	ReasonVerifyFreshReviewRequired = verifyFreshReviewRequiredPhase
 
 	// Human decisions: AO has genuinely stopped and a person must act.
 	ReasonFixBudgetExhausted    = "fix_budget_exhausted"
@@ -90,7 +96,16 @@ const (
 	// failed on AO's own infrastructure every single time. The remedy is no
 	// longer "continue it again", which is exactly why it needs its own name.
 	ReasonVerifyRecoveryExhausted = "verify_recovery_exhausted"
-	ReasonReviewStateAmbiguous    = "review_state_ambiguous"
+	// ReasonVerifyWorkspaceUnattributable is the refusal half of
+	// ReasonVerifyFreshReviewRequired: an authorized verification recovery found
+	// the workspace no longer matching the approval, AND could not attribute the
+	// difference to this task's own uncommitted work. Distinct from
+	// ReasonVerifyUnrepairable because the remedy is distinct — the question is
+	// not "why did the checks fail", it is "who changed this worktree" — and
+	// because naming it separately is what keeps a plain verify_workspace_changed
+	// OUTSIDE a recovery reading exactly as it always did.
+	ReasonVerifyWorkspaceUnattributable = "verify_workspace_unattributable"
+	ReasonReviewStateAmbiguous          = "review_state_ambiguous"
 	// ReasonFixDispatchAmbiguous is a fix cycle whose delivery to the worker
 	// session AO could not prove either way after a restart — and only after
 	// fix_delivery_recovery.go has exhausted every durable fact that could have
@@ -145,6 +160,8 @@ var attentionDispositions = map[string]AttentionDisposition{
 	ReasonPromptTransportRetry:  {SelfRemediable: true, Phase: PhaseRetrying},
 	ReasonReviewerLaunchRetry:   {SelfRemediable: true, Phase: PhaseRetrying},
 
+	ReasonVerifyFreshReviewRequired: {SelfRemediable: true, Phase: PhaseReviewing},
+
 	// ---- Human decisions ---------------------------------------------------
 	"dirty_worktree": {
 		HumanAction: "Commit, stash or discard the local changes in the target repository, then continue this run.",
@@ -190,6 +207,9 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonVerifyRecoveryExhausted: {
 		HumanAction: "Verification has been reopened the maximum number of times and still fails on AO's own verification infrastructure rather than on the code. Read the latest verify output, correct the verification configuration or the host, then start a fresh run — or cancel this one.",
+	},
+	ReasonVerifyWorkspaceUnattributable: {
+		HumanAction: "Verification was reopened, but the worktree no longer matches what review approved and AO cannot attribute the difference to this task's own uncommitted work (its branch or its HEAD moved). Inspect the worktree, restore it or commit the intended state, then continue or cancel this run.",
 	},
 	ReasonReviewStateAmbiguous: {
 		HumanAction: "AO could not prove what the review concluded. Inspect the reviewer session, then continue or cancel this run.",
