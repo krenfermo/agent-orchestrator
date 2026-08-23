@@ -58,6 +58,22 @@ type Store interface {
 	UpdateWorkflowStepState(ctx stdctx.Context, id string, expected, next domain.WorkflowStepState, now time.Time) (bool, error)
 	ListWorkflowAttempts(ctx stdctx.Context, stepID string) ([]domain.WorkflowAttempt, error)
 
+	// ReopenFailedWorkflowStep moves a terminally FAILED step back to `ready` so
+	// a new attempt can be created for it. It is the one and only write in AO
+	// that leaves a terminal step state, and it is a separate, narrowly named
+	// method rather than a widened UpdateWorkflowStepState precisely so that
+	// stays true and greppable: ValidWorkflowStepTransition keeps its "terminal
+	// states have zero outgoing transitions" contract unchanged, and this method
+	// can never target a step in any other state because the compare-and-swap is
+	// hard-coded to expect `failed`.
+	//
+	// Its only caller is verify_recovery.go's resumeStaleVerifyFailure, which is
+	// itself only reachable from an explicit human Continue on a run stopped by a
+	// recoverable verification infrastructure failure. Reports false when the
+	// step was not (or is no longer) failed, which is what makes repeated calls
+	// idempotent rather than racy.
+	ReopenFailedWorkflowStep(ctx stdctx.Context, stepID string, now time.Time) (bool, error)
+
 	// The methods below back Checkpoint 8B's work-step dispatch/observation.
 	UpdateWorkflowStepArtifact(ctx stdctx.Context, stepID, artifactJSON string, now time.Time) (bool, error)
 	UpdateWorkflowStepSession(ctx stdctx.Context, stepID, sessionID string, now time.Time) (bool, error)
@@ -941,6 +957,26 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 			if refreshed, ok2, rerr := c.store.GetWorkflowRun(ctx, runID); rerr == nil && ok2 {
 				run = refreshed
 			}
+		}
+	}
+
+	// Checkpoint 8P-E.14C: this is the one place in AO where a terminal
+	// verification failure can be reopened, and it is here rather than in GetRun
+	// or the cascade because THIS call is the person saying "I corrected the
+	// thing that was broken". resumeStaleVerifyFailure decides on the run's own
+	// durable evidence whether that licence applies; when it does not, it is a
+	// no-op and everything below behaves exactly as it always did.
+	reopened, rerr := false, error(nil)
+	if run, reopened, rerr = c.resumeStaleVerifyFailure(ctx, run, steps); rerr != nil {
+		return RunDetail{}, rerr
+	}
+	if reopened {
+		// The verify step is no longer terminal and the run is no longer parked;
+		// the cascade below must see that, not the snapshot read at entry.
+		if refreshed, err := c.store.ListWorkflowSteps(ctx, runID); err != nil {
+			return RunDetail{}, err
+		} else {
+			steps = refreshed
 		}
 	}
 

@@ -182,6 +182,27 @@ func (f *fakeStore) UpdateWorkflowStepState(_ context.Context, id string, expect
 	return false, nil
 }
 
+// ReopenFailedWorkflowStep mirrors the real store's compare-and-swap: expected
+// state pinned to `failed`, completed_at cleared, false when no row matched.
+func (f *fakeStore) ReopenFailedWorkflowStep(_ context.Context, stepID string, now time.Time) (bool, error) {
+	for runID, steps := range f.steps {
+		for i, step := range steps {
+			if step.ID != stepID {
+				continue
+			}
+			if step.State != domain.WorkflowStepFailed {
+				return false, nil
+			}
+			step.State = domain.WorkflowStepReady
+			step.UpdatedAt = now
+			step.CompletedAt = nil
+			f.steps[runID][i] = step
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (f *fakeStore) ListWorkflowAttempts(_ context.Context, stepID string) ([]domain.WorkflowAttempt, error) {
 	return append([]domain.WorkflowAttempt{}, f.attempts[stepID]...), nil
 }

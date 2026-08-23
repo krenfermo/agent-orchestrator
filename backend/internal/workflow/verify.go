@@ -87,6 +87,13 @@ type VerifyResult struct {
 	// infrastructure rather than the code under test. Its presence alone
 	// disqualifies the failure from ever being handed to a fix worker.
 	InfraFailure *VerifyInfraFailure `json:"infraFailure,omitempty"`
+	// RecoveryGeneration is which stale-verify recovery this attempt belongs to
+	// (verify_recovery.go): 0 for every ordinary verification, and N>0 for the
+	// Nth attempt a person explicitly reopened after correcting AO's own
+	// verification infrastructure. It makes a recovery attempt's result
+	// distinguishable from the historical one it re-asked, and it is what the
+	// recovery ledger reads to know a generation has been answered.
+	RecoveryGeneration int `json:"recoveryGeneration,omitempty"`
 }
 
 func verificationTargetKey(fingerprint string, plan VerificationPlan) string {
@@ -95,8 +102,22 @@ func verificationTargetKey(fingerprint string, plan VerificationPlan) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func verifyAttemptID(stepID, targetKey string) string {
-	sum := sha256.Sum256([]byte(stepID + "\n" + targetKey))
+// verifyAttemptID is the deterministic identity of one verification attempt:
+// the same step verifying the same target is the same attempt, however many
+// times AO re-enters maybeVerify.
+//
+// recoveryGeneration widens that identity by exactly one dimension. A recovery
+// (verify_recovery.go) re-asks the SAME target with a corrected verifier, so it
+// must be a NEW attempt row — the old one is history that stays on disk — while
+// still being the same attempt every time this generation is re-entered.
+// Generation 0 hashes exactly what it always did, so no existing attempt id
+// changes.
+func verifyAttemptID(stepID, targetKey string, recoveryGeneration int) string {
+	seed := stepID + "\n" + targetKey
+	if recoveryGeneration > 0 {
+		seed += fmt.Sprintf("\nrecovery=%d", recoveryGeneration)
+	}
+	sum := sha256.Sum256([]byte(seed))
 	return "wfa-verify-" + hex.EncodeToString(sum[:12])
 }
 
@@ -247,9 +268,37 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 	}
 	targetKey := verificationTargetKey(reviewed, artifact.Verification)
 
+	// Checkpoint 8P-E.14C: an open stale-verify recovery (verify_recovery.go) is
+	// a person's explicit licence to re-ask a target whose historical answer came
+	// from a verifier or an environment that has since been corrected.
+	//
+	// The licence is deliberately narrow. It authorizes a NEW attempt row for the
+	// SAME reviewed target, and nothing else: if the target moved between the
+	// authorization and this execution, the recovery is void rather than
+	// silently re-using an approval that was given for different work.
+	recovery, recovering := c.currentVerifyRecovery(ctx, run.ID)
+	if recovering && recovery.ReviewedFingerprint != "" && recovery.ReviewedFingerprint != reviewed {
+		return c.failVerifyWithoutExecution(ctx, run, verifyStep, domain.WorkflowErrorVerifyAmbiguous,
+			"the reviewed target changed after verification recovery was authorized")
+	}
+	recoveryGeneration := 0
+	if recovering {
+		recoveryGeneration = recovery.Generation
+	}
+
 	latest, hasAttempt, err := c.store.GetLatestWorkflowAttempt(ctx, verifyStep.ID)
 	if err != nil {
 		return run, verifyStep, err
+	}
+	// The finished attempt of a superseded recovery generation is history, not a
+	// decision about this one. Keyed on the attempt's IDENTITY rather than on
+	// timestamps, so re-entering this generation any number of times (a repeat
+	// Continue, a poll, a restart) finds its own attempt and never opens a
+	// second: verifyAttemptID is a pure function of step, target and generation.
+	if hasAttempt && recovering && latest.Outcome != "" &&
+		latest.ID != verifyAttemptID(verifyStep.ID, targetKey, recoveryGeneration) {
+		hasAttempt = false
+		latest = domain.WorkflowAttempt{}
 	}
 	if hasAttempt && latest.Model != targetKey {
 		// A target change is normally the ambiguity this guard exists to
@@ -267,7 +316,7 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 	if hasAttempt && latest.Outcome == "" {
 		if cp, found, cpErr := c.store.GetLatestWorkflowCheckpointByStep(ctx, verifyStep.ID); cpErr != nil {
 			return run, verifyStep, cpErr
-		} else if found && cp.DurablePhase == "verify_result" && cp.AttemptID != nil && *cp.AttemptID == latest.ID {
+		} else if found && cp.DurablePhase == verifyResultPhase && cp.AttemptID != nil && *cp.AttemptID == latest.ID {
 			var recovered VerifyResult
 			if json.Unmarshal([]byte(cp.RetryState), &recovered) != nil {
 				return c.finishVerifyFailure(ctx, run, verifyStep, latest, VerifyResult{Version: verifyResultVersion, TargetKey: targetKey, ErrorClass: domain.WorkflowErrorVerifyAmbiguous}, "persisted verify result is unreadable")
@@ -305,7 +354,7 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 
 	now := c.clock()
 	if !hasAttempt {
-		attemptID := verifyAttemptID(verifyStep.ID, targetKey)
+		attemptID := verifyAttemptID(verifyStep.ID, targetKey, recoveryGeneration)
 		latest, err = c.store.CreateWorkflowAttempt(ctx, attemptID, verifyStep.ID, "local-verify", targetKey, now)
 		if err != nil {
 			return run, verifyStep, err
@@ -851,12 +900,23 @@ func (c *Coordinator) persistVerifyContextRepair(ctx stdctx.Context, run domain.
 }
 
 func (c *Coordinator) persistVerifyResult(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, attempt domain.WorkflowAttempt, result VerifyResult, next string) error {
+	// Checkpoint 8P-E.14C: stamp the open recovery generation onto every result
+	// this run persists, here rather than at each of maybeVerify's ~ten
+	// construction sites. One place cannot drift from another, and it is also the
+	// exact moment the stamp means what it says: a persisted result IS the answer
+	// to the generation that was open when it was written, and writing it is what
+	// closes that generation (see verifyRecoveryLedger.executed).
+	if result.RecoveryGeneration == 0 {
+		if rec, ok := c.currentVerifyRecovery(ctx, run.ID); ok {
+			result.RecoveryGeneration = rec.Generation
+		}
+	}
 	b, err := json.Marshal(result)
 	if err != nil {
 		return err
 	}
 	sid, aid := step.ID, attempt.ID
-	_, err = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{ID: "wfc-" + c.newID(), WorkflowRunID: run.ID, WorkflowStepID: &sid, AttemptID: &aid, ProjectID: run.ProjectID, RetryState: string(b), NextAction: next, DurablePhase: "verify_result", PayloadVersion: verifyResultVersion, FingerprintBefore: result.PreFingerprint, FingerprintAfter: result.PostFingerprint, CreatedAt: c.clock()})
+	_, err = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{ID: "wfc-" + c.newID(), WorkflowRunID: run.ID, WorkflowStepID: &sid, AttemptID: &aid, ProjectID: run.ProjectID, RetryState: string(b), NextAction: next, DurablePhase: verifyResultPhase, PayloadVersion: verifyResultVersion, FingerprintBefore: result.PreFingerprint, FingerprintAfter: result.PostFingerprint, CreatedAt: c.clock()})
 	return err
 }
 

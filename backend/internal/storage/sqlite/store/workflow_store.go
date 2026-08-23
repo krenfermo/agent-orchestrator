@@ -280,6 +280,30 @@ func (s *Store) UpdateWorkflowStepState(
 	return rows > 0, nil
 }
 
+// ReopenFailedWorkflowStep moves a terminally failed step back to `ready` and
+// clears its completed_at, so a new attempt can run against the same target.
+//
+// It reuses the same compare-and-swap UPDATE as UpdateWorkflowStepState with the
+// expected state pinned to `failed`, which is the whole safety property: this
+// method cannot be pointed at a step in any other state, and a second caller
+// matches no row and gets false. See workflow.Store's doc comment for why the
+// reopen is a method of its own rather than a widening of the state machine.
+func (s *Store) ReopenFailedWorkflowStep(ctx context.Context, stepID string, now time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.UpdateWorkflowStepState(ctx, gen.UpdateWorkflowStepStateParams{
+		State:         domain.WorkflowStepReady,
+		UpdatedAt:     now,
+		CompletedAt:   sql.NullTime{},
+		ID:            stepID,
+		ExpectedState: domain.WorkflowStepFailed,
+	})
+	if err != nil {
+		return false, fmt.Errorf("reopen failed workflow step %s: %w", stepID, err)
+	}
+	return rows > 0, nil
+}
+
 // UpdateWorkflowStepArtifact persists a step's deterministic artifact JSON
 // (e.g. the plan step's PlanArtifact). Not a state transition.
 func (s *Store) UpdateWorkflowStepArtifact(ctx context.Context, stepID, artifactJSON string, now time.Time) (bool, error) {

@@ -224,9 +224,10 @@ func hasNonEphemeralChanges(obs ports.WorkspaceObservation) bool {
 	return false
 }
 
-// Durable phases this file reads. They are written elsewhere
-// (branch_execution.go, verify.go) as string literals; naming them here makes
-// the cross-file dependency explicit rather than a repeated literal.
+// Durable phases this file reads. verifyResultPhase is also the phase verify.go
+// WRITES every VerifyResult under, and the one verify_recovery.go's ledger reads
+// back to know whether a recovery generation has been answered; naming them here
+// makes the cross-file dependency explicit rather than a repeated literal.
 const (
 	autonomousLocalCommitPhase = "autonomous_local_commit"
 	verifyResultPhase          = "verify_result"

@@ -84,7 +84,13 @@ const (
 	ReasonVerifyConfigInvalid   = "verify_config_invalid"
 	ReasonVerifyToolUnavailable = "verify_tool_unavailable"
 	ReasonVerifyInfraFailed     = "verify_infrastructure_failed"
-	ReasonReviewStateAmbiguous  = "review_state_ambiguous"
+	// ReasonVerifyRecoveryExhausted is verify_recovery.go's bound, reached: a
+	// person has now reopened this run's terminal verification failure
+	// maxVerifyRecoveryAttempts times after correcting something, and it has
+	// failed on AO's own infrastructure every single time. The remedy is no
+	// longer "continue it again", which is exactly why it needs its own name.
+	ReasonVerifyRecoveryExhausted = "verify_recovery_exhausted"
+	ReasonReviewStateAmbiguous    = "review_state_ambiguous"
 	// ReasonFixDispatchAmbiguous is a fix cycle whose delivery to the worker
 	// session AO could not prove either way after a restart — and only after
 	// fix_delivery_recovery.go has exhausted every durable fact that could have
@@ -181,6 +187,9 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonVerifyInfraFailed: {
 		HumanAction: "Verification could not be run to completion on this machine (a runtime or resource failure, not a code defect). Check the host, then continue this run.",
+	},
+	ReasonVerifyRecoveryExhausted: {
+		HumanAction: "Verification has been reopened the maximum number of times and still fails on AO's own verification infrastructure rather than on the code. Read the latest verify output, correct the verification configuration or the host, then start a fresh run — or cancel this one.",
 	},
 	ReasonReviewStateAmbiguous: {
 		HumanAction: "AO could not prove what the review concluded. Inspect the reviewer session, then continue or cancel this run.",
