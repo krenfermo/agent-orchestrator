@@ -12100,14 +12100,61 @@ components:
       - label
       - passed
       type: object
+    WorkflowVerifyContextResolution:
+      properties:
+        label:
+          type: string
+        reason:
+          type: string
+        repaired:
+          type: boolean
+        requested:
+          type: string
+        resolved:
+          type: string
+        rewrittenArgs:
+          items:
+            type: string
+          type: array
+      required:
+      - label
+      - requested
+      - resolved
+      - reason
+      type: object
+    WorkflowVerifyInfraFailure:
+      properties:
+        command:
+          type: string
+        detail:
+          type: string
+        directory:
+          type: string
+        kind:
+          type: string
+        repairable:
+          type: boolean
+        transient:
+          type: boolean
+      required:
+      - kind
+      - detail
+      - command
+      type: object
     WorkflowVerifyResult:
       properties:
         checks:
           items:
             $ref: '#/components/schemas/WorkflowVerifyCheckResult'
           type: array
+        contextResolutions:
+          items:
+            $ref: '#/components/schemas/WorkflowVerifyContextResolution'
+          type: array
         errorClass:
           type: string
+        infraFailure:
+          $ref: '#/components/schemas/WorkflowVerifyInfraFailure'
         passed:
           type: boolean
         postFingerprint:

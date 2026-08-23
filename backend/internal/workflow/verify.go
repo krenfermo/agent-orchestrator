@@ -66,6 +66,14 @@ type VerifyResult struct {
 	// actually applied (e.g. "go test ./... -> go test ./internal/foo/...").
 	// Empty when scope is repository or no recognizable command qualified.
 	ScopeAppliedTransforms []string `json:"scopeAppliedTransforms,omitempty"`
+	// ContextResolutions records every working directory AO corrected for this
+	// attempt (Checkpoint 8P-E.14), pre-flight or self-healed. Empty when every
+	// command ran exactly where the plan said.
+	ContextResolutions []VerifyContextResolution `json:"contextResolutions,omitempty"`
+	// InfraFailure, when set, means this failure was AO's own verification
+	// infrastructure rather than the code under test. Its presence alone
+	// disqualifies the failure from ever being handed to a fix worker.
+	InfraFailure *VerifyInfraFailure `json:"infraFailure,omitempty"`
 }
 
 func verificationTargetKey(fingerprint string, plan VerificationPlan) string {
@@ -337,7 +345,22 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 	result.Scope = &scopeDecision
 	result.ScopeAppliedTransforms = applied
 
-	for _, check := range narrowedPlan.Commands {
+	// Checkpoint 8P-E.14: resolve each command's working directory against the
+	// project's real module root BEFORE executing it. A Go command asked to run
+	// from a directory that is not inside any module is the incident this guards
+	// — it fails with exit code 1 and a message about the main module, which is
+	// indistinguishable from a broken build unless AO knows where the module is.
+	repairsUsed := c.verifyContextRepairCount(ctx, run.ID)
+	for _, planned := range narrowedPlan.Commands {
+		check := planned
+		if resolved, resolution, resolveErr := resolveVerifyCommandContext(workCP.WorktreePath, check, false); resolveErr == nil && resolution != nil {
+			check = resolved
+			result.ContextResolutions = append(result.ContextResolutions, *resolution)
+		}
+		// A resolution failure (no module root, or several) is deliberately not
+		// fatal here: the command still runs exactly as configured, and if it
+		// then fails for that reason the classifier below names it precisely
+		// instead of AO pre-judging a project layout it does not understand.
 		dir, pathErr := secureWorktreePath(workCP.WorktreePath, check.WorkingDirectory)
 		if pathErr != nil {
 			result.ErrorClass = domain.WorkflowErrorVerifyEnvironment
@@ -347,27 +370,76 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 		if timeout == 0 {
 			timeout = 10 * time.Minute
 		}
-		execResult, runErr := c.verifier.Run(ctx, VerifyCommandRequest{Command: check.Command, Args: check.Args, Directory: dir, Timeout: timeout})
-		if errors.Is(runErr, stdctx.Canceled) {
-			return run, verifyStep, runErr
-		}
-		exitCode := execResult.ExitCode
-		cr := VerifyCheckResult{Kind: "command", Label: strings.Join(append([]string{check.Command}, check.Args...), " "), ExitCode: &exitCode, DurationMS: execResult.DurationMS, StdoutTail: execResult.StdoutTail, StderrTail: execResult.StderrTail}
-		switch {
-		case execResult.TimedOut:
-			result.ErrorClass = domain.WorkflowErrorVerifyTimeout
-			cr.FailureReason = "command timed out"
-		case runErr != nil:
-			result.ErrorClass = domain.WorkflowErrorVerifyEnvironment
-			cr.FailureReason = runErr.Error()
-		case exitCode != check.RequiredExitCode:
-			result.ErrorClass = domain.WorkflowErrorVerifyCommandFailed
-			cr.FailureReason = fmt.Sprintf("exit code %d, required %d", exitCode, check.RequiredExitCode)
-		default:
-			cr.Passed = true
-		}
-		result.Checks = append(result.Checks, cr)
-		if !cr.Passed {
+		transientRetries := 0
+		for {
+			execResult, runErr := c.verifier.Run(ctx, VerifyCommandRequest{Command: check.Command, Args: check.Args, Directory: dir, Timeout: timeout})
+			if errors.Is(runErr, stdctx.Canceled) {
+				return run, verifyStep, runErr
+			}
+			exitCode := execResult.ExitCode
+			cr := VerifyCheckResult{Kind: "command", Label: commandLabel(check), ExitCode: &exitCode, DurationMS: execResult.DurationMS, StdoutTail: execResult.StdoutTail, StderrTail: execResult.StderrTail}
+			var infra *VerifyInfraFailure
+			switch {
+			case execResult.TimedOut:
+				result.ErrorClass = domain.WorkflowErrorVerifyTimeout
+				cr.FailureReason = "command timed out"
+			case runErr != nil:
+				infra = classifyVerifyExecutionFailure(check, normalizeRel(check.WorkingDirectory), execResult, runErr)
+				result.ErrorClass = domain.WorkflowErrorVerifyEnvironment
+				cr.FailureReason = runErr.Error()
+			case exitCode != check.RequiredExitCode:
+				infra = classifyVerifyExecutionFailure(check, normalizeRel(check.WorkingDirectory), execResult, nil)
+				if infra != nil {
+					result.ErrorClass = domain.WorkflowErrorVerifyEnvironment
+					cr.FailureReason = infra.Reason()
+				} else {
+					result.ErrorClass = domain.WorkflowErrorVerifyCommandFailed
+					cr.FailureReason = fmt.Sprintf("exit code %d, required %d", exitCode, check.RequiredExitCode)
+				}
+			default:
+				cr.Passed = true
+			}
+			if cr.Passed {
+				result.Checks = append(result.Checks, cr)
+				break
+			}
+			if infra != nil {
+				// Self-heal: the command proved it ran outside the module it was
+				// meant to verify. When AO can deterministically name the right
+				// module root, it records that decision durably and re-runs the
+				// same command there — no human, no fix worker.
+				if infra.Kind == VerifyInfraWrongModuleRoot && repairsUsed < maxVerifyContextRepairs {
+					repaired, resolution, resolveErr := resolveVerifyCommandContext(workCP.WorktreePath, check, true)
+					if resolveErr == nil && resolution != nil {
+						repairedDir, dirErr := secureWorktreePath(workCP.WorktreePath, repaired.WorkingDirectory)
+						if dirErr == nil {
+							resolution.Repaired = true
+							resolution.Reason = fmt.Sprintf("%s (after: %s)", resolution.Reason, infra.Detail)
+							if err := c.persistVerifyContextRepair(ctx, run, verifyStep, latest, *resolution); err != nil {
+								return run, verifyStep, err
+							}
+							result.ContextResolutions = append(result.ContextResolutions, *resolution)
+							check, dir, repairsUsed = repaired, repairedDir, repairsUsed+1
+							continue
+						}
+					}
+					if resolveErr != nil {
+						// Nothing AO may safely guess (no module root at all, or
+						// several). Report the layout problem itself rather than
+						// the toolchain message it produced.
+						infra.Kind = VerifyInfraConfigInvalid
+						infra.Repairable = false
+						infra.Detail = resolveErr.Error() + "; " + infra.Detail
+						cr.FailureReason = infra.Reason()
+					}
+				}
+				if infra.Transient && check.RetrySafe && transientRetries < maxTransientVerifyRetries {
+					transientRetries++
+					continue
+				}
+				result.InfraFailure = infra
+			}
+			result.Checks = append(result.Checks, cr)
 			return c.finishVerifyFailure(ctx, run, verifyStep, latest, result, cr.FailureReason)
 		}
 	}
@@ -634,7 +706,11 @@ func (c *Coordinator) finishVerifyFailure(ctx stdctx.Context, run domain.Workflo
 	// structurally impossible — the exact trap this branch exists to avoid.
 	budget := policyForRun(run).MaxFixCycles
 	used := c.verifyFixCycleCount(ctx, run.ID)
-	if repairableVerifyFailure(result.ErrorClass) && used < budget && c.messageSender != nil {
+	// Checkpoint 8P-E.14: an infrastructure failure is never a code defect, so
+	// it never reaches a fix worker — however repairable its error class would
+	// otherwise look. This is the guard whose absence turned "AO ran go build
+	// from the wrong directory" into "the worker's code is broken".
+	if result.InfraFailure == nil && repairableVerifyFailure(result.ErrorClass) && used < budget && c.messageSender != nil {
 		if step.State == domain.WorkflowStepRunning {
 			if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, domain.WorkflowStepRunning, domain.WorkflowStepWaiting, now); err != nil {
 				return run, step, err
@@ -691,11 +767,63 @@ func (c *Coordinator) finishVerifyFailure(ctx stdctx.Context, run domain.Workflo
 	// everything the budget allows" from "no fix cycle could have helped" —
 	// two different situations with two different remedies.
 	stopReason := ReasonVerifyUnrepairable
-	if repairableVerifyFailure(result.ErrorClass) {
+	detail := fmt.Sprintf("verify failed (%s) after %d fix cycles: %s", result.ErrorClass, used, reason)
+	switch {
+	case result.InfraFailure != nil:
+		// Name the infrastructure failure for what it is, so the user is told to
+		// fix the verifier rather than to go read a diff that is not at fault.
+		stopReason = infraAttentionReason(result.InfraFailure.Kind)
+		detail = result.InfraFailure.Reason()
+	case repairableVerifyFailure(result.ErrorClass):
 		stopReason = ReasonVerifyBudgetExhausted
 	}
-	c.recordAttentionStop(ctx, run, &step.ID, stopReason, fmt.Sprintf("verify failed (%s) after %d fix cycles: %s", result.ErrorClass, used, reason))
+	c.recordAttentionStop(ctx, run, &step.ID, stopReason, detail)
 	return run, step, nil
+}
+
+// verifyContextRepairCount counts this run's durable verify_context_repair
+// checkpoints: how many times AO has already corrected a verification working
+// directory by itself. Derived from append-only rows for the same reason
+// verifyFixCycleCount is — the bound has to survive a restart, or a repair that
+// does not help becomes an unbounded loop.
+func (c *Coordinator) verifyContextRepairCount(ctx stdctx.Context, runID string) int {
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		return maxVerifyContextRepairs
+	}
+	n := 0
+	for _, cp := range cps {
+		if cp.DurablePhase == verifyContextRepairPhase {
+			n++
+		}
+	}
+	return n
+}
+
+// persistVerifyContextRepair records a working-directory correction before the
+// re-run happens, so the decision is durable even if the daemon dies mid-retry
+// and so a person can later read exactly why a command ran somewhere other than
+// where the plan said.
+func (c *Coordinator) persistVerifyContextRepair(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, attempt domain.WorkflowAttempt, resolution VerifyContextResolution) error {
+	payload, err := json.Marshal(resolution)
+	if err != nil {
+		return err
+	}
+	sid, aid := step.ID, attempt.ID
+	_, err = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+		ID:             "wfc-" + c.newID(),
+		WorkflowRunID:  run.ID,
+		WorkflowStepID: &sid,
+		AttemptID:      &aid,
+		ProjectID:      run.ProjectID,
+		RetryState:     string(payload),
+		NextAction: fmt.Sprintf("verify: re-running %q from %q (was %q)",
+			resolution.Label, resolution.Resolved, resolution.Requested),
+		DurablePhase:   verifyContextRepairPhase,
+		PayloadVersion: verifyResultVersion,
+		CreatedAt:      c.clock(),
+	})
+	return err
 }
 
 func (c *Coordinator) persistVerifyResult(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, attempt domain.WorkflowAttempt, result VerifyResult, next string) error {

@@ -4402,9 +4402,27 @@ export interface components {
             stderrTail?: string;
             stdoutTail?: string;
         };
+        WorkflowVerifyContextResolution: {
+            label: string;
+            reason: string;
+            repaired?: boolean;
+            requested: string;
+            resolved: string;
+            rewrittenArgs?: string[];
+        };
+        WorkflowVerifyInfraFailure: {
+            command: string;
+            detail: string;
+            directory?: string;
+            kind: string;
+            repairable?: boolean;
+            transient?: boolean;
+        };
         WorkflowVerifyResult: {
             checks: components["schemas"]["WorkflowVerifyCheckResult"][];
+            contextResolutions?: components["schemas"]["WorkflowVerifyContextResolution"][];
             errorClass?: string;
+            infraFailure?: components["schemas"]["WorkflowVerifyInfraFailure"];
             passed: boolean;
             postFingerprint: string;
             preFingerprint: string;

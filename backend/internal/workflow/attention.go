@@ -75,6 +75,15 @@ const (
 	ReasonFixBudgetExhausted    = "fix_budget_exhausted"
 	ReasonVerifyBudgetExhausted = "verify_budget_exhausted"
 	ReasonVerifyUnrepairable    = "verify_unrepairable"
+	// The three reasons below are verify_context.go's precise replacements for
+	// ReasonVerifyUnrepairable when the failure was AO's own verification
+	// infrastructure rather than the code: a verifier configuration AO cannot
+	// repair, a verifier binary that is not usable, and a verifier that could
+	// not be run to completion for an environmental reason. None of them is
+	// ever handed to a fix worker, and each names a different thing to do.
+	ReasonVerifyConfigInvalid   = "verify_config_invalid"
+	ReasonVerifyToolUnavailable = "verify_tool_unavailable"
+	ReasonVerifyInfraFailed     = "verify_infrastructure_failed"
 	ReasonReviewStateAmbiguous  = "review_state_ambiguous"
 	ReasonReviewerLaunchFailed  = "reviewer_launch_failed"
 	// The four reasons below are review_launch_recovery.go's precise
@@ -157,6 +166,15 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonVerifyUnrepairable: {
 		HumanAction: "Verification failed for a reason no fix cycle can repair (its environment or its target changed under it). Inspect the worktree, then continue or cancel this run.",
+	},
+	ReasonVerifyConfigInvalid: {
+		HumanAction: "AO's verification configuration for this project is not a valid invocation (wrong directory or wrong command). Correct the project's verification commands, then continue this run.",
+	},
+	ReasonVerifyToolUnavailable: {
+		HumanAction: "The verification tool is not installed or not on PATH for the daemon. Install it (or fix PATH), then continue this run.",
+	},
+	ReasonVerifyInfraFailed: {
+		HumanAction: "Verification could not be run to completion on this machine (a runtime or resource failure, not a code defect). Check the host, then continue this run.",
 	},
 	ReasonReviewStateAmbiguous: {
 		HumanAction: "AO could not prove what the review concluded. Inspect the reviewer session, then continue or cancel this run.",

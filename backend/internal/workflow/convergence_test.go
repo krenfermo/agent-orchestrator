@@ -358,8 +358,10 @@ func TestVerifyEnvironmentFailureDoesNotEnterAFixCycle(t *testing.T) {
 	if life.Attention != workflowcore.AttentionHuman || life.AttentionAction == "" {
 		t.Fatalf("attention=%q action=%q, want an actionable human decision", life.Attention, life.AttentionAction)
 	}
-	if life.AttentionReason != workflowcore.ReasonVerifyUnrepairable {
-		t.Fatalf("reason = %q, want %q", life.AttentionReason, workflowcore.ReasonVerifyUnrepairable)
+	// Checkpoint 8P-E.14 sharpened this from the flat verify_unrepairable to the
+	// precise thing a person can act on: the verifier's binary is not installed.
+	if life.AttentionReason != workflowcore.ReasonVerifyToolUnavailable {
+		t.Fatalf("reason = %q, want %q", life.AttentionReason, workflowcore.ReasonVerifyToolUnavailable)
 	}
 }
 
