@@ -366,6 +366,96 @@ func resolveVerifyCommandContext(root string, check VerificationCommandCheck, fo
 	return moved, resolution, nil
 }
 
+// VerifyPathContext is the namespace one verification spec's relative paths
+// live in — Checkpoint 8P-E.14B.
+//
+// The incident it exists for (wf-6528a538): a plan whose commands said
+// `go test ./internal/postrunqa/...` with workingDirectory "." and whose file
+// checks said `internal/postrunqa/classify.go`. Both halves were authored in
+// the same namespace — the Go module, which lives in `backend/`. AO resolved
+// the COMMAND into that module (". -> backend", args rebased) and both commands
+// passed, then evaluated the FILE check against the worktree root, stat'd
+// `<worktree>/internal/postrunqa`, and failed the whole verification with
+// verify_environment_error over a file that was right where the plan said it
+// was. The durable VerifyResult recorded both halves of the contradiction.
+//
+// The cause was an ownership boundary, not a bad stat: resolveVerifyCommandContext
+// owned the working directory and the package arguments of ONE command, and
+// nothing owned the spec. So this type owns the spec's namespace, both halves
+// of it consult it, and they cannot disagree by construction.
+type VerifyPathContext struct {
+	// Base is the worktree-relative directory this spec's relative paths are
+	// interpreted against. "." means the worktree root.
+	Base string
+}
+
+// ResolvePath maps one declared path onto its worktree-relative location.
+//
+// The rule is deterministic and purely syntactic — it never consults the
+// filesystem, so a path resolves to the same place whether or not the file
+// happens to exist. That is what keeps a genuinely missing artifact a genuine
+// verification failure instead of a namespace question:
+//
+//	Base == "."                      -> the path is already worktree-relative.
+//	path is Base, or under Base/     -> already worktree-root-qualified; used
+//	                                    as-is, so backend/internal/x.go can
+//	                                    never become backend/backend/internal/x.go.
+//	otherwise                        -> interpreted in Base, the namespace the
+//	                                    spec's own commands run in.
+//
+// It is idempotent: ResolvePath(ResolvePath(p)) == ResolvePath(p), because the
+// result always satisfies the second branch.
+//
+// The one ambiguity the rule cannot remove is a repository that genuinely has
+// `backend/backend/`: there, a context-relative `backend/foo.go` is
+// indistinguishable from a root-qualified one, and root-qualified wins. That is
+// a documented, deterministic tie-break rather than a guess, and it is the same
+// direction the command-argument rebase already takes.
+func (vc VerifyPathContext) ResolvePath(rel string) string {
+	p := normalizeRel(rel)
+	base := normalizeRel(vc.Base)
+	if base == "." || p == "." {
+		return p
+	}
+	if p == base || strings.HasPrefix(p, base+"/") {
+		return p
+	}
+	return path.Join(base, p)
+}
+
+// verifyPathContextFor derives a spec's namespace from the EFFECTIVE working
+// directories of the commands that actually ran — after any pre-flight
+// resolution and any mid-attempt self-heal, which is exactly why it is computed
+// from the executed commands rather than from the plan text or from the
+// recorded resolutions.
+//
+// The rule refuses to guess, in both directions:
+//
+//   - exactly one distinct effective directory -> that directory is the spec's
+//     namespace, whether the plan asked for it (an explicit, valid
+//     services/api) or AO resolved it (". -> backend");
+//   - no commands at all, or commands that ran in different directories -> no
+//     authoritative context, so paths stay worktree-relative. A spec whose
+//     commands disagree has no single namespace to speak of, and inventing one
+//     would be precisely the kind of guess this file exists to avoid.
+func verifyPathContextFor(effectiveDirs []string) VerifyPathContext {
+	base := ""
+	for _, dir := range effectiveDirs {
+		d := normalizeRel(dir)
+		if base == "" {
+			base = d
+			continue
+		}
+		if base != d {
+			return VerifyPathContext{Base: "."}
+		}
+	}
+	if base == "" {
+		return VerifyPathContext{Base: "."}
+	}
+	return VerifyPathContext{Base: base}
+}
+
 // relForWorkingDirectory renders a resolved directory for
 // VerificationCommandCheck.WorkingDirectory, whose empty value means "the
 // worktree root".

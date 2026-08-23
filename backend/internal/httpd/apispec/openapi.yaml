@@ -12091,6 +12091,8 @@ components:
           type: string
         passed:
           type: boolean
+        resolvedPath:
+          type: string
         stderrTail:
           type: string
         stdoutTail:
@@ -12157,6 +12159,8 @@ components:
           $ref: '#/components/schemas/WorkflowVerifyInfraFailure'
         passed:
           type: boolean
+        pathContext:
+          type: string
         postFingerprint:
           type: string
         preFingerprint:

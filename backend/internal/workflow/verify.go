@@ -38,9 +38,15 @@ type VerifyRunner interface {
 }
 
 type VerifyCheckResult struct {
-	Kind          string `json:"kind"`
-	Label         string `json:"label"`
-	Passed        bool   `json:"passed"`
+	Kind   string `json:"kind"`
+	Label  string `json:"label"`
+	Passed bool   `json:"passed"`
+	// ResolvedPath is where a file check was actually evaluated, worktree-
+	// relative, when that differs from nothing at all. Label keeps the path as
+	// the plan declared it, so the durable record shows both the declaration and
+	// the namespace it was read in rather than leaving the two to be guessed
+	// apart afterwards (wf-6528a538).
+	ResolvedPath  string `json:"resolvedPath,omitempty"`
 	ExitCode      *int   `json:"exitCode,omitempty"`
 	DurationMS    int64  `json:"durationMs,omitempty"`
 	StdoutTail    string `json:"stdoutTail,omitempty"`
@@ -70,6 +76,13 @@ type VerifyResult struct {
 	// attempt (Checkpoint 8P-E.14), pre-flight or self-healed. Empty when every
 	// command ran exactly where the plan said.
 	ContextResolutions []VerifyContextResolution `json:"contextResolutions,omitempty"`
+	// PathContext is the worktree-relative namespace every relative path check
+	// in this attempt was evaluated in — the same directory this attempt's
+	// commands ran in, with "." meaning the worktree root. It is recorded even
+	// when it is "." so the record states the rule it applied instead of leaving
+	// a reader to infer it, and it is what an invariant check reads to prove the
+	// commands and the file checks of one spec agreed.
+	PathContext string `json:"pathContext,omitempty"`
 	// InfraFailure, when set, means this failure was AO's own verification
 	// infrastructure rather than the code under test. Its presence alone
 	// disqualifies the failure from ever being handed to a fix worker.
@@ -351,6 +364,11 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 	// — it fails with exit code 1 and a message about the main module, which is
 	// indistinguishable from a broken build unless AO knows where the module is.
 	repairsUsed := c.verifyContextRepairCount(ctx, run.ID)
+	// effectiveDirs collects where each command ACTUALLY ran, after any
+	// pre-flight resolution and any mid-attempt repair. It is what the file
+	// checks below derive their namespace from, which is the whole reason the
+	// two halves of one spec can no longer disagree — see VerifyPathContext.
+	var effectiveDirs []string
 	for _, planned := range narrowedPlan.Commands {
 		check := planned
 		if resolved, resolution, resolveErr := resolveVerifyCommandContext(workCP.WorktreePath, check, false); resolveErr == nil && resolution != nil {
@@ -442,9 +460,15 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 			result.Checks = append(result.Checks, cr)
 			return c.finishVerifyFailure(ctx, run, verifyStep, latest, result, cr.FailureReason)
 		}
+		effectiveDirs = append(effectiveDirs, normalizeRel(check.WorkingDirectory))
 	}
-	for _, check := range artifact.Verification.Files {
-		cr, class := verifyFile(workCP.WorktreePath, check)
+	// One namespace for this spec, derived from where its commands ran and
+	// recorded durably, so the VerifyResult states the rule it applied rather
+	// than leaving a reader to infer it from two independently-resolved halves.
+	pathCtx := verifyPathContextFor(effectiveDirs)
+	result.PathContext = pathCtx.Base
+	for _, check := range narrowedPlan.Files {
+		cr, class := verifyFile(workCP.WorktreePath, pathCtx, check)
 		result.Checks = append(result.Checks, cr)
 		if !cr.Passed {
 			result.ErrorClass = class
@@ -910,22 +934,79 @@ func secureWorktreePath(root, relative string) (string, error) {
 	return real, nil
 }
 
-func verifyFile(root string, check VerificationFileCheck) (VerifyCheckResult, domain.WorkflowErrorClass) {
-	cr := VerifyCheckResult{Kind: "file", Label: check.Path}
-	parent := filepath.Dir(check.Path)
-	dir, err := secureWorktreePath(root, parent)
+// secureVerifyArtifactPath is secureWorktreePath's counterpart for a file an
+// artifact check names, and it differs in exactly one deliberate way: it does
+// not require the path — or its parent — to exist.
+//
+// That is the second half of the wf-6528a538 incident. The old code resolved
+// the artifact's PARENT through secureWorktreePath, which stats and returns an
+// error for a missing directory, so a check whose directory was not there came
+// back as verify_environment_error ("stat .../internal/postrunqa: no such file
+// or directory") instead of the artifact-missing verdict the check actually
+// warranted. Existence is the question a file check asks; it must not also be
+// the precondition for asking it.
+//
+// Containment is still enforced in full, and without depending on existence:
+// lexically first, then — for whatever part of the path does exist — through
+// EvalSymlinks on the deepest existing ancestor, which is where a symlink could
+// smuggle the read outside the worktree. A path with no existing ancestor
+// inside the worktree cannot escape it, because there is nothing to follow.
+func secureVerifyArtifactPath(root, relative string) (string, error) {
+	if relative == "" || relative == "." {
+		return "", errors.New("verify file path is required")
+	}
+	if filepath.IsAbs(relative) {
+		return "", errors.New("verify file path must be relative to the worktree")
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	rootReal, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return "", err
+	}
+	candidate := filepath.Clean(filepath.Join(rootAbs, filepath.FromSlash(relative)))
+	rel, err := filepath.Rel(rootAbs, candidate)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", errors.New("verify path escapes the worktree")
+	}
+	// Walk up to the deepest ancestor that exists and prove IT is still inside
+	// the worktree once symlinks are resolved. Everything below it does not
+	// exist yet, so no link on that part of the path can redirect the read.
+	for probe := candidate; ; probe = filepath.Dir(probe) {
+		real, evalErr := filepath.EvalSymlinks(probe)
+		if evalErr != nil {
+			if os.IsNotExist(evalErr) {
+				if filepath.Clean(probe) == filepath.Clean(rootAbs) {
+					return "", errors.New("verify worktree root does not exist")
+				}
+				parent := filepath.Dir(probe)
+				if parent == probe {
+					return "", errors.New("verify path escapes the worktree")
+				}
+				continue
+			}
+			return "", evalErr
+		}
+		realRel, relErr := filepath.Rel(rootReal, real)
+		if relErr != nil || realRel == ".." || strings.HasPrefix(realRel, ".."+string(filepath.Separator)) {
+			return "", errors.New("artifact symlink escapes the worktree")
+		}
+		return candidate, nil
+	}
+}
+
+func verifyFile(root string, pathCtx VerifyPathContext, check VerificationFileCheck) (VerifyCheckResult, domain.WorkflowErrorClass) {
+	// One resolution, shared with the commands of this same spec, applied
+	// identically to existence, exact-content and sha256 checks — they all read
+	// the same bytes from the same resolved path below.
+	resolved := pathCtx.ResolvePath(check.Path)
+	cr := VerifyCheckResult{Kind: "file", Label: check.Path, ResolvedPath: resolved}
+	path, err := secureVerifyArtifactPath(root, resolved)
 	if err != nil {
 		cr.FailureReason = err.Error()
 		return cr, domain.WorkflowErrorVerifyEnvironment
-	}
-	path := filepath.Join(dir, filepath.Base(check.Path))
-	if real, evalErr := filepath.EvalSymlinks(path); evalErr == nil {
-		rootReal, rootErr := filepath.EvalSymlinks(root)
-		rel, relErr := filepath.Rel(rootReal, real)
-		if rootErr != nil || relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			cr.FailureReason = "artifact symlink escapes the worktree"
-			return cr, domain.WorkflowErrorVerifyEnvironment
-		}
 	}
 	data, err := os.ReadFile(path)
 	if !check.Exists {
