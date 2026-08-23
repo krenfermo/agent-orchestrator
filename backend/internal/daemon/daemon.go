@@ -492,6 +492,17 @@ func RunWithConfig(cfg config.Config) error {
 		runFile:    cfg.RunFilePath,
 		executable: os.Executable,
 	}
+	// Checkpoint 8P-E.19: the Incident Advisor's Diagnostic Agent launcher.
+	// Same agent registry, same runtime adapter and same PATH/shim handling as
+	// the decision resolver above — the only differences are its narrower
+	// read-only mandate and its isolated scratch workspace.
+	incidentAgentLauncher := &incidentAgentLauncher{
+		agents:     agents,
+		runtime:    runtimeAdapter,
+		dataDir:    cfg.DataDir,
+		runFile:    cfg.RunFilePath,
+		executable: os.Executable,
+	}
 	// Checkpoint 8P-E.11: durable direct-branch execution locks. The owner
 	// token is this daemon instance's identity -- it is what lets boot
 	// reconciliation tell a lock this instance still owns from one a crashed
@@ -511,7 +522,7 @@ func RunWithConfig(cfg config.Config) error {
 	// Checkpoint 8P-E.14A: lifecycle drives the same locks at the session's turn
 	// boundaries, through the re-acquire variant (see sessionTurnBranchLocks).
 	lcStack.LCM.SetBranchLocks(sessionTurnBranchLocks{mgr: branchLocks})
-	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, notificationWriter, log)
+	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, incidentAgentLauncher, notificationWriter, log)
 	// Checkpoint 8P-E.13A: reconciliation can only decide a stopped owner's
 	// lock once it can ask what that stop means, and only the coordinator knows
 	// (branchlock/retention.go). The coordinator needs the lock manager to

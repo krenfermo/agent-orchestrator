@@ -2684,6 +2684,7 @@ export interface components {
             diagnosesUsed: number;
             diagnosis?: components["schemas"]["ControllersIncidentDiagnosisView"];
             id: string;
+            launchOutcome?: string;
             maxDiagnoses: number;
             maxRepairs: number;
             repairsUsed: number;

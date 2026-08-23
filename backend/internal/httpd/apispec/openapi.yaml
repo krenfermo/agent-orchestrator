@@ -7470,6 +7470,8 @@ components:
           $ref: '#/components/schemas/ControllersIncidentDiagnosisView'
         id:
           type: string
+        launchOutcome:
+          type: string
         maxDiagnoses:
           type: integer
         maxRepairs:

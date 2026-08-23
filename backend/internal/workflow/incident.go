@@ -191,6 +191,25 @@ var incidentPhases = map[string]IncidentState{
 	incidentClosedPhase:     IncidentClosed,
 }
 
+// incidentAuxiliaryPhases are incident-ledger rows that are NOT state
+// transitions: they record something about an investigation without moving it.
+// They are deliberately kept out of incidentPhases so foldIncident cannot read
+// one as progress — a capacity wait means nothing started, and folding it into
+// `diagnosing` would claim an agent was running when none was.
+var incidentAuxiliaryPhases = map[string]bool{
+	ReasonIncidentDiagnosisCapacityWait: true,
+	incidentLaunchFailedPhase:           true,
+}
+
+// incidentLaunchFailedPhase records a diagnostic launch that never produced a
+// pane. It exists because the request row is written BEFORE the launch (so a
+// launch AO could not write down is a launch it does not make), which means the
+// row alone cannot distinguish "an agent is running" from "an agent failed to
+// start". Without this, one transient spawn failure would leave the generation
+// looking outstanding until it timed out, and the incident uninvestigable for
+// fifteen minutes.
+const incidentLaunchFailedPhase = "incident_diagnosis_launch_failed"
+
 // isIncidentLedgerPhase reports whether a checkpoint belongs to the incident
 // ledger rather than to the run's own progress.
 //
@@ -200,8 +219,10 @@ var incidentPhases = map[string]IncidentState{
 // counted, merely ASKING about a stop would rewrite the run's derived stop
 // reason and lifecycle phase. Asking a question must not change the answer.
 func isIncidentLedgerPhase(phase string) bool {
-	_, ok := incidentPhases[phase]
-	return ok
+	if _, ok := incidentPhases[phase]; ok {
+		return true
+	}
+	return incidentAuxiliaryPhases[phase]
 }
 
 // ---- bounds -----------------------------------------------------------------
@@ -264,6 +285,9 @@ type IncidentRecord struct {
 	// AgentSessionID / Harness identify the isolated agent that produced this.
 	AgentSessionID string `json:"agentSessionId,omitempty"`
 	Harness        string `json:"harness,omitempty"`
+	// RoutingReasons records why routing chose (or could not choose) a
+	// provider, so a capacity wait is explainable from the ledger alone.
+	RoutingReasons []string `json:"routingReasons,omitempty"`
 
 	// Approval/execution fields.
 	ApprovedBy string `json:"approvedBy,omitempty"`
@@ -318,9 +342,19 @@ type Incident struct {
 	Repairs int
 	// Executions counts executions of an approved action already spent.
 	Executions int
+	// FailedGeneration is the highest diagnosis generation whose launch is
+	// durably known to have failed. A generation at or below it is dead, not
+	// outstanding.
+	FailedGeneration int
 
 	OpenedAt  time.Time
 	UpdatedAt time.Time
+
+	// LaunchOutcome is what the most recent RequestIncidentDiagnosis call
+	// actually did. It is a per-call value, never folded from the ledger: the
+	// difference between "your agent is running now" and "one was already
+	// running" is about THIS request, not about the incident's history.
+	LaunchOutcome IncidentLaunchOutcome
 
 	// Stale marks an incident whose stop signature no longer matches the run's
 	// current stop — the situation moved under it. A stale incident is never
@@ -400,15 +434,17 @@ func incidentIDFor(runID, signature string) string {
 func foldIncident(incidentID string, cps []domain.WorkflowCheckpoint) (Incident, bool) {
 	rows := make([]domain.WorkflowCheckpoint, 0, 8)
 	for _, cp := range cps {
-		state, ok := incidentPhases[cp.DurablePhase]
-		if !ok {
+		// Auxiliary rows are collected too: they are not transitions, but they
+		// carry facts the fold needs (a launch that failed, a capacity wait).
+		// The state advance below is driven by incidentPhases alone, so an
+		// auxiliary row can never move the incident.
+		if !isIncidentLedgerPhase(cp.DurablePhase) {
 			continue
 		}
 		var rec IncidentRecord
 		if json.Unmarshal([]byte(cp.RetryState), &rec) != nil || rec.IncidentID != incidentID {
 			continue
 		}
-		_ = state
 		rows = append(rows, cp)
 	}
 	if len(rows) == 0 {
@@ -448,6 +484,10 @@ func foldIncident(incidentID string, cps []domain.WorkflowCheckpoint) (Incident,
 				Evidence: rec.Evidence, Missing: rec.MissingData, Risk: rec.Risk,
 				Options: rec.Options, Action: rec.Action, Attempt: rec.DiagnosisAttempt,
 				PackDigest: rec.PackDigest, Harness: rec.Harness, At: cp.CreatedAt,
+			}
+		case incidentLaunchFailedPhase:
+			if rec.DiagnosisAttempt > inc.FailedGeneration {
+				inc.FailedGeneration = rec.DiagnosisAttempt
 			}
 		case incidentExecutingPhase:
 			inc.Executions++

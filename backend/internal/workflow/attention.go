@@ -82,6 +82,14 @@ const (
 	// verifies THAT, once, by itself — nobody has a decision to make about
 	// "the approval AO is holding is older than the code".
 	ReasonVerifyFreshReviewRequired = verifyFreshReviewRequiredPhase
+	// ReasonIncidentDiagnosisCapacityWait is an Incident Advisor investigation
+	// AO wants to run and currently cannot, because no provider has capacity.
+	// Self-remediable by construction: a durable wake is scheduled and AO comes
+	// back to it, and nobody has a decision to make about "the provider is rate
+	// limited". It never parks the RUN — the run is already stopped for its own
+	// reason, and an investigation that cannot start yet is a fact about the
+	// investigation, not a second fact about the run.
+	ReasonIncidentDiagnosisCapacityWait = "incident_diagnosis_capacity_wait"
 
 	// Human decisions: AO has genuinely stopped and a person must act.
 	ReasonFixBudgetExhausted    = "fix_budget_exhausted"
@@ -188,14 +196,15 @@ const (
 // is the entire definition of "AO knows what this stop is".
 var attentionDispositions = map[string]AttentionDisposition{
 	// ---- Self-remediable ---------------------------------------------------
-	ReasonPlannerRetryScheduled: {SelfRemediable: true, Phase: PhaseRetrying},
-	ReasonPlannerCapacityWait:   {SelfRemediable: true, Phase: PhaseWaitingForCapacity},
-	ReasonReviewCapacityRetry:   {SelfRemediable: true, Phase: PhaseWaitingForCapacity},
-	ReasonBranchQueued:          {SelfRemediable: true, Phase: PhaseBlocked},
-	ReasonVerifyFixReentry:      {SelfRemediable: true, Phase: PhaseFixing},
-	ReasonPromptTransportRetry:  {SelfRemediable: true, Phase: PhaseRetrying},
-	ReasonReviewerLaunchRetry:   {SelfRemediable: true, Phase: PhaseRetrying},
-	ReasonWorkerLaunchRetry:     {SelfRemediable: true, Phase: PhaseRetrying},
+	ReasonPlannerRetryScheduled:         {SelfRemediable: true, Phase: PhaseRetrying},
+	ReasonPlannerCapacityWait:           {SelfRemediable: true, Phase: PhaseWaitingForCapacity},
+	ReasonReviewCapacityRetry:           {SelfRemediable: true, Phase: PhaseWaitingForCapacity},
+	ReasonBranchQueued:                  {SelfRemediable: true, Phase: PhaseBlocked},
+	ReasonVerifyFixReentry:              {SelfRemediable: true, Phase: PhaseFixing},
+	ReasonPromptTransportRetry:          {SelfRemediable: true, Phase: PhaseRetrying},
+	ReasonReviewerLaunchRetry:           {SelfRemediable: true, Phase: PhaseRetrying},
+	ReasonWorkerLaunchRetry:             {SelfRemediable: true, Phase: PhaseRetrying},
+	ReasonIncidentDiagnosisCapacityWait: {SelfRemediable: true, Phase: PhaseWaitingForCapacity},
 
 	ReasonVerifyFreshReviewRequired: {SelfRemediable: true, Phase: PhaseReviewing},
 

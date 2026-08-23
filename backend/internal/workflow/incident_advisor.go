@@ -292,38 +292,80 @@ func (c *Coordinator) RequestIncidentDiagnosis(ctx stdctx.Context, runID string)
 		return inc, pack, ErrIncidentStale
 	}
 	if !inc.CanDiagnose() {
-		return inc, pack, fmt.Errorf("workflow: incident %s has used its %d diagnosis attempts", inc.ID, maxIncidentDiagnoses)
+		return inc, pack, fmt.Errorf("workflow: incident %s has used its %d diagnosis attempts", inc.ID, MaxIncidentDiagnoses)
 	}
 	run, ok, err := c.store.GetWorkflowRun(ctx, runID)
 	if err != nil || !ok {
 		return inc, pack, err
 	}
 
+	// An outstanding generation is one whose agent may still answer. Launching
+	// another would double-spend a provider on a question already being asked.
+	generation, outstanding := c.diagnosisGeneration(inc, c.clock())
+	if outstanding {
+		inc.LaunchOutcome = IncidentAlreadyRunning
+		return inc, pack, nil
+	}
+
+	// Provider selection through AO's ordinary routing — health, capacity,
+	// profile eligibility and the operator's own priority list all apply, and a
+	// shortage becomes the ordinary self-remediable wait.
+	decision, err := c.selectIncidentDiagnosticProvider(ctx, run, c.incumbentHarnessFor(ctx, runID))
+	if err != nil {
+		return inc, pack, err
+	}
+	if decision.Waiting || decision.SelectedHarness == "" {
+		c.recordIncidentCapacityWait(ctx, run, inc, decision)
+		inc.LaunchOutcome = IncidentWaitingForCapacity
+		return inc, pack, nil
+	}
+
+	// Claim the single-flight slot BEFORE anything is launched or recorded, so
+	// a concurrent poll, a double click and a restarted daemon converge on one
+	// launch instead of three.
+	entry, claimed, err := c.claimIncidentLaunch(ctx, run, inc, generation)
+	if err != nil {
+		return inc, pack, err
+	}
+	if !claimed {
+		inc.LaunchOutcome = IncidentAlreadyRunning
+		return inc, pack, nil
+	}
+
+	// The durable request row is written before the launch, for the same reason
+	// recordFixDispatchIntent is: a launch AO could not first write down is a
+	// launch AO does not make, and this row is what bounds the attempt count
+	// across a restart.
 	rec := IncidentRecord{
 		IncidentID: inc.ID, StopReason: inc.StopReason, StopDetail: inc.StopDetail,
-		Signature: inc.Signature, DiagnosisAttempt: inc.Diagnoses + 1,
-		PackDigest: pack.Digest,
+		Signature: inc.Signature, DiagnosisAttempt: generation,
+		PackDigest: pack.Digest, Harness: string(decision.SelectedHarness),
 	}
 	if err := c.writeIncidentRow(ctx, run, incidentDiagnosingPhase,
-		fmt.Sprintf("incident_diagnosis_requested: attempt %d of %d over a %d-byte pack (~%d tokens)",
-			rec.DiagnosisAttempt, maxIncidentDiagnoses, pack.Bytes, pack.EstimatedTokens), rec); err != nil {
+		fmt.Sprintf("incident_diagnosis_requested: attempt %d of %d to %s over a %d-byte pack (~%d tokens)",
+			generation, MaxIncidentDiagnoses, decision.SelectedHarness, pack.Bytes, pack.EstimatedTokens), rec); err != nil {
+		c.releaseIncidentLaunch(ctx, run, inc, generation, entry, err)
 		return inc, pack, err
 	}
 
 	res, err := c.incidentAgents.LaunchDiagnostic(ctx, IncidentAgentRequest{
 		IncidentID: inc.ID, RunID: runID, ProjectID: run.ProjectID,
 		Prompt: BuildIncidentDiagnosticPrompt(pack), PackDigest: pack.Digest,
-		ReadOnly: true,
+		Harness: string(decision.SelectedHarness), ReadOnly: true,
 	})
 	if err != nil {
+		// Nothing is running. Release the claim so the next generation can be
+		// claimed rather than leaving the incident permanently unlaunchable.
+		c.releaseIncidentLaunch(ctx, run, inc, generation, entry, err)
 		return inc, pack, err
 	}
 	if c.log != nil {
 		c.log.Info("workflow: diagnostic agent launched for an incident",
-			"run", runID, "incident", inc.ID, "attempt", rec.DiagnosisAttempt,
-			"packBytes", pack.Bytes, "session", res.SessionID)
+			"run", runID, "incident", inc.ID, "generation", generation,
+			"harness", decision.SelectedHarness, "packBytes", pack.Bytes, "session", res.SessionID)
 	}
-	inc.State, inc.Diagnoses = IncidentDiagnosing, rec.DiagnosisAttempt
+	inc.State, inc.Diagnoses = IncidentDiagnosing, generation
+	inc.LaunchOutcome = IncidentLaunched
 	return inc, pack, nil
 }
 

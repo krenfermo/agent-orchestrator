@@ -53,6 +53,12 @@ type IncidentView struct {
 
 	CanDiagnose bool `json:"canDiagnose"`
 	CanExecute  bool `json:"canExecute"`
+	// LaunchOutcome is what the request that produced this view actually did:
+	// launched / already_running / waiting_for_capacity. It is empty for a plain
+	// read. The modal needs it to tell "your agent is starting" apart from "one
+	// was already running" apart from "every provider is busy, AO will retry" —
+	// three situations that look identical from the incident's state alone.
+	LaunchOutcome string `json:"launchOutcome,omitempty"`
 
 	Diagnosis *IncidentDiagnosisView `json:"diagnosis,omitempty"`
 	Pack      *IncidentPackView      `json:"contextPack,omitempty"`
@@ -255,6 +261,7 @@ func incidentView(inc workflowcore.Incident, pack *workflowcore.IncidentContextP
 		Diagnoses: inc.Diagnoses, MaxDiagnoses: workflowcore.MaxIncidentDiagnoses,
 		Repairs: inc.Repairs, MaxRepairs: workflowcore.MaxIncidentRepairs,
 		CanDiagnose: inc.CanDiagnose(), CanExecute: inc.CanExecute(),
+		LaunchOutcome: string(inc.LaunchOutcome),
 	}
 	if pack != nil {
 		pv := IncidentPackView{

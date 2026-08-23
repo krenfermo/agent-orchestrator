@@ -146,7 +146,7 @@ func (c coordinatorLockClassifier) ClassifyLockOwner(ctx context.Context, run do
 	}, nil
 }
 
-func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, notifications workflowcore.NotificationSink, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
+func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {
 		plannerBinary = "claude"
@@ -193,6 +193,7 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		QuestionsStore:           store,
 		PaneReader:               paneReader,
 		DecisionResolverLauncher: decisionResolverLauncher,
+		IncidentAgents:           incidentAgents,
 		WakeScheduler:            wakeScheduler,
 		// A run that durably reaches the completed state raises one "workflow
 		// finished" notification, on the same write-side producer lifecycle

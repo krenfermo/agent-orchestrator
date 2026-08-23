@@ -344,17 +344,19 @@ func TestDiagnosisAttemptsAreBoundedAcrossRestart(t *testing.T) {
 	f := newAdvisorFixture(t, workflowcore.ReasonFixCycleNotStarted, "the worker never started this cycle")
 	ctx := context.Background()
 
+	// Each pass advances past the outstanding-generation window, so every ask
+	// is genuinely eligible to launch and the only thing stopping it is the
+	// budget — which is the property under test.
 	for i := 0; i < 5; i++ {
 		if i == 2 {
 			f.c = f.newCoordinator()
 		}
-		_, _, err := f.c.RequestIncidentDiagnosis(ctx, f.runID)
-		if i >= 2 && err == nil {
-			t.Fatalf("attempt %d was allowed past the budget", i+1)
-		}
+		f.clk.Advance(20 * time.Minute)
+		_, _, _ = f.c.RequestIncidentDiagnosis(ctx, f.runID)
 	}
-	if f.agents.diagnostics != 2 {
-		t.Fatalf("diagnostic launches = %d, want exactly 2", f.agents.diagnostics)
+	if f.agents.diagnostics != workflowcore.MaxIncidentDiagnoses {
+		t.Fatalf("diagnostic launches = %d, want exactly %d however often it is asked",
+			f.agents.diagnostics, workflowcore.MaxIncidentDiagnoses)
 	}
 }
 
@@ -516,3 +518,52 @@ func hugeChangeSet(n int) []ports.WorkspaceChange {
 }
 
 var _ = domain.WorkflowRunNeedsAttention
+
+// A generation that is already launched is never launched again — by a 2s poll,
+// by a double click, or by a daemon that restarted mid-flight. The outbox's
+// unique idempotency key is what makes all three converge on one pane.
+func TestConcurrentAsksLaunchExactlyOneDiagnosticAgent(t *testing.T) {
+	f := newAdvisorFixture(t, workflowcore.ReasonFixCycleNotStarted, "the worker never started this cycle")
+	ctx := context.Background()
+
+	for i := 0; i < 6; i++ {
+		if i == 3 {
+			f.c = f.newCoordinator() // a restart mid-investigation
+		}
+		inc, _, err := f.c.RequestIncidentDiagnosis(ctx, f.runID)
+		if err != nil {
+			t.Fatalf("ask %d: %v", i+1, err)
+		}
+		if i > 0 && inc.LaunchOutcome != workflowcore.IncidentAlreadyRunning {
+			t.Fatalf("ask %d outcome = %q, want already_running", i+1, inc.LaunchOutcome)
+		}
+	}
+	if f.agents.diagnostics != 1 {
+		t.Fatalf("diagnostic launches = %d, want exactly 1 across six asks and a restart", f.agents.diagnostics)
+	}
+}
+
+// A launch that fails releases its claim, so the incident stays investigable
+// rather than being wedged by a transient spawn failure.
+func TestFailedLaunchDoesNotBurnTheIncident(t *testing.T) {
+	f := newAdvisorFixture(t, workflowcore.ReasonFixCycleNotStarted, "the worker never started this cycle")
+	ctx := context.Background()
+
+	f.agents.err = errors.New("runtime refused to create a pane")
+	if _, _, err := f.c.RequestIncidentDiagnosis(ctx, f.runID); err == nil {
+		t.Fatal("expected the launch failure to be reported")
+	}
+
+	f.agents.err = nil
+	f.clk.Advance(time.Minute)
+	inc, _, err := f.c.RequestIncidentDiagnosis(ctx, f.runID)
+	if err != nil {
+		t.Fatalf("second attempt after a failed launch: %v", err)
+	}
+	if inc.LaunchOutcome != workflowcore.IncidentLaunched {
+		t.Fatalf("outcome = %q, want launched", inc.LaunchOutcome)
+	}
+	if f.agents.diagnostics != 1 {
+		t.Fatalf("successful launches = %d, want 1", f.agents.diagnostics)
+	}
+}
