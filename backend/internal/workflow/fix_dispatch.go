@@ -72,6 +72,12 @@ type promptDeliveryRecord struct {
 	CycleNumber      int                   `json:"cycleNumber"`
 	TransportAttempt int                   `json:"transportAttempt,omitempty"`
 	Reason           string                `json:"reason,omitempty"`
+	// PromptReceipt is the digest of the exact bytes the session will record as
+	// its LatestUserPrompt once this prompt is written into it. Recorded BEFORE
+	// delivery, it is what lets recovery prove after a restart that this
+	// session received THIS cycle's prompt rather than some other message. See
+	// fix_delivery_recovery.go.
+	PromptReceipt string `json:"promptReceipt,omitempty"`
 }
 
 func newPromptDeliveryRecord(prompt string, cycleNumber, transportAttempt int, contextPack bool) promptDeliveryRecord {
@@ -81,6 +87,7 @@ func newPromptDeliveryRecord(prompt string, cycleNumber, transportAttempt int, c
 		ContextPack:      contextPack,
 		CycleNumber:      cycleNumber,
 		TransportAttempt: transportAttempt,
+		PromptReceipt:    promptReceiptDigest(prompt),
 	}
 }
 
@@ -166,12 +173,16 @@ func (c *Coordinator) dispatchFixStep(ctx stdctx.Context, run domain.WorkflowRun
 	case domain.WorkflowOutboxPending:
 		return c.dispatchFixFromPending(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt)
 	case domain.WorkflowOutboxDispatched, domain.WorkflowOutboxAcknowledged:
-		// Boundary B: a previous attempt got at least as far as "about to
-		// call Send," but Send has no idempotency key and no reliable
-		// positive-delivery fact is available here in general, so recovery
-		// must NOT call Send again ("nunca asumir éxito"). Surface ambiguity.
-		return c.markFixAmbiguous(ctx, run, fixStep, entry,
-			"ambiguous_fix_delivery: cannot confirm message delivery after restart")
+		// Boundary B: a previous attempt got at least as far as "about to call
+		// Send". Send still has no idempotency key, so this must never call it
+		// blindly — but "no idempotency key" was never the same thing as "no
+		// evidence". resolveFixDeliveryAfterRestart reads the durable
+		// pre-delivery record and the session's own facts, and re-sends only
+		// when it can PROVE nothing was delivered, adopts the cycle when it can
+		// prove it was, and escalates only what is genuinely unprovable — once.
+		// Before this, every pass through here parked the run and wrote another
+		// identical checkpoint, which is the wf-6528a538 incident.
+		return c.resolveFixDeliveryAfterRestart(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt)
 	case domain.WorkflowOutboxFailed:
 		return fixStep, nil
 	default:
@@ -195,28 +206,67 @@ func (c *Coordinator) dispatchFixFromPending(
 	}
 	entry.Status = domain.WorkflowOutboxDispatched
 
-	from := fixStep.State
-	if from == domain.WorkflowStepPending {
+	return c.deliverFixPrompt(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt)
+}
+
+// runFixStep puts the fix step into the state a delivery is made from. Both
+// delivery entry points go through it, so a cycle delivered on the first pass
+// and one delivered by recovery after a restart leave the step identically.
+func (c *Coordinator) runFixStep(ctx stdctx.Context, fixStep domain.WorkflowStep) (domain.WorkflowStep, error) {
+	now := c.clock()
+	if fixStep.State == domain.WorkflowStepPending {
 		if _, err := c.store.UpdateWorkflowStepState(ctx, fixStep.ID, domain.WorkflowStepPending, domain.WorkflowStepReady, now); err != nil {
 			return fixStep, err
 		}
-		from = domain.WorkflowStepReady
 		fixStep.State = domain.WorkflowStepReady
 	}
-	// ready->running (cycle 1) and waiting->running (cycle N+1) are both
-	// valid transitions.
-	if from == domain.WorkflowStepReady || from == domain.WorkflowStepWaiting {
-		if _, err := c.store.UpdateWorkflowStepState(ctx, fixStep.ID, from, domain.WorkflowStepRunning, now); err != nil {
+	// ready->running (cycle 1) and waiting->running (cycle N+1, and a cycle
+	// re-entered by delivery recovery) are all valid transitions.
+	if fixStep.State == domain.WorkflowStepReady || fixStep.State == domain.WorkflowStepWaiting {
+		if _, err := c.store.UpdateWorkflowStepState(ctx, fixStep.ID, fixStep.State, domain.WorkflowStepRunning, now); err != nil {
 			return fixStep, err
 		}
 		fixStep.State = domain.WorkflowStepRunning
 	}
+	return fixStep, nil
+}
 
+// deliverFixPrompt is the one place a fix prompt is ever handed to the
+// transport. Both entry points use it — the ordinary pending dispatch, and the
+// recovery path that has PROVEN a previous attempt never got this far — so
+// "deliver this cycle" has exactly one implementation, one pre-delivery record
+// and one set of outcomes, whichever side of a restart it happens on.
+//
+// The caller owns the outbox entry and must have already moved it out of
+// `pending`; this function never enqueues one, so it can never mint a second
+// delivery identity for the same logical cycle.
+func (c *Coordinator) deliverFixPrompt(
+	ctx stdctx.Context,
+	run domain.WorkflowRun,
+	workStep, fixStep domain.WorkflowStep,
+	entry domain.WorkflowOutboxEntry,
+	reviewRun domain.ReviewRun,
+	cycleNumber int,
+	transportAttempt int,
+	prompt string,
+) (domain.WorkflowStep, error) {
+	fixStep, err := c.runFixStep(ctx, fixStep)
+	if err != nil {
+		return fixStep, err
+	}
 	// Checkpoint 8M §12/§27: apply the session lifecycle decision (and
 	// persist it) right here — the single outbox-idempotency-guarded point
 	// reached exactly once per real cycle dispatch, never once per poll.
 	prompt, contextPack := c.applyFixLifecycleDecision(ctx, run, fixStep, reviewRun, cycleNumber, prompt)
 	delivery := newPromptDeliveryRecord(prompt, cycleNumber, transportAttempt, contextPack)
+
+	// The durable pre-delivery record, written STRICTLY before Send and fatal
+	// if it fails. Its presence or absence is the fact recovery reasons from
+	// after a restart, so a delivery AO could not first write down is a
+	// delivery AO does not make — see recordFixDispatchIntent.
+	if err := c.recordFixDispatchIntent(ctx, run, fixStep, reviewRun, reviewRun.TargetSHA, delivery); err != nil {
+		return fixStep, err
+	}
 
 	if err := c.messageSender.Send(ctx, reviewRun.SessionID, prompt, nil); err != nil {
 		// Checkpoint 8P-E.13C: a transport that refused the message before any
@@ -374,39 +424,10 @@ func (c *Coordinator) recordFixDispatchFailure(ctx stdctx.Context, run domain.Wo
 	return fixStep, nil
 }
 
-// markFixAmbiguous handles a retry/recovery call that found the fix
-// outbox entry already dispatched (or, defensively, acknowledged), with no
-// reliable fact proving Send actually happened. Never calls Send again.
-func (c *Coordinator) markFixAmbiguous(ctx stdctx.Context, run domain.WorkflowRun, fixStep domain.WorkflowStep, entry domain.WorkflowOutboxEntry, nextAction string) (domain.WorkflowStep, error) {
-	now := c.clock()
-	if fixStep.State == domain.WorkflowStepRunning || fixStep.State == domain.WorkflowStepReady {
-		from := fixStep.State
-		if _, err := c.store.UpdateWorkflowStepState(ctx, fixStep.ID, from, domain.WorkflowStepWaiting, now); err != nil {
-			return fixStep, err
-		}
-		fixStep.State = domain.WorkflowStepWaiting
-	}
-	if run.State == domain.WorkflowRunRunning || run.State == domain.WorkflowRunWaiting {
-		if _, err := c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, now); err != nil {
-			return fixStep, err
-		}
-	}
-	stepID := fixStep.ID
-	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
-		ID:             "wfc-" + c.newID(),
-		WorkflowRunID:  run.ID,
-		WorkflowStepID: &stepID,
-		ProjectID:      run.ProjectID,
-		NextAction:     nextAction,
-		DurablePhase:   "fix_dispatch_ambiguous",
-		PayloadVersion: "v1",
-		RetryState:     "{}",
-		CreatedAt:      now,
-	}); err != nil {
-		return fixStep, err
-	}
-	return fixStep, nil
-}
+// markFixAmbiguous is gone: escalating an unresolved delivery now lives in
+// fix_delivery_recovery.go's markFixDeliveryUnproven, which is reached only
+// after the evidence lookup has come back empty, records WHAT was inconclusive,
+// and writes at most one checkpoint per unchanged condition.
 
 func fixPayloadJSON(fixStepID, reviewRunID string, cycleNumber int) string {
 	return `{"fixStepId":"` + fixStepID + `","reviewRunId":"` + reviewRunID + `","cycle":` + strconv.Itoa(cycleNumber) + `}`

@@ -85,7 +85,13 @@ const (
 	ReasonVerifyToolUnavailable = "verify_tool_unavailable"
 	ReasonVerifyInfraFailed     = "verify_infrastructure_failed"
 	ReasonReviewStateAmbiguous  = "review_state_ambiguous"
-	ReasonReviewerLaunchFailed  = "reviewer_launch_failed"
+	// ReasonFixDispatchAmbiguous is a fix cycle whose delivery to the worker
+	// session AO could not prove either way after a restart — and only after
+	// fix_delivery_recovery.go has exhausted every durable fact that could have
+	// proven it. The rows already on disk from before that recovery existed
+	// carry this same string, so they keep their meaning.
+	ReasonFixDispatchAmbiguous = "fix_dispatch_ambiguous"
+	ReasonReviewerLaunchFailed = "reviewer_launch_failed"
 	// The four reasons below are review_launch_recovery.go's precise
 	// replacements for the flat ReasonReviewerLaunchFailed: a reviewer that
 	// could not start because its credentials were rejected, because its CLI is
@@ -149,8 +155,8 @@ var attentionDispositions = map[string]AttentionDisposition{
 	"review_dispatch_ambiguous": {
 		HumanAction: "Confirm the state of the review, then continue or cancel this run.",
 	},
-	"fix_dispatch_ambiguous": {
-		HumanAction: "Confirm the state of the fix, then continue or cancel this run.",
+	ReasonFixDispatchAmbiguous: {
+		HumanAction: "AO could not prove whether the reviewer's findings reached the worker session. Open that session, check whether it received them, then continue this run (AO re-checks its own evidence first and will resume by itself if the answer becomes provable) or cancel it.",
 	},
 	"work_provider_failure_needs_attention": {
 		HumanAction: "Every configured provider attempt failed. Check provider auth/capacity, then continue this run.",
