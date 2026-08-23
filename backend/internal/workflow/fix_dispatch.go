@@ -29,6 +29,65 @@ type MessageSender interface {
 	Send(ctx stdctx.Context, id domain.SessionID, message string, attachment *ports.SpawnAttachment) error
 }
 
+// SubmissionReportingSender is the optional capability that lets workflow tell
+// "the prompt reached the agent's composer" apart from "the agent was given a
+// turn" — Checkpoint 8P-E.17. Satisfied by *session_manager.Manager.
+//
+// Workflow degrades cleanly without it: a sender that only implements
+// MessageSender behaves exactly as it always did, and every verdict below is
+// simply unavailable rather than assumed.
+type SubmissionReportingSender interface {
+	MessageSender
+	// SendReportingSubmission delivers and then says what it could prove.
+	SendReportingSubmission(ctx stdctx.Context, id domain.SessionID, message string, attachment *ports.SpawnAttachment) (ports.PromptSubmission, error)
+	// SubmitPending submits a draft already in the composer, writing no new
+	// payload — the only safe retry for a prompt that is loaded but not sent.
+	SubmitPending(ctx stdctx.Context, id domain.SessionID) (ports.PromptSubmission, error)
+	// ComposerState reports what the composer holds, writing nothing.
+	ComposerState(ctx stdctx.Context, id domain.SessionID) ports.PromptSubmission
+}
+
+// maxFixSubmitRetries bounds the submit-only retries for one delivery. Each is
+// an Enter with no payload, so it can never duplicate a prompt; the bound is
+// here because a composer that will not clear after three submits is a
+// condition to report, not to keep poking.
+const maxFixSubmitRetries = 2
+
+// deliverAndConfirm writes the prompt and returns the strongest statement AO can
+// make about whether the agent actually received a turn.
+//
+// The submit-only retries matter more than they look. The transport now refuses
+// to write into a pane whose keys it cannot deliver, but a TUI can still absorb
+// a submit behind a large paste, and the ONLY correct response to that is to
+// submit again — never to re-send, which appends a second copy of the prompt to
+// the draft that is already there. That is precisely how session
+// agent-orchestrator-29 ended up holding two copies of the same 15 KB fix
+// prompt in one composer.
+func (c *Coordinator) deliverAndConfirm(ctx stdctx.Context, sessionID domain.SessionID, prompt string) (ports.PromptSubmission, error) {
+	reporter, ok := c.messageSender.(SubmissionReportingSender)
+	if !ok {
+		return ports.PromptSubmissionUnset, c.messageSender.Send(ctx, sessionID, prompt, nil)
+	}
+	submission, err := reporter.SendReportingSubmission(ctx, sessionID, prompt, nil)
+	if err != nil {
+		return submission, err
+	}
+	for i := 0; i < maxFixSubmitRetries && submission == ports.PromptLoadedNotSubmitted; i++ {
+		if c.log != nil {
+			c.log.Info("workflow: fix prompt is loaded but unsubmitted; submitting again without re-sending it",
+				"session", sessionID, "attempt", i+1, "max", maxFixSubmitRetries)
+		}
+		next, serr := reporter.SubmitPending(ctx, sessionID)
+		if serr != nil {
+			// The submit could not be issued. Nothing was written either way,
+			// so the caller still owns the loaded-not-submitted verdict.
+			return submission, nil
+		}
+		submission = next
+	}
+	return submission, nil
+}
+
 // fixStepOutboxIdempotencyKey is the deterministic, cycle-specific
 // idempotency key for a fix step's send-message command. Cycle-specific for
 // the same reason review dispatch is (design decision 2): a second fix cycle
@@ -78,6 +137,9 @@ type promptDeliveryRecord struct {
 	CycleNumber      int                   `json:"cycleNumber"`
 	TransportAttempt int                   `json:"transportAttempt,omitempty"`
 	Reason           string                `json:"reason,omitempty"`
+	// Submission is what the transport could prove about the submit itself:
+	// whether the payload left the agent's composer. Empty means no check ran.
+	Submission ports.PromptSubmission `json:"submission,omitempty"`
 	// PromptReceipt is the digest of the exact bytes the session will record as
 	// its LatestUserPrompt once this prompt is written into it. Recorded BEFORE
 	// delivery, it is what lets recovery prove after a restart that this
@@ -95,6 +157,16 @@ func newPromptDeliveryRecord(prompt string, cycleNumber, transportAttempt int, c
 		TransportAttempt: transportAttempt,
 		PromptReceipt:    promptReceiptDigest(prompt),
 	}
+}
+
+// promptDeliveryRecordFromJSON re-reads a delivery record off a checkpoint,
+// returning the zero value when the checkpoint carries none.
+func promptDeliveryRecordFromJSON(raw string) promptDeliveryRecord {
+	var rec promptDeliveryRecord
+	if json.Unmarshal([]byte(raw), &rec) != nil {
+		return promptDeliveryRecord{}
+	}
+	return rec
 }
 
 func (r promptDeliveryRecord) json() string {
@@ -274,7 +346,8 @@ func (c *Coordinator) deliverFixPrompt(
 		return fixStep, err
 	}
 
-	if err := c.messageSender.Send(ctx, reviewRun.SessionID, prompt, nil); err != nil {
+	submission, err := c.deliverAndConfirm(ctx, reviewRun.SessionID, prompt)
+	if err != nil {
 		// Checkpoint 8P-E.13C: a transport that refused the message before any
 		// of it reached the agent is a transport problem, not a workflow
 		// verdict. Nothing was delivered, so re-sending is provably safe, and
@@ -285,6 +358,14 @@ func (c *Coordinator) deliverFixPrompt(
 		}
 		return c.recordFixDispatchFailure(ctx, run, fixStep, entry, domain.WorkflowErrorPromptDeliveryFailed, err)
 	}
+	// Checkpoint 8P-E.17: a prompt sitting in the composer is NOT a delivered
+	// fix cycle, and recording one as if it were is the whole of wf-57f90ff2.
+	// Every submit-only retry has already been spent by deliverAndConfirm, so
+	// this is a durable statement of a condition, not a place to try again.
+	if submission == ports.PromptLoadedNotSubmitted {
+		return c.recordFixPromptNotSubmitted(ctx, run, fixStep, entry, reviewRun, delivery)
+	}
+	delivery.Submission = submission
 	return c.recordFixDispatchSuccess(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, delivery)
 }
 
@@ -426,6 +507,83 @@ func (c *Coordinator) recordFixDispatchFailure(ctx stdctx.Context, run domain.Wo
 		fmt.Sprintf("fix dispatch failed (%s): %v", errClass, cause))
 	if c.log != nil {
 		c.log.Warn("workflow: fix step dispatch failed", "step", fixStep.ID, "err", cause)
+	}
+	return fixStep, nil
+}
+
+// fixPromptNotSubmittedPhase is the durable phase of a prompt that reached the
+// agent's composer and did not leave it. It is a canonical attention reason
+// (attention.go), because a person can genuinely act on it — and because
+// ContinueRun's resume path keys on it to submit what is already there rather
+// than send it again.
+const fixPromptNotSubmittedPhase = ReasonFixPromptNotSubmitted
+
+// recordFixPromptNotSubmitted parks a fix cycle whose prompt is provably
+// sitting unsubmitted in the worker's composer.
+//
+// The shape is deliberately unlike recordFixDispatchFailure. Nothing failed in
+// the transport, the payload IS with the agent, and the step must stay
+// non-terminal and re-submittable:
+//
+//   - the outbox entry is left ACKNOWLEDGED, not failed. The delivery happened;
+//     re-minting it would invite a second paste, which is the one thing that
+//     must never happen here.
+//   - no attempt row is written, so the cycle is not counted as delivered and
+//     the fix budget is untouched.
+//   - the checkpoint carries the prompt receipt, which is what later lets AO
+//     attribute the pending draft to itself instead of to a person.
+func (c *Coordinator) recordFixPromptNotSubmitted(
+	ctx stdctx.Context,
+	run domain.WorkflowRun,
+	fixStep domain.WorkflowStep,
+	entry domain.WorkflowOutboxEntry,
+	reviewRun domain.ReviewRun,
+	delivery promptDeliveryRecord,
+) (domain.WorkflowStep, error) {
+	now := c.clock()
+	if entry.Status != domain.WorkflowOutboxAcknowledged {
+		if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, entry.Status, domain.WorkflowOutboxAcknowledged, now, ""); err != nil {
+			return fixStep, err
+		}
+	}
+	if fixStep.State == domain.WorkflowStepRunning {
+		if _, err := c.store.UpdateWorkflowStepState(ctx, fixStep.ID, domain.WorkflowStepRunning, domain.WorkflowStepWaiting, now); err != nil {
+			return fixStep, err
+		}
+		fixStep.State = domain.WorkflowStepWaiting
+	}
+	if run.State == domain.WorkflowRunRunning || run.State == domain.WorkflowRunWaiting {
+		if _, err := c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, now); err != nil {
+			return fixStep, err
+		}
+	}
+	delivery.Submission = ports.PromptLoadedNotSubmitted
+	stepID := fixStep.ID
+	sid := string(reviewRun.SessionID)
+	rid := reviewRun.ID
+	detail := fmt.Sprintf(
+		"fix cycle %d reached worker session %s but is still sitting unsubmitted in its composer after %d submit attempts — the agent has the text and has not been given the turn",
+		delivery.CycleNumber, sid, maxFixSubmitRetries+1)
+	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+		ID:                "wfc-" + c.newID(),
+		WorkflowRunID:     run.ID,
+		WorkflowStepID:    &stepID,
+		ProjectID:         run.ProjectID,
+		SessionID:         &sid,
+		ReviewRunID:       &rid,
+		FingerprintBefore: reviewRun.TargetSHA,
+		NextAction:        detail,
+		DurablePhase:      fixPromptNotSubmittedPhase,
+		PayloadVersion:    "v1",
+		RetryState:        delivery.json(),
+		CreatedAt:         now,
+	}); err != nil {
+		return fixStep, err
+	}
+	c.recordAttentionStopOnce(ctx, run, &fixStep.ID, ReasonFixPromptNotSubmitted, detail)
+	if c.log != nil {
+		c.log.Warn("workflow: fix prompt is in the agent's composer but was never submitted",
+			"run", run.ID, "step", fixStep.ID, "cycle", delivery.CycleNumber, "session", sid)
 	}
 	return fixStep, nil
 }

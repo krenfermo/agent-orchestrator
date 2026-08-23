@@ -63,6 +63,43 @@ func PromptTransportFor(payloadBytes int) PromptTransport {
 	return PromptTransportInline
 }
 
+// PromptSubmission is what AO could PROVE about a prompt it wrote into an
+// interactive agent's terminal — Checkpoint 8P-E.17.
+//
+// The distinction exists because "the transport commands exited 0" and "the
+// agent was given a turn" are different facts, and AO used to record the first
+// as if it were the second. In incident wf-57f90ff2 a 15 KB fix prompt was
+// pasted into a pane sitting in tmux copy-mode: the paste queued, the
+// submitting Enter was consumed by the mode, both commands succeeded, and the
+// prompt sat in Codex's composer as an unsubmitted draft while AO believed it
+// had been delivered.
+//
+// Note what is deliberately NOT in this vocabulary: "the turn actually
+// started". That is not the transport's to claim — it is established by the
+// agent's own submit hook reaching AO as session activity, and it is judged by
+// the workflow (see fixCycleStarted). This type only ever answers "did AO's
+// submit land", which is the part the transport can observe.
+type PromptSubmission string
+
+const (
+	// PromptSubmissionUnset is the zero value: no submission check ran at all
+	// (an empty nudge, a chat-mode send, a harness with no composer probe).
+	// It is not a verdict and must never be read as one.
+	PromptSubmissionUnset PromptSubmission = ""
+	// PromptSubmitted: the composer was observed empty after the submit, so
+	// the payload left the composer. Positive evidence.
+	PromptSubmitted PromptSubmission = "submitted"
+	// PromptLoadedNotSubmitted: the payload reached the composer and is still
+	// sitting there. Positive evidence too — of the failure. A caller must
+	// never re-paste on this verdict; the bytes are already in the draft, and
+	// pasting again is exactly what appends a second copy.
+	PromptLoadedNotSubmitted PromptSubmission = "loaded_not_submitted"
+	// PromptSubmissionAmbiguous: the check could not be made (no styled pane
+	// read, no detector for this harness, a read error). Missing evidence,
+	// never evidence of either outcome.
+	PromptSubmissionAmbiguous PromptSubmission = "ambiguous"
+)
+
 // ErrPromptUndelivered reports that a prompt delivery failed BEFORE any part
 // of the payload reached the agent — the transport refused the message
 // outright (tmux's "command too long", a paste buffer that could not be

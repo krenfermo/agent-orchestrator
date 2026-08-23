@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
 // fix_cycle_resume.go — Checkpoint 8P-E.16.
@@ -96,6 +97,56 @@ func (r fixCycleRedeliveryRecord) json() string {
 var resumeFixCycleStops = map[string]bool{
 	ReasonFixNoVerifiableChange: true,
 	ReasonFixCycleNotStarted:    true,
+	ReasonFixPromptNotSubmitted: true,
+}
+
+// submitPendingFixPrompt is the resume path for a cycle whose prompt is already
+// in the worker's composer — Checkpoint 8P-E.17.
+//
+// It answers the one question that decides between the two safe actions:
+// is there pending input, and can AO attribute it to itself?
+//
+//   - composer empty          -> nothing pending; the caller re-delivers.
+//   - composer holds a draft, and AO's own durable record says it wrote this
+//     cycle's prompt into THIS session -> the draft is AO's. Submit it. Nothing
+//     is pasted, nothing is deleted, and the prompt cannot be duplicated.
+//   - composer holds a draft AO cannot attribute -> refuse outright. It may be
+//     a person's unsent message, and neither submitting nor clearing someone
+//     else's draft is AO's to do.
+//   - composer unreadable     -> refuse. Missing evidence is not evidence.
+//
+// Attribution is deliberately conservative: it rests on AO having recorded a
+// delivery of this cycle to this exact session (the fix_dispatched /
+// fix_dispatch_intent / fix_cycle_redelivery checkpoint the caller already
+// resolved), not on matching the composer's rendered text, which no harness
+// reproduces byte-for-byte once it has collapsed a large paste into a summary
+// line like "[Pasted Content 15360 chars]".
+//
+// Returns (handled, error): handled means the pending draft was dealt with and
+// the caller must not deliver anything.
+func (c *Coordinator) submitPendingFixPrompt(ctx stdctx.Context, sessionID string, attributable bool) (bool, ports.PromptSubmission, error) {
+	reporter, ok := c.messageSender.(SubmissionReportingSender)
+	if !ok {
+		// No composer visibility at all: behave exactly as before this existed.
+		return false, ports.PromptSubmissionUnset, nil
+	}
+	state := reporter.ComposerState(ctx, domain.SessionID(sessionID))
+	switch state {
+	case ports.PromptSubmitted:
+		// Composer is empty; a fresh delivery is the right thing.
+		return false, state, nil
+	case ports.PromptLoadedNotSubmitted:
+		if !attributable {
+			// Someone else's draft, or one AO cannot claim. Leave it alone.
+			return true, state, nil
+		}
+		submitted, err := reporter.SubmitPending(ctx, domain.SessionID(sessionID))
+		return true, submitted, err
+	default:
+		// Ambiguous: AO cannot see whether a draft is pending, so it must not
+		// paste over one.
+		return true, state, nil
+	}
 }
 
 // resumeUnstartedFixCycle re-delivers a fix cycle whose worker provably never
@@ -203,6 +254,28 @@ func (c *Coordinator) resumeUnstartedFixCycle(ctx stdctx.Context, run domain.Wor
 		// this work. Two sources of truth in conflict is exactly when AO must
 		// not act.
 		return run, false, nil
+	}
+
+	// Checkpoint 8P-E.17: before considering a re-delivery at all, deal with a
+	// prompt that is already in the composer. AO's dispatch record for this
+	// cycle names this session, which is what makes a pending draft here
+	// attributable to AO — so the correct action is to submit it, never to
+	// paste a second copy on top of it.
+	handled, submission, serr := c.submitPendingFixPrompt(ctx, sessionID, true)
+	if serr != nil {
+		return run, false, serr
+	}
+	if handled {
+		if submission != ports.PromptSubmitted {
+			// Could not submit (or could not see) the pending draft. The stop
+			// stands, unchanged, rather than being papered over with a resend.
+			if c.log != nil {
+				c.log.Info("workflow: fix prompt still pending in the composer; not re-sending it",
+					"run", run.ID, "session", sessionID, "cycle", cycleNumber, "submission", submission)
+			}
+			return run, false, nil
+		}
+		return c.adoptSubmittedPendingFixPrompt(ctx, run, *workStep, *fixStep, dispatch, reviewRun, cycleNumber, sessionID, stop)
 	}
 
 	redeliveries := c.fixCycleRedeliveryCount(ctx, run.ID, fixStep.ID, cycleNumber)
@@ -313,6 +386,72 @@ func (c *Coordinator) resumeUnstartedFixCycle(ctx stdctx.Context, run domain.Wor
 	// recordFixDispatchSuccess only creates one when len(attempts) < cycleNumber.
 	if _, err := c.deliverFixPrompt(ctx, run, *workStep, *fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt); err != nil {
 		return run, true, err
+	}
+	if refreshed, ok, rerr := c.store.GetWorkflowRun(ctx, run.ID); rerr == nil && ok {
+		run = refreshed
+	}
+	return run, true, nil
+}
+
+// adoptSubmittedPendingFixPrompt completes a cycle whose already-loaded prompt
+// AO has just submitted.
+//
+// The cycle is now genuinely with the agent, so the durable state must be the
+// state a first-pass delivery leaves: the step running and observable, the run
+// released from its stop. It writes no new outbox entry, no new attempt row and
+// no second dispatch identity — this is the SAME delivery finally being given
+// its turn, not a new one.
+func (c *Coordinator) adoptSubmittedPendingFixPrompt(
+	ctx stdctx.Context,
+	run domain.WorkflowRun,
+	workStep, fixStep domain.WorkflowStep,
+	dispatch domain.WorkflowCheckpoint,
+	reviewRun domain.ReviewRun,
+	cycleNumber int,
+	sessionID, stop string,
+) (domain.WorkflowRun, bool, error) {
+	fixStep, err := c.runFixStep(ctx, fixStep)
+	if err != nil {
+		return run, false, err
+	}
+	// Release the stop BEFORE the success bookkeeping, for the same reason
+	// adoptDeliveredFix does: the stop is resolved from the run's newest
+	// checkpoint, and recordFixDispatchSuccess is about to write one.
+	run = c.unparkRun(ctx, run, stop,
+		fmt.Sprintf("fix cycle %d was already loaded in session %s and AO submitted it without re-sending the prompt",
+			cycleNumber, sessionID))
+
+	// The cycle's own outbox entry, under its canonical key — Enqueue returns
+	// the row already on disk rather than minting a second delivery identity.
+	transportAttempt := c.fixTransportRetryCount(ctx, run.ID, fixStep.ID, cycleNumber)
+	entry, _, err := c.store.EnqueueWorkflowOutboxEntry(ctx, domain.WorkflowOutboxEntry{
+		ID:             "wfo-" + c.newID(),
+		WorkflowRunID:  run.ID,
+		WorkflowStepID: &fixStep.ID,
+		IdempotencyKey: fixStepOutboxIdempotencyKey(fixStep.ID, cycleNumber, transportAttempt),
+		CommandType:    domain.WorkflowOutboxSendMessage,
+		Payload:        fixPayloadJSON(fixStep.ID, reviewRun.ID, cycleNumber),
+		CreatedAt:      c.clock(),
+	})
+	if err != nil {
+		return run, false, err
+	}
+
+	// Finish the dispatch through the ordinary success path rather than
+	// open-coding it. This is what makes an adopted cycle indistinguishable
+	// from a first-pass one — including the attempt row, whose absence would
+	// otherwise send the very next cascade pass back into dispatchFixStep to
+	// re-derive and re-escalate a cycle that is now genuinely with the agent.
+	delivery := promptDeliveryRecordFromJSON(dispatch.RetryState)
+	delivery.CycleNumber = cycleNumber
+	delivery.Submission = ports.PromptSubmitted
+	delivery.Reason = "submitted a prompt that was already loaded in the composer; nothing was re-sent"
+	if _, err := c.recordFixDispatchSuccess(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, delivery); err != nil {
+		return run, false, err
+	}
+	if c.log != nil {
+		c.log.Info("workflow: submitted a fix prompt that was already loaded in the composer",
+			"run", run.ID, "step", fixStep.ID, "cycle", cycleNumber, "session", sessionID, "clearedStop", stop)
 	}
 	if refreshed, ok, rerr := c.store.GetWorkflowRun(ctx, run.ID); rerr == nil && ok {
 		run = refreshed

@@ -143,16 +143,23 @@ const (
 	// need separate remedies: one is a person reading a diff, the other is a
 	// cycle that has simply not been picked up and can be re-delivered.
 	ReasonFixCycleNotStarted = "fix_cycle_not_started"
-	ReasonPlannerExhausted               = "planner_retries_exhausted"
-	ReasonPlannerStartFailed             = "planner_start_failed"
-	ReasonPlannerPolicyViolation         = "planner_policy_violation"
-	ReasonPlannerAmbiguous               = "planner_ambiguous"
-	ReasonChildNeedsAttention            = "child_needs_attention"
-	ReasonChildFailed                    = "child_failed"
-	ReasonRecoveryInterrupted            = "recovery_interrupted"
-	ReasonWorkerDispatchAmbiguous        = "worker_dispatch_ambiguous"
-	ReasonWorkerBlocked                  = "worker_blocked"
-	ReasonDispatchFailed                 = "dispatch_failed"
+	// ReasonFixPromptNotSubmitted is a fix prompt that provably reached the
+	// worker's composer and provably did not leave it. Distinct from
+	// ReasonFixCycleNotStarted, which says only that the worker has been silent:
+	// here AO can see the text sitting in the draft, so the remedy is a submit,
+	// never another send — the payload is already there and re-sending appends a
+	// second copy.
+	ReasonFixPromptNotSubmitted   = "fix_prompt_not_submitted"
+	ReasonPlannerExhausted        = "planner_retries_exhausted"
+	ReasonPlannerStartFailed      = "planner_start_failed"
+	ReasonPlannerPolicyViolation  = "planner_policy_violation"
+	ReasonPlannerAmbiguous        = "planner_ambiguous"
+	ReasonChildNeedsAttention     = "child_needs_attention"
+	ReasonChildFailed             = "child_failed"
+	ReasonRecoveryInterrupted     = "recovery_interrupted"
+	ReasonWorkerDispatchAmbiguous = "worker_dispatch_ambiguous"
+	ReasonWorkerBlocked           = "worker_blocked"
+	ReasonDispatchFailed          = "dispatch_failed"
 	// ReasonWorkerLaunchRetry is a worker spawn that failed transiently before
 	// any worker session existed and that AO has already scheduled its own
 	// bounded retry for (worker_launch_recovery.go). Self-remediable: it is
@@ -268,6 +275,9 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonFixCycleNotStarted: {
 		HumanAction: "The reviewer's findings reached the worker session but the worker never started on them. Check that the session is alive and responsive, then continue this run — AO re-checks its own evidence first and re-delivers the cycle by itself when it can prove that is safe.",
+	},
+	ReasonFixPromptNotSubmitted: {
+		HumanAction: "The reviewer's findings are sitting unsubmitted in the worker session's composer. Continue this run and AO will submit what is already there (it never re-sends the text, so the prompt cannot be duplicated); if that keeps failing, open the session and submit it yourself.",
 	},
 	ReasonPlannerExhausted: {
 		Nonrecoverable: true,

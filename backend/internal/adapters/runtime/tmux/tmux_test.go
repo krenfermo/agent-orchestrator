@@ -23,6 +23,56 @@ type fakeRunner struct {
 	outputs [][]byte
 	err     error
 	hook    func(context.Context, int) error
+	// paneInMode answers SendMessage's #{pane_in_mode} guard
+	// (ensurePaneAcceptsKeys). It is served ahead of the outputs queue and
+	// defaults to "0" — not in a mode — so every pre-existing test keeps its
+	// original call/output expectations. Tests about the guard itself set it,
+	// and a queue of values models a pane that changes state across probes
+	// (e.g. "1" then "0" for a cancel that worked).
+	paneInMode    []string
+	paneInModeErr error
+}
+
+// nextPaneInMode pops the next scripted #{pane_in_mode} answer, repeating the
+// last one once the script is exhausted so a steady state needs one entry.
+func (f *fakeRunner) nextPaneInMode() string {
+	switch len(f.paneInMode) {
+	case 0:
+		return "0"
+	case 1:
+		return f.paneInMode[0]
+	default:
+		v := f.paneInMode[0]
+		f.paneInMode = f.paneInMode[1:]
+		return v
+	}
+}
+
+// sendCalls returns fr's recorded calls with SendMessage's #{pane_in_mode}
+// guard probes filtered out, so the delivery assertions below stay about the
+// delivery. The guard has its own tests; every other SendMessage test asserts
+// what reaches the pane, which is unchanged by it.
+func sendCalls(fr *fakeRunner) []runnerCall {
+	out := make([]runnerCall, 0, len(fr.calls))
+	for _, c := range fr.calls {
+		if isPaneInModeProbe(c.args) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+func isPaneInModeProbe(args []string) bool {
+	if subcommandOf(args) != "display-message" {
+		return false
+	}
+	for _, a := range args {
+		if a == "#{pane_in_mode}" {
+			return true
+		}
+	}
+	return false
 }
 
 type runnerCall struct {
@@ -33,6 +83,12 @@ type runnerCall struct {
 
 func (f *fakeRunner) Run(ctx context.Context, env []string, name string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, runnerCall{env: append([]string(nil), env...), name: name, args: append([]string(nil), args...)})
+	if isPaneInModeProbe(args) {
+		if f.paneInModeErr != nil {
+			return nil, f.paneInModeErr
+		}
+		return []byte(f.nextPaneInMode() + "\n"), nil
+	}
 	var out []byte
 	if len(f.outputs) > 0 {
 		out = f.outputs[0]
@@ -1069,19 +1125,20 @@ func TestSendMessageChunksAndSendsEnter(t *testing.T) {
 	if err := r.SendMessage(context.Background(), ports.RuntimeHandle{ID: "sess-1"}, "hello世界"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
-	if len(fr.calls) != 4 {
-		t.Fatalf("calls = %d, want 4 (3 chunks + Enter)", len(fr.calls))
+	sent := sendCalls(fr)
+	if len(sent) != 4 {
+		t.Fatalf("calls = %d, want 4 (3 chunks + Enter)", len(sent))
 	}
-	if got, want := fr.calls[0].args, srv(sendKeysLiteralArgs("sess-1", "hello")); !reflect.DeepEqual(got, want) {
+	if got, want := sent[0].args, srv(sendKeysLiteralArgs("sess-1", "hello")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("chunk 1 args = %#v, want %#v", got, want)
 	}
-	if got, want := fr.calls[1].args, srv(sendKeysLiteralArgs("sess-1", "世")); !reflect.DeepEqual(got, want) {
+	if got, want := sent[1].args, srv(sendKeysLiteralArgs("sess-1", "世")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("chunk 2 args = %#v, want %#v", got, want)
 	}
-	if got, want := fr.calls[2].args, srv(sendKeysLiteralArgs("sess-1", "界")); !reflect.DeepEqual(got, want) {
+	if got, want := sent[2].args, srv(sendKeysLiteralArgs("sess-1", "界")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("chunk 3 args = %#v, want %#v", got, want)
 	}
-	if got, want := fr.calls[3].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
+	if got, want := sent[3].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Enter args = %#v, want %#v", got, want)
 	}
 }
@@ -1092,8 +1149,8 @@ func TestSendMessageUsesLiteralFlag(t *testing.T) {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	// First call must use -l so "Enter" is sent literally, not as a key binding.
-	if fr.calls[0].args[5] != "-l" {
-		t.Fatalf("send-keys args[5] = %q, want -l", fr.calls[0].args[5])
+	if first := sendCalls(fr)[0].args; first[5] != "-l" {
+		t.Fatalf("send-keys args[5] = %q, want -l", first[5])
 	}
 }
 
@@ -1126,10 +1183,11 @@ func TestSendMessageDelaysBeforeEnter(t *testing.T) {
 		t.Fatalf("SendMessage took %s, want >= %s pre-Enter pause", dt, r.enterDelay)
 	}
 	// Non-empty message still ends with the literal chunks then Enter.
-	if len(fr.calls) != 2 {
-		t.Fatalf("calls = %d, want 2 (chunk + Enter)", len(fr.calls))
+	sent := sendCalls(fr)
+	if len(sent) != 2 {
+		t.Fatalf("calls = %d, want 2 (chunk + Enter)", len(sent))
 	}
-	if got, want := fr.calls[1].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
+	if got, want := sent[1].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Enter args = %#v, want %#v", got, want)
 	}
 
@@ -1144,10 +1202,10 @@ func TestSendMessageDelaysBeforeEnter(t *testing.T) {
 		t.Fatalf("nudge SendMessage took %s; want no pause for empty message", dt)
 	}
 	// Empty message is Enter-only: no send-keys -l call, just Enter.
-	if len(frNudge.calls) != 1 {
-		t.Fatalf("nudge calls = %d, want 1 (Enter only)", len(frNudge.calls))
+	if sent := sendCalls(frNudge); len(sent) != 1 {
+		t.Fatalf("nudge calls = %d, want 1 (Enter only)", len(sent))
 	}
-	if got, want := frNudge.calls[0].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
+	if got, want := sendCalls(frNudge)[0].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("nudge Enter args = %#v, want %#v", got, want)
 	}
 }
@@ -1170,10 +1228,11 @@ func TestSendMessageEnterSurvivesCallerCancel(t *testing.T) {
 	if err := r.SendMessage(ctx, ports.RuntimeHandle{ID: "sess-1"}, "hello"); err != nil {
 		t.Fatalf("SendMessage cancelled mid-pause: %v (Enter must run detached)", err)
 	}
-	if len(fr.calls) != 2 {
-		t.Fatalf("calls = %d, want 2 (chunk + Enter despite the caller cancel after the paste)", len(fr.calls))
+	sent := sendCalls(fr)
+	if len(sent) != 2 {
+		t.Fatalf("calls = %d, want 2 (chunk + Enter despite the caller cancel after the paste)", len(sent))
 	}
-	if got, want := fr.calls[1].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
+	if got, want := sent[1].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Enter args = %#v, want %#v", got, want)
 	}
 }
@@ -1191,7 +1250,9 @@ func TestSendMessageRemainingChunksSurviveCallerCancel(t *testing.T) {
 		close(callerCancelled)
 	}()
 	fr.hook = func(runCtx context.Context, call int) error {
-		if call != 2 {
+		// call 1 is SendMessage's #{pane_in_mode} guard probe, so the second
+		// literal chunk is call 3.
+		if call != 3 {
 			return nil
 		}
 		close(secondChunkStarted)
@@ -1205,13 +1266,13 @@ func TestSendMessageRemainingChunksSurviveCallerCancel(t *testing.T) {
 	if ctx.Err() != context.Canceled {
 		t.Fatalf("caller context error = %v, want context.Canceled", ctx.Err())
 	}
-	if len(fr.calls) != 3 {
-		t.Fatalf("calls = %d, want 3 (two chunks + Enter)", len(fr.calls))
+	if sent := sendCalls(fr); len(sent) != 3 {
+		t.Fatalf("calls = %d, want 3 (two chunks + Enter)", len(sent))
 	}
-	if got, want := fr.calls[1].args, srv(sendKeysLiteralArgs("sess-1", "world")); !reflect.DeepEqual(got, want) {
+	if got, want := sendCalls(fr)[1].args, srv(sendKeysLiteralArgs("sess-1", "world")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("chunk 2 args = %#v, want %#v", got, want)
 	}
-	if got, want := fr.calls[2].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
+	if got, want := sendCalls(fr)[2].args, srv(sendEnterArgs("sess-1")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Enter args = %#v, want %#v", got, want)
 	}
 }

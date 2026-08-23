@@ -337,6 +337,10 @@ type fixRecoveryFixture struct {
 	launcher       *fakeReviewerLauncher
 	spawner        *fakeSpawner
 	sender         *fakeMessageSender
+	// senderOverride replaces sender in the Coordinator when a test needs a
+	// richer one (see reportingSender). nil means "use sender as-is".
+	senderOverride workflowcore.MessageSender
+	reporting      *reportingSender
 	runID          string
 	fixStepID      string
 	workSessionID  domain.SessionID
@@ -379,13 +383,22 @@ func (f *fixRecoveryFixture) newCoordinator() *workflowcore.Coordinator {
 		WorkspaceFacts:   f.workspaceFacts,
 		ReviewRuns:       f.reviewRuns,
 		ReviewerLauncher: f.launcher,
-		MessageSender:    f.sender,
+		MessageSender:    f.messageSender(),
 		Clock:            f.clk.Now,
 		NewID: func() string {
 			f.idSeq++
 			return fmt.Sprintf("id%d", f.idSeq)
 		},
 	})
+}
+
+// messageSender is the sender the Coordinator is built around: the plain fake
+// unless a test installed a richer one.
+func (f *fixRecoveryFixture) messageSender() workflowcore.MessageSender {
+	if f.senderOverride != nil {
+		return f.senderOverride
+	}
+	return f.sender
 }
 
 func (f *fixRecoveryFixture) restart() *workflowcore.Coordinator {
