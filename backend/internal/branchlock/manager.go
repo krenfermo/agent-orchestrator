@@ -502,6 +502,22 @@ func (m *Manager) Renew(ctx context.Context, runID, stepID, sessionID string) {
 	}
 }
 
+// ReleaseLock frees one lock by id and reports whether it was still held.
+//
+// It is the release form an owner that holds exactly one pair needs: the
+// target-integration lane (internal/integration) takes a single
+// repository+branch for the duration of one integration and has to give that
+// pair back when the integration ends, without waiting for its run or its
+// session to end. ReleaseRun and ReleaseSession both free everything an owner
+// holds, which for an integrating run would also free the branches its other
+// tasks are still writing.
+func (m *Manager) ReleaseLock(ctx context.Context, lockID, reason string) (bool, error) {
+	if strings.TrimSpace(lockID) == "" {
+		return false, nil
+	}
+	return m.store.ReleaseBranchLock(ctx, lockID, reason, m.clock())
+}
+
 // ReleaseRun frees every lock a run holds. It is called on completion,
 // failure, and cancellation alike: whichever way a run ends, it must not leave
 // a branch occupied.

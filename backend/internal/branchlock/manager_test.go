@@ -525,3 +525,49 @@ func TestAcquirePersistsNonDirectOwnershipKinds(t *testing.T) {
 		}
 	}
 }
+
+// ReleaseLock exists for an owner that holds several pairs and has finished
+// with exactly one of them -- the target-integration lane, which takes one
+// repository+branch per integration while its run's other tasks are still
+// writing branches of their own. Releasing by run would hand those away too.
+func TestReleaseLockFreesOnlyTheNamedPair(t *testing.T) {
+	store := sqlitetest.MustOpen(t)
+	mgr := newManager(t, store, &fakePreflight{}, "owner-1")
+	ctx := context.Background()
+	repo := t.TempDir()
+
+	acquire := func(branch string) domain.BranchLock {
+		t.Helper()
+		locks, err := mgr.Acquire(ctx, branchlock.AcquireRequest{
+			ProjectID: "proj", RunID: "run-1", Kind: domain.BranchLockOwnershipTargetIntegration,
+			RepoPath: repo, Branch: branch,
+		})
+		if err != nil {
+			t.Fatalf("acquire %s: %v", branch, err)
+		}
+		return locks[0]
+	}
+	main := acquire("main")
+	release := acquire("release")
+
+	released, err := mgr.ReleaseLock(ctx, main.ID, "integration finished")
+	if err != nil || !released {
+		t.Fatalf("ReleaseLock = %v, %v; want true, nil", released, err)
+	}
+	if _, found, err := store.GetHeldBranchLock(ctx, main.LockKey); err != nil || found {
+		t.Fatalf("main is still held (found=%v err=%v)", found, err)
+	}
+	if _, found, err := store.GetHeldBranchLock(ctx, release.LockKey); err != nil || !found {
+		t.Fatalf("releasing main also freed release (found=%v err=%v)", found, err)
+	}
+
+	// Releasing the same lock again is not an error; it simply frees nothing.
+	if released, err := mgr.ReleaseLock(ctx, main.ID, "again"); err != nil || released {
+		t.Fatalf("second ReleaseLock = %v, %v; want false, nil", released, err)
+	}
+	// An empty id is a no-op rather than a store round trip, so a caller that
+	// never acquired can still run its release path unconditionally.
+	if released, err := mgr.ReleaseLock(ctx, "  ", "empty"); err != nil || released {
+		t.Fatalf("empty ReleaseLock = %v, %v; want false, nil", released, err)
+	}
+}
