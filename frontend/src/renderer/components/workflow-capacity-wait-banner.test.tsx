@@ -13,6 +13,7 @@ function baseRun(overrides: Partial<WorkflowRunView>): WorkflowRunView {
 		executionMode: "manual",
 		phase: "waiting",
 		lastActivityAt: new Date().toISOString(),
+		canContinue: false,
 		...overrides,
 	};
 }
@@ -63,5 +64,51 @@ describe("WorkflowCapacityWaitBanner", () => {
 			/>,
 		);
 		expect(container).toBeEmptyDOMElement();
+	});
+
+	// The normalized capacity projection: the banner must report the provider
+	// policy the backend derived, not re-derive it from the wake reason. This
+	// is the wf-57f90ff2 shape -- a reviewer wait whose real cause is one stale
+	// transient launch failure AO is now re-probing.
+	it("renders the normalized capacity wait: reason, independence, known reset and provider health age", () => {
+		render(
+			<WorkflowCapacityWaitBanner
+				run={baseRun({
+					waitReason: "reviewer_capacity",
+					nextWakeAt: "2026-01-01T00:05:00.000Z",
+					wakeAttemptCount: 3,
+					capacityWait: {
+						role: "reviewer",
+						reason: "provider_health_stale",
+						independenceRequired: true,
+						nextAttemptAt: "2026-01-01T00:05:00.000Z",
+						knownResetAt: "2026-01-01T01:00:00.000Z",
+						attempt: 4,
+						probing: true,
+						providers: [
+							{
+								profileId: "prof-claude",
+								provider: "anthropic",
+								harness: "claude-code",
+								displayName: "Claude",
+								capacity: "unknown",
+								healthState: "cooldown",
+								healthReason: "agent_start_failed (unknown)",
+								failureClass: "agent_start_failed",
+								healthAgeSeconds: 10_800,
+								recovery: "cooldown",
+								probeEligible: true,
+							},
+						],
+					},
+				})}
+			/>,
+		);
+		expect(screen.getByText(/re-checking the provider/i)).toBeInTheDocument();
+		expect(screen.getByText(/An independent reviewer is required/i)).toBeInTheDocument();
+		expect(screen.getByText(/Known reset:/i)).toBeInTheDocument();
+		// The projection's own attempt count wins over the raw wake row's.
+		expect(screen.getByText("Attempt 4")).toBeInTheDocument();
+		expect(screen.getByText(/Claude.*observed 3h 00m ago.*agent_start_failed/i)).toBeInTheDocument();
 	});
 });

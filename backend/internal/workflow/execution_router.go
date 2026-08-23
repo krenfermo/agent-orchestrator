@@ -300,15 +300,24 @@ func selectFromPriority(priority []domain.ProviderProfileID, req RoutingRequest,
 // the state unknown — never a fabricated "available", and never a downgrade to
 // "unavailable" on no evidence.
 func (c *Coordinator) capacitySnapshotForProfiles(ctx stdctx.Context, userID domain.UserID, profiles map[domain.ProviderProfileID]domain.ProviderProfile) map[domain.ProviderProfileID]domain.CapacityState {
+	now := c.clock()
 	snapshot := make(map[domain.ProviderProfileID]domain.CapacityState, len(profiles))
 	for id, p := range profiles {
 		scope := healthScope{userID: userID, profileID: id}
-		state := domain.CapacityUnknown
-		if health, err := c.agentHealth(ctx, p.Harness, scope); err == nil {
-			state = domain.CapacityStateFromHealth(health.State)
+		observed := domain.AgentHealth{Harness: p.Harness, State: domain.AgentHealthUnknown}
+		if h, err := c.agentHealth(ctx, p.Harness, scope); err == nil {
+			observed = h
 		}
-		if state == domain.CapacityUnknown {
-			if probed, ok := c.probeCapacityForProfile(ctx, scope, p); ok {
+		// EffectiveState, not State: a cooldown whose window has run out is a
+		// past failure, not current evidence, and reporting it as still-blocking
+		// is the whole of the self-locking bug.
+		state := domain.CapacityStateFromHealth(observed.EffectiveState(now))
+		if observed.ProbeEligible(now) {
+			// A probe of an already-observed provider is a RECOVERY probe: it
+			// re-evaluates a stale verdict rather than discovering an unobserved
+			// one, and must not be gated on the telemetry capability (see
+			// probeCapacityForProfile).
+			if probed, ok := c.probeCapacityForProfile(ctx, scope, p, observed.State != domain.AgentHealthUnknown); ok {
 				state = probed
 			}
 		}

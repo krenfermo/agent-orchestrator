@@ -21,7 +21,16 @@ export function formatElapsedCompact(startedAt: string | null | undefined, now: 
 	if (!startedAt) return undefined;
 	const started = new Date(startedAt).getTime();
 	if (!Number.isFinite(started)) return undefined;
-	const seconds = Math.max(0, Math.floor((now - started) / 1000));
+	return formatDurationCompact(Math.floor((now - started) / 1000));
+}
+
+/**
+ * The same compact unit string for a duration the backend already measured, in
+ * seconds. Used for provider-health age, which the daemon computes against its
+ * own clock so the renderer never has to guess whether the two agree.
+ */
+export function formatDurationCompact(totalSeconds: number): string {
+	const seconds = Math.max(0, Math.floor(totalSeconds));
 	if (seconds < 60) return `${seconds}s`;
 	const minutes = Math.floor(seconds / 60);
 	if (minutes < 60) return `${minutes}m`;

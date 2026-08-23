@@ -476,6 +476,10 @@ type RunDetail struct {
 	// means the run has never asked anything; it is what DeriveLifecycle reads
 	// to decide whether a stop is genuinely the user's to resolve.
 	Questions []domain.WorkflowQuestion
+	// CapacityWait is the normalized provider-capacity wait projection (see
+	// capacity_wait.go). Non-nil only while the run's newest routing decision is
+	// actually a wait, so the UI renders a real, explainable wait or nothing.
+	CapacityWait *CapacityWait
 }
 
 // SessionLifecycleAuditEntry is one durable session-lifecycle decision plus
@@ -766,6 +770,11 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 			detail.WakeAttemptCount = next.AttemptCount
 		}
 	}
+
+	// The normalized capacity-wait projection, read the same live way. Derived
+	// after the wake lookup above because it reports that wake's next attempt
+	// and attempt count as part of one coherent answer.
+	detail.CapacityWait = c.deriveCapacityWait(ctx, detail)
 
 	// Checkpoint 8P-E.11: surface the structured branch wait, read the same
 	// live way. Guarded on the run actually being in Waiting so a checkpoint

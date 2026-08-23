@@ -40,6 +40,12 @@ type AttentionDisposition struct {
 	// a reason AO has no advice about, and pretending otherwise is what
 	// produced "needs attention" cards nobody could act on.
 	HumanAction string
+	// Nonrecoverable marks a stop that POST /continue cannot do anything about,
+	// because the remedy is a different action entirely (start a fresh run,
+	// retry planning). It is the whole basis of the run detail's authoritative
+	// canContinue flag: offering "Reanudar" for one of these is offering a
+	// button that provably does nothing.
+	Nonrecoverable bool
 	// Phase overrides the derived lifecycle phase for a self-remediable stop,
 	// so a run AO is retrying reads as "retrying" rather than the durable
 	// run-state's flat "needs_attention". Empty means "keep the derived
@@ -219,7 +225,8 @@ var attentionDispositions = map[string]AttentionDisposition{
 		HumanAction: "Verification could not be run to completion on this machine (a runtime or resource failure, not a code defect). Check the host, then continue this run.",
 	},
 	ReasonVerifyRecoveryExhausted: {
-		HumanAction: "Verification has been reopened the maximum number of times and still fails on AO's own verification infrastructure rather than on the code. Read the latest verify output, correct the verification configuration or the host, then start a fresh run — or cancel this one.",
+		Nonrecoverable: true,
+		HumanAction:    "Verification has been reopened the maximum number of times and still fails on AO's own verification infrastructure rather than on the code. Read the latest verify output, correct the verification configuration or the host, then start a fresh run — or cancel this one.",
 	},
 	ReasonVerifyWorkspaceUnattributable: {
 		HumanAction: "Verification was reopened, but the worktree no longer matches what review approved and AO cannot attribute the difference to this task's own uncommitted work (its branch or its HEAD moved). Inspect the worktree, restore it or commit the intended state, then continue or cancel this run.",
@@ -249,16 +256,20 @@ var attentionDispositions = map[string]AttentionDisposition{
 		HumanAction: "The fix worker finished without changing anything AO can verify. Inspect the worktree, then continue or cancel this run.",
 	},
 	ReasonPlannerExhausted: {
-		HumanAction: "The planner failed on every allowed retry. Retry planning, simplify the objective, or switch the planner provider.",
+		Nonrecoverable: true,
+		HumanAction:    "The planner failed on every allowed retry. Retry planning, simplify the objective, or switch the planner provider.",
 	},
 	ReasonPlannerStartFailed: {
-		HumanAction: "The planner could not be started. Check the planner provider's auth and installation, then retry planning.",
+		Nonrecoverable: true,
+		HumanAction:    "The planner could not be started. Check the planner provider's auth and installation, then retry planning.",
 	},
 	ReasonPlannerPolicyViolation: {
-		HumanAction: "The generated plan violated AO's plan policy. Rephrase the objective and retry planning.",
+		Nonrecoverable: true,
+		HumanAction:    "The generated plan violated AO's plan policy. Rephrase the objective and retry planning.",
 	},
 	ReasonPlannerAmbiguous: {
-		HumanAction: "The planner's state could not be recovered after a restart. Retry planning for this objective.",
+		Nonrecoverable: true,
+		HumanAction:    "The planner's state could not be recovered after a restart. Retry planning for this objective.",
 	},
 	ReasonChildNeedsAttention: {
 		HumanAction: "The running task stopped and needs a decision. Open that task's run to see what it is waiting on.",

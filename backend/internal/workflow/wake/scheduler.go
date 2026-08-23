@@ -183,9 +183,38 @@ func (s *Scheduler) Schedule(ctx context.Context, runID domain.WorkflowRunID, st
 	attempt := 0
 	if existing, ok, err := s.store.GetWorkflowWakeScheduleByIdempotencyKey(ctx, key); err != nil {
 		return Schedule{}, fmt.Errorf("lookup existing wake schedule for run %s: %w", runID, err)
-	} else if ok && (existing.Status == string(StatusPending) || existing.Status == string(StatusClaimed)) &&
-		!isFixedCadence(reason) {
-		attempt = int(existing.AttemptCount)
+	} else if ok {
+		// A wake that is already PENDING is already the answer to this exact
+		// question, and re-parking on it must not disturb it.
+		//
+		// This is the second half of the wf-57f90ff2 incident. Schedule is called
+		// from the routing path, which is re-entered by every ContinueRun — the
+		// autonomous heartbeat, the board's own 2s poll, every master reconcile
+		// pass. Each call landed on the pending/claimed branch, which increments
+		// attempt_count AND overwrites scheduled_at with now+backoff. Two things
+		// followed. The counter climbed without bound (the real reviewer_capacity
+		// wake reached >200 attempts), and — far worse — the wake's due time was
+		// pushed 30 minutes into the future more often than every 30 minutes, so
+		// the row was permanently pending and never became due. The retry that
+		// was supposed to re-evaluate capacity could not fire at all, which is why
+		// hundreds of routing checks produced no probe.
+		//
+		// Leaving a pending row untouched makes attempt_count mean what its name
+		// says (retries actually taken), makes the backoff real, and reduces N
+		// re-parks to N-1 no writes at all.
+		//
+		// The CLAIMED branch still reschedules: the poller has fired that wake and
+		// is inside ContinueRun right now, so a re-park during it is a genuine
+		// retry and must both back off and count. See wakepoller's own
+		// completion-semantics note, which depends on exactly that supersession.
+		switch existing.Status {
+		case string(StatusPending):
+			return fromStoreRow(existing), nil
+		case string(StatusClaimed):
+			if !isFixedCadence(reason) {
+				attempt = int(existing.AttemptCount)
+			}
+		}
 	}
 	scheduledAt, _ := computeScheduledAt(now, knownResetAt, attempt, s.effectivePolicy(), s.rng)
 

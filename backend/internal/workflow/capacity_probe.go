@@ -102,8 +102,20 @@ func (g *capacityProbeGate) clear(key capacityProbeKey) {
 // prober that returns ok=false all leave the state unknown, which
 // capacityEligible still treats as routable: an indeterminate probe must never
 // downgrade a provider to "unavailable" on no evidence.
-func (c *Coordinator) probeCapacityForProfile(ctx stdctx.Context, scope healthScope, profile domain.ProviderProfile) (domain.CapacityState, bool) {
-	if c.capacityProber == nil || !domain.HasCapability(profile.Capabilities, domain.CapabilityCapacityTelemetry) {
+//
+// recovery=true means the caller is probing to RE-EVALUATE a stale/expired
+// non-available health observation rather than to discover an unobserved one.
+// It bypasses the capacity_telemetry capability gate, and only that gate: a
+// probe is local CLI/auth readiness, which every harnessed adapter can answer
+// regardless of whether its profile advertises telemetry. Keeping the gate here
+// would recreate the very bug this path exists to fix — a profile without the
+// capability could be blocked by a failure and then have no mechanism left that
+// could ever clear it. The throttle still applies, so this cannot spin.
+func (c *Coordinator) probeCapacityForProfile(ctx stdctx.Context, scope healthScope, profile domain.ProviderProfile, recovery bool) (domain.CapacityState, bool) {
+	if c.capacityProber == nil {
+		return domain.CapacityUnknown, false
+	}
+	if !recovery && !domain.HasCapability(profile.Capabilities, domain.CapabilityCapacityTelemetry) {
 		return domain.CapacityUnknown, false
 	}
 	key := capacityProbeKey{harness: profile.Harness, userID: scope.userID, profile: scope.profileID}

@@ -86,6 +86,17 @@ type Lifecycle struct {
 	// WaitReason mirrors the soonest open wake's reason (the wait taxonomy).
 	WaitReason string
 	NextWakeAt *time.Time
+	// CanContinue is the authoritative answer to "would POST /continue do
+	// anything for this run right now". The frontend must not re-derive it: the
+	// rules are step states, run state and the stop's own disposition, all of
+	// which live here, and a second implementation in React would drift.
+	CanContinue bool
+	// AttentionWorkflowID names the run a human should actually act on when this
+	// run's stop is a MIRROR of another run's (a master reflecting its child).
+	// Empty for a stop the run owns itself. It is what lets the objective's
+	// "child_needs_attention" card send the user — and a Continue — to the exact
+	// child, instead of to the parent that merely reported it.
+	AttentionWorkflowID string
 	// LastActivityAt is the newest durable timestamp AO has for this run: its
 	// latest checkpoint if it has one, otherwise the run row's own updated_at.
 	// This is what the Board shows as "Last activity", and it is deliberately
@@ -156,7 +167,57 @@ func DeriveLifecycle(in LifecycleInput) Lifecycle {
 	if verdict.Phase != "" {
 		life.Phase = verdict.Phase
 	}
+	life.CanContinue = canContinueRun(d, life.Phase)
+	if verdict.Reason == ReasonChildNeedsAttention || verdict.Reason == ReasonChildFailed {
+		life.AttentionWorkflowID = DeriveTaskProgress(d.Tasks).CurrentRunID
+	}
 	return life
+}
+
+// canContinueRun reports whether POST /continue can advance this run.
+//
+// Three rules, in order:
+//
+//  1. A terminal run can never be continued. ContinueRun itself answers
+//     ErrAlreadyTerminal, so a button for it is a button that only ever errors.
+//  2. A stopped run can be continued unless its own recorded stop says the
+//     remedy is something else entirely (Nonrecoverable — "start a fresh run",
+//     "retry planning"). This is the recoverable-needs_attention case the
+//     Reanudar control exists for.
+//  3. A run that is NOT stopped has exactly one meaningful continue: the
+//     explicit "the work step finished, hand off to review" step. Everything
+//     else in flight is either already moving or has a durable wake that will
+//     move it, and offering Continue there invites a person to intervene in
+//     something AO is handling — which is the misreport the lifecycle work has
+//     spent several checkpoints removing.
+func canContinueRun(d RunDetail, phase Phase) bool {
+	if phase.Terminal() {
+		return false
+	}
+	switch d.Run.State {
+	case domain.WorkflowRunCompleted, domain.WorkflowRunFailed, domain.WorkflowRunCancelled:
+		return false
+	case domain.WorkflowRunNeedsAttention:
+		_, disp, ok := resolveAttentionReason(d)
+		return !ok || !disp.Nonrecoverable
+	}
+	return reviewHandoffPending(d)
+}
+
+// reviewHandoffPending reports the one non-stopped state a manual continue
+// legitimately advances: a completed work step with its review step still
+// waiting to be dispatched.
+func reviewHandoffPending(d RunDetail) bool {
+	var workDone, reviewPending bool
+	for _, s := range d.Steps {
+		switch s.Step.Kind {
+		case domain.WorkflowStepWork:
+			workDone = s.Step.State == domain.WorkflowStepCompleted
+		case domain.WorkflowStepReview:
+			reviewPending = s.Step.State == domain.WorkflowStepPending || s.Step.State == domain.WorkflowStepReady
+		}
+	}
+	return workDone && reviewPending
 }
 
 func derivePhase(d RunDetail) Phase {

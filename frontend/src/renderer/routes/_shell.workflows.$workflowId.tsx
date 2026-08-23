@@ -12,6 +12,7 @@ import { WorkflowQuestionsSection } from "../components/workflow-questions-secti
 import { WorkflowCapacityWaitBanner } from "../components/workflow-capacity-wait-banner";
 import { WorkflowBranchWaitBanner } from "../components/workflow-branch-wait-banner";
 import { WorkflowRoutingSummary } from "../components/workflow-routing-summary";
+import { WorkflowResumeButton } from "../components/workflow-resume-button";
 import {
 	translateDynamic,
 	WorkflowActivityPanel,
@@ -290,6 +291,20 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 						</button>
 						{continueError && <p className="mt-1 text-sm text-destructive">{continueError}</p>}
 					</div>
+				)}
+				{/* Resume, for a run stopped on something a person has now dealt
+				    with. Gated on the backend's authoritative canContinue flag —
+				    never on a state string read here — so a terminal or
+				    nonrecoverable stop never gets a button that provably does
+				    nothing. Hidden when canContinueReview already renders the
+				    same POST under its own, more specific label. */}
+				{workflow.run.canContinue && !canContinueReview && (
+					<WorkflowResumeButton
+						attentionWorkflowId={workflow.run.attentionWorkflowId}
+						continueError={continueError}
+						continueRun={continueRun}
+						continuing={continuing}
+					/>
 				)}
 				{nonTerminal && (
 					<div>

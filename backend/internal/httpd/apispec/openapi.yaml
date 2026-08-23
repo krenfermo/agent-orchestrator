@@ -11437,6 +11437,11 @@ components:
           type: array
         title:
           type: string
+        waitReason:
+          enum:
+          - waiting_for_dependencies
+          - waiting_for_write_conflict
+          type: string
         workflowId:
           type: string
       required:
@@ -11470,6 +11475,95 @@ components:
           type: string
       required:
       - branch
+      type: object
+    WorkflowCapacityWaitProviderView:
+      properties:
+        capacity:
+          enum:
+          - available
+          - limited
+          - cooldown
+          - unavailable
+          - unknown
+          type: string
+        cooldownUntil:
+          format: date-time
+          type:
+          - "null"
+          - string
+        displayName:
+          type: string
+        failureClass:
+          type: string
+        harness:
+          type: string
+        healthAgeSeconds:
+          format: int64
+          type: integer
+        healthReason:
+          type: string
+        healthState:
+          enum:
+          - available
+          - cooldown
+          - unavailable
+          - unknown
+          type: string
+        observedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        probeEligible:
+          type: boolean
+        profileId:
+          type: string
+        provider:
+          type: string
+        recovery:
+          enum:
+          - cooldown
+          - probe
+          - manual
+          type: string
+      required:
+      - profileId
+      - capacity
+      type: object
+    WorkflowCapacityWaitView:
+      properties:
+        attempt:
+          format: int64
+          type: integer
+        independenceRequired:
+          type: boolean
+        knownResetAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        nextAttemptAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        probing:
+          type: boolean
+        providers:
+          items:
+            $ref: '#/components/schemas/WorkflowCapacityWaitProviderView'
+          type: array
+        reason:
+          enum:
+          - provider_health_stale
+          - provider_cooldown
+          - provider_unavailable
+          - no_eligible_provider
+          type: string
+        role:
+          type: string
+      required:
+      - reason
       type: object
     WorkflowMasterPlan:
       properties:
@@ -11782,13 +11876,19 @@ components:
           type: string
         attentionReason:
           type: string
+        attentionWorkflowId:
+          type: string
         branchWait:
           $ref: '#/components/schemas/WorkflowBranchWaitView'
+        canContinue:
+          type: boolean
         cancelledAt:
           format: date-time
           type:
           - "null"
           - string
+        capacityWait:
+          $ref: '#/components/schemas/WorkflowCapacityWaitView'
         completedAt:
           format: date-time
           type:
@@ -11863,6 +11963,7 @@ components:
       - executionMode
       - phase
       - lastActivityAt
+      - canContinue
       type: object
     WorkflowStepProgressView:
       properties:

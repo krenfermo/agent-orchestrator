@@ -220,8 +220,46 @@ func TestScheduler_IdempotentUpsert(t *testing.T) {
 	if second.ID != first.ID {
 		t.Fatalf("expected same row id across idempotent schedules, got %s vs %s", first.ID, second.ID)
 	}
-	if second.AttemptCount != 2 {
-		t.Fatalf("expected attempt_count to increment to 2, got %d", second.AttemptCount)
+	// Re-parking on a wake that is already PENDING must not disturb it: the
+	// wake is already the scheduled answer to this exact wait, and rewriting it
+	// is what let a reviewer_capacity wake reach attempt_count>200 while being
+	// pushed out of due-ness on every routing pass so it never fired at all.
+	if second.AttemptCount != 1 {
+		t.Fatalf("expected attempt_count to stay 1 while the wake is pending, got %d", second.AttemptCount)
+	}
+	if !second.ScheduledAt.Equal(first.ScheduledAt) {
+		t.Fatalf("expected scheduled_at untouched by a re-park, got %v after %v", second.ScheduledAt, first.ScheduledAt)
+	}
+}
+
+// TestScheduler_RepeatedReparksDoNotChurn is the direct regression for the
+// wf-57f90ff2 wake pathology: 500 routing passes over an unchanged wait must
+// produce exactly one durable row, one attempt, and no rescheduling.
+func TestScheduler_RepeatedReparksDoNotChurn(t *testing.T) {
+	fs := newFakeStore()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	sched := newTestScheduler(fs, now)
+	ctx := context.Background()
+
+	var last Schedule
+	for i := 0; i < 500; i++ {
+		sch, err := sched.Schedule(ctx, "wf-1", nil, ReasonReviewerCapacity, nil)
+		if err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+		last = sch
+	}
+	if len(fs.rows) != 1 {
+		t.Fatalf("expected exactly 1 wake row after 500 passes, got %d", len(fs.rows))
+	}
+	if last.AttemptCount != 1 {
+		t.Fatalf("expected attempt_count 1 after 500 passes over an unchanged wait, got %d", last.AttemptCount)
+	}
+	// And the row is genuinely due at the FIRST backoff, not pushed 500 delays
+	// into the future — the retry actually happens.
+	wantBy := now.Add(time.Duration(domain.DefaultWakePolicy().InitialBackoffSeconds+domain.DefaultWakePolicy().JitterSeconds) * time.Second)
+	if last.ScheduledAt.After(wantBy) {
+		t.Fatalf("wake scheduled at %v, later than the first backoff bound %v", last.ScheduledAt, wantBy)
 	}
 }
 
@@ -306,10 +344,25 @@ func TestScheduler_FailReschedulesUntilBudgetExhausted(t *testing.T) {
 	}
 }
 
+// fireWake simulates one poller cycle for a scope: the row is claimed, which is
+// the state a wake is in while ContinueRun runs and the wait is re-derived.
+// Re-parking during that window is a genuine retry, and is the only thing that
+// may grow the backoff.
+func fireWake(t *testing.T, fs *fakeStore, id string) {
+	t.Helper()
+	r, ok := fs.rows[id]
+	if !ok {
+		t.Fatalf("no wake row %s", id)
+	}
+	claimedAt := r.ScheduledAt
+	r.Status, r.ClaimedAt = "claimed", &claimedAt
+	fs.rows[id] = r
+}
+
 // TestScheduler_ScheduleBackoffGrowsOnRepeatedUnknownReset proves Schedule
-// reads the existing row's real AttemptCount (not a hardcoded 0) when a
-// caller re-parks on the same idempotency-key scope with an unknown reset:
-// each successive call must produce a strictly later scheduled_at than the
+// reads the existing row's real AttemptCount (not a hardcoded 0) when a wake
+// that has actually FIRED re-parks on the same scope with an unknown reset:
+// each successive retry must produce a strictly later scheduled_at than the
 // last, up to the policy's cap.
 func TestScheduler_ScheduleBackoffGrowsOnRepeatedUnknownReset(t *testing.T) {
 	fs := newFakeStore()
@@ -321,10 +374,12 @@ func TestScheduler_ScheduleBackoffGrowsOnRepeatedUnknownReset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first schedule: %v", err)
 	}
+	fireWake(t, fs, first.ID)
 	second, err := sched.Schedule(ctx, "wf-1", nil, ReasonWorkerCapacity, nil)
 	if err != nil {
 		t.Fatalf("second schedule: %v", err)
 	}
+	fireWake(t, fs, second.ID)
 	third, err := sched.Schedule(ctx, "wf-1", nil, ReasonWorkerCapacity, nil)
 	if err != nil {
 		t.Fatalf("third schedule: %v", err)
@@ -401,6 +456,7 @@ func TestAutonomousHeartbeatKeepsAFixedCadence(t *testing.T) {
 		if err != nil {
 			t.Fatalf("cycle %d: Schedule: %v", cycle, err)
 		}
+		fireWake(t, fs, sch.ID)
 		delay := sch.ScheduledAt.Sub(now)
 		if cycle == 0 {
 			first = delay
@@ -420,6 +476,7 @@ func TestAutonomousHeartbeatKeepsAFixedCadence(t *testing.T) {
 		if err != nil {
 			t.Fatalf("capacity cycle %d: Schedule: %v", cycle, err)
 		}
+		fireWake(t, fs, sch.ID)
 		delay := sch.ScheduledAt.Sub(now)
 		if cycle > 0 && delay <= prev {
 			t.Fatalf("capacity cycle %d: backoff did not grow (%v after %v)", cycle, delay, prev)

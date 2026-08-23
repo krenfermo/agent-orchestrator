@@ -3,6 +3,7 @@ package workflow
 import (
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -41,6 +42,39 @@ type ProviderFailureClassification struct {
 	// retry §15 allows. Implementation/test/review failures are never
 	// eligible — those are normal work, not provider failure.
 	Eligible bool
+	// ResetAt is the provider's OWN reported reset time, when it reported one.
+	// It is populated only from a typed signal (an error implementing
+	// ProviderResetAtError), never from parsed prose, and it is what makes a
+	// cooldown honour a real reset instead of AO's generic backoff. nil means
+	// "no reset time is known", which is a fact in its own right and must not
+	// be replaced by an invented timestamp.
+	ResetAt *time.Time
+}
+
+// ProviderResetAtError is the typed signal an adapter uses to report the exact
+// moment a rate limit or quota window clears. AO deliberately accepts a reset
+// time from nowhere else: a timestamp scraped out of an error string is a guess,
+// and scheduling a workflow's next attempt against a guess is worse than
+// scheduling it against an honest bounded backoff.
+type ProviderResetAtError interface {
+	error
+	// ProviderResetAt returns the reported reset instant. A zero time means the
+	// provider named the condition but not when it clears.
+	ProviderResetAt() time.Time
+}
+
+// providerResetAt extracts a typed provider reset time from err, if any error
+// in its chain reports one.
+func providerResetAt(err error) *time.Time {
+	var typed ProviderResetAtError
+	if !errors.As(err, &typed) {
+		return nil
+	}
+	at := typed.ProviderResetAt()
+	if at.IsZero() {
+		return nil
+	}
+	return &at
 }
 
 // classifyProviderFailure is the single provider-neutral failure classifier
@@ -53,6 +87,12 @@ type ProviderFailureClassification struct {
 // strings against every class name — only a short, explicit, reviewed list of
 // phrases known to be provider rate-limit/capacity language.
 func classifyProviderFailure(err error) ProviderFailureClassification {
+	cls := classifyProviderFailureClass(err)
+	cls.ResetAt = providerResetAt(err)
+	return cls
+}
+
+func classifyProviderFailureClass(err error) ProviderFailureClassification {
 	if err == nil {
 		return ProviderFailureClassification{Class: domain.WorkflowErrorAmbiguousWorkerState, Certainty: CertaintyUnknown}
 	}

@@ -4164,6 +4164,8 @@ export interface components {
             state: "blocked" | "eligible" | "running" | "completed" | "failed" | "cancelled";
             steps?: components["schemas"]["WorkflowStepProgressView"][];
             title: string;
+            /** @enum {string} */
+            waitReason?: "waiting_for_dependencies" | "waiting_for_write_conflict";
             workflowId?: string;
         };
         WorkflowBranchWaitView: {
@@ -4175,6 +4177,41 @@ export interface components {
             heldByState?: "pending" | "running" | "waiting" | "needs_attention" | "completed" | "failed" | "cancelled";
             heldByWorkflowRunId?: string;
             repoPath?: string;
+        };
+        WorkflowCapacityWaitProviderView: {
+            /** @enum {string} */
+            capacity: "available" | "limited" | "cooldown" | "unavailable" | "unknown";
+            /** Format: date-time */
+            cooldownUntil?: null | string;
+            displayName?: string;
+            failureClass?: string;
+            harness?: string;
+            /** Format: int64 */
+            healthAgeSeconds?: number;
+            healthReason?: string;
+            /** @enum {string} */
+            healthState?: "available" | "cooldown" | "unavailable" | "unknown";
+            /** Format: date-time */
+            observedAt?: null | string;
+            probeEligible?: boolean;
+            profileId: string;
+            provider?: string;
+            /** @enum {string} */
+            recovery?: "cooldown" | "probe" | "manual";
+        };
+        WorkflowCapacityWaitView: {
+            /** Format: int64 */
+            attempt?: number;
+            independenceRequired?: boolean;
+            /** Format: date-time */
+            knownResetAt?: null | string;
+            /** Format: date-time */
+            nextAttemptAt?: null | string;
+            probing?: boolean;
+            providers?: components["schemas"]["WorkflowCapacityWaitProviderView"][];
+            /** @enum {string} */
+            reason: "provider_health_stale" | "provider_cooldown" | "provider_unavailable" | "no_eligible_provider";
+            role?: string;
         };
         WorkflowMasterPlan: {
             objective: string;
@@ -4286,9 +4323,12 @@ export interface components {
             attention?: "ao_internal" | "human_decision";
             attentionAction?: string;
             attentionReason?: string;
+            attentionWorkflowId?: string;
             branchWait?: components["schemas"]["WorkflowBranchWaitView"];
+            canContinue: boolean;
             /** Format: date-time */
             cancelledAt?: null | string;
+            capacityWait?: components["schemas"]["WorkflowCapacityWaitView"];
             /** Format: date-time */
             completedAt?: null | string;
             /** Format: date-time */

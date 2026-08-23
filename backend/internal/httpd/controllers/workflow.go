@@ -261,6 +261,101 @@ type WorkflowRunView struct {
 	// worker session's activity state, because an idle worker during a review
 	// is not an idle workflow.
 	LastActivityAt time.Time `json:"lastActivityAt"`
+	// CanContinue is the backend's authoritative answer to "would POST
+	// /continue advance this run". The UI renders its Continue/Reanudar control
+	// from this flag alone and must never re-derive the rule from state/phase
+	// strings — see workflow.canContinueRun for the rules and why they live
+	// there.
+	CanContinue bool `json:"canContinue"`
+	// AttentionWorkflowID names the run a person should actually act on when
+	// this run's stop merely mirrors another's (an objective reflecting the task
+	// that stopped). Empty for a stop the run owns itself.
+	AttentionWorkflowID string `json:"attentionWorkflowId,omitempty"`
+	// CapacityWait is the normalized provider-capacity wait projection: which
+	// role is blocked, the normalized reason, when the next automatic attempt
+	// is, whether a real provider reset is known, and each candidate provider's
+	// health evidence with its age. Present only while the run is genuinely
+	// parked on capacity.
+	CapacityWait *WorkflowCapacityWaitView `json:"capacityWait,omitempty"`
+}
+
+// WorkflowCapacityWaitView is the wire form of workflow.CapacityWait.
+type WorkflowCapacityWaitView struct {
+	Role string `json:"role,omitempty"`
+	// Reason is the normalized cause, not a wake reason: provider_health_stale
+	// (a past failure whose window expired — AO is re-probing),
+	// provider_cooldown, provider_unavailable, or no_eligible_provider.
+	Reason string `json:"reason" enum:"provider_health_stale,provider_cooldown,provider_unavailable,no_eligible_provider"`
+	// IndependenceRequired records that review independence additionally forbids
+	// falling back to the implementer's own provider, however available it is.
+	IndependenceRequired bool `json:"independenceRequired,omitempty"`
+	// NextAttemptAt is the soonest scheduled automatic retry; KnownResetAt is
+	// non-nil only when a provider actually reported its own reset time.
+	NextAttemptAt *time.Time `json:"nextAttemptAt,omitempty"`
+	KnownResetAt  *time.Time `json:"knownResetAt,omitempty"`
+	Attempt       int64      `json:"attempt,omitempty"`
+	// Probing is true when AO is actively re-evaluating a blocked provider
+	// rather than waiting out a clock.
+	Probing   bool                               `json:"probing,omitempty"`
+	Providers []WorkflowCapacityWaitProviderView `json:"providers,omitempty"`
+}
+
+// WorkflowCapacityWaitProviderView is one candidate provider's capacity
+// evidence, including how old the observation behind it is.
+type WorkflowCapacityWaitProviderView struct {
+	ProfileID   string `json:"profileId"`
+	Provider    string `json:"provider,omitempty"`
+	Harness     string `json:"harness,omitempty"`
+	DisplayName string `json:"displayName,omitempty"`
+	Capacity    string `json:"capacity" enum:"available,limited,cooldown,unavailable,unknown"`
+	HealthState string `json:"healthState,omitempty" enum:"available,cooldown,unavailable,unknown"`
+	// HealthReason and FailureClass are the durable observation's own words —
+	// e.g. "agent_start_failed (unknown)" — never re-worded here.
+	HealthReason string `json:"healthReason,omitempty"`
+	FailureClass string `json:"failureClass,omitempty"`
+	// ObservedAt is when that observation was recorded; HealthAgeSeconds is its
+	// age at response time, so the UI never has to compute a duration against a
+	// clock that may not match the daemon's.
+	ObservedAt       *time.Time `json:"observedAt,omitempty"`
+	HealthAgeSeconds int64      `json:"healthAgeSeconds,omitempty"`
+	// Recovery is how this state can clear: cooldown (time-boxed), probe (a
+	// capacity probe can prove it), or manual (a human must change credentials
+	// or configuration).
+	Recovery      string     `json:"recovery,omitempty" enum:"cooldown,probe,manual"`
+	CooldownUntil *time.Time `json:"cooldownUntil,omitempty"`
+	ProbeEligible bool       `json:"probeEligible,omitempty"`
+}
+
+func workflowCapacityWaitView(w *workflowcore.CapacityWait, now time.Time) *WorkflowCapacityWaitView {
+	if w == nil {
+		return nil
+	}
+	view := &WorkflowCapacityWaitView{
+		Role:                 string(w.Role),
+		Reason:               string(w.Reason),
+		IndependenceRequired: w.IndependenceRequired,
+		NextAttemptAt:        w.NextAttemptAt,
+		KnownResetAt:         w.KnownResetAt,
+		Attempt:              w.Attempt,
+		Probing:              w.Probing,
+	}
+	for _, p := range w.Providers {
+		entry := WorkflowCapacityWaitProviderView{
+			ProfileID: string(p.ProfileID), Provider: p.Provider, Harness: string(p.Harness),
+			DisplayName: p.DisplayName, Capacity: string(p.Capacity),
+			HealthState: string(p.HealthState), HealthReason: p.HealthReason,
+			FailureClass: string(p.FailureClass), ObservedAt: p.ObservedAt,
+			Recovery: string(p.Recovery), CooldownUntil: p.CooldownUntil,
+			ProbeEligible: p.ProbeEligible,
+		}
+		if p.ObservedAt != nil {
+			if age := now.Sub(*p.ObservedAt); age > 0 {
+				entry.HealthAgeSeconds = int64(age.Seconds())
+			}
+		}
+		view.Providers = append(view.Providers, entry)
+	}
+	return view
 }
 
 // WorkflowBranchWaitView names the branch a run is queued on and the workflow
@@ -505,6 +600,9 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 	runView.AttentionReason = life.AttentionReason
 	runView.AttentionAction = life.AttentionAction
 	runView.LastActivityAt = life.LastActivityAt
+	runView.CanContinue = life.CanContinue
+	runView.AttentionWorkflowID = life.AttentionWorkflowID
+	runView.CapacityWait = workflowCapacityWaitView(detail.CapacityWait, time.Now().UTC())
 	view := WorkflowRunDetailView{Run: runView, Steps: steps}
 	if detail.Plan != nil {
 		pv := WorkflowPlanView{Status: detail.Plan.Status, ApprovalMode: detail.Plan.ApprovalMode, Provider: detail.Plan.Provider, Model: detail.Plan.Model, PromptContextVersion: detail.Plan.PromptContextVersion, PlanHash: detail.Plan.PlanHash, ErrorClass: detail.Plan.ErrorClass}

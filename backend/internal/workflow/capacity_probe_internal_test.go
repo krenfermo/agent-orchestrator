@@ -167,17 +167,21 @@ func TestCapacitySnapshot_ProbeErrorLeavesUnknown(t *testing.T) {
 	}
 }
 
-// A recorded cooldown/unavailable fact is authoritative: the probe is never
-// consulted, so an optimistic local probe can never clear a real, observed
-// rate limit.
+// A LIVE recorded cooldown is authoritative: the probe is never consulted, so
+// an optimistic local probe can never clear a real, observed rate limit while
+// its window is still open. (An EXPIRED one is a different fact entirely — see
+// TestCapacitySnapshot_ExpiredCooldownIsReprobed.)
 func TestCapacitySnapshot_RecordedFailureIsNeverOverriddenByProbe(t *testing.T) {
 	prober := &fakeProber{state: domain.CapacityAvailable, reason: "cli authenticated", ok: true}
 	c, store, userID, codex := probeFixture(t, prober)
 	ctx := t.Context()
 
+	cooldownUntil := time.Now().UTC().Add(30 * time.Minute)
 	if _, err := store.RecordAgentHealthEvent(ctx, domain.AgentHealthEvent{
 		ID: "ahe-cooldown", Harness: domain.HarnessCodex, UserID: userID, ProviderProfileID: codex.ID,
-		State: domain.AgentHealthCooldown, Reason: "rate_limited", CreatedAt: time.Now().UTC(),
+		State: domain.AgentHealthCooldown, Reason: "rate_limited",
+		FailureClass: domain.WorkflowErrorRateLimited, CooldownUntil: &cooldownUntil,
+		ConsecutiveFailures: 1, CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("record cooldown: %v", err)
 	}

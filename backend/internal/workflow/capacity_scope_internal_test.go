@@ -46,10 +46,15 @@ func TestCapacityScope_CrossUserIsolation(t *testing.T) {
 
 	c := New(Deps{Store: store, Projects: store})
 
-	// User A's Claude profile goes into cooldown...
+	// User A's Claude profile goes into a LIVE cooldown -- the shape
+	// recordAgentHealthFailure actually writes, with a real expiry, so this
+	// isolation proof does not depend on an already-expired window.
+	cooldownUntil := now.Add(30 * time.Minute)
 	if _, err := store.RecordAgentHealthEvent(ctx, domain.AgentHealthEvent{
 		ID: "ahe-a", Harness: domain.HarnessClaudeCode, UserID: userA, ProviderProfileID: profA,
-		State: domain.AgentHealthCooldown, Reason: "rate_limited", CreatedAt: now,
+		State: domain.AgentHealthCooldown, Reason: "rate_limited",
+		FailureClass: domain.WorkflowErrorRateLimited, CooldownUntil: &cooldownUntil,
+		ConsecutiveFailures: 1, CreatedAt: now,
 	}); err != nil {
 		t.Fatalf("record A's cooldown: %v", err)
 	}
