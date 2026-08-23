@@ -11523,6 +11523,20 @@ components:
       - approvalMode
       - promptContextVersion
       type: object
+    WorkflowPlannedSafeOverlap:
+      properties:
+        paths:
+          items:
+            type: string
+          type: array
+        reason:
+          type: string
+        with:
+          type: string
+      required:
+      - with
+      - reason
+      type: object
     WorkflowPlannedStep:
       properties:
         acceptanceCriteria:
@@ -11544,6 +11558,10 @@ components:
         packages:
           items:
             type: string
+          type: array
+        safeWriteOverlaps:
+          items:
+            $ref: '#/components/schemas/WorkflowPlannedSafeOverlap'
           type: array
         title:
           type: string

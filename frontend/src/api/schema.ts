@@ -4197,6 +4197,11 @@ export interface components {
             status: string;
             validation?: components["schemas"]["WorkflowPlanValidation"];
         };
+        WorkflowPlannedSafeOverlap: {
+            paths?: string[];
+            reason: string;
+            with: string;
+        };
         WorkflowPlannedStep: {
             acceptanceCriteria: string[];
             dependencies: string[];
@@ -4204,6 +4209,7 @@ export interface components {
             files?: string[];
             id: string;
             packages?: string[];
+            safeWriteOverlaps?: components["schemas"]["WorkflowPlannedSafeOverlap"][];
             title: string;
             verify: components["schemas"]["WorkflowVerificationPlanType2"];
         };

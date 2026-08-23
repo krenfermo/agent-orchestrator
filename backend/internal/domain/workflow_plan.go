@@ -167,6 +167,32 @@ type WorkflowTaskScope struct {
 	// ObservedWritePaths are the paths this task's execution actually changed,
 	// recorded once the task completes. Empty until then.
 	ObservedWritePaths []string `json:"observedWritePaths"`
+	// SafeWriteOverlaps are this task's explicit waivers: overlaps with a
+	// named sibling that the plan declares safe to share despite both tasks
+	// writing there. Empty for almost every task -- an overlap that nobody
+	// marked safe is a probable write conflict, and that default is what makes
+	// the waiver meaningful.
+	SafeWriteOverlaps []WorkflowTaskSafeOverlap `json:"safeWriteOverlaps"`
+}
+
+// WorkflowTaskSafeOverlap is one declaration that a write-set overlap with a
+// specific sibling task is not a conflict.
+//
+// It is deliberately narrow in two ways. It names the sibling it applies to,
+// because a blanket "this task never conflicts" waiver is exactly the mistake
+// the conflict default exists to catch. And it carries a Reason, because a
+// waiver is a claim about the code that a person may later have to audit --
+// the reason travels into the stored relationship's detail so the decision
+// explains itself without anyone re-deriving why it was waived.
+type WorkflowTaskSafeOverlap struct {
+	// WithTaskID is the sibling task this waiver applies to.
+	WithTaskID string `json:"withTaskId"`
+	// Paths narrows the waiver to specific paths; a directory waives
+	// everything under it. Empty waives the whole overlap with that sibling.
+	Paths []string `json:"paths"`
+	// Reason is why sharing these paths is safe (e.g. "append-only registry,
+	// both tasks add distinct entries"). Required.
+	Reason string `json:"reason"`
 }
 
 // WorkflowTaskRelation is the classification of one unordered pair of planned
@@ -199,8 +225,11 @@ type WorkflowTaskRelationship struct {
 	Reason string
 	// Detail is the human-readable sentence behind Reason.
 	Detail string
-	// Overlap is the specific set of paths that made this a write conflict, so
-	// the decision can be checked rather than trusted. Empty otherwise.
+	// Overlap is where the two tasks' estimated write sets intersect, so the
+	// decision can be checked rather than trusted. For a write conflict it is
+	// what made it one; for a pair whose overlap was explicitly declared safe
+	// it is what was waived; for a pair that simply does not intersect, and
+	// for a functional dependency, it is empty.
 	Overlap   []string
 	CreatedAt time.Time
 }

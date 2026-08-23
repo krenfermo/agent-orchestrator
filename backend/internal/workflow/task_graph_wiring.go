@@ -69,7 +69,28 @@ func taskScopeInputs(plan MasterPlan, tasks []domain.WorkflowTask, idByPlan map[
 			DeclaredFiles:      s.Files,
 			DeclaredPackages:   s.Packages,
 			ObservedWritePaths: observed[id],
+			SafeWriteOverlaps:  safeOverlapsForStep(s, idByPlan),
 		})
+	}
+	return out
+}
+
+// safeOverlapsForStep resolves a step's waivers from plan step ids into the
+// task ids everything downstream speaks in. A waiver naming a step that did
+// not become a task is dropped: it can no longer refer to anything, and a
+// waiver that resolves to nothing must not silently widen into one that
+// waives everything.
+func safeOverlapsForStep(s PlannedStep, idByPlan map[string]string) []domain.WorkflowTaskSafeOverlap {
+	if len(s.SafeWriteOverlaps) == 0 {
+		return nil
+	}
+	out := make([]domain.WorkflowTaskSafeOverlap, 0, len(s.SafeWriteOverlaps))
+	for _, w := range s.SafeWriteOverlaps {
+		with, ok := idByPlan[w.With]
+		if !ok {
+			continue
+		}
+		out = append(out, domain.WorkflowTaskSafeOverlap{WithTaskID: with, Paths: w.Paths, Reason: w.Reason})
 	}
 	return out
 }
@@ -148,7 +169,7 @@ func (c *Coordinator) reclassifyTaskRelationships(ctx stdctx.Context, runID stri
 			return
 		}
 		scopes[t.ID] = scope
-		pairs = append(pairs, TaskRelationInput{TaskID: t.ID, Ordinal: t.Ordinal, Dependencies: t.Dependencies, WritePaths: scope.WritePaths})
+		pairs = append(pairs, TaskRelationInput{TaskID: t.ID, Ordinal: t.Ordinal, Dependencies: t.Dependencies, WritePaths: scope.WritePaths, SafeWriteOverlaps: scope.SafeWriteOverlaps})
 	}
 	rels, scheduling := ClassifyTaskRelations(runID, pairs)
 	now := c.clock()

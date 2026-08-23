@@ -2,6 +2,7 @@ package workflow_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -159,6 +160,109 @@ func TestClassifyTaskGraphFlagsDirectoryContainingAnotherTasksFile(t *testing.T)
 	}
 	if len(rel.Overlap) != 1 || rel.Overlap[0] != "backend/internal/workflow/board.go" {
 		t.Fatalf("overlap=%+v, want the contained file", rel.Overlap)
+	}
+}
+
+// An overlapping write set is a conflict by default, and ONLY an explicit,
+// reasoned waiver naming the other task clears it. The waiver's reason is
+// carried into the stored decision.
+func TestDeclaredSafeOverlapClearsAnOtherwiseProbableConflict(t *testing.T) {
+	tasks := []workflowcore.TaskScopeInput{
+		{TaskID: "wft-a", Ordinal: 1, Title: "Register one handler",
+			Description: "Add an entry.", DeclaredFiles: []string{"backend/internal/httpd/routes.go"}},
+		{TaskID: "wft-b", Ordinal: 2, Title: "Register another handler",
+			Description: "Add an entry.", DeclaredFiles: []string{"backend/internal/httpd/routes.go"}},
+	}
+
+	// Unmarked: the default stands.
+	unmarked := workflowcore.ClassifyTaskGraph(workflowcore.TaskGraphInput{WorkflowRunID: "wf-1", Tasks: tasks})
+	if rel := relationFor(t, unmarked.Relationships, "wft-a", "wft-b"); rel.Relation != domain.WorkflowTaskRelationWriteConflict {
+		t.Fatalf("unmarked overlap relation=%q, want probable_write_conflict", rel.Relation)
+	}
+
+	// Marked safe by one side, naming the other and stating why.
+	tasks[0].SafeWriteOverlaps = []domain.WorkflowTaskSafeOverlap{{
+		WithTaskID: "wft-b",
+		Paths:      []string{"backend/internal/httpd/routes.go"},
+		Reason:     "append-only route table, both tasks add distinct routes",
+	}}
+	marked := workflowcore.ClassifyTaskGraph(workflowcore.TaskGraphInput{WorkflowRunID: "wf-1", Tasks: tasks})
+	rel := relationFor(t, marked.Relationships, "wft-a", "wft-b")
+	if rel.Relation != domain.WorkflowTaskRelationIndependent {
+		t.Fatalf("declared-safe relation=%q, want independent", rel.Relation)
+	}
+	if rel.Reason != string(workflowcore.TaskRelationReasonDeclaredSafeOverlap) {
+		t.Fatalf("reason=%q, want %q", rel.Reason, workflowcore.TaskRelationReasonDeclaredSafeOverlap)
+	}
+	if !hasPath(rel.Overlap, "backend/internal/httpd/routes.go") {
+		t.Fatalf("overlap=%+v, want the waived path recorded", rel.Overlap)
+	}
+	if !strings.Contains(rel.Detail, "append-only route table") || !strings.Contains(rel.Detail, "wft-a") {
+		t.Fatalf("detail=%q, want the waiver reason and the declaring task", rel.Detail)
+	}
+	// A cleared pair is schedulable in parallel again.
+	for _, id := range []string{"wft-a", "wft-b"} {
+		if got := marked.Scopes[id].ExecutionStrategy; got != domain.WorkflowTaskExecutionParallel {
+			t.Fatalf("%s strategy=%q, want parallel once the overlap is waived", id, got)
+		}
+	}
+}
+
+// A waiver clears only what it names. Anything it does not cover still
+// conflicts, so a narrow waiver can never widen into a blanket exemption.
+func TestSafeOverlapWaivesOnlyThePathsItNames(t *testing.T) {
+	graph := workflowcore.ClassifyTaskGraph(workflowcore.TaskGraphInput{
+		WorkflowRunID: "wf-1",
+		Tasks: []workflowcore.TaskScopeInput{
+			{TaskID: "wft-a", Ordinal: 1, Title: "One", Description: "Add entries.",
+				DeclaredFiles: []string{"backend/internal/httpd/routes.go", "backend/internal/httpd/server.go"},
+				SafeWriteOverlaps: []domain.WorkflowTaskSafeOverlap{{
+					WithTaskID: "wft-b",
+					Paths:      []string{"backend/internal/httpd/routes.go"},
+					Reason:     "append-only route table",
+				}},
+			},
+			{TaskID: "wft-b", Ordinal: 2, Title: "Two", Description: "Add entries.",
+				DeclaredFiles: []string{"backend/internal/httpd/routes.go", "backend/internal/httpd/server.go"}},
+		},
+	})
+	rel := relationFor(t, graph.Relationships, "wft-a", "wft-b")
+	if rel.Relation != domain.WorkflowTaskRelationWriteConflict {
+		t.Fatalf("relation=%q, want the unwaived path to keep the pair in conflict", rel.Relation)
+	}
+	if len(rel.Overlap) != 1 || rel.Overlap[0] != "backend/internal/httpd/server.go" {
+		t.Fatalf("overlap=%+v, want only the unwaived file", rel.Overlap)
+	}
+	if !strings.Contains(rel.Detail, "declared safe") || !strings.Contains(rel.Detail, "routes.go") {
+		t.Fatalf("detail=%q, want the partial waiver recorded", rel.Detail)
+	}
+}
+
+// A waiver that names the wrong sibling, names nobody, or states no reason
+// waives nothing: the pair stays a conflict.
+func TestMalformedSafeOverlapDoesNotWaiveAnything(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		waiver domain.WorkflowTaskSafeOverlap
+	}{
+		{"wrong sibling", domain.WorkflowTaskSafeOverlap{WithTaskID: "wft-z", Reason: "unrelated"}},
+		{"no sibling", domain.WorkflowTaskSafeOverlap{Reason: "blanket exemption"}},
+		{"no reason", domain.WorkflowTaskSafeOverlap{WithTaskID: "wft-b"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			graph := workflowcore.ClassifyTaskGraph(workflowcore.TaskGraphInput{
+				WorkflowRunID: "wf-1",
+				Tasks: []workflowcore.TaskScopeInput{
+					{TaskID: "wft-a", Ordinal: 1, Title: "One", Description: "Add an entry.",
+						DeclaredFiles: []string{"backend/internal/httpd/routes.go"}, SafeWriteOverlaps: []domain.WorkflowTaskSafeOverlap{tc.waiver}},
+					{TaskID: "wft-b", Ordinal: 2, Title: "Two", Description: "Add an entry.",
+						DeclaredFiles: []string{"backend/internal/httpd/routes.go"}},
+				},
+			})
+			if rel := relationFor(t, graph.Relationships, "wft-a", "wft-b"); rel.Relation != domain.WorkflowTaskRelationWriteConflict {
+				t.Fatalf("relation=%q, want probable_write_conflict", rel.Relation)
+			}
+		})
 	}
 }
 

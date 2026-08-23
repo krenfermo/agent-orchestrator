@@ -40,6 +40,11 @@ const (
 	// TaskRelationReasonDisjointWriteSets means no dependency edge and no
 	// overlapping write scope -- the pair is independent work.
 	TaskRelationReasonDisjointWriteSets TaskRelationReason = "disjoint_write_sets"
+	// TaskRelationReasonDeclaredSafeOverlap means the write sets DO overlap,
+	// but the plan explicitly declared every overlapping path safe to share
+	// with this specific sibling. The waiver's own reason is carried into the
+	// stored relationship's detail.
+	TaskRelationReasonDeclaredSafeOverlap TaskRelationReason = "declared_safe_write_overlap"
 )
 
 // TaskScopeInput is everything the classifier is allowed to know about one
@@ -67,6 +72,10 @@ type TaskScopeInput struct {
 	// Empty until the task has run; when present they are the strongest
 	// possible write-set evidence and flip the scope's source to "observed".
 	ObservedWritePaths []string
+	// SafeWriteOverlaps are this task's explicit waivers, already resolved to
+	// task ids. Absent any waiver, an overlapping write set is a probable
+	// conflict -- see ClassifyTaskRelations.
+	SafeWriteOverlaps []domain.WorkflowTaskSafeOverlap
 }
 
 // TaskGraphInput is one whole plan, as handed to the classifier.
@@ -120,7 +129,7 @@ func ClassifyTaskGraph(in TaskGraphInput) TaskGraph {
 	for _, t := range tasks {
 		scope := estimateTaskScope(t, in.Objective, roots)
 		graph.Scopes[t.TaskID] = scope
-		pairs = append(pairs, TaskRelationInput{TaskID: t.TaskID, Ordinal: t.Ordinal, Dependencies: t.Dependencies, WritePaths: scope.WritePaths})
+		pairs = append(pairs, TaskRelationInput{TaskID: t.TaskID, Ordinal: t.Ordinal, Dependencies: t.Dependencies, WritePaths: scope.WritePaths, SafeWriteOverlaps: scope.SafeWriteOverlaps})
 	}
 
 	// Passes 2 and 3: pair verdicts, then the scheduling facts that are only
@@ -146,6 +155,10 @@ type TaskRelationInput struct {
 	Ordinal      int64
 	Dependencies []string
 	WritePaths   []string
+	// SafeWriteOverlaps are this task's waivers. They travel with the write
+	// set so a re-classification from persisted scopes applies exactly the
+	// same waivers the original classification did.
+	SafeWriteOverlaps []domain.WorkflowTaskSafeOverlap
 }
 
 // TaskScheduling is what a pair classification implies for one task on its
@@ -371,10 +384,41 @@ func estimateTaskScope(t TaskScopeInput, objective string, roots []string) domai
 	scope.Files, scope.Packages, scope.Components = derivePathFacets(facetPaths, roots)
 
 	scope.Symbols = extractSymbols(t)
+	scope.SafeWriteOverlaps = normalizeSafeOverlaps(t.SafeWriteOverlaps)
 	if scope.IntegrationDependencies == nil {
 		scope.IntegrationDependencies = []string{}
 	}
 	return scope
+}
+
+// normalizeSafeOverlaps canonicalizes a task's waivers so the persisted scope
+// is byte-stable, and drops the ones that could never waive anything: a waiver
+// naming no sibling, or stating no reason. Dropping them here rather than at
+// use keeps the stored record honest about which declarations actually count.
+func normalizeSafeOverlaps(in []domain.WorkflowTaskSafeOverlap) []domain.WorkflowTaskSafeOverlap {
+	out := []domain.WorkflowTaskSafeOverlap{}
+	for _, w := range in {
+		with := strings.TrimSpace(w.WithTaskID)
+		reason := strings.TrimSpace(w.Reason)
+		if with == "" || reason == "" {
+			continue
+		}
+		paths := map[string]bool{}
+		for _, p := range w.Paths {
+			p = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(p), "./"), "/")
+			if p != "" {
+				paths[p] = true
+			}
+		}
+		out = append(out, domain.WorkflowTaskSafeOverlap{WithTaskID: with, Paths: sortedKeys(paths), Reason: reason})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].WithTaskID != out[j].WithTaskID {
+			return out[i].WithTaskID < out[j].WithTaskID
+		}
+		return out[i].Reason < out[j].Reason
+	})
+	return out
 }
 
 func classifyTaskPair(a, b TaskRelationInput, reach map[string]map[string]bool) domain.WorkflowTaskRelationship {
@@ -392,23 +436,121 @@ func classifyTaskPair(a, b TaskRelationInput, reach map[string]map[string]bool) 
 		rel.Reason, rel.Detail = dependencyReason(b, a)
 		return rel
 	}
-	overlap, sharedFile := writeOverlap(a.WritePaths, b.WritePaths)
+	overlap, exactFiles := writeOverlap(a.WritePaths, b.WritePaths)
 	if len(overlap) == 0 {
 		rel.Relation = domain.WorkflowTaskRelationIndependent
 		rel.Reason = string(TaskRelationReasonDisjointWriteSets)
 		rel.Detail = fmt.Sprintf("%s and %s have no dependency edge and no overlapping write scope", rel.TaskID, rel.RelatedTaskID)
 		return rel
 	}
+	// An overlap is a conflict by default. Only an explicit, path-scoped,
+	// reasoned waiver naming the other task can clear one, and only the paths
+	// it actually names: whatever it does not cover still conflicts, so a
+	// waiver can never quietly widen into a blanket exemption.
+	remaining, waived, waiverReason := applySafeOverlaps(overlap, a, b)
+	if len(remaining) == 0 {
+		rel.Relation = domain.WorkflowTaskRelationIndependent
+		rel.Reason = string(TaskRelationReasonDeclaredSafeOverlap)
+		rel.Overlap = waived
+		rel.Detail = fmt.Sprintf("%s and %s both write %s, declared safe: %s",
+			rel.TaskID, rel.RelatedTaskID, strings.Join(waived, ", "), waiverReason)
+		return rel
+	}
 	rel.Relation = domain.WorkflowTaskRelationWriteConflict
-	rel.Overlap = overlap
-	if sharedFile {
+	rel.Overlap = remaining
+	waivedNote := ""
+	if len(waived) > 0 {
+		waivedNote = fmt.Sprintf(" (%s declared safe: %s)", strings.Join(waived, ", "), waiverReason)
+	}
+	if namesSharedFile(remaining, exactFiles) {
 		rel.Reason = string(TaskRelationReasonSharedFileWrite)
-		rel.Detail = fmt.Sprintf("%s and %s are both estimated to write %s", rel.TaskID, rel.RelatedTaskID, strings.Join(overlap, ", "))
+		rel.Detail = fmt.Sprintf("%s and %s are both estimated to write %s%s", rel.TaskID, rel.RelatedTaskID, strings.Join(remaining, ", "), waivedNote)
 		return rel
 	}
 	rel.Reason = string(TaskRelationReasonSharedPackageWrite)
-	rel.Detail = fmt.Sprintf("%s and %s are both estimated to write inside %s", rel.TaskID, rel.RelatedTaskID, strings.Join(overlap, ", "))
+	rel.Detail = fmt.Sprintf("%s and %s are both estimated to write inside %s%s", rel.TaskID, rel.RelatedTaskID, strings.Join(remaining, ", "), waivedNote)
 	return rel
+}
+
+// applySafeOverlaps removes from an overlap every path a waiver on either side
+// explicitly covers, and returns what is left, what was waived, and the
+// combined reason text the waivers gave.
+//
+// A waiver from ONE side is enough. The plan authors both tasks, so requiring
+// both to repeat the same declaration would buy no extra safety and only make
+// the waiver easy to get subtly wrong; the detail names which task declared it
+// so the claim stays attributable.
+func applySafeOverlaps(overlap []string, a, b TaskRelationInput) (remaining, waived []string, reason string) {
+	type waiverNote struct{ by, text string }
+	notes := []waiverNote{}
+	waivedSet := map[string]bool{}
+	consider := func(self, other TaskRelationInput) {
+		for _, w := range self.SafeWriteOverlaps {
+			if strings.TrimSpace(w.WithTaskID) != other.TaskID || strings.TrimSpace(w.Reason) == "" {
+				// A waiver that names nobody, names the wrong sibling, or
+				// states no reason waives nothing. Silently ignoring it is
+				// the safe direction: the pair simply stays a conflict.
+				continue
+			}
+			covered := false
+			for _, p := range overlap {
+				if !waiverCovers(w.Paths, p) {
+					continue
+				}
+				waivedSet[p] = true
+				covered = true
+			}
+			if covered {
+				notes = append(notes, waiverNote{by: self.TaskID, text: strings.TrimSpace(w.Reason)})
+			}
+		}
+	}
+	consider(a, b)
+	consider(b, a)
+	if len(waivedSet) == 0 {
+		return overlap, []string{}, ""
+	}
+	for _, p := range overlap {
+		if !waivedSet[p] {
+			remaining = append(remaining, p)
+		}
+	}
+	sort.Slice(notes, func(i, j int) bool {
+		if notes[i].by != notes[j].by {
+			return notes[i].by < notes[j].by
+		}
+		return notes[i].text < notes[j].text
+	})
+	texts := make([]string, 0, len(notes))
+	seen := map[string]bool{}
+	for _, n := range notes {
+		line := fmt.Sprintf("%s: %s", n.by, n.text)
+		if seen[line] {
+			continue
+		}
+		seen[line] = true
+		texts = append(texts, line)
+	}
+	return remaining, sortedKeys(waivedSet), strings.Join(texts, "; ")
+}
+
+// waiverCovers reports whether a waiver's path list covers one overlapping
+// path. An empty list covers the whole overlap with that sibling; a directory
+// covers everything under it.
+func waiverCovers(paths []string, candidate string) bool {
+	if len(paths) == 0 {
+		return true
+	}
+	for _, p := range paths {
+		p = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(p), "./"), "/")
+		if p == "" {
+			continue
+		}
+		if p == candidate || pathWithin(candidate, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func dependencyReason(downstream, upstream TaskRelationInput) (reason, detail string) {
@@ -423,18 +565,22 @@ func dependencyReason(downstream, upstream TaskRelationInput) (reason, detail st
 }
 
 // writeOverlap returns the specific paths that make two write sets intersect,
-// and whether any of them names a concrete file. A directory in one set that
-// contains a path in the other counts: the directory is only ever in a write
-// set because the exact file was unknown.
-func writeOverlap(a, b []string) ([]string, bool) {
+// and which of them both sets name EXACTLY. A directory in one set that
+// contains a path in the other also counts as an intersection -- the directory
+// is only ever in a write set because the exact file was unknown -- but it is
+// not an exact match, so it stays a shared-package finding rather than
+// claiming the two tasks named the same file.
+func writeOverlap(a, b []string) (overlap []string, exact map[string]bool) {
 	out := map[string]bool{}
-	sharedFile := false
+	exact = map[string]bool{}
 	for _, pa := range a {
 		for _, pb := range b {
 			switch {
 			case pa == pb:
 				out[pa] = true
-				sharedFile = sharedFile || isFilePath(pa)
+				if isFilePath(pa) {
+					exact[pa] = true
+				}
 			case !isFilePath(pa) && pathWithin(pb, pa):
 				out[pb] = true
 			case !isFilePath(pb) && pathWithin(pa, pb):
@@ -442,7 +588,19 @@ func writeOverlap(a, b []string) ([]string, bool) {
 			}
 		}
 	}
-	return sortedKeys(out), sharedFile
+	return sortedKeys(out), exact
+}
+
+// namesSharedFile reports whether any surviving overlap path is one both write
+// sets named exactly, which is what separates a shared-file conflict from a
+// shared-package one.
+func namesSharedFile(paths []string, exact map[string]bool) bool {
+	for _, p := range paths {
+		if exact[p] {
+			return true
+		}
+	}
+	return false
 }
 
 // pathWithin reports whether child sits under dir. Both are slash-separated
@@ -736,6 +894,14 @@ func MarshalTaskScope(scope domain.WorkflowTaskScope) (string, error) {
 	} {
 		if *p == nil {
 			*p = []string{}
+		}
+	}
+	if scope.SafeWriteOverlaps == nil {
+		scope.SafeWriteOverlaps = []domain.WorkflowTaskSafeOverlap{}
+	}
+	for i := range scope.SafeWriteOverlaps {
+		if scope.SafeWriteOverlaps[i].Paths == nil {
+			scope.SafeWriteOverlaps[i].Paths = []string{}
 		}
 	}
 	b, err := json.Marshal(scope)

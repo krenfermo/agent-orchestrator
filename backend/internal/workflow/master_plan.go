@@ -42,6 +42,31 @@ type PlannedStep struct {
 	// hashes -- exactly as it did before these fields existed.
 	Files    []string `json:"files,omitempty"`
 	Packages []string `json:"packages,omitempty"`
+	// SafeWriteOverlaps are this step's OPTIONAL waivers: overlaps with a
+	// named sibling step that are safe to share despite both steps writing
+	// there. Absent a waiver, an overlapping write set is classified as a
+	// probable write conflict -- that default is deliberate, and a waiver is
+	// the only thing that clears it.
+	//
+	// Also omitempty and nil when undeclared, so a plan that declares none
+	// serializes, and hashes, exactly as it did before this field existed.
+	SafeWriteOverlaps []PlannedSafeOverlap `json:"safeWriteOverlaps,omitempty"`
+}
+
+// PlannedSafeOverlap is a plan-level declaration that a write-set overlap with
+// one other step is not a conflict. It is the plan-text form of
+// domain.WorkflowTaskSafeOverlap, in plan step ids rather than task ids.
+type PlannedSafeOverlap struct {
+	// With is the other step's id. Required: a waiver that names no
+	// counterpart would be a blanket exemption, which is exactly what the
+	// conflict default exists to prevent.
+	With string `json:"with"`
+	// Paths narrows the waiver to specific paths; a directory waives
+	// everything under it. Empty waives the whole overlap with that step.
+	Paths []string `json:"paths,omitempty"`
+	// Reason is why sharing is safe. Required, and stored with the
+	// classification so the waived decision explains itself later.
+	Reason string `json:"reason"`
 }
 
 type PlanValidation struct {
@@ -136,6 +161,16 @@ func NormalizeAndValidatePlan(plan MasterPlan, objective string, maxSteps int) (
 		if s.Packages = normalizeStrings(s.Packages); len(s.Packages) == 0 {
 			s.Packages = nil
 		}
+		for j := range s.SafeWriteOverlaps {
+			w := &s.SafeWriteOverlaps[j]
+			w.With, w.Reason = strings.TrimSpace(w.With), strings.TrimSpace(w.Reason)
+			if w.Paths = normalizeStrings(w.Paths); len(w.Paths) == 0 {
+				w.Paths = nil
+			}
+		}
+		if len(s.SafeWriteOverlaps) == 0 {
+			s.SafeWriteOverlaps = nil
+		}
 		if s.Verify.Commands == nil {
 			s.Verify.Commands = []VerificationCommandCheck{}
 		}
@@ -160,6 +195,25 @@ func NormalizeAndValidatePlan(plan MasterPlan, objective string, maxSteps int) (
 		for _, dep := range s.Dependencies {
 			if !ids[dep] {
 				add(fmt.Sprintf("step %q has unknown dependency %q", s.ID, dep))
+			}
+		}
+		// A waiver is the one thing that can turn a probable write conflict
+		// into independent work, so a malformed one is a plan error rather
+		// than something to quietly drop: a waiver naming a step that does not
+		// exist, or naming itself, or stating no reason, is never what the
+		// planner meant, and letting it through would leave a real overlap
+		// looking reviewed when nobody reviewed it.
+		for _, w := range s.SafeWriteOverlaps {
+			switch {
+			case w.With == "":
+				add(fmt.Sprintf("step %q has a safe write overlap with no target step", s.ID))
+			case w.With == s.ID:
+				add(fmt.Sprintf("step %q declares a safe write overlap with itself", s.ID))
+			case !ids[w.With]:
+				add(fmt.Sprintf("step %q has a safe write overlap with unknown step %q", s.ID, w.With))
+			}
+			if w.Reason == "" {
+				add(fmt.Sprintf("step %q has a safe write overlap without a reason", s.ID))
 			}
 		}
 	}
