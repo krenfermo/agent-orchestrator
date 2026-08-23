@@ -168,7 +168,7 @@ func TestRestartResumesAfterASelfRemediableStop(t *testing.T) {
 
 	// Simulate the restart: a fresh Coordinator over the same durable rows,
 	// with nothing carried over in memory.
-	restarted := newAutonomousCoordinator(fx.store, fx.clk, fx.spawner, fx.planner, fx.ws, fx.launcher, fx.verifier, fx.sender, fx.wake)
+	restarted := newAutonomousCoordinator(fx.store, fx.clk, fx.spawner, fx.planner, fx.ws, fx.launcher, fx.verifier, fx.sender, fx.wake, fx.emails)
 	if err := restarted.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile after restart: %v", err)
 	}

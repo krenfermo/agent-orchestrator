@@ -17,12 +17,15 @@ package workflow_test
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/notify"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/sqlitetest"
@@ -110,6 +113,38 @@ type autonomousFixture struct {
 	launcher *fakeReviewerLauncher
 	verifier *fakeVerifyRunner
 	sender   *fakeMessageSender
+	// emails records every notification the REAL notify.Manager decided to
+	// send. The manager is wired for real (over the same sqlite store) rather
+	// than faked, because the property these tests care about — one
+	// notification per real event, however many times a poll re-derives it —
+	// lives in the store's durable dedupe index, not in the sink.
+	emails *autoEmailer
+}
+
+// autoEmailer is attention_notify_internal_test.go's recordingEmailer, for the
+// external test package.
+type autoEmailer struct {
+	mu   sync.Mutex
+	sent []domain.NotificationRecord
+}
+
+func (e *autoEmailer) EmailNotification(_ context.Context, rec domain.NotificationRecord) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sent = append(e.sent, rec)
+	return nil
+}
+
+func (e *autoEmailer) countOfType(typ domain.NotificationType) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	n := 0
+	for _, rec := range e.sent {
+		if rec.Type == typ {
+			n++
+		}
+	}
+	return n
 }
 
 // seedUser seeds a real User + two owned ProviderProfiles (claude-code,
@@ -187,15 +222,17 @@ func newAutonomousFixture(t *testing.T, plan workflowcore.MasterPlan) *autonomou
 	launcher := &fakeReviewerLauncher{}
 	verifier := &fakeVerifyRunner{result: workflowcore.VerifyCommandExecution{ExitCode: 0}}
 	sender := &fakeMessageSender{}
-	coord := newAutonomousCoordinator(store, clk, spawner, planner, ws, launcher, verifier, sender, wakeSched)
+	emails := &autoEmailer{}
+	coord := newAutonomousCoordinator(store, clk, spawner, planner, ws, launcher, verifier, sender, wakeSched, emails)
 	poller := wakepoller.New(wakeSched, coord, wakepoller.Config{Clock: clk.Now})
 	return &autonomousFixture{
 		store: store, clk: clk, wake: wakeSched, poller: poller, coord: coord,
 		spawner: spawner, planner: planner, ws: ws, launcher: launcher, verifier: verifier, sender: sender,
+		emails: emails,
 	}
 }
 
-func newAutonomousCoordinator(store *sqlite.Store, clk *fakeClock, spawner *autoSpawner, planner *staticPlanner, ws *fakeWorkspaceFacts, launcher *fakeReviewerLauncher, verifier *fakeVerifyRunner, sender *fakeMessageSender, wakeSched *wake.Scheduler) *workflowcore.Coordinator {
+func newAutonomousCoordinator(store *sqlite.Store, clk *fakeClock, spawner *autoSpawner, planner *staticPlanner, ws *fakeWorkspaceFacts, launcher *fakeReviewerLauncher, verifier *fakeVerifyRunner, sender *fakeMessageSender, wakeSched *wake.Scheduler, emails *autoEmailer) *workflowcore.Coordinator {
 	return workflowcore.New(workflowcore.Deps{
 		Store: store, Projects: store,
 		Spawner: spawner, SessionFacts: store, WorkspaceFacts: ws,
@@ -207,7 +244,13 @@ func newAutonomousCoordinator(store *sqlite.Store, clk *fakeClock, spawner *auto
 		ProviderProfiles:  store,
 		ExecutionPolicies: store,
 		RuntimeIsolation:  &identityRuntimeIsolation{store: store},
-		Clock:             clk.Now, NewID: autoIDSeq("id"),
+		Notifications: notify.New(notify.Deps{
+			Store:   store,
+			Emailer: emails,
+			Logger:  slog.Default(),
+			Clock:   clk.Now,
+		}),
+		Clock: clk.Now, NewID: autoIDSeq("id"),
 	})
 }
 

@@ -528,7 +528,16 @@ func (c *Coordinator) maybeScheduleAutonomousHeartbeat(ctx stdctx.Context, runID
 	// could not name — used to end the heartbeat as hard as an exhausted fix
 	// budget, which is how a run AO had already recovered from stayed silent:
 	// nothing was waiting on a person, and nothing was going to call back.
-	if run.State == domain.WorkflowRunNeedsAttention && c.stopIsHumanOwned(ctx, run) {
+	//
+	// One human-owned reason is deliberately exempt: the child mirror. It is not
+	// a decision addressed to this run at all (the person acts on the CHILD),
+	// and ending the parent's heartbeat on it is what made the mirror permanent
+	// — the heartbeat is the only thing that re-enters reconcileMasterTasks, so
+	// with it gone nothing was left to notice the child had recovered. The
+	// parent keeps watching; reconcileMirroredChildStop decides, from the
+	// child's current state, whether the mirror is still true.
+	if run.State == domain.WorkflowRunNeedsAttention && c.stopIsHumanOwned(ctx, run) &&
+		!c.stopIsMirroredChildStop(ctx, run) {
 		return
 	}
 	if !policyForRun(run).Execution.AutonomousMode {
@@ -560,6 +569,13 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 	if err != nil {
 		return err
 	}
+	// Before anything is decided about this plan: re-derive the one piece of the
+	// parent's state that is not the parent's own, from the children's CURRENT
+	// durable states. It runs first so every branch below — promotion, task
+	// completion, the plan's own completeRun, the next task's dispatch — sees a
+	// parent whose attention reflects what is true now rather than what was true
+	// when some child stopped hours ago.
+	run = c.reconcileMirroredChildStop(ctx, run, tasks)
 	completed := map[string]bool{}
 	active := false
 	for i := range tasks {
@@ -598,11 +614,9 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 			child.Run.State == domain.WorkflowRunWaiting ||
 			(child.Run.State == domain.WorkflowRunNeedsAttention && !c.stopIsHumanOwned(ctx, child.Run))
 		if childCanAdvance {
-			// The child is progressing, so a parent still mirroring an older
-			// stop of this child's is mirroring something that is no longer
-			// true. Clearing it here also restores the parent's own autonomous
-			// heartbeat, which the mirror had stopped.
-			run = c.clearMirroredChildStop(ctx, run)
+			// The parent's mirror of this child was already re-derived above,
+			// from the children's current states, for every branch of this pass
+			// — not just this one.
 			var workDone, reviewPending bool
 			for _, s := range child.Steps {
 				if s.Step.Kind == domain.WorkflowStepWork && s.Step.State == domain.WorkflowStepCompleted {
@@ -695,7 +709,12 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 			if run.State == domain.WorkflowRunRunning {
 				_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, c.clock())
 			}
-			c.recordAttentionStop(ctx, run, nil, ReasonChildNeedsAttention,
+			// Once per distinct occurrence, not once per poll: this branch is
+			// re-derived on every reconcile pass for as long as the child stays
+			// stopped, and the parent keeps its heartbeat through the mirror
+			// (see maybeScheduleAutonomousHeartbeat), so there are now many more
+			// passes over the same unchanged condition than there used to be.
+			c.recordAttentionStopOnce(ctx, run, nil, ReasonChildNeedsAttention,
 				fmt.Sprintf("task %d (%s) stopped and needs a decision — run %s", task.Ordinal, task.Title, child.Run.ID))
 			return nil
 		}

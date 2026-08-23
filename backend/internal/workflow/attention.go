@@ -570,27 +570,78 @@ func (c *Coordinator) unparkRun(ctx stdctx.Context, run domain.WorkflowRun, reas
 	return run
 }
 
-// clearMirroredChildStop releases a master run from a stop that was never its
-// own: ReasonChildNeedsAttention is a mirror of a child's state, recorded so
-// the parent does not go silent while its task is stopped. Once that child is
-// demonstrably progressing again the mirrored condition is simply false, and
-// leaving it in place is what kept a recovered child's parent showing
-// "Te necesita" — and, because the mirror is a human-owned reason, killed the
-// parent's own autonomous heartbeat, which is the only thing that drives the
-// child forward.
+// reconcileMirroredChildStop is the single authoritative rule for the one
+// attention reason a master run does not own: ReasonChildNeedsAttention is a
+// MIRROR of a child's state, recorded so the parent does not go silent while
+// its task is stopped, and it is therefore only ever as true as the child's
+// state is RIGHT NOW.
 //
-// Only the mirror is cleared. A parent stopped for any other reason (a failed
-// integration, an exhausted planner, a child that FAILED) is untouched, and a
-// child that is itself still stopped on a human decision never reaches here.
-func (c *Coordinator) clearMirroredChildStop(ctx stdctx.Context, run domain.WorkflowRun) domain.WorkflowRun {
+// Before this rule the mirror was historical: reconcileMasterTasksOnce wrote it
+// when a child stopped on a human decision and cleared it only from inside the
+// "this child can advance" branch, which a parent could stop reaching at all —
+// the mirror is a human-owned reason, so it killed the parent's own autonomous
+// heartbeat (maybeScheduleAutonomousHeartbeat), and the heartbeat was the only
+// thing that would ever have called back to notice the child had recovered.
+// The result is the incident this rule exists to remove: child running, parent
+// durably "Te necesita — child_needs_attention", every later task blocked, and
+// nothing short of a human clicking Continue on the PARENT to break the tie.
+//
+// The rule is: derive the mirror from the children's current durable states, on
+// every reconcile pass.
+//
+//   - No child of this plan is currently stopped on a decision a person has to
+//     make => the mirror is false => unpark the parent.
+//   - Any child still stopped on a human-owned reason => the mirror is still
+//     true => leave the parent exactly where it is.
+//   - Any child terminally FAILED => not this rule's business. A failure is not
+//     a recovery, and reconcileMasterTasksOnce's own failure branch supersedes
+//     the mirror with ReasonChildFailed. Never clear it here.
+//
+// Everything else about the parent is untouched. A parent stopped for any other
+// reason — a failed integration, an exhausted planner, a dirty worktree, a
+// child that failed — does not match the reason check and is left alone; this
+// is the whole guarantee that "unrelated parent attention is never cleared".
+//
+// Idempotent by construction: the clear moves the run out of needs_attention
+// and writes an attention_cleared checkpoint, so a repeat pass fails both the
+// state check and the reason check and does nothing at all.
+func (c *Coordinator) reconcileMirroredChildStop(ctx stdctx.Context, run domain.WorkflowRun, tasks []domain.WorkflowTask) domain.WorkflowRun {
 	if run.State != domain.WorkflowRunNeedsAttention {
 		return run
 	}
-	reason, _, ok := c.stopReason(ctx, run)
-	if !ok || reason != ReasonChildNeedsAttention {
+	if !c.stopIsMirroredChildStop(ctx, run) {
 		return run
 	}
-	return c.unparkRun(ctx, run, reason, "the task this objective was waiting on resumed")
+	for _, task := range tasks {
+		if task.ExecutionRunID == nil {
+			continue
+		}
+		child, ok, err := c.store.GetWorkflowRun(ctx, *task.ExecutionRunID)
+		if err != nil || !ok {
+			// Cannot prove the mirror is stale, so do not act on the guess.
+			// Failing to read is never a licence to un-park a stopped run.
+			return run
+		}
+		if child.State == domain.WorkflowRunFailed {
+			return run
+		}
+		if child.State == domain.WorkflowRunNeedsAttention && c.stopIsHumanOwned(ctx, child) {
+			return run
+		}
+	}
+	return c.unparkRun(ctx, run, ReasonChildNeedsAttention,
+		"no task of this objective is waiting on a decision any more")
+}
+
+// stopIsMirroredChildStop reports whether a stopped run's current durable stop
+// is the child mirror rather than a decision of its own. Two callers need this
+// exact distinction: reconcileMirroredChildStop, to know what it may clear, and
+// maybeScheduleAutonomousHeartbeat, to know that this one human-owned reason
+// must NOT end the parent's heartbeat — the person acts on the child, and the
+// parent has to keep watching in order to notice when they have.
+func (c *Coordinator) stopIsMirroredChildStop(ctx stdctx.Context, run domain.WorkflowRun) bool {
+	reason, _, ok := c.stopReason(ctx, run)
+	return ok && reason == ReasonChildNeedsAttention
 }
 
 // clearIntegrationStop releases a master run from an integration failure it has
