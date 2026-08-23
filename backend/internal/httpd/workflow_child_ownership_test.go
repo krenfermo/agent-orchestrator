@@ -11,10 +11,10 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	authsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/authsvc"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/executionpolicy"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/providerprofile"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/questions"
-	authsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/authsvc"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/sqlitetest"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"

@@ -79,14 +79,14 @@ type WorkflowPolicy struct {
 // because a snapshot has no ID/UserID/CreatedAt/UpdatedAt of its own -- it is
 // a frozen value, not a referenceable row.
 type ExecutionPolicySnapshot struct {
-	Version                   string               `json:"version"`
-	AutonomousMode            bool                 `json:"autonomousMode"`
-	PlannerPriority           []ProviderProfileID  `json:"plannerPriority"`
-	WorkerPriority            []ProviderProfileID  `json:"workerPriority"`
-	ReviewerPriority          []ProviderProfileID  `json:"reviewerPriority"`
-	DecisionResolverPriority  []ProviderProfileID  `json:"decisionResolverPriority"`
-	FallbackBehavior          FallbackBehavior     `json:"fallbackBehavior"`
-	ReviewIndependence        ReviewIndependence   `json:"reviewIndependence"`
+	Version                  string              `json:"version"`
+	AutonomousMode           bool                `json:"autonomousMode"`
+	PlannerPriority          []ProviderProfileID `json:"plannerPriority"`
+	WorkerPriority           []ProviderProfileID `json:"workerPriority"`
+	ReviewerPriority         []ProviderProfileID `json:"reviewerPriority"`
+	DecisionResolverPriority []ProviderProfileID `json:"decisionResolverPriority"`
+	FallbackBehavior         FallbackBehavior    `json:"fallbackBehavior"`
+	ReviewIndependence       ReviewIndependence  `json:"reviewIndependence"`
 }
 
 // ExecutionPolicySnapshotFrom captures a point-in-time copy of a

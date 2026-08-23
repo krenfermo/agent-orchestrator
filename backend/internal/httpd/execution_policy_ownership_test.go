@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
-	"github.com/aoagents/agent-orchestrator/backend/internal/service/executionpolicy"
 	authsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/authsvc"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/executionpolicy"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/providerprofile"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/sqlitetest"
 )
