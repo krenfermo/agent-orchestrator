@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -59,6 +60,21 @@ type IncidentView struct {
 	// was already running" apart from "every provider is busy, AO will retry" —
 	// three situations that look identical from the incident's state alone.
 	LaunchOutcome string `json:"launchOutcome,omitempty"`
+
+	// Progress is the single derived value the modal renders. Everything the UI
+	// shows about motion comes from here, so it never simulates progress with a
+	// timer: a progress that advanced on a clock rather than on a fact would
+	// eventually claim a repair was verified while it was still building.
+	Progress string `json:"progress"`
+	// DiagnosticHarness / CapacityReasons / NextEvaluationAt explain the two
+	// states a person would otherwise read as an unexplained spinner.
+	DiagnosticHarness string   `json:"diagnosticHarness,omitempty"`
+	CapacityReasons   []string `json:"capacityReasons,omitempty"`
+	NextEvaluationAt  string   `json:"nextEvaluationAt,omitempty"`
+	// ClosureCause / ClosureEvidence say why AO stopped asking, for an incident
+	// whose condition ended without a repair.
+	ClosureCause    string   `json:"closureCause,omitempty"`
+	ClosureEvidence []string `json:"closureEvidence,omitempty"`
 
 	// Repair is the linked repair run and its audit trail, present once a
 	// class-B repair has been approved and dispatched. The modal needs it to say
@@ -129,6 +145,10 @@ type IncidentRepairView struct {
 	ApprovedBy string `json:"approvedBy,omitempty"`
 	Generation int    `json:"generation,omitempty"`
 	MaxRepairs int    `json:"maxRepairs"`
+	// The outcome facts, once the repair run has produced them.
+	ReviewerHarness string `json:"reviewerHarness,omitempty"`
+	VerifyResult    string `json:"verifyResult,omitempty"`
+	FinalSHA        string `json:"finalSha,omitempty"`
 }
 
 // IncidentResponse is the envelope every incident route returns.
@@ -158,7 +178,7 @@ func (c *WorkflowsController) getIncident(w http.ResponseWriter, r *http.Request
 		writeIncidentError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, IncidentResponse{Incident: incidentView(inc, &pack)})
+	envelope.WriteJSON(w, http.StatusOK, IncidentResponse{Incident: incidentView(inc, &pack, adv.DeriveIncidentStatus(r.Context(), inc))})
 }
 
 func (c *WorkflowsController) diagnoseIncident(w http.ResponseWriter, r *http.Request) {
@@ -172,7 +192,7 @@ func (c *WorkflowsController) diagnoseIncident(w http.ResponseWriter, r *http.Re
 		writeIncidentError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusAccepted, IncidentResponse{Incident: incidentView(inc, &pack)})
+	envelope.WriteJSON(w, http.StatusAccepted, IncidentResponse{Incident: incidentView(inc, &pack, adv.DeriveIncidentStatus(r.Context(), inc))})
 }
 
 // submitIncidentDiagnosis is the Diagnostic Agent's callback. It is a separate
@@ -196,7 +216,7 @@ func (c *WorkflowsController) submitIncidentDiagnosis(w http.ResponseWriter, r *
 		writeIncidentError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, IncidentResponse{Incident: incidentView(inc, nil)})
+	envelope.WriteJSON(w, http.StatusOK, IncidentResponse{Incident: incidentView(inc, nil, adv.DeriveIncidentStatus(r.Context(), inc))})
 }
 
 // IncidentDiagnosisSubmissionBody documents the Diagnostic Agent's callback
@@ -264,19 +284,27 @@ func (c *WorkflowsController) executeIncidentAction(w http.ResponseWriter, r *ht
 		writeIncidentError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, IncidentResponse{Incident: incidentView(inc, nil)})
+	envelope.WriteJSON(w, http.StatusOK, IncidentResponse{Incident: incidentView(inc, nil, adv.DeriveIncidentStatus(r.Context(), inc))})
 }
 
 // incidentView renders the durable incident for the modal, computing every
 // decision the UI would otherwise have to guess at.
-func incidentView(inc workflowcore.Incident, pack *workflowcore.IncidentContextPack) IncidentView {
+func incidentView(inc workflowcore.Incident, pack *workflowcore.IncidentContextPack, status workflowcore.IncidentStatus) IncidentView {
 	v := IncidentView{
 		ID: inc.ID, RunID: inc.RunID, State: string(inc.State),
 		StopReason: inc.StopReason, StopDetail: inc.StopDetail, Stale: inc.Stale,
 		Diagnoses: inc.Diagnoses, MaxDiagnoses: workflowcore.MaxIncidentDiagnoses,
 		Repairs: inc.Repairs, MaxRepairs: workflowcore.MaxIncidentRepairs,
 		CanDiagnose: inc.CanDiagnose(), CanExecute: inc.CanExecute(),
-		LaunchOutcome: string(inc.LaunchOutcome),
+		LaunchOutcome:     string(inc.LaunchOutcome),
+		Progress:          string(status.Progress),
+		DiagnosticHarness: status.DiagnosticHarness,
+		CapacityReasons:   status.CapacityReasons,
+		ClosureCause:      inc.ClosureCause,
+		ClosureEvidence:   inc.ClosureEvidence,
+	}
+	if status.NextEvaluationAt != nil {
+		v.NextEvaluationAt = status.NextEvaluationAt.UTC().Format(time.RFC3339)
 	}
 	if pack != nil {
 		pv := IncidentPackView{
@@ -294,6 +322,9 @@ func incidentView(inc workflowcore.Incident, pack *workflowcore.IncidentContextP
 		v.Repair = &IncidentRepairView{
 			RunID: inc.RepairRunID, ApprovedBy: inc.ApprovedBy,
 			Generation: inc.Repairs, MaxRepairs: workflowcore.MaxIncidentRepairs,
+			ReviewerHarness: status.ReviewerHarness,
+			VerifyResult:    status.VerifyResult,
+			FinalSHA:        status.FinalSHA,
 		}
 	}
 	if inc.Diagnosis == nil {

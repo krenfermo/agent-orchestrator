@@ -303,6 +303,11 @@ type IncidentRecord struct {
 	VerifyResult     string `json:"verifyResult,omitempty"`
 	FinalSHA         string `json:"finalSha,omitempty"`
 
+	// Closure fields — Checkpoint 8P-E.21. ClosureCause names WHY the condition
+	// stopped existing and Evidence is the minimum observation that justifies
+	// saying so, because "AO stopped asking" must always be answerable.
+	ClosureCause string `json:"closureCause,omitempty"`
+
 	// Approval/execution fields.
 	ApprovedBy string `json:"approvedBy,omitempty"`
 	Outcome    string `json:"outcome,omitempty"`
@@ -361,6 +366,17 @@ type Incident struct {
 	// restart re-derives them rather than losing the link.
 	RepairRunID string
 	ApprovedBy  string
+
+	// DiagnosticHarness is the provider the newest investigation was routed to.
+	DiagnosticHarness string
+	// WaitingForCapacity is true when the newest thing that happened to this
+	// incident was a capacity wait rather than a launch.
+	WaitingForCapacity bool
+	CapacityReasons    []string
+
+	// ClosureCause/ClosureEvidence explain a CLOSED incident.
+	ClosureCause    string
+	ClosureEvidence []string
 
 	// FailedGeneration is the highest diagnosis generation whose launch is
 	// durably known to have failed. A generation at or below it is dead, not
@@ -494,6 +510,10 @@ func foldIncident(incidentID string, cps []domain.WorkflowCheckpoint) (Incident,
 		switch cp.DurablePhase {
 		case incidentDiagnosingPhase:
 			inc.Diagnoses++
+			inc.DiagnosticHarness = rec.Harness
+			// A launch supersedes any earlier capacity wait: AO is no longer
+			// waiting for a provider, it has one.
+			inc.WaitingForCapacity, inc.CapacityReasons = false, nil
 		case incidentDiagnosedPhase, incidentRefusedPhase:
 			// A refusal IS a diagnosis, and folding it as one is load-bearing:
 			// an unsafe/insufficient verdict's whole value is the evidence it
@@ -512,6 +532,12 @@ func foldIncident(incidentID string, cps []domain.WorkflowCheckpoint) (Incident,
 				Options: rec.Options, Action: rec.Action, Attempt: rec.DiagnosisAttempt,
 				PackDigest: rec.PackDigest, Harness: rec.Harness, At: cp.CreatedAt,
 			}
+		case ReasonIncidentDiagnosisCapacityWait:
+			inc.WaitingForCapacity = true
+			inc.CapacityReasons = rec.RoutingReasons
+		case incidentClosedPhase:
+			inc.ClosureCause = rec.ClosureCause
+			inc.ClosureEvidence = rec.Evidence
 		case incidentLaunchFailedPhase:
 			if rec.DiagnosisAttempt > inc.FailedGeneration {
 				inc.FailedGeneration = rec.DiagnosisAttempt

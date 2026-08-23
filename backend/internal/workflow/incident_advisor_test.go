@@ -410,7 +410,11 @@ func TestInsufficientEvidenceNeverExecutes(t *testing.T) {
 
 // ---- staleness --------------------------------------------------------------
 
-// A diagnosis must not outlive the situation it was taken against.
+// A diagnosis must not outlive the situation it was taken against. Since
+// Checkpoint 8P-E.21 that is expressed as a CLOSURE rather than merely as
+// staleness: the condition it was about is observably gone, so the incident
+// stops asking for attention instead of lingering with advice nobody should
+// take.
 func TestDiagnosisIsNotExecutedAfterTheSituationMoves(t *testing.T) {
 	f := newAdvisorFixture(t, workflowcore.ReasonFixCycleNotStarted, "the worker never started this cycle")
 	inc := f.diagnoseWith(t, workflowcore.IncidentDiagnosisSubmission{
@@ -421,15 +425,18 @@ func TestDiagnosisIsNotExecutedAfterTheSituationMoves(t *testing.T) {
 	// The stop changes underneath: a different reason entirely.
 	f.parkAsFixStop(workflowcore.ReasonFixBudgetExhausted, "the reviewer still requests changes")
 
-	if _, err := f.c.ExecuteIncidentAction(context.Background(), f.runID, inc.ID, "morakurt@icloud.com"); !errors.Is(err, workflowcore.ErrIncidentStale) {
-		t.Fatalf("err = %v, want ErrIncidentStale", err)
+	if _, err := f.c.ExecuteIncidentAction(context.Background(), f.runID, inc.ID, "morakurt@icloud.com"); err == nil {
+		t.Fatal("a diagnosis taken against a different situation was executed")
 	}
 	loaded, err := f.c.LoadIncident(context.Background(), f.runID, inc.ID)
 	if err != nil {
 		t.Fatalf("LoadIncident: %v", err)
 	}
-	if !loaded.Stale {
-		t.Fatal("the incident is not marked stale after its stop changed")
+	if loaded.State != workflowcore.IncidentClosed {
+		t.Fatalf("state = %q, want closed once its condition changed", loaded.State)
+	}
+	if loaded.ClosureCause == "" || len(loaded.ClosureEvidence) == 0 {
+		t.Fatal("the closure recorded no cause or evidence; AO must be able to say why it stopped asking")
 	}
 }
 

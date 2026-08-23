@@ -37,6 +37,10 @@ type IncidentAdvisor interface {
 	// LoadIncident folds one incident, marking it stale when the run's current
 	// stop no longer matches it.
 	LoadIncident(ctx context.Context, runID, incidentID string) (workflowcore.Incident, error)
+	// DeriveIncidentStatus projects an incident onto the modal's vocabulary.
+	DeriveIncidentStatus(ctx context.Context, inc workflowcore.Incident) workflowcore.IncidentStatus
+	// RepairOriginFor reports whether a run is an Incident Advisor repair.
+	RepairOriginFor(ctx context.Context, runID string) (workflowcore.IncidentRepairOrigin, bool)
 }
 
 func (s *Service) OpenIncident(ctx context.Context, runID string) (workflowcore.Incident, error) {
@@ -61,4 +65,12 @@ func (s *Service) ExecuteIncidentAction(ctx context.Context, runID, incidentID, 
 
 func (s *Service) LoadIncident(ctx context.Context, runID, incidentID string) (workflowcore.Incident, error) {
 	return s.coordinator.LoadIncident(ctx, runID, incidentID)
+}
+
+func (s *Service) DeriveIncidentStatus(ctx context.Context, inc workflowcore.Incident) workflowcore.IncidentStatus {
+	return s.coordinator.DeriveIncidentStatus(ctx, inc)
+}
+
+func (s *Service) RepairOriginFor(ctx context.Context, runID string) (workflowcore.IncidentRepairOrigin, bool) {
+	return s.coordinator.RepairOriginFor(ctx, runID)
 }

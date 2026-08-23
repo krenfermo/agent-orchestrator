@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -60,6 +61,12 @@ export function WorkflowIncidentDialog({
 					</DialogDescription>
 				</DialogHeader>
 
+				{/* The one place motion is shown, and it is entirely backend-derived.
+				    There is deliberately no timer here: a progress that advanced on a
+				    clock rather than on a fact would eventually claim a repair was
+				    verified while it was still building. */}
+				{incident && <ProgressBanner incident={incident} />}
+
 				{error && <p className="text-sm text-destructive">{error}</p>}
 
 				{incident?.stale && (
@@ -87,6 +94,72 @@ export function WorkflowIncidentDialog({
 				)}
 			</DialogContent>
 		</Dialog>
+	);
+}
+
+/**
+ * ProgressBanner renders the backend's single derived progress value, plus the
+ * facts that stop each state from reading as an unexplained spinner: which
+ * provider is investigating, why there is no capacity and when AO will look
+ * again, and — once a repair exists — the run, its reviewer, its verification
+ * and the commit it landed at.
+ */
+function ProgressBanner({ incident }: { incident: IncidentView }) {
+	const { t } = useTranslation();
+	const repair = incident.repair;
+	return (
+		<div className="space-y-1 rounded border bg-muted/40 p-3 text-sm">
+			<p className="font-medium">{t(`incident.progress.${incident.progress}` as never)}</p>
+
+			{incident.diagnosticHarness && (
+				<p className="text-muted-foreground">
+					{t("incident.diagnosticAgent", { harness: incident.diagnosticHarness })}
+				</p>
+			)}
+			{incident.capacityReasons?.length ? (
+				<p className="text-muted-foreground">
+					{t("incident.capacityWhy", { reasons: incident.capacityReasons.join(", ") })}
+				</p>
+			) : null}
+			{incident.nextEvaluationAt && (
+				<p className="text-muted-foreground">
+					{t("incident.nextEvaluation", { at: new Date(incident.nextEvaluationAt).toLocaleTimeString() })}
+				</p>
+			)}
+			{incident.closureCause && (
+				<p className="text-muted-foreground">
+					{t("incident.closedBecause", { cause: incident.closureCause })}
+				</p>
+			)}
+			{incident.closureEvidence?.length ? (
+				<ul className="list-disc pl-5 text-muted-foreground">
+					{incident.closureEvidence.map((e: string) => (
+						<li key={e}>{e}</li>
+					))}
+				</ul>
+			) : null}
+
+			{repair?.runId && (
+				<div className="mt-2 space-y-1 border-t pt-2">
+					<p className="font-medium">{t("incident.repairRun")}</p>
+					{/* Navigable, because a repair is a real workflow run and an
+					    operator must be able to read it rather than take the modal's
+					    word for what happened. */}
+					<Link className="underline" params={{ workflowId: repair.runId }} to="/workflows/$workflowId">
+						{t("incident.openRepairRun")}
+					</Link>
+					{repair.reviewerHarness && (
+						<p className="text-muted-foreground">{t("incident.reviewer", { harness: repair.reviewerHarness })}</p>
+					)}
+					{repair.verifyResult && (
+						<p className="text-muted-foreground">{t("incident.verifyResult", { result: repair.verifyResult })}</p>
+					)}
+					{repair.finalSha && (
+						<p className="font-mono text-muted-foreground">{t("incident.finalSha", { sha: repair.finalSha.slice(0, 12) })}</p>
+					)}
+				</div>
+			)}
+		</div>
 	);
 }
 

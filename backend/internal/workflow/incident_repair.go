@@ -154,6 +154,13 @@ func (c *Coordinator) launchIncidentRepair(ctx stdctx.Context, run domain.Workfl
 		return "", err
 	}
 
+	// Checkpoint 8P-E.21: the repair run's own ledger says what it is and where
+	// it came from, so the Board can label it as AO's automatic repair rather
+	// than mixing it into the project's ordinary work. It lives on the repair
+	// run (not the incident's) because it answers a question asked FROM that
+	// run: "why does this exist?".
+	c.markRepairRunOrigin(ctx, created.Run, inc, run.ID, approvedBy)
+
 	if _, err := c.StartRun(ctx, created.Run.ID); err != nil {
 		// The run exists and is linked; starting it again is what recovery and
 		// the ordinary continue path already do, so this is reported rather
@@ -372,4 +379,72 @@ func (c *Coordinator) repairVerifyResult(ctx stdctx.Context, repairRunID string)
 		}
 	}
 	return result
+}
+
+// incidentRepairOriginPhase marks a run as an Incident Advisor repair.
+const incidentRepairOriginPhase = "incident_repair_origin"
+
+// IncidentRepairOrigin is a repair run's provenance, derived at read time.
+type IncidentRepairOrigin struct {
+	// Origin is the constant "incident_repair", so a reader can branch on one
+	// value rather than on the presence of fields.
+	Origin string
+	// IncidentID and SourceRunID are what this repair is for and where it came
+	// from, so the Board can link back rather than stranding the operator in an
+	// unexplained run.
+	IncidentID  string
+	SourceRunID string
+	ApprovedBy  string
+}
+
+// markRepairRunOrigin records the provenance on the repair run itself.
+// Best-effort: a repair that ran and was reviewed is not undone by a missing
+// label, and the incident's own ledger still holds the link.
+func (c *Coordinator) markRepairRunOrigin(ctx stdctx.Context, repairRun domain.WorkflowRun, inc Incident, sourceRunID, approvedBy string) {
+	rec := IncidentRecord{
+		IncidentID: inc.ID, StopReason: inc.StopReason,
+		RepairRunID: repairRun.ID, ApprovedBy: approvedBy,
+		Note: sourceRunID,
+	}
+	payload, err := marshalIncidentRecord(rec)
+	if err != nil {
+		return
+	}
+	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+		ID:            "wfc-" + c.newID(),
+		WorkflowRunID: repairRun.ID,
+		ProjectID:     repairRun.ProjectID,
+		NextAction: fmt.Sprintf("incident_repair_origin: automatic AO repair for incident %s (from run %s), approved by %s",
+			inc.ID, sourceRunID, approvedBy),
+		DurablePhase:   incidentRepairOriginPhase,
+		PayloadVersion: "v1",
+		RetryState:     payload,
+		CreatedAt:      c.clock(),
+	}); err != nil && c.log != nil {
+		c.log.Warn("workflow: could not label a repair run's origin", "repairRun", repairRun.ID, "err", err)
+	}
+}
+
+// RepairOriginFor reports whether a run is an Incident Advisor repair, and what
+// it is a repair OF. Used by the Board and the run view to label and group it
+// away from the project's ordinary work.
+func (c *Coordinator) RepairOriginFor(ctx stdctx.Context, runID string) (IncidentRepairOrigin, bool) {
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		return IncidentRepairOrigin{}, false
+	}
+	for _, cp := range cps {
+		if cp.DurablePhase != incidentRepairOriginPhase {
+			continue
+		}
+		rec, ok := decodeIncidentRecord(cp)
+		if !ok {
+			continue
+		}
+		return IncidentRepairOrigin{
+			Origin: "incident_repair", IncidentID: rec.IncidentID,
+			SourceRunID: rec.Note, ApprovedBy: rec.ApprovedBy,
+		}, true
+	}
+	return IncidentRepairOrigin{}, false
 }

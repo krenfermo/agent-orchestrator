@@ -142,6 +142,7 @@ func (c *Coordinator) OpenIncident(ctx stdctx.Context, runID string) (Incident, 
 		// different endpoint. A real E2E found it sitting at `open` with a
 		// completed repair run linked to it.
 		inc = c.reconcileIncidentRepair(ctx, run, inc)
+		inc = c.reconcileIncidentClosure(ctx, run, inc)
 		return inc, nil
 	}
 
@@ -626,6 +627,7 @@ func (c *Coordinator) LoadIncident(ctx stdctx.Context, runID, incidentID string)
 		// A dispatched repair is watched on every read, so its outcome lands in
 		// the incident without anyone having to poll a second endpoint.
 		inc = c.reconcileIncidentRepair(ctx, run, inc)
+		inc = c.reconcileIncidentClosure(ctx, run, inc)
 		if !inc.State.Terminal() {
 			if ferr := c.assertIncidentFresh(ctx, run, inc); ferr != nil {
 				inc.Stale = true

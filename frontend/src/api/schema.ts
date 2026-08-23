@@ -2676,9 +2676,12 @@ export interface components {
         };
         ControllersIncidentRepairView: {
             approvedBy?: string;
+            finalSha?: string;
             generation?: number;
             maxRepairs: number;
+            reviewerHarness?: string;
             runId: string;
+            verifyResult?: string;
         };
         ControllersIncidentResponse: {
             incident: components["schemas"]["ControllersIncidentView"];
@@ -2686,13 +2689,19 @@ export interface components {
         ControllersIncidentView: {
             canDiagnose: boolean;
             canExecute: boolean;
+            capacityReasons?: string[];
+            closureCause?: string;
+            closureEvidence?: string[];
             contextPack?: components["schemas"]["ControllersIncidentPackView"];
             diagnosesUsed: number;
             diagnosis?: components["schemas"]["ControllersIncidentDiagnosisView"];
+            diagnosticHarness?: string;
             id: string;
             launchOutcome?: string;
             maxDiagnoses: number;
             maxRepairs: number;
+            nextEvaluationAt?: string;
+            progress: string;
             repair?: components["schemas"]["ControllersIncidentRepairView"];
             repairsUsed: number;
             runId: string;
@@ -3017,6 +3026,12 @@ export interface components {
             updatedAt: string;
             workflowQuestionId: string;
             workflowRunId: string;
+        };
+        ControllersWorkflowRunOriginView: {
+            approvedBy?: string;
+            incidentId?: string;
+            kind: string;
+            sourceWorkflowId?: string;
         };
         ControllersWorkflowUsageResponse: {
             advisory: components["schemas"]["ControllersSessionRefreshAdvisoryResponse"];
@@ -4495,6 +4510,7 @@ export interface components {
             /** Format: date-time */
             nextWakeAt?: null | string;
             objective: string;
+            origin?: components["schemas"]["ControllersWorkflowRunOriginView"];
             /** @enum {string} */
             phase: "queued" | "planning" | "running" | "reviewing" | "fixing" | "verifying" | "waiting" | "waiting_for_capacity" | "retrying" | "blocked" | "needs_attention" | "completed" | "failed" | "cancelled";
             projectId: string;

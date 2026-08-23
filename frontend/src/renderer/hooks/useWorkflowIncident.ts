@@ -42,7 +42,15 @@ export function useWorkflowIncident(workflowId: string | undefined, enabled: boo
 			if (error) throw error;
 			return data.incident;
 		},
-		refetchInterval: (state) => (state.state.data?.state === "diagnosing" ? 3_000 : false),
+		// Poll while something is genuinely moving, and stop when it is not. The
+		// set is the backend's own progress vocabulary rather than a guess about
+		// which incident states are busy, so a new state cannot silently become
+		// un-polled.
+		refetchInterval: (state) => {
+			const progress = state.state.data?.progress;
+			const moving = new Set(["diagnosing", "waiting_capacity", "repairing", "reviewing", "verifying"]);
+			return progress && moving.has(progress) ? 3_000 : false;
+		},
 	});
 
 	const invalidate = () => {

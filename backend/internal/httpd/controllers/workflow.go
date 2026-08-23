@@ -221,6 +221,13 @@ type WorkflowRunView struct {
 	UpdatedAt   time.Time               `json:"updatedAt"`
 	CompletedAt *time.Time              `json:"completedAt,omitempty"`
 	CancelledAt *time.Time              `json:"cancelledAt,omitempty"`
+	// Origin marks a run AO created for itself rather than one the project
+	// asked for. Today the only value is "incident_repair" — Checkpoint
+	// 8P-E.21 — and it exists so the Board can group AO's automatic repairs
+	// away from the project's ordinary work instead of interleaving them, and
+	// so the run page can say what this run is and link back to the incident
+	// that authorised it. Empty for every ordinary run.
+	Origin *WorkflowRunOriginView `json:"origin,omitempty"`
 	// ArchivedAt is set once a human has cancelled and archived the run. It is
 	// a presentation fact, not an execution one: an archived run is absent from
 	// the active Board and present in the archived view, and every one of its
@@ -601,6 +608,16 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 	runView.AttentionAction = life.AttentionAction
 	runView.LastActivityAt = life.LastActivityAt
 	runView.CanContinue = life.CanContinue
+	// Checkpoint 8P-E.21: label AO's own repair runs so neither the Board nor a
+	// person mistakes one for work the project asked for.
+	if adv, ok := c.incidentAdvisor(); ok {
+		if origin, isRepair := adv.RepairOriginFor(ctx, detail.Run.ID); isRepair {
+			runView.Origin = &WorkflowRunOriginView{
+				Kind: origin.Origin, IncidentID: origin.IncidentID,
+				SourceWorkflowID: origin.SourceRunID, ApprovedBy: origin.ApprovedBy,
+			}
+		}
+	}
 	runView.AttentionWorkflowID = life.AttentionWorkflowID
 	runView.CapacityWait = workflowCapacityWaitView(detail.CapacityWait, time.Now().UTC())
 	view := WorkflowRunDetailView{Run: runView, Steps: steps}
@@ -669,6 +686,18 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 		view.Usage = &usage
 	}
 	return view
+}
+
+// WorkflowRunOriginView explains a run AO created for itself.
+type WorkflowRunOriginView struct {
+	// Kind is the closed vocabulary of AO-created runs. "incident_repair" is
+	// currently the only member.
+	Kind string `json:"kind"`
+	// IncidentID and SourceWorkflowID are what this run is a repair OF and
+	// where it came from, so a reader is never stranded in an unexplained run.
+	IncidentID       string `json:"incidentId,omitempty"`
+	SourceWorkflowID string `json:"sourceWorkflowId,omitempty"`
+	ApprovedBy       string `json:"approvedBy,omitempty"`
 }
 
 // WorkflowsController owns the /workflows routes. A nil Svc returns 501.

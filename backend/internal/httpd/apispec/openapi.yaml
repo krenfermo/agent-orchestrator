@@ -7453,11 +7453,17 @@ components:
       properties:
         approvedBy:
           type: string
+        finalSha:
+          type: string
         generation:
           type: integer
         maxRepairs:
           type: integer
+        reviewerHarness:
+          type: string
         runId:
+          type: string
+        verifyResult:
           type: string
       required:
       - runId
@@ -7476,12 +7482,24 @@ components:
           type: boolean
         canExecute:
           type: boolean
+        capacityReasons:
+          items:
+            type: string
+          type: array
+        closureCause:
+          type: string
+        closureEvidence:
+          items:
+            type: string
+          type: array
         contextPack:
           $ref: '#/components/schemas/ControllersIncidentPackView'
         diagnosesUsed:
           type: integer
         diagnosis:
           $ref: '#/components/schemas/ControllersIncidentDiagnosisView'
+        diagnosticHarness:
+          type: string
         id:
           type: string
         launchOutcome:
@@ -7490,6 +7508,10 @@ components:
           type: integer
         maxRepairs:
           type: integer
+        nextEvaluationAt:
+          type: string
+        progress:
+          type: string
         repair:
           $ref: '#/components/schemas/ControllersIncidentRepairView'
         repairsUsed:
@@ -7516,6 +7538,7 @@ components:
       - maxRepairs
       - canDiagnose
       - canExecute
+      - progress
       type: object
     ControllersListCapacityResponse:
       properties:
@@ -8408,6 +8431,19 @@ components:
       - requiresHuman
       - createdAt
       - updatedAt
+      type: object
+    ControllersWorkflowRunOriginView:
+      properties:
+        approvedBy:
+          type: string
+        incidentId:
+          type: string
+        kind:
+          type: string
+        sourceWorkflowId:
+          type: string
+      required:
+      - kind
       type: object
     ControllersWorkflowUsageResponse:
       properties:
@@ -12330,6 +12366,8 @@ components:
           - string
         objective:
           type: string
+        origin:
+          $ref: '#/components/schemas/ControllersWorkflowRunOriginView'
         phase:
           enum:
           - queued
