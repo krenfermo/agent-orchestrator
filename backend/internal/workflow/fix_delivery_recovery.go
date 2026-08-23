@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -53,30 +52,19 @@ import (
 // it, and ClassifyAttention must never surface it as a stop.
 const fixDispatchIntentPhase = "fix_dispatch_intent"
 
-// receiptFactBytes mirrors session_manager's conversationFactBytes: the bound
-// it applies to the prompt text before persisting it as the session's
-// LatestUserPrompt receipt.
+// promptReceiptDigest is the digest of the exact bytes that end up in a
+// session's LatestUserPrompt once a message has been written into it.
+// Computing it from the outbound prompt at intent time and from the stored
+// receipt at recovery time makes "this session received this prompt" an exact
+// comparison rather than a fuzzy text match.
 //
-// Duplicating the constant is a deliberate, bounded coupling. The alternative —
-// exporting the bound, or reading the receipt through a new port — would make
-// workflow depend on session_manager's internals for a fact it only ever uses
-// as CORROBORATION. If the two ever drift, the digests simply stop matching and
-// classifyFixDelivery falls through to its other evidence or to ambiguity. The
-// failure mode of drift is "AO proves less", never "AO proves something false",
-// which is the only property this constant has to have.
-const receiptFactBytes = 16 << 10
-
-// promptReceiptDigest is the digest of the exact bytes session_manager records
-// as a session's LatestUserPrompt after it has written a message into that
-// session. Computing it from the outbound prompt at intent time and from the
-// stored receipt at recovery time makes "this session received this prompt" an
-// exact comparison rather than a fuzzy text match.
+// The bounding is domain.BoundLatestUserPrompt — the same function
+// session_manager applies on the way in, and the reason this comparison can be
+// exact at all. Workflow deliberately does not import session_manager (see
+// failover.go), so the shared definition lives on the field's own type, where
+// both sides can reach it without either depending on the other.
 func promptReceiptDigest(prompt string) string {
-	trimmed := strings.TrimSpace(prompt)
-	if len(trimmed) > receiptFactBytes {
-		trimmed = strings.ToValidUTF8(trimmed[:receiptFactBytes], "�")
-	}
-	sum := sha256.Sum256([]byte(trimmed))
+	sum := sha256.Sum256([]byte(domain.BoundLatestUserPrompt(prompt)))
 	return hex.EncodeToString(sum[:])
 }
 

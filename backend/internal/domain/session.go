@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // These ID types are distinct string types so they can't be swapped at a call
 // site by accident.
@@ -37,6 +40,10 @@ type SessionMetadata struct {
 	// LatestUserPrompt is the latest real user-authored task direction observed
 	// for this AO session. Internal AO coordination messages (for example an
 	// agent-switch handoff request) must not replace it.
+	//
+	// It is stored bounded — see BoundLatestUserPrompt, which is the single
+	// definition of "the exact bytes this field ends up holding" for both the
+	// writer and any reader that has to recognise what it wrote.
 	LatestUserPrompt string `json:"latestUserPrompt,omitempty"`
 	// LatestAssistantUpdate is the latest user-facing assistant update observed
 	// before any internal agent-switch coordination turn.
@@ -71,6 +78,31 @@ type SessionMetadata struct {
 	// session. Keeping the verifier durable lets a surviving worker authenticate
 	// after the desktop app or daemon restarts.
 	BrowserCapabilityVerifier string `json:"-"`
+}
+
+// LatestUserPromptBytes is the bound applied to SessionMetadata.LatestUserPrompt
+// before it is persisted. It lives here, on the field's own type, rather than in
+// whichever package happens to do the writing, because it is part of what the
+// field MEANS: two packages that disagree about it disagree about whether a
+// stored prompt is the one they sent.
+const LatestUserPromptBytes = 16 << 10
+
+// BoundLatestUserPrompt renders a message exactly as it will be stored in
+// SessionMetadata.LatestUserPrompt.
+//
+// It is a function rather than a bare constant so that "the bytes that end up
+// in that field" has one definition, not one per caller: the trim, the byte
+// bound and the UTF-8 repair are all part of the answer, and a reader that
+// reproduces two of the three still gets a different string. session_manager
+// calls it on the way in; workflow's fix-delivery recovery calls it on the way
+// out to recognise its own prompt in a session it may have been restarted away
+// from.
+func BoundLatestUserPrompt(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) <= LatestUserPromptBytes {
+		return trimmed
+	}
+	return strings.ToValidUTF8(trimmed[:LatestUserPromptBytes], "�")
 }
 
 // SessionRecord is the persistence shape. It intentionally stores only durable

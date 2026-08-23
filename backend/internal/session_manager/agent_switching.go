@@ -21,7 +21,6 @@ import (
 
 const (
 	maxSwitchNoteBytes          = 16 << 10
-	conversationFactBytes       = 16 << 10
 	handoffContinuationMaxBytes = 96 << 10
 	// Retain a small bounded prefix of each deterministic conversation fact in
 	// the final emergency context envelope.
@@ -2729,8 +2728,13 @@ func nativeSessionIDPtr(id domain.AgentNativeSessionID) *domain.AgentNativeSessi
 	return &copyID
 }
 
+// boundedConversationFact renders a conversation fact exactly as
+// SessionMetadata.LatestUserPrompt stores it. The bound and the trimming live
+// on the domain field itself rather than here: workflow's fix-delivery recovery
+// recognises a prompt it sent by re-deriving these same bytes, and two packages
+// that each kept their own copy of the rule could drift apart silently.
 func boundedConversationFact(value string) string {
-	return boundedString(strings.TrimSpace(value), conversationFactBytes)
+	return domain.BoundLatestUserPrompt(value)
 }
 
 func boundedString(value string, maxBytes int) string {
