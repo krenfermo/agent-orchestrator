@@ -21,8 +21,10 @@ import (
 // read from the structured source that already owns it — the branch-lock
 // manager's own held-lock and retention state, the wake scheduler's own
 // schedule rows, the workspace preflighter's own porcelain status, the hook
-// launcher's own shim and target, the session cleanup facts table — never by
-// grepping an agent's log for prose that looks like a failure. Log text is
+// launcher's own shim and target, the session cleanup facts table, the
+// daemon's and the runtimes' own error records — never by grepping an agent's
+// log for prose that looks like a failure. A component's structured record of
+// its own failure is a fact; a line in a transcript that reads like one is not. Log text is
 // unversioned, harness-specific, and lies by omission the moment a provider
 // reformats a message; the durable records do not.
 //
@@ -91,6 +93,12 @@ const (
 	SourceWake         EvidenceSource = "wake"
 	SourceProcess      EvidenceSource = "process"
 	SourceSession      EvidenceSource = "session"
+	// SourceRuntimeLog is the daemon's and the runtimes' own error records --
+	// the failures that never reach a git status, a lock row, or a process
+	// exit code because the component that hit them logged them and carried
+	// on. A gate that cannot see them reports "nothing left behind" for an
+	// execution whose runtime was throwing errors the whole time.
+	SourceRuntimeLog EvidenceSource = "runtime_log"
 )
 
 // SourceError records that one source could not be read. Collect keeps going
@@ -218,6 +226,68 @@ type ProcessEvidence struct {
 	Anomaly string `json:"anomaly,omitempty"`
 }
 
+// Runtime error levels, as the daemon and the runtime adapters record them.
+// Any other value, and the empty string, is treated as LevelError: this source
+// is an error log, and a record whose level nobody set is not thereby harmless.
+const (
+	RuntimeLevelWarn  = "warn"
+	RuntimeLevelError = "error"
+	RuntimeLevelFatal = "fatal"
+)
+
+// RuntimeErrorRecord is one error the daemon or a runtime adapter recorded
+// while this execution was running, as the component that hit it recorded it.
+// It is declared here, like ProcessRecord and WakeScheduleRecord, so the
+// collector depends on the fact rather than on whichever logger produced it.
+//
+// It is deliberately not a log line. A grep over an agent's transcript is the
+// one thing this package refuses to do; this is the structured record a
+// component wrote about its own failure, which is why it can carry a stable
+// Code and an occurrence count instead of prose that changes with a reformat.
+type RuntimeErrorRecord struct {
+	// Component is the daemon subsystem or runtime adapter that reported it
+	// ("lifecycle.reaper", "runtime.tmux"). It is the finding's subject, so it
+	// must identify the component, not the incident.
+	Component string `json:"component"`
+	// Code is the component's own stable code for this failure. When it is
+	// set, it -- and not the rendered message -- is what makes two records the
+	// same error, which is what keeps a baseline comparison from turning on a
+	// message someone rephrased.
+	Code string `json:"code,omitempty"`
+	// Message is the rendered error, kept verbatim as evidence for a human.
+	Message string `json:"message"`
+	// Level is one of the RuntimeLevel constants.
+	Level string `json:"level,omitempty"`
+	// SessionID names the session the error belongs to, when it belongs to
+	// one. Empty for a daemon-wide failure.
+	SessionID string `json:"sessionId,omitempty"`
+	// Count is how many times this error was recorded. It is evidence for a
+	// human and is deliberately excluded from the signature: an error that
+	// fired three times before the execution and seven times during it is the
+	// same pre-existing error, and a signature that moved with the counter
+	// would report every recurrence as newly introduced.
+	Count       int64     `json:"count,omitempty"`
+	FirstSeenAt time.Time `json:"firstSeenAt,omitzero"`
+	LastSeenAt  time.Time `json:"lastSeenAt,omitzero"`
+}
+
+// Fatal reports whether the record is at the level that makes its component
+// unusable rather than merely degraded.
+func (r RuntimeErrorRecord) Fatal() bool {
+	return strings.EqualFold(strings.TrimSpace(r.Level), RuntimeLevelFatal)
+}
+
+// Warning reports whether the record was explicitly logged below error level.
+func (r RuntimeErrorRecord) Warning() bool {
+	return strings.EqualFold(strings.TrimSpace(r.Level), RuntimeLevelWarn)
+}
+
+// RuntimeErrorEvidence is a RuntimeErrorRecord plus the collector's verdict.
+type RuntimeErrorEvidence struct {
+	RuntimeErrorRecord
+	Anomaly string `json:"anomaly,omitempty"`
+}
+
 // SessionEvidence is one session's teardown state, read from the durable
 // session row and its cleanup facts rather than from whether a pane looks
 // gone.
@@ -254,6 +324,9 @@ type EvidenceReport struct {
 	Wakes        []WakeEvidence       `json:"wakes,omitempty"`
 	Processes    []ProcessEvidence    `json:"processes,omitempty"`
 	Sessions     []SessionEvidence    `json:"sessions,omitempty"`
+	// RuntimeErrors are the daemon's and the runtimes' own error records for
+	// this execution.
+	RuntimeErrors []RuntimeErrorEvidence `json:"runtimeErrors,omitempty"`
 
 	// FinalAgentReport is the agent's closing report, verbatim. The collector
 	// never parses it; downstream classification compares it against the
@@ -289,6 +362,9 @@ func (r EvidenceReport) Anomalies() []string {
 	}
 	for _, s := range r.Sessions {
 		add("session "+s.SessionID, s.Anomaly)
+	}
+	for _, e := range r.RuntimeErrors {
+		add("runtime "+e.Component, e.Anomaly)
 	}
 	return out
 }
@@ -336,6 +412,14 @@ type ProcessSource interface {
 	ProcessRecords(ctx context.Context, executionID string) ([]ProcessRecord, error)
 }
 
+// RuntimeErrorSource reports the errors the daemon and the runtime adapters
+// recorded for one execution. Like ProcessSource it is keyed on the execution,
+// so a deployment that keeps its runtime errors somewhere this package must
+// not import adapts at the wiring site rather than here.
+type RuntimeErrorSource interface {
+	RuntimeErrors(ctx context.Context, executionID string) ([]RuntimeErrorRecord, error)
+}
+
 // SessionSource is the durable session read side: the session row and its
 // cleanup facts. *sqlite.Store satisfies it directly.
 type SessionSource interface {
@@ -348,14 +432,15 @@ type SessionSource interface {
 // is what a deployment that genuinely has no such source should produce. It is
 // not a substitute for a source that failed — that is a SourceError.
 type EvidenceDeps struct {
-	Executions   ExecutionSource
-	Git          GitSource
-	BranchLocks  BranchLockSource
-	HookLauncher HookLauncherProbe
-	Wakes        WakeSource
-	Processes    ProcessSource
-	Sessions     SessionSource
-	Clock        func() time.Time
+	Executions    ExecutionSource
+	Git           GitSource
+	BranchLocks   BranchLockSource
+	HookLauncher  HookLauncherProbe
+	Wakes         WakeSource
+	Processes     ProcessSource
+	Sessions      SessionSource
+	RuntimeErrors RuntimeErrorSource
+	Clock         func() time.Time
 }
 
 // EvidenceCollector assembles one EvidenceReport per execution.
@@ -413,6 +498,7 @@ func (c *EvidenceCollector) Collect(ctx context.Context, executionID string) (Ev
 	report.Wakes = c.collectWakes(ctx, exec, now, &report)
 	report.Processes = c.collectProcesses(ctx, exec, &report)
 	report.Sessions = c.collectSessions(ctx, exec, &report)
+	report.RuntimeErrors = c.collectRuntimeErrors(ctx, exec, &report)
 	return report, nil
 }
 
@@ -628,6 +714,53 @@ func (c *EvidenceCollector) collectProcesses(ctx context.Context, exec Execution
 		ev.Anomaly = strings.Join(reasons, "; ")
 		out = append(out, ev)
 	}
+	return out
+}
+
+// collectRuntimeErrors reads the daemon's and the runtimes' own error records.
+//
+// Every record the source returns is an anomaly: it is an error log, and the
+// component that wrote the entry had already decided something went wrong. The
+// collector's only judgement here is how to phrase it, and whether an
+// explicitly-warn record is worth saying "error" about.
+func (c *EvidenceCollector) collectRuntimeErrors(ctx context.Context, exec Execution, report *EvidenceReport) []RuntimeErrorEvidence {
+	if c.deps.RuntimeErrors == nil {
+		return nil
+	}
+	records, err := c.deps.RuntimeErrors.RuntimeErrors(ctx, exec.ID)
+	if err != nil {
+		report.sourceFailed(SourceRuntimeLog, exec.ID, err)
+		return nil
+	}
+	out := make([]RuntimeErrorEvidence, 0, len(records))
+	for _, rec := range records {
+		ev := RuntimeErrorEvidence{RuntimeErrorRecord: rec}
+		severity := "error"
+		switch {
+		case rec.Fatal():
+			severity = "fatal error"
+		case rec.Warning():
+			severity = "warning"
+		}
+		reason := fmt.Sprintf("%s recorded a %s", firstNonEmpty(rec.Component, "an unnamed component"), severity)
+		if rec.Code != "" {
+			reason += " (" + rec.Code + ")"
+		}
+		if rec.Count > 1 {
+			reason += fmt.Sprintf(" %d times", rec.Count)
+		}
+		if rec.Message != "" {
+			reason += ": " + rec.Message
+		}
+		ev.Anomaly = reason
+		out = append(out, ev)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Component != out[j].Component {
+			return out[i].Component < out[j].Component
+		}
+		return out[i].Code < out[j].Code
+	})
 	return out
 }
 

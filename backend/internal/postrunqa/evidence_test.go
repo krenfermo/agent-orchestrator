@@ -100,6 +100,15 @@ func (f fakeProcesses) ProcessRecords(context.Context, string) ([]postrunqa.Proc
 	return f.records, f.err
 }
 
+type fakeRuntimeErrors struct {
+	records []postrunqa.RuntimeErrorRecord
+	err     error
+}
+
+func (f fakeRuntimeErrors) RuntimeErrors(context.Context, string) ([]postrunqa.RuntimeErrorRecord, error) {
+	return f.records, f.err
+}
+
 type fakeSessions struct {
 	sessions map[domain.SessionID]domain.SessionRecord
 	facts    map[domain.SessionID]domain.SessionCleanupRecord
@@ -151,6 +160,7 @@ func cleanFixture(t *testing.T) postrunqa.EvidenceDeps {
 		Processes: fakeProcesses{records: []postrunqa.ProcessRecord{
 			{Label: "go test ./...", ExitCode: &zero, EndedAt: endedAt},
 		}},
+		RuntimeErrors: fakeRuntimeErrors{},
 		Sessions: fakeSessions{
 			sessions: map[domain.SessionID]domain.SessionRecord{"ses-1": {ID: "ses-1", IsTerminated: true}},
 			facts: map[domain.SessionID]domain.SessionCleanupRecord{"ses-1": {
@@ -251,6 +261,9 @@ func TestCollect_CleanFixtureReportsNoAnomalies(t *testing.T) {
 	}
 	if len(report.Sessions) != 1 || !report.Sessions[0].RuntimeReleased {
 		t.Fatalf("session evidence = %+v, want one released session", report.Sessions)
+	}
+	if len(report.RuntimeErrors) != 0 {
+		t.Fatalf("runtime error evidence = %+v, want none", report.RuntimeErrors)
 	}
 }
 
@@ -600,5 +613,64 @@ func TestCollect_StaleHookBinSymlinkSurfacesAsAnomaly(t *testing.T) {
 	}
 	if !report.HasAnomalies() {
 		t.Fatal("HasAnomalies() = false with a broken hook launcher")
+	}
+}
+
+// The daemon and the runtimes record their own failures; those records are
+// evidence like any other, and the collector must surface them rather than
+// leave the gate reading "nothing left behind" for an execution whose runtime
+// was erroring throughout.
+func TestCollect_RuntimeErrorsSurfaceAsAnomalies(t *testing.T) {
+	deps := cleanFixture(t)
+	deps.RuntimeErrors = fakeRuntimeErrors{records: []postrunqa.RuntimeErrorRecord{
+		{Component: "runtime.tmux", Code: "PANE_GONE", Message: "pane disappeared mid-send", Level: postrunqa.RuntimeLevelError, Count: 4},
+		{Component: "lifecycle.reaper", Code: "REAP_TIMEOUT", Message: "reap pass timed out", Level: postrunqa.RuntimeLevelFatal, Count: 1},
+	}}
+
+	report := collect(t, deps)
+
+	if len(report.RuntimeErrors) != 2 {
+		t.Fatalf("runtime error evidence = %+v, want 2", report.RuntimeErrors)
+	}
+	// Sorted by component, so two collections of the same state produce the
+	// same report.
+	if report.RuntimeErrors[0].Component != "lifecycle.reaper" {
+		t.Fatalf("runtime errors are not ordered by component: %+v", report.RuntimeErrors)
+	}
+	if !report.RuntimeErrors[0].Fatal() {
+		t.Fatalf("Fatal() = false for a fatal record: %+v", report.RuntimeErrors[0])
+	}
+	for _, e := range report.RuntimeErrors {
+		if e.Anomaly == "" {
+			t.Fatalf("every runtime error record is an anomaly, but %+v carries none", e)
+		}
+	}
+	if !strings.Contains(report.RuntimeErrors[1].Anomaly, "4 times") {
+		t.Fatalf("the occurrence count belongs in the prose: %q", report.RuntimeErrors[1].Anomaly)
+	}
+	if !strings.Contains(strings.Join(report.Anomalies(), "\n"), "runtime lifecycle.reaper") {
+		t.Fatalf("runtime errors are missing from Anomalies(): %v", report.Anomalies())
+	}
+}
+
+// A runtime-error source that cannot be read is a SourceError, never a report
+// that quietly claims the daemon logged nothing.
+func TestCollect_FailingRuntimeErrorSourceIsRecorded(t *testing.T) {
+	deps := cleanFixture(t)
+	deps.RuntimeErrors = fakeRuntimeErrors{err: errors.New("log store is offline")}
+
+	report := collect(t, deps)
+
+	var found bool
+	for _, e := range report.SourceErrors {
+		if e.Source == postrunqa.SourceRuntimeLog && strings.Contains(e.Message, "log store is offline") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("SourceErrors = %+v, want the runtime log failure recorded", report.SourceErrors)
+	}
+	if len(report.RuntimeErrors) != 0 {
+		t.Fatalf("a failed source must contribute no evidence: %+v", report.RuntimeErrors)
 	}
 }

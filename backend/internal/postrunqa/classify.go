@@ -190,8 +190,11 @@ type signal struct {
 	severity Severity
 	safety   SafetyVerdict
 	// scope and scopeReason are decided per signal because each source is
-	// keyed on a different part of the execution.
-	inScope     bool
+	// keyed on a different part of the execution. scope is tri-state on
+	// purpose: "the execution never told us what it owned" is not the same
+	// answer as "we checked and it is ours", and collapsing the two into a
+	// bool is what lets an auto-fix run against state of unknown ownership.
+	scope       FindingScope
 	scopeReason string
 	// matchTokens are the strings that, appearing in a line of the agent's
 	// report, make that line a claim about this signal.
@@ -253,7 +256,7 @@ func Classify(in ClassificationInput) Classification {
 			Reproducible: !postFailedSources[s.source],
 			Safety:       s.safety,
 		}
-		f.Scope, f.ScopeReason = scopeVerdict(s)
+		f.Scope, f.ScopeReason = s.scope, s.scopeReason
 		f.Attribution, f.AttributionReason = attribute(s, in.Baseline != nil, baselineSignatures, baselineFailedSources)
 		findings = append(findings, f)
 		byFinding = append(byFinding, s)
@@ -304,23 +307,17 @@ func attribute(s signal, hasBaseline bool, baselineSignatures map[string]bool, b
 	return AttributionNew, "absent from the pre-run snapshot and present after the execution"
 }
 
-func scopeVerdict(s signal) (FindingScope, string) {
-	if s.inScope {
-		return ScopeInScope, s.scopeReason
-	}
-	return ScopeOutOfScope, s.scopeReason
-}
-
 // --- signal derivation -------------------------------------------------------
 
 func deriveSignals(r EvidenceReport, scope ExecutionScope) []signal {
-	out := make([]signal, 0, len(r.Git)+len(r.BranchLocks)+len(r.Wakes)+len(r.Processes)+len(r.Sessions)+1)
+	out := make([]signal, 0, len(r.Git)+len(r.BranchLocks)+len(r.Wakes)+len(r.Processes)+len(r.Sessions)+len(r.RuntimeErrors)+1)
 	out = append(out, gitSignals(r, scope)...)
 	out = append(out, branchLockSignals(r, scope)...)
 	out = append(out, hookLauncherSignals(r, scope)...)
 	out = append(out, wakeSignals(r, scope)...)
 	out = append(out, processSignals(r, scope)...)
 	out = append(out, sessionSignals(r, scope)...)
+	out = append(out, runtimeErrorSignals(r, scope)...)
 	sort.SliceStable(out, func(i, j int) bool { return out[i].signature() < out[j].signature() })
 	return out
 }
@@ -328,7 +325,7 @@ func deriveSignals(r EvidenceReport, scope ExecutionScope) []signal {
 func gitSignals(r EvidenceReport, scope ExecutionScope) []signal {
 	var out []signal
 	for _, g := range r.Git {
-		inScope, reason := repoScope(scope, g.RepoPath)
+		repoVerdict, reason := repoScope(scope, g.RepoPath)
 		repoName := filepath.Base(g.RepoPath)
 
 		// One signal per changed path, not one per dirty repository. A tree
@@ -344,7 +341,7 @@ func gitSignals(r EvidenceReport, scope ExecutionScope) []signal {
 				evidence:    g.Anomaly,
 				severity:    SeverityMajor,
 				safety:      SafetyUnsafe,
-				inScope:     inScope,
+				scope:       repoVerdict,
 				scopeReason: reason,
 				matchTokens: []string{c.Path, filepath.Base(c.Path), repoName},
 			})
@@ -358,7 +355,7 @@ func gitSignals(r EvidenceReport, scope ExecutionScope) []signal {
 				evidence:    g.Anomaly,
 				severity:    SeverityMajor,
 				safety:      SafetyUnsafe,
-				inScope:     inScope,
+				scope:       repoVerdict,
 				scopeReason: reason,
 				matchTokens: []string{repoName, g.RepoPath},
 			})
@@ -372,7 +369,7 @@ func gitSignals(r EvidenceReport, scope ExecutionScope) []signal {
 				evidence:    g.Anomaly,
 				severity:    SeverityMajor,
 				safety:      SafetyAmbiguous,
-				inScope:     inScope,
+				scope:       repoVerdict,
 				scopeReason: reason,
 				matchTokens: []string{repoName, g.CurrentBranch, g.ConfiguredBranch},
 			})
@@ -384,7 +381,7 @@ func gitSignals(r EvidenceReport, scope ExecutionScope) []signal {
 func branchLockSignals(r EvidenceReport, scope ExecutionScope) []signal {
 	var out []signal
 	for _, l := range r.BranchLocks {
-		inScope, reason := repoScope(scope, l.RepoPath)
+		repoVerdict, reason := repoScope(scope, l.RepoPath)
 		subject := firstNonEmpty(l.LockKey, l.LockID)
 		add := func(detail, summary string, severity Severity, safety SafetyVerdict) {
 			out = append(out, signal{
@@ -395,7 +392,7 @@ func branchLockSignals(r EvidenceReport, scope ExecutionScope) []signal {
 				evidence:    l.Anomaly,
 				severity:    severity,
 				safety:      safety,
-				inScope:     inScope,
+				scope:       repoVerdict,
 				scopeReason: reason,
 				matchTokens: []string{subject, l.Branch, filepath.Base(l.RepoPath), "branch lock"},
 			})
@@ -421,10 +418,13 @@ func hookLauncherSignals(r EvidenceReport, scope ExecutionScope) []signal {
 	if !h.Probed {
 		return nil
 	}
-	inScope := strings.TrimSpace(scope.DataDir) != ""
+	// A probed launcher with no data dir on the scope is not someone else's
+	// launcher -- it is a launcher whose owner nobody recorded.
+	launcherScope := ScopeInScope
 	reason := "the hook launcher under the execution's own data dir"
-	if !inScope {
-		reason = "the execution declares no data dir, so this launcher is not its own"
+	if strings.TrimSpace(scope.DataDir) == "" {
+		launcherScope = ScopeUnknown
+		reason = "the execution declares no data dir, so ownership of this launcher cannot be established"
 	}
 	subject := firstNonEmpty(h.Path, "hook-launcher")
 	// Every hook-launcher defect has the same repair -- reinstall the shim
@@ -439,7 +439,7 @@ func hookLauncherSignals(r EvidenceReport, scope ExecutionScope) []signal {
 			evidence:    h.Anomaly,
 			severity:    SeverityMajor,
 			safety:      SafetyAutoFix,
-			inScope:     inScope,
+			scope:       launcherScope,
 			scopeReason: reason,
 			matchTokens: []string{"hook launcher", "hooks", filepath.Base(h.Target)},
 		}
@@ -464,11 +464,10 @@ func hookLauncherSignals(r EvidenceReport, scope ExecutionScope) []signal {
 }
 
 func wakeSignals(r EvidenceReport, scope ExecutionScope) []signal {
-	inScope := scope.WorkflowRunID != "" && scope.WorkflowRunID == r.WorkflowRunID
-	reason := "a wake schedule owned by this execution's workflow run"
-	if !inScope {
-		reason = "the wake schedule belongs to a workflow run this execution does not own"
-	}
+	verdict, reason := idScope(scope.WorkflowRunID, r.WorkflowRunID,
+		"a wake schedule owned by this execution's workflow run",
+		"the wake schedule belongs to a workflow run this execution does not own",
+		"no workflow run id is recorded on either side, so wake ownership cannot be established")
 	var out []signal
 	for _, w := range r.Wakes {
 		add := func(detail, summary string, severity Severity, safety SafetyVerdict) {
@@ -480,7 +479,7 @@ func wakeSignals(r EvidenceReport, scope ExecutionScope) []signal {
 				evidence:    w.Anomaly,
 				severity:    severity,
 				safety:      safety,
-				inScope:     inScope,
+				scope:       verdict,
 				scopeReason: reason,
 				matchTokens: []string{w.ScheduleID, w.StepID, "wake"},
 			})
@@ -506,14 +505,14 @@ func wakeSignals(r EvidenceReport, scope ExecutionScope) []signal {
 }
 
 func processSignals(r EvidenceReport, scope ExecutionScope) []signal {
-	// Process records are read keyed on the execution id, so they are this
-	// execution's by construction; the only way they are not is an execution
-	// with no identity at all.
-	inScope := strings.TrimSpace(scope.ExecutionID) == "" || scope.ExecutionID == r.ExecutionID
-	reason := "a process this execution ran"
-	if !inScope {
-		reason = "the process belongs to a different execution"
-	}
+	// Process records are read keyed on the execution id, so a record whose
+	// report carries the same id as the scope is this execution's. An
+	// execution with no id, or a report with none, proves nothing either way:
+	// that is ScopeUnknown, not a free pass.
+	verdict, reason := idScope(scope.ExecutionID, r.ExecutionID,
+		"a process this execution ran",
+		"the process belongs to a different execution",
+		"neither the execution nor the evidence report carries an execution id, so process ownership cannot be established")
 	var out []signal
 	for _, p := range r.Processes {
 		add := func(detail, summary string, severity Severity, safety SafetyVerdict) {
@@ -525,7 +524,7 @@ func processSignals(r EvidenceReport, scope ExecutionScope) []signal {
 				evidence:    firstNonEmpty(p.Anomaly, p.StderrTail),
 				severity:    severity,
 				safety:      safety,
-				inScope:     inScope,
+				scope:       verdict,
 				scopeReason: reason,
 				matchTokens: []string{p.Label},
 			})
@@ -555,9 +554,13 @@ func processSignals(r EvidenceReport, scope ExecutionScope) []signal {
 func sessionSignals(r EvidenceReport, scope ExecutionScope) []signal {
 	var out []signal
 	for _, s := range r.Sessions {
-		inScope := scope.ownsSession(s.SessionID)
-		reason := "a session this execution ran in"
-		if !inScope {
+		sessionScope, reason := ScopeInScope, "a session this execution ran in"
+		switch {
+		case len(scope.SessionIDs) == 0:
+			sessionScope = ScopeUnknown
+			reason = "the execution declares no sessions, so ownership of " + s.SessionID + " cannot be established"
+		case !scope.ownsSession(s.SessionID):
+			sessionScope = ScopeOutOfScope
 			reason = "the session is not one this execution ran in"
 		}
 		add := func(detail, summary string, severity Severity, safety SafetyVerdict) {
@@ -569,7 +572,7 @@ func sessionSignals(r EvidenceReport, scope ExecutionScope) []signal {
 				evidence:    s.Anomaly,
 				severity:    severity,
 				safety:      safety,
-				inScope:     inScope,
+				scope:       sessionScope,
 				scopeReason: reason,
 				matchTokens: []string{s.SessionID},
 			})
@@ -604,17 +607,143 @@ func sessionSignals(r EvidenceReport, scope ExecutionScope) []signal {
 	return out
 }
 
-func repoScope(scope ExecutionScope, repoPath string) (bool, string) {
+// idScope decides ownership from a pair of identifiers that must match: the
+// one the execution scope declares and the one the evidence report carries.
+// Either being empty is ScopeUnknown -- an identifier nobody recorded is not
+// an identifier that matches.
+func idScope(scopeID, reportID, inReason, outReason, unknownReason string) (FindingScope, string) {
+	scopeID, reportID = strings.TrimSpace(scopeID), strings.TrimSpace(reportID)
+	if scopeID == "" || reportID == "" {
+		return ScopeUnknown, unknownReason
+	}
+	if scopeID == reportID {
+		return ScopeInScope, inReason
+	}
+	return ScopeOutOfScope, outReason
+}
+
+// repoScope decides ownership of one repository.
+//
+// An execution that declares no repositories does not thereby own every
+// repository the collector happened to probe. Missing scope metadata is
+// ScopeUnknown, which blocks (it may well be ours) but is never auto-fixed
+// (we cannot show that it is).
+// runtimeErrorSignals turns the daemon's and the runtimes' own error records
+// into classifiable signals.
+//
+// The whole point of putting them through the same diff as everything else is
+// that a daemon error is the single most likely thing to be pre-existing: a
+// reaper that has been logging the same failure for a week is not the agent's
+// doing, and blocking a task on it would be exactly the misattribution this
+// package exists to prevent. So the signature is the error's IDENTITY --
+// component plus code, or component plus a fingerprint of the message when the
+// component supplies no code -- and never its count, its timestamps, or the
+// ids interpolated into its message.
+func runtimeErrorSignals(r EvidenceReport, scope ExecutionScope) []signal {
+	out := make([]signal, 0, len(r.RuntimeErrors))
+	for _, e := range r.RuntimeErrors {
+		component := firstNonEmpty(e.Component, "unnamed-component")
+		verdict, reason := runtimeErrorScope(scope, r, e)
+
+		severity := SeverityMajor
+		switch {
+		case e.Fatal():
+			// A fatal record means the component gave up, not that it retried.
+			severity = SeverityBlocker
+		case e.Warning():
+			severity = SeverityMinor
+		}
+
+		summary := fmt.Sprintf("%s recorded a runtime error", component)
+		if e.Code != "" {
+			summary += " (" + e.Code + ")"
+		}
+		if e.Message != "" {
+			summary += ": " + e.Message
+		}
+
+		out = append(out, signal{
+			source:  SourceRuntimeLog,
+			subject: component,
+			detail:  "runtime-error:" + runtimeErrorFingerprint(e.RuntimeErrorRecord),
+			summary: summary,
+			// The rendered message is evidence for a human, never the thing
+			// the diff turns on.
+			evidence: firstNonEmpty(e.Anomaly, e.Message),
+			severity: severity,
+			// A daemon error's repair is never mechanical from here: the gate
+			// has no idea what the component needs, only that it failed.
+			safety:      SafetyAmbiguous,
+			scope:       verdict,
+			scopeReason: reason,
+			matchTokens: []string{component, e.Code, e.SessionID},
+		})
+	}
+	return out
+}
+
+// runtimeErrorScope decides ownership of one runtime error. A record that
+// names a session is that session's; one that does not is the daemon's, and
+// belongs to whichever execution the report was collected for.
+func runtimeErrorScope(scope ExecutionScope, r EvidenceReport, e RuntimeErrorEvidence) (FindingScope, string) {
+	if strings.TrimSpace(e.SessionID) != "" {
+		if len(scope.SessionIDs) == 0 {
+			return ScopeUnknown, "the execution declares no sessions, so ownership of the error in " + e.SessionID + " cannot be established"
+		}
+		if !scope.ownsSession(e.SessionID) {
+			return ScopeOutOfScope, "the error belongs to session " + e.SessionID + ", which this execution did not run in"
+		}
+		return ScopeInScope, "a runtime error in a session this execution ran in"
+	}
+	return idScope(scope.ExecutionID, r.ExecutionID,
+		"a daemon error recorded for this execution",
+		"the error was recorded for a different execution",
+		"the error names no session and neither side carries an execution id, so ownership cannot be established")
+}
+
+// runtimeErrorFingerprint is what makes two runtime error records the same
+// error across two snapshots.
+//
+// A component's own code is used whenever it has one, because it is the only
+// part of an error record that is guaranteed stable across a rephrasing. Only
+// when there is no code does the message get fingerprinted, and then the
+// digits come out: session ids, ports, pids, durations, and attempt counters
+// are exactly the parts of a message that differ between two occurrences of
+// the same failure, and leaving them in would report every recurrence as new.
+func runtimeErrorFingerprint(rec RuntimeErrorRecord) string {
+	if code := strings.TrimSpace(rec.Code); code != "" {
+		return strings.ToLower(code)
+	}
+	var b strings.Builder
+	lastWasDigit := false
+	for _, r := range strings.ToLower(strings.Join(strings.Fields(rec.Message), " ")) {
+		if r >= '0' && r <= '9' {
+			if !lastWasDigit {
+				b.WriteByte('#')
+			}
+			lastWasDigit = true
+			continue
+		}
+		lastWasDigit = false
+		b.WriteRune(r)
+	}
+	fingerprint := b.String()
+	// Long messages tail off into the specifics of one occurrence; the head is
+	// what identifies the failure.
+	if len(fingerprint) > 160 {
+		fingerprint = fingerprint[:160]
+	}
+	return fingerprint
+}
+
+func repoScope(scope ExecutionScope, repoPath string) (FindingScope, string) {
 	if len(scope.Repositories) == 0 {
-		// Nothing declares what this execution owned, so there is nothing to
-		// contradict. Ambiguity here belongs in attribution, not in a scope
-		// rejection the caller never asked for.
-		return true, "the execution declares no repository scope to exclude it"
+		return ScopeUnknown, "the execution declares no repository scope, so ownership of " + repoPath + " cannot be established"
 	}
 	if scope.ownsRepo(repoPath) {
-		return true, "a repository this execution was permitted to write"
+		return ScopeInScope, "a repository this execution was permitted to write"
 	}
-	return false, fmt.Sprintf("%s is not among the repositories this execution was permitted to write", repoPath)
+	return ScopeOutOfScope, fmt.Sprintf("%s is not among the repositories this execution was permitted to write", repoPath)
 }
 
 // --- the agent's closing report ---------------------------------------------

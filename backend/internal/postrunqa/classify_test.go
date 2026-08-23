@@ -438,7 +438,258 @@ func TestClassify_HookLauncherEphemeralTarget(t *testing.T) {
 	scope.DataDir = ""
 	got = postrunqa.Classify(postrunqa.ClassificationInput{Baseline: &pre, Post: post, Scope: scope})
 	f = findingFor(t, got, "ephemeral Go build-cache binary")
+	// Undecided, not exonerated: a probed launcher the scope says nothing
+	// about is not thereby someone else's launcher.
+	if f.Scope != postrunqa.ScopeUnknown {
+		t.Fatalf("scope = %q (%s), want unknown", f.Scope, f.ScopeReason)
+	}
+	if f.AutoFixEligible() {
+		t.Fatalf("unknown ownership must not be auto-fixed: %+v", f)
+	}
+	if !f.Blocking() {
+		t.Fatalf("unknown ownership still blocks -- it may well be ours: %+v", f)
+	}
+}
+
+func runtimeError(component, code, message string) postrunqa.RuntimeErrorEvidence {
+	return postrunqa.RuntimeErrorEvidence{
+		RuntimeErrorRecord: postrunqa.RuntimeErrorRecord{
+			Component: component, Code: code, Message: message,
+			Level: postrunqa.RuntimeLevelError, Count: 1,
+		},
+		Anomaly: component + " recorded an error: " + message,
+	}
+}
+
+// A daemon/runtime error the pre-run snapshot did not have is this execution's,
+// and blocks like any other structured signal.
+func TestClassify_RuntimeErrorAbsentPreRunIsNew(t *testing.T) {
+	pre := snapshot(false, nil)
+	pre.RuntimeErrors = []postrunqa.RuntimeErrorEvidence{
+		runtimeError("lifecycle.reaper", "REAP_TIMEOUT", "reap pass timed out"),
+	}
+	post := snapshot(true, nil)
+	post.RuntimeErrors = append(append([]postrunqa.RuntimeErrorEvidence(nil), pre.RuntimeErrors...),
+		runtimeError("runtime.tmux", "PANE_GONE", "pane disappeared mid-send"))
+
+	got := postrunqa.Classify(postrunqa.ClassificationInput{Baseline: &pre, Post: post, Scope: appScope()})
+
+	fresh := findingFor(t, got, "pane disappeared mid-send")
+	if fresh.Attribution != postrunqa.AttributionNew {
+		t.Fatalf("attribution = %q (%s), want new", fresh.Attribution, fresh.AttributionReason)
+	}
+	if fresh.Verification != postrunqa.VerificationEvidence || !fresh.Reproducible {
+		t.Fatalf("a daemon error record is structured evidence: %+v", fresh)
+	}
+	if !fresh.Blocking() {
+		t.Fatalf("a new in-scope runtime error must block: %+v", fresh)
+	}
+	if fresh.Safety != postrunqa.SafetyAmbiguous || fresh.AutoFixEligible() {
+		t.Fatalf("the gate cannot mechanically repair a daemon error: %+v", fresh)
+	}
+
+	if old := findingFor(t, got, "reap pass timed out"); old.Attribution != postrunqa.AttributionBaseline {
+		t.Fatalf("the error present on both sides = %q, want baseline", old.Attribution)
+	}
+}
+
+// The same runtime error on both sides is the daemon's pre-existing problem,
+// and stays that way however many more times it fired during the execution.
+func TestClassify_RuntimeErrorOnBothSidesIsBaselineEvenWhenItFiredMoreOften(t *testing.T) {
+	before := runtimeError("lifecycle.reaper", "REAP_TIMEOUT", "reap pass timed out after 3 attempts")
+	before.Count = 3
+	before.FirstSeenAt = classifiedAt.Add(-72 * time.Hour)
+	after := runtimeError("lifecycle.reaper", "REAP_TIMEOUT", "reap pass timed out after 11 attempts")
+	after.Count = 11
+	after.LastSeenAt = classifiedAt
+
+	pre := snapshot(false, nil)
+	pre.RuntimeErrors = []postrunqa.RuntimeErrorEvidence{before}
+	post := snapshot(true, nil)
+	post.RuntimeErrors = []postrunqa.RuntimeErrorEvidence{after}
+
+	got := postrunqa.Classify(postrunqa.ClassificationInput{Baseline: &pre, Post: post, Scope: appScope()})
+
+	f := findingFor(t, got, "REAP_TIMEOUT")
+	if f.Attribution != postrunqa.AttributionBaseline {
+		t.Fatalf("attribution = %q (%s), want baseline: a rising counter is not a new error",
+			f.Attribution, f.AttributionReason)
+	}
+	if f.Blocking() {
+		t.Fatalf("a baseline runtime error must not block: %+v", f)
+	}
+	if len(got.BaselineFindings()) != 1 {
+		t.Fatalf("baseline findings = %d, want the runtime error carried through:\n%s",
+			len(got.BaselineFindings()), dumpFindings(got.Findings))
+	}
+}
+
+// With no component-supplied code the message is fingerprinted, and the ids
+// and counters interpolated into it are exactly what the fingerprint drops.
+func TestClassify_RuntimeErrorWithoutCodeMatchesOnMessageFingerprint(t *testing.T) {
+	pre := snapshot(false, nil)
+	pre.RuntimeErrors = []postrunqa.RuntimeErrorEvidence{
+		runtimeError("runtime.tmux", "", "exec failed for pane 41 after 3 attempts"),
+	}
+	post := snapshot(true, nil)
+	post.RuntimeErrors = []postrunqa.RuntimeErrorEvidence{
+		runtimeError("runtime.tmux", "", "exec failed for pane 87 after 12 attempts"),
+		runtimeError("runtime.tmux", "", "socket handshake was rejected"),
+	}
+
+	got := postrunqa.Classify(postrunqa.ClassificationInput{Baseline: &pre, Post: post, Scope: appScope()})
+
+	same := findingFor(t, got, "exec failed for pane 87")
+	if same.Attribution != postrunqa.AttributionBaseline {
+		t.Fatalf("attribution = %q (%s), want baseline: only the ids moved",
+			same.Attribution, same.AttributionReason)
+	}
+	fresh := findingFor(t, got, "socket handshake was rejected")
+	if fresh.Attribution != postrunqa.AttributionNew {
+		t.Fatalf("attribution = %q, want new: a genuinely different failure", fresh.Attribution)
+	}
+}
+
+// A runtime error corroborates final-report defect language exactly as any
+// other structured source does -- including overriding the agent's own
+// classification of it.
+func TestClassify_RuntimeErrorCorroboratesFinalReportLanguage(t *testing.T) {
+	pre := snapshot(false, nil)
+	post := snapshot(true, nil)
+	post.RuntimeErrors = []postrunqa.RuntimeErrorEvidence{
+		runtimeError("runtime.tmux", "PANE_GONE", "pane disappeared mid-send"),
+	}
+	post.FinalAgentReport = "Remaining issue: runtime.tmux kept erroring, but that is a pre-existing daemon problem.\n" +
+		"The metrics exporter could not be reached either."
+
+	got := postrunqa.Classify(postrunqa.ClassificationInput{Baseline: &pre, Post: post, Scope: appScope()})
+
+	claim := findingFor(t, got, "runtime.tmux kept erroring")
+	if claim.Verification != postrunqa.VerificationEvidence {
+		t.Fatalf("verification = %q, want evidence-backed: a runtime error record corroborates it", claim.Verification)
+	}
+	if claim.CorroboratedBy == "" {
+		t.Fatalf("a corroborated claim must name the signal backing it: %+v", claim)
+	}
+	if claim.Attribution != postrunqa.AttributionNew {
+		t.Fatalf("attribution = %q (%s), want new despite the report calling it pre-existing",
+			claim.Attribution, claim.AttributionReason)
+	}
+	if !claim.Blocking() {
+		t.Fatalf("a corroborated defect claim must block: %+v", claim)
+	}
+
+	// And the claim no runtime error backs stays report-only.
+	unverified := findingFor(t, got, "metrics exporter")
+	if unverified.Verification != postrunqa.VerificationReportOnly {
+		t.Fatalf("verification = %q, want report_only", unverified.Verification)
+	}
+	if unverified.Blocking() {
+		t.Fatalf("an uncorroborated claim must not block: %+v", unverified)
+	}
+}
+
+// A runtime error belonging to a session this execution never ran in is not
+// its problem.
+func TestClassify_RuntimeErrorForAnotherSessionIsOutOfScope(t *testing.T) {
+	stray := runtimeError("runtime.tmux", "PANE_GONE", "pane disappeared mid-send")
+	stray.SessionID = "sess-someone-else"
+
+	pre := snapshot(false, nil)
+	post := snapshot(true, nil)
+	post.RuntimeErrors = []postrunqa.RuntimeErrorEvidence{stray}
+
+	got := postrunqa.Classify(postrunqa.ClassificationInput{Baseline: &pre, Post: post, Scope: appScope()})
+
+	f := findingFor(t, got, "PANE_GONE")
 	if f.Scope != postrunqa.ScopeOutOfScope {
 		t.Fatalf("scope = %q (%s), want out_of_scope", f.Scope, f.ScopeReason)
+	}
+	if f.Blocking() || f.AutoFixEligible() {
+		t.Fatalf("another session's runtime error neither blocks nor is auto-fixed: %+v", f)
+	}
+}
+
+// Missing scope metadata is undecided, never an affirmative "yes, ours". The
+// findings still block -- they may well be this execution's -- but nothing
+// with unestablished ownership is ever handed to an automated repair.
+func TestClassify_IncompleteScopeMetadataIsUnknownAndNeverAutoFixed(t *testing.T) {
+	exit := 1
+	pre := snapshot(false, nil)
+	post := snapshot(true, []postrunqa.GitEvidence{
+		dirtyRepo(appRepo, ports.WorkspaceChange{Path: "internal/svc/handler.go", Status: "M"}),
+	})
+	post.Processes = []postrunqa.ProcessEvidence{{
+		ProcessRecord: postrunqa.ProcessRecord{Label: "go build ./...", ExitCode: &exit},
+	}}
+	post.Sessions = []postrunqa.SessionEvidence{{
+		SessionID: "sess-1", Found: true, Terminated: true, CleanupRecorded: true,
+		WorkspaceDisposition: domain.DispositionFailed,
+	}}
+	post.RuntimeErrors = []postrunqa.RuntimeErrorEvidence{
+		runtimeError("lifecycle.reaper", "REAP_TIMEOUT", "reap pass timed out"),
+	}
+
+	tests := []struct {
+		name  string
+		strip func(*postrunqa.ExecutionScope)
+		want  string
+	}{
+		{"no repository allowlist", func(s *postrunqa.ExecutionScope) { s.Repositories = nil }, "internal/svc/handler.go"},
+		{"no execution id", func(s *postrunqa.ExecutionScope) { s.ExecutionID = "" }, "go build ./..."},
+		{"no session ids", func(s *postrunqa.ExecutionScope) { s.SessionIDs = nil }, "workspace teardown failed"},
+		{"no execution id for a daemon-wide error", func(s *postrunqa.ExecutionScope) { s.ExecutionID = "" }, "REAP_TIMEOUT"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			scope := appScope()
+			tc.strip(&scope)
+
+			got := postrunqa.Classify(postrunqa.ClassificationInput{Baseline: &pre, Post: post, Scope: scope})
+
+			f := findingFor(t, got, tc.want)
+			if f.Scope != postrunqa.ScopeUnknown {
+				t.Fatalf("scope = %q (%s), want unknown", f.Scope, f.ScopeReason)
+			}
+			if f.ScopeReason == "" {
+				t.Fatalf("an unknown scope must say why: %+v", f)
+			}
+			if f.Attribution != postrunqa.AttributionNew {
+				t.Fatalf("attribution = %q, want new -- scope is what is undecided, not attribution", f.Attribution)
+			}
+			if f.AutoFixEligible() {
+				t.Fatalf("state whose ownership was never established must not be auto-fixed: %+v", f)
+			}
+			if !f.Blocking() {
+				t.Fatalf("unknown ownership is undecided, not exonerated, so it still blocks: %+v", f)
+			}
+			for _, other := range got.AutoFixable() {
+				if other.Scope != postrunqa.ScopeInScope {
+					t.Fatalf("auto-fixable finding with %q scope: %+v", other.Scope, other)
+				}
+			}
+		})
+	}
+}
+
+// The full-scope control for the case above: with the same evidence and a
+// complete scope, the mechanical failure IS auto-fixable. Without this, the
+// test above would pass just as well if nothing were ever auto-fixable.
+func TestClassify_CompleteScopeMetadataStillAllowsAutoFix(t *testing.T) {
+	exit := 1
+	pre := snapshot(false, nil)
+	post := snapshot(true, nil)
+	post.Processes = []postrunqa.ProcessEvidence{{
+		ProcessRecord: postrunqa.ProcessRecord{Label: "go build ./...", ExitCode: &exit},
+	}}
+
+	got := postrunqa.Classify(postrunqa.ClassificationInput{Baseline: &pre, Post: post, Scope: appScope()})
+
+	f := findingFor(t, got, "go build ./...")
+	if f.Scope != postrunqa.ScopeInScope {
+		t.Fatalf("scope = %q (%s), want in_scope", f.Scope, f.ScopeReason)
+	}
+	if !f.AutoFixEligible() {
+		t.Fatalf("a new, in-scope, mechanical failure must stay auto-fixable: %+v", f)
 	}
 }

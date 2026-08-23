@@ -119,8 +119,15 @@ func (a Attribution) Valid() bool {
 type FindingScope string
 
 const (
-	// ScopeUnknown is the unset value. It is what a finding written before
-	// classification existed loads as, so it must stay persistable.
+	// ScopeUnknown means ownership could not be established: the execution
+	// declared no repositories, no sessions, or no run/execution id to match
+	// the evidence against. It is deliberately the zero value, so a finding
+	// written before classification existed also loads as undecided rather
+	// than as an affirmative answer nobody gave.
+	//
+	// Unknown is not a soft yes. It still blocks -- the state may well be this
+	// execution's -- but it is never auto-fixed, because a repair needs a
+	// positive answer to "is this ours", not the absence of a negative one.
 	ScopeUnknown FindingScope = ""
 	// ScopeInScope means the finding's subject is one this execution owned.
 	ScopeInScope FindingScope = "in_scope"
@@ -310,7 +317,8 @@ type Finding struct {
 // hand an agent someone else's breakage. An out-of-scope finding belongs to a
 // project or session this execution never owned. A report-only finding is the
 // agent's own prose with nothing structured behind it, and prose is not
-// evidence. Everything else that is more than informational blocks.
+// evidence. Everything else that is more than informational blocks --
+// including ScopeUnknown, which is undecided rather than exonerated.
 func (f Finding) Blocking() bool {
 	if f.Scope == ScopeOutOfScope {
 		return false
@@ -335,6 +343,10 @@ func (f Finding) Blocking() bool {
 // breakage this execution introduced, only act on signals a structured source
 // actually reported and would report again, and only run for finding kinds
 // whose repair is mechanical.
+//
+// The scope clause tests for ScopeInScope rather than "not out of scope", so
+// ScopeUnknown fails it. Repairing state whose ownership nobody recorded is
+// exactly the reach outside the blast radius this check exists to prevent.
 func (f Finding) AutoFixEligible() bool {
 	return f.Scope == ScopeInScope &&
 		f.Attribution == AttributionNew &&
