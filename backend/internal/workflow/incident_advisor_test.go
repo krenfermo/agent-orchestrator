@@ -247,33 +247,129 @@ func TestAutoRecoverableContinueRunsWithoutApproval(t *testing.T) {
 	}
 }
 
-// Class B never runs on the agent's say-so. This is the self-approval boundary.
+// Class B never runs on the agent's say-so. This is the self-approval boundary,
+// and it is the one condition the whole repair path hangs from.
 func TestRepairAgentRefusesWithoutHumanApproval(t *testing.T) {
 	f := newAdvisorFixture(t, workflowcore.ReasonVerifyInfraFailed, "verification infrastructure failure")
-	inc := f.diagnoseWith(t, workflowcore.IncidentDiagnosisSubmission{
-		Class: workflowcore.IncidentRepairAO, Summary: "AO resolves the module root wrongly",
-		Action: &workflowcore.IncidentActionSpec{Kind: workflowcore.IncidentActionRepairAgent, Reason: "fix the resolver"},
-	}, true)
+	inc := f.approvedRepairDiagnosis(t)
 
 	if _, err := f.c.ExecuteIncidentAction(context.Background(), f.runID, inc.ID, ""); err == nil {
-		t.Fatal("a Repair Agent launched without human approval")
+		t.Fatal("a repair launched without human approval")
 	}
-	if f.agents.repairs != 0 {
-		t.Fatalf("repair launches = %d, want 0", f.agents.repairs)
+	if n := f.repairRuns(); n != 0 {
+		t.Fatalf("repair runs = %d, want 0", n)
 	}
 
 	got, err := f.c.ExecuteIncidentAction(context.Background(), f.runID, inc.ID, "morakurt@icloud.com")
 	if err != nil {
 		t.Fatalf("ExecuteIncidentAction with approval: %v", err)
 	}
-	if f.agents.repairs != 1 {
-		t.Fatalf("repair launches = %d, want exactly 1", f.agents.repairs)
+	if n := f.repairRuns(); n != 1 {
+		t.Fatalf("repair runs = %d, want exactly 1", n)
 	}
-	if got.State != workflowcore.IncidentResolved {
-		t.Fatalf("incident state = %q, want resolved", got.State)
+	// Crucially NOT resolved: a launched repair has not yet been reviewed or
+	// verified, and saying otherwise is the failure this whole checkpoint is
+	// arranged to prevent.
+	if got.State == workflowcore.IncidentResolved {
+		t.Fatal("the incident resolved the moment a repair launched, before any review or verification")
 	}
 	if n := f.countCheckpointPhase("incident_action_approved"); n != 1 {
 		t.Fatalf("approval rows = %d, want exactly 1 durable record of who approved", n)
+	}
+	if n := f.countCheckpointPhase("incident_repair_dispatched"); n != 1 {
+		t.Fatalf("repair dispatch rows = %d, want exactly 1", n)
+	}
+}
+
+// An install with no configured self-repair project refuses rather than
+// guessing which checkout is AO's own source.
+func TestRepairRefusesWithoutAConfiguredTarget(t *testing.T) {
+	f := newAdvisorFixture(t, workflowcore.ReasonVerifyInfraFailed, "verification infrastructure failure")
+	f.selfRepairProject = ""
+	f.c = f.newCoordinator()
+	inc := f.approvedRepairDiagnosis(t)
+
+	_, err := f.c.ExecuteIncidentAction(context.Background(), f.runID, inc.ID, "morakurt@icloud.com")
+	if !errors.Is(err, workflowcore.ErrSelfRepairUnavailable) {
+		t.Fatalf("err = %v, want ErrSelfRepairUnavailable", err)
+	}
+	if n := f.repairRuns(); n != 0 {
+		t.Fatalf("repair runs = %d, want 0", n)
+	}
+}
+
+// The incident resolves only when the repair run has been reviewed AND
+// verified — which is exactly what its own `completed` state means.
+func TestIncidentResolvesOnlyAfterTheRepairRunIsReviewedAndVerified(t *testing.T) {
+	f := newAdvisorFixture(t, workflowcore.ReasonVerifyInfraFailed, "verification infrastructure failure")
+	inc := f.approvedRepairDiagnosis(t)
+	if _, err := f.c.ExecuteIncidentAction(context.Background(), f.runID, inc.ID, "morakurt@icloud.com"); err != nil {
+		t.Fatalf("ExecuteIncidentAction: %v", err)
+	}
+
+	// While the repair run is still working, the incident stays executing.
+	mid, err := f.c.LoadIncident(context.Background(), f.runID, inc.ID)
+	if err != nil {
+		t.Fatalf("LoadIncident: %v", err)
+	}
+	if mid.State == workflowcore.IncidentResolved {
+		t.Fatalf("state = %q while the repair run is still in flight", mid.State)
+	}
+
+	f.finishRepairRun(t, mid.RepairRunID, domain.WorkflowRunCompleted)
+
+	done, err := f.c.LoadIncident(context.Background(), f.runID, inc.ID)
+	if err != nil {
+		t.Fatalf("LoadIncident: %v", err)
+	}
+	if done.State != workflowcore.IncidentResolved {
+		t.Fatalf("state = %q, want resolved once the repair run completed", done.State)
+	}
+	if n := f.countCheckpointPhase("incident_resolved"); n != 1 {
+		t.Fatalf("resolved rows = %d, want exactly 1", n)
+	}
+	// Re-reading must not write a second resolution.
+	if _, err := f.c.LoadIncident(context.Background(), f.runID, inc.ID); err != nil {
+		t.Fatalf("LoadIncident again: %v", err)
+	}
+	if n := f.countCheckpointPhase("incident_resolved"); n != 1 {
+		t.Fatalf("resolved rows after a second read = %d, want still 1", n)
+	}
+}
+
+// A repair run that fails is not a resolution. The incident says so.
+func TestFailedRepairRunRefusesTheIncident(t *testing.T) {
+	f := newAdvisorFixture(t, workflowcore.ReasonVerifyInfraFailed, "verification infrastructure failure")
+	inc := f.approvedRepairDiagnosis(t)
+	if _, err := f.c.ExecuteIncidentAction(context.Background(), f.runID, inc.ID, "morakurt@icloud.com"); err != nil {
+		t.Fatalf("ExecuteIncidentAction: %v", err)
+	}
+	loaded, _ := f.c.LoadIncident(context.Background(), f.runID, inc.ID)
+	f.finishRepairRun(t, loaded.RepairRunID, domain.WorkflowRunFailed)
+
+	got, err := f.c.LoadIncident(context.Background(), f.runID, inc.ID)
+	if err != nil {
+		t.Fatalf("LoadIncident: %v", err)
+	}
+	if got.State != workflowcore.IncidentRefused {
+		t.Fatalf("state = %q, want refused after a failed repair", got.State)
+	}
+}
+
+// A restart mid-approval must not create a second repair run.
+func TestRestartDoesNotDuplicateARepairRun(t *testing.T) {
+	f := newAdvisorFixture(t, workflowcore.ReasonVerifyInfraFailed, "verification infrastructure failure")
+	inc := f.approvedRepairDiagnosis(t)
+	ctx := context.Background()
+
+	for i := 0; i < 4; i++ {
+		if i == 2 {
+			f.c = f.newCoordinator()
+		}
+		_, _ = f.c.ExecuteIncidentAction(ctx, f.runID, inc.ID, "morakurt@icloud.com")
+	}
+	if n := f.repairRuns(); n != 1 {
+		t.Fatalf("repair runs = %d, want exactly 1 across four approvals and a restart", n)
 	}
 }
 
@@ -360,14 +456,11 @@ func TestDiagnosisAttemptsAreBoundedAcrossRestart(t *testing.T) {
 	}
 }
 
-// The Repair Agent is bounded at one. A repair that did not work is a new
-// incident with new evidence, not a retry of a guess.
+// The repair is bounded at one. A repair that did not work is a new incident
+// with new evidence, not a retry of a guess.
 func TestRepairIsBoundedAtOne(t *testing.T) {
 	f := newAdvisorFixture(t, workflowcore.ReasonVerifyInfraFailed, "verification infrastructure failure")
-	inc := f.diagnoseWith(t, workflowcore.IncidentDiagnosisSubmission{
-		Class: workflowcore.IncidentRepairAO, Summary: "AO resolves the module root wrongly",
-		Action: &workflowcore.IncidentActionSpec{Kind: workflowcore.IncidentActionRepairAgent, Reason: "fix it"},
-	}, true)
+	inc := f.approvedRepairDiagnosis(t)
 
 	ctx := context.Background()
 	if _, err := f.c.ExecuteIncidentAction(ctx, f.runID, inc.ID, "morakurt@icloud.com"); err != nil {
@@ -376,8 +469,8 @@ func TestRepairIsBoundedAtOne(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		_, _ = f.c.ExecuteIncidentAction(ctx, f.runID, inc.ID, "morakurt@icloud.com")
 	}
-	if f.agents.repairs != 1 {
-		t.Fatalf("repair launches = %d, want exactly 1", f.agents.repairs)
+	if n := f.repairRuns(); n != 1 {
+		t.Fatalf("repair runs = %d, want exactly 1", n)
 	}
 }
 
@@ -409,19 +502,22 @@ func TestDiagnosticIsReadOnlyAndRepairIsSeparate(t *testing.T) {
 
 // The repair prompt must forbid the destructive operations outright and hand
 // judgement to the independent reviewer.
-func TestRepairPromptForbidsDestructiveWorkAndSelfApproval(t *testing.T) {
+func TestRepairObjectiveForbidsDestructiveWorkAndSelfApproval(t *testing.T) {
 	f := newAdvisorFixture(t, workflowcore.ReasonVerifyInfraFailed, "verification infrastructure failure")
-	inc := f.diagnoseWith(t, workflowcore.IncidentDiagnosisSubmission{
-		Class: workflowcore.IncidentRepairAO, Summary: "AO resolves the module root wrongly",
-		Action: &workflowcore.IncidentActionSpec{Kind: workflowcore.IncidentActionRepairAgent, Reason: "fix it"},
-	}, true)
+	inc := f.approvedRepairDiagnosis(t)
 	if _, err := f.c.ExecuteIncidentAction(context.Background(), f.runID, inc.ID, "morakurt@icloud.com"); err != nil {
 		t.Fatalf("ExecuteIncidentAction: %v", err)
 	}
-	for _, must := range []string{"no reset", "no stash", "no force", "NOT the reviewer", "Never modify the database directly"} {
-		if !strings.Contains(f.agents.lastRepairPrompt, must) {
-			t.Fatalf("repair prompt is missing %q:\n%s", must, f.agents.lastRepairPrompt)
+	loaded, _ := f.c.LoadIncident(context.Background(), f.runID, inc.ID)
+	objective := f.repairObjective(t, loaded.RepairRunID)
+	for _, must := range []string{"no reset", "no stash", "no force", "Do not approve your own change", "Do not modify AO's database"} {
+		if !strings.Contains(objective, must) {
+			t.Fatalf("repair objective is missing %q:\n%s", must, objective)
 		}
+	}
+	// The repairer receives the approved diagnosis, never the raw evidence pack.
+	if strings.Contains(objective, "Incident context pack") {
+		t.Fatal("the repair objective carries the raw context pack; it must carry only the approved diagnosis")
 	}
 }
 
@@ -467,6 +563,7 @@ func newAdvisorFixture(t *testing.T, reason, detail string) *advisorFixture {
 	base := newFixRecoveryFixture(t)
 	agents := &fakeIncidentAgents{}
 	base.incidentAgents = agents
+	base.selfRepairProject = "ao-self"
 	base.c = base.newCoordinator()
 	base.driveToFixDispatch()
 	base.parkAsFixStop(reason, detail)
@@ -591,5 +688,52 @@ func TestRefusedDiagnosisKeepsItsContentForTheModal(t *testing.T) {
 	}
 	if len(inc.Diagnosis.Missing) != 2 {
 		t.Fatalf("missing evidence = %v, want both entries preserved", inc.Diagnosis.Missing)
+	}
+}
+
+// approvedRepairDiagnosis records a class-B diagnosis proposing a repair.
+func (f *advisorFixture) approvedRepairDiagnosis(t *testing.T) workflowcore.Incident {
+	t.Helper()
+	return f.diagnoseWith(t, workflowcore.IncidentDiagnosisSubmission{
+		Class:        workflowcore.IncidentRepairAO,
+		Summary:      "AO resolves the verification module root wrongly",
+		WhatHappened: "verify ran from the repository root of a repo whose module lives in backend/",
+		WhyStopped:   "exit code 1 was read as a code defect rather than a wrong working directory",
+		Evidence:     []string{"verify_result: does not contain main module"},
+		Action:       &workflowcore.IncidentActionSpec{Kind: workflowcore.IncidentActionRepairAgent, Reason: "correct the module-root resolution"},
+	}, true)
+}
+
+// repairRuns counts the workflow runs created in the self-repair project.
+func (f *advisorFixture) repairRuns() int {
+	runs, err := f.store.ListWorkflowRuns(context.Background(), "ao-self")
+	if err != nil {
+		return -1
+	}
+	return len(runs)
+}
+
+// repairObjective reads back the objective the repair run was created with.
+func (f *advisorFixture) repairObjective(t *testing.T, repairRunID string) string {
+	t.Helper()
+	run, ok, err := f.store.GetWorkflowRun(context.Background(), repairRunID)
+	if err != nil || !ok {
+		t.Fatalf("GetWorkflowRun(%s): %v (found=%v)", repairRunID, err, ok)
+	}
+	return run.Objective
+}
+
+// finishRepairRun drives the repair run to a terminal state, standing in for
+// the work/review/verify it would really go through.
+func (f *advisorFixture) finishRepairRun(t *testing.T, repairRunID string, state domain.WorkflowRunState) {
+	t.Helper()
+	ctx := context.Background()
+	run, ok, err := f.store.GetWorkflowRun(ctx, repairRunID)
+	if err != nil || !ok {
+		t.Fatalf("GetWorkflowRun(%s): %v (found=%v)", repairRunID, err, ok)
+	}
+	f.clk.Advance(time.Minute)
+	if _, err := f.store.UpdateWorkflowRunState(ctx, repairRunID, run.State, state, f.clk.Now()); err != nil {
+		t.Fatalf("finish repair run: %v", err)
 	}
 }

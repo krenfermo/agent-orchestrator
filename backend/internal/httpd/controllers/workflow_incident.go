@@ -60,6 +60,12 @@ type IncidentView struct {
 	// three situations that look identical from the incident's state alone.
 	LaunchOutcome string `json:"launchOutcome,omitempty"`
 
+	// Repair is the linked repair run and its audit trail, present once a
+	// class-B repair has been approved and dispatched. The modal needs it to say
+	// "a repair is running and will be independently reviewed and verified"
+	// rather than implying the incident is already fixed.
+	Repair *IncidentRepairView `json:"repair,omitempty"`
+
 	Diagnosis *IncidentDiagnosisView `json:"diagnosis,omitempty"`
 	Pack      *IncidentPackView      `json:"contextPack,omitempty"`
 }
@@ -114,6 +120,15 @@ type IncidentPackView struct {
 	EstimatedTokens int      `json:"estimatedTokens"`
 	Sections        []string `json:"sections"`
 	Dropped         []string `json:"droppedSections,omitempty"`
+}
+
+// IncidentRepairView is the durable answer to "who authorised this, what is
+// carrying it out, and how much repair budget is left".
+type IncidentRepairView struct {
+	RunID      string `json:"runId"`
+	ApprovedBy string `json:"approvedBy,omitempty"`
+	Generation int    `json:"generation,omitempty"`
+	MaxRepairs int    `json:"maxRepairs"`
 }
 
 // IncidentResponse is the envelope every incident route returns.
@@ -274,6 +289,12 @@ func incidentView(inc workflowcore.Incident, pack *workflowcore.IncidentContextP
 			}
 		}
 		v.Pack = &pv
+	}
+	if inc.RepairRunID != "" {
+		v.Repair = &IncidentRepairView{
+			RunID: inc.RepairRunID, ApprovedBy: inc.ApprovedBy,
+			Generation: inc.Repairs, MaxRepairs: workflowcore.MaxIncidentRepairs,
+		}
 	}
 	if inc.Diagnosis == nil {
 		return v

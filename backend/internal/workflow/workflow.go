@@ -214,6 +214,7 @@ type Deps struct {
 	// delivering fix findings to the SAME worker session, never a new Spawn.
 	// Optional: a nil MessageSender means dispatchFixStep is a no-op.
 	IncidentAgents        IncidentAgentLauncher
+	SelfRepairProjectID   string
 	MessageSender         MessageSender
 	Verifier              VerifyRunner
 	Planner               Planner
@@ -339,6 +340,13 @@ type Coordinator struct {
 	// automatically.
 	incidentAgents IncidentAgentLauncher
 
+	// selfRepairProjectID names the project holding AO's OWN source, the only
+	// repository an incident repair may be launched into. Empty means self
+	// repair is unavailable, which is a refusal rather than a fallback: guessing
+	// which checkout is AO's own is exactly the guess that would land a repair
+	// in the user's working tree. See incident_repair.go.
+	selfRepairProjectID string
+
 	// messageSender backs Checkpoint 8D's fix-step dispatch. Optional.
 	messageSender         MessageSender
 	verifier              VerifyRunner
@@ -410,6 +418,7 @@ func New(d Deps) *Coordinator {
 		workspaceFacts:           d.WorkspaceFacts,
 		reviewerLauncher:         d.ReviewerLauncher,
 		incidentAgents:           d.IncidentAgents,
+		selfRepairProjectID:      d.SelfRepairProjectID,
 		messageSender:            d.MessageSender,
 		verifier:                 d.Verifier,
 		planStore:                func() masterPlanStore { s, _ := d.Store.(masterPlanStore); return s }(),

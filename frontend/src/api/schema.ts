@@ -2674,6 +2674,12 @@ export interface components {
             maxBytes: number;
             sections: string[];
         };
+        ControllersIncidentRepairView: {
+            approvedBy?: string;
+            generation?: number;
+            maxRepairs: number;
+            runId: string;
+        };
         ControllersIncidentResponse: {
             incident: components["schemas"]["ControllersIncidentView"];
         };
@@ -2687,6 +2693,7 @@ export interface components {
             launchOutcome?: string;
             maxDiagnoses: number;
             maxRepairs: number;
+            repair?: components["schemas"]["ControllersIncidentRepairView"];
             repairsUsed: number;
             runId: string;
             stale: boolean;

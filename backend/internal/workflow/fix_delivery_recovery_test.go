@@ -344,10 +344,14 @@ type fixRecoveryFixture struct {
 	// incidentAgents installs the Incident Advisor's isolated agents. nil
 	// leaves the Advisor unable to investigate, which is its own tested state.
 	incidentAgents workflowcore.IncidentAgentLauncher
-	runID          string
-	fixStepID      string
-	workSessionID  domain.SessionID
-	idSeq          int
+	// selfRepairProject is the project an approved incident repair is launched
+	// into. Empty models an install that has not configured one, which is its
+	// own tested refusal.
+	selfRepairProject string
+	runID             string
+	fixStepID         string
+	workSessionID     domain.SessionID
+	idSeq             int
 }
 
 func newFixRecoveryFixture(t *testing.T) *fixRecoveryFixture {
@@ -380,15 +384,16 @@ func newFixRecoveryFixture(t *testing.T) *fixRecoveryFixture {
 // again by restart() to model a daemon that came back over the same rows.
 func (f *fixRecoveryFixture) newCoordinator() *workflowcore.Coordinator {
 	return workflowcore.New(workflowcore.Deps{
-		Store:            f.store,
-		Spawner:          f.spawner,
-		SessionFacts:     f.sessionFacts,
-		WorkspaceFacts:   f.workspaceFacts,
-		ReviewRuns:       f.reviewRuns,
-		ReviewerLauncher: f.launcher,
-		MessageSender:    f.messageSender(),
-		IncidentAgents:   f.incidentAgents,
-		Clock:            f.clk.Now,
+		Store:               f.store,
+		Spawner:             f.spawner,
+		SessionFacts:        f.sessionFacts,
+		WorkspaceFacts:      f.workspaceFacts,
+		ReviewRuns:          f.reviewRuns,
+		ReviewerLauncher:    f.launcher,
+		MessageSender:       f.messageSender(),
+		IncidentAgents:      f.incidentAgents,
+		SelfRepairProjectID: f.selfRepairProject,
+		Clock:               f.clk.Now,
 		NewID: func() string {
 			f.idSeq++
 			return fmt.Sprintf("id%d", f.idSeq)

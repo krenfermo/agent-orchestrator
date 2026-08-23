@@ -7449,6 +7449,20 @@ components:
       - estimatedTokens
       - sections
       type: object
+    ControllersIncidentRepairView:
+      properties:
+        approvedBy:
+          type: string
+        generation:
+          type: integer
+        maxRepairs:
+          type: integer
+        runId:
+          type: string
+      required:
+      - runId
+      - maxRepairs
+      type: object
     ControllersIncidentResponse:
       properties:
         incident:
@@ -7476,6 +7490,8 @@ components:
           type: integer
         maxRepairs:
           type: integer
+        repair:
+          $ref: '#/components/schemas/ControllersIncidentRepairView'
         repairsUsed:
           type: integer
         runId:

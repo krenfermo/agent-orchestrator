@@ -532,15 +532,21 @@ func (c *Coordinator) ExecuteIncidentAction(ctx stdctx.Context, runID, incidentI
 		return inc, err
 	}
 
-	outcome, execErr := c.runIncidentAction(ctx, run, inc, action)
+	outcome, execErr := c.runIncidentAction(ctx, run, inc, action, approvedBy)
 	rec.Outcome = outcome
 	if execErr != nil {
 		rec.Note = execErr.Error()
 		_ = c.writeIncidentRow(ctx, run, incidentRefusedPhase, "incident_refused: action failed: "+execErr.Error(), rec)
 		return inc, execErr
 	}
-	if err := c.writeIncidentRow(ctx, run, incidentResolvedPhase, "incident_resolved: "+outcome, rec); err != nil {
-		return inc, err
+	// A repair does not resolve the incident here. It resolves when its run has
+	// been reviewed and verified — reconcileIncidentRepair reads that from the
+	// run's own terminal state, so "only then IncidentResolved" is a property of
+	// the data rather than a promise in a comment.
+	if action != IncidentActionRepairAgent {
+		if err := c.writeIncidentRow(ctx, run, incidentResolvedPhase, "incident_resolved: "+outcome, rec); err != nil {
+			return inc, err
+		}
 	}
 	return c.LoadIncident(ctx, runID, incidentID)
 }
@@ -549,7 +555,7 @@ func (c *Coordinator) ExecuteIncidentAction(ctx stdctx.Context, runID, incidentI
 // every branch delegates to a mechanism that already exists and is already
 // bounded. There is no branch that shells out, edits a file, or writes to the
 // database directly.
-func (c *Coordinator) runIncidentAction(ctx stdctx.Context, run domain.WorkflowRun, inc Incident, kind IncidentActionKind) (string, error) {
+func (c *Coordinator) runIncidentAction(ctx stdctx.Context, run domain.WorkflowRun, inc Incident, kind IncidentActionKind, approvedBy string) (string, error) {
 	switch kind {
 	case IncidentActionContinueRun:
 		if _, err := c.ContinueRun(ctx, run.ID); err != nil {
@@ -562,17 +568,15 @@ func (c *Coordinator) runIncidentAction(ctx stdctx.Context, run domain.WorkflowR
 		}
 		return "cancelled the run", nil
 	case IncidentActionRepairAgent:
-		if c.incidentAgents == nil {
-			return "", errors.New("no incident agent launcher is configured")
-		}
-		res, err := c.incidentAgents.LaunchRepair(ctx, IncidentAgentRequest{
-			IncidentID: inc.ID, RunID: run.ID, ProjectID: run.ProjectID,
-			Prompt: BuildIncidentRepairPrompt(inc), ReadOnly: false,
-		})
+		// A repair is a workflow run, not a bare agent: that is what gives it an
+		// independent reviewer, deterministic verification, a bounded fix budget
+		// and restart recovery without any of it being written twice. See
+		// incident_repair.go.
+		repairRunID, err := c.launchIncidentRepair(ctx, run, inc, approvedBy)
 		if err != nil {
 			return "", err
 		}
-		return "launched a repair agent in session " + res.SessionID, nil
+		return "launched repair run " + repairRunID + " (independent review and deterministic verification follow before this incident resolves)", nil
 	default:
 		return "", fmt.Errorf("workflow: %q is not an executable incident action", kind)
 	}
@@ -613,8 +617,13 @@ func (c *Coordinator) LoadIncident(ctx stdctx.Context, runID, incidentID string)
 	}
 	inc.RunID = runID
 	if run, ok, rerr := c.store.GetWorkflowRun(ctx, runID); rerr == nil && ok && !inc.State.Terminal() {
-		if ferr := c.assertIncidentFresh(ctx, run, inc); ferr != nil {
-			inc.Stale = true
+		// A dispatched repair is watched on every read, so its outcome lands in
+		// the incident without anyone having to poll a second endpoint.
+		inc = c.reconcileIncidentRepair(ctx, run, inc)
+		if !inc.State.Terminal() {
+			if ferr := c.assertIncidentFresh(ctx, run, inc); ferr != nil {
+				inc.Stale = true
+			}
 		}
 	}
 	return inc, nil

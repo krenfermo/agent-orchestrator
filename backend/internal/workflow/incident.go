@@ -189,6 +189,9 @@ var incidentPhases = map[string]IncidentState{
 	incidentResolvedPhase:   IncidentResolved,
 	incidentRefusedPhase:    IncidentRefused,
 	incidentClosedPhase:     IncidentClosed,
+	// A dispatched repair keeps the incident in `executing`: the work is
+	// happening, and only the repair run reaching `completed` may resolve it.
+	incidentRepairPhase: IncidentExecuting,
 }
 
 // incidentAuxiliaryPhases are incident-ledger rows that are NOT state
@@ -289,6 +292,17 @@ type IncidentRecord struct {
 	// provider, so a capacity wait is explainable from the ledger alone.
 	RoutingReasons []string `json:"routingReasons,omitempty"`
 
+	// Repair linkage and audit — Checkpoint 8P-E.20. Together these answer, from
+	// the ledger alone: who approved, which diagnosis authorised it, which
+	// repair generation it was, which independent reviewer read it, what the
+	// deterministic verification said, and what commit it landed at.
+	RepairRunID      string `json:"repairRunId,omitempty"`
+	RepairProjectID  string `json:"repairProjectId,omitempty"`
+	RepairGeneration int    `json:"repairGeneration,omitempty"`
+	ReviewerHarness  string `json:"reviewerHarness,omitempty"`
+	VerifyResult     string `json:"verifyResult,omitempty"`
+	FinalSHA         string `json:"finalSha,omitempty"`
+
 	// Approval/execution fields.
 	ApprovedBy string `json:"approvedBy,omitempty"`
 	Outcome    string `json:"outcome,omitempty"`
@@ -342,6 +356,12 @@ type Incident struct {
 	Repairs int
 	// Executions counts executions of an approved action already spent.
 	Executions int
+	// RepairRunID is the workflow run carrying the approved repair, and
+	// ApprovedBy is who authorised it. Both are folded from the ledger so a
+	// restart re-derives them rather than losing the link.
+	RepairRunID string
+	ApprovedBy  string
+
 	// FailedGeneration is the highest diagnosis generation whose launch is
 	// durably known to have failed. A generation at or below it is dead, not
 	// outstanding.
@@ -474,9 +494,6 @@ func foldIncident(incidentID string, cps []domain.WorkflowCheckpoint) (Incident,
 		switch cp.DurablePhase {
 		case incidentDiagnosingPhase:
 			inc.Diagnoses++
-			if rec.Action != nil && rec.Action.Kind == IncidentActionRepairAgent {
-				inc.Repairs++
-			}
 		case incidentDiagnosedPhase, incidentRefusedPhase:
 			// A refusal IS a diagnosis, and folding it as one is load-bearing:
 			// an unsafe/insufficient verdict's whole value is the evidence it
@@ -501,9 +518,14 @@ func foldIncident(incidentID string, cps []domain.WorkflowCheckpoint) (Incident,
 			}
 		case incidentExecutingPhase:
 			inc.Executions++
-			if rec.Action != nil && rec.Action.Kind == IncidentActionRepairAgent {
-				inc.Repairs++
-			}
+		case incidentRepairPhase:
+			// The repair generation is counted HERE, from the row that records a
+			// repair actually being dispatched, rather than from the generic
+			// executing row. Counting both would spend the budget twice for one
+			// repair.
+			inc.Repairs++
+			inc.RepairRunID = rec.RepairRunID
+			inc.ApprovedBy = rec.ApprovedBy
 		}
 		// The state only advances along declared edges. A row describing a
 		// transition the machine does not allow is a row from a future or
