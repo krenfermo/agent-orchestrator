@@ -110,6 +110,96 @@ func (a Attribution) Valid() bool {
 	}
 }
 
+// FindingScope records whether a finding falls inside the project/runtime
+// scope this execution was actually allowed to touch. It is separate from
+// Attribution because the two questions are independent: a signal can be new
+// this execution and still belong to a repository, session, or run the
+// execution never owned, and auto-fixing that is reaching outside the blast
+// radius the execution was granted.
+type FindingScope string
+
+const (
+	// ScopeUnknown is the unset value. It is what a finding written before
+	// classification existed loads as, so it must stay persistable.
+	ScopeUnknown FindingScope = ""
+	// ScopeInScope means the finding's subject is one this execution owned.
+	ScopeInScope FindingScope = "in_scope"
+	// ScopeOutOfScope means the finding's subject belongs to some other
+	// project, run, or session. Recorded, never auto-fixed.
+	ScopeOutOfScope FindingScope = "out_of_scope"
+)
+
+// Valid reports whether a scope value is persistable.
+func (s FindingScope) Valid() bool {
+	switch s {
+	case ScopeUnknown, ScopeInScope, ScopeOutOfScope:
+		return true
+	default:
+		return false
+	}
+}
+
+// Verification records what the finding actually rests on. The gate reads two
+// very different kinds of input: structured runtime state (git status, lock
+// rows, wake schedules, process exit codes, session cleanup facts) and the
+// agent's own closing prose. Only the first is checkable, so only the first
+// may block.
+type Verification string
+
+const (
+	// VerificationUnknown is the unset value, kept persistable for rows
+	// written before classification existed.
+	VerificationUnknown Verification = ""
+	// VerificationEvidence means a structured source reported the signal.
+	VerificationEvidence Verification = "evidence_backed"
+	// VerificationReportOnly means the only thing asserting this defect is the
+	// agent's final report, and no structured source corroborates it. Such a
+	// finding is kept — discarding it would erase the one hint a human has
+	// that the agent thought something was wrong — but it never blocks.
+	VerificationReportOnly Verification = "report_only"
+)
+
+// Valid reports whether a verification value is persistable.
+func (v Verification) Valid() bool {
+	switch v {
+	case VerificationUnknown, VerificationEvidence, VerificationReportOnly:
+		return true
+	default:
+		return false
+	}
+}
+
+// SafetyVerdict is whether an automated repair may touch this finding at all.
+// It is a property of the finding's kind, not of how confident the gate is:
+// releasing a lock reconciliation already calls stale is mechanical, and
+// discarding a working tree full of uncommitted changes is not, no matter how
+// certain the gate is that the tree is dirty.
+type SafetyVerdict string
+
+const (
+	// SafetyUnknown is the unset value, kept persistable.
+	SafetyUnknown SafetyVerdict = ""
+	// SafetyAutoFix means an automated repair of this finding is mechanical
+	// and non-destructive.
+	SafetyAutoFix SafetyVerdict = "safe_to_autofix"
+	// SafetyAmbiguous means a repair may be correct but cannot be shown to be
+	// harmless without a judgement call.
+	SafetyAmbiguous SafetyVerdict = "ambiguous"
+	// SafetyUnsafe means an automated repair could destroy work or state a
+	// human still needs.
+	SafetyUnsafe SafetyVerdict = "unsafe"
+)
+
+// Valid reports whether a safety value is persistable.
+func (s SafetyVerdict) Valid() bool {
+	switch s {
+	case SafetyUnknown, SafetyAutoFix, SafetyAmbiguous, SafetyUnsafe:
+		return true
+	default:
+		return false
+	}
+}
+
 // Severity is how badly one finding matters.
 type Severity string
 
@@ -177,8 +267,80 @@ type Finding struct {
 	Evidence string `json:"evidence"`
 	// Attribution is whether this subject introduced the signal.
 	Attribution Attribution `json:"attribution"`
+	// AttributionReason is why the classifier decided that, in one line. It
+	// exists so "baseline" is auditable later without re-running the diff.
+	AttributionReason string `json:"attributionReason,omitempty"`
 	// Severity is how badly the finding matters.
 	Severity Severity `json:"severity"`
+	// Subject is what the finding is about — a repository path, a lock key, a
+	// session id, a command. It is the half of Signature that is never
+	// normalized, so two different sessions with identical breakage stay two
+	// findings.
+	Subject string `json:"subject,omitempty"`
+	// Signature is the stable identity used to match this finding against the
+	// pre-run snapshot. Two findings with the same Signature are the same
+	// finding observed twice; that is the whole basis of baseline detection,
+	// so it must not carry timestamps, counts, or durations.
+	Signature string `json:"signature,omitempty"`
+	// Scope is whether the finding's subject is inside what this execution
+	// owned.
+	Scope FindingScope `json:"scope,omitempty"`
+	// ScopeReason is why, in one line.
+	ScopeReason string `json:"scopeReason,omitempty"`
+	// Verification is whether a structured source reported this, or only the
+	// agent's closing prose did.
+	Verification Verification `json:"verification,omitempty"`
+	// CorroboratedBy names the structured signal that backs a finding derived
+	// from the agent's report. Empty for a finding that is itself structured,
+	// and empty for an uncorroborated report claim.
+	CorroboratedBy string `json:"corroboratedBy,omitempty"`
+	// Reproducible reports that re-reading the same durable source would
+	// surface this finding again. It is false for a claim that exists only in
+	// prose, and false when the source it came from could not be read cleanly.
+	Reproducible bool `json:"reproducible,omitempty"`
+	// Safety is whether an automated repair may touch this finding.
+	Safety SafetyVerdict `json:"safety,omitempty"`
+}
+
+// Blocking reports whether this finding should stop the gate from reporting
+// the subject complete.
+//
+// The three exemptions are the whole point of classification. A baseline
+// finding was already true before the execution ran, so blocking on it would
+// hand an agent someone else's breakage. An out-of-scope finding belongs to a
+// project or session this execution never owned. A report-only finding is the
+// agent's own prose with nothing structured behind it, and prose is not
+// evidence. Everything else that is more than informational blocks.
+func (f Finding) Blocking() bool {
+	if f.Scope == ScopeOutOfScope {
+		return false
+	}
+	if f.Attribution == AttributionBaseline {
+		return false
+	}
+	if f.Verification == VerificationReportOnly {
+		return false
+	}
+	switch f.Severity {
+	case SeverityBlocker, SeverityMajor:
+		return true
+	default:
+		return false
+	}
+}
+
+// AutoFixEligible reports whether an automated repair may be attempted for
+// this finding. Every clause is a veto, and each one has cost someone a bad
+// afternoon: repairs stay inside the execution's own scope, only touch
+// breakage this execution introduced, only act on signals a structured source
+// actually reported and would report again, and only run for finding kinds
+// whose repair is mechanical.
+func (f Finding) AutoFixEligible() bool {
+	return f.Scope == ScopeInScope &&
+		f.Attribution == AttributionNew &&
+		f.Verification == VerificationEvidence &&
+		f.Reproducible &&
+		f.Safety == SafetyAutoFix
 }
 
 // Validate reports whether the finding's enum fields are persistable.
@@ -188,6 +350,15 @@ func (f Finding) Validate() error {
 	}
 	if !f.Severity.Valid() {
 		return fmt.Errorf("postrunqa: invalid severity %q", f.Severity)
+	}
+	if !f.Scope.Valid() {
+		return fmt.Errorf("postrunqa: invalid scope %q", f.Scope)
+	}
+	if !f.Verification.Valid() {
+		return fmt.Errorf("postrunqa: invalid verification %q", f.Verification)
+	}
+	if !f.Safety.Valid() {
+		return fmt.Errorf("postrunqa: invalid safety verdict %q", f.Safety)
 	}
 	return nil
 }
