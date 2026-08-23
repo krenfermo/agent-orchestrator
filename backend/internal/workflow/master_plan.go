@@ -32,6 +32,16 @@ type PlannedStep struct {
 	Dependencies       []string         `json:"dependencies"`
 	AcceptanceCriteria []string         `json:"acceptanceCriteria"`
 	Verify             VerificationPlan `json:"verify"`
+	// Files and Packages are the step's OPTIONAL explicit scope declaration:
+	// the files it will touch when the planner knows them, and the
+	// packages/components it expects to touch. They feed the task-graph
+	// classifier, which trusts them over anything it infers from prose.
+	//
+	// Both are omitempty and are left nil when the planner declares nothing,
+	// so a plan that says nothing about scope serializes -- and therefore
+	// hashes -- exactly as it did before these fields existed.
+	Files    []string `json:"files,omitempty"`
+	Packages []string `json:"packages,omitempty"`
 }
 
 type PlanValidation struct {
@@ -117,6 +127,14 @@ func NormalizeAndValidatePlan(plan MasterPlan, objective string, maxSteps int) (
 		sort.Strings(s.Dependencies)
 		if s.AcceptanceCriteria == nil {
 			s.AcceptanceCriteria = []string{}
+		}
+		// Normalized only when declared: an empty declaration stays nil so it
+		// stays out of the canonical JSON the plan hash is taken over.
+		if s.Files = normalizeStrings(s.Files); len(s.Files) == 0 {
+			s.Files = nil
+		}
+		if s.Packages = normalizeStrings(s.Packages); len(s.Packages) == 0 {
+			s.Packages = nil
 		}
 		if s.Verify.Commands == nil {
 			s.Verify.Commands = []VerificationCommandCheck{}

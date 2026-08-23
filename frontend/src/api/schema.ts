@@ -4201,7 +4201,9 @@ export interface components {
             acceptanceCriteria: string[];
             dependencies: string[];
             description: string;
+            files?: string[];
             id: string;
+            packages?: string[];
             title: string;
             verify: components["schemas"]["WorkflowVerificationPlanType2"];
         };
@@ -4399,6 +4401,7 @@ export interface components {
             kind: string;
             label: string;
             passed: boolean;
+            resolvedPath?: string;
             stderrTail?: string;
             stdoutTail?: string;
         };
@@ -4424,11 +4427,15 @@ export interface components {
             errorClass?: string;
             infraFailure?: components["schemas"]["WorkflowVerifyInfraFailure"];
             passed: boolean;
+            pathContext?: string;
             postFingerprint: string;
             preFingerprint: string;
+            recoveryGeneration?: number;
             reviewedFingerprint: string;
             scope?: components["schemas"]["WorkflowVerifyScopeDecision"];
             scopeAppliedTransforms?: string[];
+            stopReason?: string;
+            supersededByFreshReview?: boolean;
             targetKey: string;
             version: string;
         };

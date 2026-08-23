@@ -35,8 +35,8 @@ WHERE workflow_run_id = ? AND status IN ('pending','validated','invalid');
 
 -- name: InsertWorkflowTask :exec
 INSERT OR IGNORE INTO workflow_tasks (id, workflow_run_id, plan_step_id, ordinal, title, description,
-    acceptance_criteria_json, verify_json, state, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    acceptance_criteria_json, verify_json, scope_json, state, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: InsertWorkflowTaskDependency :exec
 INSERT OR IGNORE INTO workflow_task_dependencies (workflow_task_id, depends_on_task_id) VALUES (?, ?);
@@ -50,6 +50,21 @@ FROM workflow_tasks t WHERE t.workflow_run_id = ? ORDER BY t.ordinal;
 UPDATE workflow_tasks SET state = sqlc.arg(state), updated_at = sqlc.arg(updated_at),
     completed_at = CASE WHEN sqlc.arg(state) = 'completed' THEN sqlc.arg(completed_at) ELSE completed_at END
 WHERE id = sqlc.arg(id) AND state = sqlc.arg(expected_state);
+
+-- name: UpdateWorkflowTaskScope :execrows
+UPDATE workflow_tasks SET scope_json = ?, updated_at = ? WHERE id = ?;
+
+-- name: UpsertWorkflowTaskRelationship :exec
+INSERT INTO workflow_task_relationships (workflow_run_id, task_id, related_task_id, relation,
+    reason, detail, overlap_json, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(task_id, related_task_id) DO UPDATE SET
+    relation = excluded.relation, reason = excluded.reason, detail = excluded.detail,
+    overlap_json = excluded.overlap_json, created_at = excluded.created_at;
+
+-- name: ListWorkflowTaskRelationships :many
+SELECT * FROM workflow_task_relationships WHERE workflow_run_id = ?
+ORDER BY task_id, related_task_id;
 
 -- name: SetWorkflowTaskExecutionRun :execrows
 UPDATE workflow_tasks SET execution_run_id = ?, state = 'running', updated_at = ?

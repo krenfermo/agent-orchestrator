@@ -72,7 +72,11 @@ func (s *Store) InsertWorkflowTasks(ctx context.Context, tasks []domain.Workflow
 	defer s.writeMu.Unlock()
 	return s.inTx(ctx, "insert workflow plan tasks", func(q *gen.Queries) error {
 		for _, task := range tasks {
-			if err := q.InsertWorkflowTask(ctx, gen.InsertWorkflowTaskParams{ID: task.ID, WorkflowRunID: task.WorkflowRunID, PlanStepID: task.PlanStepID, Ordinal: task.Ordinal, Title: task.Title, Description: task.Description, AcceptanceCriteriaJson: task.AcceptanceCriteriaJSON, VerifyJson: task.VerifyJSON, State: string(task.State), CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt}); err != nil {
+			scope := task.ScopeJSON
+			if scope == "" {
+				scope = "{}"
+			}
+			if err := q.InsertWorkflowTask(ctx, gen.InsertWorkflowTaskParams{ID: task.ID, WorkflowRunID: task.WorkflowRunID, PlanStepID: task.PlanStepID, Ordinal: task.Ordinal, Title: task.Title, Description: task.Description, AcceptanceCriteriaJson: task.AcceptanceCriteriaJSON, VerifyJson: task.VerifyJSON, ScopeJson: scope, State: string(task.State), CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt}); err != nil {
 				return err
 			}
 		}
@@ -105,7 +109,7 @@ func (s *Store) ListWorkflowTasks(ctx context.Context, runID string) ([]domain.W
 		if len(raw) > 0 {
 			_ = json.Unmarshal(raw, &deps)
 		}
-		out = append(out, domain.WorkflowTask{ID: r.ID, WorkflowRunID: r.WorkflowRunID, PlanStepID: r.PlanStepID, Ordinal: r.Ordinal, Title: r.Title, Description: r.Description, AcceptanceCriteriaJSON: r.AcceptanceCriteriaJson, VerifyJSON: r.VerifyJson, State: domain.WorkflowTaskState(r.State), ExecutionRunID: nullStringToPtr(r.ExecutionRunID), Dependencies: deps, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, CompletedAt: nullTimeToTimePtr(r.CompletedAt)})
+		out = append(out, domain.WorkflowTask{ID: r.ID, WorkflowRunID: r.WorkflowRunID, PlanStepID: r.PlanStepID, Ordinal: r.Ordinal, Title: r.Title, Description: r.Description, AcceptanceCriteriaJSON: r.AcceptanceCriteriaJson, VerifyJSON: r.VerifyJson, ScopeJSON: r.ScopeJson, State: domain.WorkflowTaskState(r.State), ExecutionRunID: nullStringToPtr(r.ExecutionRunID), Dependencies: deps, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, CompletedAt: nullTimeToTimePtr(r.CompletedAt)})
 	}
 	return out, nil
 }
@@ -119,6 +123,76 @@ func (s *Store) UpdateWorkflowTaskState(ctx context.Context, id string, expected
 	}
 	n, err := s.qw.UpdateWorkflowTaskState(ctx, gen.UpdateWorkflowTaskStateParams{State: string(next), UpdatedAt: now, CompletedAt: completed, ID: id, ExpectedState: string(expected)})
 	return n > 0, err
+}
+
+// UpdateWorkflowTaskScope replaces a task's estimated read/write scope. It is
+// deliberately unconditional (no expected-value CAS): the scope is a derived
+// estimate, not lifecycle state, and the newest estimate always wins -- the
+// one refreshed with what a completed task actually wrote is strictly better
+// than the one guessed from its acceptance criteria.
+func (s *Store) UpdateWorkflowTaskScope(ctx context.Context, taskID, scopeJSON string, now time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if scopeJSON == "" {
+		scopeJSON = "{}"
+	}
+	n, err := s.qw.UpdateWorkflowTaskScope(ctx, gen.UpdateWorkflowTaskScopeParams{ScopeJson: scopeJSON, UpdatedAt: now, ID: taskID})
+	return n > 0, err
+}
+
+// ReplaceWorkflowTaskRelationships writes a plan's whole task-pair
+// classification in one transaction. Upsert-by-pair rather than
+// delete-then-insert: re-classifying a plan whose tasks have not changed must
+// never leave a window in which a concurrent reader sees a task graph with no
+// relationships at all.
+func (s *Store) ReplaceWorkflowTaskRelationships(ctx context.Context, rels []domain.WorkflowTaskRelationship) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.inTx(ctx, "replace workflow task relationships", func(q *gen.Queries) error {
+		for _, rel := range rels {
+			overlap := rel.Overlap
+			if overlap == nil {
+				overlap = []string{}
+			}
+			raw, err := json.Marshal(overlap)
+			if err != nil {
+				return fmt.Errorf("marshal relationship overlap: %w", err)
+			}
+			if err := q.UpsertWorkflowTaskRelationship(ctx, gen.UpsertWorkflowTaskRelationshipParams{
+				WorkflowRunID: rel.WorkflowRunID, TaskID: rel.TaskID, RelatedTaskID: rel.RelatedTaskID,
+				Relation: string(rel.Relation), Reason: rel.Reason, Detail: rel.Detail,
+				OverlapJson: string(raw), CreatedAt: rel.CreatedAt,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// ListWorkflowTaskRelationships returns every stored pair classification for a
+// run, ordered by the canonical (task_id, related_task_id) pair.
+func (s *Store) ListWorkflowTaskRelationships(ctx context.Context, runID string) ([]domain.WorkflowTaskRelationship, error) {
+	rows, err := s.qr.ListWorkflowTaskRelationships(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.WorkflowTaskRelationship, 0, len(rows))
+	for _, r := range rows {
+		var overlap []string
+		if r.OverlapJson != "" {
+			_ = json.Unmarshal([]byte(r.OverlapJson), &overlap)
+		}
+		if overlap == nil {
+			overlap = []string{}
+		}
+		out = append(out, domain.WorkflowTaskRelationship{
+			WorkflowRunID: r.WorkflowRunID, TaskID: r.TaskID, RelatedTaskID: r.RelatedTaskID,
+			Relation: domain.WorkflowTaskRelation(r.Relation), Reason: r.Reason, Detail: r.Detail,
+			Overlap: overlap, CreatedAt: r.CreatedAt,
+		})
+	}
+	return out, nil
 }
 
 func (s *Store) SetWorkflowTaskExecutionRun(ctx context.Context, taskID, executionRunID string, now time.Time) (bool, error) {

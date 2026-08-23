@@ -150,8 +150,8 @@ func (q *Queries) InsertWorkflowPlan(ctx context.Context, arg InsertWorkflowPlan
 
 const insertWorkflowTask = `-- name: InsertWorkflowTask :exec
 INSERT OR IGNORE INTO workflow_tasks (id, workflow_run_id, plan_step_id, ordinal, title, description,
-    acceptance_criteria_json, verify_json, state, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    acceptance_criteria_json, verify_json, scope_json, state, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertWorkflowTaskParams struct {
@@ -163,6 +163,7 @@ type InsertWorkflowTaskParams struct {
 	Description            string
 	AcceptanceCriteriaJson string
 	VerifyJson             string
+	ScopeJson              string
 	State                  string
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
@@ -178,6 +179,7 @@ func (q *Queries) InsertWorkflowTask(ctx context.Context, arg InsertWorkflowTask
 		arg.Description,
 		arg.AcceptanceCriteriaJson,
 		arg.VerifyJson,
+		arg.ScopeJson,
 		arg.State,
 		arg.CreatedAt,
 		arg.UpdatedAt,
@@ -199,8 +201,45 @@ func (q *Queries) InsertWorkflowTaskDependency(ctx context.Context, arg InsertWo
 	return err
 }
 
+const listWorkflowTaskRelationships = `-- name: ListWorkflowTaskRelationships :many
+SELECT workflow_run_id, task_id, related_task_id, relation, reason, detail, overlap_json, created_at FROM workflow_task_relationships WHERE workflow_run_id = ?
+ORDER BY task_id, related_task_id
+`
+
+func (q *Queries) ListWorkflowTaskRelationships(ctx context.Context, workflowRunID string) ([]WorkflowTaskRelationship, error) {
+	rows, err := q.db.QueryContext(ctx, listWorkflowTaskRelationships, workflowRunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []WorkflowTaskRelationship{}
+	for rows.Next() {
+		var i WorkflowTaskRelationship
+		if err := rows.Scan(
+			&i.WorkflowRunID,
+			&i.TaskID,
+			&i.RelatedTaskID,
+			&i.Relation,
+			&i.Reason,
+			&i.Detail,
+			&i.OverlapJson,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listWorkflowTasks = `-- name: ListWorkflowTasks :many
-SELECT t.id, t.workflow_run_id, t.plan_step_id, t.ordinal, t.title, t.description, t.acceptance_criteria_json, t.verify_json, t.state, t.execution_run_id, t.created_at, t.updated_at, t.completed_at, COALESCE((SELECT json_group_array(d.depends_on_task_id)
+SELECT t.id, t.workflow_run_id, t.plan_step_id, t.ordinal, t.title, t.description, t.acceptance_criteria_json, t.verify_json, t.state, t.execution_run_id, t.created_at, t.updated_at, t.completed_at, t.scope_json, COALESCE((SELECT json_group_array(d.depends_on_task_id)
     FROM workflow_task_dependencies d WHERE d.workflow_task_id = t.id), '[]') AS dependencies_json
 FROM workflow_tasks t WHERE t.workflow_run_id = ? ORDER BY t.ordinal
 `
@@ -219,6 +258,7 @@ type ListWorkflowTasksRow struct {
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
 	CompletedAt            sql.NullTime
+	ScopeJson              string
 	DependenciesJson       interface{}
 }
 
@@ -245,6 +285,7 @@ func (q *Queries) ListWorkflowTasks(ctx context.Context, workflowRunID string) (
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.CompletedAt,
+			&i.ScopeJson,
 			&i.DependenciesJson,
 		); err != nil {
 			return nil, err
@@ -370,6 +411,24 @@ func (q *Queries) StartWorkflowPlanCommand(ctx context.Context, arg StartWorkflo
 	return result.RowsAffected()
 }
 
+const updateWorkflowTaskScope = `-- name: UpdateWorkflowTaskScope :execrows
+UPDATE workflow_tasks SET scope_json = ?, updated_at = ? WHERE id = ?
+`
+
+type UpdateWorkflowTaskScopeParams struct {
+	ScopeJson string
+	UpdatedAt time.Time
+	ID        string
+}
+
+func (q *Queries) UpdateWorkflowTaskScope(ctx context.Context, arg UpdateWorkflowTaskScopeParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateWorkflowTaskScope, arg.ScopeJson, arg.UpdatedAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const updateWorkflowTaskState = `-- name: UpdateWorkflowTaskState :execrows
 UPDATE workflow_tasks SET state = ?1, updated_at = ?2,
     completed_at = CASE WHEN ?1 = 'completed' THEN ?3 ELSE completed_at END
@@ -396,4 +455,38 @@ func (q *Queries) UpdateWorkflowTaskState(ctx context.Context, arg UpdateWorkflo
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const upsertWorkflowTaskRelationship = `-- name: UpsertWorkflowTaskRelationship :exec
+INSERT INTO workflow_task_relationships (workflow_run_id, task_id, related_task_id, relation,
+    reason, detail, overlap_json, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(task_id, related_task_id) DO UPDATE SET
+    relation = excluded.relation, reason = excluded.reason, detail = excluded.detail,
+    overlap_json = excluded.overlap_json, created_at = excluded.created_at
+`
+
+type UpsertWorkflowTaskRelationshipParams struct {
+	WorkflowRunID string
+	TaskID        string
+	RelatedTaskID string
+	Relation      string
+	Reason        string
+	Detail        string
+	OverlapJson   string
+	CreatedAt     time.Time
+}
+
+func (q *Queries) UpsertWorkflowTaskRelationship(ctx context.Context, arg UpsertWorkflowTaskRelationshipParams) error {
+	_, err := q.db.ExecContext(ctx, upsertWorkflowTaskRelationship,
+		arg.WorkflowRunID,
+		arg.TaskID,
+		arg.RelatedTaskID,
+		arg.Relation,
+		arg.Reason,
+		arg.Detail,
+		arg.OverlapJson,
+		arg.CreatedAt,
+	)
+	return err
 }

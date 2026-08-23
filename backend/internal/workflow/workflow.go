@@ -144,6 +144,14 @@ type masterPlanStore interface {
 	FinishWorkflowPlan(ctx stdctx.Context, runID string, status domain.WorkflowPlanStatus, command domain.WorkflowPlanCommandStatus, validationJSON, hash, errorClass string, now time.Time) (bool, error)
 	InsertWorkflowTasks(ctx stdctx.Context, tasks []domain.WorkflowTask) error
 	ListWorkflowTasks(ctx stdctx.Context, runID string) ([]domain.WorkflowTask, error)
+	// UpdateWorkflowTaskScope / ReplaceWorkflowTaskRelationships /
+	// ListWorkflowTaskRelationships back the durable task write-set and
+	// conflict model (see task_graph.go): the classification is persisted with
+	// the plan so scheduling and integration read a decision instead of
+	// re-deriving one from text that may since have changed.
+	UpdateWorkflowTaskScope(ctx stdctx.Context, taskID, scopeJSON string, now time.Time) (bool, error)
+	ReplaceWorkflowTaskRelationships(ctx stdctx.Context, rels []domain.WorkflowTaskRelationship) error
+	ListWorkflowTaskRelationships(ctx stdctx.Context, runID string) ([]domain.WorkflowTaskRelationship, error)
 	UpdateWorkflowTaskState(ctx stdctx.Context, id string, expected, next domain.WorkflowTaskState, now time.Time) (bool, error)
 	SetWorkflowTaskExecutionRun(ctx stdctx.Context, taskID, executionRunID string, now time.Time) (bool, error)
 	FindWorkflowRunByPlannedTask(ctx stdctx.Context, taskID string) (string, bool, error)

@@ -790,11 +790,23 @@ type WorkflowTask struct {
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
 	CompletedAt            sql.NullTime
+	ScopeJson              string
 }
 
 type WorkflowTaskDependency struct {
 	WorkflowTaskID  string
 	DependsOnTaskID string
+}
+
+type WorkflowTaskRelationship struct {
+	WorkflowRunID string
+	TaskID        string
+	RelatedTaskID string
+	Relation      string
+	Reason        string
+	Detail        string
+	OverlapJson   string
+	CreatedAt     time.Time
 }
 
 type WorkflowWakeSchedule struct {

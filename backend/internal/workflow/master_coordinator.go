@@ -203,7 +203,33 @@ func (c *Coordinator) finalizeGeneratedPlan(ctx stdctx.Context, run domain.Workf
 		}
 		tasks = append(tasks, domain.WorkflowTask{ID: idByPlan[s.ID], WorkflowRunID: run.ID, PlanStepID: s.ID, Ordinal: int64(i + 1), Title: s.Title, Description: s.Description, AcceptanceCriteriaJSON: string(criteria), VerifyJSON: string(verify), State: state, Dependencies: deps, CreatedAt: now, UpdatedAt: now})
 	}
+	// Classify the task DAG before the tasks are written, so a task row never
+	// exists without the scope estimate that belongs to it. The pair verdicts
+	// go in straight after, once the rows they reference exist.
+	graph := ClassifyTaskGraph(TaskGraphInput{
+		WorkflowRunID: run.ID,
+		Objective:     run.Objective,
+		RepoRoots:     repoRootsFromContextManifest(record.ContextManifestJSON),
+		Tasks:         taskScopeInputs(generated, tasks, idByPlan, nil),
+	})
+	for i := range tasks {
+		scope, ok := graph.Scopes[tasks[i].ID]
+		if !ok {
+			continue
+		}
+		raw, err := MarshalTaskScope(scope)
+		if err != nil {
+			return RunDetail{}, err
+		}
+		tasks[i].ScopeJSON = raw
+	}
 	if err := c.planStore.InsertWorkflowTasks(ctx, tasks); err != nil {
+		return RunDetail{}, err
+	}
+	for i := range graph.Relationships {
+		graph.Relationships[i].CreatedAt = now
+	}
+	if err := c.planStore.ReplaceWorkflowTaskRelationships(ctx, graph.Relationships); err != nil {
 		return RunDetail{}, err
 	}
 	if _, err := c.planStore.FinishWorkflowPlan(ctx, run.ID, domain.WorkflowPlanValidated, domain.WorkflowPlanCommandCompleted, string(validationJSON), hash, "", now); err != nil {
@@ -663,6 +689,13 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 			// left to dispatch the next task either.
 			run = c.clearIntegrationStop(ctx, run)
 			_, _ = c.planStore.UpdateWorkflowTaskState(ctx, task.ID, domain.WorkflowTaskRunning, domain.WorkflowTaskCompleted, c.clock())
+			// The task is done, so its write set is no longer an estimate.
+			// Replace it with what the child run actually wrote and re-classify
+			// the remaining pairs against that evidence, so the tasks still to
+			// be scheduled are ordered by a fact rather than by a guess. After
+			// the state transition on purpose: refreshing a scope must never be
+			// what decides whether a completed task counts as completed.
+			c.recordObservedTaskWriteSet(ctx, *task, child.Run.ID)
 			completed[task.ID] = true
 			active = false
 
