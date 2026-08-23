@@ -198,6 +198,11 @@ func (c *Coordinator) verifyRecoveryLedger(ctx stdctx.Context, runID string) (ve
 	if led.generation == 0 {
 		return led, nil
 	}
+	// Pass 2 collects everything except "has this generation been answered?" —
+	// that question cannot be settled until the fresh-review rows are known,
+	// because a fresh review is precisely the statement that the generation's
+	// question CHANGED (see the third pass).
+	var results []VerifyResult
 	for _, cp := range cps {
 		switch cp.DurablePhase {
 		case verifyReopenedPhase:
@@ -209,7 +214,7 @@ func (c *Coordinator) verifyRecoveryLedger(ctx stdctx.Context, runID string) (ve
 			var res VerifyResult
 			if json.Unmarshal([]byte(cp.RetryState), &res) == nil &&
 				res.RecoveryGeneration == led.generation && !res.SupersededByFreshReview {
-				led.executed = true
+				results = append(results, res)
 			}
 		case verifyFreshReviewRequiredPhase:
 			var rec VerifyFreshReviewRecord
@@ -221,6 +226,26 @@ func (c *Coordinator) verifyRecoveryLedger(ctx stdctx.Context, runID string) (ve
 			if json.Unmarshal([]byte(cp.RetryState), &rec) == nil && rec.Generation == led.generation {
 				led.freshReviewApproved, led.freshApproval = true, rec
 			}
+		}
+	}
+
+	// Pass 3 — "answered" is answered against the question the generation is
+	// ACTUALLY asking right now, which a fresh review moves.
+	//
+	// Without a fresh review that is simply "a result exists", as it always was.
+	// With one, the generation asked about the stale approval, was told the
+	// workspace had moved, and went to get a better approval — so only a result
+	// for the FRESHLY approved fingerprint answers it. This is what lets a
+	// legacy verify_workspace_changed result, written by a daemon that had no
+	// SupersededByFreshReview flag to set, stop being read as this generation's
+	// final word once Continue durably re-asks the question
+	// (verify_fresh_review.go's historical recovery).
+	for _, res := range results {
+		switch {
+		case !led.freshReviewRequested:
+			led.executed = true
+		case led.freshReviewApproved && res.ReviewedFingerprint == led.freshApproval.ReviewedFingerprint:
+			led.executed = true
 		}
 	}
 	return led, nil

@@ -336,6 +336,235 @@ func (c *Coordinator) requestFreshReviewForRecovery(
 	return run, verifyStep, nil
 }
 
+// resumeWorkspaceChangedVerifyRecovery is the historical half of 8P-E.14D: the
+// same transition, entered from a run whose workspace mismatch was already
+// DECIDED and persisted by a daemon that predates the transition.
+//
+// wf-6528a538 is one state further along than requestFreshReviewForRecovery can
+// reach. Its generation-1 recovery ran under the old binary, discovered the
+// mismatch, and recorded the only ending that binary had:
+//
+//	verify step    failed          (terminal)
+//	run            needs_attention  attentionReason = verify_unrepairable
+//	verify_result  passed=false     verify_workspace_changed
+//	               recoveryGeneration = 1
+//	               reviewedFingerprint 5f8f9dc4…  preFingerprint 1b9f3f81…
+//
+// Installing the new code changed nothing for it, and POST /continue returned
+// 200 having done precisely nothing. The reason is a single line in
+// resumeStaleVerifyFailure's guard 2: it reads the run's newest VerifyResult and
+// requires recoverableVerifyErrorClass(result.ErrorClass), which is true only for
+// verify_environment_error and verify_ambiguous. The newest result is now the
+// generation-1 workspace_changed one, so the guard returns false and every later
+// step — the reopen, the cascade, maybeVerify's own drift branch — is never
+// reached. (maybeVerify could not have helped anyway: it returns immediately on
+// a terminal verify step, and the cascade only calls it for a review step that
+// is `completed`, which this one still is.)
+//
+// This function is the narrow, evidence-only migration of that state into the
+// SAME machinery. It never widens guard 2, and it never makes
+// verify_workspace_changed recoverable in general: everything it does is gated
+// on durable proof that this particular mismatch happened INSIDE an authorized
+// recovery generation that originated from an eligible infrastructure failure,
+// plus the identical attributableWorkspaceDrift predicate re-evaluated against
+// the workspace as it stands right now.
+//
+// Like resumeStaleVerifyFailure, its only caller is ContinueRun. Returns the
+// (possibly updated) run and whether the fresh review was opened by this call.
+func (c *Coordinator) resumeWorkspaceChangedVerifyRecovery(ctx stdctx.Context, run domain.WorkflowRun, steps []domain.WorkflowStep) (domain.WorkflowRun, bool, error) {
+	var workStep, reviewStep, verifyStep *domain.WorkflowStep
+	for i := range steps {
+		switch steps[i].Kind {
+		case domain.WorkflowStepWork:
+			workStep = &steps[i]
+		case domain.WorkflowStepReview:
+			reviewStep = &steps[i]
+		case domain.WorkflowStepVerify:
+			verifyStep = &steps[i]
+		}
+	}
+	if workStep == nil || reviewStep == nil || verifyStep == nil {
+		return run, false, nil
+	}
+
+	led, err := c.verifyRecoveryLedger(ctx, run.ID)
+	if err != nil {
+		return run, false, err
+	}
+	// Proof 1 — an authorized recovery generation exists at all, and was applied.
+	// A run that has never been reopened by a person has no lineage this
+	// transition could belong to.
+	if led.generation == 0 || !led.reopened {
+		return run, false, nil
+	}
+
+	// Resume path: the request is already durable but its state mutation did not
+	// finish (a daemon that died between the two, or a Continue that raced one).
+	// Re-applying is pure compare-and-swap, so it costs nothing when the
+	// mutation did in fact complete, and it is the only thing that keeps a crash
+	// in that window from being a permanent dead end — the decision has been
+	// made and must not be re-decided against a workspace that may have moved.
+	if led.freshReviewRequested {
+		if led.freshReviewApproved {
+			return run, false, nil
+		}
+		return c.applyFreshReviewReopen(ctx, run, *reviewStep, *verifyStep, led.freshReview)
+	}
+
+	// From here this is a first-time decision, and every proof must hold.
+	if run.State != domain.WorkflowRunNeedsAttention || verifyStep.State != domain.WorkflowStepFailed {
+		return run, false, nil
+	}
+
+	// Proof 2 — the stop is one this transition is allowed to reopen. The
+	// historical rows say verify_unrepairable (the flat reason the old
+	// finishVerifyFailure recorded for a workspace change); the new code's own
+	// refusal says verify_workspace_unattributable, and that is included on
+	// purpose — a person who has since restored the branch or the commit and
+	// presses Continue is entitled to have the predicate re-evaluated rather
+	// than being held to a verdict about a worktree that no longer exists. Every
+	// other stop, including every human-owned one, is left exactly where it is.
+	reason, _, ok := c.stopReason(ctx, run)
+	if !ok || (!recoverableVerifyStopReasons[reason] && reason != ReasonVerifyWorkspaceUnattributable) {
+		return run, false, nil
+	}
+
+	// Proof 3 — the failure actually is a workspace change produced BY a recovery
+	// generation. RecoveryGeneration is stamped by persistVerifyResult at the
+	// moment the result is written, so it cannot be back-dated onto an ordinary
+	// verification.
+	result, hasResult, err := c.latestVerifyResult(ctx, run.ID)
+	if err != nil {
+		return run, false, err
+	}
+	if !hasResult || result.Passed ||
+		result.ErrorClass != domain.WorkflowErrorVerifyWorkspaceChanged ||
+		result.RecoveryGeneration == 0 {
+		return run, false, nil
+	}
+
+	// Proof 4 — it is THIS generation's result, and the generation it belongs to
+	// originated from an eligible infrastructure/environment failure, on the same
+	// task target. Both halves of the identity are checked, not one: the
+	// generation record's target is what a person authorized, and the result's is
+	// what actually ran.
+	if result.RecoveryGeneration != led.generation ||
+		!recoverableVerifyErrorClass(led.record.ErrorClass) ||
+		led.record.TargetKey == "" || led.record.TargetKey != result.TargetKey ||
+		led.record.ReviewedFingerprint != result.ReviewedFingerprint {
+		return run, false, nil
+	}
+
+	// Proof 5/6 — the same attributableWorkspaceDrift predicate as the live path,
+	// re-evaluated against the workspace as it stands NOW, not as it stood when
+	// the old binary gave up on it.
+	workCP, hasWorkCP, err := c.store.GetLatestWorkflowCheckpointByStep(ctx, workStep.ID)
+	if err != nil {
+		return run, false, err
+	}
+	if !hasWorkCP || workCP.WorktreePath == "" || workCP.SessionID == nil || *workCP.SessionID == "" ||
+		c.workspaceFacts == nil {
+		c.recordAttentionStopOnce(ctx, run, &verifyStep.ID, ReasonVerifyWorkspaceUnattributable,
+			"verification was reopened, but AO has no workspace facts for this run to compare the approval against")
+		return run, false, nil
+	}
+	artifact, err := c.planArtifactForRun(ctx, run)
+	if err != nil {
+		return run, false, err
+	}
+	obs, err := c.workspaceFacts.ObserveWorkspace(ctx, ports.WorkspaceInfo{
+		Path:      workCP.WorktreePath,
+		Branch:    workCP.Branch,
+		SessionID: domain.SessionID(*workCP.SessionID),
+		ProjectID: domain.ProjectID(run.ProjectID),
+	})
+	if err != nil {
+		// Unreadable is not "unchanged". Leave the run stopped, say why, and let
+		// the next Continue try again once the host answers.
+		c.recordAttentionStopOnce(ctx, run, &verifyStep.ID, ReasonVerifyWorkspaceUnattributable,
+			"verification was reopened, but the worktree could not be observed: "+err.Error())
+		return run, false, nil
+	}
+	current := WorkspaceFingerprint(obs)
+	if current == result.ReviewedFingerprint {
+		// No drift left to re-review — the worktree matches the approval again.
+		// Deliberately NOT handled here: this transition exists to obtain a
+		// review of a CHANGED workspace, and inventing a re-verification for an
+		// unchanged one would be a second, unasked-for recovery path.
+		c.recordAttentionStopOnce(ctx, run, &verifyStep.ID, ReasonVerifyWorkspaceUnattributable,
+			"the worktree now matches the approved review again; there is nothing to re-review, and the previous verification's verdict still stands")
+		return run, false, nil
+	}
+	targetKey := verificationTargetKey(result.ReviewedFingerprint, artifact.Verification)
+	recovery := led.record
+	decision := c.attributableWorkspaceDrift(ctx, run, *reviewStep, recovery, led, targetKey, workCP, obs)
+	if !decision.allowed {
+		c.recordAttentionStopOnce(ctx, run, &verifyStep.ID, ReasonVerifyWorkspaceUnattributable, decision.refusal)
+		return run, false, nil
+	}
+
+	// Proof 7 (the bound) is attributableWorkspaceDrift's own check on
+	// led.freshReviewRequested, already false to have reached here.
+	record := VerifyFreshReviewRecord{
+		Generation:          led.generation,
+		TargetKey:           targetKey,
+		ApprovedFingerprint: result.ReviewedFingerprint,
+		CurrentFingerprint:  current,
+		HeadSHA:             obs.HeadSHA,
+		Branch:              workCP.Branch,
+		WorktreePath:        workCP.WorktreePath,
+		ReviewStepID:        reviewStep.ID,
+	}
+	if reviewStep.ReviewRunID != nil {
+		record.PriorReviewRunID = *reviewStep.ReviewRunID
+	}
+	// Durable before mutation, exactly as the live path does — a review reopened
+	// without this row would be an unbounded, unauditable re-review.
+	if err := c.recordFreshReview(ctx, run, *verifyStep, verifyFreshReviewRequiredPhase, record, fmt.Sprintf(
+		"verify: recovery generation %d recorded a workspace change under an older daemon; re-reviewing the current workspace %s once, in place of the stale approval of %s",
+		record.Generation, shortFingerprint(record.CurrentFingerprint), shortFingerprint(record.ApprovedFingerprint),
+	)); err != nil {
+		return run, false, err
+	}
+	return c.applyFreshReviewReopen(ctx, run, *reviewStep, *verifyStep, record)
+}
+
+// applyFreshReviewReopen is the idempotent state mutation both fresh-review
+// entry points share: review out of `completed`, verify out of `failed`, run out
+// of `needs_attention`, and finally to rest at `waiting` on a reviewer.
+//
+// Every write is a compare-and-swap on the exact state it expects, so
+// re-entering this from a repeated Continue, a poll or a restart in any order
+// converges on the same place and can never produce a second of anything.
+func (c *Coordinator) applyFreshReviewReopen(ctx stdctx.Context, run domain.WorkflowRun, reviewStep, verifyStep domain.WorkflowStep, record VerifyFreshReviewRecord) (domain.WorkflowRun, bool, error) {
+	now := c.clock()
+	if _, err := c.store.ReopenCompletedWorkflowStep(ctx, reviewStep.ID, now); err != nil {
+		return run, false, err
+	}
+	// The verify step goes back to `ready`, not `waiting`: `failed` is where the
+	// old binary left it, and ReopenFailedWorkflowStep is the one write in AO
+	// that leaves that state. maybeVerify accepts either, and will not run at all
+	// until the review step is `completed` again.
+	if _, err := c.store.ReopenFailedWorkflowStep(ctx, verifyStep.ID, now); err != nil {
+		return run, false, err
+	}
+	if moved, err := c.store.UpdateWorkflowRunState(ctx, run.ID,
+		domain.WorkflowRunNeedsAttention, domain.WorkflowRunRunning, now); err != nil {
+		return run, false, err
+	} else if moved {
+		run.State = domain.WorkflowRunRunning
+	}
+	if run.State == domain.WorkflowRunRunning {
+		if moved, err := c.store.UpdateWorkflowRunState(ctx, run.ID,
+			domain.WorkflowRunRunning, domain.WorkflowRunWaiting, now); err != nil {
+			return run, false, err
+		} else if moved {
+			run.State = domain.WorkflowRunWaiting
+		}
+	}
+	return run, true, nil
+}
+
 // pendingFreshReview returns the fresh review this run still owes a reviewer:
 // one authorized for the currently open recovery generation, not yet answered.
 // dispatchReviewStep consults it to know that a review step resting at `waiting`

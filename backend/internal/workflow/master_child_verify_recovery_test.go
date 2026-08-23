@@ -191,6 +191,111 @@ func TestChildFreshReviewRecoveryUnblocksItsMasterObjective(t *testing.T) {
 	}
 }
 
+// TestChildWorkspaceChangeRecoveryUnblocksItsMasterObjective is the parent half
+// of the already-persisted case: the child's recovery generation reached a
+// verify_workspace_changed verdict and PARKED on it, and only a later Continue
+// can move it.
+//
+// Everything here is real code end to end. The first Continue's drift is refused
+// because HEAD has moved (AO will not absorb somebody else's commit), which
+// leaves exactly the durable shape wf-6528a538 was found in: run
+// needs_attention, verify failed, and a generation-1 verify_workspace_changed
+// result on disk. The person then restores the commit, keeping the worker's
+// uncommitted work, and presses Continue again — which is the transition under
+// test.
+func TestChildWorkspaceChangeRecoveryUnblocksItsMasterObjective(t *testing.T) {
+	fx, ctx, masterID := startAutonomousObjective(t, twoTaskDependentPlan())
+	fx.ws.obs.HeadSHA = "head-at-approval"
+	_, childID := dispatchedChild(t, fx, masterID)
+
+	// 1. AO's verifier cannot run; the child stops and the parent mirrors it.
+	fx.verifier.err = verifierHostFailure
+	driveUntil(t, fx, 40, func() bool { return runState(t, fx, childID) == domain.WorkflowRunNeedsAttention })
+	driveCycles(t, fx, 10, func(int) {
+		if _, active, ok := activeChildRunID(t, fx, masterID); ok {
+			approveOpenReview(t, fx, active, domain.VerdictApproved)
+		}
+	})
+	driveUntil(t, fx, 8, func() bool { return mirroredChildStop(t, fx, masterID) })
+	if !mirroredChildStop(t, fx, masterID) {
+		t.Fatal("the parent never mirrored its stopped child")
+	}
+
+	// 2. The host is repaired, but the worktree has BOTH the worker's own
+	// uncommitted work and somebody else's commit in it. The recovery runs,
+	// refuses to absorb the commit, and parks on verify_workspace_changed.
+	fx.verifier.err = nil
+	fx.ws.obs.Changes = append(fx.ws.obs.Changes,
+		ports.WorkspaceChange{Path: "internal/postrunqa/classify.go", Status: " M"})
+	fx.ws.obs.HeadSHA = "someone-elses-commit"
+	if _, err := fx.coord.ContinueRun(ctx, childID); err != nil {
+		t.Fatalf("ContinueRun(child) #1: %v", err)
+	}
+	driveCycles(t, fx, 10, func(int) {})
+
+	if got := countCheckpointPhase(t, fx, childID, "verify_recovery_requested"); got != 1 {
+		t.Fatalf("child verify_recovery_requested checkpoints = %d, want exactly 1", got)
+	}
+	if got := countCheckpointPhase(t, fx, childID, "verify_fresh_review_required"); got != 0 {
+		t.Fatalf("child verify_fresh_review_required checkpoints = %d, want 0: an external commit was absorbed", got)
+	}
+	if got := runState(t, fx, childID); got != domain.WorkflowRunNeedsAttention {
+		t.Fatalf("child state = %q, want needs_attention on the refused drift", got)
+	}
+	if got := childStepState(t, fx, childID, domain.WorkflowStepVerify); got != domain.WorkflowStepFailed {
+		t.Fatalf("child verify step = %q, want failed: the historical shape was never reached", got)
+	}
+
+	// 3. The person restores the commit, keeping the task's uncommitted work, and
+	// presses Continue on the child alone. This is the recovery under test.
+	fx.ws.obs.HeadSHA = "head-at-approval"
+	if _, err := fx.coord.ContinueRun(ctx, childID); err != nil {
+		t.Fatalf("ContinueRun(child) #2: %v", err)
+	}
+	if got := countCheckpointPhase(t, fx, childID, "verify_fresh_review_required"); got != 1 {
+		t.Fatalf("child verify_fresh_review_required checkpoints = %d, want exactly 1: Continue was a no-op", got)
+	}
+
+	// 4. The daemon's own poller, plus the reviewer answering the fresh question.
+	driveCycles(t, fx, 40, func(int) {
+		if _, active, ok := activeChildRunID(t, fx, masterID); ok {
+			approveOpenReview(t, fx, active, domain.VerdictApproved)
+		}
+	})
+
+	if got := countCheckpointPhase(t, fx, childID, "verify_fresh_review_required"); got != 1 {
+		t.Fatalf("child verify_fresh_review_required checkpoints = %d, want still exactly 1", got)
+	}
+	if got := countCheckpointPhase(t, fx, childID, "verify_fresh_review_approved"); got != 1 {
+		t.Fatalf("child verify_fresh_review_approved checkpoints = %d, want exactly 1", got)
+	}
+	if got := countCheckpointPhase(t, fx, childID, "verify_recovery_requested"); got != 1 {
+		t.Fatalf("child verify_recovery_requested checkpoints = %d, want still exactly 1: a second generation was consumed", got)
+	}
+	if got := runState(t, fx, childID); got != domain.WorkflowRunCompleted {
+		t.Fatalf("child state = %q, want completed", got)
+	}
+	if mirroredChildStop(t, fx, masterID) {
+		t.Fatal("the parent still mirrors child_needs_attention after its child recovered and completed")
+	}
+	master, _, err := fx.store.GetWorkflowRun(ctx, masterID)
+	if err != nil {
+		t.Fatalf("GetWorkflowRun(master): %v", err)
+	}
+	if master.State != domain.WorkflowRunCompleted {
+		t.Fatalf("master state = %q, want completed: the objective never advanced", master.State)
+	}
+	taskA, _ := taskByPlanStepID(t, fx, masterID, "model")
+	taskB, _ := taskByPlanStepID(t, fx, masterID, "tests")
+	if taskB.ExecutionRunID == nil {
+		t.Fatal("task 2 was never dispatched")
+	}
+	// Same child run throughout: no duplicate run, no duplicate task.
+	if taskA.ExecutionRunID == nil || *taskA.ExecutionRunID != childID {
+		t.Fatalf("task 1's execution run = %v, want the original %q", taskA.ExecutionRunID, childID)
+	}
+}
+
 // runState is the child's durable run state, read straight from the store so the
 // assertions never depend on a read path that itself has side effects.
 func runState(t *testing.T, fx *autonomousFixture, runID string) domain.WorkflowRunState {

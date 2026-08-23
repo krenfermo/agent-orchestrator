@@ -985,6 +985,19 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 	if run, reopened, rerr = c.resumeStaleVerifyFailure(ctx, run, steps); rerr != nil {
 		return RunDetail{}, rerr
 	}
+	// Checkpoint 8P-E.14D: the same person, on the same button, for the state one
+	// step further along — a workspace mismatch an OLDER daemon already decided
+	// and persisted inside an authorized recovery generation. resumeStaleVerify-
+	// Failure cannot see it (its error-class guard is deliberately narrow, and
+	// widening it would make every workspace change recoverable), so this is a
+	// second, equally narrow entry point rather than a relaxation of the first.
+	// Only reached when the first one did nothing, and a no-op for every run
+	// without the exact durable evidence it requires.
+	if !reopened {
+		if run, reopened, rerr = c.resumeWorkspaceChangedVerifyRecovery(ctx, run, steps); rerr != nil {
+			return RunDetail{}, rerr
+		}
+	}
 	if reopened {
 		// The verify step is no longer terminal and the run is no longer parked;
 		// the cascade below must see that, not the snapshot read at entry.
