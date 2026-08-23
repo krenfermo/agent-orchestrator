@@ -20,8 +20,14 @@ func TestDetectTerminalActivity(t *testing.T) {
 			ok:     true,
 		},
 		{
+			// Codex keeps "esc to interrupt" on screen for exactly as long as a
+			// turn is in flight, so the composer being visible underneath it
+			// means nothing. This is the reading that clears a latched
+			// waiting_input on a worker that is still working (wf-57f90ff2).
 			name:   "working composer",
 			output: "• Working (2m 10s • esc to interrupt)\n› Add tests\n\ngpt-5.6-sol low · ~/project\n",
+			want:   domain.ActivityActive,
+			ok:     true,
 		},
 		{
 			name:   "approval picker",
@@ -39,5 +45,14 @@ func TestDetectTerminalActivity(t *testing.T) {
 				t.Fatalf("DetectTerminalActivity() = (%q, %v), want (%q, %v)", got, ok, tt.want, tt.ok)
 			}
 		})
+	}
+}
+
+// ContinuouslyDetectTerminalActivity must stay on: it is the only thing that
+// makes the observer look at a session already latched in waiting_input, which
+// is the state Codex's hook set can never leave on its own.
+func TestCodexOptsIntoContinuousTerminalDetection(t *testing.T) {
+	if !(&Plugin{}).ContinuouslyDetectTerminalActivity() {
+		t.Fatal("Codex must opt into continuous terminal activity detection")
 	}
 }

@@ -974,6 +974,16 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		return RunDetail{}, err
 	}
 
+	// Checkpoint 8P-E.15: the same person, on the same button, for the other
+	// stop AO could reach without evidence — a work step parked on
+	// "worker awaiting input" that no observed question actually supports. A
+	// no-op for every run except that exact durable shape, and never a verdict
+	// of its own: it returns the step to `running` so the ordinary fact-based
+	// observation below re-derives what the worker is really doing.
+	if run, *workStep, _, err = c.resumeFalseWorkerBlocked(ctx, run, *workStep); err != nil {
+		return RunDetail{}, err
+	}
+
 	if workStep.State == domain.WorkflowStepReady || workStep.State == domain.WorkflowStepRunning {
 		prompt := promptForRun(run, steps)
 		updated, err := c.dispatchWorkStep(ctx, run, *workStep, prompt, true)

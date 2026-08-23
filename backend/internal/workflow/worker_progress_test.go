@@ -34,6 +34,7 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 		baseSHA            string
 		now                time.Time
 		dispatchedAt       time.Time
+		humanInputProven   bool
 		wantNoChange       bool
 		wantStep           domain.WorkflowStepState
 		wantRun            domain.WorkflowRunState
@@ -72,13 +73,30 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 			wantNoChange: true,
 		},
 		{
-			name:         "waiting_input -> waiting, needs_attention",
-			sessionFound: true,
-			session:      activeSession(domain.ActivityWaitingInput, false),
-			wantStep:     domain.WorkflowStepWaiting,
-			wantRun:      domain.WorkflowRunNeedsAttention,
+			// Corroborated: AO holds a question it actually reconstructed from
+			// this step's pane, so a person really is being asked something.
+			name:             "waiting_input with an observed question -> waiting, needs_attention",
+			sessionFound:     true,
+			session:          activeSession(domain.ActivityWaitingInput, false),
+			humanInputProven: true,
+			wantStep:         domain.WorkflowStepWaiting,
+			wantRun:          domain.WorkflowRunNeedsAttention,
 		},
 		{
+			// Uncorroborated: the reading alone is not evidence. This is the
+			// wf-57f90ff2 shape — a Codex PermissionRequest latching
+			// waiting_input while the agent runs tests — and it must not stop
+			// the run.
+			name:         "waiting_input with nothing observed -> no change",
+			sessionFound: true,
+			session:      activeSession(domain.ActivityWaitingInput, false),
+			wantNoChange: true,
+		},
+		{
+			// `blocked` is proof on its own: it is only entered from a
+			// correlated permission dialog and is cleared by that tool's own
+			// post-tool-use or the turn boundary, so it cannot go stale while
+			// the agent works.
 			name:         "blocked -> waiting, needs_attention",
 			sessionFound: true,
 			session:      activeSession(domain.ActivityBlocked, false),
@@ -200,7 +218,7 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 			if now.IsZero() {
 				now = fixedNow
 			}
-			got := evaluateWorkStepProgress(tc.sessionFound, tc.session, tc.workspaceAvailable, tc.obs, tc.baseSHA, now, tc.dispatchedAt)
+			got := evaluateWorkStepProgress(tc.sessionFound, tc.session, tc.workspaceAvailable, tc.obs, tc.baseSHA, now, tc.dispatchedAt, tc.humanInputProven)
 			if got.NoChange != tc.wantNoChange {
 				t.Fatalf("NoChange = %v, want %v", got.NoChange, tc.wantNoChange)
 			}

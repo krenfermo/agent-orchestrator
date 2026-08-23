@@ -38,14 +38,46 @@ const workStepFirstSignalTimeout = 10 * time.Minute
 type WorkerProgress string
 
 const (
-	WorkerCreated         WorkerProgress = "worker_created"
-	WorkerStarted         WorkerProgress = "worker_started"
-	WorkerActive          WorkerProgress = "worker_active"
-	WorkerIdle            WorkerProgress = "worker_idle"
-	WorkerTerminated      WorkerProgress = "worker_terminated"
-	WorkerFailed          WorkerProgress = "worker_failed"
-	WorkerResultAvailable WorkerProgress = "worker_result_available"
+	WorkerCreated WorkerProgress = "worker_created"
+	WorkerStarted WorkerProgress = "worker_started"
+	// WorkerActive covers both "actively executing" and "actively
+	// reasoning/streaming". AO deliberately does not split them: no harness
+	// signal distinguishes the two, and nothing downstream would do anything
+	// different if it did — both mean "the worker has a turn in flight, leave
+	// it alone".
+	WorkerActive WorkerProgress = "worker_active"
+	// WorkerIdle is idle but healthy: the session is alive and its turn ended.
+	WorkerIdle WorkerProgress = "worker_idle"
+	// WorkerAwaitingHuman is the ONLY progress value that may park a run on
+	// ReasonWorkerBlocked, and it requires positive, corroborated evidence that
+	// a person is actually being asked something — see
+	// evaluateWorkStepProgress. Before it existed, a decision to stop the run
+	// on a "blocked" worker was recorded under WorkerActive, so the incident's
+	// own ledger read "worker_observed_worker_active / worker awaiting input".
+	WorkerAwaitingHuman WorkerProgress = "worker_awaiting_human"
+	// WorkerObservationAmbiguous is AO admitting it cannot tell what the
+	// session is doing: a needs-input reading it could not corroborate, on a
+	// session that has also stopped producing any activity at all. Truthful,
+	// bounded, and never phrased as "the worker is waiting for you".
+	WorkerObservationAmbiguous WorkerProgress = "worker_observation_ambiguous"
+	WorkerTerminated           WorkerProgress = "worker_terminated"
+	WorkerFailed               WorkerProgress = "worker_failed"
+	WorkerResultAvailable      WorkerProgress = "worker_result_available"
 )
+
+// workerNeedsInputCorroborationWindow bounds how long an UNCORROBORATED
+// needs-input reading may stand before AO stops calling the state healthy and
+// records an honest ambiguity instead.
+//
+// It is not a "wait longer and hope" timeout: an uncorroborated reading never
+// becomes a worker-blocked stop no matter how long it lasts, and a corroborated
+// one stops the run immediately without consulting this at all. It exists only
+// so the ambiguous tail is bounded rather than polled forever, and it is
+// measured from the session's last activity reading — which, for a worker that
+// is genuinely still working, keeps moving (the terminal activity observer
+// re-asserts `active` from the pane), so an actively working agent can never
+// age into it.
+const workerNeedsInputCorroborationWindow = 15 * time.Minute
 
 // WorkStepDecision is the outcome of evaluating a work step's session/
 // workspace facts: what to do next, expressed independent of persistence.
@@ -75,6 +107,12 @@ type WorkStepDecision struct {
 // workspaceAvailable is false when ObserveWorkspace was throttled/skipped
 // this call (see observationThrottle) or otherwise could not be obtained;
 // obs is only read when workspaceAvailable is true.
+//
+// humanInputProven is the corroboration gate on the needs-input family, and it
+// is the whole of Checkpoint 8P-E.15's invariant: AO may never park a run on
+// "the worker needs you" because the worker is merely still alive, or because
+// no completion signal has arrived. It must hold POSITIVE evidence that a
+// person is being asked something. See provenHumanInputRequest for what counts.
 func evaluateWorkStepProgress(
 	sessionFound bool,
 	session domain.SessionRecord,
@@ -83,6 +121,7 @@ func evaluateWorkStepProgress(
 	baseSHA string,
 	now time.Time,
 	dispatchedAt time.Time,
+	humanInputProven bool,
 ) WorkStepDecision {
 	// hasWorkEvidence checks the AO guardrail prompt explicitly tells the
 	// worker not to commit/push/merge (Checkpoint 8B §4), so real, verifiable
@@ -125,13 +164,59 @@ func evaluateWorkStepProgress(
 	switch session.Activity.State {
 	case domain.ActivityActive:
 		return WorkStepDecision{Progress: WorkerActive, NoChange: true}
-	case domain.ActivityWaitingInput, domain.ActivityBlocked:
+	case domain.ActivityBlocked:
+		// `blocked` is proof on its own, and is the one needs-input state that
+		// is. It is only ever entered from a permission dialog whose blocking
+		// tool AO correlated, and lifecycle's tool-precedence rule clears it as
+		// soon as that tool's post-tool-use lands or the turn ends — so a
+		// session reading `blocked` has a dialog open RIGHT NOW. Nothing about
+		// it can go stale while the agent works, which is exactly what
+		// distinguishes it from waiting_input below.
+		return blockedOnHumanDecision()
+
+	case domain.ActivityWaitingInput:
+		// `waiting_input` is a HINT, not proof, and treating it as proof is
+		// what caused incident wf-57f90ff2. It is by construction the state for
+		// a needs-input signal that carries NO tool identity (see the
+		// claude-code adapter's own note on why agent_needs_input must not map
+		// to blocked), which means nothing can correlate its resolution and it
+		// can only lift at a turn boundary. On Codex it is worse still: every
+		// PermissionRequest lands here, Codex installs no resolving hook at
+		// all, and the reading therefore latches for an entire working turn.
+		//
+		// So it needs corroboration from something that actually observed a
+		// question being asked.
+		if humanInputProven {
+			return blockedOnHumanDecision()
+		}
+		// Uncorroborated. The worker is alive and inside a turn; "alive with no
+		// completion signal" is explicitly not grounds to stop a run, so the
+		// default is to leave it alone and look again.
+		if session.Activity.LastActivityAt.IsZero() ||
+			now.Sub(session.Activity.LastActivityAt) <= workerNeedsInputCorroborationWindow {
+			return WorkStepDecision{Progress: WorkerActive, NoChange: true}
+		}
+		// The reading has neither been corroborated nor refreshed for the whole
+		// window: the session has gone completely silent in a state AO cannot
+		// explain. Say that, rather than claiming the worker is waiting on the
+		// user — a claim AO has no evidence for and which sends the person to
+		// look for a prompt that may not exist. Bounded and reopenable by a
+		// normal Continue, like every other ambiguous stop.
+		if hasWorkEvidence() {
+			return WorkStepDecision{
+				Progress:   WorkerResultAvailable,
+				NextStep:   domain.WorkflowStepCompleted,
+				NextRun:    domain.WorkflowRunWaiting,
+				NextAction: "start_review",
+			}
+		}
 		return WorkStepDecision{
-			Progress:        WorkerActive,
+			Progress:        WorkerObservationAmbiguous,
 			NextStep:        domain.WorkflowStepWaiting,
 			NextRun:         domain.WorkflowRunNeedsAttention,
-			NextAction:      "worker awaiting input/blocked — needs human attention",
-			AttentionReason: ReasonWorkerBlocked,
+			NextAction:      "worker reported waiting for input but AO could not observe any question being asked, and the session has produced no activity since — AO cannot prove what this worker is doing",
+			ErrorClass:      domain.WorkflowErrorAmbiguousWorkerState,
+			AttentionReason: ReasonWorkerDispatchAmbiguous,
 		}
 	case domain.ActivityIdle:
 		// Real, git-verified work evidence always wins, regardless of
@@ -190,6 +275,19 @@ func evaluateWorkStepProgress(
 	}
 }
 
+// blockedOnHumanDecision is the single construction of the one stop that says
+// "a person is being asked something". Both callers reach it only with positive
+// evidence, and no other site in this file may build it.
+func blockedOnHumanDecision() WorkStepDecision {
+	return WorkStepDecision{
+		Progress:        WorkerAwaitingHuman,
+		NextStep:        domain.WorkflowStepWaiting,
+		NextRun:         domain.WorkflowRunNeedsAttention,
+		NextAction:      "worker awaiting input/blocked — needs human attention",
+		AttentionReason: ReasonWorkerBlocked,
+	}
+}
+
 // observeWorkStep is the single fact-based work-step evaluation function
 // used both by GetRun (opportunistic observation, throttled) and by boot
 // recovery (Reconcile). It never trusts agent transcript text: only session
@@ -245,7 +343,15 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 		}
 	}
 
-	decision := evaluateWorkStepProgress(found, sess, workspaceAvailable, obs, baseSHA, now, dispatchedAt)
+	// The corroboration gate for the needs-input family. Read unconditionally
+	// (a cheap row scan on the run's own questions) rather than lazily inside
+	// the evaluator, so the evaluator stays a pure function of facts.
+	humanInputProven, err := c.provenHumanInputRequest(ctx, run.ID, step.ID)
+	if err != nil {
+		return step, err
+	}
+
+	decision := evaluateWorkStepProgress(found, sess, workspaceAvailable, obs, baseSHA, now, dispatchedAt, humanInputProven)
 	if decision.NoChange {
 		return step, nil
 	}

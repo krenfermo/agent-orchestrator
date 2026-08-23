@@ -58,6 +58,18 @@ type DetectResult struct {
 	// dedup no-op): the returned Question is the pre-existing row, and it
 	// was NOT reclassified or re-persisted.
 	Inserted bool
+	// Unparsed is true when the session reported a needs-input state but the
+	// pane carried no question this harness's parser could reconstruct. It is
+	// the honest "AO does not know what, if anything, is being asked" answer,
+	// and NOTHING is persisted for it.
+	//
+	// This used to persist a question with empty text, which Classify then
+	// (correctly, for what it was given) called human_required — turning the
+	// ABSENCE of evidence into a durable claim that a person was needed. In
+	// incident wf-57f90ff2 that fabricated row was the only "proof" behind a
+	// worker_blocked stop on a Codex worker that was, at that moment, running
+	// tests and that finished its turn unattended two minutes later.
+	Unparsed bool
 }
 
 // Detect is Checkpoint 8K-A's single synchronous orchestration step:
@@ -77,16 +89,26 @@ func Detect(ctx context.Context, store Store, parser ports.QuestionPaneParser, i
 	if parser != nil {
 		candidate, ok = parser.ParseQuestion(in.PaneText)
 	}
-	if ok {
-		questionText = candidate.QuestionText
-		choices = candidate.StructuredChoices
-		certainty = candidate.Certainty
-	} else {
-		// Conservative fallback: state is waiting/blocked but text can't be
-		// reconstructed reliably. Never invent text.
-		questionText = ""
-		certainty = domain.QuestionCertaintyUnknown
+	if !ok {
+		// No question could be reconstructed from the pane. Persist NOTHING.
+		//
+		// The old behaviour here was to insert a row with empty text, which
+		// Classify then labelled human_required ("question text could not be
+		// reconstructed reliably") and ResolveState parked in state
+		// human_required. That reads as a conservative choice and is the
+		// opposite: a needs-input activity reading is not proof a question was
+		// asked (a Codex PermissionRequest hook, for one, latches waiting_input
+		// for a whole working turn — see the codex adapter), so an unparseable
+		// pane means AO has no evidence at all, and manufacturing a
+		// human_required row out of it converts "we did not see anything" into
+		// "a person must act". Callers get Unparsed and decide; a genuinely
+		// stuck worker is still caught, because a real prompt is precisely what
+		// the parsers DO reconstruct.
+		return DetectResult{Unparsed: true}, nil
 	}
+	questionText = candidate.QuestionText
+	choices = candidate.StructuredChoices
+	certainty = candidate.Certainty
 
 	stepIDStr := ""
 	if in.StepID != nil {

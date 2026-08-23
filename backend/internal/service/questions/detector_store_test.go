@@ -157,7 +157,15 @@ func TestDetect_IdempotentOnRepeatedFingerprint(t *testing.T) {
 	}
 }
 
-func TestDetect_UnknownCertaintyIsAlwaysHumanRequired(t *testing.T) {
+// A pane with no reconstructable question must persist NOTHING.
+//
+// This test used to assert the opposite — that an unparseable pane produced a
+// human_required row with empty text — which reads as conservative and is the
+// exact inversion that caused wf-57f90ff2: the session's activity said
+// "needs input" (a latched Codex PermissionRequest, on a worker that was busy
+// running tests), the pane held no question because none was being asked, and
+// AO turned that absence into a durable claim that a person had to act.
+func TestDetect_UnparseablePanePersistsNothing(t *testing.T) {
 	store := sqlitetest.MustOpen(t)
 	ctx := context.Background()
 	now := time.Date(2026, time.August, 16, 10, 0, 0, 0, time.UTC)
@@ -174,14 +182,18 @@ func TestDetect_UnknownCertaintyIsAlwaysHumanRequired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Detect: %v", err)
 	}
-	if res.Question.Certainty != domain.QuestionCertaintyUnknown {
-		t.Fatalf("certainty = %v, want unknown", res.Question.Certainty)
+	if !res.Unparsed {
+		t.Fatal("an unparseable pane must be reported as unparsed")
 	}
-	if res.Question.QuestionText != "" {
-		t.Fatalf("question text = %q, want empty (never invented)", res.Question.QuestionText)
+	if res.Inserted {
+		t.Fatal("an unparseable pane must not insert a question row")
 	}
-	if res.Question.State != domain.QuestionStateHumanRequired {
-		t.Fatalf("state = %v, want human_required", res.Question.State)
+	open, err := store.ListOpenWorkflowQuestionsByRun(ctx, "run-unknown")
+	if err != nil {
+		t.Fatalf("ListOpenWorkflowQuestionsByRun: %v", err)
+	}
+	if len(open) != 0 {
+		t.Fatalf("open questions = %+v, want none: absence of a question is not evidence of one", open)
 	}
 }
 

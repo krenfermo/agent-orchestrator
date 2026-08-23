@@ -3,6 +3,7 @@ package workflow
 import (
 	stdctx "context"
 	"fmt"
+	"strings"
 	"time"
 
 	claudecodeq "github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/claudecode"
@@ -232,6 +233,97 @@ func (c *Coordinator) detectQuestionForStep(ctx stdctx.Context, run domain.Workf
 		}
 	}
 	return nil
+}
+
+// questionCarriesEvidence reports whether a question row actually records
+// something AO observed being asked, as opposed to a row that only records
+// that a session's activity reading said "needs input".
+//
+// A row with no text and no structured choices is the second kind. Detect no
+// longer produces them (see service/questions.Detect), but rows written before
+// that fix are on disk and must not keep standing in for evidence.
+func questionCarriesEvidence(q domain.WorkflowQuestion) bool {
+	return strings.TrimSpace(q.QuestionText) != "" || len(q.StructuredChoices) > 0
+}
+
+// provenHumanInputRequest is the corroboration gate observeWorkStep applies
+// before it will ever park a run on "the worker is waiting for you".
+//
+// It answers yes only when AO holds an open question for THIS step whose
+// content it actually reconstructed from the pane — i.e. it saw a question
+// being asked. A needs-input activity reading on its own is not that (a Codex
+// PermissionRequest hook latches waiting_input for a whole working turn), and
+// neither is an evidence-free question row left over from before Detect stopped
+// writing them.
+//
+// state=resolving is deliberately excluded: a question the Decision Resolver is
+// working on is AO's problem, not the user's, and must not read as a human
+// stop.
+func (c *Coordinator) provenHumanInputRequest(ctx stdctx.Context, runID, stepID string) (bool, error) {
+	if c.questionsStore == nil {
+		return false, nil
+	}
+	all, err := c.questionsStore.ListWorkflowQuestionsByRun(ctx, runID)
+	if err != nil {
+		return false, err
+	}
+	for _, q := range all {
+		if !q.State.Open() {
+			continue
+		}
+		if q.WorkflowStepID == nil || string(*q.WorkflowStepID) != stepID {
+			continue
+		}
+		if !questionCarriesEvidence(q) {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// retireUnevidencedQuestions cancels every open question on a run that records
+// no observed content, and reports how many it retired.
+//
+// These rows exist only because Detect used to manufacture one whenever a
+// session read needs-input and the pane could not be parsed — turning "AO saw
+// nothing" into a durable human_required claim. They are not evidence under the
+// rule provenHumanInputRequest applies, they block dispatch through
+// hasOpenQuestion, and nothing will ever answer them because there is no
+// question to answer. Detect cannot write another, so this only ever touches
+// history.
+//
+// Generic by construction: it keys off the row's own emptiness, not off any
+// run, step, harness or error string. Human-answered and resolver-owned
+// questions are untouched, as is any row that carries real text or choices.
+func (c *Coordinator) retireUnevidencedQuestions(ctx stdctx.Context, runID string) int {
+	if c.questionsStore == nil {
+		return 0
+	}
+	all, err := c.questionsStore.ListWorkflowQuestionsByRun(ctx, runID)
+	if err != nil {
+		return 0
+	}
+	retired := 0
+	for _, q := range all {
+		if !q.State.Open() || questionCarriesEvidence(q) {
+			continue
+		}
+		moved, terr := c.questionsStore.TransitionWorkflowQuestionState(ctx, string(q.ID), q.State,
+			domain.QuestionStateCancelled,
+			"retired: recorded no observed question text or choices, so it is not evidence that a person was asked anything",
+			c.clock())
+		if terr != nil {
+			if c.log != nil {
+				c.log.Warn("workflow: retiring an unevidenced question failed", "run", runID, "question", q.ID, "err", terr)
+			}
+			continue
+		}
+		if moved {
+			retired++
+		}
+	}
+	return retired
 }
 
 // hasOpenQuestion reports whether an unresolved question exists — open
