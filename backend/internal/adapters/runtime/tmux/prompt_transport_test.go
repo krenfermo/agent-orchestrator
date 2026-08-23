@@ -280,8 +280,15 @@ func assertOversizedLaunchIsStaged(t *testing.T, binary string) {
 	if !strings.Contains(scriptBody, prompt) {
 		t.Fatal("the staged launch script does not carry the prompt verbatim")
 	}
-	if _, statErr := os.Stat(scriptPath); !os.IsNotExist(statErr) {
-		t.Fatalf("launch script %s was not removed after the pane started", scriptPath)
+	// The script removes itself; AO must NOT unlink it from the outside. See
+	// TestCreateNeverUnlinksTheLaunchScriptItAskedTheShellToSource for why the
+	// external unlink was the wf-57f90ff2 root cause.
+	firstLine, _, _ := strings.Cut(scriptBody, "\n")
+	if !strings.Contains(firstLine, "rm -f --") || !strings.Contains(firstLine, scriptPath) {
+		t.Fatalf("the staged script's first statement must remove the script itself, got %q", firstLine)
+	}
+	if _, statErr := os.Stat(scriptPath); statErr != nil {
+		t.Fatalf("launch script %s must survive Create — only the pane's own shell may remove it (%v)", scriptPath, statErr)
 	}
 }
 

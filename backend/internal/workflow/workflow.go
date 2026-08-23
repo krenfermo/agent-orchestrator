@@ -871,7 +871,7 @@ func (c *Coordinator) StartRun(ctx stdctx.Context, runID string) (RunDetail, err
 	}
 
 	prompt := BuildWorkStepPrompt(artifact)
-	if _, err := c.dispatchWorkStep(ctx, run, *workStep, prompt); err != nil {
+	if _, err := c.dispatchWorkStep(ctx, run, *workStep, prompt, false); err != nil {
 		return RunDetail{}, err
 	}
 
@@ -961,9 +961,22 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 	// resumed nothing: the durable wake fired, claimed, and completed, but
 	// the parked step was never actually redispatched until the next daemon
 	// restart's Reconcile pass happened to sweep it up.
+	// A work step that is durably FAILED because its worker never launched is
+	// not a verdict about the work — no worker ran, nothing was produced, and
+	// the failure is AO's own dispatch. This is the one place that may reopen
+	// it, for the same reason resumeStaleVerifyFailure lives here and not in
+	// GetRun: THIS call is a person saying "start it". It is a no-op for every
+	// step without exactly that durable evidence (including one whose spawn
+	// outcome is merely ambiguous, which adoptOrMarkAmbiguous owns), and when it
+	// does apply the step comes back at `ready` so the ordinary dispatch below
+	// starts exactly one worker in this same call.
+	if run, *workStep, _, err = c.resumeWorkerLaunchAfterFailure(ctx, run, *workStep); err != nil {
+		return RunDetail{}, err
+	}
+
 	if workStep.State == domain.WorkflowStepReady || workStep.State == domain.WorkflowStepRunning {
 		prompt := promptForRun(run, steps)
-		updated, err := c.dispatchWorkStep(ctx, run, *workStep, prompt)
+		updated, err := c.dispatchWorkStep(ctx, run, *workStep, prompt, true)
 		if err != nil {
 			return RunDetail{}, err
 		}

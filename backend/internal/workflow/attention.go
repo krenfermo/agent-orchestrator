@@ -136,8 +136,20 @@ const (
 	ReasonWorkerDispatchAmbiguous        = "worker_dispatch_ambiguous"
 	ReasonWorkerBlocked                  = "worker_blocked"
 	ReasonDispatchFailed                 = "dispatch_failed"
-	ReasonCapacityRetryExhausted         = string(domain.WorkflowErrorCapacityExhausted)
-	ReasonQuestionHumanRequired          = "question_human_required"
+	// ReasonWorkerLaunchRetry is a worker spawn that failed transiently before
+	// any worker session existed and that AO has already scheduled its own
+	// bounded retry for (worker_launch_recovery.go). Self-remediable: it is
+	// recorded so the ledger explains the pause, never so a person acts on it,
+	// and the run is deliberately NOT parked while it is outstanding.
+	ReasonWorkerLaunchRetry = "worker_launch_retry"
+	// ReasonWorkerLaunchRetriesExhausted is that same transient failure after
+	// every automatic retry has been used. Distinct from ReasonDispatchFailed
+	// because the honest thing to tell a person is different: nothing about the
+	// provider's configuration is known to be wrong, the launch just would not
+	// take.
+	ReasonWorkerLaunchRetriesExhausted = "worker_launch_retries_exhausted"
+	ReasonCapacityRetryExhausted       = string(domain.WorkflowErrorCapacityExhausted)
+	ReasonQuestionHumanRequired        = "question_human_required"
 
 	// unclassifiedStop is the honest label for a run durably parked in
 	// needs_attention with no canonical reason recorded anywhere — an
@@ -159,6 +171,7 @@ var attentionDispositions = map[string]AttentionDisposition{
 	ReasonVerifyFixReentry:      {SelfRemediable: true, Phase: PhaseFixing},
 	ReasonPromptTransportRetry:  {SelfRemediable: true, Phase: PhaseRetrying},
 	ReasonReviewerLaunchRetry:   {SelfRemediable: true, Phase: PhaseRetrying},
+	ReasonWorkerLaunchRetry:     {SelfRemediable: true, Phase: PhaseRetrying},
 
 	ReasonVerifyFreshReviewRequired: {SelfRemediable: true, Phase: PhaseReviewing},
 
@@ -258,6 +271,9 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonDispatchFailed: {
 		HumanAction: "The agent could not be dispatched. Check the provider's auth and installation, then continue this run.",
+	},
+	ReasonWorkerLaunchRetriesExhausted: {
+		HumanAction: "The worker failed to start on every automatic retry, without naming a configuration problem. Check the terminal/runtime and the provider's process, then continue this run — AO reopens the dispatch and starts exactly one worker.",
 	},
 	ReasonWorkerBlocked: {
 		HumanAction: "The worker is waiting on input inside its own session (often an interactive trust or auth prompt). Answer it in the session, then continue this run.",

@@ -425,49 +425,64 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 		removeScript()
 		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: create session %s: %w", id, err)
 	}
-	verifyErr := r.verifyPaneWorkingDirectory(ctx, id, cfg.WorkspacePath)
-	// The pane's cwd only becomes the workspace once the shell has executed the
-	// script's leading `cd`, which means it has the file open. Unlinking an open
-	// file leaves the descriptor valid, so removing it here is safe even for a
-	// script the shell has not finished reading — and it means no prompt is left
-	// on disk once the session is running.
-	removeScript()
-	if verifyErr != nil {
+	// From here the session exists, and AO must not unlink the staged script
+	// behind the pane's back: the script removes ITSELF as its first statement
+	// (see writeLaunchScript), which is the only removal that is ordered AFTER
+	// the shell has opened it.
+	//
+	// The removal used to happen here instead, gated on verifyPaneWorkingDirectory
+	// succeeding, on the reasoning that a pane reporting the workspace as its cwd
+	// must already have executed the script's leading `cd` and therefore already
+	// hold the file open. That reasoning is wrong: `#{pane_current_path}` is the
+	// pane process's cwd, and tmux chdirs the pane to `new-session -c <cwd>`
+	// BEFORE exec'ing the shell — the same path this check compares against. So
+	// the probe answered "correct" from the instant the pane existed, proving
+	// nothing about the script, and the unlink raced the shell's open(). When it
+	// won that race, `. <path>` failed, `$SHELL -c` exited, tmux tore the session
+	// down, and the very next command — set-option status off — returned
+	// "no such session", failing the whole spawn (incident wf-57f90ff2,
+	// agent-orchestrator-29). Every launch command over
+	// maxInlineLaunchCommandBytes was exposed to it, i.e. exactly the large
+	// worker/reviewer prompts.
+	//
+	// failCreate tears the session down and removes the staged script on every
+	// post-create failure path, where the shell demonstrably never got to run it
+	// (or is being killed anyway).
+	failCreate := func(err error) (ports.RuntimeHandle, error) {
 		_ = r.Destroy(context.Background(), ports.RuntimeHandle{ID: id})
-		return ports.RuntimeHandle{}, verifyErr
+		removeScript()
+		return ports.RuntimeHandle{}, err
+	}
+	if err := r.verifyPaneWorkingDirectory(ctx, id, cfg.WorkspacePath); err != nil {
+		return failCreate(err)
 	}
 
 	// Hide the status bar in the embedded terminal: it clutters the view and
 	// was not designed for the in-browser display context.
 	if _, err := r.run(ctx, setStatusOffArgs(id)...); err != nil {
-		_ = r.Destroy(context.Background(), ports.RuntimeHandle{ID: id})
-		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: set status %s: %w", id, err)
+		return failCreate(fmt.Errorf("tmux runtime: set status %s: %w", id, err))
 	}
 
 	// Enable mouse mode so the embedded terminal's SGR wheel reports scroll the
 	// pane (see setMouseOnArgs). Without it, wheel scrolling silently no-ops.
 	if _, err := r.run(ctx, setMouseOnArgs(id)...); err != nil {
-		_ = r.Destroy(context.Background(), ports.RuntimeHandle{ID: id})
-		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: set mouse %s: %w", id, err)
+		return failCreate(fmt.Errorf("tmux runtime: set mouse %s: %w", id, err))
 	}
 
 	// Size the shared window to the largest attached client, not the most recent
 	// one, so a small secondary viewer (e.g. the phone) can't strip down a larger
 	// client's view (see setWindowSizeLargestArgs).
 	if _, err := r.run(ctx, setWindowSizeLargestArgs(id)...); err != nil {
-		_ = r.Destroy(context.Background(), ports.RuntimeHandle{ID: id})
-		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: set window-size %s: %w", id, err)
+		return failCreate(fmt.Errorf("tmux runtime: set window-size %s: %w", id, err))
 	}
 
 	handle := ports.RuntimeHandle{ID: id}
 	alive, err := r.IsAlive(ctx, handle)
 	if err != nil {
-		_ = r.Destroy(context.Background(), handle)
-		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: verify session %s: %w", id, err)
+		return failCreate(fmt.Errorf("tmux runtime: verify session %s: %w", id, err))
 	}
 	if !alive {
-		_ = r.Destroy(context.Background(), handle)
-		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: session %s exited before ready", id)
+		return failCreate(fmt.Errorf("tmux runtime: session %s exited before ready", id))
 	}
 	return handle, nil
 }
@@ -939,7 +954,23 @@ func (r *Runtime) scratchDirFor(kind string) (string, error) {
 
 // writeLaunchScript stages an oversized launch command as a shell script the
 // pane's shell sources. Same staging rules as writePromptFile: AO-owned
-// directory, 0600, removed as soon as the shell has opened it.
+// directory, 0600, and gone from disk as soon as it has been read — but the
+// removal is the script's OWN first statement rather than something AO does
+// from the outside.
+//
+// That is load-bearing, not a style choice. AO has no signal that tells it the
+// pane's shell has opened this file (Create's cwd probe reads the pane's start
+// directory, which tmux sets before exec'ing the shell — see Create), so any
+// unlink AO issues races the shell's open() and, when it wins, kills the
+// session it was supposed to be launching. Placing `rm` inside the script makes
+// the removal causally ordered after the open by construction: the shell cannot
+// execute the line without having read the file. POSIX keeps an unlinked file's
+// contents readable through the descriptor that is still open, so the rest of
+// the script — including the entire prompt — is unaffected.
+//
+// `/bin/rm` is the fallback because the script's own `export PATH` has not run
+// yet at that point; either form removing the file is enough, and a failure to
+// remove leaks a 0600 file rather than breaking the launch.
 func (r *Runtime) writeLaunchScript(id, launchCmd string) (string, func(), error) {
 	dir, err := r.scratchDirFor("launch")
 	if err != nil {
@@ -956,7 +987,9 @@ func (r *Runtime) writeLaunchScript(id, launchCmd string) (string, func(), error
 		cleanup()
 		return "", func() {}, err
 	}
-	if _, err := f.WriteString(launchCmd + "\n"); err != nil {
+	quoted := shellQuote(path)
+	selfRemove := "rm -f -- " + quoted + " 2>/dev/null || /bin/rm -f -- " + quoted + " 2>/dev/null\n"
+	if _, err := f.WriteString(selfRemove + launchCmd + "\n"); err != nil {
 		_ = f.Close()
 		cleanup()
 		return "", func() {}, err

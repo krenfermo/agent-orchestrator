@@ -156,16 +156,14 @@ func TestWorkDispatch_NonEligibleFailureDoesNotFailOver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartRun: %v", err)
 	}
-	if detail.Run.State != domain.WorkflowRunNeedsAttention {
-		t.Fatalf("run state = %q, want needs_attention", detail.Run.State)
-	}
-	work := workStepFrom(detail)
-	if work.Step.State != domain.WorkflowStepFailed {
-		t.Fatalf("work step state = %q, want failed", work.Step.State)
-	}
+	// The failure is not failover-eligible, and (since worker_launch_recovery.go)
+	// a first pre-work launch failure is not a stop either: it takes its own
+	// bounded retry. What this test is about is that no OTHER PROVIDER was
+	// tried — exactly one Spawn call, for the originally routed harness.
 	if len(spawner.calls) != 1 {
 		t.Fatalf("spawner calls = %v, want exactly 1 (no failover attempted)", spawner.calls)
 	}
+	work := workStepFrom(detail)
 	attempts, _ := store.ListWorkflowAttempts(ctx, work.Step.ID)
 	if len(attempts) != 1 || attempts[0].ErrorClass != domain.WorkflowErrorAgentStartFailed {
 		t.Fatalf("attempts = %+v, want exactly 1 agent_start_failed", attempts)
@@ -199,9 +197,8 @@ func TestWorkDispatch_BudgetExhaustionStopsFailover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartRun: %v", err)
 	}
-	if detail.Run.State != domain.WorkflowRunNeedsAttention {
-		t.Fatalf("run state = %q, want needs_attention (budget exhausted)", detail.Run.State)
-	}
+	// As above: the provider-attempt budget is what this test pins, so the
+	// assertion is on how many providers were tried, not on the run parking.
 	if len(spawner.calls) != 1 {
 		t.Fatalf("spawner calls = %v, want exactly 1 (budget=1 forbids fallback)", spawner.calls)
 	}

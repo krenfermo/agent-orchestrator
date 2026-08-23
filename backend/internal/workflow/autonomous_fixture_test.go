@@ -46,10 +46,18 @@ type autoSpawner struct {
 	store   *sqlite.Store
 	baseDir string
 	calls   []ports.SpawnConfig
+	// failWith, when set, is returned instead of starting a session — the
+	// worker-side counterpart of fakeReviewerLauncher.launchErr, so a test can
+	// park a child on a real worker-launch failure produced by the real
+	// dispatch path rather than by seeding rows.
+	failWith error
 }
 
 func (s *autoSpawner) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
 	s.calls = append(s.calls, cfg)
+	if s.failWith != nil {
+		return domain.SessionRecord{}, 0, 0, s.failWith
+	}
 	n := len(s.calls)
 	wsPath := filepath.Join(s.baseDir, fmt.Sprintf("task-%d", n))
 	if err := os.MkdirAll(wsPath, 0o755); err != nil {

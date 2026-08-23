@@ -91,7 +91,14 @@ func workDisplayName(objective string) string {
 // repeatedly — from StartRun, from boot recovery, and opportunistically from
 // GetRun — without ever calling Spawner.Spawn more than once for the same
 // step across the union of all call sites.
-func (c *Coordinator) dispatchWorkStep(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, prompt string) (domain.WorkflowStep, error) {
+//
+// humanResume marks the one call site a person (or the API's Continue) drives
+// — mirroring dispatchReviewStep's parameter of the same name. It only ever
+// relaxes the automatic retry PACING (worker_launch_recovery.go's
+// workerLaunchRetryDelay): a person asking now means now. It never relaxes an
+// idempotency guard, and reopening a durably failed dispatch is not done here
+// at all but in resumeWorkerLaunchAfterFailure, before this is reached.
+func (c *Coordinator) dispatchWorkStep(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, prompt string, humanResume bool) (domain.WorkflowStep, error) {
 	// Cancellation (or any other terminal transition) must never race with a
 	// late-arriving dispatch.
 	if run.State.Terminal() || step.State.Terminal() {
@@ -130,6 +137,15 @@ func (c *Coordinator) dispatchWorkStep(ctx stdctx.Context, run domain.WorkflowRu
 
 	switch entry.Status {
 	case domain.WorkflowOutboxPending:
+		// A launch failure AO has scheduled its own bounded retry for owns this
+		// step until that retry is due (worker_launch_recovery.go). Without this
+		// floor every other entry point into dispatch — boot Reconcile, a
+		// capacity wake, a master reconcile pass — would front-run the wake and
+		// burn the whole attempt budget inside one second, before the transient
+		// condition it is waiting out had any chance to clear.
+		if rec, ok := c.latestWorkerLaunchRecord(ctx, run.ID, step.ID); ok && !rec.dueForRetry(c.clock()) && !humanResume {
+			return step, nil
+		}
 		return c.dispatchFromPending(ctx, run, step, entry, prompt)
 	case domain.WorkflowOutboxDispatched, domain.WorkflowOutboxAcknowledged:
 		// Dispatched: a previous attempt got at least as far as "about to call
@@ -138,7 +154,11 @@ func (c *Coordinator) dispatchWorkStep(ctx stdctx.Context, run domain.WorkflowRu
 		// but if somehow reached, idempotent re-adoption is correct.
 		return c.adoptOrMarkAmbiguous(ctx, run, step, entry)
 	case domain.WorkflowOutboxFailed:
-		// Already durably recorded as failed; no auto-retry in 8B.
+		// Durably failed: AO's own automatic retries are spent (or the cause was
+		// never retryable), so nothing here retries it. The one way back out is
+		// an explicit human Continue, which reopens this exact entry — same
+		// idempotency key, no second row — through
+		// resumeWorkerLaunchAfterFailure before dispatch is re-entered at all.
 		return step, nil
 	default:
 		return step, nil
@@ -403,7 +423,7 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 		if aerr := c.recordWorkAttemptFailure(ctx, step.ID, harness, classification.Class, now); aerr != nil {
 			return step, aerr
 		}
-		return c.recordDispatchFailure(ctx, run, step, entry, classification.Class, err)
+		return c.recordWorkerLaunchFailure(ctx, run, step, entry, harness, workerLaunchStageRuntimeEnv, err)
 	}
 	rec, _, _, err := c.spawner.Spawn(ctx, ports.SpawnConfig{
 		ProjectID:   domain.ProjectID(run.ProjectID),
@@ -435,7 +455,11 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 			}
 			return c.attemptWorkHarness(ctx, run, step, entry, prompt, fallback, attemptNumber+1)
 		}
-		return c.recordDispatchFailure(ctx, run, step, entry, classification.Class, err)
+		// Every provider this attempt was allowed to try has now failed, and
+		// none of them left a worker behind: Spawn either returns a session
+		// record or returns an error having created none. That pre-work
+		// property is what worker_launch_recovery.go's bounded retry stands on.
+		return c.recordWorkerLaunchFailure(ctx, run, step, entry, harness, workerLaunchStageSpawn, err)
 	}
 	if attemptNumber > 1 && c.log != nil {
 		c.log.Info("workflow: work step provider failover succeeded", "step", step.ID, "harness", harness, "attempt", attemptNumber)
@@ -597,7 +621,15 @@ func (c *Coordinator) recordDispatchSuccess(ctx stdctx.Context, run domain.Workf
 	return step, nil
 }
 
-func (c *Coordinator) recordDispatchFailure(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, entry domain.WorkflowOutboxEntry, errClass domain.WorkflowErrorClass, cause error) (domain.WorkflowStep, error) {
+// recordDispatchFailure writes the terminal-for-AO shape of a failed work
+// dispatch: outbox failed, step failed, run parked. reason is the canonical
+// attention reason the caller's classification chose — the flat
+// ReasonDispatchFailed for a permanent cause (which is what every row written
+// before worker_launch_recovery.go existed carries), or
+// ReasonWorkerLaunchRetriesExhausted when the cause was transient but the
+// automatic budget is spent. Both are reopenable by an explicit human
+// Continue; see resumeWorkerLaunchAfterFailure.
+func (c *Coordinator) recordDispatchFailure(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, entry domain.WorkflowOutboxEntry, errClass domain.WorkflowErrorClass, reason string, cause error) (domain.WorkflowStep, error) {
 	now := c.clock()
 	if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, entry.Status, domain.WorkflowOutboxFailed, now, string(errClass)); err != nil {
 		return step, err
@@ -616,7 +648,10 @@ func (c *Coordinator) recordDispatchFailure(ctx stdctx.Context, run domain.Workf
 			return step, err
 		}
 	}
-	c.recordAttentionStop(ctx, run, &step.ID, ReasonDispatchFailed,
+	if reason == "" {
+		reason = ReasonDispatchFailed
+	}
+	c.recordAttentionStop(ctx, run, &step.ID, reason,
 		fmt.Sprintf("work dispatch failed (%s): %v", errClass, cause))
 	if c.log != nil {
 		c.log.Warn("workflow: work step dispatch failed", "step", step.ID, "err", cause)

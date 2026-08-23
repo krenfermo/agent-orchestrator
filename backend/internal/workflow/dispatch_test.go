@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -327,16 +328,23 @@ func TestDispatchOutboxIdempotencyNeverDoubleSpawns(t *testing.T) {
 	}
 }
 
-// TestDispatchFailureRecordsFailedAttemptAndNeedsAttention covers Spawn
-// itself failing with an untyped, unclassifiable error: step -> failed, run
-// -> needs_attention (not failed), and a failed attempt row. Checkpoint 8H
-// replaced the old blanket session_create_failed default with the real
-// provider-neutral classifier (failure_classifier.go): an untyped error with
-// no typed sentinel or known rate-limit/capacity/auth phrase classifies as
-// agent_start_failed with unknown certainty — still accurate ("dispatch
-// failed to start the agent") but not eligible for automatic failover, since
-// an unclassified failure must never silently trigger a provider switch.
-func TestDispatchFailureRecordsFailedAttemptAndNeedsAttention(t *testing.T) {
+// TestDispatchFailureRecordsFailedAttemptAndSchedulesBoundedRetry covers Spawn
+// itself failing with an untyped, unclassifiable error. Checkpoint 8H replaced
+// the old blanket session_create_failed default with the real provider-neutral
+// classifier (failure_classifier.go): an untyped error with no typed sentinel
+// or known rate-limit/capacity/auth phrase classifies as agent_start_failed
+// with unknown certainty — still accurate ("dispatch failed to start the
+// agent") but not eligible for automatic failover, since an unclassified
+// failure must never silently trigger a provider switch.
+//
+// What it must NOT do any more is strand the run. This test used to assert
+// step -> failed and run -> needs_attention on the very first such failure,
+// which is exactly what turned wf-57f90ff2's momentary tmux hiccup into a
+// permanently stuck objective. A failure AO can prove happened before any
+// worker existed now takes worker_launch_recovery.go's bounded retry: the
+// failed attempt row is still recorded (audit history is never lost), and the
+// run stays running with a durable, retryable launch record behind it.
+func TestDispatchFailureRecordsFailedAttemptAndSchedulesBoundedRetry(t *testing.T) {
 	spawner := &fakeSpawner{err: errors.New("boom")}
 	c, store, _ := newCoordinatorFull(spawner, newFakeSessionFacts(), &fakeWorkspaceFacts{})
 	ctx := context.Background()
@@ -349,12 +357,15 @@ func TestDispatchFailureRecordsFailedAttemptAndNeedsAttention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartRun: %v", err)
 	}
-	if detail.Run.State != domain.WorkflowRunNeedsAttention {
-		t.Fatalf("run state = %q, want needs_attention", detail.Run.State)
+	if detail.Run.State == domain.WorkflowRunNeedsAttention {
+		t.Fatalf("run state = %q, want the run left running for its own bounded retry", detail.Run.State)
 	}
 	work := workStepFrom(detail)
-	if work.Step.State != domain.WorkflowStepFailed {
-		t.Fatalf("work step state = %q, want failed", work.Step.State)
+	if work.Step.State == domain.WorkflowStepFailed {
+		t.Fatal("work step must not be terminally failed while an automatic retry is still owed")
+	}
+	if spawner.calls != 1 {
+		t.Fatalf("spawn calls = %d, want exactly 1 (the retry is scheduled, not run inline)", spawner.calls)
 	}
 	attempts, err := store.ListWorkflowAttempts(ctx, work.Step.ID)
 	if err != nil || len(attempts) != 1 {
@@ -363,6 +374,27 @@ func TestDispatchFailureRecordsFailedAttemptAndNeedsAttention(t *testing.T) {
 	if attempts[0].Outcome != domain.WorkflowAttemptFailed || attempts[0].ErrorClass != domain.WorkflowErrorAgentStartFailed {
 		t.Fatalf("attempt = %+v, want failed/agent_start_failed", attempts[0])
 	}
+	if !hasRetryableWorkerLaunchRecord(t, store, created.Run.ID) {
+		t.Fatal("expected a durable, retryable worker_launch_error record")
+	}
+}
+
+// hasRetryableWorkerLaunchRecord reports whether the run's ledger carries a
+// worker-launch failure record that AO has declared retryable.
+func hasRetryableWorkerLaunchRecord(t *testing.T, store interface {
+	ListWorkflowCheckpoints(context.Context, string) ([]domain.WorkflowCheckpoint, error)
+}, runID string) bool {
+	t.Helper()
+	cps, err := store.ListWorkflowCheckpoints(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("ListWorkflowCheckpoints: %v", err)
+	}
+	for _, cp := range cps {
+		if cp.DurablePhase == "worker_launch_error" && strings.Contains(cp.RetryState, `"retryable":true`) {
+			return true
+		}
+	}
+	return false
 }
 
 // TestWorkerNeverSignalsEventuallyFailsWithoutDoubleDispatch is Checkpoint

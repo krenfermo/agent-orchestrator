@@ -106,7 +106,7 @@ func (c *Coordinator) Reconcile(ctx stdctx.Context) error {
 					continue
 				}
 				prompt := promptForRun(run, steps)
-				updated, err := c.dispatchWorkStep(ctx, run, step, prompt)
+				updated, err := c.dispatchWorkStep(ctx, run, step, prompt, false)
 				if err != nil {
 					return err
 				}
