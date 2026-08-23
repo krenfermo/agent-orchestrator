@@ -427,3 +427,53 @@ func TestAutonomousHeartbeatKeepsAFixedCadence(t *testing.T) {
 		prev = delay
 	}
 }
+
+func TestScheduler_PendingForRun(t *testing.T) {
+	fs := newFakeStore()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	sched := newTestScheduler(fs, now)
+	ctx := context.Background()
+
+	early := now.Add(10 * time.Minute)
+	late := now.Add(2 * time.Hour)
+	if _, err := sched.Schedule(ctx, "wf-1", nil, ReasonReviewerCapacity, &late); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	if _, err := sched.Schedule(ctx, "wf-1", nil, ReasonWorkerCapacity, &early); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	if _, err := sched.Schedule(ctx, "wf-2", nil, ReasonWorkerCapacity, nil); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+
+	got, err := sched.PendingForRun(ctx, "wf-1")
+	if err != nil {
+		t.Fatalf("pending for run: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected both open wakes for wf-1, got %+v", got)
+	}
+	if got[0].ScheduledAt.After(got[1].ScheduledAt) {
+		t.Fatalf("expected soonest-first ordering, got %v then %v", got[0].ScheduledAt, got[1].ScheduledAt)
+	}
+	if got[0].Reason != ReasonWorkerCapacity {
+		t.Fatalf("expected the earlier worker-capacity wake first, got %q", got[0].Reason)
+	}
+
+	// NextForRun is the same read narrowed to one row, so the two must agree.
+	next, err := sched.NextForRun(ctx, "wf-1")
+	if err != nil {
+		t.Fatalf("next for run: %v", err)
+	}
+	if next == nil || next.ID != got[0].ID {
+		t.Fatalf("NextForRun = %+v, want the first PendingForRun row %+v", next, got[0])
+	}
+
+	none, err := sched.PendingForRun(ctx, "wf-missing")
+	if err != nil {
+		t.Fatalf("pending for run: %v", err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("expected no wakes for an unknown run, got %+v", none)
+	}
+}

@@ -419,3 +419,164 @@ func TestIsEphemeralExecutable(t *testing.T) {
 		}
 	}
 }
+
+func TestInspectLauncher_HealthyInstalledLauncher(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	installed, _ := writeFakeAO(t, filepath.Join(root, "install"))
+	if _, err := EnsureLauncherFor(dataDir, func() (string, error) { return installed, nil }); err != nil {
+		t.Fatal(err)
+	}
+
+	insp := InspectLauncher(dataDir)
+
+	if !insp.Present || !insp.Executable {
+		t.Fatalf("launcher present=%v executable=%v, want both true", insp.Present, insp.Executable)
+	}
+	if insp.Target != installed {
+		t.Fatalf("target = %q, want the installed binary %q", insp.Target, installed)
+	}
+	if !insp.TargetPresent || !insp.TargetExecutable || insp.TargetEphemeral {
+		t.Fatalf("target present=%v executable=%v ephemeral=%v, want true/true/false",
+			insp.TargetPresent, insp.TargetExecutable, insp.TargetEphemeral)
+	}
+	if !insp.Healthy() {
+		t.Fatal("Healthy() = false for a launcher targeting an installed binary")
+	}
+}
+
+// TestInspectLauncher_StaleGoBuildTarget is the fd9b87fae defect as an
+// observation: a shim written while AO ran from the Go build cache still names
+// that temp binary after it has been deleted. The file itself is well-formed
+// and executable, so only the target tells the truth.
+func TestInspectLauncher_StaleGoBuildTarget(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	ephemeral := filepath.Join(root, "go-build2455361342", "b001", "exe", "ao")
+	exe, _ := writeFakeAO(t, filepath.Dir(ephemeral))
+	if err := os.Rename(exe, ephemeral); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(LauncherDir(dataDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(LauncherDir(dataDir), LauncherName())
+	if err := AtomicWriteFile(path, []byte(launcherScript(ephemeral)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// The build cache is swept when the process that produced it exits.
+	if err := os.RemoveAll(filepath.Join(root, "go-build2455361342")); err != nil {
+		t.Fatal(err)
+	}
+
+	insp := InspectLauncher(dataDir)
+
+	if !insp.Present || !insp.Executable {
+		t.Fatalf("shim present=%v executable=%v, want both true: the shim itself is fine", insp.Present, insp.Executable)
+	}
+	if insp.Target != ephemeral {
+		t.Fatalf("target = %q, want %q", insp.Target, ephemeral)
+	}
+	if !insp.TargetEphemeral {
+		t.Fatal("TargetEphemeral = false for a go-build path")
+	}
+	if insp.TargetPresent {
+		t.Fatal("TargetPresent = true for a deleted build-cache binary")
+	}
+	if insp.Healthy() {
+		t.Fatal("Healthy() = true for a launcher pinned to a deleted build-cache binary")
+	}
+}
+
+func TestInspectLauncher_MissingLauncher(t *testing.T) {
+	dataDir := t.TempDir()
+
+	insp := InspectLauncher(dataDir)
+
+	if insp.Present {
+		t.Fatal("Present = true with no launcher installed")
+	}
+	if insp.Path != filepath.Join(LauncherDir(dataDir), LauncherName()) {
+		t.Fatalf("Path = %q, want the expected launcher path even when absent", insp.Path)
+	}
+	if insp.Healthy() {
+		t.Fatal("Healthy() = true with no launcher installed")
+	}
+	if insp.Error != "" {
+		t.Fatalf("Error = %q, want empty: an absent launcher is not a read failure", insp.Error)
+	}
+}
+
+func TestInspectLauncher_EmptyDataDirIsNotAJudgement(t *testing.T) {
+	insp := InspectLauncher("  ")
+
+	if insp != (LauncherInspection{}) {
+		t.Fatalf("InspectLauncher(\"\") = %+v, want the zero inspection", insp)
+	}
+}
+
+func TestParseLauncherTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		script string
+		want   string
+	}{
+		{"shell shim", "#!/bin/sh\nexec '/opt/ao/bin/ao' \"$@\"\n", "/opt/ao/bin/ao"},
+		{"shell shim with a quote in the path", "#!/bin/sh\nexec '/opt/it'\"'\"'s/ao' \"$@\"\n", "/opt/it's/ao"},
+		{"windows shim", "@echo off\r\n\"C:\\ao\\ao.exe\" %*\r\n", `C:\ao\ao.exe`},
+		{"empty", "", ""},
+		{"comment only", "#!/bin/sh\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseLauncherTarget(tc.script); got != tc.want {
+				t.Fatalf("parseLauncherTarget() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A packaged install can leave the shim pointing at a symlink whose target has
+// since been removed (an app bundle replaced, a dev symlink into a deleted
+// build dir). The shim resolves, the link resolves, and the hook still dies.
+func TestInspectLauncher_DanglingSymlinkTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevation on Windows")
+	}
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	binary, _ := writeFakeAO(t, filepath.Join(root, "build"))
+	link := filepath.Join(root, "bin", "ao")
+	if err := os.MkdirAll(filepath.Dir(link), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(binary, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureLauncherFor(dataDir, func() (string, error) { return link, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if insp := InspectLauncher(dataDir); !insp.Healthy() {
+		t.Fatalf("Healthy() = false while the symlink still resolves: %+v", insp)
+	}
+
+	if err := os.Remove(binary); err != nil {
+		t.Fatal(err)
+	}
+
+	insp := InspectLauncher(dataDir)
+
+	if insp.Target != link {
+		t.Fatalf("target = %q, want the symlink %q", insp.Target, link)
+	}
+	if insp.TargetPresent || insp.TargetExecutable {
+		t.Fatalf("target present=%v executable=%v, want both false for a dangling symlink",
+			insp.TargetPresent, insp.TargetExecutable)
+	}
+	if insp.TargetEphemeral {
+		t.Fatal("TargetEphemeral = true for a stable symlink path")
+	}
+	if insp.Healthy() {
+		t.Fatal("Healthy() = true for a launcher targeting a dangling symlink")
+	}
+}

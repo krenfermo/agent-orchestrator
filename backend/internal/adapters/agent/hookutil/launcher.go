@@ -295,3 +295,104 @@ func IsAOExecutable(word string) bool {
 	}
 	return base == LauncherBaseName
 }
+
+// LauncherInspection is the structured state of AO's hook launcher: the shim
+// AO installs under the data directory, and the binary that shim execs.
+//
+// It exists so a post-run check can read the launcher's health as durable
+// facts instead of grepping an agent's log for "No such file or directory".
+// The failure it is shaped around is the real one this file guards against: a
+// shim written while AO ran from the Go build cache keeps naming a temp binary
+// that no longer exists, so every hook after that daemon exits dies with exit
+// 127 and nothing in the shim itself looks wrong.
+type LauncherInspection struct {
+	// Path is where the shim is expected to live for the inspected data dir.
+	// It is reported even when nothing is there, so a caller can name the file
+	// that is missing.
+	Path string `json:"path"`
+	// Present and Executable describe the shim file itself.
+	Present    bool `json:"present"`
+	Executable bool `json:"executable"`
+	// Target is the binary the shim execs, recovered from the script AO wrote
+	// rather than assumed from the running executable. Empty when the shim is
+	// absent or names no command.
+	Target string `json:"target,omitempty"`
+	// TargetPresent and TargetExecutable describe that binary.
+	TargetPresent    bool `json:"targetPresent"`
+	TargetExecutable bool `json:"targetExecutable"`
+	// TargetEphemeral reports IsEphemeralExecutable(Target): the shim is
+	// pinned to a Go build-cache path that disappears when the process that
+	// built it exits. True is a defect even while the file still exists,
+	// because it will not exist the next time a hook fires.
+	TargetEphemeral bool `json:"targetEphemeral"`
+	// Error is why the shim could not be read at all ("" when it could, or
+	// when it is simply absent).
+	Error string `json:"error,omitempty"`
+}
+
+// Healthy reports whether hooks launched through this shim will actually run:
+// the shim is present and executable, it names a target, and that target is an
+// executable file at a path AO will still control when a hook fires.
+func (i LauncherInspection) Healthy() bool {
+	return i.Present && i.Executable && i.Target != "" &&
+		i.TargetPresent && i.TargetExecutable && !i.TargetEphemeral
+}
+
+// InspectLauncher reads the hook launcher AO installed under dataDir without
+// writing or repairing anything. EnsureLauncher is the repair; this is the
+// read-only observation of what the last EnsureLauncher left behind.
+//
+// An empty dataDir yields a zero inspection: there is no AO-owned shim to
+// judge, which is not the same as a broken one.
+func InspectLauncher(dataDir string) LauncherInspection {
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return LauncherInspection{}
+	}
+	if !filepath.IsAbs(dataDir) {
+		abs, err := filepath.Abs(dataDir)
+		if err != nil {
+			return LauncherInspection{Error: err.Error()}
+		}
+		dataDir = abs
+	}
+	insp := LauncherInspection{Path: filepath.Join(LauncherDir(dataDir), LauncherName())}
+	if !FileExists(insp.Path) {
+		return insp
+	}
+	insp.Present = true
+	insp.Executable = IsExecutableFile(insp.Path)
+	script, err := os.ReadFile(insp.Path) //nolint:gosec // the shim is a file AO itself wrote under its own data dir
+	if err != nil {
+		insp.Error = err.Error()
+		return insp
+	}
+	insp.Target = parseLauncherTarget(string(script))
+	if insp.Target == "" {
+		return insp
+	}
+	insp.TargetPresent = FileExists(insp.Target)
+	insp.TargetExecutable = IsExecutableFile(insp.Target)
+	insp.TargetEphemeral = IsEphemeralExecutable(insp.Target)
+	return insp
+}
+
+// parseLauncherTarget recovers the executable a launcher script execs. It
+// understands exactly the two shapes launcherScript emits — a `#!/bin/sh` +
+// `exec <quoted path> "$@"` shim and an `@echo off` + `"<path>" %*` batch
+// wrapper — and returns "" for anything else rather than guessing.
+func parseLauncherTarget(script string) string {
+	for _, line := range strings.Split(script, "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		switch {
+		case line == "", strings.HasPrefix(line, "#"), strings.EqualFold(line, "@echo off"):
+			continue
+		}
+		if rest := strings.TrimPrefix(line, "exec "); rest != line {
+			line = strings.TrimLeft(rest, " \t")
+		}
+		word, _ := SplitCommandWord(line)
+		return word
+	}
+	return ""
+}

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"sort"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -357,24 +358,39 @@ func (s *Scheduler) CancelAllForRun(ctx context.Context, runID domain.WorkflowRu
 	return int(n), nil
 }
 
-// NextForRun returns the soonest-scheduled still-open (pending or claimed)
-// wake for a run, or nil if none. Read-time source for
-// RunDetail.NextWakeAt/WaitReason.
-func (s *Scheduler) NextForRun(ctx context.Context, runID domain.WorkflowRunID) (*Schedule, error) {
+// PendingForRun returns every still-open (pending or claimed) wake for a run,
+// soonest-scheduled first.
+//
+// NextForRun answers "when does this run wake next", which is all a live run
+// detail needs. Post-run evidence collection asks the opposite question — which
+// wakes did this execution leave behind when it finished — and that needs the
+// whole set, including the ones scheduled far out and the ones that are already
+// overdue.
+func (s *Scheduler) PendingForRun(ctx context.Context, runID domain.WorkflowRunID) ([]Schedule, error) {
 	rows, err := s.store.ListPendingWorkflowWakeSchedulesByRun(ctx, string(runID))
 	if err != nil {
 		return nil, fmt.Errorf("list pending wake schedules for run %s: %w", runID, err)
 	}
+	out := make([]Schedule, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, fromStoreRow(r))
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].ScheduledAt.Before(out[j].ScheduledAt) })
+	return out, nil
+}
+
+// NextForRun returns the soonest-scheduled still-open (pending or claimed)
+// wake for a run, or nil if none. Read-time source for
+// RunDetail.NextWakeAt/WaitReason.
+func (s *Scheduler) NextForRun(ctx context.Context, runID domain.WorkflowRunID) (*Schedule, error) {
+	rows, err := s.PendingForRun(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
 	if len(rows) == 0 {
 		return nil, nil
 	}
-	best := rows[0]
-	for _, r := range rows[1:] {
-		if r.ScheduledAt.Before(best.ScheduledAt) {
-			best = r
-		}
-	}
-	out := fromStoreRow(best)
+	out := rows[0]
 	return &out, nil
 }
 
