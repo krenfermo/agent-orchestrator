@@ -332,20 +332,29 @@ func (c *Coordinator) repairFinalSHA(ctx stdctx.Context, repairRunID string) str
 }
 
 // repairReviewerHarness reads which independent reviewer approved the repair.
+//
+// It reads the review_run rather than the step's workflow_attempts: a review is
+// carried out by a reviewer run, and the attempt rows on a review step do not
+// carry the reviewer's harness. A real E2E recorded an empty reviewer for a
+// repair that had in fact been approved by codex, which is precisely the audit
+// field that must not be guessable.
 func (c *Coordinator) repairReviewerHarness(ctx stdctx.Context, repairRunID string) string {
+	if c.reviewRuns == nil {
+		return ""
+	}
 	steps, err := c.store.ListWorkflowSteps(ctx, repairRunID)
 	if err != nil {
 		return ""
 	}
 	for _, s := range steps {
-		if s.Kind != domain.WorkflowStepReview {
+		if s.Kind != domain.WorkflowStepReview || s.ReviewRunID == nil {
 			continue
 		}
-		attempts, aerr := c.store.ListWorkflowAttempts(ctx, s.ID)
-		if aerr != nil || len(attempts) == 0 {
+		rr, ok, rerr := c.reviewRuns.GetReviewRun(ctx, *s.ReviewRunID)
+		if rerr != nil || !ok {
 			return ""
 		}
-		return attempts[len(attempts)-1].Harness
+		return string(rr.Harness)
 	}
 	return ""
 }

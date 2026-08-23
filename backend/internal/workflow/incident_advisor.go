@@ -136,6 +136,12 @@ func (c *Coordinator) OpenIncident(ctx stdctx.Context, runID string) (Incident, 
 	}
 	if inc, found := foldIncident(incidentID, cps); found {
 		inc.RunID = runID
+		// Reconcile here too, not only in LoadIncident: this is the read the
+		// modal actually performs, and an incident whose repair finished must
+		// resolve on the next look rather than waiting for someone to call a
+		// different endpoint. A real E2E found it sitting at `open` with a
+		// completed repair run linked to it.
+		inc = c.reconcileIncidentRepair(ctx, run, inc)
 		return inc, nil
 	}
 

@@ -737,3 +737,25 @@ func (f *advisorFixture) finishRepairRun(t *testing.T, repairRunID string, state
 		t.Fatalf("finish repair run: %v", err)
 	}
 }
+
+// The read the modal performs must resolve a finished repair. A real E2E found
+// the incident sitting at `open` with a completed repair run linked to it,
+// because only LoadIncident reconciled and the modal reads through
+// IncidentPackFor.
+func TestTheModalReadResolvesAFinishedRepair(t *testing.T) {
+	f := newAdvisorFixture(t, workflowcore.ReasonVerifyInfraFailed, "verification infrastructure failure")
+	inc := f.approvedRepairDiagnosis(t)
+	if _, err := f.c.ExecuteIncidentAction(context.Background(), f.runID, inc.ID, "morakurt@icloud.com"); err != nil {
+		t.Fatalf("ExecuteIncidentAction: %v", err)
+	}
+	loaded, _ := f.c.LoadIncident(context.Background(), f.runID, inc.ID)
+	f.finishRepairRun(t, loaded.RepairRunID, domain.WorkflowRunCompleted)
+
+	got, _, err := f.c.IncidentPackFor(context.Background(), f.runID)
+	if err != nil {
+		t.Fatalf("IncidentPackFor: %v", err)
+	}
+	if got.State != workflowcore.IncidentResolved {
+		t.Fatalf("state from the modal's own read = %q, want resolved", got.State)
+	}
+}
