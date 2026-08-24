@@ -18,6 +18,12 @@ import (
 
 const verifyResultVersion = "v1"
 
+// verifyUnexecutedTarget is the model value failVerifyWithoutExecution stamps on
+// the attempt it records for a verification that never ran. It is not a target
+// key and must never be compared with one: such an attempt has no opinion about
+// any target, because it never got as far as having one.
+const verifyUnexecutedTarget = "invalid-target"
+
 type VerifyCommandRequest struct {
 	Command   string
 	Args      []string
@@ -328,6 +334,14 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 	// second: verifyAttemptID is a pure function of step, target and generation.
 	if hasAttempt && recovering && latest.Outcome != "" &&
 		latest.ID != verifyAttemptID(verifyStep.ID, targetKey, recoveryGeneration) {
+		hasAttempt = false
+		latest = domain.WorkflowAttempt{}
+	}
+	// An attempt that never executed has no target to have changed. Treating it
+	// as one is what let a single unexecuted failure block every later
+	// verification: its model is a placeholder, it differs from every real
+	// target key, and the guard below read that difference as drift.
+	if hasAttempt && latest.Model == verifyUnexecutedTarget {
 		hasAttempt = false
 		latest = domain.WorkflowAttempt{}
 	}
@@ -800,7 +814,22 @@ func renderVerifyFindings(result VerifyResult) string {
 
 func (c *Coordinator) failVerifyWithoutExecution(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, class domain.WorkflowErrorClass, reason string) (domain.WorkflowRun, domain.WorkflowStep, error) {
 	now := c.clock()
-	attempt, err := c.store.CreateWorkflowAttempt(ctx, "wfa-verify-"+c.newID(), step.ID, "local-verify", "invalid-target", now)
+	// One row per condition, not one per poll.
+	//
+	// maybeVerify runs on every GetRun, and a verification that cannot execute
+	// is usually a standing condition rather than an event: a missing worktree,
+	// an unparseable plan, an ambiguous target. Minting a fresh attempt row each
+	// time turned that into an unbounded write storm — wf-04e8309d accumulated
+	// 35 of them in three minutes — and, worse, each new row became the LATEST
+	// attempt, so every guard that reasons about "the attempt that came before"
+	// was reasoning about a row created microseconds ago by the previous poll.
+	// The condition re-observed is the same condition, and it is already
+	// recorded.
+	if latest, ok, lerr := c.store.GetLatestWorkflowAttempt(ctx, step.ID); lerr == nil && ok &&
+		latest.Model == verifyUnexecutedTarget && latest.Outcome != "" && latest.ErrorClass == class {
+		return run, step, nil
+	}
+	attempt, err := c.store.CreateWorkflowAttempt(ctx, "wfa-verify-"+c.newID(), step.ID, "local-verify", verifyUnexecutedTarget, now)
 	if err != nil {
 		return run, step, err
 	}

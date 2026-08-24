@@ -120,6 +120,40 @@ func TestATargetIsNotAuthorizedByAnOlderReview(t *testing.T) {
 	}
 }
 
+// A verification that cannot execute records ONE attempt for the condition,
+// not one per poll. maybeVerify runs on every GetRun, and a standing condition
+// re-observed is the same condition: wf-04e8309d minted 35 attempt rows in
+// three minutes, each one becoming the "latest" that every later guard then
+// reasoned against.
+func TestAnUnexecutableVerifyRecordsOneAttemptPerCondition(t *testing.T) {
+	coord, store, ctx, runID := newTargetFixture(t)
+	now := time.Now().UTC()
+	step := domain.WorkflowStep{ID: "wfs-v", WorkflowRunID: runID, Kind: domain.WorkflowStepVerify,
+		Ordinal: 1, State: domain.WorkflowStepPending, ArtifactJSON: "{}", CreatedAt: now, UpdatedAt: now}
+	run := domain.WorkflowRun{ID: runID + "-x", ProjectID: "p", Objective: "o",
+		State: domain.WorkflowRunRunning, PolicyVersion: policyVersionV1, PolicySnapshot: "{}",
+		CreatedAt: now, UpdatedAt: now}
+	created, steps, err := store.CreateWorkflowRun(ctx, run, []domain.WorkflowStep{step})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 5; i++ {
+		if _, _, err := coord.failVerifyWithoutExecution(ctx, created, steps[0],
+			domain.WorkflowErrorVerifyEnvironment, "verify worktree/session facts are missing"); err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+	}
+
+	attempts, err := store.ListWorkflowAttempts(ctx, steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("attempt rows = %d after 5 identical passes, want exactly 1", len(attempts))
+	}
+}
+
 // No verify-driven fix cycle at all: nothing to override.
 func TestNoReentryMeansNoOverride(t *testing.T) {
 	coord, store, ctx, runID := newTargetFixture(t)
