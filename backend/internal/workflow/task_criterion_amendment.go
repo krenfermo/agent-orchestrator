@@ -259,23 +259,31 @@ func (c *Coordinator) requireFreshReviewAfterAmendment(
 	return c.reopenReviewAfterAmendment(ctx, child)
 }
 
-// reopenReviewAfterAmendment puts the child back in a state where the ordinary
-// cascade dispatches a NEW review run.
+// reopenReviewAfterAmendment puts the child back in the state the ordinary
+// cascade dispatches a NEW review cycle from.
 //
-// It clears the stop and returns the review step to pending, which is the same
-// shape a run has before its first review — deliberately, because that is
-// exactly the claim being made: nothing has been reviewed under these criteria
-// yet. The fix step goes back with it, because a fix cycle that was waiting on
-// findings from a superseded verdict is waiting on nothing.
+// That state is `waiting`, not `pending`, and the difference is load-bearing.
+// `pending` is what a review step holds before the work step has finished, so
+// the cascade advances it to `ready` first — and dispatchReviewStep reads
+// `ready` as "this is a crash-recovery resume of the cycle already in flight",
+// recomputes the SAME cycle number, and collides with that cycle's already
+// acknowledged outbox entry. The dispatch then adopts nothing (the workspace
+// has moved, so the natural-key lookup finds no review run for the new target)
+// and the step parks as review_dispatch_ambiguous. `waiting` is exactly the
+// shape a delivered fix leaves behind, which is the situation this really is:
+// the previous verdict is spent and the next cycle is due.
+//
+// A step already `waiting` is therefore left alone rather than "reset" — moving
+// it would be the bug.
 func (c *Coordinator) reopenReviewAfterAmendment(ctx stdctx.Context, child RunDetail) error {
 	for _, s := range child.Steps {
 		switch s.Step.Kind {
 		case domain.WorkflowStepReview, domain.WorkflowStepFix:
-			if s.Step.State == domain.WorkflowStepPending || s.Step.State.Terminal() {
+			if s.Step.State == domain.WorkflowStepWaiting || s.Step.State.Terminal() {
 				continue
 			}
 			if _, err := c.store.UpdateWorkflowStepState(ctx, s.Step.ID, s.Step.State,
-				domain.WorkflowStepPending, c.clock()); err != nil {
+				domain.WorkflowStepWaiting, c.clock()); err != nil {
 				return err
 			}
 		}

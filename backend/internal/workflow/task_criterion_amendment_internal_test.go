@@ -260,8 +260,13 @@ func (f *amendFixture) assertReviewReopened(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, s := range steps {
-		if s.Kind == domain.WorkflowStepReview && s.State != domain.WorkflowStepPending {
-			t.Fatalf("review step = %q, want pending so a fresh independent review runs", s.State)
+		// waiting, not pending: that is the state a fresh review CYCLE is
+		// dispatched from. pending would make the cascade advance it to ready,
+		// which dispatchReviewStep reads as a crash-recovery resume of the
+		// cycle already spent — and it would then collide with that cycle's
+		// acknowledged outbox entry instead of opening a new one.
+		if s.Kind == domain.WorkflowStepReview && s.State != domain.WorkflowStepWaiting {
+			t.Fatalf("review step = %q, want waiting so a fresh review cycle is dispatched", s.State)
 		}
 	}
 	run, ok, err := f.store.GetWorkflowRun(f.ctx, f.child.Run.ID)
