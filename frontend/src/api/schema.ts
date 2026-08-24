@@ -2372,6 +2372,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflowId}/tasks/{taskId}/criteria/amend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Amend or declare obsolete one acceptance criterion of a planned task (migration 0132), with a named human approver, a reason and checkable evidence. Records the original text forever, applies the amendment, and re-opens an independent review — it never approves the work. */
+        post: operations["amendWorkflowTaskCriterion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workflows/{workflowId}/tasks/{taskId}/resume": {
         parameters: {
             query?: never;
@@ -2555,6 +2572,18 @@ export interface components {
         };
         ControllersAdminResetPasswordResponse: {
             ok: boolean;
+        };
+        ControllersAmendTaskCriterionRequest: {
+            amendedCriterion?: string;
+            approvedBy: string;
+            criterionIndex: number;
+            evidence: string[];
+            originalCriterion?: string;
+            reason: string;
+        };
+        ControllersAmendTaskCriterionResponse: {
+            amendment: components["schemas"]["ControllersWorkflowTaskCriterionAmendmentView"];
+            workflow: components["schemas"]["WorkflowRunDetailView"];
         };
         ControllersCapacitySnapshotResponse: {
             /** @enum {string} */
@@ -3049,6 +3078,22 @@ export interface components {
             incidentId?: string;
             kind: string;
             sourceWorkflowId?: string;
+        };
+        ControllersWorkflowTaskCriterionAmendmentView: {
+            amendedCriterion?: string;
+            approvedBy: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: int64 */
+            criterionIndex: number;
+            /** @enum {string} */
+            disposition: "amended" | "declared_obsolete";
+            evidence: string[];
+            id: string;
+            originalCriterion: string;
+            reason: string;
+            supersededReviewRunId?: string;
+            taskId: string;
         };
         ControllersWorkflowUsageResponse: {
             advisory: components["schemas"]["ControllersSessionRefreshAdvisoryResponse"];
@@ -13245,6 +13290,71 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    amendWorkflowTaskCriterion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Master workflow run identifier. */
+                workflowId: string;
+                /** @description Planned task identifier (workflow_tasks.id). */
+                taskId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersAmendTaskCriterionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersAmendTaskCriterionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

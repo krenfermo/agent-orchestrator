@@ -797,6 +797,21 @@ type WorkflowTask struct {
 	CompletedAt            sql.NullTime
 }
 
+type WorkflowTaskCriterionAmendment struct {
+	ID                    string
+	WorkflowRunID         string
+	TaskID                string
+	CriterionIndex        int64
+	OriginalCriterion     string
+	AmendedCriterion      string
+	Disposition           string
+	Reason                string
+	EvidenceJson          string
+	ApprovedBy            string
+	SupersededReviewRunID string
+	CreatedAt             time.Time
+}
+
 type WorkflowTaskDependency struct {
 	WorkflowTaskID  string
 	DependsOnTaskID string

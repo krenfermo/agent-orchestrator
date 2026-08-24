@@ -151,6 +151,55 @@ type WorkflowTask struct {
 	CompletedAt     *time.Time
 }
 
+// WorkflowTaskCriterionDisposition is what an amendment did to a criterion.
+type WorkflowTaskCriterionDisposition string
+
+const (
+	// WorkflowTaskCriterionAmended replaced the criterion with a new one that
+	// still has to be met.
+	WorkflowTaskCriterionAmended WorkflowTaskCriterionDisposition = "amended"
+	// WorkflowTaskCriterionObsolete removed the criterion. Only honest when it
+	// described something outside the work itself — a precondition of the
+	// environment that stopped holding for reasons the work did not cause.
+	WorkflowTaskCriterionObsolete WorkflowTaskCriterionDisposition = "declared_obsolete"
+)
+
+// WorkflowTaskCriterionAmendment is one durable, human-approved change to a
+// planned task's acceptance criteria (migration 0132).
+//
+// It exists because a criterion can describe a PRECONDITION OF THE ENVIRONMENT
+// rather than a property of the work, and preconditions expire. When one does,
+// the reviewer is right to keep blocking and the work is right to be blocked —
+// the thing that is wrong is the criterion, and until this existed AO had no
+// way to say so short of editing the database by hand or replanning the whole
+// objective.
+//
+// Every field is a guard against the obvious abuse, which is talking a reviewer
+// out of a real finding: the original text is kept forever, a reason and at
+// least one piece of evidence are required, and a named human must approve it.
+// The record is append-only; the task row carries the criteria as they now
+// stand, and these say how they got there.
+type WorkflowTaskCriterionAmendment struct {
+	ID            string
+	WorkflowRunID string
+	TaskID        string
+	// CriterionIndex is the position amended, as indexed at the time. The text
+	// below is what actually identifies it: an index stops meaning anything as
+	// soon as a later amendment removes an earlier criterion.
+	CriterionIndex    int64
+	OriginalCriterion string
+	AmendedCriterion  string
+	Disposition       WorkflowTaskCriterionDisposition
+	Reason            string
+	Evidence          []string
+	ApprovedBy        string
+	// SupersededReviewRunID is the review whose verdict this amendment
+	// invalidated, when there was one. A verdict reached under a criterion that
+	// no longer exists cannot carry over.
+	SupersededReviewRunID string
+	CreatedAt             time.Time
+}
+
 // WorkflowTaskExecutionStrategy is how a planned task may be executed
 // relative to its siblings in the same plan. It is derived once, when the
 // plan is accepted, from the task DAG plus the estimated write sets, and is

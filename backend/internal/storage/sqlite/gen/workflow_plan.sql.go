@@ -187,6 +187,46 @@ func (q *Queries) InsertWorkflowTask(ctx context.Context, arg InsertWorkflowTask
 	return err
 }
 
+const insertWorkflowTaskCriterionAmendment = `-- name: InsertWorkflowTaskCriterionAmendment :exec
+INSERT INTO workflow_task_criterion_amendments (id, workflow_run_id, task_id, criterion_index,
+    original_criterion, amended_criterion, disposition, reason, evidence_json, approved_by,
+    superseded_review_run_id, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`
+
+type InsertWorkflowTaskCriterionAmendmentParams struct {
+	ID                    string
+	WorkflowRunID         string
+	TaskID                string
+	CriterionIndex        int64
+	OriginalCriterion     string
+	AmendedCriterion      string
+	Disposition           string
+	Reason                string
+	EvidenceJson          string
+	ApprovedBy            string
+	SupersededReviewRunID string
+	CreatedAt             time.Time
+}
+
+func (q *Queries) InsertWorkflowTaskCriterionAmendment(ctx context.Context, arg InsertWorkflowTaskCriterionAmendmentParams) error {
+	_, err := q.db.ExecContext(ctx, insertWorkflowTaskCriterionAmendment,
+		arg.ID,
+		arg.WorkflowRunID,
+		arg.TaskID,
+		arg.CriterionIndex,
+		arg.OriginalCriterion,
+		arg.AmendedCriterion,
+		arg.Disposition,
+		arg.Reason,
+		arg.EvidenceJson,
+		arg.ApprovedBy,
+		arg.SupersededReviewRunID,
+		arg.CreatedAt,
+	)
+	return err
+}
+
 const insertWorkflowTaskDependency = `-- name: InsertWorkflowTaskDependency :exec
 INSERT OR IGNORE INTO workflow_task_dependencies (workflow_task_id, depends_on_task_id) VALUES (?, ?)
 `
@@ -199,6 +239,47 @@ type InsertWorkflowTaskDependencyParams struct {
 func (q *Queries) InsertWorkflowTaskDependency(ctx context.Context, arg InsertWorkflowTaskDependencyParams) error {
 	_, err := q.db.ExecContext(ctx, insertWorkflowTaskDependency, arg.WorkflowTaskID, arg.DependsOnTaskID)
 	return err
+}
+
+const listWorkflowTaskCriterionAmendments = `-- name: ListWorkflowTaskCriterionAmendments :many
+SELECT id, workflow_run_id, task_id, criterion_index, original_criterion, amended_criterion, disposition, reason, evidence_json, approved_by, superseded_review_run_id, created_at FROM workflow_task_criterion_amendments WHERE workflow_run_id = ?
+ORDER BY created_at, id
+`
+
+func (q *Queries) ListWorkflowTaskCriterionAmendments(ctx context.Context, workflowRunID string) ([]WorkflowTaskCriterionAmendment, error) {
+	rows, err := q.db.QueryContext(ctx, listWorkflowTaskCriterionAmendments, workflowRunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []WorkflowTaskCriterionAmendment{}
+	for rows.Next() {
+		var i WorkflowTaskCriterionAmendment
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkflowRunID,
+			&i.TaskID,
+			&i.CriterionIndex,
+			&i.OriginalCriterion,
+			&i.AmendedCriterion,
+			&i.Disposition,
+			&i.Reason,
+			&i.EvidenceJson,
+			&i.ApprovedBy,
+			&i.SupersededReviewRunID,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listWorkflowTaskRelationships = `-- name: ListWorkflowTaskRelationships :many
@@ -462,6 +543,24 @@ func (q *Queries) StartWorkflowPlanCommand(ctx context.Context, arg StartWorkflo
 		arg.UpdatedAt,
 		arg.WorkflowRunID,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const updateWorkflowTaskAcceptanceCriteria = `-- name: UpdateWorkflowTaskAcceptanceCriteria :execrows
+UPDATE workflow_tasks SET acceptance_criteria_json = ?, updated_at = ? WHERE id = ?
+`
+
+type UpdateWorkflowTaskAcceptanceCriteriaParams struct {
+	AcceptanceCriteriaJson string
+	UpdatedAt              time.Time
+	ID                     string
+}
+
+func (q *Queries) UpdateWorkflowTaskAcceptanceCriteria(ctx context.Context, arg UpdateWorkflowTaskAcceptanceCriteriaParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateWorkflowTaskAcceptanceCriteria, arg.AcceptanceCriteriaJson, arg.UpdatedAt, arg.ID)
 	if err != nil {
 		return 0, err
 	}

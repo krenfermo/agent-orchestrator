@@ -6671,6 +6671,67 @@ paths:
         step''s Codex worker'
       tags:
       - workflows
+  /api/v1/workflows/{workflowId}/tasks/{taskId}/criteria/amend:
+    post:
+      operationId: amendWorkflowTaskCriterion
+      parameters:
+      - description: Master workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Master workflow run identifier.
+          type: string
+      - description: Planned task identifier (workflow_tasks.id).
+        in: path
+        name: taskId
+        required: true
+        schema:
+          description: Planned task identifier (workflow_tasks.id).
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersAmendTaskCriterionRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersAmendTaskCriterionResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unprocessable Entity
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Amend or declare obsolete one acceptance criterion of a planned task
+        (migration 0132), with a named human approver, a reason and checkable evidence.
+        Records the original text forever, applies the amendment, and re-opens an
+        independent review — it never approves the work.
+      tags:
+      - workflows
   /api/v1/workflows/{workflowId}/tasks/{taskId}/resume:
     post:
       operationId: resumeWorkflowTask
@@ -7131,6 +7192,38 @@ components:
           type: boolean
       required:
       - ok
+      type: object
+    ControllersAmendTaskCriterionRequest:
+      properties:
+        amendedCriterion:
+          type: string
+        approvedBy:
+          type: string
+        criterionIndex:
+          type: integer
+        evidence:
+          items:
+            type: string
+          type: array
+        originalCriterion:
+          type: string
+        reason:
+          type: string
+      required:
+      - criterionIndex
+      - reason
+      - evidence
+      - approvedBy
+      type: object
+    ControllersAmendTaskCriterionResponse:
+      properties:
+        amendment:
+          $ref: '#/components/schemas/ControllersWorkflowTaskCriterionAmendmentView'
+        workflow:
+          $ref: '#/components/schemas/WorkflowRunDetailView'
+      required:
+      - amendment
+      - workflow
       type: object
     ControllersCapacitySnapshotResponse:
       properties:
@@ -8486,6 +8579,48 @@ components:
           type: string
       required:
       - kind
+      type: object
+    ControllersWorkflowTaskCriterionAmendmentView:
+      properties:
+        amendedCriterion:
+          type: string
+        approvedBy:
+          type: string
+        createdAt:
+          format: date-time
+          type: string
+        criterionIndex:
+          format: int64
+          type: integer
+        disposition:
+          enum:
+          - amended
+          - declared_obsolete
+          type: string
+        evidence:
+          items:
+            type: string
+          type: array
+        id:
+          type: string
+        originalCriterion:
+          type: string
+        reason:
+          type: string
+        supersededReviewRunId:
+          type: string
+        taskId:
+          type: string
+      required:
+      - id
+      - taskId
+      - criterionIndex
+      - originalCriterion
+      - disposition
+      - reason
+      - evidence
+      - approvedBy
+      - createdAt
       type: object
     ControllersWorkflowUsageResponse:
       properties:

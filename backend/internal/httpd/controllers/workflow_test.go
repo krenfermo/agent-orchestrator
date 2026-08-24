@@ -40,6 +40,10 @@ type fakeWorkflowService struct {
 	continueErr   error
 	continueCalls int
 
+	amendReq   workflowsvc.TaskCriterionAmendment
+	amendErr   error
+	amendCalls int
+
 	resumeRunID  string
 	resumeTaskID string
 	resumeErr    error
@@ -125,6 +129,21 @@ func (f *fakeWorkflowService) ResumeTask(_ context.Context, runID, taskID string
 		return f.detail, nil
 	}
 	return workflowcore.RunDetail{Run: domain.WorkflowRun{ID: runID, State: domain.WorkflowRunRunning}}, nil
+}
+
+func (f *fakeWorkflowService) AmendTaskCriterion(_ context.Context, req workflowsvc.TaskCriterionAmendment) (domain.WorkflowTaskCriterionAmendment, workflowcore.RunDetail, error) {
+	f.amendReq = req
+	f.amendCalls++
+	if f.amendErr != nil {
+		return domain.WorkflowTaskCriterionAmendment{}, workflowcore.RunDetail{}, f.amendErr
+	}
+	detail := f.detail
+	if detail.Run.ID == "" {
+		detail = workflowcore.RunDetail{Run: domain.WorkflowRun{ID: req.RunID, State: domain.WorkflowRunRunning}}
+	}
+	return domain.WorkflowTaskCriterionAmendment{ID: "wfca-1", TaskID: req.TaskID,
+		OriginalCriterion: "original", Disposition: domain.WorkflowTaskCriterionObsolete,
+		Reason: req.Reason, Evidence: req.Evidence, ApprovedBy: req.ApprovedBy}, detail, nil
 }
 
 func newWorkflowTestServer(t *testing.T, svc workflowsvc.Manager) *httptest.Server {

@@ -46,6 +46,10 @@ type Manager interface {
 	// ResumeTask releases one task parked in needs_attention (migration 0130)
 	// after a person has dealt with what parked it. Idempotent.
 	ResumeTask(ctx context.Context, runID, taskID string) (workflowcore.RunDetail, error)
+	// AmendTaskCriterion is the Plan / Acceptance Criteria Amendment action
+	// (migration 0132): a human-approved change to a criterion that stopped
+	// describing reality, followed by a fresh independent review.
+	AmendTaskCriterion(ctx context.Context, req TaskCriterionAmendment) (domain.WorkflowTaskCriterionAmendment, workflowcore.RunDetail, error)
 }
 
 type PlannerManager interface {
@@ -168,6 +172,35 @@ func (s *Service) ProjectBoardHistory(ctx context.Context, projectID string, lim
 // work step has completed (idempotently); a no-op otherwise.
 func (s *Service) ContinueRun(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
 	return s.coordinator.ContinueRun(ctx, runID)
+}
+
+// TaskCriterionAmendment is one human-approved amendment, at the service
+// boundary. It mirrors workflowcore.TaskCriterionAmendmentRequest rather than
+// importing that vocabulary into the transport layer.
+type TaskCriterionAmendment struct {
+	RunID             string
+	TaskID            string
+	CriterionIndex    int
+	OriginalCriterion string
+	AmendedCriterion  string
+	Reason            string
+	Evidence          []string
+	ApprovedBy        string
+}
+
+// AmendTaskCriterion records the amendment, applies it, and returns the run
+// with its review re-opened. It never approves the work.
+func (s *Service) AmendTaskCriterion(ctx context.Context, req TaskCriterionAmendment) (domain.WorkflowTaskCriterionAmendment, workflowcore.RunDetail, error) {
+	amendment, err := s.coordinator.AmendTaskAcceptanceCriterion(ctx, workflowcore.TaskCriterionAmendmentRequest{
+		RunID: req.RunID, TaskID: req.TaskID, CriterionIndex: req.CriterionIndex,
+		OriginalCriterion: req.OriginalCriterion, AmendedCriterion: req.AmendedCriterion,
+		Reason: req.Reason, Evidence: req.Evidence, ApprovedBy: req.ApprovedBy,
+	})
+	if err != nil {
+		return domain.WorkflowTaskCriterionAmendment{}, workflowcore.RunDetail{}, err
+	}
+	detail, err := s.coordinator.GetRun(ctx, req.RunID)
+	return amendment, detail, err
 }
 
 // ResumeTask releases one task parked in needs_attention after a person has

@@ -177,6 +177,70 @@ func (s *Store) UpdateWorkflowTaskState(ctx context.Context, id string, expected
 	return n > 0, err
 }
 
+// AmendWorkflowTaskCriterion records one human-approved amendment to a task's
+// acceptance criteria and applies the resulting criteria to the task, in ONE
+// transaction.
+//
+// Atomic on purpose. The ledger row is the justification for the change and the
+// task row is the change; a crash that separated them would leave either a
+// criterion nobody can account for, or an explanation for something that never
+// happened. Both are worse than the operation simply not having occurred.
+func (s *Store) AmendWorkflowTaskCriterion(ctx context.Context, a domain.WorkflowTaskCriterionAmendment, criteria []string, now time.Time) error {
+	if len(a.Evidence) == 0 || a.ApprovedBy == "" || a.Reason == "" {
+		// The schema refuses these too; failing here names the caller rather
+		// than surfacing a CHECK violation from three layers down.
+		return errors.New("amend workflow task criterion: reason, evidence and an approving human are all required")
+	}
+	evidence, err := json.Marshal(a.Evidence)
+	if err != nil {
+		return fmt.Errorf("marshal amendment evidence: %w", err)
+	}
+	applied, err := json.Marshal(criteria)
+	if err != nil {
+		return fmt.Errorf("marshal amended criteria: %w", err)
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.inTx(ctx, "amend workflow task criterion", func(q *gen.Queries) error {
+		if err := q.InsertWorkflowTaskCriterionAmendment(ctx, gen.InsertWorkflowTaskCriterionAmendmentParams{
+			ID: a.ID, WorkflowRunID: a.WorkflowRunID, TaskID: a.TaskID,
+			CriterionIndex: a.CriterionIndex, OriginalCriterion: a.OriginalCriterion,
+			AmendedCriterion: a.AmendedCriterion, Disposition: string(a.Disposition),
+			Reason: a.Reason, EvidenceJson: string(evidence), ApprovedBy: a.ApprovedBy,
+			SupersededReviewRunID: a.SupersededReviewRunID, CreatedAt: a.CreatedAt,
+		}); err != nil {
+			return err
+		}
+		_, err := q.UpdateWorkflowTaskAcceptanceCriteria(ctx, gen.UpdateWorkflowTaskAcceptanceCriteriaParams{
+			AcceptanceCriteriaJson: string(applied), UpdatedAt: now, ID: a.TaskID,
+		})
+		return err
+	})
+}
+
+// ListWorkflowTaskCriterionAmendments returns every amendment recorded for a
+// master run, oldest first.
+func (s *Store) ListWorkflowTaskCriterionAmendments(ctx context.Context, runID string) ([]domain.WorkflowTaskCriterionAmendment, error) {
+	rows, err := s.qr.ListWorkflowTaskCriterionAmendments(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.WorkflowTaskCriterionAmendment, 0, len(rows))
+	for _, r := range rows {
+		var evidence []string
+		_ = json.Unmarshal([]byte(r.EvidenceJson), &evidence)
+		out = append(out, domain.WorkflowTaskCriterionAmendment{
+			ID: r.ID, WorkflowRunID: r.WorkflowRunID, TaskID: r.TaskID,
+			CriterionIndex: r.CriterionIndex, OriginalCriterion: r.OriginalCriterion,
+			AmendedCriterion: r.AmendedCriterion,
+			Disposition:      domain.WorkflowTaskCriterionDisposition(r.Disposition),
+			Reason:           r.Reason, Evidence: evidence, ApprovedBy: r.ApprovedBy,
+			SupersededReviewRunID: r.SupersededReviewRunID, CreatedAt: r.CreatedAt,
+		})
+	}
+	return out, nil
+}
+
 // UpdateWorkflowTaskScope replaces a task's estimated read/write scope. It is
 // deliberately unconditional (no expected-value CAS): the scope is a derived
 // estimate, not lifecycle state, and the newest estimate always wins -- the

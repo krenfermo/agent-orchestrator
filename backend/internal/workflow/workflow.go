@@ -161,6 +161,14 @@ type masterPlanStore interface {
 	// what makes parking race-free and resuming idempotent.
 	ParkWorkflowTaskForAttention(ctx stdctx.Context, id string, expected domain.WorkflowTaskState, reason string, attention domain.WorkflowTaskAttention, now time.Time) (bool, error)
 	ResumeWorkflowTaskFromAttention(ctx stdctx.Context, id string, next domain.WorkflowTaskState, now time.Time) (bool, error)
+	// AmendWorkflowTaskCriterion / ListWorkflowTaskCriterionAmendments back the
+	// Plan / Acceptance Criteria Amendment mechanism (migration 0132): a
+	// human-approved, append-only change to a criterion that has stopped
+	// describing reality. The write is one transaction over the ledger row and
+	// the task's criteria, because an amendment nobody can account for and an
+	// explanation for a change that never happened are both worse than nothing.
+	AmendWorkflowTaskCriterion(ctx stdctx.Context, amendment domain.WorkflowTaskCriterionAmendment, criteria []string, now time.Time) error
+	ListWorkflowTaskCriterionAmendments(ctx stdctx.Context, runID string) ([]domain.WorkflowTaskCriterionAmendment, error)
 	SetWorkflowTaskExecutionRun(ctx stdctx.Context, taskID, executionRunID string, now time.Time) (bool, error)
 	FindWorkflowRunByPlannedTask(ctx stdctx.Context, taskID string) (string, bool, error)
 	ApproveWorkflowPlan(ctx stdctx.Context, runID string, now time.Time) (bool, error)

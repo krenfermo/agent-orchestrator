@@ -62,6 +62,19 @@ UPDATE workflow_tasks SET state = sqlc.arg(state), attention_reason = '',
     attention_at = NULL, updated_at = sqlc.arg(updated_at)
 WHERE id = sqlc.arg(id) AND state = 'needs_attention';
 
+-- name: UpdateWorkflowTaskAcceptanceCriteria :execrows
+UPDATE workflow_tasks SET acceptance_criteria_json = ?, updated_at = ? WHERE id = ?;
+
+-- name: InsertWorkflowTaskCriterionAmendment :exec
+INSERT INTO workflow_task_criterion_amendments (id, workflow_run_id, task_id, criterion_index,
+    original_criterion, amended_criterion, disposition, reason, evidence_json, approved_by,
+    superseded_review_run_id, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+-- name: ListWorkflowTaskCriterionAmendments :many
+SELECT * FROM workflow_task_criterion_amendments WHERE workflow_run_id = ?
+ORDER BY created_at, id;
+
 -- name: UpdateWorkflowTaskScope :execrows
 UPDATE workflow_tasks SET scope_json = ?, updated_at = ? WHERE id = ?;
 

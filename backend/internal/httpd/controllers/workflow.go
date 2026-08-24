@@ -784,6 +784,7 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	r.Post("/workflows/{workflowId}/start", c.start)
 	r.Post("/workflows/{workflowId}/continue", c.continueRun)
 	r.Post("/workflows/{workflowId}/tasks/{taskId}/resume", c.resumeTask)
+	r.Post("/workflows/{workflowId}/tasks/{taskId}/criteria/amend", c.amendTaskCriterion)
 
 	// Checkpoint 8P-E.18 — the Incident Advisor behind the "¿Qué hago?" control.
 	// Four routes rather than one, because the split IS the authorization
@@ -1044,6 +1045,92 @@ func (c *WorkflowsController) resumeTask(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+
+// AmendTaskCriterionRequest is one human-approved amendment of one acceptance
+// criterion (migration 0132).
+//
+// ApprovedBy is a required field rather than an inferred identity because the
+// whole legitimacy of the mechanism rests on a person having said yes to THIS
+// change: an amendment attributed to whoever happened to hold the session token
+// is an amendment nobody can be asked about afterwards.
+type AmendTaskCriterionRequest struct {
+	CriterionIndex int `json:"criterionIndex"`
+	// OriginalCriterion, when given, must match the text currently at that
+	// index — the caller's proof it is amending the criterion it means to.
+	OriginalCriterion string `json:"originalCriterion,omitempty"`
+	// AmendedCriterion replaces it. Omit or leave empty to declare the
+	// criterion obsolete and remove it.
+	AmendedCriterion string `json:"amendedCriterion,omitempty"`
+	// Reason and Evidence are both required: an amendment must say why the
+	// criterion stopped describing reality and offer something checkable.
+	Reason     string   `json:"reason"`
+	Evidence   []string `json:"evidence"`
+	ApprovedBy string   `json:"approvedBy"`
+}
+
+// AmendTaskCriterionResponse returns the recorded amendment and the run as it
+// then stands — with its review re-opened.
+type AmendTaskCriterionResponse struct {
+	Amendment WorkflowTaskCriterionAmendmentView `json:"amendment"`
+	Workflow  WorkflowRunDetailView              `json:"workflow"`
+}
+
+// WorkflowTaskCriterionAmendmentView is the read-only projection of one
+// amendment: what the criterion was, what it became, who approved it and why.
+type WorkflowTaskCriterionAmendmentView struct {
+	ID                    string    `json:"id"`
+	TaskID                string    `json:"taskId"`
+	CriterionIndex        int64     `json:"criterionIndex"`
+	OriginalCriterion     string    `json:"originalCriterion"`
+	AmendedCriterion      string    `json:"amendedCriterion,omitempty"`
+	Disposition           string    `json:"disposition" enum:"amended,declared_obsolete"`
+	Reason                string    `json:"reason"`
+	Evidence              []string  `json:"evidence"`
+	ApprovedBy            string    `json:"approvedBy"`
+	SupersededReviewRunID string    `json:"supersededReviewRunId,omitempty"`
+	CreatedAt             time.Time `json:"createdAt"`
+}
+
+// amendTaskCriterion is the supported alternative to editing the database by
+// hand or replanning an entire objective when a criterion has gone stale.
+//
+// It never approves the work. It records the amendment, applies it, and
+// re-opens an independent review under criteria that describe reality.
+func (c *WorkflowsController) amendTaskCriterion(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/tasks/{taskId}/criteria/amend")
+		return
+	}
+	var body AmendTaskCriterionRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "WORKFLOW_INVALID", "Malformed amendment body", nil)
+		return
+	}
+	amendment, detail, err := c.Svc.AmendTaskCriterion(r.Context(), workflowsvc.TaskCriterionAmendment{
+		RunID:             chi.URLParam(r, "workflowId"),
+		TaskID:            chi.URLParam(r, "taskId"),
+		CriterionIndex:    body.CriterionIndex,
+		OriginalCriterion: body.OriginalCriterion,
+		AmendedCriterion:  body.AmendedCriterion,
+		Reason:            body.Reason,
+		Evidence:          body.Evidence,
+		ApprovedBy:        body.ApprovedBy,
+	})
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, AmendTaskCriterionResponse{
+		Amendment: WorkflowTaskCriterionAmendmentView{
+			ID: amendment.ID, TaskID: amendment.TaskID, CriterionIndex: amendment.CriterionIndex,
+			OriginalCriterion: amendment.OriginalCriterion, AmendedCriterion: amendment.AmendedCriterion,
+			Disposition: string(amendment.Disposition), Reason: amendment.Reason,
+			Evidence: amendment.Evidence, ApprovedBy: amendment.ApprovedBy,
+			SupersededReviewRunID: amendment.SupersededReviewRunID, CreatedAt: amendment.CreatedAt,
+		},
+		Workflow: c.workflowRunDetailView(r.Context(), detail),
+	})
 }
 
 func writeWorkflowError(w http.ResponseWriter, r *http.Request, err error) {
