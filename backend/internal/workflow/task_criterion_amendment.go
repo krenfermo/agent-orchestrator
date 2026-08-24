@@ -322,7 +322,30 @@ func (c *Coordinator) supersedeReviewDispatch(
 			retired = append(retired, e.IdempotencyKey)
 		}
 	}
-	if len(retired) == 0 {
+	// Unlink the superseded verdict from the step.
+	//
+	// This is the other half of retiring the dispatch, and without it the
+	// retirement accomplishes nothing: workflow_steps.review_run_id is what the
+	// cascade reads to decide what a `waiting` review step means. Still linked
+	// to a changes_requested run, "waiting" means "reviewed, changes requested,
+	// a fix is due" — and the cascade dispatches a FIX cycle, against findings
+	// written under a criterion that no longer exists. Unlinked, it means what
+	// is actually true: nothing has been reviewed under these criteria yet.
+	//
+	// The link is cleared, not repointed, and nothing is deleted: the review
+	// run itself stays, and the checkpoint below names it as superseded so the
+	// chain from verdict to amendment to fresh review stays readable.
+	unlinked := false
+	for _, s := range child.Steps {
+		if s.Step.Kind != domain.WorkflowStepReview || s.Step.ReviewRunID == nil {
+			continue
+		}
+		if _, err := c.store.SetWorkflowStepReviewRun(ctx, s.Step.ID, "", c.clock()); err != nil {
+			return err
+		}
+		unlinked = true
+	}
+	if len(retired) == 0 && !unlinked {
 		return nil
 	}
 	body, _ := json.Marshal(struct {
@@ -338,7 +361,7 @@ func (c *Coordinator) supersedeReviewDispatch(
 		WorkflowStepID: &stepID,
 		ProjectID:      child.Run.ProjectID,
 		NextAction: fmt.Sprintf(
-			"review_dispatch_superseded: %d review dispatch(es) were retired because amendment %s changed the acceptance criteria they were issued under — the next review is a new, independent cycle",
+			"review_dispatch_superseded: %d review dispatch(es) were retired and the step was unlinked from its previous verdict, because amendment %s changed the acceptance criteria they were issued under — the next review is a new, independent cycle",
 			len(retired), amendment.ID),
 		DurablePhase:   supersededDispatchPhase,
 		PayloadVersion: "v1",
