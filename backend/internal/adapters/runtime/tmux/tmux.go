@@ -773,6 +773,13 @@ func (r *Runtime) SendMessage(ctx context.Context, handle ports.RuntimeHandle, m
 	if err != nil {
 		return err
 	}
+	// Nothing is written into the pane until AO knows the pane will actually
+	// hand AO's keys to the application. This runs first, before the payload is
+	// staged, pasted or typed, precisely so a refusal here is provably a
+	// non-delivery — see ensurePaneAcceptsKeys.
+	if err := r.ensurePaneAcceptsKeys(ctx, id); err != nil {
+		return err
+	}
 	enterCtx := ctx
 	if message != "" {
 		// Checkpoint 8P-E.13C: above the inline budget the payload does not go
@@ -842,6 +849,79 @@ func (r *Runtime) SendMessage(ctx context.Context, handle ports.RuntimeHandle, m
 		return fmt.Errorf("tmux runtime: send enter %s: %w", id, err)
 	}
 	return nil
+}
+
+// ensurePaneAcceptsKeys guarantees that the keys SendMessage is about to issue
+// will reach the application in the pane, and refuses the delivery outright
+// when it cannot guarantee that.
+//
+// The incident (wf-57f90ff2, 2026-08-23). A fix prompt was delivered into
+// worker session agent-orchestrator-29 while its pane sat in copy-mode. tmux
+// treats a pane in a mode as its own: keys are dispatched against the mode's
+// key table, so `send-keys -t <id> Enter` was consumed by copy-mode and never
+// reached Codex, while `paste-buffer` still queued the 15 KB payload on the
+// pane's input. Both commands exited 0. AO recorded a successful delivery, the
+// prompt sat in Codex's composer as an unsubmitted draft, and the run was later
+// stopped for a fix the worker had "not made" — a cycle it had never been given
+// the chance to start. A second delivery appended a second copy of the same
+// prompt to the same draft.
+//
+// Reproduced directly against tmux 3.7b:
+//
+//	in copy-mode: paste-buffer  -> bytes queued, application receives nothing
+//	in copy-mode: send-keys Enter -> consumed by the mode, never delivered
+//	send-keys -X cancel          -> leaves the mode; the queue is still pending
+//	next real key                -> flushes the queued paste and the key together
+//
+// So the rule is: leave the mode first, prove it was left, and only then write
+// anything. A pane that cannot be brought out of its mode — or whose mode
+// cannot be read at all — yields ports.ErrPromptUndelivered, which is honest
+// (nothing was staged, pasted or typed) and is exactly the sentinel that makes
+// a caller's re-send provably safe.
+//
+// Empty-message nudges go through this too: an Enter is precisely the key
+// copy-mode swallows, so an unguarded nudge is the same silent no-op.
+func (r *Runtime) ensurePaneAcceptsKeys(ctx context.Context, id string) error {
+	inMode, err := r.paneInMode(ctx, id)
+	if err != nil {
+		return fmt.Errorf("tmux runtime: pane state %s: %w: %w", id, ports.ErrPromptUndelivered, err)
+	}
+	if !inMode {
+		return nil
+	}
+	if _, err := r.run(ctx, cancelPaneModeArgs(id)...); err != nil {
+		return fmt.Errorf("tmux runtime: leave pane mode %s: %w: %w", id, ports.ErrPromptUndelivered, err)
+	}
+	// Re-read rather than trust the exit status: `send-keys -X cancel` reports
+	// success for a command the mode declined to act on, and a pane still in a
+	// mode would swallow the submit exactly as before.
+	stillInMode, err := r.paneInMode(ctx, id)
+	if err != nil {
+		return fmt.Errorf("tmux runtime: pane state %s: %w: %w", id, ports.ErrPromptUndelivered, err)
+	}
+	if stillInMode {
+		return fmt.Errorf("tmux runtime: pane %s is still in a tmux mode after cancel, so keys would not reach the agent: %w",
+			id, ports.ErrPromptUndelivered)
+	}
+	return nil
+}
+
+// paneInMode reads #{pane_in_mode} for the session's active pane. tmux renders
+// the flag as "1" or "0"; anything else is treated as unreadable rather than
+// guessed at, because guessing "not in a mode" is what silently drops a prompt.
+func (r *Runtime) paneInMode(ctx context.Context, id string) (bool, error) {
+	out, err := r.run(ctx, paneInModeArgs(id)...)
+	if err != nil {
+		return false, err
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "0":
+		return false, nil
+	case "1":
+		return true, nil
+	default:
+		return false, fmt.Errorf("unexpected pane_in_mode %q", strings.TrimSpace(string(out)))
+	}
 }
 
 func sendCompletionBudget(chunkCount int, commandTimeout, enterDelay time.Duration) time.Duration {

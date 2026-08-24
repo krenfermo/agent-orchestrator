@@ -142,6 +142,34 @@ func sendEnterArgs(id string) []string {
 	return []string{"send-keys", "-t", id, "Enter"}
 }
 
+// paneInModeArgs builds args for
+// `tmux display-message -p -t =<id> #{pane_in_mode}`, which answers "is this
+// pane currently in one of tmux's own modes (copy-mode, view-mode, a chooser)".
+//
+// It is load-bearing rather than diagnostic. While a pane is in a mode, tmux
+// handles keys itself against that mode's key table, so `send-keys ... Enter`
+// is consumed by the MODE and never reaches the application — while
+// `paste-buffer` still queues its bytes on the pane's input. Both commands exit
+// 0, so a delivery made in that state looks entirely successful and submits
+// nothing. See ensurePaneAcceptsKeys.
+//
+// The target is the bare id, matching send-keys/paste-buffer rather than the
+// `=`-prefixed exact form used by the session-scoped commands: display-message
+// resolves `=<name>` to nothing and prints an empty line, so the guard would
+// answer "unreadable" for every healthy pane. Verified against tmux 3.7b.
+func paneInModeArgs(id string) []string {
+	return []string{"display-message", "-p", "-t", id, "#{pane_in_mode}"}
+}
+
+// cancelPaneModeArgs builds args for `tmux send-keys -X -t <id> cancel`, the
+// mode-aware way to leave whatever mode a pane is in. -X dispatches a command
+// to the mode itself, which is why this works for copy-mode, view-mode and the
+// choosers alike, and why it is used instead of guessing at a key (`q`, Escape)
+// whose meaning depends on the mode and the configured key table.
+func cancelPaneModeArgs(id string) []string {
+	return []string{"send-keys", "-X", "-t", id, "cancel"}
+}
+
 // sendInterruptArgs builds args for `tmux send-keys -t <id> C-c` to interrupt
 // the foreground process without killing the terminal session.
 func sendInterruptArgs(id string) []string {

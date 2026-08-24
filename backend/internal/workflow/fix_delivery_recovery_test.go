@@ -337,10 +337,21 @@ type fixRecoveryFixture struct {
 	launcher       *fakeReviewerLauncher
 	spawner        *fakeSpawner
 	sender         *fakeMessageSender
-	runID          string
-	fixStepID      string
-	workSessionID  domain.SessionID
-	idSeq          int
+	// senderOverride replaces sender in the Coordinator when a test needs a
+	// richer one (see reportingSender). nil means "use sender as-is".
+	senderOverride workflowcore.MessageSender
+	reporting      *reportingSender
+	// incidentAgents installs the Incident Advisor's isolated agents. nil
+	// leaves the Advisor unable to investigate, which is its own tested state.
+	incidentAgents workflowcore.IncidentAgentLauncher
+	// selfRepairProject is the project an approved incident repair is launched
+	// into. Empty models an install that has not configured one, which is its
+	// own tested refusal.
+	selfRepairProject string
+	runID             string
+	fixStepID         string
+	workSessionID     domain.SessionID
+	idSeq             int
 }
 
 func newFixRecoveryFixture(t *testing.T) *fixRecoveryFixture {
@@ -373,19 +384,30 @@ func newFixRecoveryFixture(t *testing.T) *fixRecoveryFixture {
 // again by restart() to model a daemon that came back over the same rows.
 func (f *fixRecoveryFixture) newCoordinator() *workflowcore.Coordinator {
 	return workflowcore.New(workflowcore.Deps{
-		Store:            f.store,
-		Spawner:          f.spawner,
-		SessionFacts:     f.sessionFacts,
-		WorkspaceFacts:   f.workspaceFacts,
-		ReviewRuns:       f.reviewRuns,
-		ReviewerLauncher: f.launcher,
-		MessageSender:    f.sender,
-		Clock:            f.clk.Now,
+		Store:               f.store,
+		Spawner:             f.spawner,
+		SessionFacts:        f.sessionFacts,
+		WorkspaceFacts:      f.workspaceFacts,
+		ReviewRuns:          f.reviewRuns,
+		ReviewerLauncher:    f.launcher,
+		MessageSender:       f.messageSender(),
+		IncidentAgents:      f.incidentAgents,
+		SelfRepairProjectID: f.selfRepairProject,
+		Clock:               f.clk.Now,
 		NewID: func() string {
 			f.idSeq++
 			return fmt.Sprintf("id%d", f.idSeq)
 		},
 	})
+}
+
+// messageSender is the sender the Coordinator is built around: the plain fake
+// unless a test installed a richer one.
+func (f *fixRecoveryFixture) messageSender() workflowcore.MessageSender {
+	if f.senderOverride != nil {
+		return f.senderOverride
+	}
+	return f.sender
 }
 
 func (f *fixRecoveryFixture) restart() *workflowcore.Coordinator {

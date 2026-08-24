@@ -6194,6 +6194,197 @@ paths:
         is currently dispatchable.'
       tags:
       - workflows
+  /api/v1/workflows/{workflowId}/incident:
+    get:
+      operationId: getWorkflowIncident
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersIncidentResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Explain why a stopped workflow run is waiting for a person: the incident,
+        its bounded evidence pack, and any diagnosis with AO''s own reading of the
+        proposed action'
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/incident/diagnose:
+    post:
+      operationId: diagnoseWorkflowIncident
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersIncidentResponse'
+          description: Accepted
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unprocessable Entity
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Investigate a stopped run with an isolated, read-only Diagnostic Agent
+        over a bounded evidence pack. Bounded per incident.
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/incident/diagnosis:
+    post:
+      operationId: submitWorkflowIncidentDiagnosis
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersIncidentDiagnosisSubmissionBody'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersIncidentResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unprocessable Entity
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Record a Diagnostic Agent's validated classification and proposed action.
+        This endpoint cannot execute anything.
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/incident/execute:
+    post:
+      operationId: executeWorkflowIncidentAction
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersExecuteIncidentRequest'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersIncidentResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unprocessable Entity
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Carry out an incident's diagnosed action, after AO's authorization
+        policy and — for anything beyond the ordinary continue path — an explicit
+        human approval
+      tags:
+      - workflows
   /api/v1/workflows/{workflowId}/plan:
     get:
       operationId: getWorkflowPlan
@@ -7092,6 +7283,16 @@ components:
       - passwordSet
       - events
       type: object
+    ControllersExecuteIncidentRequest:
+      properties:
+        approve:
+          type: boolean
+        incidentId:
+          type: string
+      required:
+      - incidentId
+      - approve
+      type: object
     ControllersExecutionPolicyResponse:
       properties:
         policy:
@@ -7139,6 +7340,247 @@ components:
       - decisionResolverPriority
       - fallbackBehavior
       - reviewIndependence
+      type: object
+    ControllersIncidentActionSpecBody:
+      properties:
+        detail:
+          type: string
+        kind:
+          type: string
+        reason:
+          type: string
+      required:
+      - kind
+      type: object
+    ControllersIncidentActionView:
+      properties:
+        describe:
+          type: string
+        endsWork:
+          type: boolean
+        executable:
+          type: boolean
+        kind:
+          type: string
+        needsApproval:
+          type: boolean
+        rationale:
+          type: string
+        refusalReason:
+          type: string
+        risk:
+          type: string
+        writesCode:
+          type: boolean
+      required:
+      - kind
+      - describe
+      - risk
+      - needsApproval
+      - endsWork
+      - writesCode
+      - executable
+      type: object
+    ControllersIncidentDiagnosisSubmissionBody:
+      properties:
+        classification:
+          type: string
+        evidence:
+          items:
+            type: string
+          type: array
+        incidentId:
+          type: string
+        missingEvidence:
+          items:
+            type: string
+          type: array
+        options:
+          items:
+            $ref: '#/components/schemas/ControllersIncidentOptionView'
+          type: array
+        packDigest:
+          type: string
+        proposedAction:
+          $ref: '#/components/schemas/ControllersIncidentActionSpecBody'
+        risk:
+          type: string
+        summary:
+          type: string
+        whatHappened:
+          type: string
+        whatIsStuck:
+          type: string
+        whyAOStopped:
+          type: string
+      required:
+      - incidentId
+      - packDigest
+      - classification
+      - summary
+      type: object
+    ControllersIncidentDiagnosisView:
+      properties:
+        classification:
+          type: string
+        evidence:
+          items:
+            type: string
+          type: array
+        missingEvidence:
+          items:
+            type: string
+          type: array
+        options:
+          items:
+            $ref: '#/components/schemas/ControllersIncidentOptionView'
+          type: array
+        proposedAction:
+          $ref: '#/components/schemas/ControllersIncidentActionView'
+        risk:
+          type: string
+        summary:
+          type: string
+        whatHappened:
+          type: string
+        whatIsStuck:
+          type: string
+        whyAOStopped:
+          type: string
+      required:
+      - classification
+      - summary
+      type: object
+    ControllersIncidentOptionView:
+      properties:
+        consequence:
+          type: string
+        detail:
+          type: string
+        id:
+          type: string
+        label:
+          type: string
+      required:
+      - id
+      - label
+      - detail
+      type: object
+    ControllersIncidentPackView:
+      properties:
+        bytes:
+          type: integer
+        digest:
+          type: string
+        droppedSections:
+          items:
+            type: string
+          type: array
+        estimatedTokens:
+          type: integer
+        maxBytes:
+          type: integer
+        sections:
+          items:
+            type: string
+          type: array
+      required:
+      - digest
+      - bytes
+      - maxBytes
+      - estimatedTokens
+      - sections
+      type: object
+    ControllersIncidentRepairView:
+      properties:
+        approvedBy:
+          type: string
+        finalSha:
+          type: string
+        generation:
+          type: integer
+        maxRepairs:
+          type: integer
+        reviewerHarness:
+          type: string
+        runId:
+          type: string
+        verifyResult:
+          type: string
+      required:
+      - runId
+      - maxRepairs
+      type: object
+    ControllersIncidentResponse:
+      properties:
+        incident:
+          $ref: '#/components/schemas/ControllersIncidentView'
+      required:
+      - incident
+      type: object
+    ControllersIncidentView:
+      properties:
+        canDiagnose:
+          type: boolean
+        canExecute:
+          type: boolean
+        capacityReasons:
+          items:
+            type: string
+          type: array
+        closureCause:
+          type: string
+        closureEvidence:
+          items:
+            type: string
+          type: array
+        contextPack:
+          $ref: '#/components/schemas/ControllersIncidentPackView'
+        diagnosesUsed:
+          type: integer
+        diagnosis:
+          $ref: '#/components/schemas/ControllersIncidentDiagnosisView'
+        diagnosticHarness:
+          type: string
+        id:
+          type: string
+        launchOutcome:
+          type: string
+        maxDiagnoses:
+          type: integer
+        maxRepairs:
+          type: integer
+        nextEvaluationAt:
+          type: string
+        progress:
+          type: string
+        repair:
+          $ref: '#/components/schemas/ControllersIncidentRepairView'
+        repairsUsed:
+          type: integer
+        runId:
+          type: string
+        stale:
+          type: boolean
+        state:
+          type: string
+        stopDetail:
+          type: string
+        stopReason:
+          type: string
+      required:
+      - id
+      - runId
+      - state
+      - stopReason
+      - stale
+      - diagnosesUsed
+      - maxDiagnoses
+      - repairsUsed
+      - maxRepairs
+      - canDiagnose
+      - canExecute
+      - progress
       type: object
     ControllersListCapacityResponse:
       properties:
@@ -8031,6 +8473,19 @@ components:
       - requiresHuman
       - createdAt
       - updatedAt
+      type: object
+    ControllersWorkflowRunOriginView:
+      properties:
+        approvedBy:
+          type: string
+        incidentId:
+          type: string
+        kind:
+          type: string
+        sourceWorkflowId:
+          type: string
+      required:
+      - kind
       type: object
     ControllersWorkflowUsageResponse:
       properties:
@@ -11487,11 +11942,6 @@ components:
           type: array
         title:
           type: string
-        waitReason:
-          enum:
-          - waiting_for_dependencies
-          - waiting_for_write_conflict
-          type: string
         workflowId:
           type: string
       required:
@@ -11966,6 +12416,8 @@ components:
           - string
         objective:
           type: string
+        origin:
+          $ref: '#/components/schemas/ControllersWorkflowRunOriginView'
         phase:
           enum:
           - queued

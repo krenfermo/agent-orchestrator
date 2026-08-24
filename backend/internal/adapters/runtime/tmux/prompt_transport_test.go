@@ -152,7 +152,8 @@ func TestSendMessageLargePromptCleansUpStagedFile(t *testing.T) {
 func TestSendMessageCleansUpWhenPasteFails(t *testing.T) {
 	r, fr, scratch := newBufferTestRuntime(t)
 	fr.hook = func(_ context.Context, call int) error {
-		if call == 2 { // 1 = load-buffer, 2 = paste-buffer
+		// 1 = the #{pane_in_mode} guard probe, 2 = load-buffer, 3 = paste-buffer
+		if call == 3 {
 			return errors.New("no such pane")
 		}
 		return nil
@@ -204,7 +205,7 @@ func TestSendMessageSmallPromptStaysInline(t *testing.T) {
 	if _, ok := argsOf(fr, "load-buffer"); ok {
 		t.Fatal("a small prompt must not pay for the file transport")
 	}
-	if got, want := fr.calls[0].args, srv(sendKeysLiteralArgs("sess-1", "please fix the failing test")); !reflect.DeepEqual(got, want) {
+	if got, want := sendCalls(fr)[0].args, srv(sendKeysLiteralArgs("sess-1", "please fix the failing test")); !reflect.DeepEqual(got, want) {
 		t.Fatalf("first call = %#v, want an inline literal send %#v", got, want)
 	}
 	files, _ := filepath.Glob(filepath.Join(scratch, "prompts", "*"))

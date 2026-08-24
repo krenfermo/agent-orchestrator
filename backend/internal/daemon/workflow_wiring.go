@@ -150,7 +150,7 @@ func (c coordinatorLockClassifier) ClassifyLockOwner(ctx context.Context, run do
 	}, nil
 }
 
-func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, notifications workflowcore.NotificationSink, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
+func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {
 		plannerBinary = "claude"
@@ -197,7 +197,13 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		QuestionsStore:           store,
 		PaneReader:               paneReader,
 		DecisionResolverLauncher: decisionResolverLauncher,
-		WakeScheduler:            wakeScheduler,
+		IncidentAgents:           incidentAgents,
+		// Checkpoint 8P-E.20: the project holding AO's OWN source, the only
+		// repository an approved incident repair may be launched into. Unset
+		// means self-repair is unavailable, which is a refusal rather than a
+		// fallback — see incident_repair.go.
+		SelfRepairProjectID: os.Getenv("AO_SELF_REPAIR_PROJECT"),
+		WakeScheduler:       wakeScheduler,
 		// A run that durably reaches the completed state raises one "workflow
 		// finished" notification, on the same write-side producer lifecycle
 		// uses for session notifications.

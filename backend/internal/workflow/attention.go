@@ -82,6 +82,14 @@ const (
 	// verifies THAT, once, by itself — nobody has a decision to make about
 	// "the approval AO is holding is older than the code".
 	ReasonVerifyFreshReviewRequired = verifyFreshReviewRequiredPhase
+	// ReasonIncidentDiagnosisCapacityWait is an Incident Advisor investigation
+	// AO wants to run and currently cannot, because no provider has capacity.
+	// Self-remediable by construction: a durable wake is scheduled and AO comes
+	// back to it, and nobody has a decision to make about "the provider is rate
+	// limited". It never parks the RUN — the run is already stopped for its own
+	// reason, and an investigation that cannot start yet is a fact about the
+	// investigation, not a second fact about the run.
+	ReasonIncidentDiagnosisCapacityWait = "incident_diagnosis_capacity_wait"
 
 	// Human decisions: AO has genuinely stopped and a person must act.
 	ReasonFixBudgetExhausted    = "fix_budget_exhausted"
@@ -132,12 +140,30 @@ const (
 	ReasonReviewerLaunchRetriesExhausted = "reviewer_launch_retries_exhausted"
 	ReasonFixWorkerBlocked               = "fix_worker_blocked"
 	ReasonFixNoVerifiableChange          = "fix_no_verifiable_change"
-	ReasonPlannerExhausted               = "planner_retries_exhausted"
-	ReasonPlannerStartFailed             = "planner_start_failed"
-	ReasonPlannerPolicyViolation         = "planner_policy_violation"
-	ReasonPlannerAmbiguous               = "planner_ambiguous"
-	ReasonChildNeedsAttention            = "child_needs_attention"
-	ReasonChildFailed                    = "child_failed"
+	// ReasonFixCycleNotStarted is a fix cycle whose prompt provably reached the
+	// worker session but which the worker never began: no activity, no turn
+	// boundary and no signal postdating the dispatch, for longer than
+	// fixCyclePickupTimeout.
+	//
+	// It is deliberately NOT ReasonFixNoVerifiableChange. That reason asserts
+	// the worker ran and produced nothing — a verdict about the work — and AO
+	// has no evidence for it here. The two need separate names because they
+	// need separate remedies: one is a person reading a diff, the other is a
+	// cycle that has simply not been picked up and can be re-delivered.
+	ReasonFixCycleNotStarted = "fix_cycle_not_started"
+	// ReasonFixPromptNotSubmitted is a fix prompt that provably reached the
+	// worker's composer and provably did not leave it. Distinct from
+	// ReasonFixCycleNotStarted, which says only that the worker has been silent:
+	// here AO can see the text sitting in the draft, so the remedy is a submit,
+	// never another send — the payload is already there and re-sending appends a
+	// second copy.
+	ReasonFixPromptNotSubmitted  = "fix_prompt_not_submitted"
+	ReasonPlannerExhausted       = "planner_retries_exhausted"
+	ReasonPlannerStartFailed     = "planner_start_failed"
+	ReasonPlannerPolicyViolation = "planner_policy_violation"
+	ReasonPlannerAmbiguous       = "planner_ambiguous"
+	ReasonChildNeedsAttention    = "child_needs_attention"
+	ReasonChildFailed            = "child_failed"
 	// ReasonTaskParked is the objective's own stop when one or more of its
 	// tasks are parked in needs_attention (migration 0130) and nothing else in
 	// the plan can move. It is deliberately distinct from
@@ -176,14 +202,15 @@ const (
 // is the entire definition of "AO knows what this stop is".
 var attentionDispositions = map[string]AttentionDisposition{
 	// ---- Self-remediable ---------------------------------------------------
-	ReasonPlannerRetryScheduled: {SelfRemediable: true, Phase: PhaseRetrying},
-	ReasonPlannerCapacityWait:   {SelfRemediable: true, Phase: PhaseWaitingForCapacity},
-	ReasonReviewCapacityRetry:   {SelfRemediable: true, Phase: PhaseWaitingForCapacity},
-	ReasonBranchQueued:          {SelfRemediable: true, Phase: PhaseBlocked},
-	ReasonVerifyFixReentry:      {SelfRemediable: true, Phase: PhaseFixing},
-	ReasonPromptTransportRetry:  {SelfRemediable: true, Phase: PhaseRetrying},
-	ReasonReviewerLaunchRetry:   {SelfRemediable: true, Phase: PhaseRetrying},
-	ReasonWorkerLaunchRetry:     {SelfRemediable: true, Phase: PhaseRetrying},
+	ReasonPlannerRetryScheduled:         {SelfRemediable: true, Phase: PhaseRetrying},
+	ReasonPlannerCapacityWait:           {SelfRemediable: true, Phase: PhaseWaitingForCapacity},
+	ReasonReviewCapacityRetry:           {SelfRemediable: true, Phase: PhaseWaitingForCapacity},
+	ReasonBranchQueued:                  {SelfRemediable: true, Phase: PhaseBlocked},
+	ReasonVerifyFixReentry:              {SelfRemediable: true, Phase: PhaseFixing},
+	ReasonPromptTransportRetry:          {SelfRemediable: true, Phase: PhaseRetrying},
+	ReasonReviewerLaunchRetry:           {SelfRemediable: true, Phase: PhaseRetrying},
+	ReasonWorkerLaunchRetry:             {SelfRemediable: true, Phase: PhaseRetrying},
+	ReasonIncidentDiagnosisCapacityWait: {SelfRemediable: true, Phase: PhaseWaitingForCapacity},
 
 	ReasonVerifyFreshReviewRequired: {SelfRemediable: true, Phase: PhaseReviewing},
 
@@ -260,6 +287,12 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonFixNoVerifiableChange: {
 		HumanAction: "The fix worker finished without changing anything AO can verify. Inspect the worktree, then continue or cancel this run.",
+	},
+	ReasonFixCycleNotStarted: {
+		HumanAction: "The reviewer's findings reached the worker session but the worker never started on them. Check that the session is alive and responsive, then continue this run — AO re-checks its own evidence first and re-delivers the cycle by itself when it can prove that is safe.",
+	},
+	ReasonFixPromptNotSubmitted: {
+		HumanAction: "The reviewer's findings are sitting unsubmitted in the worker session's composer. Continue this run and AO will submit what is already there (it never re-sends the text, so the prompt cannot be duplicated); if that keeps failing, open the session and submit it yourself.",
 	},
 	ReasonPlannerExhausted: {
 		Nonrecoverable: true,
@@ -742,6 +775,16 @@ func (c *Coordinator) stopReason(ctx stdctx.Context, run domain.WorkflowRun) (st
 		return "", AttentionDisposition{}, false
 	}
 	for _, cp := range cps {
+		// Checkpoint 8P-E.18: the incident ledger describes a stop, it is never
+		// itself one. Its rows are the newest thing on a run the moment anyone
+		// asks "what do I do", so counting them here would rewrite the run's
+		// stop reason to `unclassified_stop` as a side effect of opening the
+		// modal — changing the Board, the incident's own signature, and every
+		// later comparison against it. Skipping them is what keeps asking about
+		// a stop free of consequences for the stop.
+		if isIncidentLedgerPhase(cp.DurablePhase) {
+			continue
+		}
 		// NextAction carries resolveAttentionReason's legacy carrier (the
 		// pre-8P-E.13 "human_attention" literal). Without it, a run stranded by
 		// the old fix-budget code reads as unclassified here while the very

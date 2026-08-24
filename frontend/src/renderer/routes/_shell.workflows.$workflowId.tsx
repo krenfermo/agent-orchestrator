@@ -12,6 +12,7 @@ import { WorkflowQuestionsSection } from "../components/workflow-questions-secti
 import { WorkflowCapacityWaitBanner } from "../components/workflow-capacity-wait-banner";
 import { WorkflowBranchWaitBanner } from "../components/workflow-branch-wait-banner";
 import { WorkflowRoutingSummary } from "../components/workflow-routing-summary";
+import { WorkflowIncidentDialog } from "../components/workflow-incident-dialog";
 import { WorkflowResumeButton } from "../components/workflow-resume-button";
 import {
 	translateDynamic,
@@ -111,6 +112,9 @@ function WorkflowRunRoute() {
 // crash renders THIS.
 export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 	const { t } = useTranslation();
+	// The "¿Qué hago?" modal's own open state. It is local because opening the
+	// modal is a read with no durable consequence — see the control below.
+	const [incidentOpen, setIncidentOpen] = useState(false);
 	const {
 		workflow,
 		isLoading,
@@ -298,6 +302,25 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				    nonrecoverable stop never gets a button that provably does
 				    nothing. Hidden when canContinueReview already renders the
 				    same POST under its own, more specific label. */}
+				{/* "¿Qué hago?" — offered for any run stopped on a decision, whether
+				    or not Reanudar applies. The stops a person most needs help
+				    with are precisely the ones Continue cannot resolve, so
+				    gating this on canContinue would hide it exactly when it
+				    matters. Opening it is a read: the backend deliberately keeps
+				    the incident ledger out of the run's derived stop, so asking
+				    the question does not change the answer. */}
+				{workflow.run.state === "needs_attention" && (
+					<button
+						className="rounded border border-border px-3 py-1.5 text-sm"
+						onClick={() => setIncidentOpen(true)}
+						type="button"
+					>
+						{t("incident.title")}
+					</button>
+				)}
+				{workflow.run.state === "needs_attention" && (
+					<WorkflowIncidentDialog onOpenChange={setIncidentOpen} open={incidentOpen} workflowId={workflowId} />
+				)}
 				{workflow.run.canContinue && !canContinueReview && (
 					<WorkflowResumeButton
 						attentionWorkflowId={workflow.run.attentionWorkflowId}

@@ -221,6 +221,8 @@ type Deps struct {
 	// MessageSender backs Checkpoint 8D's fix-step dispatch (fix_dispatch.go):
 	// delivering fix findings to the SAME worker session, never a new Spawn.
 	// Optional: a nil MessageSender means dispatchFixStep is a no-op.
+	IncidentAgents        IncidentAgentLauncher
+	SelfRepairProjectID   string
 	MessageSender         MessageSender
 	Verifier              VerifyRunner
 	Planner               Planner
@@ -389,6 +391,19 @@ type Coordinator struct {
 	// reviewerLauncher backs Checkpoint 8C's review-step dispatch. Optional.
 	reviewerLauncher ReviewerLauncher
 
+	// incidentAgents backs Checkpoint 8P-E.18's Incident Advisor: the isolated
+	// Diagnostic and Repair agents. Optional — without it a stopped run can
+	// still be inspected and explained, it simply cannot be investigated
+	// automatically.
+	incidentAgents IncidentAgentLauncher
+
+	// selfRepairProjectID names the project holding AO's OWN source, the only
+	// repository an incident repair may be launched into. Empty means self
+	// repair is unavailable, which is a refusal rather than a fallback: guessing
+	// which checkout is AO's own is exactly the guess that would land a repair
+	// in the user's working tree. See incident_repair.go.
+	selfRepairProjectID string
+
 	// messageSender backs Checkpoint 8D's fix-step dispatch. Optional.
 	messageSender         MessageSender
 	verifier              VerifyRunner
@@ -477,6 +492,8 @@ func New(d Deps) *Coordinator {
 		sessionFacts:             d.SessionFacts,
 		workspaceFacts:           d.WorkspaceFacts,
 		reviewerLauncher:         d.ReviewerLauncher,
+		incidentAgents:           d.IncidentAgents,
+		selfRepairProjectID:      d.SelfRepairProjectID,
 		messageSender:            d.MessageSender,
 		verifier:                 d.Verifier,
 		planStore:                func() masterPlanStore { s, _ := d.Store.(masterPlanStore); return s }(),
@@ -801,6 +818,11 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 
 	if checkpoints, cperr := c.store.ListWorkflowCheckpoints(ctx, runID); cperr == nil {
 		for _, cp := range checkpoints {
+			// Checkpoint 8P-E.18: incident-ledger rows describe a stop, they are
+			// never one. See isIncidentLedgerPhase.
+			if isIncidentLedgerPhase(cp.DurablePhase) {
+				continue
+			}
 			if cp.NextAction != "" {
 				detail.NextAction = cp.NextAction
 			}
@@ -1095,6 +1117,24 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 			if refreshed, ok2, rerr := c.store.GetWorkflowRun(ctx, runID); rerr == nil && ok2 {
 				run = refreshed
 			}
+		}
+	}
+
+	// Checkpoint 8P-E.16: the same person, on the same button, for the one stop
+	// that had no entry point at all — a fix cycle parked because its worker
+	// never started it. resumeUnstartedFixCycle re-derives that evidence now and
+	// re-delivers the same findings to the same session when, and only when, it
+	// still holds. A no-op for every other run, including one stopped on the
+	// same reason whose worker did in fact start. See fix_cycle_resume.go.
+	resumedFix := false
+	if run, resumedFix, err = c.resumeUnstartedFixCycle(ctx, run); err != nil {
+		return RunDetail{}, err
+	}
+	if resumedFix {
+		// The fix step is running again and the run is no longer parked; the
+		// cascade below must see that, not the snapshot read at entry.
+		if steps, err = c.store.ListWorkflowSteps(ctx, runID); err != nil {
+			return RunDetail{}, err
 		}
 	}
 
