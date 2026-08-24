@@ -1015,6 +1015,22 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		}
 	}
 
+	// Checkpoint 8P-E.22: the same person, on the same button, for the stop
+	// whose own advice is "apply the changes yourself" — and which then had
+	// nowhere to put them. resumeHumanAppliedFix observes that the workspace
+	// changed after the budget ran out and re-opens an INDEPENDENT review of
+	// what is actually there, without raising the budget, consuming a fix cycle
+	// or skipping the reviewer. See human_applied_fix.go.
+	humanFixed := false
+	if run, humanFixed, err = c.resumeHumanAppliedFix(ctx, run); err != nil {
+		return RunDetail{}, err
+	}
+	if humanFixed {
+		if steps, err = c.store.ListWorkflowSteps(ctx, runID); err != nil {
+			return RunDetail{}, err
+		}
+	}
+
 	// Checkpoint 8P-E.14C: this is the one place in AO where a terminal
 	// verification failure can be reopened, and it is here rather than in GetRun
 	// or the cascade because THIS call is the person saying "I corrected the
