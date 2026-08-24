@@ -356,6 +356,11 @@ func (c *Coordinator) pendingIntegrationFreshReview(ctx stdctx.Context, runID, r
 		return VerifyFreshReviewRecord{}, false
 	}
 	return VerifyFreshReviewRecord{
+		// The integration replay's own attempt count IS its generation: attempt
+		// 3 is a different authorized question from attempt 2, and must get a
+		// different dispatch identity.
+		Purpose:             freshReviewPurposeIntegration,
+		Generation:          record.Attempt,
 		TargetKey:           record.TaskID,
 		ApprovedFingerprint: record.ApprovedFingerprint,
 		CurrentFingerprint:  record.CurrentFingerprint,

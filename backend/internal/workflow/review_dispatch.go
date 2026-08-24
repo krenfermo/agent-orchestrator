@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -158,6 +159,41 @@ func reviewStepOutboxIdempotencyKey(stepID string, cycleNumber int, harness doma
 	return "workflow-step-review:" + stepID + ":cycle" + strconv.Itoa(cycleNumber) + ":" + string(harness)
 }
 
+// reviewDispatchIdempotencyKey is the durable identity of ONE authorized review
+// question: which step is asking, which provider is answering, and — when the
+// question was authorized by a fresh-review generation — which generation.
+//
+// The cycle number alone was not an identity. It is derived from how many
+// review runs have COMPLETED for this session and harness, so it only advances
+// when a review finishes. A newly authorized fresh-review generation therefore
+// computed the same cycle as the one before it, found that cycle's outbox row
+// already acknowledged, and adopted the review run it belonged to — answering a
+// new question with an old answer.
+//
+// wf-04e8309d is the case: six completed cycles, so cycleNumber 7, and an
+// acknowledged cycle7 row from an earlier dispatch. An exceptional third
+// fresh-review generation was granted, consumed, and then silently served by
+// the stale approval it existed to replace, re-emitting review_dispatched on
+// every poll without ever launching a reviewer.
+//
+// So the generation joins the key, tagged with the PURPOSE that authorized it.
+// The purpose matters because generations from different mechanisms are counted
+// independently — an integration replay's attempt 1 and a verify recovery's
+// generation 1 are different questions, and a bare number would collide them.
+//
+// Backward compatibility is exact: with no fresh-review generation in force the
+// key is byte-for-byte what it always was, so every ordinary review cycle keeps
+// its identity and every acknowledged row already on disk stays adoptable by
+// the path that wrote it. Only a fresh generation — which could not previously
+// get an identity of its own at all — gets the suffix.
+func reviewDispatchIdempotencyKey(stepID string, cycleNumber int, harness domain.ReviewerHarness, purpose string, generation int) string {
+	base := reviewStepOutboxIdempotencyKey(stepID, cycleNumber, harness)
+	if generation <= 0 || strings.TrimSpace(purpose) == "" {
+		return base
+	}
+	return base + ":fresh-" + purpose + strconv.Itoa(generation)
+}
+
 // completedReviewCycles returns the count of Claude-Code review_runs already
 // created for a worker session — Checkpoint 8D's natural cycle counter,
 // reusing review_run row cardinality as the iteration count rather than
@@ -285,6 +321,10 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 	// below (Checkpoint 8P-E.13A.3): a fix cycle's target is already the
 	// fingerprint the fix step observed moments earlier for this same cycle.
 	firstCycleTarget := false
+	// freshPurpose/freshGeneration identify the authorized fresh-review
+	// generation this dispatch serves, when there is one. They stay empty for an
+	// ordinary cycle, which is what keeps its key unchanged.
+	freshPurpose, freshGeneration := "", 0
 	switch reviewStep.State {
 	case domain.WorkflowStepPending:
 		// Cycle 1: the one-off hardcoded "work just completed, unblock
@@ -409,6 +449,10 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		}
 
 		if wantFreshReview {
+			// This generation's own dispatch identity. Without it a newly
+			// authorized generation reuses the previous cycle's outbox row and
+			// adopts the very review it was authorized to replace.
+			freshPurpose, freshGeneration = freshReview.Purpose, freshReview.Generation
 			// Start from the fingerprint verification actually found, and let
 			// reviewTargetFingerprint re-observe and pin the live workspace for
 			// this cycle exactly as every other first-target dispatch does — the
@@ -572,7 +616,7 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		ID:             "wfo-" + c.newID(),
 		WorkflowRunID:  run.ID,
 		WorkflowStepID: &reviewStep.ID,
-		IdempotencyKey: reviewStepOutboxIdempotencyKey(reviewStep.ID, cycleNumber, harness),
+		IdempotencyKey: reviewDispatchIdempotencyKey(reviewStep.ID, cycleNumber, harness, freshPurpose, freshGeneration),
 		CommandType:    domain.WorkflowOutboxTriggerReview,
 		Payload:        reviewPayloadJSON(workStep.ID, reviewStep.ID, sessionID, targetSHA, harness, cycleNumber),
 		CreatedAt:      now,

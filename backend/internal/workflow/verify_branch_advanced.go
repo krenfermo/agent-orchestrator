@@ -133,6 +133,7 @@ type branchAdvancedRecord struct {
 // than by a fourth one of its own.
 func (r branchAdvancedRecord) freshReviewRecord() VerifyFreshReviewRecord {
 	return VerifyFreshReviewRecord{
+		Purpose:             freshReviewPurposeBranchAdvance,
 		Generation:          r.Generation,
 		TargetKey:           r.TargetKey,
 		ApprovedFingerprint: r.ApprovedFingerprint,
