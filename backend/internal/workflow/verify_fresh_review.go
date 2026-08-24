@@ -583,6 +583,13 @@ func (c *Coordinator) pendingFreshReview(ctx stdctx.Context, runID, reviewStepID
 		if rec, ok := c.pendingIntegrationFreshReview(ctx, runID, reviewStepID); ok {
 			return rec, true
 		}
+		// And a BRANCH ADVANCE may be: the branch grew commits on top of the
+		// reviewed one while this run waited, so the approval describes a tree
+		// that has moved on (verify_branch_advanced.go). A third reason for the
+		// same resting state, served here for the same reason the second is.
+		if rec, ok := c.pendingBranchAdvancedFreshReview(ctx, runID, reviewStepID); ok {
+			return rec, true
+		}
 		// And an AMENDMENT may be: a criterion that stopped describing reality
 		// was changed by a person, so the verdict reached under it no longer
 		// counts (task_criterion_amendment.go). A third reason for the same

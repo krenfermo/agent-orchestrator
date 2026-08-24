@@ -454,8 +454,22 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 			if decision.allowed {
 				return c.requestFreshReviewForRecovery(ctx, run, reviewStep, verifyStep, latest, result, recovery, workCP, obs)
 			}
+			if rec, allowed, _ := c.branchAdvancedDrift(ctx, run, reviewStep, workCP, obs, reviewed, pre, targetKey); allowed {
+				return c.requestBranchAdvancedFreshReview(ctx, run, reviewStep, verifyStep, latest, result, rec)
+			}
 			result.StopReason = ReasonVerifyWorkspaceUnattributable
 			return c.finishVerifyFailure(ctx, run, verifyStep, latest, result, decision.refusal)
+		}
+		// The one shape of a workspace change that is not a verdict: the branch
+		// AO was authorized to work on grew COMMITS ON TOP of the reviewed one,
+		// which still contains it. Nothing was lost, so nothing needs a person —
+		// what went stale is the review, and AO can ask for a new one, bounded.
+		// Every other shape, and every shape AO cannot prove, falls through to
+		// the same stop it always did. See verify_branch_advanced.go.
+		if rec, allowed, refusal := c.branchAdvancedDrift(ctx, run, reviewStep, workCP, obs, reviewed, pre, targetKey); allowed {
+			return c.requestBranchAdvancedFreshReview(ctx, run, reviewStep, verifyStep, latest, result, rec)
+		} else if c.log != nil {
+			c.log.Debug("workflow: a workspace change is not a recoverable branch advance", "run", run.ID, "reason", refusal)
 		}
 		return c.finishVerifyFailure(ctx, run, verifyStep, latest, result, "workspace fingerprint no longer matches the approved review target")
 	}

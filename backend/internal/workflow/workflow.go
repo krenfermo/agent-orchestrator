@@ -1188,6 +1188,19 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 			return RunDetail{}, rerr
 		}
 	}
+	// And the third entry point, equally narrow: a run parked on a workspace
+	// change whose cause is that the branch grew COMMITS ON TOP of the reviewed
+	// commit, which still contains it. Neither of the two above can see it —
+	// the first refuses the class, the second requires an authorized recovery
+	// generation this run never had — and both refusals are correct, because
+	// what makes this one safe is a Git ancestry proof neither of them makes.
+	// A no-op for every run without exactly that durable evidence, re-derived
+	// against the repository as it stands now. See verify_branch_advanced.go.
+	if !reopened {
+		if run, reopened, rerr = c.resumeBranchAdvancedVerify(ctx, run, steps); rerr != nil {
+			return RunDetail{}, rerr
+		}
+	}
 	if reopened {
 		// The verify step is no longer terminal and the run is no longer parked;
 		// the cascade below must see that, not the snapshot read at entry.
