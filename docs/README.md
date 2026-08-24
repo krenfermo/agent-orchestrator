@@ -23,6 +23,7 @@ Start with [architecture.md](architecture.md) for the current backend model and
 | [stack.md](stack.md)                                   | Accepted library/runtime choices, pending stack decisions, and dependencies explicitly avoided for V1.                |
 | [telemetry.md](telemetry.md)                           | Telemetry collection, privacy safeguards, and configuration.                                                           |
 | [posthog-cost-controls.md](posthog-cost-controls.md)   | PostHog event-name migration, ingestion drop rules, and dashboard queries for reducing telemetry spend.              |
+| [project-memory-baseline.md](project-memory-baseline.md) | Phase 0 project-memory baseline: the per-dispatch context/token evidence schema, its measured/estimated/unavailable labeling rule, and the harness that produces it. |
 
 ## Mental model
 

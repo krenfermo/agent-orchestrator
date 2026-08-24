@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -16,6 +17,8 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/integration"
+	"github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory"
+	"github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory/wfdispatch"
 	"github.com/aoagents/agent-orchestrator/backend/internal/providerruntime"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
@@ -175,7 +178,7 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		DataDir:      cfg.DataDir,
 		TrustedLocal: cfg.TrustedLocalMode,
 	}
-	coordinator := workflowcore.New(workflowcore.Deps{
+	deps := workflowcore.Deps{
 		Store:            store,
 		Projects:         store,
 		Sessions:         store,
@@ -255,8 +258,44 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		// git-side machinery and a lifecycle manager that failed to build must
 		// not also blind the board.
 		TaskWorktreeRecords: store,
-	})
+	}
+	// Phase 0 project-memory baseline: when enabled, every agent dispatch
+	// surface above is wrapped by an observer that records what that dispatch
+	// had available and what it consumed. Off by default, and a wrapper never
+	// changes what it wraps -- see internal/observe/projectmemory.
+	deps = wfdispatch.Instrument(deps, projectMemoryBaselineRecorder(log), log)
+	coordinator := workflowcore.New(deps)
 	return coordinator, workflowsvc.New(coordinator), wakeScheduler
+}
+
+// projectMemoryBaselineEnv is the opt-in switch for baseline evidence
+// recording. Baseline measurement writes a file per agent dispatch, so it is a
+// deliberate choice rather than something a daemon does by default.
+const projectMemoryBaselineEnv = "AO_PROJECT_MEMORY_BASELINE"
+
+// projectMemoryBaselineRecorder returns the baseline recorder when the opt-in
+// env var is set, and nil otherwise -- nil meaning wfdispatch.Instrument hands
+// back the dependencies untouched.
+//
+// A sink that cannot be constructed (an AO_DATA_DIR pointing somewhere AO must
+// not write, an unresolvable home directory) disables recording with a warning
+// rather than failing startup: a daemon that refused to boot over its own
+// instrumentation would be trading a working orchestrator for a measured one.
+func projectMemoryBaselineRecorder(log *slog.Logger) *projectmemory.Recorder {
+	if strings.TrimSpace(os.Getenv(projectMemoryBaselineEnv)) == "" {
+		return nil
+	}
+	sink, err := projectmemory.NewDefaultDirSink()
+	if err != nil {
+		if log != nil {
+			log.Warn("project-memory baseline: recording disabled", "err", err)
+		}
+		return nil
+	}
+	if log != nil {
+		log.Info("project-memory baseline: recording agent dispatch evidence", "dir", sink.Root())
+	}
+	return projectmemory.NewRecorder(sink)
 }
 
 // taskWorkspaces builds the worktree lifecycle manager, or nil if it cannot be

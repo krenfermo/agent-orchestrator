@@ -4,6 +4,7 @@ import (
 	stdctx "context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -56,11 +57,31 @@ type WorkspaceFacts interface {
 	ObserveWorkspace(ctx stdctx.Context, info ports.WorkspaceInfo) (ports.WorkspaceObservation, error)
 }
 
+// workStepIssueIDPrefix is the namespace every work-step natural key carries.
+const workStepIssueIDPrefix = "workflow-step:"
+
 // workStepIssueID is the durable natural key correlating a workflow work
 // step to the session spawned for it, independent of whether workflow's own
 // outbox/checkpoint bookkeeping made it to disk.
 func workStepIssueID(stepID string) domain.IssueID {
-	return domain.IssueID("workflow-step:" + stepID)
+	return domain.IssueID(workStepIssueIDPrefix + stepID)
+}
+
+// WorkStepIDFromIssueID reverses workStepIssueID, recovering the work step a
+// spawn belongs to from the natural key it carries. It returns "" for any
+// issue id this package did not mint, so a tracker-issued id is never mistaken
+// for a step id.
+//
+// It is exported for out-of-package observers (the project-memory baseline
+// instrumentation wraps Spawner and sees only ports.SpawnConfig) so the key
+// format stays owned by the package that defines it instead of being
+// duplicated at the observation site.
+func WorkStepIDFromIssueID(id domain.IssueID) string {
+	rest, ok := strings.CutPrefix(string(id), workStepIssueIDPrefix)
+	if !ok {
+		return ""
+	}
+	return rest
 }
 
 // workStepOutboxIdempotencyKey is the deterministic idempotency key for a

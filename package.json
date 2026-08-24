@@ -13,7 +13,8 @@
 		"sqlc": "cd backend && go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate",
 		"api:spec": "cd backend && go generate ./internal/httpd/apispec/...",
 		"api:ts": "openapi-typescript backend/internal/httpd/apispec/openapi.yaml -o frontend/src/api/schema.ts",
-		"api": "npm run api:spec && npm run api:ts"
+		"api": "npm run api:spec && npm run api:ts",
+		"baseline:project-memory": "cd backend && go run ./cmd/aobaseline"
 	},
 	"devDependencies": {
 		"openapi-typescript": "7.4.4"
