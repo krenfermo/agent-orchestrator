@@ -316,7 +316,7 @@ func (c *Coordinator) integrateDirectBranchTask(
 				return "", perr
 			}
 			provenHead = observed.HeadSHA
-			return identity, c.directBranchFreshness(evidence, observed)
+			return identity, c.directBranchFreshness(pctx, evidence, observed)
 		},
 	})
 	if handled, herr := c.handleIntegrationOutcome(ctx, parent, task, child, workCP, outcome, err); handled {
@@ -439,16 +439,56 @@ func (c *Coordinator) handleIntegrationOutcome(
 	return false, nil
 }
 
+// verifiedWorkIsStillOnBranch reports whether the commit this task's
+// verification passed on is still reachable from the branch head.
+//
+// It answers with git rather than with a stored fact on purpose: the question
+// is about the ref as it is now, and only the repository can answer it. An
+// unreadable repository, a missing commit or any error at all answers NO — the
+// caller then parks for a person, which is the safe direction. Claiming the
+// work is intact because a read failed would be exactly the assumption this
+// whole check exists to refuse.
+func (c *Coordinator) verifiedWorkIsStillOnBranch(ctx stdctx.Context, evidence directBranchEvidence, headSHA string) bool {
+	if evidence.RepoPath == "" || evidence.CommitSHA == "" || headSHA == "" {
+		return false
+	}
+	git := integration.NewExecGit("")
+	if _, exists, err := git.ResolveCommitIfExists(ctx, evidence.RepoPath, evidence.CommitSHA); err != nil || !exists {
+		return false
+	}
+	contained, err := git.IsAncestor(ctx, evidence.RepoPath, evidence.CommitSHA, headSHA)
+	return err == nil && contained
+}
+
 // directBranchFreshness is the "is this still the thing that was verified"
 // check. It is unchanged in substance from the original promotion; what changed
 // is that it now runs under the lane, as the Coordinator's Precondition.
-func (c *Coordinator) directBranchFreshness(evidence directBranchEvidence, obs ports.WorkspaceObservation) error {
+func (c *Coordinator) directBranchFreshness(ctx stdctx.Context, evidence directBranchEvidence, obs ports.WorkspaceObservation) error {
 	if obs.Branch != "" && evidence.Branch != "" && obs.Branch != evidence.Branch {
 		return fmt.Errorf("the target repository is on branch %q but the verified result was produced on %q", obs.Branch, evidence.Branch)
 	}
 	switch evidence.Kind {
 	case directBranchEvidenceCommitted:
 		if obs.HeadSHA != evidence.CommitSHA {
+			// Two very different situations wear the same shape here, and
+			// telling them apart is the difference between stopping a person
+			// and asking a reviewer.
+			//
+			// If the verified commit is still an ANCESTOR of the head, nothing
+			// was lost: the branch simply grew past this task while it waited,
+			// which is ordinary on a branch several tasks share. The work is
+			// intact and conflicts with nothing; what went stale is the
+			// reviewer's opinion, and the verification, of a tree that has
+			// since moved on. AO can ask for both again — bounded — instead of
+			// parking someone.
+			//
+			// If it is NOT an ancestor, the verified work is not on the branch
+			// any more: an amend, a rebase, a reset. That is a fact only a
+			// person can act on, and it still parks.
+			if c.verifiedWorkIsStillOnBranch(ctx, evidence, obs.HeadSHA) {
+				return fmt.Errorf("%w: the branch advanced from the verified commit %s to %s, which still contains it",
+					integration.ErrPreconditionStaleReview, shortSHA(evidence.CommitSHA), shortSHA(obs.HeadSHA))
+			}
 			return fmt.Errorf("the target branch moved after verification (expected the verified commit %s, found %s) — nothing was promoted",
 				evidence.CommitSHA, obs.HeadSHA)
 		}

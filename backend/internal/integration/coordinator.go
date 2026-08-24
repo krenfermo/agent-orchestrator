@@ -55,6 +55,21 @@ var (
 	ErrNotReady = errors.New("integration: task is not ready for integration")
 	// ErrInvalidRequest means the request could not describe an integration.
 	ErrInvalidRequest = errors.New("integration: invalid request")
+	// ErrPreconditionStaleReview is the one refusal a Precondition can make
+	// that AO can answer BY ITSELF rather than by stopping for a person.
+	//
+	// A precondition normally says "the target is not what this work was judged
+	// against", and that is a fact only its author can act on. This says
+	// something narrower and much less alarming: the target moved FORWARD and
+	// still contains the verified work, so nothing is lost and nothing
+	// conflicts -- what went stale is the reviewer's opinion of a tree that has
+	// since grown, and a new opinion can simply be asked for.
+	//
+	// A Precondition that wraps this gets ReasonStaleReviewAfterRebase instead
+	// of ReasonPreconditionFailed, which routes it into the bounded
+	// re-review-and-re-verify path a replay already uses. Everything else a
+	// Precondition can return still parks.
+	ErrPreconditionStaleReview = errors.New("integration: the target advanced past the verified work, so its review is stale")
 )
 
 // Request is one task asking to be integrated.
@@ -347,6 +362,11 @@ func (c *Coordinator) integrateLocked(ctx context.Context, req Request) (Outcome
 			// Nothing has been written and nothing will be. This is an outcome,
 			// not an error: the caller's freshness check answering "no" is a
 			// normal result of integrating work whose target moved.
+			reason := ReasonPreconditionFailed
+			if errors.Is(refusal, ErrPreconditionStaleReview) {
+				// Not a stop: the work is intact on a target that simply grew.
+				reason = ReasonStaleReviewAfterRebase
+			}
 			return needsAttention(Record{
 				TaskID: req.TaskID, WorkflowRunID: req.WorkflowRunID, ProjectID: string(req.ProjectID),
 				RepoPath: req.RepoPath, TargetBranch: req.TargetBranch, TargetRef: req.TargetRef,
@@ -354,7 +374,7 @@ func (c *Coordinator) integrateLocked(ctx context.Context, req Request) (Outcome
 				BaseSHA: req.BaseSHA, IntegratedAt: c.clock(),
 				Outcome: OutcomeNeedsAttention,
 				Attention: &Attention{
-					Reason: ReasonPreconditionFailed, BaseSHA: req.BaseSHA,
+					Reason: reason, BaseSHA: req.BaseSHA,
 					TargetSHA: targetBefore, SourceSHA: sourceSHA, Detail: refusal.Error(),
 				},
 			}), nil //nolint:nilerr // an attention is an outcome, not a coordinator failure; see Outcome.Attention

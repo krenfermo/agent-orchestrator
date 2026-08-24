@@ -76,9 +76,12 @@ func (w *directBranchWS) CommitAll(_ context.Context, _ ports.WorkspaceInfo, _ s
 	sha := dbGitCommit(w.t, w.repoPath, fmt.Sprintf("ao commit %d", w.commits))
 	w.obs.HeadSHA = sha
 	if w.externalMove {
-		// Somebody else commits on top, after AO's. The branch no longer holds
-		// what was reviewed, and the promotion must refuse it.
-		w.obs.HeadSHA = dbGitCommit(w.t, w.repoPath, "someone else")
+		// Somebody else REWRITES the tip after AO's commit, so the verified
+		// commit is not even an ancestor of the branch any more. A commit on
+		// top would not do: a branch that merely grew still contains the
+		// verified work and is answered by a fresh review, not by stopping.
+		dbGit(w.t, w.repoPath, "commit", "--amend", "--allow-empty", "-m", "someone else")
+		w.obs.HeadSHA = dbGit(w.t, w.repoPath, "rev-parse", "HEAD")
 	}
 	return sha, true, nil
 }

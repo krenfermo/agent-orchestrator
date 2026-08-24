@@ -83,6 +83,19 @@ func dbCommit(t *testing.T, label string) string {
 	return laneGit(t, dbTestRepo, "rev-parse", "HEAD")
 }
 
+// dbAmendHead rewrites the branch tip so the PREVIOUS head is no longer an
+// ancestor of it — an amend, a rebase, a reset: the shape where the verified
+// work is genuinely not on the branch any more.
+//
+// It is the distinction the promotion actually makes. A branch that merely grew
+// past a task still contains its verified work and only needs a fresh opinion;
+// a branch that was rewritten does not, and that is a person's problem.
+func dbAmendHead(t *testing.T, label string) string {
+	t.Helper()
+	laneGit(t, dbTestRepo, "commit", "--amend", "-m", label)
+	return laneGit(t, dbTestRepo, "rev-parse", "HEAD")
+}
+
 // newDirectBranchCoordinator seeds a project in direct_branch execution mode
 // (the real ProjectConfig field production reads, not a test-only flag), on a
 // real repository checked out on the project's configured branch.
@@ -329,7 +342,7 @@ func TestDirectBranchPromotion_TargetMovedAfterVerifyIsNotSilentlyPromoted(t *te
 	facts := &directBranchFacts{}
 	coord, store, ctx := newDirectBranchCoordinator(t, facts)
 	verified := dbCommit(t, "one")
-	someoneElse := dbCommit(t, "two")
+	someoneElse := dbAmendHead(t, "rewritten by someone else")
 	facts.obs = dbObservation(someoneElse)
 	master, task, detail := seedDirectBranchTask(t, ctx, store, "p", "task-1", verified)
 
@@ -366,6 +379,38 @@ func TestDirectBranchPromotion_DifferentBranchIsRefused(t *testing.T) {
 	if len(promotionCheckpoints(t, ctx, store, master.ID, masterIntegrationDurablePhase)) != 0 {
 		t.Fatal("no promotion checkpoint may exist after a refusal")
 	}
+}
+
+// A branch that merely GREW past a verified task is not a stop. The work is
+// still on it, nothing conflicts, and the only thing that went stale is the
+// reviewer's opinion of a tree that has since moved on — so AO asks for a new
+// one instead of parking a person.
+//
+// This is the case a shared branch produces constantly: several tasks land on
+// one branch, and a task that waited its turn finds the head ahead of where it
+// was verified.
+func TestABranchThatOnlyAdvancedAsksForAFreshReviewInsteadOfParking(t *testing.T) {
+	facts := &directBranchFacts{}
+	coord, store, ctx := newDirectBranchCoordinator(t, facts)
+	verified := dbCommit(t, "one")
+	// A later commit ON TOP: the verified commit is still an ancestor.
+	facts.obs = dbObservation(dbCommit(t, "two"))
+	master, task, detail := seedDirectBranchTask(t, ctx, store, "p", "task-1", verified)
+
+	if err := coord.promoteTaskToIntegration(ctx, master, task, detail); err == nil {
+		t.Fatal("expected the promotion to refuse a target that moved")
+	}
+
+	// The classification is the whole point: AO called this a stale REVIEW, not
+	// a target that lost the work. The first is answered by asking a reviewer
+	// again (requestIntegrationFreshReview); only the second is a person's
+	// problem.
+	//
+	// This fixture's child has no review or verify step to re-open, so the
+	// documented fallback applies and it parks — carrying the stale-review
+	// reason rather than integration_precondition_failed, which is exactly the
+	// difference this test exists to pin.
+	assertTaskParked(t, ctx, store, master.ID, task.ID, string(integration.ReasonStaleReviewAfterRebase))
 }
 
 // assertTaskParked is the durable half of every task-level stop: the row itself
@@ -557,7 +602,7 @@ func TestDirectBranchConflictIsNotRetriedOnEveryPass(t *testing.T) {
 	facts := &directBranchFacts{}
 	coord, store, ctx := newDirectBranchCoordinator(t, facts)
 	verified := dbCommit(t, "one")
-	facts.obs = dbObservation(dbCommit(t, "two"))
+	facts.obs = dbObservation(dbAmendHead(t, "rewritten by someone else"))
 	master, task, detail := seedDirectBranchTask(t, ctx, store, "p", "task-1", verified)
 
 	if err := coord.promoteTaskToIntegration(ctx, master, task, detail); !errors.Is(err, errIntegrationTaskConflict) {
@@ -587,7 +632,7 @@ func TestResumingAParkedTaskProducesExactlyOneNewAttempt(t *testing.T) {
 	facts := &directBranchFacts{}
 	coord, store, ctx := newDirectBranchCoordinator(t, facts)
 	verified := dbCommit(t, "one")
-	facts.obs = dbObservation(dbCommit(t, "two"))
+	facts.obs = dbObservation(dbAmendHead(t, "rewritten by someone else"))
 	master, task, detail := seedDirectBranchTask(t, ctx, store, "p", "task-1", verified)
 
 	if err := coord.promoteTaskToIntegration(ctx, master, task, detail); !errors.Is(err, errIntegrationTaskConflict) {
