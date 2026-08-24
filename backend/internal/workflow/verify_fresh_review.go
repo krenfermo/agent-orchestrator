@@ -580,7 +580,15 @@ func (c *Coordinator) pendingFreshReview(ctx stdctx.Context, runID, reviewStepID
 		// dispatcher below serves both identically — which is the point of
 		// routing the second through this read rather than through a second
 		// branch of its own.
-		return c.pendingIntegrationFreshReview(ctx, runID, reviewStepID)
+		if rec, ok := c.pendingIntegrationFreshReview(ctx, runID, reviewStepID); ok {
+			return rec, true
+		}
+		// And an AMENDMENT may be: a criterion that stopped describing reality
+		// was changed by a person, so the verdict reached under it no longer
+		// counts (task_criterion_amendment.go). A third reason for the same
+		// resting state, served here for the same reason the second is —
+		// the dispatcher should not grow a branch per reason.
+		return c.pendingAmendmentFreshReview(ctx, runID, reviewStepID)
 	}
 	if !led.freshReviewRequested || led.freshReviewApproved {
 		return VerifyFreshReviewRecord{}, false

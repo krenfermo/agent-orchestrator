@@ -371,6 +371,72 @@ func (c *Coordinator) supersedeReviewDispatch(
 	return err
 }
 
+// pendingAmendmentFreshReview is the read dispatchReviewStep makes for a review
+// step reopened by an ACCEPTANCE-CRITERION AMENDMENT.
+//
+// It is the third reason for one resting state — a review step at `waiting`
+// with a review that is due — after a verify recovery and an integration
+// replay. All three are served through pendingFreshReview so the dispatcher
+// keeps one branch instead of one per reason.
+//
+// The distinction that matters here: the other two are asked for because the
+// CONTENT moved under an approval. This one is asked for because the CRITERIA
+// moved under a verdict, with the content unchanged. That is exactly why the
+// ordinary cycle-N+1 gate cannot serve it — that gate requires a fix to have
+// delivered a new fingerprint, and after an amendment there is deliberately no
+// new fingerprint to deliver. Both fingerprints are therefore the same live
+// workspace: nothing about the work changed, and the reviewer is being asked a
+// different question about it.
+//
+// Outstanding means: an amendment was recorded, and no review has been
+// dispatched since. The step's own review_run link is what says so — the
+// amendment clears it (supersedeReviewDispatch), and the next dispatch sets it
+// again, which is what makes this self-closing and restart-safe without a
+// second ledger.
+func (c *Coordinator) pendingAmendmentFreshReview(ctx stdctx.Context, runID, reviewStepID string) (VerifyFreshReviewRecord, bool) {
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		return VerifyFreshReviewRecord{}, false
+	}
+	var newest *domain.WorkflowCheckpoint
+	for i := range cps {
+		cp := &cps[i]
+		if cp.DurablePhase != supersededDispatchPhase {
+			continue
+		}
+		if cp.WorkflowStepID != nil && *cp.WorkflowStepID != reviewStepID {
+			continue
+		}
+		if newest == nil || !cp.CreatedAt.Before(newest.CreatedAt) {
+			newest = cp
+		}
+	}
+	if newest == nil {
+		return VerifyFreshReviewRecord{}, false
+	}
+	// Self-closing: once a review has been dispatched for this step the link is
+	// set again, and the amendment's request is answered.
+	steps, err := c.store.ListWorkflowSteps(ctx, runID)
+	if err != nil {
+		return VerifyFreshReviewRecord{}, false
+	}
+	for _, s := range steps {
+		if s.ID == reviewStepID && s.ReviewRunID != nil {
+			return VerifyFreshReviewRecord{}, false
+		}
+	}
+	var body struct {
+		AmendmentID           string `json:"amendmentId"`
+		SupersededReviewRunID string `json:"supersededReviewRunId"`
+	}
+	_ = json.Unmarshal([]byte(newest.RetryState), &body)
+	return VerifyFreshReviewRecord{
+		TargetKey:        body.AmendmentID,
+		ReviewStepID:     reviewStepID,
+		PriorReviewRunID: body.SupersededReviewRunID,
+	}, true
+}
+
 // ResumeAmendedTaskReview finishes an amendment whose fresh review never got
 // opened — a daemon that died between the two writes, or (as happened on
 // wf-04e8309d) an amendment applied by a build whose re-open was wrong.
