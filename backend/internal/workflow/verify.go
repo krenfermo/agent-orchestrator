@@ -338,7 +338,7 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 		// finished history for a superseded target, and this cycle gets its own
 		// attempt row (verifyAttemptID is derived from the target key, so the
 		// two can never collide).
-		if !c.verifyTargetAdvancedByFix(ctx, run.ID, latest) {
+		if !c.verifyTargetAdvancedByFix(ctx, run.ID, latest) && !c.verifyTargetAdvancedByReview(ctx, run.ID, latest) {
 			return c.failVerifyWithoutExecution(ctx, run, verifyStep, domain.WorkflowErrorVerifyAmbiguous, "verify target changed after an attempt was created")
 		}
 		hasAttempt = false
@@ -658,6 +658,34 @@ func (c *Coordinator) verifyTargetAfterFix(ctx stdctx.Context, runID string) (st
 // verifyTargetAdvancedByFix reports whether a verify-driven fix cycle was
 // authorized after the given attempt started — the one legitimate reason the
 // verification target may differ from the one that attempt recorded.
+// verifyTargetAdvancedByReview is verifyTargetAdvancedByFix's other half: the
+// target changed because AO asked a REVIEWER again, not because it ran a fix.
+//
+// The guard above exists to catch a target that drifted behind AO's back, and
+// it knew exactly one legitimate reason for a change — a verify-driven fix. But
+// a review AO itself dispatched after the attempt started is just as
+// authorized, and just as much on the record: an integration fresh review, a
+// stale-approval recovery, an amended acceptance criterion. All three end in a
+// new approval of a new target, and all three left the previous attempt as
+// finished history for a superseded one.
+//
+// Without this, that history is read as ambiguity and the verification fails
+// with "verify target changed after an attempt was created" — refusing the very
+// re-verification AO asked for. The attempt row cannot collide either way:
+// verifyAttemptID is derived from the target key.
+func (c *Coordinator) verifyTargetAdvancedByReview(ctx stdctx.Context, runID string, attempt domain.WorkflowAttempt) bool {
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		return false
+	}
+	for _, cp := range cps {
+		if cp.DurablePhase == reviewDispatchedDurablePhase && !cp.CreatedAt.Before(attempt.StartedAt) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Coordinator) verifyTargetAdvancedByFix(ctx stdctx.Context, runID string, attempt domain.WorkflowAttempt) bool {
 	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
 	if err != nil {

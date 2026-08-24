@@ -92,6 +92,34 @@ func TestAReviewBeforeTheFixDoesNotOutrankIt(t *testing.T) {
 	}
 }
 
+// A target change authorized by a review AO itself asked for is not ambiguity.
+// Without this the verification refuses the very re-verification AO requested,
+// with "verify target changed after an attempt was created".
+func TestATargetAdvancedByAReviewIsAuthorized(t *testing.T) {
+	coord, store, ctx, runID := newTargetFixture(t)
+	started := time.Now().UTC()
+	attempt := domain.WorkflowAttempt{StartedAt: started}
+
+	if coord.verifyTargetAdvancedByReview(ctx, runID, attempt) {
+		t.Fatal("no review dispatched yet, so nothing authorizes a target change")
+	}
+	seedPhase(t, ctx, store, runID, "cp-review", reviewDispatchedDurablePhase, "", started.Add(time.Minute))
+	if !coord.verifyTargetAdvancedByReview(ctx, runID, attempt) {
+		t.Fatal("a review dispatched after the attempt started must authorize the new target")
+	}
+}
+
+// A review that predates the attempt authorizes nothing: that is the approval
+// the attempt was already made against.
+func TestATargetIsNotAuthorizedByAnOlderReview(t *testing.T) {
+	coord, store, ctx, runID := newTargetFixture(t)
+	started := time.Now().UTC()
+	seedPhase(t, ctx, store, runID, "cp-review", reviewDispatchedDurablePhase, "", started.Add(-time.Minute))
+	if coord.verifyTargetAdvancedByReview(ctx, runID, domain.WorkflowAttempt{StartedAt: started}) {
+		t.Fatal("a review older than the attempt must not authorize a target change")
+	}
+}
+
 // No verify-driven fix cycle at all: nothing to override.
 func TestNoReentryMeansNoOverride(t *testing.T) {
 	coord, store, ctx, runID := newTargetFixture(t)
