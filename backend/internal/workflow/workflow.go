@@ -1058,6 +1058,13 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		if serr != nil {
 			return RunDetail{}, serr
 		}
+		// A completed child is exactly where a re-baseline belongs: the review
+		// and the verification it rests on have both finished, and integration
+		// has not run yet. It appends a fact and moves nothing, so it is safe
+		// on a terminal run in a way a state transition would not be.
+		if _, berr := c.reconcileVerifiedIntegrationBaseline(ctx, run, terminalSteps); berr != nil {
+			return RunDetail{}, berr
+		}
 		repaired, rerr := c.reconcileVerifyRace(ctx, run, terminalSteps)
 		if rerr != nil {
 			return RunDetail{}, rerr
@@ -1211,11 +1218,8 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		}
 	}
 
-	// A branch that moved past this task's own work commit, and which has since
-	// had an independent review and a verification pass against the head as it
-	// now stands, re-baselines what "the verified commit" means for
-	// integration. Proof-bound and a no-op for every task whose branch never
-	// moved. See task_integration_baseline.go.
+	// The same re-baseline for a run that is still live, so a task whose branch
+	// moved does not have to reach a terminal state first.
 	if _, rerr := c.reconcileVerifiedIntegrationBaseline(ctx, run, steps); rerr != nil {
 		return RunDetail{}, rerr
 	}
