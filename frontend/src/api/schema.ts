@@ -4354,6 +4354,8 @@ export interface components {
             state: "blocked" | "eligible" | "running" | "needs_attention" | "completed" | "failed" | "cancelled";
             steps?: components["schemas"]["WorkflowStepProgressView"][];
             title: string;
+            /** @enum {string} */
+            waitReason?: "waiting_for_dependencies" | "waiting_for_write_conflict";
             workflowId?: string;
         };
         WorkflowBranchWaitView: {

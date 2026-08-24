@@ -11942,6 +11942,11 @@ components:
           type: array
         title:
           type: string
+        waitReason:
+          enum:
+          - waiting_for_dependencies
+          - waiting_for_write_conflict
+          type: string
         workflowId:
           type: string
       required:
