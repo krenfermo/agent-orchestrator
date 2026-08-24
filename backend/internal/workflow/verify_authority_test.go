@@ -454,3 +454,80 @@ func TestIntegrationRequestCarriesTheAuthorizedWorktreeVerbatim(t *testing.T) {
 			rec.WorktreePath, authorized)
 	}
 }
+
+// ---- 9. the verify step is converged onto the winning decision -------------
+
+// The residue the first repair missed. The loser reached verify_fix_reentry
+// first and moved the verify step running -> waiting; the winner's completion
+// then found it no longer `running`, so its own transition to `completed` never
+// fired. The run ends completed with a verification that "is pending", and
+// integration refuses it with integration_not_ready — which is exactly where
+// wf-04e8309d stalled after its fix step had been stood down.
+func TestRepairConvergesTheVerifyStepOntoTheWinningDecision(t *testing.T) {
+	fx := newRaceFixture(t)
+	steps := fx.store.steps[fx.runID]
+	for i := range steps {
+		switch steps[i].Kind {
+		case domain.WorkflowStepFix:
+			steps[i].State = domain.WorkflowStepWaiting
+		case domain.WorkflowStepVerify:
+			steps[i].State = domain.WorkflowStepWaiting // where the loser left it
+		}
+	}
+	fx.store.steps[fx.runID] = steps
+	run := fx.store.runs[fx.runID]
+	run.State = domain.WorkflowRunCompleted
+	fx.store.runs[fx.runID] = run
+	// The winning verification: succeeded.
+	if won, _ := fx.store.ClaimWorkflowAttemptOutcome(context.Background(), "wfa-verify-race", fx.now, domain.WorkflowAttemptSucceeded, ""); !won {
+		t.Fatal("precondition")
+	}
+
+	if _, err := fx.coord().ContinueRun(context.Background(), fx.runID); err != nil {
+		t.Fatalf("ContinueRun: %v", err)
+	}
+
+	for _, s := range fx.store.steps[fx.runID] {
+		if s.Kind != domain.WorkflowStepVerify {
+			continue
+		}
+		if s.State != domain.WorkflowStepCompleted {
+			t.Fatalf("verify step = %s, want completed: the run is completed on this very verification, so integration would keep refusing it as pending", s.State)
+		}
+	}
+	if got := fx.store.runs[fx.runID].State; got != domain.WorkflowRunCompleted {
+		t.Fatalf("run state = %s, want completed and untouched", got)
+	}
+}
+
+// A verification that FAILED must never have its step converged to completed —
+// that would manufacture a passing verification nobody ran.
+func TestRepairNeverCompletesTheStepOfAFailedVerification(t *testing.T) {
+	fx := newRaceFixture(t)
+	steps := fx.store.steps[fx.runID]
+	for i := range steps {
+		if steps[i].Kind == domain.WorkflowStepVerify {
+			steps[i].State = domain.WorkflowStepWaiting
+		}
+		if steps[i].Kind == domain.WorkflowStepFix {
+			steps[i].State = domain.WorkflowStepRunning
+		}
+	}
+	fx.store.steps[fx.runID] = steps
+	run := fx.store.runs[fx.runID]
+	run.State = domain.WorkflowRunCompleted
+	fx.store.runs[fx.runID] = run
+	if won, _ := fx.store.ClaimWorkflowAttemptOutcome(context.Background(), "wfa-verify-race", fx.now, domain.WorkflowAttemptFailed, domain.WorkflowErrorVerifyCommandFailed); !won {
+		t.Fatal("precondition")
+	}
+
+	if _, err := fx.coord().ContinueRun(context.Background(), fx.runID); err != nil {
+		t.Fatalf("ContinueRun: %v", err)
+	}
+
+	for _, s := range fx.store.steps[fx.runID] {
+		if s.Kind == domain.WorkflowStepVerify && s.State == domain.WorkflowStepCompleted {
+			t.Fatal("the repair completed the step of a verification that failed — that would assert a passing verification nobody ran")
+		}
+	}
+}

@@ -48,10 +48,13 @@ type verifyRaceRepairRecord struct {
 	DecidedOutcome   string `json:"decidedOutcome,omitempty"`
 	// StoodDownSteps names the steps taken out of flight, and ClosedAttempts
 	// the attempt rows closed with them.
-	StoodDownSteps  []string  `json:"stoodDownSteps,omitempty"`
-	ClosedAttempts  []string  `json:"closedAttempts,omitempty"`
-	SupersededCount int       `json:"supersededVerifyResults"`
-	ObservedAt      time.Time `json:"observedAt"`
+	StoodDownSteps []string `json:"stoodDownSteps,omitempty"`
+	ClosedAttempts []string `json:"closedAttempts,omitempty"`
+	// ConvergedVerifyStep records that the verify step was brought into line
+	// with the decision that actually won.
+	ConvergedVerifyStep string    `json:"convergedVerifyStep,omitempty"`
+	SupersededCount     int       `json:"supersededVerifyResults"`
+	ObservedAt          time.Time `json:"observedAt"`
 }
 
 // reconcileVerifyRace repairs a terminal run that still has a step in flight.
@@ -69,9 +72,26 @@ func (c *Coordinator) reconcileVerifyRace(
 	if !run.State.Terminal() {
 		return false, nil
 	}
+	// Two shapes of incoherence, and a terminal run can carry either or both.
+	//
+	// The first is a step the loser left in flight. The second is subtler and is
+	// what wf-04e8309d stalled on after the first was repaired: NO step is in
+	// flight, but the verify step never reached a terminal state because the
+	// loser moved it to `waiting` before the winner could complete it. The run
+	// is finished and its verification "is pending", so integration refuses it
+	// forever.
 	why, active := runHasActiveWork(steps)
-	if !active {
+	strandedVerify := false
+	for _, s := range steps {
+		if s.Kind == domain.WorkflowStepVerify && !s.State.Terminal() {
+			strandedVerify = true
+		}
+	}
+	if !active && !strandedVerify {
 		return false, nil
+	}
+	if !active {
+		why = "the verify step never reached a terminal state"
 	}
 
 	// Which decision the run's state actually reflects. The winner is the
@@ -152,6 +172,51 @@ func (c *Coordinator) reconcileVerifyRace(
 			changed = true
 		}
 	}
+	// And converge the verify step onto the decision that won.
+	//
+	// The loser reached verify_fix_reentry first and moved the verify step from
+	// running to waiting. The winner's completion then found the step no longer
+	// `running`, so its own transition to `completed` never fired -- leaving a
+	// completed run whose verification "is pending", which is exactly what
+	// integration refuses with integration_not_ready. The attempt that won says
+	// the verification succeeded; the step must say so too.
+	//
+	// Only ever toward the winner's own conclusion, and only for a run whose
+	// terminal state already rests on it -- a FAILED verification never has its
+	// step completed here, because that would assert a passing verification
+	// nobody ran. `waiting` cannot go straight to `completed`, so it passes
+	// through `running`; both transitions are compare-and-swaps on the state
+	// they expect, so a concurrent mover simply wins and this becomes a no-op.
+	if decidedOutcome == string(domain.WorkflowAttemptSucceeded) && run.State == domain.WorkflowRunCompleted {
+		for _, s := range steps {
+			if s.Kind != domain.WorkflowStepVerify || s.State.Terminal() {
+				continue
+			}
+			state := s.State
+			if state == domain.WorkflowStepWaiting || state == domain.WorkflowStepReady {
+				moved, err := c.store.UpdateWorkflowStepState(ctx, s.ID, state, domain.WorkflowStepRunning, now)
+				if err != nil {
+					return changed, err
+				}
+				if !moved {
+					continue
+				}
+				state = domain.WorkflowStepRunning
+			}
+			if state != domain.WorkflowStepRunning {
+				continue
+			}
+			moved, err := c.store.UpdateWorkflowStepState(ctx, s.ID, domain.WorkflowStepRunning, domain.WorkflowStepCompleted, now)
+			if err != nil {
+				return changed, err
+			}
+			if moved {
+				rec.ConvergedVerifyStep = string(domain.WorkflowStepCompleted)
+				changed = true
+			}
+		}
+	}
+
 	if !changed && len(rec.ClosedAttempts) == 0 {
 		return false, nil
 	}
