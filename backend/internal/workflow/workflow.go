@@ -1165,6 +1165,23 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		}
 	}
 
+	// Before any of the resume paths below decide anything: close the attempts a
+	// restart or a crash abandoned. An attempt row with no outcome means "work
+	// may be in flight", and every guard downstream believes it — so a fossil
+	// left by a dead daemon silently refuses every recovery there is, forever,
+	// with no way to tell that from a genuine refusal. Reaping is proof-bound
+	// and closes nothing AO cannot show was abandoned (see attempt_reaper.go);
+	// for the overwhelming majority of runs it is a no-op. It happens here, on
+	// the person's own button, rather than in a poll, for the same reason the
+	// resumes do.
+	if reaped, rerr := c.reapOrphanedAttempts(ctx, run, steps); rerr != nil {
+		return RunDetail{}, rerr
+	} else if reaped > 0 {
+		if steps, err = c.store.ListWorkflowSteps(ctx, runID); err != nil {
+			return RunDetail{}, err
+		}
+	}
+
 	// Checkpoint 8P-E.14C: this is the one place in AO where a terminal
 	// verification failure can be reopened, and it is here rather than in GetRun
 	// or the cascade because THIS call is the person saying "I corrected the
