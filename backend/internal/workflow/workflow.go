@@ -1211,6 +1211,15 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		}
 	}
 
+	// A branch that moved past this task's own work commit, and which has since
+	// had an independent review and a verification pass against the head as it
+	// now stands, re-baselines what "the verified commit" means for
+	// integration. Proof-bound and a no-op for every task whose branch never
+	// moved. See task_integration_baseline.go.
+	if _, rerr := c.reconcileVerifiedIntegrationBaseline(ctx, run, steps); rerr != nil {
+		return RunDetail{}, rerr
+	}
+
 	// And the ledger's other fossil: an integration fresh-review request that a
 	// review actually answered, but which nothing ever recorded as answered
 	// because the run stopped before it integrated. pendingFreshReview consults
