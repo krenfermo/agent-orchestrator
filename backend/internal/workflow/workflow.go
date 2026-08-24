@@ -1182,6 +1182,18 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		}
 	}
 
+	// And the ledger's other fossil: an integration fresh-review request that a
+	// review actually answered, but which nothing ever recorded as answered
+	// because the run stopped before it integrated. pendingFreshReview consults
+	// integration requests before every other reason a review step can rest, so
+	// a stale one shadows them all and the run waits forever on a question that
+	// was settled hours earlier. Closing it needs proof that a specific review
+	// answered it (see task_integration_fresh_review_reconcile.go); a request
+	// genuinely still open keeps blocking, exactly as it should.
+	if _, rerr := c.reconcileIntegrationFreshReviewAnswer(ctx, run, steps); rerr != nil {
+		return RunDetail{}, rerr
+	}
+
 	// Checkpoint 8P-E.14C: this is the one place in AO where a terminal
 	// verification failure can be reopened, and it is here rather than in GetRun
 	// or the cascade because THIS call is the person saying "I corrected the
