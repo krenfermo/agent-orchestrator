@@ -160,7 +160,11 @@ func (c *Coordinator) requestIntegrationFreshReview(
 	if err != nil {
 		return err
 	}
-	if attempt >= maxIntegrationFreshReviews {
+	// The bound, widened only by explicit human grants for THIS task (see
+	// task_integration_fresh_review_exception.go). With no grant this is
+	// exactly maxIntegrationFreshReviews, as it always was.
+	budget := c.integrationFreshReviewBudget(ctx, child.Run.ID)
+	if attempt >= budget {
 		return c.parkStaleReview(ctx, parent, task, att, fmt.Sprintf(
 			"the target has moved under this task %d times since it was reviewed; a further re-review would not converge", attempt))
 	}
@@ -221,7 +225,7 @@ func (c *Coordinator) requestIntegrationFreshReview(
 	if err := c.recordIntegrationFreshReview(ctx, child.Run, integrationFreshReviewRequiredPhase, record, fmt.Sprintf(
 		"integration_fresh_review_required: replaying task %d (%s) onto the current target changed what it contributes (%s -> %s); re-reviewing the rebased work once (attempt %d of %d)",
 		task.Ordinal, task.Title, shortFingerprint(record.ApprovedEffectiveChange), shortFingerprint(record.CurrentEffectiveChange),
-		record.Attempt, maxIntegrationFreshReviews)); err != nil {
+		record.Attempt, budget)); err != nil {
 		return err
 	}
 

@@ -6780,6 +6780,63 @@ paths:
         Records no second amendment; idempotent.'
       tags:
       - workflows
+  /api/v1/workflows/{workflowId}/tasks/{taskId}/fresh-review-exception:
+    post:
+      operationId: authorizeWorkflowTaskFreshReviewException
+      parameters:
+      - description: Master workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Master workflow run identifier.
+          type: string
+      - description: Planned task identifier (workflow_tasks.id).
+        in: path
+        name: taskId
+        required: true
+        schema:
+          description: Planned task identifier (workflow_tasks.id).
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersAuthorizeFreshReviewExceptionRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowIntegrationFreshReviewException'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Authorize ONE additional integration fresh review for a task parked
+        on integration_stale_review_after_rebase whose ordinary budget is spent, with
+        a named human approver and a reason. The global bound is unchanged; the grant
+        is recorded against this task and this workspace state, and a repeat request
+        for the same state returns the existing grant rather than widening the budget
+        again.
+      tags:
+      - workflows
   /api/v1/workflows/{workflowId}/tasks/{taskId}/resume:
     post:
       operationId: resumeWorkflowTask
@@ -7272,6 +7329,16 @@ components:
       required:
       - amendment
       - workflow
+      type: object
+    ControllersAuthorizeFreshReviewExceptionRequest:
+      properties:
+        approvedBy:
+          type: string
+        reason:
+          type: string
+      required:
+      - approvedBy
+      - reason
       type: object
     ControllersCapacitySnapshotResponse:
       properties:
@@ -12252,6 +12319,36 @@ components:
           type: string
       required:
       - reason
+      type: object
+    WorkflowIntegrationFreshReviewException:
+      properties:
+        approvedBy:
+          type: string
+        childRunId:
+          type: string
+        fingerprint:
+          type: string
+        generation:
+          type: integer
+        grantedAt:
+          format: date-time
+          type: string
+        masterRunId:
+          type: string
+        priorAttempts:
+          type: integer
+        reason:
+          type: string
+        taskId:
+          type: string
+      required:
+      - taskId
+      - approvedBy
+      - reason
+      - fingerprint
+      - priorAttempts
+      - generation
+      - grantedAt
       type: object
     WorkflowMasterPlan:
       properties:

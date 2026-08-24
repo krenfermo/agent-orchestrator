@@ -18,6 +18,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
+	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 )
 
 // Build reflects the Go contract types and the operation registry below into
@@ -821,6 +822,20 @@ func workflowOperations() []operation {
 			pathParams: []any{controllers.WorkflowTaskParam{}},
 			resps: []respUnit{
 				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/tasks/{taskId}/fresh-review-exception", id: "authorizeWorkflowTaskFreshReviewException", tag: "workflows",
+			summary: "Authorize ONE additional integration fresh review for a task parked on integration_stale_review_after_rebase whose ordinary budget is spent, " +
+				"with a named human approver and a reason. The global bound is unchanged; the grant is recorded against this task and this workspace state, " +
+				"and a repeat request for the same state returns the existing grant rather than widening the budget again.",
+			pathParams: []any{controllers.WorkflowTaskParam{}},
+			reqBody:    controllers.AuthorizeFreshReviewExceptionRequest{},
+			resps: []respUnit{
+				{http.StatusOK, workflowcore.IntegrationFreshReviewException{}},
+				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
