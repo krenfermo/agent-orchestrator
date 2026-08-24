@@ -995,7 +995,8 @@ func (c *Coordinator) StartRun(ctx stdctx.Context, runID string) (RunDetail, err
 		workStep.State = domain.WorkflowStepReady
 	}
 
-	prompt := BuildWorkStepPrompt(artifact)
+	prompt := BuildWorkStepPromptWithSpec(artifact,
+		RenderEffectiveSpecification(c.effectiveTaskSpecification(ctx, run, artifact.AcceptanceCriteria)))
 	if _, err := c.dispatchWorkStep(ctx, run, *workStep, prompt, false); err != nil {
 		return RunDetail{}, err
 	}

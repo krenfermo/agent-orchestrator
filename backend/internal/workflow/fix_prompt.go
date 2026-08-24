@@ -8,6 +8,11 @@ import "fmt"
 type FixPromptInput struct {
 	Objective          string
 	AcceptanceCriteria []string
+	// EffectiveSpec is RenderEffectiveSpecification's output: the approved
+	// amendments that reconcile the original objective with the criteria in
+	// force. Empty when the task has none, which renders the identical prompt
+	// this builder produced before amendments existed.
+	EffectiveSpec string
 	ReviewRunID        string
 	// Findings is the review_run's own Body text, fetched live from the
 	// ReviewRuns port at dispatch time. It is referenced here, never copied
@@ -39,7 +44,7 @@ func BuildFixPrompt(in FixPromptInput) string {
 Original objective: %s
 
 Acceptance criteria:
-%s
+%s%s
 The reviewer's findings (review run %s), verbatim:
 ---
 %s
@@ -59,5 +64,5 @@ When you are done (or if you get stuck), report the outcome clearly in your
 final message: what you changed and what you tested. This report is
 informational only — AO verifies your work independently from the actual
 state of the worktree, not from what you say here, so be honest about
-partial progress or failures.`, in.CycleNumber, in.Objective, criteria, in.ReviewRunID, findings)
+partial progress or failures.`, in.CycleNumber, in.Objective, criteria, in.EffectiveSpec, in.ReviewRunID, findings)
 }

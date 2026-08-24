@@ -89,6 +89,16 @@ func UnmarshalPlanArtifact(raw string) (PlanArtifact, error) {
 // to the Codex worker via ports.SpawnConfig.Prompt. Pure and deterministic:
 // no IO, no model call.
 func BuildWorkStepPrompt(artifact PlanArtifact) string {
+	return BuildWorkStepPromptWithSpec(artifact, "")
+}
+
+// BuildWorkStepPromptWithSpec is BuildWorkStepPrompt plus the approved
+// amendments that reconcile the objective with the criteria in force
+// (RenderEffectiveSpecification). It is a separate entry point because the
+// worker prompt is also built at PLAN time, before any amendment can exist,
+// and that call must keep producing the byte-identical prompt it always did.
+// An empty spec makes the two functions the same function.
+func BuildWorkStepPromptWithSpec(artifact PlanArtifact, effectiveSpec string) string {
 	var criteria string
 	for _, c := range artifact.AcceptanceCriteria {
 		criteria += "- " + c + "\n"
@@ -101,7 +111,7 @@ Your task: implement the objective above as a concrete, reviewable code
 change in this worktree.
 
 Acceptance criteria:
-%s
+%s%s
 Guardrails (follow all of these):
 - Work only inside the current worktree. Do not touch files outside it.
 - Run any reasonable/available test suite for this project before
@@ -114,7 +124,7 @@ When you are done (or if you get stuck), report the outcome clearly in your
 final message: what changed, what you tested, and whether it succeeded. This
 report is informational only — AO verifies your work independently from the
 actual state of the worktree, not from what you say here, so be honest about
-partial progress or failures.`, artifact.Objective, criteria)
+partial progress or failures.`, artifact.Objective, criteria, effectiveSpec)
 }
 
 // promptForRun reconstructs the work step's task prompt from the plan step's

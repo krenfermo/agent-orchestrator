@@ -14,6 +14,10 @@ import (
 type DecisionResolverPromptInput struct {
 	Objective          string
 	AcceptanceCriteria []string
+	// EffectiveSpec is RenderEffectiveSpecification's output: the approved
+	// amendments that reconcile the original objective with the criteria in
+	// force. Empty when the task has none.
+	EffectiveSpec string
 	QuestionText       string
 	Choices            []domain.QuestionChoice
 	Branch             string
@@ -86,7 +90,7 @@ whatever you discover by inspecting the repository yourself.
 %s
 Objective of the overall run: %s
 
-Acceptance criteria for the run's work: %s
+Acceptance criteria for the run's work: %s%s
 Branch: %s
 Worktree path (already your current checkout — do not clone or fetch elsewhere): %s
 Policy version at capture: %s
@@ -123,7 +127,7 @@ or, if you cannot determine a confident answer from repo evidence:
 Where <reference> is a short pointer to the evidence you used (e.g. a file path, or a file
 path plus line range) — never a full file dump or transcript.`,
 		sameProviderNote,
-		in.Objective, criteria, in.Branch, in.WorktreePath, in.PolicyVersion,
+		in.Objective, criteria, in.EffectiveSpec, in.Branch, in.WorktreePath, in.PolicyVersion,
 		contextPackBlock,
 		strings.TrimSpace(in.QuestionText), choices,
 		in.ResolverSessionID, in.ResolutionRunID,

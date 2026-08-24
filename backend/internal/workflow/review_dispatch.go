@@ -815,6 +815,7 @@ func (c *Coordinator) dispatchReviewFromPending(
 	prompt := BuildReviewPrompt(ReviewPromptInput{
 		Objective:             run.Objective,
 		AcceptanceCriteria:    scope.AcceptanceCriteria,
+		EffectiveSpec:         RenderEffectiveSpecification(c.effectiveTaskSpecification(ctx, run, scope.AcceptanceCriteria)),
 		AvailableDependencies: scope.AvailableDependencies,
 		FuturePlannedTasks:    scope.FuturePlannedTasks,
 		WorkerSessionID:       workerSessionID,

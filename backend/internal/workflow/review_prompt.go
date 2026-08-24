@@ -12,6 +12,10 @@ import (
 type ReviewPromptInput struct {
 	Objective          string
 	AcceptanceCriteria []string
+	// EffectiveSpec is RenderEffectiveSpecification's output: the approved
+	// amendments that reconcile the original objective with the criteria in
+	// force. Empty when the task has none.
+	EffectiveSpec string
 	WorkerSessionID    string
 	Branch             string
 	WorktreePath       string
@@ -66,7 +70,7 @@ func BuildReviewPrompt(in ReviewPromptInput) string {
 Objective of the task you are reviewing: %s
 
 Acceptance criteria for the work you are reviewing:
-%s%s
+%s%s%s
 Worker session under review: %s
 Branch: %s
 Worktree path (already your current checkout — do not clone or fetch elsewhere): %s
@@ -119,7 +123,7 @@ changes_requested and must contain your findings (what's wrong and what should c
 On an approval --body is optional and is where your non-blocking notes go.
 This is the ONLY way to record your verdict — AO reads it back from this review run, not
 from anything else you output.`,
-		in.Objective, criteria, scope, in.WorkerSessionID, in.Branch, in.WorktreePath,
+		in.Objective, criteria, in.EffectiveSpec, scope, in.WorkerSessionID, in.Branch, in.WorktreePath,
 		in.BaseSHA, in.HeadSHA, commitNote,
 		in.WorkerSessionID, in.ReviewRunID,
 		in.WorkerSessionID, in.ReviewRunID,

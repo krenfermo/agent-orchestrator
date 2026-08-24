@@ -223,6 +223,12 @@ func (c *Coordinator) IncidentPackFor(ctx stdctx.Context, runID string) (Inciden
 	}
 	c.attachIncidentSessionFacts(ctx, detail, &in)
 	c.attachIncidentReviewFacts(ctx, detail, &in)
+	// The same authoritative reading every other role gets, from the same
+	// function. See effective_task_specification.go.
+	if artifact, aerr := c.planArtifactForRun(ctx, detail.Run); aerr == nil {
+		in.EffectiveSpec = RenderEffectiveSpecification(
+			c.effectiveTaskSpecification(ctx, detail.Run, artifact.AcceptanceCriteria))
+	}
 
 	pack := BuildIncidentContextPack(in)
 	pack.AttachBuiltAt(c.clock())
