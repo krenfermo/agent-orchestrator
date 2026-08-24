@@ -614,6 +614,7 @@ func (c *Coordinator) verifyTargetAfterFix(ctx stdctx.Context, runID string) (st
 	var reentryAt time.Time
 	var delivered string
 	var deliveredAt time.Time
+	var reviewedAt time.Time
 	for _, cp := range cps {
 		switch cp.DurablePhase {
 		case ReasonVerifyFixReentry:
@@ -624,9 +625,31 @@ func (c *Coordinator) verifyTargetAfterFix(ctx stdctx.Context, runID string) (st
 			if cp.FingerprintAfter != "" && cp.CreatedAt.After(deliveredAt) {
 				delivered, deliveredAt = cp.FingerprintAfter, cp.CreatedAt
 			}
+		case reviewDispatchedDurablePhase:
+			if cp.CreatedAt.After(reviewedAt) {
+				reviewedAt = cp.CreatedAt
+			}
 		}
 	}
 	if reentryAt.IsZero() || delivered == "" || !deliveredAt.After(reentryAt) {
+		return "", false
+	}
+	// A review dispatched AFTER the fix delivery outranks it, and this override
+	// must stand down.
+	//
+	// The override exists for one situation: a verify-driven fix changed the
+	// worktree, so the approved review's target no longer names what has to be
+	// verified. That reasoning holds only while the approval predates the fix.
+	// Once AO has asked a reviewer again — an integration fresh review, a
+	// stale-approval recovery, an amended criterion — the answer to "what is to
+	// be verified" is that newer review's target, and returning the fix's
+	// fingerprint here would hand maybeVerify a target key identical to the
+	// spent attempt's. It would then read the run as already answered, decline
+	// to open a new attempt, and the run would sit at waiting forever with an
+	// approved review and a verification that never runs. wf-04e8309d did
+	// exactly that: a fix delivered at 07:02, a fresh review approved at 13:15,
+	// and no verify attempt in between.
+	if reviewedAt.After(deliveredAt) {
 		return "", false
 	}
 	return delivered, true
