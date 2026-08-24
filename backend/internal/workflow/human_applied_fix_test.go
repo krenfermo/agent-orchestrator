@@ -356,3 +356,49 @@ func (f *fixRecoveryFixture) fixAttempts() int {
 func jsonUnmarshalString(raw string, out any) error {
 	return json.Unmarshal([]byte(raw), out)
 }
+
+// A worker that finished a turn shortly after the stop and has been quiet ever
+// since is history, not a delivery in flight — which is exactly the shape the
+// real incident had (last turn twelve minutes after the stop, silent for hours).
+// The earlier, cruder guard refused this and stranded the run it exists for.
+func TestALongSilentWorkerDoesNotBlockTheRecovery(t *testing.T) {
+	f := newBudgetExhaustedFixture(t)
+	f.applyExternalFix(t, "human-edited-tree")
+	f.mutateSession(func(rec *domain.SessionRecord) {
+		// Spoke AFTER the stop, then went quiet for an hour.
+		rec.Activity = domain.Activity{State: domain.ActivityIdle, LastActivityAt: f.clk.Now().Add(-time.Hour)}
+		rec.TurnCompletedAt = f.clk.Now().Add(-time.Hour)
+	})
+	f.launcher.launchCalls = 0
+
+	f.continueRun()
+
+	if n := f.countCheckpointPhase("human_applied_fix_observed"); n != 1 {
+		t.Fatalf("observed rows = %d, want 1: a worker silent for an hour is not in flight", n)
+	}
+	if f.launcher.launchCalls != 1 {
+		t.Fatalf("reviewer launches = %d, want 1", f.launcher.launchCalls)
+	}
+	rec := f.humanFixRecord(t)
+	if rec["workerSilentFor"] == nil || rec["workerSilentFor"] == "" {
+		t.Fatal("the record does not say how long the worker had been silent")
+	}
+}
+
+// A worker that spoke moments ago might still be delivering, so the change is
+// ambiguous and must not be adopted.
+func TestARecentlyActiveWorkerBlocksTheRecovery(t *testing.T) {
+	f := newBudgetExhaustedFixture(t)
+	f.applyExternalFix(t, "human-edited-tree")
+	f.mutateSession(func(rec *domain.SessionRecord) {
+		rec.Activity = domain.Activity{State: domain.ActivityIdle, LastActivityAt: f.clk.Now().Add(-time.Minute)}
+		rec.TurnCompletedAt = f.clk.Now().Add(-time.Minute)
+	})
+	f.launcher.launchCalls = 0
+
+	f.continueRun()
+
+	if n := f.countCheckpointPhase("human_applied_fix_observed"); n != 0 {
+		t.Fatalf("observed rows = %d, want 0 while a delivery could still be landing", n)
+	}
+}

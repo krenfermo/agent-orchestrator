@@ -50,6 +50,21 @@ const humanAppliedFixPhase = "human_applied_fix_observed"
 // ever passing review is not being helped by a fourth silent re-review.
 const maxHumanAppliedFixRecoveries = 3
 
+// humanFixSettleWindow is how long this run's own worker must have been silent
+// before a workspace change may be treated as an outside intervention.
+//
+// The hazard this guards is a delivery still landing: an agent mid-turn whose
+// output is arriving while AO looks. It is emphatically NOT "the agent did
+// anything at all since the stop" — a worker that finished a turn shortly after
+// the budget ran out and has said nothing for hours is not in flight, and
+// refusing on that basis strands exactly the run this recovery exists for
+// (wf-c23a4b0c: last turn 21:26, stop 21:14, silent ever since).
+//
+// It mirrors fixCyclePickupTimeout deliberately: the two answer the same
+// question — "could this agent still be about to act?" — and they should not
+// disagree about how long that takes.
+const humanFixSettleWindow = 10 * time.Minute
+
 // humanAppliedFixRecord is what the ledger keeps. Every field is something AO
 // observed rather than something it was told.
 type humanAppliedFixRecord struct {
@@ -65,9 +80,13 @@ type humanAppliedFixRecord struct {
 	// StoppedAt is when the budget-exhausted stop was recorded, which is what
 	// makes "after the stop" a checkable claim rather than an assumption.
 	StoppedAt time.Time `json:"stoppedAt"`
-	SessionID string    `json:"sessionId,omitempty"`
-	Branch    string    `json:"branch,omitempty"`
-	Worktree  string    `json:"worktree,omitempty"`
+	// SilentFor is how long this run's worker had been quiet when the change
+	// was adopted, so "nothing of AO's was in flight" is a checkable claim
+	// rather than an assertion.
+	SilentFor string `json:"workerSilentFor,omitempty"`
+	SessionID string `json:"sessionId,omitempty"`
+	Branch    string `json:"branch,omitempty"`
+	Worktree  string `json:"worktree,omitempty"`
 }
 
 func (r humanAppliedFixRecord) json() string {
@@ -184,11 +203,10 @@ func (c *Coordinator) resumeHumanAppliedFix(ctx stdctx.Context, run domain.Workf
 	if !hasStop {
 		return run, false, nil
 	}
-	// "After the stop, and not by an agent of this run." AO cannot see the edit
-	// itself, but it can see whether its own worker was active since the stop —
-	// and if it was, the change is ambiguous delivery rather than an outside
-	// intervention, which this rule must not adopt.
-	if agentActiveSince(sess, stoppedAt) {
+	// "Not something of AO's that is still moving." AO cannot see the edit
+	// itself, but it can see whether its own worker could still be delivering.
+	// If it could, the change is ambiguous and this rule must not adopt it.
+	if agentMayStillBeDelivering(sess, c.clock()) {
 		return run, false, nil
 	}
 
@@ -212,6 +230,7 @@ func (c *Coordinator) resumeHumanAppliedFix(ctx stdctx.Context, run domain.Workf
 		PreviousReviewRunID: prevReview.ID,
 		Attribution:         "external intervention (AO observed the change; it cannot attribute it to a person)",
 		ObservedAt:          c.clock(), Generation: generation, StoppedAt: stoppedAt,
+		SilentFor: workerSilence(sess, c.clock()).Round(time.Second).String(),
 		SessionID: sessionID, Branch: sess.Metadata.Branch, Worktree: sess.Metadata.WorkspacePath,
 	}
 	// Written on the FIX step, carrying the new fingerprint, because that is
@@ -296,15 +315,25 @@ func (c *Coordinator) stopRecordedAt(ctx stdctx.Context, runID, reason string) (
 	return at, !at.IsZero()
 }
 
-// agentActiveSince reports whether this run's own worker has done anything
-// since the stop.
+// agentMayStillBeDelivering reports whether this run's own worker could still be
+// putting something into the workspace.
 //
-// If it has, the workspace change may be that agent's delivery still landing,
-// and adopting it as an external fix would credit a person for an agent's work
-// and re-review something that is still moving. Ambiguity here is a refusal.
-func agentActiveSince(sess domain.SessionRecord, stoppedAt time.Time) bool {
-	return afterInstant(sess.Activity.LastActivityAt, stoppedAt) ||
-		afterInstant(sess.TurnCompletedAt, stoppedAt)
+// Two things make that true: it is active right now, or it has spoken recently
+// enough that a turn could still be completing. Anything older is a worker that
+// has stopped, and a change appearing after that is not its delivery.
+//
+// Ambiguity is always a refusal here — but "it did something an hour ago" is not
+// ambiguity, it is history.
+func agentMayStillBeDelivering(sess domain.SessionRecord, now time.Time) bool {
+	if sess.Activity.State == domain.ActivityActive {
+		return true
+	}
+	for _, at := range []time.Time{sess.Activity.LastActivityAt, sess.TurnCompletedAt} {
+		if !at.IsZero() && now.Sub(at) < humanFixSettleWindow {
+			return true
+		}
+	}
+	return false
 }
 
 // sameWorkspaceIdentity checks the observed workspace is the one this run owns.
@@ -342,4 +371,16 @@ func (c *Coordinator) humanAppliedFixState(ctx stdctx.Context, runID, newFingerp
 		}
 	}
 	return n + 1, false
+}
+
+// workerSilence is how long the run's worker has said nothing.
+func workerSilence(sess domain.SessionRecord, now time.Time) time.Duration {
+	latest := sess.Activity.LastActivityAt
+	if sess.TurnCompletedAt.After(latest) {
+		latest = sess.TurnCompletedAt
+	}
+	if latest.IsZero() {
+		return 0
+	}
+	return now.Sub(latest)
 }
