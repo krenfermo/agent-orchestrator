@@ -302,3 +302,15 @@ func derefString(s *string) string {
 	}
 	return *s
 }
+
+// StopReasonForTest exposes the run's derived stop reason to the external test
+// package. It exists so a test can assert the one property the reaper must
+// preserve and cannot check any other way: that writing a reap record leaves
+// the run's answer to "why did this stop?" exactly as it found it.
+func (c *Coordinator) StopReasonForTest(ctx stdctx.Context, runID string) (string, AttentionDisposition, bool) {
+	run, found, err := c.store.GetWorkflowRun(ctx, runID)
+	if err != nil || !found {
+		return "", AttentionDisposition{}, false
+	}
+	return c.stopReason(ctx, run)
+}

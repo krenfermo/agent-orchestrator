@@ -356,3 +356,40 @@ func TestReapingCreatesNoAttemptAndSpendsNoBudget(t *testing.T) {
 		t.Fatalf("policy snapshot changed to %q: reaping must never touch a budget", snap)
 	}
 }
+
+// ---- 5. the reap must not become the run's stop reason ---------------------
+
+// The reap record is written on a parked run, from the very Continue that is
+// about to ask why the run is parked. If it counted as the newest checkpoint it
+// would displace the real stop phase, and the run would lose the ability to say
+// why it stopped — silently, and at exactly the moment a person is asking.
+//
+// This is not hypothetical: it is what the reaper did to Task 8's run on its
+// first live use, which refused the recovery that was otherwise provable.
+func TestReapRecordDoesNotDisplaceTheRunsStopReason(t *testing.T) {
+	fx := newReaperFixture(t)
+	// A real stop, of the class that is recoverable, recorded before the reap.
+	verifyStepID := "verify"
+	fx.store.checkpoints[fx.runID] = append(fx.store.checkpoints[fx.runID], domain.WorkflowCheckpoint{
+		ID: "stop-cp", WorkflowRunID: fx.runID, WorkflowStepID: &verifyStepID, ProjectID: "project-1",
+		DurablePhase: "verify_unrepairable", NextAction: "verify failed (verify_workspace_changed)",
+		CreatedAt: fx.now.Add(-time.Hour),
+	})
+
+	before, _, okBefore := fx.coord.StopReasonForTest(context.Background(), fx.runID)
+	if !okBefore || before != "verify_unrepairable" {
+		t.Fatalf("precondition: stop reason = %q (ok=%v), want verify_unrepairable", before, okBefore)
+	}
+
+	fx.continueRun()
+	if fx.orphan().FinishedAt == nil {
+		t.Fatal("precondition: the attempt should have been reaped")
+	}
+
+	after, _, okAfter := fx.coord.StopReasonForTest(context.Background(), fx.runID)
+	if !okAfter || after != before {
+		t.Fatalf("the reap rewrote the run's stop reason to %q (ok=%v), want %q left intact — "+
+			"a run that cannot say why it stopped is the failure this exclusion exists to prevent",
+			after, okAfter, before)
+	}
+}

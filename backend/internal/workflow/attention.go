@@ -782,7 +782,10 @@ func (c *Coordinator) stopReason(ctx stdctx.Context, run domain.WorkflowRun) (st
 		// modal — changing the Board, the incident's own signature, and every
 		// later comparison against it. Skipping them is what keeps asking about
 		// a stop free of consequences for the stop.
-		if isIncidentLedgerPhase(cp.DurablePhase) {
+		// The same exclusion now covers the attempt reaper's own record, which
+		// is written on this very call path and would otherwise displace the
+		// stop phase it is about to be asked for. See isBookkeepingPhase.
+		if isBookkeepingPhase(cp.DurablePhase) {
 			continue
 		}
 		// NextAction carries resolveAttentionReason's legacy carrier (the
