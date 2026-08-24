@@ -51,6 +51,8 @@ func (s *Store) UpsertTaskWorktree(ctx context.Context, rec domain.TaskWorktreeR
 		DependenciesJson: string(raw),
 		ExecutionMode:    string(rec.ExecutionMode),
 		State:            string(rec.State),
+		IntegratedSha:    rec.IntegratedSHA,
+		BranchDeleted:    boolToInt64(rec.BranchDeleted),
 		Detail:           rec.Detail,
 		CreatedAt:        rec.CreatedAt,
 		UpdatedAt:        rec.UpdatedAt,
@@ -86,6 +88,24 @@ func (s *Store) ListTaskWorktreesByRun(ctx context.Context, runID string) ([]dom
 	return out, nil
 }
 
+// ListUnfinishedTaskWorktrees returns every record the worktree lifecycle
+// manager is not yet done with, across every run.
+//
+// Startup reconciliation reads this rather than walking runs. A worktree whose
+// run has since gone terminal is exactly the orphan a reconcile pass exists to
+// find, and a run-scoped read is the one read that could never see it.
+func (s *Store) ListUnfinishedTaskWorktrees(ctx context.Context) ([]domain.TaskWorktreeRecord, error) {
+	rows, err := s.qr.ListUnfinishedTaskWorktrees(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list unfinished task worktrees: %w", err)
+	}
+	out := make([]domain.TaskWorktreeRecord, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, taskWorktreeFromGen(row))
+	}
+	return out, nil
+}
+
 func taskWorktreeFromGen(row gen.WorkflowTaskWorktree) domain.TaskWorktreeRecord {
 	deps := []domain.TaskWorktreeDependency{}
 	if row.DependenciesJson != "" {
@@ -106,6 +126,8 @@ func taskWorktreeFromGen(row gen.WorkflowTaskWorktree) domain.TaskWorktreeRecord
 		Dependencies:  deps,
 		ExecutionMode: domain.ExecutionMode(row.ExecutionMode),
 		State:         domain.TaskWorktreeState(row.State),
+		IntegratedSHA: row.IntegratedSha,
+		BranchDeleted: row.BranchDeleted != 0,
 		Detail:        row.Detail,
 		CreatedAt:     row.CreatedAt,
 		UpdatedAt:     row.UpdatedAt,

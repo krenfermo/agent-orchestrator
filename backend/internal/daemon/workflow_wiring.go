@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +22,8 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 	"github.com/aoagents/agent-orchestrator/backend/internal/workflow/wake"
+	taskworkspace "github.com/aoagents/agent-orchestrator/backend/internal/workspace"
+	"github.com/aoagents/agent-orchestrator/backend/internal/worktree"
 )
 
 // workflowAgentSwitcher adapts *session_manager.Manager.SwitchAgent — the
@@ -226,6 +229,41 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		// human happens to run it, which is how an authenticated Codex reviewer
 		// could sit unusable while a high-risk independent review waited.
 		CapacityProber: capacityprobe.New(),
+		// The AO-owned worktree lifecycle. It is what records a task's work as
+		// landed, cleans the worktree and its ao/* branch up afterwards,
+		// preserves both when the task did not land, and -- at boot, from
+		// Coordinator.Reconcile -- finishes whichever of those a restart cut in
+		// half.
+		//
+		// Task worktrees live under the SAME <data dir>/worktrees root the
+		// per-session adapters use (lifecycle_wiring.go), namespaced per
+		// project/run/task beneath it, so one AO_DATA_DIR still accounts for
+		// every checkout AO has ever created. A construction failure is not
+		// fatal: nil leaves worktrees exactly where they are, which is untidy
+		// and never unsafe.
+		TaskWorkspaces: taskWorkspaces(cfg, store, log),
 	})
 	return coordinator, workflowsvc.New(coordinator), wakeScheduler
+}
+
+// taskWorkspaces builds the worktree lifecycle manager, or nil if it cannot be
+// built.
+//
+// Returning nil rather than failing startup is deliberate and matches every
+// other optional dependency above: without it AO creates no task worktrees to
+// clean up in the first place, and a daemon that refused to boot over its
+// housekeeping would be trading a working orchestrator for a tidy one.
+func taskWorkspaces(cfg config.Config, store *sqlite.Store, log *slog.Logger) workflowcore.TaskWorkspaces {
+	mgr, err := taskworkspace.New(taskworkspace.Options{
+		Root:  filepath.Join(cfg.DataDir, "worktrees"),
+		Git:   worktree.NewExecGit(""),
+		Store: store,
+	})
+	if err != nil {
+		if log != nil {
+			log.Error("workflow: AO task worktree lifecycle unavailable", "err", err)
+		}
+		return nil
+	}
+	return mgr
 }

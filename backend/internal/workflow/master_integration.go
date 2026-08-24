@@ -187,6 +187,17 @@ func (c *Coordinator) promoteTaskToIntegration(ctx stdctx.Context, parent domain
 	}
 	for _, id := range state.CompletedTaskIDs {
 		if id == task.ID {
+			// The promotion is already a durable fact, so nothing may be
+			// integrated again -- but the cleanup that follows it may never
+			// have run. That is the crash window between the promotion
+			// checkpoint and the worktree record, and this early return used to
+			// be where it leaked: the task looked done to every later pass and
+			// its directory and ao/* branch stayed forever.
+			//
+			// The head is read back from the ledger row rather than from the
+			// ref, which may have moved several times since. Both calls below
+			// are idempotent, so a task already cleaned up costs one read.
+			c.finishTaskWorktree(ctx, parent, task, c.promotedHeadSHA(ctx, parent.ID, task.ID))
 			return nil
 		}
 	}

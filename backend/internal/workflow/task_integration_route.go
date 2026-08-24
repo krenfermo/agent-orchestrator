@@ -155,7 +155,7 @@ func (c *Coordinator) integrateIsolatedTask(
 		TaskID:  task.ID,
 		RefName: state.RefName,
 	})
-	_, err = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
 		ID:             "wfc-" + c.newID(),
 		WorkflowRunID:  parent.ID,
 		ProjectID:      parent.ProjectID,
@@ -166,8 +166,18 @@ func (c *Coordinator) integrateIsolatedTask(
 		DurablePhase:   masterIntegrationDurablePhase,
 		PayloadVersion: masterIntegrationPayloadVersion,
 		CreatedAt:      c.clock(),
-	})
-	return err
+	}); err != nil {
+		return err
+	}
+
+	// Only now. The promotion is durable, so no later pass will try to read
+	// this task's ao/* branch in order to integrate it again -- which is the
+	// single precondition for being allowed to delete that branch at all.
+	// Cleaning up any earlier would mean a crash between the two left a task
+	// that still has to be integrated and no longer has the commits to
+	// integrate. See task_worktree_lifecycle.go.
+	c.finishTaskWorktree(ctx, parent, task, outcome.Record.TargetAfterSHA)
+	return nil
 }
 
 // errIntegrationBusy means the lane was occupied. It is separated from

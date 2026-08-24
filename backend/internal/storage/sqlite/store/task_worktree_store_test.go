@@ -131,3 +131,114 @@ func TestUpsertTaskWorktreeRejectsUnknownState(t *testing.T) {
 		t.Fatalf("err = %v, want the unknown state named", err)
 	}
 }
+
+// The two cleanup facts have to survive the round trip like every other field:
+// integrated_sha is what authorizes deleting a branch, and branch_deleted is
+// what stops a reconcile pass from looking for one that is already gone.
+func TestTaskWorktreeCleanupFactsRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	seedTaskForWorktree(t, s, "proj", "wf-1", "task-1", now)
+
+	released := now.Add(time.Minute)
+	rec := domain.TaskWorktreeRecord{
+		WorkflowRunID: "wf-1", TaskID: "task-1", ProjectID: "proj",
+		RepoPath: "/repos/proj", Path: "/data/worktrees/proj/wf-1/task-1",
+		Branch: "ao/wf-1/task-1", TargetBranch: "main", BaseSHA: "base1",
+		ExecutionMode: domain.ExecutionIsolatedWorktree,
+		State:         domain.TaskWorktreeReleased,
+		IntegratedSHA: "landed1",
+		BranchDeleted: true,
+		CreatedAt:     now, UpdatedAt: released, ReleasedAt: &released,
+	}
+	if err := s.UpsertTaskWorktree(ctx, rec); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got, ok, err := s.GetTaskWorktree(ctx, "task-1")
+	if err != nil || !ok {
+		t.Fatalf("get: ok=%v err=%v", ok, err)
+	}
+	if got.IntegratedSHA != "landed1" || !got.BranchDeleted {
+		t.Fatalf("cleanup facts = %q/%v, want landed1/true", got.IntegratedSHA, got.BranchDeleted)
+	}
+	if got.State != domain.TaskWorktreeReleased {
+		t.Fatalf("state = %q, want released", got.State)
+	}
+}
+
+// ListUnfinishedTaskWorktrees is what boot reconciliation reads, so its
+// predicate IS the definition of "still AO's problem".
+//
+// The two ends are the interesting ones. A released record whose branch is
+// still there is NOT finished -- its checkout is gone but its commits are not,
+// and something has to go back and delete that branch. A preserved record IS
+// finished, permanently and on purpose: it is a decision to keep the work, and
+// listing it would invite a later pass to re-decide.
+func TestListUnfinishedTaskWorktreesSelectsWhatStillNeedsWork(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	type seed struct {
+		task          string
+		state         domain.TaskWorktreeState
+		branchDeleted bool
+		want          bool
+	}
+	seeds := []seed{
+		{"task-1", domain.TaskWorktreeCreating, false, true},
+		{"task-2", domain.TaskWorktreeActive, false, true},
+		{"task-3", domain.TaskWorktreeIntegrated, false, true},
+		{"task-4", domain.TaskWorktreeReleased, false, true},
+		{"task-5", domain.TaskWorktreeReleased, true, false},
+		{"task-6", domain.TaskWorktreePreserved, false, false},
+		{"task-7", domain.TaskWorktreeFailed, false, false},
+	}
+	seedProject(t, s, "proj")
+	run := sampleWorkflowRun("proj", "wf-1", now)
+	if _, _, err := s.CreateWorkflowRun(ctx, run, sampleWorkflowSteps("wf-1", now)); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	var tasks []domain.WorkflowTask
+	for i, sd := range seeds {
+		tasks = append(tasks, domain.WorkflowTask{
+			ID: sd.task, WorkflowRunID: "wf-1", PlanStepID: "wf-1-step-" + sd.task, Ordinal: int64(i + 1),
+			Title: "task", Description: "d", AcceptanceCriteriaJSON: "[]", VerifyJSON: "[]",
+			State: domain.WorkflowTaskEligible, CreatedAt: now, UpdatedAt: now,
+		})
+	}
+	if err := s.InsertWorkflowTasks(ctx, tasks); err != nil {
+		t.Fatalf("insert tasks: %v", err)
+	}
+	for _, sd := range seeds {
+		if err := s.UpsertTaskWorktree(ctx, domain.TaskWorktreeRecord{
+			WorkflowRunID: "wf-1", TaskID: sd.task, ProjectID: "proj",
+			RepoPath: "/repos/proj", Path: "/data/worktrees/" + sd.task,
+			Branch: "ao/wf-1/" + sd.task, TargetBranch: "main", BaseSHA: "base1",
+			ExecutionMode: domain.ExecutionIsolatedWorktree,
+			State:         sd.state, BranchDeleted: sd.branchDeleted,
+			CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("upsert %s: %v", sd.task, err)
+		}
+	}
+
+	rows, err := s.ListUnfinishedTaskWorktrees(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	listed := map[string]bool{}
+	for _, row := range rows {
+		listed[row.TaskID] = true
+	}
+	for _, sd := range seeds {
+		if listed[sd.task] != sd.want {
+			t.Fatalf("task %s (%s, branchDeleted=%v) listed=%v, want %v",
+				sd.task, sd.state, sd.branchDeleted, listed[sd.task], sd.want)
+		}
+	}
+	if !strings.HasPrefix(rows[0].TaskID, "task-") {
+		t.Fatalf("first row = %+v", rows[0])
+	}
+}

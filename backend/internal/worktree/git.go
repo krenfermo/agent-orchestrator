@@ -1,6 +1,7 @@
 // Package worktree is the git-worktree operations AO is allowed to perform:
-// resolving refs, adding a worktree, removing one it created, and pruning
-// registrations whose directories are gone.
+// resolving refs, testing ancestry, adding a worktree, removing one it
+// created, pruning registrations whose directories are gone, and deleting an
+// AO-owned branch it can prove holds nothing that is not already elsewhere.
 //
 // It is split out from internal/workspace, which decides WHICH worktree a task
 // gets and records it, because the two answer different questions and the
@@ -47,6 +48,32 @@ type Git interface {
 	// Prune drops registrations whose directories are gone. Nothing on disk is
 	// deleted by it.
 	Prune(ctx context.Context, repo string) error
+	// IsAncestor reports whether ancestor is reachable from descendant.
+	//
+	// It is the one question that makes deleting an AO branch safe rather than
+	// merely tidy: a branch whose tip is reachable from the commit its work
+	// landed at holds nothing that would be lost, and a branch whose tip is not
+	// holds commits that exist nowhere else. Read-only.
+	IsAncestor(ctx context.Context, repo, ancestor, descendant string) (bool, error)
+	// DeleteBranch deletes refs/heads/<branch>, and only while it still points
+	// at expectedSHA.
+	//
+	// The compare-and-delete is not decoration. Everything that authorizes the
+	// deletion -- the ancestry proof above, the integration record naming where
+	// the work landed -- is a statement about the branch as it was READ, and an
+	// agent, a user, or a later run may have moved it since. Deleting only from
+	// the value that was proved means the proof cannot be outlived. A branch
+	// that moved fails the delete and keeps its commits, which is the outcome
+	// that loses nothing.
+	//
+	// It is the only mutating method here that is not `git worktree`, and it is
+	// narrowed accordingly at the runner: `git update-ref -d <ref> <oldvalue>`
+	// and nothing else. `git branch -d` is deliberately not used -- its
+	// "is it merged" test is against whatever HEAD the user's checkout happens
+	// to be on, which answers a different question than the one that was
+	// proved, and answers it wrong in the ordinary case where the user is
+	// sitting on some third branch.
+	DeleteBranch(ctx context.Context, repo, branch, expectedSHA string) error
 }
 
 // ErrForbiddenGitCommand is returned when something asks execGit to run a git
@@ -58,15 +85,34 @@ var ErrForbiddenGitCommand = fmt.Errorf("worktree: forbidden git subcommand")
 
 // allowedGitSubcommands is every git subcommand this package may run.
 //
-// `rev-parse` and `show-ref` only read. `worktree` only ever adds a NEW
-// directory, removes one AO created, or prunes registrations for directories
-// that no longer exist -- none of which touches the primary checkout's HEAD,
-// index, or files. Everything that could (checkout, switch, reset, stash,
-// clean, restore, merge, rebase, pull) is absent, and absent is the point.
+// `rev-parse`, `show-ref` and `merge-base` only read. `worktree` only ever
+// adds a NEW directory, removes one AO created, or prunes registrations for
+// directories that no longer exist. `update-ref` is narrowed below to a single
+// compare-and-delete of one ref. None of them touches the primary checkout's
+// HEAD, index, or files. Everything that could (checkout, switch, reset,
+// stash, clean, restore, merge, rebase, pull) is absent, and absent is the
+// point.
 var allowedGitSubcommands = map[string]bool{
-	"rev-parse": true,
-	"show-ref":  true,
-	"worktree":  true,
+	"rev-parse":  true,
+	"show-ref":   true,
+	"worktree":   true,
+	"merge-base": true,
+	"update-ref": true,
+}
+
+// narrowedGitArgs further restricts the subcommands whose allowlist entry
+// alone would be too wide.
+//
+// `update-ref` is the only mutating command here that can touch a ref outside
+// AO's own worktree registrations, so being on the list is not enough: it is
+// pinned to exactly `update-ref -d <ref> <oldvalue>`, the compare-and-delete
+// DeleteBranch needs. That excludes every write form (`update-ref <ref>
+// <value>`), the stdin batch form, and the unguarded delete (`-d <ref>` with no
+// old value) which would drop a branch that had moved since it was proved safe.
+var narrowedGitArgs = map[string]func(args []string) bool{
+	"update-ref": func(args []string) bool {
+		return len(args) == 4 && args[1] == "-d" && args[2] != "" && args[3] != ""
+	},
 }
 
 // execGit is the real Git, running the git binary.
@@ -130,6 +176,32 @@ func (g execGit) Prune(ctx context.Context, repo string) error {
 	return err
 }
 
+func (g execGit) IsAncestor(ctx context.Context, repo, ancestor, descendant string) (bool, error) {
+	_, err := g.run(ctx, repo, "merge-base", "--is-ancestor", ancestor, descendant)
+	if err == nil {
+		return true, nil
+	}
+	// Exit 1 is git's answer "no", not a failure. Anything else (an unknown
+	// commit, a broken repository) must never be reported as a clean "no":
+	// this answer authorizes a deletion, and an error read as "not an
+	// ancestor" is the safe direction while an error read as "yes" is not.
+	if isExitCode(err, 1) {
+		return false, nil
+	}
+	return false, err
+}
+
+func (g execGit) DeleteBranch(ctx context.Context, repo, branch, expectedSHA string) error {
+	if strings.TrimSpace(expectedSHA) == "" {
+		// An empty old value is git's spelling of "I do not care what it points
+		// at", which is precisely the unguarded delete this package must never
+		// perform.
+		return fmt.Errorf("worktree: refusing to delete %s without the commit it is expected to be at", branch)
+	}
+	_, err := g.run(ctx, repo, "update-ref", "-d", "refs/heads/"+branch, expectedSHA)
+	return err
+}
+
 func (g execGit) run(ctx context.Context, repo string, args ...string) ([]byte, error) {
 	if len(args) == 0 || !allowedGitSubcommands[args[0]] {
 		sub := ""
@@ -137,6 +209,9 @@ func (g execGit) run(ctx context.Context, repo string, args ...string) ([]byte, 
 			sub = args[0]
 		}
 		return nil, fmt.Errorf("%w: %q", ErrForbiddenGitCommand, sub)
+	}
+	if narrow, ok := narrowedGitArgs[args[0]]; ok && !narrow(args) {
+		return nil, fmt.Errorf("%w: %q with %v", ErrForbiddenGitCommand, args[0], args[1:])
 	}
 	full := append([]string{"-C", repo}, args...)
 	cmd := aoprocess.CommandContext(ctx, g.binary, full...)

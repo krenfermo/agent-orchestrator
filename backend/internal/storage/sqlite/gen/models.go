@@ -825,6 +825,8 @@ type WorkflowTaskWorktree struct {
 	DependenciesJson string
 	ExecutionMode    string
 	State            string
+	IntegratedSha    string
+	BranchDeleted    int64
 	Detail           string
 	CreatedAt        time.Time
 	UpdatedAt        time.Time

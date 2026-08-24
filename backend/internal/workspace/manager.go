@@ -50,6 +50,11 @@ import (
 type Store interface {
 	UpsertTaskWorktree(ctx context.Context, rec domain.TaskWorktreeRecord) error
 	GetTaskWorktree(ctx context.Context, taskID string) (domain.TaskWorktreeRecord, bool, error)
+	// ListUnfinishedTaskWorktrees is the read boot reconciliation needs: every
+	// record the manager is not yet done with, across every run. It is not
+	// scoped to a run on purpose -- a worktree whose run has since gone
+	// terminal is exactly the orphan a reconcile pass exists to find.
+	ListUnfinishedTaskWorktrees(ctx context.Context) ([]domain.TaskWorktreeRecord, error)
 }
 
 // FS is the small filesystem surface the manager consults. It only ever asks
@@ -205,7 +210,11 @@ func (m *Manager) Ensure(ctx context.Context, req Request) (Lease, error) {
 	if err != nil {
 		return Lease{}, fmt.Errorf("workspace: read record for task %s: %w", req.TaskID, err)
 	}
-	if found && existing.State == domain.TaskWorktreeActive {
+	// `integrated` joins `active` here rather than falling through to a fresh
+	// create: the task's work has already landed, its directory is still there
+	// pending cleanup, and cutting it a new worktree would both lose the state
+	// and re-open a lifecycle that is over.
+	if found && (existing.State == domain.TaskWorktreeActive || existing.State == domain.TaskWorktreeIntegrated) {
 		present, err := m.fs.DirExists(existing.Path)
 		if err != nil {
 			return Lease{}, err

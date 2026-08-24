@@ -767,6 +767,11 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 
 		case domain.WorkflowRunFailed:
 			_, _ = c.planStore.UpdateWorkflowTaskState(ctx, task.ID, domain.WorkflowTaskRunning, domain.WorkflowTaskFailed, c.clock())
+			// Whatever the agent committed is on an ao/* branch and nowhere
+			// else. Mark it kept, durably, so no later tidy-up pass has to
+			// decide from the filesystem alone whether it mattered.
+			c.preserveTaskWorktree(ctx, run, *task,
+				fmt.Sprintf("task %d (%s) failed before its work could be integrated", task.Ordinal, task.Title))
 			// The task's own terminal failure, reported once for the task and
 			// then again — as the parent's stop — for the workflow it blocks.
 			// This reconcile re-runs on every poll and after every restart; the
@@ -786,6 +791,10 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 			// ask about: mirror it onto the task and let the parent's own
 			// completion accounting below decide what that means for the run.
 			_, _ = c.planStore.UpdateWorkflowTaskState(ctx, task.ID, domain.WorkflowTaskRunning, domain.WorkflowTaskCancelled, c.clock())
+			// Cancelling stops the work; it does not throw it away. The same
+			// preservation a failure gets, for the same reason.
+			c.preserveTaskWorktree(ctx, run, *task,
+				fmt.Sprintf("task %d (%s) was cancelled before its work could be integrated", task.Ordinal, task.Title))
 			delete(activeTasks, task.ID)
 
 		case domain.WorkflowRunNeedsAttention:

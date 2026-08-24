@@ -19,6 +19,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/integration"
 	"github.com/aoagents/agent-orchestrator/backend/internal/workflow/wake"
+	"github.com/aoagents/agent-orchestrator/backend/internal/workspace"
 )
 
 // ErrInvalid and ErrNotFound let the transport layer map failures to 422/404.
@@ -308,6 +309,35 @@ type Deps struct {
 	// CapacityProber backs Checkpoint 8P-E.13A.4's active capacity probe (see
 	// CapacityProber). Optional.
 	CapacityProber CapacityProber
+
+	// TaskWorkspaces is the AO-owned worktree lifecycle (internal/workspace):
+	// what records a task's work as landed, what cleans up after it, what
+	// preserves it when it did not land, and what reconciles all three after a
+	// restart. Optional: nil leaves every AO worktree and ao/* branch exactly
+	// where it is, which is the pre-cleanup behavior -- untidy, never unsafe.
+	TaskWorkspaces TaskWorkspaces
+}
+
+// TaskWorkspaces is the workflow side's view of the worktree lifecycle
+// manager, satisfied by *internal/workspace.Manager.
+//
+// It is a port rather than a direct dependency for the reason every other one
+// here is: the coordinator only ever asks it four questions, and naming them
+// is what keeps "the workflow engine can delete a branch" from being true in
+// any broader sense than these four calls.
+type TaskWorkspaces interface {
+	// MarkIntegrated records that a task's work is durably on its target ref,
+	// at the given commit. It is what authorizes cleanup, and it is called only
+	// after the promotion is itself durably recorded.
+	MarkIntegrated(ctx stdctx.Context, taskID, integratedSHA string) (domain.TaskWorktreeRecord, error)
+	// Cleanup removes an integrated task's worktree and deletes its ao/* branch
+	// when it can prove the branch holds nothing the target does not.
+	Cleanup(ctx stdctx.Context, taskID string) (workspace.CleanupResult, error)
+	// Preserve marks a failed or cancelled task's worktree as evidence to keep.
+	Preserve(ctx stdctx.Context, taskID, reason string) (domain.TaskWorktreeRecord, bool, error)
+	// Reconcile matches every unfinished record against the repository and
+	// finishes whatever a restart interrupted.
+	Reconcile(ctx stdctx.Context) (workspace.ReconcileReport, error)
 }
 
 // ProviderProfiles lists a user's owned provider profiles (Checkpoint
@@ -399,6 +429,11 @@ type Coordinator struct {
 	// never-dispatched profile stays domain.CapacityUnknown.
 	capacityProber CapacityProber
 	probeGate      *capacityProbeGate
+
+	// taskWorkspaces is the AO-owned worktree lifecycle: cleanup after an
+	// integration, preservation after a failure, and the boot pass that
+	// finishes either one after a restart. Optional.
+	taskWorkspaces TaskWorkspaces
 }
 
 // New wires a Coordinator from its dependencies, defaulting the clock and id source.
@@ -440,6 +475,7 @@ func New(d Deps) *Coordinator {
 		executionPolicies:        d.ExecutionPolicies,
 		trustedLocal:             d.TrustedLocal,
 		capacityProber:           d.CapacityProber,
+		taskWorkspaces:           d.TaskWorkspaces,
 		probeGate:                &capacityProbeGate{attempts: make(map[capacityProbeKey]time.Time)},
 		clock:                    clock,
 		newID:                    newID,

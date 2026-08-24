@@ -19,10 +19,37 @@ const (
 	// TaskWorktreeActive means the worktree exists on disk and the task's work
 	// belongs in it.
 	TaskWorktreeActive TaskWorktreeState = "active"
+	// TaskWorktreeIntegrated means the task's work is durably on its target
+	// ref and the integration is durably recorded, but the worktree and the
+	// ao/* branch are still there.
+	//
+	// It exists for exactly one crash window: between the moment an
+	// integration becomes a fact and the moment its leftovers are cleaned up.
+	// Without a state for it, a restart in that window is indistinguishable
+	// from a restart before the integration -- the worktree is present, the
+	// branch is present, the task looks ready -- and the only way to tell is
+	// to integrate again, which is the duplicate this whole design exists to
+	// prevent. Written AFTER the audit record and BEFORE the first removal, so
+	// the worst a crash can leave behind is a row that says "this landed at
+	// <sha>; finish tidying up".
+	TaskWorktreeIntegrated TaskWorktreeState = "integrated"
 	// TaskWorktreeReleased means the worktree directory is gone. The branch is
-	// NOT: releasing a worktree removes the checkout, never the commits, so a
-	// released row still names the branch that holds the task's work.
+	// NOT necessarily: releasing a worktree removes the checkout, never the
+	// commits. A released row that also has BranchDeleted set is the only
+	// shape where AO claims the ao/* branch is gone too, and it is only ever
+	// reached for work that provably landed.
 	TaskWorktreeReleased TaskWorktreeState = "released"
+	// TaskWorktreePreserved means the task failed, was cancelled, or was
+	// abandoned with work that never reached its target, and its directory and
+	// branch are deliberately being kept.
+	//
+	// It is the explicit opposite of released: a durable "do not clean this
+	// up". Cleanup is not merely skipped for such a task, it is refused, and
+	// the state is what a later pass reads instead of re-deciding from
+	// whatever is on disk. The agent's commits are the only copy of work
+	// somebody may still want, and a tidy-up that deletes them is the one
+	// unrecoverable mistake in this package.
+	TaskWorktreePreserved TaskWorktreeState = "preserved"
 	// TaskWorktreeFailed means creation or teardown failed and the row is the
 	// record of what was attempted. It is terminal for the manager; a human or
 	// a later run decides what to do with whatever is on disk.
@@ -32,7 +59,20 @@ const (
 // IsKnown reports whether the value is one this build understands.
 func (s TaskWorktreeState) IsKnown() bool {
 	switch s {
-	case TaskWorktreeCreating, TaskWorktreeActive, TaskWorktreeReleased, TaskWorktreeFailed:
+	case TaskWorktreeCreating, TaskWorktreeActive, TaskWorktreeIntegrated,
+		TaskWorktreeReleased, TaskWorktreePreserved, TaskWorktreeFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+// Terminal reports whether the manager is done with this record: nothing it
+// does later can move a released or preserved row, and a failed one waits for
+// a person.
+func (s TaskWorktreeState) Terminal() bool {
+	switch s {
+	case TaskWorktreeReleased, TaskWorktreePreserved, TaskWorktreeFailed:
 		return true
 	default:
 		return false
@@ -97,7 +137,26 @@ type TaskWorktreeRecord struct {
 	// never has a record at all.
 	ExecutionMode ExecutionMode
 	State         TaskWorktreeState
-	// Detail explains a Failed state. Empty otherwise.
+	// IntegratedSHA is the commit this task's work actually reached its target
+	// at, copied from the integration's own audit record.
+	//
+	// It is the authorization for every destructive step that follows. The
+	// branch is only deleted when its tip is provably reachable from this
+	// commit, so "the work is safe to throw the checkout away" is a proof
+	// against a recorded fact rather than an inference from a state name.
+	// Empty for every record that has not integrated.
+	IntegratedSHA string
+	// BranchDeleted reports that the ao/* branch is gone -- deleted by AO's own
+	// cleanup, or already absent when cleanup went to look.
+	//
+	// It is recorded rather than re-derived because absence alone is ambiguous
+	// at read time: a branch may be missing because cleanup finished, or
+	// because it was never created. Only a row that says so distinguishes "this
+	// task is done with" from "this task still has work sitting on a branch",
+	// and the second is the one a reconcile pass has to finish.
+	BranchDeleted bool
+	// Detail explains a Failed state, or says why a Preserved one is being
+	// kept. Empty otherwise.
 	Detail     string
 	CreatedAt  time.Time
 	UpdatedAt  time.Time

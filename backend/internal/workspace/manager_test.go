@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +33,28 @@ func (f *fakeStore) UpsertTaskWorktree(_ context.Context, rec domain.TaskWorktre
 	return nil
 }
 
+// ListUnfinishedTaskWorktrees mirrors the real query's predicate: everything
+// the manager is not done with, plus a released row whose branch is still
+// there.
+func (f *fakeStore) ListUnfinishedTaskWorktrees(_ context.Context) ([]domain.TaskWorktreeRecord, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	var out []domain.TaskWorktreeRecord
+	for _, rec := range f.rows {
+		switch rec.State {
+		case domain.TaskWorktreeCreating, domain.TaskWorktreeActive, domain.TaskWorktreeIntegrated:
+			out = append(out, rec)
+		case domain.TaskWorktreeReleased:
+			if !rec.BranchDeleted {
+				out = append(out, rec)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].TaskID < out[j].TaskID })
+	return out, nil
+}
+
 func (f *fakeStore) GetTaskWorktree(_ context.Context, taskID string) (domain.TaskWorktreeRecord, bool, error) {
 	if f.err != nil {
 		return domain.TaskWorktreeRecord{}, false, f.err
@@ -46,12 +69,18 @@ type fakeGit struct {
 	calls    []string
 	commits  map[string]string
 	branches map[string]bool
-	addErr   error
-	rmErr    error
+	// ancestors is keyed "<ancestor>..<descendant>" and answers IsAncestor.
+	// Absent means "no", which is the safe direction for a lookup a test
+	// forgot to script: it keeps a branch rather than deleting one.
+	ancestors   map[string]bool
+	addErr      error
+	rmErr       error
+	ancestorErr error
+	deleteErr   error
 }
 
 func newFakeGit() *fakeGit {
-	return &fakeGit{commits: map[string]string{}, branches: map[string]bool{}}
+	return &fakeGit{commits: map[string]string{}, branches: map[string]bool{}, ancestors: map[string]bool{}}
 }
 
 func (g *fakeGit) ResolveCommit(_ context.Context, _, rev string) (string, error) {
@@ -88,6 +117,23 @@ func (g *fakeGit) RemoveWorktree(_ context.Context, _, path string) error {
 
 func (g *fakeGit) Prune(_ context.Context, _ string) error {
 	g.calls = append(g.calls, "prune")
+	return nil
+}
+
+func (g *fakeGit) IsAncestor(_ context.Context, _, ancestor, descendant string) (bool, error) {
+	g.calls = append(g.calls, "is-ancestor "+ancestor+" "+descendant)
+	if g.ancestorErr != nil {
+		return false, g.ancestorErr
+	}
+	return g.ancestors[ancestor+".."+descendant], nil
+}
+
+func (g *fakeGit) DeleteBranch(_ context.Context, _, branch, expectedSHA string) error {
+	g.calls = append(g.calls, "delete-branch "+branch+" "+expectedSHA)
+	if g.deleteErr != nil {
+		return g.deleteErr
+	}
+	delete(g.branches, branch)
 	return nil
 }
 

@@ -51,6 +51,17 @@ type Sessions interface {
 // alone by its respective rule, and a run already needs_attention is left
 // alone, so running Reconcile twice in a row is a no-op the second time.
 func (c *Coordinator) Reconcile(ctx stdctx.Context) error {
+	// Before any run is advanced: match every AO-owned worktree record against
+	// what is actually in the repository, and finish whatever a restart cut in
+	// half -- a worktree whose directory appeared but whose state write did
+	// not, a registration that outlived its directory, or an integration whose
+	// cleanup never ran. Everything below reads worktrees and branches, and it
+	// has to read them in the state the durable records describe.
+	//
+	// It is the same ordering reason branch locks are reconciled before this
+	// function is called at all (see internal/daemon).
+	c.reconcileTaskWorktrees(ctx)
+
 	runs, err := c.store.ListNonTerminalWorkflowRuns(ctx)
 	if err != nil {
 		return err

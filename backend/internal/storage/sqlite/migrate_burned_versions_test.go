@@ -134,6 +134,7 @@ var shippedMigrations = map[int64]string{
 	128: "0128_workflow_task_worktrees.sql",
 	129: "0129_branch_lock_ownership_kind.sql",
 	130: "0130_workflow_task_needs_attention.sql",
+	131: "0131_workflow_task_worktree_cleanup.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they
