@@ -176,6 +176,18 @@ func (p *Plugin) SessionInfo(ctx context.Context, session ports.SessionRef) (por
 // AuthStatus checks whether opencode has a configured provider credential.
 // Missing credentials remain unknown because opencode can still run its public
 // free models without a provider login.
+// authProbeTimeout bounds the `opencode auth list` probe.
+//
+// It is a var rather than a const for one reason: tests widen it. The probe
+// spawns a process, so on a machine busy enough to make fork+exec take seconds
+// -- a full `go test ./...` on a laptop saturates every core -- a fixed three
+// seconds fails a test about PARSING auth output for a reason that has nothing
+// to do with parsing. Shipping behavior is unchanged; three seconds is still
+// what the daemon waits before calling a harness's auth status unknown, which
+// is the point: a UI that blocks on an unresponsive CLI is worse than one that
+// admits it does not know.
+var authProbeTimeout = 3 * time.Second
+
 func (p *Plugin) AuthStatus(ctx context.Context) (ports.AgentAuthStatus, error) {
 	binary, err := p.opencodeBinary(ctx)
 	if err != nil {
@@ -186,7 +198,7 @@ func (p *Plugin) AuthStatus(ctx context.Context) (ports.AgentAuthStatus, error) 
 	} else if ok {
 		return status, nil
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, authProbeTimeout)
 	defer cancel()
 
 	out, err := aoprocess.CommandContext(probeCtx, binary, "auth", "list").CombinedOutput()

@@ -138,6 +138,61 @@ describe("WorkflowBoardCard", () => {
 		expect(tasks[2]).toHaveTextContent("Blocked");
 	});
 
+	// The seven planner statuses parallel execution created. A task state alone
+	// cannot express any of them: two tasks that are both "running" read the
+	// same whether or not they are running together, and a task queued for the
+	// integration lane reads as "running" while nothing is running at all.
+	it("labels each planner status a task can be in", () => {
+		const statuses = [
+			["running_in_parallel", "Running in parallel"],
+			["waiting_for_dependency", "Waiting for dependency"],
+			["waiting_for_conflict", "Waiting for conflict"],
+			["ready_to_integrate", "Ready to integrate"],
+			["integrating", "Integrating"],
+			["conflict", "Conflict"],
+			["integrated", "Integrated"],
+		] as const;
+		render(
+			<WorkflowBoardCard
+				workflow={boardWorkflow({
+					tasksTotal: statuses.length,
+					tasks: statuses.map(([status], index) => ({
+						ordinal: index + 1,
+						title: `Task ${index + 1}`,
+						state: "running" as const,
+						planner: {
+							status,
+							dependencies: [],
+							integrationDependencies: [],
+							parallelGroup: 1,
+							parallelGroupSize: statuses.length,
+							writeScope: { writePaths: [], readPaths: [], packages: [], components: [], files: [] },
+						},
+					})),
+				})}
+			/>,
+		);
+		for (const [status, label] of statuses) {
+			expect(screen.getByTestId(`workflow-task-planner-${status}`)).toHaveTextContent(label);
+		}
+	});
+
+	// The badge is additive. A task the daemon has nothing planner-level to say
+	// about keeps the row it always had, with its state and nothing else.
+	it("adds no planner badge to a task with no planner status", () => {
+		render(
+			<WorkflowBoardCard
+				workflow={boardWorkflow({
+					tasksTotal: 1,
+					tasks: [{ ordinal: 1, title: "Lifecycle mapping", state: "blocked" }],
+				})}
+			/>,
+		);
+		const row = within(screen.getByTestId("workflow-child-tasks")).getAllByRole("listitem")[0];
+		expect(row).toHaveTextContent("Blocked");
+		expect(row.querySelector('[data-slot="badge"]')).toBeNull();
+	});
+
 	// The checklist is what makes "where is this run" legible at a glance, and
 	// the never-executed advance step must not appear in it.
 	it("renders the plan/work/review/fix/verify checklist", () => {

@@ -59,6 +59,12 @@ const HarnessEnv = "AO_FAKE_HARNESS"
 // for an ~12s run unspeeded, which AO_FAKE_SPEEDUP compresses for tests.
 const basePhaseSeconds = 2.0
 
+// timelinePhases is how many of those sleeping phases there are. It is named
+// rather than left as the "six" in the comment above so a test can state its
+// timing bound in terms of the timeline itself instead of a number that
+// silently stops matching when a phase is added.
+const timelinePhases = 6.0
+
 // Plugin is the fake agent adapter. It holds no state and is safe for
 // concurrent use.
 type Plugin struct {

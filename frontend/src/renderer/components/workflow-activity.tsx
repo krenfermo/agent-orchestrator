@@ -3,6 +3,7 @@ import type { TFunction } from "i18next";
 import { AlertTriangle, Check, Circle, CircleDot, CircleX, Loader2 } from "lucide-react";
 import type { components } from "../../api/schema";
 import { cn } from "../lib/utils";
+import { Badge, type BadgeVariant } from "./ui/badge";
 
 export type WorkflowPhase = components["schemas"]["WorkflowRunView"]["phase"];
 export type WorkflowStepProgress = components["schemas"]["WorkflowStepProgressView"];
@@ -255,5 +256,61 @@ export function WorkflowActivityPanel({
 				</dl>
 			) : null}
 		</section>
+	);
+}
+
+/**
+ * A planned task's planner-level status, as one pill.
+ *
+ * It is the vocabulary parallel execution created and the task state alone
+ * cannot express: two tasks that are both "running" are a very different
+ * picture depending on whether they are running *together*, and a task that is
+ * "running" while its work sits in the integration queue is not running at all.
+ * The seven values come from the daemon's own projection (workflow.TaskPlannerStatus)
+ * — the renderer classifies nothing here, it only labels.
+ *
+ * Absent for a task with nothing planner-level to say, which is the ordinary
+ * case: the row keeps rendering its phase or state exactly as before, and this
+ * badge is additive rather than a replacement.
+ */
+export type WorkflowTaskPlannerStatus = NonNullable<
+	NonNullable<components["schemas"]["WorkflowBoardTaskView"]["planner"]>["status"]
+>;
+
+/**
+ * Tone per status. Color is rare and meaningful here (DESIGN.md → Color): only
+ * the two outcomes a person may have to act on, and the one that is finished,
+ * get any at all. Every wait is deliberately neutral — a queue is not a
+ * problem, and painting it like one is how a board stops being readable.
+ */
+const PLANNER_STATUS_VARIANT: Record<WorkflowTaskPlannerStatus, BadgeVariant> = {
+	running_in_parallel: "neutral",
+	waiting_for_dependency: "outline",
+	waiting_for_conflict: "warning",
+	ready_to_integrate: "outline",
+	integrating: "neutral",
+	conflict: "error",
+	integrated: "success",
+};
+
+export function WorkflowTaskPlannerBadge({
+	status,
+	className,
+}: {
+	status: WorkflowTaskPlannerStatus | undefined;
+	className?: string;
+}) {
+	const { t } = useTranslation();
+	if (!status) return null;
+	return (
+		<Badge
+			className={cn("h-4 px-1.5 text-[10px] font-medium", className)}
+			data-testid={`workflow-task-planner-${status}`}
+			variant={PLANNER_STATUS_VARIANT[status] ?? "neutral"}
+		>
+			{/* A status the daemon grows before the renderer does still shows its
+			    real value rather than a dangling translation key. */}
+			{translateDynamic(t, `board.plannerStatus.${status}`, status)}
+		</Badge>
 	);
 }

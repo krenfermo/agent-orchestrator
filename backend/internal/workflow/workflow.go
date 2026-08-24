@@ -316,6 +316,21 @@ type Deps struct {
 	// restart. Optional: nil leaves every AO worktree and ao/* branch exactly
 	// where it is, which is the pre-cleanup behavior -- untidy, never unsafe.
 	TaskWorkspaces TaskWorkspaces
+
+	// TaskWorktreeRecords is the READ side of the same worktree records
+	// TaskWorkspaces writes. It is a separate dependency rather than two more
+	// methods on that port because the two have opposite blast radii: one
+	// removes directories and deletes branches, the other answers "which
+	// checkout and which ao/* branch hold this task's work" for a board card.
+	// Optional: nil leaves the worktree/branch fields of the planner projection
+	// empty, which is the honest answer when nothing can be read.
+	TaskWorktreeRecords TaskWorktreeRecords
+}
+
+// TaskWorktreeRecords lists the AO worktree records belonging to one master
+// run. Satisfied by *storage/sqlite/store.Store.
+type TaskWorktreeRecords interface {
+	ListTaskWorktreesByRun(ctx stdctx.Context, runID string) ([]domain.TaskWorktreeRecord, error)
 }
 
 // TaskWorkspaces is the workflow side's view of the worktree lifecycle
@@ -434,6 +449,9 @@ type Coordinator struct {
 	// integration, preservation after a failure, and the boot pass that
 	// finishes either one after a restart. Optional.
 	taskWorkspaces TaskWorkspaces
+	// taskWorktreeRecords reads those same records back for the planner
+	// projection the API and the Board render. Optional.
+	taskWorktreeRecords TaskWorktreeRecords
 }
 
 // New wires a Coordinator from its dependencies, defaulting the clock and id source.
@@ -476,6 +494,7 @@ func New(d Deps) *Coordinator {
 		trustedLocal:             d.TrustedLocal,
 		capacityProber:           d.CapacityProber,
 		taskWorkspaces:           d.TaskWorkspaces,
+		taskWorktreeRecords:      d.TaskWorktreeRecords,
 		probeGate:                &capacityProbeGate{attempts: make(map[capacityProbeKey]time.Time)},
 		clock:                    clock,
 		newID:                    newID,
@@ -538,6 +557,12 @@ type RunDetail struct {
 	// capacity_wait.go). Non-nil only while the run's newest routing decision is
 	// actually a wait, so the UI renders a real, explainable wait or nothing.
 	CapacityWait *CapacityWait
+	// TaskPlanner is the per-task planner projection (see
+	// task_planner_view.go): execution strategy, dependencies, waiting reason,
+	// dispatch wave, probable write scope, AO worktree/branch and integration
+	// state, one entry per element of Tasks and in the same order. Empty for a
+	// run that has no planned tasks.
+	TaskPlanner []TaskPlannerView
 }
 
 // SessionLifecycleAuditEntry is one durable session-lifecycle decision plus

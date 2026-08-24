@@ -474,6 +474,10 @@ func (c *Coordinator) getMasterRun(ctx stdctx.Context, run domain.WorkflowRun, s
 		return RunDetail{}, err
 	}
 	detail := RunDetail{Run: run, Plan: &plan, Tasks: tasks}
+	// The planner projection is read AFTER the reconcile pass above, so a task
+	// this very call promoted, parked or unblocked is reported at what it is
+	// now rather than at what it was when the request arrived.
+	detail.TaskPlanner = c.loadTaskPlannerViews(ctx, run, tasks, c.completedChildRuns(ctx, tasks))
 	for _, step := range steps {
 		attempts, _ := c.store.ListWorkflowAttempts(ctx, step.ID)
 		detail.Steps = append(detail.Steps, StepDetail{Step: step, Attempts: attempts})

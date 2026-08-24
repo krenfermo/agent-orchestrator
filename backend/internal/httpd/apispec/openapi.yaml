@@ -11462,11 +11462,15 @@ components:
       type: object
     WorkflowBoardTaskView:
       properties:
+        id:
+          type: string
         ordinal:
           format: int64
           type: integer
         phase:
           type: string
+        planner:
+          $ref: '#/components/schemas/WorkflowTaskPlannerView'
         state:
           enum:
           - blocked
@@ -12119,6 +12123,115 @@ components:
       - updatedAt
       - attempts
       type: object
+    WorkflowTaskDowngradeView:
+      properties:
+        conflicts:
+          items:
+            type: string
+          type: array
+        detail:
+          type: string
+        from:
+          type: string
+        reason:
+          type: string
+        serial:
+          type: boolean
+        to:
+          type: string
+      required:
+      - from
+      - to
+      type: object
+    WorkflowTaskIntegrationStateView:
+      properties:
+        attentionReason:
+          type: string
+        baseSha:
+          type: string
+        conflictFiles:
+          items:
+            type: string
+          type: array
+        outcome:
+          enum:
+          - attempting
+          - integrated
+          - needs_attention
+          type: string
+        replayed:
+          type: boolean
+        sourceSha:
+          type: string
+        strategy:
+          enum:
+          - fast_forward
+          - rebase_fast_forward
+          - cherry_pick
+          - merge_commit
+          - no_op
+          type: string
+        targetAfterSha:
+          type: string
+        targetBeforeSha:
+          type: string
+      type: object
+    WorkflowTaskPlannerView:
+      properties:
+        dependencies:
+          items:
+            type: string
+          type: array
+        downgrade:
+          $ref: '#/components/schemas/WorkflowTaskDowngradeView'
+        executionMode:
+          enum:
+          - direct_branch
+          - isolated_worktree
+          - smart_parallel_worktrees
+          type: string
+        executionStrategy:
+          enum:
+          - parallel
+          - sequential
+          - serialized
+          type: string
+        integration:
+          $ref: '#/components/schemas/WorkflowTaskIntegrationStateView'
+        integrationDependencies:
+          items:
+            type: string
+          type: array
+        parallelGroup:
+          type: integer
+        parallelGroupSize:
+          type: integer
+        status:
+          enum:
+          - running_in_parallel
+          - waiting_for_dependency
+          - waiting_for_conflict
+          - ready_to_integrate
+          - integrating
+          - conflict
+          - integrated
+          type: string
+        waitingReason:
+          enum:
+          - waiting_for_dependencies
+          - waiting_for_write_conflict
+          type: string
+        worktree:
+          $ref: '#/components/schemas/WorkflowTaskWorktreeView'
+        writeScope:
+          $ref: '#/components/schemas/WorkflowTaskWriteScopeView'
+      required:
+      - dependencies
+      - integrationDependencies
+      - parallelGroup
+      - parallelGroupSize
+      - writeScope
+      type: object
     WorkflowTaskView:
       properties:
         acceptanceCriteria:
@@ -12138,6 +12251,8 @@ components:
         number:
           format: int64
           type: integer
+        planner:
+          $ref: '#/components/schemas/WorkflowTaskPlannerView'
         state:
           type: string
         title:
@@ -12153,6 +12268,64 @@ components:
       - acceptanceCriteria
       - verify
       - state
+      type: object
+    WorkflowTaskWorktreeView:
+      properties:
+        baseSha:
+          type: string
+        branch:
+          type: string
+        branchDeleted:
+          type: boolean
+        integratedSha:
+          type: string
+        path:
+          type: string
+        state:
+          enum:
+          - creating
+          - active
+          - integrated
+          - released
+          - preserved
+          - failed
+          type: string
+        targetBranch:
+          type: string
+      type: object
+    WorkflowTaskWriteScopeView:
+      properties:
+        components:
+          items:
+            type: string
+          type: array
+        files:
+          items:
+            type: string
+          type: array
+        packages:
+          items:
+            type: string
+          type: array
+        readPaths:
+          items:
+            type: string
+          type: array
+        source:
+          enum:
+          - estimated
+          - observed
+          type: string
+        writePaths:
+          items:
+            type: string
+          type: array
+      required:
+      - writePaths
+      - readPaths
+      - packages
+      - components
+      - files
       type: object
     WorkflowVerificationCommand:
       properties:

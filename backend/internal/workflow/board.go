@@ -57,9 +57,14 @@ type BoardEntry struct {
 
 // BoardChildTask is one planned task of a master run.
 type BoardChildTask struct {
-	Ordinal int64
-	Title   string
-	State   domain.WorkflowTaskState
+	TaskID string
+	// PlanStepID is the id this task is known by outside the daemon (the API's
+	// WorkflowTaskView.ID). It travels with TaskID so a reader can translate
+	// the planner projection's dependency task ids without a second lookup.
+	PlanStepID string
+	Ordinal    int64
+	Title      string
+	State      domain.WorkflowTaskState
 	// WaitReason is present for an undispatched blocked task and distinguishes
 	// dependency ordering from a write-set lane conflict.
 	WaitReason string
@@ -69,6 +74,11 @@ type BoardChildTask struct {
 	// unknown.
 	Phase Phase
 	Steps []StepProgress
+	// Planner is the task's planner-level projection (see
+	// task_planner_view.go). Nil only when the projection could not be built at
+	// all; a task with nothing planner-level to say carries a view with an
+	// empty Status rather than no view.
+	Planner *TaskPlannerView
 }
 
 // ProjectBoard projects every top-level workflow run of a project.
@@ -144,8 +154,14 @@ func (c *Coordinator) boardEntry(ctx stdctx.Context, run domain.WorkflowRun) (Bo
 		return entry, nil
 	}
 
+	// Which tasks have a finished execution run, collected from the child runs
+	// this loop already reads. It is the one fact the planner projection cannot
+	// fold out of the task rows, and gathering it here costs nothing: reading
+	// the child runs a second time inside the projection would double every
+	// board poll's query count for an answer already in hand.
+	childCompleted := map[string]bool{}
 	for _, task := range detail.Tasks {
-		child := BoardChildTask{Ordinal: task.Ordinal, Title: task.Title, State: task.State}
+		child := BoardChildTask{TaskID: task.ID, PlanStepID: task.PlanStepID, Ordinal: task.Ordinal, Title: task.Title, State: task.State}
 		if scope, err := UnmarshalTaskScope(task.ScopeJSON); err == nil {
 			child.WaitReason = string(scope.WaitingReason)
 		}
@@ -156,6 +172,9 @@ func (c *Coordinator) boardEntry(ctx stdctx.Context, run domain.WorkflowRun) (Bo
 				return BoardEntry{}, cerr
 			}
 			if ok {
+				if childRun.State == domain.WorkflowRunCompleted {
+					childCompleted[task.ID] = true
+				}
 				childDetail, derr := c.readOnlyDetail(ctx, childRun)
 				if derr != nil {
 					return BoardEntry{}, derr
@@ -194,6 +213,18 @@ func (c *Coordinator) boardEntry(ctx stdctx.Context, run domain.WorkflowRun) (Bo
 			}
 		}
 		entry.ChildTasks = append(entry.ChildTasks, child)
+	}
+
+	// One projection for the whole plan, then attached per task: the dispatch
+	// wave and the "is anything else running" half of the status are properties
+	// of the plan as a whole, so they cannot be decided one card at a time.
+	planner := c.loadTaskPlannerViews(ctx, run, detail.Tasks, childCompleted)
+	byTask := make(map[string]*TaskPlannerView, len(planner))
+	for i := range planner {
+		byTask[planner[i].TaskID] = &planner[i]
+	}
+	for i := range entry.ChildTasks {
+		entry.ChildTasks[i].Planner = byTask[entry.ChildTasks[i].TaskID]
 	}
 	return entry, nil
 }

@@ -40,6 +40,16 @@ type WorkflowBoardTaskView struct {
 	// has no child run yet — a fact, not an unknown.
 	Phase string                     `json:"phase,omitempty"`
 	Steps []WorkflowStepProgressView `json:"steps,omitempty"`
+	// ID is the plan-step id this task is known by on the run-detail endpoint
+	// (WorkflowTaskView.id), so a Board row and a detail row can be matched
+	// without going through the ordinal.
+	ID string `json:"id,omitempty"`
+	// Planner is the same per-task planner projection the run-detail endpoint
+	// returns: execution strategy, dependency and integration ordering, waiting
+	// reason, dispatch wave, probable write scope, AO worktree/branch and
+	// integration state. It is what lets a Board row say "Waiting for conflict"
+	// or "Ready to integrate" instead of only "blocked" or "running".
+	Planner *WorkflowTaskPlannerView `json:"planner,omitempty"`
 }
 
 // WorkflowBoardEntryView is one Board card.
@@ -151,6 +161,13 @@ func workflowBoardEntryView(e workflowcore.BoardEntry) WorkflowBoardEntryView {
 		Steps:               stepProgressViews(e.Steps),
 		BranchWait:          workflowBranchWaitView(e.BranchWait),
 	}
+	// The planner projection speaks in task ids; every other id on this endpoint
+	// is a plan-step id, and mixing the two in one response is how a client ends
+	// up rendering an opaque internal id next to a readable one.
+	planIDByTask := make(map[string]string, len(e.ChildTasks))
+	for _, t := range e.ChildTasks {
+		planIDByTask[t.TaskID] = t.PlanStepID
+	}
 	for _, t := range e.ChildTasks {
 		view.Tasks = append(view.Tasks, WorkflowBoardTaskView{
 			Ordinal:    t.Ordinal,
@@ -160,6 +177,8 @@ func workflowBoardEntryView(e workflowcore.BoardEntry) WorkflowBoardEntryView {
 			WorkflowID: t.RunID,
 			Phase:      string(t.Phase),
 			Steps:      stepProgressViews(t.Steps),
+			ID:         t.PlanStepID,
+			Planner:    workflowTaskPlannerView(t.Planner, planIDByTask),
 		})
 	}
 	return view

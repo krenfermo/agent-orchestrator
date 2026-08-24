@@ -450,6 +450,12 @@ type WorkflowTaskView struct {
 	Verify              workflowcore.VerificationPlan `json:"verify"`
 	State               domain.WorkflowTaskState      `json:"state"`
 	ExecutionWorkflowID string                        `json:"executionWorkflowId,omitempty"`
+	// Planner is everything the plan decided about this task and everything
+	// that has happened to it since: execution strategy, dependency and
+	// integration ordering, waiting reason, dispatch wave, probable write
+	// scope, AO worktree/branch, and integration state. Absent only for a run
+	// with no planner projection at all.
+	Planner *WorkflowTaskPlannerView `json:"planner,omitempty"`
 }
 
 // WorkflowRunResponse is the body of create/get/cancel (200/201).
@@ -636,6 +642,7 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 	for _, task := range detail.Tasks {
 		planIDByTask[task.ID] = task.PlanStepID
 	}
+	planner := workflowTaskPlannerViews(detail.TaskPlanner)
 	for _, task := range detail.Tasks {
 		var criteria []string
 		var verify workflowcore.VerificationPlan
@@ -651,7 +658,7 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 		if task.ExecutionRunID != nil {
 			execID = *task.ExecutionRunID
 		}
-		view.Tasks = append(view.Tasks, WorkflowTaskView{ID: task.PlanStepID, Number: task.Ordinal, Title: task.Title, Description: task.Description, Dependencies: deps, AcceptanceCriteria: criteria, Verify: verify, State: task.State, ExecutionWorkflowID: execID})
+		view.Tasks = append(view.Tasks, WorkflowTaskView{ID: task.PlanStepID, Number: task.Ordinal, Title: task.Title, Description: task.Description, Dependencies: deps, AcceptanceCriteria: criteria, Verify: verify, State: task.State, ExecutionWorkflowID: execID, Planner: workflowTaskPlannerView(planner[task.ID], planIDByTask)})
 	}
 	var questionsForRun []domain.WorkflowQuestion
 	if c.QuestionsReader != nil {

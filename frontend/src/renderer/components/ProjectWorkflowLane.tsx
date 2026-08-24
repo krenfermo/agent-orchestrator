@@ -24,6 +24,7 @@ import {
 	WorkflowActivityPanel,
 	WorkflowPhaseBadge,
 	WorkflowStepChecklist,
+	WorkflowTaskPlannerBadge,
 } from "./workflow-activity";
 
 /**
@@ -381,6 +382,12 @@ function ChildTaskList({ tasks }: { tasks: BoardWorkflowTask[] }) {
 				<li className="flex items-center gap-2 text-xs" key={task.ordinal}>
 					<span className="w-4 shrink-0 text-right text-passive">{task.ordinal}.</span>
 					<span className="min-w-0 flex-1 truncate text-muted-foreground">{task.title}</span>
+					{/* The planner status sits BEFORE the phase/state rather than
+					    replacing it: "Waiting for conflict" says why the task is not
+					    moving, and "blocked" still says what it is. Absent for a task
+					    with nothing planner-level to say, which leaves the row exactly
+					    as it was. */}
+					<WorkflowTaskPlannerBadge status={task.planner?.status} />
 					<span className="shrink-0 text-passive">
 						{task.phase
 							? translateDynamic(t, `board.phase.${task.phase}`, task.phase)

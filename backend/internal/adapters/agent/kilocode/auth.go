@@ -21,6 +21,18 @@ var _ ports.AgentAuthChecker = (*Plugin)(nil)
 // AuthStatus returns the plugin's local authentication status. Missing
 // credentials remain unknown because Kilo can still run eligible public free
 // models without a provider login.
+// authProbeTimeout bounds the `kilocode auth list` probe.
+//
+// It is a var rather than a const for one reason: tests widen it. The probe
+// spawns a process, so on a machine busy enough to make fork+exec take seconds
+// -- a full `go test ./...` on a laptop saturates every core -- a fixed three
+// seconds fails a test about PARSING auth output for a reason that has nothing
+// to do with parsing. Shipping behavior is unchanged; three seconds is still
+// what the daemon waits before calling a harness's auth status unknown, which
+// is the point: a UI that blocks on an unresponsive CLI is worse than one that
+// admits it does not know.
+var authProbeTimeout = 3 * time.Second
+
 func (p *Plugin) AuthStatus(ctx context.Context) (ports.AgentAuthStatus, error) {
 	binary, err := p.ResolveBinary(ctx)
 	if err != nil {
@@ -32,7 +44,7 @@ func (p *Plugin) AuthStatus(ctx context.Context) (ports.AgentAuthStatus, error) 
 		return status, nil
 	}
 
-	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, authProbeTimeout)
 	defer cancel()
 	out, err := aoprocess.CommandContext(probeCtx, binary, "auth", "list").CombinedOutput()
 	if probeCtx.Err() != nil {

@@ -4175,9 +4175,11 @@ export interface components {
             workflows: components["schemas"]["WorkflowBoardEntryView"][];
         };
         WorkflowBoardTaskView: {
+            id?: string;
             /** Format: int64 */
             ordinal: number;
             phase?: string;
+            planner?: components["schemas"]["WorkflowTaskPlannerView"];
             /** @enum {string} */
             state: "blocked" | "eligible" | "running" | "needs_attention" | "completed" | "failed" | "cancelled";
             steps?: components["schemas"]["WorkflowStepProgressView"][];
@@ -4409,6 +4411,45 @@ export interface components {
             verification?: components["schemas"]["WorkflowVerifyResult"];
             worktreePath?: string;
         };
+        WorkflowTaskDowngradeView: {
+            conflicts?: string[];
+            detail?: string;
+            from: string;
+            reason?: string;
+            serial?: boolean;
+            to: string;
+        };
+        WorkflowTaskIntegrationStateView: {
+            attentionReason?: string;
+            baseSha?: string;
+            conflictFiles?: string[];
+            /** @enum {string} */
+            outcome?: "attempting" | "integrated" | "needs_attention";
+            replayed?: boolean;
+            sourceSha?: string;
+            /** @enum {string} */
+            strategy?: "fast_forward" | "rebase_fast_forward" | "cherry_pick" | "merge_commit" | "no_op";
+            targetAfterSha?: string;
+            targetBeforeSha?: string;
+        };
+        WorkflowTaskPlannerView: {
+            dependencies: string[];
+            downgrade?: components["schemas"]["WorkflowTaskDowngradeView"];
+            /** @enum {string} */
+            executionMode?: "direct_branch" | "isolated_worktree" | "smart_parallel_worktrees";
+            /** @enum {string} */
+            executionStrategy?: "parallel" | "sequential" | "serialized";
+            integration?: components["schemas"]["WorkflowTaskIntegrationStateView"];
+            integrationDependencies: string[];
+            parallelGroup: number;
+            parallelGroupSize: number;
+            /** @enum {string} */
+            status?: "running_in_parallel" | "waiting_for_dependency" | "waiting_for_conflict" | "ready_to_integrate" | "integrating" | "conflict" | "integrated";
+            /** @enum {string} */
+            waitingReason?: "waiting_for_dependencies" | "waiting_for_write_conflict";
+            worktree?: components["schemas"]["WorkflowTaskWorktreeView"];
+            writeScope: components["schemas"]["WorkflowTaskWriteScopeView"];
+        };
         WorkflowTaskView: {
             acceptanceCriteria: string[];
             dependencies: string[];
@@ -4417,9 +4458,29 @@ export interface components {
             id: string;
             /** Format: int64 */
             number: number;
+            planner?: components["schemas"]["WorkflowTaskPlannerView"];
             state: string;
             title: string;
             verify: components["schemas"]["WorkflowVerificationPlanType2"];
+        };
+        WorkflowTaskWorktreeView: {
+            baseSha?: string;
+            branch?: string;
+            branchDeleted?: boolean;
+            integratedSha?: string;
+            path?: string;
+            /** @enum {string} */
+            state?: "creating" | "active" | "integrated" | "released" | "preserved" | "failed";
+            targetBranch?: string;
+        };
+        WorkflowTaskWriteScopeView: {
+            components: string[];
+            files: string[];
+            packages: string[];
+            readPaths: string[];
+            /** @enum {string} */
+            source?: "estimated" | "observed";
+            writePaths: string[];
         };
         WorkflowVerificationCommand: {
             args?: string[];

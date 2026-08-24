@@ -242,6 +242,13 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		// fatal: nil leaves worktrees exactly where they are, which is untidy
 		// and never unsafe.
 		TaskWorkspaces: taskWorkspaces(cfg, store, log),
+		// The read side of the same records: which checkout and which ao/*
+		// branch hold a task's work, for the planner projection the task API
+		// and the Board render. It is the store directly rather than the
+		// manager above, because reading a row needs none of the manager's
+		// git-side machinery and a lifecycle manager that failed to build must
+		// not also blind the board.
+		TaskWorktreeRecords: store,
 	})
 	return coordinator, workflowsvc.New(coordinator), wakeScheduler
 }
