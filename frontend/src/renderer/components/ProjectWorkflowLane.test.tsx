@@ -20,6 +20,7 @@ function boardWorkflow(overrides: Partial<BoardWorkflow> = {}): BoardWorkflow {
 		tasksBlocked: 0,
 		tasksEligible: 0,
 		tasksFailed: 0,
+		tasksNeedsAttention: 0,
 		...overrides,
 	};
 }

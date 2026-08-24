@@ -7,7 +7,6 @@ import (
 	"fmt"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
-	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
 // Checkpoint 8M.1: master task git state propagation.
@@ -223,37 +222,24 @@ func (c *Coordinator) promoteTaskToIntegration(ctx stdctx.Context, parent domain
 		return c.recordIntegrationFailure(ctx, parent, task, "worktree/session facts are missing")
 	}
 
-	// Checkpoint 8P-E.13B: execution-mode semantics are explicit here, at the
-	// one place that decides how a completed task's code becomes the master's
-	// integrated state. Isolated worktrees must have their content materialized
-	// into an AO-owned ref; direct-branch runs already committed it on the
-	// project's branch and only have to prove it (master_integration_directbranch.go).
-	if domain.ResolveExecutionMode(project.Kind, project.Config) == domain.ExecutionDirectBranch {
-		return c.promoteDirectBranchTask(ctx, parent, task, child, workCP, state)
-	}
-
-	message := fmt.Sprintf("AO internal integration checkpoint: task %s (%s)", task.ID, task.Title)
-	commitSHA, treeSHA, reused, err := c.workspaceFacts.MaterializeIntegrationCommit(ctx,
-		ports.WorkspaceInfo{Path: workCP.WorktreePath, Branch: workCP.Branch, SessionID: domain.SessionID(*workCP.SessionID), ProjectID: domain.ProjectID(parent.ProjectID)},
-		state.RefName, state.CurrentSHA, message, EphemeralArtifactExcludePatterns())
-	if err != nil {
-		return c.recordIntegrationFailure(ctx, parent, task, err.Error())
-	}
-
-	payload, _ := json.Marshal(masterIntegrationPromotionPayload{TaskID: task.ID, TreeSHA: treeSHA, RefName: state.RefName, Reused: reused})
-	_, err = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
-		ID:             "wfc-" + c.newID(),
-		WorkflowRunID:  parent.ID,
-		ProjectID:      parent.ProjectID,
-		SessionID:      workCP.SessionID,
-		BaseSHA:        state.CurrentSHA,
-		HeadSHA:        commitSHA,
-		RetryState:     string(payload),
-		DurablePhase:   masterIntegrationDurablePhase,
-		PayloadVersion: masterIntegrationPayloadVersion,
-		CreatedAt:      c.clock(),
-	})
-	return err
+	// Checkpoint 8P-E.13B / Task 5: ONE authoritative integration point.
+	//
+	// Execution-mode semantics still differ — an isolated worktree's commits
+	// have to be moved onto the target, a direct-branch task's are already
+	// there — but the guarantees around them no longer do. Both modes go
+	// through integrateReadyTask into the Integration Coordinator, which takes
+	// the target lane, reads the head INSIDE it, gates on readiness, chooses a
+	// strategy, lands under compare-and-set and records the audit.
+	//
+	// What used to be here instead: a direct-branch early return, and a fork on
+	// taskBaseWasOvertaken computed from CACHED state that sent the "target has
+	// not moved" case straight to MaterializeIntegrationCommit with no lane, no
+	// gate and no record. That fork is the TOCTOU this replaces — the cached
+	// answer could be stale by the time the commit was made, and an integration
+	// that had never read the current head could revert a sibling that landed
+	// in between. "The target did not move" is now a strategy the Coordinator
+	// decides under the lock, not a shortcut past it.
+	return c.integrateReadyTask(ctx, parent, task, child, workCP, state, project)
 }
 
 // recordIntegrationFailure persists a diagnostic checkpoint (best-effort —

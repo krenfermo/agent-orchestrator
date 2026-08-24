@@ -32,7 +32,7 @@ type WorkflowStepProgressView struct {
 type WorkflowBoardTaskView struct {
 	Ordinal    int64  `json:"ordinal"`
 	Title      string `json:"title"`
-	State      string `json:"state" enum:"blocked,eligible,running,completed,failed,cancelled"`
+	State      string `json:"state" enum:"blocked,eligible,running,needs_attention,completed,failed,cancelled"`
 	WaitReason string `json:"waitReason,omitempty" enum:"waiting_for_dependencies,waiting_for_write_conflict"`
 	// WorkflowID is the child run executing this task, empty until dispatched.
 	WorkflowID string `json:"workflowId,omitempty"`
@@ -90,6 +90,11 @@ type WorkflowBoardEntryView struct {
 	// (Checkpoint 8P-E.13). Non-zero is why a master run with nothing running
 	// is nonetheless not going to finish on its own.
 	TasksFailed int `json:"tasksFailed"`
+	// TasksNeedsAttention counts tasks parked on a decision only a person can
+	// make — today, an integration conflict (migration 0130). Separate from
+	// TasksFailed because the remedy is different: the work is very likely
+	// fine and one resume releases it.
+	TasksNeedsAttention int `json:"tasksNeedsAttention"`
 	// CurrentTaskOrdinal/CurrentTaskTitle name the running task, so a card can
 	// say "Task 2 of 7 — Backend backup API" from facts.
 	CurrentTaskOrdinal int64  `json:"currentTaskOrdinal,omitempty"`
@@ -116,34 +121,35 @@ type WorkflowBoardResponse struct {
 
 func workflowBoardEntryView(e workflowcore.BoardEntry) WorkflowBoardEntryView {
 	view := WorkflowBoardEntryView{
-		WorkflowID:         e.Run.ID,
-		ProjectID:          e.Run.ProjectID,
-		Objective:          e.Run.Objective,
-		State:              string(e.Run.State),
-		Phase:              string(e.ActivePhase),
-		Attention:          string(e.Lifecycle.Attention),
-		AttentionReason:    e.Lifecycle.AttentionReason,
-		AttentionAction:    e.Lifecycle.AttentionAction,
-		WaitReason:         e.Lifecycle.WaitReason,
-		NextWakeAt:         e.Lifecycle.NextWakeAt,
-		LastActivityAt:     e.Lifecycle.LastActivityAt,
-		ErrorClass:         string(e.ErrorClass),
-		ExecutionMode:      e.ExecutionMode,
-		Harness:            e.Harness,
-		Model:              e.Model,
-		SessionID:          e.SessionID,
-		TasksTotal:         e.Tasks.Total,
-		TasksCompleted:     e.Tasks.Completed,
-		TasksRunning:       e.Tasks.Running,
-		TasksBlocked:       e.Tasks.Blocked,
-		TasksEligible:      e.Tasks.Eligible,
-		TasksFailed:        e.Tasks.Failed + e.Tasks.Cancelled,
-		CurrentTaskOrdinal: e.Tasks.CurrentNumber,
-		CurrentTaskTitle:   e.Tasks.CurrentTitle,
-		ArchivedAt:         e.Run.ArchivedAt,
-		ReviewCycles:       e.ReviewCycles,
-		Steps:              stepProgressViews(e.Steps),
-		BranchWait:         workflowBranchWaitView(e.BranchWait),
+		WorkflowID:          e.Run.ID,
+		ProjectID:           e.Run.ProjectID,
+		Objective:           e.Run.Objective,
+		State:               string(e.Run.State),
+		Phase:               string(e.ActivePhase),
+		Attention:           string(e.Lifecycle.Attention),
+		AttentionReason:     e.Lifecycle.AttentionReason,
+		AttentionAction:     e.Lifecycle.AttentionAction,
+		WaitReason:          e.Lifecycle.WaitReason,
+		NextWakeAt:          e.Lifecycle.NextWakeAt,
+		LastActivityAt:      e.Lifecycle.LastActivityAt,
+		ErrorClass:          string(e.ErrorClass),
+		ExecutionMode:       e.ExecutionMode,
+		Harness:             e.Harness,
+		Model:               e.Model,
+		SessionID:           e.SessionID,
+		TasksTotal:          e.Tasks.Total,
+		TasksCompleted:      e.Tasks.Completed,
+		TasksRunning:        e.Tasks.Running,
+		TasksBlocked:        e.Tasks.Blocked,
+		TasksEligible:       e.Tasks.Eligible,
+		TasksFailed:         e.Tasks.Failed + e.Tasks.Cancelled,
+		TasksNeedsAttention: e.Tasks.NeedsAttention,
+		CurrentTaskOrdinal:  e.Tasks.CurrentNumber,
+		CurrentTaskTitle:    e.Tasks.CurrentTitle,
+		ArchivedAt:          e.Run.ArchivedAt,
+		ReviewCycles:        e.ReviewCycles,
+		Steps:               stepProgressViews(e.Steps),
+		BranchWait:          workflowBranchWaitView(e.BranchWait),
 	}
 	for _, t := range e.ChildTasks {
 		view.Tasks = append(view.Tasks, WorkflowBoardTaskView{

@@ -38,6 +38,12 @@ type WorkflowIDParam struct {
 	WorkflowID string `path:"workflowId" description:"Workflow run identifier."`
 }
 
+// WorkflowTaskParam addresses one planned task of a master run.
+type WorkflowTaskParam struct {
+	WorkflowID string `path:"workflowId" description:"Master workflow run identifier."`
+	TaskID     string `path:"taskId" description:"Planned task identifier (workflow_tasks.id)."`
+}
+
 // ListWorkflowsQuery is the query string accepted by GET /api/v1/workflows.
 type ListWorkflowsQuery struct {
 	ProjectID string `query:"projectId,omitempty" description:"Project id filter."`
@@ -741,6 +747,7 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	r.Get("/projects/{projectId}/board/history", c.boardHistory)
 	r.Post("/workflows/{workflowId}/start", c.start)
 	r.Post("/workflows/{workflowId}/continue", c.continueRun)
+	r.Post("/workflows/{workflowId}/tasks/{taskId}/resume", c.resumeTask)
 	r.Post("/workflows/{workflowId}/plan/generate", c.generatePlan)
 	r.Get("/workflows/{workflowId}/plan", c.get)
 	r.Post("/workflows/{workflowId}/plan/approve", c.approvePlan)
@@ -965,6 +972,28 @@ func (c *WorkflowsController) continueRun(w http.ResponseWriter, r *http.Request
 		return
 	}
 	detail, err := c.Svc.ContinueRun(r.Context(), chi.URLParam(r, "workflowId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+
+// resumeTask releases one task parked in needs_attention after a person has
+// dealt with what parked it — the explicit human half of the task-level
+// attention state.
+//
+// POST rather than PATCH, and idempotent rather than conditional: resuming a
+// task that is not parked returns the run unchanged with 200. A retried request
+// or a double-clicked button must never produce a second integration attempt,
+// and making that true of the operation itself is more robust than making the
+// caller careful.
+func (c *WorkflowsController) resumeTask(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/tasks/{taskId}/resume")
+		return
+	}
+	detail, err := c.Svc.ResumeTask(r.Context(), chi.URLParam(r, "workflowId"), chi.URLParam(r, "taskId"))
 	if err != nil {
 		writeWorkflowError(w, r, err)
 		return

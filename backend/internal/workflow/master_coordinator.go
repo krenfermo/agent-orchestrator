@@ -609,10 +609,27 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 	run = c.reconcileMirroredChildStop(ctx, run, tasks)
 	completed := map[string]bool{}
 	activeTasks := map[string]bool{}
+	parkedTasks := map[string]bool{}
 	for i := range tasks {
 		task := &tasks[i]
 		if task.State == domain.WorkflowTaskCompleted {
 			completed[task.ID] = true
+			continue
+		}
+		if task.State.Parked() {
+			// The task is stopped on something only a person can decide, and
+			// this pass must do NOTHING about it. Skipping it here is the whole
+			// remedy for the retry storm the reviewer found: before the parked
+			// state existed, a task whose integration had conflicted stayed at
+			// "running", so every poll re-entered the branch below, re-rebased
+			// the same worktree onto the same target, hit the same conflict and
+			// wrote another checkpoint and another notification.
+			//
+			// It is deliberately NOT counted as active. An independent sibling
+			// must keep running and integrating — a parked task holds nothing
+			// and blocks nobody except its own dependents, who are blocked
+			// because they depend on it, not because the objective stopped.
+			parkedTasks[task.ID] = true
 			continue
 		}
 		if task.State != domain.WorkflowTaskRunning {
@@ -676,6 +693,30 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 			// it completed, so a crash between the two never lets a task
 			// count as "done" without its code actually being propagated.
 			if err := c.promoteTaskToIntegration(ctx, run, *task, child); err != nil {
+				if errors.Is(err, errIntegrationBusy) {
+					// Another task of this run owns the integration lane right
+					// now. Nothing is wrong: the task stays running and this
+					// reconcile (which re-runs on every GetRun) retries. Parking
+					// the run in needs_attention here would turn the single-lane
+					// property itself into a stop for a human.
+					return nil
+				}
+				if errors.Is(err, errIntegrationTaskConflict) {
+					// The conflict belongs to THIS task. It has already been
+					// recorded against it, with the files and all three SHAs,
+					// and the integration lane is back. Every independent
+					// sibling must still be allowed to run and to integrate —
+					// parking the objective on one task's merge problem is the
+					// opposite of what parallel execution is for. The objective
+					// stops only when nothing is left that can move, which the
+					// end of this pass decides on its own — so this pass's own
+					// accounting has to know the task just stopped being
+					// active, or the objective would read "a task is still
+					// working" from a task that has in fact parked.
+					delete(activeTasks, task.ID)
+					parkedTasks[task.ID] = true
+					continue
+				}
 				if run.State == domain.WorkflowRunRunning {
 					_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, c.clock())
 					run.State = domain.WorkflowRunNeedsAttention
@@ -783,7 +824,12 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 	dispatched := false
 	for i := range tasks {
 		task := &tasks[i]
-		if task.State.Terminal() || task.ExecutionRunID != nil {
+		// A parked task is skipped here as well as above. It is not terminal —
+		// a person will very likely release it — but it is emphatically not
+		// dispatchable, and the dispatch loop's own test ("not terminal, no
+		// execution run yet") would otherwise send a task that has already run
+		// and conflicted back to a worker.
+		if task.State.Terminal() || task.State.Parked() || task.ExecutionRunID != nil {
 			continue
 		}
 		eligible := true
@@ -845,6 +891,30 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 		return nil
 	}
 
+	// A parked task stops the OBJECTIVE only when it has stopped everything
+	// else too.
+	//
+	// This is the second half of "a conflict belongs to the task": the master
+	// keeps going while any sibling can still move, and reflects the stop only
+	// once nothing in the DAG can. Reaching here already means nothing was
+	// dispatched and the plan did not complete; the extra condition is that
+	// nothing is in flight either, because a running sibling is progress and a
+	// run that reported attention while a task was still working would be
+	// asking a person to decide something that may resolve itself.
+	if len(activeTasks) == 0 && len(parkedTasks) > 0 {
+		if run.State == domain.WorkflowRunRunning {
+			_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, c.clock())
+			run.State = domain.WorkflowRunNeedsAttention
+		}
+		// Once per distinct occurrence, not once per poll: this condition is
+		// re-derived on every reconcile pass for as long as the task stays
+		// parked, and the parked task itself already carries the detail.
+		c.recordAttentionStopOnce(ctx, run, nil, ReasonTaskParked,
+			fmt.Sprintf("%s, and no other task can make progress until it is resolved",
+				describeParkedTasks(tasks)))
+		return nil
+	}
+
 	// Checkpoint 8P-E.13 Phase 6: nothing is running, nothing completed the
 	// plan, and no task is eligible to dispatch. That is only reachable when a
 	// task ended unsuccessfully and its dependents can therefore never unblock.
@@ -878,6 +948,23 @@ func (c *Coordinator) persistTaskWaitingReason(ctx stdctx.Context, task *domain.
 	}
 	task.ScopeJSON = raw
 	return nil
+}
+
+// describeParkedTasks names the parked tasks and what each is parked on, so the
+// objective's stop points at the tasks a person has to act on instead of saying
+// only that it stopped.
+func describeParkedTasks(tasks []domain.WorkflowTask) string {
+	var parts []string
+	for _, t := range tasks {
+		if !t.State.Parked() {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("task %d (%s) is parked on %s", t.Ordinal, t.Title, t.AttentionReason))
+	}
+	if len(parts) == 0 {
+		return "a task is parked"
+	}
+	return strings.Join(parts, "; ")
 }
 
 // blockedByUnsuccessfulTask reports whether this plan can no longer make

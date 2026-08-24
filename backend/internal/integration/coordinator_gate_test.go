@@ -36,12 +36,22 @@ func (g *coordStubGit) called() []string {
 
 func (g *coordStubGit) ResolveCommit(_ context.Context, dir, rev string) (string, error) {
 	g.record("resolve %s %s", dir, rev)
-	switch rev {
-	case "main":
+	if strings.HasPrefix(rev, "refs/heads/") && !strings.HasPrefix(rev, "refs/heads/ao/") {
 		return g.target, nil
-	default:
-		return g.source, nil
 	}
+	return g.source, nil
+}
+
+// ResolveCommitIfExists mirrors ResolveCommit for this stub: every ref the gate
+// tests name does exist. The "target ref not created yet" case has its own
+// coverage against a real repository, where absence is a real git answer rather
+// than a flag on a stub.
+func (g *coordStubGit) ResolveCommitIfExists(ctx context.Context, dir, rev string) (string, bool, error) {
+	sha, err := g.ResolveCommit(ctx, dir, rev)
+	if err != nil {
+		return "", false, err
+	}
+	return sha, sha != "", nil
 }
 
 func (g *coordStubGit) IsAncestor(_ context.Context, _, _, _ string) (bool, error) {
@@ -100,8 +110,8 @@ func (g *coordStubGit) CheckoutBranch(_ context.Context, _, branch string) error
 	return nil
 }
 
-func (g *coordStubGit) CompareAndSetBranch(_ context.Context, _, branch, next, expected string) error {
-	g.record("cas %s %s<-%s", branch, expected, next)
+func (g *coordStubGit) CompareAndSetRef(_ context.Context, _, ref, next, expected string) error {
+	g.record("cas %s %s<-%s", ref, expected, next)
 	if g.casErr != nil {
 		return g.casErr
 	}
@@ -271,7 +281,7 @@ func TestIntegrationLaneIsSingleFilePerTargetAndOnlyPerTarget(t *testing.T) {
 	// The first integration parks inside the lane by blocking in its verifier's
 	// place: IsAncestor is the first thing that happens after the lock is taken.
 	blocking := &coordBlockingGit{coordStubGit: git, entered: entered, release: release}
-	first, err := New(Deps{Git: blocking, Locks: locks})
+	first, err := New(Deps{Git: blocking, Locks: locks, Recorder: &coordRecorder{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +292,7 @@ func TestIntegrationLaneIsSingleFilePerTargetAndOnlyPerTarget(t *testing.T) {
 	}()
 	<-entered
 
-	second, err := New(Deps{Git: &coordStubGit{target: "tgt111", source: "src333", contains: true}, Locks: locks})
+	second, err := New(Deps{Git: &coordStubGit{target: "tgt111", source: "src333", contains: true}, Locks: locks, Recorder: &coordRecorder{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +304,7 @@ func TestIntegrationLaneIsSingleFilePerTargetAndOnlyPerTarget(t *testing.T) {
 
 	// A different target branch shares nothing with the busy one.
 	otherGit := &coordStubGit{target: "oth111", source: "oth222", contains: true}
-	other, err := New(Deps{Git: otherGit, Locks: locks})
+	other, err := New(Deps{Git: otherGit, Locks: locks, Recorder: &coordRecorder{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,15 +381,27 @@ func TestFastForwardIntegrationIsRecordedWithItsStrategyAndSHAs(t *testing.T) {
 	if verifier.calls != 0 {
 		t.Fatalf("verification ran %d times for a fast-forward", verifier.calls)
 	}
-	if records := rec.all(); len(records) != 1 || records[0].Strategy != StrategyFastForward {
-		t.Fatalf("recorder saw %+v", records)
+	// Two rows, in this order: the intent to move the ref, then what happened.
+	// The first is what makes a landed target impossible to leave unaccounted
+	// for if the process dies mid-update.
+	records := rec.all()
+	if len(records) != 2 {
+		t.Fatalf("recorder saw %d rows, want an intent and a result: %+v", len(records), records)
+	}
+	if records[0].Outcome != OutcomeAttempting || records[1].Outcome != OutcomeIntegrated {
+		t.Fatalf("ledger outcomes = %q, %q; want attempting then integrated", records[0].Outcome, records[1].Outcome)
+	}
+	for i, r := range records {
+		if r.Strategy != StrategyFastForward || r.TargetBeforeSHA != "tgt111" || r.TargetAfterSHA != "src222" {
+			t.Fatalf("row %d does not name the update: %+v", i, r)
+		}
 	}
 	// The ref update must be a compare-and-set against the head that was read.
 	var sawCAS bool
 	for _, call := range git.called() {
 		if strings.HasPrefix(call, "cas ") {
 			sawCAS = true
-			if call != "cas main tgt111<-src222" {
+			if call != "cas refs/heads/main tgt111<-src222" {
 				t.Fatalf("ref update = %q", call)
 			}
 		}
@@ -414,8 +436,18 @@ func TestTargetWrittenOutsideAOStopsForAPerson(t *testing.T) {
 	if att.TargetSHA != "tgt111" || att.BaseSHA != "base000" {
 		t.Fatalf("attention SHAs = %+v", att)
 	}
-	if len(rec.all()) != 1 {
-		t.Fatal("the attention outcome was not recorded")
+	// The intent was recorded before the ref update was attempted, and the
+	// refusal after it -- so the ledger shows an update that was tried and did
+	// not take, rather than nothing at all.
+	records := rec.all()
+	if len(records) != 2 {
+		t.Fatalf("recorder saw %d rows, want an intent and a refusal: %+v", len(records), records)
+	}
+	if records[0].Outcome != OutcomeAttempting || records[1].Outcome != OutcomeNeedsAttention {
+		t.Fatalf("ledger outcomes = %q, %q", records[0].Outcome, records[1].Outcome)
+	}
+	if records[1].TargetAfterSHA != "" {
+		t.Fatalf("a refused update recorded a target-after of %q", records[1].TargetAfterSHA)
 	}
 }
 
@@ -425,7 +457,7 @@ func TestTargetWrittenOutsideAOStopsForAPerson(t *testing.T) {
 func TestReplayWithoutAVerifierIsRefused(t *testing.T) {
 	t.Parallel()
 	git := &coordStubGit{target: "tgt111", source: "src222", contains: false}
-	c, err := New(Deps{Git: git, Locks: newCoordFakeLocker()})
+	c, err := New(Deps{Git: git, Locks: newCoordFakeLocker(), Recorder: &coordRecorder{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +473,7 @@ func TestReplayWithoutAVerifierIsRefused(t *testing.T) {
 // The mutating half of Git may only ever run in AO's own task worktree.
 func TestIntegrationRefusesToUseTheRepositoryAsItsWorktree(t *testing.T) {
 	t.Parallel()
-	c, err := New(Deps{Git: &coordStubGit{}, Locks: newCoordFakeLocker()})
+	c, err := New(Deps{Git: &coordStubGit{}, Locks: newCoordFakeLocker(), Recorder: &coordRecorder{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,5 +481,124 @@ func TestIntegrationRefusesToUseTheRepositoryAsItsWorktree(t *testing.T) {
 	req.WorktreePath = req.RepoPath
 	if _, err := c.Integrate(context.Background(), req); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("err = %v, want ErrInvalidRequest", err)
+	}
+}
+
+// An integration nobody can account for afterwards is worse than one that did
+// not happen, and it is undetectable once it has occurred -- so the only place
+// a missing Recorder can be caught is before anything has been integrated.
+func TestCoordinatorCannotBeBuiltWithoutARecorder(t *testing.T) {
+	t.Parallel()
+	if _, err := New(Deps{Git: &coordStubGit{}, Locks: newCoordFakeLocker()}); err == nil ||
+		!strings.Contains(err.Error(), "Recorder is required") {
+		t.Fatalf("err = %v, want a refusal naming the missing recorder", err)
+	}
+	if _, err := New(Deps{Git: &coordStubGit{}, Locks: newCoordFakeLocker(), Recorder: &coordRecorder{}}); err != nil {
+		t.Fatalf("a fully configured coordinator was refused: %v", err)
+	}
+}
+
+// One writable ref must mean exactly one lane, however the request spells it.
+//
+// The hazard this guards is specific: if the lane were keyed on a TargetBranch
+// a caller could choose independently of TargetRef, two requests naming one ref
+// under two labels would take two different locks and both start replaying onto
+// it. The compare-and-set would still stop the second from overwriting the
+// first -- but only after it had rebased and re-verified against a target that
+// was already stale, and only by failing. So the name is derived from the ref,
+// and these are the two halves of that: different spellings contend, and a
+// spelling that contradicts its ref is refused outright.
+func TestOneTargetRefIsOneLaneHoweverItIsSpelled(t *testing.T) {
+	t.Parallel()
+	locks := newCoordFakeLocker()
+	entered, release := make(chan struct{}), make(chan struct{})
+
+	// The first request names the target by branch alone.
+	blocking := &coordBlockingGit{
+		coordStubGit: &coordStubGit{target: "tgt111", source: "src222", contains: true},
+		entered:      entered, release: release,
+	}
+	first, err := New(Deps{Git: blocking, Locks: locks, Recorder: &coordRecorder{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byBranch := coordRequest()
+	byBranch.TargetBranch, byBranch.TargetRef = "main", ""
+	done := make(chan error, 1)
+	go func() {
+		_, err := first.Integrate(context.Background(), byBranch)
+		done <- err
+	}()
+	<-entered
+
+	// The second names the SAME ref by its full name and no branch at all.
+	second, err := New(Deps{
+		Git:      &coordStubGit{target: "tgt111", source: "src333", contains: true},
+		Locks:    locks,
+		Recorder: &coordRecorder{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byRef := coordRequest()
+	byRef.TaskID, byRef.TargetBranch, byRef.TargetRef = "task-2", "", "refs/heads/main"
+	if _, err := second.Integrate(context.Background(), byRef); !errors.Is(err, ErrLockBusy) {
+		t.Fatalf("a request naming the same ref by its full name got its own lane: err = %v", err)
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("first integration: %v", err)
+	}
+	// Exactly one lane was ever taken, under the canonical short-branch name --
+	// which is the key a direct-branch writer of main uses too.
+	if got := locks.acquisitions(); len(got) != 1 || got[0] != "/repo#main" {
+		t.Fatalf("lanes taken = %v, want exactly [/repo#main]", got)
+	}
+}
+
+// A ref and a branch label that contradict each other are refused rather than
+// silently reconciled: a caller that believes it is integrating something other
+// than what the ref says would have recorded that belief too.
+func TestTargetBranchThatContradictsItsRefIsRefused(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		branch, ref string
+		wantLane    string
+		wantRefusal bool
+	}{
+		{name: "branch alone derives its ref", branch: "main", ref: "", wantLane: "main"},
+		{name: "ref alone derives its lane", branch: "", ref: "refs/heads/main", wantLane: "main"},
+		{name: "matching pair is accepted", branch: "main", ref: "refs/heads/main", wantLane: "main"},
+		{
+			// An AO-owned ref is not a branch, so its lane is its full name --
+			// which cannot collide with any branch's short name.
+			name: "an AO ref keeps its full name as its lane",
+			ref:  "refs/ao/workflows/wf-1/integration", wantLane: "refs/ao/workflows/wf-1/integration",
+		},
+		{name: "a label that names a different ref", branch: "release", ref: "refs/heads/main", wantRefusal: true},
+		{name: "a label attached to a non-branch ref", branch: "main", ref: "refs/ao/workflows/wf-1/integration", wantRefusal: true},
+		{name: "neither a ref nor a branch", wantRefusal: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := coordRequest()
+			req.TargetBranch, req.TargetRef = tc.branch, tc.ref
+			err := req.validate()
+			if tc.wantRefusal {
+				if !errors.Is(err, ErrInvalidRequest) {
+					t.Fatalf("err = %v, want ErrInvalidRequest", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validate: %v", err)
+			}
+			if req.TargetBranch != tc.wantLane {
+				t.Fatalf("lane name = %q, want %q", req.TargetBranch, tc.wantLane)
+			}
+		})
 	}
 }

@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -30,6 +31,17 @@ const (
 	// never been verified as a whole by anything but this integration. It is
 	// only ever chosen when Policy.AllowMergeCommit says so explicitly.
 	StrategyMergeCommit Strategy = "merge_commit"
+	// StrategyNoOp is an integration with no git operation at all: the work is
+	// already on the target ref and all that had to happen was proving, under
+	// the lane, that it still is.
+	//
+	// It exists so direct-branch execution can take the same road as every
+	// other mode instead of a parallel one. Calling it a fast-forward would be
+	// the small lie that made the parallel road look justified — nothing was
+	// forwarded — and an integration that performs no git operation still has
+	// a lane to take, a readiness gate to pass, a precondition to satisfy and
+	// an audit row to write. Naming the no-op is what lets it have all four.
+	StrategyNoOp Strategy = "no_op"
 )
 
 // Outcome is what happened to one integration attempt, and it has exactly
@@ -60,7 +72,10 @@ type Record struct {
 	ProjectID     string
 	RepoPath      string
 	TargetBranch  string
-	SourceBranch  string
+	// TargetRef is the ref that actually moved -- refs/heads/<TargetBranch>
+	// for a real branch, or the AO-owned ref a master run accumulates on.
+	TargetRef    string
+	SourceBranch string
 
 	Strategy Strategy
 	// SourceSHA is the commit that was integrated -- after any rebase, so it is
@@ -95,24 +110,102 @@ type Record struct {
 // filtered without re-reading the rest of the row.
 type RecordOutcome string
 
-// The two outcomes an attempt can have. There is no "failed": an attempt that
-// could not run at all returns an error and is not recorded, because nothing
-// happened to the target branch for a ledger to describe.
+// The outcomes an attempt can have. There is no "failed": an attempt that could
+// not run at all returns an error and is not recorded, because nothing happened
+// to the target for a ledger to describe.
+//
+// OutcomeAttempting is the reason a landed target can never lack an audit
+// record. The ref update and the record of it are two writes to two different
+// stores, so no ordering of them alone is safe: recording afterwards loses the
+// record if the process dies in between, and recording only beforehand cannot
+// say what happened. Writing the intent first and the result after means the
+// worst a crash can leave behind is a row that names exactly which commit was
+// about to move which ref, from where -- which is enough to see what happened
+// and reconcile it. Both rows are written while the lane is still held.
 const (
+	OutcomeAttempting     RecordOutcome = "attempting"
 	OutcomeIntegrated     RecordOutcome = "integrated"
 	OutcomeNeedsAttention RecordOutcome = "needs_attention"
 )
 
-// Verification is the result of re-running the task's verification after its
-// work was replayed onto a target that had moved. Ran is false for a plain
-// fast-forward: nothing changed, so the verification the task already passed
-// still describes the exact content being integrated, and re-running it would
-// be an expensive way to get the same answer.
+// Verification is the verification that authorized one integration.
+//
+// It is NOT only "did this package re-run the checks". Every integration is
+// authorized by some verification — a plain fast-forward and a direct-branch
+// proof are authorized by the one the task itself already passed, and only a
+// replay is authorized by one this package ran. Recording Ran=false for the
+// first two was the defect: an audit row that says "verificationRan: false" for
+// work that a durable, successful verify step had in fact approved describes
+// the coordinator's own activity instead of the fact a reader needs, which is
+// what authorized moving the ref.
+//
+// So the zero value means "no verification is claimed at all", and anything
+// else carries the evidence: which durable record the verdict comes from, and
+// which content identity it describes. A verdict whose Fingerprint no longer
+// matches what is being integrated is never reused (see Request.Verified).
 type Verification struct {
 	Ran    bool
 	Passed bool
 	// Summary is a short human-readable account of what ran and what failed.
 	Summary string
+	// Source says where this verdict came from, so a reader can tell a reused
+	// verdict from one this integration produced.
+	Source VerificationSource
+	// StepID and EvidenceID point at the durable records behind the verdict —
+	// the workflow step that verified, and the specific result row. Both are
+	// links into evidence that outlives this record, which is the difference
+	// between an auditable claim and an assertion.
+	StepID     string
+	EvidenceID string
+	// Fingerprint is the content identity this verdict describes: the thing
+	// that was verified, not the thing that happened to be integrated. When it
+	// stops matching what is about to land, the verdict is stale and this
+	// package refuses to reuse it.
+	Fingerprint string
+}
+
+// VerificationSource is where a Verification's verdict came from.
+type VerificationSource string
+
+const (
+	// SourceTaskVerification is the task's own durable verify step: the
+	// verification that authorized the work in the first place, reused because
+	// the content being integrated is byte-for-byte the content it judged.
+	SourceTaskVerification VerificationSource = "task_verification"
+	// SourcePostReplay is a verification this coordinator ran after replaying
+	// the work onto a target that had moved, i.e. against content no earlier
+	// verification had ever seen.
+	SourcePostReplay VerificationSource = "post_replay"
+	// SourceRevalidated is a verification this coordinator ran because the
+	// task's own verdict had gone stale — the work changed after it was
+	// verified, without any replay by this package.
+	SourceRevalidated VerificationSource = "revalidated"
+	// SourceNotPlanned means the task's plan declared no verification at all.
+	// It is not a pass; it is the absence of anything to pass.
+	SourceNotPlanned VerificationSource = "not_planned"
+)
+
+// authorizes reports whether this verdict may authorize integrating content
+// whose identity is fingerprint, and why not when it may not.
+//
+// The empty-fingerprint cases are refusals rather than passes on purpose. A
+// verdict that cannot say what it describes, or a caller that cannot say what
+// it is integrating, has not shown the two are the same thing — and "not shown"
+// has to be treated exactly as "different" here, or the check is decorative.
+func (v Verification) authorizes(fingerprint string) (bool, string) {
+	switch {
+	case !v.Ran:
+		return false, "no verification is claimed"
+	case !v.Passed:
+		return false, "the verification it claims did not pass"
+	case v.Fingerprint == "":
+		return false, "the verification does not say what content it describes"
+	case fingerprint == "":
+		return false, "the content being integrated has no fingerprint to compare against"
+	case v.Fingerprint != fingerprint:
+		return false, fmt.Sprintf("it verified %s and the content being integrated is %s", v.Fingerprint, fingerprint)
+	}
+	return true, ""
 }
 
 // Verifier re-runs a task's verification against the worktree in its current
@@ -173,15 +266,31 @@ const (
 	// common ancestor, so none of the strategies -- every one of which replays
 	// a change relative to a base -- has anything to work with.
 	ReasonNoApplicableStrategy AttentionReason = "integration_no_applicable_strategy"
+	// ReasonPreconditionFailed is a caller's own freshness check refusing under
+	// the lane — the target is not what the task's work was judged against.
+	ReasonPreconditionFailed AttentionReason = "integration_precondition_failed"
+	// ReasonTargetMovedAfterVerification is a no-replay integration whose
+	// target no longer contains the verified work. It is distinct from a
+	// conflict: nothing is wrong with the work, something moved the branch.
+	ReasonTargetMovedAfterVerification AttentionReason = "integration_target_moved_after_verification"
 	// ReasonTargetMoved means the target branch changed between the read and
 	// the compare-and-set despite the lock -- something outside AO wrote it.
 	ReasonTargetMoved AttentionReason = "integration_target_moved"
+	// ReasonStaleVerification means the verification the caller offered no
+	// longer describes the content being integrated, and nothing was available
+	// to produce a fresh one. Integrating anyway would record an authorization
+	// that did not authorize this — the exact fiction the evidence fields
+	// exist to prevent — so it stops instead.
+	ReasonStaleVerification AttentionReason = "integration_stale_verification"
 )
 
-// Recorder persists one attempt's Record. It is called for BOTH outcomes: an
-// integration that stopped for a person is exactly as much a fact about the
-// target branch as one that landed, and the SHAs it names stop being
-// recoverable the moment anything else moves.
+// Recorder persists one attempt's Record. It is required, not optional: an
+// integration nobody can account for afterwards is worse than one that did not
+// happen, so a Coordinator cannot be built without one.
+//
+// It is called for EVERY outcome. An integration that stopped for a person is
+// exactly as much a fact about the target as one that landed, and the SHAs it
+// names stop being recoverable the moment anything else moves.
 type Recorder interface {
 	RecordIntegration(ctx context.Context, rec Record) error
 }

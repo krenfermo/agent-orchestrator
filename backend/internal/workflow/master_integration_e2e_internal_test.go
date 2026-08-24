@@ -95,7 +95,7 @@ func e2eFixture(t *testing.T) (*Coordinator, *sqlite.Store, *gitworktree.Workspa
 	if err := store.UpsertProject(ctx, domain.ProjectRecord{ID: "p", Path: repo, RegisteredAt: time.Now().UTC()}); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
-	coord := New(Deps{Store: store, Projects: store, WorkspaceFacts: ws, Clock: func() time.Time { return time.Now().UTC() }})
+	coord := New(Deps{Store: store, Projects: store, WorkspaceFacts: ws, IntegrationLocks: newLaneStub(), Clock: func() time.Time { return time.Now().UTC() }})
 	return coord, store, ws, repo, ctx
 }
 
@@ -165,6 +165,19 @@ func e2eDispatchTask(t *testing.T, ctx stdctx.Context, coord *Coordinator, store
 // creates a helper, task 2 physically sees and uses it, task 3 physically
 // sees and uses both 1 and 2's files — proof captured BEFORE each
 // task's own worker writes anything.
+// e2eCommitWork turns a task's written files into commits on its own branch.
+//
+// The Integration Coordinator moves COMMITS; the legacy promotion materialized
+// uncommitted worktree content, which is why these fixtures could get away with
+// only writing files. A promotion test now has to produce what a real task
+// produces. Tests that are about the worktree's dirty state rather than about
+// integration deliberately do not call this.
+func e2eCommitWork(t *testing.T, worktree, taskID string) {
+	t.Helper()
+	laneGit(t, worktree, "add", ".")
+	laneGit(t, worktree, "commit", "-m", "work of "+taskID)
+}
+
 func TestE2E_ThreeTaskChain_PhysicalCodePropagation(t *testing.T) {
 	coord, store, ws, repo, ctx := e2eFixture(t)
 	now := time.Now().UTC()
@@ -174,9 +187,10 @@ func TestE2E_ThreeTaskChain_PhysicalCodePropagation(t *testing.T) {
 	}
 
 	// Task 1: no dependencies, based on the project default branch.
-	task1, detail1, _ := e2eDispatchTask(t, ctx, coord, store, ws, master, "task-1", "", map[string]string{
+	task1, detail1, info1 := e2eDispatchTask(t, ctx, coord, store, ws, master, "task-1", "", map[string]string{
 		"helper.py": "def helper():\n    return 42\n",
 	})
+	e2eCommitWork(t, info1.Path, "task-1")
 	if err := coord.promoteTaskToIntegration(ctx, master, task1, detail1); err != nil {
 		t.Fatalf("promote task 1: %v", err)
 	}
@@ -197,6 +211,7 @@ func TestE2E_ThreeTaskChain_PhysicalCodePropagation(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(info2.Path, "helper.py")); err != nil {
 		t.Fatalf("task 2 worktree missing task 1's helper.py BEFORE its own worker wrote anything: %v", err)
 	}
+	e2eCommitWork(t, info2.Path, "task-2")
 	if err := coord.promoteTaskToIntegration(ctx, master, task2, detail2); err != nil {
 		t.Fatalf("promote task 2: %v", err)
 	}
@@ -211,6 +226,7 @@ func TestE2E_ThreeTaskChain_PhysicalCodePropagation(t *testing.T) {
 			t.Fatalf("task 3 worktree missing %s (from tasks 1+2) BEFORE its own worker wrote anything: %v", f, err)
 		}
 	}
+	e2eCommitWork(t, info3.Path, "task-3")
 	if err := coord.promoteTaskToIntegration(ctx, master, task3, detail3); err != nil {
 		t.Fatalf("promote task 3: %v", err)
 	}
@@ -250,7 +266,8 @@ func TestE2E_RestartMidPromotion_IdempotentSinglePromotion(t *testing.T) {
 	if _, _, err := store.CreateWorkflowRun(ctx, master, nil); err != nil {
 		t.Fatalf("seed master: %v", err)
 	}
-	task1, detail1, _ := e2eDispatchTask(t, ctx, coord, store, ws, master, "task-1", "", map[string]string{"helper.py": "x = 1\n"})
+	task1, detail1, info1 := e2eDispatchTask(t, ctx, coord, store, ws, master, "task-1", "", map[string]string{"helper.py": "x = 1\n"})
+	e2eCommitWork(t, info1.Path, "task-1")
 	if err := coord.promoteTaskToIntegration(ctx, master, task1, detail1); err != nil {
 		t.Fatalf("promote task 1 (first coordinator instance): %v", err)
 	}
@@ -260,7 +277,7 @@ func TestE2E_RestartMidPromotion_IdempotentSinglePromotion(t *testing.T) {
 	}
 
 	// Simulate daemon restart: brand-new Coordinator, same store/git.
-	restarted := New(Deps{Store: store, Projects: store, WorkspaceFacts: ws, Clock: func() time.Time { return time.Now().UTC() }})
+	restarted := New(Deps{Store: store, Projects: store, WorkspaceFacts: ws, IntegrationLocks: newLaneStub(), Clock: func() time.Time { return time.Now().UTC() }})
 	if err := restarted.promoteTaskToIntegration(ctx, master, task1, detail1); err != nil {
 		t.Fatalf("re-promote task 1 after restart: %v", err)
 	}

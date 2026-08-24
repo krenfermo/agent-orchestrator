@@ -109,9 +109,61 @@ func (s *Store) ListWorkflowTasks(ctx context.Context, runID string) ([]domain.W
 		if len(raw) > 0 {
 			_ = json.Unmarshal(raw, &deps)
 		}
-		out = append(out, domain.WorkflowTask{ID: r.ID, WorkflowRunID: r.WorkflowRunID, PlanStepID: r.PlanStepID, Ordinal: r.Ordinal, Title: r.Title, Description: r.Description, AcceptanceCriteriaJSON: r.AcceptanceCriteriaJson, VerifyJSON: r.VerifyJson, ScopeJSON: r.ScopeJson, State: domain.WorkflowTaskState(r.State), ExecutionRunID: nullStringToPtr(r.ExecutionRunID), Dependencies: deps, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, CompletedAt: nullTimeToTimePtr(r.CompletedAt)})
+		var attention domain.WorkflowTaskAttention
+		if r.AttentionJson != "" {
+			// A body that will not unmarshal must not lose the task. The reason
+			// column is the load-bearing part (it is what the CHECK guarantees
+			// a parked task has); the detail is a convenience.
+			_ = json.Unmarshal([]byte(r.AttentionJson), &attention)
+		}
+		out = append(out, domain.WorkflowTask{ID: r.ID, WorkflowRunID: r.WorkflowRunID, PlanStepID: r.PlanStepID, Ordinal: r.Ordinal, Title: r.Title, Description: r.Description, AcceptanceCriteriaJSON: r.AcceptanceCriteriaJson, VerifyJSON: r.VerifyJson, ScopeJSON: r.ScopeJson, State: domain.WorkflowTaskState(r.State), ExecutionRunID: nullStringToPtr(r.ExecutionRunID), Dependencies: deps, AttentionReason: r.AttentionReason, Attention: attention, AttentionAt: nullTimeToTimePtr(r.AttentionAt), CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, CompletedAt: nullTimeToTimePtr(r.CompletedAt)})
 	}
 	return out, nil
+}
+
+// ParkWorkflowTaskForAttention moves a task into the durable needs_attention
+// state with the detail a person needs to act on it.
+//
+// Conditional on the expected state for the same reason UpdateWorkflowTaskState
+// is: two reconcile passes racing on one task must not both park it, and a task
+// that has since been cancelled must not be revived by a late conflict report.
+// A false return means the task was not in the expected state, which the caller
+// must treat as "somebody else already decided", not as an error.
+func (s *Store) ParkWorkflowTaskForAttention(ctx context.Context, id string, expected domain.WorkflowTaskState, reason string, attention domain.WorkflowTaskAttention, now time.Time) (bool, error) {
+	if reason == "" {
+		// The schema refuses this too; failing here names the caller instead of
+		// surfacing a CHECK violation from three layers down.
+		return false, errors.New("park workflow task: a parked task must carry a reason")
+	}
+	body, err := json.Marshal(attention)
+	if err != nil {
+		return false, fmt.Errorf("marshal task attention: %w", err)
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	n, err := s.qw.ParkWorkflowTaskForAttention(ctx, gen.ParkWorkflowTaskForAttentionParams{
+		AttentionReason: reason, AttentionJson: string(body),
+		AttentionAt: sql.NullTime{Time: now, Valid: true}, UpdatedAt: now,
+		ID: id, ExpectedState: string(expected),
+	})
+	return n > 0, err
+}
+
+// ResumeWorkflowTaskFromAttention is the one exit from the parked state, and
+// the reason resuming is idempotent: the statement only matches a task that is
+// actually parked, so a second resume of the same task affects zero rows and
+// cannot produce a second integration attempt.
+//
+// The attention body is deliberately kept and only the reason and timestamp
+// are released. What the task was parked on is what tells the next attempt it
+// is a retry rather than a first try.
+func (s *Store) ResumeWorkflowTaskFromAttention(ctx context.Context, id string, next domain.WorkflowTaskState, now time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	n, err := s.qw.ResumeWorkflowTaskFromAttention(ctx, gen.ResumeWorkflowTaskFromAttentionParams{
+		State: string(next), UpdatedAt: now, ID: id,
+	})
+	return n > 0, err
 }
 
 func (s *Store) UpdateWorkflowTaskState(ctx context.Context, id string, expected, next domain.WorkflowTaskState, now time.Time) (bool, error) {

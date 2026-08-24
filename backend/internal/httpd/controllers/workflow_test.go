@@ -40,6 +40,11 @@ type fakeWorkflowService struct {
 	continueErr   error
 	continueCalls int
 
+	resumeRunID  string
+	resumeTaskID string
+	resumeErr    error
+	resumeCalls  int
+
 	detail workflowcore.RunDetail
 	runs   []domain.WorkflowRun
 }
@@ -108,6 +113,18 @@ func (f *fakeWorkflowService) ContinueRun(_ context.Context, runID string) (work
 		return f.detail, nil
 	}
 	return workflowcore.RunDetail{Run: domain.WorkflowRun{ID: runID, State: domain.WorkflowRunWaiting}}, nil
+}
+
+func (f *fakeWorkflowService) ResumeTask(_ context.Context, runID, taskID string) (workflowcore.RunDetail, error) {
+	f.resumeRunID, f.resumeTaskID = runID, taskID
+	f.resumeCalls++
+	if f.resumeErr != nil {
+		return workflowcore.RunDetail{}, f.resumeErr
+	}
+	if f.detail.Run.ID != "" {
+		return f.detail, nil
+	}
+	return workflowcore.RunDetail{Run: domain.WorkflowRun{ID: runID, State: domain.WorkflowRunRunning}}, nil
 }
 
 func newWorkflowTestServer(t *testing.T, svc workflowsvc.Manager) *httptest.Server {

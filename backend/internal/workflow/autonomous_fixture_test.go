@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -45,7 +46,13 @@ import (
 type autoSpawner struct {
 	store   *sqlite.Store
 	baseDir string
-	calls   []ports.SpawnConfig
+	// repoPath is the real git repository each spawned task gets a real
+	// worktree of. Task 5 routed every integration through the Integration
+	// Coordinator, which reads refs, computes ancestry and moves branches with
+	// git — so a task's worktree has to be one, and a fixture that handed out
+	// bare directories was describing a promotion path that no longer exists.
+	repoPath string
+	calls    []ports.SpawnConfig
 	// failWith, when set, is returned instead of starting a session — the
 	// worker-side counterpart of fakeReviewerLauncher.launchErr, so a test can
 	// park a child on a real worker-launch failure produced by the real
@@ -60,7 +67,24 @@ func (s *autoSpawner) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.
 	}
 	n := len(s.calls)
 	wsPath := filepath.Join(s.baseDir, fmt.Sprintf("task-%d", n))
-	if err := os.MkdirAll(wsPath, 0o755); err != nil {
+	branch := fmt.Sprintf("ao/task-%d", n)
+	if s.repoPath != "" {
+		// A real worktree on its own branch, with one commit of its own — the
+		// shape the Coordinator has to be able to fast-forward or replay.
+		if out, err := autoGit(s.repoPath, "worktree", "add", "-b", branch, wsPath); err != nil {
+			return domain.SessionRecord{}, 0, 0, fmt.Errorf("worktree add: %w: %s", err, out)
+		}
+		file := filepath.Join(wsPath, fmt.Sprintf("task-%d.txt", n))
+		if err := os.WriteFile(file, []byte(fmt.Sprintf("work of task %d\n", n)), 0o600); err != nil {
+			return domain.SessionRecord{}, 0, 0, err
+		}
+		if out, err := autoGit(wsPath, "add", "."); err != nil {
+			return domain.SessionRecord{}, 0, 0, fmt.Errorf("git add: %w: %s", err, out)
+		}
+		if out, err := autoGit(wsPath, "commit", "-m", fmt.Sprintf("task %d", n)); err != nil {
+			return domain.SessionRecord{}, 0, 0, fmt.Errorf("git commit: %w: %s", err, out)
+		}
+	} else if err := os.MkdirAll(wsPath, 0o755); err != nil {
 		return domain.SessionRecord{}, 0, 0, err
 	}
 	rec := domain.SessionRecord{
@@ -70,7 +94,7 @@ func (s *autoSpawner) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.
 		Harness:   cfg.Harness,
 		IssueID:   cfg.IssueID,
 		Activity:  domain.Activity{State: domain.ActivityIdle},
-		Metadata:  domain.SessionMetadata{Branch: fmt.Sprintf("ao/task-%d", n), WorkspacePath: wsPath},
+		Metadata:  domain.SessionMetadata{Branch: branch, WorkspacePath: wsPath},
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
 	}
@@ -94,7 +118,12 @@ type identityRuntimeIsolation struct{ store *sqlite.Store }
 
 func (r *identityRuntimeIsolation) Resolve(ctx context.Context, runID string, _ domain.AgentHarness) (map[string]string, domain.UserID, domain.ProviderProfileID, error) {
 	owner, err := r.store.GetWorkflowRunOwner(ctx, runID)
-	if err != nil || owner == nil {
+	if err != nil {
+		// A fixture cannot invent an owner, and a read failure is not one.
+		// Reporting no owner is what production does with an unowned run.
+		return nil, "", "", nil //nolint:nilerr // an unreadable owner reads as no owner, exactly as an unowned run does
+	}
+	if owner == nil {
 		return nil, "", "", nil
 	}
 	return nil, *owner, "", nil
@@ -219,11 +248,12 @@ func newAutonomousFixture(t *testing.T, plan workflowcore.MasterPlan) *autonomou
 	t.Helper()
 	store := sqlitetest.MustOpen(t)
 	ctx := context.Background()
-	if err := store.UpsertProject(ctx, domain.ProjectRecord{ID: "p", Path: t.TempDir(), RegisteredAt: time.Now().UTC()}); err != nil {
+	repoPath := newAutoTestRepo(t)
+	if err := store.UpsertProject(ctx, domain.ProjectRecord{ID: "p", Path: repoPath, RegisteredAt: time.Now().UTC()}); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
 	clk := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-	spawner := &autoSpawner{store: store, baseDir: t.TempDir()}
+	spawner := &autoSpawner{store: store, baseDir: t.TempDir(), repoPath: repoPath}
 	planner := &staticPlanner{plan: plan}
 	wakeSched := wake.New(store, clk.Now, autoIDSeq("wk"), wake.Config{})
 	ws := &fakeWorkspaceFacts{obs: ports.WorkspaceObservation{Dirty: true}}
@@ -242,7 +272,11 @@ func newAutonomousFixture(t *testing.T, plan workflowcore.MasterPlan) *autonomou
 
 func newAutonomousCoordinator(store *sqlite.Store, clk *fakeClock, spawner *autoSpawner, planner *staticPlanner, ws *fakeWorkspaceFacts, launcher *fakeReviewerLauncher, verifier *fakeVerifyRunner, sender *fakeMessageSender, wakeSched *wake.Scheduler, emails *autoEmailer) *workflowcore.Coordinator {
 	return workflowcore.New(workflowcore.Deps{
-		Store: store, Projects: store,
+		// Task 5: every ready task now reaches its target through the
+		// Integration Coordinator, which takes the lane first. A fixture
+		// without one cannot integrate at all.
+		IntegrationLocks: newLaneStubExternal(),
+		Store:            store, Projects: store,
 		Spawner: spawner, SessionFacts: store, WorkspaceFacts: ws,
 		ReviewRuns: store, ReviewerLauncher: launcher,
 		Verifier: verifier, MessageSender: sender,
@@ -388,4 +422,51 @@ func invalidCyclePlan() workflowcore.MasterPlan {
 	p := validMasterPlan()
 	p.Steps[0].Dependencies = []string{"tests"}
 	return p
+}
+
+// autoGit runs one git command for the autonomous fixtures.
+func autoGit(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANGUAGE=", "GIT_EDITOR=true",
+		"GIT_AUTHOR_NAME=Ao", "GIT_AUTHOR_EMAIL=ao@example.com",
+		"GIT_COMMITTER_NAME=Ao", "GIT_COMMITTER_EMAIL=ao@example.com")
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// newAutoTestRepo creates the real repository the autonomous fixtures now need.
+//
+// It is real git rather than a stub because the behaviour under test genuinely
+// depends on git: which commit a ref points at, whether one commit contains
+// another, whether a fast-forward applies, and whether a compare-and-set still
+// sees the value it read. A fake that answered those questions would be
+// asserting the fixture's opinion rather than the system's.
+func newAutoTestRepo(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repo, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"init", "--initial-branch=main"},
+		{"config", "user.email", "ao@example.com"},
+		{"config", "user.name", "Ao Agents"},
+	} {
+		if out, err := autoGit(repo, args...); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repo, "seed.txt"), []byte("seed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := autoGit(repo, "add", "."); err != nil {
+		t.Fatalf("git add: %v: %s", err, out)
+	}
+	if out, err := autoGit(repo, "commit", "-m", "seed"); err != nil {
+		t.Fatalf("git commit: %v: %s", err, out)
+	}
+	return repo
 }

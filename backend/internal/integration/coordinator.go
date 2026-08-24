@@ -41,6 +41,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -73,7 +74,26 @@ type Request struct {
 	// runs a mutating git command. It must not be RepoPath.
 	WorktreePath string
 
+	// TargetBranch is the lane's name, and it is DERIVED, never independent:
+	// validate() overwrites it with targetLaneName(TargetRef) and refuses a
+	// request that supplied a different one. Supplying it alone is the ordinary
+	// way to name a branch target (TargetRef is then refs/heads/<it>).
+	//
+	// It is not an independent input because it is what the lock is keyed on.
+	// If a caller could pair one TargetRef with any TargetBranch it liked, two
+	// requests naming one ref under two labels would take two different locks
+	// and replay onto that ref concurrently -- the compare-and-set would still
+	// stop the second from overwriting the first, but only after it had already
+	// rebased and re-verified against a target that was going stale underneath
+	// it, and only by failing. One writable ref has to mean exactly one lane,
+	// and deriving the name is what makes that true by construction rather than
+	// by every call site being careful.
 	TargetBranch string
+	// TargetRef is the ref the integration moves, and the single source of
+	// truth for which lane it belongs to. Empty means refs/heads/<TargetBranch>,
+	// which is what a project's own branch is; a master run integrating onto
+	// its accumulated AO-owned ref names that ref here.
+	TargetRef    string
 	SourceBranch string
 	// BaseSHA is the target commit the task's work was built on, as the task
 	// recorded it when it started. The coordinator compares it against the
@@ -82,26 +102,107 @@ type Request struct {
 
 	Readiness Readiness
 	Policy    Policy
+
+	// Verified is the durable verification that already authorized this work,
+	// as the caller reads it from its own records: the task's verify step, the
+	// result row behind it, and the content identity it describes.
+	//
+	// It is what an audit record reports for an integration this package did
+	// not itself verify — a fast-forward, a no-op direct-branch proof — instead
+	// of the bare Ran=false that used to stand in for "we didn't re-run the
+	// checks" and read as "nothing verified this". The zero value is the honest
+	// answer for a caller with no such record, and it stays Ran=false.
+	//
+	// It is only ever REUSED while it still describes what is landing: see
+	// SourceFingerprint.
+	Verified Verification
+	// SourceFingerprint is the content identity of the work about to be
+	// integrated, in whatever scheme the caller's verification also uses (a
+	// commit SHA for direct-branch, a workspace fingerprint for an AO
+	// worktree). The two are compared, never interpreted.
+	//
+	// If it does not equal Verified.Fingerprint, the verification is stale —
+	// something changed the work after it was judged — and this package will
+	// re-verify or stop rather than credit the old verdict to new content.
+	SourceFingerprint string
+
+	// NoReplay declares that the source is ALREADY on the target ref and must
+	// never be moved onto it.
+	//
+	// It exists for direct-branch execution, where the task committed straight
+	// onto the target and "integration" is a proof rather than a git operation.
+	// Such a request has no AO-owned worktree at all, so the package's standing
+	// rule — never run a mutating git command outside AO's own worktree — is
+	// kept by making a replay impossible instead of by trusting the caller not
+	// to need one: a target that has moved off the source becomes an attention,
+	// exactly as it does today, rather than a rebase of the user's own checkout.
+	NoReplay bool
+
+	// Precondition is the caller's own freshness check, evaluated INSIDE the
+	// lane against the target as it actually is.
+	//
+	// It closes the last TOCTOU gap: a caller that has to compare the target
+	// against something it learned earlier (direct-branch's "the branch still
+	// holds the commit that was reviewed and verified") cannot do that before
+	// the lane without the answer going stale between the check and the land.
+	// Returning an error refuses the integration with that reason recorded;
+	// nothing is written to the target.
+	//
+	// It also returns the content identity it observed, which becomes
+	// SourceFingerprint for the rest of this integration. That is the only way
+	// a caller whose fingerprint can only be read in the repository — direct
+	// branch — gets an in-lane one rather than a remembered one. Returning ""
+	// leaves the request's own SourceFingerprint in place.
+	Precondition func(ctx context.Context, targetSHA, sourceSHA string) (observedFingerprint string, err error)
 }
 
 func (r *Request) validate() error {
 	trimmed(&r.WorkflowRunID, &r.TaskID, &r.SessionID, &r.RepoPath, &r.RepoName,
-		&r.WorktreePath, &r.TargetBranch, &r.SourceBranch, &r.BaseSHA)
+		&r.WorktreePath, &r.TargetBranch, &r.TargetRef, &r.SourceBranch, &r.BaseSHA,
+		&r.SourceFingerprint, &r.Verified.Fingerprint)
+	if r.TargetRef == "" && r.TargetBranch != "" {
+		r.TargetRef = "refs/heads/" + r.TargetBranch
+	}
+	// Canonicalize the lane name from the ref, and refuse a request that named
+	// a different one rather than silently correcting it: a caller that thinks
+	// it is integrating something other than what the ref says is a caller
+	// whose record would have been wrong too.
+	if r.TargetRef != "" {
+		canonical := targetLaneName(r.TargetRef)
+		if r.TargetBranch != "" && r.TargetBranch != canonical {
+			return fmt.Errorf("%w: target branch %q does not name ref %q (its lane is %q)",
+				ErrInvalidRequest, r.TargetBranch, r.TargetRef, canonical)
+		}
+		r.TargetBranch = canonical
+	}
 	switch {
 	case r.TaskID == "":
 		return fmt.Errorf("%w: task id is required", ErrInvalidRequest)
 	case r.RepoPath == "":
 		return fmt.Errorf("%w: repository path is required", ErrInvalidRequest)
-	case r.WorktreePath == "":
+	case r.WorktreePath == "" && !r.NoReplay:
+		// A no-replay request never runs a mutating git command, so it has no
+		// worktree to run one in. Every other request does, and the requirement
+		// stands for them — it is what keeps this package's writes confined to
+		// AO's own trees.
 		return fmt.Errorf("%w: worktree path is required", ErrInvalidRequest)
-	case r.TargetBranch == "":
-		return fmt.Errorf("%w: target branch is required", ErrInvalidRequest)
+	case r.TargetRef == "":
+		return fmt.Errorf("%w: a target ref or branch is required", ErrInvalidRequest)
 	case r.SourceBranch == "":
 		return fmt.Errorf("%w: source branch is required", ErrInvalidRequest)
 	case r.WorkflowRunID == "" && r.SessionID == "":
 		// The lock is owned by a run or by a session. An acquisition with
 		// neither could never be released by either and would strand the lane.
 		return fmt.Errorf("%w: neither a workflow run nor a session owns this integration", ErrInvalidRequest)
+	case r.TargetRef == "refs/heads/"+r.SourceBranch && !r.NoReplay:
+		// Integrating a branch onto itself would compare-and-set a ref to a
+		// commit it already points at, or worse, move it in a loop.
+		//
+		// A no-replay request is the one legitimate case where source and
+		// target ARE the same ref: direct-branch execution committed onto the
+		// target, and what is being asked for is a proof under the lane, not a
+		// move. Nothing is written that is not already there.
+		return fmt.Errorf("%w: the source and target are the same ref (%s)", ErrInvalidRequest, r.TargetRef)
 	case r.WorktreePath == r.RepoPath:
 		// This is the one invariant worth refusing rather than working around.
 		// Every replay this package performs -- rebase, cherry-pick, merge,
@@ -113,11 +214,11 @@ func (r *Request) validate() error {
 	return nil
 }
 
-// Deps are the coordinator's collaborators. Git and Locks are required;
-// Verifier may be nil only for a caller that can guarantee it will never need
-// a replay, which in practice no caller can, so leaving it out is treated as a
-// configuration error at the moment it would have been needed rather than
-// silently integrating unverified content.
+// Deps are the coordinator's collaborators. Git, Locks and Recorder are all
+// required. Verifier may be nil only for a caller that can guarantee it will
+// never need a replay, which in practice no caller can, so leaving it out is
+// treated as a configuration error at the moment it would have been needed
+// rather than silently integrating unverified content.
 type Deps struct {
 	Git      Git
 	Locks    Locker
@@ -142,6 +243,12 @@ func New(deps Deps) (*Coordinator, error) {
 	}
 	if deps.Locks == nil {
 		return nil, errors.New("integration: a Locker is required")
+	}
+	if deps.Recorder == nil {
+		// Refused at construction rather than at the first integration: an
+		// unrecorded integration is not detectable afterwards, so the only
+		// place this can be caught is before anything has been integrated.
+		return nil, errors.New("integration: a Recorder is required")
 	}
 	clock := deps.Clock
 	if clock == nil {
@@ -207,7 +314,7 @@ func (c *Coordinator) integrateLocked(ctx context.Context, req Request) (Outcome
 	// Read the target from the repository, now, inside the lane. req.BaseSHA is
 	// what the task believed when it started and is kept only to describe the
 	// drift.
-	targetBefore, err := c.git.ResolveCommit(ctx, req.RepoPath, req.TargetBranch)
+	targetBefore, targetExists, err := c.git.ResolveCommitIfExists(ctx, req.RepoPath, req.TargetRef)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -216,12 +323,39 @@ func (c *Coordinator) integrateLocked(ctx context.Context, req Request) (Outcome
 		return Outcome{}, err
 	}
 
+	if req.Precondition != nil {
+		observed, refusal := req.Precondition(ctx, targetBefore, sourceSHA)
+		if refusal != nil {
+			// Refused under the lane, against the target as it actually is.
+			// Nothing has been written and nothing will be. This is an outcome,
+			// not an error: the caller's freshness check answering "no" is a
+			// normal result of integrating work whose target moved.
+			return needsAttention(Record{
+				TaskID: req.TaskID, WorkflowRunID: req.WorkflowRunID, ProjectID: string(req.ProjectID),
+				RepoPath: req.RepoPath, TargetBranch: req.TargetBranch, TargetRef: req.TargetRef,
+				SourceBranch: req.SourceBranch, SourceSHA: sourceSHA, TargetBeforeSHA: targetBefore,
+				BaseSHA: req.BaseSHA, IntegratedAt: c.clock(),
+				Outcome: OutcomeNeedsAttention,
+				Attention: &Attention{
+					Reason: ReasonPreconditionFailed, BaseSHA: req.BaseSHA,
+					TargetSHA: targetBefore, SourceSHA: sourceSHA, Detail: refusal.Error(),
+				},
+			}), nil //nolint:nilerr // an attention is an outcome, not a coordinator failure; see Outcome.Attention
+		}
+		if observed != "" {
+			// req is this call's own copy, so the in-lane observation replaces
+			// whatever the caller remembered for the rest of the integration.
+			req.SourceFingerprint = observed
+		}
+	}
+
 	rec := Record{
 		TaskID:          req.TaskID,
 		WorkflowRunID:   req.WorkflowRunID,
 		ProjectID:       string(req.ProjectID),
 		RepoPath:        req.RepoPath,
 		TargetBranch:    req.TargetBranch,
+		TargetRef:       req.TargetRef,
 		SourceBranch:    req.SourceBranch,
 		SourceSHA:       sourceSHA,
 		TargetBeforeSHA: targetBefore,
@@ -232,6 +366,16 @@ func (c *Coordinator) integrateLocked(ctx context.Context, req Request) (Outcome
 		rec.BaseSHA = targetBefore
 	}
 
+	if !targetExists {
+		// The first integration onto a master run's AO-owned ref. There is
+		// nothing to be overtaken by, no ancestry to compute and no old value
+		// to compare against — but this still happens INSIDE the lane, and the
+		// ref is still created with a compare-and-set whose expected value is
+		// "must not exist", so two first integrations cannot both win.
+		rec.Strategy = StrategyFastForward
+		return c.landAuthorized(ctx, req, rec, sourceSHA)
+	}
+
 	contained, err := c.git.IsAncestor(ctx, req.RepoPath, targetBefore, sourceSHA)
 	if err != nil {
 		return Outcome{}, err
@@ -239,10 +383,33 @@ func (c *Coordinator) integrateLocked(ctx context.Context, req Request) (Outcome
 	if contained {
 		// The target is still an ancestor of the source, so the source already
 		// contains every commit the target has: moving the ref forward loses
-		// nothing and re-verifying would re-answer a question the task already
-		// answered against this exact content.
+		// nothing, and the verification the task already passed still describes
+		// this exact content — which is what landAuthorized checks rather than
+		// assumes.
 		rec.Strategy = StrategyFastForward
-		return c.land(ctx, req, rec, sourceSHA)
+		if req.NoReplay {
+			// Direct-branch execution: the work is already on the target ref
+			// and nothing at all is being forwarded. Recording it as a
+			// fast-forward would overstate what happened by one git operation.
+			rec.Strategy = StrategyNoOp
+		}
+		return c.landAuthorized(ctx, req, rec, sourceSHA)
+	}
+
+	if req.NoReplay {
+		// The source was supposed to be on the target and is not. Something
+		// moved the branch after this task's work was reviewed and verified, so
+		// what is there now is not what was judged. Refuse; never rebase a
+		// checkout this package does not own.
+		rec.Outcome = OutcomeNeedsAttention
+		rec.Attention = &Attention{
+			Reason:    ReasonTargetMovedAfterVerification,
+			BaseSHA:   rec.BaseSHA,
+			TargetSHA: targetBefore,
+			SourceSHA: sourceSHA,
+			Detail:    "the target no longer contains the verified work, and this integration may not replay onto it",
+		}
+		return needsAttention(rec), nil
 	}
 
 	// The target moved while this task was working. Everything below replays
@@ -284,6 +451,12 @@ func (c *Coordinator) integrateLocked(ctx context.Context, req Request) (Outcome
 	if err != nil {
 		return Outcome{}, err
 	}
+	// The replay changed the content, so whatever the task verified before is
+	// no longer what is landing. The audit says so explicitly rather than by
+	// omission: this verdict came from here, and it describes the replayed
+	// commit.
+	verification.Source = SourcePostReplay
+	verification.Fingerprint = replayed
 	rec.Verification = verification
 	if !verification.Passed {
 		// The work is correct against the base it was written on and wrong
@@ -524,6 +697,79 @@ func (c *Coordinator) verify(ctx context.Context, req Request, head, targetSHA s
 	return verification, nil
 }
 
+// landAuthorized is land for the paths that perform no replay: it first
+// establishes WHAT authorized the integration, and records it.
+//
+// The three answers it can reach, in order:
+//
+//   - The caller offered no verification at all. Nothing is claimed, the record
+//     keeps Ran=false, and the integration proceeds exactly as it always has.
+//     That is honest for a caller with no durable verify record; it is the
+//     caller's job not to be one.
+//   - The caller's verification still describes the content being integrated.
+//     It is reused verbatim, evidence links and all, so the audit row names the
+//     verify that actually authorized this ref update instead of reporting that
+//     nothing verified it.
+//   - The verification has gone stale: the work changed after it was judged.
+//     It is NOT reused. A fresh verification is run where one can be, and where
+//     it cannot the integration stops for a person — because the alternative is
+//     an audit record crediting an old verdict to content it never saw.
+func (c *Coordinator) landAuthorized(ctx context.Context, req Request, rec Record, next string) (Outcome, error) {
+	if !req.Verified.Ran {
+		// No verification is claimed. Recording the caller's own zero value
+		// rather than nothing keeps the distinction a reader needs — "the plan
+		// declared no verification" is a different fact from "nobody said".
+		rec.Verification = req.Verified
+		return c.land(ctx, req, rec, next)
+	}
+	authorized, why := req.Verified.authorizes(req.SourceFingerprint)
+	if authorized {
+		rec.Verification = req.Verified
+		if rec.Verification.Source == "" {
+			rec.Verification.Source = SourceTaskVerification
+		}
+		return c.land(ctx, req, rec, next)
+	}
+
+	if c.verifier == nil || req.WorktreePath == "" {
+		// Nothing here can re-establish the authorization, and this package
+		// does not run commands in a checkout it does not own. Stopping is the
+		// only outcome that neither integrates unverified content nor claims a
+		// verification that did not happen.
+		rec.Outcome = OutcomeNeedsAttention
+		rec.Attention = &Attention{
+			Reason:    ReasonStaleVerification,
+			BaseSHA:   rec.BaseSHA,
+			TargetSHA: rec.TargetBeforeSHA,
+			SourceSHA: rec.SourceSHA,
+			Strategy:  rec.Strategy,
+			Detail:    "the verification this work carries no longer describes it (" + why + "), and nothing here can produce a fresh one",
+		}
+		return needsAttention(rec), nil
+	}
+
+	verification, err := c.verify(ctx, req, next, rec.TargetBeforeSHA)
+	if err != nil {
+		return Outcome{}, err
+	}
+	verification.Source = SourceRevalidated
+	verification.Fingerprint = req.SourceFingerprint
+	rec.Verification = verification
+	if !verification.Passed {
+		rec.Outcome = OutcomeNeedsAttention
+		rec.Attention = &Attention{
+			Reason:    ReasonVerificationFailed,
+			BaseSHA:   rec.BaseSHA,
+			TargetSHA: rec.TargetBeforeSHA,
+			SourceSHA: rec.SourceSHA,
+			Strategy:  rec.Strategy,
+			Detail:    "the work changed after it was verified (" + why + ") and re-verifying it failed: " + verification.Summary,
+		}
+		return needsAttention(rec), nil
+	}
+	return c.land(ctx, req, rec, next)
+}
+
 // land performs the atomic step and completes the record.
 func (c *Coordinator) land(ctx context.Context, req Request, rec Record, next string) (Outcome, error) {
 	if next == rec.TargetBeforeSHA {
@@ -534,10 +780,23 @@ func (c *Coordinator) land(ctx context.Context, req Request, rec Record, next st
 		rec.Outcome = OutcomeIntegrated
 		return Outcome{Integrated: true, Record: rec}, nil
 	}
-	if err := c.git.CompareAndSetBranch(ctx, req.RepoPath, req.TargetBranch, next, rec.TargetBeforeSHA); err != nil {
+	// The intent is recorded BEFORE the ref moves. The ref update and its audit
+	// record are writes to two different stores, so there is no ordering of the
+	// two that a crash cannot split; writing the intent first means the worst a
+	// split can leave behind is a row naming exactly which commit was about to
+	// move which ref, from where. See RecordOutcome's comment.
+	rec.TargetAfterSHA = next
+	intent := rec
+	intent.Outcome = OutcomeAttempting
+	if err := c.recorder.RecordIntegration(ctx, intent); err != nil {
+		return Outcome{}, fmt.Errorf("integration: recording the intent to move %s to %s: %w", req.TargetRef, next, err)
+	}
+
+	if err := c.git.CompareAndSetRef(ctx, req.RepoPath, req.TargetRef, next, rec.TargetBeforeSHA); err != nil {
 		// The lane guarantees no other integration moved the target, so a
-		// failed compare-and-set means something outside AO wrote the branch
-		// while we held it. That is a fact a person needs, not a retry.
+		// failed compare-and-set means something outside AO wrote the ref while
+		// we held it. That is a fact a person needs, not a retry.
+		rec.TargetAfterSHA = ""
 		rec.Outcome = OutcomeNeedsAttention
 		rec.Attention = &Attention{
 			Reason:    ReasonTargetMoved,
@@ -552,18 +811,21 @@ func (c *Coordinator) land(ctx context.Context, req Request, rec Record, next st
 		}
 		return needsAttention(rec), nil
 	}
-	rec.TargetAfterSHA = next
 	rec.Outcome = OutcomeIntegrated
-	if rec.Strategy != StrategyRebaseFastForward {
+	if rec.Replayed && rec.Strategy != StrategyRebaseFastForward {
 		// The result was built on a detached HEAD; give the worktree its branch
-		// back now that the ref has moved.
+		// back now that the ref has moved. Gated on Replayed, not on the
+		// strategy alone: a no-op integration never checked anything out, and
+		// has no worktree of its own to check back in.
 		_ = c.git.CheckoutBranch(ctx, req.WorktreePath, req.SourceBranch)
 	}
 	return Outcome{Integrated: true, Record: rec}, nil
 }
 
 func (c *Coordinator) record(ctx context.Context, rec Record) error {
-	if c.recorder == nil || rec.Strategy == "" && rec.Attention == nil {
+	if rec.Strategy == "" && rec.Attention == nil {
+		// Nothing was decided, so there is nothing to account for. This is only
+		// reachable if a future branch returns before choosing a strategy.
 		return nil
 	}
 	return c.recorder.RecordIntegration(ctx, rec)
@@ -574,6 +836,27 @@ func (c *Coordinator) record(ctx context.Context, rec Record) error {
 // person has to act.
 func needsAttention(rec Record) Outcome {
 	return Outcome{Record: rec, Attention: rec.Attention}
+}
+
+// targetLaneName maps a target ref onto the name its lane is keyed on. It is
+// the whole ref-to-lock-key mapping, in one place, and it is total: every ref
+// has exactly one lane name and every lane name comes from exactly one ref.
+//
+// A branch ref maps to its SHORT name on purpose. That is the same key
+// direct-branch ownership uses (domain.BranchLockKey takes a branch name), so
+// an integration of refs/heads/main and a run writing main directly contend for
+// one lock rather than for two -- which is the exclusion that has to hold, and
+// would be silently lost if the lane were keyed on the full ref.
+//
+// Anything else -- an AO-owned ref under refs/ao/, a tag, any future ref
+// namespace -- keeps its full name, which cannot collide with a branch's short
+// name (a branch name may not contain a path segment that makes it look like
+// "refs/...", and two different refs never share a full name).
+func targetLaneName(ref string) string {
+	if short := strings.TrimPrefix(ref, "refs/heads/"); short != ref {
+		return short
+	}
+	return ref
 }
 
 func replayOp(strategy Strategy) (ReplayOp, error) {

@@ -14,6 +14,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/branchlock"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/integration"
 	"github.com/aoagents/agent-orchestrator/backend/internal/providerruntime"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
@@ -215,6 +216,11 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		// adapter and is refused for every other mode.
 		BranchLocks:        workflowBranchLocks{mgr: branchLocks},
 		WorkspaceCommitter: workspace,
+		// The target-integration lane, over the SAME branch-lock manager as
+		// BranchLocks above. Sharing the manager is what makes an integration
+		// and a direct writer of one branch exclude each other: they contend
+		// for one lock key in one table, rather than for two ideas of a lock.
+		IntegrationLocks: integration.NewBranchLocker(branchLocks),
 		// Checkpoint 8P-E.13A.4: without an active prober, a provider profile
 		// that has never been dispatched to reports CapacityUnknown until a
 		// human happens to run it, which is how an authenticated Codex reviewer

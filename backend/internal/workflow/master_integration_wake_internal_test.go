@@ -119,7 +119,8 @@ func TestMasterIntegration_CapacityWaitThenWake_Task2SeesTask1BeforeItWrites(t *
 	wakeSched := wake.New(store, clk.Now, newWakeIntIDSeqMaster(), wake.Config{})
 	coord := New(Deps{
 		Store: store, Projects: store, WorkspaceFacts: ws,
-		Spawner: spawner, SessionFacts: store,
+		IntegrationLocks: newLaneStub(),
+		Spawner:          spawner, SessionFacts: store,
 		WakeScheduler: wakeSched, Clock: clk.Now,
 		NewID: newWakeIntIDSeqMaster(),
 	})
@@ -131,9 +132,10 @@ func TestMasterIntegration_CapacityWaitThenWake_Task2SeesTask1BeforeItWrites(t *
 	if _, _, err := store.CreateWorkflowRun(ctx, master, nil); err != nil {
 		t.Fatalf("seed master: %v", err)
 	}
-	task1, detail1, _ := e2eDispatchTask(t, ctx, coord, store, ws, master, "task-1", "", map[string]string{
+	task1, detail1, info1 := e2eDispatchTask(t, ctx, coord, store, ws, master, "task-1", "", map[string]string{
 		"helper.py": "def helper():\n    return 42\n",
 	})
+	e2eCommitWork(t, info1.Path, "task-1")
 	if err := coord.promoteTaskToIntegration(ctx, master, task1, detail1); err != nil {
 		t.Fatalf("promote task 1: %v", err)
 	}

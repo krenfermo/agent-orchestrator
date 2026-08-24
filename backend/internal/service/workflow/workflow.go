@@ -43,6 +43,9 @@ type Manager interface {
 	// completed; a future checkpoint can extend it (fix/verify automation)
 	// without a breaking API change.
 	ContinueRun(ctx context.Context, runID string) (workflowcore.RunDetail, error)
+	// ResumeTask releases one task parked in needs_attention (migration 0130)
+	// after a person has dealt with what parked it. Idempotent.
+	ResumeTask(ctx context.Context, runID, taskID string) (workflowcore.RunDetail, error)
 }
 
 type PlannerManager interface {
@@ -165,4 +168,16 @@ func (s *Service) ProjectBoardHistory(ctx context.Context, projectID string, lim
 // work step has completed (idempotently); a no-op otherwise.
 func (s *Service) ContinueRun(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
 	return s.coordinator.ContinueRun(ctx, runID)
+}
+
+// ResumeTask releases one task parked in needs_attention after a person has
+// dealt with what parked it, and returns the run as it then is.
+//
+// Idempotent: resuming a task that is not parked changes nothing and is not an
+// error, so a repeated request cannot produce a second integration attempt.
+func (s *Service) ResumeTask(ctx context.Context, runID, taskID string) (workflowcore.RunDetail, error) {
+	if err := s.coordinator.ResumeTaskAfterAttention(ctx, runID, taskID); err != nil {
+		return workflowcore.RunDetail{}, err
+	}
+	return s.coordinator.GetRun(ctx, runID)
 }

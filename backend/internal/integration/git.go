@@ -31,6 +31,13 @@ import (
 type Git interface {
 	// ResolveCommit returns the commit SHA rev names in dir.
 	ResolveCommit(ctx context.Context, dir, rev string) (string, error)
+	// ResolveCommitIfExists is ResolveCommit for a ref that legitimately may
+	// not exist yet: the FIRST integration onto a master run's AO-owned ref
+	// happens when nothing has ever been integrated, so there is no commit to
+	// read and that is not an error. exists=false means "the ref is absent",
+	// which is a different fact from "the repository could not be read", and
+	// only the first is safe to treat as an empty target.
+	ResolveCommitIfExists(ctx context.Context, dir, rev string) (sha string, exists bool, err error)
 	// IsAncestor reports whether ancestor is reachable from descendant. It is
 	// how "does the target still contain everything the source was built on"
 	// is answered, and therefore how fast-forward applicability is decided.
@@ -89,11 +96,16 @@ type Git interface {
 	// cherry-pick or merge staging area is undone after the ref has moved.
 	CheckoutBranch(ctx context.Context, worktree, branch string) error
 
-	// CompareAndSetBranch moves refs/heads/branch from expected to next, and
-	// fails if the ref is not at expected. This is the atomic step: the whole
-	// integration lands in one ref update or not at all, and a target that
-	// moved between the read and the write loses rather than being overwritten.
-	CompareAndSetBranch(ctx context.Context, repo, branch, next, expected string) error
+	// CompareAndSetRef moves ref from expected to next, and fails if the ref is
+	// not at expected. This is the atomic step: the whole integration lands in
+	// one ref update or not at all, and a target that moved between the read
+	// and the write loses rather than being overwritten.
+	//
+	// It takes a full ref name rather than a branch because not every
+	// integration target is a branch: a master run accumulates its tasks on an
+	// AO-owned ref under refs/ao/, and that ref is contended by exactly the
+	// same tasks, for exactly the same reason, as a branch would be.
+	CompareAndSetRef(ctx context.Context, repo, ref, next, expected string) error
 }
 
 // ReplayOp names the in-progress git operation a continue or abort refers to.
@@ -137,6 +149,37 @@ func (g execGit) ResolveCommit(ctx context.Context, dir, rev string) (string, er
 		return "", fmt.Errorf("integration: %q does not resolve to a commit in %s", rev, dir)
 	}
 	return sha, nil
+}
+
+func (g execGit) ResolveCommitIfExists(ctx context.Context, dir, rev string) (string, bool, error) {
+	// `rev-parse --verify --quiet` is precisely this question: it exits
+	// non-zero with no output when the ref is absent, and only prints on
+	// success. Distinguishing that from a genuine failure is why this cannot
+	// simply swallow ResolveCommit's error.
+	out, err := g.run(ctx, dir, "rev-parse", "--verify", "--quiet", rev+"^{commit}")
+	sha := strings.TrimSpace(string(out))
+	if err != nil {
+		if sha == "" && isMissingRefExit(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if sha == "" {
+		return "", false, nil
+	}
+	return sha, true, nil
+}
+
+// isMissingRefExit reports whether git's failure was the plain "no such ref"
+// exit rather than a broken repository. An unreadable repository must never be
+// mistaken for an empty target: the first would integrate onto nothing, the
+// second would create a ref in a repository AO cannot actually use.
+func isMissingRefExit(err error) bool {
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return exit.ExitCode() == 1
+	}
+	return false
 }
 
 func (g execGit) IsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, error) {
@@ -298,8 +341,11 @@ func (g execGit) CheckoutBranch(ctx context.Context, worktree, branch string) er
 	return err
 }
 
-func (g execGit) CompareAndSetBranch(ctx context.Context, repo, branch, next, expected string) error {
-	_, err := g.run(ctx, repo, "update-ref", "refs/heads/"+branch, next, expected)
+func (g execGit) CompareAndSetRef(ctx context.Context, repo, ref, next, expected string) error {
+	// An empty expected value is git's own spelling of "this ref must not
+	// exist yet", which is what the first integration onto a fresh AO ref
+	// needs, and is still a compare-and-set rather than a blind write.
+	_, err := g.run(ctx, repo, "update-ref", ref, next, expected)
 	return err
 }
 

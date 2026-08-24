@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/integration"
 	"github.com/aoagents/agent-orchestrator/backend/internal/workflow/wake"
 )
 
@@ -153,6 +154,12 @@ type masterPlanStore interface {
 	ReplaceWorkflowTaskRelationships(ctx stdctx.Context, rels []domain.WorkflowTaskRelationship) error
 	ListWorkflowTaskRelationships(ctx stdctx.Context, runID string) ([]domain.WorkflowTaskRelationship, error)
 	UpdateWorkflowTaskState(ctx stdctx.Context, id string, expected, next domain.WorkflowTaskState, now time.Time) (bool, error)
+	// ParkWorkflowTaskForAttention / ResumeWorkflowTaskFromAttention are the
+	// only two transitions in and out of the durable task-level parked state
+	// (migration 0130). Both are conditional on the state they expect, which is
+	// what makes parking race-free and resuming idempotent.
+	ParkWorkflowTaskForAttention(ctx stdctx.Context, id string, expected domain.WorkflowTaskState, reason string, attention domain.WorkflowTaskAttention, now time.Time) (bool, error)
+	ResumeWorkflowTaskFromAttention(ctx stdctx.Context, id string, next domain.WorkflowTaskState, now time.Time) (bool, error)
 	SetWorkflowTaskExecutionRun(ctx stdctx.Context, taskID, executionRunID string, now time.Time) (bool, error)
 	FindWorkflowRunByPlannedTask(ctx stdctx.Context, taskID string) (string, bool, error)
 	ApproveWorkflowPlan(ctx stdctx.Context, runID string, now time.Time) (bool, error)
@@ -281,7 +288,12 @@ type Deps struct {
 	// whose project policy allows it. Both optional: nil means no run ever
 	// takes a branch lock and no run ever commits on its own -- exactly the
 	// pre-8P-E.11 behavior every isolated-worktree project keeps.
-	BranchLocks        BranchLocks
+	BranchLocks BranchLocks
+	// IntegrationLocks is the target-integration lane (internal/integration).
+	// Wired in internal/daemon to integration.NewBranchLocker over the same
+	// branch-lock manager BranchLocks uses, so an integration and a direct
+	// writer of one branch exclude each other.
+	IntegrationLocks   integration.Locker
 	WorkspaceCommitter WorkspaceCommitter
 
 	// TrustedLocal mirrors config.Config.TrustedLocalMode (Checkpoint 8P-C):
@@ -368,6 +380,15 @@ type Coordinator struct {
 	executionPolicies ExecutionPolicies
 	trustedLocal      bool
 
+	// integrationLocks is the target-integration lane every task's work passes
+	// through on its way onto a target ref (internal/integration). It is
+	// separate from branchLocks because the two answer different questions:
+	// branchLocks is "may this run write this project's branches at all", held
+	// for the length of a run, while this is "may this task move this target
+	// right now", held for the length of one integration. Optional: a
+	// deployment without it keeps the serial promotion path and refuses, loudly,
+	// only where a lane would actually have been needed.
+	integrationLocks integration.Locker
 	// branchLocks and workspaceCommitter back Checkpoint 8P-E.11's
 	// direct-branch execution mode. Both optional.
 	branchLocks        BranchLocks
@@ -397,6 +418,7 @@ func New(d Deps) *Coordinator {
 		reviewRuns:               d.ReviewRuns,
 		log:                      d.Logger,
 		branchLocks:              d.BranchLocks,
+		integrationLocks:         d.IntegrationLocks,
 		workspaceCommitter:       d.WorkspaceCommitter,
 		spawner:                  d.Spawner,
 		sessionFacts:             d.SessionFacts,

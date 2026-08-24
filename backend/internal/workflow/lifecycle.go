@@ -124,6 +124,12 @@ type TaskProgress struct {
 	// 8P-E.13). A non-zero value is why a master run with no running task is
 	// nonetheless not going to finish.
 	Failed int
+	// NeedsAttention counts tasks parked on something only a person can decide
+	// — today, an integration conflict (migration 0130). It is kept separate
+	// from Failed on purpose: the work is very likely fine and one human
+	// decision releases it, which is a different card and a different action
+	// from a task that ended badly.
+	NeedsAttention int
 	// CurrentNumber/CurrentTitle/CurrentRunID describe the task currently
 	// running, when one is. CurrentNumber is the task's own
 	// workflow_tasks.ordinal, so "Task 2 of 7" is a fact, not an index.
@@ -431,6 +437,8 @@ func DeriveTaskProgress(tasks []domain.WorkflowTask) TaskProgress {
 			p.Cancelled++
 		case domain.WorkflowTaskFailed:
 			p.Failed++
+		case domain.WorkflowTaskNeedsAttention:
+			p.NeedsAttention++
 		}
 	}
 	return p

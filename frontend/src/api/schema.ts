@@ -2304,6 +2304,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflowId}/tasks/{taskId}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume a planned task parked in needs_attention after a person has resolved what parked it (migration 0130). Idempotent: a task that is not parked is returned unchanged. */
+        post: operations["resumeWorkflowTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -4148,6 +4165,7 @@ export interface components {
             tasksCompleted: number;
             tasksEligible: number;
             tasksFailed: number;
+            tasksNeedsAttention: number;
             tasksRunning: number;
             tasksTotal: number;
             waitReason?: string;
@@ -4161,7 +4179,7 @@ export interface components {
             ordinal: number;
             phase?: string;
             /** @enum {string} */
-            state: "blocked" | "eligible" | "running" | "completed" | "failed" | "cancelled";
+            state: "blocked" | "eligible" | "running" | "needs_attention" | "completed" | "failed" | "cancelled";
             steps?: components["schemas"]["WorkflowStepProgressView"][];
             title: string;
             /** @enum {string} */
@@ -12760,6 +12778,49 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    resumeWorkflowTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Master workflow run identifier. */
+                workflowId: string;
+                /** @description Planned task identifier (workflow_tasks.id). */
+                taskId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

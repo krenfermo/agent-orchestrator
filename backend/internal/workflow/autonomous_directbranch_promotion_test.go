@@ -22,6 +22,9 @@ package workflow_test
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,12 +45,19 @@ const dbBranch = "feat/engineering-control-center"
 // materializing an AO-internal integration commit, which is the real adapter's
 // deliberate contract (directbranch/workspace.go), not a test shortcut.
 type directBranchWS struct {
+	// t and repoPath make the commits REAL. Task 5 routed direct-branch
+	// integration through the Integration Coordinator, which resolves refs and
+	// compares ancestry with git, so a fake "commit-1" would only ever exercise
+	// "git could not read this repository" — the opposite of what these tests
+	// are about.
+	t               *testing.T
+	repoPath        string
 	obs             ports.WorkspaceObservation
 	commits         int
 	materializeCall int
-	// externalMove, when set, is the SHA an outside actor leaves on the branch
-	// after AO's own commit — the "someone else moved the branch" case.
-	externalMove string
+	// externalMove, when set, makes an outside actor leave a DIFFERENT commit
+	// on the branch after AO's own — the "someone else moved the branch" case.
+	externalMove bool
 }
 
 func (w *directBranchWS) ObserveWorkspace(context.Context, ports.WorkspaceInfo) (ports.WorkspaceObservation, error) {
@@ -63,12 +73,33 @@ func (w *directBranchWS) MaterializeIntegrationCommit(context.Context, ports.Wor
 // commit on the branch, and HEAD moves to it.
 func (w *directBranchWS) CommitAll(_ context.Context, _ ports.WorkspaceInfo, _ string) (string, bool, error) {
 	w.commits++
-	sha := fmt.Sprintf("commit-%d", w.commits)
+	sha := dbGitCommit(w.t, w.repoPath, fmt.Sprintf("ao commit %d", w.commits))
 	w.obs.HeadSHA = sha
-	if w.externalMove != "" {
-		w.obs.HeadSHA = w.externalMove
+	if w.externalMove {
+		// Somebody else commits on top, after AO's. The branch no longer holds
+		// what was reviewed, and the promotion must refuse it.
+		w.obs.HeadSHA = dbGitCommit(w.t, w.repoPath, "someone else")
 	}
 	return sha, true, nil
+}
+
+// dbGit runs one git command in dir and returns its trimmed stdout.
+func dbGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1", "HOME="+dir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func dbGitCommit(t *testing.T, dir, message string) string {
+	t.Helper()
+	dbGit(t, dir, "commit", "--allow-empty", "-m", message)
+	return dbGit(t, dir, "rev-parse", "HEAD")
 }
 
 // directBranchSpawner is autoSpawner with the direct-branch session shape: every
@@ -130,9 +161,16 @@ type directBranchFixture struct {
 
 func newDirectBranchFixture(t *testing.T, plan workflowcore.MasterPlan) *directBranchFixture {
 	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
 	store := sqlitetest.MustOpen(t)
 	ctx := context.Background()
 	repo := t.TempDir()
+	dbGit(t, repo, "init", "--initial-branch="+dbBranch)
+	dbGit(t, repo, "config", "user.email", "ao@example.com")
+	dbGit(t, repo, "config", "user.name", "Ao Agents")
+	base := dbGitCommit(t, repo, "seed")
 	if err := store.UpsertProject(ctx, domain.ProjectRecord{
 		ID: "p", Path: repo, RegisteredAt: time.Now().UTC(),
 		Config: domain.ProjectConfig{DefaultBranch: dbBranch, ExecutionMode: domain.ExecutionDirectBranch},
@@ -140,8 +178,8 @@ func newDirectBranchFixture(t *testing.T, plan workflowcore.MasterPlan) *directB
 		t.Fatalf("seed direct-branch project: %v", err)
 	}
 	clk := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-	ws := &directBranchWS{obs: ports.WorkspaceObservation{
-		Path: repo, Branch: dbBranch, HeadSHA: "commit-0", Dirty: true,
+	ws := &directBranchWS{t: t, repoPath: repo, obs: ports.WorkspaceObservation{
+		Path: repo, Branch: dbBranch, HeadSHA: base, Dirty: true,
 		Changes: []ports.WorkspaceChange{{Path: "frontend/src/Board.tsx", Status: " M"}},
 	}}
 	spawner := &directBranchSpawner{store: store, repoPath: repo}
@@ -162,7 +200,11 @@ func newDirectBranchFixture(t *testing.T, plan workflowcore.MasterPlan) *directB
 
 func newDirectBranchAutonomousCoordinator(store *sqlite.Store, clk *fakeClock, spawner *directBranchSpawner, planner *staticPlanner, ws *directBranchWS, launcher *fakeReviewerLauncher, verifier *fakeVerifyRunner, sender *fakeMessageSender, wakeSched *wake.Scheduler, locks *branchlock.Manager, idPrefix string) *workflowcore.Coordinator {
 	return workflowcore.New(workflowcore.Deps{
-		Store: store, Projects: store,
+		// Task 5: every ready task now reaches its target through the
+		// Integration Coordinator, which takes the lane first. A fixture
+		// without one cannot integrate at all.
+		IntegrationLocks: newLaneStubExternal(),
+		Store:            store, Projects: store,
 		Spawner: spawner, SessionFacts: store, WorkspaceFacts: ws,
 		ReviewRuns: store, ReviewerLauncher: launcher,
 		Verifier: verifier, MessageSender: sender,
@@ -290,7 +332,7 @@ func TestDirectBranch_RepeatedPollsAfterIntegrationFailureDoNotSpamCheckpoints(t
 	ctx := context.Background()
 	// An outside actor owns the branch tip after AO's commit, so the verified
 	// result can never be proven integrated: a permanent, human-owned stop.
-	fx.ws.externalMove = "someone-elses-commit"
+	fx.ws.externalMove = true
 	masterID := startDirectBranchObjective(t, fx)
 
 	driveCycles(t, fx.autonomousFixture, 12, func(int) {
@@ -299,29 +341,42 @@ func TestDirectBranch_RepeatedPollsAfterIntegrationFailureDoNotSpamCheckpoints(t
 		}
 	})
 
-	failures := countCheckpoints(t, fx.store, masterID, "master_integration_promotion_failed")
-	if failures == 0 {
+	// The refusal belongs to the TASK, so it is recorded there — and the
+	// promotion-failure phase, which parks the whole objective, is not used for
+	// it at all.
+	conflicts := countCheckpoints(t, fx.store, masterID, "task_integration_conflict")
+	if conflicts == 0 {
 		t.Fatal("expected the moved branch to be refused; the fixture never reached the state under test")
 	}
+	if n := countCheckpoints(t, fx.store, masterID, "master_integration_promotion_failed"); n != 0 {
+		t.Fatalf("a task-level conflict was recorded as %d objective-level integration failures", n)
+	}
 
-	// Twenty board polls over the unchanged condition.
+	// Twenty board polls over the unchanged condition. Each one reconciles the
+	// plan, and each one must leave the parked task exactly as it found it:
+	// this is the retry storm the durable state exists to end.
 	for i := 0; i < 20; i++ {
 		if _, err := fx.coord.GetRun(ctx, masterID); err != nil {
 			t.Fatalf("GetRun poll %d: %v", i, err)
 		}
 	}
-	after := countCheckpoints(t, fx.store, masterID, "master_integration_promotion_failed")
-	if after != failures {
-		t.Fatalf("integration-failure checkpoints grew from %d to %d across 20 polls of one unchanged condition", failures, after)
+	after := countCheckpoints(t, fx.store, masterID, "task_integration_conflict")
+	if after != conflicts {
+		t.Fatalf("conflict checkpoints grew from %d to %d across 20 polls of one unchanged condition", conflicts, after)
 	}
-	if failures > 2 {
-		t.Fatalf("integration-failure checkpoints = %d for a single deterministic failure", failures)
+	if conflicts > 1 {
+		t.Fatalf("conflict checkpoints = %d for a single deterministic conflict", conflicts)
 	}
-	// And the task is emphatically NOT completed: a refused promotion never
-	// lets a task count as done.
+
+	// The task is emphatically NOT completed — a refused promotion never lets a
+	// task count as done — and it is parked, durably, with the detail a person
+	// needs rather than only a line in a ledger.
 	taskA, _ := taskByPlanStepID(t, fx.autonomousFixture, masterID, "model")
-	if taskA.State == domain.WorkflowTaskCompleted {
-		t.Fatal("task was completed despite an unprovable integration")
+	if taskA.State != domain.WorkflowTaskNeedsAttention {
+		t.Fatalf("task state = %q, want needs_attention", taskA.State)
+	}
+	if taskA.AttentionReason == "" || taskA.Attention.RecommendedAction == "" {
+		t.Fatalf("parked task carries no actionable detail: %+v", taskA.Attention)
 	}
 }
 

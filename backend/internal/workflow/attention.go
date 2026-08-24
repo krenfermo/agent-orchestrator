@@ -138,10 +138,16 @@ const (
 	ReasonPlannerAmbiguous               = "planner_ambiguous"
 	ReasonChildNeedsAttention            = "child_needs_attention"
 	ReasonChildFailed                    = "child_failed"
-	ReasonRecoveryInterrupted            = "recovery_interrupted"
-	ReasonWorkerDispatchAmbiguous        = "worker_dispatch_ambiguous"
-	ReasonWorkerBlocked                  = "worker_blocked"
-	ReasonDispatchFailed                 = "dispatch_failed"
+	// ReasonTaskParked is the objective's own stop when one or more of its
+	// tasks are parked in needs_attention (migration 0130) and nothing else in
+	// the plan can move. It is deliberately distinct from
+	// ReasonChildNeedsAttention: the child run finished perfectly well, and
+	// what is stopped is the integration of its result.
+	ReasonTaskParked              = "task_integration_attention"
+	ReasonRecoveryInterrupted     = "recovery_interrupted"
+	ReasonWorkerDispatchAmbiguous = "worker_dispatch_ambiguous"
+	ReasonWorkerBlocked           = "worker_blocked"
+	ReasonDispatchFailed          = "dispatch_failed"
 	// ReasonWorkerLaunchRetry is a worker spawn that failed transiently before
 	// any worker session existed and that AO has already scheduled its own
 	// bounded retry for (worker_launch_recovery.go). Self-remediable: it is
@@ -276,6 +282,9 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonChildFailed: {
 		HumanAction: "The running task failed. Open that task's run to see why, then retry or cancel this objective.",
+	},
+	ReasonTaskParked: {
+		HumanAction: "A task passed review and verification but its work could not be integrated automatically. Resolve the conflict named on that task, then resume it.",
 	},
 	ReasonRecoveryInterrupted: {
 		HumanAction: "This step was interrupted by a daemon restart and AO cannot prove where it got to. Inspect it, then continue or cancel this run.",

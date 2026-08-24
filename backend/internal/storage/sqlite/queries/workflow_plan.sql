@@ -51,6 +51,17 @@ UPDATE workflow_tasks SET state = sqlc.arg(state), updated_at = sqlc.arg(updated
     completed_at = CASE WHEN sqlc.arg(state) = 'completed' THEN sqlc.arg(completed_at) ELSE completed_at END
 WHERE id = sqlc.arg(id) AND state = sqlc.arg(expected_state);
 
+-- name: ParkWorkflowTaskForAttention :execrows
+UPDATE workflow_tasks SET state = 'needs_attention',
+    attention_reason = sqlc.arg(attention_reason), attention_json = sqlc.arg(attention_json),
+    attention_at = sqlc.arg(attention_at), updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id) AND state = sqlc.arg(expected_state);
+
+-- name: ResumeWorkflowTaskFromAttention :execrows
+UPDATE workflow_tasks SET state = sqlc.arg(state), attention_reason = '',
+    attention_at = NULL, updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id) AND state = 'needs_attention';
+
 -- name: UpdateWorkflowTaskScope :execrows
 UPDATE workflow_tasks SET scope_json = ?, updated_at = ? WHERE id = ?;
 

@@ -239,7 +239,7 @@ func (q *Queries) ListWorkflowTaskRelationships(ctx context.Context, workflowRun
 }
 
 const listWorkflowTasks = `-- name: ListWorkflowTasks :many
-SELECT t.id, t.workflow_run_id, t.plan_step_id, t.ordinal, t.title, t.description, t.acceptance_criteria_json, t.verify_json, t.state, t.execution_run_id, t.created_at, t.updated_at, t.completed_at, t.scope_json, COALESCE((SELECT json_group_array(d.depends_on_task_id)
+SELECT t.id, t.workflow_run_id, t.plan_step_id, t.ordinal, t.title, t.description, t.acceptance_criteria_json, t.verify_json, t.scope_json, t.state, t.attention_reason, t.attention_json, t.attention_at, t.execution_run_id, t.created_at, t.updated_at, t.completed_at, COALESCE((SELECT json_group_array(d.depends_on_task_id)
     FROM workflow_task_dependencies d WHERE d.workflow_task_id = t.id), '[]') AS dependencies_json
 FROM workflow_tasks t WHERE t.workflow_run_id = ? ORDER BY t.ordinal
 `
@@ -253,12 +253,15 @@ type ListWorkflowTasksRow struct {
 	Description            string
 	AcceptanceCriteriaJson string
 	VerifyJson             string
+	ScopeJson              string
 	State                  string
+	AttentionReason        string
+	AttentionJson          string
+	AttentionAt            sql.NullTime
 	ExecutionRunID         sql.NullString
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
 	CompletedAt            sql.NullTime
-	ScopeJson              string
 	DependenciesJson       interface{}
 }
 
@@ -280,12 +283,15 @@ func (q *Queries) ListWorkflowTasks(ctx context.Context, workflowRunID string) (
 			&i.Description,
 			&i.AcceptanceCriteriaJson,
 			&i.VerifyJson,
+			&i.ScopeJson,
 			&i.State,
+			&i.AttentionReason,
+			&i.AttentionJson,
+			&i.AttentionAt,
 			&i.ExecutionRunID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.CompletedAt,
-			&i.ScopeJson,
 			&i.DependenciesJson,
 		); err != nil {
 			return nil, err
@@ -299,6 +305,37 @@ func (q *Queries) ListWorkflowTasks(ctx context.Context, workflowRunID string) (
 		return nil, err
 	}
 	return items, nil
+}
+
+const parkWorkflowTaskForAttention = `-- name: ParkWorkflowTaskForAttention :execrows
+UPDATE workflow_tasks SET state = 'needs_attention',
+    attention_reason = ?1, attention_json = ?2,
+    attention_at = ?3, updated_at = ?4
+WHERE id = ?5 AND state = ?6
+`
+
+type ParkWorkflowTaskForAttentionParams struct {
+	AttentionReason string
+	AttentionJson   string
+	AttentionAt     sql.NullTime
+	UpdatedAt       time.Time
+	ID              string
+	ExpectedState   string
+}
+
+func (q *Queries) ParkWorkflowTaskForAttention(ctx context.Context, arg ParkWorkflowTaskForAttentionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, parkWorkflowTaskForAttention,
+		arg.AttentionReason,
+		arg.AttentionJson,
+		arg.AttentionAt,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.ExpectedState,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const persistWorkflowPlanResponse = `-- name: PersistWorkflowPlanResponse :execrows
@@ -339,6 +376,26 @@ type RejectWorkflowPlanParams struct {
 
 func (q *Queries) RejectWorkflowPlan(ctx context.Context, arg RejectWorkflowPlanParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, rejectWorkflowPlan, arg.RejectedAt, arg.UpdatedAt, arg.WorkflowRunID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const resumeWorkflowTaskFromAttention = `-- name: ResumeWorkflowTaskFromAttention :execrows
+UPDATE workflow_tasks SET state = ?1, attention_reason = '',
+    attention_at = NULL, updated_at = ?2
+WHERE id = ?3 AND state = 'needs_attention'
+`
+
+type ResumeWorkflowTaskFromAttentionParams struct {
+	State     string
+	UpdatedAt time.Time
+	ID        string
+}
+
+func (q *Queries) ResumeWorkflowTaskFromAttention(ctx context.Context, arg ResumeWorkflowTaskFromAttentionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, resumeWorkflowTaskFromAttention, arg.State, arg.UpdatedAt, arg.ID)
 	if err != nil {
 		return 0, err
 	}

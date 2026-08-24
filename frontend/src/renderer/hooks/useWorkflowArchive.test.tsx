@@ -35,6 +35,7 @@ function boardWorkflow(id: string, state: BoardWorkflow["state"] = "needs_attent
 		tasksBlocked: 0,
 		tasksEligible: 0,
 		tasksFailed: 0,
+		tasksNeedsAttention: 0,
 	};
 }
 

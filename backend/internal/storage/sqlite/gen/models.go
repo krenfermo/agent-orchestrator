@@ -786,12 +786,15 @@ type WorkflowTask struct {
 	Description            string
 	AcceptanceCriteriaJson string
 	VerifyJson             string
+	ScopeJson              string
 	State                  string
+	AttentionReason        string
+	AttentionJson          string
+	AttentionAt            sql.NullTime
 	ExecutionRunID         sql.NullString
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
 	CompletedAt            sql.NullTime
-	ScopeJson              string
 }
 
 type WorkflowTaskDependency struct {

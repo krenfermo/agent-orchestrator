@@ -66,11 +66,62 @@ const (
 	// master run's Board card unreadable.
 	WorkflowTaskFailed    WorkflowTaskState = "failed"
 	WorkflowTaskCancelled WorkflowTaskState = "cancelled"
+	// WorkflowTaskNeedsAttention means this task is parked on something only a
+	// person can decide — today, an integration conflict AO may not resolve by
+	// itself. Added by migration 0130.
+	//
+	// It is deliberately NOT terminal and deliberately NOT "running". A parked
+	// task has not ended, so calling it failed would be a lie about work that
+	// is very likely fine; but it is also not making progress, and leaving it
+	// at "running" is what made the same conflict be retried on every poll,
+	// re-rebasing the same worktree and writing the same checkpoint forever.
+	// The only exit is ResumeTaskAfterAttention, i.e. a person.
+	WorkflowTaskNeedsAttention WorkflowTaskState = "needs_attention"
 )
 
 // Terminal reports whether a task can never change state again.
 func (s WorkflowTaskState) Terminal() bool {
 	return s == WorkflowTaskCompleted || s == WorkflowTaskFailed || s == WorkflowTaskCancelled
+}
+
+// Parked reports whether the task is stopped awaiting a human decision. It is
+// the middle ground Terminal() does not cover: not finished, and not going to
+// move on its own.
+func (s WorkflowTaskState) Parked() bool { return s == WorkflowTaskNeedsAttention }
+
+// WorkflowTaskAttention is everything a person needs to act on a parked task,
+// stored on the task row itself (workflow_tasks.attention_json).
+//
+// It lives with the task rather than only on the run's checkpoint ledger
+// because it is state, not history: reconciliation reads it to know the task
+// is parked and why, the Board renders it, and the resume transition clears
+// it. A ledger row can say a conflict happened; only this can say the task is
+// still stopped on one.
+type WorkflowTaskAttention struct {
+	// Reason is the stable machine-checkable code, mirrored into the
+	// attention_reason column so it can be filtered without parsing JSON.
+	Reason string `json:"reason"`
+	// ConflictingFiles are the exact repository-relative paths that collided,
+	// in git's order. Empty for a stop that is not a conflict.
+	ConflictingFiles []string `json:"conflictingFiles,omitempty"`
+	// SourceSHA, BaseSHA and TargetBeforeSHA are the three commits that
+	// describe the situation completely: what is trying to land, what it was
+	// built on, and where the target actually was.
+	SourceSHA       string `json:"sourceSha,omitempty"`
+	BaseSHA         string `json:"baseSha,omitempty"`
+	TargetBeforeSHA string `json:"targetBeforeSha,omitempty"`
+	// IntegrationStrategy is the strategy that was attempted, so a reader can
+	// tell "the rebase conflicted" from "no strategy applied at all".
+	IntegrationStrategy string `json:"integrationStrategy,omitempty"`
+	// RecommendedAction says what a person can actually do about it, in the
+	// vocabulary of the thing that went wrong.
+	RecommendedAction string `json:"recommendedAction,omitempty"`
+	// Detail is the sentence behind Reason.
+	Detail string `json:"detail,omitempty"`
+	// Attempt counts how many times this task has been integrated and parked.
+	// It increments only on a human resume followed by a fresh stop, which is
+	// what makes "the resume produced exactly one new attempt" checkable.
+	Attempt int `json:"attempt,omitempty"`
 }
 
 type WorkflowTask struct {
@@ -89,9 +140,15 @@ type WorkflowTask struct {
 	State          WorkflowTaskState
 	ExecutionRunID *string
 	Dependencies   []string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	CompletedAt    *time.Time
+	// AttentionReason and Attention are populated exactly while State is
+	// WorkflowTaskNeedsAttention; the schema's own CHECK refuses a parked task
+	// with no reason. Attention is the unmarshalled attention_json.
+	AttentionReason string
+	Attention       WorkflowTaskAttention
+	AttentionAt     *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	CompletedAt     *time.Time
 }
 
 // WorkflowTaskExecutionStrategy is how a planned task may be executed

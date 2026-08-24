@@ -1,9 +1,7 @@
 package workflow
 
 import (
-	stdctx "context"
 	"encoding/json"
-	"fmt"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -75,83 +73,18 @@ type directBranchEvidence struct {
 	Fingerprint string
 }
 
-// promoteDirectBranchTask is the direct-branch counterpart of the
-// MaterializeIntegrationCommit path. It never writes to the repository: it
-// observes the target branch and either records the already-integrated result
-// as promoted, or refuses.
+// The promotion function that used to live here is GONE, deliberately.
 //
-// Refusal is always recordIntegrationFailure, i.e. the task stays Running, the
-// master stops, and nothing downstream may treat the task as done. The three
-// refusals are distinct on purpose, because they are three different situations
-// for whoever reads the checkpoint: the child left no proof, the branch is not
-// where the child left it, or the workspace could not be observed at all.
-func (c *Coordinator) promoteDirectBranchTask(ctx stdctx.Context, parent domain.WorkflowRun, task domain.WorkflowTask, child RunDetail, workCP domain.WorkflowCheckpoint, state MasterIntegrationState) error {
-	checkpoints, err := c.store.ListWorkflowCheckpoints(ctx, child.Run.ID)
-	if err != nil {
-		return err
-	}
-	evidence, ok := directBranchPromotionEvidence(checkpoints, workCP)
-	if !ok {
-		return c.recordIntegrationFailure(ctx, parent, task,
-			"directbranch: the execution run recorded no durable proof that its verified result reached the target branch (its local-commit policy may have deferred or skipped the commit)")
-	}
-
-	obs, err := c.workspaceFacts.ObserveWorkspace(ctx, ports.WorkspaceInfo{
-		Path:      evidence.RepoPath,
-		Branch:    evidence.Branch,
-		ProjectID: domain.ProjectID(parent.ProjectID),
-		RepoPath:  evidence.RepoPath,
-	})
-	if err != nil {
-		return c.recordIntegrationFailure(ctx, parent, task, "directbranch: target branch could not be observed: "+err.Error())
-	}
-	if evidence.Branch != "" && obs.Branch != "" && obs.Branch != evidence.Branch {
-		return c.recordIntegrationFailure(ctx, parent, task, fmt.Sprintf(
-			"directbranch: the target repository is on branch %q but the verified result was produced on %q", obs.Branch, evidence.Branch))
-	}
-
-	switch evidence.Kind {
-	case directBranchEvidenceCommitted:
-		// External branch movement is never silently accepted. The reviewed and
-		// verified result is one specific commit; if the branch has moved past
-		// it (a rebase, an amend, another actor's commit), what is on the branch
-		// now is not what was reviewed, and promoting it would launder unreviewed
-		// state into the master's completed-task ledger.
-		if obs.HeadSHA != evidence.CommitSHA {
-			return c.recordIntegrationFailure(ctx, parent, task, fmt.Sprintf(
-				"directbranch: the target branch moved after verification (expected the verified commit %s, found %s) — nothing was promoted", evidence.CommitSHA, obs.HeadSHA))
-		}
-	case directBranchEvidenceAlreadyClean:
-		if hasNonEphemeralChanges(obs) {
-			return c.recordIntegrationFailure(ctx, parent, task,
-				"directbranch: the target repository holds uncommitted changes, so the verified result is not durably integrated on the branch")
-		}
-		if fp := WorkspaceFingerprint(obs); fp != evidence.Fingerprint {
-			return c.recordIntegrationFailure(ctx, parent, task,
-				"directbranch: the target workspace no longer matches the fingerprint verification passed on — nothing was promoted")
-		}
-	}
-
-	payload, _ := json.Marshal(masterIntegrationPromotionPayload{
-		TaskID: task.ID,
-		Mode:   masterIntegrationModeDirectBranch,
-		Branch: obs.Branch,
-	})
-	_, err = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
-		ID:             "wfc-" + c.newID(),
-		WorkflowRunID:  parent.ID,
-		ProjectID:      parent.ProjectID,
-		Branch:         obs.Branch,
-		WorktreePath:   evidence.RepoPath,
-		BaseSHA:        state.CurrentSHA,
-		HeadSHA:        obs.HeadSHA,
-		RetryState:     string(payload),
-		DurablePhase:   masterIntegrationDurablePhase,
-		PayloadVersion: masterIntegrationPayloadVersion,
-		CreatedAt:      c.clock(),
-	})
-	return err
-}
+// It was the second integration route: it observed the target branch and
+// recorded a promotion, outside any lane, with no readiness gate and no audit
+// row. Task 5's reviewer found it, and the fix is not to harden it — a second
+// road that has been made as safe as the first is still a second road, and the
+// two drifted apart once already. Direct-branch integration now goes through
+// integrateReadyTask into the Integration Coordinator exactly like every other
+// mode, expressing what is different about it as inputs (NoReplay, a
+// Precondition, StrategyNoOp) rather than as a separate implementation. What
+// remains in this file is only the evidence reading that route needs, which was
+// never the part in question.
 
 // directBranchPromotionEvidence reads the child's own append-only checkpoint
 // ledger for the newest record of where its verified result ended up.

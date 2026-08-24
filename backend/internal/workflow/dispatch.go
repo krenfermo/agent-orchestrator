@@ -45,13 +45,15 @@ type SessionFacts interface {
 
 // WorkspaceFacts is the narrow read path workflow uses to observe live
 // worktree state (current HEAD SHA, dirty state) without caching staleness.
+// It is read-only, and narrowed back to read-only by Task 5.
+// MaterializeIntegrationCommit used to be here, because 8M.1's master-task
+// promotion captured a worktree's content into an AO-owned commit. That route
+// is gone — every ready task now reaches its target through the Integration
+// Coordinator — and keeping the method on the interface workflow depends on
+// would leave the door to it open for the next change that wanted a shortcut.
+// The adapters still implement it; workflow simply no longer asks.
 type WorkspaceFacts interface {
 	ObserveWorkspace(ctx stdctx.Context, info ports.WorkspaceInfo) (ports.WorkspaceObservation, error)
-	// MaterializeIntegrationCommit backs Checkpoint 8M.1's master task git
-	// state propagation (master_integration.go). Every production
-	// WorkspaceFacts value already implements this (it's ports.Workspace),
-	// so this only widens the interface workflow depends on, not the wiring.
-	MaterializeIntegrationCommit(ctx stdctx.Context, info ports.WorkspaceInfo, ref, parentSHA, message string, excludePatterns []string) (commitSHA, treeSHA string, reused bool, err error)
 }
 
 // workStepIssueID is the durable natural key correlating a workflow work
