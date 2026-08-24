@@ -238,7 +238,10 @@ const incidentLaunchFailedPhase = "incident_diagnosis_launch_failed"
 // Every reader that folds "the newest checkpoint" into derived state uses this,
 // not isIncidentLedgerPhase directly.
 func isBookkeepingPhase(phase string) bool {
-	return isIncidentLedgerPhase(phase) || phase == attemptReapedPhase
+	return isIncidentLedgerPhase(phase) ||
+		phase == attemptReapedPhase ||
+		phase == verifySupersededPhase ||
+		phase == verifyRaceReconciledPhase
 }
 
 func isIncidentLedgerPhase(phase string) bool {

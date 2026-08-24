@@ -170,4 +170,3 @@ func RenderEffectiveSpecification(spec EffectiveTaskSpecification) string {
 	}
 	return b.String()
 }
-

@@ -97,6 +97,11 @@ type Store interface {
 	CreateWorkflowAttempt(ctx stdctx.Context, id, stepID, harness, model string, startedAt time.Time) (domain.WorkflowAttempt, error)
 	GetLatestWorkflowAttempt(ctx stdctx.Context, stepID string) (domain.WorkflowAttempt, bool, error)
 	UpdateWorkflowAttemptOutcome(ctx stdctx.Context, attemptID string, finishedAt time.Time, outcome domain.WorkflowAttemptOutcome, errorClass domain.WorkflowErrorClass) error
+	// ClaimWorkflowAttemptOutcome is the conditional form: it concludes the
+	// attempt only if nothing has concluded it yet, and says whether this
+	// caller won. It is what decides which of several concurrent verify
+	// executions of one target is allowed to have side effects.
+	ClaimWorkflowAttemptOutcome(ctx stdctx.Context, attemptID string, finishedAt time.Time, outcome domain.WorkflowAttemptOutcome, errorClass domain.WorkflowErrorClass) (bool, error)
 	CreateWorkflowCheckpoint(ctx stdctx.Context, cp domain.WorkflowCheckpoint) (domain.WorkflowCheckpoint, error)
 	ListWorkflowCheckpoints(ctx stdctx.Context, runID string) ([]domain.WorkflowCheckpoint, error)
 	GetLatestWorkflowCheckpointByStep(ctx stdctx.Context, stepID string) (domain.WorkflowCheckpoint, bool, error)
@@ -416,9 +421,13 @@ type Coordinator struct {
 	selfRepairProjectID string
 
 	// messageSender backs Checkpoint 8D's fix-step dispatch. Optional.
-	messageSender         MessageSender
-	verifier              VerifyRunner
-	planStore             masterPlanStore
+	messageSender MessageSender
+	verifier      VerifyRunner
+	planStore     masterPlanStore
+	// verifyClaimsState holds the per-process claims that stop one daemon from
+	// executing the same verify attempt twice concurrently. See
+	// verify_authority.go.
+	verifyClaimsState
 	planner               Planner
 	plannerContextBuilder PlannerContextBuilder
 
@@ -1037,6 +1046,25 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		return RunDetail{}, fmt.Errorf("%w: workflow run %q", ErrNotFound, runID)
 	}
 	if run.State.Terminal() {
+		// A terminal run is normally nothing to continue. The exception is a run
+		// left incoherent by a concurrent verification that lost its decision
+		// and acted anyway: terminal, with a step the loser started still in
+		// flight. That is not a run to continue, it is a run to repair, and this
+		// is the person-driven entry point where repairing it belongs. It never
+		// completes, cancels or re-decides anything -- see
+		// verify_race_reconcile.go. For every coherent terminal run it is a
+		// no-op and the refusal below is unchanged.
+		terminalSteps, serr := c.store.ListWorkflowSteps(ctx, runID)
+		if serr != nil {
+			return RunDetail{}, serr
+		}
+		repaired, rerr := c.reconcileVerifyRace(ctx, run, terminalSteps)
+		if rerr != nil {
+			return RunDetail{}, rerr
+		}
+		if repaired {
+			return c.GetRun(ctx, runID)
+		}
 		return RunDetail{}, fmt.Errorf("%w: workflow run %q is already %s", ErrAlreadyTerminal, runID, run.State)
 	}
 

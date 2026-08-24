@@ -15,13 +15,13 @@ type ReviewPromptInput struct {
 	// EffectiveSpec is RenderEffectiveSpecification's output: the approved
 	// amendments that reconcile the original objective with the criteria in
 	// force. Empty when the task has none.
-	EffectiveSpec string
-	WorkerSessionID    string
-	Branch             string
-	WorktreePath       string
-	BaseSHA            string
-	HeadSHA            string
-	ReviewRunID        string
+	EffectiveSpec   string
+	WorkerSessionID string
+	Branch          string
+	WorktreePath    string
+	BaseSHA         string
+	HeadSHA         string
+	ReviewRunID     string
 	// AvailableDependencies names the plan's already-delivered tasks — the work
 	// this reviewer may assume exists.
 	AvailableDependencies []string

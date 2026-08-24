@@ -13,7 +13,7 @@ type FixPromptInput struct {
 	// force. Empty when the task has none, which renders the identical prompt
 	// this builder produced before amendments existed.
 	EffectiveSpec string
-	ReviewRunID        string
+	ReviewRunID   string
 	// Findings is the review_run's own Body text, fetched live from the
 	// ReviewRuns port at dispatch time. It is referenced here, never copied
 	// into any workflow table — workflow_checkpoints only ever store the

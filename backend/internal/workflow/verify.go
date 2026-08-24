@@ -428,6 +428,23 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 		}
 	}
 
+	// One execution of this attempt per process. An attempt in flight is
+	// indistinguishable from one abandoned by a crash — that ambiguity is what
+	// let a Continue and a Board poll run the same checks concurrently and both
+	// act on their own answer. Losing the claim means another goroutine is
+	// already executing these checks and its decision will settle the run, so
+	// this pass simply stands down. Correctness does not rest here: the durable
+	// CAS in decideVerify is what actually arbitrates. See verify_authority.go.
+	releaseClaim, claimed := c.claimVerifyExecution(latest.ID)
+	if !claimed {
+		if c.log != nil {
+			c.log.Debug("workflow: a verification of this attempt is already executing in this process",
+				"run", run.ID, "attempt", latest.ID)
+		}
+		return run, verifyStep, nil
+	}
+	defer releaseClaim()
+
 	obs, err := c.workspaceFacts.ObserveWorkspace(ctx, ports.WorkspaceInfo{Path: workCP.WorktreePath, Branch: workCP.Branch, SessionID: domain.SessionID(*workCP.SessionID), ProjectID: domain.ProjectID(run.ProjectID)})
 	if err != nil {
 		return c.finishVerifyFailure(ctx, run, verifyStep, latest, VerifyResult{Version: verifyResultVersion, TargetKey: targetKey, ReviewedFingerprint: reviewed, ErrorClass: domain.WorkflowErrorVerifyEnvironment}, err.Error())
@@ -615,10 +632,18 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 		return c.finishVerifyFailure(ctx, run, verifyStep, latest, result, "workspace changed while verification was running")
 	}
 	result.Passed = true
-	if err := c.persistVerifyResult(ctx, run, verifyStep, latest, result, "done"); err != nil {
-		return run, verifyStep, err
+	// The decision BEFORE the effects. If a concurrent execution of this same
+	// attempt already decided, this pass is stale however green it is, and
+	// completing the run on it would be the winning half of the race that left
+	// wf-04e8309d terminal with a fix still running. See verify_authority.go.
+	decision, derr := c.decideVerify(ctx, run, verifyStep, latest, domain.WorkflowAttemptSucceeded, "", result)
+	if derr != nil {
+		return run, verifyStep, derr
 	}
-	if err := c.store.UpdateWorkflowAttemptOutcome(ctx, latest.ID, c.clock(), domain.WorkflowAttemptSucceeded, ""); err != nil {
+	if !decision.Won {
+		return run, verifyStep, nil
+	}
+	if err := c.persistVerifyResult(ctx, run, verifyStep, latest, result, "done"); err != nil {
 		return run, verifyStep, err
 	}
 	return c.completeVerifiedRun(ctx, run, verifyStep)
@@ -907,11 +932,20 @@ func (c *Coordinator) finishVerifyFailure(ctx stdctx.Context, run domain.Workflo
 	if len(result.Checks) == 0 && reason != "" {
 		result.Checks = []VerifyCheckResult{{Kind: "guard", Label: "verify guard", Passed: false, FailureReason: reason}}
 	}
+	// The decision BEFORE the effects, for exactly the reason the success path
+	// makes it: a failing execution that lost the race must not open a fix
+	// cycle against a target another execution already passed.
+	decision, derr := c.decideVerify(ctx, run, step, attempt, domain.WorkflowAttemptFailed, result.ErrorClass, result)
+	if derr != nil {
+		return run, step, derr
+	}
+	if !decision.Won {
+		return run, step, nil
+	}
 	if err := c.persistVerifyResult(ctx, run, step, attempt, result, "verify_failed"); err != nil {
 		return run, step, err
 	}
 	now := c.clock()
-	_ = c.store.UpdateWorkflowAttemptOutcome(ctx, attempt.ID, now, domain.WorkflowAttemptFailed, result.ErrorClass)
 
 	// Checkpoint 8P-E.13 Phase 5 — the debt 8P-E.12 left explicit. A failed
 	// verification used to be the end of the road: the verify step went to
@@ -1075,6 +1109,29 @@ func (c *Coordinator) persistVerifyResult(ctx stdctx.Context, run domain.Workflo
 
 func (c *Coordinator) completeVerifiedRun(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep) (domain.WorkflowRun, domain.WorkflowStep, error) {
 	now := c.clock()
+	// A run may not go terminal while something that can still change its
+	// outcome is running. Completing over a live fix worker claims the work is
+	// finished while an agent is still editing it, and strands an advance step
+	// that will now never run -- the exact shape wf-04e8309d ended in. The
+	// verify step itself is excluded because it is THIS step, mid-completion.
+	//
+	// Refusing is safe and self-correcting: the cascade re-enters once the other
+	// step settles, and this verification's result is already durable.
+	if steps, serr := c.store.ListWorkflowSteps(ctx, run.ID); serr == nil {
+		var others []domain.WorkflowStep
+		for _, s := range steps {
+			if s.ID != step.ID {
+				others = append(others, s)
+			}
+		}
+		if why, active := runHasActiveWork(others); active {
+			if c.log != nil {
+				c.log.Info("workflow: a verified run is not completing yet because work is still in flight",
+					"run", run.ID, "reason", why)
+			}
+			return run, step, nil
+		}
+	}
 	// Checkpoint 8P-E.11: the autonomous local commit happens here, between
 	// "verified" and "completed", and while the branch lock is still held --
 	// the only window in which the work is known-good and the repository is

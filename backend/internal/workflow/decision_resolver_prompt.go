@@ -17,15 +17,15 @@ type DecisionResolverPromptInput struct {
 	// EffectiveSpec is RenderEffectiveSpecification's output: the approved
 	// amendments that reconcile the original objective with the criteria in
 	// force. Empty when the task has none.
-	EffectiveSpec string
-	QuestionText       string
-	Choices            []domain.QuestionChoice
-	Branch             string
-	WorktreePath       string
-	PolicyVersion      string
-	AllowSameProvider  bool
-	ResolverSessionID  string
-	ResolutionRunID    string
+	EffectiveSpec     string
+	QuestionText      string
+	Choices           []domain.QuestionChoice
+	Branch            string
+	WorktreePath      string
+	PolicyVersion     string
+	AllowSameProvider bool
+	ResolverSessionID string
+	ResolutionRunID   string
 	// ContextPack is Checkpoint 8M's optional rendered SessionContextPack
 	// (decision_resolver role) — minimal-evidence facts (fingerprint, any
 	// prior decisions/tests already recorded), never a transcript. Empty

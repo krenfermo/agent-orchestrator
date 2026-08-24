@@ -458,6 +458,64 @@ func (s *Store) UpdateWorkflowAttemptOutcome(
 	return nil
 }
 
+// ClaimWorkflowAttemptOutcome concludes an attempt ONLY if nothing has
+// concluded it yet, and reports whether this caller is the one that did.
+//
+// It is the durable arbiter of which of several concurrent verify executions is
+// allowed to act. An attempt row with finished_at IS NULL means "in flight",
+// and more than one execution can legitimately reach that state — a Continue
+// and a Board poll entering the cascade together, a restart resuming an
+// attempt whose process is still alive elsewhere. Before this existed they all
+// concluded the attempt with an unconditional UPDATE and all went on to act on
+// their own result, which is how one failing and one passing verification of
+// the same target both produced side effects.
+//
+// The WHERE clause is the whole mechanism: exactly one UPDATE can match a row
+// whose finished_at is NULL, so exactly one caller sees ok=true. Everyone else
+// is a loser and must become a no-op. It is a compare-and-swap rather than a
+// timestamp comparison deliberately — wall-clock ordering cannot decide a race
+// between two writers, and a lease would still have to be arbitrated by
+// something like this at the end.
+//
+// Hand-written rather than generated because sqlc is not part of the build
+// here; the query is deliberately trivial so it stays readable next to the
+// generated ones.
+func (s *Store) ClaimWorkflowAttemptOutcome(
+	ctx context.Context,
+	attemptID string,
+	finishedAt time.Time,
+	outcome domain.WorkflowAttemptOutcome,
+	errorClass domain.WorkflowErrorClass,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	var finishedAtNull sql.NullTime
+	if !finishedAt.IsZero() {
+		finishedAtNull = sql.NullTime{Time: finishedAt, Valid: true}
+	}
+	var outcomePtr *domain.WorkflowAttemptOutcome
+	if outcome != "" {
+		outcomePtr = &outcome
+	}
+	var errorClassPtr *domain.WorkflowErrorClass
+	if errorClass != "" {
+		errorClassPtr = &errorClass
+	}
+	res, err := s.writeDB.ExecContext(ctx,
+		`UPDATE workflow_attempts
+		    SET finished_at = ?, outcome = ?, error_class = ?
+		  WHERE id = ? AND finished_at IS NULL`,
+		finishedAtNull, outcomePtr, errorClassPtr, attemptID)
+	if err != nil {
+		return false, fmt.Errorf("claim workflow attempt %s outcome: %w", attemptID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("claim workflow attempt %s outcome: %w", attemptID, err)
+	}
+	return n == 1, nil
+}
+
 // CreateWorkflowAttempt inserts a new attempt for a step, assigning it the
 // next sequential attempt_number for that step. writeMu serialises the
 // read-then-insert against concurrent writers, mirroring the store's other
