@@ -6732,6 +6732,54 @@ paths:
         independent review — it never approves the work.
       tags:
       - workflows
+  /api/v1/workflows/{workflowId}/tasks/{taskId}/criteria/resume-review:
+    post:
+      operationId: resumeAmendedWorkflowTaskReview
+      parameters:
+      - description: Master workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Master workflow run identifier.
+          type: string
+      - description: Planned task identifier (workflow_tasks.id).
+        in: path
+        name: taskId
+        required: true
+        schema:
+          description: Planned task identifier (workflow_tasks.id).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRunResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unprocessable Entity
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Finish an acceptance-criterion amendment whose fresh independent review
+        never opened: retire the superseded review dispatch and re-open the review.
+        Records no second amendment; idempotent.'
+      tags:
+      - workflows
   /api/v1/workflows/{workflowId}/tasks/{taskId}/resume:
     post:
       operationId: resumeWorkflowTask

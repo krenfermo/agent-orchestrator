@@ -237,6 +237,91 @@ func TestAmendingACriterionReplacesItAndStillRequiresIt(t *testing.T) {
 	f.assertReviewReopened(t)
 }
 
+// The dispatch the amendment invalidated is retired, so the next review is a
+// genuinely new cycle instead of an adoption of the spent one — and retiring it
+// is idempotent, because a resume after a crash must not undo or repeat it.
+func TestAmendmentRetiresTheSupersededReviewDispatch(t *testing.T) {
+	f := newAmendFixture(t, []string{"a", "b"})
+	// The review cycle that produced the verdict the amendment invalidates.
+	entry, _, err := f.store.EnqueueWorkflowOutboxEntry(f.ctx, domain.WorkflowOutboxEntry{
+		ID: "wfo-1", WorkflowRunID: f.child.Run.ID, WorkflowStepID: strPtr("wfs-review"),
+		IdempotencyKey: "workflow-step-review:wfs-review:cycle1:codex",
+		CommandType:    domain.WorkflowOutboxTriggerReview, Payload: "{}", CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.UpdateWorkflowOutboxStatus(f.ctx, entry.ID, domain.WorkflowOutboxPending,
+		domain.WorkflowOutboxAcknowledged, time.Now().UTC(), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.coord.AmendTaskAcceptanceCriterion(f.ctx, baseRequest()); err != nil {
+		t.Fatalf("amend: %v", err)
+	}
+
+	// Retired, not deleted: the row and its history stay, its status says why.
+	entries, err := f.store.ListWorkflowOutboxByRun(f.ctx, f.child.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("outbox entries = %d, want the original still present", len(entries))
+	}
+	if entries[0].Status != domain.WorkflowOutboxFailed {
+		t.Fatalf("superseded dispatch = %q, want failed so it cannot be re-adopted", entries[0].Status)
+	}
+	if entries[0].ErrorClass != supersededDispatchPhase {
+		t.Fatalf("error class = %q, want %q", entries[0].ErrorClass, supersededDispatchPhase)
+	}
+	if n := f.countPhase(t, supersededDispatchPhase); n != 1 {
+		t.Fatalf("supersede records = %d, want exactly 1", n)
+	}
+
+	// Idempotent: resuming the SAME amendment retires nothing further and
+	// records no second supersede, however many times it runs.
+	for i := 0; i < 3; i++ {
+		if err := f.coord.ResumeAmendedTaskReview(f.ctx, f.master.ID, f.task.ID); err != nil {
+			t.Fatalf("resume %d: %v", i, err)
+		}
+	}
+	if n := f.countPhase(t, supersededDispatchPhase); n != 1 {
+		t.Fatalf("supersede records after 3 resumes = %d, want still exactly 1", n)
+	}
+	// And no second amendment was invented along the way.
+	all, err := f.coord.ListTaskCriterionAmendments(f.ctx, f.master.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("amendments = %d, want exactly 1 across three resumes", len(all))
+	}
+}
+
+// Resuming a task that was never amended is refused: this path re-applies an
+// existing decision, it does not invent one.
+func TestResumingWithoutAnAmendmentIsRefused(t *testing.T) {
+	f := newAmendFixture(t, []string{"a", "b"})
+	if err := f.coord.ResumeAmendedTaskReview(f.ctx, f.master.ID, f.task.ID); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid", err)
+	}
+}
+
+func (f *amendFixture) countPhase(t *testing.T, phase string) int {
+	t.Helper()
+	cps, err := f.store.ListWorkflowCheckpoints(f.ctx, f.child.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, cp := range cps {
+		if cp.DurablePhase == phase {
+			n++
+		}
+	}
+	return n
+}
+
 func (f *amendFixture) currentCriteria(t *testing.T) []string {
 	t.Helper()
 	tasks, err := f.store.ListWorkflowTasks(f.ctx, f.master.ID)

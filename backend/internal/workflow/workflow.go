@@ -102,6 +102,9 @@ type Store interface {
 	GetLatestWorkflowCheckpointByStep(ctx stdctx.Context, stepID string) (domain.WorkflowCheckpoint, bool, error)
 	EnqueueWorkflowOutboxEntry(ctx stdctx.Context, entry domain.WorkflowOutboxEntry) (domain.WorkflowOutboxEntry, bool, error)
 	UpdateWorkflowOutboxStatus(ctx stdctx.Context, id string, expected, next domain.WorkflowOutboxStatus, now time.Time, errorClass string) (bool, error)
+	// ListWorkflowOutboxByRun is what lets a superseded dispatch be retired
+	// rather than left to be re-adopted. See supersedeReviewDispatch.
+	ListWorkflowOutboxByRun(ctx stdctx.Context, runID string) ([]domain.WorkflowOutboxEntry, error)
 
 	// SetWorkflowStepReviewRun backs Checkpoint 8C/8D's review-step dispatch
 	// (review_dispatch.go). Checkpoint 8D redefines workflow_steps.

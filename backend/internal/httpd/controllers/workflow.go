@@ -785,6 +785,7 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	r.Post("/workflows/{workflowId}/continue", c.continueRun)
 	r.Post("/workflows/{workflowId}/tasks/{taskId}/resume", c.resumeTask)
 	r.Post("/workflows/{workflowId}/tasks/{taskId}/criteria/amend", c.amendTaskCriterion)
+	r.Post("/workflows/{workflowId}/tasks/{taskId}/criteria/resume-review", c.resumeAmendedTaskReview)
 
 	// Checkpoint 8P-E.18 — the Incident Advisor behind the "¿Qué hago?" control.
 	// Four routes rather than one, because the split IS the authorization
@@ -1131,6 +1132,23 @@ func (c *WorkflowsController) amendTaskCriterion(w http.ResponseWriter, r *http.
 		},
 		Workflow: c.workflowRunDetailView(r.Context(), detail),
 	})
+}
+
+// resumeAmendedTaskReview finishes an amendment whose fresh review never
+// opened — a daemon that died between the amendment and the re-open, or a
+// re-open that was itself wrong. It records no second amendment; it re-applies
+// the consequences of the one already on file, idempotently.
+func (c *WorkflowsController) resumeAmendedTaskReview(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/tasks/{taskId}/criteria/resume-review")
+		return
+	}
+	detail, err := c.Svc.ResumeAmendedTaskReview(r.Context(), chi.URLParam(r, "workflowId"), chi.URLParam(r, "taskId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
 }
 
 func writeWorkflowError(w http.ResponseWriter, r *http.Request, err error) {

@@ -50,6 +50,9 @@ type Manager interface {
 	// (migration 0132): a human-approved change to a criterion that stopped
 	// describing reality, followed by a fresh independent review.
 	AmendTaskCriterion(ctx context.Context, req TaskCriterionAmendment) (domain.WorkflowTaskCriterionAmendment, workflowcore.RunDetail, error)
+	// ResumeAmendedTaskReview re-applies an existing amendment's consequences
+	// when its fresh review never opened. It creates no second amendment.
+	ResumeAmendedTaskReview(ctx context.Context, runID, taskID string) (workflowcore.RunDetail, error)
 }
 
 type PlannerManager interface {
@@ -201,6 +204,15 @@ func (s *Service) AmendTaskCriterion(ctx context.Context, req TaskCriterionAmend
 	}
 	detail, err := s.coordinator.GetRun(ctx, req.RunID)
 	return amendment, detail, err
+}
+
+// ResumeAmendedTaskReview finishes an amendment whose fresh review never got
+// opened. Idempotent: a task already moving is left alone.
+func (s *Service) ResumeAmendedTaskReview(ctx context.Context, runID, taskID string) (workflowcore.RunDetail, error) {
+	if err := s.coordinator.ResumeAmendedTaskReview(ctx, runID, taskID); err != nil {
+		return workflowcore.RunDetail{}, err
+	}
+	return s.coordinator.GetRun(ctx, runID)
 }
 
 // ResumeTask releases one task parked in needs_attention after a person has

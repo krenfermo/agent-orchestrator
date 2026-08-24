@@ -256,7 +256,135 @@ func (c *Coordinator) requireFreshReviewAfterAmendment(
 
 	// Re-open the review itself. Nothing here approves anything: the reviewer
 	// is asked again, from scratch, against criteria that now describe reality.
-	return c.reopenReviewAfterAmendment(ctx, child)
+	return c.reopenReviewAfterAmendment(ctx, child, amendment)
+}
+
+// supersededDispatchPhase is the durable record that a review dispatch was
+// retired because the criteria it was issued under no longer exist.
+const supersededDispatchPhase = "review_dispatch_superseded"
+
+// supersedeReviewDispatch retires whatever is left of the review the amendment
+// invalidated, so the next dispatch is a genuinely new one.
+//
+// The problem it solves is specific. A review step's trigger-review command
+// lives in the outbox under a per-cycle idempotency key, and dispatch is
+// single-flight against it: an entry that is already dispatched or acknowledged
+// means "this cycle was issued", and the dispatcher will try to ADOPT its
+// review run rather than start another. That is exactly right for a crash
+// recovery and exactly wrong after an amendment, where the point is that the
+// old cycle's verdict no longer counts. Left alone, the stale entry either gets
+// re-adopted (reviving a verdict reached under a criterion that is gone) or,
+// when the workspace has since moved and no review run matches, parks the step
+// as review_dispatch_ambiguous — which is what wf-04e8309d actually did.
+//
+// So every non-terminal trigger-review entry on the step is moved to failed,
+// carrying an error class that says why. Nothing is deleted: the entries and
+// their review runs stay exactly where they are, and the checkpoint below names
+// which verdict the amendment superseded.
+//
+// Idempotent and restart-safe by construction: an entry already terminal is
+// skipped, so a second call, a retry or a resume after a crash finds nothing
+// left to retire and writes nothing.
+func (c *Coordinator) supersedeReviewDispatch(
+	ctx stdctx.Context,
+	child RunDetail,
+	amendment domain.WorkflowTaskCriterionAmendment,
+) error {
+	reviewStepID := ""
+	for _, s := range child.Steps {
+		if s.Step.Kind == domain.WorkflowStepReview {
+			reviewStepID = s.Step.ID
+			break
+		}
+	}
+	if reviewStepID == "" {
+		return nil
+	}
+	entries, err := c.store.ListWorkflowOutboxByRun(ctx, child.Run.ID)
+	if err != nil {
+		return err
+	}
+	retired := make([]string, 0, 1)
+	for _, e := range entries {
+		if e.CommandType != domain.WorkflowOutboxTriggerReview ||
+			e.WorkflowStepID == nil || *e.WorkflowStepID != reviewStepID {
+			continue
+		}
+		if e.Status == domain.WorkflowOutboxFailed {
+			continue // already retired; nothing to do and nothing to record
+		}
+		moved, err := c.store.UpdateWorkflowOutboxStatus(ctx, e.ID, e.Status,
+			domain.WorkflowOutboxFailed, c.clock(), supersededDispatchPhase)
+		if err != nil {
+			return err
+		}
+		if moved {
+			retired = append(retired, e.IdempotencyKey)
+		}
+	}
+	if len(retired) == 0 {
+		return nil
+	}
+	body, _ := json.Marshal(struct {
+		AmendmentID           string   `json:"amendmentId"`
+		TaskID                string   `json:"taskId"`
+		RetiredDispatches     []string `json:"retiredDispatches"`
+		SupersededReviewRunID string   `json:"supersededReviewRunId,omitempty"`
+	}{amendment.ID, amendment.TaskID, retired, amendment.SupersededReviewRunID})
+	stepID := reviewStepID
+	_, err = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+		ID:             "wfc-" + c.newID(),
+		WorkflowRunID:  child.Run.ID,
+		WorkflowStepID: &stepID,
+		ProjectID:      child.Run.ProjectID,
+		NextAction: fmt.Sprintf(
+			"review_dispatch_superseded: %d review dispatch(es) were retired because amendment %s changed the acceptance criteria they were issued under — the next review is a new, independent cycle",
+			len(retired), amendment.ID),
+		DurablePhase:   supersededDispatchPhase,
+		PayloadVersion: "v1",
+		RetryState:     string(body),
+		CreatedAt:      c.clock(),
+	})
+	return err
+}
+
+// ResumeAmendedTaskReview finishes an amendment whose fresh review never got
+// opened — a daemon that died between the two writes, or (as happened on
+// wf-04e8309d) an amendment applied by a build whose re-open was wrong.
+//
+// It creates NO new amendment. It re-applies the consequences of the amendment
+// already on record: retire any superseded dispatch, put the review step back
+// where a new cycle is dispatched from, and unpark the run. Every one of those
+// is idempotent, so calling it on a task that is already moving does nothing.
+func (c *Coordinator) ResumeAmendedTaskReview(ctx stdctx.Context, runID, taskID string) error {
+	amendments, err := c.planStore.ListWorkflowTaskCriterionAmendments(ctx, runID)
+	if err != nil {
+		return err
+	}
+	var latest domain.WorkflowTaskCriterionAmendment
+	for _, a := range amendments {
+		if a.TaskID == taskID {
+			latest = a
+		}
+	}
+	if latest.ID == "" {
+		return fmt.Errorf("%w: task %s has no recorded acceptance-criterion amendment to resume", ErrInvalid, taskID)
+	}
+	tasks, err := c.planStore.ListWorkflowTasks(ctx, runID)
+	if err != nil {
+		return err
+	}
+	for i := range tasks {
+		if tasks[i].ID != taskID {
+			continue
+		}
+		child, ok := c.executionRunFor(ctx, tasks[i])
+		if !ok {
+			return fmt.Errorf("%w: task %s has no execution run", ErrInvalid, taskID)
+		}
+		return c.reopenReviewAfterAmendment(ctx, child, latest)
+	}
+	return fmt.Errorf("%w: run %s has no task %s", ErrNotFound, runID, taskID)
 }
 
 // reopenReviewAfterAmendment puts the child back in the state the ordinary
@@ -275,7 +403,14 @@ func (c *Coordinator) requireFreshReviewAfterAmendment(
 //
 // A step already `waiting` is therefore left alone rather than "reset" — moving
 // it would be the bug.
-func (c *Coordinator) reopenReviewAfterAmendment(ctx stdctx.Context, child RunDetail) error {
+func (c *Coordinator) reopenReviewAfterAmendment(ctx stdctx.Context, child RunDetail, amendment domain.WorkflowTaskCriterionAmendment) error {
+	// First retire whatever is left of the dispatch the amendment invalidated.
+	// Before the step is moved, so a poll landing in between finds a step that
+	// is not yet dispatchable rather than one whose stale outbox entry is still
+	// adoptable.
+	if err := c.supersedeReviewDispatch(ctx, child, amendment); err != nil {
+		return err
+	}
 	for _, s := range child.Steps {
 		switch s.Step.Kind {
 		case domain.WorkflowStepReview, domain.WorkflowStepFix:
@@ -293,7 +428,11 @@ func (c *Coordinator) reopenReviewAfterAmendment(ctx stdctx.Context, child RunDe
 		return err
 	}
 	if run.State == domain.WorkflowRunNeedsAttention {
-		c.unparkRun(ctx, run, ReasonFixNoVerifiableChange,
+		// The stop being cleared is whatever the run happened to be parked on —
+		// the exhausted fix budget, an ambiguous dispatch, a blocked worker. All
+		// of them are answered by the same fact, so the record says that fact
+		// rather than guessing at a reason code.
+		c.unparkRun(ctx, run, taskCriterionAmendedPhase,
 			"an acceptance criterion was amended by a person, so an independent review of the current work is due")
 	}
 	return nil

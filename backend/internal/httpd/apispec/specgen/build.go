@@ -839,6 +839,17 @@ func workflowOperations() []operation {
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
 		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/tasks/{taskId}/criteria/resume-review", id: "resumeAmendedWorkflowTaskReview", tag: "workflows",
+			summary:    "Finish an acceptance-criterion amendment whose fresh independent review never opened: retire the superseded review dispatch and re-open the review. Records no second amendment; idempotent.",
+			pathParams: []any{controllers.WorkflowTaskParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
 		// Checkpoint 8P-E.18 — the Incident Advisor. Four operations, mirroring
 		// the four routes: the split between proposing and executing is the
 		// authorization boundary, not a REST style choice.

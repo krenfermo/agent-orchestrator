@@ -146,6 +146,13 @@ func (f *fakeWorkflowService) AmendTaskCriterion(_ context.Context, req workflow
 		Reason: req.Reason, Evidence: req.Evidence, ApprovedBy: req.ApprovedBy}, detail, nil
 }
 
+func (f *fakeWorkflowService) ResumeAmendedTaskReview(_ context.Context, runID, _ string) (workflowcore.RunDetail, error) {
+	if f.detail.Run.ID != "" {
+		return f.detail, nil
+	}
+	return workflowcore.RunDetail{Run: domain.WorkflowRun{ID: runID, State: domain.WorkflowRunRunning}}, nil
+}
+
 func newWorkflowTestServer(t *testing.T, svc workflowsvc.Manager) *httptest.Server {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))

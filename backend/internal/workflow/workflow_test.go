@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -355,6 +356,17 @@ func (f *fakeStore) EnqueueWorkflowOutboxEntry(_ context.Context, entry domain.W
 	entry.Status = domain.WorkflowOutboxPending
 	f.outbox[entry.IdempotencyKey] = entry
 	return entry, true, nil
+}
+
+func (f *fakeStore) ListWorkflowOutboxByRun(_ context.Context, runID string) ([]domain.WorkflowOutboxEntry, error) {
+	out := []domain.WorkflowOutboxEntry{}
+	for _, entry := range f.outbox {
+		if entry.WorkflowRunID == runID {
+			out = append(out, entry)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
 }
 
 func (f *fakeStore) UpdateWorkflowOutboxStatus(_ context.Context, id string, expected, next domain.WorkflowOutboxStatus, now time.Time, errorClass string) (bool, error) {
