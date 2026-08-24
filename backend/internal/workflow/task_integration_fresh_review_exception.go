@@ -72,8 +72,12 @@ type IntegrationFreshReviewException struct {
 	// deliberately separate from the ordinary attempt count: the two are
 	// different kinds of authority and conflating them would hide which was
 	// which.
-	Generation int       `json:"generation"`
-	GrantedAt  time.Time `json:"grantedAt"`
+	Generation int `json:"generation"`
+	// Reauthorized marks a grant a person made for a workspace state that had
+	// already been authorized once -- the deliberate second decision, never an
+	// accident of repetition.
+	Reauthorized bool      `json:"reauthorized,omitempty"`
+	GrantedAt    time.Time `json:"grantedAt"`
 }
 
 // IntegrationFreshReviewExceptionRequest is what a caller must supply.
@@ -82,6 +86,13 @@ type IntegrationFreshReviewExceptionRequest struct {
 	TaskID      string
 	ApprovedBy  string
 	Reason      string
+	// Reauthorize is the explicit second decision. Without it a request naming
+	// a workspace state that already has a grant returns that grant unchanged,
+	// which is what makes a poll, a retry or a double-click harmless. With it a
+	// person is saying "I know this state was already authorized, and I am
+	// authorizing it again" -- the only way a second generation exists for one
+	// unchanged workspace, and it is recorded as such.
+	Reauthorize bool
 }
 
 // AuthorizeIntegrationFreshReviewException grants one additional fresh-review
@@ -153,9 +164,14 @@ func (c *Coordinator) AuthorizeIntegrationFreshReviewException(
 	// request for a workspace state already granted is the same decision
 	// arriving twice, and it must return that decision rather than be refused
 	// for a budget its own grant has already widened.
-	for _, g := range granted {
-		if g.Fingerprint == fingerprint {
-			return g, nil
+	//
+	// Reauthorize is the documented exception to that: a person explicitly
+	// saying they mean a second grant for a state they already authorized.
+	if !req.Reauthorize {
+		for _, g := range granted {
+			if g.Fingerprint == fingerprint {
+				return g, nil
+			}
 		}
 	}
 	// The ordinary budget must actually be spent. While it is not, the normal
@@ -176,6 +192,7 @@ func (c *Coordinator) AuthorizeIntegrationFreshReviewException(
 		Fingerprint:   fingerprint,
 		PriorAttempts: prior,
 		Generation:    len(granted) + 1,
+		Reauthorized:  req.Reauthorize && exceptionAlreadyGrantedFor(granted, fingerprint),
 		GrantedAt:     c.clock(),
 	}
 	payload, err := json.Marshal(exception)
@@ -292,4 +309,15 @@ func (c *Coordinator) currentTaskFingerprint(ctx stdctx.Context, childRunID stri
 		return ""
 	}
 	return WorkspaceFingerprint(obs)
+}
+
+// exceptionAlreadyGrantedFor reports whether this workspace state already has a
+// grant, so a re-authorization can say so on the record.
+func exceptionAlreadyGrantedFor(granted []IntegrationFreshReviewException, fingerprint string) bool {
+	for _, g := range granted {
+		if g.Fingerprint == fingerprint {
+			return true
+		}
+	}
+	return false
 }

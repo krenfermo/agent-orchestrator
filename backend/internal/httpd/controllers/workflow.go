@@ -1059,6 +1059,9 @@ func (c *WorkflowsController) resumeTask(w http.ResponseWriter, r *http.Request)
 type AuthorizeFreshReviewExceptionRequest struct {
 	ApprovedBy string `json:"approvedBy"`
 	Reason     string `json:"reason"`
+	// Reauthorize authorizes a SECOND grant for a workspace state that already
+	// has one. Without it such a request returns the existing grant unchanged.
+	Reauthorize bool `json:"reauthorize,omitempty"`
 }
 
 func (c *WorkflowsController) authorizeFreshReviewException(w http.ResponseWriter, r *http.Request) {
@@ -1076,6 +1079,7 @@ func (c *WorkflowsController) authorizeFreshReviewException(w http.ResponseWrite
 		TaskID:      chi.URLParam(r, "taskId"),
 		ApprovedBy:  body.ApprovedBy,
 		Reason:      body.Reason,
+		Reauthorize: body.Reauthorize,
 	})
 	if err != nil {
 		writeWorkflowError(w, r, err)

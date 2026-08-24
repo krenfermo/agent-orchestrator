@@ -330,3 +330,65 @@ func TestAnUngrantedRunKeepsTheOriginalBudget(t *testing.T) {
 		t.Fatalf("budget = %d, want %d: the global bound must be untouched for everyone else", b, maxIntegrationFreshReviews)
 	}
 }
+
+// ---- 5. the explicit second decision --------------------------------------
+
+// Without it, a repeat for an already-granted state is idempotent. With it, a
+// person is deliberately authorizing again for that same state -- the only way
+// a second generation exists for an unchanged workspace, and it says so.
+func TestReauthorizeGrantsASecondGenerationForTheSameWorkspace(t *testing.T) {
+	fx := newExceptionFixture(t, maxIntegrationFreshReviews)
+	first, err := fx.authorize("joaquin", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The budget must genuinely be spent again before a second grant is due.
+	payload, _ := json.Marshal(IntegrationFreshReviewRecord{TaskID: fx.taskID, Attempt: 3})
+	if _, err := fx.store.CreateWorkflowCheckpoint(fx.ctx, domain.WorkflowCheckpoint{
+		ID: "wfc-req-x", WorkflowRunID: fx.childID, ProjectID: "p",
+		RetryState: string(payload), DurablePhase: integrationFreshReviewRequiredPhase,
+		PayloadVersion: "v1", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := fx.coord.AuthorizeIntegrationFreshReviewException(fx.ctx, IntegrationFreshReviewExceptionRequest{
+		MasterRunID: "wf-exc-master", TaskID: fx.taskID,
+		ApprovedBy: "joaquin", Reason: "the first generation was consumed by a dispatch defect, since fixed",
+		Reauthorize: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Generation != first.Generation+1 {
+		t.Fatalf("generation = %d, want %d", second.Generation, first.Generation+1)
+	}
+	if !second.Reauthorized {
+		t.Fatal("a second grant for an already-authorized workspace must record that it was a deliberate re-authorization")
+	}
+	if n := len(fx.grants()); n != 2 {
+		t.Fatalf("grants = %d, want 2", n)
+	}
+}
+
+// Re-authorization is still an authorization: it needs an approver and a
+// reason, and it still refuses when the budget is not spent.
+func TestReauthorizeStillRefusesAnUnjustifiedGrant(t *testing.T) {
+	fx := newExceptionFixture(t, maxIntegrationFreshReviews)
+	if _, err := fx.authorize("joaquin", "first"); err != nil {
+		t.Fatal(err)
+	}
+	// Budget not spent again: 2 attempts, budget now 3.
+	_, err := fx.coord.AuthorizeIntegrationFreshReviewException(fx.ctx, IntegrationFreshReviewExceptionRequest{
+		MasterRunID: "wf-exc-master", TaskID: fx.taskID,
+		ApprovedBy: "joaquin", Reason: "again", Reauthorize: true,
+	})
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid: re-authorizing does not bypass the budget check", err)
+	}
+	if _, err := fx.coord.AuthorizeIntegrationFreshReviewException(fx.ctx, IntegrationFreshReviewExceptionRequest{
+		MasterRunID: "wf-exc-master", TaskID: fx.taskID, ApprovedBy: "", Reason: "x", Reauthorize: true,
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid: re-authorizing still needs a named approver", err)
+	}
+}
