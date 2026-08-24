@@ -290,6 +290,7 @@ func (c *Coordinator) resumeUnstartedFixCycle(ctx stdctx.Context, run domain.Wor
 	prompt := BuildFixPrompt(FixPromptInput{
 		Objective:          run.Objective,
 		AcceptanceCriteria: artifact.AcceptanceCriteria,
+		EffectiveSpec:      RenderEffectiveSpecification(c.effectiveTaskSpecification(ctx, run, artifact.AcceptanceCriteria)),
 		ReviewRunID:        reviewRun.ID,
 		Findings:           reviewRun.Body,
 		CycleNumber:        cycleNumber,

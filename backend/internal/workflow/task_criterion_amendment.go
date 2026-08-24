@@ -399,6 +399,7 @@ func (c *Coordinator) pendingAmendmentFreshReview(ctx stdctx.Context, runID, rev
 		return VerifyFreshReviewRecord{}, false
 	}
 	var newest *domain.WorkflowCheckpoint
+	amendmentGeneration := 0
 	for i := range cps {
 		cp := &cps[i]
 		if cp.DurablePhase != supersededDispatchPhase {
@@ -407,6 +408,7 @@ func (c *Coordinator) pendingAmendmentFreshReview(ctx stdctx.Context, runID, rev
 		if cp.WorkflowStepID != nil && *cp.WorkflowStepID != reviewStepID {
 			continue
 		}
+		amendmentGeneration++
 		if newest == nil || !cp.CreatedAt.Before(newest.CreatedAt) {
 			newest = cp
 		}
@@ -431,6 +433,12 @@ func (c *Coordinator) pendingAmendmentFreshReview(ctx stdctx.Context, runID, rev
 	}
 	_ = json.Unmarshal([]byte(newest.RetryState), &body)
 	return VerifyFreshReviewRecord{
+		// One amendment authorizes one review question. The amendment id is the
+		// generation's natural identity, but the dispatch key needs a number, so
+		// the count of superseded dispatches recorded so far serves as it: it
+		// advances once per amendment and never goes backwards.
+		Purpose:          freshReviewPurposeAmendment,
+		Generation:       amendmentGeneration,
 		TargetKey:        body.AmendmentID,
 		ReviewStepID:     reviewStepID,
 		PriorReviewRunID: body.SupersededReviewRunID,

@@ -97,6 +97,11 @@ type Store interface {
 	CreateWorkflowAttempt(ctx stdctx.Context, id, stepID, harness, model string, startedAt time.Time) (domain.WorkflowAttempt, error)
 	GetLatestWorkflowAttempt(ctx stdctx.Context, stepID string) (domain.WorkflowAttempt, bool, error)
 	UpdateWorkflowAttemptOutcome(ctx stdctx.Context, attemptID string, finishedAt time.Time, outcome domain.WorkflowAttemptOutcome, errorClass domain.WorkflowErrorClass) error
+	// ClaimWorkflowAttemptOutcome is the conditional form: it concludes the
+	// attempt only if nothing has concluded it yet, and says whether this
+	// caller won. It is what decides which of several concurrent verify
+	// executions of one target is allowed to have side effects.
+	ClaimWorkflowAttemptOutcome(ctx stdctx.Context, attemptID string, finishedAt time.Time, outcome domain.WorkflowAttemptOutcome, errorClass domain.WorkflowErrorClass) (bool, error)
 	CreateWorkflowCheckpoint(ctx stdctx.Context, cp domain.WorkflowCheckpoint) (domain.WorkflowCheckpoint, error)
 	ListWorkflowCheckpoints(ctx stdctx.Context, runID string) ([]domain.WorkflowCheckpoint, error)
 	GetLatestWorkflowCheckpointByStep(ctx stdctx.Context, stepID string) (domain.WorkflowCheckpoint, bool, error)
@@ -416,9 +421,13 @@ type Coordinator struct {
 	selfRepairProjectID string
 
 	// messageSender backs Checkpoint 8D's fix-step dispatch. Optional.
-	messageSender         MessageSender
-	verifier              VerifyRunner
-	planStore             masterPlanStore
+	messageSender MessageSender
+	verifier      VerifyRunner
+	planStore     masterPlanStore
+	// verifyClaimsState holds the per-process claims that stop one daemon from
+	// executing the same verify attempt twice concurrently. See
+	// verify_authority.go.
+	verifyClaimsState
 	planner               Planner
 	plannerContextBuilder PlannerContextBuilder
 
@@ -830,8 +839,8 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 	if checkpoints, cperr := c.store.ListWorkflowCheckpoints(ctx, runID); cperr == nil {
 		for _, cp := range checkpoints {
 			// Checkpoint 8P-E.18: incident-ledger rows describe a stop, they are
-			// never one. See isIncidentLedgerPhase.
-			if isIncidentLedgerPhase(cp.DurablePhase) {
+			// never one. See isBookkeepingPhase.
+			if isBookkeepingPhase(cp.DurablePhase) {
 				continue
 			}
 			if cp.NextAction != "" {
@@ -995,7 +1004,8 @@ func (c *Coordinator) StartRun(ctx stdctx.Context, runID string) (RunDetail, err
 		workStep.State = domain.WorkflowStepReady
 	}
 
-	prompt := BuildWorkStepPrompt(artifact)
+	prompt := BuildWorkStepPromptWithSpec(artifact,
+		RenderEffectiveSpecification(c.effectiveTaskSpecification(ctx, run, artifact.AcceptanceCriteria)))
 	if _, err := c.dispatchWorkStep(ctx, run, *workStep, prompt, false); err != nil {
 		return RunDetail{}, err
 	}
@@ -1036,6 +1046,32 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		return RunDetail{}, fmt.Errorf("%w: workflow run %q", ErrNotFound, runID)
 	}
 	if run.State.Terminal() {
+		// A terminal run is normally nothing to continue. The exception is a run
+		// left incoherent by a concurrent verification that lost its decision
+		// and acted anyway: terminal, with a step the loser started still in
+		// flight. That is not a run to continue, it is a run to repair, and this
+		// is the person-driven entry point where repairing it belongs. It never
+		// completes, cancels or re-decides anything -- see
+		// verify_race_reconcile.go. For every coherent terminal run it is a
+		// no-op and the refusal below is unchanged.
+		terminalSteps, serr := c.store.ListWorkflowSteps(ctx, runID)
+		if serr != nil {
+			return RunDetail{}, serr
+		}
+		// A completed child is exactly where a re-baseline belongs: the review
+		// and the verification it rests on have both finished, and integration
+		// has not run yet. It appends a fact and moves nothing, so it is safe
+		// on a terminal run in a way a state transition would not be.
+		if _, berr := c.reconcileVerifiedIntegrationBaseline(ctx, run, terminalSteps); berr != nil {
+			return RunDetail{}, berr
+		}
+		repaired, rerr := c.reconcileVerifyRace(ctx, run, terminalSteps)
+		if rerr != nil {
+			return RunDetail{}, rerr
+		}
+		if repaired {
+			return c.GetRun(ctx, runID)
+		}
 		return RunDetail{}, fmt.Errorf("%w: workflow run %q is already %s", ErrAlreadyTerminal, runID, run.State)
 	}
 
@@ -1165,6 +1201,41 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		}
 	}
 
+	// Before any of the resume paths below decide anything: close the attempts a
+	// restart or a crash abandoned. An attempt row with no outcome means "work
+	// may be in flight", and every guard downstream believes it — so a fossil
+	// left by a dead daemon silently refuses every recovery there is, forever,
+	// with no way to tell that from a genuine refusal. Reaping is proof-bound
+	// and closes nothing AO cannot show was abandoned (see attempt_reaper.go);
+	// for the overwhelming majority of runs it is a no-op. It happens here, on
+	// the person's own button, rather than in a poll, for the same reason the
+	// resumes do.
+	if reaped, rerr := c.reapOrphanedAttempts(ctx, run, steps); rerr != nil {
+		return RunDetail{}, rerr
+	} else if reaped > 0 {
+		if steps, err = c.store.ListWorkflowSteps(ctx, runID); err != nil {
+			return RunDetail{}, err
+		}
+	}
+
+	// The same re-baseline for a run that is still live, so a task whose branch
+	// moved does not have to reach a terminal state first.
+	if _, rerr := c.reconcileVerifiedIntegrationBaseline(ctx, run, steps); rerr != nil {
+		return RunDetail{}, rerr
+	}
+
+	// And the ledger's other fossil: an integration fresh-review request that a
+	// review actually answered, but which nothing ever recorded as answered
+	// because the run stopped before it integrated. pendingFreshReview consults
+	// integration requests before every other reason a review step can rest, so
+	// a stale one shadows them all and the run waits forever on a question that
+	// was settled hours earlier. Closing it needs proof that a specific review
+	// answered it (see task_integration_fresh_review_reconcile.go); a request
+	// genuinely still open keeps blocking, exactly as it should.
+	if _, rerr := c.reconcileIntegrationFreshReviewAnswer(ctx, run, steps); rerr != nil {
+		return RunDetail{}, rerr
+	}
+
 	// Checkpoint 8P-E.14C: this is the one place in AO where a terminal
 	// verification failure can be reopened, and it is here rather than in GetRun
 	// or the cascade because THIS call is the person saying "I corrected the
@@ -1185,6 +1256,19 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 	// without the exact durable evidence it requires.
 	if !reopened {
 		if run, reopened, rerr = c.resumeWorkspaceChangedVerifyRecovery(ctx, run, steps); rerr != nil {
+			return RunDetail{}, rerr
+		}
+	}
+	// And the third entry point, equally narrow: a run parked on a workspace
+	// change whose cause is that the branch grew COMMITS ON TOP of the reviewed
+	// commit, which still contains it. Neither of the two above can see it —
+	// the first refuses the class, the second requires an authorized recovery
+	// generation this run never had — and both refusals are correct, because
+	// what makes this one safe is a Git ancestry proof neither of them makes.
+	// A no-op for every run without exactly that durable evidence, re-derived
+	// against the repository as it stands now. See verify_branch_advanced.go.
+	if !reopened {
+		if run, reopened, rerr = c.resumeBranchAdvancedVerify(ctx, run, steps); rerr != nil {
 			return RunDetail{}, rerr
 		}
 	}

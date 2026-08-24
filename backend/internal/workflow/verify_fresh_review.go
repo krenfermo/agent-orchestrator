@@ -81,7 +81,23 @@ const (
 // checkpoints. It names the generation it belongs to and pins every fact the
 // decision was made from, so a restart re-reads the decision instead of
 // re-deriving it from a workspace that has since moved.
+// The mechanisms that can authorize a fresh review. Each counts its own
+// generations, so the purpose is what keeps two unrelated "generation 1"s from
+// collapsing onto one dispatch identity.
+const (
+	freshReviewPurposeVerifyRecovery = "verify"
+	freshReviewPurposeIntegration    = "integration"
+	freshReviewPurposeBranchAdvance  = "branchadvance"
+	freshReviewPurposeAmendment      = "amendment"
+)
+
 type VerifyFreshReviewRecord struct {
+	// Purpose names the mechanism that authorized this fresh review: a verify
+	// recovery, an integration replay, a branch advance, an amended criterion.
+	// It is part of the dispatch identity because each mechanism counts its own
+	// generations independently, so a bare generation number would collide two
+	// unrelated questions onto one review run. Empty for an ordinary cycle.
+	Purpose string `json:"purpose,omitempty"`
 	// Generation is the verify recovery generation this fresh review serves. It
 	// is the join key for the whole lifecycle: request, dispatch and approval all
 	// carry it, and the ledger answers every "already done?" question with it.
@@ -277,6 +293,7 @@ func (c *Coordinator) requestFreshReviewForRecovery(
 	obs ports.WorkspaceObservation,
 ) (domain.WorkflowRun, domain.WorkflowStep, error) {
 	record := VerifyFreshReviewRecord{
+		Purpose:             freshReviewPurposeVerifyRecovery,
 		Generation:          recovery.Generation,
 		TargetKey:           result.TargetKey,
 		ApprovedFingerprint: result.ReviewedFingerprint,
@@ -506,6 +523,7 @@ func (c *Coordinator) resumeWorkspaceChangedVerifyRecovery(ctx stdctx.Context, r
 	// Proof 7 (the bound) is attributableWorkspaceDrift's own check on
 	// led.freshReviewRequested, already false to have reached here.
 	record := VerifyFreshReviewRecord{
+		Purpose:             freshReviewPurposeVerifyRecovery,
 		Generation:          led.generation,
 		TargetKey:           targetKey,
 		ApprovedFingerprint: result.ReviewedFingerprint,
@@ -581,6 +599,13 @@ func (c *Coordinator) pendingFreshReview(ctx stdctx.Context, runID, reviewStepID
 		// routing the second through this read rather than through a second
 		// branch of its own.
 		if rec, ok := c.pendingIntegrationFreshReview(ctx, runID, reviewStepID); ok {
+			return rec, true
+		}
+		// And a BRANCH ADVANCE may be: the branch grew commits on top of the
+		// reviewed one while this run waited, so the approval describes a tree
+		// that has moved on (verify_branch_advanced.go). A third reason for the
+		// same resting state, served here for the same reason the second is.
+		if rec, ok := c.pendingBranchAdvancedFreshReview(ctx, runID, reviewStepID); ok {
 			return rec, true
 		}
 		// And an AMENDMENT may be: a criterion that stopped describing reality

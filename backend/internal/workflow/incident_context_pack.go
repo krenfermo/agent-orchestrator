@@ -117,6 +117,11 @@ type IncidentPackInput struct {
 	StopReason string
 	StopDetail string
 	IncidentID string
+	// EffectiveSpec is RenderEffectiveSpecification's output for this run: the
+	// approved amendments that reconcile the original objective with the
+	// criteria in force. Empty when the task has none, which leaves the pack
+	// byte-identical to what it was before amendments existed.
+	EffectiveSpec string
 
 	// Master, when this run is a child, is the parent's state — the single most
 	// common thing a person needs and cannot see from the child.
@@ -197,6 +202,13 @@ func BuildIncidentContextPack(in IncidentPackInput) IncidentContextPack {
 	// Priority 2 — the immediate mechanics of the stop.
 	add(2, "Recent checkpoints", renderIncidentCheckpoints(in.Checkpoints), 0)
 	add(2, "Worker session", renderIncidentSession(in), 0)
+
+	// Priority 2 as well: an approved amendment is often the whole explanation
+	// for a stop, because a reviewer blocking on a requirement a person already
+	// retired looks identical to a reviewer blocking on a real defect. The
+	// advisor is given the same authoritative reading every other role gets
+	// (RenderEffectiveSpecification), never the historical requirement alone.
+	add(2, "Approved amendments to the task's requirements", in.EffectiveSpec, 0)
 
 	// Priority 3 — the surrounding state a stop is usually explained by.
 	if in.MasterState != "" {

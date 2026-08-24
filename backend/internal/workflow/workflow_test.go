@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,7 +19,10 @@ type fakeStore struct {
 
 	// attempts, checkpoints, and outbox back Checkpoint 8B's dispatch/
 	// observation methods. Keyed the same way the real store's queries are.
-	attempts    map[string][]domain.WorkflowAttempt    // by workflow_step_id
+	attempts map[string][]domain.WorkflowAttempt // by workflow_step_id
+	// attemptMu makes the compare-and-swap below atomic under the concurrency
+	// tests, which is the whole property it exists to model.
+	attemptMu   sync.Mutex
 	checkpoints map[string][]domain.WorkflowCheckpoint // by workflow_run_id, oldest first
 	outbox      map[string]domain.WorkflowOutboxEntry  // by idempotency_key
 
@@ -300,6 +304,31 @@ func (f *fakeStore) GetLatestWorkflowAttempt(_ context.Context, stepID string) (
 		return domain.WorkflowAttempt{}, false, nil
 	}
 	return list[len(list)-1], true, nil
+}
+
+// ClaimWorkflowAttemptOutcome is the fake's compare-and-swap: it concludes the
+// attempt only when nothing has, which is what lets a test run two verify
+// executions against one attempt and assert that exactly one of them may act.
+func (f *fakeStore) ClaimWorkflowAttemptOutcome(_ context.Context, attemptID string, finishedAt time.Time, outcome domain.WorkflowAttemptOutcome, errorClass domain.WorkflowErrorClass) (bool, error) {
+	f.attemptMu.Lock()
+	defer f.attemptMu.Unlock()
+	for stepID, list := range f.attempts {
+		for i, a := range list {
+			if a.ID != attemptID {
+				continue
+			}
+			if a.FinishedAt != nil {
+				return false, nil
+			}
+			t := finishedAt
+			a.FinishedAt = &t
+			a.Outcome = outcome
+			a.ErrorClass = errorClass
+			f.attempts[stepID][i] = a
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (f *fakeStore) UpdateWorkflowAttemptOutcome(_ context.Context, attemptID string, finishedAt time.Time, outcome domain.WorkflowAttemptOutcome, errorClass domain.WorkflowErrorClass) error {

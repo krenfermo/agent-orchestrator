@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -784,6 +785,7 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	r.Post("/workflows/{workflowId}/start", c.start)
 	r.Post("/workflows/{workflowId}/continue", c.continueRun)
 	r.Post("/workflows/{workflowId}/tasks/{taskId}/resume", c.resumeTask)
+	r.Post("/workflows/{workflowId}/tasks/{taskId}/fresh-review-exception", c.authorizeFreshReviewException)
 	r.Post("/workflows/{workflowId}/tasks/{taskId}/criteria/amend", c.amendTaskCriterion)
 	r.Post("/workflows/{workflowId}/tasks/{taskId}/criteria/resume-review", c.resumeAmendedTaskReview)
 
@@ -1046,6 +1048,44 @@ func (c *WorkflowsController) resumeTask(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+
+// AuthorizeFreshReviewExceptionRequest authorizes ONE additional integration
+// fresh review for a task whose ordinary budget is spent.
+//
+// ApprovedBy and Reason are required for the same reason they are on an
+// amendment: this widens a guard, and a widening nobody can be asked about
+// afterwards is indistinguishable from the guard not being there.
+type AuthorizeFreshReviewExceptionRequest struct {
+	ApprovedBy string `json:"approvedBy"`
+	Reason     string `json:"reason"`
+	// Reauthorize authorizes a SECOND grant for a workspace state that already
+	// has one. Without it such a request returns the existing grant unchanged.
+	Reauthorize bool `json:"reauthorize,omitempty"`
+}
+
+func (c *WorkflowsController) authorizeFreshReviewException(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/tasks/{taskId}/fresh-review-exception")
+		return
+	}
+	var body AuthorizeFreshReviewExceptionRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeWorkflowError(w, r, fmt.Errorf("%w: malformed request body", workflowcore.ErrInvalid))
+		return
+	}
+	exception, err := c.Svc.AuthorizeIntegrationFreshReviewException(r.Context(), workflowcore.IntegrationFreshReviewExceptionRequest{
+		MasterRunID: chi.URLParam(r, "workflowId"),
+		TaskID:      chi.URLParam(r, "taskId"),
+		ApprovedBy:  body.ApprovedBy,
+		Reason:      body.Reason,
+		Reauthorize: body.Reauthorize,
+	})
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, exception)
 }
 
 // AmendTaskCriterionRequest is one human-approved amendment of one acceptance

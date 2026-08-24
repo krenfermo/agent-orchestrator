@@ -153,6 +153,7 @@ func (c *Coordinator) dispatchDecisionResolver(ctx stdctx.Context, run domain.Wo
 	prompt := BuildDecisionResolverPrompt(DecisionResolverPromptInput{
 		Objective:          run.Objective,
 		AcceptanceCriteria: acceptanceCriteria,
+		EffectiveSpec:      RenderEffectiveSpecification(c.effectiveTaskSpecification(ctx, run, acceptanceCriteria)),
 		QuestionText:       q.QuestionText,
 		Choices:            q.StructuredChoices,
 		Branch:             branch,

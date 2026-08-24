@@ -252,6 +252,17 @@ func (c *Coordinator) integrateDirectBranchTask(
 		return err
 	}
 	evidence, ok := directBranchPromotionEvidence(checkpoints, workCP)
+	// A task whose branch moved past its own work commit, and which has since
+	// had an independent review AND a verification pass against the head as it
+	// now stands, is certified fit to integrate at THAT head. The work commit
+	// is unchanged and still on the record; what the baseline replaces is only
+	// the answer to "what was last certified", which is the question freshness
+	// is actually asking. See task_integration_baseline.go.
+	if ok && evidence.Kind == directBranchEvidenceCommitted {
+		if baseline, has := c.verifiedIntegrationBaseline(ctx, child.Run.ID); has && baseline.VerifiedIntegrationCommit != "" {
+			evidence.CommitSHA = baseline.VerifiedIntegrationCommit
+		}
+	}
 	if !ok {
 		return c.recordIntegrationFailure(ctx, parent, task,
 			"directbranch: the execution run recorded no durable proof that its verified result reached the target branch (its local-commit policy may have deferred or skipped the commit)")

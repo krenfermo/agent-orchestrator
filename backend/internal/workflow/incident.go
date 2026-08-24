@@ -221,6 +221,29 @@ const incidentLaunchFailedPhase = "incident_diagnosis_launch_failed"
 // "¿Qué hago?" modal, which makes it instantly the newest row on the run; if it
 // counted, merely ASKING about a stop would rewrite the run's derived stop
 // reason and lifecycle phase. Asking a question must not change the answer.
+// isBookkeepingPhase reports whether a checkpoint records something ABOUT a run
+// rather than something the run DID — and must therefore never be folded into
+// the run's derived state.
+//
+// The incident ledger is one such set, for the reason described above. The
+// attempt reaper writes the other: closing an attempt a restart abandoned is
+// housekeeping on the run's history, not a step of it, and certainly not a
+// stop. It is also written at the worst possible moment — on a parked run, from
+// the very Continue that is about to ask why the run is parked — so if it
+// counted as the newest checkpoint it would displace the real stop phase and
+// leave the run unable to say why it stopped. That is exactly the
+// wf-3220567f failure this file's guard already prevents once; a second phase
+// with the same shape needs the same exclusion, not a second lesson.
+//
+// Every reader that folds "the newest checkpoint" into derived state uses this,
+// not isIncidentLedgerPhase directly.
+func isBookkeepingPhase(phase string) bool {
+	return isIncidentLedgerPhase(phase) ||
+		phase == attemptReapedPhase ||
+		phase == verifySupersededPhase ||
+		phase == verifyRaceReconciledPhase
+}
+
 func isIncidentLedgerPhase(phase string) bool {
 	if _, ok := incidentPhases[phase]; ok {
 		return true

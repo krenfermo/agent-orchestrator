@@ -44,10 +44,13 @@ type fakeWorkflowService struct {
 	amendErr   error
 	amendCalls int
 
-	resumeRunID  string
-	resumeTaskID string
-	resumeErr    error
-	resumeCalls  int
+	resumeRunID    string
+	resumeTaskID   string
+	resumeErr      error
+	resumeCalls    int
+	exceptionReq   workflowcore.IntegrationFreshReviewExceptionRequest
+	exceptionCalls int
+	exceptionErr   error
 
 	detail workflowcore.RunDetail
 	runs   []domain.WorkflowRun
@@ -117,6 +120,21 @@ func (f *fakeWorkflowService) ContinueRun(_ context.Context, runID string) (work
 		return f.detail, nil
 	}
 	return workflowcore.RunDetail{Run: domain.WorkflowRun{ID: runID, State: domain.WorkflowRunWaiting}}, nil
+}
+
+// AuthorizeIntegrationFreshReviewException records the exceptional grant the
+// controller asked for, so a test can assert the approver and reason reach the
+// coordinator rather than being dropped between the wire and the ledger.
+func (f *fakeWorkflowService) AuthorizeIntegrationFreshReviewException(_ context.Context, req workflowcore.IntegrationFreshReviewExceptionRequest) (workflowcore.IntegrationFreshReviewException, error) {
+	f.exceptionReq = req
+	f.exceptionCalls++
+	if f.exceptionErr != nil {
+		return workflowcore.IntegrationFreshReviewException{}, f.exceptionErr
+	}
+	return workflowcore.IntegrationFreshReviewException{
+		TaskID: req.TaskID, MasterRunID: req.MasterRunID,
+		ApprovedBy: req.ApprovedBy, Reason: req.Reason, Generation: 1,
+	}, nil
 }
 
 func (f *fakeWorkflowService) ResumeTask(_ context.Context, runID, taskID string) (workflowcore.RunDetail, error) {

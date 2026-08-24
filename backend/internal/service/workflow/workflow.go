@@ -46,6 +46,11 @@ type Manager interface {
 	// ResumeTask releases one task parked in needs_attention (migration 0130)
 	// after a person has dealt with what parked it. Idempotent.
 	ResumeTask(ctx context.Context, runID, taskID string) (workflowcore.RunDetail, error)
+	// AuthorizeIntegrationFreshReviewException grants ONE additional
+	// integration fresh review to a task whose ordinary budget is spent, on a
+	// named person's explicit authority. See
+	// workflow/task_integration_fresh_review_exception.go.
+	AuthorizeIntegrationFreshReviewException(ctx context.Context, req workflowcore.IntegrationFreshReviewExceptionRequest) (workflowcore.IntegrationFreshReviewException, error)
 	// AmendTaskCriterion is the Plan / Acceptance Criteria Amendment action
 	// (migration 0132): a human-approved change to a criterion that stopped
 	// describing reality, followed by a fresh independent review.
@@ -213,6 +218,14 @@ func (s *Service) ResumeAmendedTaskReview(ctx context.Context, runID, taskID str
 		return workflowcore.RunDetail{}, err
 	}
 	return s.coordinator.GetRun(ctx, runID)
+}
+
+// AuthorizeIntegrationFreshReviewException grants one additional integration
+// fresh review for a parked task, on a named person's authority. The bound
+// itself is unchanged; this widens it for exactly this task and exactly this
+// workspace state.
+func (s *Service) AuthorizeIntegrationFreshReviewException(ctx context.Context, req workflowcore.IntegrationFreshReviewExceptionRequest) (workflowcore.IntegrationFreshReviewException, error) {
+	return s.coordinator.AuthorizeIntegrationFreshReviewException(ctx, req)
 }
 
 // ResumeTask releases one task parked in needs_attention after a person has
