@@ -95,6 +95,22 @@ type Record struct {
 	// had advanced, and therefore that Verification describes a run against
 	// content that did not exist when the task finished.
 	Replayed bool
+	// DependenciesRequired are the sibling tasks this integration proved were
+	// already on the target before it moved it. It is the durable answer to
+	// "was this task allowed to land here", which stops being derivable the
+	// moment anything else moves the ref.
+	DependenciesRequired []string
+	// EffectiveFingerprintBefore and EffectiveFingerprintAfter are the identity
+	// of the change this task contributes, as its review saw it and as the
+	// replay produced it. They are equal exactly when the replay left the task's
+	// diff alone, which is the whole question a carried-over approval turns on;
+	// both are empty when nothing was replayed and there was no question.
+	EffectiveFingerprintBefore string
+	EffectiveFingerprintAfter  string
+	// ReviewReused reports that the task's existing approval still described
+	// what landed after a replay. False on every path where no replay happened,
+	// where the review was never an approval, and where the approval went stale.
+	ReviewReused bool
 	// AutoResolvedPaths are the conflicted files the coordinator resolved by
 	// itself, under the one deterministic rule in conflict.go. Empty for the
 	// overwhelming majority of integrations.
@@ -276,6 +292,19 @@ const (
 	// ReasonTargetMoved means the target branch changed between the read and
 	// the compare-and-set despite the lock -- something outside AO wrote it.
 	ReasonTargetMoved AttentionReason = "integration_target_moved"
+	// ReasonDependencyMissingFromTarget means a task this one required did
+	// integrate, and the target has since stopped containing its work. Landing
+	// here would produce exactly the state dependency-aware integration exists
+	// to prevent: a task integrated against a target that excludes a dependency
+	// it required. It is distinct from a dependency that has simply not landed
+	// yet, which is ErrDependencyPending and not an attention at all.
+	ReasonDependencyMissingFromTarget AttentionReason = "integration_dependency_missing_from_target"
+	// ReasonStaleReviewAfterRebase means the replay changed the change: what
+	// would land is no longer the diff the reviewer approved. It is not a
+	// failure of the work and not a conflict -- it is a question that has to go
+	// back to a reviewer before this task may integrate, and the caller answers
+	// it by re-opening the task's review rather than by parking for a human.
+	ReasonStaleReviewAfterRebase AttentionReason = "integration_stale_review_after_rebase"
 	// ReasonStaleVerification means the verification the caller offered no
 	// longer describes the content being integrated, and nothing was available
 	// to produce a fresh one. Integrating anyway would record an authorization

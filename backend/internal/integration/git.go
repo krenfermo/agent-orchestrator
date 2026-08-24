@@ -52,6 +52,17 @@ type Git interface {
 	// A range that does is one git rebase would silently flatten, which is
 	// what disqualifies rebase as a strategy for it.
 	HasMergeCommits(ctx context.Context, dir, base, head string) (bool, error)
+	// PatchIdentity returns a stable identity for the change from..to: the
+	// lines it adds and removes, in the files it touches, with everything that
+	// merely describes WHERE they sit removed.
+	//
+	// It is how "is what this task contributes still the same change" is
+	// answered after a replay, which is what a carried-over review approval
+	// stands or falls on. Like every other read here it takes a repository
+	// path: a worktree shares the repository's objects, so a replayed commit
+	// is readable from either, and reading from the repository keeps the
+	// question read-only.
+	PatchIdentity(ctx context.Context, dir, from, to string) (string, error)
 
 	// Rebase replays the worktree's checked-out branch onto onto. It returns
 	// ErrReplayConflict when it stopped on a conflict, leaving the rebase in
@@ -216,6 +227,21 @@ func (g execGit) HasMergeCommits(ctx context.Context, dir, base, head string) (b
 		return false, err
 	}
 	return strings.TrimSpace(string(out)) != "", nil
+}
+
+func (g execGit) PatchIdentity(ctx context.Context, dir, from, to string) (string, error) {
+	// -U0 asks git for the change with no surrounding context, which is the
+	// whole point: context is the code AROUND this task's change, and after a
+	// replay that code belongs to the dependency that landed first -- reviewed
+	// on its own way in, and not this task's contribution to re-review.
+	// --no-ext-diff so a user's configured external differ cannot change what
+	// AO hashes, and --find-renames so a rename is one identity rather than a
+	// delete plus an add that happens to look different after a replay.
+	out, err := g.run(ctx, dir, "diff", "--no-color", "--no-ext-diff", "--find-renames", "-U0", from, to)
+	if err != nil {
+		return "", err
+	}
+	return patchIdentity(out), nil
 }
 
 func (g execGit) Rebase(ctx context.Context, worktree, onto string) error {

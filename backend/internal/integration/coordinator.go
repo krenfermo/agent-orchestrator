@@ -103,6 +103,15 @@ type Request struct {
 	Readiness Readiness
 	Policy    Policy
 
+	// Dependencies are the sibling tasks whose work must already be on the
+	// target ref before this task's may land on it.
+	//
+	// They are what makes speculative parallel execution safe to START without
+	// making it unsafe to LAND: a task may be dispatched before the task it
+	// depends on has integrated, but it may not move the target until that
+	// dependency's commit is provably reachable from it. See dependency.go.
+	Dependencies []Dependency
+
 	// Verified is the durable verification that already authorized this work,
 	// as the caller reads it from its own records: the task's verify step, the
 	// result row behind it, and the content identity it describes.
@@ -271,6 +280,12 @@ func (c *Coordinator) Integrate(ctx context.Context, req Request) (Outcome, erro
 	if ok, why := req.Readiness.Ready(); !ok {
 		return Outcome{}, fmt.Errorf("%w: task %s: %s", ErrNotReady, req.TaskID, why)
 	}
+	// A task whose dependency has not integrated is not late, wrong or stopped:
+	// it is early. Refusing here, before the lane, is what keeps it from
+	// occupying the one thing its dependency needs in order to land.
+	if dep, waiting := pendingDependency(req.Dependencies); waiting {
+		return Outcome{}, fmt.Errorf("%w: task %s requires task %s", ErrDependencyPending, req.TaskID, dep.TaskID)
+	}
 
 	handle, err := c.locks.Acquire(ctx, LockRequest{
 		ProjectID:     req.ProjectID,
@@ -298,6 +313,8 @@ func (c *Coordinator) Integrate(ctx context.Context, req Request) (Outcome, erro
 	// to let the next task try.
 	relReason := "integration finished"
 	switch {
+	case errors.Is(err, ErrDependencyPending):
+		relReason = "integration waiting on a dependency"
 	case err != nil:
 		relReason = "integration failed"
 	case outcome.Record.Attention != nil:
@@ -364,6 +381,20 @@ func (c *Coordinator) integrateLocked(ctx context.Context, req Request) (Outcome
 	}
 	if rec.BaseSHA == "" {
 		rec.BaseSHA = targetBefore
+	}
+	rec.DependenciesRequired = dependencyTaskIDs(req.Dependencies)
+
+	// Every dependency that HAS integrated must still be on the target, proved
+	// against the head this integration is about to move rather than against
+	// anything remembered. It is the only place the guarantee can be made: a
+	// dependency that landed an hour ago and was rewritten off the ref a minute
+	// ago is indistinguishable from one that never landed, except here.
+	if att, derr := c.dependencyGate(ctx, req, targetBefore, targetExists); derr != nil {
+		return Outcome{}, derr
+	} else if att != nil {
+		att.BaseSHA, att.SourceSHA = rec.BaseSHA, sourceSHA
+		rec.Outcome, rec.Attention = OutcomeNeedsAttention, att
+		return needsAttention(rec), nil
 	}
 
 	if !targetExists {
@@ -446,6 +477,45 @@ func (c *Coordinator) integrateLocked(ctx context.Context, req Request) (Outcome
 		return needsAttention(rec), nil
 	}
 	rec.SourceSHA = replayed
+
+	// The replay succeeded; the question left is whether it produced the change
+	// the reviewer approved or a different one. Asked BEFORE re-verifying,
+	// because a verification of work whose review has gone stale answers the
+	// wrong question -- and because the fresh review this returns may itself
+	// lead to a fix, which would make the verification wasted twice over.
+	effectiveBefore, effectiveAfter, err := c.effectiveFingerprints(ctx, req, targetBefore, sourceSHA, replayed)
+	if err != nil {
+		return Outcome{}, err
+	}
+	rec.EffectiveFingerprintBefore, rec.EffectiveFingerprintAfter = effectiveBefore, effectiveAfter
+	survives, why := reviewSurvivesReplay(req.Readiness.Review, effectiveBefore, effectiveAfter)
+	if !survives {
+		// The rebase is deliberately LEFT in place, exactly as it is for a
+		// failed verification: it has already put this task's commits on top of
+		// the current target, which is the state a fresh review has to read.
+		// (A cherry-pick or a merge built its result on a detached HEAD, so
+		// undoReplay puts the worktree back on the task's own branch and the
+		// next attempt replays again -- the review then reads the un-replayed
+		// work, which is the honest thing to show when nothing durable was
+		// rebased.)
+		c.undoReplay(ctx, req, strategy)
+		rec.Outcome = OutcomeNeedsAttention
+		rec.Attention = &Attention{
+			Reason:    ReasonStaleReviewAfterRebase,
+			BaseSHA:   rec.BaseSHA,
+			TargetSHA: targetBefore,
+			SourceSHA: replayed,
+			Strategy:  strategy,
+			Detail:    "replaying this task onto the current target changed what it contributes, so its approval no longer describes it: " + why,
+		}
+		return needsAttention(rec), nil
+	}
+	// The approval still describes the change. It is reused, and the content is
+	// re-verified below because the content -- unlike the change -- is new.
+	// Only an actual approval can be reused: a policy-skipped review survives
+	// every replay because there was never a verdict to invalidate, and
+	// recording that as a reuse would claim an approval nobody gave.
+	rec.ReviewReused = req.Readiness.Review == ReviewApproved
 
 	verification, err := c.verify(ctx, req, replayed, targetBefore)
 	if err != nil {

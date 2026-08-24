@@ -573,7 +573,14 @@ func (c *Coordinator) applyFreshReviewReopen(ctx stdctx.Context, run domain.Work
 func (c *Coordinator) pendingFreshReview(ctx stdctx.Context, runID, reviewStepID string) (VerifyFreshReviewRecord, bool) {
 	led, err := c.verifyRecoveryLedger(ctx, runID)
 	if err != nil || led.generation == 0 || led.executed {
-		return VerifyFreshReviewRecord{}, false
+		// No verify recovery is asking for one. An INTEGRATION may be: a replay
+		// onto a moved target can leave a task's approval describing a change
+		// that is no longer the change (task_integration_fresh_review.go). The
+		// two are different reasons for the same resting state, and the
+		// dispatcher below serves both identically — which is the point of
+		// routing the second through this read rather than through a second
+		// branch of its own.
+		return c.pendingIntegrationFreshReview(ctx, runID, reviewStepID)
 	}
 	if !led.freshReviewRequested || led.freshReviewApproved {
 		return VerifyFreshReviewRecord{}, false

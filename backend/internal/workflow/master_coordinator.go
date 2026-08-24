@@ -701,6 +701,26 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 					// property itself into a stop for a human.
 					return nil
 				}
+				if errors.Is(err, errIntegrationWaitingOnDependency) || errors.Is(err, errIntegrationFreshReview) {
+					// Two different reasons for the same shape of answer: this
+					// task cannot integrate in THIS pass, nothing is wrong, and
+					// nothing about it stops a sibling.
+					//
+					//   - waiting on a dependency: a task it requires has not
+					//     landed yet, so it is early rather than blocked. The
+					//     pass that follows that dependency's integration finds
+					//     it ready.
+					//   - waiting on a fresh review: its rebase changed what it
+					//     contributes, so its child run has been re-opened for
+					//     one more review cycle and is running again.
+					//
+					// `continue` rather than `return nil`, which is the whole
+					// difference from the busy lane: a lane that is busy is busy
+					// for every task of this run, and one task waiting on its own
+					// dependency must not stop the pass that would integrate the
+					// dependency itself. The task stays active and stays running.
+					continue
+				}
 				if errors.Is(err, errIntegrationTaskConflict) {
 					// The conflict belongs to THIS task. It has already been
 					// recorded against it, with the files and all three SHAs,

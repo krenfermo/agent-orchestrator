@@ -20,6 +20,10 @@ type coordStubGit struct {
 	source   string
 	contains bool // is target an ancestor of source
 	casErr   error
+	// patchIdentities maps "from..to" to the identity of that change, for the
+	// tests that care what a replay did to a task's diff. Nil means "every
+	// change is the same change", which is what a test that never replays wants.
+	patchIdentities map[string]string
 }
 
 func (g *coordStubGit) record(format string, args ...any) {
@@ -67,6 +71,17 @@ func (g *coordStubGit) MergeBase(_ context.Context, _, _, _ string) (string, err
 func (g *coordStubGit) HasMergeCommits(_ context.Context, _, _, _ string) (bool, error) {
 	g.record("has-merges")
 	return false, nil
+}
+
+// PatchIdentity answers from the stub's fixed graph: the gate tests never
+// replay, so the only property that matters is that the two identities it
+// returns are equal unless a test says otherwise.
+func (g *coordStubGit) PatchIdentity(_ context.Context, _, from, to string) (string, error) {
+	g.record("patch-identity %s..%s", from, to)
+	if g.patchIdentities != nil {
+		return g.patchIdentities[from+".."+to], nil
+	}
+	return "same-change", nil
 }
 
 func (g *coordStubGit) Rebase(_ context.Context, worktree, onto string) error {

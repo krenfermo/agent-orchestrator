@@ -109,6 +109,14 @@ func (c *Coordinator) integrateIsolatedTask(
 	if workCP.SessionID != nil {
 		sessionID = *workCP.SessionID
 	}
+	// What this task's plan says has to be on the target before it may land,
+	// paired with where each of those integrations actually left the ref. The
+	// Coordinator proves the second half against the ref itself; nothing here
+	// is evidence that anything landed.
+	deps, err := c.integrationDependencies(ctx, parent, task)
+	if err != nil {
+		return err
+	}
 	outcome, err := coordinator.Integrate(ctx, integration.Request{
 		ProjectID:     domain.ProjectID(parent.ProjectID),
 		WorkflowRunID: parent.ID,
@@ -116,6 +124,7 @@ func (c *Coordinator) integrateIsolatedTask(
 		SessionID:     sessionID,
 		RepoPath:      project.Path,
 		WorktreePath:  workCP.WorktreePath,
+		Dependencies:  deps,
 		// Only the ref is named; the lane is derived from it (targetLaneName).
 		// Two master runs integrating their own refs in one repository
 		// therefore do not serialize against each other, while two tasks of ONE
@@ -135,7 +144,7 @@ func (c *Coordinator) integrateIsolatedTask(
 		Verified:          c.taskVerificationEvidence(ctx, child, artifact.Verification, ""),
 		SourceFingerprint: c.observedWorktreeFingerprint(ctx, parent, workCP),
 	})
-	if handled, herr := c.handleIntegrationOutcome(ctx, parent, task, outcome, err); handled {
+	if handled, herr := c.handleIntegrationOutcome(ctx, parent, task, child, workCP, outcome, err); handled {
 		return herr
 	}
 
@@ -266,6 +275,10 @@ func (c *Coordinator) integrateDirectBranchTask(
 	if workCP.SessionID != nil {
 		sessionID = *workCP.SessionID
 	}
+	deps, err := c.integrationDependencies(ctx, parent, task)
+	if err != nil {
+		return err
+	}
 	// The head the proof actually ran against, captured by the precondition so
 	// the promotion checkpoint below records the branch as it was INSIDE the
 	// lane rather than as anyone remembered it.
@@ -283,6 +296,7 @@ func (c *Coordinator) integrateDirectBranchTask(
 		TargetBranch: branch,
 		SourceBranch: branch,
 		BaseSHA:      evidence.CommitSHA,
+		Dependencies: deps,
 		NoReplay:     true,
 		Readiness:    taskReadiness(child),
 		Verified:     c.taskVerificationEvidence(ctx, child, artifact.Verification, directBranchVerifiedIdentity(evidence)),
@@ -295,7 +309,7 @@ func (c *Coordinator) integrateDirectBranchTask(
 			return identity, c.directBranchFreshness(evidence, observed)
 		},
 	})
-	if handled, herr := c.handleIntegrationOutcome(ctx, parent, task, outcome, err); handled {
+	if handled, herr := c.handleIntegrationOutcome(ctx, parent, task, child, workCP, outcome, err); handled {
 		return herr
 	}
 
@@ -364,10 +378,18 @@ func (c *Coordinator) handleIntegrationOutcome(
 	ctx stdctx.Context,
 	parent domain.WorkflowRun,
 	task domain.WorkflowTask,
+	child RunDetail,
+	workCP domain.WorkflowCheckpoint,
 	outcome integration.Outcome,
 	err error,
 ) (bool, error) {
 	switch {
+	case errors.Is(err, integration.ErrDependencyPending):
+		// A task this one requires has not landed yet. Nothing is wrong and
+		// nothing is recorded: the task stays exactly where it is, its siblings
+		// are untouched, and the pass that follows the dependency's own
+		// integration finds it ready.
+		return true, fmt.Errorf("%w: %s", errIntegrationWaitingOnDependency, err.Error())
 	case errors.Is(err, integration.ErrLockBusy):
 		// Another task of this run owns the lane. Nothing is wrong and nothing
 		// is recorded: this reconcile pass leaves the task where it is, and the
@@ -388,6 +410,12 @@ func (c *Coordinator) handleIntegrationOutcome(
 		return true, c.recordIntegrationAuditPending(ctx, parent, task, outcome.Record, err)
 	case err != nil:
 		return true, c.recordIntegrationFailure(ctx, parent, task, err.Error())
+	case outcome.Attention != nil && outcome.Attention.Reason == integration.ReasonStaleReviewAfterRebase:
+		// The one attention AO can answer by itself. The work is fine and the
+		// target is fine; what went stale is a reviewer's opinion of a change
+		// the replay altered, and AO can go and ask for a new one rather than
+		// parking a person on it. It parks only when it cannot ask.
+		return true, c.requestIntegrationFreshReview(ctx, parent, task, child, workCP, outcome.Record)
 	case outcome.Attention != nil:
 		// A conflict belongs to the TASK, not to the objective. Parking the
 		// master here would stop every unrelated sibling on one task's merge
@@ -396,6 +424,8 @@ func (c *Coordinator) handleIntegrationOutcome(
 	}
 	// The audit landed, so any earlier pending marker for this task is answered.
 	c.clearIntegrationAuditPending(ctx, parent, task)
+	// And so is any fresh review this integration asked for on the way here.
+	c.closeIntegrationFreshReview(ctx, child)
 	return false, nil
 }
 
@@ -633,6 +663,10 @@ func recommendedConflictAction(att integration.Attention) string {
 		return "the task branch and the target share no history; re-cut this task's worktree from the current target and redo the work"
 	case integration.ReasonTargetMovedAfterVerification:
 		return "something moved the target branch after this task was verified; confirm what is on it now, then re-run this task's verification"
+	case integration.ReasonDependencyMissingFromTarget:
+		return "the target no longer contains a task this one depends on; restore the target to a state that includes it, or re-run the dependency, before continuing this task"
+	case integration.ReasonStaleReviewAfterRebase:
+		return "rebasing this task changed the diff its reviewer approved, and AO could not obtain a fresh review; review the rebased work on the task's own branch, then continue this run"
 	default:
 		return "resolve the conflicting files on the task's own branch, then continue this run"
 	}

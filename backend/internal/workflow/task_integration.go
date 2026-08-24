@@ -59,6 +59,15 @@ type taskIntegrationPayload struct {
 	BaseSHA           string   `json:"baseSha,omitempty"`
 	Replayed          bool     `json:"replayed,omitempty"`
 	AutoResolvedPaths []string `json:"autoResolvedPaths,omitempty"`
+	// The dependency-aware half of the audit. Dependencies names what this
+	// integration proved was already on the target; the two effective
+	// fingerprints name the change this task contributed before and after any
+	// replay, and ReviewReused whether its existing approval still described
+	// that change. All four stop being derivable the moment the ref moves again.
+	Dependencies    []string `json:"dependencies,omitempty"`
+	EffectiveBefore string   `json:"effectiveChangeBefore,omitempty"`
+	EffectiveAfter  string   `json:"effectiveChangeAfter,omitempty"`
+	ReviewReused    bool     `json:"reviewReused,omitempty"`
 	// The verification that authorized this integration, in full. Recording
 	// only Ran/Passed was the reviewer's third finding: a reader could not tell
 	// "nothing verified this" from "the task's own verify step did, and here is
@@ -101,6 +110,10 @@ func (l integrationLedger) RecordIntegration(ctx stdctx.Context, rec integration
 		BaseSHA:             rec.BaseSHA,
 		Replayed:            rec.Replayed,
 		AutoResolvedPaths:   rec.AutoResolvedPaths,
+		Dependencies:        rec.DependenciesRequired,
+		EffectiveBefore:     rec.EffectiveFingerprintBefore,
+		EffectiveAfter:      rec.EffectiveFingerprintAfter,
+		ReviewReused:        rec.ReviewReused,
 		VerificationRan:     rec.Verification.Ran,
 		VerificationPass:    rec.Verification.Passed,
 		VerificationNote:    rec.Verification.Summary,
@@ -149,6 +162,14 @@ type TaskIntegrationRecord struct {
 	TargetAfterSHA  string
 	BaseSHA         string
 	Replayed        bool
+	// Dependencies, EffectiveBefore/After and ReviewReused are the
+	// dependency-aware account: what had to be on the target first, what this
+	// task contributed before and after any replay, and whether its approval
+	// still described that contribution.
+	Dependencies    []string
+	EffectiveBefore string
+	EffectiveAfter  string
+	ReviewReused    bool
 	VerificationRan bool
 	VerificationOK  bool
 	// The evidence behind the verdict: where it came from, which durable
@@ -188,6 +209,10 @@ func (c *Coordinator) ListTaskIntegrations(ctx stdctx.Context, masterRunID strin
 			TargetAfterSHA:      payload.TargetAfterSHA,
 			BaseSHA:             payload.BaseSHA,
 			Replayed:            payload.Replayed,
+			Dependencies:        payload.Dependencies,
+			EffectiveBefore:     payload.EffectiveBefore,
+			EffectiveAfter:      payload.EffectiveAfter,
+			ReviewReused:        payload.ReviewReused,
 			VerificationRan:     payload.VerificationRan,
 			VerificationOK:      payload.VerificationPass,
 			VerificationSource:  payload.VerificationSource,
