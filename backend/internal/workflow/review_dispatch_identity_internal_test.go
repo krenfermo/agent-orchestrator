@@ -17,11 +17,17 @@ package workflow
 // a reviewer.
 
 import (
+	stdctx "context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
+	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/sqlitetest"
 )
 
 const idStep = "wfs-review"
@@ -199,4 +205,101 @@ func TestConcurrentResolutionAgreesOnOneIdentityPerGeneration(t *testing.T) {
 			t.Fatal("concurrent resolution landed on the previous generation")
 		}
 	}
+}
+
+// ---- the target pin shares the dispatch identity --------------------------
+
+// The second half of the same collision, one layer below the outbox key. The
+// reviewed target is pinned so every retry of ONE question resolves the same
+// workspace; it used to be pinned per cycle, and the cycle does not advance
+// across generations — so a newly authorized generation was handed the target
+// pinned by the previous one, and adoption by (session, target, harness) then
+// bound the new question to the old review run.
+func TestPinnedTargetIsScopedToTheDispatchIdentity(t *testing.T) {
+	fx := newPinFixture(t)
+	prevKey := reviewDispatchIdempotencyKey(idStep, 7, domain.ReviewerCodex, "", 0)
+	freshKey := reviewDispatchIdempotencyKey(idStep, 7, domain.ReviewerCodex, freshReviewPurposeIntegration, 3)
+
+	fx.pin(prevKey, 7, "target-of-the-previous-question")
+
+	// The previous question still resolves its own pinned target: retries and
+	// restarts of it must stay stable.
+	if got, ok := fx.coord.recordedReviewTarget(fx.ctx, fx.runID, idStep, prevKey, 7); !ok || got != "target-of-the-previous-question" {
+		t.Fatalf("the previous question lost its pin: %q ok=%v", got, ok)
+	}
+	// The newly authorized generation must NOT inherit it.
+	if got, ok := fx.coord.recordedReviewTarget(fx.ctx, fx.runID, idStep, freshKey, 7); ok {
+		t.Fatalf("the new generation inherited the previous question's target %q — it would adopt that question's review run", got)
+	}
+	// Once it pins its own, that is what it resolves, stably.
+	fx.pin(freshKey, 7, "target-of-the-new-question")
+	for i := 0; i < 20; i++ {
+		got, ok := fx.coord.recordedReviewTarget(fx.ctx, fx.runID, idStep, freshKey, 7)
+		if !ok || got != "target-of-the-new-question" {
+			t.Fatalf("the new generation's pin is unstable: %q ok=%v", got, ok)
+		}
+	}
+}
+
+// A row written before dispatch keys existed carries none, and must still
+// resolve for the ordinary path that wrote it.
+func TestLegacyPinWithoutADispatchKeyStillResolvesByCycle(t *testing.T) {
+	fx := newPinFixture(t)
+	fx.pinLegacy(4, "historical-target")
+	got, ok := fx.coord.recordedReviewTarget(fx.ctx, fx.runID, idStep, "", 4)
+	if !ok || got != "historical-target" {
+		t.Fatalf("a historical pin stopped resolving: %q ok=%v", got, ok)
+	}
+}
+
+// pinFixture is a minimal durable store holding review_target_observed rows.
+type pinFixture struct {
+	t     *testing.T
+	coord *Coordinator
+	store *sqlite.Store
+	ctx   stdctx.Context
+	runID string
+	n     int
+}
+
+func newPinFixture(t *testing.T) *pinFixture {
+	t.Helper()
+	store := sqlitetest.MustOpen(t)
+	ctx := stdctx.Background()
+	now := time.Now().UTC()
+	if err := store.UpsertProject(ctx, domain.ProjectRecord{ID: "p", Path: t.TempDir(), RegisteredAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	runID := "wf-pin"
+	steps := []domain.WorkflowStep{{ID: idStep, WorkflowRunID: runID, Kind: domain.WorkflowStepReview, Ordinal: 1,
+		State: domain.WorkflowStepWaiting, ArtifactJSON: "{}", CreatedAt: now, UpdatedAt: now}}
+	run := domain.WorkflowRun{ID: runID, ProjectID: "p", Objective: "o", State: domain.WorkflowRunRunning,
+		PolicyVersion: policyVersionV1, PolicySnapshot: "{}", CreatedAt: now, UpdatedAt: now}
+	if _, _, err := store.CreateWorkflowRun(ctx, run, steps); err != nil {
+		t.Fatal(err)
+	}
+	return &pinFixture{t: t, coord: New(Deps{Store: store, Projects: store,
+		Clock: func() time.Time { return time.Now().UTC() }}), store: store, ctx: ctx, runID: runID}
+}
+
+func (fx *pinFixture) write(state map[string]any, target string) {
+	fx.t.Helper()
+	fx.n++
+	raw, _ := json.Marshal(state)
+	stepID := idStep
+	if _, err := fx.store.CreateWorkflowCheckpoint(fx.ctx, domain.WorkflowCheckpoint{
+		ID: fmt.Sprintf("wfc-pin-%d", fx.n), WorkflowRunID: fx.runID, WorkflowStepID: &stepID,
+		ProjectID: "p", FingerprintAfter: target, RetryState: string(raw),
+		DurablePhase: reviewTargetDurablePhase, PayloadVersion: "v1", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		fx.t.Fatal(err)
+	}
+}
+
+func (fx *pinFixture) pin(dispatchKey string, cycle int, target string) {
+	fx.write(map[string]any{"cycle": cycle, "dispatchKey": dispatchKey}, target)
+}
+
+func (fx *pinFixture) pinLegacy(cycle int, target string) {
+	fx.write(map[string]any{"cycle": cycle}, target)
 }

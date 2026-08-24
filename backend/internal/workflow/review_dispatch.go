@@ -607,8 +607,11 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 	// nobody reviewed, and Verify — which compares the live workspace against
 	// that label — then fails with verify_workspace_changed even though
 	// nothing changed after the reviewer approved.
+	// The dispatch identity, resolved once and used for BOTH the target pin and
+	// the outbox key, so the two can never disagree about which question this is.
+	dispatchKey := reviewDispatchIdempotencyKey(reviewStep.ID, cycleNumber, harness, freshPurpose, freshGeneration)
 	if firstCycleTarget {
-		targetSHA = c.reviewTargetFingerprint(ctx, run, reviewStep, workCP, cycleNumber, targetSHA)
+		targetSHA = c.reviewTargetFingerprint(ctx, run, reviewStep, workCP, dispatchKey, cycleNumber, targetSHA)
 	}
 
 	now := c.clock()
@@ -616,7 +619,7 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		ID:             "wfo-" + c.newID(),
 		WorkflowRunID:  run.ID,
 		WorkflowStepID: &reviewStep.ID,
-		IdempotencyKey: reviewDispatchIdempotencyKey(reviewStep.ID, cycleNumber, harness, freshPurpose, freshGeneration),
+		IdempotencyKey: dispatchKey,
 		CommandType:    domain.WorkflowOutboxTriggerReview,
 		Payload:        reviewPayloadJSON(workStep.ID, reviewStep.ID, sessionID, targetSHA, harness, cycleNumber),
 		CreatedAt:      now,
@@ -663,8 +666,8 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 // the pre-8P-E.13A.3 behavior — because a missing observation must not turn a
 // dispatchable review into an error. It only means the target is as good as it
 // used to be, never worse.
-func (c *Coordinator) reviewTargetFingerprint(ctx stdctx.Context, run domain.WorkflowRun, reviewStep domain.WorkflowStep, workCP domain.WorkflowCheckpoint, cycleNumber int, fallback string) string {
-	if recorded, ok := c.recordedReviewTarget(ctx, run.ID, reviewStep.ID, cycleNumber); ok {
+func (c *Coordinator) reviewTargetFingerprint(ctx stdctx.Context, run domain.WorkflowRun, reviewStep domain.WorkflowStep, workCP domain.WorkflowCheckpoint, dispatchKey string, cycleNumber int, fallback string) string {
+	if recorded, ok := c.recordedReviewTarget(ctx, run.ID, reviewStep.ID, dispatchKey, cycleNumber); ok {
 		return recorded
 	}
 	if c.workspaceFacts == nil || workCP.WorktreePath == "" || workCP.SessionID == nil || *workCP.SessionID == "" {
@@ -684,7 +687,7 @@ func (c *Coordinator) reviewTargetFingerprint(ctx stdctx.Context, run domain.Wor
 		return fallback
 	}
 	stepID := reviewStep.ID
-	stateJSON, _ := json.Marshal(map[string]any{"cycle": cycleNumber})
+	stateJSON, _ := json.Marshal(map[string]any{"cycle": cycleNumber, "dispatchKey": dispatchKey})
 	nextAction := "review_target_observed: reviewing the workspace as it stands now"
 	if target != fallback {
 		// Not a failure — the reviewer reads the live workspace either way —
@@ -721,7 +724,7 @@ func (c *Coordinator) reviewTargetFingerprint(ctx stdctx.Context, run domain.Wor
 
 // recordedReviewTarget returns the fingerprint already durably recorded for
 // this review step's given cycle, if any.
-func (c *Coordinator) recordedReviewTarget(ctx stdctx.Context, runID, reviewStepID string, cycleNumber int) (string, bool) {
+func (c *Coordinator) recordedReviewTarget(ctx stdctx.Context, runID, reviewStepID, dispatchKey string, cycleNumber int) (string, bool) {
 	checkpoints, err := c.store.ListWorkflowCheckpoints(ctx, runID)
 	if err != nil {
 		return "", false
@@ -733,9 +736,26 @@ func (c *Coordinator) recordedReviewTarget(ctx stdctx.Context, runID, reviewStep
 			continue
 		}
 		var state struct {
-			Cycle int `json:"cycle"`
+			Cycle       int    `json:"cycle"`
+			DispatchKey string `json:"dispatchKey"`
 		}
-		if json.Unmarshal([]byte(cp.RetryState), &state) != nil || state.Cycle != cycleNumber {
+		if json.Unmarshal([]byte(cp.RetryState), &state) != nil {
+			continue
+		}
+		// The target is pinned per DISPATCH IDENTITY, not per cycle. The cycle
+		// number does not advance across fresh-review generations, so matching
+		// on it alone handed a newly authorized generation the target pinned by
+		// the previous one -- and adoption by (session, target, harness) then
+		// bound the new question to the old review run. That is the second half
+		// of the wf-04e8309d collision, one layer below the outbox key.
+		//
+		// Rows written before dispatch keys existed carry none, and are still
+		// matched by cycle so historical runs keep resolving their own target.
+		if state.DispatchKey != "" || dispatchKey != "" {
+			if state.DispatchKey != dispatchKey {
+				continue
+			}
+		} else if state.Cycle != cycleNumber {
 			continue
 		}
 		if cp.FingerprintAfter == "" {
