@@ -435,11 +435,24 @@ func (c *Coordinator) recordWorkAdoption(ctx stdctx.Context, run domain.Workflow
 		return err
 	}
 	stepID := workStep.ID
+	var sessionIDPtr *string
+	if rec.SessionID != "" {
+		sid := rec.SessionID
+		sessionIDPtr = &sid
+	}
 	_, err = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
-		ID:               "wfc-" + c.newID(),
-		WorkflowRunID:    run.ID,
-		WorkflowStepID:   &stepID,
-		ProjectID:        run.ProjectID,
+		ID:             "wfc-" + c.newID(),
+		WorkflowRunID:  run.ID,
+		WorkflowStepID: &stepID,
+		ProjectID:      run.ProjectID,
+		// Session, branch, worktree, base, head and fingerprint are carried on
+		// this row as well as on the completion row that follows it. Both are
+		// written at the same instant, so "the latest checkpoint for this step"
+		// can legitimately resolve to either — and review dispatch reads exactly
+		// these fields off it to find the worktree it must launch a reviewer
+		// against. A row missing them would park the run on
+		// review_dispatch_ambiguous immediately after a successful adoption.
+		SessionID:        sessionIDPtr,
 		Branch:           rec.Branch,
 		WorktreePath:     rec.WorktreePath,
 		BaseSHA:          rec.DispatchBaseSHA,

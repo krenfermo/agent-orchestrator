@@ -4268,3 +4268,39 @@ func firstNonEmptyString(values ...string) string {
 	}
 	return ""
 }
+
+// SessionRuntimeAlive probes whether a session's runtime — its tmux session,
+// its process — still exists RIGHT NOW.
+//
+// It is the workflow package's independent liveness fact, and it exists because
+// AO once concluded a worker had died from the silence of the hook pipeline
+// alone (see workflow/worker_signal_reconcile.go). The session row cannot
+// settle that question: a row nobody has updated looks identical to a live
+// worker, and a row the reaper has not reached yet looks identical to a dead
+// one. The runtime can.
+//
+// It answers in three values on purpose. known=false means AO could not tell —
+// no handle recorded, a session it cannot read, a probe that errored — and the
+// caller must treat that as unknown, never as death. That is the same rule
+// AGENTS.md already states for runtime probes, applied at a new call site: "do
+// not treat failed/unknown runtime probes as proof a session is dead".
+func (m *Manager) SessionRuntimeAlive(ctx context.Context, id domain.SessionID) (alive, known bool, err error) {
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil || !ok {
+		return false, false, err
+	}
+	if rec.IsTerminated {
+		// A durably terminated session is the one case the row alone settles:
+		// AO itself recorded the teardown.
+		return false, true, nil
+	}
+	handle := runtimeHandle(rec.Metadata)
+	if handle.ID == "" || m.runtime == nil {
+		return false, false, nil
+	}
+	live, probeErr := m.runtime.IsAlive(ctx, handle)
+	if probeErr != nil {
+		return false, false, probeErr
+	}
+	return live, true, nil
+}
