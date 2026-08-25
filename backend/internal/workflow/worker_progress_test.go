@@ -35,6 +35,7 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 		now                time.Time
 		dispatchedAt       time.Time
 		humanInputProven   bool
+		evidence           workerEvidence
 		wantNoChange       bool
 		wantStep           domain.WorkflowStepState
 		wantRun            domain.WorkflowRunState
@@ -153,16 +154,32 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 			dispatchedAt:       fixedNow.Add(-1 * time.Minute),
 			wantNoChange:       true,
 		},
+		// Checkpoint 8P-E.24 (incident wf-00283521 / medusa-4) sharpened this.
+		// Past the startup grace with no first signal, a session AO can still
+		// see is NOT proof the worker died — that inference killed a worker
+		// which was sixteen minutes into a complete implementation. It now
+		// reconciles instead, and only fails on evidence of absence.
 		{
-			name:               "idle, no first signal, startup grace exceeded -> failed, agent_start_failed",
+			name:               "idle, no first signal, startup grace exceeded, worker provably gone -> failed, agent_start_failed",
 			sessionFound:       true,
 			session:            domain.SessionRecord{ID: "sess-1", Activity: domain.Activity{State: domain.ActivityIdle}},
 			workspaceAvailable: false,
 			now:                fixedNow,
 			dispatchedAt:       fixedNow.Add(-(workStepFirstSignalTimeout + time.Minute)),
+			evidence:           workerEvidence{ProbeKnown: true, ProbeAlive: false},
 			wantStep:           domain.WorkflowStepFailed,
 			wantRun:            domain.WorkflowRunNeedsAttention,
 			wantErrorClass:     domain.WorkflowErrorAgentStartFailed,
+		},
+		{
+			name:               "idle, no first signal, startup grace exceeded, worker still alive -> no change",
+			sessionFound:       true,
+			session:            domain.SessionRecord{ID: "sess-1", Activity: domain.Activity{State: domain.ActivityIdle}},
+			workspaceAvailable: false,
+			now:                fixedNow,
+			dispatchedAt:       fixedNow.Add(-(workStepFirstSignalTimeout + time.Minute)),
+			evidence:           workerEvidence{SessionAlive: true, ActivitySinceDispatch: true},
+			wantNoChange:       true,
 		},
 		// Regression: discovered by the real Codex E2E run. The guardrail
 		// prompt tells the worker not to commit/push/merge, so a genuinely
@@ -218,7 +235,7 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 			if now.IsZero() {
 				now = fixedNow
 			}
-			got := evaluateWorkStepProgress(tc.sessionFound, tc.session, tc.workspaceAvailable, tc.obs, tc.baseSHA, now, tc.dispatchedAt, tc.humanInputProven)
+			got := evaluateWorkStepProgress(tc.sessionFound, tc.session, tc.workspaceAvailable, tc.obs, tc.baseSHA, now, tc.dispatchedAt, tc.humanInputProven, tc.evidence)
 			if got.NoChange != tc.wantNoChange {
 				t.Fatalf("NoChange = %v, want %v", got.NoChange, tc.wantNoChange)
 			}

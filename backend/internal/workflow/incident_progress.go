@@ -30,6 +30,12 @@ const (
 	IncidentProgressWaitingCapacity IncidentProgress = "waiting_capacity"
 	// IncidentProgressDiagnosing: a Diagnostic Agent is running.
 	IncidentProgressDiagnosing IncidentProgress = "diagnosing"
+	// IncidentProgressDiagnosisBlocked: a Diagnostic Agent was launched and is
+	// waiting on a person inside its own session — a trust dialog, a permission
+	// prompt, a login. It is deliberately NOT "diagnosing": that is where this
+	// state used to hide, and reporting an investigation as making progress
+	// while it waits for input nobody knows to give is the whole of incident F.
+	IncidentProgressDiagnosisBlocked IncidentProgress = "diagnosis_blocked"
 	// IncidentProgressDiagnosed: a diagnosis exists and proposes nothing to run.
 	IncidentProgressDiagnosed IncidentProgress = "diagnosed"
 	// IncidentProgressAwaitingApproval: a diagnosis proposes an action that
@@ -63,6 +69,14 @@ type IncidentStatus struct {
 	// again at …" rather than "AO might look again".
 	NextEvaluationAt *time.Time
 
+	// Diagnosis is the investigation as an observable background job: its
+	// state, the agent and provider running it, when it started, how long it
+	// has been going, its last activity and last signal, and — when AO can
+	// tell — what it is blocked on. Derived on every read from durable state
+	// and the agent session, never stored and never timed by the UI. See
+	// incident_diagnosis_job.go.
+	Diagnosis IncidentDiagnosisJob
+
 	// Repair linkage, for the states that are about a repair run.
 	RepairRunID     string
 	ReviewerHarness string
@@ -81,6 +95,7 @@ func (c *Coordinator) DeriveIncidentStatus(ctx stdctx.Context, inc Incident) Inc
 	st := IncidentStatus{
 		RepairRunID: inc.RepairRunID,
 		Progress:    IncidentProgressAnalyzing,
+		Diagnosis:   c.DeriveIncidentDiagnosisJob(ctx, inc),
 	}
 
 	switch inc.State {
@@ -121,6 +136,12 @@ func (c *Coordinator) DeriveIncidentStatus(ctx stdctx.Context, inc Incident) Inc
 	if inc.State == IncidentDiagnosing {
 		st.Progress = IncidentProgressDiagnosing
 		st.DiagnosticHarness = inc.DiagnosticHarness
+		// Checkpoint 8P-E.24: "diagnosing" is where an investigation blocked on
+		// an interactive prompt used to hide. The job's own state is the honest
+		// answer, and a job waiting on a person is not AO making progress.
+		if st.Diagnosis.State == DiagnosisWaitingForUser {
+			st.Progress = IncidentProgressDiagnosisBlocked
+		}
 		return st
 	}
 	if inc.WaitingForCapacity {

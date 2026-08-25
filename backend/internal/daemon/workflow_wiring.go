@@ -19,6 +19,8 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/integration"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory/wfdispatch"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/providerpreflight"
 	"github.com/aoagents/agent-orchestrator/backend/internal/providerruntime"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
@@ -153,7 +155,7 @@ func (c coordinatorLockClassifier) ClassifyLockOwner(ctx context.Context, run do
 	}, nil
 }
 
-func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
+func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, agents ports.AgentResolver, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {
 		plannerBinary = "claude"
@@ -233,6 +235,20 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		// and a direct writer of one branch exclude each other: they contend
 		// for one lock key in one table, rather than for two ideas of a lock.
 		IntegrationLocks: integration.NewBranchLocker(branchLocks),
+		// Checkpoint 8P-E.24: the two evidence sources the recovery work added.
+		//
+		// WorkerLiveness is the independent "is the runtime still there" fact
+		// the missing-first-signal reconciliation consults before it will call a
+		// worker dead — the fact whose absence let AO declare a worker
+		// agent_start_failed while it was sixteen minutes into a complete
+		// implementation.
+		//
+		// WorkerPreflight asks, before an unattended launch, whether the
+		// provider can start without an operator. Both are optional by
+		// construction and both answer "unknown" rather than "no" whenever they
+		// cannot tell, so neither can ground a dispatch on its own uncertainty.
+		WorkerLiveness:  workflowWorkerLiveness{mgr: sessionMgr},
+		WorkerPreflight: &providerpreflight.Checker{Agents: agents},
 		// Checkpoint 8P-E.13A.4: without an active prober, a provider profile
 		// that has never been dispatched to reports CapacityUnknown until a
 		// human happens to run it, which is how an authenticated Codex reviewer
@@ -318,4 +334,15 @@ func taskWorkspaces(cfg config.Config, store *sqlite.Store, log *slog.Logger) wo
 		return nil
 	}
 	return mgr
+}
+
+// workflowWorkerLiveness adapts the Session Manager's runtime probe to
+// workflow's narrow port. It is a type rather than a direct dependency for the
+// same reason every other adapter here is: the coordinator asks exactly one
+// question, and naming it is what keeps "the workflow engine can drive the
+// runtime" from being true in any broader sense.
+type workflowWorkerLiveness struct{ mgr *sessionmanager.Manager }
+
+func (l workflowWorkerLiveness) SessionAlive(ctx context.Context, id domain.SessionID) (bool, bool, error) {
+	return l.mgr.SessionRuntimeAlive(ctx, id)
 }

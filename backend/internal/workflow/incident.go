@@ -202,6 +202,11 @@ var incidentPhases = map[string]IncidentState{
 var incidentAuxiliaryPhases = map[string]bool{
 	ReasonIncidentDiagnosisCapacityWait: true,
 	incidentLaunchFailedPhase:           true,
+	// The started row names the session a launch produced. It is deliberately
+	// auxiliary: the incident is already `diagnosing` from the request row, and
+	// folding this as a transition would make the state depend on whether a
+	// best-effort observability write happened to land.
+	incidentDiagnosisStartedPhase: true,
 }
 
 // incidentLaunchFailedPhase records a diagnostic launch that never produced a
@@ -392,6 +397,13 @@ type Incident struct {
 
 	// DiagnosticHarness is the provider the newest investigation was routed to.
 	DiagnosticHarness string
+	// DiagnosticSessionID is the agent session the newest launch actually
+	// produced, and DiagnosisStartedAt when it was recorded. Both are what make
+	// the investigation observable as a job rather than as a row — see
+	// incident_diagnosis_job.go. Empty means no session has been recorded yet,
+	// which is a different fact from "no agent is running".
+	DiagnosticSessionID string
+	DiagnosisStartedAt  time.Time
 	// WaitingForCapacity is true when the newest thing that happened to this
 	// incident was a capacity wait rather than a launch.
 	WaitingForCapacity bool
@@ -534,6 +546,9 @@ func foldIncident(incidentID string, cps []domain.WorkflowCheckpoint) (Incident,
 		case incidentDiagnosingPhase:
 			inc.Diagnoses++
 			inc.DiagnosticHarness = rec.Harness
+			// A new generation supersedes the previous one's session: the row
+			// naming this generation's session lands after it.
+			inc.DiagnosticSessionID, inc.DiagnosisStartedAt = "", time.Time{}
 			// A launch supersedes any earlier capacity wait: AO is no longer
 			// waiting for a provider, it has one.
 			inc.WaitingForCapacity, inc.CapacityReasons = false, nil
@@ -554,6 +569,14 @@ func foldIncident(incidentID string, cps []domain.WorkflowCheckpoint) (Incident,
 				Evidence: rec.Evidence, Missing: rec.MissingData, Risk: rec.Risk,
 				Options: rec.Options, Action: rec.Action, Attempt: rec.DiagnosisAttempt,
 				PackDigest: rec.PackDigest, Harness: rec.Harness, At: cp.CreatedAt,
+			}
+		case incidentDiagnosisStartedPhase:
+			if rec.DiagnosisAttempt >= inc.Diagnoses {
+				inc.DiagnosticSessionID = rec.AgentSessionID
+				inc.DiagnosisStartedAt = cp.CreatedAt
+				if rec.Harness != "" {
+					inc.DiagnosticHarness = rec.Harness
+				}
 			}
 		case ReasonIncidentDiagnosisCapacityWait:
 			inc.WaitingForCapacity = true

@@ -222,6 +222,10 @@ func (c *Coordinator) IncidentPackFor(ctx stdctx.Context, runID string) (Inciden
 		}
 	}
 	c.attachIncidentSessionFacts(ctx, detail, &in)
+	// Checkpoint 8P-E.24: a parent stopped on a child carries that child's own
+	// bounded evidence, so nobody has to run a second investigation to discover
+	// a reason AO already held. See incident_child_pack.go.
+	c.attachIncidentChildFacts(ctx, detail, &in)
 	c.attachIncidentReviewFacts(ctx, detail, &in)
 	// The same authoritative reading every other role gets, from the same
 	// function. See effective_task_specification.go.
@@ -381,6 +385,11 @@ func (c *Coordinator) RequestIncidentDiagnosis(ctx stdctx.Context, runID string)
 		c.releaseIncidentLaunch(ctx, run, inc, generation, entry, err)
 		return inc, pack, err
 	}
+	// The session the launch produced, durably, so the investigation is
+	// observable as a job after this call returns, after the modal closes and
+	// after a restart. Before this row the session id existed only in the log
+	// line below, which nothing can read back. See incident_diagnosis_job.go.
+	c.recordIncidentDiagnosisStarted(ctx, run, inc, generation, res, pack.Digest)
 	if c.log != nil {
 		c.log.Info("workflow: diagnostic agent launched for an incident",
 			"run", runID, "incident", inc.ID, "generation", generation,

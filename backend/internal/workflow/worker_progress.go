@@ -122,6 +122,7 @@ func evaluateWorkStepProgress(
 	now time.Time,
 	dispatchedAt time.Time,
 	humanInputProven bool,
+	evidence workerEvidence,
 ) WorkStepDecision {
 	// hasWorkEvidence checks the AO guardrail prompt explicitly tells the
 	// worker not to commit/push/merge (Checkpoint 8B §4), so real, verifiable
@@ -247,13 +248,13 @@ func evaluateWorkStepProgress(
 		// workspace evidence, so waiting on that would wait forever too.
 		if session.FirstSignalAt.IsZero() {
 			if !dispatchedAt.IsZero() && now.Sub(dispatchedAt) > workStepFirstSignalTimeout {
-				return WorkStepDecision{
-					Progress:   WorkerFailed,
-					NextStep:   domain.WorkflowStepFailed,
-					NextRun:    domain.WorkflowRunNeedsAttention,
-					NextAction: "worker produced no first signal within " + workStepFirstSignalTimeout.String() + " of dispatch — startup likely failed (e.g. blocked on an interactive prompt, auth, or a launch error)",
-					ErrorClass: domain.WorkflowErrorAgentStartFailed,
-				}
+				// Checkpoint 8P-E.24 (incident wf-00283521 / medusa-4): an
+				// absent first signal is a fact about the HOOK PIPELINE, never
+				// proof the process died. Hand it to the reconciliation, which
+				// weighs every independent fact AO can actually obtain and only
+				// declares a startup failure on evidence of absence — see
+				// worker_signal_reconcile.go.
+				return reconcileMissingFirstSignal(evidence, now, dispatchedAt).Decision
 			}
 			return WorkStepDecision{Progress: WorkerCreated, NoChange: true}
 		}
@@ -351,7 +352,31 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 		return step, err
 	}
 
-	decision := evaluateWorkStepProgress(found, sess, workspaceAvailable, obs, baseSHA, now, dispatchedAt, humanInputProven)
+	// Checkpoint 8P-E.24: the two decisions that can END a work step on the
+	// ABSENCE of evidence — "terminated with nothing to show" and "no first
+	// signal" — must never be taken against a throttled observation. The
+	// throttle exists to keep a healthy poll cheap; a step that is quietly
+	// polling writes no checkpoints, so it can keep the one fact that would
+	// have proven the work exists permanently out of reach. When either of
+	// those two decisions is in play AO pays for the git observation, every
+	// time, and gathers the independent liveness facts alongside it.
+	terminalish := !found || sess.IsTerminated || sess.Activity.State == domain.ActivityExited
+	missingFirstSignal := found && sess.FirstSignalAt.IsZero() &&
+		!dispatchedAt.IsZero() && now.Sub(dispatchedAt) > workStepFirstSignalTimeout
+	var evidence workerEvidence
+	if terminalish || missingFirstSignal {
+		evidence, obs, workspaceAvailable = c.workerEvidenceFor(
+			ctx, run, found, sess, obs, workspaceAvailable, baseSHA, dispatchedAt)
+	}
+
+	decision := evaluateWorkStepProgress(found, sess, workspaceAvailable, obs, baseSHA, now, dispatchedAt, humanInputProven, evidence)
+	if missingFirstSignal {
+		// The reconciliation's verdict is durable whether or not it changes any
+		// state: "AO looked again and decided to keep waiting" is exactly the
+		// fact whose absence made the medusa-4 incident unreadable.
+		verdict := reconcileMissingFirstSignal(evidence, now, dispatchedAt)
+		c.recordFirstSignalReconciliation(ctx, run, step, verdict, evidence, latestCP)
+	}
 	if decision.NoChange {
 		return step, nil
 	}

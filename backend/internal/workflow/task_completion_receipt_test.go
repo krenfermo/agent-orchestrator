@@ -54,10 +54,10 @@ func TestWorkflowDecisionsIgnoreTheTaskCompletionReceipt(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			without := evaluateWorkStepProgress(
-				true, session(tc.state, tc.term, false), tc.available, tc.obs, "base", now, dispatchedAt, false,
+				true, session(tc.state, tc.term, false), tc.available, tc.obs, "base", now, dispatchedAt, false, workerEvidence{SessionAlive: true},
 			)
 			with := evaluateWorkStepProgress(
-				true, session(tc.state, tc.term, true), tc.available, tc.obs, "base", now, dispatchedAt, false,
+				true, session(tc.state, tc.term, true), tc.available, tc.obs, "base", now, dispatchedAt, false, workerEvidence{SessionAlive: true},
 			)
 			if with != without {
 				t.Fatalf("work-step decision changed with a completion receipt:\n with = %+v\n want = %+v", with, without)

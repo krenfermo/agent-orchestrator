@@ -2406,6 +2406,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflowId}/tasks/{taskId}/fresh-review-exception": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Authorize ONE additional integration fresh review for a task parked on integration_stale_review_after_rebase whose ordinary budget is spent, with a named human approver and a reason. The global bound is unchanged; the grant is recorded against this task and this workspace state, and a repeat request for the same state returns the existing grant rather than widening the budget again. */
+        post: operations["authorizeWorkflowTaskFreshReviewException"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workflows/{workflowId}/tasks/{taskId}/resume": {
         parameters: {
             query?: never;
@@ -2602,6 +2619,11 @@ export interface components {
             amendment: components["schemas"]["ControllersWorkflowTaskCriterionAmendmentView"];
             workflow: components["schemas"]["WorkflowRunDetailView"];
         };
+        ControllersAuthorizeFreshReviewExceptionRequest: {
+            approvedBy: string;
+            reason: string;
+            reauthorize?: boolean;
+        };
         ControllersCapacitySnapshotResponse: {
             /** @enum {string} */
             certainty: "actual" | "inferred" | "unknown";
@@ -2697,6 +2719,19 @@ export interface components {
             risk: string;
             writesCode: boolean;
         };
+        ControllersIncidentDiagnosisJobView: {
+            attempt?: number;
+            blockingInteraction?: string;
+            elapsedSeconds?: number;
+            harness?: string;
+            lastActivityAt?: string;
+            lastSignalAt?: string;
+            max?: number;
+            sessionId?: string;
+            startedAt?: string;
+            /** @enum {string} */
+            state: "queued" | "starting" | "running" | "waiting_for_provider" | "waiting_for_user" | "completed" | "failed";
+        };
         ControllersIncidentDiagnosisSubmissionBody: {
             classification: string;
             evidence?: string[];
@@ -2758,6 +2793,7 @@ export interface components {
             contextPack?: components["schemas"]["ControllersIncidentPackView"];
             diagnosesUsed: number;
             diagnosis?: components["schemas"]["ControllersIncidentDiagnosisView"];
+            diagnosisJob: components["schemas"]["ControllersIncidentDiagnosisJobView"];
             diagnosticHarness?: string;
             id: string;
             launchOutcome?: string;
@@ -4350,7 +4386,7 @@ export interface components {
             /** Format: int64 */
             attemptNumber: number;
             /** @enum {string} */
-            errorClass?: "rate_limited" | "auth" | "transient" | "tool" | "test_failed" | "review_changes_requested" | "session_create_failed" | "agent_start_failed" | "prompt_delivery_failed" | "runtime_failed" | "worker_terminated_unexpectedly" | "ambiguous_worker_state" | "reviewer_launch_failed" | "fix_budget_exhausted" | "verify_command_failed" | "verify_timeout" | "verify_environment_error" | "verify_artifact_missing" | "verify_artifact_mismatch" | "verify_workspace_changed" | "verify_ambiguous" | "capacity_exhausted" | "binary_missing";
+            errorClass?: "rate_limited" | "auth" | "transient" | "tool" | "test_failed" | "review_changes_requested" | "session_create_failed" | "agent_start_failed" | "prompt_delivery_failed" | "runtime_failed" | "worker_terminated_unexpectedly" | "ambiguous_worker_state" | "reviewer_launch_failed" | "fix_budget_exhausted" | "verify_command_failed" | "verify_timeout" | "verify_environment_error" | "verify_artifact_missing" | "verify_artifact_mismatch" | "verify_workspace_changed" | "verify_ambiguous" | "capacity_exhausted" | "binary_missing" | "provider_auth_required" | "provider_workspace_trust_required" | "provider_preflight_failed";
             /** Format: date-time */
             finishedAt?: null | string;
             harness?: string;
@@ -4464,6 +4500,19 @@ export interface components {
             /** @enum {string} */
             reason: "provider_health_stale" | "provider_cooldown" | "provider_unavailable" | "no_eligible_provider";
             role?: string;
+        };
+        WorkflowIntegrationFreshReviewException: {
+            approvedBy: string;
+            childRunId?: string;
+            fingerprint: string;
+            generation: number;
+            /** Format: date-time */
+            grantedAt: string;
+            masterRunId?: string;
+            priorAttempts: number;
+            reason: string;
+            reauthorized?: boolean;
+            taskId: string;
         };
         WorkflowMasterPlan: {
             objective: string;
@@ -13424,6 +13473,62 @@ export interface operations {
             };
             /** @description Unprocessable Entity */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    authorizeWorkflowTaskFreshReviewException: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Master workflow run identifier. */
+                workflowId: string;
+                /** @description Planned task identifier (workflow_tasks.id). */
+                taskId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersAuthorizeFreshReviewExceptionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowIntegrationFreshReviewException"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

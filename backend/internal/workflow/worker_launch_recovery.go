@@ -107,6 +107,11 @@ type workerLaunchStage string
 const (
 	workerLaunchStageRuntimeEnv workerLaunchStage = "runtime_env"
 	workerLaunchStageSpawn      workerLaunchStage = "spawn"
+	// workerLaunchStagePreflight is a launch refused BEFORE anything was
+	// spawned, because the provider would have stopped at an interactive
+	// prompt. It is the earliest stage there is, and the only one at which AO
+	// can be certain nothing was created.
+	workerLaunchStagePreflight workerLaunchStage = "preflight"
 )
 
 // workerLaunchClassification is the verdict on one worker-launch failure: which
@@ -138,6 +143,14 @@ type workerLaunchClassification struct {
 // maxWorkerLaunchAttempts guarantees an unnameable failure still reaches a
 // human quickly instead of looping.
 func classifyWorkerLaunchFailure(err error) workerLaunchClassification {
+	// A refused provider preflight already carries its own proven class and its
+	// own precise attention reason (provider_preflight.go). It is never
+	// retryable — no amount of waiting installs a credential or trusts a folder
+	// — and re-deriving it from the error text would collapse three distinct
+	// remedies back into one.
+	if cls, ok := classifyPreflightRefusal(err); ok {
+		return cls
+	}
 	base := classifyProviderFailure(err)
 	switch base.Class {
 	case domain.WorkflowErrorAuth, domain.WorkflowErrorBinaryMissing:

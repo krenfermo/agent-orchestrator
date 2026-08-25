@@ -100,6 +100,14 @@ func CanonicalRoot(root string) (string, error) {
 	if !filepath.IsAbs(trimmed) {
 		return "", fmt.Errorf("%w: %q must be absolute; a relative root would key the index by the process working directory", ErrProjectRoot, root)
 	}
+	// Clean BEFORE resolving symlinks, not after. EvalSymlinks fails outright
+	// on a path whose components do not all exist, so a redundant-but-valid
+	// spelling like "<root>/child/.." (where `child` does not exist) fell
+	// through unresolved while plain "<root>" resolved — and on macOS, where
+	// /var is a symlink to /private/var, those are two different keys for one
+	// checkout. Cleaning first collapses the spelling to a real path, which
+	// EvalSymlinks can then resolve.
+	trimmed = filepath.Clean(trimmed)
 	if resolved, err := filepath.EvalSymlinks(trimmed); err == nil {
 		trimmed = resolved
 	}

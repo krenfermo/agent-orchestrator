@@ -56,8 +56,15 @@ func TestParentReconcilesStaleChildAttentionWhenTheChildResumes(t *testing.T) {
 	if !mirroredChildStop(t, fx, masterID) {
 		t.Fatal("the parent never mirrored its stopped child; the fixture never reached the state under test")
 	}
-	if got := fx.emails.countOfType(domain.NotificationWorkflowNeedsAttention); got != 1 {
-		t.Fatalf("workflow needs-attention notifications while the stop was real = %d, want exactly 1", got)
+	// Checkpoint 8P-E.24: ONE notification per real incident. The child is the
+	// run that actually stopped and the one whose notification names a reason a
+	// person can act on; the parent's mirror is the same incident seen from one
+	// level up, and emailing about both is two messages for one problem.
+	if got := fx.emails.countOfType(domain.NotificationTaskNeedsAttention); got != 1 {
+		t.Fatalf("task needs-attention notifications while the stop was real = %d, want exactly 1", got)
+	}
+	if got := fx.emails.countOfType(domain.NotificationWorkflowNeedsAttention); got != 0 {
+		t.Fatalf("parent mirror produced %d objective-level notifications, want 0: the child already reported this same incident", got)
 	}
 
 	// 4. The child recovers by itself — the branch queue clears, the retry
@@ -92,8 +99,11 @@ func TestParentReconcilesStaleChildAttentionWhenTheChildResumes(t *testing.T) {
 	}
 	// History is intact: the notification raised while the condition was real
 	// is still there, and no second one was invented.
-	if got := fx.emails.countOfType(domain.NotificationWorkflowNeedsAttention); got != 1 {
-		t.Fatalf("workflow needs-attention notifications after the recovery = %d, want still 1", got)
+	if got := fx.emails.countOfType(domain.NotificationTaskNeedsAttention); got != 1 {
+		t.Fatalf("task needs-attention notifications after the recovery = %d, want still 1", got)
+	}
+	if got := fx.emails.countOfType(domain.NotificationWorkflowNeedsAttention); got != 0 {
+		t.Fatalf("the recovery invented %d objective-level notifications, want 0", got)
 	}
 	if got := pendingWakeCount(t, fx, masterID); got > 1 {
 		t.Fatalf("pending wake entries for the master = %d, want at most 1", got)
@@ -177,8 +187,11 @@ func TestParentKeepsChildAttentionWhileTheChildStillNeedsAHuman(t *testing.T) {
 	if got := countCheckpointPhase(t, fx, masterID, workflowcore.ReasonChildNeedsAttention); got != 1 {
 		t.Fatalf("child_needs_attention checkpoints = %d, want exactly 1 across %d reconcile passes", got, 10)
 	}
-	if got := fx.emails.countOfType(domain.NotificationWorkflowNeedsAttention); got != 1 {
-		t.Fatalf("workflow needs-attention notifications = %d, want exactly 1", got)
+	if got := fx.emails.countOfType(domain.NotificationTaskNeedsAttention); got != 1 {
+		t.Fatalf("task needs-attention notifications = %d, want exactly 1", got)
+	}
+	if got := fx.emails.countOfType(domain.NotificationWorkflowNeedsAttention); got != 0 {
+		t.Fatalf("parent mirror produced %d objective-level notifications, want 0", got)
 	}
 	if got := pendingWakeCount(t, fx, masterID); got > 1 {
 		t.Fatalf("pending wake entries for the master = %d, want at most 1", got)
@@ -257,8 +270,8 @@ func TestDaemonRestartHealsAStaleParentMirror(t *testing.T) {
 	if task.ID != taskID || task.ExecutionRunID == nil || *task.ExecutionRunID != childID {
 		t.Fatalf("task/child identity changed across restart: task=%q child=%v", task.ID, task.ExecutionRunID)
 	}
-	if got := fx.emails.countOfType(domain.NotificationWorkflowNeedsAttention); got != 1 {
-		t.Fatalf("workflow needs-attention notifications = %d, want still 1 after the restart", got)
+	if got := fx.emails.countOfType(domain.NotificationTaskNeedsAttention); got != 1 {
+		t.Fatalf("task needs-attention notifications = %d, want still 1 after the restart", got)
 	}
 }
 

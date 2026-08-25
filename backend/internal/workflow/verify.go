@@ -488,7 +488,32 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 		} else if c.log != nil {
 			c.log.Debug("workflow: a workspace change is not a recoverable branch advance", "run", run.ID, "reason", refusal)
 		}
-		return c.finishVerifyFailure(ctx, run, verifyStep, latest, result, "workspace fingerprint no longer matches the approved review target")
+		// Checkpoint 8P-E.24 (incident wf-cd5bad10): before this becomes an
+		// unexplained stop, ANSWER THE SECOND QUESTION — whose change is this?
+		// A difference AO can attribute to this task's own authorized work or
+		// fix worker, in this task's own worktree at an unchanged HEAD, is not
+		// untrusted code; it is code no reviewer has read YET. The remedy for
+		// that is a review, not a person. Every other class — external,
+		// another AO task's, a rewritten history, or anything AO cannot prove —
+		// stops exactly as it always did, with the provenance recorded so the
+		// stop is readable.
+		steps, serr := c.store.ListWorkflowSteps(ctx, run.ID)
+		if serr != nil {
+			return run, verifyStep, serr
+		}
+		prov := c.classifyWorkspaceDrift(ctx, run, steps, reviewStep, workCP, obs, reviewed, pre, targetKey)
+		if prov.Class.Authorized() {
+			if generation := c.provenanceFreshReviewGenerations(ctx, run.ID) + 1; generation <= maxProvenanceFreshReviews {
+				prov.Generation = generation
+				return c.requestProvenanceFreshReview(ctx, run, reviewStep, verifyStep, latest, result, prov)
+			}
+			prov.Rationale += fmt.Sprintf("; but this run has already used its %d provenance-authorized re-reviews, so it stops instead", maxProvenanceFreshReviews)
+		}
+		if perr := c.recordWorkspaceProvenance(ctx, run, verifyStep.ID, prov); perr != nil && c.log != nil {
+			c.log.Warn("workflow: recording workspace provenance failed", "run", run.ID, "err", perr)
+		}
+		return c.finishVerifyFailure(ctx, run, verifyStep, latest, result,
+			"workspace fingerprint no longer matches the approved review target ("+string(prov.Class)+": "+prov.Rationale+")")
 	}
 
 	// Checkpoint 8I: VerifyScopePolicy narrows the Planner's commands (when

@@ -188,6 +188,11 @@ const (
 	ReasonWorkerLaunchRetriesExhausted = "worker_launch_retries_exhausted"
 	ReasonCapacityRetryExhausted       = string(domain.WorkflowErrorCapacityExhausted)
 	ReasonQuestionHumanRequired        = "question_human_required"
+	// The three provider-preflight reasons are declared in
+	// provider_preflight.go, next to the classes they mirror, and registered in
+	// the dispositions table below. They name the one thing AO can now detect
+	// BEFORE spending a dispatch: a provider that would have stopped at an
+	// interactive prompt nobody was there to answer.
 
 	// unclassifiedStop is the honest label for a run durably parked in
 	// needs_attention with no canonical reason recorded anywhere — an
@@ -334,6 +339,15 @@ var attentionDispositions = map[string]AttentionDisposition{
 	ReasonCapacityRetryExhausted: {
 		HumanAction: "Every automatic retry ran out while the provider was still at capacity. Wait and continue this run, switch provider, or cancel it.",
 	},
+	ReasonProviderAuthRequired: {
+		HumanAction: "The provider reported that its credentials are not usable, so an unattended launch would have stopped at a login prompt. Sign that provider profile in, then continue this run.",
+	},
+	ReasonProviderWorkspaceTrustRequired: {
+		HumanAction: "The provider has no recorded trust for this workspace, so an unattended launch would have stopped at its \"do you trust this folder?\" prompt. Trust the directory through the provider's own configuration (never by answering the prompt for an agent), then continue this run.",
+	},
+	ReasonProviderPreflightFailed: {
+		HumanAction: "The provider would have asked the operator something before it could work — usually a permission mode that cannot run unattended. Correct the provider configuration, then continue this run.",
+	},
 }
 
 // attentionErrorClasses maps an attempt-level error class onto the same
@@ -366,6 +380,9 @@ var attentionErrorClasses = map[domain.WorkflowErrorClass]AttentionDisposition{
 	domain.WorkflowErrorCapacityExhausted: {
 		HumanAction: "Every automatic retry ran out while the provider was still at capacity. Wait and continue this run, switch provider, or cancel it.",
 	},
+	WorkflowErrorProviderAuthRequired:           attentionDispositions[ReasonProviderAuthRequired],
+	WorkflowErrorProviderWorkspaceTrustRequired: attentionDispositions[ReasonProviderWorkspaceTrustRequired],
+	WorkflowErrorProviderPreflightFailed:        attentionDispositions[ReasonProviderPreflightFailed],
 }
 
 // AttentionVerdict is ClassifyAttention's whole output: the classification, the
@@ -600,6 +617,21 @@ func (c *Coordinator) stopIsHumanOwned(ctx stdctx.Context, run domain.WorkflowRu
 	return ok && disp.HumanAction != ""
 }
 
+// stopIsSelfRemediable reports whether a run parked in needs_attention stopped
+// for a reason AO is POSITIVELY known to be handling itself (a scheduled retry,
+// a capacity wait, a queued branch, a fresh review AO asked for).
+//
+// It is deliberately not the negation of stopIsHumanOwned. There are three
+// kinds of stop — AO's, the user's, and one AO could not name at all — and this
+// function answers only the first, so an unnameable stop answers "no". That
+// asymmetry is the whole of the parent-attention fix: clearing a mirror
+// requires proof the child is moving, while holding it requires nothing but the
+// child still being stopped.
+func (c *Coordinator) stopIsSelfRemediable(ctx stdctx.Context, run domain.WorkflowRun) bool {
+	_, disp, ok := c.stopReason(ctx, run)
+	return ok && disp.SelfRemediable
+}
+
 // attentionClearedPhase is the durable phase of the checkpoint clearResolvedStop
 // writes. It is deliberately not a canonical attention reason: it records a
 // resume, not a stop, and a run that stops again always writes its own reason.
@@ -729,7 +761,22 @@ func (c *Coordinator) reconcileMirroredChildStop(ctx stdctx.Context, run domain.
 		if child.State == domain.WorkflowRunFailed {
 			return run
 		}
-		if child.State == domain.WorkflowRunNeedsAttention && c.stopIsHumanOwned(ctx, child) {
+		// Checkpoint 8P-E.24 (incident wf-f0efac7e): the mirror is cleared only
+		// when the child has DURABLY left needs_attention, or when AO can
+		// POSITIVELY prove the stop it is still in is one AO remediates itself.
+		//
+		// The old test was the opposite way round — hold only if the child's
+		// stop is human-owned — and "human-owned" is derived from the child's
+		// NEWEST checkpoint. Any row landing on the child after its stop (a
+		// worker observation, an incident record, a wake) makes that lookup come
+		// back empty for one pass, which read as "not human-owned" and unparked
+		// the parent. The next pass re-derived the stop and parked it again.
+		// That is exactly the flap the incident recorded: child_needs_attention,
+		// attention_cleared eight seconds later, child_needs_attention again.
+		//
+		// Not being able to name a child's stop is not evidence the child has
+		// recovered. A child still sitting in needs_attention holds the mirror.
+		if child.State == domain.WorkflowRunNeedsAttention && !c.stopIsSelfRemediable(ctx, child) {
 			return run
 		}
 	}
@@ -812,4 +859,48 @@ func (c *Coordinator) stopReason(ctx stdctx.Context, run domain.WorkflowRun) (st
 		}
 	}
 	return resolveAttentionReason(d)
+}
+
+// recordChildAttentionStopOnce is recordAttentionStopOnce for the parent's
+// mirror of a child's stop (Checkpoint 8P-E.24).
+//
+// recordAttentionStopOnce compares only against the run's NEWEST checkpoint, so
+// any unrelated row landing on the parent between two reconcile passes — an
+// incident record, a wake note, another task's integration — makes the same
+// unchanged child stop look new and write another identical row. Over a night
+// of polling that is thousands of rows describing one condition, and it is what
+// made wf-f0efac7e's ledger unreadable.
+//
+// This looks back through the parent's ledger to the last point at which the
+// mirror could have MEANINGFULLY changed: an attention_cleared (the mirror was
+// released) or a different attention reason (the parent stopped for something
+// else). If the same child mirror, with the same detail, is still standing
+// after that point, nothing is written.
+func (c *Coordinator) recordChildAttentionStopOnce(ctx stdctx.Context, run domain.WorkflowRun, reason, detail string) {
+	if reason == "" {
+		return
+	}
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, run.ID)
+	if err != nil {
+		// Failing to read is never a reason to lose a stop record.
+		c.recordAttentionStop(ctx, run, nil, reason, detail)
+		return
+	}
+	want := strings.TrimSpace(detail)
+	// Newest first: the first row that either matches or invalidates decides.
+	for i := len(cps) - 1; i >= 0; i-- {
+		cp := cps[i]
+		if cp.DurablePhase == reason && cp.NextAction == want {
+			return
+		}
+		if cp.DurablePhase == attentionClearedPhase {
+			break
+		}
+		if _, isReason := attentionDispositions[cp.DurablePhase]; isReason {
+			// The parent stopped for a different reason since; this mirror is
+			// news again.
+			break
+		}
+	}
+	c.recordAttentionStop(ctx, run, nil, reason, detail)
 }
