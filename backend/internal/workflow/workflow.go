@@ -504,6 +504,12 @@ type Coordinator struct {
 	// check. Both optional.
 	workerLiveness  WorkerLivenessProbe
 	workerPreflight WorkerPreflight
+
+	// plannerExec owns the execution contexts in-flight planner calls run on,
+	// so a minutes-long plan generation outlives the request or poller tick
+	// that entered it without outliving the daemon or the run. See
+	// planner_execution_context.go.
+	plannerExec plannerExecution
 }
 
 // New wires a Coordinator from its dependencies, defaulting the clock and id source.
@@ -1397,6 +1403,12 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 	if !moved {
 		return RunDetail{}, fmt.Errorf("%w: workflow run %q changed while cancelling", ErrInvalid, runID)
 	}
+
+	// A cancelled run stops paying for work: any planner subprocess still
+	// running for it is killed here. It runs on an AO-owned context rather
+	// than the caller's precisely so nothing ELSE can kill it, which makes
+	// this the one place that must.
+	c.cancelInFlightPlanner(runID)
 
 	// Checkpoint 8P-E13A.1: the branch is freed the instant the run is durably
 	// cancelled, before any of the fallible bookkeeping below, and on a defer

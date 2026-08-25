@@ -55,19 +55,22 @@ func medusaSizedRequest() workflowcore.PlannerRequest {
 	}
 }
 
+// The step-allowance term is passed as 0 here on purpose: these two cases
+// pin the INPUT half of the budget, which must keep behaving exactly as
+// Checkpoint 8P-E.10 defined it. The output half has its own tests below.
 func TestScaledTimeout_SmallPayloadStaysAtBase(t *testing.T) {
-	got := scaledTimeout(defaultTimeout, defaultMaxTimeout, 100)
+	got := scaledTimeout(defaultTimeout, defaultMaxTimeout, 100, 0)
 	if got != defaultTimeout {
 		t.Fatalf("small payload should not be scaled up, got %s", got)
 	}
 }
 
 func TestScaledTimeout_LargePayloadScalesButStaysBounded(t *testing.T) {
-	got := scaledTimeout(defaultTimeout, defaultMaxTimeout, 10*1024*1024) // 10MB, way past any real prompt
+	got := scaledTimeout(defaultTimeout, defaultMaxTimeout, 10*1024*1024, 0) // 10MB, way past any real prompt
 	if got != defaultMaxTimeout {
 		t.Fatalf("oversized payload must be capped at MaxTimeout, got %s", got)
 	}
-	mid := scaledTimeout(defaultTimeout, defaultMaxTimeout, 400*1024) // 400KB
+	mid := scaledTimeout(defaultTimeout, defaultMaxTimeout, 400*1024, 0) // 400KB
 	if mid <= defaultTimeout || mid > defaultMaxTimeout {
 		t.Fatalf("mid-size payload should scale strictly between base and max, got %s", mid)
 	}

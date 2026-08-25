@@ -542,6 +542,11 @@ func RunWithConfig(cfg config.Config) error {
 	// Checkpoint 8N.1: the daemon-level poller that claims due wakes and
 	// resumes their runs automatically — see workflow/wakepoller's own doc
 	// comment for why this is a separate package from wake.Scheduler itself.
+	// Durable workflow work (today: plan generation, which takes minutes) runs
+	// on a context the coordinator owns rather than on the request or poller
+	// tick that entered it -- this is the daemon lifetime that still ends it.
+	// Set before the poller starts, so the first wake it fires already has it.
+	workflowCoordinator.SetExecutionLifetime(ctx)
 	wakePoller := wakepoller.New(wakeScheduler, workflowCoordinator, wakepoller.Config{Logger: log})
 	lcStack.wakePollerDone = wakePoller.Start(ctx)
 	autoReview := autoreview.New(store, reviewSvc, autoreview.Config{Logger: log})
