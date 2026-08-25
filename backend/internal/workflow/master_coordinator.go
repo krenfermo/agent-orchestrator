@@ -81,9 +81,22 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 	if err != nil {
 		return c.failPlan(ctx, run, "planner_start_failed", err)
 	}
+	// The manifest is the content-free record of what was sent: paths and
+	// hashes, never document bodies. It must be built from a COPY of the
+	// documents, not from the same backing array -- `manifest := contextValue`
+	// copies the struct but shares Documents, so blanking Content here used to
+	// blank it in contextValue too, and the planner was handed a context of
+	// paths and hashes with every body emptied.
+	//
+	// That aliasing is the wf-80dc9f12 root cause: it silently stripped the
+	// repository context from every planner call AND shrank the payload the
+	// adapter measures its timeout budget from, pinning a 12-step objective to
+	// the flat 3-minute floor it then blew through four times.
 	manifest := contextValue
-	for i := range manifest.Documents {
-		manifest.Documents[i].Content = ""
+	manifest.Documents = make([]PlannerDocument, len(contextValue.Documents))
+	for i, doc := range contextValue.Documents {
+		doc.Content = ""
+		manifest.Documents[i] = doc
 	}
 	manifestJSON, _ := json.Marshal(manifest)
 	provider, model := "unknown", "unknown"
@@ -109,7 +122,16 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 	if err != nil {
 		return c.failPlan(ctx, run, "planner_start_failed", err)
 	}
-	response, err := c.planner.Generate(ctx, PlannerRequest{Objective: run.Objective, Project: project, Context: contextValue, MaxSteps: MaxPlanSteps, RuntimeEnv: runtimeEnv})
+	// The planner runs on a workflow-owned execution context, never on the
+	// caller's: this same GeneratePlan is entered from an HTTP request
+	// (r.Context(), dead the moment the browser navigates away) and from the
+	// wake poller's cycle context, and a plan generation that takes minutes
+	// must not be killed by either. What it must still obey -- daemon
+	// shutdown, cancellation of this run, and the adapter's own bounded
+	// timeout -- it does; see plannerExecutionContext.
+	plannerCtx, releasePlannerCtx := c.plannerExecutionContext(ctx, run.ID)
+	response, err := c.planner.Generate(plannerCtx, PlannerRequest{Objective: run.Objective, Project: project, Context: contextValue, MaxSteps: MaxPlanSteps, RuntimeEnv: runtimeEnv})
+	releasePlannerCtx()
 	if err != nil {
 		// Checkpoint 8N.1: a capacity/rate-limit-shaped planner failure must
 		// never be treated the same as a real permanent failure (parse
@@ -350,16 +372,28 @@ func (c *Coordinator) retryPlanOrFail(ctx stdctx.Context, run domain.WorkflowRun
 	// ErrPlanLocks every retry.
 	_, _ = c.planStore.FinishWorkflowPlan(ctx, run.ID, domain.WorkflowPlanPending, domain.WorkflowPlanCommandIdle, string(validation), "", class, now)
 	c.stopPlanningStep(ctx, run.ID)
-	c.recordAttentionStop(ctx, run, nil, ReasonPlannerRetryScheduled, fmt.Sprintf(
+	c.recordAttentionStopWithState(ctx, run, nil, ReasonPlannerRetryScheduled, fmt.Sprintf(
 		"%s (retry %d of %d): %s — AO will retry planning automatically, no action needed",
 		class, attempts+1, maxPlannerRetries, cause.Error(),
-	))
+	), plannerEvidenceState(cause))
 	// transient_retry is the existing wake reason for exactly this shape of
 	// wait (a bounded retry of something that failed once), and its backoff
 	// grows per attempt off the wake row's own attempt_count. No new reason,
 	// no migration.
 	c.scheduleWake(ctx, run, nil, wake.ReasonTransientRetry, "")
 	return c.GetRun(ctx, run.ID)
+}
+
+// plannerEvidenceState renders a planner failure's attempt evidence for the
+// checkpoint's retry_state column, or "{}" for a failure that carries none
+// (every non-planner stop, and a planner failure raised before the adapter
+// ever ran a subprocess).
+func plannerEvidenceState(cause error) string {
+	evidence, ok := PlannerEvidenceFrom(cause)
+	if !ok {
+		return "{}"
+	}
+	return evidence.JSON()
 }
 
 // plannerRetryCount counts this run's durable planner_retry_scheduled
@@ -389,8 +423,10 @@ func (c *Coordinator) failPlan(ctx stdctx.Context, run domain.WorkflowRun, class
 	c.stopPlanningStep(ctx, run.ID)
 	// Checkpoint 8P-E.13: a failed plan records WHY in the canonical
 	// vocabulary, so the Board can name the stop and the action instead of
-	// falling through to an unnamed needs_attention.
-	c.recordAttentionStop(ctx, run, nil, class, cause.Error())
+	// falling through to an unnamed needs_attention. When the failure came
+	// from a planner attempt, the checkpoint also carries that attempt's
+	// measurements: the budget it was given, what it sent and how it ended.
+	c.recordAttentionStopWithState(ctx, run, nil, class, cause.Error(), plannerEvidenceState(cause))
 	detail, getErr := c.GetRun(ctx, run.ID)
 	if getErr != nil {
 		return RunDetail{}, getErr

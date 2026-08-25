@@ -198,7 +198,7 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		// (scaledTimeout) may stretch it for a large MEDUSA-class objective +
 		// repository context payload. Neither value is a blind global bump --
 		// small objectives still finish (or time out) inside 3 minutes.
-		Planner:                  plannercommand.Planner{Binary: plannerBinary, Model: plannerModel, Timeout: 3 * time.Minute, MaxTimeout: 12 * time.Minute},
+		Planner:                  plannercommand.Planner{Binary: plannerBinary, Model: plannerModel, Timeout: 3 * time.Minute, MaxTimeout: 12 * time.Minute, Logger: log},
 		PlannerContextBuilder:    plannercommand.ContextBuilder{},
 		Switcher:                 workflowAgentSwitcher{mgr: sessionMgr},
 		QuestionsStore:           store,

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -24,13 +25,28 @@ const defaultTimeout = 3 * time.Minute
 // not a blind global bump: small objectives still get defaultTimeout.
 const defaultMaxTimeout = 12 * time.Minute
 
-// bytesPerExtraMinute is the scaling factor behind scaledTimeout: every full
+// bytesPerExtraMinute is the input half of the timeout budget: every full
 // multiple of this many bytes of prompt+context payload earns the call one
 // more minute, up to MaxTimeout. Chosen conservatively -- MEDUSA-sized
 // prompts (tens of KB of objective text plus repository context) land well
 // inside a handful of extra minutes rather than saturating the cap on
 // ordinary objectives.
 const bytesPerExtraMinute = 40 * 1024
+
+// perStepAllowance is the OUTPUT half of the timeout budget: how much time a
+// single planned step is expected to cost the provider to produce.
+//
+// Input size alone was the wrong knob, and wf-80dc9f12 is why. That run's
+// planner call sent an 8 KB payload -- far below one bytesPerExtraMinute --
+// and so ran on the flat 3-minute floor, yet the identical invocation
+// reproduced outside AO took 5m36s: six provider turns and ~40k output tokens
+// spent writing a 12-step plan with acceptance criteria and structured verify
+// blocks for each step. What made the call slow was what it had to WRITE, and
+// the request already declares that ceiling in MaxSteps. The measured run
+// averaged ~28s per emitted step, so 30s per step is a calibrated allowance
+// rather than a guess -- and it is still an allowance, not a floor: a planner
+// that finishes in six seconds returns in six seconds.
+const perStepAllowance = 30 * time.Second
 
 // maxParseRetries is how many additional attempts (beyond the first) the
 // adapter makes when the planner subprocess itself succeeds (no timeout, no
@@ -57,11 +73,29 @@ type Planner struct {
 	// (the common case, set once in wiring) defaults to defaultMaxTimeout.
 	MaxTimeout time.Duration
 
+	// Logger receives one structured line per attempt carrying the budget it
+	// was given, the payload sizes it sent and how it ended -- the evidence
+	// wf-80dc9f12 had no way to leave behind. Optional: nil logs nothing, and
+	// the same evidence still rides back on the error either way.
+	Logger *slog.Logger
+
 	// runCommand executes the planner subprocess and returns its combined
 	// stdout+stderr. Nil (the production default) runs the real binary via
 	// exec.CommandContext; tests inject a fake to exercise timeout scaling,
 	// envelope extraction, and retry behavior without a real CLI.
 	runCommand func(ctx context.Context, binary string, args []string, dir string, env []string) ([]byte, error)
+}
+
+// logAttempt emits one line per attempt at the level its outcome deserves.
+func (p Planner) logAttempt(evidence workflowcore.PlannerAttemptEvidence, err error) {
+	if p.Logger == nil {
+		return
+	}
+	if err == nil {
+		p.Logger.Info("planner attempt completed", evidence.LogArgs()...)
+		return
+	}
+	p.Logger.Warn("planner attempt failed", append(evidence.LogArgs(), "err", err)...)
 }
 
 func (p Planner) Descriptor() (string, string) {
@@ -72,13 +106,18 @@ func (p Planner) Descriptor() (string, string) {
 	return "anthropic", model
 }
 
-// scaledTimeout grows the base timeout by one minute per bytesPerExtraMinute
-// of payload, capped at max. Checkpoint 8P-E.10: MEDUSA-class prompts were
-// timing out at a flat 3 minutes regardless of size; rather than raising that
-// constant for every objective (a blind global bump the checkpoint
-// explicitly rejects), only payloads large enough to plausibly need more
-// processing time get more of it.
-func scaledTimeout(base, max time.Duration, payloadSize int) time.Duration {
+// scaledTimeout computes one attempt's bounded budget from the two things
+// that actually drive a planner call's duration: how much it must read
+// (payloadSize) and how much it must write (maxSteps). Checkpoint 8P-E.10
+// added the first term because MEDUSA-class prompts were timing out at a flat
+// 3 minutes; the bootstrap repair adds the second because wf-80dc9f12 showed a
+// SMALL prompt timing out at that same flat 3 minutes while the provider was
+// still writing its twelfth step.
+//
+// It stays a bound, not a blind global bump: base is unchanged, max is
+// unchanged, and a small objective planned into a handful of steps still gets
+// a budget close to the floor it always had.
+func scaledTimeout(base, max time.Duration, payloadSize, maxSteps int) time.Duration {
 	if base <= 0 {
 		base = defaultTimeout
 	}
@@ -88,8 +127,10 @@ func scaledTimeout(base, max time.Duration, payloadSize int) time.Duration {
 	if max < base {
 		max = base
 	}
-	extra := time.Duration(payloadSize/bytesPerExtraMinute) * time.Minute
-	t := base + extra
+	t := base + time.Duration(payloadSize/bytesPerExtraMinute)*time.Minute
+	if maxSteps > 0 {
+		t += time.Duration(maxSteps) * perStepAllowance
+	}
 	if t > max {
 		t = max
 	}
@@ -117,7 +158,26 @@ Conservative repository context:
 	}
 	args := []string{"--print", "--output-format", "json", "--json-schema", schema, "--tools", "", "--permission-mode", "plan", "--no-session-persistence", "--model", model, prompt}
 	env := mergeEnv(os.Environ(), req.RuntimeEnv)
-	timeout := scaledTimeout(p.Timeout, p.MaxTimeout, len(prompt)+len(contextJSON))
+	timeout := scaledTimeout(p.Timeout, p.MaxTimeout, len(prompt)+len(contextJSON), req.MaxSteps)
+	// Shape of this attempt, recorded whatever happens to it. Sizes only --
+	// never the prompt, the objective, a document body or an env value.
+	shape := workflowcore.PlannerAttemptEvidence{
+		CalculatedTimeoutMS: timeout.Milliseconds(),
+		EffectiveTimeoutMS:  timeout.Milliseconds(),
+		ObjectiveBytes:      len(req.Objective),
+		ContextBytes:        len(contextJSON),
+		PayloadBytes:        len(prompt) + len(contextJSON),
+		DocumentCount:       len(req.Context.Documents),
+		MaxSteps:            req.MaxSteps,
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		shape.HasParentDeadline = true
+		shape.ParentDeadlineMS = remaining.Milliseconds()
+		if remaining < timeout {
+			shape.EffectiveTimeoutMS = remaining.Milliseconds()
+		}
+	}
 
 	var lastErr error
 	for attempt := 0; attempt <= maxParseRetries; attempt++ {
@@ -133,10 +193,12 @@ Conservative repository context:
 			case <-time.After(parseRetryBackoff):
 			}
 		}
-		plan, provider, respModel, err := p.attempt(ctx, args, req.Project.Path, env, timeout, model)
+		plan, provider, respModel, evidence, err := p.attempt(ctx, args, req.Project.Path, env, timeout, model, shape)
+		p.logAttempt(evidence, err)
 		if err == nil {
 			return workflowcore.PlannerResponse{Plan: plan, Provider: provider, Model: respModel}, nil
 		}
+		err = &workflowcore.PlannerAttemptError{Evidence: evidence, Err: err}
 		if !errors.Is(err, ports.ErrPlannerOutputMalformed) {
 			// Timeout, missing binary, non-zero exit, etc. -- never worth
 			// retrying blind: a slow provider stays slow, a missing binary
@@ -153,7 +215,7 @@ Conservative repository context:
 // attempt runs exactly one planner subprocess invocation and parses its
 // output. Split out of Generate so the bounded retry loop above has a single
 // place that decides whether an error is retry-eligible.
-func (p Planner) attempt(ctx context.Context, args []string, dir string, env []string, timeout time.Duration, model string) (workflowcore.MasterPlan, string, string, error) {
+func (p Planner) attempt(ctx context.Context, args []string, dir string, env []string, timeout time.Duration, model string, shape workflowcore.PlannerAttemptEvidence) (workflowcore.MasterPlan, string, string, workflowcore.PlannerAttemptEvidence, error) {
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -161,30 +223,48 @@ func (p Planner) attempt(ctx context.Context, args []string, dir string, env []s
 	if run == nil {
 		run = runRealCommand
 	}
+	started := time.Now()
 	b, err := run(callCtx, p.Binary, args, dir, env)
+	evidence := shape
+	evidence.DurationMS = time.Since(started).Milliseconds()
+	fail := func(class string, err error) (workflowcore.MasterPlan, string, string, workflowcore.PlannerAttemptEvidence, error) {
+		evidence.Classification = class
+		return workflowcore.MasterPlan{}, "", "", evidence, err
+	}
 	if err != nil {
-		if callCtx.Err() != nil {
-			return workflowcore.MasterPlan{}, "", "", fmt.Errorf("planner timeout: %w: %w", ports.ErrPlannerTimeout, callCtx.Err())
+		// A dead caller context and an expired planner budget both surface
+		// here as "context deadline exceeded", and telling them apart is
+		// exactly what wf-80dc9f12's postmortem could not do. The classifier
+		// asks the PARENT first: if the caller's context is already done, the
+		// planner's own budget was never what stopped this attempt. Both stay
+		// ErrPlannerTimeout so master_coordinator keeps retrying rather than
+		// permanently invalidating a plan over a daemon shutdown.
+		if parentErr := ctx.Err(); parentErr != nil {
+			return fail(workflowcore.PlannerAttemptParentCancelled, fmt.Errorf("planner interrupted by caller: %w: %w", ports.ErrPlannerTimeout, parentErr))
 		}
-		return workflowcore.MasterPlan{}, "", "", fmt.Errorf("planner command: %w: %s", err, strings.TrimSpace(snippet(b, outputSnippetLimit)))
+		if callCtx.Err() != nil {
+			return fail(workflowcore.PlannerAttemptTimeout, fmt.Errorf("planner timeout: %w: %w", ports.ErrPlannerTimeout, callCtx.Err()))
+		}
+		return fail(workflowcore.PlannerAttemptCommandFailed, fmt.Errorf("planner command: %w: %s", err, strings.TrimSpace(snippet(b, outputSnippetLimit))))
 	}
 
 	envelope, envErr := extractEnvelope(b)
 	if envErr != nil {
-		return workflowcore.MasterPlan{}, "", "", fmt.Errorf("planner parse envelope: %w: %w: output=%q", ports.ErrPlannerOutputMalformed, envErr, snippet(b, outputSnippetLimit))
+		return fail(workflowcore.PlannerAttemptMalformed, fmt.Errorf("planner parse envelope: %w: %w: output=%q", ports.ErrPlannerOutputMalformed, envErr, snippet(b, outputSnippetLimit)))
 	}
 	raw := envelope.StructuredOutput
 	if len(raw) == 0 && envelope.Result != "" {
 		raw = []byte(envelope.Result)
 	}
 	if len(raw) == 0 {
-		return workflowcore.MasterPlan{}, "", "", fmt.Errorf("planner output missing structured plan: %w: output=%q", ports.ErrPlannerOutputMalformed, snippet(b, outputSnippetLimit))
+		return fail(workflowcore.PlannerAttemptMalformed, fmt.Errorf("planner output missing structured plan: %w: output=%q", ports.ErrPlannerOutputMalformed, snippet(b, outputSnippetLimit)))
 	}
 	var plan workflowcore.MasterPlan
 	if err := json.Unmarshal(raw, &plan); err != nil {
-		return workflowcore.MasterPlan{}, "", "", fmt.Errorf("planner parse plan: %w: %w: output=%q", ports.ErrPlannerOutputMalformed, err, snippet(raw, outputSnippetLimit))
+		return fail(workflowcore.PlannerAttemptMalformed, fmt.Errorf("planner parse plan: %w: %w: output=%q", ports.ErrPlannerOutputMalformed, err, snippet(raw, outputSnippetLimit)))
 	}
-	return plan, "anthropic", model, nil
+	evidence.Classification = workflowcore.PlannerAttemptOK
+	return plan, "anthropic", model, evidence, nil
 }
 
 type plannerEnvelope struct {

@@ -524,8 +524,21 @@ const legacyFixBudgetNextAction = "human_attention"
 // failures" convention. A run that stops AND fails to record why is strictly
 // better off than one that fails to stop.
 func (c *Coordinator) recordAttentionStop(ctx stdctx.Context, run domain.WorkflowRun, stepID *string, reason, detail string) {
+	c.recordAttentionStopWithState(ctx, run, stepID, reason, detail, "{}")
+}
+
+// recordAttentionStopWithState is recordAttentionStop with a caller-supplied
+// retry_state payload, for a stop that carries machine-readable evidence about
+// what produced it (today: planner attempt evidence -- see
+// planner_evidence.go). It rides on the SAME checkpoint row the stop already
+// writes rather than a row of its own, so nothing that reads a run's newest
+// checkpoint starts seeing a diagnostic where it expects a stop.
+func (c *Coordinator) recordAttentionStopWithState(ctx stdctx.Context, run domain.WorkflowRun, stepID *string, reason, detail, retryState string) {
 	if reason == "" {
 		return
+	}
+	if strings.TrimSpace(retryState) == "" {
+		retryState = "{}"
 	}
 	var step *string
 	if stepID != nil && *stepID != "" {
@@ -540,7 +553,7 @@ func (c *Coordinator) recordAttentionStop(ctx stdctx.Context, run domain.Workflo
 		NextAction:     strings.TrimSpace(detail),
 		DurablePhase:   reason,
 		PayloadVersion: "v1",
-		RetryState:     "{}",
+		RetryState:     retryState,
 		CreatedAt:      c.clock(),
 	}); err != nil && c.log != nil {
 		c.log.Warn("workflow: recording attention stop failed", "run", run.ID, "reason", reason, "err", err)
