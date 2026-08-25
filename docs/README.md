@@ -17,6 +17,7 @@ Start with [architecture.md](architecture.md) for the current backend model and
 | [cli/README.md](cli/README.md)                         | CLI commands and daemon control surface.                                                                              |
 | [cloud-development.md](cloud-development.md)           | Optional private checkout workflow, current Cloud foundation, remaining implementation, and recommended build order. |
 | [cloud-refactor.md](cloud-refactor.md)                 | Public contracts, generated Cloud schema types, typed client, reusable product UI, and private implementation boundaries. |
+| [code-graph.md](code-graph.md)                         | Provider-agnostic code-graph adapter boundary, the native AST/symbol indexer, hash-gated incremental updates, and per-project index isolation under `~/.ao`. |
 | [development.md](development.md)                       | Prerequisites, build steps, running tests, and troubleshooting for local development.                                 |
 | [STATUS.md](STATUS.md)                                 | What is shipped on `main` today and what is still in flight.                                                          |
 | [workflow-lifecycle-mapping.md](workflow-lifecycle-mapping.md) | Canonical mapping from persisted workflow-engine tables to the UI lifecycle vocabulary; contract for the backend projection and workflow UI. |
