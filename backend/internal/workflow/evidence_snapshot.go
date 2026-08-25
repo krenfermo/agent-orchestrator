@@ -47,12 +47,23 @@ import (
 //     is never given the most plausible owner, because the most plausible
 //     owner is exactly what a person would then act on.
 //
-// Note what "no live-process guessing" means here, precisely. The collector
-// reads durable rows, and it reads two live sources: the runtime liveness
-// probe and the git worktree. Both are RECORDED ANSWERS, not inferences — a
-// probe that cannot tell yields `unavailable`, never "probably dead", and an
-// unobservable worktree yields `unavailable`, never "nothing changed".
-// Silence is never converted into a fact anywhere in this file.
+// Note what "durable facts only" means here, and how strictly. The collector
+// performs NO live reads at all: it does not probe a runtime, it does not shell
+// out to git, it opens no port. Every field it fills comes from a row that was
+// already written down.
+//
+// That is a stronger rule than "do not guess", and it is the right one. A live
+// probe can be perfectly honest at the instant it answers and still be a fact
+// AO cannot produce again: the daemon restarts, the pane is gone, the worktree
+// is deleted, and the snapshot the stop was authorized on can no longer be
+// reconstructed or checked. An answer that only exists in memory is not
+// evidence, it is a memory of evidence.
+//
+// So the two live readings AO can take — the runtime liveness probe and the git
+// worktree — are taken by the CALLER, persisted as an ObservedWorkerFacts row
+// BEFORE the raise is authorized, and read back here from that row. Nothing
+// recorded means `unavailable`, never an inference: silence is never converted
+// into a fact anywhere in this file.
 
 const (
 	// EvidenceSnapshotVersion identifies the shape of a serialized snapshot.
@@ -279,11 +290,109 @@ type EvidenceRequest struct {
 	// produces a snapshot that says so, rather than one that quietly describes
 	// a different step.
 	Step domain.WorkflowStep
-	// Observation is a workspace observation the caller has ALREADY paid for.
-	// Supplying it keeps one git shell-out per decision instead of two, and
-	// keeps the snapshot describing the same observation the decision used.
-	// Nil means the collector may obtain one itself.
-	Observation *ports.WorkspaceObservation
+}
+
+// WorkerObservationEvidencePhase is the durable home of the two readings AO can
+// only take live: the git worktree and the runtime liveness probe.
+//
+// One append-only checkpoint per observation, written by whoever paid for it,
+// BEFORE anything is authorized on it. It exists so that CollectWorkerEvidence
+// can be a pure reader of durable rows: an observation that was never written
+// down cannot be shown to anyone after a restart, cannot be compared against a
+// later one, and cannot be checked by the person reading the stop it caused.
+const WorkerObservationEvidencePhase = "worker_observation_evidence"
+
+// ObservedWorkerFacts is the persisted form of one such observation.
+//
+// Every field is something a port actually reported. The two `*Known` flags are
+// load-bearing: they distinguish "the reading was taken and said no" from "no
+// reading was taken", which are different facts with different remedies, and
+// collapsing them is how an unobserved worktree becomes a clean one.
+type ObservedWorkerFacts struct {
+	ObservedAt time.Time `json:"observedAt"`
+	SessionID  string    `json:"sessionId,omitempty"`
+
+	// WorkspaceKnown records that a git observation was actually obtained.
+	WorkspaceKnown bool     `json:"workspaceKnown"`
+	WorktreePath   string   `json:"worktreePath,omitempty"`
+	Branch         string   `json:"branch,omitempty"`
+	HeadSHA        string   `json:"headSha,omitempty"`
+	Dirty          bool     `json:"dirty,omitempty"`
+	Staged         bool     `json:"staged,omitempty"`
+	Untracked      bool     `json:"untracked,omitempty"`
+	ChangedFiles   []string `json:"changedFiles,omitempty"`
+	Fingerprint    string   `json:"fingerprint,omitempty"`
+
+	// LivenessKnown records that the runtime probe ANSWERED. False covers both
+	// "no probe is wired" and "the probe could not tell", neither of which is
+	// ever read as death.
+	LivenessKnown bool `json:"livenessKnown"`
+	LivenessAlive bool `json:"livenessAlive"`
+}
+
+// Empty reports whether this record holds no reading at all, in which case
+// there is nothing worth writing down.
+func (o ObservedWorkerFacts) Empty() bool { return !o.WorkspaceKnown && !o.LivenessKnown }
+
+// NewObservedWorkspaceFacts turns a git observation a caller already paid for
+// into the durable form. It is the only conversion; the raw port value never
+// reaches the collector.
+func NewObservedWorkspaceFacts(obs ports.WorkspaceObservation) ObservedWorkerFacts {
+	facts := ObservedWorkerFacts{
+		WorkspaceKnown: true,
+		WorktreePath:   obs.Path,
+		Branch:         obs.Branch,
+		HeadSHA:        obs.HeadSHA,
+		Dirty:          obs.Dirty,
+		Staged:         obs.Staged,
+		Untracked:      obs.Untracked,
+		Fingerprint:    WorkspaceFingerprint(obs),
+	}
+	changes := obs.Changes
+	if len(changes) > evidenceMaxChangedFiles {
+		changes = changes[:evidenceMaxChangedFiles]
+	}
+	for _, ch := range changes {
+		facts.ChangedFiles = append(facts.ChangedFiles, strings.TrimSpace(ch.Status+" "+ch.Path))
+	}
+	return facts
+}
+
+// DecodeObservedWorkerFacts reads one back off the ledger.
+func DecodeObservedWorkerFacts(raw string) (ObservedWorkerFacts, bool) {
+	if strings.TrimSpace(raw) == "" {
+		return ObservedWorkerFacts{}, false
+	}
+	var o ObservedWorkerFacts
+	if err := json.Unmarshal([]byte(raw), &o); err != nil {
+		return ObservedWorkerFacts{}, false
+	}
+	return o, true
+}
+
+// newestObservedWorkerFacts finds the newest recorded observation for a step,
+// falling back to the run's newest when the step has none of its own.
+func newestObservedWorkerFacts(cps []domain.WorkflowCheckpoint, stepID string) (ObservedWorkerFacts, bool) {
+	ordered := append([]domain.WorkflowCheckpoint(nil), cps...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].CreatedAt.After(ordered[j].CreatedAt) })
+	var runWide ObservedWorkerFacts
+	haveRunWide := false
+	for _, cp := range ordered {
+		if cp.DurablePhase != WorkerObservationEvidencePhase {
+			continue
+		}
+		facts, ok := DecodeObservedWorkerFacts(cp.RetryState)
+		if !ok {
+			continue
+		}
+		if stepID != "" && cp.WorkflowStepID != nil && *cp.WorkflowStepID == stepID {
+			return facts, true
+		}
+		if !haveRunWide {
+			runWide, haveRunWide = facts, true
+		}
+	}
+	return runWide, haveRunWide
 }
 
 // ProvenanceStore is the optional durable surface migration 0133 added: the
@@ -326,7 +435,6 @@ func (c *Coordinator) CollectWorkerEvidence(ctx stdctx.Context, req EvidenceRequ
 	}
 
 	checkpoints, cpErr := c.checkpointsForEvidence(ctx, req)
-	latestCP, hasCP := newestCheckpointFor(checkpoints, req.Step.ID)
 	ledger := newestCheckpointGitFacts(checkpoints, req.Step.ID)
 
 	c.evidenceWorkflow(b, req)
@@ -334,11 +442,11 @@ func (c *Coordinator) CollectWorkerEvidence(ctx stdctx.Context, req EvidenceRequ
 	attemptID := c.evidenceAttempt(ctx, b, req)
 	snap.AttemptID = attemptID
 	sess, sessFound := c.evidenceSession(ctx, b, req)
-	c.evidenceLiveness(ctx, b, sess, sessFound)
+	observed, observedOK := newestObservedWorkerFacts(checkpoints, req.Step.ID)
+	c.evidenceLiveness(b, observed, observedOK)
 	c.evidenceLaunch(ctx, b, req)
-	obs, obsOK := c.evidenceObservation(ctx, req, sess, sessFound, latestCP, hasCP)
-	c.evidenceGit(b, sess, sessFound, obs, obsOK, ledger)
-	c.evidenceFingerprints(b, checkpoints, cpErr, obs, obsOK)
+	c.evidenceGit(b, sess, sessFound, observed, observedOK, ledger)
+	c.evidenceFingerprints(b, checkpoints, cpErr, observed, observedOK)
 	c.evidenceProvenance(ctx, b, req)
 	c.evidenceArtifacts(ctx, b, req)
 	c.evidenceResult(b, req, sess, sessFound, checkpoints, cpErr)
@@ -526,33 +634,28 @@ func (c *Coordinator) evidenceSession(ctx stdctx.Context, b *evidenceBuilder, re
 	return sess, true
 }
 
-func (c *Coordinator) evidenceLiveness(
-	ctx stdctx.Context, b *evidenceBuilder,
-	sess domain.SessionRecord, sessFound bool,
-) {
+// evidenceLiveness reports the RECORDED liveness answer. It never probes: a
+// probe taken here would be a fact only this process ever held, and the whole
+// point of the snapshot is that a person can read the stop's evidence back
+// after a restart. Whoever pays for a probe persists it first — see
+// ObservedWorkerFacts.
+func (c *Coordinator) evidenceLiveness(b *evidenceBuilder, observed ObservedWorkerFacts, observedOK bool) {
 	b.section(EvidenceSectionLiveness, "Process liveness")
-	if c.workerLiveness == nil {
-		b.unavailable(EvidenceSectionLiveness+".runtime", "runtime process",
-			"no runtime liveness probe is wired; AO does not infer liveness from silence")
-		return
-	}
-	if !sessFound {
-		b.unavailable(EvidenceSectionLiveness+".runtime", "runtime process",
-			"there is no session row to probe a runtime for")
-		return
-	}
-	alive, known, err := c.workerLiveness.SessionAlive(ctx, sess.ID)
 	switch {
-	case err != nil:
+	case !observedOK:
 		b.unavailable(EvidenceSectionLiveness+".runtime", "runtime process",
-			"the liveness probe failed: "+err.Error())
-	case !known:
+			"no observation has been recorded for this step; AO does not probe a runtime from "+
+				"inside the collector and never infers liveness from silence")
+	case !observed.LivenessKnown:
 		b.unavailable(EvidenceSectionLiveness+".runtime", "runtime process",
-			"the liveness probe could not tell; an unanswered probe is never read as death")
-	case alive:
-		b.observed(EvidenceSectionLiveness+".runtime", "runtime process", "alive (probed)")
+			"the recorded observation carries no liveness answer (no probe wired, or the probe "+
+				"could not tell); an unanswered probe is never read as death")
+	case observed.LivenessAlive:
+		b.observed(EvidenceSectionLiveness+".runtime", "runtime process",
+			"alive (probed "+stamp(observed.ObservedAt, "at an unrecorded time")+")")
 	default:
-		b.observed(EvidenceSectionLiveness+".runtime", "runtime process", "not running (probed)")
+		b.observed(EvidenceSectionLiveness+".runtime", "runtime process",
+			"not running (probed "+stamp(observed.ObservedAt, "at an unrecorded time")+")")
 	}
 }
 
@@ -608,51 +711,16 @@ func renderDispatchHistory(records []domain.WorkflowDispatchCheckpoint) string {
 	return strings.Join(lines, "; ")
 }
 
-// evidenceObservation resolves the workspace observation the git and
-// fingerprint sections read. A caller-supplied one always wins, so the snapshot
-// describes the same observation the decision was made on.
-func (c *Coordinator) evidenceObservation(
-	ctx stdctx.Context, req EvidenceRequest,
-	sess domain.SessionRecord, sessFound bool,
-	latestCP domain.WorkflowCheckpoint, hasCP bool,
-) (ports.WorkspaceObservation, bool) {
-	if req.Observation != nil {
-		return *req.Observation, true
-	}
-	if c.workspaceFacts == nil {
-		return ports.WorkspaceObservation{}, false
-	}
-	path, branch := "", ""
-	if sessFound {
-		path, branch = sess.Metadata.WorkspacePath, sess.Metadata.Branch
-	}
-	if path == "" && hasCP {
-		path, branch = latestCP.WorktreePath, latestCP.Branch
-	}
-	if path == "" {
-		return ports.WorkspaceObservation{}, false
-	}
-	obs, err := c.workspaceFacts.ObserveWorkspace(ctx, ports.WorkspaceInfo{
-		Path:      path,
-		Branch:    branch,
-		SessionID: sess.ID,
-		ProjectID: domain.ProjectID(req.Run.ProjectID),
-	})
-	if err != nil {
-		return ports.WorkspaceObservation{}, false
-	}
-	return obs, true
-}
-
 func (c *Coordinator) evidenceGit(
 	b *evidenceBuilder,
 	sess domain.SessionRecord, sessFound bool,
-	obs ports.WorkspaceObservation, obsOK bool,
+	observed ObservedWorkerFacts, observedOK bool,
 	ledger checkpointGitFacts,
 ) {
 	b.section(EvidenceSectionGit, "Git branch / HEAD / status")
+	obsOK := observedOK && observed.WorkspaceKnown
 
-	branch := firstNonEmpty(pick(obsOK, obs.Branch), ledger.Branch, pick(sessFound, sess.Metadata.Branch))
+	branch := firstNonEmpty(pick(obsOK, observed.Branch), ledger.Branch, pick(sessFound, sess.Metadata.Branch))
 	if branch == "" {
 		b.unavailable(EvidenceSectionGit+".branch", "branch",
 			"no branch was recorded on this step's session, checkpoints or observation")
@@ -660,7 +728,7 @@ func (c *Coordinator) evidenceGit(
 		b.observed(EvidenceSectionGit+".branch", "branch", branch)
 	}
 
-	head := firstNonEmpty(pick(obsOK, obs.HeadSHA), ledger.HeadSHA)
+	head := firstNonEmpty(pick(obsOK, observed.HeadSHA), ledger.HeadSHA)
 	if head == "" {
 		b.unavailable(EvidenceSectionGit+".headSha", "HEAD",
 			"no HEAD SHA was observed and none is recorded on this step's checkpoints")
@@ -675,7 +743,7 @@ func (c *Coordinator) evidenceGit(
 			"no base SHA is recorded on any of this step's checkpoints")
 	}
 
-	path := firstNonEmpty(pick(obsOK, obs.Path), pick(sessFound, sess.Metadata.WorkspacePath), ledger.WorktreePath)
+	path := firstNonEmpty(pick(obsOK, observed.WorktreePath), pick(sessFound, sess.Metadata.WorkspacePath), ledger.WorktreePath)
 	if path == "" {
 		b.unavailable(EvidenceSectionGit+".worktreePath", "worktree",
 			"no worktree path was recorded on this step's session or checkpoints")
@@ -684,41 +752,24 @@ func (c *Coordinator) evidenceGit(
 	}
 
 	if !obsOK {
-		b.unavailable(EvidenceSectionGit+".status", "git status",
-			"no workspace observation was available; AO does not read an unobservable tree as a clean one")
-		b.unavailable(EvidenceSectionGit+".changedFiles", "changed files",
-			"no workspace observation was available")
+		const why = "no workspace observation has been recorded for this step; AO does not " +
+			"shell out to git from inside the collector, and never reads an unobserved tree as a clean one"
+		b.unavailable(EvidenceSectionGit+".status", "git status", why)
+		b.unavailable(EvidenceSectionGit+".changedFiles", "changed files", why)
 		return
 	}
 	b.observed(EvidenceSectionGit+".status", "git status", fmt.Sprintf(
-		"dirty=%t staged=%t untracked=%t changes=%d", obs.Dirty, obs.Staged, obs.Untracked, len(obs.Changes)))
-	b.observed(EvidenceSectionGit+".changedFiles", "changed files", renderEvidenceChanges(obs.Changes))
-}
-
-func renderEvidenceChanges(changes []ports.WorkspaceChange) string {
-	if len(changes) == 0 {
-		return "none — the observed tree has no reported change"
-	}
-	shown := changes
-	more := 0
-	if len(shown) > evidenceMaxChangedFiles {
-		more = len(shown) - evidenceMaxChangedFiles
-		shown = shown[:evidenceMaxChangedFiles]
-	}
-	lines := make([]string, 0, len(shown)+1)
-	for _, ch := range shown {
-		lines = append(lines, strings.TrimSpace(ch.Status+" "+ch.Path))
-	}
-	if more > 0 {
-		lines = append(lines, fmt.Sprintf("… (%d more)", more))
-	}
-	return strings.Join(lines, "; ")
+		"dirty=%t staged=%t untracked=%t changes=%d (observed %s)",
+		observed.Dirty, observed.Staged, observed.Untracked, len(observed.ChangedFiles),
+		stamp(observed.ObservedAt, "at an unrecorded time")))
+	b.observed(EvidenceSectionGit+".changedFiles", "changed files",
+		renderBoundedList(observed.ChangedFiles, "none — the observed tree had no reported change"))
 }
 
 func (c *Coordinator) evidenceFingerprints(
 	b *evidenceBuilder,
 	checkpoints []domain.WorkflowCheckpoint, cpErr error,
-	obs ports.WorkspaceObservation, obsOK bool,
+	observed ObservedWorkerFacts, observedOK bool,
 ) {
 	b.section(EvidenceSectionFingerprints, "Workspace fingerprints")
 	if cpErr != nil {
@@ -731,12 +782,12 @@ func (c *Coordinator) evidenceFingerprints(
 		b.observed(EvidenceSectionFingerprints+".recorded", "newest certified fingerprint",
 			orValue(after, "none recorded on this run's ledger"))
 	}
-	if !obsOK {
+	if !observedOK || !observed.WorkspaceKnown || observed.Fingerprint == "" {
 		b.unavailable(EvidenceSectionFingerprints+".observed", "observed fingerprint",
-			"no workspace observation was available to fingerprint")
+			"no recorded workspace observation carries a fingerprint for this step")
 		return
 	}
-	b.observed(EvidenceSectionFingerprints+".observed", "observed fingerprint", WorkspaceFingerprint(obs))
+	b.observed(EvidenceSectionFingerprints+".observed", "observed fingerprint", observed.Fingerprint)
 }
 
 func (c *Coordinator) evidenceProvenance(ctx stdctx.Context, b *evidenceBuilder, req EvidenceRequest) {
@@ -960,20 +1011,6 @@ func (c *Coordinator) checkpointsForEvidence(ctx stdctx.Context, req EvidenceReq
 		return nil, nil
 	}
 	return c.store.ListWorkflowCheckpoints(ctx, req.Run.ID)
-}
-
-func newestCheckpointFor(cps []domain.WorkflowCheckpoint, stepID string) (domain.WorkflowCheckpoint, bool) {
-	var newest domain.WorkflowCheckpoint
-	found := false
-	for _, cp := range cps {
-		if stepID != "" && (cp.WorkflowStepID == nil || *cp.WorkflowStepID != stepID) {
-			continue
-		}
-		if !found || !cp.CreatedAt.Before(newest.CreatedAt) {
-			newest, found = cp, true
-		}
-	}
-	return newest, found
 }
 
 // checkpointGitFacts is the workspace identity a step's ledger carries.

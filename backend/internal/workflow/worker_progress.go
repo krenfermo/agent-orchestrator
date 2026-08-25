@@ -394,11 +394,17 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 	// thing that can hand back the error class. See ambiguous_worker_state.go.
 	var ambiguity AmbiguousWorkerState
 	if decision.Ambiguous {
-		var observed *ports.WorkspaceObservation
+		var observation *ports.WorkspaceObservation
 		if workspaceAvailable {
 			o := obs
-			observed = &o
+			observation = &o
 		}
+		// The observation this decision was actually taken on, plus a liveness
+		// answer, are handed to the gate so it can write them down BEFORE the
+		// snapshot is built. The collector reads only durable rows, so an
+		// observation that stayed in memory would be one nobody could see
+		// afterwards. See observedWorkerFactsFor.
+		observed := c.observedWorkerFactsFor(ctx, sessionIDIfFound(found, sess), observation)
 		reason := decision.AttentionReason
 		if reason == "" {
 			reason = ReasonWorkerDispatchAmbiguous
@@ -552,4 +558,14 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 	}
 
 	return step, nil
+}
+
+// sessionIDIfFound is the session to probe and to stamp on a recorded
+// observation, or empty when there is no session row at all. AO never probes a
+// runtime for a session it cannot see.
+func sessionIDIfFound(found bool, sess domain.SessionRecord) domain.SessionID {
+	if !found {
+		return ""
+	}
+	return sess.ID
 }

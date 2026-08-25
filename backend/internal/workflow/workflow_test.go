@@ -43,6 +43,11 @@ type fakeStore struct {
 	dispatchCheckpoints []domain.WorkflowDispatchCheckpoint
 	mutationProvenance  []domain.WorkflowMutationProvenance
 
+	// checkpointWriteErr injects a storage failure into one checkpoint write, so
+	// a test can prove what does NOT happen when a durable record AO requires
+	// cannot be written. Nil means every write succeeds.
+	checkpointWriteErr func(domain.WorkflowCheckpoint) error
+
 	// listStepsErr injects a storage failure into the step lookup, so a test
 	// can prove what still happens when the bookkeeping AFTER a durable state
 	// transition fails (Checkpoint 8P-E13A.1).
@@ -360,6 +365,11 @@ func (f *fakeStore) UpdateWorkflowAttemptOutcome(_ context.Context, attemptID st
 }
 
 func (f *fakeStore) CreateWorkflowCheckpoint(_ context.Context, cp domain.WorkflowCheckpoint) (domain.WorkflowCheckpoint, error) {
+	if f.checkpointWriteErr != nil {
+		if err := f.checkpointWriteErr(cp); err != nil {
+			return domain.WorkflowCheckpoint{}, err
+		}
+	}
 	f.checkpoints[cp.WorkflowRunID] = append(f.checkpoints[cp.WorkflowRunID], cp)
 	return cp, nil
 }

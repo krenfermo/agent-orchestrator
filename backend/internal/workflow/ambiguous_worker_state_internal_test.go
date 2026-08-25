@@ -132,6 +132,33 @@ func TestAmbiguousWorkerStateIsOnlyRaisedThroughTheGate(t *testing.T) {
 	}
 }
 
+// The collector reads durable rows and nothing else. That is not a style
+// preference: a live reading is a fact only this process ever held, so a
+// snapshot built on one cannot be shown to anyone after a restart and cannot be
+// checked by the person reading the stop it authorized. The two live readings
+// AO can take are taken by the caller and persisted BEFORE the raise (see
+// ObservedWorkerFacts); the collector must never reach for them itself.
+//
+// Guarded structurally, because the failure mode is the EXISTENCE of a port
+// call in this file, not anything a behavioural test would observe: a probe
+// added here would return the right answer in-process every time.
+func TestTheEvidenceCollectorTakesNoLiveReadings(t *testing.T) {
+	body, ok := workflowSources(t)["evidence_snapshot.go"]
+	if !ok {
+		t.Fatal("evidence_snapshot.go is gone")
+	}
+	for _, live := range []struct{ call, why string }{
+		{"c.workspaceFacts", "the collector must not observe a worktree; the caller persists its observation first"},
+		{"c.workerLiveness", "the collector must not probe a runtime; the caller persists the probe's answer first"},
+		{"ObserveWorkspace(", "a git observation taken here would be a fact only this process ever held"},
+		{"SessionAlive(", "a liveness probe taken here would be a fact only this process ever held"},
+	} {
+		if strings.Contains(body, live.call) {
+			t.Errorf("evidence_snapshot.go calls %s: %s", live.call, live.why)
+		}
+	}
+}
+
 // newEvidenceOnlyCoordinator is the smallest Coordinator the collector needs:
 // a store and a clock, nothing else wired. It is deliberately bare, because the
 // collector's contract is that every unwired port becomes an `unavailable`

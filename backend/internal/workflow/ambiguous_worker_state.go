@@ -2,6 +2,7 @@ package workflow
 
 import (
 	stdctx "context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -115,63 +116,198 @@ func assertAmbiguousEvidence(class domain.WorkflowErrorClass, raise AmbiguousWor
 	return nil
 }
 
-// raiseAmbiguousWorkerState collects the evidence, raises the ambiguity and
-// records the snapshot on the run's ledger — in that order, before any caller
-// is given a value it can persist.
+// raiseAmbiguousWorkerState is the whole gate: persist what was observed,
+// collect the evidence, raise the ambiguity, record the snapshot — and refuse
+// the raise if any of it could not be made durable.
 //
-// Every ambiguous_worker_state stop in AO starts here. The order matters for
-// the same reason recordFixDispatchIntent's does: a stop AO could not first
-// write the evidence for is a stop AO does not take, so a daemon that dies
-// between the two leaves a readable evidence row and no unexplained stop,
-// rather than the reverse.
+// The order is the contract. `observed` is what the CALLER already paid for (a
+// git observation, a runtime liveness answer), and it is written down BEFORE
+// the snapshot is built, because the collector reads only durable rows: an
+// observation that never reached the ledger is one nobody can see after a
+// restart, and a stop authorized on it would be unreviewable.
+//
+// And every failure here fails the raise. A raise whose evidence could not be
+// written is precisely the stop this whole mechanism exists to abolish — a
+// conclusion with nothing under it — so it is not taken at all. The step is
+// left exactly as it was and the next poll tries again; an ambiguity that is
+// still true in three seconds is still true, while an unevidenced
+// ambiguous_worker_state on the ledger is permanent.
 func (c *Coordinator) raiseAmbiguousWorkerState(
 	ctx stdctx.Context,
 	run domain.WorkflowRun,
 	step domain.WorkflowStep,
 	reason, detail string,
-	obs *ports.WorkspaceObservation,
+	observed *ObservedWorkerFacts,
 ) (AmbiguousWorkerState, error) {
-	snap := c.CollectWorkerEvidence(ctx, EvidenceRequest{Run: run, Step: step, Observation: obs})
+	// The row about to be written becomes "the latest checkpoint for this
+	// step". Read what that currently is, so everything below can carry it
+	// forward rather than replace it. See ambiguityCheckpoint.
+	var carry domain.WorkflowCheckpoint
+	if step.ID != "" {
+		if cp, ok, cerr := c.store.GetLatestWorkflowCheckpointByStep(ctx, step.ID); cerr == nil && ok {
+			carry = cp
+		}
+	}
+	if observed != nil && !observed.Empty() {
+		if err := c.recordObservedWorkerFacts(ctx, run, step, *observed, carry); err != nil {
+			return AmbiguousWorkerState{}, fmt.Errorf(
+				"workflow: refusing to raise ambiguous_worker_state for step %s — its observation could not be recorded: %w",
+				step.ID, err)
+		}
+	}
+	snap := c.CollectWorkerEvidence(ctx, EvidenceRequest{Run: run, Step: step})
 	raise, err := RaiseAmbiguousWorkerState(snap, reason, detail)
 	if err != nil {
 		return AmbiguousWorkerState{}, err
 	}
-	c.recordAmbiguityEvidence(ctx, run, step, raise)
+	if err := c.recordAmbiguityEvidence(ctx, run, step, raise, carry); err != nil {
+		return AmbiguousWorkerState{}, fmt.Errorf(
+			"workflow: refusing to raise ambiguous_worker_state for step %s — its evidence snapshot could not be recorded: %w",
+			step.ID, err)
+	}
 	return raise, nil
 }
 
-// recordAmbiguityEvidence writes the snapshot row. A failure to write it is
-// logged and does not block the stop: the alternative — leaving a run running
-// on a state AO has already decided it cannot read — is worse than an
-// unexplained stop, and the stop's own checkpoint still lands.
+// recordObservedWorkerFacts persists one live reading so the collector never
+// has to take one. Append-only, and it carries the step's identity forward for
+// the same reason every other checkpoint here does.
+func (c *Coordinator) recordObservedWorkerFacts(
+	ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep,
+	observed ObservedWorkerFacts, carry domain.WorkflowCheckpoint,
+) error {
+	if observed.ObservedAt.IsZero() {
+		observed.ObservedAt = c.clock()
+	}
+	payload, err := json.Marshal(observed)
+	if err != nil {
+		return err
+	}
+	cp := c.ambiguityCheckpoint(run, step, carry, WorkerObservationEvidencePhase,
+		"recorded workspace/liveness observation", string(payload))
+	// The observation's own readings win over the carried ones where it has
+	// them: this row IS the newer fact about the worktree.
+	if observed.WorkspaceKnown {
+		cp.Branch = firstNonEmpty(observed.Branch, cp.Branch)
+		cp.WorktreePath = firstNonEmpty(observed.WorktreePath, cp.WorktreePath)
+		cp.HeadSHA = firstNonEmpty(observed.HeadSHA, cp.HeadSHA)
+	}
+	_, err = c.store.CreateWorkflowCheckpoint(ctx, cp)
+	return err
+}
+
+// observedWorkerFactsFor assembles what a caller holds into the durable form,
+// taking the one liveness reading AO can take here — outside the collector, and
+// only on the path that is about to persist it.
+//
+// Returns nil when there is nothing to record, which leaves the corresponding
+// snapshot fields `unavailable`. That is the honest answer: AO would rather say
+// "no reading was taken" than have a collector invent one.
+func (c *Coordinator) observedWorkerFactsFor(
+	ctx stdctx.Context,
+	sessionID domain.SessionID,
+	obs *ports.WorkspaceObservation,
+) *ObservedWorkerFacts {
+	facts := ObservedWorkerFacts{ObservedAt: c.clock(), SessionID: string(sessionID)}
+	if obs != nil {
+		workspace := NewObservedWorkspaceFacts(*obs)
+		workspace.ObservedAt, workspace.SessionID = facts.ObservedAt, facts.SessionID
+		facts = workspace
+	}
+	if c.workerLiveness != nil && sessionID != "" {
+		if alive, known, err := c.workerLiveness.SessionAlive(ctx, sessionID); err == nil && known {
+			facts.LivenessAlive, facts.LivenessKnown = alive, true
+		}
+	}
+	if facts.Empty() {
+		return nil
+	}
+	return &facts
+}
+
+// recordAmbiguityEvidence writes the snapshot row, carrying the step's whole
+// workspace identity forward from the checkpoint it is about to supersede.
+//
+// The carry is not tidiness, it is the whole correctness of this row. A
+// checkpoint written against a step BECOMES "the latest checkpoint for this
+// step", which is what some twenty readers resolve the worktree, the branch,
+// the dispatch base, the worker session and the delivered fingerprint from —
+// the same rule observeWorkStep's own checkpoint and
+// recordFirstSignalReconciliation both state, and for the same reason. An
+// evidence row that dropped them would not merely fail to help; it would
+// DESTROY already-correct work:
+//
+//	observeFixStep    latestCP.SessionID == nil     -> returns early, forever
+//	dispatchReviewStep  fixCP.FingerprintAfter == "" -> cycle N+1 never dispatches
+//	dispatchReviewStep  workCP.WorktreePath == ""    -> "workspace path is required"
+//
+// A fix worker's genuinely delivered change would still be sitting in the
+// worktree, with AO having thrown away the record that says it landed and
+// disabled the one observer that could ever record it again.
+//
+// So this row is strictly ADDITIVE: same identity, plus the evidence. The only
+// field it originates is the snapshot in RetryState.
+//
+// A failure to write it FAILS THE RAISE. It used to be logged and swallowed,
+// which quietly reintroduced the exact stop this mechanism abolishes: the
+// caller would go on to persist ambiguous_worker_state, and after a restart the
+// Incident Advisor would find a stop with no stop-time snapshot under it — the
+// unevidenced dead end, now with a mechanism that claims to prevent it.
 func (c *Coordinator) recordAmbiguityEvidence(
-	ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, raise AmbiguousWorkerState,
-) {
+	ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep,
+	raise AmbiguousWorkerState, carry domain.WorkflowCheckpoint,
+) error {
+	_, err := c.store.CreateWorkflowCheckpoint(ctx, c.ambiguityCheckpoint(
+		run, step, carry, AmbiguousWorkerStateEvidencePhase, raise.Detail(), raise.Snapshot().JSON()))
+	if err != nil && c.log != nil {
+		c.log.Warn("workflow: recording ambiguous_worker_state evidence failed; the raise is refused",
+			"run", run.ID, "step", step.ID, "reason", raise.Reason(), "err", err)
+	}
+	return err
+}
+
+// ambiguityCheckpoint builds a gate row, carrying the step's identity forward
+// from the checkpoint it is about to supersede. Both gate rows go through it,
+// so neither can drift out of step with the carry rule.
+func (c *Coordinator) ambiguityCheckpoint(
+	run domain.WorkflowRun, step domain.WorkflowStep, carry domain.WorkflowCheckpoint,
+	phase, nextAction, payload string,
+) domain.WorkflowCheckpoint {
 	var stepID *string
 	if step.ID != "" {
 		id := step.ID
 		stepID = &id
 	}
-	var sessionID *string
-	if step.SessionID != nil && *step.SessionID != "" {
-		sid := *step.SessionID
-		sessionID = &sid
+	// The carried session id wins over the step row's: the fix step never gets
+	// a session_id column of its own (only work dispatch writes one), so its
+	// worker session lives ONLY on its checkpoints. Preferring the step row
+	// here would silently drop it for every fix-step ambiguity there is.
+	sessionID := carry.SessionID
+	if sessionID == nil || *sessionID == "" {
+		if step.SessionID != nil && *step.SessionID != "" {
+			sid := *step.SessionID
+			sessionID = &sid
+		}
 	}
-	snap := raise.Snapshot()
-	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+	return domain.WorkflowCheckpoint{
 		ID:             "wfc-" + c.newID(),
 		WorkflowRunID:  run.ID,
 		WorkflowStepID: stepID,
 		ProjectID:      run.ProjectID,
 		SessionID:      sessionID,
-		NextAction:     raise.Detail(),
-		DurablePhase:   AmbiguousWorkerStateEvidencePhase,
-		PayloadVersion: "v1",
-		RetryState:     snap.JSON(),
-		CreatedAt:      c.clock(),
-	}); err != nil && c.log != nil {
-		c.log.Warn("workflow: recording ambiguous_worker_state evidence failed",
-			"run", run.ID, "step", step.ID, "reason", raise.Reason(), "err", err)
+		// Carried, every one of them. See the doc comment above.
+		Branch:            carry.Branch,
+		WorktreePath:      carry.WorktreePath,
+		BaseSHA:           carry.BaseSHA,
+		HeadSHA:           carry.HeadSHA,
+		ReviewRunID:       carry.ReviewRunID,
+		ReviewVerdict:     carry.ReviewVerdict,
+		FingerprintBefore: carry.FingerprintBefore,
+		FingerprintAfter:  carry.FingerprintAfter,
+		NextAction:        nextAction,
+		DurablePhase:      phase,
+		PayloadVersion:    "v1",
+		RetryState:        payload,
+		CreatedAt:         c.clock(),
 	}
 }
 

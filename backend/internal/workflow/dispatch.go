@@ -574,7 +574,8 @@ func (c *Coordinator) adoptOrMarkAmbiguous(ctx stdctx.Context, run domain.Workfl
 	// ambiguity raise owes — collected and recorded BEFORE any state moves, so a
 	// daemon that dies here leaves readable evidence rather than an unexplained
 	// stop. See ambiguous_worker_state.go.
-	if _, rerr := c.raiseAmbiguousWorkerState(ctx, run, step, ReasonWorkerDispatchAmbiguous, nextAction, nil); rerr != nil {
+	if _, rerr := c.raiseAmbiguousWorkerState(ctx, run, step, ReasonWorkerDispatchAmbiguous, nextAction,
+		c.observedWorkerFactsFor(ctx, sessionIDIfFound(found, rec), nil)); rerr != nil {
 		return step, rerr
 	}
 	if step.State == domain.WorkflowStepRunning {

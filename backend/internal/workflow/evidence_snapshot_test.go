@@ -22,6 +22,7 @@ package workflow_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -116,14 +117,15 @@ func TestIncidentAdvisorRendersEveryAvailableEvidenceField(t *testing.T) {
 		{"attempt review target", "fp-reviewed"},
 		{"session activity", string(domain.ActivityIdle)},
 		{"session first signal", "2026-08-22T12:01:00Z"},
-		{"process liveness", "alive (probed)"},
+		{"process liveness", "alive (probed"},
 		{"harness launch phase", string(domain.DispatchPhaseWorkerDispatched)},
 		{"harness launch outcome", string(domain.LaunchOutcomeDispatched)},
 		{"git branch", "ao/wf-evidence"},
-		{"git HEAD", "head-sha-2"},
+		{"git HEAD", "base-sha-1"},
 		{"git base", "base-sha-1"},
-		{"git status", "dirty=true"},
-		{"changed files", "internal/workflow/evidence_snapshot.go"},
+		{"git status", "dirty=false staged=false untracked=false changes=0"},
+		{"changed files", "none — the observed tree had no reported change"},
+		{"observed fingerprint", "observed fingerprint: "},
 		{"recorded fingerprint", "fp-reviewed"},
 		{"mutation provenance class", string(domain.MutationAuthorizedWork)},
 		{"mutation provenance owner", "sess-evidence"},
@@ -232,16 +234,6 @@ func TestIncidentAdvisorReportsAbsentProvenanceAsUnattributed(t *testing.T) {
 func TestAnAmbiguousWorkerStopAlwaysCarriesItsEvidence(t *testing.T) {
 	f := newEvidenceFixture(t)
 	f.seedFullEvidence()
-	// An idle worker whose tree carries nothing at all: the ambiguous stop.
-	f.workspaceFacts.obs = ports.WorkspaceObservation{
-		Path: "/ws/evidence", Branch: "ao/wf-evidence", HeadSHA: "base-sha-1",
-	}
-	f.unpark()
-	f.clk.Advance(time.Minute)
-
-	if _, err := f.c.GetRun(context.Background(), f.runID); err != nil {
-		t.Fatalf("GetRun: %v", err)
-	}
 
 	attempts, err := f.store.ListWorkflowAttempts(context.Background(), f.workStepID)
 	if err != nil {
@@ -342,6 +334,14 @@ func newEvidenceFixture(t *testing.T) *evidenceFixture {
 // make the test depend on a dozen behaviours it is not about.
 func (f *evidenceFixture) seedFullEvidence() {
 	f.t.Helper()
+	f.seedDurableFacts()
+	f.driveToAmbiguity()
+}
+
+// seedDurableFacts writes every durable fact AO could hold about one work step,
+// and stops short of the stop itself.
+func (f *evidenceFixture) seedDurableFacts() {
+	f.t.Helper()
 	ctx := context.Background()
 
 	// Every step but the work step is left pending, so the Advisor's focus step
@@ -407,10 +407,12 @@ func (f *evidenceFixture) seedFullEvidence() {
 		Metadata:        domain.SessionMetadata{Branch: "ao/wf-evidence", WorkspacePath: "/ws/evidence"},
 	})
 
-	// The observed worktree.
+	// The worktree AO will observe: clean, still at the dispatch base. That is
+	// what an ambiguous work stop IS — a worker that went idle with nothing to
+	// show — so this is the observation the production path really takes here,
+	// and the one it must write down.
 	f.workspaceFacts.obs = ports.WorkspaceObservation{
-		Path: "/ws/evidence", Branch: "ao/wf-evidence", HeadSHA: "head-sha-2", Dirty: true,
-		Changes: []ports.WorkspaceChange{{Status: " M", Path: "internal/workflow/evidence_snapshot.go"}},
+		Path: "/ws/evidence", Branch: "ao/wf-evidence", HeadSHA: "base-sha-1",
 	}
 
 	// The ledger: a dispatch, a worker observation, and the stop itself.
@@ -447,46 +449,67 @@ func (f *evidenceFixture) seedFullEvidence() {
 		ObservedAt: &observedAt, CreatedAt: f.clk.Now(),
 	})
 
-	f.park()
 }
 
-// park stops the run on a reason the Advisor will open an incident for.
-func (f *evidenceFixture) park() {
+// driveToAmbiguity stops the run the way production does: an ordinary GetRun
+// poll, observeWorkStep's own idle/no-evidence decision, and the gate it has to
+// pass through. NOTHING about the stop is written by this fixture — the
+// observation record, the evidence snapshot and the parked run are all produced
+// by the code under test, which is the only way the Advisor assertions below
+// mean anything.
+func (f *evidenceFixture) driveToAmbiguity() {
 	f.t.Helper()
-	ctx := context.Background()
-	run, ok, err := f.store.GetWorkflowRun(ctx, f.runID)
+	f.clk.Advance(time.Minute)
+	if _, err := f.c.GetRun(context.Background(), f.runID); err != nil {
+		f.t.Fatalf("GetRun: %v", err)
+	}
+	if got := f.runState(); got != domain.WorkflowRunNeedsAttention {
+		f.t.Fatalf("run state = %q, want needs_attention: the ambiguous stop was never reached", got)
+	}
+	if n := f.countPhase(workflowcore.AmbiguousWorkerStateEvidencePhase); n == 0 {
+		f.t.Fatal("the ambiguous stop wrote no evidence snapshot")
+	}
+}
+
+func (f *evidenceFixture) runState() domain.WorkflowRunState {
+	f.t.Helper()
+	run, ok, err := f.store.GetWorkflowRun(context.Background(), f.runID)
 	if err != nil || !ok {
 		f.t.Fatalf("GetWorkflowRun: %v (found=%v)", err, ok)
 	}
-	f.clk.Advance(time.Second)
-	if run.State != domain.WorkflowRunNeedsAttention {
-		if _, err := f.store.UpdateWorkflowRunState(ctx, f.runID, run.State, domain.WorkflowRunNeedsAttention, f.clk.Now()); err != nil {
-			f.t.Fatalf("park run: %v", err)
+	return run.State
+}
+
+func (f *evidenceFixture) countPhase(phase string) int {
+	f.t.Helper()
+	cps, err := f.store.ListWorkflowCheckpoints(context.Background(), f.runID)
+	if err != nil {
+		f.t.Fatalf("ListWorkflowCheckpoints: %v", err)
+	}
+	n := 0
+	for _, cp := range cps {
+		if cp.DurablePhase == phase {
+			n++
 		}
 	}
-	// The stop carries the workspace identity forward, exactly as every
-	// observation checkpoint does — a row that dropped them would silently lose
-	// the worktree the reviewer is later launched against.
-	f.checkpoint(domain.WorkflowCheckpoint{
-		DurablePhase: workflowcore.ReasonWorkerDispatchAmbiguous,
-		NextAction:   "AO cannot prove what this worker is doing",
-		Branch:       "ao/wf-evidence", WorktreePath: "/ws/evidence",
-		BaseSHA: "base-sha-1", HeadSHA: "head-sha-2",
-	})
+	return n
 }
 
-// unpark returns the run to running so an observation pass can take its own
-// decision, which is what the end-to-end gate test needs.
-func (f *evidenceFixture) unpark() {
+// checkpointWithPhase returns the newest checkpoint carrying a phase.
+func (f *evidenceFixture) checkpointWithPhase(phase string) (domain.WorkflowCheckpoint, bool) {
 	f.t.Helper()
-	ctx := context.Background()
-	run, ok, err := f.store.GetWorkflowRun(ctx, f.runID)
-	if err != nil || !ok {
-		f.t.Fatalf("GetWorkflowRun: %v (found=%v)", err, ok)
+	cps, err := f.store.ListWorkflowCheckpoints(context.Background(), f.runID)
+	if err != nil {
+		f.t.Fatalf("ListWorkflowCheckpoints: %v", err)
 	}
-	if _, err := f.store.UpdateWorkflowRunState(ctx, f.runID, run.State, domain.WorkflowRunRunning, f.clk.Now()); err != nil {
-		f.t.Fatalf("unpark run: %v", err)
+	var newest domain.WorkflowCheckpoint
+	found := false
+	for _, cp := range cps {
+		if cp.DurablePhase == phase && (!found || !cp.CreatedAt.Before(newest.CreatedAt)) {
+			newest, found = cp, true
+		}
 	}
+	return newest, found
 }
 
 func (f *evidenceFixture) collect() workflowcore.WorkerEvidenceSnapshot {
@@ -561,4 +584,298 @@ func packSectionTitles(pack workflowcore.IncidentContextPack) []string {
 		out = append(out, s.Title)
 	}
 	return out
+}
+
+// ---- the evidence row must be additive --------------------------------------
+
+// The evidence row is written for a STEP, which makes it "the latest checkpoint
+// for this step" — the row ~20 readers resolve the worktree, the branch, the
+// dispatch base, the worker session and the delivered fingerprint from.
+//
+// So it must carry that identity forward, exactly as observeWorkStep's own
+// checkpoint and recordFirstSignalReconciliation's do, and for exactly the
+// reason both of them say so. A bare evidence row does not merely fail to
+// help: it DESTROYS already-correct work.
+//
+// On the fix step the loss is permanent and total:
+//
+//	observeFixStep      latestCP.SessionID == nil        -> returns early, forever
+//	review_dispatch     fixCP.FingerprintAfter == ""     -> cycle N+1 never dispatches
+//
+// A fix worker's genuinely delivered change is still in the worktree; AO has
+// simply thrown away the record that says it landed, and has disabled the one
+// observer that could ever record it again.
+func TestAmbiguityEvidencePreservesTheStepsWorkspaceIdentity(t *testing.T) {
+	f := newFixRecoveryFixture(t)
+	f.driveToFixDispatch()
+
+	before := latestCheckpointForStep(t, f.store, f.fixStepID)
+	if before.SessionID == nil || *before.SessionID == "" {
+		t.Fatalf("fixture precondition: the fix dispatch checkpoint carries no session id")
+	}
+
+	// The incident's own shape: a cycle nobody started, past the grace window.
+	f.silentSinceBeforeDispatch()
+	f.clk.Advance(11 * time.Minute)
+	f.poll(1)
+
+	if n := f.countCheckpointPhase(workflowcore.ReasonFixCycleNotStarted); n == 0 {
+		t.Fatal("fixture precondition: the ambiguous fix stop was never reached")
+	}
+	if n := f.countCheckpointPhase(workflowcore.AmbiguousWorkerStateEvidencePhase); n == 0 {
+		t.Fatal("fixture precondition: no evidence row was written for the ambiguous stop")
+	}
+
+	after := latestCheckpointForStep(t, f.store, f.fixStepID)
+	if after.SessionID == nil || *after.SessionID == "" {
+		t.Fatalf("the fix step's latest checkpoint (%s) lost the worker session id: "+
+			"observeFixStep's own guard now returns early on every future poll, so this "+
+			"fix cycle can never be observed again", after.DurablePhase)
+	}
+	if *after.SessionID != *before.SessionID {
+		t.Fatalf("session id changed from %q to %q", *before.SessionID, *after.SessionID)
+	}
+	for _, field := range []struct{ name, was, now string }{
+		{"branch", before.Branch, after.Branch},
+		{"worktree path", before.WorktreePath, after.WorktreePath},
+		{"base SHA", before.BaseSHA, after.BaseSHA},
+		{"head SHA", before.HeadSHA, after.HeadSHA},
+		{"fingerprint before", before.FingerprintBefore, after.FingerprintBefore},
+		{"fingerprint after", before.FingerprintAfter, after.FingerprintAfter},
+	} {
+		if field.was != "" && field.now == "" {
+			t.Errorf("the fix step's latest checkpoint (%s) dropped the %s (%q): "+
+				"an evidence row must annotate a step, never strip it",
+				after.DurablePhase, field.name, field.was)
+		}
+	}
+}
+
+// The same invariant on the work step. Here the loss is a crash window rather
+// than a permanent one — observeWorkStep writes its own full checkpoint
+// immediately afterwards — but the evidence row is deliberately written FIRST
+// so that a daemon dying between the two leaves readable evidence. A bare row
+// would make that window leave the reviewer with no worktree to launch into,
+// which is the exact failure 8C's real E2E run hit.
+func TestAmbiguityEvidenceOnTheWorkStepCarriesTheWorktreeForward(t *testing.T) {
+	f := newEvidenceFixture(t)
+	f.seedFullEvidence()
+
+	cps, err := f.store.ListWorkflowCheckpoints(context.Background(), f.runID)
+	if err != nil {
+		t.Fatalf("ListWorkflowCheckpoints: %v", err)
+	}
+	var evidence domain.WorkflowCheckpoint
+	found := false
+	for _, cp := range cps {
+		if cp.DurablePhase == workflowcore.AmbiguousWorkerStateEvidencePhase {
+			evidence, found = cp, true
+		}
+	}
+	if !found {
+		t.Fatal("no evidence row was written for the ambiguous work stop")
+	}
+	if evidence.Branch == "" || evidence.WorktreePath == "" {
+		t.Errorf("the evidence row carries branch=%q worktree=%q: a restart in the window "+
+			"between it and the stop's own checkpoint would leave the reviewer with no "+
+			"worktree to launch into", evidence.Branch, evidence.WorktreePath)
+	}
+	if evidence.BaseSHA == "" {
+		t.Error("the evidence row carries no base SHA, so a restart would compare the " +
+			"worktree against an empty dispatch base and read any HEAD at all as new work")
+	}
+}
+
+func latestCheckpointForStep(t *testing.T, store *fakeStore, stepID string) domain.WorkflowCheckpoint {
+	t.Helper()
+	cp, ok, err := store.GetLatestWorkflowCheckpointByStep(context.Background(), stepID)
+	if err != nil {
+		t.Fatalf("GetLatestWorkflowCheckpointByStep: %v", err)
+	}
+	if !ok {
+		t.Fatalf("step %s has no checkpoint at all", stepID)
+	}
+	return cp
+}
+
+// ---- the observation is written by production code, not by a fixture --------
+
+// The collector reads only durable rows, which is worth nothing unless
+// production actually writes them. Nothing in this fixture creates a
+// worker_observation_evidence checkpoint: the one asserted here is written by
+// observeWorkStep's own gate, from the observation that decision was taken on,
+// before the snapshot is built.
+func TestTheAmbiguityGateDurablyRecordsTheObservationItDecidedOn(t *testing.T) {
+	f := newEvidenceFixture(t)
+	f.seedFullEvidence()
+
+	if n := f.countPhase(workflowcore.WorkerObservationEvidencePhase); n != 1 {
+		t.Fatalf("worker_observation_evidence rows = %d, want exactly 1 written by the raise path", n)
+	}
+	cp, ok := f.checkpointWithPhase(workflowcore.WorkerObservationEvidencePhase)
+	if !ok {
+		t.Fatal("the production raise path recorded no observation")
+	}
+	facts, ok := workflowcore.DecodeObservedWorkerFacts(cp.RetryState)
+	if !ok {
+		t.Fatalf("the recorded observation did not decode: %q", cp.RetryState)
+	}
+	if !facts.WorkspaceKnown {
+		t.Error("the recorded observation does not say a workspace reading was taken")
+	}
+	if facts.HeadSHA != "base-sha-1" || facts.Branch != "ao/wf-evidence" {
+		t.Errorf("recorded observation head=%q branch=%q, want the tree observeWorkStep actually read",
+			facts.HeadSHA, facts.Branch)
+	}
+	if facts.Fingerprint == "" {
+		t.Error("the recorded observation carries no fingerprint, so nothing can be compared against it later")
+	}
+	if !facts.LivenessKnown || !facts.LivenessAlive {
+		t.Errorf("recorded liveness known=%v alive=%v, want the probe's own answer persisted",
+			facts.LivenessKnown, facts.LivenessAlive)
+	}
+	if facts.ObservedAt.IsZero() {
+		t.Error("the recorded observation is undated")
+	}
+	// It must also be readable by a coordinator that never took the reading —
+	// which is the whole reason for writing it down.
+	restarted := f.restartedCoordinator()
+	_, pack, err := restarted.IncidentPackFor(context.Background(), f.runID)
+	if err != nil {
+		t.Fatalf("IncidentPackFor after restart: %v", err)
+	}
+	section := packSection(t, pack, "Durable evidence snapshot (bounded)")
+	if strings.Contains(section.Body, "NOT AVAILABLE") {
+		t.Fatalf("after a restart the Advisor lost evidence the stop was taken on:\n%s", section.Body)
+	}
+}
+
+// The same path on the fix step, where the observed tree is legitimately dirty:
+// the bounded changed-file list and the dirty flags must survive into the
+// durable record, not just a "something was observed" bit.
+func TestTheFixAmbiguityGateRecordsTheFullObservedTree(t *testing.T) {
+	f := newFixRecoveryFixture(t)
+	// Set before the drive so the fingerprint this tree hashes to is the one
+	// review approves — which is what makes the later stop "no verifiable NEW
+	// change" rather than a delivered fix.
+	f.workspaceFacts.obs = ports.WorkspaceObservation{
+		Path: "/ws/wf", Branch: "ao/wf", HeadSHA: "head-1",
+		Changes: []ports.WorkspaceChange{
+			{Status: " M", Path: "internal/workflow/evidence_snapshot.go"},
+			{Status: "??", Path: "internal/workflow/ambiguous_worker_state.go"},
+		},
+	}
+	f.driveToFixDispatch()
+	// The worker picked the cycle up and went idle again without changing
+	// anything new: activity that POSTDATES the dispatch, plus a first signal.
+	dispatchedAt := f.intentCreatedAt()
+	f.mutateSession(func(rec *domain.SessionRecord) {
+		rec.Activity = domain.Activity{State: domain.ActivityIdle, LastActivityAt: dispatchedAt.Add(time.Minute)}
+		rec.TurnCompletedAt = dispatchedAt.Add(time.Minute)
+		rec.FirstSignalAt = dispatchedAt.Add(30 * time.Second)
+		rec.IsTerminated = false
+	})
+
+	f.clk.Advance(2 * time.Minute)
+	f.poll(1)
+
+	if n := f.countCheckpointPhase(workflowcore.ReasonFixNoVerifiableChange); n == 0 {
+		t.Fatal("fixture precondition: the fix ambiguity was never reached")
+	}
+	cp := latestCheckpointWithPhase(t, f.store, f.runID, workflowcore.WorkerObservationEvidencePhase)
+	facts, ok := workflowcore.DecodeObservedWorkerFacts(cp.RetryState)
+	if !ok {
+		t.Fatalf("the recorded observation did not decode: %q", cp.RetryState)
+	}
+	if !facts.Dirty {
+		t.Error("the recorded observation lost the dirty flag")
+	}
+	if len(facts.ChangedFiles) != 2 {
+		t.Fatalf("recorded changed files = %v, want both observed paths", facts.ChangedFiles)
+	}
+	if !strings.Contains(strings.Join(facts.ChangedFiles, " "), "evidence_snapshot.go") {
+		t.Errorf("recorded changed files = %v, want the porcelain status and path", facts.ChangedFiles)
+	}
+}
+
+// ---- a raise whose evidence cannot be written is not a raise ----------------
+
+// If the durable snapshot cannot be written, the ambiguity must not happen at
+// all. The alternative is the exact dead end this mechanism exists to abolish:
+// ambiguous_worker_state on the ledger with no stop-time evidence under it, so
+// that after a restart the Advisor has a conclusion and nothing to show for it.
+func TestAnAmbiguityIsNotPersistedWhenItsEvidenceCannotBeWritten(t *testing.T) {
+	f := newEvidenceFixture(t)
+	f.seedDurableFacts()
+	f.store.checkpointWriteErr = func(cp domain.WorkflowCheckpoint) error {
+		if cp.DurablePhase == workflowcore.AmbiguousWorkerStateEvidencePhase {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+
+	f.clk.Advance(time.Minute)
+	_, err := f.c.GetRun(context.Background(), f.runID)
+	if err == nil {
+		t.Fatal("the poll succeeded even though the stop's evidence could not be written")
+	}
+	if !strings.Contains(err.Error(), "refusing to raise ambiguous_worker_state") {
+		t.Fatalf("error = %v, want the gate's own refusal", err)
+	}
+
+	// And nothing about the ambiguity reached durable state.
+	if got := f.runState(); got == domain.WorkflowRunNeedsAttention {
+		t.Error("the run was parked on an ambiguity whose evidence was never written")
+	}
+	steps, err := f.store.ListWorkflowSteps(context.Background(), f.runID)
+	if err != nil {
+		t.Fatalf("ListWorkflowSteps: %v", err)
+	}
+	for _, s := range steps {
+		if s.ID != f.workStepID {
+			continue
+		}
+		if s.State != domain.WorkflowStepRunning {
+			t.Errorf("work step state = %q, want still running: the transition should not have been taken", s.State)
+		}
+	}
+	attempts, err := f.store.ListWorkflowAttempts(context.Background(), f.workStepID)
+	if err != nil {
+		t.Fatalf("ListWorkflowAttempts: %v", err)
+	}
+	for _, a := range attempts {
+		if a.ErrorClass == domain.WorkflowErrorAmbiguousWorkerState {
+			t.Error("ambiguous_worker_state was persisted on an attempt with no evidence behind it")
+		}
+	}
+	if n := f.countPhase(workflowcore.AmbiguousWorkerStateEvidencePhase); n != 0 {
+		t.Errorf("evidence rows = %d, want 0", n)
+	}
+
+	// Once the store recovers, the very next poll takes the stop properly.
+	f.store.checkpointWriteErr = nil
+	f.clk.Advance(time.Minute)
+	if _, err := f.c.GetRun(context.Background(), f.runID); err != nil {
+		t.Fatalf("GetRun after the store recovered: %v", err)
+	}
+	if f.countPhase(workflowcore.AmbiguousWorkerStateEvidencePhase) != 1 {
+		t.Error("the recovered poll did not take the stop it had refused")
+	}
+}
+
+// restartedCoordinator models a daemon that came back over the same rows: it
+// never took any of the readings the stop was made on, so anything it can still
+// show a person came out of the ledger.
+func (f *evidenceFixture) restartedCoordinator() *workflowcore.Coordinator {
+	f.t.Helper()
+	var idSeq int
+	return workflowcore.New(workflowcore.Deps{
+		Store:        f.store,
+		SessionFacts: f.sessionFacts,
+		Clock:        f.clk.Now,
+		NewID: func() string {
+			idSeq++
+			return fmt.Sprintf("rst%d", idSeq)
+		},
+	})
 }

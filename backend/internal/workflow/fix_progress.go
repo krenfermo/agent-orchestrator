@@ -141,7 +141,11 @@ func (c *Coordinator) observeFixStep(ctx stdctx.Context, run domain.WorkflowRun,
 	if !fixCycleStarted(sess, latestCP.CreatedAt) {
 		// A genuinely new fingerprint always outranks the gate: it is direct
 		// evidence of work, and no activity clock can contradict it.
-		if obs, ok := c.observeFixWorkspace(ctx, sess); ok {
+		// Hoisted out of the `if` it used to live in so the stop below can
+		// persist the very observation this branch already paid for, rather
+		// than reaching a conclusion on evidence nothing wrote down.
+		obs, observedOK := c.observeFixWorkspace(ctx, sess)
+		if observedOK {
 			if fp := WorkspaceFingerprint(obs); fp != fingerprintBefore {
 				return c.recordFixOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunWaiting,
 					fp, true, "fix delivered — awaiting next review cycle", "")
@@ -153,8 +157,8 @@ func (c *Coordinator) observeFixStep(ctx stdctx.Context, run domain.WorkflowRun,
 			// anything, so record nothing at all.
 			return step, nil
 		}
-		return c.stopFixAmbiguous(ctx, run, step, ReasonFixCycleNotStarted,
-			fixCycleNotStartedDetail(latestCP, *latestCP.SessionID, now), nil)
+		return c.stopFixAmbiguous(ctx, run, step, sessionID, ReasonFixCycleNotStarted,
+			fixCycleNotStartedDetail(latestCP, *latestCP.SessionID, now), observationOrNil(obs, observedOK))
 	}
 
 	switch sess.Activity.State {
@@ -182,7 +186,7 @@ func (c *Coordinator) observeFixStep(ctx stdctx.Context, run domain.WorkflowRun,
 		// Conservative, mirrors evaluateWorkStepProgress's idle+no-evidence
 		// rule exactly: "Codex went idle but did not actually change
 		// anything new" must not silently trigger a new review.
-		return c.stopFixAmbiguous(ctx, run, step, ReasonFixNoVerifiableChange,
+		return c.stopFixAmbiguous(ctx, run, step, sessionID, ReasonFixNoVerifiableChange,
 			"fix worker idle with no verifiable new change — needs human review", &obs)
 	default:
 		return step, nil
@@ -197,10 +201,12 @@ func (c *Coordinator) stopFixAmbiguous(
 	ctx stdctx.Context,
 	run domain.WorkflowRun,
 	step domain.WorkflowStep,
+	sessionID domain.SessionID,
 	reason, detail string,
 	obs *ports.WorkspaceObservation,
 ) (domain.WorkflowStep, error) {
-	raised, err := c.raiseAmbiguousWorkerState(ctx, run, step, reason, detail, obs)
+	raised, err := c.raiseAmbiguousWorkerState(
+		ctx, run, step, reason, detail, c.observedWorkerFactsFor(ctx, sessionID, obs))
 	if err != nil {
 		return step, err
 	}
@@ -325,4 +331,14 @@ func (c *Coordinator) recordFixOutcome(
 	}
 
 	return step, nil
+}
+
+// observationOrNil hands on an observation only when one was actually obtained.
+// A zero WorkspaceObservation would be recorded as a clean tree, which is the
+// one thing an unobserved worktree must never be read as.
+func observationOrNil(obs ports.WorkspaceObservation, ok bool) *ports.WorkspaceObservation {
+	if !ok {
+		return nil
+	}
+	return &obs
 }

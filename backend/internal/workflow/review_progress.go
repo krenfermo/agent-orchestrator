@@ -203,7 +203,16 @@ func (c *Coordinator) stopReviewAmbiguous(
 	step domain.WorkflowStep,
 	reason, detail, verdict string,
 ) (domain.WorkflowStep, error) {
-	raised, err := c.raiseAmbiguousWorkerState(ctx, run, step, reason, detail, nil)
+	// A review step has no worktree of its own to observe, but it does have a
+	// reviewer session — so the one reading AO can take here (is that runtime
+	// still alive?) is taken and written down before the raise, rather than
+	// left as an unrecorded gap.
+	var sessionID domain.SessionID
+	if step.SessionID != nil {
+		sessionID = domain.SessionID(*step.SessionID)
+	}
+	raised, err := c.raiseAmbiguousWorkerState(
+		ctx, run, step, reason, detail, c.observedWorkerFactsFor(ctx, sessionID, nil))
 	if err != nil {
 		return step, err
 	}
