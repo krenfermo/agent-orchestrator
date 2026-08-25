@@ -32,6 +32,16 @@ func (c *Coordinator) notifyAttentionStop(ctx stdctx.Context, run domain.Workflo
 	if disp, ok := attentionDispositions[reason]; !ok || disp.HumanAction == "" {
 		return
 	}
+	// Checkpoint 8P-E.24: a parent's mirror of a child's stop is the SAME
+	// real-world incident the child already reported, seen from one level up.
+	// Notifying about both is two messages for one problem, and — because the
+	// parent re-derives its mirror on every reconcile pass while the child stays
+	// stopped — it is the half most likely to keep arriving. The person is told
+	// once, about the run that actually stopped, and the parent's own ledger
+	// still records the mirror for anyone reading the objective.
+	if reason == ReasonChildNeedsAttention || reason == ReasonChildFailed {
+		return
+	}
 	c.notifyRunEvent(ctx, run, attentionTypeFor(run), reason, detail)
 }
 

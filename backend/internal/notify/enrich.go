@@ -3,6 +3,7 @@ package notify
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
@@ -122,6 +123,19 @@ func stopBody(lead string, intent Intent) string {
 	}
 	if reason := strings.TrimSpace(intent.AttentionReason); reason != "" {
 		body += "\n\nReason: " + reason
+	}
+	// Checkpoint 8P-E.24: a notification a person reads hours later has to be
+	// actionable on its own. Two overnight blockages went unreported, and the
+	// message that finally reported them has to say which project and which run
+	// to open — a reason with no address is a reason nobody can act on.
+	if project := strings.TrimSpace(string(intent.ProjectID)); project != "" {
+		body += "\nProject: " + project
+	}
+	if runID := strings.TrimSpace(intent.WorkflowRunID); runID != "" {
+		body += "\nRun: " + runID
+	}
+	if !intent.CreatedAt.IsZero() {
+		body += "\nStopped at: " + intent.CreatedAt.UTC().Format(time.RFC3339)
 	}
 	return body
 }

@@ -153,6 +153,14 @@ type IncidentPackInput struct {
 	// stop is about them.
 	ProviderNotes string
 
+	// ChildEvidence is the bounded evidence pack for the stopped CHILD a
+	// parent's stop is about (incident_child_pack.go). Empty for every stop that
+	// is not about a child, which leaves the pack byte-identical to what it was
+	// before this existed. When it is present it is priority 1: a parent stopped
+	// on child_needs_attention has no diagnosis to make without it, which is
+	// exactly why the answer used to be "go and diagnose the child first".
+	ChildEvidence string
+
 	// Checkpoints is the run's ledger, newest-relevant-first selection is done
 	// by the builder.
 	Checkpoints []domain.WorkflowCheckpoint
@@ -198,6 +206,10 @@ func BuildIncidentContextPack(in IncidentPackInput) IncidentContextPack {
 	add(1, "Stop", fmt.Sprintf("run: %s\nstate: %s\nreason: %s\ndetail: %s",
 		in.Detail.Run.ID, in.Detail.Run.State, in.StopReason, in.StopDetail), 0)
 	add(1, "Steps", renderIncidentSteps(in.Detail), 0)
+	// Priority 1, and never dropped: when a parent stops BECAUSE a child
+	// stopped, the child's reason IS the parent's reason. Without it the only
+	// honest diagnosis is "diagnose the child first", which is not a diagnosis.
+	add(1, "Stopped child task (bounded evidence)", in.ChildEvidence, incidentPackMaxSectionBytes)
 
 	// Priority 2 — the immediate mechanics of the stop.
 	add(2, "Recent checkpoints", renderIncidentCheckpoints(in.Checkpoints), 0)

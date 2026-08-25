@@ -66,6 +66,12 @@ type IncidentView struct {
 	// timer: a progress that advanced on a clock rather than on a fact would
 	// eventually claim a repair was verified while it was still building.
 	Progress string `json:"progress"`
+
+	// Diagnosis is the investigation as an observable background job. It is
+	// durable and independent of this modal: closing the UI does not affect it,
+	// and reopening re-derives every field below from the ledger and the agent
+	// session. See workflow/incident_diagnosis_job.go.
+	DiagnosisJob IncidentDiagnosisJobView `json:"diagnosisJob"`
 	// DiagnosticHarness / CapacityReasons / NextEvaluationAt explain the two
 	// states a person would otherwise read as an unexplained spinner.
 	DiagnosticHarness string   `json:"diagnosticHarness,omitempty"`
@@ -299,6 +305,7 @@ func incidentView(inc workflowcore.Incident, pack *workflowcore.IncidentContextP
 		LaunchOutcome:     string(inc.LaunchOutcome),
 		Progress:          string(status.Progress),
 		DiagnosticHarness: status.DiagnosticHarness,
+		DiagnosisJob:      diagnosisJobView(status.Diagnosis),
 		CapacityReasons:   status.CapacityReasons,
 		ClosureCause:      inc.ClosureCause,
 		ClosureEvidence:   inc.ClosureEvidence,
@@ -366,4 +373,43 @@ func writeIncidentError(w http.ResponseWriter, r *http.Request, err error) {
 	default:
 		envelope.WriteAPIError(w, r, http.StatusUnprocessableEntity, "unprocessable", "INCIDENT_REFUSED", err.Error(), nil)
 	}
+}
+
+// IncidentDiagnosisJobView is the investigation's own status, separate from the
+// incident's. A person watching an investigation needs to know it is running,
+// which agent and provider are running it, since when, and — the field the
+// whole thing exists for — whether it is actually blocked on a prompt.
+type IncidentDiagnosisJobView struct {
+	State   string `json:"state" enum:"queued,starting,running,waiting_for_provider,waiting_for_user,completed,failed"`
+	Attempt int    `json:"attempt,omitempty"`
+	Max     int    `json:"max,omitempty"`
+
+	SessionID string `json:"sessionId,omitempty"`
+	Harness   string `json:"harness,omitempty"`
+
+	StartedAt      string `json:"startedAt,omitempty"`
+	ElapsedSeconds int    `json:"elapsedSeconds,omitempty"`
+	LastActivityAt string `json:"lastActivityAt,omitempty"`
+	LastSignalAt   string `json:"lastSignalAt,omitempty"`
+
+	// BlockingInteraction is empty when AO does not know. The UI must render
+	// that as "unknown", never as "nothing is blocking it".
+	BlockingInteraction string `json:"blockingInteraction,omitempty"`
+}
+
+func diagnosisJobView(job workflowcore.IncidentDiagnosisJob) IncidentDiagnosisJobView {
+	v := IncidentDiagnosisJobView{
+		State: string(job.State), Attempt: job.Attempt, Max: job.Max,
+		SessionID: job.SessionID, Harness: job.Harness,
+		ElapsedSeconds:      job.ElapsedSeconds,
+		BlockingInteraction: job.BlockingInteraction,
+	}
+	stamp := func(t time.Time) string {
+		if t.IsZero() {
+			return ""
+		}
+		return t.UTC().Format(time.RFC3339)
+	}
+	v.StartedAt, v.LastActivityAt, v.LastSignalAt = stamp(job.StartedAt), stamp(job.LastActivityAt), stamp(job.LastSignalAt)
+	return v
 }

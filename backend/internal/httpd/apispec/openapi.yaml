@@ -7591,6 +7591,39 @@ components:
       - writesCode
       - executable
       type: object
+    ControllersIncidentDiagnosisJobView:
+      properties:
+        attempt:
+          type: integer
+        blockingInteraction:
+          type: string
+        elapsedSeconds:
+          type: integer
+        harness:
+          type: string
+        lastActivityAt:
+          type: string
+        lastSignalAt:
+          type: string
+        max:
+          type: integer
+        sessionId:
+          type: string
+        startedAt:
+          type: string
+        state:
+          enum:
+          - queued
+          - starting
+          - running
+          - waiting_for_provider
+          - waiting_for_user
+          - completed
+          - failed
+          type: string
+      required:
+      - state
+      type: object
     ControllersIncidentDiagnosisSubmissionBody:
       properties:
         classification:
@@ -7750,6 +7783,8 @@ components:
           type: integer
         diagnosis:
           $ref: '#/components/schemas/ControllersIncidentDiagnosisView'
+        diagnosisJob:
+          $ref: '#/components/schemas/ControllersIncidentDiagnosisJobView'
         diagnosticHarness:
           type: string
         id:
@@ -7791,6 +7826,7 @@ components:
       - canDiagnose
       - canExecute
       - progress
+      - diagnosisJob
       type: object
     ControllersListCapacityResponse:
       properties:
@@ -12007,6 +12043,9 @@ components:
           - verify_ambiguous
           - capacity_exhausted
           - binary_missing
+          - provider_auth_required
+          - provider_workspace_trust_required
+          - provider_preflight_failed
           type: string
         finishedAt:
           format: date-time
