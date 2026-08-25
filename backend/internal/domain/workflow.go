@@ -408,6 +408,24 @@ type WorkflowAttempt struct {
 	Outcome        WorkflowAttemptOutcome
 	ErrorClass     WorkflowErrorClass
 	RetryAfter     *time.Time
+	// DeadlineAt is when this attempt must have concluded by (migration 0133).
+	// Nil for every attempt written before that migration and for every attempt
+	// kind that has no deadline; see WorkflowVerifyWindow for why it is never
+	// filled in from a default duration.
+	DeadlineAt *time.Time
+	// ReviewTarget is the reviewed artifact a verify attempt is judging
+	// (migration 0133). Zero-valued -- ReviewTarget.Empty() -- for every
+	// attempt that predates it and for every non-verify attempt.
+	ReviewTarget WorkflowReviewTarget
+}
+
+// VerifyWindow returns this attempt's timing envelope.
+func (a WorkflowAttempt) VerifyWindow() WorkflowVerifyWindow {
+	return WorkflowVerifyWindow{
+		StartedAt:  a.StartedAt,
+		FinishedAt: a.FinishedAt,
+		DeadlineAt: a.DeadlineAt,
+	}
 }
 
 // WorkflowCheckpoint is one append-only durable checkpoint recorded while a

@@ -723,6 +723,15 @@ func workflowAttemptFromRow(r gen.WorkflowAttempt) domain.WorkflowAttempt {
 		Outcome:        outcome,
 		ErrorClass:     errClass,
 		RetryAfter:     nullTimeToTimePtr(r.RetryAfter),
+		// Migration 0133. An attempt written before it has no deadline and no
+		// review target, and maps to a nil pointer and a zero-valued
+		// WorkflowReviewTarget rather than to an error.
+		DeadlineAt: nullTimeToTimePtr(r.DeadlineAt),
+		ReviewTarget: domain.WorkflowReviewTarget{
+			ReviewRunID: nullStringToPtr(r.ReviewTargetReviewRunID),
+			Fingerprint: r.ReviewTargetFingerprint,
+			HeadSHA:     r.ReviewTargetHeadSha,
+		},
 	}
 }
 

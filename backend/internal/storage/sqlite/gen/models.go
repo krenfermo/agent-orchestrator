@@ -628,16 +628,20 @@ type UserExecutionPolicy struct {
 }
 
 type WorkflowAttempt struct {
-	ID             string
-	WorkflowStepID string
-	AttemptNumber  int64
-	Harness        string
-	Model          string
-	StartedAt      time.Time
-	FinishedAt     sql.NullTime
-	Outcome        *domain.WorkflowAttemptOutcome
-	ErrorClass     *domain.WorkflowErrorClass
-	RetryAfter     sql.NullTime
+	ID                      string
+	WorkflowStepID          string
+	AttemptNumber           int64
+	Harness                 string
+	Model                   string
+	StartedAt               time.Time
+	FinishedAt              sql.NullTime
+	Outcome                 *domain.WorkflowAttemptOutcome
+	ErrorClass              *domain.WorkflowErrorClass
+	RetryAfter              sql.NullTime
+	DeadlineAt              sql.NullTime
+	ReviewTargetReviewRunID sql.NullString
+	ReviewTargetFingerprint string
+	ReviewTargetHeadSha     string
 }
 
 type WorkflowCheckpoint struct {
@@ -660,6 +664,45 @@ type WorkflowCheckpoint struct {
 	CreatedAt         time.Time
 	FingerprintBefore string
 	FingerprintAfter  string
+}
+
+type WorkflowDispatchCheckpoint struct {
+	ID             string
+	WorkflowRunID  string
+	WorkflowStepID sql.NullString
+	AttemptID      sql.NullString
+	CheckpointID   sql.NullString
+	Phase          string
+	IdempotencyKey string
+	Harness        string
+	SessionID      sql.NullString
+	LaunchStage    string
+	LaunchOutcome  string
+	ErrorClass     string
+	EvidenceJson   string
+	Detail         string
+	CreatedAt      time.Time
+}
+
+type WorkflowMutationProvenance struct {
+	ID                string
+	WorkflowRunID     string
+	WorkflowStepID    sql.NullString
+	AttemptID         sql.NullString
+	TaskID            string
+	ProvenanceClass   string
+	Harness           string
+	SessionID         sql.NullString
+	Branch            string
+	WorktreePath      string
+	BaseSha           string
+	HeadSha           string
+	FingerprintBefore string
+	FingerprintAfter  string
+	Reason            string
+	EvidenceJson      string
+	ObservedAt        sql.NullTime
+	CreatedAt         time.Time
 }
 
 type WorkflowOutbox struct {

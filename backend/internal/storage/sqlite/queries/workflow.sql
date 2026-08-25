@@ -159,18 +159,21 @@ INSERT INTO workflow_attempts (
     started_at, finished_at, outcome, error_class, retry_after
 ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
 RETURNING id, workflow_step_id, attempt_number, harness, model,
-          started_at, finished_at, outcome, error_class, retry_after;
+          started_at, finished_at, outcome, error_class, retry_after,
+          deadline_at, review_target_review_run_id, review_target_fingerprint, review_target_head_sha;
 
 -- name: ListWorkflowAttemptsByStep :many
 SELECT id, workflow_step_id, attempt_number, harness, model,
-       started_at, finished_at, outcome, error_class, retry_after
+       started_at, finished_at, outcome, error_class, retry_after,
+       deadline_at, review_target_review_run_id, review_target_fingerprint, review_target_head_sha
 FROM workflow_attempts
 WHERE workflow_step_id = ?
 ORDER BY attempt_number;
 
 -- name: GetLatestWorkflowAttemptByStep :one
 SELECT id, workflow_step_id, attempt_number, harness, model,
-       started_at, finished_at, outcome, error_class, retry_after
+       started_at, finished_at, outcome, error_class, retry_after,
+       deadline_at, review_target_review_run_id, review_target_fingerprint, review_target_head_sha
 FROM workflow_attempts
 WHERE workflow_step_id = ?
 ORDER BY attempt_number DESC
