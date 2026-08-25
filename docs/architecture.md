@@ -220,6 +220,16 @@ the repository is provably the run's to write. A commit failure parks the run in
 `needs_attention` and keeps the lock rather than reporting a completed run whose
 work is uncommitted.
 
+### Planner lifecycle context
+
+Autonomous planner execution runs under a workflow-owned lifecycle context — one
+scoped to the run itself, the same scope that owns the run's durable facts and
+its branch-lock wake. That context must never inherit a short-lived transport
+deadline (an inbound HTTP request context, for example) or a wake-poller tick
+deadline: both are bounded by the caller's own lifetime, not the plan's, so
+either would cancel planning before it can legitimately finish and park a run in
+`needs_attention` for a deadline it never actually exceeded.
+
 
 ## Core Architectural Principles
 
