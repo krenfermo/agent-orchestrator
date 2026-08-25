@@ -76,6 +76,30 @@ The daemon wires the recorder first, so the router wrapper sits outside it and
 its decision reaches the record of the payload it produced. With only the
 recorder installed, the context carries nothing and the record says so.
 
+## Summing it across a run
+
+`backend/internal/observe/context_metrics.go` (`observe.SummarizeContextSelection`)
+is the read model over those per-dispatch blocks: it folds a set of evidence
+records into one run-level picture — how many dispatches the router shaped, and
+the sent / potential / selected / reused / newly-read byte totals.
+
+Summing is where the measured-versus-estimated discipline is easiest to lose, so
+it enforces two rules in one place instead of at each call site:
+
+- **Only measured bytes are added.** A size a dispatch could not measure
+  contributes nothing and increments `Unmeasured` instead, so `Complete()`
+  reports whether the totals are exact or a lower bound. A verify command run,
+  which carries no payload at all, is the ordinary reason a run is incomplete.
+- **No token figure is ever summed.** Token counts in the evidence are a mix of
+  provider-reported (measured) and byte-derived (estimated); adding those
+  together yields a number that is neither. `observe.EstimatedTokens(bytes)`
+  derives a token view from a byte total instead, and its name makes every call
+  site say that it is an estimate.
+
+`ReductionPercent()` and `ReusedSharePercent()` both return `ok=false` rather
+than `0` when nothing measured supports them. The regression harness below reads
+its run totals from this summary rather than summing the records itself.
+
 ## The regression harness
 
 `backend/internal/observe/ctxregress`, driven by `backend/cmd/aoctxregress`.
@@ -140,6 +164,9 @@ making the agent search shows up as reads rather than disappearing.
   schema version), the measured/estimated labeling of every routing size, the
   disabled block, the reduction figure's refusal to invent a percentage, and the
   context carrier between the two wrappers.
+- `backend/internal/observe` (`context_metrics_test.go`) — that only measured
+  bytes are summed, that an unavailable size counts as unmeasured rather than as
+  zero, and that no percentage is invented without a measurement behind it.
 - `backend/internal/contextrouter` (`metrics_test.go`) — the indexed/read origin
   split, considered-versus-selected sizing against pre-retrieval size, and the
   conversion to a routing block.

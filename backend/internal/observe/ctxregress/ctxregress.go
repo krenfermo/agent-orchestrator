@@ -51,6 +51,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/contextrouter"
 	"github.com/aoagents/agent-orchestrator/backend/internal/contextrouter/wfrouter"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/observe"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory/wfdispatch"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
@@ -172,6 +173,11 @@ type RunOutcome struct {
 	// ReusedBytes is how much of what was sent came out of AO's own indexed
 	// stores rather than being read for this dispatch.
 	ReusedBytes int64 `json:"reusedBytes"`
+	// Selection is the whole run's context-selection picture, including the
+	// counters the three fields above flatten: how many dispatches the router
+	// shaped, and whether any size went unmeasured and therefore makes these
+	// totals a lower bound.
+	Selection observe.ContextSelectionSummary `json:"selection"`
 	// Records are the evidence records the run wrote, in dispatch order.
 	Records []projectmemory.EvidenceRecord `json:"records"`
 }
@@ -226,6 +232,9 @@ func (c Comparison) Report(w io.Writer) error {
 		fmt.Fprintf(&b, "                  dispatches=%d contextSentBytes=%d potentialBytes=%d reusedBytes=%d\n",
 			run.Dispatches, run.ContextSentBytes, run.PotentialBytes, run.ReusedBytes)
 		fmt.Fprintf(&b, "                  toolCalls=%d fileReads=%d\n", run.ToolCalls, run.FileReads)
+		if !run.Selection.Complete() {
+			fmt.Fprintf(&b, "                  note: %d size(s) went unmeasured, so the byte totals above are a lower bound\n", run.Selection.Unmeasured)
+		}
 		if len(run.MissingFacts) > 0 {
 			fmt.Fprintf(&b, "                  missing facts: %s\n", strings.Join(run.MissingFacts, "; "))
 		}
@@ -323,35 +332,26 @@ func runOnce(ctx stdctx.Context, opts Options, router *contextrouter.Router) (Ru
 	}
 
 	records := capture.taken()
-	out := RunOutcome{
-		RouterEnabled: router != nil,
-		TaskStatus:    agent.taskStatus(),
-		ReviewStatus:  agent.reviewStatus(),
-		VerifyStatus:  agent.verifyStatus(),
-		MissingFacts:  agent.missingFacts(),
-		ToolCalls:     agent.toolCalls(),
-		FileReads:     agent.fileReads(),
-		Dispatches:    len(records),
-		Records:       records,
-	}
-	for _, record := range records {
-		out.ContextSentBytes += metricValue(record.Context.ContextSentBytes)
-		if record.Routing != nil {
-			out.PotentialBytes += metricValue(record.Routing.PotentialBytes)
-			out.ReusedBytes += metricValue(record.Routing.ReusedBytes)
-		}
-	}
-	return out, nil
-}
-
-// metricValue reads a metric's count, treating an unavailable metric as
-// nothing to add rather than as a zero measurement. The distinction survives in
-// the records themselves, which the caller still has.
-func metricValue(m projectmemory.Metric) int64 {
-	if m.Value == nil {
-		return 0
-	}
-	return *m.Value
+	// The run's totals come from the shared context-selection read model
+	// rather than from a second summation written here: it is the one place
+	// that decides which sizes may be added up and which are only a lower
+	// bound, and a harness that reimplemented that rule could drift from it.
+	summary := observe.SummarizeContextSelection(records)
+	return RunOutcome{
+		RouterEnabled:    router != nil,
+		TaskStatus:       agent.taskStatus(),
+		ReviewStatus:     agent.reviewStatus(),
+		VerifyStatus:     agent.verifyStatus(),
+		MissingFacts:     agent.missingFacts(),
+		ToolCalls:        agent.toolCalls(),
+		FileReads:        agent.fileReads(),
+		Dispatches:       len(records),
+		ContextSentBytes: summary.SentBytes,
+		PotentialBytes:   summary.PotentialBytes,
+		ReusedBytes:      summary.ReusedBytes,
+		Selection:        summary,
+		Records:          records,
+	}, nil
 }
 
 // dispatchFixture drives one fixture task through the instrumented surfaces in
