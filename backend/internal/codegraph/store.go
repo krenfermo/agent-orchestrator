@@ -80,24 +80,30 @@ func ValidateStoreDir(dir string) error {
 	return nil
 }
 
-// CanonicalRoot turns a project root into the absolute, symlink-resolved,
-// cleaned path the graph is keyed by. Two spellings of the same checkout
-// (a relative path, a path through /tmp on macOS) must land on one key, or
-// the same project would be indexed twice; two genuinely different checkouts
-// must never collapse onto one.
+// CanonicalRoot turns an absolute project root into the symlink-resolved,
+// cleaned path the graph is keyed by. Two spellings of the same checkout (a
+// path through /tmp on macOS, one with a redundant element) must land on one
+// key, or the same project would be indexed twice; two genuinely different
+// checkouts must never collapse onto one.
+//
+// A relative root is rejected rather than resolved against the process's
+// working directory. The CodeGraphProvider contract requires an absolute
+// root, and a root that means "wherever the daemon happens to be chdir'd"
+// would key a project's persisted index by an accident of the daemon's
+// lifecycle instead of by the checkout's own identity — the same spelling
+// could reach two different projects across restarts.
 func CanonicalRoot(root string) (string, error) {
 	trimmed := strings.TrimSpace(root)
 	if trimmed == "" {
 		return "", fmt.Errorf("%w: project root is required", ErrProjectRoot)
 	}
-	abs, err := filepath.Abs(trimmed)
-	if err != nil {
-		return "", fmt.Errorf("%w: resolve %q: %w", ErrProjectRoot, root, err)
+	if !filepath.IsAbs(trimmed) {
+		return "", fmt.Errorf("%w: %q must be absolute; a relative root would key the index by the process working directory", ErrProjectRoot, root)
 	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = resolved
+	if resolved, err := filepath.EvalSymlinks(trimmed); err == nil {
+		trimmed = resolved
 	}
-	return filepath.Clean(abs), nil
+	return filepath.Clean(trimmed), nil
 }
 
 // ProjectKey is the storage key for a canonical project root: a readable

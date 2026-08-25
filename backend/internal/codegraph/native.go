@@ -301,9 +301,12 @@ func (n *NativeIndexer) syncFile(graph *Graph, root, rel string, result *IndexRe
 // consider: an existing regular file within the size cap. ok=false means "not
 // indexable", which is a normal outcome, not an error.
 func (n *NativeIndexer) readCandidate(root, rel string) (data []byte, ok bool, err error) {
-	abs, err := n.resolve(root, rel)
+	abs, exists, err := n.resolve(root, rel)
 	if err != nil {
 		return nil, false, err
+	}
+	if !exists {
+		return nil, false, nil
 	}
 	info, err := os.Lstat(abs)
 	if err != nil {
@@ -326,15 +329,51 @@ func (n *NativeIndexer) readCandidate(root, rel string) (data []byte, ok bool, e
 }
 
 // resolve turns a project-relative path into an absolute one, refusing any
-// path that would escape the project root. A diff is data from outside the
-// process; a "../../etc/passwd" entry in one must not make the indexer read
-// outside the checkout it was asked about.
-func (n *NativeIndexer) resolve(root, rel string) (string, error) {
+// path that does not genuinely live beneath the project root. A diff is data
+// from outside the process; neither a "../../etc/passwd" entry nor a
+// "linked/secret.go" entry that reaches another checkout through a symlinked
+// directory inside this one may make the indexer read — or file under this
+// project's graph — a file the caller did not ask about.
+//
+// Lexical cleaning alone cannot decide this: it sees no ".." in
+// "linked/secret.go", and os.Lstat only ever inspects the final component. So
+// the parent directory is symlink-resolved and proven to be inside the
+// canonical root before anything is opened. The final component is left
+// unresolved on purpose — readCandidate's Lstat then sees a symlink for what
+// it is and declines it as a non-regular file.
+//
+// exists=false means the path (or a directory on the way to it) is simply not
+// there, which is a normal outcome for a stale or partially-applied diff, not
+// an error.
+func (n *NativeIndexer) resolve(root, rel string) (abs string, exists bool, err error) {
 	clean := filepath.Clean(filepath.FromSlash(rel))
-	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("%w: path %q escapes the project root", ErrProjectRoot, rel)
+	if clean == "." || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", false, fmt.Errorf("%w: path %q escapes the project root", ErrProjectRoot, rel)
 	}
-	return filepath.Join(root, clean), nil
+
+	candidate := filepath.Join(root, clean)
+	parent, err := filepath.EvalSymlinks(filepath.Dir(candidate))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("codegraph: resolve %s: %w", rel, err)
+	}
+	if !containedIn(root, parent) {
+		return "", false, fmt.Errorf("%w: path %q leaves the project root through a symlink", ErrProjectRoot, rel)
+	}
+	return filepath.Join(parent, filepath.Base(candidate)), true, nil
+}
+
+// containedIn reports whether path is root itself or sits beneath it. Both
+// must already be absolute and symlink-resolved for the answer to mean
+// anything.
+func containedIn(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // walk collects every indexable project-relative path under root.

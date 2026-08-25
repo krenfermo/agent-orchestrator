@@ -96,7 +96,10 @@ location.
 
 Isolation between projects is structural, not conventional:
 
-- A project root is canonicalized (absolute, symlinks resolved, cleaned) so one
+- A project root must be absolute; a relative one is refused with
+  `ErrProjectRoot` rather than resolved against the process working directory,
+  which would key a project's index by an accident of the daemon's lifecycle.
+- An absolute root is canonicalized (symlinks resolved, cleaned) so one
   checkout spelled two ways lands on one key.
 - The project key is a readable directory-name prefix plus a hash of the
   **full** root path, so sibling checkouts sharing a base name (`orgA/api` and
@@ -106,7 +109,12 @@ Isolation between projects is structural, not conventional:
 - A graph records the root it was built for, and `Store.Load` refuses one whose
   recorded root does not match the caller's — a planted or stale file yields an
   empty graph and a re-index, never another project's symbols.
-- Paths coming in from a diff are refused if they escape the project root.
+- Paths coming in from a diff are refused if they escape the project root —
+  lexically (`../../etc/passwd`) or through a symlinked directory inside the
+  checkout (`linked/secret.go`). A candidate's parent directory is
+  symlink-resolved and proven to sit under the canonical root before anything
+  is opened, and the final component is left unresolved so a symlinked file is
+  declined as non-regular.
 
 ## Tests
 

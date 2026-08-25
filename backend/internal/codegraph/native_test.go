@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -330,6 +331,52 @@ func TestIncrementalUpdateRejectsAPathEscapingTheProject(t *testing.T) {
 	}
 }
 
+func TestIncrementalUpdateRefusesAPathThroughASymlinkedDirectory(t *testing.T) {
+	indexer := newIndexer(t)
+	root := newProject(t, "app")
+
+	// A second checkout, reachable from inside the first only through a
+	// symlinked directory. Nothing in it is this project's business.
+	outside := filepath.Join(t.TempDir(), "other-project")
+	writeFile(t, outside, "secret.go", "package other\n\nfunc Secret() string { return \"token\" }\n")
+	if err := os.Symlink(outside, filepath.Join(root, "linked")); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	ctx := context.Background()
+	if _, err := indexer.Index(ctx, IndexRequest{ProjectRoot: root}); err != nil {
+		t.Fatalf("Index: %v", err)
+	}
+	assertNoForeignSymbols(t, indexer, root)
+
+	// "linked/secret.go" is lexically innocent — no ".." anywhere — and only
+	// the directory component is a symlink, so a final-component check would
+	// wave it through.
+	for name, diff := range map[string]Diff{
+		"modified": {Changes: []FileChange{{Status: ChangeModified, Path: "linked/secret.go"}}},
+		"added":    {Changes: []FileChange{{Status: ChangeAdded, Path: "linked/secret.go"}}},
+		"renamed":  {Changes: []FileChange{{Status: ChangeRenamed, Path: "linked/secret.go", OldPath: "helper.go"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := indexer.IncrementalUpdate(ctx, UpdateRequest{ProjectRoot: root, Diff: diff}); !errors.Is(err, ErrProjectRoot) {
+				t.Fatalf("IncrementalUpdate through a symlinked directory = %v, want ErrProjectRoot", err)
+			}
+			assertNoForeignSymbols(t, indexer, root)
+		})
+	}
+}
+
+// assertNoForeignSymbols fails if anything from outside the project reached
+// the project's graph.
+func assertNoForeignSymbols(t *testing.T, indexer *NativeIndexer, root string) {
+	t.Helper()
+	for _, id := range symbolIDs(t, indexer, root) {
+		if strings.Contains(id, "linked/") || strings.Contains(id, "Secret") {
+			t.Fatalf("a file outside the project was indexed into it: %q", id)
+		}
+	}
+}
+
 func TestProjectsWithDifferentRootsNeverShareEntries(t *testing.T) {
 	indexer := newIndexer(t)
 	base := t.TempDir()
@@ -435,6 +482,38 @@ func TestIndexRejectsAnUnusableProjectRoot(t *testing.T) {
 				t.Fatalf("Index(%q) = %v, want ErrProjectRoot", root, err)
 			}
 		})
+	}
+}
+
+func TestProviderRejectsARelativeProjectRoot(t *testing.T) {
+	indexer := newIndexer(t)
+	root := newProject(t, "app")
+
+	// Chdir so the relative root names a real, indexable directory: it must be
+	// refused because it is relative, not because it is missing. The contract
+	// requires an absolute root, and honoring a relative one would key the
+	// persisted index by the process working directory.
+	t.Chdir(filepath.Dir(root))
+	const relative = "app"
+
+	ctx := context.Background()
+	if _, err := indexer.Index(ctx, IndexRequest{ProjectRoot: relative}); !errors.Is(err, ErrProjectRoot) {
+		t.Fatalf("Index(%q) = %v, want ErrProjectRoot", relative, err)
+	}
+	if _, err := indexer.IncrementalUpdate(ctx, UpdateRequest{
+		ProjectRoot: relative,
+		Diff:        Diff{Changes: []FileChange{{Status: ChangeModified, Path: "helper.go"}}},
+	}); !errors.Is(err, ErrProjectRoot) {
+		t.Fatalf("IncrementalUpdate(%q) = %v, want ErrProjectRoot", relative, err)
+	}
+	if _, err := indexer.Query(ctx, QueryRequest{ProjectRoot: relative, Symbol: "Helper"}); !errors.Is(err, ErrProjectRoot) {
+		t.Fatalf("Query(%q) = %v, want ErrProjectRoot", relative, err)
+	}
+
+	// Nothing was written for the relative spelling, and the absolute root
+	// still works.
+	if _, err := indexer.Index(ctx, IndexRequest{ProjectRoot: root}); err != nil {
+		t.Fatalf("Index with an absolute root: %v", err)
 	}
 }
 

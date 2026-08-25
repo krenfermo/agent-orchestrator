@@ -70,6 +70,39 @@ func TestValidateStoreDirRejectsUnusableLocations(t *testing.T) {
 	}
 }
 
+func TestCanonicalRootRequiresAnAbsolutePath(t *testing.T) {
+	for name, root := range map[string]string{
+		"empty":   "",
+		"blank":   "   ",
+		"dot":     ".",
+		"nested":  filepath.Join("some", "checkout"),
+		"parent":  filepath.Join("..", "checkout"),
+		"homeish": "~/projects/api",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := CanonicalRoot(root); !errors.Is(err, ErrProjectRoot) {
+				t.Fatalf("CanonicalRoot(%q) = %v, want ErrProjectRoot", root, err)
+			}
+		})
+	}
+
+	dir := t.TempDir()
+	canonical, err := CanonicalRoot(dir)
+	if err != nil {
+		t.Fatalf("CanonicalRoot(%q): %v", dir, err)
+	}
+	if !filepath.IsAbs(canonical) {
+		t.Fatalf("CanonicalRoot returned a relative path %q", canonical)
+	}
+	// A redundant spelling of the same absolute checkout must collapse onto
+	// the same key, symlinks resolved.
+	sep := string(filepath.Separator)
+	noisy := dir + sep + "child" + sep + ".."
+	if got, err := CanonicalRoot(noisy); err != nil || got != canonical {
+		t.Fatalf("CanonicalRoot(%q) = %q, %v; want %q", noisy, got, err, canonical)
+	}
+}
+
 func TestProjectKeySeparatesSameNamedProjects(t *testing.T) {
 	base := t.TempDir()
 	first := filepath.Join(base, "orgA", "api")
