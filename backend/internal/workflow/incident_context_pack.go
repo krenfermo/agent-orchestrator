@@ -161,6 +161,20 @@ type IncidentPackInput struct {
 	// exactly why the answer used to be "go and diagnose the child first".
 	ChildEvidence string
 
+	// EvidenceSnapshot is CollectWorkerEvidence's rendered, bounded snapshot for
+	// the step this stop is about: workflow/step/attempt state, session
+	// lifecycle, process liveness, harness launch and exit, branch and HEAD, the
+	// git status summary, workspace fingerprints, AO-owned mutation provenance,
+	// the expected artifacts, the worker's last result signal, the recent
+	// checkpoints and the parent/child relationship — each field carrying its
+	// own status.
+	//
+	// It is priority 2 and therefore never dropped. Its whole purpose is that a
+	// person asking "¿Qué hago?" is shown every fact AO can actually obtain,
+	// with the ones it cannot named as such, instead of a stop that recorded a
+	// conclusion and nothing under it. See evidence_snapshot.go.
+	EvidenceSnapshot string
+
 	// Checkpoints is the run's ledger, newest-relevant-first selection is done
 	// by the builder.
 	Checkpoints []domain.WorkflowCheckpoint
@@ -210,6 +224,10 @@ func BuildIncidentContextPack(in IncidentPackInput) IncidentContextPack {
 	// stopped, the child's reason IS the parent's reason. Without it the only
 	// honest diagnosis is "diagnose the child first", which is not a diagnosis.
 	add(1, "Stopped child task (bounded evidence)", in.ChildEvidence, incidentPackMaxSectionBytes)
+
+	// Priority 2, and never dropped: the durable evidence snapshot. Everything
+	// below it is context for a stop; this IS the stop's evidence.
+	add(2, "Durable evidence snapshot (bounded)", in.EvidenceSnapshot, incidentPackMaxSectionBytes)
 
 	// Priority 2 — the immediate mechanics of the stop.
 	add(2, "Recent checkpoints", renderIncidentCheckpoints(in.Checkpoints), 0)

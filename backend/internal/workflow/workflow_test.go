@@ -36,6 +36,13 @@ type fakeStore struct {
 	// GetWorkflowRunOwner). nil/missing entry means unowned.
 	owners map[string]domain.UserID
 
+	// dispatchCheckpoints and mutationProvenance back migration 0133's two
+	// append-only tables (workflowcore.ProvenanceStore). Both are slices
+	// because both are append-only in the real store, and "the sequence of
+	// rows IS the history" is the property the readers depend on.
+	dispatchCheckpoints []domain.WorkflowDispatchCheckpoint
+	mutationProvenance  []domain.WorkflowMutationProvenance
+
 	// listStepsErr injects a storage failure into the step lookup, so a test
 	// can prove what still happens when the bookkeeping AFTER a durable state
 	// transition fails (Checkpoint 8P-E13A.1).

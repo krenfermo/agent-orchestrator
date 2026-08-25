@@ -246,7 +246,14 @@ func isBookkeepingPhase(phase string) bool {
 	return isIncidentLedgerPhase(phase) ||
 		phase == attemptReapedPhase ||
 		phase == verifySupersededPhase ||
-		phase == verifyRaceReconciledPhase
+		phase == verifyRaceReconciledPhase ||
+		// The ambiguity gate's evidence row has exactly the shape this guard is
+		// about: it is written at the same instant as the stop it is evidence
+		// FOR, so if it counted it would displace that stop's own phase and the
+		// run would once again be unable to say why it stopped — with, this
+		// time, a checkpoint full of evidence sitting next to it saying nothing
+		// about the decision. See ambiguous_worker_state.go.
+		phase == AmbiguousWorkerStateEvidencePhase
 }
 
 func isIncidentLedgerPhase(phase string) bool {

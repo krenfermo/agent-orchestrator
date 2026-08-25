@@ -40,6 +40,11 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 		wantStep           domain.WorkflowStepState
 		wantRun            domain.WorkflowRunState
 		wantErrorClass     domain.WorkflowErrorClass
+		// wantAmbiguous is the ambiguous_worker_state conclusion WITHOUT the
+		// error class: the pure evaluator states it, and observeWorkStep is
+		// obliged to collect the evidence snapshot before it can become one.
+		// See ambiguous_worker_state.go.
+		wantAmbiguous bool
 	}{
 		{
 			name:           "session not found -> failed, needs_attention",
@@ -132,7 +137,7 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 			baseSHA:            "base-sha",
 			wantStep:           domain.WorkflowStepWaiting,
 			wantRun:            domain.WorkflowRunNeedsAttention,
-			wantErrorClass:     domain.WorkflowErrorAmbiguousWorkerState,
+			wantAmbiguous:      true,
 		},
 		{
 			name:               "idle, workspace throttled/unavailable -> no change",
@@ -225,7 +230,7 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 			baseSHA:            "base-sha",
 			wantStep:           domain.WorkflowStepWaiting,
 			wantRun:            domain.WorkflowRunNeedsAttention,
-			wantErrorClass:     domain.WorkflowErrorAmbiguousWorkerState,
+			wantAmbiguous:      true,
 		},
 	}
 
@@ -250,6 +255,14 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 			}
 			if got.ErrorClass != tc.wantErrorClass {
 				t.Errorf("ErrorClass = %q, want %q", got.ErrorClass, tc.wantErrorClass)
+			}
+			if got.Ambiguous != tc.wantAmbiguous {
+				t.Errorf("Ambiguous = %v, want %v", got.Ambiguous, tc.wantAmbiguous)
+			}
+			// The evaluator may never hand back the class itself: it has no
+			// evidence snapshot, so it has no right to it.
+			if got.ErrorClass == domain.WorkflowErrorAmbiguousWorkerState {
+				t.Error("the pure evaluator assigned ambiguous_worker_state directly, bypassing the evidence gate")
 			}
 			if !domain.ValidWorkflowStepTransition(domain.WorkflowStepRunning, got.NextStep) {
 				t.Errorf("NextStep %q is not a valid transition from running", got.NextStep)

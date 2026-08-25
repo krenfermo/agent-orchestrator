@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
@@ -222,6 +223,12 @@ func (c *Coordinator) IncidentPackFor(ctx stdctx.Context, runID string) (Inciden
 		}
 	}
 	c.attachIncidentSessionFacts(ctx, detail, &in)
+	// The single evidence collector, feeding the Advisor the same bounded
+	// snapshot the ambiguity gate is required to stand on. Collected fresh so
+	// the modal shows what AO can obtain NOW; the digest of whatever was
+	// recorded at the stop itself is appended so the two can be compared rather
+	// than confused. See evidence_snapshot.go.
+	c.attachIncidentEvidenceSnapshot(ctx, detail, cps, &in)
 	// Checkpoint 8P-E.24: a parent stopped on a child carries that child's own
 	// bounded evidence, so nobody has to run a second investigation to discover
 	// a reason AO already held. See incident_child_pack.go.
@@ -237,6 +244,52 @@ func (c *Coordinator) IncidentPackFor(ctx stdctx.Context, runID string) (Inciden
 	pack := BuildIncidentContextPack(in)
 	pack.AttachBuiltAt(c.clock())
 	return inc, pack, nil
+}
+
+// attachIncidentEvidenceSnapshot collects the run's bounded evidence snapshot
+// and renders it into the pack.
+//
+// The step it is collected for is the one the stop is actually about: the
+// newest step that is still running or waiting, falling back to the work step
+// and then to the last step there is. Collecting for the wrong step would
+// produce a snapshot that is complete and about something else, which is worse
+// than an incomplete one.
+func (c *Coordinator) attachIncidentEvidenceSnapshot(
+	ctx stdctx.Context, detail RunDetail, cps []domain.WorkflowCheckpoint, in *IncidentPackInput,
+) {
+	snap := c.CollectWorkerEvidence(ctx, EvidenceRequest{
+		Run:  detail.Run,
+		Step: incidentFocusStep(detail),
+	})
+	rendered := snap.Render()
+	if recorded, ok := c.latestAmbiguityEvidence(cps); ok {
+		rendered += fmt.Sprintf(
+			"\nevidence recorded at the stop itself: digest %s, collected %s (%d bytes)\n",
+			shortDigest(recorded.Digest), recorded.CollectedAt.UTC().Format(time.RFC3339), recorded.Bytes)
+	}
+	in.EvidenceSnapshot = rendered
+}
+
+// incidentFocusStep picks the step a stop is about.
+func incidentFocusStep(detail RunDetail) domain.WorkflowStep {
+	var work, last, active domain.WorkflowStep
+	for _, sd := range detail.Steps {
+		last = sd.Step
+		if sd.Step.Kind == domain.WorkflowStepWork {
+			work = sd.Step
+		}
+		switch sd.Step.State {
+		case domain.WorkflowStepRunning, domain.WorkflowStepWaiting:
+			active = sd.Step
+		}
+	}
+	if active.ID != "" {
+		return active
+	}
+	if work.ID != "" {
+		return work
+	}
+	return last
 }
 
 // attachIncidentSessionFacts fills in the worker session and its workspace from

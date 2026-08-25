@@ -153,9 +153,8 @@ func (c *Coordinator) observeFixStep(ctx stdctx.Context, run domain.WorkflowRun,
 			// anything, so record nothing at all.
 			return step, nil
 		}
-		return c.stopFix(ctx, run, step, domain.WorkflowStepWaiting, ReasonFixCycleNotStarted,
-			fixCycleNotStartedDetail(latestCP, *latestCP.SessionID, now),
-			domain.WorkflowErrorAmbiguousWorkerState)
+		return c.stopFixAmbiguous(ctx, run, step, ReasonFixCycleNotStarted,
+			fixCycleNotStartedDetail(latestCP, *latestCP.SessionID, now), nil)
 	}
 
 	switch sess.Activity.State {
@@ -183,11 +182,32 @@ func (c *Coordinator) observeFixStep(ctx stdctx.Context, run domain.WorkflowRun,
 		// Conservative, mirrors evaluateWorkStepProgress's idle+no-evidence
 		// rule exactly: "Codex went idle but did not actually change
 		// anything new" must not silently trigger a new review.
-		return c.stopFix(ctx, run, step, domain.WorkflowStepWaiting, ReasonFixNoVerifiableChange,
-			"fix worker idle with no verifiable new change — needs human review", domain.WorkflowErrorAmbiguousWorkerState)
+		return c.stopFixAmbiguous(ctx, run, step, ReasonFixNoVerifiableChange,
+			"fix worker idle with no verifiable new change — needs human review", &obs)
 	default:
 		return step, nil
 	}
+}
+
+// stopFixAmbiguous is the ONLY way fix observation reaches
+// ambiguous_worker_state. It goes through the evidence gate first, so the stop
+// it writes carries the bounded snapshot AO stood on rather than a conclusion
+// on its own. See ambiguous_worker_state.go.
+func (c *Coordinator) stopFixAmbiguous(
+	ctx stdctx.Context,
+	run domain.WorkflowRun,
+	step domain.WorkflowStep,
+	reason, detail string,
+	obs *ports.WorkspaceObservation,
+) (domain.WorkflowStep, error) {
+	raised, err := c.raiseAmbiguousWorkerState(ctx, run, step, reason, detail, obs)
+	if err != nil {
+		return step, err
+	}
+	if err := assertAmbiguousEvidence(raised.ErrorClass(), raised); err != nil {
+		return step, err
+	}
+	return c.stopFix(ctx, run, step, domain.WorkflowStepWaiting, reason, detail, raised.ErrorClass())
 }
 
 // stopFix is fix observation's counterpart to stopReview: the same

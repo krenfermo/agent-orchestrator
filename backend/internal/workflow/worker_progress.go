@@ -93,6 +93,13 @@ type WorkStepDecision struct {
 	// interactive prompt is not an "error", so it has no error class, and
 	// before this field it reached the Board as an unexplained needs_attention.
 	AttentionReason string
+	// Ambiguous is set by the pure evaluator when the decision it reached IS an
+	// ambiguous_worker_state stop. It deliberately does NOT carry the error
+	// class: the class can only come from a raise that has a collected evidence
+	// snapshot behind it, so the evaluator states the conclusion and
+	// observeWorkStep is obliged to go and gather the evidence before that
+	// conclusion can become durable. See ambiguous_worker_state.go.
+	Ambiguous bool
 	// NoChange is true when the facts do not yet justify any transition (e.g.
 	// still actively working, or workspace evidence was throttled/unavailable
 	// this call). The caller must leave step/run state untouched.
@@ -216,7 +223,7 @@ func evaluateWorkStepProgress(
 			NextStep:        domain.WorkflowStepWaiting,
 			NextRun:         domain.WorkflowRunNeedsAttention,
 			NextAction:      "worker reported waiting for input but AO could not observe any question being asked, and the session has produced no activity since — AO cannot prove what this worker is doing",
-			ErrorClass:      domain.WorkflowErrorAmbiguousWorkerState,
+			Ambiguous:       true,
 			AttentionReason: ReasonWorkerDispatchAmbiguous,
 		}
 	case domain.ActivityIdle:
@@ -268,7 +275,7 @@ func evaluateWorkStepProgress(
 			NextStep:   domain.WorkflowStepWaiting,
 			NextRun:    domain.WorkflowRunNeedsAttention,
 			NextAction: "worker idle with no verifiable change — needs human review",
-			ErrorClass: domain.WorkflowErrorAmbiguousWorkerState,
+			Ambiguous:  true,
 		}
 	default:
 		// Unknown/unspecified activity: make no change rather than guess.
@@ -379,6 +386,32 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 	}
 	if decision.NoChange {
 		return step, nil
+	}
+
+	// The ambiguity gate. A decision that concluded "AO cannot prove what this
+	// worker is doing" may not become durable on that conclusion alone: the
+	// raise collects the bounded evidence snapshot, records it, and is the only
+	// thing that can hand back the error class. See ambiguous_worker_state.go.
+	var ambiguity AmbiguousWorkerState
+	if decision.Ambiguous {
+		var observed *ports.WorkspaceObservation
+		if workspaceAvailable {
+			o := obs
+			observed = &o
+		}
+		reason := decision.AttentionReason
+		if reason == "" {
+			reason = ReasonWorkerDispatchAmbiguous
+		}
+		raised, rerr := c.raiseAmbiguousWorkerState(ctx, run, step, reason, decision.NextAction, observed)
+		if rerr != nil {
+			return step, rerr
+		}
+		ambiguity = raised
+		decision.ErrorClass = raised.ErrorClass()
+	}
+	if err := assertAmbiguousEvidence(decision.ErrorClass, ambiguity); err != nil {
+		return step, err
 	}
 
 	if !domain.ValidWorkflowStepTransition(step.State, decision.NextStep) {

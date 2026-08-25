@@ -569,6 +569,14 @@ func (c *Coordinator) adoptOrMarkAmbiguous(ctx stdctx.Context, run domain.Workfl
 	if found {
 		nextAction = fmt.Sprintf("ambiguous_worker_state: orphaned session %s with no workspace after restart", rec.ID)
 	}
+	// The evidence gate. This path says "ambiguous_worker_state" in the sentence
+	// a person reads, so it owes the same bounded snapshot every other
+	// ambiguity raise owes — collected and recorded BEFORE any state moves, so a
+	// daemon that dies here leaves readable evidence rather than an unexplained
+	// stop. See ambiguous_worker_state.go.
+	if _, rerr := c.raiseAmbiguousWorkerState(ctx, run, step, ReasonWorkerDispatchAmbiguous, nextAction, nil); rerr != nil {
+		return step, rerr
+	}
 	if step.State == domain.WorkflowStepRunning {
 		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, domain.WorkflowStepRunning, domain.WorkflowStepWaiting, now); err != nil {
 			return step, err

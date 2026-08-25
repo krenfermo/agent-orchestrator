@@ -65,8 +65,8 @@ func (c *Coordinator) observeReviewStep(ctx stdctx.Context, run domain.WorkflowR
 	if !found {
 		// Defensive: the id we hold does not resolve. Surface ambiguity
 		// rather than guessing.
-		return c.stopReview(ctx, run, step, ReasonReviewStateAmbiguous,
-			"ambiguous_review_state: review run referenced by this step no longer exists", "", domain.WorkflowErrorAmbiguousWorkerState)
+		return c.stopReviewAmbiguous(ctx, run, step, ReasonReviewStateAmbiguous,
+			"ambiguous_review_state: review run referenced by this step no longer exists", "")
 	}
 
 	switch reviewRun.Status {
@@ -85,8 +85,8 @@ func (c *Coordinator) observeReviewStep(ctx stdctx.Context, run domain.WorkflowR
 			}
 		}
 		if hasCP && elapsed > reviewStalenessThreshold {
-			return c.stopReview(ctx, run, step, ReasonReviewStateAmbiguous,
-				"ambiguous_review_state: review has been running longer than expected with no verdict", "", domain.WorkflowErrorAmbiguousWorkerState)
+			return c.stopReviewAmbiguous(ctx, run, step, ReasonReviewStateAmbiguous,
+				"ambiguous_review_state: review has been running longer than expected with no verdict", "")
 		}
 		// Still genuinely working (or too fresh to judge): no change.
 		return step, nil
@@ -165,8 +165,8 @@ func (c *Coordinator) observeReviewStep(ctx stdctx.Context, run domain.WorkflowR
 			// Complete/delivered with an empty/invalid verdict should not
 			// happen given submitOne's own validation, but defend anyway
 			// rather than silently treating it as approved.
-			return c.stopReview(ctx, run, step, ReasonReviewStateAmbiguous,
-				"ambiguous_review_state: review run completed with no valid verdict", string(reviewRun.Verdict), domain.WorkflowErrorAmbiguousWorkerState)
+			return c.stopReviewAmbiguous(ctx, run, step, ReasonReviewStateAmbiguous,
+				"ambiguous_review_state: review run completed with no valid verdict", string(reviewRun.Verdict))
 		}
 
 	case domain.ReviewRunFailed, domain.ReviewRunCancelled:
@@ -193,6 +193,26 @@ func (c *Coordinator) observeReviewStep(ctx stdctx.Context, run domain.WorkflowR
 // decides (raise the budget, fix it themselves, cancel), the loop must still
 // be resumable; a "failed" review step would have zero outgoing transitions
 // and would make that impossible forever.
+// stopReviewAmbiguous is the ONLY way review observation reaches
+// ambiguous_worker_state. Like its fix-step counterpart it goes through the
+// evidence gate first: a review AO cannot read the state of is still a state AO
+// holds a dozen durable facts about, and the stop must carry them.
+func (c *Coordinator) stopReviewAmbiguous(
+	ctx stdctx.Context,
+	run domain.WorkflowRun,
+	step domain.WorkflowStep,
+	reason, detail, verdict string,
+) (domain.WorkflowStep, error) {
+	raised, err := c.raiseAmbiguousWorkerState(ctx, run, step, reason, detail, nil)
+	if err != nil {
+		return step, err
+	}
+	if err := assertAmbiguousEvidence(raised.ErrorClass(), raised); err != nil {
+		return step, err
+	}
+	return c.stopReview(ctx, run, step, reason, detail, verdict, raised.ErrorClass())
+}
+
 func (c *Coordinator) stopReview(
 	ctx stdctx.Context,
 	run domain.WorkflowRun,
