@@ -608,6 +608,14 @@ func (c *Coordinator) pendingFreshReview(ctx stdctx.Context, runID, reviewStepID
 		if rec, ok := c.pendingBranchAdvancedFreshReview(ctx, runID, reviewStepID); ok {
 			return rec, true
 		}
+		// And an attributable WORKSPACE CHANGE may be: verification found the
+		// worktree carrying this task's own authorized work or fix output, which
+		// no reviewer has read yet (workspace_provenance.go). A fifth reason for
+		// the same resting state, served here for the same reason the others
+		// are — the dispatcher should not grow a branch per reason.
+		if rec, ok := c.pendingProvenanceFreshReview(ctx, runID, reviewStepID); ok {
+			return rec, true
+		}
 		// And an AMENDMENT may be: a criterion that stopped describing reality
 		// was changed by a person, so the verdict reached under it no longer
 		// counts (task_criterion_amendment.go). A third reason for the same

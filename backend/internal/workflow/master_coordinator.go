@@ -831,7 +831,9 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 			// stopped, and the parent keeps its heartbeat through the mirror
 			// (see maybeScheduleAutonomousHeartbeat), so there are now many more
 			// passes over the same unchanged condition than there used to be.
-			c.recordAttentionStopOnce(ctx, run, nil, ReasonChildNeedsAttention,
+			// Once per distinct child stop, however many unrelated rows land on
+			// the parent in between — see recordChildAttentionStopOnce.
+			c.recordChildAttentionStopOnce(ctx, run, ReasonChildNeedsAttention,
 				fmt.Sprintf("task %d (%s) stopped and needs a decision — run %s", task.Ordinal, task.Title, child.Run.ID))
 			return nil
 		}

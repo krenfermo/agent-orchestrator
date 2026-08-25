@@ -343,6 +343,17 @@ type Deps struct {
 	// Optional: nil leaves the worktree/branch fields of the planner projection
 	// empty, which is the honest answer when nothing can be read.
 	TaskWorktreeRecords TaskWorktreeRecords
+
+	// WorkerLiveness is the optional runtime liveness probe the missing-first-
+	// signal reconciliation consults (worker_signal_reconcile.go). Optional: nil
+	// simply removes one independent fact, and its absence is never read as a
+	// dead worker.
+	WorkerLiveness WorkerLivenessProbe
+
+	// WorkerPreflight is the optional pre-dispatch provider readiness check
+	// (provider_preflight.go). Optional: nil keeps the pre-8P-E.24 behavior of
+	// spawning straight into whatever the provider does.
+	WorkerPreflight WorkerPreflight
 }
 
 // TaskWorktreeRecords lists the AO worktree records belonging to one master
@@ -487,6 +498,12 @@ type Coordinator struct {
 	// taskWorktreeRecords reads those same records back for the planner
 	// projection the API and the Board render. Optional.
 	taskWorktreeRecords TaskWorktreeRecords
+
+	// workerLiveness backs the missing-first-signal reconciliation's optional
+	// runtime probe; workerPreflight backs the pre-dispatch provider readiness
+	// check. Both optional.
+	workerLiveness  WorkerLivenessProbe
+	workerPreflight WorkerPreflight
 }
 
 // New wires a Coordinator from its dependencies, defaulting the clock and id source.
@@ -532,6 +549,8 @@ func New(d Deps) *Coordinator {
 		capacityProber:           d.CapacityProber,
 		taskWorkspaces:           d.TaskWorkspaces,
 		taskWorktreeRecords:      d.TaskWorktreeRecords,
+		workerLiveness:           d.WorkerLiveness,
+		workerPreflight:          d.WorkerPreflight,
 		probeGate:                &capacityProbeGate{attempts: make(map[capacityProbeKey]time.Time)},
 		clock:                    clock,
 		newID:                    newID,
@@ -1145,6 +1164,35 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		return RunDetail{}, err
 	}
 
+	// Checkpoint 8P-E.24: the same person, on the same button, for the state
+	// both overnight incidents actually ended in — AO lost track of a worker,
+	// the worker's output was real, and it was committed by hand because there
+	// was nowhere else for it to go. resumeAdoptedTaskCommit proves the commit
+	// is this task's own (descends from its dispatch base, on its own branch, in
+	// its own worktree, nothing else writing) and adopts it as the work step's
+	// result, so review and verification run against it normally. It never marks
+	// a task complete, and it is a no-op for every run without exactly that
+	// durable evidence. Crucially it runs BEFORE the dispatch below, so an
+	// adoptable changeset can never have a second writer started over it.
+	// See work_adoption.go.
+	adopted := false
+	if run, adopted, err = c.resumeAdoptedTaskCommit(ctx, run, steps); err != nil {
+		return RunDetail{}, err
+	}
+	if adopted {
+		if steps, err = c.store.ListWorkflowSteps(ctx, runID); err != nil {
+			return RunDetail{}, err
+		}
+		for i := range steps {
+			if steps[i].Kind == domain.WorkflowStepWork {
+				workStep = &steps[i]
+			}
+			if steps[i].Kind == domain.WorkflowStepReview {
+				reviewStep = &steps[i]
+			}
+		}
+	}
+
 	if workStep.State == domain.WorkflowStepReady || workStep.State == domain.WorkflowStepRunning {
 		prompt := promptForRun(run, steps)
 		updated, err := c.dispatchWorkStep(ctx, run, *workStep, prompt, true)
@@ -1269,6 +1317,21 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 	// against the repository as it stands now. See verify_branch_advanced.go.
 	if !reopened {
 		if run, reopened, rerr = c.resumeBranchAdvancedVerify(ctx, run, steps); rerr != nil {
+			return RunDetail{}, rerr
+		}
+	}
+	// And the fourth, equally narrow: a run parked on a workspace change whose
+	// difference is this task's OWN authorized work or fix output, uncommitted,
+	// in this task's own worktree at an unchanged HEAD — code no reviewer has
+	// read yet rather than code AO has any reason to distrust. None of the three
+	// above can see it: the first refuses the class, the second requires a
+	// recovery generation this run never had, and the third requires the HEAD to
+	// have MOVED. What makes this one safe is an attribution proof none of them
+	// makes, and it still ends in a fresh independent review — never in
+	// verifying an approval that does not describe the tree. See
+	// workspace_provenance.go.
+	if !reopened {
+		if run, reopened, rerr = c.resumeProvenanceWorkspaceChange(ctx, run, steps); rerr != nil {
 			return RunDetail{}, rerr
 		}
 	}

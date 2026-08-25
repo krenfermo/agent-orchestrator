@@ -448,6 +448,29 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 		}
 		return c.recordWorkerLaunchFailure(ctx, run, step, entry, harness, workerLaunchStageRuntimeEnv, err)
 	}
+	// Checkpoint 8P-E.24: before an UNATTENDED launch, ask whether this
+	// provider can actually start without an operator. A refusal here is a
+	// pre-work failure exactly like a failed Spawn — nothing was created, no
+	// worker owns anything — so it travels through the same
+	// recordWorkerLaunchFailure path and lands with its own proven class and
+	// its own precise attention reason. A missing or unrunnable checker is not
+	// a refusal; see preflightWorkerDispatch.
+	if perr := c.preflightWorkerDispatch(ctx, WorkerPreflightRequest{
+		Harness:       harness,
+		WorkspacePath: c.projectPathFor(ctx, run.ProjectID),
+		ProjectID:     run.ProjectID,
+		RunID:         run.ID,
+		StepID:        step.ID,
+		RuntimeEnv:    runtimeEnv,
+		Owner:         owner,
+		ProfileID:     profileID,
+	}); perr != nil {
+		now := c.clock()
+		if aerr := c.recordWorkAttemptFailure(ctx, step.ID, harness, classifyWorkerLaunchFailure(perr).Class, now); aerr != nil {
+			return step, aerr
+		}
+		return c.recordWorkerLaunchFailure(ctx, run, step, entry, harness, workerLaunchStagePreflight, perr)
+	}
 	rec, _, _, err := c.spawner.Spawn(ctx, ports.SpawnConfig{
 		ProjectID:   domain.ProjectID(run.ProjectID),
 		Kind:        domain.KindWorker,
@@ -680,4 +703,18 @@ func (c *Coordinator) recordDispatchFailure(ctx stdctx.Context, run domain.Workf
 		c.log.Warn("workflow: work step dispatch failed", "step", step.ID, "err", cause)
 	}
 	return step, nil
+}
+
+// projectPathFor resolves a run's project checkout path for the provider
+// preflight's workspace-trust question. Empty when it cannot be read, which the
+// checker is free to treat as "no path-scoped question to ask".
+func (c *Coordinator) projectPathFor(ctx stdctx.Context, projectID string) string {
+	if c.projects == nil {
+		return ""
+	}
+	proj, ok, err := c.projects.GetProject(ctx, projectID)
+	if err != nil || !ok {
+		return ""
+	}
+	return proj.Path
 }

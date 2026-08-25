@@ -459,9 +459,28 @@ func TestWorkerNeverSignalsEventuallyFailsWithoutDoubleDispatch(t *testing.T) {
 		t.Fatalf("spawner calls within grace = %d, want still 1 (no duplicate worker)", spawner.calls)
 	}
 
-	// Past the startup grace period with FirstSignalAt still unset: AO must
-	// stop waiting and reach a deterministic, non-capacity failure state.
+	// Checkpoint 8P-E.24 (incident wf-00283521 / medusa-4): past the startup
+	// grace, a missing first signal alone is NOT a verdict any more. The hook
+	// pipeline being silent is not proof the process died, and treating it as
+	// proof killed a worker that was sixteen minutes into a complete
+	// implementation. AO reconciles instead — and, critically, still never
+	// spawns a second worker while it does.
 	clk.Advance(9 * time.Minute)
+	got, err = c.GetRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("GetRun (just past grace): %v", err)
+	}
+	if workStepFrom(got).Step.State == domain.WorkflowStepFailed {
+		t.Fatalf("work step failed on a missing first signal alone, with the session still readable — this is the medusa-4 regression")
+	}
+	if spawner.calls != 1 {
+		t.Fatalf("spawner calls just past grace = %d, want still 1 (no duplicate worker)", spawner.calls)
+	}
+
+	// Past the reconciliation bound with nothing at all to show for it — no
+	// signal, no activity, no turn boundary, no workspace change — AO must
+	// still stop waiting and reach a deterministic, non-capacity failure state.
+	clk.Advance(46 * time.Minute) // past workStepSignalReconcileTimeout
 	got, err = c.GetRun(ctx, created.Run.ID)
 	if err != nil {
 		t.Fatalf("GetRun (past grace): %v", err)
