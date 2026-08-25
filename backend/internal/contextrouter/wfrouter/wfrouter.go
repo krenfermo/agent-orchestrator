@@ -43,6 +43,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/contextrouter"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	baseline "github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 )
@@ -99,20 +100,27 @@ func InstrumentPlanner(next workflowcore.Planner, router *contextrouter.Router, 
 }
 
 func (p *planner) Generate(ctx stdctx.Context, request workflowcore.PlannerRequest) (workflowcore.PlannerResponse, error) {
-	return p.next.Generate(ctx, p.route(ctx, request))
+	ctx, request = p.route(ctx, request)
+	return p.next.Generate(ctx, request)
 }
 
 // route replaces the planner's documents with the routed selection. A routing
 // failure returns the request untouched: the router exists to send less, and
 // sending nothing because it could not decide what to send would be a strictly
 // worse outcome than the full-context behaviour it replaces.
-func (p *planner) route(ctx stdctx.Context, request workflowcore.PlannerRequest) workflowcore.PlannerRequest {
+//
+// It returns a context carrying what the router decided, so the independent
+// baseline recorder wrapped INSIDE this one records the routing alongside the
+// payload it measures. Neither wrapper requires the other to be installed:
+// without this one the context simply carries nothing, and the recorder says
+// so (see baseline.WithRouting).
+func (p *planner) route(ctx stdctx.Context, request workflowcore.PlannerRequest) (stdctx.Context, workflowcore.PlannerRequest) {
 	root, ok := routableRoot(request.Project.Path)
 	if !ok {
 		if p.log != nil {
 			p.log.Warn("context router: no checkout root, sending the unrouted planner context", "project", request.Project.ID, "path", request.Project.Path)
 		}
-		return request
+		return ctx, request
 	}
 	docs := make([]contextrouter.Document, 0, len(request.Context.Documents))
 	for _, doc := range request.Context.Documents {
@@ -131,7 +139,7 @@ func (p *planner) route(ctx stdctx.Context, request workflowcore.PlannerRequest)
 		Documents: docs,
 	})
 	if !selected {
-		return request
+		return ctx, request
 	}
 	routed := make([]workflowcore.PlannerDocument, 0, len(selection.Sections))
 	for _, section := range selection.Sections {
@@ -154,7 +162,7 @@ func (p *planner) route(ctx stdctx.Context, request workflowcore.PlannerRequest)
 	}
 	request.Context.Documents = routed
 	logSelection(p.log, "context router: planner context routed", selection)
-	return request
+	return baseline.WithRouting(ctx, selection.BaselineRouting()), request
 }
 
 // spawner routes the issue context AO pre-fetches for a worker spawn.
@@ -183,16 +191,20 @@ func InstrumentSpawner(next workflowcore.Spawner, router *contextrouter.Router, 
 }
 
 func (s *spawner) Spawn(ctx stdctx.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
-	return s.next.Spawn(ctx, s.route(ctx, cfg))
+	ctx, cfg = s.route(ctx, cfg)
+	return s.next.Spawn(ctx, cfg)
 }
 
-func (s *spawner) route(ctx stdctx.Context, cfg ports.SpawnConfig) ports.SpawnConfig {
+// route replaces the spawn's pre-fetched issue context with the routed
+// selection, and returns a context carrying what the router decided for the
+// baseline recorder inside it — see planner.route.
+func (s *spawner) route(ctx stdctx.Context, cfg ports.SpawnConfig) (stdctx.Context, ports.SpawnConfig) {
 	if strings.TrimSpace(cfg.Prompt) == "" && strings.TrimSpace(cfg.IssueContext) == "" {
-		return cfg
+		return ctx, cfg
 	}
 	root, ok := s.projectRoot(ctx, cfg.ProjectID)
 	if !ok {
-		return cfg
+		return ctx, cfg
 	}
 	var docs []contextrouter.Document
 	if strings.TrimSpace(cfg.IssueContext) != "" {
@@ -212,7 +224,7 @@ func (s *spawner) route(ctx stdctx.Context, cfg ports.SpawnConfig) ports.SpawnCo
 		Documents: docs,
 	})
 	if !routed {
-		return cfg
+		return ctx, cfg
 	}
 	var b strings.Builder
 	for _, section := range selection.Sections {
@@ -231,7 +243,7 @@ func (s *spawner) route(ctx stdctx.Context, cfg ports.SpawnConfig) ports.SpawnCo
 	}
 	cfg.IssueContext = b.String()
 	logSelection(s.log, "context router: worker issue context routed", selection)
-	return cfg
+	return baseline.WithRouting(ctx, selection.BaselineRouting()), cfg
 }
 
 // projectRoot resolves a spawn's project id to its checkout root, and reports

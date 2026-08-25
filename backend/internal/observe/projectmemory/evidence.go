@@ -59,6 +59,15 @@ type EvidenceRecord struct {
 	Tools          ToolMetrics     `json:"tools"`
 	Outcomes       OutcomeLinks    `json:"outcomes"`
 
+	// Routing is what the role-aware context router decided for this
+	// dispatch, when there is anything to say about it. It is an ADDITIVE
+	// extension of this schema, not a change to it: the field is a pointer
+	// with omitempty, so a record from a dispatch with no routing story is
+	// byte-for-byte the record this schema always produced, and a consumer
+	// that predates the router keeps reading every record unchanged. See
+	// RoutingMetrics.
+	Routing *RoutingMetrics `json:"routing,omitempty"`
+
 	// Notes carries harness-level remarks about how this record was produced
 	// (for example: which dispatch surfaces were exercised without a live
 	// provider). Notes never contain metrics.
@@ -199,6 +208,10 @@ func (r EvidenceRecord) normalized() EvidenceRecord {
 	r.ProviderTokens.Total = r.ProviderTokens.Total.normalized()
 	r.Tools.Total = r.Tools.Total.normalized()
 	r.Outcomes.VerifyDurationMS = r.Outcomes.VerifyDurationMS.normalized()
+	if r.Routing != nil {
+		routing := r.Routing.normalized()
+		r.Routing = &routing
+	}
 	return r
 }
 
@@ -217,6 +230,11 @@ func (r EvidenceRecord) Validate() error {
 	}
 	if r.GeneratedAt.IsZero() {
 		return fmt.Errorf("%w: generatedAt is required", ErrEvidenceInvalid)
+	}
+	if r.Routing != nil {
+		if err := r.Routing.Validate(); err != nil {
+			return err
+		}
 	}
 	for _, m := range r.metrics() {
 		if err := m.metric.Validate(); err != nil {
@@ -256,6 +274,9 @@ func (r EvidenceRecord) metrics() []namedMetric {
 			namedMetric{fmt.Sprintf("context.files[%d].bytes", i), f.Bytes},
 			namedMetric{fmt.Sprintf("context.files[%d].estimatedTokens", i), f.EstimatedTokens},
 		)
+	}
+	if r.Routing != nil {
+		out = append(out, r.Routing.metrics()...)
 	}
 	return out
 }

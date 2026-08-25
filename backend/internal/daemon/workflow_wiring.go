@@ -14,7 +14,6 @@ import (
 	plannercommand "github.com/aoagents/agent-orchestrator/backend/internal/adapters/planner/command"
 	workspacerouter "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/router"
 	"github.com/aoagents/agent-orchestrator/backend/internal/branchlock"
-	"github.com/aoagents/agent-orchestrator/backend/internal/codegraph"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/contextrouter"
 	"github.com/aoagents/agent-orchestrator/backend/internal/contextrouter/wfrouter"
@@ -23,7 +22,6 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory/wfdispatch"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
-	projectmemorystore "github.com/aoagents/agent-orchestrator/backend/internal/projectmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/providerpreflight"
 	"github.com/aoagents/agent-orchestrator/backend/internal/providerruntime"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
@@ -341,45 +339,18 @@ func contextRouterFor(log *slog.Logger) *contextrouter.Router {
 	if !contextrouter.Enabled() {
 		return nil
 	}
-	budgets, err := contextrouter.BudgetsFromEnv()
+	// contextrouter.Default is the one place the shipped router is assembled,
+	// so the daemon and the disabled-vs-enabled regression harness measure the
+	// same configuration rather than two that merely look alike.
+	router, err := contextrouter.Default(log)
 	if err != nil {
 		if log != nil {
-			log.Warn("context router: disabled, budget override rejected", "env", contextrouter.BudgetEnv, "err", err)
-		}
-		return nil
-	}
-	opts := contextrouter.Options{
-		Budgets: budgets,
-		Diff:    contextrouter.NewGitDiffSource(),
-		Log:     log,
-	}
-	if store, storeErr := codegraph.NewDefaultStore(); storeErr != nil {
-		if log != nil {
-			log.Warn("context router: graph evidence unavailable", "err", storeErr)
-		}
-	} else if indexer, indexErr := codegraph.NewNativeIndexer(store); indexErr != nil {
-		if log != nil {
-			log.Warn("context router: graph evidence unavailable", "err", indexErr)
-		}
-	} else {
-		opts.Graph = indexer
-	}
-	if memory, memErr := projectmemorystore.NewDefaultStore(); memErr != nil {
-		if log != nil {
-			log.Warn("context router: memory evidence unavailable", "err", memErr)
-		}
-	} else {
-		opts.Memory = memory
-	}
-	router, err := contextrouter.New(opts)
-	if err != nil {
-		if log != nil {
-			log.Warn("context router: disabled", "err", err)
+			log.Warn("context router: disabled", "env", contextrouter.BudgetEnv, "err", err)
 		}
 		return nil
 	}
 	if log != nil {
-		log.Info("context router: routing agent dispatch context", "budgets", budgets.Describe())
+		log.Info("context router: routing agent dispatch context", "budgets", router.Budgets().Describe())
 	}
 	return router
 }

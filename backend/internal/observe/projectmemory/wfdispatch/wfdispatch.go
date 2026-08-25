@@ -59,6 +59,7 @@ func (s *spawner) Spawn(ctx stdctx.Context, cfg ports.SpawnConfig) (domain.Sessi
 	})
 	span.ObserveContextSent(cfg.Prompt)
 	span.ObserveContextSent(cfg.IssueContext)
+	span.ObserveRoutingFromContext(ctx)
 	span.Note("worker dispatch: AO measures the prompt it sends; the provider process makes its own file reads and tool calls, which this surface does not report")
 	rec, sent, queued, err := s.next.Spawn(ctx, cfg)
 	span.Identify(string(rec.ID), "", "")
@@ -96,6 +97,7 @@ func (r *reviewerLauncher) Launch(ctx stdctx.Context, req workflowcore.ReviewerL
 	})
 	span.ObserveContextSent(req.SystemPrompt)
 	span.ObserveContextSent(req.Prompt)
+	span.ObserveRoutingFromContext(ctx)
 	span.LinkReviewRun(req.RunID)
 	span.Note("reviewer dispatch: this surface carries no workflow run id, so the record is keyed by the reviewer session it created and linked to its review run")
 	result, err := r.next.Launch(ctx, req)
@@ -149,6 +151,7 @@ func (m *messageSender) begin(sessionID domain.SessionID, message string) *proje
 
 func (m *messageSender) Send(ctx stdctx.Context, id domain.SessionID, message string, attachment *ports.SpawnAttachment) error {
 	span := m.begin(id, message)
+	span.ObserveRoutingFromContext(ctx)
 	err := m.next.Send(ctx, id, message, attachment)
 	finish(ctx, m.log, span, err)
 	return err
@@ -156,6 +159,7 @@ func (m *messageSender) Send(ctx stdctx.Context, id domain.SessionID, message st
 
 func (r *reportingMessageSender) SendReportingSubmission(ctx stdctx.Context, id domain.SessionID, message string, attachment *ports.SpawnAttachment) (ports.PromptSubmission, error) {
 	span := r.begin(id, message)
+	span.ObserveRoutingFromContext(ctx)
 	submission, err := r.reporting.SendReportingSubmission(ctx, id, message, attachment)
 	finish(ctx, r.log, span, err)
 	return submission, err
@@ -247,6 +251,7 @@ func (p *planner) Generate(ctx stdctx.Context, request workflowcore.PlannerReque
 		Observable: projectmemory.Capabilities{FileReads: true, ContextPayload: true},
 	})
 	RecordPlannerContext(span, request)
+	span.ObserveRoutingFromContext(ctx)
 	response, err := p.next.Generate(ctx, request)
 	span.Identify("", response.Provider, response.Model)
 	finish(ctx, p.log, span, err)

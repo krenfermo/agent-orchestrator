@@ -196,3 +196,11 @@ reads those agents then make. Run the daemon with
 - `backend/cmd/aobaseline` — that the harness writes one valid evidence file per
   task, under `AO_DATA_DIR`, with the supply side measured and the consumption
   side explicitly unavailable.
+
+## The routing block
+
+An evidence record can also carry what the context router decided for that
+dispatch (`EvidenceRecord.Routing`). It is an additive extension: the field is
+omitted entirely when there is nothing to say, `EvidenceSchemaVersion` is
+unchanged, and every consumer of this schema keeps reading every record. See
+[context-router-metrics.md](context-router-metrics.md).

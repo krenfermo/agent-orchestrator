@@ -278,6 +278,7 @@ func (r *Router) assemble(ctx context.Context, req Request, tier Tier) (Selectio
 	candidates = append(candidates, memorySections...)
 
 	sortSections(candidates)
+	considered := sizeCandidates(candidates)
 	packed := pack(candidates, limit)
 
 	selection := Selection{
@@ -288,6 +289,8 @@ func (r *Router) assemble(ctx context.Context, req Request, tier Tier) (Selectio
 		Dropped:         packed.dropped,
 		EstimatedTokens: packed.tokens,
 		EstimatedBytes:  packed.bytes,
+		Considered:      considered,
+		Selected:        sizePacked(packed.sections),
 		Budget:          budget,
 		Limit:           limit,
 		Notes:           notes,
@@ -363,6 +366,10 @@ func documentSections(req Request, order map[SectionKind]int, tier Tier, limits 
 		}
 		section := newSection(SectionDocument, title, "caller document", content, order[SectionDocument]+i, tier)
 		section.Truncated = truncated
+		// The whole document is what this dispatch would have been sent
+		// unrouted, whether or not the compact tier's per-document cap already
+		// cut it down before packing ever saw it.
+		section.SourceBytes = len(strings.TrimRight(doc.Content, "\n"))
 		out = append(out, section)
 	}
 	return out
@@ -669,6 +676,7 @@ func newSection(kind SectionKind, title, source, content string, priority int, t
 		Tier:            tier,
 		EstimatedTokens: estimateTokens(content),
 		Bytes:           len(content),
+		SourceBytes:     len(content),
 	}
 }
 

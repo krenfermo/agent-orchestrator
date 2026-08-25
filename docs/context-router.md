@@ -139,3 +139,10 @@ record with no absolute path, no `Projects` port wired — the wrapper passes th
 original payload through. The router exists to send less, never to prevent a
 dispatch, and a routed payload assembled without a root would be a smaller
 payload with the diff and graph evidence silently missing.
+
+## Measuring it, and proving it changed nothing
+
+What the router decided is recorded per dispatch alongside the existing baseline
+evidence, and a harness runs one fixture task with the flag off and on and fails
+when the routed run reaches a different outcome. See
+[context-router-metrics.md](context-router-metrics.md).

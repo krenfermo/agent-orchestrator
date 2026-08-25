@@ -145,6 +145,8 @@ type Span struct {
 	scan         SourceScan
 	scanObserved bool
 
+	routing *RoutingMetrics
+
 	usage         domain.UsageMetricTotals
 	usageObserved bool
 
@@ -220,6 +222,37 @@ func (s *Span) ObserveContextBytes(bytes int64) {
 	defer s.mu.Unlock()
 	s.contextBytes += bytes
 	s.contextObserved = true
+}
+
+// ObserveContextRouting records what the role-aware context router decided for
+// this dispatch. It is how the routing block reaches an evidence record, and
+// it is additive: a dispatch that never calls it produces exactly the record
+// it produced before routing existed, except for the disabled-routing block
+// build derives from the payload size when there is one to derive it from.
+//
+// The last call wins. A dispatch surface routes its payload once, so a second
+// call means a caller changed its mind about what it sent, and the record
+// should describe what was sent rather than the first guess.
+func (s *Span) ObserveContextRouting(routing RoutingMetrics) {
+	if s == nil {
+		return
+	}
+	normalized := routing.normalized()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.routing = &normalized
+}
+
+// ObserveRoutingFromContext records the routing block a dispatch call carries
+// in its context, if it carries one, and reports whether it did. It is the
+// bridge between the two independent dispatch wrappers — see WithRouting.
+func (s *Span) ObserveRoutingFromContext(ctx stdctx.Context) bool {
+	routing, ok := RoutingFromContext(ctx)
+	if !ok {
+		return false
+	}
+	s.ObserveContextRouting(routing)
+	return true
 }
 
 // ObserveSourceScope records how much source the dispatch's declared scope
@@ -379,6 +412,7 @@ func (s *Span) build(dispatchErr error) EvidenceRecord {
 			Succeeded:   dispatchErr == nil,
 		},
 		Context:        s.contextMetrics(),
+		Routing:        s.routingMetrics(),
 		ProviderTokens: s.providerTokens(),
 		Tools:          s.toolMetrics(),
 		Outcomes: OutcomeLinks{
@@ -458,6 +492,26 @@ func (s *Span) contextMetrics() ContextMetrics {
 		out.ContextSentTokens = Measured(*s.usage.InputTokens, "prompt tokens reported by provider telemetry")
 	}
 	return out
+}
+
+// routingMetrics resolves the record's routing block.
+//
+// A dispatch the router shaped reports what it decided. A dispatch it did not
+// shape reports a disabled block sized by the payload that went out anyway --
+// but only when this surface actually carries that payload, because a routing
+// block whose sizes were invented would be worse than no routing block at all.
+// Every other dispatch gets no block, and the field stays absent from the
+// file exactly as it was before routing existed.
+func (s *Span) routingMetrics() *RoutingMetrics {
+	if s.routing != nil {
+		routing := *s.routing
+		return &routing
+	}
+	if !s.dispatch.Observable.ContextPayload || !s.contextObserved {
+		return nil
+	}
+	routing := RoutingDisabled(s.contextBytes, "no context router selection reached this dispatch; the full assembled payload was sent")
+	return &routing
 }
 
 func (s *Span) providerTokens() ProviderTokens {

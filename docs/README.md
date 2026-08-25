@@ -25,6 +25,7 @@ Start with [architecture.md](architecture.md) for the current backend model and
 | [stack.md](stack.md)                                   | Accepted library/runtime choices, pending stack decisions, and dependencies explicitly avoided for V1.                |
 | [telemetry.md](telemetry.md)                           | Telemetry collection, privacy safeguards, and configuration.                                                           |
 | [posthog-cost-controls.md](posthog-cost-controls.md)   | PostHog event-name migration, ingestion drop rules, and dashboard queries for reducing telemetry spend.              |
+| [context-router-metrics.md](context-router-metrics.md) | Context-selection metrics recorded alongside the baseline evidence (potential/selected/reused/new sizes, measured vs estimated) and the disabled-vs-enabled harness that fails the build when routing changes an outcome. |
 | [project-memory-baseline.md](project-memory-baseline.md) | Phase 0 project-memory baseline: the per-dispatch context/token evidence schema, its measured/estimated/unavailable labeling rule, and the harness that produces it. |
 | [project-memory-store.md](project-memory-store.md) | Durable project memory: the item schema and its provenance fields, where items live under `~/.ao`, the content-hash idempotent upsert, staleness against HEAD/file hashes, and ingesting the baseline evidence. |
 

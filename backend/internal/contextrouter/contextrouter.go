@@ -230,6 +230,14 @@ type Section struct {
 	// EstimatedTokens and Bytes size the block as packed.
 	EstimatedTokens int `json:"estimatedTokens"`
 	Bytes           int `json:"bytes"`
+	// SourceBytes is the size of the content this block was built from before
+	// any retrieval cap was applied to it — a whole caller document, say,
+	// where Bytes is the head of it that survived. It equals Bytes for a block
+	// nothing was cut from, and it is what a "how much did routing save"
+	// figure has to be measured against: comparing a packed block with itself
+	// would report a saving of zero for a document that was cut in half during
+	// retrieval.
+	SourceBytes int `json:"sourceBytes"`
 }
 
 // Dropped is one candidate section that did not make it into the payload. It
@@ -257,6 +265,14 @@ type Selection struct {
 	// figure is what the budget is measured against.
 	EstimatedTokens int `json:"estimatedTokens"`
 	EstimatedBytes  int `json:"estimatedBytes"`
+	// Considered sizes every candidate the router assembled at full length,
+	// before the budget was applied — what this dispatch could have been sent.
+	// Selected sizes what it was sent, and both are split by origin. Together
+	// they are what a context-reduction figure is computed from: a selection
+	// that reports only its own size proves it is small, not that it is
+	// smaller than what it replaced.
+	Considered Sizes `json:"considered"`
+	Selected   Sizes `json:"selected"`
 	// Budget is the role budget this selection was packed against.
 	Budget Budget `json:"budget"`
 	// Limit is the token target actually applied for this tier — the compact
