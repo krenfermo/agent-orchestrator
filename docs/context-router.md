@@ -127,5 +127,15 @@ specific correction, the command to run). Budgeting a prompt would truncate
 instructions rather than evidence, so those surfaces are left alone even though
 the router budgets their roles.
 
-If routing fails for any reason, the wrapper passes the original payload
-through: the router exists to send less, never to prevent a dispatch.
+Both routed surfaces need the checkout's **absolute root** — it is what the
+diff source runs git in and what the code graph is keyed by. The planner
+request carries it (`ProjectRecord.Path`); a `SpawnConfig` carries only a
+project id, so the spawner wrapper resolves the root through the same
+`workflow.Projects` port the coordinator already uses. A relative path is
+refused rather than resolved against the daemon's working directory.
+
+If routing fails for any reason — a source error, an unregistered project, a
+record with no absolute path, no `Projects` port wired — the wrapper passes the
+original payload through. The router exists to send less, never to prevent a
+dispatch, and a routed payload assembled without a root would be a smaller
+payload with the diff and graph evidence silently missing.

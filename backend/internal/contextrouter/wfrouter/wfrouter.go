@@ -23,6 +23,14 @@
 // are left alone even though the router budgets their roles — a role's budget
 // exists for callers that assemble context for it, including the ones a later
 // checkpoint will add.
+//
+// Both routed surfaces need the checkout's absolute root: it is what the diff
+// source runs git in and what the code graph is keyed by. The planner request
+// carries it; a worker spawn carries only a project id, so the wrapper resolves
+// the root through the same workflow.Projects port the coordinator already
+// uses. A root that cannot be resolved means the two evidence sources that
+// justify routing are both unavailable, so the wrapper sends the original
+// payload rather than a shrunken one assembled from what was left.
 package wfrouter
 
 import (
@@ -30,6 +38,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"log/slog"
+	"path/filepath"
 	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/contextrouter"
@@ -50,7 +59,7 @@ func Instrument(deps workflowcore.Deps, router *contextrouter.Router, log *slog.
 		return deps
 	}
 	deps.Planner = InstrumentPlanner(deps.Planner, router, log)
-	deps.Spawner = InstrumentSpawner(deps.Spawner, router, log)
+	deps.Spawner = InstrumentSpawner(deps.Spawner, router, deps.Projects, log)
 	return deps
 }
 
@@ -98,11 +107,18 @@ func (p *planner) Generate(ctx stdctx.Context, request workflowcore.PlannerReque
 // sending nothing because it could not decide what to send would be a strictly
 // worse outcome than the full-context behaviour it replaces.
 func (p *planner) route(ctx stdctx.Context, request workflowcore.PlannerRequest) workflowcore.PlannerRequest {
+	root, ok := routableRoot(request.Project.Path)
+	if !ok {
+		if p.log != nil {
+			p.log.Warn("context router: no checkout root, sending the unrouted planner context", "project", request.Project.ID, "path", request.Project.Path)
+		}
+		return request
+	}
 	docs := make([]contextrouter.Document, 0, len(request.Context.Documents))
 	for _, doc := range request.Context.Documents {
 		docs = append(docs, contextrouter.Document{Path: doc.Path, Content: doc.Content})
 	}
-	selection, ok := route(ctx, p.router, p.log, contextrouter.Request{
+	selection, selected := route(ctx, p.router, p.log, contextrouter.Request{
 		Role: contextrouter.RolePlanner,
 		Task: contextrouter.Task{
 			ID:        request.Project.ID,
@@ -110,11 +126,11 @@ func (p *planner) route(ctx stdctx.Context, request workflowcore.PlannerRequest)
 		},
 		Project: contextrouter.Project{
 			ID:   request.Project.ID,
-			Root: request.Project.Path,
+			Root: root,
 		},
 		Documents: docs,
 	})
-	if !ok {
+	if !selected {
 		return request
 	}
 	routed := make([]workflowcore.PlannerDocument, 0, len(selection.Sections))
@@ -143,19 +159,27 @@ func (p *planner) route(ctx stdctx.Context, request workflowcore.PlannerRequest)
 
 // spawner routes the issue context AO pre-fetches for a worker spawn.
 type spawner struct {
-	next   workflowcore.Spawner
-	router *contextrouter.Router
-	log    *slog.Logger
+	next     workflowcore.Spawner
+	router   *contextrouter.Router
+	projects workflowcore.Projects
+	log      *slog.Logger
 }
 
 // InstrumentSpawner wraps a worker-spawn path so its pre-fetched issue context
 // is routed against the worker budget. The prompt is never touched: it carries
 // the instruction, not the evidence.
-func InstrumentSpawner(next workflowcore.Spawner, router *contextrouter.Router, log *slog.Logger) workflowcore.Spawner {
+//
+// projects resolves the spawn's project id to its checkout root — the absolute
+// path the diff source runs git in and the code graph is keyed by. A spawn
+// config carries no path of its own, so without this port the two evidence
+// sources that justify routing a worker payload would both be silently
+// unavailable. A nil resolver therefore disables worker routing rather than
+// producing a payload assembled from whatever was left.
+func InstrumentSpawner(next workflowcore.Spawner, router *contextrouter.Router, projects workflowcore.Projects, log *slog.Logger) workflowcore.Spawner {
 	if next == nil || router == nil {
 		return next
 	}
-	return &spawner{next: next, router: router, log: log}
+	return &spawner{next: next, router: router, projects: projects, log: log}
 }
 
 func (s *spawner) Spawn(ctx stdctx.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
@@ -166,11 +190,15 @@ func (s *spawner) route(ctx stdctx.Context, cfg ports.SpawnConfig) ports.SpawnCo
 	if strings.TrimSpace(cfg.Prompt) == "" && strings.TrimSpace(cfg.IssueContext) == "" {
 		return cfg
 	}
+	root, ok := s.projectRoot(ctx, cfg.ProjectID)
+	if !ok {
+		return cfg
+	}
 	var docs []contextrouter.Document
 	if strings.TrimSpace(cfg.IssueContext) != "" {
 		docs = append(docs, contextrouter.Document{Path: "issue context", Content: cfg.IssueContext})
 	}
-	selection, ok := route(ctx, s.router, s.log, contextrouter.Request{
+	selection, routed := route(ctx, s.router, s.log, contextrouter.Request{
 		Role: contextrouter.RoleWorker,
 		Task: contextrouter.Task{
 			ID:        string(cfg.IssueID),
@@ -178,11 +206,12 @@ func (s *spawner) route(ctx stdctx.Context, cfg ports.SpawnConfig) ports.SpawnCo
 		},
 		Project: contextrouter.Project{
 			ID:      string(cfg.ProjectID),
+			Root:    root,
 			BaseRef: cfg.BaseRef,
 		},
 		Documents: docs,
 	})
-	if !ok {
+	if !routed {
 		return cfg
 	}
 	var b strings.Builder
@@ -203,6 +232,56 @@ func (s *spawner) route(ctx stdctx.Context, cfg ports.SpawnConfig) ports.SpawnCo
 	cfg.IssueContext = b.String()
 	logSelection(s.log, "context router: worker issue context routed", selection)
 	return cfg
+}
+
+// projectRoot resolves a spawn's project id to its checkout root, and reports
+// whether routing may proceed. Every reason it cannot — no resolver, a lookup
+// failure, an unregistered project, a record with no usable path — leaves the
+// spawn on its original full context, because a routed payload assembled
+// without a root would be a smaller payload with the diff and graph evidence
+// silently missing.
+func (s *spawner) projectRoot(ctx stdctx.Context, id domain.ProjectID) (string, bool) {
+	if s.projects == nil {
+		s.warnNoRoot(id, "no project resolver is wired", nil)
+		return "", false
+	}
+	record, found, err := s.projects.GetProject(ctx, string(id))
+	if err != nil {
+		s.warnNoRoot(id, "project lookup failed", err)
+		return "", false
+	}
+	if !found {
+		s.warnNoRoot(id, "project is not registered", nil)
+		return "", false
+	}
+	root, ok := routableRoot(record.Path)
+	if !ok {
+		s.warnNoRoot(id, "project record carries no absolute checkout path", nil)
+		return "", false
+	}
+	return root, true
+}
+
+func (s *spawner) warnNoRoot(id domain.ProjectID, reason string, err error) {
+	if s.log == nil {
+		return
+	}
+	s.log.Warn("context router: no checkout root, sending the unrouted issue context", "project", string(id), "reason", reason, "err", err)
+}
+
+// routableRoot returns the cleaned checkout root a routed request may use, and
+// reports whether there is one.
+//
+// A relative path is refused rather than resolved against the daemon's working
+// directory — the same rule contextrouter.GitDiffSource and the code graph
+// apply to their own roots, restated here so an unusable root is caught at the
+// dispatch boundary instead of becoming a per-source failure inside the router.
+func routableRoot(path string) (string, bool) {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" || !filepath.IsAbs(trimmed) {
+		return "", false
+	}
+	return filepath.Clean(trimmed), true
 }
 
 // route runs the compact pass and, only when that pass reports its evidence

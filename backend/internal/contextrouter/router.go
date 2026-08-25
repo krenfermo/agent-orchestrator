@@ -376,6 +376,14 @@ func (r *Router) gatherDiff(ctx context.Context, req Request) (changes []codegra
 	if r.diff == nil {
 		return nil, "diff evidence unavailable: no diff source is configured", false
 	}
+	if strings.TrimSpace(req.Project.Root) == "" {
+		// The production diff source runs git in the checkout and refuses an
+		// empty root. Saying so here — rather than letting the source reject
+		// the call — keeps a request that simply has no checkout from looking
+		// like a retrieval that failed, which would mark the selection
+		// insufficient and buy an expansion that cannot help.
+		return nil, "diff evidence unavailable: the request carries no project root", false
+	}
 	diff, err := r.diff.Changes(ctx, req.Project)
 	if err != nil {
 		r.warn("contextrouter: diff source failed", "project", req.Project.ID, "err", err)

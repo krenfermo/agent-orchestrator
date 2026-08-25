@@ -4,6 +4,9 @@ import (
 	stdctx "context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -43,38 +46,116 @@ func (s *recordingSpawner) Spawn(_ stdctx.Context, cfg ports.SpawnConfig) (domai
 	return domain.SessionRecord{ID: domain.SessionID("sess-1")}, 0, 0, nil
 }
 
-type stubDiff struct{ changes []codegraph.FileChange }
+const testProjectRoot = "/checkout/proj-1"
 
-func (s stubDiff) Changes(stdctx.Context, contextrouter.Project) (codegraph.Diff, error) {
-	return codegraph.Diff{Changes: s.changes}, nil
+const changedFile = "backend/internal/contextrouter/router.go"
+
+// rootStrictDiff mirrors the one requirement the production
+// contextrouter.GitDiffSource imposes: it runs git inside the checkout, so an
+// empty or relative root is refused. A fake that ignored the root would let a
+// wrapper that never resolves one pass its tests while losing the evidence in
+// production.
+type rootStrictDiff struct {
+	changes []codegraph.FileChange
+	// roots records the root each call was made with, so a test can assert
+	// the resolved checkout actually reached the source.
+	roots []string
+}
+
+func (d *rootStrictDiff) Changes(_ stdctx.Context, project contextrouter.Project) (codegraph.Diff, error) {
+	d.roots = append(d.roots, project.Root)
+	if strings.TrimSpace(project.Root) == "" {
+		return codegraph.Diff{}, errors.New("contextrouter: diff needs a project root")
+	}
+	if !filepath.IsAbs(project.Root) {
+		return codegraph.Diff{}, fmt.Errorf("contextrouter: project root %q must be absolute", project.Root)
+	}
+	return codegraph.Diff{Changes: d.changes}, nil
+}
+
+// rootStrictGraph answers only for the project root it was built for, the way
+// a per-project code graph does.
+type rootStrictGraph struct {
+	root    string
+	symbols map[string][]codegraph.Symbol
+	roots   []string
+}
+
+func (g *rootStrictGraph) Query(_ stdctx.Context, req codegraph.QueryRequest) (codegraph.QueryResult, error) {
+	g.roots = append(g.roots, req.ProjectRoot)
+	if req.ProjectRoot != g.root {
+		return codegraph.QueryResult{}, codegraph.ErrNotIndexed
+	}
+	return codegraph.QueryResult{ProjectRoot: req.ProjectRoot, Symbols: g.symbols[req.File]}, nil
 }
 
 type stubMemory struct{ items []memory.MemoryItem }
 
 func (s stubMemory) List(string) ([]memory.MemoryItem, error) { return s.items, nil }
 
-func testRouter(t *testing.T) *contextrouter.Router {
-	t.Helper()
-	router, err := contextrouter.New(contextrouter.Options{
-		Diff: stubDiff{changes: []codegraph.FileChange{
-			{Status: codegraph.ChangeModified, Path: "backend/internal/contextrouter/router.go"},
+// stubProjects stands in for the workflow.Projects port the coordinator wires.
+type stubProjects struct {
+	record domain.ProjectRecord
+	found  bool
+	err    error
+	calls  int
+}
+
+func (p *stubProjects) GetProject(_ stdctx.Context, id string) (domain.ProjectRecord, bool, error) {
+	p.calls++
+	if p.err != nil {
+		return domain.ProjectRecord{}, false, p.err
+	}
+	if !p.found || p.record.ID != id {
+		return domain.ProjectRecord{}, false, nil
+	}
+	return p.record, true, nil
+}
+
+func registeredProject() *stubProjects {
+	return &stubProjects{record: domain.ProjectRecord{ID: "proj-1", Path: testProjectRoot}, found: true}
+}
+
+func testSources() (contextrouter.Options, *rootStrictDiff, *rootStrictGraph) {
+	diff := &rootStrictDiff{changes: []codegraph.FileChange{
+		{Status: codegraph.ChangeModified, Path: changedFile},
+	}}
+	graph := &rootStrictGraph{root: testProjectRoot, symbols: map[string][]codegraph.Symbol{
+		changedFile: {{
+			ID: changedFile + "#function:Select", Name: "Select", Kind: codegraph.SymbolFunction,
+			File: changedFile, Line: 42,
 		}},
+	}}
+	return contextrouter.Options{
+		Diff:  diff,
+		Graph: graph,
 		Memory: stubMemory{items: []memory.MemoryItem{{
 			ID: "mem-1", Project: "proj-1", Type: memory.TypeNote, Confidence: 0.7,
 			Content: "the daemon's loopback listener stays unauthenticated",
-			Source:  memory.Source{Kind: memory.SourceManual, Path: "backend/internal/contextrouter/router.go"},
+			Source:  memory.Source{Kind: memory.SourceManual, Path: changedFile},
 		}}},
-	})
+	}, diff, graph
+}
+
+func newRouter(t *testing.T, opts contextrouter.Options) *contextrouter.Router {
+	t.Helper()
+	router, err := contextrouter.New(opts)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return router
 }
 
+func testRouter(t *testing.T) *contextrouter.Router {
+	t.Helper()
+	opts, _, _ := testSources()
+	return newRouter(t, opts)
+}
+
 func plannerRequest() workflowcore.PlannerRequest {
 	return workflowcore.PlannerRequest{
 		Objective: "Add a role-aware context router.",
-		Project:   domain.ProjectRecord{ID: "proj-1", Path: "/checkout/proj-1"},
+		Project:   domain.ProjectRecord{ID: "proj-1", Path: testProjectRoot},
 		Context: workflowcore.PlannerContext{
 			Version:   workflowcore.PlannerContextVersion,
 			ProjectID: "proj-1",
@@ -108,7 +189,7 @@ func TestNilRouterLeavesDispatchUntouched(t *testing.T) {
 	if InstrumentPlanner(planner, nil, nil) != workflowcore.Planner(planner) {
 		t.Fatal("InstrumentPlanner wrapped with a nil router")
 	}
-	if InstrumentSpawner(spawner, nil, nil) != workflowcore.Spawner(spawner) {
+	if InstrumentSpawner(spawner, nil, registeredProject(), nil) != workflowcore.Spawner(spawner) {
 		t.Fatal("InstrumentSpawner wrapped with a nil router")
 	}
 
@@ -218,7 +299,9 @@ func TestPlannerDescriptorSurvivesTheWrapper(t *testing.T) {
 // the instruction rather than the evidence, is not touched.
 func TestSpawnIssueContextIsRoutedAndPromptIsNot(t *testing.T) {
 	spawner := &recordingSpawner{}
-	wrapped := InstrumentSpawner(spawner, testRouter(t), nil)
+	opts, diff, graph := testSources()
+	projects := registeredProject()
+	wrapped := InstrumentSpawner(spawner, newRouter(t, opts), projects, nil)
 	cfg := ports.SpawnConfig{
 		ProjectID:    "proj-1",
 		IssueID:      "issue-7",
@@ -238,13 +321,35 @@ func TestSpawnIssueContextIsRoutedAndPromptIsNot(t *testing.T) {
 	if !strings.Contains(got.IssueContext, "issue context") {
 		t.Fatalf("the routed issue context lost the caller's own document: %q", got.IssueContext)
 	}
-	if !strings.Contains(got.IssueContext, "Changed files") {
+	if !strings.Contains(got.IssueContext, "Changed files") || !strings.Contains(got.IssueContext, changedFile) {
 		t.Fatalf("the routed issue context carries no diff evidence: %q", got.IssueContext)
+	}
+	if !strings.Contains(got.IssueContext, "Impacted symbols") || !strings.Contains(got.IssueContext, "Select") {
+		t.Fatalf("the routed issue context carries no graph evidence: %q", got.IssueContext)
+	}
+	// The evidence above is only reachable because the wrapper resolved the
+	// checkout root and passed it down: both sources refuse an empty one, the
+	// way the production diff source and per-project graph do.
+	if projects.calls == 0 {
+		t.Fatal("the wrapper never resolved the project root")
+	}
+	for _, root := range diff.roots {
+		if root != testProjectRoot {
+			t.Fatalf("the diff source was called with root %q, want %q", root, testProjectRoot)
+		}
+	}
+	if len(graph.roots) == 0 {
+		t.Fatal("the code graph was never queried")
+	}
+	for _, root := range graph.roots {
+		if root != testProjectRoot {
+			t.Fatalf("the code graph was queried with root %q, want %q", root, testProjectRoot)
+		}
 	}
 	if strings.Contains(got.IssueContext, cfg.Prompt) {
 		t.Fatalf("the prompt was duplicated into the issue context: %q", got.IssueContext)
 	}
-	budget := testRouter(t).BudgetFor(contextrouter.RoleWorker)
+	budget := contextrouter.DefaultBudgets().For(contextrouter.RoleWorker)
 	if tokens := (len(got.IssueContext) + 3) / 4; tokens > budget.HardCapTokens {
 		t.Fatalf("the routed issue context (%d tokens) exceeds the worker hard cap of %d", tokens, budget.HardCapTokens)
 	}
@@ -254,7 +359,7 @@ func TestSpawnIssueContextIsRoutedAndPromptIsNot(t *testing.T) {
 // route and is left alone.
 func TestSpawnWithoutContextIsUntouched(t *testing.T) {
 	spawner := &recordingSpawner{}
-	wrapped := InstrumentSpawner(spawner, testRouter(t), nil)
+	wrapped := InstrumentSpawner(spawner, testRouter(t), registeredProject(), nil)
 	cfg := ports.SpawnConfig{ProjectID: "proj-1", IssueID: "issue-7"}
 	if _, _, _, err := wrapped.Spawn(stdctx.Background(), cfg); err != nil {
 		t.Fatalf("Spawn: %v", err)
@@ -268,8 +373,9 @@ func TestSpawnWithoutContextIsUntouched(t *testing.T) {
 // and verify paths carry instructions, not assembled context.
 func TestInstrumentLeavesUnroutedSurfacesAlone(t *testing.T) {
 	deps := workflowcore.Deps{
-		Planner: &recordingPlanner{},
-		Spawner: &recordingSpawner{},
+		Planner:  &recordingPlanner{},
+		Spawner:  &recordingSpawner{},
+		Projects: registeredProject(),
 	}
 	before := deps
 	routed := Instrument(deps, testRouter(t), nil)
@@ -292,5 +398,112 @@ func TestInstrumentToleratesNilDependencies(t *testing.T) {
 	routed := Instrument(workflowcore.Deps{}, testRouter(t), nil)
 	if routed.Planner != nil || routed.Spawner != nil {
 		t.Fatalf("nil dependencies were wrapped: planner=%v spawner=%v", routed.Planner, routed.Spawner)
+	}
+}
+
+// Routing a worker spawn requires the checkout root, because the production
+// diff source runs git in it and the code graph is keyed by it. Every reason
+// the root cannot be resolved leaves the spawn on its original full context
+// rather than on a routed payload with that evidence silently missing.
+func TestSpawnIsUnroutedWithoutAResolvableRoot(t *testing.T) {
+	cases := map[string]workflowcore.Projects{
+		"no resolver wired": nil,
+		"lookup failed":     &stubProjects{err: errors.New("database is locked")},
+		"not registered":    &stubProjects{found: false},
+		"no path recorded":  &stubProjects{record: domain.ProjectRecord{ID: "proj-1"}, found: true},
+		"relative path":     &stubProjects{record: domain.ProjectRecord{ID: "proj-1", Path: "checkouts/proj-1"}, found: true},
+	}
+	for name, projects := range cases {
+		t.Run(name, func(t *testing.T) {
+			spawner := &recordingSpawner{}
+			opts, diff, graph := testSources()
+			wrapped := InstrumentSpawner(spawner, newRouter(t, opts), projects, nil)
+			cfg := ports.SpawnConfig{
+				ProjectID:    "proj-1",
+				IssueID:      "issue-7",
+				Prompt:       "Implement the router.",
+				IssueContext: strings.Repeat("tracker issue body. ", 200),
+			}
+			if _, _, _, err := wrapped.Spawn(stdctx.Background(), cfg); err != nil {
+				t.Fatalf("Spawn: %v", err)
+			}
+			if spawner.got.IssueContext != cfg.IssueContext || spawner.got.Prompt != cfg.Prompt {
+				t.Fatalf("an unroutable spawn was rewritten anyway: %+v", spawner.got)
+			}
+			if len(diff.roots) != 0 {
+				t.Fatalf("the diff source was consulted without a root: %v", diff.roots)
+			}
+			if len(graph.roots) != 0 {
+				t.Fatalf("the code graph was consulted without a root: %v", graph.roots)
+			}
+		})
+	}
+}
+
+// Instrument is what hands the spawner its project resolver; without that
+// wiring every enabled worker dispatch would silently fall back to full
+// context.
+func TestInstrumentWiresTheProjectResolverIntoTheSpawner(t *testing.T) {
+	cfg := ports.SpawnConfig{
+		ProjectID:    "proj-1",
+		IssueID:      "issue-7",
+		Prompt:       "Implement the router.",
+		IssueContext: strings.Repeat("tracker issue body. ", 200),
+	}
+
+	spawner := &recordingSpawner{}
+	opts, diff, _ := testSources()
+	routed := Instrument(workflowcore.Deps{Spawner: spawner, Projects: registeredProject()}, newRouter(t, opts), nil)
+	if _, _, _, err := routed.Spawner.Spawn(stdctx.Background(), cfg); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if !strings.Contains(spawner.got.IssueContext, changedFile) {
+		t.Fatalf("Instrument did not pass the resolver through; routing lost its diff evidence: %q", spawner.got.IssueContext)
+	}
+	if len(diff.roots) == 0 || diff.roots[0] != testProjectRoot {
+		t.Fatalf("the resolved root did not reach the diff source: %v", diff.roots)
+	}
+
+	// Without a Projects port in Deps there is no root to resolve, so the
+	// spawn keeps its original context.
+	bare := &recordingSpawner{}
+	bareOpts, bareDiff, _ := testSources()
+	unresolvable := Instrument(workflowcore.Deps{Spawner: bare}, newRouter(t, bareOpts), nil)
+	if _, _, _, err := unresolvable.Spawner.Spawn(stdctx.Background(), cfg); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if bare.got.IssueContext != cfg.IssueContext {
+		t.Fatalf("a spawn with no project resolver was routed anyway: %q", bare.got.IssueContext)
+	}
+	if len(bareDiff.roots) != 0 {
+		t.Fatalf("the diff source was consulted with no resolver: %v", bareDiff.roots)
+	}
+}
+
+// The planner carries its own checkout path, and the same rule applies to it:
+// no absolute root, no routing.
+func TestPlannerIsUnroutedWithoutAnAbsoluteRoot(t *testing.T) {
+	for name, path := range map[string]string{"empty": "", "relative": "checkouts/proj-1"} {
+		t.Run(name, func(t *testing.T) {
+			planner := &recordingPlanner{}
+			opts, diff, _ := testSources()
+			wrapped := InstrumentPlanner(planner, newRouter(t, opts), nil)
+			request := plannerRequest()
+			request.Project.Path = path
+			if _, err := wrapped.Generate(stdctx.Background(), request); err != nil {
+				t.Fatalf("Generate: %v", err)
+			}
+			if len(planner.got.Context.Documents) != len(request.Context.Documents) {
+				t.Fatalf("an unroutable planner request was rewritten: %d documents, want %d", len(planner.got.Context.Documents), len(request.Context.Documents))
+			}
+			for i, doc := range planner.got.Context.Documents {
+				if doc != request.Context.Documents[i] {
+					t.Fatalf("document %d was altered without a checkout root: %+v", i, doc)
+				}
+			}
+			if len(diff.roots) != 0 {
+				t.Fatalf("the diff source was consulted without a root: %v", diff.roots)
+			}
+		})
 	}
 }

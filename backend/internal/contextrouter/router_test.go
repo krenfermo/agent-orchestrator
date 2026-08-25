@@ -594,3 +594,52 @@ func TestCanceledContextIsRefused(t *testing.T) {
 		t.Fatalf("got %v, want context.Canceled", err)
 	}
 }
+
+// A request with no checkout root cannot carry diff or graph evidence: both
+// sources are keyed by the root, and the production diff source refuses an
+// empty one. That is reported as unavailable evidence, not as a retrieval
+// failure — marking it a failure would make the selection insufficient and buy
+// an expansion that cannot possibly help.
+func TestMissingProjectRootIsNotedNotFailed(t *testing.T) {
+	opts := fullSources()
+	opts.Memory = &fakeMemory{items: []memory.MemoryItem{{
+		ID: "mem-small", Project: "proj-1", Type: memory.TypeNote, Confidence: 0.4,
+		Content: "small fact", Source: memory.Source{Kind: memory.SourceManual},
+	}}}
+	diff := opts.Diff.(*fakeDiff)
+	graph := opts.Graph.(*fakeGraph)
+	router := newTestRouter(t, opts)
+
+	selection, err := router.Select(context.Background(), Request{
+		Role:    RoleWorker,
+		Task:    testTask(),
+		Project: Project{ID: "proj-1"},
+	})
+	if err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	if diff.calls != 0 {
+		t.Fatalf("the diff source was consulted without a root: %d call(s)", diff.calls)
+	}
+	if graph.calls != 0 {
+		t.Fatalf("the code graph was consulted without a root: %d call(s)", graph.calls)
+	}
+	notes := strings.Join(selection.Notes, " | ")
+	if !strings.Contains(notes, "diff evidence unavailable: the request carries no project root") {
+		t.Fatalf("notes %q do not report the missing root for the diff", notes)
+	}
+	if !strings.Contains(notes, "graph evidence unavailable: the request carries no project root") {
+		t.Fatalf("notes %q do not report the missing root for the graph", notes)
+	}
+	if !selection.EvidenceSufficient {
+		t.Fatal("a missing root is a request that cannot carry that evidence, not a failed retrieval")
+	}
+	if selection.Expandable {
+		t.Fatal("a selection with no root to retrieve from advertised an expansion that cannot help")
+	}
+	for _, section := range selection.Sections {
+		if section.Kind == SectionDiff || section.Kind == SectionGraph {
+			t.Fatalf("evidence was produced without a checkout root: %+v", section)
+		}
+	}
+}
