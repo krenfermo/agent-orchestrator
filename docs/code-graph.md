@@ -19,7 +19,7 @@ type CodeGraphProvider interface {
 ```
 
 Rules an adapter must honor (the full contract is documented on the interface
-in `provider.go`):
+in `codegraph.go`):
 
 - Every method keys its state by `ProjectRoot`. Indexing project A must never
   observe, mutate, or return project B's entries. An empty, relative, or
