@@ -14,12 +14,16 @@ import (
 	plannercommand "github.com/aoagents/agent-orchestrator/backend/internal/adapters/planner/command"
 	workspacerouter "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/router"
 	"github.com/aoagents/agent-orchestrator/backend/internal/branchlock"
+	"github.com/aoagents/agent-orchestrator/backend/internal/codegraph"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+	"github.com/aoagents/agent-orchestrator/backend/internal/contextrouter"
+	"github.com/aoagents/agent-orchestrator/backend/internal/contextrouter/wfrouter"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/integration"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory/wfdispatch"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	projectmemorystore "github.com/aoagents/agent-orchestrator/backend/internal/projectmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/providerpreflight"
 	"github.com/aoagents/agent-orchestrator/backend/internal/providerruntime"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
@@ -280,6 +284,14 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 	// had available and what it consumed. Off by default, and a wrapper never
 	// changes what it wraps -- see internal/observe/projectmemory.
 	deps = wfdispatch.Instrument(deps, projectMemoryBaselineRecorder(log), log)
+	// Role-aware context routing: when enabled, the two surfaces where AO
+	// itself assembles a context payload (the planner's documents, a worker
+	// spawn's pre-fetched issue context) send a bounded, role-budgeted
+	// selection instead of everything they hold. Off by default -- a disabled
+	// flag yields a nil router, and wfrouter.Instrument then hands the
+	// dependencies back untouched, so provider adapters keep receiving today's
+	// full context.
+	deps = wfrouter.Instrument(deps, contextRouterFor(log), log)
 	coordinator := workflowcore.New(deps)
 	return coordinator, workflowsvc.New(coordinator), wakeScheduler
 }
@@ -312,6 +324,64 @@ func projectMemoryBaselineRecorder(log *slog.Logger) *projectmemory.Recorder {
 		log.Info("project-memory baseline: recording agent dispatch evidence", "dir", sink.Root())
 	}
 	return projectmemory.NewRecorder(sink)
+}
+
+// contextRouterFor builds the role-aware context router when
+// contextrouter.FlagEnv opts in, and returns nil otherwise -- nil meaning
+// wfrouter.Instrument hands the dependencies back untouched and dispatch keeps
+// its pre-existing full-context behavior.
+//
+// Every evidence source is optional and failing to build one only costs that
+// source: a router with a diff but no code graph still routes, and says so in
+// the selection's notes. A misconfigured budget override, by contrast,
+// disables routing entirely -- an operator who mistyped a budget must get the
+// old behavior and a warning, not a payload sized by a budget they did not
+// write.
+func contextRouterFor(log *slog.Logger) *contextrouter.Router {
+	if !contextrouter.Enabled() {
+		return nil
+	}
+	budgets, err := contextrouter.BudgetsFromEnv()
+	if err != nil {
+		if log != nil {
+			log.Warn("context router: disabled, budget override rejected", "env", contextrouter.BudgetEnv, "err", err)
+		}
+		return nil
+	}
+	opts := contextrouter.Options{
+		Budgets: budgets,
+		Diff:    contextrouter.NewGitDiffSource(),
+		Log:     log,
+	}
+	if store, storeErr := codegraph.NewDefaultStore(); storeErr != nil {
+		if log != nil {
+			log.Warn("context router: graph evidence unavailable", "err", storeErr)
+		}
+	} else if indexer, indexErr := codegraph.NewNativeIndexer(store); indexErr != nil {
+		if log != nil {
+			log.Warn("context router: graph evidence unavailable", "err", indexErr)
+		}
+	} else {
+		opts.Graph = indexer
+	}
+	if memory, memErr := projectmemorystore.NewDefaultStore(); memErr != nil {
+		if log != nil {
+			log.Warn("context router: memory evidence unavailable", "err", memErr)
+		}
+	} else {
+		opts.Memory = memory
+	}
+	router, err := contextrouter.New(opts)
+	if err != nil {
+		if log != nil {
+			log.Warn("context router: disabled", "err", err)
+		}
+		return nil
+	}
+	if log != nil {
+		log.Info("context router: routing agent dispatch context", "budgets", budgets.Describe())
+	}
+	return router
 }
 
 // taskWorkspaces builds the worktree lifecycle manager, or nil if it cannot be
