@@ -2,6 +2,7 @@ package workflow
 
 import (
 	stdctx "context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -69,8 +70,7 @@ func (c *Coordinator) observeReviewStep(ctx stdctx.Context, run domain.WorkflowR
 			"ambiguous_review_state: review run referenced by this step no longer exists", "")
 	}
 
-	switch reviewRun.Status {
-	case domain.ReviewRunRunning:
+	if reviewRun.Status == domain.ReviewRunRunning {
 		latestCP, hasCP, cperr := c.store.GetLatestWorkflowCheckpointByStep(ctx, step.ID)
 		if cperr != nil {
 			return step, cperr
@@ -90,97 +90,124 @@ func (c *Coordinator) observeReviewStep(ctx stdctx.Context, run domain.WorkflowR
 		}
 		// Still genuinely working (or too fresh to judge): no change.
 		return step, nil
+	}
 
-	case domain.ReviewRunComplete, domain.ReviewRunDelivered:
-		switch reviewRun.Verdict {
-		case domain.VerdictApproved:
-			return c.recordReviewOutcome(ctx, run, step, domain.WorkflowStepCompleted, domain.WorkflowRunWaiting, "verify", string(reviewRun.Verdict), "")
-		case domain.VerdictChangesRequested:
-			// 8C->8D revision: a changes_requested verdict used to send the
-			// review step straight to "completed" (a terminal state with zero
-			// outgoing transitions), which made a second review cycle for the
-			// same step impossible. Checkpoint 8D instead rests the review
-			// step at "waiting" (non-terminal): running -> waiting -> running
-			// (cycle N+1) -> waiting -> ... until either an approved verdict
-			// lands (-> completed, final) or the fix budget is exhausted
-			// (stays waiting, non-terminal, resumable later).
-			//
-			// Budget enforcement lives here, at the moment a changes_requested
-			// verdict is first observed for this cycle: the count of
-			// review_runs already created for this worker session IS the
-			// cycle number this verdict just concluded (reused, not a new
-			// counter column). If it has reached policy.MaxFixCycles, the
-			// loop must hard-stop rather than dispatch another fix — next_action
-			// becomes the literal "human_attention" and the run moves to
-			// needs_attention, but the review (and, separately, the fix) step
-			// itself is not "failed": the work it already did is not wrong,
-			// the loop simply ran out of budget.
-			cycleCount := 0
-			if c.reviewRuns != nil {
-				if runs, err := c.reviewRuns.ListReviewRunsBySession(ctx, reviewRun.SessionID); err == nil {
-					for _, r := range runs {
-						if r.Harness == reviewRun.Harness {
-							cycleCount++
-						}
+	updated, handled, err := c.applyTerminalReviewRun(ctx, run, step, reviewRun)
+	if err != nil {
+		return step, err
+	}
+	if handled {
+		return updated, nil
+	}
+	// Unknown/unspecified status: make no change rather than guess.
+	return step, nil
+}
+
+// applyTerminalReviewRun applies whatever a review run has durably CONCLUDED to
+// its step: a verdict, or an ending without one. handled is false when the run
+// has concluded nothing yet, in which case the caller must leave the step alone.
+//
+// It is a function rather than three switch arms because two callers need it.
+// The obvious one is observation. The other is the reviewer-stall path, which
+// has to be able to say "my cancellation lost — this review actually finished"
+// and then apply that finish by exactly the route an on-time one takes. Two
+// copies of this decision would be two different answers to "what does this
+// verdict mean", and the stall path would be the copy nobody maintained.
+func (c *Coordinator) applyTerminalReviewRun(
+	ctx stdctx.Context,
+	run domain.WorkflowRun,
+	step domain.WorkflowStep,
+	reviewRun domain.ReviewRun,
+) (domain.WorkflowStep, bool, error) {
+	// The verdict decides first, and it is read through EffectiveVerdict so that
+	// a reviewer's answer drives the same cascade whichever column holds it.
+	// Before this, an ADOPTED late `changes_requested` reached here on a run
+	// whose `verdict` column is empty by design, fell through to the status
+	// switch, and was applied as "the review run ended as cancelled" — failing
+	// the step instead of dispatching the fix its findings were asking for.
+	switch reviewRun.EffectiveVerdict() {
+	case domain.VerdictApproved:
+		updated, err := c.recordReviewOutcome(ctx, run, step,
+			domain.WorkflowStepCompleted, domain.WorkflowRunWaiting, "verify", string(reviewRun.EffectiveVerdict()), "")
+		return updated, true, err
+
+	case domain.VerdictChangesRequested:
+		// 8C->8D revision: a changes_requested verdict used to send the
+		// review step straight to "completed" (a terminal state with zero
+		// outgoing transitions), which made a second review cycle for the
+		// same step impossible. Checkpoint 8D instead rests the review
+		// step at "waiting" (non-terminal): running -> waiting -> running
+		// (cycle N+1) -> waiting -> ... until either an approved verdict
+		// lands (-> completed, final) or the fix budget is exhausted
+		// (stays waiting, non-terminal, resumable later).
+		//
+		// Budget enforcement lives here, at the moment a changes_requested
+		// verdict is first observed for this cycle: the count of
+		// review_runs already created for this worker session IS the
+		// cycle number this verdict just concluded (reused, not a new
+		// counter column). If it has reached policy.MaxFixCycles, the
+		// loop must hard-stop rather than dispatch another fix.
+		cycleCount := 0
+		if c.reviewRuns != nil {
+			if runs, err := c.reviewRuns.ListReviewRunsBySession(ctx, reviewRun.SessionID); err == nil {
+				for _, r := range runs {
+					if r.Harness == reviewRun.Harness {
+						cycleCount++
 					}
 				}
 			}
-			policy := policyForRun(run)
-			// Checkpoint 8P-E.12: this comparison used to be `>=`, while
-			// maybeDispatchFix's own budget guard (cascade.go) used `>`. With
-			// MaxFixCycles=3 the two disagreed at exactly cycle 3: this
-			// function moved the run to needs_attention with
-			// next_action "human_attention", and the very same cascade call
-			// then dispatched fix cycle 3 anyway — which is legal, since the
-			// policy allows three fix cycles. The run therefore sat in
-			// needs_attention while AO kept working, which is precisely the
-			// "human_attention does not mean the user is needed" report this
-			// checkpoint exists to end. MaxFixCycles is documented as how many
-			// fix cycles the loop MAY run, so `>` is the correct reading and
-			// the two guards now agree exactly.
-			if cycleCount > 0 && cycleCount > policy.MaxFixCycles {
-				// Checkpoint 8P-E.13: this is the exact stop that stranded
-				// wf-3220567f. recordReviewOutcome tried to carry
-				// fix_budget_exhausted on the review step's latest attempt row
-				// — but review dispatch never creates workflow_attempts rows,
-				// so GetLatestWorkflowAttempt found nothing and the class was
-				// silently dropped. The only durable trace left was a
-				// "review_observed" checkpoint, which names what AO was doing,
-				// not why it stopped. stopReview records the canonical reason
-				// as its own checkpoint instead, so the stop is explainable
-				// from durable state alone regardless of whether an attempt row
-				// happens to exist.
-				return c.stopReview(ctx, run, step, ReasonFixBudgetExhausted,
-					fmt.Sprintf("fix_budget_exhausted: the reviewer still requests changes after %d review cycles (max_fix_cycles=%d)", cycleCount, policy.MaxFixCycles),
-					string(reviewRun.Verdict), domain.WorkflowErrorFixBudgetExhausted)
-			}
-			// Within budget: rest at waiting. next_action "fix" is
-			// informational only here — the actual fix dispatch happens from
-			// the coordinator's cascade orchestration (workflow.go's
-			// advanceReviewFixCycle), which GetRun/Reconcile/ContinueRun all
-			// invoke within the same call, per Checkpoint 8D's automatic-
-			// progression design.
-			return c.recordReviewOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunWaiting, "fix", string(reviewRun.Verdict), "")
-		default:
-			// Complete/delivered with an empty/invalid verdict should not
-			// happen given submitOne's own validation, but defend anyway
-			// rather than silently treating it as approved.
-			return c.stopReviewAmbiguous(ctx, run, step, ReasonReviewStateAmbiguous,
-				"ambiguous_review_state: review run completed with no valid verdict", string(reviewRun.Verdict))
 		}
+		policy := policyForRun(run)
+		// Checkpoint 8P-E.12: `>` rather than `>=`, so this guard and
+		// maybeDispatchFix's own budget guard (cascade.go) agree exactly.
+		// MaxFixCycles is how many fix cycles the loop MAY run.
+		if cycleCount > 0 && cycleCount > policy.MaxFixCycles {
+			// Checkpoint 8P-E.13: stopReview records the canonical reason
+			// as its own checkpoint, so the stop is explainable from
+			// durable state alone regardless of whether an attempt row
+			// happens to exist (review dispatch never creates one).
+			updated, err := c.stopReview(ctx, run, step, ReasonFixBudgetExhausted,
+				fmt.Sprintf("fix_budget_exhausted: the reviewer still requests changes after %d review cycles (max_fix_cycles=%d)", cycleCount, policy.MaxFixCycles),
+				string(reviewRun.EffectiveVerdict()), domain.WorkflowErrorFixBudgetExhausted)
+			return updated, true, err
+		}
+		// Within budget: rest at waiting. next_action "fix" is
+		// informational only here — the actual fix dispatch happens from
+		// the coordinator's cascade orchestration (workflow.go's
+		// advanceReviewFixCycle), which GetRun/Reconcile/ContinueRun all
+		// invoke within the same call, per Checkpoint 8D's automatic-
+		// progression design.
+		updated, err := c.recordReviewOutcome(ctx, run, step,
+			domain.WorkflowStepWaiting, domain.WorkflowRunWaiting, "fix", string(reviewRun.EffectiveVerdict()), "")
+		return updated, true, err
+
+	}
+
+	// No verdict of any kind. What the run's own status says it became is then
+	// the whole answer.
+	switch reviewRun.Status {
+	case domain.ReviewRunComplete, domain.ReviewRunDelivered:
+		// Concluded with an empty/invalid verdict should not happen given
+		// submitOne's own validation, but defend anyway rather than silently
+		// treating it as approved.
+		updated, err := c.stopReviewAmbiguous(ctx, run, step, ReasonReviewStateAmbiguous,
+			"ambiguous_review_state: review run completed with no valid verdict", string(reviewRun.Verdict))
+		return updated, true, err
 
 	case domain.ReviewRunFailed, domain.ReviewRunCancelled:
-		step, err := c.recordReviewOutcome(ctx, run, step, domain.WorkflowStepFailed, domain.WorkflowRunNeedsAttention,
-			fmt.Sprintf("review run ended as %s", reviewRun.Status), string(reviewRun.Verdict), domain.WorkflowErrorReviewerLaunchFailed)
+		updated, err := c.recordReviewOutcome(ctx, run, step,
+			domain.WorkflowStepFailed, domain.WorkflowRunNeedsAttention,
+			fmt.Sprintf("review run ended as %s", reviewRun.Status), string(reviewRun.Verdict),
+			domain.WorkflowErrorReviewerLaunchFailed)
 		if err != nil {
-			return step, err
+			return updated, true, err
 		}
-		c.recordAttentionStop(ctx, run, &step.ID, ReasonReviewerLaunchFailed, fmt.Sprintf("review run ended as %s", reviewRun.Status))
-		return step, nil
+		c.recordAttentionStop(ctx, run, &updated.ID, ReasonReviewerLaunchFailed,
+			fmt.Sprintf("review run ended as %s", reviewRun.Status))
+		return updated, true, nil
 
 	default:
-		// Unknown/unspecified status: make no change rather than guess.
-		return step, nil
+		return step, false, nil
 	}
 }
 
@@ -387,16 +414,81 @@ func (c *Coordinator) reviewerSessionStalled(ctx stdctx.Context, reviewRun domai
 // reviewer_capacity wake. No new fallback-selection logic to duplicate or
 // drift from the dispatch-time path.
 func (c *Coordinator) handleReviewerCapacityStall(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, reviewRun domain.ReviewRun, now time.Time) (domain.WorkflowStep, error) {
+	if c.reviewRuns == nil {
+		return step, nil
+	}
+
+	// THE CANCELLATION, and then the only thing that decides what follows: what
+	// this review run actually BECAME.
+	//
+	// A reviewer AO has judged stalled may be submitting its verdict in the same
+	// instant — that is the whole shape of this race, and the submit side is
+	// already built for it. CancelRunningReviewRunsBySessionAndHarness is
+	// CAS-guarded in SQL on `status='running' AND verdict=''`, so a verdict that
+	// landed first leaves it matching nothing.
+	//
+	// This used to discard both the row count and the error and park the step
+	// regardless. That produced the one state from which nothing recovers: a
+	// review run durably COMPLETE with an approval, and its workflow parked at
+	// `waiting` under review_capacity_retry — invisible to observation (which
+	// only looks at running steps), and read as intact by authority
+	// reconciliation (a run with a verdict still speaks). The approval was never
+	// applied and the run never moved again.
+	//
+	// The row count alone would not be proof either: the cancel is keyed by
+	// (session, harness), not by this run's id, so it can report rows for a
+	// sibling run. The durable proof is re-reading THIS run.
+	if _, cerr := c.reviewRuns.CancelRunningReviewRunsBySessionAndHarness(ctx, reviewRun.SessionID, reviewRun.Harness,
+		"reviewer_capacity: session went idle with no verdict after dispatch — treated as provider capacity exhaustion, never fabricated as an approved verdict from pane text"); cerr != nil {
+		// AO cannot prove the cancellation won, so it may not act as if it did.
+		// The step is left exactly as it was and the next observation pass tries
+		// again — a stall that is still true in three seconds is still true,
+		// while a step parked over a verdict AO never applied is permanent.
+		if c.log != nil {
+			c.log.Warn("workflow: could not close out a stalled review run; leaving the step untouched",
+				"run", run.ID, "step", step.ID, "reviewRun", reviewRun.ID, "err", cerr)
+		}
+		return step, nil
+	}
+
+	fresh, found, ferr := c.reviewRuns.GetReviewRun(ctx, reviewRun.ID)
+	if ferr != nil {
+		return step, ferr
+	}
+	if !found {
+		return step, nil
+	}
+	if fresh.Status != domain.ReviewRunCancelled {
+		// The cancellation did not win this run. Whatever it became instead is
+		// authoritative, and it is applied by exactly the route an on-time
+		// conclusion takes — including an approval, which completes the step
+		// here and now rather than being stranded behind a retry nobody needs.
+		//
+		// `handled` false means it concluded nothing after all (still running):
+		// no verdict to apply, and no proof the cancellation won, so nothing is
+		// parked and nothing is retried.
+		updated, handled, aerr := c.applyTerminalReviewRun(ctx, run, step, fresh)
+		if aerr != nil {
+			return step, aerr
+		}
+		if handled {
+			if c.log != nil {
+				c.log.Info("workflow: a stalled reviewer had in fact concluded; its verdict wins over the cancellation",
+					"run", run.ID, "step", step.ID, "reviewRun", fresh.ID,
+					"status", fresh.Status, "verdict", fresh.Verdict)
+			}
+			return updated, nil
+		}
+		return step, nil
+	}
+
+	// Only now, with the cancellation durably proven to have won, is this a
+	// capacity stall: record the provider health failure and park for the retry.
 	harness := domain.AgentHarness(reviewRun.Harness)
 	_, owner, profileID, _ := c.resolveRuntimeEnv(ctx, run.ID, harness)
 	scope := healthScope{userID: owner, profileID: profileID}
 	classification := ProviderFailureClassification{Class: domain.WorkflowErrorCapacityExhausted, Certainty: CertaintyInferred, Eligible: true}
 	c.recordAgentHealthFailure(ctx, harness, scope, classification, now)
-
-	if c.reviewRuns != nil {
-		_, _ = c.reviewRuns.CancelRunningReviewRunsBySessionAndHarness(ctx, reviewRun.SessionID, reviewRun.Harness,
-			"reviewer_capacity: session went idle with no verdict after dispatch — treated as provider capacity exhaustion, never fabricated as an approved verdict from pane text")
-	}
 
 	if domain.ValidWorkflowStepTransition(step.State, domain.WorkflowStepWaiting) {
 		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, step.State, domain.WorkflowStepWaiting, now); err != nil {
@@ -418,20 +510,49 @@ func (c *Coordinator) handleReviewerCapacityStall(ctx stdctx.Context, run domain
 	// and maybeDispatchFix's own Verdict!=ChangesRequested guard already
 	// makes it a safe no-op against the cancelled (empty-verdict) run in the
 	// meantime.
+	// The retry's own evidence. This used to be a sentence and a `{}` payload:
+	// "retrying per execution policy", naming neither the run it had just closed
+	// out nor the target that run was reviewing nor the provider it was using.
+	// After a restart nothing could reconstruct what was being retried from it —
+	// which is exactly what a reconciler needs (review_authority.go), and exactly
+	// what wf-756988ae's ledger could not tell anyone. Additive: the same phase
+	// and the same sentence, with the facts attached.
 	stepID := step.ID
+	runID := reviewRun.ID
+	payload, _ := json.Marshal(reviewCapacityRetryRecord{
+		ClosedRunID: reviewRun.ID,
+		Status:      string(domain.ReviewRunCancelled),
+		TargetSHA:   reviewRun.TargetSHA,
+		Harness:     string(reviewRun.Harness),
+		SessionID:   string(reviewRun.SessionID),
+		Reason:      "reviewer session went idle with no verdict after dispatch",
+	})
 	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
 		ID:                "wfc-" + c.newID(),
 		WorkflowRunID:     run.ID,
 		WorkflowStepID:    &stepID,
 		ProjectID:         run.ProjectID,
+		ReviewRunID:       &runID,
 		FingerprintBefore: reviewRun.TargetSHA,
 		NextAction:        "retry_review: reviewer session stalled without a verdict, retrying per execution policy",
 		DurablePhase:      reviewCapacityRetryDurablePhase,
 		PayloadVersion:    "v1",
-		RetryState:        "{}",
+		RetryState:        string(payload),
 		CreatedAt:         now,
 	}); err != nil {
 		return step, err
 	}
 	return step, nil
+}
+
+// reviewCapacityRetryRecord is what a capacity retry records about itself: which
+// review run it closed out, what that run was reviewing, and with which
+// provider. Enough, after a restart, to say what the retry was for.
+type reviewCapacityRetryRecord struct {
+	ClosedRunID string `json:"closedRunId"`
+	Status      string `json:"status"`
+	TargetSHA   string `json:"targetSha"`
+	Harness     string `json:"harness"`
+	SessionID   string `json:"sessionId"`
+	Reason      string `json:"reason"`
 }

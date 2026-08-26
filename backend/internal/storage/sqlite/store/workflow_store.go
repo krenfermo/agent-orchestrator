@@ -596,10 +596,44 @@ func (s *Store) CreateWorkflowCheckpoint(ctx context.Context, cp domain.Workflow
 		FingerprintBefore: cp.FingerprintBefore,
 		FingerprintAfter:  cp.FingerprintAfter,
 	})
+	if isSQLiteUnique(err) {
+		// Only a uniqueness-constrained phase can land here — the review
+		// authority claim/receipt phases from migration 0135. Surfaced as a
+		// sentinel so its one caller can read it as "another reconciler already
+		// claimed this replacement" instead of as a storage failure.
+		return domain.WorkflowCheckpoint{}, fmt.Errorf(
+			"insert workflow checkpoint for run %s phase %s: %w",
+			cp.WorkflowRunID, cp.DurablePhase, domain.ErrDuplicateWorkflowCheckpoint)
+	}
 	if err != nil {
 		return domain.WorkflowCheckpoint{}, fmt.Errorf("insert workflow checkpoint for run %s: %w", cp.WorkflowRunID, err)
 	}
 	return workflowCheckpointFromRow(row), nil
+}
+
+// ReleaseWorkflowStepReviewRunIfNoLateVerdict clears a review step's authority
+// pointer only while the run it names still has no late verdict.
+//
+// The check and the release are one statement on purpose: a reconciler that
+// tested for a late verdict and then cleared the pointer in a second call could
+// have the reviewer's verdict land between the two, orphaning a valid
+// authoritative verdict and dispatching a replacement over completed work.
+// False means the decision was stale — re-read and decide again.
+func (s *Store) ReleaseWorkflowStepReviewRunIfNoLateVerdict(
+	ctx context.Context, stepID, reviewRunID string, now time.Time,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.ReleaseWorkflowStepReviewRunIfNoLateVerdict(
+		ctx, gen.ReleaseWorkflowStepReviewRunIfNoLateVerdictParams{
+			UpdatedAt:   now,
+			ID:          stepID,
+			ReviewRunID: sql.NullString{String: reviewRunID, Valid: reviewRunID != ""},
+		})
+	if err != nil {
+		return false, fmt.Errorf("release workflow step %s review run: %w", stepID, err)
+	}
+	return rows > 0, nil
 }
 
 // ListWorkflowCheckpoints lists a run's checkpoints oldest first.

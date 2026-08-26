@@ -23,6 +23,13 @@ type fakeReviewRuns struct {
 	// insertCalls counts InsertReviewRun invocations, used to assert a
 	// review is created exactly once across repeated dispatch calls.
 	insertCalls int
+	// beforeCancelRunning fires inside CancelRunningReviewRunsBySessionAndHarness,
+	// immediately before its CAS-guarded update, so a test can make a normal
+	// verdict win that exact race rather than approximately.
+	beforeCancelRunning func()
+	// cancelErr makes the cancellation itself fail, so a test can prove AO never
+	// acts on a cancellation it could not prove.
+	cancelErr error
 	// forceDuplicate makes the next InsertReviewRun return
 	// domain.ErrDuplicateReviewRun instead of inserting, so tests can drive
 	// the dedupe-fallback path deterministically.
@@ -78,7 +85,9 @@ func (f *fakeReviewRuns) InsertReviewRun(_ context.Context, run domain.ReviewRun
 
 // byNaturalKey returns the newest run matching the natural key, mirroring the
 // real query's `ORDER BY created_at DESC LIMIT 1`. excludeFailed mirrors the
-// unique index's `status != 'failed'` predicate (insert dedupe only).
+// unique index's `status NOT IN ('failed','cancelled')` predicate (insert
+// dedupe only): a run AO closed out never wins idempotency over its own
+// replacement.
 func (f *fakeReviewRuns) byNaturalKey(key string, excludeFailed bool) (domain.ReviewRun, bool) {
 	var newest domain.ReviewRun
 	found := false
@@ -86,7 +95,15 @@ func (f *fakeReviewRuns) byNaturalKey(key string, excludeFailed bool) (domain.Re
 		if naturalKey(r.SessionID, r.PRURL, r.TargetSHA, r.Harness) != key {
 			continue
 		}
-		if excludeFailed && r.Status == domain.ReviewRunFailed {
+		// The real index is `status NOT IN ('failed','cancelled') AND (status =
+		// 'running' OR verdict NOT IN ('','changes_requested'))`. `cancelled`
+		// was missing here, and that gap hid the wf-756988ae retry: after a
+		// stall closed a run out as cancelled, the replacement's insert deduped
+		// onto the very run it was replacing, so the step was rebound to the
+		// dead review and observed straight into reviewer_launch_failed. In the
+		// real store that insert succeeds.
+		if excludeFailed &&
+			(r.Status == domain.ReviewRunFailed || r.Status == domain.ReviewRunCancelled) {
 			continue
 		}
 		if !found || r.CreatedAt.After(newest.CreatedAt) {
@@ -121,6 +138,16 @@ func (f *fakeReviewRuns) ListReviewRunsBySession(_ context.Context, id domain.Se
 // reviewer-capacity stall recovery, mirroring the real store's CAS guard
 // (status='running' AND verdict=”).
 func (f *fakeReviewRuns) CancelRunningReviewRunsBySessionAndHarness(_ context.Context, id domain.SessionID, harness domain.ReviewerHarness, body string) (int64, error) {
+	if hook := f.beforeCancelRunning; hook != nil {
+		// Deterministic interleaving point: a competing submit runs HERE, after
+		// the stall path decided to cancel and before the CAS-guarded update
+		// takes effect. Cleared first so a hook cannot recurse.
+		f.beforeCancelRunning = nil
+		hook()
+	}
+	if f.cancelErr != nil {
+		return 0, f.cancelErr
+	}
 	var n int64
 	for rid, r := range f.runs {
 		if r.SessionID == id && r.Harness == harness && r.Status == domain.ReviewRunRunning && r.Verdict == "" {
@@ -131,6 +158,34 @@ func (f *fakeReviewRuns) CancelRunningReviewRunsBySessionAndHarness(_ context.Co
 		}
 	}
 	return n, nil
+}
+
+// MarkReviewRunSupersededBy mirrors the real store's write-once guard: it names
+// the replacement that took authority over a closed-out run.
+func (f *fakeReviewRuns) MarkReviewRunSupersededBy(_ context.Context, id, supersededBy string) (bool, error) {
+	r, ok := f.runs[id]
+	if !ok || r.SupersededBy != "" || id == supersededBy {
+		return false, nil
+	}
+	r.SupersededBy = supersededBy
+	f.runs[id] = r
+	return true, nil
+}
+
+// RecordLateReviewVerdict mirrors the real store's guard: a run AO closed out
+// without a verdict, and no late verdict recorded yet. It is what makes a
+// reviewer that answered after AO stopped listening testable here.
+func (f *fakeReviewRuns) RecordLateReviewVerdict(
+	id string, verdict domain.ReviewVerdict, body string, at time.Time,
+) bool {
+	r, ok := f.runs[id]
+	if !ok || !r.TerminalWithoutVerdict() || r.LateVerdict.Valid() {
+		return false
+	}
+	stamp := at
+	r.LateVerdict, r.LateVerdictBody, r.LateVerdictAt = verdict, body, &stamp
+	f.runs[id] = r
+	return true
 }
 
 // UpdateReviewRunResult mirrors the real store's CAS guard (status='running'):
@@ -206,6 +261,9 @@ func (f *fakeReviewerLauncher) Launch(_ context.Context, req workflowcore.Review
 // 8C's review deps, all fakes.
 func newCoordinatorWithReview(spawner workflowcore.Spawner, sessionFacts workflowcore.SessionFacts, workspaceFacts workflowcore.WorkspaceFacts, reviewRuns *fakeReviewRuns, launcher *fakeReviewerLauncher) (*workflowcore.Coordinator, *fakeStore, *fakeClock) {
 	store := newFakeStore()
+	// The store's conditional release has to be able to see the run's late
+	// verdict, exactly as the real single-statement UPDATE does.
+	store.reviewRuns = reviewRuns
 	clk := &fakeClock{t: time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)}
 	var idSeq int
 	c := workflowcore.New(workflowcore.Deps{
@@ -215,6 +273,35 @@ func newCoordinatorWithReview(spawner workflowcore.Spawner, sessionFacts workflo
 		WorkspaceFacts:   workspaceFacts,
 		ReviewRuns:       reviewRuns,
 		ReviewerLauncher: launcher,
+		Clock:            clk.Now,
+		NewID: func() string {
+			idSeq++
+			return fmt.Sprintf("id%d", idSeq)
+		},
+	})
+	return c, store, clk
+}
+
+// newCoordinatorWithReviewAndMessages is newCoordinatorWithReview plus the fix
+// step's message transport, so a test can observe the prompt a fix cycle
+// actually delivers.
+func newCoordinatorWithReviewAndMessages(
+	spawner workflowcore.Spawner, sessionFacts workflowcore.SessionFacts,
+	workspaceFacts workflowcore.WorkspaceFacts, reviewRuns *fakeReviewRuns,
+	launcher *fakeReviewerLauncher, messages workflowcore.MessageSender,
+) (*workflowcore.Coordinator, *fakeStore, *fakeClock) {
+	store := newFakeStore()
+	store.reviewRuns = reviewRuns
+	clk := &fakeClock{t: time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)}
+	var idSeq int
+	c := workflowcore.New(workflowcore.Deps{
+		Store:            store,
+		Spawner:          spawner,
+		SessionFacts:     sessionFacts,
+		WorkspaceFacts:   workspaceFacts,
+		ReviewRuns:       reviewRuns,
+		ReviewerLauncher: launcher,
+		MessageSender:    messages,
 		Clock:            clk.Now,
 		NewID: func() string {
 			idSeq++

@@ -195,6 +195,47 @@ func (s *Store) CancelRunningReviewRunsBySessionAndHarness(ctx context.Context, 
 	})
 }
 
+// RecordLateReviewVerdict preserves a verdict the reviewer produced after AO had
+// already closed its run out (migration 0135).
+//
+// It returns whether this call is the one that recorded it. False means either
+// the run is not in the terminal-without-verdict state this is for, or a late
+// verdict was already recorded — both of which make a retried submit a
+// successful no-op rather than a second opinion.
+func (s *Store) RecordLateReviewVerdict(
+	ctx context.Context, id string, verdict domain.ReviewVerdict, body string, at time.Time,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.RecordLateReviewVerdict(ctx, gen.RecordLateReviewVerdictParams{
+		LateVerdict:     string(verdict),
+		LateVerdictBody: body,
+		LateVerdictAt:   sql.NullTime{Time: at, Valid: true},
+		ID:              id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("record late review verdict %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// MarkReviewRunSupersededBy names the replacement that took authority over a
+// closed-out review run, so "which review speaks for this step" is answerable
+// from durable state after a restart. Write-once; a second call is a no-op.
+func (s *Store) MarkReviewRunSupersededBy(ctx context.Context, id, supersededBy string) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.MarkReviewRunSupersededBy(ctx, gen.MarkReviewRunSupersededByParams{
+		SupersededBy: supersededBy,
+		ID:           id,
+		ID_2:         supersededBy,
+	})
+	if err != nil {
+		return false, fmt.Errorf("mark review run %s superseded: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
 // MarkReviewRunDelivered records that lifecycle delivered the worker nudge for
 // a completed AO-internal review pass.
 func (s *Store) MarkReviewRunDelivered(ctx context.Context, id string, deliveredAt time.Time) (bool, error) {
@@ -322,6 +363,11 @@ func reviewRunFromRow(r gen.ReviewRun) domain.ReviewRun {
 		t := r.DeliveredAt.Time
 		deliveredAt = &t
 	}
+	var lateVerdictAt *time.Time
+	if r.LateVerdictAt.Valid {
+		t := r.LateVerdictAt.Time
+		lateVerdictAt = &t
+	}
 	return domain.ReviewRun{
 		ID:               r.ID,
 		ReviewID:         r.ReviewID,
@@ -338,5 +384,9 @@ func reviewRunFromRow(r gen.ReviewRun) domain.ReviewRun {
 		CreatedAt:        r.CreatedAt,
 		DeliveredAt:      deliveredAt,
 		AutoInjectReview: r.AutoInjectReview,
+		LateVerdict:      domain.ReviewVerdict(r.LateVerdict),
+		LateVerdictBody:  r.LateVerdictBody,
+		LateVerdictAt:    lateVerdictAt,
+		SupersededBy:     r.SupersededBy,
 	}
 }

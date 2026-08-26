@@ -3918,10 +3918,15 @@ export interface components {
             githubReviewId: string;
             harness: string;
             id: string;
+            lateVerdict?: string;
+            /** Format: date-time */
+            lateVerdictAt?: null | string;
+            lateVerdictBody?: string;
             prUrl: string;
             reviewId: string;
             sessionId: string;
             status: string;
+            supersededBy?: string;
             targetSha: string;
             /** @enum {string} */
             triggerSource: "manual" | "auto";

@@ -148,6 +148,27 @@ UPDATE workflow_steps
 SET review_run_id = sqlc.arg(review_run_id), updated_at = sqlc.arg(updated_at)
 WHERE id = sqlc.arg(id);
 
+-- name: ReleaseWorkflowStepReviewRunIfNoLateVerdict :execrows
+-- Releases a review step's authority pointer ONLY while the run it names still
+-- has no late verdict -- one statement, so the check and the release cannot be
+-- interleaved.
+--
+-- Without this atomicity a reconciler could read "no late verdict", have the
+-- reviewer durably write one an instant later, and then clear the pointer
+-- anyway: a valid authoritative verdict orphaned, and a replacement reviewer
+-- dispatched over work that was already done. Zero rows affected means the
+-- decision is stale -- either a verdict landed or the pointer already moved --
+-- and the caller must re-read rather than proceed.
+UPDATE workflow_steps
+SET review_run_id = NULL, updated_at = sqlc.arg(updated_at)
+WHERE workflow_steps.id = sqlc.arg(id)
+  AND workflow_steps.review_run_id = sqlc.arg(review_run_id)
+  AND NOT EXISTS (
+      SELECT 1 FROM review_run AS r
+      WHERE r.id = sqlc.arg(review_run_id)
+        AND r.late_verdict != ''
+  );
+
 -- name: GetMaxWorkflowAttemptNumber :one
 SELECT CAST(COALESCE(MAX(attempt_number), 0) AS INTEGER) AS max_attempt_number
 FROM workflow_attempts

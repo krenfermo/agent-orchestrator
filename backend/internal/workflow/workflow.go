@@ -94,6 +94,12 @@ type Store interface {
 	// The methods below back Checkpoint 8B's work-step dispatch/observation.
 	UpdateWorkflowStepArtifact(ctx stdctx.Context, stepID, artifactJSON string, now time.Time) (bool, error)
 	UpdateWorkflowStepSession(ctx stdctx.Context, stepID, sessionID string, now time.Time) (bool, error)
+	// ReleaseWorkflowStepReviewRunIfNoLateVerdict clears a review step's
+	// authority pointer only while the run it names still has no late verdict —
+	// check and release in ONE statement, so a verdict landing in between cannot
+	// be orphaned. False means the decision was stale, never that it failed.
+	// See workflow/review_authority.go.
+	ReleaseWorkflowStepReviewRunIfNoLateVerdict(ctx stdctx.Context, stepID, reviewRunID string, now time.Time) (bool, error)
 	CreateWorkflowAttempt(ctx stdctx.Context, id, stepID, harness, model string, startedAt time.Time) (domain.WorkflowAttempt, error)
 	GetLatestWorkflowAttempt(ctx stdctx.Context, stepID string) (domain.WorkflowAttempt, bool, error)
 	UpdateWorkflowAttemptOutcome(ctx stdctx.Context, attemptID string, finishedAt time.Time, outcome domain.WorkflowAttemptOutcome, errorClass domain.WorkflowErrorClass) error

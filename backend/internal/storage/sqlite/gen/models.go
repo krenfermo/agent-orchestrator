@@ -439,6 +439,10 @@ type ReviewRun struct {
 	BatchID          string
 	AutoInjectReview bool
 	TriggerSource    domain.ReviewTriggerSource
+	LateVerdict      string
+	LateVerdictBody  string
+	LateVerdictAt    sql.NullTime
+	SupersededBy     string
 }
 
 type Session struct {

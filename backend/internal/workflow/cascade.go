@@ -57,6 +57,50 @@ func (c *Coordinator) advanceReviewFixCycle(ctx stdctx.Context, run domain.Workf
 		return nil
 	}
 
+	// 0. Does this step's review still speak for it?
+	//
+	// Ahead of everything below, because every step that follows acts on the
+	// step's CURRENT state and its review_run_id, and this is the one check that
+	// can tell those two are contradicting each other. observeReviewStep (step 1)
+	// only ever looks at a RUNNING step, so a step resting at `waiting` over a
+	// review AO had closed out was, before this, seen by nobody — at boot, on
+	// wake, or on any poll. That is how wf-756988ae stayed waiting forever on a
+	// review run it had itself cancelled.
+	//
+	// It launches nothing and never touches an intact pointer. See
+	// review_authority.go.
+	// Terminal review steps are included deliberately. A late approval may have
+	// completed the step just before the process died, but before the durable
+	// adoption marker was written. Reconciliation must be allowed to finish that
+	// interrupted adoption on boot; ReconcileReviewAuthority itself remains
+	// narrow and ignores every terminal step that is not in that exact shape.
+	if !run.State.Terminal() {
+		outcome, updatedStep, updatedRun, err := c.ReconcileReviewAuthority(ctx, run, *reviewStep)
+		if err != nil {
+			return run, err
+		}
+		run = updatedRun
+		*reviewStep = updatedStep
+		if outcome.Resolved() {
+			if refreshed, rerr := c.store.ListWorkflowSteps(ctx, run.ID); rerr == nil {
+				for i := range refreshed {
+					switch refreshed[i].Kind {
+					case domain.WorkflowStepWork:
+						*workStep = refreshed[i]
+					case domain.WorkflowStepReview:
+						*reviewStep = refreshed[i]
+					case domain.WorkflowStepFix:
+						*fixStep = refreshed[i]
+					case domain.WorkflowStepVerify:
+						if verifyStep != nil {
+							*verifyStep = refreshed[i]
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// 1. Observe a running review step's live verdict.
 	if !run.State.Terminal() && reviewStep.State == domain.WorkflowStepRunning {
 		updated, err := c.observeReviewStep(ctx, run, *reviewStep)
@@ -177,7 +221,11 @@ func (c *Coordinator) maybeDispatchFix(ctx stdctx.Context, run domain.WorkflowRu
 	if err != nil {
 		return fixStep, err
 	}
-	if !ok || reviewRun.Verdict != domain.VerdictChangesRequested {
+	// EffectiveVerdict, not Verdict: an ADOPTED late changes_requested is
+	// authoritative and must dispatch its fix. Reading the storage column the
+	// normal submission path uses is what let an adopted late verdict become
+	// authoritative and then drive nothing at all.
+	if !ok || reviewRun.EffectiveVerdict() != domain.VerdictChangesRequested {
 		return fixStep, nil
 	}
 
@@ -207,8 +255,9 @@ func (c *Coordinator) maybeDispatchFix(ctx stdctx.Context, run domain.WorkflowRu
 		AcceptanceCriteria: artifact.AcceptanceCriteria,
 		EffectiveSpec:      RenderEffectiveSpecification(c.effectiveTaskSpecification(ctx, run, artifact.AcceptanceCriteria)),
 		ReviewRunID:        reviewRun.ID,
-		Findings:           reviewRun.Body,
-		CycleNumber:        cycleCount,
+		// The reviewer's actual findings, from whichever column carries them.
+		Findings:    reviewRun.EffectiveBody(),
+		CycleNumber: cycleCount,
 	})
 
 	// Checkpoint 8M §12/§27: the lifecycle decision itself is applied inside
@@ -249,7 +298,7 @@ func (c *Coordinator) applyFixLifecycleDecision(ctx stdctx.Context, run domain.W
 			facts := BuildTaskCheckpointSummary(TaskCheckpointSummaryInput{
 				Detail: RunDetail{Run: run}, Artifact: &artifact,
 			})
-			facts.LatestReviewFindings = reviewRun.Body
+			facts.LatestReviewFindings = reviewRun.EffectiveBody()
 			built := BuildSessionContextPack(domain.WorkflowRoleFixWorker, facts)
 			pack = &built
 			decision.ContextPackHash = built.ContentHash()

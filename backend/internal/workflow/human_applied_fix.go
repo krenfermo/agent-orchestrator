@@ -161,7 +161,7 @@ func (c *Coordinator) resumeHumanAppliedFix(ctx stdctx.Context, run domain.Workf
 	if err != nil {
 		return run, false, err
 	}
-	if !found || prevReview.Verdict != domain.VerdictChangesRequested {
+	if !found || prevReview.EffectiveVerdict() != domain.VerdictChangesRequested {
 		return run, false, nil
 	}
 

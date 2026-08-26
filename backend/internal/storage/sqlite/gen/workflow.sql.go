@@ -1087,6 +1087,42 @@ func (q *Queries) ListWorkflowStepsByRun(ctx context.Context, workflowRunID stri
 	return items, nil
 }
 
+const releaseWorkflowStepReviewRunIfNoLateVerdict = `-- name: ReleaseWorkflowStepReviewRunIfNoLateVerdict :execrows
+UPDATE workflow_steps
+SET review_run_id = NULL, updated_at = ?1
+WHERE workflow_steps.id = ?2
+  AND workflow_steps.review_run_id = ?3
+  AND NOT EXISTS (
+      SELECT 1 FROM review_run AS r
+      WHERE r.id = ?3
+        AND r.late_verdict != ''
+  )
+`
+
+type ReleaseWorkflowStepReviewRunIfNoLateVerdictParams struct {
+	UpdatedAt   time.Time
+	ID          string
+	ReviewRunID sql.NullString
+}
+
+// Releases a review step's authority pointer ONLY while the run it names still
+// has no late verdict -- one statement, so the check and the release cannot be
+// interleaved.
+//
+// Without this atomicity a reconciler could read "no late verdict", have the
+// reviewer durably write one an instant later, and then clear the pointer
+// anyway: a valid authoritative verdict orphaned, and a replacement reviewer
+// dispatched over work that was already done. Zero rows affected means the
+// decision is stale -- either a verdict landed or the pointer already moved --
+// and the caller must re-read rather than proceed.
+func (q *Queries) ReleaseWorkflowStepReviewRunIfNoLateVerdict(ctx context.Context, arg ReleaseWorkflowStepReviewRunIfNoLateVerdictParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, releaseWorkflowStepReviewRunIfNoLateVerdict, arg.UpdatedAt, arg.ID, arg.ReviewRunID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const setWorkflowStepReviewRun = `-- name: SetWorkflowStepReviewRun :execrows
 UPDATE workflow_steps
 SET review_run_id = ?1, updated_at = ?2

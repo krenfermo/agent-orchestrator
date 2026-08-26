@@ -10776,6 +10776,15 @@ components:
           type: string
         id:
           type: string
+        lateVerdict:
+          type: string
+        lateVerdictAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        lateVerdictBody:
+          type: string
         prUrl:
           type: string
         reviewId:
@@ -10783,6 +10792,8 @@ components:
         sessionId:
           type: string
         status:
+          type: string
+        supersededBy:
           type: string
         targetSha:
           type: string

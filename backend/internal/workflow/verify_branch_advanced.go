@@ -193,7 +193,7 @@ func (c *Coordinator) branchAdvancedDecision(
 	// Proof 5a — no reviewer is in flight. A review run without a verdict means
 	// a reviewer is reading this tree right now, and re-dispatching would be a
 	// second reviewer for one question.
-	if priorReview.Verdict != domain.VerdictApproved {
+	if priorReview.EffectiveVerdict() != domain.VerdictApproved {
 		return refuse("the review of this workspace is %q, not an approval that could have gone stale", priorReview.Verdict)
 	}
 

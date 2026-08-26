@@ -23,7 +23,12 @@ type fakeStore struct {
 	prs                     []domain.PullRequest
 	sessionAutoInjectReview *bool
 
-	updateCalls        int
+	updateCalls      int
+	lateVerdictCalls int
+	// beforeResultCAS fires inside UpdateReviewRunResult, immediately before the
+	// compare-and-swap takes effect, so a test can make the stall path win that
+	// race exactly rather than approximately.
+	beforeResultCAS    func(id string)
 	agentSessionUpdate int
 	markCalls          int
 	markedIDs          []string
@@ -65,7 +70,38 @@ func (f *fakeStore) GetSession(_ context.Context, id domain.SessionID) (domain.S
 	return domain.SessionRecord{ID: id, AutoInjectReview: enabled}, true, nil
 }
 
+// RecordLateReviewVerdict mirrors the real store's guard: terminal without a
+// verdict, and no late verdict already recorded.
+func (f *fakeStore) RecordLateReviewVerdict(
+	_ context.Context, id string, verdict domain.ReviewVerdict, body string, at time.Time,
+) (bool, error) {
+	apply := func(r *domain.ReviewRun) bool {
+		if r.ID != id || !r.TerminalWithoutVerdict() || r.LateVerdict.Valid() {
+			return false
+		}
+		stamp := at
+		r.LateVerdict, r.LateVerdictBody, r.LateVerdictAt = verdict, body, &stamp
+		f.lateVerdictCalls++
+		return true
+	}
+	for i := range f.batchRuns {
+		if apply(&f.batchRuns[i]) {
+			if f.run.ID == id {
+				f.run = f.batchRuns[i]
+			}
+			return true, nil
+		}
+	}
+	return apply(&f.run), nil
+}
+
 func (f *fakeStore) UpdateReviewRunResult(_ context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID string, autoInjectReview bool) (bool, error) {
+	if hook := f.beforeResultCAS; hook != nil {
+		// Deterministic interleaving point: a competing writer runs HERE, after
+		// submitOne read the run as RUNNING and before the CAS executes.
+		f.beforeResultCAS = nil
+		hook(id)
+	}
 	for i := range f.batchRuns {
 		if f.batchRuns[i].ID == id {
 			if f.batchRuns[i].Status != domain.ReviewRunRunning {
@@ -536,5 +572,69 @@ func TestReviewErrorKindClassifiesEngineSentinels(t *testing.T) {
 		if got := reviewErrorKind(c.err); got != c.want {
 			t.Errorf("%s: reviewErrorKind = %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// FINDING 1: the submit-vs-cancel race, at its narrowest.
+//
+// submitOne reads the run as RUNNING and decides to record the verdict. AO's
+// reviewer-stall path cancels that run in the instant before the CAS executes,
+// so the CAS matches nothing. Returning REVIEW_INVALID there is the production
+// bug that destroyed wf-756988ae's approval — just compressed into a few
+// milliseconds — because the verdict is no less real for having lost a race.
+//
+// The submit must re-read and preserve it as a late verdict, exactly as if the
+// run had already been terminal when the submit arrived. The cancellation is
+// injected INSIDE the store call, immediately before the CAS takes effect: an
+// exact interleaving, with no goroutine and no sleep.
+func TestSubmitPreservesTheVerdictWhenACancellationWinsTheCAS(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	st := &fakeStore{
+		ok:  true,
+		run: domain.ReviewRun{ID: "run-1", SessionID: "mer-1", PRURL: "pr1", TargetSHA: "sha1", Status: domain.ReviewRunRunning},
+	}
+	svc := New(nil, st, WithClock(func() time.Time { return now }))
+
+	st.beforeResultCAS = func(id string) {
+		if st.run.ID != id {
+			return
+		}
+		st.run.Status = domain.ReviewRunCancelled
+		st.run.Body = "reviewer_capacity: session went idle with no verdict after dispatch"
+	}
+
+	got, err := svc.Submit(context.Background(), "mer-1", "run-1",
+		domain.VerdictApproved, "no task-scoped defect found", "")
+	if err != nil {
+		t.Fatalf("SubmitReview lost the verdict to a concurrent cancellation: %v", err)
+	}
+	if got.LateVerdict != domain.VerdictApproved {
+		t.Fatalf("late verdict = %q, want the approval preserved", got.LateVerdict)
+	}
+	if got.LateVerdictAt == nil {
+		t.Fatal("the preserved verdict carries no timestamp")
+	}
+	if got.Status != domain.ReviewRunCancelled {
+		t.Fatalf("status = %q: preserving a late verdict must not make it authoritative", got.Status)
+	}
+	if got.Verdict.Valid() {
+		t.Fatalf("verdict = %q: a late verdict must never reach the authoritative column", got.Verdict)
+	}
+	if st.lateVerdictCalls != 1 {
+		t.Fatalf("late-verdict writes = %d, want exactly 1", st.lateVerdictCalls)
+	}
+
+	// Idempotent: a retried submit is a no-op, a conflicting one is refused.
+	again, err := svc.Submit(context.Background(), "mer-1", "run-1",
+		domain.VerdictApproved, "no task-scoped defect found", "")
+	if err != nil {
+		t.Fatalf("retried submit: %v", err)
+	}
+	if again.LateVerdict != domain.VerdictApproved || st.lateVerdictCalls != 1 {
+		t.Fatalf("retry was not idempotent: verdict=%q writes=%d", again.LateVerdict, st.lateVerdictCalls)
+	}
+	if _, err := svc.Submit(context.Background(), "mer-1", "run-1",
+		domain.VerdictChangesRequested, "actually no", ""); err == nil {
+		t.Fatal("a conflicting late verdict silently overwrote the one AO already held")
 	}
 }

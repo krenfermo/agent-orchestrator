@@ -53,25 +53,48 @@ UPDATE review_run SET status = 'cancelled', body = ? WHERE session_id = ? AND ha
 UPDATE review_run SET status = 'delivered', delivered_at = ? WHERE id = ? AND status = 'complete' AND delivered_at IS NULL;
 
 -- name: GetReviewRun :one
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
 FROM review_run WHERE id = ?;
 
 -- name: GetReviewRunBySessionPRAndSHA :one
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
 FROM review_run WHERE session_id = ? AND pr_url = ? AND target_sha = ? ORDER BY created_at DESC LIMIT 1;
 
 -- name: GetReviewRunBySessionPRSHAAndHarness :one
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
 FROM review_run WHERE session_id = ? AND pr_url = ? AND target_sha = ? AND harness = ? ORDER BY created_at DESC LIMIT 1;
 
 -- name: ListReviewRunsBySession :many
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
 FROM review_run WHERE session_id = ? ORDER BY created_at DESC;
 
 -- name: ListRunningReviewRunsBySession :many
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
 FROM review_run WHERE session_id = ? AND status = 'running' AND verdict = '' ORDER BY created_at DESC;
 
 -- name: ListReviewRunsByBatch :many
-SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source
+SELECT id, review_id, session_id, harness, pr_url, target_sha, status, verdict, body, created_at, github_review_id, delivered_at, batch_id, auto_inject_review, trigger_source, late_verdict, late_verdict_body, late_verdict_at, superseded_by
 FROM review_run WHERE session_id = ? AND batch_id = ? ORDER BY created_at ASC, id ASC;
+
+-- name: RecordLateReviewVerdict :execrows
+-- The verdict a reviewer produced after AO had already closed its run out.
+--
+-- Guarded on the run being terminal-WITHOUT-a-verdict (exactly the states AO's
+-- own stall/supersede bookkeeping writes) and on no late verdict having been
+-- recorded yet, so a retried submit is idempotent rather than a second opinion.
+-- The run keeps its terminal status: this records what the reviewer said, and
+-- says nothing about whether it still speaks for the workflow. See migration
+-- 0135.
+UPDATE review_run
+SET late_verdict = ?, late_verdict_body = ?, late_verdict_at = ?
+WHERE id = ?
+  AND status IN ('cancelled', 'failed')
+  AND verdict = ''
+  AND late_verdict = '';
+
+-- name: MarkReviewRunSupersededBy :execrows
+-- Names the replacement that took authority over a closed-out run, so "which
+-- review speaks for this step" survives a restart. Write-once.
+UPDATE review_run
+SET superseded_by = ?
+WHERE id = ? AND superseded_by = '' AND id != ?;

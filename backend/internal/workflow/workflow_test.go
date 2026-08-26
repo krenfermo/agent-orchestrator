@@ -55,10 +55,35 @@ type fakeStore struct {
 	// cannot be written. Nil means every write succeeds.
 	checkpointWriteErr func(domain.WorkflowCheckpoint) error
 
+	// stepStateWriteErr injects a compare-and-swap failure before a workflow
+	// step transition. Late-verdict recovery uses it to prove that a failed
+	// transition cannot be mistaken for completed adoption.
+	stepStateWriteErr func(id string, expected, next domain.WorkflowStepState) error
+
 	// listStepsErr injects a storage failure into the step lookup, so a test
 	// can prove what still happens when the bookkeeping AFTER a durable state
 	// transition fails (Checkpoint 8P-E13A.1).
 	listStepsErr error
+
+	// reviewRuns lets the fake honour ReleaseWorkflowStepReviewRunIfNoLateVerdict's
+	// real condition (the run's late verdict) rather than pretending it away.
+	// Nil means "no late verdicts exist", which is true for every fixture that
+	// wires no review runs at all.
+	reviewRuns *fakeReviewRuns
+
+	// beforeCheckpointInsert and beforeReleaseReviewRun are deterministic
+	// interleaving points. They run INSIDE the store call, immediately before it
+	// takes effect, which is how the concurrency tests here reproduce an exact
+	// racing order without a goroutine, a sleep or a timing assumption.
+	beforeCheckpointInsert func(cp domain.WorkflowCheckpoint)
+	beforeReleaseReviewRun func(stepID, reviewRunID string)
+
+	// checkpointClaims mirrors migration 0135's partial UNIQUE indexes on the
+	// review authority claim and completed-adoption receipt phases.
+	checkpointClaims map[string]bool
+	// claimMu makes the claim check-and-insert atomic, which is the whole
+	// property the single-winner tests exercise.
+	claimMu sync.Mutex
 
 	seq int
 }
@@ -73,6 +98,7 @@ func newFakeStore() *fakeStore {
 		healthEvents:       map[string][]domain.AgentHealthEvent{},
 		scopedHealthEvents: map[string][]domain.AgentHealthEvent{},
 		owners:             map[string]domain.UserID{},
+		checkpointClaims:   map[string]bool{},
 	}
 }
 
@@ -186,6 +212,11 @@ func (f *fakeStore) ListWorkflowSteps(_ context.Context, runID string) ([]domain
 }
 
 func (f *fakeStore) UpdateWorkflowStepState(_ context.Context, id string, expected, next domain.WorkflowStepState, now time.Time) (bool, error) {
+	if f.stepStateWriteErr != nil {
+		if err := f.stepStateWriteErr(id, expected, next); err != nil {
+			return false, err
+		}
+	}
 	for runID, steps := range f.steps {
 		for i, step := range steps {
 			if step.ID != id {
@@ -377,8 +408,74 @@ func (f *fakeStore) CreateWorkflowCheckpoint(_ context.Context, cp domain.Workfl
 			return domain.WorkflowCheckpoint{}, err
 		}
 	}
+	if hook := f.beforeCheckpointInsert; hook != nil {
+		// Deterministic interleaving point: a competing writer runs HERE, after
+		// this caller decided to insert and before the insert takes effect.
+		// Cleared first so a hook that re-enters the same path cannot recurse.
+		f.beforeCheckpointInsert = nil
+		hook(cp)
+	}
+	// Migration 0135's partial UNIQUE indexes, modelled.
+	if key, claimed := checkpointClaimKey(cp); claimed {
+		f.claimMu.Lock()
+		if f.checkpointClaims[key] {
+			f.claimMu.Unlock()
+			return domain.WorkflowCheckpoint{}, fmt.Errorf(
+				"fake store: %w", domain.ErrDuplicateWorkflowCheckpoint)
+		}
+		f.checkpointClaims[key] = true
+		f.claimMu.Unlock()
+	}
+	f.claimMu.Lock()
 	f.checkpoints[cp.WorkflowRunID] = append(f.checkpoints[cp.WorkflowRunID], cp)
+	f.claimMu.Unlock()
 	return cp, nil
+}
+
+// checkpointClaimKey returns the uniqueness key for the one constrained
+// checkpoint phase, and whether this row is constrained at all.
+func checkpointClaimKey(cp domain.WorkflowCheckpoint) (string, bool) {
+	if (cp.DurablePhase != "review_authority_rebind" &&
+		cp.DurablePhase != "review_late_verdict_adopted") ||
+		cp.WorkflowStepID == nil || cp.ReviewRunID == nil {
+		return "", false
+	}
+	return cp.DurablePhase + "|" + *cp.WorkflowStepID + "|" + *cp.ReviewRunID, true
+}
+
+// ReleaseWorkflowStepReviewRunIfNoLateVerdict mirrors the real single-statement
+// UPDATE: the pointer is cleared only while it still names reviewRunID AND that
+// run has no late verdict. The two conditions are evaluated under one lock, so
+// the fake cannot admit an interleaving the database would refuse.
+func (f *fakeStore) ReleaseWorkflowStepReviewRunIfNoLateVerdict(
+	_ context.Context, stepID, reviewRunID string, now time.Time,
+) (bool, error) {
+	if hook := f.beforeReleaseReviewRun; hook != nil {
+		f.beforeReleaseReviewRun = nil
+		hook(stepID, reviewRunID)
+	}
+	f.claimMu.Lock()
+	defer f.claimMu.Unlock()
+	if f.reviewRuns != nil {
+		if r, ok := f.reviewRuns.runs[reviewRunID]; ok && r.LateVerdict.Valid() {
+			return false, nil
+		}
+	}
+	for runID, steps := range f.steps {
+		for i := range steps {
+			if steps[i].ID != stepID {
+				continue
+			}
+			if steps[i].ReviewRunID == nil || *steps[i].ReviewRunID != reviewRunID {
+				return false, nil
+			}
+			steps[i].ReviewRunID = nil
+			steps[i].UpdatedAt = now
+			f.steps[runID] = steps
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (f *fakeStore) ListWorkflowCheckpoints(_ context.Context, runID string) ([]domain.WorkflowCheckpoint, error) {

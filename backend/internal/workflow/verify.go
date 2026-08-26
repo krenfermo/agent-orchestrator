@@ -252,7 +252,7 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 		if err != nil || !ok {
 			return run, verifyStep, err
 		}
-		if reviewRun.Verdict != domain.VerdictApproved {
+		if reviewRun.EffectiveVerdict() != domain.VerdictApproved {
 			return run, verifyStep, nil
 		}
 		reviewed = reviewRun.TargetSHA

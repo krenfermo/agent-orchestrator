@@ -80,6 +80,10 @@ type Store interface {
 	GetReviewRun(ctx context.Context, id string) (domain.ReviewRun, bool, error)
 	GetSession(ctx context.Context, id domain.SessionID) (domain.SessionRecord, bool, error)
 	UpdateReviewRunResult(ctx context.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID string, autoInjectReview bool) (bool, error)
+	// RecordLateReviewVerdict preserves a verdict produced after AO had already
+	// closed the run out. See migration 0135 and the cancelled/failed arm of
+	// submitOne.
+	RecordLateReviewVerdict(ctx context.Context, id string, verdict domain.ReviewVerdict, body string, at time.Time) (bool, error)
 	MarkReviewRunDelivered(ctx context.Context, id string, deliveredAt time.Time) (bool, error)
 	ListPRsBySession(ctx context.Context, id domain.SessionID) ([]domain.PullRequest, error)
 }
@@ -353,7 +357,26 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 			return domain.ReviewRun{}, err
 		}
 		if !updated {
-			return domain.ReviewRun{}, fmt.Errorf("%w: review run %q is not running", ErrInvalid, runID)
+			// The CAS lost. Between this call reading the run as RUNNING and the
+			// update executing, something moved it — in practice AO's own
+			// reviewer-stall path cancelling it out from under a reviewer that
+			// was, demonstrably, still working: it is submitting right now.
+			//
+			// Returning REVIEW_INVALID here is the production race that destroyed
+			// wf-756988ae's approval, just narrowed to a few milliseconds. The
+			// verdict is no less real for having lost a CAS, so re-read what the
+			// run actually became and preserve it exactly as an ordinary late
+			// arrival — same durable mechanism, same authority rules, same
+			// idempotency. Only a state that is genuinely not preservable still
+			// refuses.
+			latest, found, rerr := s.store.GetReviewRun(ctx, run.ID)
+			if rerr != nil {
+				return domain.ReviewRun{}, rerr
+			}
+			if !found {
+				return domain.ReviewRun{}, fmt.Errorf("%w: review run %q", ErrNotFound, runID)
+			}
+			return s.preserveLateVerdict(ctx, workerID, latest, verdict, body)
 		}
 		run.Status = domain.ReviewRunComplete
 		run.Verdict = verdict
@@ -381,9 +404,102 @@ func (s *Service) submitOne(ctx context.Context, workerID domain.SessionID, revi
 		}
 	case domain.ReviewRunDelivered:
 		return run, nil
+	case domain.ReviewRunCancelled, domain.ReviewRunFailed:
+		// A verdict that arrived after AO had already given up on this run.
+		//
+		// This used to be the `default` arm: REVIEW_INVALID, "review run … is
+		// not running", and a real review — a real read of a real diff — thrown
+		// away because AO's own stall detection had closed the run out from
+		// under a reviewer that was still working (wf-756988ae / review run
+		// 4ac56ac5). The reviewer is not wrong here and has nothing to retry;
+		// AO is the one that stopped listening, so AO keeps the answer.
+		//
+		// What this deliberately does NOT do is make the verdict authoritative.
+		// The run keeps its terminal status, it is not delivered to the worker,
+		// and whether the workflow may act on it is decided elsewhere, by
+		// whether the review step still points at THIS run (see
+		// workflow/review_authority.go). A late verdict on a run some
+		// replacement has already superseded is evidence, never a decision.
+		return s.preserveLateVerdict(ctx, workerID, run, verdict, body)
 	default:
 		return domain.ReviewRun{}, fmt.Errorf("%w: review run %q is not running", ErrInvalid, runID)
 	}
+	return run, nil
+}
+
+// preserveLateVerdict records a verdict the reviewer produced after AO had
+// already closed its run out — whether that was discovered up front (the run was
+// already terminal when the submit arrived) or by losing the result CAS to a
+// concurrent cancellation.
+//
+// Both routes are the same event and must stay one implementation: a real review
+// AO is no longer expecting. It is preserved, it is never made authoritative
+// here (the run keeps its terminal status and is not delivered to the worker),
+// and whether the workflow may act on it is decided by whether the review step
+// still points at this run — see workflow/review_authority.go.
+//
+// Idempotent by construction: the store's write is CAS-guarded on there being no
+// late verdict yet, so a retried submit is a successful no-op and a genuinely
+// conflicting one is refused rather than silently overwriting.
+func (s *Service) preserveLateVerdict(
+	ctx context.Context,
+	workerID domain.SessionID,
+	run domain.ReviewRun,
+	verdict domain.ReviewVerdict,
+	body string,
+) (domain.ReviewRun, error) {
+	if run.HasDurableVerdict() {
+		// It concluded while it was still authoritative. If that is the same
+		// verdict, this submit is simply a retry of a write that landed; a
+		// different one is a genuine conflict.
+		if run.Verdict != verdict {
+			return domain.ReviewRun{}, fmt.Errorf(
+				"%w: review run %q already recorded verdict %q", ErrInvalid, run.ID, run.Verdict)
+		}
+		return run, nil
+	}
+	if !run.TerminalWithoutVerdict() {
+		// Not a state a late verdict may be preserved against (still running, or
+		// a status this build does not know). Never guessed at.
+		return domain.ReviewRun{}, fmt.Errorf("%w: review run %q is not running", ErrInvalid, run.ID)
+	}
+	if run.LateVerdict.Valid() {
+		// Already preserved. A retried submit is idempotent, and a DIFFERENT
+		// late verdict is refused rather than silently overwriting the one AO
+		// already holds.
+		if run.LateVerdict != verdict {
+			return domain.ReviewRun{}, fmt.Errorf(
+				"%w: review run %q already recorded late verdict %q", ErrInvalid, run.ID, run.LateVerdict)
+		}
+		return run, nil
+	}
+	at := s.clock()
+	recorded, err := s.store.RecordLateReviewVerdict(ctx, run.ID, verdict, body, at)
+	if err != nil {
+		return domain.ReviewRun{}, err
+	}
+	if !recorded {
+		// Lost to a concurrent submit of the same run. Re-read rather than
+		// reporting a failure for work that is now durably held.
+		latest, found, rerr := s.store.GetReviewRun(ctx, run.ID)
+		if rerr != nil || !found {
+			return run, rerr
+		}
+		if latest.LateVerdict.Valid() && latest.LateVerdict != verdict {
+			return domain.ReviewRun{}, fmt.Errorf(
+				"%w: review run %q already recorded late verdict %q", ErrInvalid, run.ID, latest.LateVerdict)
+		}
+		return latest, nil
+	}
+	run.LateVerdict = verdict
+	run.LateVerdictBody = body
+	run.LateVerdictAt = &at
+	s.emit("ao.review.submitted_late", workerID, map[string]any{
+		"harness":     string(run.Harness),
+		"verdict":     string(verdict),
+		"run_status":  string(run.Status),
+		"duration_ms": at.Sub(run.CreatedAt).Milliseconds(),
+	})
 	return run, nil
 }
 

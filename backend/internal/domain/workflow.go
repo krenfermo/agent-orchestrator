@@ -1,12 +1,24 @@
 package domain
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // WorkflowRunID identifies one durable workflow run.
 type WorkflowRunID string
 
 // WorkflowStepID identifies one durable workflow step within a run.
 type WorkflowStepID string
+
+// ErrDuplicateWorkflowCheckpoint is returned by CreateWorkflowCheckpoint when a
+// uniqueness-constrained checkpoint already exists.
+//
+// Almost every checkpoint phase is append-only and can never hit this. The
+// constrained review-authority phases use it for a durable single winner: a
+// rebind claim and a completed late-verdict adoption receipt.
+var ErrDuplicateWorkflowCheckpoint = errors.New(
+	"domain: a checkpoint already exists for this uniqueness-constrained phase")
 
 // WorkflowRunState is the durable progress of a workflow run. It is an
 // operational fact, not a derived display status.

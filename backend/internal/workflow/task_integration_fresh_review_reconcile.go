@@ -143,7 +143,7 @@ func (c *Coordinator) reconcileIntegrationFreshReviewAnswer(
 		if r.Status != domain.ReviewRunComplete {
 			continue
 		}
-		if r.Verdict != domain.VerdictApproved && r.Verdict != domain.VerdictChangesRequested {
+		if v := r.EffectiveVerdict(); v != domain.VerdictApproved && v != domain.VerdictChangesRequested {
 			continue
 		}
 		answer = r

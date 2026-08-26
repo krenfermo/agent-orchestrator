@@ -170,9 +170,14 @@ type ownedExecution struct {
 	SessionID domain.SessionID
 	Evidence  SessionOwnershipEvidence
 
-	// Found/Terminated come from the session row itself.
-	Found      bool
-	Terminated bool
+	// RowFound/RowTerminated come from the session ROW, which is a different
+	// question from the one the ownership proof answers and must not be folded
+	// into it. The row says whether the agent's session ended; the proof says
+	// whether the execution AO launched still exists. A worker that finished
+	// normally satisfies the first and not the second, and telling those apart
+	// is what keeps a completed worker from being read as a phantom.
+	RowFound      bool
+	RowTerminated bool
 
 	// LivenessKnown records that the runtime probe ANSWERED. False covers both
 	// "no probe is wired" and "the probe could not tell", exactly as in
@@ -188,7 +193,7 @@ type ownedExecution struct {
 
 // Live reports a worker AO can prove is running under this identity.
 func (o ownedExecution) Live() bool {
-	if o.SessionID == "" || !o.Evidence.Observed || o.Terminated {
+	if o.SessionID == "" || !o.Evidence.Observed || o.RowTerminated {
 		return false
 	}
 	return !o.LivenessKnown || o.LivenessAlive
@@ -203,13 +208,50 @@ func (o ownedExecution) ProvenGone() bool {
 		return o.NaturalKeyRead
 	}
 	switch {
-	case o.Evidence.Missing, o.Terminated:
+	case o.Evidence.Missing, o.RowTerminated:
 		return true
 	case o.LivenessKnown && !o.LivenessAlive:
 		return true
 	default:
 		return false
 	}
+}
+
+// ExecutionProvenGone is the OWNERSHIP half of ProvenGone, on its own: the
+// process/session AO launched demonstrably does not exist any more.
+//
+// It deliberately excludes the session row's own verdict. "The agent's session
+// ended" and "the execution AO launched is gone" are different facts with
+// different owners, and only this one belongs to dispatch.
+func (o ownedExecution) ExecutionProvenGone() bool {
+	if o.SessionID == "" {
+		return false
+	}
+	return o.Evidence.Missing || (o.LivenessKnown && !o.LivenessAlive)
+}
+
+// PhantomRunning is the contradiction this file is named for: the records say a
+// worker is running, and there is no execution behind them.
+//
+// Both halves are required, and the second one is the whole of the distinction
+// between a phantom and a finished worker:
+//
+//   - the owned execution is PROVEN gone — the ownership proof read back absent,
+//     or the runtime probe answered "not running". Silence never qualifies;
+//   - and the session ROW still reads as a usable worker. That is what makes it
+//     a phantom rather than a conclusion: work observation reads that row, sees
+//     a worker that is fine, and therefore cannot resolve this state at all. It
+//     is structurally blind to exactly this case, which is why reconciliation
+//     owns it.
+//
+// A row that says terminated/exited is NOT a phantom, however dead the process
+// is — in production every worker that finishes normally is exactly that: a
+// terminated row and a runtime probe answering "not running". Whether such an
+// ending was a completion or a failure is decided on commit evidence
+// reconciliation never reads, so it belongs to observation, and taking it here
+// would turn every finished worker into an incident.
+func (o ownedExecution) PhantomRunning() bool {
+	return o.ExecutionProvenGone() && o.RowFound && !o.RowTerminated
 }
 
 // Unprovable is the gap: neither live nor provably gone. The only correct
@@ -227,10 +269,18 @@ func (o ownedExecution) describe() string {
 		return "no session exists under this dispatch key"
 	case o.SessionID == "":
 		return "no session identity is recorded and none could be looked up"
+	case o.Evidence.Missing && o.RowFound && !o.RowTerminated:
+		return fmt.Sprintf(
+			"the session row for %s still reads as a live worker and its owned execution no longer exists",
+			o.SessionID)
 	case o.Evidence.Missing:
 		return fmt.Sprintf("session %s no longer exists", o.SessionID)
-	case o.Terminated:
+	case o.RowTerminated:
 		return fmt.Sprintf("session %s is terminated", o.SessionID)
+	case o.LivenessKnown && !o.LivenessAlive && o.RowFound:
+		return fmt.Sprintf(
+			"the session row for %s still reads as a live worker and the runtime says nothing is running under it",
+			o.SessionID)
 	case o.LivenessKnown && !o.LivenessAlive:
 		return fmt.Sprintf("session %s answered the liveness probe as not running", o.SessionID)
 	default:
@@ -247,8 +297,8 @@ func (c *Coordinator) observeOneOwnedExecution(ctx stdctx.Context, id domain.Ses
 	o.Evidence = c.sessionOwnershipOrDefault().ObserveSessionOwnership(ctx, id)
 	if c.sessionFacts != nil {
 		if rec, found, err := c.sessionFacts.GetSession(ctx, id); err == nil && found {
-			o.Found = true
-			o.Terminated = rec.IsTerminated || rec.Activity.State == domain.ActivityExited
+			o.RowFound = true
+			o.RowTerminated = rec.IsTerminated || rec.Activity.State == domain.ActivityExited
 		}
 	}
 	if c.workerLiveness != nil {
@@ -493,15 +543,35 @@ func (c *Coordinator) reconcileWorkStepDispatch(
 	switch status.Phase {
 	case WorkerDispatchConfirmed:
 		if step.State == domain.WorkflowStepRunning && step.SessionID != nil && *step.SessionID != "" {
-			// A confirmed launch that reached RUNNING with its session durably
-			// on the step is not a contradiction: it is a worker, and what
-			// happened to it is work OBSERVATION's question (worker_progress.go
-			// reads the same session and already knows how to finish, fail or
-			// park it, including when it has exited). Reconciliation exists for
-			// the states observation cannot see; taking this one from it would
-			// turn every completed worker into an incident.
-			result.Detail = "a confirmed, running launch with a durable session belongs to work observation"
-			return result, run, nil
+			// A confirmed launch that reached RUNNING with its session on the
+			// step is one of two very different things, and the split is the
+			// whole of case (e).
+			//
+			// PHANTOM: the session row still reads as a usable worker and the
+			// execution behind it is proven gone. Work observation reads that
+			// row, sees a healthy worker and leaves the step running — it is
+			// structurally blind to this, because the only facts that reveal it
+			// are the ownership proof and the runtime probe, neither of which it
+			// consults. So reconciliation resolves it, below.
+			//
+			// NOT a phantom: a session row that says terminated/exited. That is
+			// a worker that ENDED, and whether the ending was a completion is
+			// decided on commit evidence reconciliation never reads. In
+			// production every normal finish looks exactly like this — terminated
+			// row, runtime probe answering "not running" — so taking it here
+			// would turn every completed worker into an incident. It belongs to
+			// observation, which is on the very next line of both callers.
+			if !owned.PhantomRunning() {
+				result.Detail = fmt.Sprintf(
+					"a confirmed, running launch whose execution is not proven gone behind a live-reading row belongs to work observation (%s)",
+					owned.describe())
+				return result, run, nil
+			}
+			result.Contradiction = ContradictionStaleRunning
+			result.Detail = fmt.Sprintf(
+				"attempt %s is RUNNING over session %s and there is no execution behind it: %s",
+				orValue(result.AttemptID, "(none)"), *step.SessionID, owned.describe())
+			break
 		}
 		// The other shape a confirmation can leave: the boundary is durable and
 		// the transition after it is not — the step never reached RUNNING, or
@@ -689,6 +759,13 @@ func (c *Coordinator) retryReconciledDispatch(
 	// what stops two workers on one worktree), and no reconciler may release
 	// another component's ownership. So this is a human decision, with the
 	// evidence.
+	//
+	// This is the phantom's route. The contradiction is still CLOSED here — the
+	// stop below concludes the open attempt, so the fossil that told every
+	// downstream guard "a writer is live in this tree" is gone, and the step
+	// leaves RUNNING — but the retry half is genuinely unavailable while the
+	// step owns a session AO has no way to release. The bounded needs_attention
+	// path carries the full launch evidence to a person instead.
 	if step.SessionID != nil && *step.SessionID != "" {
 		result.Detail = fmt.Sprintf("%s — and the step still owns session %s, which reconciliation may not release",
 			result.Detail, *step.SessionID)

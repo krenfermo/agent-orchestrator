@@ -85,6 +85,12 @@ type ReviewRuns interface {
 	// excludes from the (session_id, target_sha) unique index so a retry of the
 	// same target can insert a fresh run instead of adopting the dead one.
 	UpdateReviewRunResult(ctx stdctx.Context, id string, status domain.ReviewRunStatus, verdict domain.ReviewVerdict, body, githubReviewID string, autoInjectReview bool) (bool, error)
+
+	// MarkReviewRunSupersededBy names the replacement that took authority over
+	// a closed-out run (migration 0135). It is what makes "which review speaks
+	// for this step" answerable from durable state after a restart, and it is
+	// what stops a late verdict on a replaced run from ever being adopted.
+	MarkReviewRunSupersededBy(ctx stdctx.Context, id, supersededBy string) (bool, error)
 }
 
 // ReviewerLaunchRequest is workflow's request to actually start a reviewer
@@ -483,12 +489,45 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 				if err != nil {
 					return reviewStep, err
 				}
-				if ok && existing.TargetSHA == fixCP.FingerprintAfter {
+				// "Already reviewed by the step's current run" requires that
+				// run to still SPEAK for this fingerprint. A run AO closed out
+				// without a verdict does not, and treating it as if it did is
+				// what stranded wf-756988ae: its review run was cancelled by the
+				// stall path, the fix step happened to be resting at `waiting`
+				// with the very fingerprint that run had been dispatched
+				// against, and so this guard matched and returned — on every
+				// poll, every wake and every boot, forever. The capacity-retry
+				// branch written for exactly that state sits below this one and
+				// was never reached.
+				if ok && existing.TargetSHA == fixCP.FingerprintAfter && reviewRunStillSpeaks(existing) {
 					return reviewStep, nil
 				}
 			}
 			targetSHA = fixCP.FingerprintAfter
 			baseSHA = fixCP.FingerprintBefore
+		} else if rebind, pending := c.pendingReviewAuthorityRebind(ctx, run, reviewStep); pending {
+			// Review-authority reconciliation released this step: its previous
+			// review was closed out with no verdict, the pointer to it has been
+			// cleared, and exactly one replacement is authorized
+			// (review_authority.go). The authorization checkpoint is the only
+			// fact that describes this resting state — the run it replaced is no
+			// longer reachable from the step — and it carries the target so the
+			// replacement reviews the same thing rather than drifting.
+			//
+			// Checked before the fix-cycle gate below because an authorized
+			// rebind is about a review that never concluded, not about a new
+			// fingerprint to review; letting the fix branch claim it would
+			// silently turn a retry into a cycle.
+			targetSHA = rebind.TargetSHA
+			if targetSHA == "" {
+				targetSHA = workCP.FingerprintAfter
+			}
+			if targetSHA == "" {
+				targetSHA = workCP.HeadSHA
+			}
+			if targetSHA == "" {
+				targetSHA = baseSHA
+			}
 		} else if rec, isLaunchRetry := c.latestReviewLaunchRecord(ctx, run.ID, reviewStep.ID); isLaunchRetry {
 			// A reviewer launch failed before any reviewer session existed and
 			// rested this step at "waiting" (review_launch_recovery.go). No
@@ -544,7 +583,13 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 			if err != nil {
 				return reviewStep, err
 			}
-			if !ok || priorRun.Status != domain.ReviewRunCancelled {
+			// Cancelled AND silent. A cancelled run that produced a verdict
+			// after the fact is not an unresolved capacity stall — its verdict
+			// has been adopted and is already driving the cascade (a fix, or
+			// verify). Retrying on status alone dispatched a second reviewer
+			// over the SAME target while that fix was still in flight: a review
+			// of work nobody had changed yet.
+			if !ok || priorRun.Status != domain.ReviewRunCancelled || priorRun.HasEffectiveVerdict() {
 				return reviewStep, nil
 			}
 			targetSHA = priorRun.TargetSHA
@@ -1015,6 +1060,32 @@ func (c *Coordinator) recordReviewDispatchSuccess(ctx stdctx.Context, run domain
 	// Only reviewer-launch reasons are cleared (review_launch_recovery.go).
 	run = c.clearReviewLaunchStop(ctx, run)
 
+	// The replacement takes authority here, and the run it replaces is told so
+	// durably BEFORE the step is rebound. Order matters: a crash between the two
+	// leaves a run marked superseded by a replacement the step has not adopted
+	// yet, which reconciliation reads as "not authoritative" and retries — the
+	// safe direction. The reverse order would leave a replaced run looking
+	// authoritative with the step already pointing elsewhere.
+	predecessor := ""
+	if reviewStep.ReviewRunID != nil {
+		predecessor = *reviewStep.ReviewRunID
+	}
+	if predecessor == "" {
+		// Review-authority reconciliation clears the pointer when it releases a
+		// step (review_authority.go), so by the time a replacement binds, the
+		// step no longer names what it replaced. The rebind authorization does,
+		// and consulting it here is what keeps the durable authority chain
+		// complete: every replaced run ends up naming its replacement, whichever
+		// route the replacement arrived by.
+		if rebind, pending := c.pendingReviewAuthorityRebind(ctx, run, reviewStep); pending {
+			predecessor = rebind.AbandonedRunID
+		}
+	}
+	if predecessor != "" && predecessor != reviewRun.ID {
+		if _, err := c.reviewRuns.MarkReviewRunSupersededBy(ctx, predecessor, reviewRun.ID); err != nil {
+			return reviewStep, err
+		}
+	}
 	if _, err := c.store.SetWorkflowStepReviewRun(ctx, reviewStep.ID, reviewRun.ID, now); err != nil {
 		return reviewStep, err
 	}

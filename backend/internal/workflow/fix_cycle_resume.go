@@ -244,7 +244,7 @@ func (c *Coordinator) resumeUnstartedFixCycle(ctx stdctx.Context, run domain.Wor
 	if err != nil {
 		return run, false, err
 	}
-	if !found || reviewRun.Verdict != domain.VerdictChangesRequested {
+	if !found || reviewRun.EffectiveVerdict() != domain.VerdictChangesRequested {
 		// The reviewer is no longer asking for changes, so there is nothing to
 		// re-deliver and this is not the stop it looked like.
 		return run, false, nil
@@ -292,7 +292,7 @@ func (c *Coordinator) resumeUnstartedFixCycle(ctx stdctx.Context, run domain.Wor
 		AcceptanceCriteria: artifact.AcceptanceCriteria,
 		EffectiveSpec:      RenderEffectiveSpecification(c.effectiveTaskSpecification(ctx, run, artifact.AcceptanceCriteria)),
 		ReviewRunID:        reviewRun.ID,
-		Findings:           reviewRun.Body,
+		Findings:           reviewRun.EffectiveBody(),
 		CycleNumber:        cycleNumber,
 	})
 

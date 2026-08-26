@@ -125,7 +125,10 @@ func (c *Coordinator) reconcileVerifiedIntegrationBaseline(
 	if err != nil {
 		return false, err
 	}
-	if !found || review.Status != domain.ReviewRunComplete || review.Verdict != domain.VerdictApproved {
+	// EffectiveVerdict already implies the review concluded, and it is strictly
+	// more precise than the old status+verdict pair: a running or failed run has
+	// no effective verdict, and an adopted late approval is an approval.
+	if !found || review.EffectiveVerdict() != domain.VerdictApproved {
 		return false, nil
 	}
 	approvedFingerprint := review.TargetSHA

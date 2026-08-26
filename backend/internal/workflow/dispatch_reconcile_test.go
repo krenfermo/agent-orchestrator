@@ -347,6 +347,32 @@ func (f *dispatchReconcileFixture) seedLiveWorker(id domain.SessionID) *fakeOwne
 	})
 }
 
+// seedPhantomWorker is the shape work observation is blind to: the session ROW
+// still reads as a perfectly healthy worker, and the execution behind it is
+// proven gone. `missingRow` picks which of the two ownership-side proofs says
+// so — the ownership read answering "no such session", or the runtime probe
+// answering "nothing is running under it".
+func (f *dispatchReconcileFixture) seedPhantomWorker(id domain.SessionID, missingRow bool) {
+	f.t.Helper()
+	// Alive, un-terminated, active: exactly what a session row that outlived
+	// the process behind it looks like.
+	f.facts.put(domain.SessionRecord{
+		ID: id, ProjectID: "proj-1", Harness: domain.HarnessCodex,
+		Kind: domain.KindWorker, IssueID: f.issueID(),
+		Activity: domain.Activity{State: domain.ActivityActive},
+		Metadata: domain.SessionMetadata{Branch: "feat/reconcile", WorkspacePath: "/tmp/wt/" + string(id)},
+	})
+	w := &fakeOwnedWorker{sessionID: id, dispatchKey: f.dispatchKey()}
+	if missingRow {
+		// The ownership proof reads back absent.
+		w.missing = true
+	} else {
+		// The runtime probe answers: nothing is running under this session.
+		w.live, w.livenessKnown = false, true
+	}
+	f.registry.register(w)
+}
+
 // seedDeadWorker puts a worker under the key whose session row is terminated
 // and whose probe says so. Positive evidence, not silence.
 func (f *dispatchReconcileFixture) seedDeadWorker(id domain.SessionID) {
@@ -631,6 +657,116 @@ func TestReconcileClosesAStaleRunningAttemptWhoseExecutionIsGone(t *testing.T) {
 	if n := f.registry.liveUnder(f.dispatchKey()); n != 0 {
 		t.Fatalf("live workers under the dispatch key = %d, want 0", n)
 	}
+}
+
+// The phantom proper, and the shape the first cut of this file wrongly handed
+// to work observation: a step RUNNING with an open attempt, a confirmed
+// dispatch and its session durably attached — over an execution that is gone.
+//
+// Observation cannot resolve it. It reads the session row, and the row says the
+// worker is fine; the only facts that reveal the truth are the ownership proof
+// and the runtime probe, neither of which observation consults. Left alone this
+// step stays RUNNING across every boot and every wake, forever.
+func TestReconcileClosesAPhantomRunningStepWhoseSessionIsAttached(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		missingRow bool
+	}{
+		{"the ownership proof reads back absent", true},
+		{"the runtime probe says nothing is running", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDispatchReconcileFixture(t)
+			f.seedRunState(domain.WorkflowRunRunning)
+			f.seedStepState(domain.WorkflowStepReady)
+			f.seedStepState(domain.WorkflowStepRunning)
+			f.seedOutbox(domain.WorkflowOutboxAcknowledged)
+			attempt := f.seedOpenAttempt("codex")
+			f.seedBoundary(domain.DispatchPhaseWorkerDispatched, domain.LaunchStageConfirm,
+				domain.LaunchOutcomeDispatched, attempt.ID, "sess-phantom")
+			f.seedPhantomWorker("sess-phantom", tc.missingRow)
+			f.seedStepSession("sess-phantom")
+
+			got := f.reconcile()
+			if got.Contradiction != workflowcore.ContradictionStaleRunning {
+				t.Fatalf("contradiction = %q, want stale_running (detail: %s)", got.Contradiction, got.Detail)
+			}
+			// Closed, and stopped with the evidence: the retry half is
+			// unavailable while the step owns a session AO cannot release, which
+			// is precisely when the bounded needs_attention path is owed.
+			if got.Action != workflowcore.DispatchReconcileNeedsAttention {
+				t.Fatalf("action = %q, want the phantom resolved (detail: %s)", got.Action, got.Detail)
+			}
+			f.assertNothingLaunched()
+
+			// The fossil that told every downstream guard a writer was live is
+			// gone, and the step has left RUNNING.
+			if attempts := f.attempts(); attempts[0].Outcome != domain.WorkflowAttemptFailed {
+				t.Fatalf("attempt outcome = %q, want the phantom attempt closed", attempts[0].Outcome)
+			}
+			if got := f.step().State; got == domain.WorkflowStepRunning {
+				t.Fatal("the step is still RUNNING over an execution that does not exist")
+			}
+			if got := f.run().State; got != domain.WorkflowRunNeedsAttention {
+				t.Fatalf("run state = %q, want needs_attention", got)
+			}
+			// And the stop is evidenced, through the same writer as every other.
+			if _, ok := latestCheckpointOfPhase(t, f.store, f.runID,
+				workflowcore.AmbiguousWorkerStateEvidencePhase); !ok {
+				t.Fatalf("the phantom stop carries no evidence snapshot; phases = %v", f.checkpointPhases())
+			}
+			// A second wake changes nothing and starts nothing.
+			if second := f.reconcile(); second.Action != workflowcore.DispatchReconcileNoop {
+				t.Fatalf("duplicate wake action = %q, want noop (detail: %s)", second.Action, second.Detail)
+			}
+			f.assertNothingLaunched()
+			if n := f.registry.liveUnder(f.dispatchKey()); n != 0 {
+				t.Fatalf("live workers under the dispatch key = %d, want 0", n)
+			}
+		})
+	}
+}
+
+// The other side of that line, and the reason it is a line at all: a worker that
+// FINISHED looks dead in every way a phantom does — terminated row, runtime
+// probe answering "not running" — and is not a contradiction. Whether its
+// ending was a completion is decided on commit evidence reconciliation never
+// reads, so reconciliation stands aside and work observation, which runs on the
+// very next line of both callers, resolves it.
+//
+// This is asserted end to end through boot recovery rather than against the
+// reconciler alone, because the property that matters is that the step does not
+// stay running — not which component moved it.
+func TestReconcileLeavesAFinishedWorkerToObservationAndItStillResolves(t *testing.T) {
+	f := newDispatchReconcileFixture(t)
+	f.seedRunState(domain.WorkflowRunRunning)
+	f.seedStepState(domain.WorkflowStepReady)
+	f.seedStepState(domain.WorkflowStepRunning)
+	f.seedOutbox(domain.WorkflowOutboxAcknowledged)
+	attempt := f.seedOpenAttempt("codex")
+	f.seedBoundary(domain.DispatchPhaseWorkerDispatched, domain.LaunchStageConfirm,
+		domain.LaunchOutcomeDispatched, attempt.ID, "sess-finished")
+	f.seedDeadWorker("sess-finished")
+	f.seedStepSession("sess-finished")
+
+	// Reconciliation itself stands aside...
+	got := f.reconcile()
+	if got.Action != workflowcore.DispatchReconcileNoop {
+		t.Fatalf("action = %q, want noop: a finished worker is observation's question (detail: %s)",
+			got.Action, got.Detail)
+	}
+	if got.Contradiction != workflowcore.ContradictionNone {
+		t.Fatalf("contradiction = %q, want none for a worker that ended", got.Contradiction)
+	}
+
+	// ...and the step still does not stay running.
+	if err := f.c.Reconcile(f.ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if got := f.step().State; got == domain.WorkflowStepRunning {
+		t.Fatalf("step state = %q: a finished worker left its step running across boot recovery", got)
+	}
+	f.assertNothingLaunched()
 }
 
 // ---- (f) a live, evidenced worker: untouched ----------------------------------
