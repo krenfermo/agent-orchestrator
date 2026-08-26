@@ -17,8 +17,25 @@ import "time"
 type WorkflowDispatchPhase string
 
 const (
+	// DispatchPhaseWorkerLaunchIntent is the boundary AO records BEFORE it
+	// invokes any launcher: this run/step/attempt is about to be launched,
+	// under this outbox command, aimed at this workspace. It is written first
+	// precisely because it is the only record that can exist if the process
+	// dies during the launch — an intent with no matching confirmation is how
+	// a restart knows a launch was started and never proven.
+	DispatchPhaseWorkerLaunchIntent WorkflowDispatchPhase = "worker_launch_intent"
 	// DispatchPhaseWorkerDispatched is a worker launch AO can prove completed.
 	DispatchPhaseWorkerDispatched WorkflowDispatchPhase = "worker_dispatched"
+	// DispatchPhaseWorkerLaunchUnconfirmed is the launch the launcher reported
+	// as successful and AO could not durably confirm, because the confirmation
+	// write itself failed.
+	//
+	// It is a phase of its own rather than either neighbour because collapsing
+	// it into one of them is wrong in both directions: read as success, AO
+	// would treat an unrecorded worker as running; read as failure, AO would
+	// retry a launch that may well have started an agent, and put two of them
+	// on one worktree.
+	DispatchPhaseWorkerLaunchUnconfirmed WorkflowDispatchPhase = "worker_launch_unconfirmed"
 	// DispatchPhaseWorkerLaunchError is a worker launch that failed, carrying
 	// the classification and the runtime's own words.
 	DispatchPhaseWorkerLaunchError WorkflowDispatchPhase = "worker_launch_error"
@@ -38,22 +55,41 @@ const (
 type WorkflowLaunchStage string
 
 const (
+	// LaunchStageIntent is the stage at which nothing has been invoked yet:
+	// the intent record is being written. A failure here is the one failure
+	// that is certain to have created nothing at all, because nothing had been
+	// called.
+	LaunchStageIntent WorkflowLaunchStage = "intent"
 	// LaunchStagePreflight is a launch refused BEFORE anything was spawned. It
-	// is the earliest stage there is, and the only one at which AO can be
-	// certain nothing was created.
+	// is the earliest stage there is at which a launcher was consulted, and the
+	// last one at which AO can be certain nothing was created.
 	LaunchStagePreflight WorkflowLaunchStage = "preflight"
 	// LaunchStageRuntimeEnv is a failure resolving the runtime environment.
 	LaunchStageRuntimeEnv WorkflowLaunchStage = "runtime_env"
 	// LaunchStageSpawn is a failure in the spawn itself.
 	LaunchStageSpawn WorkflowLaunchStage = "spawn"
+	// LaunchStageConfirm is the stage AFTER the launcher answered: AO is
+	// recording what it observed. A failure here says nothing about whether the
+	// agent started — only that AO could not write down that it had.
+	LaunchStageConfirm WorkflowLaunchStage = "confirm"
 )
 
 // WorkflowLaunchOutcome is what a dispatch boundary concluded.
 type WorkflowLaunchOutcome string
 
 const (
+	// LaunchOutcomeIntended means the launch has been recorded and not yet
+	// attempted. It concludes nothing, and it is the one outcome that must
+	// never be read as progress: an intent is a statement about AO, not about
+	// any agent.
+	LaunchOutcomeIntended WorkflowLaunchOutcome = "intended"
 	// LaunchOutcomeDispatched means AO can prove the launch completed.
 	LaunchOutcomeDispatched WorkflowLaunchOutcome = "dispatched"
+	// LaunchOutcomeUnconfirmed means the launcher reported success and AO could
+	// not durably record it. Unlike LaunchOutcomeAmbiguous, AO does hold the
+	// launch evidence — a session identity, and whatever ownership proof came
+	// with it; what it could not do is persist the confirmation.
+	LaunchOutcomeUnconfirmed WorkflowLaunchOutcome = "unconfirmed"
 	// LaunchOutcomeFailed means AO can prove the launch did not complete.
 	LaunchOutcomeFailed WorkflowLaunchOutcome = "failed"
 	// LaunchOutcomeAmbiguous means AO cannot prove either way.
@@ -68,6 +104,15 @@ const (
 // An ambiguous outcome is not proven and must never be retried as if it were.
 func (o WorkflowLaunchOutcome) Proven() bool {
 	return o == LaunchOutcomeDispatched || o == LaunchOutcomeFailed
+}
+
+// LicensesRunning reports whether this outcome is the one — and it is exactly
+// one — that permits an attempt and its step to be treated as RUNNING.
+//
+// Intended, unconfirmed, ambiguous and failed all mean the same thing to this
+// question: AO has not proven an agent is running, so nothing may say it is.
+func (o WorkflowLaunchOutcome) LicensesRunning() bool {
+	return o == LaunchOutcomeDispatched
 }
 
 // WorkflowDispatchCheckpoint is one durable record of a dispatch boundary:

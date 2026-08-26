@@ -157,7 +157,16 @@ func ValidWorkflowStepTransition(from, to WorkflowStepState) bool {
 	case WorkflowStepPending:
 		return to == WorkflowStepReady || to == WorkflowStepCancelled
 	case WorkflowStepReady:
-		return to == WorkflowStepRunning || to == WorkflowStepCancelled
+		// ready -> failed and ready -> waiting are both the launch that never
+		// happened. Once RUNNING is gated on a durable dispatch confirmation
+		// (see workflow/dispatch_state_machine.go), a step whose launch failed,
+		// or whose launch AO cannot prove either way, is still sitting at
+		// `ready` — and it must be able to reach its own terminal or parked
+		// state without first being walked through `running`. Claiming a step
+		// ran because its launch was attempted is exactly the lie that gate
+		// exists to prevent.
+		return to == WorkflowStepRunning || to == WorkflowStepWaiting ||
+			to == WorkflowStepFailed || to == WorkflowStepCancelled
 	case WorkflowStepRunning:
 		return to == WorkflowStepWaiting || to == WorkflowStepCompleted ||
 			to == WorkflowStepFailed || to == WorkflowStepCancelled

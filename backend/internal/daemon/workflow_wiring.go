@@ -157,6 +157,13 @@ func (c coordinatorLockClassifier) ClassifyLockOwner(ctx context.Context, run do
 	}, nil
 }
 
+// The production store MUST be able to record dispatch boundaries. The phased
+// worker dispatch refuses to launch anything it cannot first record an intent
+// for (workflow/dispatch_state_machine.go), so a store that silently stopped
+// satisfying this interface would not degrade worker dispatch -- it would end
+// it, at runtime, on every run. Pinning it here makes that a compile error.
+var _ workflowcore.DispatchRecorder = (*sqlite.Store)(nil)
+
 func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, agents ports.AgentResolver, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {

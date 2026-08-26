@@ -70,6 +70,12 @@ func TestValidWorkflowStepTransition(t *testing.T) {
 		{WorkflowStepPending, WorkflowStepRunning, false},
 		{WorkflowStepReady, WorkflowStepRunning, true},
 		{WorkflowStepReady, WorkflowStepCancelled, true},
+		// A launch that failed, or that AO cannot prove either way, leaves the
+		// step at `ready`; it must still be able to reach its own terminal or
+		// parked state.
+		{WorkflowStepReady, WorkflowStepFailed, true},
+		{WorkflowStepReady, WorkflowStepWaiting, true},
+		{WorkflowStepReady, WorkflowStepCompleted, false},
 		{WorkflowStepReady, WorkflowStepPending, false},
 		{WorkflowStepRunning, WorkflowStepWaiting, true},
 		{WorkflowStepRunning, WorkflowStepCompleted, true},

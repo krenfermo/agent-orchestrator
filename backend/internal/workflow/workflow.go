@@ -227,6 +227,14 @@ type Deps struct {
 	SessionFacts   SessionFacts
 	WorkspaceFacts WorkspaceFacts
 
+	// WorkerLauncher and SessionOwnership override the phased dispatch state
+	// machine's launch boundary (dispatch_state_machine.go). Both optional and
+	// both default to adapters over Spawner/SessionFacts, so production wiring
+	// is unchanged by their existence; they are here so that a launch, and the
+	// ownership proof read back from it, can each be faked independently.
+	WorkerLauncher   WorkerLauncher
+	SessionOwnership SessionOwnership
+
 	// ReviewerLauncher backs Checkpoint 8C's review-step dispatch
 	// (review_dispatch.go). Optional: a nil ReviewerLauncher means
 	// dispatchReviewStep is a no-op, same convention as a nil Spawner for
@@ -415,6 +423,15 @@ type Coordinator struct {
 	sessionFacts   SessionFacts
 	workspaceFacts WorkspaceFacts
 
+	// workerLauncher and sessionOwnership are the phased dispatch state
+	// machine's launch boundary (dispatch_state_machine.go). Both optional:
+	// nil workerLauncher adapts the Spawner above, nil sessionOwnership adapts
+	// SessionFacts. They exist as separate, injectable interfaces so a test can
+	// drive launch success, launch failure and evidence-free success without a
+	// process or a timer.
+	workerLauncher   WorkerLauncher
+	sessionOwnership SessionOwnership
+
 	// reviewerLauncher backs Checkpoint 8C's review-step dispatch. Optional.
 	reviewerLauncher ReviewerLauncher
 
@@ -534,6 +551,8 @@ func New(d Deps) *Coordinator {
 		spawner:                  d.Spawner,
 		sessionFacts:             d.SessionFacts,
 		workspaceFacts:           d.WorkspaceFacts,
+		workerLauncher:           d.WorkerLauncher,
+		sessionOwnership:         d.SessionOwnership,
 		reviewerLauncher:         d.ReviewerLauncher,
 		incidentAgents:           d.IncidentAgents,
 		selfRepairProjectID:      d.SelfRepairProjectID,

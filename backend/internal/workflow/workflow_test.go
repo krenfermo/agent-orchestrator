@@ -43,6 +43,13 @@ type fakeStore struct {
 	dispatchCheckpoints []domain.WorkflowDispatchCheckpoint
 	mutationProvenance  []domain.WorkflowMutationProvenance
 
+	// dispatchWriteErr injects a storage failure into one dispatch-boundary
+	// write, so a test can drive the two phases of the dispatch state machine
+	// that are DEFINED by a failed durable write: an intent that cannot be
+	// recorded (nothing is launched) and a confirmation that cannot be recorded
+	// (launched, unconfirmed). Nil means every write succeeds.
+	dispatchWriteErr func(domain.WorkflowDispatchCheckpoint) error
+
 	// checkpointWriteErr injects a storage failure into one checkpoint write, so
 	// a test can prove what does NOT happen when a durable record AO requires
 	// cannot be written. Nil means every write succeeds.

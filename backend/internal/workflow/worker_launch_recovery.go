@@ -105,6 +105,11 @@ const (
 type workerLaunchStage string
 
 const (
+	// workerLaunchStageIntent is a dispatch that stopped before ANY launcher or
+	// session call, because the durable dispatch-intent record could not be
+	// written. It is the only stage at which nothing whatsoever was invoked, so
+	// it is also the only one where "nothing was created" needs no argument.
+	workerLaunchStageIntent     workerLaunchStage = "intent"
 	workerLaunchStageRuntimeEnv workerLaunchStage = "runtime_env"
 	workerLaunchStageSpawn      workerLaunchStage = "spawn"
 	// workerLaunchStagePreflight is a launch refused BEFORE anything was

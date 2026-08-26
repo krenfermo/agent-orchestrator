@@ -3,6 +3,7 @@ package workflow
 import (
 	stdctx "context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -138,8 +139,8 @@ func (c *Coordinator) dispatchWorkStep(ctx stdctx.Context, run domain.WorkflowRu
 	if step.SessionID != nil {
 		return step, nil
 	}
-	if c.spawner == nil {
-		// No spawner wired (e.g. a unit test exercising only the durable
+	if c.workerLauncherOrDefault() == nil {
+		// No launcher wired (e.g. a unit test exercising only the durable
 		// foundation). Nothing to dispatch.
 		return step, nil
 	}
@@ -253,12 +254,10 @@ func (c *Coordinator) dispatchFromPending(ctx stdctx.Context, run domain.Workflo
 	// against the DB row (which is genuinely already "dispatched"), leaving
 	// the outbox permanently stuck instead of advancing to acknowledged/failed.
 	entry.Status = domain.WorkflowOutboxDispatched
-	if step.State == domain.WorkflowStepReady {
-		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, domain.WorkflowStepReady, domain.WorkflowStepRunning, now); err != nil {
-			return step, err
-		}
-		step.State = domain.WorkflowStepRunning
-	}
+	// The step deliberately does NOT move to running here. It moves in
+	// recordDispatchSuccess, strictly after the dispatch confirmation is
+	// durable -- see dispatch_state_machine.go. Marking it running at this
+	// line is what used to make "running" mean "AO intended to launch".
 
 	prompt = c.applyWorkLifecycleDecision(ctx, run, step, prompt)
 	return c.attemptWorkHarness(ctx, run, step, entry, prompt, decision.SelectedHarness, 1)
@@ -437,15 +436,33 @@ func (c *Coordinator) scheduleWake(ctx stdctx.Context, run domain.WorkflowRun, s
 // polling, so a mid-uptime Spawn failure has no other opportunity to retry
 // before the checkpoint's own attempt budget would otherwise go unused.
 func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, entry domain.WorkflowOutboxEntry, prompt string, harness domain.AgentHarness, attemptNumber int) (domain.WorkflowStep, error) {
+	// PHASE 1 -- INTENT. Durable before anything is invoked: the attempt row
+	// and the dispatch-intent record. A store that cannot write this cannot
+	// launch, because a launch AO holds no record of is a launch no restart can
+	// reconcile. See dispatch_state_machine.go.
+	intent, err := c.beginWorkerDispatch(ctx, run, step, entry, harness)
+	if err != nil {
+		if intent.attempt.ID != "" {
+			// The attempt row was opened before the intent write failed; it
+			// describes a launch that never happened, so it concludes here
+			// rather than staying open over nothing.
+			if aerr := c.concludeWorkerAttemptFailure(ctx, intent, domain.WorkflowErrorRuntimeFailed, c.clock()); aerr != nil {
+				return step, aerr
+			}
+		}
+		return c.recordWorkerLaunchFailure(ctx, run, step, entry, harness, workerLaunchStageIntent, err)
+	}
+
 	runtimeEnv, owner, profileID, err := c.resolveRuntimeEnv(ctx, run.ID, harness)
 	scope := healthScope{userID: owner, profileID: profileID}
 	if err != nil {
 		classification := classifyProviderFailure(err)
 		now := c.clock()
 		c.recordAgentHealthFailure(ctx, harness, scope, classification, now)
-		if aerr := c.recordWorkAttemptFailure(ctx, step.ID, harness, classification.Class, now); aerr != nil {
+		if aerr := c.concludeWorkerAttemptFailure(ctx, intent, classification.Class, now); aerr != nil {
 			return step, aerr
 		}
+		c.recordLaunchFailureBoundary(ctx, run, step, entry, intent, domain.LaunchStageRuntimeEnv, classification.Class, err)
 		return c.recordWorkerLaunchFailure(ctx, run, step, entry, harness, workerLaunchStageRuntimeEnv, err)
 	}
 	// Checkpoint 8P-E.24: before an UNATTENDED launch, ask whether this
@@ -466,14 +483,21 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 		ProfileID:     profileID,
 	}); perr != nil {
 		now := c.clock()
-		if aerr := c.recordWorkAttemptFailure(ctx, step.ID, harness, classifyWorkerLaunchFailure(perr).Class, now); aerr != nil {
+		class := classifyWorkerLaunchFailure(perr).Class
+		if aerr := c.concludeWorkerAttemptFailure(ctx, intent, class, now); aerr != nil {
 			return step, aerr
 		}
+		c.recordLaunchFailureBoundary(ctx, run, step, entry, intent, domain.LaunchStagePreflight, class, perr)
 		return c.recordWorkerLaunchFailure(ctx, run, step, entry, harness, workerLaunchStagePreflight, perr)
 	}
-	rec, _, _, err := c.spawner.Spawn(ctx, ports.SpawnConfig{
+
+	// PHASE 2 -- LAUNCH. Through the injectable launcher, with the process/
+	// session ownership proof read back through the injectable prober.
+	result, ownership, err := c.launchWorker(ctx, WorkerLaunchRequest{
+		RunID:       run.ID,
+		StepID:      step.ID,
+		AttemptID:   intent.attempt.ID,
 		ProjectID:   domain.ProjectID(run.ProjectID),
-		Kind:        domain.KindWorker,
 		Harness:     harness,
 		IssueID:     workStepIssueID(step.ID),
 		Prompt:      prompt,
@@ -486,15 +510,29 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 		// acquire it as a task in its own right and queue behind its own run.
 		WorkflowRunID: run.ID,
 	})
+	if errors.Is(err, errLaunchWithoutEvidence) {
+		// The launcher answered "fine" and named no session. Nothing is retried
+		// and nothing is confirmed: the outbox stays `dispatched` with no
+		// session on the step, which is precisely the shape adoptOrMarkAmbiguous
+		// resolves from evidence — adopt what is really there, escalate
+		// otherwise, never launch a second worker over the first.
+		c.recordAmbiguousLaunchBoundary(ctx, run, step, entry, intent)
+		if c.log != nil {
+			c.log.Warn("workflow: worker launch reported success without a session identity",
+				"step", step.ID, "harness", harness)
+		}
+		return step, nil
+	}
 	if err != nil {
 		classification := classifyProviderFailure(err)
 		now := c.clock()
 		c.recordAgentHealthFailure(ctx, harness, scope, classification, now)
-		// Always record this attempt's failure first — audit history, never
-		// deleted or overwritten, regardless of whether a fallback follows.
-		if aerr := c.recordWorkAttemptFailure(ctx, step.ID, harness, classification.Class, now); aerr != nil {
+		// Always conclude this attempt first — audit history, never deleted or
+		// overwritten, regardless of whether a fallback follows.
+		if aerr := c.concludeWorkerAttemptFailure(ctx, intent, classification.Class, now); aerr != nil {
 			return step, aerr
 		}
+		c.recordLaunchFailureBoundary(ctx, run, step, entry, intent, domain.LaunchStageSpawn, classification.Class, err)
 		if fallback, ok := c.selectFallbackForWork(ctx, run, step.ID, harness, attemptNumber, classification); ok {
 			if c.log != nil {
 				c.log.Warn("workflow: work step failing over to fallback harness", "step", step.ID, "from", harness, "to", fallback, "class", classification.Class)
@@ -502,8 +540,8 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 			return c.attemptWorkHarness(ctx, run, step, entry, prompt, fallback, attemptNumber+1)
 		}
 		// Every provider this attempt was allowed to try has now failed, and
-		// none of them left a worker behind: Spawn either returns a session
-		// record or returns an error having created none. That pre-work
+		// none of them left a worker behind: the launcher either returns a
+		// session record or returns an error having created none. That pre-work
 		// property is what worker_launch_recovery.go's bounded retry stands on.
 		return c.recordWorkerLaunchFailure(ctx, run, step, entry, harness, workerLaunchStageSpawn, err)
 	}
@@ -511,7 +549,8 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 		c.log.Info("workflow: work step provider failover succeeded", "step", step.ID, "harness", harness, "attempt", attemptNumber)
 	}
 	c.recordAgentHealthSuccess(ctx, harness, scope, c.clock())
-	return c.recordDispatchSuccess(ctx, run, step, entry, rec)
+	// PHASES 3 and 4 -- CONFIRMATION, then RUNNING, in that order.
+	return c.confirmWorkerDispatch(ctx, run, step, entry, intent, result, ownership)
 }
 
 // resolveRuntimeEnv is the single call site every dispatcher (worker,
@@ -526,17 +565,17 @@ func (c *Coordinator) resolveRuntimeEnv(ctx stdctx.Context, runID string, harnes
 	return c.runtimeIsolation.Resolve(ctx, runID, harness)
 }
 
-// recordWorkAttemptFailure appends a terminal, failed workflow_attempts row
-// for one provider attempt (Checkpoint 8H). Always called before any
-// fallback decision, so the losing provider's attempt is never lost even
-// when a fallback attempt subsequently succeeds ("no borres el intento
-// Codex").
-func (c *Coordinator) recordWorkAttemptFailure(ctx stdctx.Context, stepID string, harness domain.AgentHarness, errClass domain.WorkflowErrorClass, now time.Time) error {
-	attempt, err := c.store.CreateWorkflowAttempt(ctx, "wfa-"+c.newID(), stepID, string(harness), "", now)
-	if err != nil {
-		return err
-	}
-	return c.store.UpdateWorkflowAttemptOutcome(ctx, attempt.ID, now, domain.WorkflowAttemptFailed, errClass)
+// concludeWorkerAttemptFailure terminates the attempt opened at intent time
+// (Checkpoint 8H). Always called before any fallback decision, so the losing
+// provider's attempt is never lost even when a fallback attempt subsequently
+// succeeds ("no borres el intento Codex").
+//
+// It concludes rather than creates: since the phased dispatch opens the attempt
+// row before the launcher is invoked, creating another one here would leave two
+// rows per provider attempt — one open forever, describing a launch that
+// already failed.
+func (c *Coordinator) concludeWorkerAttemptFailure(ctx stdctx.Context, intent workerDispatchIntent, errClass domain.WorkflowErrorClass, now time.Time) error {
+	return c.store.UpdateWorkflowAttemptOutcome(ctx, intent.attempt.ID, now, domain.WorkflowAttemptFailed, errClass)
 }
 
 // adoptOrMarkAmbiguous handles a retry/recovery call that found the outbox
@@ -578,8 +617,12 @@ func (c *Coordinator) adoptOrMarkAmbiguous(ctx stdctx.Context, run domain.Workfl
 		c.observedWorkerFactsFor(ctx, sessionIDIfFound(found, rec), nil)); rerr != nil {
 		return step, rerr
 	}
-	if step.State == domain.WorkflowStepRunning {
-		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, domain.WorkflowStepRunning, domain.WorkflowStepWaiting, now); err != nil {
+	// `ready` parks exactly like `running`: a daemon that died between the
+	// dispatch intent and its confirmation leaves the step at ready with the
+	// outbox already dispatched, and leaving it there would have every later
+	// reconcile pass re-enter this branch and raise the same ambiguity again.
+	if step.State == domain.WorkflowStepRunning || step.State == domain.WorkflowStepReady {
+		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, step.State, domain.WorkflowStepWaiting, now); err != nil {
 			return step, err
 		}
 		step.State = domain.WorkflowStepWaiting
@@ -608,53 +651,99 @@ func (c *Coordinator) adoptOrMarkAmbiguous(ctx stdctx.Context, run domain.Workfl
 	return step, nil
 }
 
+// recordDispatchSuccess is the entry point for a dispatch whose session is
+// already in hand: an adoption at recovery time (adoptOrMarkAmbiguous,
+// resumeWorkerLaunchAfterFailure) rather than a launch this process performed.
+//
+// It rejoins the phased state machine at phase 3 — the same confirmation write,
+// the same RUNNING gate — so an adopted worker and a freshly launched one leave
+// exactly the same durable trail. What it cannot claim is LaunchedAt: a session
+// found after a restart was launched at a time this process never observed, and
+// filling that in from the current clock would date the launch to the recovery.
 func (c *Coordinator) recordDispatchSuccess(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, entry domain.WorkflowOutboxEntry, rec domain.SessionRecord) (domain.WorkflowStep, error) {
-	now := c.clock()
-
-	attempts, err := c.store.ListWorkflowAttempts(ctx, step.ID)
+	attempt, err := c.openWorkerAttempt(ctx, step.ID, rec.Harness, c.clock())
 	if err != nil {
 		return step, err
 	}
-	// Create a new attempt row unless one is already open for this dispatch:
-	// no attempts yet (first-ever attempt), or the latest one is already
-	// terminal (Checkpoint 8H: a prior provider's attempt failed and this
-	// success belongs to the fallback harness — never overwrite that row).
-	if len(attempts) == 0 || attempts[len(attempts)-1].Outcome != "" {
-		if _, err := c.store.CreateWorkflowAttempt(ctx, "wfa-"+c.newID(), step.ID, string(rec.Harness), "", now); err != nil {
-			return step, err
-		}
-	}
+	intent := workerDispatchIntent{attempt: attempt, harness: rec.Harness}
+	ownership := c.sessionOwnershipOrDefault().ObserveSessionOwnership(ctx, rec.ID)
+	return c.confirmWorkerDispatch(ctx, run, step, entry, intent, WorkerLaunchResult{Session: rec}, ownership)
+}
 
-	if _, err := c.store.UpdateWorkflowStepSession(ctx, step.ID, string(rec.ID), now); err != nil {
-		return step, err
-	}
-	sid := string(rec.ID)
-	step.SessionID = &sid
-
-	// Checkpoint 8P-E.11: point any branch lock this run holds at the session
-	// that now occupies it, so "currently used by" can name the live session
-	// and not just the run. Best-effort by construction (Renew never fails a
-	// caller): ownership is decided by lock state, never by heartbeat freshness.
-	if c.branchLocks != nil {
-		c.branchLocks.Renew(ctx, run.ID, step.ID, sid)
-	}
-
-	if entry.Status != domain.WorkflowOutboxAcknowledged {
-		if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, entry.Status, domain.WorkflowOutboxAcknowledged, now, ""); err != nil {
-			return step, err
-		}
-	}
-
-	baseSHA := ""
-	branch := rec.Metadata.Branch
-	worktree := rec.Metadata.WorkspacePath
+// confirmWorkerDispatch is phase 3 followed by phase 4, and the ordering
+// between them is the whole contract: the dispatch confirmation is durable
+// BEFORE the step is running, the session is written onto the step, or the
+// outbox is acknowledged.
+//
+// If the confirmation write fails, none of those four things happen. What is
+// left behind is the deliberately distinct "launched, not confirmed" state
+// (recordUnconfirmedLaunch): the outbox still `dispatched`, the step still
+// without a session and still not running, and a durable ledger record naming
+// the session that WAS launched — so the next pass adopts it instead of
+// launching a second worker over it.
+func (c *Coordinator) confirmWorkerDispatch(
+	ctx stdctx.Context,
+	run domain.WorkflowRun,
+	step domain.WorkflowStep,
+	entry domain.WorkflowOutboxEntry,
+	intent workerDispatchIntent,
+	result WorkerLaunchResult,
+	ownership SessionOwnershipEvidence,
+) (domain.WorkflowStep, error) {
+	now := c.clock()
+	rec := result.Session
+	branch, worktree, baseSHA := launchWorkspaceFacts(result, ownership)
+	fingerprint := ""
 	if c.workspaceFacts != nil && worktree != "" {
 		if obs, err := c.workspaceFacts.ObserveWorkspace(ctx, ports.WorkspaceInfo{
 			Path: worktree, Branch: branch, SessionID: rec.ID, ProjectID: rec.ProjectID,
 		}); err == nil {
+			// The live tree wins over the session row's recorded base: it is the
+			// commit the launch is actually sitting on right now.
 			baseSHA = obs.HeadSHA
+			fingerprint = WorkspaceFingerprint(obs)
 		}
 	}
+
+	// PHASE 3 -- CONFIRMATION. Mandatory, and the gate everything below stands
+	// on.
+	var launchedAt *time.Time
+	if !result.LaunchedAt.IsZero() {
+		at := result.LaunchedAt
+		launchedAt = &at
+	}
+	evidence := map[string]string{"attemptId": intent.attempt.ID}
+	if ownership.Observed {
+		evidence["ownership"] = "observed"
+	} else {
+		evidence["ownership"] = "unavailable"
+		evidence["ownershipUnavailable"] = ownership.Unavailable
+	}
+	if err := c.recordDispatchBoundary(ctx, dispatchBoundary{
+		run: run, step: step, entry: entry, attempt: intent.attempt.ID, harness: rec.Harness,
+		phase:           domain.DispatchPhaseWorkerDispatched,
+		stage:           domain.LaunchStageConfirm,
+		outcome:         domain.LaunchOutcomeDispatched,
+		sessionID:       string(rec.ID),
+		detail:          fmt.Sprintf("worker session %s confirmed for attempt %s", rec.ID, intent.attempt.ID),
+		branch:          branch,
+		worktreePath:    worktree,
+		baseSHA:         baseSHA,
+		fingerprint:     fingerprint,
+		runtimeHandleID: ownership.RuntimeHandleID,
+		runtimeLaunchID: ownership.RuntimeLaunchID,
+		agentSessionID:  ownership.AgentSessionID,
+		launchedAt:      launchedAt,
+		evidence:        evidence,
+	}); err != nil {
+		c.recordUnconfirmedLaunch(ctx, run, step, intent, result, ownership, err)
+		return step, err
+	}
+
+	// The ledger's own worker_dispatched row. Kept, and kept in this shape,
+	// because it is what work_adoption.go and worker_launch_recovery.go read as
+	// "a worker actually launched for this step"; the dispatch record above is
+	// the evidence, this is the phase marker those readers already know.
 	stepID := step.ID
 	sessID := string(rec.ID)
 	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
@@ -666,12 +755,38 @@ func (c *Coordinator) recordDispatchSuccess(ctx stdctx.Context, run domain.Workf
 		Branch:         branch,
 		WorktreePath:   worktree,
 		BaseSHA:        baseSHA,
-		DurablePhase:   "worker_dispatched",
+		DurablePhase:   workerDispatchedDurablePhase,
 		PayloadVersion: "v1",
 		RetryState:     "{}",
 		CreatedAt:      now,
 	}); err != nil {
 		return step, err
+	}
+
+	// PHASE 4 -- RUNNING. Only now.
+	if _, err := c.store.UpdateWorkflowStepSession(ctx, step.ID, sessID, now); err != nil {
+		return step, err
+	}
+	step.SessionID = &sessID
+
+	// Checkpoint 8P-E.11: point any branch lock this run holds at the session
+	// that now occupies it, so "currently used by" can name the live session
+	// and not just the run. Best-effort by construction (Renew never fails a
+	// caller): ownership is decided by lock state, never by heartbeat freshness.
+	if c.branchLocks != nil {
+		c.branchLocks.Renew(ctx, run.ID, step.ID, sessID)
+	}
+
+	if entry.Status != domain.WorkflowOutboxAcknowledged {
+		if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, entry.Status, domain.WorkflowOutboxAcknowledged, now, ""); err != nil {
+			return step, err
+		}
+	}
+	if step.State == domain.WorkflowStepReady {
+		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, domain.WorkflowStepReady, domain.WorkflowStepRunning, now); err != nil {
+			return step, err
+		}
+		step.State = domain.WorkflowStepRunning
 	}
 	return step, nil
 }
@@ -690,10 +805,15 @@ func (c *Coordinator) recordDispatchFailure(ctx stdctx.Context, run domain.Workf
 		return step, err
 	}
 	// The failing (and any tried-and-failed fallback) attempt row was
-	// already recorded by attemptWorkHarness/recordWorkAttemptFailure before
-	// this terminal path was reached — never duplicated here.
-	if step.State == domain.WorkflowStepRunning {
-		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, domain.WorkflowStepRunning, domain.WorkflowStepFailed, now); err != nil {
+	// already concluded by attemptWorkHarness/concludeWorkerAttemptFailure
+	// before this terminal path was reached — never duplicated here.
+	//
+	// `ready` is now as ordinary a starting point as `running`: a launch that
+	// never got past its own intent leaves the step exactly where it was, and a
+	// step whose launch permanently failed is a failed step whether or not
+	// anything ever ran in it. See ValidWorkflowStepTransition.
+	if step.State == domain.WorkflowStepRunning || step.State == domain.WorkflowStepReady {
+		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, step.State, domain.WorkflowStepFailed, now); err != nil {
 			return step, err
 		}
 		step.State = domain.WorkflowStepFailed
