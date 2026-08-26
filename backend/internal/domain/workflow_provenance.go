@@ -98,7 +98,45 @@ type WorkflowDispatchCheckpoint struct {
 	// at the boundary. Defaults to "{}" so a read never decodes an empty string.
 	EvidenceJSON string
 	Detail       string
-	CreatedAt    time.Time
+
+	// Branch and WorktreePath say where the launch was aimed. They are what
+	// joins a dispatch to the WorkflowMutationProvenance rows for the same
+	// tree: without them, "this boundary" and "this change" are two facts
+	// about the same workspace that cannot be put next to each other.
+	Branch       string
+	WorktreePath string
+	// BaseSHA is the commit the launch was authorized against
+	// (SessionMetadata.DiffBaseSHA), which is what keeps a later diff honest
+	// once the target branch has moved.
+	BaseSHA string
+	// WorkspaceFingerprint is the tree as it stood at the boundary, so a later
+	// "the worker changed nothing" is decided against what the workspace
+	// actually looked like when the worker started.
+	WorkspaceFingerprint string
+
+	// RuntimeHandleID, RuntimeLaunchID and AgentSessionID are the process and
+	// session ownership evidence for the launch: the runtime instance AO
+	// created, the launch generation that fences it
+	// (ports.SupervisedProcessRef), and the harness's own session identity.
+	//
+	// The launch id is the one that decides a retry. SessionID survives a
+	// daemon restart while the process behind it does not, so "a session row
+	// exists" is not "the process AO started is alive"; only the generation
+	// fence separates those, and getting it wrong is how one step becomes two
+	// agents on one worktree.
+	RuntimeHandleID string
+	RuntimeLaunchID string
+	AgentSessionID  string
+
+	// LaunchedAt is when the launch itself happened, which is not CreatedAt.
+	// Nil whenever the writer cannot honestly say — a preflight or runtime_env
+	// failure describes a launch that never happened at all, and every row
+	// written before migration 0134 has no recorded launch instant. It is
+	// never defaulted to CreatedAt: that would turn "the row was written then"
+	// into "the process started then".
+	LaunchedAt *time.Time
+	// CreatedAt is when this record was written.
+	CreatedAt time.Time
 }
 
 // WorkflowMutationClass names whose change a workspace mutation is.

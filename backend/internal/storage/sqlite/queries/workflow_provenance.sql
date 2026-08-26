@@ -6,11 +6,21 @@
 -- edited is no longer evidence of anything.
 
 -- name: InsertWorkflowDispatchCheckpoint :one
+-- Migration 0134 added the rest of the launch evidence: where the launch was
+-- aimed (branch, worktree, base SHA, workspace fingerprint), which process and
+-- session came out of it (runtime handle, launch generation, the harness's own
+-- session id), and when the launch itself happened. Every one of them is
+-- written exactly as the caller observed it -- an empty string or a NULL
+-- launched_at means the writer could not read that fact, and is never filled
+-- in from a neighbouring one.
 INSERT INTO workflow_dispatch_checkpoints (
     id, workflow_run_id, workflow_step_id, attempt_id, checkpoint_id,
     phase, idempotency_key, harness, session_id,
-    launch_stage, launch_outcome, error_class, evidence_json, detail, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    launch_stage, launch_outcome, error_class, evidence_json, detail,
+    branch, worktree_path, base_sha, workspace_fingerprint,
+    runtime_handle_id, runtime_launch_id, agent_session_id,
+    launched_at, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
 -- name: ListWorkflowDispatchCheckpointsByRun :many

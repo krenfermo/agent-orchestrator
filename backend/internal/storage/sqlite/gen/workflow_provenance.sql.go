@@ -12,7 +12,7 @@ import (
 )
 
 const getLatestWorkflowDispatchCheckpointByStep = `-- name: GetLatestWorkflowDispatchCheckpointByStep :one
-SELECT id, workflow_run_id, workflow_step_id, attempt_id, checkpoint_id, phase, idempotency_key, harness, session_id, launch_stage, launch_outcome, error_class, evidence_json, detail, created_at FROM workflow_dispatch_checkpoints
+SELECT id, workflow_run_id, workflow_step_id, attempt_id, checkpoint_id, phase, idempotency_key, harness, session_id, launch_stage, launch_outcome, error_class, evidence_json, detail, created_at, branch, worktree_path, base_sha, workspace_fingerprint, runtime_handle_id, runtime_launch_id, agent_session_id, launched_at FROM workflow_dispatch_checkpoints
 WHERE workflow_step_id = ?
 ORDER BY created_at DESC, id DESC
 LIMIT 1
@@ -41,6 +41,14 @@ func (q *Queries) GetLatestWorkflowDispatchCheckpointByStep(ctx context.Context,
 		&i.EvidenceJson,
 		&i.Detail,
 		&i.CreatedAt,
+		&i.Branch,
+		&i.WorktreePath,
+		&i.BaseSha,
+		&i.WorkspaceFingerprint,
+		&i.RuntimeHandleID,
+		&i.RuntimeLaunchID,
+		&i.AgentSessionID,
+		&i.LaunchedAt,
 	)
 	return i, err
 }
@@ -91,27 +99,38 @@ const insertWorkflowDispatchCheckpoint = `-- name: InsertWorkflowDispatchCheckpo
 INSERT INTO workflow_dispatch_checkpoints (
     id, workflow_run_id, workflow_step_id, attempt_id, checkpoint_id,
     phase, idempotency_key, harness, session_id,
-    launch_stage, launch_outcome, error_class, evidence_json, detail, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id, workflow_run_id, workflow_step_id, attempt_id, checkpoint_id, phase, idempotency_key, harness, session_id, launch_stage, launch_outcome, error_class, evidence_json, detail, created_at
+    launch_stage, launch_outcome, error_class, evidence_json, detail,
+    branch, worktree_path, base_sha, workspace_fingerprint,
+    runtime_handle_id, runtime_launch_id, agent_session_id,
+    launched_at, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, workflow_run_id, workflow_step_id, attempt_id, checkpoint_id, phase, idempotency_key, harness, session_id, launch_stage, launch_outcome, error_class, evidence_json, detail, created_at, branch, worktree_path, base_sha, workspace_fingerprint, runtime_handle_id, runtime_launch_id, agent_session_id, launched_at
 `
 
 type InsertWorkflowDispatchCheckpointParams struct {
-	ID             string
-	WorkflowRunID  string
-	WorkflowStepID sql.NullString
-	AttemptID      sql.NullString
-	CheckpointID   sql.NullString
-	Phase          string
-	IdempotencyKey string
-	Harness        string
-	SessionID      sql.NullString
-	LaunchStage    string
-	LaunchOutcome  string
-	ErrorClass     string
-	EvidenceJson   string
-	Detail         string
-	CreatedAt      time.Time
+	ID                   string
+	WorkflowRunID        string
+	WorkflowStepID       sql.NullString
+	AttemptID            sql.NullString
+	CheckpointID         sql.NullString
+	Phase                string
+	IdempotencyKey       string
+	Harness              string
+	SessionID            sql.NullString
+	LaunchStage          string
+	LaunchOutcome        string
+	ErrorClass           string
+	EvidenceJson         string
+	Detail               string
+	Branch               string
+	WorktreePath         string
+	BaseSha              string
+	WorkspaceFingerprint string
+	RuntimeHandleID      string
+	RuntimeLaunchID      string
+	AgentSessionID       string
+	LaunchedAt           sql.NullTime
+	CreatedAt            time.Time
 }
 
 // Migration 0133's three durable facts: dispatch checkpoints, AO-owned
@@ -120,6 +139,13 @@ type InsertWorkflowDispatchCheckpointParams struct {
 // Both tables are append-only. There is no update statement for either, on
 // purpose: a provenance record is evidence of a moment, and a moment that gets
 // edited is no longer evidence of anything.
+// Migration 0134 added the rest of the launch evidence: where the launch was
+// aimed (branch, worktree, base SHA, workspace fingerprint), which process and
+// session came out of it (runtime handle, launch generation, the harness's own
+// session id), and when the launch itself happened. Every one of them is
+// written exactly as the caller observed it -- an empty string or a NULL
+// launched_at means the writer could not read that fact, and is never filled
+// in from a neighbouring one.
 func (q *Queries) InsertWorkflowDispatchCheckpoint(ctx context.Context, arg InsertWorkflowDispatchCheckpointParams) (WorkflowDispatchCheckpoint, error) {
 	row := q.db.QueryRowContext(ctx, insertWorkflowDispatchCheckpoint,
 		arg.ID,
@@ -136,6 +162,14 @@ func (q *Queries) InsertWorkflowDispatchCheckpoint(ctx context.Context, arg Inse
 		arg.ErrorClass,
 		arg.EvidenceJson,
 		arg.Detail,
+		arg.Branch,
+		arg.WorktreePath,
+		arg.BaseSha,
+		arg.WorkspaceFingerprint,
+		arg.RuntimeHandleID,
+		arg.RuntimeLaunchID,
+		arg.AgentSessionID,
+		arg.LaunchedAt,
 		arg.CreatedAt,
 	)
 	var i WorkflowDispatchCheckpoint
@@ -155,6 +189,14 @@ func (q *Queries) InsertWorkflowDispatchCheckpoint(ctx context.Context, arg Inse
 		&i.EvidenceJson,
 		&i.Detail,
 		&i.CreatedAt,
+		&i.Branch,
+		&i.WorktreePath,
+		&i.BaseSha,
+		&i.WorkspaceFingerprint,
+		&i.RuntimeHandleID,
+		&i.RuntimeLaunchID,
+		&i.AgentSessionID,
+		&i.LaunchedAt,
 	)
 	return i, err
 }
@@ -236,7 +278,7 @@ func (q *Queries) InsertWorkflowMutationProvenance(ctx context.Context, arg Inse
 }
 
 const listWorkflowDispatchCheckpointsByRun = `-- name: ListWorkflowDispatchCheckpointsByRun :many
-SELECT id, workflow_run_id, workflow_step_id, attempt_id, checkpoint_id, phase, idempotency_key, harness, session_id, launch_stage, launch_outcome, error_class, evidence_json, detail, created_at FROM workflow_dispatch_checkpoints
+SELECT id, workflow_run_id, workflow_step_id, attempt_id, checkpoint_id, phase, idempotency_key, harness, session_id, launch_stage, launch_outcome, error_class, evidence_json, detail, created_at, branch, worktree_path, base_sha, workspace_fingerprint, runtime_handle_id, runtime_launch_id, agent_session_id, launched_at FROM workflow_dispatch_checkpoints
 WHERE workflow_run_id = ?
 ORDER BY created_at, id
 `
@@ -266,6 +308,14 @@ func (q *Queries) ListWorkflowDispatchCheckpointsByRun(ctx context.Context, work
 			&i.EvidenceJson,
 			&i.Detail,
 			&i.CreatedAt,
+			&i.Branch,
+			&i.WorktreePath,
+			&i.BaseSha,
+			&i.WorkspaceFingerprint,
+			&i.RuntimeHandleID,
+			&i.RuntimeLaunchID,
+			&i.AgentSessionID,
+			&i.LaunchedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -281,7 +331,7 @@ func (q *Queries) ListWorkflowDispatchCheckpointsByRun(ctx context.Context, work
 }
 
 const listWorkflowDispatchCheckpointsByStep = `-- name: ListWorkflowDispatchCheckpointsByStep :many
-SELECT id, workflow_run_id, workflow_step_id, attempt_id, checkpoint_id, phase, idempotency_key, harness, session_id, launch_stage, launch_outcome, error_class, evidence_json, detail, created_at FROM workflow_dispatch_checkpoints
+SELECT id, workflow_run_id, workflow_step_id, attempt_id, checkpoint_id, phase, idempotency_key, harness, session_id, launch_stage, launch_outcome, error_class, evidence_json, detail, created_at, branch, worktree_path, base_sha, workspace_fingerprint, runtime_handle_id, runtime_launch_id, agent_session_id, launched_at FROM workflow_dispatch_checkpoints
 WHERE workflow_step_id = ?
 ORDER BY created_at, id
 `
@@ -311,6 +361,14 @@ func (q *Queries) ListWorkflowDispatchCheckpointsByStep(ctx context.Context, wor
 			&i.EvidenceJson,
 			&i.Detail,
 			&i.CreatedAt,
+			&i.Branch,
+			&i.WorktreePath,
+			&i.BaseSha,
+			&i.WorkspaceFingerprint,
+			&i.RuntimeHandleID,
+			&i.RuntimeLaunchID,
+			&i.AgentSessionID,
+			&i.LaunchedAt,
 		); err != nil {
 			return nil, err
 		}

@@ -51,7 +51,20 @@ func (s *Store) CreateWorkflowDispatchCheckpoint(
 		ErrorClass:     string(cp.ErrorClass),
 		EvidenceJson:   evidence,
 		Detail:         cp.Detail,
-		CreatedAt:      cp.CreatedAt,
+		// Migration 0134's launch evidence. Written exactly as observed: an
+		// empty string is "the writer could not read this", and a nil
+		// LaunchedAt is "the writer cannot say when the launch happened" —
+		// neither is ever filled in from CreatedAt or from a neighbouring
+		// field.
+		Branch:               cp.Branch,
+		WorktreePath:         cp.WorktreePath,
+		BaseSha:              cp.BaseSHA,
+		WorkspaceFingerprint: cp.WorkspaceFingerprint,
+		RuntimeHandleID:      cp.RuntimeHandleID,
+		RuntimeLaunchID:      cp.RuntimeLaunchID,
+		AgentSessionID:       cp.AgentSessionID,
+		LaunchedAt:           timePtrToNullTime(cp.LaunchedAt),
+		CreatedAt:            cp.CreatedAt,
 	})
 	if err != nil {
 		return domain.WorkflowDispatchCheckpoint{}, fmt.Errorf(
@@ -275,7 +288,18 @@ func workflowDispatchCheckpointFromRow(r gen.WorkflowDispatchCheckpoint) domain.
 		ErrorClass:     domain.WorkflowErrorClass(r.ErrorClass),
 		EvidenceJSON:   r.EvidenceJson,
 		Detail:         r.Detail,
-		CreatedAt:      r.CreatedAt,
+
+		Branch:               r.Branch,
+		WorktreePath:         r.WorktreePath,
+		BaseSHA:              r.BaseSha,
+		WorkspaceFingerprint: r.WorkspaceFingerprint,
+		RuntimeHandleID:      r.RuntimeHandleID,
+		RuntimeLaunchID:      r.RuntimeLaunchID,
+		AgentSessionID:       r.AgentSessionID,
+		// A pre-0134 row, and any row whose launch never happened, reads back
+		// with a nil LaunchedAt rather than borrowing CreatedAt.
+		LaunchedAt: nullTimeToPtr(r.LaunchedAt),
+		CreatedAt:  r.CreatedAt,
 	}
 }
 

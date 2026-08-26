@@ -667,21 +667,29 @@ type WorkflowCheckpoint struct {
 }
 
 type WorkflowDispatchCheckpoint struct {
-	ID             string
-	WorkflowRunID  string
-	WorkflowStepID sql.NullString
-	AttemptID      sql.NullString
-	CheckpointID   sql.NullString
-	Phase          string
-	IdempotencyKey string
-	Harness        string
-	SessionID      sql.NullString
-	LaunchStage    string
-	LaunchOutcome  string
-	ErrorClass     string
-	EvidenceJson   string
-	Detail         string
-	CreatedAt      time.Time
+	ID                   string
+	WorkflowRunID        string
+	WorkflowStepID       sql.NullString
+	AttemptID            sql.NullString
+	CheckpointID         sql.NullString
+	Phase                string
+	IdempotencyKey       string
+	Harness              string
+	SessionID            sql.NullString
+	LaunchStage          string
+	LaunchOutcome        string
+	ErrorClass           string
+	EvidenceJson         string
+	Detail               string
+	CreatedAt            time.Time
+	Branch               string
+	WorktreePath         string
+	BaseSha              string
+	WorkspaceFingerprint string
+	RuntimeHandleID      string
+	RuntimeLaunchID      string
+	AgentSessionID       string
+	LaunchedAt           sql.NullTime
 }
 
 type WorkflowMutationProvenance struct {
