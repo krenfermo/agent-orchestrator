@@ -223,6 +223,15 @@ type Deps struct {
 	// a nil Spawner means dispatchWorkStep is a no-op (useful for tests that
 	// only exercise the durable foundation); nil SessionFacts/WorkspaceFacts
 	// similarly skip observation.
+	//
+	// One qualification on SessionFacts, since the phased dispatch landed: it
+	// is the default read-back the dispatch confirmation proves session
+	// ownership through (dispatch_state_machine.go). A Spawner wired WITHOUT
+	// either SessionFacts or an explicit SessionOwnership can still launch
+	// workers, but can never prove one, so every launch lands in the durable
+	// `worker_launch_unconfirmed` state instead of reaching RUNNING. That is
+	// the honest outcome rather than a silent one -- the record names the
+	// missing read path -- but a deployment that dispatches work wants both.
 	Spawner        Spawner
 	SessionFacts   SessionFacts
 	WorkspaceFacts WorkspaceFacts

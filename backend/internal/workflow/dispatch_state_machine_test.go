@@ -695,3 +695,155 @@ func TestUnconfirmedLaunchIsAdoptedRatherThanRelaunched(t *testing.T) {
 		t.Fatal("the adopted attempt is running once its dispatch is confirmed")
 	}
 }
+
+// ---- 8. an unprovable ownership is not a confirmation ----------------------
+
+// TestUnprovenOwnershipNeverConfirmsOrRuns is the other half of phase 3's
+// evidence requirement. A launcher-returned session id is the launcher's WORD
+// that it started something; only the ownership read-back says that session
+// exists, belongs to this launch, and is fenced by a launch generation AO can
+// tell apart from a row that outlived the process behind it.
+//
+// So an ownership proof AO could not read produces no confirmation and no
+// RUNNING — for every way it can fail to read one.
+func TestUnprovenOwnershipNeverConfirmsOrRuns(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ownership workflowcore.SessionOwnershipEvidence
+	}{
+		{
+			name:      "probe reports the session unreadable",
+			ownership: workflowcore.SessionOwnershipEvidence{Unavailable: "the session row could not be found"},
+		},
+		{
+			name:      "probe failed outright",
+			ownership: workflowcore.SessionOwnershipEvidence{Unavailable: "reading the session failed: disk i/o error"},
+		},
+		{
+			// The launcher's word, verbatim, with nothing behind it: handles and
+			// ids present, and no read-back that says any of them are real.
+			name: "handles present but never observed",
+			ownership: workflowcore.SessionOwnershipEvidence{
+				RuntimeHandleID: "tmux-1", RuntimeLaunchID: "gen-7", AgentSessionID: "agent-9",
+				Unavailable: "no session read path is wired into this coordinator",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			launcher := &fakeWorkerLauncher{session: domain.SessionRecord{
+				ID: "sess-claimed", Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"},
+			}}
+			c, store, _ := newDispatchMachineCoordinator(launcher, &fakeSessionOwnership{evidence: tc.ownership})
+
+			created, err := c.CreateRun(ctx, "proj-1", "ship the thing")
+			if err != nil {
+				t.Fatalf("CreateRun: %v", err)
+			}
+			stepID := workStepIDOf(t, store, created.Run.ID)
+			if _, err := c.StartRun(ctx, created.Run.ID); err != nil {
+				t.Fatalf("StartRun: %v", err)
+			}
+
+			// No confirmation, at all.
+			for _, r := range dispatchRecordsFor(t, store, stepID) {
+				if r.Phase == domain.DispatchPhaseWorkerDispatched || r.LaunchOutcome == domain.LaunchOutcomeDispatched {
+					t.Fatalf("a dispatched confirmation was written on unproven ownership: %+v", r)
+				}
+			}
+			// And therefore no RUNNING, no session on the step, no acknowledged
+			// outbox — the three things a confirmation licenses.
+			step := stepByID(t, store, created.Run.ID, stepID)
+			if step.State == domain.WorkflowStepRunning {
+				t.Fatal("the step reached RUNNING on a session whose ownership was never proven")
+			}
+			if step.SessionID != nil {
+				t.Fatalf("step session = %q, want none until ownership is proven", *step.SessionID)
+			}
+			if entry := store.outbox["workflow-step-spawn:"+stepID]; entry.Status != domain.WorkflowOutboxDispatched {
+				t.Fatalf("outbox status = %q, want it left dispatched for a later adoption", entry.Status)
+			}
+			attempts, _ := store.ListWorkflowAttempts(ctx, stepID)
+			if len(attempts) != 1 {
+				t.Fatalf("attempts = %+v, want the one attempt opened at intent time", attempts)
+			}
+			if c.WorkerAttemptRunning(ctx, created.Run.ID, step, attempts[0]) {
+				t.Fatal("WorkerAttemptRunning was true for a launch whose ownership was never proven")
+			}
+
+			// It IS durably recorded, as its own state, naming the session so a
+			// reconciler can adopt it rather than launch a second worker over it.
+			status := c.WorkerDispatchStatusForStep(ctx, created.Run.ID, stepID)
+			if status.Phase != workflowcore.WorkerDispatchUnconfirmed {
+				t.Fatalf("dispatch phase = %q, want unconfirmed", status.Phase)
+			}
+			if status.LicensesRunning() {
+				t.Fatal("an unproven launch must never license RUNNING")
+			}
+			if status.SessionID != "sess-claimed" {
+				t.Fatalf("dispatch status session = %q, want the session the launcher claimed", status.SessionID)
+			}
+			var unconfirmed domain.WorkflowCheckpoint
+			cps, _ := store.ListWorkflowCheckpoints(ctx, created.Run.ID)
+			for _, cp := range cps {
+				if cp.DurablePhase == "worker_launch_unconfirmed" {
+					unconfirmed = cp
+				}
+			}
+			if unconfirmed.ID == "" {
+				t.Fatalf("no durable unconfirmed record; phases were %v", ledgerPhases(t, store, created.Run.ID))
+			}
+			// The reason is recorded, because "AO could not prove who owns this"
+			// and "AO could not write down what it proved" need different
+			// answers from whoever reconciles them.
+			if !strings.Contains(unconfirmed.RetryState, "ownership_unproven") {
+				t.Fatalf("unconfirmed record %q does not say WHY it is unconfirmed", unconfirmed.RetryState)
+			}
+			if !strings.Contains(unconfirmed.RetryState, tc.ownership.Unavailable) {
+				t.Fatalf("unconfirmed record %q does not carry the probe's own words", unconfirmed.RetryState)
+			}
+		})
+	}
+}
+
+// TestConfirmationReasonDistinguishesWriteFailureFromUnprovenOwnership pins the
+// distinction the reason exists for: both leave the same phase, and a
+// reconciler that could not tell them apart could not choose between retrying
+// the write and finding out who owns the session.
+func TestConfirmationReasonDistinguishesWriteFailureFromUnprovenOwnership(t *testing.T) {
+	ctx := context.Background()
+	launcher := &fakeWorkerLauncher{session: domain.SessionRecord{ID: "sess-observed"}}
+	c, store, _ := newDispatchMachineCoordinator(launcher, &fakeSessionOwnership{
+		evidence: workflowcore.SessionOwnershipEvidence{Observed: true, RuntimeLaunchID: "gen-7"},
+	})
+	store.dispatchWriteErr = func(cp domain.WorkflowDispatchCheckpoint) error {
+		if cp.Phase == domain.DispatchPhaseWorkerDispatched {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+
+	created, err := c.CreateRun(ctx, "proj-1", "ship the thing")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if _, err := c.StartRun(ctx, created.Run.ID); err == nil {
+		t.Fatal("StartRun must surface the confirmation-persistence failure")
+	}
+	cps, _ := store.ListWorkflowCheckpoints(ctx, created.Run.ID)
+	var unconfirmed domain.WorkflowCheckpoint
+	for _, cp := range cps {
+		if cp.DurablePhase == "worker_launch_unconfirmed" {
+			unconfirmed = cp
+		}
+	}
+	if unconfirmed.ID == "" {
+		t.Fatal("no durable unconfirmed record")
+	}
+	if !strings.Contains(unconfirmed.RetryState, "confirmation_write_failed") {
+		t.Fatalf("unconfirmed record %q, want the write-failure reason, not the ownership one", unconfirmed.RetryState)
+	}
+	if strings.Contains(unconfirmed.RetryState, "ownership_unproven") {
+		t.Fatalf("unconfirmed record %q blames ownership for a write failure", unconfirmed.RetryState)
+	}
+}

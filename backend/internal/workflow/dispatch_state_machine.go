@@ -577,6 +577,24 @@ func (c *Coordinator) recordAmbiguousLaunchBoundary(
 // record.
 const unconfirmedLaunchRecordPhase = "worker_launch_unconfirmed"
 
+// unconfirmedLaunchReason names WHY a launch could not be confirmed. Both
+// reasons leave the same durable phase — nothing is running and nothing may be
+// relaunched — but they are not the same problem, and a reconciler that cannot
+// tell them apart cannot choose between "try the confirmation again" and "find
+// out who owns this session".
+type unconfirmedLaunchReason string
+
+const (
+	// unconfirmedOwnershipUnproven is a launch whose session identity AO holds
+	// and whose ownership it could not observe. The launcher's word for a
+	// session is not proof that the session exists, belongs to this launch, or
+	// is backed by a process AO started; only the read-back is.
+	unconfirmedOwnershipUnproven unconfirmedLaunchReason = "ownership_unproven"
+	// unconfirmedWriteFailed is a launch AO observed in full and could not
+	// durably record, because the confirmation write itself failed.
+	unconfirmedWriteFailed unconfirmedLaunchReason = "confirmation_write_failed"
+)
+
 // unconfirmedLaunchRecord is the decoded form of that checkpoint's RetryState:
 // enough to adopt the launched session later without relaunching it.
 type unconfirmedLaunchRecord struct {
@@ -589,51 +607,95 @@ type unconfirmedLaunchRecord struct {
 	RuntimeHandleID string `json:"runtimeHandleId"`
 	RuntimeLaunchID string `json:"runtimeLaunchId"`
 	AgentSessionID  string `json:"agentSessionId"`
-	// Cause is why the confirmation could not be persisted, verbatim.
-	Cause string `json:"cause"`
+	// Reason says which kind of unconfirmed this is; Cause carries the
+	// underlying words, verbatim, when there were any.
+	Reason string `json:"reason"`
+	Cause  string `json:"cause"`
 	// OwnershipUnavailable names why the ownership proof could not be read, if
 	// it could not. Empty when it was observed.
 	OwnershipUnavailable string `json:"ownershipUnavailable,omitempty"`
 }
 
 // recordUnconfirmedLaunch persists the distinct "launched, not confirmed"
-// state. It deliberately does NOT set the step's session, advance the outbox,
-// or move the step to running: every one of those would collapse this state
-// into full success, and the outbox left at `dispatched` with no session on the
-// step is exactly the shape adoptOrMarkAmbiguous already knows how to resolve
-// from evidence rather than by launching a second worker.
+// state, in both durable homes it has.
+//
+// It deliberately does NOT set the step's session, advance the outbox, or move
+// the step to running: every one of those would collapse this state into full
+// success, and the outbox left at `dispatched` with no session on the step is
+// exactly the shape adoptOrMarkAmbiguous already knows how to resolve from
+// evidence rather than by launching a second worker.
+//
+// Two homes, because the two reasons fail differently. The dispatch boundary is
+// where this state belongs and is the one a reconciler reads first; but when the
+// reason IS that the dispatch table refused a write, that home may well refuse
+// this one too, so the ledger record is written unconditionally and carries
+// everything needed to adopt the session later. Neither write is allowed to
+// abort the other.
 func (c *Coordinator) recordUnconfirmedLaunch(
 	ctx stdctx.Context,
 	run domain.WorkflowRun,
 	step domain.WorkflowStep,
+	entry domain.WorkflowOutboxEntry,
 	intent workerDispatchIntent,
 	result WorkerLaunchResult,
 	ownership SessionOwnershipEvidence,
+	reason unconfirmedLaunchReason,
 	cause error,
 ) {
 	causeText := ""
 	if cause != nil {
 		causeText = cause.Error()
 	}
+	if causeText == "" {
+		causeText = ownership.Unavailable
+	}
 	if len(causeText) > workerLaunchErrorMaxLen {
 		causeText = causeText[:workerLaunchErrorMaxLen]
 	}
 	branch, worktree, baseSHA := launchWorkspaceFacts(result, ownership)
+	sessionID := string(result.Session.ID)
+	detail := fmt.Sprintf(
+		"worker session %s launched and not confirmed (%s): %s", sessionID, reason, causeText)
+
+	if err := c.recordDispatchBoundary(ctx, dispatchBoundary{
+		run: run, step: step, entry: entry, attempt: intent.attempt.ID, harness: result.Session.Harness,
+		phase:           domain.DispatchPhaseWorkerLaunchUnconfirmed,
+		stage:           domain.LaunchStageConfirm,
+		outcome:         domain.LaunchOutcomeUnconfirmed,
+		sessionID:       sessionID,
+		detail:          detail,
+		branch:          branch,
+		worktreePath:    worktree,
+		baseSHA:         baseSHA,
+		runtimeHandleID: ownership.RuntimeHandleID,
+		runtimeLaunchID: ownership.RuntimeLaunchID,
+		agentSessionID:  ownership.AgentSessionID,
+		evidence: map[string]string{
+			"attemptId":            intent.attempt.ID,
+			"reason":               string(reason),
+			"ownership":            ownershipEvidenceStatus(ownership),
+			"ownershipUnavailable": ownership.Unavailable,
+		},
+	}); err != nil && c.log != nil {
+		c.log.Warn("workflow: could not record the unconfirmed launch boundary",
+			"step", step.ID, "session", sessionID, "reason", reason, "err", err)
+	}
+
 	state, _ := json.Marshal(unconfirmedLaunchRecord{
 		AttemptID:            intent.attempt.ID,
 		Harness:              string(intent.harness),
-		SessionID:            string(result.Session.ID),
+		SessionID:            sessionID,
 		Branch:               branch,
 		WorktreePath:         worktree,
 		BaseSHA:              baseSHA,
 		RuntimeHandleID:      ownership.RuntimeHandleID,
 		RuntimeLaunchID:      ownership.RuntimeLaunchID,
 		AgentSessionID:       ownership.AgentSessionID,
+		Reason:               string(reason),
 		Cause:                causeText,
 		OwnershipUnavailable: ownership.Unavailable,
 	})
 	stepID := step.ID
-	sessionID := string(result.Session.ID)
 	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
 		ID:             "wfc-" + c.newID(),
 		WorkflowRunID:  run.ID,
@@ -643,9 +705,7 @@ func (c *Coordinator) recordUnconfirmedLaunch(
 		Branch:         branch,
 		WorktreePath:   worktree,
 		BaseSHA:        baseSHA,
-		NextAction: fmt.Sprintf(
-			"worker session %s launched but its dispatch confirmation could not be persisted: %s",
-			sessionID, causeText),
+		NextAction:     detail,
 		DurablePhase:   unconfirmedLaunchRecordPhase,
 		PayloadVersion: "v1",
 		RetryState:     string(state),
@@ -656,12 +716,24 @@ func (c *Coordinator) recordUnconfirmedLaunch(
 		// adoptOrMarkAmbiguous and resolves this from the session row itself —
 		// which is why this is logged rather than escalated into a stop.
 		c.log.Error("workflow: worker launch could not be confirmed OR recorded as unconfirmed",
-			"step", step.ID, "session", sessionID, "err", err)
+			"step", step.ID, "session", sessionID, "reason", reason, "err", err)
 	}
 	if c.log != nil {
-		c.log.Warn("workflow: worker launched but its confirmation could not be persisted",
-			"step", step.ID, "session", sessionID, "err", cause)
+		c.log.Warn("workflow: worker launched but its dispatch could not be confirmed",
+			"step", step.ID, "session", sessionID, "reason", reason, "err", cause,
+			"ownershipUnavailable", ownership.Unavailable)
 	}
+}
+
+// ownershipEvidenceStatus renders the ownership read-back's own status, in the
+// same vocabulary the evidence snapshot uses: a fact AO holds is `observed`,
+// and a fact it could not read is `unavailable` — never silence recast as an
+// answer.
+func ownershipEvidenceStatus(ownership SessionOwnershipEvidence) string {
+	if ownership.Observed {
+		return "observed"
+	}
+	return "unavailable"
 }
 
 // launchWorkspaceFacts folds the two sources of a LAUNCHED session's workspace

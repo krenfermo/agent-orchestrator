@@ -22,6 +22,11 @@ type harnessAwareSpawner struct {
 	failHarness domain.AgentHarness
 	failErr     error
 	calls       []domain.AgentHarness
+	// facts receives every successfully spawned session, exactly as a real
+	// Spawn's row becomes readable through SessionFacts the moment it returns.
+	// The dispatch confirmation reads it back to prove ownership, so a fake
+	// that skipped this would model a launcher whose sessions never exist.
+	facts *fakeSessionFacts
 }
 
 func (f *harnessAwareSpawner) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
@@ -36,6 +41,11 @@ func (f *harnessAwareSpawner) Spawn(_ context.Context, cfg ports.SpawnConfig) (d
 		Kind:      cfg.Kind,
 		IssueID:   cfg.IssueID,
 		Metadata:  domain.SessionMetadata{Branch: "wf/step", WorkspacePath: "/tmp/wf-worktree"},
+	}
+	if f.facts != nil {
+		registered := rec
+		registered.Activity = domain.Activity{State: domain.ActivityActive}
+		f.facts.put(registered)
 	}
 	return rec, len(cfg.Prompt), 0, nil
 }
@@ -75,12 +85,23 @@ func (f *fakeSwitcher) SwitchAgent(_ context.Context, id domain.SessionID, cfg w
 func newCoordinatorWithSwitcher(spawner workflowcore.Spawner, switcher workflowcore.AgentSwitcher) (*workflowcore.Coordinator, *fakeStore, *fakeClock) {
 	store := newFakeStore()
 	clk := &fakeClock{t: time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)}
+	// See newCoordinatorFull: a dispatch is confirmed only once the launched
+	// session's ownership can be read back, so the spawner's sessions have to
+	// land somewhere SessionFacts can see them.
+	facts := newFakeSessionFacts()
+	if fake, ok := spawner.(*harnessAwareSpawner); ok && fake.facts == nil {
+		fake.facts = facts
+	}
+	if fake, ok := spawner.(*fakeSpawner); ok && fake.facts == nil {
+		fake.facts = facts
+	}
 	var idSeq int
 	c := workflowcore.New(workflowcore.Deps{
-		Store:    store,
-		Spawner:  spawner,
-		Switcher: switcher,
-		Clock:    clk.Now,
+		Store:        store,
+		Spawner:      spawner,
+		SessionFacts: facts,
+		Switcher:     switcher,
+		Clock:        clk.Now,
 		NewID: func() string {
 			idSeq++
 			return fmt.Sprintf("id%d", idSeq)

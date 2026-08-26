@@ -125,12 +125,17 @@ func TestWorkDispatch_CapacityRestoredAfterRestartLaunchesExactlyOneWorker(t *te
 
 	// Simulate a daemon restart: a fresh Coordinator over the same durable
 	// store (the exact pattern recovery_boundaries_test.go already uses).
-	spawner2 := &harnessAwareSpawner{}
+	// The restarted daemon gets its own session read path, as the real one
+	// does: a dispatch is confirmed only once the launched session's ownership
+	// can be read back (dispatch_state_machine.go).
+	facts2 := newFakeSessionFacts()
+	spawner2 := &harnessAwareSpawner{facts: facts2}
 	c2 := workflowcore.New(workflowcore.Deps{
-		Store:   store,
-		Spawner: spawner2,
-		Clock:   clk.Now,
-		NewID:   func() string { return "restart-id" },
+		Store:        store,
+		Spawner:      spawner2,
+		SessionFacts: facts2,
+		Clock:        clk.Now,
+		NewID:        func() string { return "restart-id" },
 	})
 	if err := c2.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile: %v", err)

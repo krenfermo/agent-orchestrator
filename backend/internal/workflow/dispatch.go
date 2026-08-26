@@ -707,17 +707,29 @@ func (c *Coordinator) confirmWorkerDispatch(
 
 	// PHASE 3 -- CONFIRMATION. Mandatory, and the gate everything below stands
 	// on.
+	//
+	// Both halves of the evidence are required, not one. A session identity is
+	// the launcher's WORD that it started something; the ownership read-back is
+	// the only thing that says that session exists, belongs to this launch, and
+	// is fenced by a launch generation AO can tell apart from a session row that
+	// merely outlived the process behind it. Confirming on the id alone would
+	// license RUNNING off an unverified claim — which is the precise shape of
+	// the bug this whole state machine exists to remove — so an ownership proof
+	// AO could not read routes to the unconfirmed state instead, with the step
+	// left out of running and the launched session named for a later adoption.
+	if !ownership.Observed {
+		c.recordUnconfirmedLaunch(ctx, run, step, entry, intent, result, ownership,
+			unconfirmedOwnershipUnproven, nil)
+		return step, nil
+	}
 	var launchedAt *time.Time
 	if !result.LaunchedAt.IsZero() {
 		at := result.LaunchedAt
 		launchedAt = &at
 	}
-	evidence := map[string]string{"attemptId": intent.attempt.ID}
-	if ownership.Observed {
-		evidence["ownership"] = "observed"
-	} else {
-		evidence["ownership"] = "unavailable"
-		evidence["ownershipUnavailable"] = ownership.Unavailable
+	evidence := map[string]string{
+		"attemptId": intent.attempt.ID,
+		"ownership": ownershipEvidenceStatus(ownership),
 	}
 	if err := c.recordDispatchBoundary(ctx, dispatchBoundary{
 		run: run, step: step, entry: entry, attempt: intent.attempt.ID, harness: rec.Harness,
@@ -736,7 +748,8 @@ func (c *Coordinator) confirmWorkerDispatch(
 		launchedAt:      launchedAt,
 		evidence:        evidence,
 	}); err != nil {
-		c.recordUnconfirmedLaunch(ctx, run, step, intent, result, ownership, err)
+		c.recordUnconfirmedLaunch(ctx, run, step, entry, intent, result, ownership,
+			unconfirmedWriteFailed, err)
 		return step, err
 	}
 

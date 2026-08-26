@@ -111,6 +111,17 @@ func (f *fakeWorkspaceFacts) ObserveWorkspace(_ context.Context, _ ports.Workspa
 func newCoordinatorFull(spawner workflowcore.Spawner, sessionFacts workflowcore.SessionFacts, workspaceFacts workflowcore.WorkspaceFacts) (*workflowcore.Coordinator, *fakeStore, *fakeClock) {
 	store := newFakeStore()
 	clk := &fakeClock{t: time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)}
+	// A real Spawn's session row is readable through SessionFacts the moment
+	// Spawn returns, and the dispatch confirmation depends on reading it back:
+	// a session AO cannot observe is a session whose ownership it cannot prove
+	// (dispatch_state_machine.go). Wiring the two fakes together here keeps
+	// every test in this package on that same fidelity instead of each one
+	// remembering to pass `facts:` by hand.
+	if fake, ok := spawner.(*fakeSpawner); ok && fake.facts == nil {
+		if facts, ok := sessionFacts.(*fakeSessionFacts); ok {
+			fake.facts = facts
+		}
+	}
 	var idSeq int
 	c := workflowcore.New(workflowcore.Deps{
 		Store:          store,
