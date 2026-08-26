@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -69,13 +70,55 @@ const (
 	// EvidenceSnapshotVersion identifies the shape of a serialized snapshot.
 	EvidenceSnapshotVersion = "worker-evidence/v1"
 
-	// evidenceMaxBytes is the whole-snapshot ceiling. It is much smaller than
-	// the incident pack's, because this is one section OF that pack: a
-	// snapshot that could crowd out the reviewer findings or the child
-	// evidence would have made the pack worse, not better.
-	evidenceMaxBytes = 5 * 1024
+	// evidenceMaxSerializedBytes is the whole-snapshot ceiling, and it binds
+	// the thing that actually exists: len(JSON()).
+	//
+	// It used to bind an internal tally of value+note lengths, which is not the
+	// artifact. That tally excluded every field key and label, every status
+	// string, every section key and title, the version, the ids, the digest,
+	// the timestamps, the truncation lists, and all of JSON's own punctuation
+	// and escaping — well over half of a real snapshot. A "5 KB ceiling" that
+	// admitted a 12 KB row is not a bound, it is a number next to a row, and
+	// the row is what gets written to the ledger and carried into a prompt.
+	//
+	// The figure is NOT comparable to the old one, because it measures a
+	// different thing. A complete, ordinary snapshot — every section filled,
+	// nothing pathological — serializes to roughly 5 KB, so the old "5 KB"
+	// constant was in truth admitting about twice that. This is sized so a
+	// complete ordinary snapshot fits whole, with room to spare, while a
+	// pathological one (seventy fields each at the 1 KB per-field cap would be
+	// ~72 KB) is still cut down hard. Preserving the useful evidence is the
+	// point of a budget; a ceiling that mangles every normal snapshot is not a
+	// tighter bound, it is a broken one.
+	evidenceMaxSerializedBytes = 16 * 1024
 	// evidenceMaxFieldBytes bounds any single field's value.
 	evidenceMaxFieldBytes = 1024
+	// evidenceMaxTruncatedKeys bounds the two accounting lists, which are
+	// serialized too and would otherwise be the one unbounded thing left in a
+	// snapshot whose whole point is being bounded.
+	evidenceMaxTruncatedKeys = 12
+	// evidenceDigestHexLen is the width of a sha256 hex digest. The budget pass
+	// measures with a placeholder of exactly this width, so stamping the real
+	// digest afterwards cannot change the serialized length.
+	evidenceDigestHexLen = 64
+	// evidenceMaxIdentifierBytes bounds each TOP-LEVEL identifier: the run,
+	// step, attempt and session ids.
+	//
+	// They sit outside Sections, so the budget pass — which works by dropping
+	// fields and then whole sections — could never reach them. With an
+	// oversized id the loop would run out of things to drop and still be over
+	// the ceiling, which is not a bound at all. Capping them is what makes the
+	// floor of a fully-drained snapshot provably small.
+	//
+	// 128 bytes is far more than any real id needs (a run id is ~40) so
+	// ordinary snapshots are untouched, and small enough that even a
+	// pathological id made entirely of characters JSON must escape six-fold
+	// leaves the drained floor at a couple of kilobytes.
+	evidenceMaxIdentifierBytes = 128
+	// evidenceIdentifierTruncationMark is appended to a capped identifier, so a
+	// reader is never shown a prefix that looks like a whole id. It is counted
+	// inside the cap, never added on top of it.
+	evidenceIdentifierTruncationMark = "…[truncated]"
 	// The list caps. Each one bounds a source whose natural size is unbounded.
 	evidenceMaxCheckpoints       = 12
 	evidenceMaxDispatchRecords   = 8
@@ -165,10 +208,20 @@ type WorkerEvidenceSnapshot struct {
 	Sections []EvidenceSection `json:"sections"`
 
 	// Budget accounting, recorded so the snapshot's own cost is a fact.
+	//
+	// Bytes is len(JSON()) — the real serialized length of this very value,
+	// not a tally of its parts — and MaxBytes is the ceiling that length is
+	// held under.
 	Bytes    int `json:"bytes"`
 	MaxBytes int `json:"maxBytes"`
-	// Truncated names every field whose value was capped.
+	// Truncated names fields whose VALUE was capped (bounded list).
 	Truncated []string `json:"truncated,omitempty"`
+	// DroppedForBudget names fields removed entirely to fit the ceiling, and
+	// DroppedForBudgetCount is how many there were in total. The list is
+	// bounded and the count is not, so a reader is never told a smaller number
+	// than the truth even when the names themselves had to be cut.
+	DroppedForBudget      []string `json:"droppedForBudget,omitempty"`
+	DroppedForBudgetCount int      `json:"droppedForBudgetCount,omitempty"`
 	// Digest identifies this exact evidence.
 	Digest string `json:"digest"`
 
@@ -249,7 +302,17 @@ func (s WorkerEvidenceSnapshot) Render() string {
 			}
 		}
 	}
-	fmt.Fprintf(&b, "\nsnapshot size: %d bytes, limit %d bytes.\n", s.Bytes, s.MaxBytes)
+	if s.DroppedForBudgetCount > 0 {
+		fmt.Fprintf(&b, "\n%d field(s) were removed to fit the snapshot budget", s.DroppedForBudgetCount)
+		if len(s.DroppedForBudget) > 0 {
+			fmt.Fprintf(&b, ": %s", strings.Join(s.DroppedForBudget, ", "))
+			if s.DroppedForBudgetCount > len(s.DroppedForBudget) {
+				fmt.Fprintf(&b, " and %d more", s.DroppedForBudgetCount-len(s.DroppedForBudget))
+			}
+		}
+		b.WriteString(".\n")
+	}
+	fmt.Fprintf(&b, "\nsnapshot size: %d serialized bytes, limit %d.\n", s.Bytes, s.MaxBytes)
 	return b.String()
 }
 
@@ -370,13 +433,23 @@ func DecodeObservedWorkerFacts(raw string) (ObservedWorkerFacts, bool) {
 	return o, true
 }
 
-// newestObservedWorkerFacts finds the newest recorded observation for a step,
-// falling back to the run's newest when the step has none of its own.
-func newestObservedWorkerFacts(cps []domain.WorkflowCheckpoint, stepID string) (ObservedWorkerFacts, bool) {
+// newestObservedWorkerFacts finds the newest recorded observation FOR THIS STEP.
+//
+// It used to fall back to the run's newest observation when the step had none
+// of its own, which is a fabrication with a plausible face on it: a run has a
+// work step, a review step and a fix step, each with its own session and — in
+// task execution — its own worktree. Handing the fix step's dirty tree to a
+// question about the work step produces a snapshot that is complete, internally
+// consistent, and about something else. That is worse than an empty one,
+// because nothing in it looks wrong.
+//
+// So: exact WorkflowStepID, never borrowed. A legacy row that carries no step
+// id at all is admissible only where it cannot mislead — the question is itself
+// run-scoped, or the row names the very session this step ran under, which is
+// durable proof that it is the same worker's observation.
+func newestObservedWorkerFacts(cps []domain.WorkflowCheckpoint, stepID, sessionID string) (ObservedWorkerFacts, bool) {
 	ordered := append([]domain.WorkflowCheckpoint(nil), cps...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].CreatedAt.After(ordered[j].CreatedAt) })
-	var runWide ObservedWorkerFacts
-	haveRunWide := false
 	for _, cp := range ordered {
 		if cp.DurablePhase != WorkerObservationEvidencePhase {
 			continue
@@ -385,14 +458,69 @@ func newestObservedWorkerFacts(cps []domain.WorkflowCheckpoint, stepID string) (
 		if !ok {
 			continue
 		}
-		if stepID != "" && cp.WorkflowStepID != nil && *cp.WorkflowStepID == stepID {
+		if rowStep := deref(cp.WorkflowStepID); rowStep != "" {
+			if stepID != "" && rowStep == stepID {
+				return facts, true
+			}
+			continue
+		}
+		// Legacy, run-scoped row.
+		if stepID == "" {
 			return facts, true
 		}
-		if !haveRunWide {
-			runWide, haveRunWide = facts, true
+		if sessionID != "" && facts.SessionID == sessionID {
+			return facts, true
 		}
 	}
-	return runWide, haveRunWide
+	return ObservedWorkerFacts{}, false
+}
+
+// durableStepSessionID resolves the session a step ACTUALLY ran under.
+//
+// workflow_steps.session_id is written by exactly one path — work dispatch — so
+// the review and fix steps have none, and reading only the column reports "no
+// session" about steps that plainly have one. Their session identity lives on
+// their own durable checkpoints instead, which is where this looks second.
+//
+// Exact WorkflowStepID only. Borrowing a session id from a neighbouring step
+// would attach the wrong worker, the wrong liveness answer and the wrong
+// worktree to the stop, which is the same fabrication in a different field.
+func durableStepSessionID(cps []domain.WorkflowCheckpoint, step domain.WorkflowStep) string {
+	if id := deref(step.SessionID); id != "" {
+		return id
+	}
+	if step.ID == "" {
+		return ""
+	}
+	ordered := append([]domain.WorkflowCheckpoint(nil), cps...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].CreatedAt.After(ordered[j].CreatedAt) })
+	for _, cp := range ordered {
+		if deref(cp.WorkflowStepID) != step.ID {
+			continue
+		}
+		if id := deref(cp.SessionID); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+// DurableSessionForStep is the coordinator-level form: the session identity a
+// step ran under, resolved from its own durable rows. Used by the review and
+// fix ambiguity paths so the observation they persist is recorded for the
+// session that actually exists rather than for an empty one.
+func (c *Coordinator) DurableSessionForStep(ctx stdctx.Context, runID string, step domain.WorkflowStep) domain.SessionID {
+	if id := deref(step.SessionID); id != "" {
+		return domain.SessionID(id)
+	}
+	if runID == "" || step.ID == "" {
+		return ""
+	}
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		return ""
+	}
+	return domain.SessionID(durableStepSessionID(cps, step))
 }
 
 // ProvenanceStore is the optional durable surface migration 0133 added: the
@@ -426,27 +554,29 @@ func (c *Coordinator) CollectWorkerEvidence(ctx stdctx.Context, req EvidenceRequ
 	snap := WorkerEvidenceSnapshot{
 		Version:     EvidenceSnapshotVersion,
 		CollectedAt: c.clock(),
-		RunID:       req.Run.ID,
-		StepID:      req.Step.ID,
-		MaxBytes:    evidenceMaxBytes,
+		RunID:       truncateIdentifier(req.Run.ID),
+		StepID:      truncateIdentifier(req.Step.ID),
+		MaxBytes:    evidenceMaxSerializedBytes,
 	}
-	if req.Step.SessionID != nil {
-		snap.SessionID = *req.Step.SessionID
-	}
-
 	checkpoints, cpErr := c.checkpointsForEvidence(ctx, req)
 	ledger := newestCheckpointGitFacts(checkpoints, req.Step.ID)
+	// The session this step actually ran under, from the step row when it has
+	// one and from the step's OWN checkpoints when it does not (review and fix
+	// steps never get the column). Resolved once, so every section below agrees
+	// about whose worker this is. See durableStepSessionID.
+	sessionID := durableStepSessionID(checkpoints, req.Step)
+	snap.SessionID = truncateIdentifier(sessionID)
 
 	c.evidenceWorkflow(b, req)
-	c.evidenceStep(b, req)
+	c.evidenceStep(b, req, sessionID)
 	attemptID := c.evidenceAttempt(ctx, b, req)
-	snap.AttemptID = attemptID
-	sess, sessFound := c.evidenceSession(ctx, b, req)
-	observed, observedOK := newestObservedWorkerFacts(checkpoints, req.Step.ID)
+	snap.AttemptID = truncateIdentifier(attemptID)
+	sess, sessFound := c.evidenceSession(ctx, b, sessionID)
+	observed, observedOK := newestObservedWorkerFacts(checkpoints, req.Step.ID, sessionID)
 	c.evidenceLiveness(b, observed, observedOK)
 	c.evidenceLaunch(ctx, b, req)
 	c.evidenceGit(b, sess, sessFound, observed, observedOK, ledger)
-	c.evidenceFingerprints(b, checkpoints, cpErr, observed, observedOK)
+	c.evidenceFingerprints(b, checkpoints, cpErr, req.Step.ID, observed, observedOK)
 	c.evidenceProvenance(ctx, b, req)
 	c.evidenceArtifacts(ctx, b, req)
 	c.evidenceResult(b, req, sess, sessFound, checkpoints, cpErr)
@@ -455,8 +585,13 @@ func (c *Coordinator) CollectWorkerEvidence(ctx stdctx.Context, req EvidenceRequ
 
 	snap.Sections = b.sections
 	snap.Truncated = b.truncated
+	// Order matters and is the whole of the serialized bound: budget against a
+	// fixed-width digest placeholder, stamp the real digest (identical width,
+	// so the length does not move), then record the length that actually
+	// resulted. See applyBudget.
 	snap.applyBudget()
 	snap.Digest = snap.digest()
+	snap.settleBytes()
 	snap.collected = true
 	return snap
 }
@@ -481,7 +616,9 @@ func (b *evidenceBuilder) add(f EvidenceField) {
 	if len(f.Value) > evidenceMaxFieldBytes {
 		f.Value = f.Value[:evidenceMaxFieldBytes]
 		f.Truncated = true
-		b.truncated = append(b.truncated, f.Key)
+		if len(b.truncated) < evidenceMaxTruncatedKeys {
+			b.truncated = append(b.truncated, f.Key)
+		}
 	}
 	b.sections[b.current].Fields = append(b.sections[b.current].Fields, f)
 }
@@ -517,7 +654,7 @@ func (c *Coordinator) evidenceWorkflow(b *evidenceBuilder, req EvidenceRequest) 
 	b.observed(EvidenceSectionWorkflow+".createdAt", "created", stamp(req.Run.CreatedAt, "unknown"))
 }
 
-func (c *Coordinator) evidenceStep(b *evidenceBuilder, req EvidenceRequest) {
+func (c *Coordinator) evidenceStep(b *evidenceBuilder, req EvidenceRequest, sessionID string) {
 	b.section(EvidenceSectionStep, "Step")
 	if req.Step.ID == "" {
 		b.unavailable(EvidenceSectionStep+".id", "step",
@@ -529,8 +666,19 @@ func (c *Coordinator) evidenceStep(b *evidenceBuilder, req EvidenceRequest) {
 	b.observed(EvidenceSectionStep+".state", "state", string(req.Step.State))
 	b.observed(EvidenceSectionStep+".harness", "assigned harness",
 		orValue(req.Step.AssignedHarness, "none assigned"))
-	b.observed(EvidenceSectionStep+".sessionId", "session",
-		orValue(deref(req.Step.SessionID), "none recorded on this step"))
+	// The resolved identity, with its provenance stated: a review or fix step
+	// has no session_id column, so "recovered from this step's checkpoints" and
+	// "on the step row" are different facts and a reader deserves to know which.
+	switch {
+	case deref(req.Step.SessionID) != "":
+		b.observed(EvidenceSectionStep+".sessionId", "session", sessionID+" (on the step row)")
+	case sessionID != "":
+		b.observed(EvidenceSectionStep+".sessionId", "session",
+			sessionID+" (recovered from this step's own checkpoints)")
+	default:
+		b.observed(EvidenceSectionStep+".sessionId", "session",
+			"none recorded on this step or on any of its checkpoints")
+	}
 	b.observed(EvidenceSectionStep+".reviewRunId", "review run",
 		orValue(deref(req.Step.ReviewRunID), "none — this step has no review run"))
 	b.observed(EvidenceSectionStep+".expectedArtifactsVersion", "expected-artifacts version",
@@ -589,16 +737,18 @@ func renderReviewTarget(t domain.WorkflowReviewTarget) string {
 	return strings.Join(parts, " ")
 }
 
-func (c *Coordinator) evidenceSession(ctx stdctx.Context, b *evidenceBuilder, req EvidenceRequest) (domain.SessionRecord, bool) {
+func (c *Coordinator) evidenceSession(
+	ctx stdctx.Context, b *evidenceBuilder, sessionID string,
+) (domain.SessionRecord, bool) {
 	b.section(EvidenceSectionSession, "Session lifecycle")
 	if c.sessionFacts == nil {
 		b.unavailable(EvidenceSectionSession+".id", "session",
 			"no session-facts port is wired into this coordinator")
 		return domain.SessionRecord{}, false
 	}
-	sessionID := deref(req.Step.SessionID)
 	if sessionID == "" {
-		b.observed(EvidenceSectionSession+".id", "session", "none recorded on this step")
+		b.observed(EvidenceSectionSession+".id", "session",
+			"none recorded on this step or on any of its checkpoints")
 		return domain.SessionRecord{}, false
 	}
 	sess, found, err := c.sessionFacts.GetSession(ctx, domain.SessionID(sessionID))
@@ -768,7 +918,7 @@ func (c *Coordinator) evidenceGit(
 
 func (c *Coordinator) evidenceFingerprints(
 	b *evidenceBuilder,
-	checkpoints []domain.WorkflowCheckpoint, cpErr error,
+	checkpoints []domain.WorkflowCheckpoint, cpErr error, stepID string,
 	observed ObservedWorkerFacts, observedOK bool,
 ) {
 	b.section(EvidenceSectionFingerprints, "Workspace fingerprints")
@@ -776,11 +926,11 @@ func (c *Coordinator) evidenceFingerprints(
 		b.unavailable(EvidenceSectionFingerprints+".recorded", "recorded fingerprint",
 			"reading the run's checkpoints failed: "+cpErr.Error())
 	} else {
-		before, after := newestFingerprints(checkpoints)
+		before, after := newestFingerprints(checkpoints, stepID)
 		b.observed(EvidenceSectionFingerprints+".addressed", "fingerprint under repair",
-			orValue(before, "none recorded on this run's ledger"))
+			orValue(before, "none recorded on this step's ledger"))
 		b.observed(EvidenceSectionFingerprints+".recorded", "newest certified fingerprint",
-			orValue(after, "none recorded on this run's ledger"))
+			orValue(after, "none recorded on this step's ledger"))
 	}
 	if !observedOK || !observed.WorkspaceKnown || observed.Fingerprint == "" {
 		b.unavailable(EvidenceSectionFingerprints+".observed", "observed fingerprint",
@@ -798,23 +948,33 @@ func (c *Coordinator) evidenceProvenance(ctx stdctx.Context, b *evidenceBuilder,
 			"this store cannot read mutation provenance (it predates migration 0133)")
 		return
 	}
-	records, err := ps.ListWorkflowMutationProvenanceByRun(ctx, req.Run.ID)
+	// Exact step, or nothing. Reading the RUN's provenance and only narrowing to
+	// the step when step-scoped rows happened to exist is how the fix step's
+	// authorized mutation came to be reported as the work step's: a real record,
+	// a real owner, attached to the wrong question. An absent step-scoped record
+	// is `unattributed`, which is the honest answer and the one that does not
+	// send anybody to revert somebody else's change.
+	var records []domain.WorkflowMutationProvenance
+	var err error
+	scope := "this step"
+	if req.Step.ID != "" {
+		records, err = ps.ListWorkflowMutationProvenanceByStep(ctx, req.Step.ID)
+	} else {
+		scope = "this run"
+		records, err = ps.ListWorkflowMutationProvenanceByRun(ctx, req.Run.ID)
+	}
 	if err != nil {
 		b.unavailable(EvidenceSectionProvenance+".owner", "attributed owner",
 			"reading the mutation provenance failed: "+err.Error())
 		return
-	}
-	if req.Step.ID != "" {
-		if scoped, serr := ps.ListWorkflowMutationProvenanceByStep(ctx, req.Step.ID); serr == nil && len(scoped) > 0 {
-			records = scoped
-		}
 	}
 	if len(records) == 0 {
 		// The whole point of this branch. AO holds no record of who changed
 		// this workspace, and the plausible owner — this run's own worker — is
 		// exactly the attribution that would send a person to revert the wrong
 		// work. So the field says unattributed and names nobody.
-		note := "no AO-owned mutation provenance is recorded for this run; AO cannot say whose change this is and will not guess"
+		note := "no AO-owned mutation provenance is recorded for " + scope +
+			"; AO cannot say whose change this is and will not guess"
 		b.unattributed(EvidenceSectionProvenance+".owner", "attributed owner", note)
 		b.unattributed(EvidenceSectionProvenance+".class", "mutation class", note)
 		b.unattributed(EvidenceSectionProvenance+".reason", "mutation reason", note)
@@ -1044,11 +1204,19 @@ func newestCheckpointGitFacts(cps []domain.WorkflowCheckpoint, stepID string) ch
 }
 
 // newestFingerprints returns the newest non-empty FingerprintBefore and
-// FingerprintAfter recorded anywhere on the run's ledger.
-func newestFingerprints(cps []domain.WorkflowCheckpoint) (before, after string) {
+// FingerprintAfter recorded ON THIS STEP.
+//
+// It used to scan the whole run, which meant a question about the work step
+// could be answered with the fix step's fingerprint — two different trees at two
+// different instants, presented as this step's own. A run-scoped row (one with
+// no step id) is only admissible when the question is itself run-scoped.
+func newestFingerprints(cps []domain.WorkflowCheckpoint, stepID string) (before, after string) {
 	ordered := append([]domain.WorkflowCheckpoint(nil), cps...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].CreatedAt.After(ordered[j].CreatedAt) })
 	for _, cp := range ordered {
+		if stepID != "" && deref(cp.WorkflowStepID) != stepID {
+			continue
+		}
 		if before == "" && cp.FingerprintBefore != "" {
 			before = cp.FingerprintBefore
 		}
@@ -1079,37 +1247,132 @@ func newestWorkerObservation(cps []domain.WorkflowCheckpoint, stepID string) (ph
 	return "", ""
 }
 
-// applyBudget brings the snapshot under its ceiling by dropping whole fields
-// from the last section backwards, recording each one as unavailable-for-budget
-// rather than silently removing it. A snapshot that quietly shrank would be a
-// snapshot whose absences mean two different things.
+// applyBudget brings the snapshot under evidenceMaxSerializedBytes, measured on
+// len(JSON()) — the artifact itself, not a tally of some of its parts.
+//
+// Three things make that measurable rather than circular:
+//
+//   - the digest is stamped as a fixed-width placeholder first, so replacing it
+//     with the real one afterwards cannot change the length by a single byte;
+//   - Bytes is measured at its widest possible value during the pass, so the
+//     final (smaller or equal) number can only shrink the row, never grow it;
+//   - a dropped field is REMOVED, not blanked. Blanking left the key, the
+//     label, the status and a 47-byte explanation behind, so dropping every
+//     field in a maximal snapshot still left several kilobytes of scaffolding
+//     and the loop could not converge at all.
+//
+// Fields go lowest-value first: the last section backwards, so the workflow and
+// step identity — without which the snapshot is about nothing — is the last
+// thing to go. What went is recorded in DroppedForBudget, itself bounded, with
+// an unbounded count beside it so the accounting cannot quietly under-report.
 func (s *WorkerEvidenceSnapshot) applyBudget() {
-	total := s.fieldBytes()
-	for i := len(s.Sections) - 1; i >= 0 && total > evidenceMaxBytes; i-- {
-		for j := len(s.Sections[i].Fields) - 1; j >= 0 && total > evidenceMaxBytes; j-- {
-			f := &s.Sections[i].Fields[j]
-			if f.Status != EvidenceObserved {
-				continue
-			}
-			total -= len(f.Value)
-			f.Value = ""
-			f.Status = EvidenceUnavailable
-			f.Truncated = false
-			f.Note = "dropped to keep the snapshot under its byte budget"
-			s.Truncated = append(s.Truncated, f.Key)
+	s.MaxBytes = evidenceMaxSerializedBytes
+	s.Digest = strings.Repeat("0", evidenceDigestHexLen)
+	s.Bytes = evidenceMaxSerializedBytes
+	if len(s.Truncated) > evidenceMaxTruncatedKeys {
+		s.Truncated = s.Truncated[:evidenceMaxTruncatedKeys]
+	}
+
+	for s.serializedLen() > evidenceMaxSerializedBytes {
+		if !s.dropLowestValueField() {
+			break
 		}
 	}
-	s.Bytes = s.fieldBytes()
+	// A section whose fields have all gone still costs its key and title. Once
+	// there is nothing left to drop, they are what is left to drop.
+	for s.serializedLen() > evidenceMaxSerializedBytes {
+		if !s.dropTrailingEmptySection() {
+			break
+		}
+	}
+	// Last resort: the accounting lists. They are bounded already
+	// (evidenceMaxTruncatedKeys entries of field keys, which are constants in
+	// this file), so they cannot themselves prevent convergence — but they are
+	// the only variable-length thing left once the sections have gone, and
+	// dropping them costs nothing a reader needs: DroppedForBudgetCount is an
+	// integer and survives, so the accounting still cannot under-report.
+	if s.serializedLen() > evidenceMaxSerializedBytes {
+		s.Truncated = nil
+		s.DroppedForBudget = nil
+	}
+	// What remains is a floor that is bounded BY CONSTRUCTION rather than by
+	// this loop: a constant version string, four identifiers each capped at
+	// evidenceMaxIdentifierBytes, one RFC3339 timestamp, three integers and a
+	// fixed-width digest. That is the whole reason the identifiers are capped
+	// at all — without it this function could drop every field and every
+	// section it has and still be over the ceiling, with nothing left to do.
 }
 
-func (s WorkerEvidenceSnapshot) fieldBytes() int {
-	n := 0
-	for _, sec := range s.Sections {
-		for _, f := range sec.Fields {
-			n += len(f.Value) + len(f.Note)
+// settleBytes stamps the true serialized length into Bytes.
+//
+// It iterates because Bytes is itself serialized: writing a shorter number
+// makes the row shorter. It only ever shrinks (the budget pass measured with
+// the widest value there can be), so it converges in at most a couple of
+// rounds and can never push the row back over the ceiling.
+func (s *WorkerEvidenceSnapshot) settleBytes() {
+	for range 4 {
+		n := s.serializedLen()
+		if n == s.Bytes {
+			return
 		}
+		s.Bytes = n
 	}
-	return n
+}
+
+func (s WorkerEvidenceSnapshot) serializedLen() int { return len(s.JSON()) }
+
+// truncateIdentifier caps one identifier, on a rune boundary, with a mark that
+// says it was capped.
+//
+// Rune-safe because a split multi-byte rune is invalid UTF-8, which
+// encoding/json rewrites as U+FFFD — turning one byte into three at marshal
+// time. The budget loop measures the real marshalled row so the ceiling would
+// still hold, but the FLOOR would stop being predictable from the cap, and a
+// bound you cannot compute in advance is a bound you cannot reason about.
+func truncateIdentifier(id string) string {
+	if len(id) <= evidenceMaxIdentifierBytes {
+		return id
+	}
+	keep := evidenceMaxIdentifierBytes - len(evidenceIdentifierTruncationMark)
+	if keep < 0 {
+		keep = 0
+	}
+	// Back off to a rune boundary so the kept prefix stays valid UTF-8.
+	for keep > 0 && !utf8.RuneStart(id[keep]) {
+		keep--
+	}
+	return id[:keep] + evidenceIdentifierTruncationMark
+}
+
+// dropLowestValueField removes one field, last section first and last field
+// within it first. Reports false when there is nothing left to remove.
+func (s *WorkerEvidenceSnapshot) dropLowestValueField() bool {
+	for i := len(s.Sections) - 1; i >= 0; i-- {
+		fields := s.Sections[i].Fields
+		if len(fields) == 0 {
+			continue
+		}
+		dropped := fields[len(fields)-1]
+		s.Sections[i].Fields = fields[:len(fields)-1]
+		s.DroppedForBudgetCount++
+		if len(s.DroppedForBudget) < evidenceMaxTruncatedKeys {
+			s.DroppedForBudget = append(s.DroppedForBudget, dropped.Key)
+		}
+		return true
+	}
+	return false
+}
+
+// dropTrailingEmptySection removes the last section that has no fields left.
+func (s *WorkerEvidenceSnapshot) dropTrailingEmptySection() bool {
+	for i := len(s.Sections) - 1; i >= 0; i-- {
+		if len(s.Sections[i].Fields) != 0 {
+			continue
+		}
+		s.Sections = append(s.Sections[:i], s.Sections[i+1:]...)
+		return true
+	}
+	return false
 }
 
 func (s WorkerEvidenceSnapshot) digest() string {

@@ -205,14 +205,15 @@ func (c *Coordinator) stopReviewAmbiguous(
 ) (domain.WorkflowStep, error) {
 	// A review step has no worktree of its own to observe, but it does have a
 	// reviewer session — so the one reading AO can take here (is that runtime
-	// still alive?) is taken and written down before the raise, rather than
-	// left as an unrecorded gap.
-	var sessionID domain.SessionID
-	if step.SessionID != nil {
-		sessionID = domain.SessionID(*step.SessionID)
-	}
-	raised, err := c.raiseAmbiguousWorkerState(
-		ctx, run, step, reason, detail, c.observedWorkerFactsFor(ctx, sessionID, nil))
+	// still alive?) is taken and written down before the raise.
+	//
+	// Resolved through DurableSessionForStep, NOT off step.SessionID: only work
+	// dispatch ever writes that column, so a review step's own id is empty and
+	// reading it probed nothing, recorded nothing, and left the stop with a
+	// liveness field permanently unavailable for a session that plainly exists.
+	// The identity lives on this step's own checkpoints.
+	raised, err := c.raiseAmbiguousWorkerState(ctx, run, step, reason, detail,
+		c.observedWorkerFactsFor(ctx, c.DurableSessionForStep(ctx, run.ID, step), nil))
 	if err != nil {
 		return step, err
 	}

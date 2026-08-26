@@ -205,6 +205,13 @@ func (c *Coordinator) stopFixAmbiguous(
 	reason, detail string,
 	obs *ports.WorkspaceObservation,
 ) (domain.WorkflowStep, error) {
+	// The fix path resolves its session off the step's own dispatch checkpoint
+	// and passes it in; the fallback covers the case where that row carried
+	// none, and resolves it the same way — from this step's checkpoints, never
+	// from a neighbouring step's.
+	if sessionID == "" {
+		sessionID = c.DurableSessionForStep(ctx, run.ID, step)
+	}
 	raised, err := c.raiseAmbiguousWorkerState(
 		ctx, run, step, reason, detail, c.observedWorkerFactsFor(ctx, sessionID, obs))
 	if err != nil {
