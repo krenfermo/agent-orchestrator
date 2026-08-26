@@ -1167,6 +1167,32 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		return RunDetail{}, fmt.Errorf("%w: workflow run %q is missing its work/review step", ErrInvalid, runID)
 	}
 
+	// The wake-triggered half of crash/restart reconciliation (the other is boot
+	// recovery -- see dispatch_reconcile.go). A wake is the first thing that
+	// reaches a run after the daemon that was launching for it died, so it is
+	// the first opportunity to resolve the contradiction that crash left: an
+	// attempt open over a launch that never happened, a worker launched and
+	// never confirmed, a step RUNNING over an execution that is gone.
+	//
+	// It runs BEFORE every resume below, and before dispatch, because all of
+	// those act on the step's CURRENT state — and reconciliation is what makes
+	// that state true. It never launches anything and it never touches a live,
+	// evidenced worker.
+	reconciled, reconciledRun, rerr := c.ReconcileWorkStepDispatch(ctx, run, *workStep)
+	if rerr != nil {
+		return RunDetail{}, rerr
+	}
+	run = reconciledRun
+	if reconciled.Action.Resolved() {
+		refreshedStep, ok, serr := c.getWorkflowStep(ctx, runID, workStep.ID)
+		if serr != nil {
+			return RunDetail{}, serr
+		}
+		if ok {
+			*workStep = refreshedStep
+		}
+	}
+
 	// Checkpoint 8N.1: a work step parked at Ready (never dispatched — the
 	// capacity-wait case, see markRunWaitingForCapacity) must be re-entered
 	// into dispatchWorkStep here, exactly like Reconcile already does at boot

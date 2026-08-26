@@ -129,6 +129,16 @@ type SessionOwnershipEvidence struct {
 	// is never "the session is not ours" — it is "AO could not tell", and
 	// Unavailable says why.
 	Observed bool
+	// Missing separates the ONE not-observed answer that is itself a fact from
+	// every other one: the read succeeded and there is no such session. That is
+	// positive evidence that nothing AO launched is running under this identity,
+	// and it is the only shape from which a reconciler may close and retry.
+	//
+	// A read that FAILED, or a read path that was never wired, leaves this
+	// false with Unavailable set — "AO could not tell", never "nothing is
+	// there". Collapsing the two is how a reconciler starts a second worker
+	// over a live one.
+	Missing bool
 	// Unavailable names why the proof could not be read. Empty when Observed.
 	Unavailable string
 }
@@ -245,6 +255,7 @@ func (o sessionFactsOwnership) ObserveSessionOwnership(ctx stdctx.Context, id do
 		ev.Unavailable = "reading the session failed: " + err.Error()
 		return ev
 	case !found:
+		ev.Missing = true
 		ev.Unavailable = "the session row could not be found"
 		return ev
 	}

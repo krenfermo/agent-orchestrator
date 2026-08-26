@@ -113,6 +113,38 @@ func (c *Coordinator) Reconcile(ctx stdctx.Context) error {
 			c.checkStepIntegrity(ctx, step)
 
 			if step.Kind == domain.WorkflowStepWork {
+				// Before anything is dispatched: read the durable launch
+				// evidence under this step and resolve whatever a crash left
+				// contradicting it -- an attempt open over a launch that never
+				// happened, a worker launched and never confirmed, a step
+				// RUNNING over an execution that is gone. Dispatch is
+				// idempotent, but it cannot answer those questions: it asks
+				// "has this step got a session" and re-enters from the outbox,
+				// which is not the same thing as asking which phase of the
+				// launch actually completed. See dispatch_reconcile.go.
+				//
+				// It runs FIRST for the same reason the intent record is
+				// written before the launcher is invoked: a live worker AO has
+				// not yet recognised must be adopted before anything gets the
+				// chance to start a second one over it.
+				reconciled, reconciledRun, rerr := c.ReconcileWorkStepDispatch(ctx, run, step)
+				if rerr != nil {
+					return rerr
+				}
+				run = reconciledRun
+				if reconciled.Action.Resolved() {
+					// The step may have moved (adopted -> running, stopped ->
+					// waiting), and dispatch below must see where it actually
+					// is rather than where this loop found it.
+					refreshed, ok, serr := c.getWorkflowStep(ctx, run.ID, step.ID)
+					if serr != nil {
+						return serr
+					}
+					if !ok {
+						continue
+					}
+					step = refreshed
+				}
 				if step.State != domain.WorkflowStepReady && step.State != domain.WorkflowStepRunning {
 					continue
 				}

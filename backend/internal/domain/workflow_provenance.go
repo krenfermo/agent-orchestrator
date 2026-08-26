@@ -39,6 +39,16 @@ const (
 	// DispatchPhaseWorkerLaunchError is a worker launch that failed, carrying
 	// the classification and the runtime's own words.
 	DispatchPhaseWorkerLaunchError WorkflowDispatchPhase = "worker_launch_error"
+	// DispatchPhaseWorkerDispatchReconciled is the boundary crash/restart
+	// reconciliation records when it RESOLVES a contradiction between an
+	// attempt/step that says it is in flight and the launch evidence under it.
+	//
+	// It is written into the same append-only dispatch history as every other
+	// boundary, and for the same reason: the resolution of a launch is part of
+	// that launch's story. It is also what makes reconciliation idempotent —
+	// while it is the newest boundary for a step, the contradiction it names has
+	// already been answered, so a duplicate wake finds nothing left to do.
+	DispatchPhaseWorkerDispatchReconciled WorkflowDispatchPhase = "worker_dispatch_reconciled"
 	// DispatchPhaseWorkerLaunchHumanRetry is a person reopening a durably
 	// failed worker dispatch.
 	DispatchPhaseWorkerLaunchHumanRetry WorkflowDispatchPhase = "worker_launch_human_retry"

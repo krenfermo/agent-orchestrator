@@ -271,7 +271,7 @@ func (c *Coordinator) recordWorkerLaunchFailure(
 	}
 
 	attempt := c.workerLaunchAttemptCount(ctx, run.ID, step.ID) + 1
-	retry := cls.Retryable && attempt < maxWorkerLaunchAttempts
+	retry := c.workerLaunchRetryAllowed(ctx, run.ID, step.ID, cls)
 
 	detail := fmt.Sprintf("work dispatch failed at stage %s (%s, %s, attempt %d/%d): %s",
 		stage, cls.Class, cls.Certainty, attempt, maxWorkerLaunchAttempts, deep)
@@ -335,6 +335,22 @@ func (c *Coordinator) recordWorkerLaunchFailure(
 			"step", step.ID, "stage", stage, "class", cls.Class, "reason", reason, "attempt", attempt, "err", cause)
 	}
 	return c.recordDispatchFailure(ctx, run, step, entry, cls.Class, reason, cause)
+}
+
+// workerLaunchRetryAllowed is the bounded-retry policy itself, as one
+// expression: a cause AO may retry, and budget left to retry it with.
+//
+// It is a function rather than an inlined condition because the crash/restart
+// reconciler has to ASK the policy before it acts — a reconciled contradiction
+// that the policy would not retry must stop with its evidence rather than be
+// pushed through the failure path and stop without it (see
+// dispatch_reconcile.go). Two copies of this expression would be two policies.
+func (c *Coordinator) workerLaunchRetryAllowed(
+	ctx stdctx.Context,
+	runID, stepID string,
+	cls workerLaunchClassification,
+) bool {
+	return cls.Retryable && c.workerLaunchAttemptCount(ctx, runID, stepID)+1 < maxWorkerLaunchAttempts
 }
 
 // latestWorkerLaunchRecord returns the newest launch-failure record for a work
