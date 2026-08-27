@@ -422,6 +422,115 @@ func (s *Store) UpdateWorkflowOutboxStatus(
 	return rows > 0, nil
 }
 
+// ClaimWorkflowOutboxDispatch takes an entry pending -> dispatched and stamps
+// the claim token that identifies the dispatch now owning it.
+//
+// The token and the status change are one statement, so a claimed row always
+// says who claimed it; every ownership-dependent transition off `dispatched`
+// then names the token back.
+func (s *Store) ClaimWorkflowOutboxDispatch(
+	ctx context.Context,
+	id string,
+	now time.Time,
+	dispatchGeneration string,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.ClaimWorkflowOutboxDispatch(ctx, gen.ClaimWorkflowOutboxDispatchParams{
+		DispatchedAt:       sql.NullTime{Time: now, Valid: true},
+		DispatchGeneration: dispatchGeneration,
+		ID:                 id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("claim workflow outbox %s dispatch: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// FailWorkflowOutboxWithGeneration moves an entry to `failed`, stamps the
+// identity of the failure that did it, and PROVES the caller still owns the
+// dispatch — all in the SAME statement.
+//
+// One statement is the requirement, not a convenience. The stamp is what a later
+// human resume compare-and-swaps against, so a row that reached `failed` without
+// it would be a failure nobody could prove the generation of. And the ownership
+// half is why `id + status = dispatched` is not enough: a dispatch that paused
+// after recording its launch error can wake to find the row dispatched AGAIN, to
+// somebody else, and would otherwise fail that live generation and stamp its own
+// failure onto it.
+func (s *Store) FailWorkflowOutboxWithGeneration(
+	ctx context.Context,
+	id string,
+	expected domain.WorkflowOutboxStatus,
+	now time.Time,
+	errorClass, generation, dispatchGeneration string,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.FailWorkflowOutboxWithGeneration(ctx, gen.FailWorkflowOutboxWithGenerationParams{
+		FailedAt:           sql.NullTime{Time: now, Valid: true},
+		ErrorClass:         errorClass,
+		FailureGeneration:  generation,
+		ID:                 id,
+		ExpectedStatus:     expected,
+		DispatchGeneration: dispatchGeneration,
+	})
+	if err != nil {
+		return false, fmt.Errorf("fail workflow outbox %s with generation: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// ReleaseDispatchedWorkflowOutboxGeneration gives one dispatch's claim back:
+// dispatched -> pending, for the exact token that holds it. A stale release
+// changes nothing rather than handing a live dispatch's claim to somebody else.
+func (s *Store) ReleaseDispatchedWorkflowOutboxGeneration(
+	ctx context.Context,
+	id string,
+	errorClass, dispatchGeneration string,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.ReleaseDispatchedWorkflowOutboxGeneration(ctx, gen.ReleaseDispatchedWorkflowOutboxGenerationParams{
+		ErrorClass:         errorClass,
+		ID:                 id,
+		DispatchGeneration: dispatchGeneration,
+	})
+	if err != nil {
+		return false, fmt.Errorf("release workflow outbox %s dispatch: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// ReopenFailedWorkflowOutboxGeneration moves ONE named failed generation back to
+// `pending`.
+//
+// The generation is in the UPDATE's own WHERE clause, so "is this still the
+// failure the person acted on?" is answered by the same statement that changes
+// the state. Answering it with a read first and swapping on id + status
+// afterwards is the TOCTOU this exists to remove: the row can fail again, under
+// the same id and the same status, in between.
+//
+// false means zero rows matched — already reopened, or replaced by a newer
+// failure. Both are idempotent no-ops for the caller, never errors.
+func (s *Store) ReopenFailedWorkflowOutboxGeneration(
+	ctx context.Context,
+	id string,
+	errorClass, generation string,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.ReopenFailedWorkflowOutboxGeneration(ctx, gen.ReopenFailedWorkflowOutboxGenerationParams{
+		ErrorClass:        errorClass,
+		ID:                id,
+		FailureGeneration: generation,
+	})
+	if err != nil {
+		return false, fmt.Errorf("reopen workflow outbox %s generation: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
 // UpdateWorkflowAttemptOutcome updates an existing attempt row's terminal
 // facts (finished_at/outcome/error_class). Used both to conclude a dispatch
 // attempt and to later refine an already-recorded attempt's error_class
@@ -611,6 +720,71 @@ func (s *Store) CreateWorkflowCheckpoint(ctx context.Context, cp domain.Workflow
 	return workflowCheckpointFromRow(row), nil
 }
 
+// RebindWorkflowStepReviewRunFrom compare-and-swaps a review step's authority
+// pointer. expected "" means "currently unset" (the state review-authority
+// reconciliation leaves behind when it releases a step).
+//
+// False is never a failure — it is "somebody else owns this step now", and the
+// caller must stop acting as its owner.
+func (s *Store) RebindWorkflowStepReviewRunFrom(
+	ctx context.Context, stepID, expected, predecessor, next string, now time.Time,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	var rows int64
+	var err error
+	if expected == "" {
+		rows, err = s.qw.ClaimWorkflowStepReviewRunIfUnset(ctx, gen.ClaimWorkflowStepReviewRunIfUnsetParams{
+			ReviewRunID:            sql.NullString{String: next, Valid: next != ""},
+			UpdatedAt:              now,
+			ID:                     stepID,
+			PredecessorReviewRunID: predecessor,
+		})
+	} else {
+		rows, err = s.qw.RebindWorkflowStepReviewRunFrom(ctx, gen.RebindWorkflowStepReviewRunFromParams{
+			NextReviewRunID:        sql.NullString{String: next, Valid: next != ""},
+			UpdatedAt:              now,
+			ID:                     stepID,
+			ExpectedReviewRunID:    sql.NullString{String: expected, Valid: true},
+			PredecessorReviewRunID: predecessor,
+		})
+	}
+	if err != nil {
+		return false, fmt.Errorf("rebind workflow step %s review run: %w", stepID, err)
+	}
+	return rows > 0, nil
+}
+
+// UpdateWorkflowStepStateIfReviewRun applies a step transition only while the
+// named review run is still the step's authority. False means the decision was
+// stale — the pointer moved, or the step was not in the expected state.
+func (s *Store) UpdateWorkflowStepStateIfReviewRun(
+	ctx context.Context, stepID string, expected, next domain.WorkflowStepState,
+	reviewRunID string, now time.Time,
+) (bool, error) {
+	if !domain.ValidWorkflowStepTransition(expected, next) {
+		return false, nil
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	var completedAt sql.NullTime
+	if next.Terminal() {
+		completedAt = sql.NullTime{Time: now, Valid: true}
+	}
+	rows, err := s.qw.UpdateWorkflowStepStateIfReviewRun(ctx, gen.UpdateWorkflowStepStateIfReviewRunParams{
+		State:         next,
+		UpdatedAt:     now,
+		CompletedAt:   completedAt,
+		ID:            stepID,
+		ExpectedState: expected,
+		ReviewRunID:   sql.NullString{String: reviewRunID, Valid: reviewRunID != ""},
+	})
+	if err != nil {
+		return false, fmt.Errorf("update workflow step %s state under review run %s: %w", stepID, reviewRunID, err)
+	}
+	return rows > 0, nil
+}
+
 // ReleaseWorkflowStepReviewRunIfNoLateVerdict clears a review step's authority
 // pointer only while the run it names still has no late verdict.
 //
@@ -685,6 +859,16 @@ func (s *Store) EnqueueWorkflowOutboxEntry(ctx context.Context, entry domain.Wor
 		return domain.WorkflowOutboxEntry{}, false, fmt.Errorf("read workflow outbox entry %s: %w", entry.IdempotencyKey, lookupErr)
 	}
 	return workflowOutboxFromRow(existing), rows > 0, nil
+}
+
+// ListWorkflowRunIDsByCheckpointPhase returns the runs carrying a checkpoint of
+// the given durable phase, terminal runs included.
+func (s *Store) ListWorkflowRunIDsByCheckpointPhase(ctx context.Context, phase string) ([]string, error) {
+	ids, err := s.qr.ListWorkflowRunIDsByCheckpointPhase(ctx, phase)
+	if err != nil {
+		return nil, fmt.Errorf("list workflow runs by checkpoint phase %s: %w", phase, err)
+	}
+	return ids, nil
 }
 
 // ListWorkflowOutboxByRun lists a run's outbox entries oldest first.
@@ -807,6 +991,9 @@ func workflowOutboxFromRow(r gen.WorkflowOutbox) domain.WorkflowOutboxEntry {
 		AcknowledgedAt: nullTimeToTimePtr(r.AcknowledgedAt),
 		FailedAt:       nullTimeToTimePtr(r.FailedAt),
 		ErrorClass:     r.ErrorClass,
+
+		FailureGeneration:  r.FailureGeneration,
+		DispatchGeneration: r.DispatchGeneration,
 	}
 }
 

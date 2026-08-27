@@ -76,6 +76,30 @@ type fakeStore struct {
 	// takes effect, which is how the concurrency tests here reproduce an exact
 	// racing order without a goroutine, a sleep or a timing assumption.
 	beforeCheckpointInsert func(cp domain.WorkflowCheckpoint)
+	// beforeStepStateWrite fires inside the AUTHORITY-GUARDED step transition,
+	// immediately before it takes effect — the interleaving point at which a
+	// replacement can steal the step from an adopter that is mid-flight.
+	beforeStepStateWrite func(stepID string)
+	// beforeOutboxCAS fires inside the outbox compare-and-swap, immediately
+	// before it takes effect — the interleaving point at which a second
+	// dispatcher can claim the pending dispatch out from under this one.
+	beforeOutboxCAS func(id string, expected, next domain.WorkflowOutboxStatus)
+	// checkpointListErr makes the durable ledger unreadable. Every decision that
+	// depends on evidence must fail CLOSED when it is set: an unreadable ledger
+	// is the absence of proof, never a substitute for it.
+	checkpointListErr error
+	// checkpointListErrAfter lets a test place the failure at a precise point in
+	// a decision, so the branch under test is the one that meets it rather than
+	// some earlier read that never gets that far.
+	checkpointListErrAfter int
+	checkpointListCalls    int
+	// checkpointListErrOnce fails exactly ONE read. It isolates a single
+	// decision's evidence lookup from the reads around it, so a fail-open bug in
+	// one place cannot be masked by a fail-closed guard in the next.
+	checkpointListErrOnce error
+	// outboxCASErr fails the outbox compare-and-swap, modelling a crash between
+	// a durable decision and the transition it authorises.
+	outboxCASErr           error
 	beforeReleaseReviewRun func(stepID, reviewRunID string)
 
 	// checkpointClaims mirrors migration 0135's partial UNIQUE indexes on the
@@ -435,12 +459,111 @@ func (f *fakeStore) CreateWorkflowCheckpoint(_ context.Context, cp domain.Workfl
 // checkpointClaimKey returns the uniqueness key for the one constrained
 // checkpoint phase, and whether this row is constrained at all.
 func checkpointClaimKey(cp domain.WorkflowCheckpoint) (string, bool) {
+	// Migration 0136: the human budget reset is single-winner per (step, epoch),
+	// with the epoch carried in head_sha.
+	if cp.DurablePhase == "reviewer_launch_human_retry" {
+		if cp.WorkflowStepID == nil || cp.HeadSHA == "" {
+			return "", false
+		}
+		return cp.DurablePhase + "|" + *cp.WorkflowStepID + "|" + cp.HeadSHA, true
+	}
 	if (cp.DurablePhase != "review_authority_rebind" &&
 		cp.DurablePhase != "review_late_verdict_adopted") ||
 		cp.WorkflowStepID == nil || cp.ReviewRunID == nil {
 		return "", false
 	}
 	return cp.DurablePhase + "|" + *cp.WorkflowStepID + "|" + *cp.ReviewRunID, true
+}
+
+// RebindWorkflowStepReviewRunFrom mirrors the real compare-and-swap: the pointer
+// moves only when it currently holds exactly `expected` ("" meaning unset).
+func (f *fakeStore) RebindWorkflowStepReviewRunFrom(
+	_ context.Context, stepID, expected, predecessor, next string, now time.Time,
+) (bool, error) {
+	f.claimMu.Lock()
+	defer f.claimMu.Unlock()
+	// Mirrors the real statement's third guard: a run carrying a LATE verdict may
+	// not be replaced out from under the outcome adoption is applying for it. An
+	// on-time verdict is the ordinary cycle and is replaceable.
+	if predecessor != "" && f.reviewRuns != nil {
+		if r, ok := f.reviewRuns.runs[predecessor]; ok && r.LateVerdict.Valid() {
+			return false, nil
+		}
+	}
+	for runID, steps := range f.steps {
+		for i := range steps {
+			if steps[i].ID != stepID {
+				continue
+			}
+			if steps[i].State.Terminal() {
+				// A resolved review step is not replaceable, whatever its
+				// pointer says.
+				return false, nil
+			}
+			cur := ""
+			if steps[i].ReviewRunID != nil {
+				cur = *steps[i].ReviewRunID
+			}
+			if cur != expected {
+				return false, nil
+			}
+			if next == "" {
+				steps[i].ReviewRunID = nil
+			} else {
+				id := next
+				steps[i].ReviewRunID = &id
+			}
+			steps[i].UpdatedAt = now
+			f.steps[runID] = steps
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// UpdateWorkflowStepStateIfReviewRun mirrors the real single-statement guarded
+// transition: state AND authority pointer are checked with the write, so the
+// fake cannot admit an interleaving the database would refuse.
+func (f *fakeStore) UpdateWorkflowStepStateIfReviewRun(
+	_ context.Context, stepID string, expected, next domain.WorkflowStepState,
+	reviewRunID string, now time.Time,
+) (bool, error) {
+	if !domain.ValidWorkflowStepTransition(expected, next) {
+		return false, nil
+	}
+	if hook := f.beforeStepStateWrite; hook != nil {
+		f.beforeStepStateWrite = nil
+		hook(stepID)
+	}
+	// Same injected-failure surface as the unguarded writer: adoption now uses
+	// THIS method, so a test that injects a transition failure must still see it.
+	if f.stepStateWriteErr != nil {
+		if err := f.stepStateWriteErr(stepID, expected, next); err != nil {
+			return false, err
+		}
+	}
+	f.claimMu.Lock()
+	defer f.claimMu.Unlock()
+	for runID, steps := range f.steps {
+		for i := range steps {
+			if steps[i].ID != stepID {
+				continue
+			}
+			if steps[i].State != expected ||
+				steps[i].ReviewRunID == nil || *steps[i].ReviewRunID != reviewRunID {
+				return false, nil
+			}
+			steps[i].State = next
+			steps[i].UpdatedAt = now
+			if next.Terminal() {
+				t := now
+				steps[i].CompletedAt = &t
+			}
+			f.steps[runID] = steps
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ReleaseWorkflowStepReviewRunIfNoLateVerdict mirrors the real single-statement
@@ -478,7 +601,33 @@ func (f *fakeStore) ReleaseWorkflowStepReviewRunIfNoLateVerdict(
 	return false, nil
 }
 
+// ListWorkflowRunIDsByCheckpointPhase mirrors the real query: runs carrying a
+// checkpoint of this phase, terminal ones included.
+func (f *fakeStore) ListWorkflowRunIDsByCheckpointPhase(_ context.Context, phase string) ([]string, error) {
+	seen := map[string]bool{}
+	var out []string
+	for runID, cps := range f.checkpoints {
+		for _, cp := range cps {
+			if cp.DurablePhase == phase && !seen[runID] {
+				seen[runID] = true
+				out = append(out, runID)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 func (f *fakeStore) ListWorkflowCheckpoints(_ context.Context, runID string) ([]domain.WorkflowCheckpoint, error) {
+	f.checkpointListCalls++
+	if f.checkpointListErrOnce != nil {
+		err := f.checkpointListErrOnce
+		f.checkpointListErrOnce = nil
+		return nil, err
+	}
+	if f.checkpointListErr != nil && f.checkpointListCalls > f.checkpointListErrAfter {
+		return nil, f.checkpointListErr
+	}
 	return append([]domain.WorkflowCheckpoint{}, f.checkpoints[runID]...), nil
 }
 
@@ -520,6 +669,13 @@ func (f *fakeStore) ListWorkflowOutboxByRun(_ context.Context, runID string) ([]
 }
 
 func (f *fakeStore) UpdateWorkflowOutboxStatus(_ context.Context, id string, expected, next domain.WorkflowOutboxStatus, now time.Time, errorClass string) (bool, error) {
+	if f.outboxCASErr != nil {
+		return false, f.outboxCASErr
+	}
+	if hook := f.beforeOutboxCAS; hook != nil {
+		f.beforeOutboxCAS = nil
+		hook(id, expected, next)
+	}
 	for key, entry := range f.outbox {
 		if entry.ID != id {
 			continue
@@ -540,6 +696,127 @@ func (f *fakeStore) UpdateWorkflowOutboxStatus(_ context.Context, id string, exp
 			entry.FailedAt = &t
 		}
 		entry.ErrorClass = errorClass
+		// Modelled exactly as the SQL does it: any transition through here
+		// clears BOTH tokens, so neither a failure identity nor a claim can be
+		// inherited by a state it does not describe.
+		entry.FailureGeneration = ""
+		entry.DispatchGeneration = ""
+		f.outbox[key] = entry
+		return true, nil
+	}
+	return false, nil
+}
+
+// FailWorkflowOutboxWithGeneration models the generation-stamping failure: the
+// status change and the stamp are one operation, never two.
+// ClaimWorkflowOutboxDispatch models the ownership claim: pending ->
+// dispatched, stamping the token of the dispatch that took it.
+func (f *fakeStore) ClaimWorkflowOutboxDispatch(_ context.Context, id string, now time.Time, dispatchGeneration string) (bool, error) {
+	if f.outboxCASErr != nil {
+		return false, f.outboxCASErr
+	}
+	if hook := f.beforeOutboxCAS; hook != nil {
+		f.beforeOutboxCAS = nil
+		hook(id, domain.WorkflowOutboxPending, domain.WorkflowOutboxDispatched)
+	}
+	for key, entry := range f.outbox {
+		if entry.ID != id {
+			continue
+		}
+		if entry.Status != domain.WorkflowOutboxPending {
+			return false, nil
+		}
+		t := now
+		entry.Status = domain.WorkflowOutboxDispatched
+		entry.DispatchedAt = &t
+		entry.ErrorClass = ""
+		entry.FailureGeneration = ""
+		entry.DispatchGeneration = dispatchGeneration
+		f.outbox[key] = entry
+		return true, nil
+	}
+	return false, nil
+}
+
+// ReleaseDispatchedWorkflowOutboxGeneration models the ownership-conditioned
+// release: dispatched -> pending for the EXACT claim that holds the row.
+func (f *fakeStore) ReleaseDispatchedWorkflowOutboxGeneration(_ context.Context, id, errorClass, dispatchGeneration string) (bool, error) {
+	if f.outboxCASErr != nil {
+		return false, f.outboxCASErr
+	}
+	if hook := f.beforeOutboxCAS; hook != nil {
+		f.beforeOutboxCAS = nil
+		hook(id, domain.WorkflowOutboxDispatched, domain.WorkflowOutboxPending)
+	}
+	for key, entry := range f.outbox {
+		if entry.ID != id {
+			continue
+		}
+		if entry.Status != domain.WorkflowOutboxDispatched || entry.DispatchGeneration != dispatchGeneration {
+			return false, nil
+		}
+		entry.Status = domain.WorkflowOutboxPending
+		entry.DispatchedAt = nil
+		entry.ErrorClass = errorClass
+		entry.FailureGeneration = ""
+		entry.DispatchGeneration = ""
+		f.outbox[key] = entry
+		return true, nil
+	}
+	return false, nil
+}
+
+func (f *fakeStore) FailWorkflowOutboxWithGeneration(_ context.Context, id string, expected domain.WorkflowOutboxStatus, now time.Time, errorClass, generation, dispatchGeneration string) (bool, error) {
+	if f.outboxCASErr != nil {
+		return false, f.outboxCASErr
+	}
+	if hook := f.beforeOutboxCAS; hook != nil {
+		f.beforeOutboxCAS = nil
+		hook(id, expected, domain.WorkflowOutboxFailed)
+	}
+	for key, entry := range f.outbox {
+		if entry.ID != id {
+			continue
+		}
+		// The ownership half of the predicate, exactly as in the SQL: a caller
+		// that no longer holds the claim changes nothing.
+		if entry.Status != expected || entry.DispatchGeneration != dispatchGeneration {
+			return false, nil
+		}
+		t := now
+		entry.Status = domain.WorkflowOutboxFailed
+		entry.FailedAt = &t
+		entry.ErrorClass = errorClass
+		entry.FailureGeneration = generation
+		entry.DispatchGeneration = ""
+		f.outbox[key] = entry
+		return true, nil
+	}
+	return false, nil
+}
+
+// ReopenFailedWorkflowOutboxGeneration models the generation-conditioned CAS.
+// The generation is part of the predicate, exactly as in the SQL: a row that
+// failed again under the same id and status does NOT match.
+func (f *fakeStore) ReopenFailedWorkflowOutboxGeneration(_ context.Context, id, errorClass, generation string) (bool, error) {
+	if f.outboxCASErr != nil {
+		return false, f.outboxCASErr
+	}
+	if hook := f.beforeOutboxCAS; hook != nil {
+		f.beforeOutboxCAS = nil
+		hook(id, domain.WorkflowOutboxFailed, domain.WorkflowOutboxPending)
+	}
+	for key, entry := range f.outbox {
+		if entry.ID != id {
+			continue
+		}
+		if entry.Status != domain.WorkflowOutboxFailed || entry.FailureGeneration != generation {
+			return false, nil
+		}
+		entry.Status = domain.WorkflowOutboxPending
+		entry.FailedAt = nil
+		entry.ErrorClass = errorClass
+		entry.FailureGeneration = ""
 		f.outbox[key] = entry
 		return true, nil
 	}

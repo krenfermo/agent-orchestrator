@@ -221,7 +221,13 @@ func (s *Store) RecordLateReviewVerdict(
 
 // MarkReviewRunSupersededBy names the replacement that took authority over a
 // closed-out review run, so "which review speaks for this step" is answerable
-// from durable state after a restart. Write-once; a second call is a no-op.
+// from durable state after a restart.
+//
+// True means this replacement holds the claim — whether it took it just now or
+// already held it. A replay after a crash between this write and the pointer
+// rebind therefore succeeds instead of looking like a lost race, which is what
+// lets the restart finish the rebind. False means a DIFFERENT replacement owns
+// the run, and the caller must stop.
 func (s *Store) MarkReviewRunSupersededBy(ctx context.Context, id, supersededBy string) (bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -233,7 +239,26 @@ func (s *Store) MarkReviewRunSupersededBy(ctx context.Context, id, supersededBy 
 	if err != nil {
 		return false, fmt.Errorf("mark review run %s superseded: %w", id, err)
 	}
-	return rows > 0, nil
+	if rows > 0 {
+		return true, nil
+	}
+	// Zero rows is two different situations, and telling them apart is the whole
+	// point: a DIFFERENT replacement owns this run, or THIS replacement already
+	// wrote the same value and is replaying after a crash that landed between
+	// this write and the pointer rebind. Reporting both as failure strands the
+	// replay — the step would never be rebound.
+	//
+	// The re-read is authoritative rather than a check-then-act race precisely
+	// because the column is write-once: once non-empty it can never change again,
+	// so what it says now is what it will always say.
+	row, err := s.qr.GetReviewRun(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("re-read review run %s after superseded CAS: %w", id, err)
+	}
+	return row.SupersededBy == supersededBy, nil
 }
 
 // MarkReviewRunDelivered records that lifecycle delivered the worker nudge for

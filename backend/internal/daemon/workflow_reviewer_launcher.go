@@ -14,12 +14,27 @@ import (
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 )
 
-// workflowReviewerRuntime is the narrow runtime-pane-creation surface
-// workflowReviewerLauncher needs. runtimeselect.Runtime (the same tmux/conpty
-// adapter every session pane in the daemon already uses) satisfies it.
+// workflowReviewerRuntime is the narrow runtime surface workflowReviewerLauncher
+// needs. runtimeselect.Runtime (the same tmux/conpty adapter every session pane
+// in the daemon already uses) satisfies it.
+//
+// It is create-plus-reconcile rather than create-only, because a launch that can
+// only be created is a launch that cannot be recovered: after a crash AO must be
+// able to ask whether the reviewer it may or may not have started actually
+// exists, and to terminate one it no longer owns. Those two questions are what
+// make the deterministic identity useful — see ReviewerIdentity below.
 type workflowReviewerRuntime interface {
 	Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error)
+	IsAlive(ctx context.Context, handle ports.RuntimeHandle) (bool, error)
+	Destroy(ctx context.Context, handle ports.RuntimeHandle) error
 }
+
+// workflowReviewerLauncher must satisfy the ensure/probe/cancel contract, not
+// merely the launch one. The assertion is compile-time on purpose: the protocol
+// consumes it through a type assertion, so a drifted signature would not fail to
+// build — it would silently disable deterministic recovery in production while
+// every test kept passing against the fake that still implemented it.
+var _ workflowcore.ReviewerEnsurer = (*workflowReviewerLauncher)(nil)
 
 // workflowReviewerLauncher is Checkpoint 8C's concrete workflowcore.ReviewerLauncher.
 //
@@ -104,6 +119,197 @@ func (l *workflowReviewerLauncher) Preflight(ctx context.Context, harness domain
 	return nil
 }
 
+// ReviewerIdentity is the deterministic external identity of one reviewer
+// launch: derived purely from the review run id, which AO generates and makes
+// durable before anything is created.
+//
+// It was already the handle Launch used; naming it makes it something AO can
+// persist BEFORE the launch and ask about afterwards, which is what turns an
+// uncertain replay from a guess into a probe. It must stay pure and stable —
+// deriving it from a clock, a counter or a random value would reintroduce the
+// exact ambiguity it exists to remove.
+func (l *workflowReviewerLauncher) ReviewerIdentity(req workflowcore.ReviewerLaunchRequest) string {
+	return "workflow-review-" + req.RunID
+}
+
+// ProbeReviewer answers whether the reviewer with that deterministic identity
+// exists right now. It is how recovery tells "never launched" from "launched and
+// the confirmation was lost".
+//
+// `known` false is AO admitting it could not tell, never "it is not there": the
+// caller must treat that as uncertainty, not as absence.
+func (l *workflowReviewerLauncher) ProbeReviewer(ctx context.Context, ref workflowcore.ReviewerRef) (workflowcore.ReviewerObservation, error) {
+	presence, instance, err := l.probeReviewerInstance(ctx, ref)
+	return workflowcore.ReviewerObservation{Presence: presence, InstanceID: instance}, err
+}
+
+// probeReviewerInstance classifies the reviewer AND returns the exact session
+// incarnation the classification is about.
+//
+// The instance travels with the verdict because a verdict alone is not
+// actionable: by the time a caller acts on `owned`, the name may belong to a
+// different session. Anything destructive must name the instance that was
+// actually verified, which is why this is the shape every caller here uses.
+func (l *workflowReviewerLauncher) probeReviewerInstance(
+	ctx context.Context, ref workflowcore.ReviewerRef,
+) (workflowcore.ReviewerPresence, string, error) {
+	handleID := ref.HandleID
+	if handleID == "" || l.runtime == nil {
+		return workflowcore.ReviewerPresenceUnknown, "", nil
+	}
+	reader, ok := l.sessionFactsReader()
+	if !ok {
+		// A runtime that cannot answer about a session as ONE INSTANCE cannot
+		// support adoption or termination safely: every fact it returns is keyed
+		// by a reusable name. Uncertainty is the only honest verdict, and it
+		// licenses nothing.
+		return workflowcore.ReviewerPresenceUnknown, "", nil
+	}
+
+	// The DURABLE instance, when the launch recorded one, is what this asks
+	// about. Resolving the name instead would let a replacement answer for a
+	// reviewer AO launched — which is precisely what persisting the instance
+	// through the launch confirmation exists to prevent.
+	facts, exists, err := reader.SessionFacts(ctx, ports.RuntimeHandle{
+		ID: handleID, InstanceID: ref.InstanceID,
+	})
+	if err != nil {
+		// Includes ErrRuntimeSessionReplaced: the observation spanned two
+		// different sessions, so it is a fact about neither.
+		return workflowcore.ReviewerPresenceUnknown, "", err
+	}
+	if !exists {
+		// tmux distinguishes "no such session" from "cannot reach the server"
+		// and only the former reaches here, so absence is genuinely proven.
+		return workflowcore.ReviewerPresenceAbsent, "", nil
+	}
+
+	// A NAME EXISTS. That is the weakest fact available, and on its own it
+	// proves nothing: a collision, a stale shell, and AO's own live reviewer are
+	// indistinguishable by name.
+	//
+	// Ownership is proven by the token the runtime attaches AS PART OF creating
+	// the session, and the token is correlated — it names the review run this
+	// identity belongs to, so it cannot be satisfied by a session that merely
+	// echoes its own name back.
+	if !facts.OwnerKnown {
+		return workflowcore.ReviewerPresenceUnknown, "", nil
+	}
+	if facts.Owner != reviewerOwnerToken(handleID) {
+		return workflowcore.ReviewerPresenceForeign, "", nil
+	}
+
+	// PROVEN OURS. One question remains: is the reviewer still running? Session
+	// existence does not answer it — AO's own launch command execs a keep-alive
+	// when the reviewer exits, so the session outlives the work.
+	if !facts.WorkloadKnown {
+		// Ownership is proven, but claiming it is running would be a guess, and
+		// the caller must not adopt on a guess.
+		return workflowcore.ReviewerPresenceUnknown, facts.InstanceID, nil
+	}
+	if !facts.WorkloadAlive {
+		return workflowcore.ReviewerPresenceExited, facts.InstanceID, nil
+	}
+	return workflowcore.ReviewerPresenceOwned, facts.InstanceID, nil
+}
+
+// reviewerOwnerToken is the ownership token for one reviewer identity.
+//
+// It deliberately is not the identity itself. A marker whose value is the
+// session's own name proves only that SOMETHING wrote the name back, which any
+// process could do and which carries no information a constant would not. This
+// binds the token to AO and to the review run, so a session can be checked
+// against what it claims to be.
+func reviewerOwnerToken(handleID string) string {
+	return "ao-reviewer:" + handleID
+}
+
+// sessionFactsReader is the runtime capability that answers about a session as
+// one coherent incarnation and can destroy that exact incarnation.
+func (l *workflowReviewerLauncher) sessionFactsReader() (ports.SessionFactsReader, bool) {
+	reader, ok := l.runtime.(ports.SessionFactsReader)
+	return reader, ok
+}
+
+// CancelReviewer terminates the reviewer with that identity, idempotently.
+//
+// Idempotence is the property crash-interrupted cancellation rests on: a replay
+// that finds the reviewer already gone must succeed, so the durable
+// cancel-intent can always be driven to a confirmation.
+//
+// COMPARE BEFORE DESTROY. Ownership is proven of a specific session INSTANCE and
+// the kill is aimed at that instance, never at the name. Verifying a name and
+// then killing a name is a window a replacement can walk into: AO would prove
+// its own session owned, that session would exit, a stranger would take the
+// freed name, and the kill would land on the stranger. Targeting `$N` makes that
+// unreachable — the id belongs to one incarnation for the life of the server.
+func (l *workflowReviewerLauncher) CancelReviewer(ctx context.Context, ref workflowcore.ReviewerRef) error {
+	handleID := ref.HandleID
+	if handleID == "" || l.runtime == nil {
+		return nil
+	}
+	presence, instance, perr := l.probeReviewerInstance(ctx, ref)
+	if perr != nil {
+		return perr
+	}
+	if presence == workflowcore.ReviewerPresenceAbsent {
+		return nil
+	}
+	// Both `owned` and `exited` are proofs of AO's own ownership, and both are
+	// safe to destroy — an exited reviewer still holds its session name, and
+	// reclaiming it is the only way that identity becomes reusable. `foreign`
+	// and `unknown` are never destroyed: AO cannot prove the session is its own,
+	// and killing something on that basis is the one failure worse than leaving
+	// an orphan.
+	if !presence.LicensesTermination() {
+		return fmt.Errorf("reviewer %s is %s; refusing to terminate a session AO cannot prove it owns",
+			handleID, presence)
+	}
+	reader, ok := l.sessionFactsReader()
+	if !ok || instance == "" {
+		return fmt.Errorf(
+			"reviewer %s cannot be terminated: AO has no stable identity for the session it verified",
+			handleID)
+	}
+
+	// REVALIDATE IMMEDIATELY BEFORE THE DESTRUCTIVE ACT. The verdict above was
+	// true when it was taken; this proves the same incarnation is still there,
+	// so the kill cannot be redirected by a replacement in between.
+	// Addressed to the INSTANCE, not the name. Re-resolving the name here would
+	// hand the decision back to whatever holds it now — the exact window the
+	// verdict above was taken to close.
+	verified := ports.RuntimeHandle{ID: handleID, InstanceID: instance}
+	current, exists, cerr := reader.SessionFacts(ctx, verified)
+	if cerr != nil {
+		return cerr
+	}
+	if !exists {
+		// That incarnation is gone on its own. Nothing to do, and nothing to
+		// kill — and emphatically not whatever now answers to its name.
+		return nil
+	}
+	if current.InstanceID != instance {
+		return fmt.Errorf(
+			"reviewer %s: the session behind this name changed from %s to %s before termination; refusing to destroy it",
+			handleID, instance, current.InstanceID)
+	}
+	if err := reader.DestroyInstance(ctx, instance); err != nil {
+		return err
+	}
+	// Confirm THAT instance is gone — not merely that the name is free, which a
+	// replacement would also satisfy.
+	after, stillThere, aerr := reader.SessionFacts(ctx, verified)
+	if aerr != nil {
+		// Cannot verify. The caller retries rather than recording a
+		// confirmation AO cannot stand behind.
+		return aerr
+	}
+	if stillThere && after.InstanceID == instance {
+		return fmt.Errorf("reviewer %s: session instance %s survived termination", handleID, instance)
+	}
+	return nil
+}
+
 // Launch resolves the adapter, builds a workflow-owned ReviewInvocation, and
 // creates a fresh runtime pane — a single-shot launch (workflow never resumes
 // or re-notifies an existing reviewer pane; each review step gets exactly one
@@ -113,7 +319,7 @@ func (l *workflowReviewerLauncher) Launch(ctx context.Context, req workflowcore.
 	if !ok {
 		return workflowcore.ReviewerLaunchResult{}, fmt.Errorf("no reviewer adapter for harness %q", req.Harness)
 	}
-	handleID := "workflow-review-" + req.RunID
+	handleID := l.ReviewerIdentity(req)
 	inv := ports.ReviewInvocation{
 		ReviewerID:      handleID,
 		RunID:           req.RunID,
@@ -161,16 +367,30 @@ func (l *workflowReviewerLauncher) Launch(ctx context.Context, req workflowcore.
 		workingDirectory = req.WorkspacePath
 	}
 	env := l.runtimeEnv(ctx, req, cmd.Argv, cmd.Env)
+	// OWNERSHIP TRAVELS WITH CREATION.
+	//
+	// This used to be a marker written after Create returned, and that ordering
+	// was the defect: a crash — or merely a failed write, since its error was
+	// discarded — left a live reviewer AO could not identify, and therefore
+	// could neither adopt nor terminate, forever. Handing the token to the
+	// runtime makes ownership part of the same operation that makes the session
+	// exist, and the runtime destroys anything it cannot stamp rather than
+	// returning a handle to it.
 	handle, err := l.runtime.Create(ctx, ports.RuntimeConfig{
 		SessionID:     domain.SessionID(handleID),
 		WorkspacePath: workingDirectory,
 		Argv:          cmd.Argv,
 		Env:           env,
+		Owner:         reviewerOwnerToken(handleID),
 	})
 	if err != nil {
 		return workflowcore.ReviewerLaunchResult{}, fmt.Errorf("reviewer runtime: %w", err)
 	}
-	return workflowcore.ReviewerLaunchResult{HandleID: handle.ID}, nil
+	// The INSTANCE the runtime just created travels back with the result, so the
+	// confirmation can persist it. Without it the launch would be addressable
+	// only by a reusable name, and a replacement could answer for it forever
+	// after.
+	return workflowcore.ReviewerLaunchResult{HandleID: handle.ID, InstanceID: handle.InstanceID}, nil
 }
 
 func (l *workflowReviewerLauncher) runtimeEnv(ctx context.Context, req workflowcore.ReviewerLaunchRequest, argv []string, base map[string]string) map[string]string {
@@ -183,6 +403,15 @@ func (l *workflowReviewerLauncher) runtimeEnv(ctx context.Context, req workflowc
 		env[k] = v
 	}
 	delete(env, sessionmanager.EnvSessionID)
+	// SUPERVISED, so that the reviewer's EXIT is observable.
+	//
+	// Without this the runtime replaces a finished process with an interactive
+	// keep-alive shell (buildLaunchCommand), and every liveness probe then
+	// answers about that shell instead of the reviewer: a review that ended
+	// hours ago still reads as running, and AO adopts it forever. Supervised
+	// mode swaps that arbitrary shell for AO's own deterministic sentinel, which
+	// is what the workload-liveness probe recognises and reports as exited.
+	env[sessionmanager.EnvSupervisedProcess] = "1"
 	env["AO_REVIEW_SESSION_ID"] = req.ReviewID
 	env["AO_REVIEW_WORKER_SESSION_ID"] = string(req.WorkerSessionID)
 	env["AO_REVIEW_HARNESS"] = string(req.Harness)

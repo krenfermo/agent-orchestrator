@@ -346,8 +346,13 @@ func (c *Coordinator) attachIncidentReviewFacts(ctx stdctx.Context, detail RunDe
 		if err != nil || !ok {
 			return
 		}
-		in.ReviewVerdict = string(rr.Verdict)
-		in.ReviewFindings = rr.Body
+		// EffectiveVerdict/EffectiveBody: an adopted late verdict is the review's
+		// real outcome, and the Incident Advisor exists to be given the evidence AO
+		// actually holds. Reading the normal columns would hand a person an empty
+		// verdict and empty findings for precisely the incident class this whole
+		// mechanism was built for.
+		in.ReviewVerdict = string(rr.EffectiveVerdict())
+		in.ReviewFindings = rr.EffectiveBody()
 	}
 }
 

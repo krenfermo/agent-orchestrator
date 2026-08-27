@@ -103,12 +103,30 @@ func (f *fakeReviewerResolver) Reviewer(_ domain.ReviewerHarness) (ports.Reviewe
 type fakeWorkflowReviewerRuntime struct {
 	lastCfg ports.RuntimeConfig
 	calls   int
+	// live models the external world: which deterministic reviewer identities
+	// currently exist. It is what makes probe/cancel testable without a runtime.
+	live         map[string]bool
+	destroyCalls int
 }
 
 func (f *fakeWorkflowReviewerRuntime) Create(_ context.Context, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
 	f.calls++
 	f.lastCfg = cfg
-	return ports.RuntimeHandle{ID: "pane-1"}, nil
+	if f.live == nil {
+		f.live = map[string]bool{}
+	}
+	f.live[string(cfg.SessionID)] = true
+	return ports.RuntimeHandle{ID: string(cfg.SessionID)}, nil
+}
+
+func (f *fakeWorkflowReviewerRuntime) IsAlive(_ context.Context, h ports.RuntimeHandle) (bool, error) {
+	return f.live[h.ID], nil
+}
+
+func (f *fakeWorkflowReviewerRuntime) Destroy(_ context.Context, h ports.RuntimeHandle) error {
+	f.destroyCalls++
+	delete(f.live, h.ID)
+	return nil
 }
 
 // TestWorkflowReviewerLauncherReusesAdapterCommandUnmodified asserts that
@@ -141,8 +159,14 @@ func TestWorkflowReviewerLauncherReusesAdapterCommandUnmodified(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	if result.HandleID != "pane-1" {
-		t.Fatalf("handle id = %q, want pane-1", result.HandleID)
+	// The handle IS the deterministic reviewer identity. The real runtimes
+	// derive their handle from the session id they were given
+	// (conpty: `id := string(cfg.SessionID)`), and recovery depends on that:
+	// probing and cancelling after a crash address the reviewer by the identity
+	// AO computed and persisted, so a handle that were anything else would make
+	// an interrupted launch unrecoverable.
+	if want := l.ReviewerIdentity(req); result.HandleID != want {
+		t.Fatalf("handle id = %q, want the deterministic identity %q", result.HandleID, want)
 	}
 	if len(runtime.lastCfg.Argv) != 2 || runtime.lastCfg.Argv[0] != "claude" || runtime.lastCfg.Argv[1] != "--some-real-flag" {
 		t.Fatalf("runtime Argv = %v, want the adapter's own argv passed through unmodified", runtime.lastCfg.Argv)

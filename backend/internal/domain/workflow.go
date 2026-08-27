@@ -495,4 +495,26 @@ type WorkflowOutboxEntry struct {
 	AcknowledgedAt *time.Time
 	FailedAt       *time.Time
 	ErrorClass     string
+	// FailureGeneration names the failure that put this entry into `failed`,
+	// when one recorded itself: the claim key plus the id of the launch-failure
+	// record (see the workflow package's reviewLaunchGeneration).
+	//
+	// Empty means no such generation is recorded — a live entry, one failed by
+	// another mechanism, or one that was already failed before the column
+	// existed. It is what a human resume compare-and-swaps against, because the
+	// row is reused across retries and "failed" alone does not say WHICH
+	// failure.
+	FailureGeneration string
+	// DispatchGeneration names the dispatch that currently OWNS this entry: the
+	// id of the review_dispatch_authorized checkpoint whose claim took it.
+	//
+	// The row is reclaimable — a released claim goes back to pending and can be
+	// taken again — so "dispatched" alone does not say WHOSE dispatch it is.
+	// Every ownership-dependent transition off `dispatched` names this token in
+	// its own predicate, so a dispatch that no longer owns the row cannot fail
+	// it, release it, or stamp its own failure onto somebody else's launch.
+	//
+	// Empty means no claim token is recorded: a pending, acknowledged or failed
+	// row, or one claimed before the column existed.
+	DispatchGeneration string
 }

@@ -2,6 +2,7 @@ package workflow_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,7 +75,18 @@ func TestReviewRecoveryBoundaryA_PendingOutboxNeverLaunchedDispatchesOnce(t *tes
 // at "dispatched") -> recovery adopts the found review_run via natural-key
 // lookup, does NOT launch a second reviewer, and backfills
 // review_run_id/checkpoint/outbox acknowledged.
-func TestReviewRecoveryBoundaryB_DispatchedOutboxAdoptsFoundReviewRunWithoutRelaunching(t *testing.T) {
+// Boundary B: a dispatched outbox entry with a review_run behind it, and NO
+// record that any reviewer was ever launched.
+//
+// This used to adopt the run and bind it, on the reasoning that a non-failed
+// review_run must be the reviewer this command started. It is not: dispatch
+// creates the row BEFORE it launches anything, so a crash in between leaves a
+// row describing an intent. Binding it made a reviewer that may never have
+// existed the step's authority forever, and nothing would ever launch one.
+//
+// The safe recovery is to close the unlaunched row out and give the claim back,
+// so the launch protocol resumes and produces exactly one reviewer.
+func TestReviewRecoveryBoundaryB_DispatchedOutboxWithNoLaunchRecordResumesTheProtocol(t *testing.T) {
 	sessionFacts := newFakeSessionFacts()
 	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
 	workspaceFacts := &fakeWorkspaceFacts{}
@@ -132,20 +144,65 @@ func TestReviewRecoveryBoundaryB_DispatchedOutboxAdoptsFoundReviewRunWithoutRela
 	if err := c.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if launcher.launchCalls != 0 {
-		t.Fatalf("launch calls = %d, want 0 (adopt, never relaunch)", launcher.launchCalls)
-	}
+
+	// The unlaunched row must NOT have become this step's authority.
 	got, err := c.GetRun(ctx, created.Run.ID)
 	if err != nil {
 		t.Fatalf("GetRun: %v", err)
 	}
 	review := reviewStepFrom(got)
-	if review.Step.ReviewRunID == nil || *review.Step.ReviewRunID != preexistingRunID {
-		t.Fatalf("review step review_run_id = %v, want %s", review.Step.ReviewRunID, preexistingRunID)
+	if review.Step.ReviewRunID != nil && *review.Step.ReviewRunID == preexistingRunID {
+		t.Fatal("a review run with no launch record became the step's authority; " +
+			"nothing would ever launch a reviewer for it")
 	}
-	if entry := store.outbox[outboxKey]; entry.Status != domain.WorkflowOutboxAcknowledged {
-		t.Fatalf("outbox status = %q, want acknowledged", entry.Status)
+	// It is closed out, so it cannot be re-adopted...
+	if st := reviewRuns.runs[preexistingRunID].Status; st != domain.ReviewRunFailed {
+		t.Fatalf("review run status = %q, want failed (no launch was ever recorded)", st)
 	}
+	// ...and the launch protocol resumed: the claim was given back and re-taken
+	// within this pass, producing exactly one reviewer.
+	if launcher.launchCalls != 1 {
+		t.Fatalf("launch calls = %d, want exactly 1", launcher.launchCalls)
+	}
+	// Whatever now holds authority is a run that was actually launched, and it
+	// carries an exact runtime instance.
+	if review.Step.ReviewRunID == nil {
+		t.Fatal("no reviewer was bound after the protocol resumed")
+	}
+	bound := *review.Step.ReviewRunID
+	if !hasConfirmationWithInstance(t, store, created.Run.ID, bound) {
+		t.Fatalf("the bound review run %s has no confirmation carrying an exact instance", bound)
+	}
+
+	// Repeating the pass must not launch a second one.
+	if _, err := c.ContinueRun(ctx, created.Run.ID); err != nil {
+		t.Fatalf("ContinueRun: %v", err)
+	}
+	if launcher.launchCalls != 1 {
+		t.Fatalf("launch calls = %d after a second pass, want exactly 1", launcher.launchCalls)
+	}
+}
+
+// hasConfirmationWithInstance reports whether a launch confirmation for one
+// review run recorded an exact runtime instance.
+func hasConfirmationWithInstance(t *testing.T, store *fakeStore, runID, reviewRunID string) bool {
+	t.Helper()
+	cps, err := store.ListWorkflowCheckpoints(context.Background(), runID)
+	if err != nil {
+		return false
+	}
+	for _, cp := range cps {
+		if cp.DurablePhase != "review_launch_confirmed" {
+			continue
+		}
+		if !strings.Contains(cp.RetryState, `"reviewRunId":"`+reviewRunID+`"`) {
+			continue
+		}
+		if strings.Contains(cp.RetryState, `"instanceId":"`) {
+			return true
+		}
+	}
+	return false
 }
 
 // Boundary F (ambiguous): outbox dispatched but no review_run found by

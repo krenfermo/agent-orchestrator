@@ -303,3 +303,37 @@ func (fx *pinFixture) pin(dispatchKey string, cycle int, target string) {
 func (fx *pinFixture) pinLegacy(cycle int, target string) {
 	fx.write(map[string]any{"cycle": cycle}, target)
 }
+
+// A replacement review's dispatch identity must not vary with the provider that
+// happens to be routed for it.
+//
+// The ordinary key is scoped by (cycle, harness). Two concurrent replacement
+// dispatchers that routed differently therefore produced two different keys,
+// each passed the outbox's single-flight guard, and each launched its own
+// reviewer over the same abandoned review. The replacement key is keyed on the
+// run being replaced instead: one identity per replacement, whatever either
+// dispatcher picks, and stable across retries so a capacity wait re-enters the
+// same row.
+func TestReplacementDispatchIdentityIsHarnessIndependent(t *testing.T) {
+	const stepID, replaced = "wfs-1", "rr-abandoned"
+
+	codex := reviewDispatchIdempotencyKey(stepID, 1, domain.ReviewerCodex, "", 0)
+	claude := reviewDispatchIdempotencyKey(stepID, 1, domain.ReviewerClaudeCode, "", 0)
+	if codex == claude {
+		t.Fatal("the ordinary cycle key is expected to vary by harness; this test's premise is gone")
+	}
+
+	a := reviewReplacementIdempotencyKey(stepID, replaced)
+	b := reviewReplacementIdempotencyKey(stepID, replaced)
+	if a != b || a == "" {
+		t.Fatalf("replacement key is not stable: %q vs %q", a, b)
+	}
+	if a == codex || a == claude {
+		t.Fatalf("replacement key %q collides with a cycle key; a retry would adopt the wrong outbox row", a)
+	}
+	// Different replacements stay distinct, so one abandoned review's retry can
+	// never adopt another's row.
+	if other := reviewReplacementIdempotencyKey(stepID, "rr-other"); other == a {
+		t.Fatal("two different replacements share one dispatch identity")
+	}
+}

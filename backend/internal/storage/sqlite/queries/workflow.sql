@@ -148,6 +148,74 @@ UPDATE workflow_steps
 SET review_run_id = sqlc.arg(review_run_id), updated_at = sqlc.arg(updated_at)
 WHERE id = sqlc.arg(id);
 
+-- name: RebindWorkflowStepReviewRunFrom :execrows
+-- Compare-and-swap of a review step's AUTHORITY POINTER, when it currently
+-- names a specific run.
+--
+-- The unconditional setter it replaces on the dispatch path let a replacement
+-- bind over a pointer whose ownership had changed under it, so two dispatchers
+-- could each believe they owned the step. Zero rows means somebody else owns it
+-- now, and the caller must not proceed as its owner.
+--
+-- It guards three things, not one, because a pointer swap alone permits a state
+-- nothing downstream can read: the step carrying the OLD review's adopted
+-- outcome while pointing at the live NEW one.
+--
+--   * the pointer is still what this dispatcher expected;
+--   * the step has not already RESOLVED (a completed/failed/cancelled review
+--     step is not replaceable, whatever its pointer says);
+--   * and the run being replaced carries no LATE verdict.
+--
+-- The third is deliberately about late verdicts only, not verdicts in general.
+-- An on-time verdict being superseded is the ordinary review cycle: R1 asks for
+-- changes, the fix lands, and cycle N+1's review replaces it. A LATE verdict is
+-- the one that races: it can arrive after reconciliation has already released
+-- the step, and adoption may be applying its outcome at this very moment. This
+-- is what makes those two mutually exclusive rather than merely ordered --
+-- whichever writes first, the other's guard fails.
+UPDATE workflow_steps
+SET review_run_id = sqlc.arg(next_review_run_id), updated_at = sqlc.arg(updated_at)
+WHERE workflow_steps.id = sqlc.arg(id)
+  AND workflow_steps.review_run_id = sqlc.arg(expected_review_run_id)
+  AND workflow_steps.state NOT IN ('completed', 'failed', 'cancelled')
+  AND NOT EXISTS (
+      SELECT 1 FROM review_run AS r
+      WHERE r.id = sqlc.arg(predecessor_review_run_id)
+        AND r.late_verdict != ''
+  );
+
+-- name: ClaimWorkflowStepReviewRunIfUnset :execrows
+-- The other half of the same CAS: claim a step whose pointer review-authority
+-- reconciliation has released. Guarded on NULL so exactly one of several
+-- concurrent replacement dispatchers can take it.
+UPDATE workflow_steps
+SET review_run_id = sqlc.arg(review_run_id), updated_at = sqlc.arg(updated_at)
+WHERE workflow_steps.id = sqlc.arg(id)
+  AND workflow_steps.review_run_id IS NULL
+  AND workflow_steps.state NOT IN ('completed', 'failed', 'cancelled')
+  AND NOT EXISTS (
+      SELECT 1 FROM review_run AS r
+      WHERE r.id = sqlc.arg(predecessor_review_run_id)
+        AND r.late_verdict != ''
+  );
+
+-- name: UpdateWorkflowStepStateIfReviewRun :execrows
+-- A step transition that is valid only while the named review run is still the
+-- step's authority.
+--
+-- Late-verdict adoption spans several writes. Re-reading the pointer before them
+-- cannot bind: a replacement can take authority in the gap between the check and
+-- the write, and the adopter would then complete or park a step that no longer
+-- belongs to its review. Conditioning each write on the pointer removes the gap
+-- -- every individual write either lands while the run is still authoritative or
+-- does not land at all.
+UPDATE workflow_steps
+SET state = sqlc.arg(state), updated_at = sqlc.arg(updated_at),
+    completed_at = sqlc.arg(completed_at)
+WHERE id = sqlc.arg(id)
+  AND state = sqlc.arg(expected_state)
+  AND review_run_id = sqlc.arg(review_run_id);
+
 -- name: ReleaseWorkflowStepReviewRunIfNoLateVerdict :execrows
 -- Releases a review step's authority pointer ONLY while the run it names still
 -- has no late verdict -- one statement, so the check and the release cannot be
@@ -240,13 +308,27 @@ ON CONFLICT (idempotency_key) DO NOTHING;
 
 -- name: GetWorkflowOutboxByIdempotencyKey :one
 SELECT id, workflow_run_id, workflow_step_id, idempotency_key, command_type,
-       payload, status, created_at, dispatched_at, acknowledged_at, failed_at, error_class
+       payload, status, created_at, dispatched_at, acknowledged_at, failed_at, error_class,
+       failure_generation, dispatch_generation
 FROM workflow_outbox
 WHERE idempotency_key = ?;
 
+-- name: ListWorkflowRunIDsByCheckpointPhase :many
+-- The run ids that carry at least one checkpoint of a given durable phase.
+--
+-- It exists for one job: finding runs that still owe something EXTERNAL. Every
+-- other recovery entry point starts from the non-terminal runs, because a
+-- terminal run has nothing left to decide -- but a terminal run can still own a
+-- reviewer process AO started and never cleaned up, and nothing that only looks
+-- at live runs will ever find it.
+SELECT DISTINCT workflow_run_id
+FROM workflow_checkpoints
+WHERE durable_phase = ?;
+
 -- name: ListWorkflowOutboxByRun :many
 SELECT id, workflow_run_id, workflow_step_id, idempotency_key, command_type,
-       payload, status, created_at, dispatched_at, acknowledged_at, failed_at, error_class
+       payload, status, created_at, dispatched_at, acknowledged_at, failed_at, error_class,
+       failure_generation, dispatch_generation
 FROM workflow_outbox
 WHERE workflow_run_id = ?
 ORDER BY created_at, id;
@@ -256,13 +338,96 @@ ORDER BY created_at, id;
 -- acknowledged, or -> failed from either pending or dispatched). Timestamps
 -- are set by the caller only for the column matching the target status; the
 -- store layer null-guards the other two.
+--
+-- failure_generation and dispatch_generation are both CLEARED by every
+-- transition through here. A token describes ONE state of the row -- the
+-- failure that failed it, or the dispatch that owns it -- and carrying either
+-- into the next state would let a caller that observed the old one match a row
+-- that has since moved on. A failure that records its generation uses
+-- FailWorkflowOutboxWithGeneration; a claim that takes ownership uses
+-- ClaimWorkflowOutboxDispatch.
 UPDATE workflow_outbox
 SET status = sqlc.arg(status),
     dispatched_at = sqlc.arg(dispatched_at),
     acknowledged_at = sqlc.arg(acknowledged_at),
     failed_at = sqlc.arg(failed_at),
-    error_class = sqlc.arg(error_class)
+    error_class = sqlc.arg(error_class),
+    failure_generation = '',
+    dispatch_generation = ''
 WHERE id = sqlc.arg(id) AND status = sqlc.arg(expected_status);
+
+-- name: ClaimWorkflowOutboxDispatch :execrows
+-- The launch-ownership claim: pending -> dispatched, stamping WHO owns it.
+--
+-- The token is the id of the review_dispatch_authorized checkpoint written
+-- immediately before this statement, so ownership is durable, reconstructable,
+-- and named by the same artifact the rest of the launch protocol reads. Every
+-- ownership-dependent transition off dispatched then names it back.
+UPDATE workflow_outbox
+SET status = 'dispatched',
+    dispatched_at = sqlc.arg(dispatched_at),
+    error_class = '',
+    failure_generation = '',
+    dispatch_generation = sqlc.arg(dispatch_generation)
+WHERE id = sqlc.arg(id) AND status = 'pending';
+
+-- name: FailWorkflowOutboxWithGeneration :execrows
+-- Move an outbox entry to failed AND stamp the failure that did it, in one
+-- statement. The stamp is what a later human resume compare-and-swaps against,
+-- so it must land with the state it describes -- never afterwards, where a
+-- crash would leave a failed row nobody can prove the generation of.
+--
+-- It also PROVES OWNERSHIP, in the same statement. id + status = dispatched is
+-- not proof: a dispatch that paused after recording its launch error can find
+-- the row dispatched again to somebody else -- released by recovery, reclaimed
+-- by a second dispatch -- and would then fail a live generation and stamp its
+-- own failure onto it, which a human resume could later reopen. So the claim
+-- token this caller was given is part of the predicate: a caller that no longer
+-- owns the row changes nothing.
+UPDATE workflow_outbox
+SET status = 'failed',
+    failed_at = sqlc.arg(failed_at),
+    error_class = sqlc.arg(error_class),
+    failure_generation = sqlc.arg(failure_generation),
+    dispatch_generation = ''
+WHERE id = sqlc.arg(id)
+  AND status = sqlc.arg(expected_status)
+  AND dispatch_generation = sqlc.arg(dispatch_generation);
+
+-- name: ReleaseDispatchedWorkflowOutboxGeneration :execrows
+-- Give a claim back: dispatched -> pending, for the EXACT dispatch that holds
+-- it. The mirror of the fail above and ownership-dependent for the same reason
+-- -- a stale release would hand the claim of a live dispatch to somebody else.
+UPDATE workflow_outbox
+SET status = 'pending',
+    dispatched_at = NULL,
+    error_class = sqlc.arg(error_class),
+    failure_generation = '',
+    dispatch_generation = ''
+WHERE id = sqlc.arg(id)
+  AND status = 'dispatched'
+  AND dispatch_generation = sqlc.arg(dispatch_generation);
+
+-- name: ReopenFailedWorkflowOutboxGeneration :execrows
+-- The human resume reopen: failed -> pending for ONE named failed generation.
+--
+-- The generation is part of THIS statement, not of a check preceding it. That
+-- is the whole point: id + status = failed is satisfied by any failure of
+-- this row, so a resume that observed failure F1 and arrived after F1 had been
+-- resumed, redispatched and failed again as F2 would reopen F2 -- a launch and
+-- a fresh budget epoch nobody asked for. With the generation in the predicate,
+-- such a resume updates zero rows and its caller no-ops.
+--
+-- The reopened row carries no generation: it is no longer failed, and the next
+-- failure will stamp its own.
+UPDATE workflow_outbox
+SET status = 'pending',
+    failed_at = NULL,
+    error_class = sqlc.arg(error_class),
+    failure_generation = ''
+WHERE id = sqlc.arg(id)
+  AND status = 'failed'
+  AND failure_generation = sqlc.arg(failure_generation);
 
 -- name: UpdateWorkflowAttemptOutcome :execrows
 -- Updates an existing attempt row's terminal facts. Used both when a dispatch

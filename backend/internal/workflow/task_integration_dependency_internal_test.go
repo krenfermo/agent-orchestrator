@@ -538,6 +538,22 @@ func (depReviewerLauncher) Preflight(stdctx.Context, domain.ReviewerHarness, str
 	return nil
 }
 
-func (depReviewerLauncher) Launch(stdctx.Context, ReviewerLaunchRequest) (ReviewerLaunchResult, error) {
-	return ReviewerLaunchResult{}, nil
+// A launch must report an exact instance: a confirmation without one is
+// refused, because nothing downstream could address it.
+func (depReviewerLauncher) Launch(_ stdctx.Context, req ReviewerLaunchRequest) (ReviewerLaunchResult, error) {
+	return ReviewerLaunchResult{
+		HandleID:   "workflow-review-" + req.RunID,
+		InstanceID: "inst-" + req.RunID,
+	}, nil
 }
+
+// No external session is ever created here, so `absent` is the honest answer.
+func (depReviewerLauncher) ReviewerIdentity(req ReviewerLaunchRequest) string {
+	return "workflow-review-" + req.RunID
+}
+
+func (depReviewerLauncher) ProbeReviewer(stdctx.Context, ReviewerRef) (ReviewerObservation, error) {
+	return ReviewerObservation{Presence: ReviewerPresenceAbsent}, nil
+}
+
+func (depReviewerLauncher) CancelReviewer(stdctx.Context, ReviewerRef) error { return nil }

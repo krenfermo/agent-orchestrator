@@ -55,6 +55,10 @@ type Store interface {
 	GetWorkflowRun(ctx stdctx.Context, id string) (domain.WorkflowRun, bool, error)
 	ListWorkflowRuns(ctx stdctx.Context, projectID string) ([]domain.WorkflowRun, error)
 	ListNonTerminalWorkflowRuns(ctx stdctx.Context) ([]domain.WorkflowRun, error)
+	// ListWorkflowRunIDsByCheckpointPhase finds runs carrying a given durable
+	// phase, TERMINAL ONES INCLUDED. It is what lets boot recovery find external
+	// obligations that outlived the workflow that created them.
+	ListWorkflowRunIDsByCheckpointPhase(ctx stdctx.Context, phase string) ([]string, error)
 	UpdateWorkflowRunState(ctx stdctx.Context, id string, expected, next domain.WorkflowRunState, now time.Time) (bool, error)
 	ListWorkflowSteps(ctx stdctx.Context, runID string) ([]domain.WorkflowStep, error)
 	UpdateWorkflowStepState(ctx stdctx.Context, id string, expected, next domain.WorkflowStepState, now time.Time) (bool, error)
@@ -100,6 +104,18 @@ type Store interface {
 	// be orphaned. False means the decision was stale, never that it failed.
 	// See workflow/review_authority.go.
 	ReleaseWorkflowStepReviewRunIfNoLateVerdict(ctx stdctx.Context, stepID, reviewRunID string, now time.Time) (bool, error)
+	// RebindWorkflowStepReviewRunFrom compare-and-swaps the authority pointer.
+	// expected "" means "currently unset"; predecessor names the run being
+	// replaced (which is not the same thing once reconciliation has released the
+	// pointer). It refuses when the step has already RESOLVED, or when the
+	// predecessor has produced a verdict — the guard that makes adoption and
+	// replacement mutually exclusive rather than merely ordered. False means
+	// another owner won, or the step is no longer replaceable.
+	RebindWorkflowStepReviewRunFrom(ctx stdctx.Context, stepID, expected, predecessor, next string, now time.Time) (bool, error)
+	// UpdateWorkflowStepStateIfReviewRun applies a step transition only while
+	// the named review run is still the step's authority — the primitive that
+	// makes late-verdict adoption safe against a concurrent replacement.
+	UpdateWorkflowStepStateIfReviewRun(ctx stdctx.Context, stepID string, expected, next domain.WorkflowStepState, reviewRunID string, now time.Time) (bool, error)
 	CreateWorkflowAttempt(ctx stdctx.Context, id, stepID, harness, model string, startedAt time.Time) (domain.WorkflowAttempt, error)
 	GetLatestWorkflowAttempt(ctx stdctx.Context, stepID string) (domain.WorkflowAttempt, bool, error)
 	UpdateWorkflowAttemptOutcome(ctx stdctx.Context, attemptID string, finishedAt time.Time, outcome domain.WorkflowAttemptOutcome, errorClass domain.WorkflowErrorClass) error
@@ -113,6 +129,31 @@ type Store interface {
 	GetLatestWorkflowCheckpointByStep(ctx stdctx.Context, stepID string) (domain.WorkflowCheckpoint, bool, error)
 	EnqueueWorkflowOutboxEntry(ctx stdctx.Context, entry domain.WorkflowOutboxEntry) (domain.WorkflowOutboxEntry, bool, error)
 	UpdateWorkflowOutboxStatus(ctx stdctx.Context, id string, expected, next domain.WorkflowOutboxStatus, now time.Time, errorClass string) (bool, error)
+	// FailWorkflowOutboxWithGeneration moves an entry to `failed` and stamps,
+	// in the same statement, the identity of the failure that did it. A row is
+	// reused across retries, so `failed` alone does not say WHICH failure — the
+	// stamp is what a later human resume is allowed to act on.
+	// ClaimWorkflowOutboxDispatch takes an entry pending -> dispatched and
+	// stamps the token identifying the dispatch that now owns it. The row is
+	// reclaimable, so "dispatched" alone never says WHOSE dispatch it is.
+	ClaimWorkflowOutboxDispatch(ctx stdctx.Context, id string, now time.Time, dispatchGeneration string) (bool, error)
+	// FailWorkflowOutboxWithGeneration moves an entry to `failed`, stamps the
+	// identity of the failure that did it, and proves the caller still owns the
+	// dispatch — one statement. A dispatch that paused after recording its
+	// launch error can wake to find the row dispatched again to somebody else;
+	// without the ownership half it would fail that live generation and stamp
+	// its own failure onto it.
+	FailWorkflowOutboxWithGeneration(ctx stdctx.Context, id string, expected domain.WorkflowOutboxStatus, now time.Time, errorClass, generation, dispatchGeneration string) (bool, error)
+	// ReleaseDispatchedWorkflowOutboxGeneration gives one dispatch's claim
+	// back: dispatched -> pending for the exact token holding it. False means
+	// the caller no longer owns the row — an idempotent no-op, never an error.
+	ReleaseDispatchedWorkflowOutboxGeneration(ctx stdctx.Context, id string, errorClass, dispatchGeneration string) (bool, error)
+	// ReopenFailedWorkflowOutboxGeneration moves ONE named failed generation
+	// back to `pending`. The generation is part of the UPDATE's own predicate,
+	// so a resume cannot be handed a row that failed again after it looked.
+	// False means zero rows matched: already reopened, or superseded. Both are
+	// idempotent no-ops, never errors.
+	ReopenFailedWorkflowOutboxGeneration(ctx stdctx.Context, id string, errorClass, generation string) (bool, error)
 	// ListWorkflowOutboxByRun is what lets a superseded dispatch be retired
 	// rather than left to be re-adopted. See supersedeReviewDispatch.
 	ListWorkflowOutboxByRun(ctx stdctx.Context, runID string) ([]domain.WorkflowOutboxEntry, error)
@@ -872,13 +913,18 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 		if step.Kind == domain.WorkflowStepReview {
 			if step.ReviewRunID != nil && c.reviewRuns != nil {
 				if rr, found, rrErr := c.reviewRuns.GetReviewRun(ctx, *step.ReviewRunID); rrErr == nil && found {
-					body := rr.Body
+					// The read model shows the EFFECTIVE authoritative outcome. An
+					// adopted late verdict is the review's real result; rendering
+					// the raw column would show the API, the Board and every
+					// checkpoint/context summary a blank verdict with no findings
+					// for a review that had in fact concluded.
+					body := rr.EffectiveBody()
 					if len(body) > reviewFindingsSummaryMaxLen {
 						body = body[:reviewFindingsSummaryMaxLen]
 					}
 					reviewSummary = &ReviewSummary{
 						Harness:         rr.Harness,
-						Verdict:         rr.Verdict,
+						Verdict:         rr.EffectiveVerdict(),
 						Target:          rr.TargetSHA,
 						FindingsSummary: body,
 					}

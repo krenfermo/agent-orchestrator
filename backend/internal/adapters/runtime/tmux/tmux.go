@@ -387,6 +387,63 @@ func New(opts Options) *Runtime {
 
 // Create starts a new tmux session in the workspace, running the agent's
 // launch command with a keep-alive shell, and returns a handle to it.
+// failUnownableCreate is the teardown for the one create failure that can leave
+// something running: the session exists, and AO could not establish that it owns
+// it.
+//
+// Every other post-create failure can discard its Destroy error, because the
+// session is one AO can still identify and a later sweep can still reclaim. This
+// one cannot: an unowned session is invisible to every probe that decides what
+// may be adopted or terminated, so if teardown fails there is nothing left that
+// will ever clean it up. The teardown result is therefore CONSUMED, and absence
+// is re-proven rather than assumed.
+//
+// A session that survives — or whose fate cannot be determined — is reported
+// through ErrRuntimeOrphanedSession, so the caller escalates instead of reading
+// it as a clean failure with nothing running.
+func (r *Runtime) failUnownableCreate(
+	ctx context.Context, id, instance string, removeScript func(), cause error,
+) (ports.RuntimeHandle, error) {
+	// Detached from ctx: this teardown must still run when the create was
+	// cancelled or timed out, which is exactly when it matters most.
+	cleanupCtx := context.WithoutCancel(ctx)
+
+	// INSTANCE-ONLY. A kill aimed at the name lands on whatever holds the name
+	// when it runs, which after a replacement is a stranger's session. There is
+	// deliberately no name fallback here: without an instance AO does not know
+	// what it would be destroying, and not destroying is always the safer half.
+	if !isSessionInstanceID(instance) {
+		removeScript()
+		return ports.RuntimeHandle{}, fmt.Errorf(
+			"%w: session %s could not be identified, so it was not destroyed (%v)",
+			ports.ErrRuntimeOrphanedSession, id, cause)
+	}
+	destroyErr := r.DestroyInstance(cleanupCtx, instance)
+
+	// "Gone" means THAT instance is gone. A replacement under the same name
+	// leaves the name occupied, and reading that as survival would report an
+	// orphan AO does not have.
+	alive, probeErr := r.instanceAlive(cleanupCtx, instance)
+	switch {
+	case probeErr == nil && !alive:
+		// Proven gone. This is an ordinary create failure: nothing is running.
+		removeScript()
+		return ports.RuntimeHandle{}, cause
+	case probeErr == nil && alive:
+		return ports.RuntimeHandle{}, fmt.Errorf(
+			"%w: session %s (%s) is still running and carries no AO ownership token (%v; destroy: %v)",
+			ports.ErrRuntimeOrphanedSession, id, instance, cause, destroyErr)
+	default:
+		// The probe itself could not answer, so AO does not know whether it
+		// tore anything down. Uncertainty here must escalate, never resolve
+		// into "clean failure".
+		return ports.RuntimeHandle{}, fmt.Errorf(
+			"%w: session %s (%s) could not be proven torn down after ownership verification failed "+
+				"(%v; destroy: %v; probe: %v)",
+			ports.ErrRuntimeOrphanedSession, id, instance, cause, destroyErr, probeErr)
+	}
+}
+
 func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
 	id, err := tmuxSessionName(cfg.SessionID)
 	if err != nil {
@@ -420,10 +477,37 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 		removeScript = cleanup
 		launchCmd = ". " + shellQuote(path)
 	}
-	args := newSessionArgs(id, cfg.WorkspacePath, r.shell, launchCmd)
-	if _, err := r.run(ctx, args...); err != nil {
+	args := newSessionArgs(id, cfg.WorkspacePath, r.shell, launchCmd, cfg.Owner)
+	createOut, err := r.run(ctx, args...)
+	if err != nil {
 		removeScript()
 		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: create session %s: %w", id, err)
+	}
+	// THE INSTANCE COMES FROM THE CREATION COMMAND, not from a later look-up.
+	//
+	// `new-session -P -F "#{session_id}"` prints the id of the session it just
+	// made, so this cannot resolve to anything else. Discovering it afterwards
+	// by name is the bug that motivates it: between create and look-up the
+	// session can vanish and a stranger take the name, and every later step —
+	// including teardown — would then be aimed at the stranger.
+	createdInstance := strings.TrimSpace(string(createOut))
+	if !isSessionInstanceID(createdInstance) {
+		// new-session SUCCEEDED but did not tell AO what it made.
+		//
+		// Something is running and AO cannot name it. Tearing down by the
+		// reusable name here would be the worst available move: the session may
+		// already have exited and a stranger taken the name, and AO would kill
+		// the stranger — destroying somebody else's work to tidy up its own.
+		//
+		// So nothing is destroyed. The failure is reported as an ORPHAN, which
+		// is what it is: non-retryable, evidence-preserving, and routed to a
+		// person rather than to a retry that would launch a second reviewer
+		// beside the first.
+		removeScript()
+		return ports.RuntimeHandle{}, fmt.Errorf(
+			"%w: session %s was created but reported no session id (%q), so it can neither be "+
+				"identified nor safely destroyed",
+			ports.ErrRuntimeOrphanedSession, id, createdInstance)
 	}
 	// From here the session exists, and AO must not unlink the staged script
 	// behind the pane's back: the script removes ITSELF as its first statement
@@ -448,43 +532,86 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 	// failCreate tears the session down and removes the staged script on every
 	// post-create failure path, where the shell demonstrably never got to run it
 	// (or is being killed anyway).
+	// EVERY OPERATION FROM HERE TARGETS THE INSTANCE, NEVER THE NAME.
+	//
+	// The name has done its only job — it created the session. It is a reusable
+	// discovery key, and any further read or action addressed to it can land on
+	// a different session. `createdInstance` is the authority key from now on:
+	// immutable, unreassignable, and the only thing this Create is allowed to
+	// verify or destroy.
 	failCreate := func(err error) (ports.RuntimeHandle, error) {
-		_ = r.Destroy(context.Background(), ports.RuntimeHandle{ID: id})
+		_ = r.DestroyInstance(context.WithoutCancel(ctx), createdInstance)
 		removeScript()
 		return ports.RuntimeHandle{}, err
 	}
-	if err := r.verifyPaneWorkingDirectory(ctx, id, cfg.WorkspacePath); err != nil {
+	if err := r.verifyPaneWorkingDirectory(ctx, createdInstance, cfg.WorkspacePath); err != nil {
 		return failCreate(err)
 	}
 
 	// Hide the status bar in the embedded terminal: it clutters the view and
 	// was not designed for the in-browser display context.
-	if _, err := r.run(ctx, setStatusOffArgs(id)...); err != nil {
+	if _, err := r.run(ctx, setStatusOffArgs(createdInstance)...); err != nil {
 		return failCreate(fmt.Errorf("tmux runtime: set status %s: %w", id, err))
 	}
 
 	// Enable mouse mode so the embedded terminal's SGR wheel reports scroll the
 	// pane (see setMouseOnArgs). Without it, wheel scrolling silently no-ops.
-	if _, err := r.run(ctx, setMouseOnArgs(id)...); err != nil {
+	if _, err := r.run(ctx, setMouseOnArgs(createdInstance)...); err != nil {
 		return failCreate(fmt.Errorf("tmux runtime: set mouse %s: %w", id, err))
 	}
 
 	// Size the shared window to the largest attached client, not the most recent
 	// one, so a small secondary viewer (e.g. the phone) can't strip down a larger
 	// client's view (see setWindowSizeLargestArgs).
-	if _, err := r.run(ctx, setWindowSizeLargestArgs(id)...); err != nil {
+	if _, err := r.run(ctx, setWindowSizeLargestArgs(createdInstance)...); err != nil {
 		return failCreate(fmt.Errorf("tmux runtime: set window-size %s: %w", id, err))
 	}
 
-	handle := ports.RuntimeHandle{ID: id}
-	alive, err := r.IsAlive(ctx, handle)
+	// A reviewer that exits must take its session with it. Without this, an
+	// operator's `set -g remain-on-exit on` leaves the dead pane standing.
+	// Best-effort by design: workload liveness is proven from the process tree
+	// and does not depend on this having worked.
+	_, _ = r.run(ctx, setRemainOnExitOffArgs(createdInstance)...)
+
+	// FINAL PROOF, ALL OF IT ABOUT THE ONE INSTANCE.
+	//
+	// A name-only liveness check here was the last place a replacement could
+	// still be handed back as success: the name would be occupied, the check
+	// would pass, and Create would return a handle to somebody else's session.
+	// Readiness and ownership are therefore both re-proven against
+	// createdInstance, which no replacement can satisfy.
+	alive, err := r.instanceAlive(ctx, createdInstance)
 	if err != nil {
 		return failCreate(fmt.Errorf("tmux runtime: verify session %s: %w", id, err))
 	}
 	if !alive {
+		// Route through the same cleanup as every other post-create failure.
+		// The instance is already gone, so the destroy is a no-op — but it is an
+		// INSTANCE-targeted no-op, and going through one path keeps "Create
+		// failed" and "nothing of AO's is left running" the same statement.
 		return failCreate(fmt.Errorf("tmux runtime: session %s exited before ready", id))
 	}
-	return handle, nil
+	if cfg.Owner != "" {
+		// OWNERSHIP, VERIFIED BEFORE ANY HANDLE ESCAPES.
+		//
+		// The token was passed to new-session above, so in the normal case this
+		// only confirms it. What it guards is the abnormal case: a tmux too old
+		// to understand `-e`, a server that dropped the variable — anything that
+		// would leave a live session AO cannot later identify. Such a session is
+		// unadoptable AND unterminatable, the exact permanent orphan this
+		// ordering exists to abolish, so it is torn down and creation fails.
+		owner, known, oerr := r.instanceOwner(ctx, createdInstance)
+		if oerr != nil {
+			return r.failUnownableCreate(ctx, id, createdInstance, removeScript,
+				fmt.Errorf("tmux runtime: verify owner of session %s: %w", id, oerr))
+		}
+		if !known || owner != cfg.Owner {
+			return r.failUnownableCreate(ctx, id, createdInstance, removeScript, fmt.Errorf(
+				"tmux runtime: session %s did not retain its ownership token (wanted %q, got %q, present=%t)",
+				id, cfg.Owner, owner, known))
+		}
+	}
+	return ports.RuntimeHandle{ID: id, InstanceID: createdInstance}, nil
 }
 
 // ContaminatedEnvVars best-effort inspects this Runtime's tmux server's
@@ -1632,3 +1759,327 @@ func (e commandError) Error() string {
 }
 
 func (e commandError) Unwrap() error { return e.err }
+
+// SessionFacts is ONE COHERENT observation of a session: ownership, workload
+// liveness, and the incarnation all three belong to.
+//
+// It exists because a tmux session NAME is reusable the moment its holder exits.
+// Reading ownership under a name and then reading liveness under the same name
+// can therefore describe two different sessions — AO's own, which passed the
+// ownership check, and a stranger's that took the name afterwards. Combining
+// them yields "owned and alive" about a session AO never verified, which
+// licenses adopting it or killing it.
+//
+// So the incarnation is captured first (`#{session_id}`, a `$N` handle tmux
+// allocates once and never reuses), every other fact is gathered, and the
+// incarnation is read again at the end. If it moved, nothing is returned: the
+// observation spanned two sessions and is not a fact about either.
+func (r *Runtime) SessionFacts(ctx context.Context, handle ports.RuntimeHandle) (ports.SessionFacts, bool, error) {
+	id, err := handleID(handle)
+	if err != nil {
+		return ports.SessionFacts{}, false, err
+	}
+
+	// STEP 1 — DISCOVERY. The only name-resolved read in this function.
+	//
+	// If the caller already holds the instance, even this is skipped: the name
+	// never enters the decision at all.
+	instance := handle.InstanceID
+	if !isSessionInstanceID(instance) {
+		var ok bool
+		instance, ok, err = r.resolveInstance(ctx, id)
+		if err != nil {
+			return ports.SessionFacts{}, false, err
+		}
+		if !ok {
+			return ports.SessionFacts{}, false, nil
+		}
+	}
+
+	// STEP 2 — EVERY FACT ADDRESSED TO THAT INSTANCE.
+	//
+	// This replaces a read-name / read-name / compare-the-two scheme, which
+	// could not see an ABA: the name could be surrendered to a stranger and
+	// reclaimed between the two reads, so both ends agreed while a fact in the
+	// middle came from somebody else's session. Addressing `$N` removes the
+	// question — a stranger cannot answer to an id it was never given.
+	facts := ports.SessionFacts{InstanceID: instance}
+
+	owner, ownerKnown, oerr := r.instanceOwner(ctx, instance)
+	if errors.Is(oerr, errInstanceGone) {
+		return ports.SessionFacts{}, false, nil
+	}
+	if oerr != nil {
+		return ports.SessionFacts{}, true, oerr
+	}
+	facts.Owner, facts.OwnerKnown = owner, ownerKnown
+
+	panePID, ok, perr := r.instancePanePID(ctx, instance)
+	if perr != nil {
+		return ports.SessionFacts{}, true, perr
+	}
+	if !ok {
+		// The instance is gone. Not facts about it, and not facts about whatever
+		// holds its former name.
+		return ports.SessionFacts{}, false, nil
+	}
+	facts.WorkloadAlive, facts.WorkloadKnown = r.workloadAliveForPane(ctx, panePID)
+
+	// FINAL EXACT-INSTANCE REVALIDATION.
+	//
+	// The process tree is global and lags: a pane's processes stay visible for a
+	// moment after its session is gone. Without this check the sequence
+	//
+	//	read pane pid of $N -> $N destroyed -> stranger takes the name ->
+	//	read a global ps that still shows $N's processes
+	//
+	// returns "owned and alive" for a session that no longer exists — a phantom
+	// assembled from a stale process listing. Confirming $N is still there makes
+	// the whole observation about one incarnation that existed throughout it.
+	if alive, aerr := r.instanceAlive(ctx, instance); aerr != nil {
+		return ports.SessionFacts{}, true, aerr
+	} else if !alive {
+		return ports.SessionFacts{}, false, nil
+	}
+	return facts, true, nil
+}
+
+// DestroyInstance kills ONE exact incarnation.
+//
+// Targeting `$N` rather than the name is what makes this safe: if the session
+// AO proved it owned has been replaced, the kill cannot reach the replacement —
+// it addresses an id that no longer exists and fails harmlessly.
+func (r *Runtime) DestroyInstance(ctx context.Context, instanceID string) error {
+	if strings.TrimSpace(instanceID) == "" {
+		return errors.New("tmux runtime: destroy requires a session instance id")
+	}
+	out, err := r.run(ctx, killSessionInstanceArgs(instanceID)...)
+	if err != nil {
+		if sessionMissingOutput(string(out)) || strings.Contains(strings.ToLower(string(out)), "can't find session") {
+			// Already gone. Destroying what does not exist is success.
+			return nil
+		}
+		return fmt.Errorf("tmux runtime: destroy session instance %s: %w: %s",
+			instanceID, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// errInstanceGone reports that one exact incarnation no longer exists. It is
+// deliberately distinct from every "cannot tell" answer: the instance is proven
+// absent, while whatever holds its former name is simply not this session.
+var errInstanceGone = errors.New("tmux runtime: this session instance no longer exists")
+
+// resolveInstance is the ONE name→instance lookup a decision is allowed.
+//
+// After it, every read and every action targets the instance. That ordering is
+// what makes ABA impossible: a name can be surrendered, taken by a stranger and
+// reclaimed between two look-ups, so comparing a name-read at the start against
+// a name-read at the end proves nothing about what happened in between. An
+// instance id cannot be reassigned, so a query addressed to it either answers
+// about that exact session or fails.
+func (r *Runtime) resolveInstance(ctx context.Context, id string) (string, bool, error) {
+	out, err := r.run(ctx, sessionInstanceArgs(id)...)
+	if err != nil {
+		if sessionMissingOutput(string(out)) {
+			return "", false, nil
+		}
+		if serverUnreachableOutput(string(out)) {
+			return "", false, fmt.Errorf("tmux runtime: resolve session %s: %w: %s",
+				id, ports.ErrRuntimeUnavailable, strings.TrimSpace(string(out)))
+		}
+		return "", false, fmt.Errorf("tmux runtime: resolve session %s: %w", id, err)
+	}
+	instance := strings.TrimSpace(string(out))
+	if !isSessionInstanceID(instance) {
+		return "", false, nil
+	}
+	return instance, true, nil
+}
+
+// instanceAlive asks whether ONE EXACT incarnation still exists. A replacement
+// holding the same name cannot satisfy it.
+func (r *Runtime) instanceAlive(ctx context.Context, instance string) (bool, error) {
+	out, err := r.run(ctx, hasSessionArgs(instance)...)
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if sessionMissingOutput(string(out)) {
+				return false, nil
+			}
+			if serverUnreachableOutput(string(out)) {
+				return false, fmt.Errorf("tmux runtime: probe instance %s: %w: %s",
+					instance, ports.ErrRuntimeUnavailable, strings.TrimSpace(string(out)))
+			}
+		}
+		return false, fmt.Errorf("tmux runtime: probe instance %s: %w", instance, err)
+	}
+	return true, nil
+}
+
+// instanceOwner reads the ownership token from ONE EXACT incarnation.
+func (r *Runtime) instanceOwner(ctx context.Context, instance string) (owner string, known bool, err error) {
+	out, rerr := r.run(ctx, sessionOwnerArgs(instance)...)
+	if rerr != nil {
+		if sessionMissingOutput(string(out)) {
+			// The incarnation is gone. Reported as such — never as "unmarked",
+			// which would be a claim about a session that no longer exists, and
+			// never as facts about whatever took its name.
+			return "", false, errInstanceGone
+		}
+		if serverUnreachableOutput(string(out)) {
+			return "", false, fmt.Errorf("tmux runtime: read owner of instance %s: %w: %s",
+				instance, ports.ErrRuntimeUnavailable, strings.TrimSpace(string(out)))
+		}
+		return "", false, nil
+	}
+	err = nil
+	line := strings.TrimSpace(string(out))
+	if line == "" || strings.HasPrefix(line, "-") {
+		return "", false, nil
+	}
+	owner, ok := strings.CutPrefix(line, ownerEnvKey+"=")
+	if !ok {
+		return "", false, nil
+	}
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return "", false, nil
+	}
+	return owner, true, nil
+}
+
+// instancePanePID reads the pane root pid of ONE EXACT incarnation.
+func (r *Runtime) instancePanePID(ctx context.Context, instance string) (int, bool, error) {
+	out, err := r.run(ctx, panePIDArgs(instance)...)
+	if err != nil {
+		if sessionMissingOutput(string(out)) {
+			return 0, false, nil
+		}
+		if serverUnreachableOutput(string(out)) {
+			return 0, false, fmt.Errorf("tmux runtime: read pane pid of instance %s: %w: %s",
+				instance, ports.ErrRuntimeUnavailable, strings.TrimSpace(string(out)))
+		}
+		return 0, false, fmt.Errorf("tmux runtime: read pane pid of instance %s: %w", instance, err)
+	}
+	pid, perr := strconv.Atoi(strings.TrimSpace(string(out)))
+	if perr != nil || pid <= 0 {
+		return 0, false, fmt.Errorf("tmux runtime: invalid pane pid %q for instance %s",
+			strings.TrimSpace(string(out)), instance)
+	}
+	return pid, true, nil
+}
+
+// workloadAliveForPane applies the process-tree rule (see PaneProcessAlive) to a
+// pane root pid the caller has already resolved.
+func (r *Runtime) workloadAliveForPane(ctx context.Context, panePID int) (alive bool, known bool) {
+	processOut, err := r.runCommand(ctx, "ps", "-ww", "-axo", "pid=,ppid=,args=")
+	if err != nil {
+		return false, false
+	}
+	entries, perr := parseProcessTable(string(processOut))
+	if perr != nil {
+		return false, false
+	}
+	for _, e := range entries {
+		if e.ppid == panePID {
+			return true, true
+		}
+	}
+	for _, e := range entries {
+		if e.pid != panePID {
+			continue
+		}
+		if isKeepAliveCommand(e.command) {
+			return false, true
+		}
+		return false, false
+	}
+	return false, false
+}
+
+// PaneProcessAlive reports whether the WORKLOAD AO launched into this session is
+// still running.
+//
+// It answers from PROCESS IDENTITY, never from a command name. Two weaker
+// signals were tried and both are wrong:
+//
+//   - `has-session` asks whether a NAME is registered. AO's launch command
+//     execs a keep-alive when the workload exits, so the session outlives it and
+//     this answers yes forever.
+//   - `#{pane_current_command}` reports the pane's FOREGROUND command, which
+//     belongs to whatever the workload is running right now. A reviewer reading
+//     a file with `cat` is indistinguishable from AO's own `cat` keep-alive —
+//     and acting on that would destroy a working reviewer and launch a second
+//     one over its work.
+//
+// What is actually decisive is the shape of the process tree. tmux's pane_pid is
+// the pane's ROOT process: the `$SHELL -c "<launch command>"` AO started. While
+// the workload runs it is a CHILD of that shell, so a child existing proves the
+// workload is alive no matter what it happens to be executing. When the workload
+// exits, the launch command's trailing `exec` REPLACES that shell in place —
+// same pid, now the keep-alive, and with no children at all.
+//
+// So:
+//
+//	pane_pid has a child            -> ALIVE   (whatever it is running)
+//	no child, pane_pid IS the exec'd keep-alive -> EXITED (proven)
+//	no child, pane_pid is still the shell       -> UNKNOWN (still starting up)
+//	pane pid or process table unreadable        -> UNKNOWN
+//
+// The exec'd keep-alive is identified by the command line of the process AT
+// pane_pid — not by any foreground name — which is why a reviewer's own `cat`
+// can never be mistaken for it.
+//
+// `known` false means AO could not obtain an answer. Callers must treat that as
+// uncertainty, never as death.
+func (r *Runtime) PaneProcessAlive(ctx context.Context, handle ports.RuntimeHandle) (alive bool, known bool, err error) {
+	entries, panePID, terr := r.supervisedProcessTree(ctx, handle)
+	if terr != nil {
+		return false, false, terr
+	}
+	for _, e := range entries {
+		if e.ppid == panePID {
+			// A live child of the pane's root process. This is the workload —
+			// or something the workload started, which means the same thing.
+			return true, true, nil
+		}
+	}
+	// No children. Either the workload finished and AO's own keep-alive took
+	// over the pane's root process, or the launch command has not reached the
+	// workload yet. Only the first is proof of exit.
+	for _, e := range entries {
+		if e.pid != panePID {
+			continue
+		}
+		if isKeepAliveCommand(e.command) {
+			return false, true, nil
+		}
+		// Still the launch shell, with nothing started under it yet.
+		return false, false, nil
+	}
+	// The pane's root process is not in the table AO just read. That is a
+	// disagreement between two sources, not a death.
+	return false, false, nil
+}
+
+// isKeepAliveCommand reports whether a PANE ROOT process's command line is the
+// keep-alive AO's own launch command execs once the workload exits.
+//
+// It is matched against the root process's full command line, never against a
+// foreground command name, so a workload that itself runs `cat` cannot satisfy
+// it: that `cat` is a descendant with its own pid, and this only ever inspects
+// the process at pane_pid.
+func isKeepAliveCommand(command string) bool {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	// `exec cat >/dev/null` leaves exactly `cat` as the root process: the
+	// redirect is the shell's, not an argument. Anything carrying arguments is
+	// somebody else's cat.
+	if len(fields) != 1 {
+		return false
+	}
+	return filepath.Base(fields[0]) == "cat"
+}

@@ -75,12 +75,36 @@ func (c *Coordinator) advanceReviewFixCycle(ctx stdctx.Context, run domain.Workf
 	// interrupted adoption on boot; ReconcileReviewAuthority itself remains
 	// narrow and ignores every terminal step that is not in that exact shape.
 	if !run.State.Terminal() {
+		// Finish any reviewer termination whose intent is durable and whose
+		// confirmation is not. A crash between the two leaves a live orphan AO
+		// had already decided it wanted gone; replaying is idempotent, and doing
+		// it first means nothing below reasons about a reviewer that should not
+		// exist.
+		if cerr := c.finishPendingReviewCancellations(ctx, run, *reviewStep); cerr != nil {
+			return run, cerr
+		}
 		outcome, updatedStep, updatedRun, err := c.ReconcileReviewAuthority(ctx, run, *reviewStep)
 		if err != nil {
 			return run, err
 		}
 		run = updatedRun
 		*reviewStep = updatedStep
+		// Re-read the review step unconditionally, not only when the authority
+		// call resolved something.
+		//
+		// A pass that returns "not applicable" may still have DISCOVERED that
+		// authority moved — that is exactly what its revalidation is for — and
+		// the caller's in-memory step then still names the review that lost it.
+		// Everything below acts on that pointer: observation would read the old
+		// run and apply its verdict with no guard at all, completing a step a
+		// replacement had already taken. One cheap read removes the whole class.
+		if refreshed, rerr := c.store.ListWorkflowSteps(ctx, run.ID); rerr == nil {
+			for i := range refreshed {
+				if refreshed[i].Kind == domain.WorkflowStepReview {
+					*reviewStep = refreshed[i]
+				}
+			}
+		}
 		if outcome.Resolved() {
 			if refreshed, rerr := c.store.ListWorkflowSteps(ctx, run.ID); rerr == nil {
 				for i := range refreshed {

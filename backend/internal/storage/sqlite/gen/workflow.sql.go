@@ -39,6 +39,42 @@ func (q *Queries) ArchiveWorkflowRun(ctx context.Context, arg ArchiveWorkflowRun
 	return result.RowsAffected()
 }
 
+const claimWorkflowStepReviewRunIfUnset = `-- name: ClaimWorkflowStepReviewRunIfUnset :execrows
+UPDATE workflow_steps
+SET review_run_id = ?1, updated_at = ?2
+WHERE workflow_steps.id = ?3
+  AND workflow_steps.review_run_id IS NULL
+  AND workflow_steps.state NOT IN ('completed', 'failed', 'cancelled')
+  AND NOT EXISTS (
+      SELECT 1 FROM review_run AS r
+      WHERE r.id = ?4
+        AND r.late_verdict != ''
+  )
+`
+
+type ClaimWorkflowStepReviewRunIfUnsetParams struct {
+	ReviewRunID            sql.NullString
+	UpdatedAt              time.Time
+	ID                     string
+	PredecessorReviewRunID string
+}
+
+// The other half of the same CAS: claim a step whose pointer review-authority
+// reconciliation has released. Guarded on NULL so exactly one of several
+// concurrent replacement dispatchers can take it.
+func (q *Queries) ClaimWorkflowStepReviewRunIfUnset(ctx context.Context, arg ClaimWorkflowStepReviewRunIfUnsetParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, claimWorkflowStepReviewRunIfUnset,
+		arg.ReviewRunID,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.PredecessorReviewRunID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getLatestAgentHealthEvent = `-- name: GetLatestAgentHealthEvent :one
 SELECT id, harness, user_id, provider_profile_id, state, reason, failure_class, cooldown_until,
        consecutive_failures, created_at
@@ -220,7 +256,8 @@ func (q *Queries) GetMaxWorkflowAttemptNumber(ctx context.Context, workflowStepI
 
 const getWorkflowOutboxByIdempotencyKey = `-- name: GetWorkflowOutboxByIdempotencyKey :one
 SELECT id, workflow_run_id, workflow_step_id, idempotency_key, command_type,
-       payload, status, created_at, dispatched_at, acknowledged_at, failed_at, error_class
+       payload, status, created_at, dispatched_at, acknowledged_at, failed_at, error_class,
+       failure_generation, dispatch_generation
 FROM workflow_outbox
 WHERE idempotency_key = ?
 `
@@ -241,6 +278,8 @@ func (q *Queries) GetWorkflowOutboxByIdempotencyKey(ctx context.Context, idempot
 		&i.AcknowledgedAt,
 		&i.FailedAt,
 		&i.ErrorClass,
+		&i.FailureGeneration,
+		&i.DispatchGeneration,
 	)
 	return i, err
 }
@@ -904,7 +943,8 @@ func (q *Queries) ListWorkflowCheckpointsByRun(ctx context.Context, workflowRunI
 
 const listWorkflowOutboxByRun = `-- name: ListWorkflowOutboxByRun :many
 SELECT id, workflow_run_id, workflow_step_id, idempotency_key, command_type,
-       payload, status, created_at, dispatched_at, acknowledged_at, failed_at, error_class
+       payload, status, created_at, dispatched_at, acknowledged_at, failed_at, error_class,
+       failure_generation, dispatch_generation
 FROM workflow_outbox
 WHERE workflow_run_id = ?
 ORDER BY created_at, id
@@ -932,10 +972,48 @@ func (q *Queries) ListWorkflowOutboxByRun(ctx context.Context, workflowRunID str
 			&i.AcknowledgedAt,
 			&i.FailedAt,
 			&i.ErrorClass,
+			&i.FailureGeneration,
+			&i.DispatchGeneration,
 		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkflowRunIDsByCheckpointPhase = `-- name: ListWorkflowRunIDsByCheckpointPhase :many
+SELECT DISTINCT workflow_run_id
+FROM workflow_checkpoints
+WHERE durable_phase = ?
+`
+
+// The run ids that carry at least one checkpoint of a given durable phase.
+//
+// It exists for one job: finding runs that still owe something EXTERNAL. Every
+// other recovery entry point starts from the non-terminal runs, because a
+// terminal run has nothing left to decide -- but a terminal run can still own a
+// reviewer process AO started and never cleaned up, and nothing that only looks
+// at live runs will ever find it.
+func (q *Queries) ListWorkflowRunIDsByCheckpointPhase(ctx context.Context, durablePhase string) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listWorkflowRunIDsByCheckpointPhase, durablePhase)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var workflow_run_id string
+		if err := rows.Scan(&workflow_run_id); err != nil {
+			return nil, err
+		}
+		items = append(items, workflow_run_id)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -1087,6 +1165,65 @@ func (q *Queries) ListWorkflowStepsByRun(ctx context.Context, workflowRunID stri
 	return items, nil
 }
 
+const rebindWorkflowStepReviewRunFrom = `-- name: RebindWorkflowStepReviewRunFrom :execrows
+UPDATE workflow_steps
+SET review_run_id = ?1, updated_at = ?2
+WHERE workflow_steps.id = ?3
+  AND workflow_steps.review_run_id = ?4
+  AND workflow_steps.state NOT IN ('completed', 'failed', 'cancelled')
+  AND NOT EXISTS (
+      SELECT 1 FROM review_run AS r
+      WHERE r.id = ?5
+        AND r.late_verdict != ''
+  )
+`
+
+type RebindWorkflowStepReviewRunFromParams struct {
+	NextReviewRunID        sql.NullString
+	UpdatedAt              time.Time
+	ID                     string
+	ExpectedReviewRunID    sql.NullString
+	PredecessorReviewRunID string
+}
+
+// Compare-and-swap of a review step's AUTHORITY POINTER, when it currently
+// names a specific run.
+//
+// The unconditional setter it replaces on the dispatch path let a replacement
+// bind over a pointer whose ownership had changed under it, so two dispatchers
+// could each believe they owned the step. Zero rows means somebody else owns it
+// now, and the caller must not proceed as its owner.
+//
+// It guards three things, not one, because a pointer swap alone permits a state
+// nothing downstream can read: the step carrying the OLD review's adopted
+// outcome while pointing at the live NEW one.
+//
+//   - the pointer is still what this dispatcher expected;
+//   - the step has not already RESOLVED (a completed/failed/cancelled review
+//     step is not replaceable, whatever its pointer says);
+//   - and the run being replaced carries no LATE verdict.
+//
+// The third is deliberately about late verdicts only, not verdicts in general.
+// An on-time verdict being superseded is the ordinary review cycle: R1 asks for
+// changes, the fix lands, and cycle N+1's review replaces it. A LATE verdict is
+// the one that races: it can arrive after reconciliation has already released
+// the step, and adoption may be applying its outcome at this very moment. This
+// is what makes those two mutually exclusive rather than merely ordered --
+// whichever writes first, the other's guard fails.
+func (q *Queries) RebindWorkflowStepReviewRunFrom(ctx context.Context, arg RebindWorkflowStepReviewRunFromParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, rebindWorkflowStepReviewRunFrom,
+		arg.NextReviewRunID,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.ExpectedReviewRunID,
+		arg.PredecessorReviewRunID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const releaseWorkflowStepReviewRunIfNoLateVerdict = `-- name: ReleaseWorkflowStepReviewRunIfNoLateVerdict :execrows
 UPDATE workflow_steps
 SET review_run_id = NULL, updated_at = ?1
@@ -1184,13 +1321,170 @@ func (q *Queries) UpdateWorkflowAttemptOutcome(ctx context.Context, arg UpdateWo
 	return result.RowsAffected()
 }
 
+const claimWorkflowOutboxDispatch = `-- name: ClaimWorkflowOutboxDispatch :execrows
+UPDATE workflow_outbox
+SET status = 'dispatched',
+    dispatched_at = ?1,
+    error_class = '',
+    failure_generation = '',
+    dispatch_generation = ?2
+WHERE id = ?3 AND status = 'pending'
+`
+
+type ClaimWorkflowOutboxDispatchParams struct {
+	DispatchedAt       sql.NullTime
+	DispatchGeneration string
+	ID                 string
+}
+
+// The launch-ownership claim: pending -> dispatched, stamping WHO owns it.
+//
+// The token is the id of the review_dispatch_authorized checkpoint written
+// immediately before this statement, so ownership is durable, reconstructable,
+// and named by the same artifact the rest of the launch protocol reads. Every
+// ownership-dependent transition off dispatched then names it back.
+func (q *Queries) ClaimWorkflowOutboxDispatch(ctx context.Context, arg ClaimWorkflowOutboxDispatchParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, claimWorkflowOutboxDispatch,
+		arg.DispatchedAt,
+		arg.DispatchGeneration,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const failWorkflowOutboxWithGeneration = `-- name: FailWorkflowOutboxWithGeneration :execrows
+UPDATE workflow_outbox
+SET status = 'failed',
+    failed_at = ?1,
+    error_class = ?2,
+    failure_generation = ?3,
+    dispatch_generation = ''
+WHERE id = ?4
+  AND status = ?5
+  AND dispatch_generation = ?6
+`
+
+type FailWorkflowOutboxWithGenerationParams struct {
+	FailedAt           sql.NullTime
+	ErrorClass         string
+	FailureGeneration  string
+	ID                 string
+	ExpectedStatus     domain.WorkflowOutboxStatus
+	DispatchGeneration string
+}
+
+// Move an outbox entry to failed AND stamp the failure that did it, in one
+// statement. The stamp is what a later human resume compare-and-swaps against,
+// so it must land with the state it describes -- never afterwards, where a
+// crash would leave a failed row nobody can prove the generation of.
+//
+// It also PROVES OWNERSHIP, in the same statement. id + status = dispatched is
+// not proof: a dispatch that paused after recording its launch error can find
+// the row dispatched again to somebody else -- released by recovery, reclaimed
+// by a second dispatch -- and would then fail a live generation and stamp its
+// own failure onto it, which a human resume could later reopen. So the claim
+// token this caller was given is part of the predicate: a caller that no longer
+// owns the row changes nothing.
+func (q *Queries) FailWorkflowOutboxWithGeneration(ctx context.Context, arg FailWorkflowOutboxWithGenerationParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, failWorkflowOutboxWithGeneration,
+		arg.FailedAt,
+		arg.ErrorClass,
+		arg.FailureGeneration,
+		arg.ID,
+		arg.ExpectedStatus,
+		arg.DispatchGeneration,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const releaseDispatchedWorkflowOutboxGeneration = `-- name: ReleaseDispatchedWorkflowOutboxGeneration :execrows
+UPDATE workflow_outbox
+SET status = 'pending',
+    dispatched_at = NULL,
+    error_class = ?1,
+    failure_generation = '',
+    dispatch_generation = ''
+WHERE id = ?2
+  AND status = 'dispatched'
+  AND dispatch_generation = ?3
+`
+
+type ReleaseDispatchedWorkflowOutboxGenerationParams struct {
+	ErrorClass         string
+	ID                 string
+	DispatchGeneration string
+}
+
+// Give a claim back: dispatched -> pending, for the EXACT dispatch that holds
+// it. The mirror of the fail above and ownership-dependent for the same reason
+// -- a stale release would hand the claim of a live dispatch to somebody else.
+func (q *Queries) ReleaseDispatchedWorkflowOutboxGeneration(ctx context.Context, arg ReleaseDispatchedWorkflowOutboxGenerationParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, releaseDispatchedWorkflowOutboxGeneration,
+		arg.ErrorClass,
+		arg.ID,
+		arg.DispatchGeneration,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const reopenFailedWorkflowOutboxGeneration = `-- name: ReopenFailedWorkflowOutboxGeneration :execrows
+UPDATE workflow_outbox
+SET status = 'pending',
+    failed_at = NULL,
+    error_class = ?1,
+    failure_generation = ''
+WHERE id = ?2
+  AND status = 'failed'
+  AND failure_generation = ?3
+`
+
+type ReopenFailedWorkflowOutboxGenerationParams struct {
+	ErrorClass        string
+	ID                string
+	FailureGeneration string
+}
+
+// The human resume reopen: failed -> pending for ONE named failed generation.
+//
+// The generation is part of THIS statement, not of a check preceding it. That
+// is the whole point: id + status = failed is satisfied by any failure of
+// this row, so a resume that observed failure F1 and arrived after F1 had been
+// resumed, redispatched and failed again as F2 would reopen F2 -- a launch and
+// a fresh budget epoch nobody asked for. With the generation in the predicate,
+// such a resume updates zero rows and its caller no-ops.
+//
+// The reopened row carries no generation: it is no longer failed, and the next
+// failure will stamp its own.
+func (q *Queries) ReopenFailedWorkflowOutboxGeneration(ctx context.Context, arg ReopenFailedWorkflowOutboxGenerationParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, reopenFailedWorkflowOutboxGeneration,
+		arg.ErrorClass,
+		arg.ID,
+		arg.FailureGeneration,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const updateWorkflowOutboxStatus = `-- name: UpdateWorkflowOutboxStatus :execrows
 UPDATE workflow_outbox
 SET status = ?1,
     dispatched_at = ?2,
     acknowledged_at = ?3,
     failed_at = ?4,
-    error_class = ?5
+    error_class = ?5,
+    failure_generation = '',
+    dispatch_generation = ''
 WHERE id = ?6 AND status = ?7
 `
 
@@ -1208,6 +1502,14 @@ type UpdateWorkflowOutboxStatusParams struct {
 // acknowledged, or -> failed from either pending or dispatched). Timestamps
 // are set by the caller only for the column matching the target status; the
 // store layer null-guards the other two.
+//
+// failure_generation and dispatch_generation are both CLEARED by every
+// transition through here. A token describes ONE state of the row -- the
+// failure that failed it, or the dispatch that owns it -- and carrying either
+// into the next state would let a caller that observed the old one match a row
+// that has since moved on. A failure that records its generation uses
+// FailWorkflowOutboxWithGeneration; a claim that takes ownership uses
+// ClaimWorkflowOutboxDispatch.
 func (q *Queries) UpdateWorkflowOutboxStatus(ctx context.Context, arg UpdateWorkflowOutboxStatusParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, updateWorkflowOutboxStatus,
 		arg.Status,
@@ -1348,6 +1650,48 @@ func (q *Queries) UpdateWorkflowStepState(ctx context.Context, arg UpdateWorkflo
 		arg.CompletedAt,
 		arg.ID,
 		arg.ExpectedState,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const updateWorkflowStepStateIfReviewRun = `-- name: UpdateWorkflowStepStateIfReviewRun :execrows
+UPDATE workflow_steps
+SET state = ?1, updated_at = ?2,
+    completed_at = ?3
+WHERE id = ?4
+  AND state = ?5
+  AND review_run_id = ?6
+`
+
+type UpdateWorkflowStepStateIfReviewRunParams struct {
+	State         domain.WorkflowStepState
+	UpdatedAt     time.Time
+	CompletedAt   sql.NullTime
+	ID            string
+	ExpectedState domain.WorkflowStepState
+	ReviewRunID   sql.NullString
+}
+
+// A step transition that is valid only while the named review run is still the
+// step's authority.
+//
+// Late-verdict adoption spans several writes. Re-reading the pointer before them
+// cannot bind: a replacement can take authority in the gap between the check and
+// the write, and the adopter would then complete or park a step that no longer
+// belongs to its review. Conditioning each write on the pointer removes the gap
+// -- every individual write either lands while the run is still authoritative or
+// does not land at all.
+func (q *Queries) UpdateWorkflowStepStateIfReviewRun(ctx context.Context, arg UpdateWorkflowStepStateIfReviewRunParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateWorkflowStepStateIfReviewRun,
+		arg.State,
+		arg.UpdatedAt,
+		arg.CompletedAt,
+		arg.ID,
+		arg.ExpectedState,
+		arg.ReviewRunID,
 	)
 	if err != nil {
 		return 0, err

@@ -718,18 +718,20 @@ type WorkflowMutationProvenance struct {
 }
 
 type WorkflowOutbox struct {
-	ID             string
-	WorkflowRunID  string
-	WorkflowStepID sql.NullString
-	IdempotencyKey string
-	CommandType    domain.WorkflowOutboxCommandType
-	Payload        string
-	Status         domain.WorkflowOutboxStatus
-	CreatedAt      time.Time
-	DispatchedAt   sql.NullTime
-	AcknowledgedAt sql.NullTime
-	FailedAt       sql.NullTime
-	ErrorClass     string
+	ID                 string
+	WorkflowRunID      string
+	WorkflowStepID     sql.NullString
+	IdempotencyKey     string
+	CommandType        domain.WorkflowOutboxCommandType
+	Payload            string
+	Status             domain.WorkflowOutboxStatus
+	CreatedAt          time.Time
+	DispatchedAt       sql.NullTime
+	AcknowledgedAt     sql.NullTime
+	FailedAt           sql.NullTime
+	ErrorClass         string
+	FailureGeneration  string
+	DispatchGeneration string
 }
 
 type WorkflowPlan struct {

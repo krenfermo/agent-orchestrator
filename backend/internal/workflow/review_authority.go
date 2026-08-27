@@ -69,9 +69,21 @@ func reviewRunStillSpeaks(run domain.ReviewRun) bool {
 // step stays exactly where it was, which is the unreachable state the caller was
 // trying to resolve.
 func (c *Coordinator) liftRestingReviewStep(
-	ctx stdctx.Context, step domain.WorkflowStep,
+	ctx stdctx.Context, step domain.WorkflowStep, authorityRunID string,
 ) (domain.WorkflowStep, error) {
 	if step.State != domain.WorkflowStepWaiting {
+		return step, nil
+	}
+	if authorityRunID != "" {
+		moved, err := c.store.UpdateWorkflowStepStateIfReviewRun(ctx, step.ID,
+			domain.WorkflowStepWaiting, domain.WorkflowStepRunning, authorityRunID, c.clock())
+		if err != nil {
+			return step, err
+		}
+		if !moved {
+			return step, errReviewAuthorityLost
+		}
+		step.State = domain.WorkflowStepRunning
 		return step, nil
 	}
 	if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID,
@@ -269,10 +281,43 @@ func (c *Coordinator) adoptLateReviewVerdict(
 	reviewStep domain.WorkflowStep,
 	current domain.ReviewRun,
 ) (ReviewAuthorityOutcome, domain.WorkflowStep, domain.WorkflowRun, error) {
+	// REVALIDATE, immediately before anything is applied.
+	//
+	// `current` reached this function through a read that may be several store
+	// calls old, and in that window another caller can have created a
+	// replacement, superseded this run and rebound the step. Acting on the cached
+	// value would complete or park a step that now belongs to a different review.
+	// The re-read is the cheap half of the defence; the guarded writes below are
+	// the half that actually binds.
+	fresh, found, ferr := c.getWorkflowStep(ctx, run.ID, reviewStep.ID)
+	if ferr != nil {
+		return ReviewAuthorityNotApplicable, reviewStep, run, ferr
+	}
+	if !found {
+		return ReviewAuthorityNotApplicable, reviewStep, run, nil
+	}
+	reviewStep = fresh
+	if reviewStep.ReviewRunID == nil || *reviewStep.ReviewRunID != current.ID {
+		// A replacement already took the step.
+		return ReviewAuthorityNotApplicable, reviewStep, run, nil
+	}
+	latest, ok, lrerr := c.reviewRuns.GetReviewRun(ctx, current.ID)
+	if lrerr != nil {
+		return ReviewAuthorityNotApplicable, reviewStep, run, lrerr
+	}
+	if !ok || latest.SupersededBy != "" || !latest.LateVerdict.Valid() {
+		return ReviewAuthorityNotApplicable, reviewStep, run, nil
+	}
+	current = latest
+
 	// A review step resting at `waiting` has to come back before it can be
-	// concluded. See liftRestingReviewStep.
-	lifted, lerr := c.liftRestingReviewStep(ctx, reviewStep)
+	// concluded — under the same authority guard, so the lift itself cannot land
+	// after a replacement has taken over. See liftRestingReviewStep.
+	lifted, lerr := c.liftRestingReviewStep(ctx, reviewStep, current.ID)
 	if lerr != nil {
+		if errors.Is(lerr, errReviewAuthorityLost) {
+			return ReviewAuthorityNotApplicable, reviewStep, run, nil
+		}
 		return ReviewAuthorityNotApplicable, reviewStep, run, lerr
 	}
 	reviewStep = lifted
@@ -285,7 +330,12 @@ func (c *Coordinator) adoptLateReviewVerdict(
 	// It had two, briefly, and that is precisely how an adopted late
 	// changes_requested came to rest at `waiting` while dispatching no fix: this
 	// copy knew about the verdict and the cascade behind it did not.
-	updated, handled, err := c.applyTerminalReviewRun(ctx, run, reviewStep, current)
+	updated, handled, err := c.applyTerminalReviewRun(ctx, run, reviewStep, current, current.ID)
+	if errors.Is(err, errReviewAuthorityLost) {
+		// A replacement took the step mid-apply. The guarded write refused, so
+		// nothing landed on its behalf; the owner decides now.
+		return ReviewAuthorityNotApplicable, reviewStep, run, nil
+	}
 	if err != nil {
 		return ReviewAuthorityNotApplicable, reviewStep, run, err
 	}
@@ -557,7 +607,7 @@ func (c *Coordinator) stopReviewAuthority(
 		"review_state_ambiguous: this step's review run %s ended as %s with no verdict, and %d replacement reviews have already been authorized (max %d)",
 		current.ID, current.Status, generation, maxReviewAuthorityRebinds)
 	updated, err := c.stopReview(ctx, run, reviewStep, ReasonReviewStateAmbiguous, detail,
-		string(current.Verdict), domain.WorkflowErrorReviewerLaunchFailed)
+		string(current.Verdict), domain.WorkflowErrorReviewerLaunchFailed, "")
 	if err != nil {
 		return ReviewAuthorityNotApplicable, reviewStep, run, err
 	}

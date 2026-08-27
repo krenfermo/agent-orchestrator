@@ -94,7 +94,19 @@ WHERE id = ?
 
 -- name: MarkReviewRunSupersededBy :execrows
 -- Names the replacement that took authority over a closed-out run, so "which
--- review speaks for this step" survives a restart. Write-once.
+-- review speaks for this step" survives a restart.
+--
+-- Write-once. The idempotent-replay case -- superseded_by already holding the
+-- replacement that is now replaying, because a crash landed between this write
+-- and the pointer rebind -- is resolved by the store, which re-reads after a
+-- zero-row result. That is sound rather than a check-then-act race precisely
+-- BECAUSE this column is write-once: once set it can never change again, so a
+-- read taken after the failed swap is as authoritative as the swap.
+--
+-- NOTE: do not write a pair of single quotes anywhere in this comment block.
+-- sqlc's SQLite lexer treats it as a string literal, mis-lexes the statement
+-- below and emits it TRUNCATED, with no error at generate time -- the failure
+-- surfaces at runtime as "SQL logic error: incomplete input".
 UPDATE review_run
 SET superseded_by = ?
 WHERE id = ? AND superseded_by = '' AND id != ?;

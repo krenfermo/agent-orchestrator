@@ -132,8 +132,12 @@ func (a *fixtureAgent) Launch(_ stdctx.Context, req workflowcore.ReviewerLaunchR
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.tools++
+	// The fixture owns its own "runtime", so it mints a real per-launch
+	// instance rather than leaving it empty: a confirmation without one is
+	// refused, and rightly so — nothing downstream could address it.
 	return workflowcore.ReviewerLaunchResult{
 		HandleID:       req.RunID + "-handle",
+		InstanceID:     req.RunID + "-instance",
 		AgentSessionID: req.RunID + "-reviewer",
 	}, nil
 }
@@ -386,3 +390,18 @@ func fixtureMemory(fixture Fixture) []memory.MemoryItem {
 		},
 	}
 }
+
+// The fixture reviewer is entirely in-process: Launch returns a verdict rather
+// than starting anything, so there is never an external session behind an
+// identity. `absent` is therefore the true answer, not a convenient one, and
+// cancelling is genuinely a no-op.
+
+func (a *fixtureAgent) ReviewerIdentity(req workflowcore.ReviewerLaunchRequest) string {
+	return req.RunID + "-handle"
+}
+
+func (a *fixtureAgent) ProbeReviewer(_ stdctx.Context, _ workflowcore.ReviewerRef) (workflowcore.ReviewerObservation, error) {
+	return workflowcore.ReviewerObservation{Presence: workflowcore.ReviewerPresenceAbsent}, nil
+}
+
+func (a *fixtureAgent) CancelReviewer(_ stdctx.Context, _ workflowcore.ReviewerRef) error { return nil }

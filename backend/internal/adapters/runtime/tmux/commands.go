@@ -1,19 +1,38 @@
 package tmux
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // newSessionArgs builds args for `tmux new-session -d -s <id> -x 220 -y 50
 // -c <cwd> <shell> -c <launchCmd>`. The shell -c form runs the launch command
 // inside the configured shell so exported env vars and quoting work correctly.
-func newSessionArgs(id, cwd, shellPath, launchCmd string) []string {
-	return []string{
+// newSessionArgs builds the creation command.
+//
+// When owner is set, `-e AO_SESSION_OWNER=<token>` makes the ownership token
+// part of the very command that creates the session: tmux applies it while
+// constructing the session, so the session cannot become visible to a probe
+// before it carries its identity. Ownership is therefore a property of
+// creation, not a follow-up write.
+func newSessionArgs(id, cwd, shellPath, launchCmd, owner string) []string {
+	args := []string{
 		"new-session", "-d",
+		// -P -F prints the NEW session's immutable instance id as part of the
+		// creation command itself. Discovering it afterwards by name would defeat
+		// the purpose: between creating and looking it up, the session could
+		// vanish and a stranger take the name, and AO would adopt the stranger's
+		// id as "the session I just made" — and later destroy it.
+		"-P", "-F", "#{session_id}",
 		"-s", id,
 		"-x", "220",
 		"-y", "50",
 		"-c", cwd,
-		shellPath, "-c", launchCmd,
 	}
+	if owner != "" {
+		args = append(args, "-e", ownerEnvKey+"="+owner)
+	}
+	return append(args, shellPath, "-c", launchCmd)
 }
 
 // respawnPaneArgs replaces the process in the session's only pane while keeping
@@ -96,7 +115,23 @@ func hasSessionArgs(id string) []string {
 // support this prefix; pane-targeting commands (send-keys, capture-pane,
 // set-option) use a plain session name.
 func exactSessionTarget(id string) string {
+	if isSessionInstanceID(id) {
+		// An instance id is ALREADY exact — it names one incarnation and cannot
+		// be reassigned. Prefixing it with `=` would make tmux look for a
+		// session literally named "$3".
+		return id
+	}
 	return "=" + id
+}
+
+// isSessionInstanceID reports whether a target is tmux's immutable `$N` session
+// id rather than a reusable name.
+//
+// The distinction is the whole ownership model: a NAME is a discovery key and
+// nothing more, while an instance id is the authority key that every fact and
+// every destructive action must be addressed to once discovery is done.
+func isSessionInstanceID(target string) bool {
+	return strings.HasPrefix(target, "$")
 }
 
 // listPanePIDsArgs builds args for `tmux list-panes -s -t =<id> -F #{pane_pid}`.
@@ -186,4 +221,51 @@ func capturePaneArgs(id string, lines int) []string {
 // dim TUI placeholder from normal human-authored composer text.
 func capturePaneStyledArgs(id string, lines int) []string {
 	return []string{"capture-pane", "-e", "-t", id, "-p", "-S", fmt.Sprintf("-%d", lines)}
+}
+
+// ownerEnvKey is the session-environment variable carrying AO's ownership
+// token. Session environment is used rather than a `@`-prefixed user option
+// because `new-session -e` sets it AS PART OF the creation command, which a
+// `set-option` call never can: the marker and the session become visible in the
+// same tmux operation, so no state exists in which one is present without the
+// other.
+const ownerEnvKey = "AO_SESSION_OWNER"
+
+// sessionOwnerArgs reads the ownership token back.
+//
+// tmux exits non-zero ("unknown variable") when the session carries no such
+// variable, which the caller reads as "unmarked", not as an error.
+func sessionOwnerArgs(id string) []string {
+	return []string{"show-environment", "-t", exactSessionTarget(id), ownerEnvKey}
+}
+
+// paneDeadArgs asks whether each pane's process has exited.
+//
+// `has-session` answers a different and much weaker question — whether a NAME
+// is registered — and a session whose reviewer has exited still answers yes to
+// it whenever `remain-on-exit` keeps the dead pane around. Adopting on that
+// answer is adopting a corpse, so liveness is proven per-pane instead.
+
+// setRemainOnExitOffArgs pins the dead-pane behaviour AO relies on, whatever the
+// operator's own tmux configuration says. With `remain-on-exit on` inherited
+// from a user's config, a finished reviewer leaves its session standing, which
+// is the precise shape of a phantom running review.
+func setRemainOnExitOffArgs(id string) []string {
+	return []string{"set-option", "-t", exactSessionTarget(id), "remain-on-exit", "off"}
+}
+
+// sessionInstanceArgs re-reads just the instance id, for the revalidation that
+// closes a read-then-act window.
+func sessionInstanceArgs(id string) []string {
+	return []string{"display-message", "-p", "-t", id, "#{session_id}"}
+}
+
+// killSessionInstanceArgs destroys ONE EXACT session incarnation.
+//
+// tmux accepts a `$N` session id as a target, and that is the whole point: a
+// kill aimed at a NAME lands on whatever holds the name at the moment it runs,
+// which after a replacement is somebody else's session. Aimed at `$N` it either
+// kills the instance AO proved it owned or it fails, and both outcomes are safe.
+func killSessionInstanceArgs(instanceID string) []string {
+	return []string{"kill-session", "-t", instanceID}
 }

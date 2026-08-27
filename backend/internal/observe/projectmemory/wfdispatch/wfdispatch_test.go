@@ -379,3 +379,13 @@ func TestInstrumentLeavesNilDependenciesNil(t *testing.T) {
 		t.Fatalf("a nil dependency was replaced by a wrapper: %+v", got)
 	}
 }
+
+func (f *fakeReviewer) ReviewerIdentity(req workflowcore.ReviewerLaunchRequest) string {
+	return "workflow-review-" + req.RunID
+}
+
+func (f *fakeReviewer) ProbeReviewer(stdctx.Context, workflowcore.ReviewerRef) (workflowcore.ReviewerObservation, error) {
+	return workflowcore.ReviewerObservation{Presence: workflowcore.ReviewerPresenceAbsent}, nil
+}
+
+func (f *fakeReviewer) CancelReviewer(stdctx.Context, workflowcore.ReviewerRef) error { return nil }

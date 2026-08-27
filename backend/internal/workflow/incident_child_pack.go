@@ -196,8 +196,12 @@ func (c *Coordinator) collectChildEvidence(ctx stdctx.Context, task domain.Workf
 				continue
 			}
 			if rr, ok, rerr := c.reviewRuns.GetReviewRun(ctx, *s.ReviewRunID); rerr == nil && ok {
-				ev.ReviewVerdict = string(rr.Verdict)
-				ev.ReviewFindings = rr.Body
+				// Effective, for the same reason the parent advisor pack uses it:
+				// a child whose review concluded via an adopted late verdict must
+				// hand the Incident Advisor that verdict and those findings, not
+				// two empty strings.
+				ev.ReviewVerdict = string(rr.EffectiveVerdict())
+				ev.ReviewFindings = rr.EffectiveBody()
 			}
 		}
 	}

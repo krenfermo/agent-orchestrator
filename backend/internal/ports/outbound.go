@@ -110,12 +110,30 @@ type RuntimeConfig struct {
 	WorkspacePath string
 	Argv          []string
 	Env           map[string]string
+	// Owner is AO's ownership token for this runtime instance, and it is
+	// attached ATOMICALLY with creation — not written afterwards.
+	//
+	// The distinction is the whole point. A marker written after Create returns
+	// leaves a window in which a live session exists that AO cannot identify:
+	// unadoptable (it might be someone else's), unterminatable (destroying what
+	// you cannot prove you own is worse), and therefore permanent. A runtime
+	// that cannot attach this token must fail creation and destroy whatever it
+	// partially created, so that window has no states in it.
+	//
+	// Empty means unowned, which is the pre-existing behaviour for every
+	// caller that does not need a recoverable identity.
+	Owner string
 }
 
 // RuntimeHandle identifies a live runtime instance. Its ID is opaque outside
 // the concrete runtime adapter.
 type RuntimeHandle struct {
 	ID string
+	// InstanceID is the runtime's immutable identity for this exact incarnation,
+	// when the runtime has one (tmux's `$N`). ID is a reusable name and is only a
+	// discovery key; this is the authority key. Empty when the runtime does not
+	// distinguish incarnations.
+	InstanceID string
 }
 
 // SupervisedProcessRef identifies the AO-owned supervisor belonging to one
@@ -380,7 +398,59 @@ var (
 	// every session on the board). Adapters wrap this sentinel via fmt.Errorf
 	// so callers can match it with errors.Is.
 	ErrRuntimeUnavailable = errors.New("runtime: infrastructure unavailable")
+	// ErrRuntimeOrphanedSession reports the one outcome a failed Create must
+	// never hide: the session was created, could not be made ownable, AND could
+	// not be proven torn down.
+	//
+	// An ordinary create failure means nothing is running. This means something
+	// may well be — a live session AO cannot identify, and therefore can neither
+	// adopt nor terminate. Collapsing the two would report a clean failure over
+	// a permanent orphan, which is precisely the class of silence this boundary
+	// exists to remove, so callers match this sentinel to escalate rather than
+	// simply retry.
+	ErrRuntimeOrphanedSession = errors.New("runtime: a created session could not be made ownable or proven torn down")
+	// ErrRuntimeSessionReplaced reports that the session occupying a name
+	// CHANGED between two observations AO was combining.
+	//
+	// Session names are reusable the instant their holder exits, so facts read
+	// under the same name can belong to different incarnations: ownership proven
+	// of one session, liveness measured on another. Merging them would let AO
+	// adopt — or destroy — a session it never verified. Callers must treat this
+	// as uncertainty and re-observe, never as a verdict about either instance.
+	ErrRuntimeSessionReplaced = errors.New("runtime: the session behind this name was replaced between observations")
 )
+
+// SessionFacts is ONE COHERENT observation of a runtime session: every field
+// belongs to the same session incarnation, or the read fails.
+//
+// It exists because the interesting questions about a session (is it AO's? is
+// its workload running?) cannot be answered by a single command, and answering
+// them with separate look-ups keyed by a reusable name is how facts from two
+// different sessions get combined into one false conclusion.
+type SessionFacts struct {
+	// InstanceID is the runtime's immutable per-incarnation identity (tmux's
+	// `$N`), never a name. It is what destructive actions must target.
+	InstanceID string
+	// Owner is the ownership token attached at creation; OwnerKnown is false
+	// when the session carries none.
+	Owner      string
+	OwnerKnown bool
+	// WorkloadAlive reports whether the process AO launched is still running.
+	// WorkloadKnown is false when that could not be determined, which callers
+	// must treat as uncertainty rather than exit.
+	WorkloadAlive bool
+	WorkloadKnown bool
+}
+
+// SessionFactsReader is the optional runtime capability that answers about a
+// session as a single coherent instance. Implementations MUST fail with
+// ErrRuntimeSessionReplaced rather than return facts spanning incarnations.
+type SessionFactsReader interface {
+	SessionFacts(ctx context.Context, handle RuntimeHandle) (SessionFacts, bool, error)
+	// DestroyInstance destroys one exact incarnation, identified by InstanceID.
+	// A session that has since been replaced under the same name MUST survive.
+	DestroyInstance(ctx context.Context, instanceID string) error
+}
 
 // WorkspaceConfig is the spec for creating or restoring a session's workspace.
 type WorkspaceConfig struct {

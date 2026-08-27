@@ -285,3 +285,20 @@ func Instrument(deps workflowcore.Deps, recorder *projectmemory.Recorder, log *s
 	deps.Planner = InstrumentPlanner(deps.Planner, recorder, log)
 	return deps
 }
+
+// The reviewer-launch boundary's recovery half is required, and this decorator
+// only observes — so each call goes straight through to the launcher it wraps.
+// Answering these itself would make the recorder, rather than the real
+// launcher, the thing that decides what may be adopted or destroyed.
+
+func (r *reviewerLauncher) ReviewerIdentity(req workflowcore.ReviewerLaunchRequest) string {
+	return r.next.ReviewerIdentity(req)
+}
+
+func (r *reviewerLauncher) ProbeReviewer(ctx stdctx.Context, ref workflowcore.ReviewerRef) (workflowcore.ReviewerObservation, error) {
+	return r.next.ProbeReviewer(ctx, ref)
+}
+
+func (r *reviewerLauncher) CancelReviewer(ctx stdctx.Context, ref workflowcore.ReviewerRef) error {
+	return r.next.CancelReviewer(ctx, ref)
+}

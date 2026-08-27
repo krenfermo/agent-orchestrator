@@ -2,8 +2,10 @@ package workflow_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -30,10 +32,16 @@ type fakeReviewRuns struct {
 	// cancelErr makes the cancellation itself fail, so a test can prove AO never
 	// acts on a cancellation it could not prove.
 	cancelErr error
+	// beforeGetReviewRun fires on each read, so a test can change authority
+	// between an adopter's gate read and its own revalidation — the exact window
+	// the revalidation exists to close.
+	beforeGetReviewRun func(id string)
 	// forceDuplicate makes the next InsertReviewRun return
 	// domain.ErrDuplicateReviewRun instead of inserting, so tests can drive
 	// the dedupe-fallback path deterministically.
-	forceDuplicate bool
+	forceDuplicate       bool
+	rowCreateErr         error
+	afterInsertReviewRun func(reviewRunID string)
 }
 
 func newFakeReviewRuns() *fakeReviewRuns {
@@ -52,11 +60,21 @@ func naturalKey(id domain.SessionID, prURL, targetSHA string, harness domain.Rev
 }
 
 func (f *fakeReviewRuns) GetReviewRun(_ context.Context, id string) (domain.ReviewRun, bool, error) {
+	if hook := f.beforeGetReviewRun; hook != nil {
+		hook(id)
+	}
 	r, ok := f.runs[id]
 	return r, ok, nil
 }
 
 func (f *fakeReviewRuns) GetReviewBySessionAndHarness(_ context.Context, id domain.SessionID, harness domain.ReviewerHarness) (domain.Review, bool, error) {
+	// rowCreateErr models the review ROW failing to be created — the window in
+	// which a launch attempt dies before any review run id exists.
+	if f.rowCreateErr != nil {
+		err := f.rowCreateErr
+		f.rowCreateErr = nil
+		return domain.Review{}, false, err
+	}
 	r, ok := f.reviews[reviewKey(id, harness)]
 	return r, ok, nil
 }
@@ -68,6 +86,14 @@ func (f *fakeReviewRuns) UpsertReview(_ context.Context, r domain.Review) error 
 
 func (f *fakeReviewRuns) InsertReviewRun(_ context.Context, run domain.ReviewRun) error {
 	f.insertCalls++
+	// afterInsertReviewRun fires once the identity exists and before anything is
+	// launched — the window in which a dispatch can lose its authorization with
+	// a review row already on disk.
+	if f.afterInsertReviewRun != nil {
+		hook := f.afterInsertReviewRun
+		f.afterInsertReviewRun = nil
+		defer hook(run.ID)
+	}
 	if f.forceDuplicate {
 		f.forceDuplicate = false
 		return domain.ErrDuplicateReviewRun
@@ -164,8 +190,15 @@ func (f *fakeReviewRuns) CancelRunningReviewRunsBySessionAndHarness(_ context.Co
 // the replacement that took authority over a closed-out run.
 func (f *fakeReviewRuns) MarkReviewRunSupersededBy(_ context.Context, id, supersededBy string) (bool, error) {
 	r, ok := f.runs[id]
-	if !ok || r.SupersededBy != "" || id == supersededBy {
+	if !ok || id == supersededBy {
 		return false, nil
+	}
+	if r.SupersededBy != "" {
+		// Mirrors the real store: already holding THIS replacement is an
+		// idempotent replay (a crash between the supersede and the rebind), and
+		// must succeed so the replay can finish the rebind. Holding a DIFFERENT
+		// replacement is a genuinely lost race.
+		return r.SupersededBy == supersededBy, nil
 	}
 	r.SupersededBy = supersededBy
 	f.runs[id] = r
@@ -234,6 +267,39 @@ func (f *fakeReviewRuns) setStatus(id string, status domain.ReviewRunStatus, ver
 // fakeReviewerLauncher is a hand-rolled fake for workflowcore.ReviewerLauncher
 // (no real Claude Code process/pane in unit tests).
 type fakeReviewerLauncher struct {
+	// externalLive models the world OUTSIDE AO: which deterministic reviewer
+	// identities currently exist. It survives "restarts" (the coordinator is
+	// rebuilt, this map is not), which is what makes an orphaned reviewer
+	// observable at all.
+	externalLive map[string]bool
+	probeCalls   int
+	cancelCalls  int
+	// probeUnknown makes the probe answer "AO cannot tell", the one reply that
+	// must never be read as absence.
+	probeUnknown bool
+	// probeErrorsOnce models a transient probe failure over a reviewer that is
+	// genuinely alive — the case in which launching would duplicate it.
+	probeErrorsOnce bool
+	// foreign marks identities that exist but are NOT AO's reviewer: a name
+	// collision or a stale shell. They may never be adopted or destroyed.
+	foreign map[string]bool
+	// beforeLaunch fires immediately before the external launch, so a test can
+	// change durable state in the window between the review identity being
+	// created and the reviewer existing.
+	beforeLaunch func()
+	// externalExited models AO's own reviewer whose process has exited while its
+	// session lingers.
+	externalExited map[string]bool
+	// instances maps a reviewer name to the incarnation currently behind it.
+	// Replacing the value models a NAME changing hands.
+	instances   map[string]string
+	instanceSeq int
+	// ownedWithoutInstance models a launcher that reports a live reviewer it
+	// cannot pin to an incarnation — the one answer a confirmation must refuse.
+	ownedWithoutInstance bool
+	// afterProbe fires once an observation has been produced, so a test can
+	// replace the session in the window a second look-up would fall into.
+	afterProbe     func()
 	preflightCalls int
 	launchCalls    int
 	preflightErr   error
@@ -251,10 +317,30 @@ func (f *fakeReviewerLauncher) Launch(_ context.Context, req workflowcore.Review
 	f.launchCalls++
 	f.lastPrompt = req.Prompt
 	f.lastReq = req
+	if hook := f.beforeLaunch; hook != nil {
+		f.beforeLaunch = nil
+		hook()
+	}
+	if f.externalLive == nil {
+		f.externalLive = map[string]bool{}
+	}
+	identity := f.ReviewerIdentity(req)
+	f.externalLive[identity] = true
+	if f.instances == nil {
+		f.instances = map[string]string{}
+	}
+	f.instanceSeq++
+	f.instances[identity] = "$" + strconv.Itoa(f.instanceSeq)
 	if f.launchErr != nil {
 		return workflowcore.ReviewerLaunchResult{}, f.launchErr
 	}
-	return workflowcore.ReviewerLaunchResult{HandleID: fmt.Sprintf("handle-%d", f.launchCalls)}, nil
+	// The handle IS the deterministic identity, exactly as the production
+	// launcher returns it (the real runtimes derive their handle from the
+	// session id they are given). A fake that invented its own handle would let
+	// probe and cancel address something that does not exist.
+	// The instance the "runtime" just created travels back, exactly as the real
+	// launcher returns tmux's `$N`.
+	return workflowcore.ReviewerLaunchResult{HandleID: identity, InstanceID: f.instances[identity]}, nil
 }
 
 // newCoordinatorWithReview wires a coordinator with 8B's work-step deps plus
@@ -756,4 +842,82 @@ func TestReviewStaleRunningNeedsAttention(t *testing.T) {
 	if final.Run.State != domain.WorkflowRunNeedsAttention {
 		t.Fatalf("run state = %q, want needs_attention", final.Run.State)
 	}
+}
+
+// ReviewerIdentity/ProbeReviewer/CancelReviewer make this fake a
+// workflowcore.ReviewerEnsurer, mirroring the production launcher: the identity
+// is derived purely from the review run id, so it is knowable before the launch
+// and askable afterwards.
+func (f *fakeReviewerLauncher) ReviewerIdentity(req workflowcore.ReviewerLaunchRequest) string {
+	return "workflow-review-" + req.RunID
+}
+
+func (f *fakeReviewerLauncher) ProbeReviewer(_ context.Context, ref workflowcore.ReviewerRef) (workflowcore.ReviewerObservation, error) {
+	handleID := ref.HandleID
+	f.probeCalls++
+	if f.afterProbe != nil {
+		hook := f.afterProbe
+		f.afterProbe = nil
+		defer hook()
+	}
+	// A LIVE SESSION ALWAYS HAS AN INCARNATION. The real runtime learns `$N` at
+	// creation and reports it with every observation, so a fake that could
+	// answer "owned, instance unknown" would be expressing a state production
+	// cannot reach — and would hide the refusal that state is supposed to
+	// trigger. Tests that want that state set ownedWithoutInstance explicitly.
+	if !f.ownedWithoutInstance && (f.externalLive[handleID] || f.externalExited[handleID]) {
+		if f.instances == nil {
+			f.instances = map[string]string{}
+		}
+		if f.instances[handleID] == "" {
+			f.instanceSeq++
+			f.instances[handleID] = "$" + strconv.Itoa(f.instanceSeq)
+		}
+	}
+	// A ref that carries an INSTANCE addresses that exact incarnation. If the
+	// name now holds a different one, the answer is about neither — which is the
+	// property persisting the instance exists to give.
+	if ref.Known() && f.instances[handleID] != ref.InstanceID {
+		return workflowcore.ReviewerObservation{Presence: workflowcore.ReviewerPresenceAbsent}, nil
+	}
+	if f.probeErrorsOnce {
+		f.probeErrorsOnce = false
+		return workflowcore.ReviewerObservation{Presence: workflowcore.ReviewerPresenceUnknown}, errors.New("probe transport failed")
+	}
+	if f.probeUnknown {
+		return workflowcore.ReviewerObservation{Presence: workflowcore.ReviewerPresenceUnknown}, nil
+	}
+	if f.foreign[handleID] {
+		return workflowcore.ReviewerObservation{Presence: workflowcore.ReviewerPresenceForeign, InstanceID: f.instances[handleID]}, nil
+	}
+	// Ours, but finished: the session name is still taken while the process
+	// behind it is gone. Modelled separately from `owned` because production
+	// distinguishes them, and a fake that collapsed them would hide exactly the
+	// adopt-a-corpse bug this classification exists to prevent.
+	if f.externalExited[handleID] {
+		return workflowcore.ReviewerObservation{Presence: workflowcore.ReviewerPresenceExited, InstanceID: f.instances[handleID]}, nil
+	}
+	if f.externalLive[handleID] {
+		return workflowcore.ReviewerObservation{Presence: workflowcore.ReviewerPresenceOwned, InstanceID: f.instances[handleID]}, nil
+	}
+	return workflowcore.ReviewerObservation{Presence: workflowcore.ReviewerPresenceAbsent}, nil
+}
+
+// CancelReviewer terminates only what AO owns, exactly as the production
+// launcher does: a foreign session is refused, never destroyed.
+func (f *fakeReviewerLauncher) CancelReviewer(_ context.Context, ref workflowcore.ReviewerRef) error {
+	handleID := ref.HandleID
+	f.cancelCalls++
+	if ref.Known() && f.instances[handleID] != ref.InstanceID {
+		// The incarnation AO verified is gone; whatever holds the name now is
+		// not it, and must not be destroyed.
+		return nil
+	}
+	if f.foreign[handleID] {
+		return errors.New("refusing to terminate a session AO does not own")
+	}
+	delete(f.externalLive, handleID)
+	delete(f.externalExited, handleID)
+	delete(f.instances, handleID)
+	return nil
 }

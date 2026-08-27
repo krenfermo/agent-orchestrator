@@ -62,6 +62,17 @@ func (c *Coordinator) Reconcile(ctx stdctx.Context) error {
 	// function is called at all (see internal/daemon).
 	c.reconcileTaskWorktrees(ctx)
 
+	// External-session obligations first, and for EVERY run — including terminal
+	// ones, which every other path below deliberately skips.
+	//
+	// A terminal run is the end of AO's interest in a review, not the end of its
+	// responsibility for a process it started. A cancellation that won the race
+	// against an in-flight launch leaves a reviewer running with nothing that
+	// would ever look for it again, because "the run is over" is exactly the
+	// condition under which recovery stops looking. See
+	// ReconcileOrphanedReviewers.
+	c.reconcileOrphanedReviewersForAllRuns(ctx)
+
 	runs, err := c.store.ListNonTerminalWorkflowRuns(ctx)
 	if err != nil {
 		return err

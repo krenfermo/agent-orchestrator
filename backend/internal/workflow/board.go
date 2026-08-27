@@ -249,7 +249,9 @@ func (c *Coordinator) readOnlyDetail(ctx stdctx.Context, run domain.WorkflowRun)
 		}
 		if step.Kind == domain.WorkflowStepReview && step.ReviewRunID != nil && c.reviewRuns != nil {
 			if rr, found, rerr := c.reviewRuns.GetReviewRun(ctx, *step.ReviewRunID); rerr == nil && found {
-				sd.Review = &ReviewSummary{Harness: rr.Harness, Verdict: rr.Verdict, Target: rr.TargetSHA}
+				// The verdict a person reads on the Board is the effective one; an
+				// adopted late verdict is not a blank review.
+				sd.Review = &ReviewSummary{Harness: rr.Harness, Verdict: rr.EffectiveVerdict(), Target: rr.TargetSHA}
 			}
 		}
 		detail.Steps = append(detail.Steps, sd)

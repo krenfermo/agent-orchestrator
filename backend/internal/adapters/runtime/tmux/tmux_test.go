@@ -18,6 +18,9 @@ import (
 
 // -- fakeRunner test seam --
 
+// fakeInstanceID is the tmux `$N` handle every fake creation returns.
+const fakeInstanceID = "$1"
+
 type fakeRunner struct {
 	calls   []runnerCall
 	outputs [][]byte
@@ -93,6 +96,11 @@ func (f *fakeRunner) Run(ctx context.Context, env []string, name string, args ..
 	if len(f.outputs) > 0 {
 		out = f.outputs[0]
 		f.outputs = f.outputs[1:]
+	}
+	// `new-session -P -F "#{session_id}"` prints the new session's instance id.
+	// Every fake must answer it, or Create cannot identify what it created.
+	if subcommandOf(args) == "new-session" && len(out) == 0 {
+		out = []byte(fakeInstanceID + "\n")
 	}
 	if f.hook != nil {
 		if err := f.hook(ctx, len(f.calls)); err != nil {
@@ -360,9 +368,16 @@ func TestContaminatedEnvVars_ReportsExistingDrift(t *testing.T) {
 // -- command builder tests --
 
 func TestCommandBuilders(t *testing.T) {
-	if got, want := newSessionArgs("sess-1", "/tmp/ws", "/bin/sh", `echo hi; exec "${SHELL:-/bin/sh}" -i`),
-		[]string{"new-session", "-d", "-s", "sess-1", "-x", "220", "-y", "50", "-c", "/tmp/ws", "/bin/sh", "-c", `echo hi; exec "${SHELL:-/bin/sh}" -i`}; !reflect.DeepEqual(got, want) {
+	if got, want := newSessionArgs("sess-1", "/tmp/ws", "/bin/sh", `echo hi; exec "${SHELL:-/bin/sh}" -i`, ""),
+		[]string{"new-session", "-d", "-P", "-F", "#{session_id}", "-s", "sess-1", "-x", "220", "-y", "50", "-c", "/tmp/ws", "/bin/sh", "-c", `echo hi; exec "${SHELL:-/bin/sh}" -i`}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("newSessionArgs = %#v, want %#v", got, want)
+	}
+	// With an owner, the token is part of the CREATION command itself — that is
+	// the property the whole ownership model rests on.
+	if got, want := newSessionArgs("sess-1", "/tmp/ws", "/bin/sh", "run", "ao-reviewer:sess-1"),
+		[]string{"new-session", "-d", "-P", "-F", "#{session_id}", "-s", "sess-1", "-x", "220", "-y", "50", "-c", "/tmp/ws",
+			"-e", "AO_SESSION_OWNER=ao-reviewer:sess-1", "/bin/sh", "-c", "run"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("newSessionArgs(owner) = %#v, want %#v", got, want)
 	}
 	if got, want := respawnPaneArgs("sess-1", "/tmp/ws", "/bin/sh", "echo hi"),
 		[]string{"respawn-pane", "-k", "-t", "sess-1:0.0", "-c", "/tmp/ws", "/bin/sh", "-c", "echo hi"}; !reflect.DeepEqual(got, want) {
@@ -472,7 +487,7 @@ func TestCreateIssuesNewSessionAndStatusOff(t *testing.T) {
 	// new-session, display-message cwd verification, set-option status,
 	// set-option mouse, set-option window-size, has-session (exit 0 = alive)
 	r, fr := newTestRuntime(0)
-	fr.outputs = [][]byte{nil, []byte("/tmp/ws\n"), nil, nil, nil, nil}
+	fr.outputs = [][]byte{nil, []byte("/tmp/ws\n"), nil, nil, nil, nil, nil}
 
 	h, err := r.Create(context.Background(), ports.RuntimeConfig{
 		SessionID:     "sess-1",
@@ -486,10 +501,15 @@ func TestCreateIssuesNewSessionAndStatusOff(t *testing.T) {
 	if h.ID != "sess-1" {
 		t.Fatalf("handle ID = %q, want sess-1", h.ID)
 	}
-	// Expect 6 calls: new-session, display-message cwd verification,
-	// set-option status, set-option mouse, set-option window-size, has-session.
-	if len(fr.calls) != 6 {
-		t.Fatalf("calls = %d, want 6", len(fr.calls))
+	// Expect 7 calls: new-session, display-message cwd verification,
+	// set-option status, set-option mouse, set-option window-size,
+	// set-option remain-on-exit off, has-session.
+	//
+	// No owner is configured here, so there is no ownership read-back: an
+	// unowned session is the pre-existing behaviour for every caller that does
+	// not need a recoverable identity.
+	if len(fr.calls) != 7 {
+		t.Fatalf("calls = %d, want 7", len(fr.calls))
 	}
 
 	// Call 0: new-session
@@ -513,29 +533,35 @@ func TestCreateIssuesNewSessionAndStatusOff(t *testing.T) {
 	}
 
 	// Call 1: verify pane cwd.
-	if got, want := fr.calls[1].args, srv(paneCurrentPathArgs("sess-1")); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[1].args, srv(paneCurrentPathArgs(fakeInstanceID)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[1] = %#v, want %#v", got, want)
 	}
 
 	// Call 2: set-option status off (plain target, pane-targeting does not use =).
-	if got, want := fr.calls[2].args, srv(setStatusOffArgs("sess-1")); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[2].args, srv(setStatusOffArgs(fakeInstanceID)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[2] = %#v, want %#v", got, want)
 	}
 
 	// Call 3: set-option mouse on (enables wheel-scroll of the pane).
-	if got, want := fr.calls[3].args, srv(setMouseOnArgs("sess-1")); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[3].args, srv(setMouseOnArgs(fakeInstanceID)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[3] = %#v, want %#v", got, want)
 	}
 
 	// Call 4: set-option window-size largest (multi-client sizing, see
 	// setWindowSizeLargestArgs).
-	if got, want := fr.calls[4].args, srv(setWindowSizeLargestArgs("sess-1")); !reflect.DeepEqual(got, want) {
+	if got, want := fr.calls[4].args, srv(setWindowSizeLargestArgs(fakeInstanceID)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[4] = %#v, want %#v", got, want)
 	}
 
-	// Call 5: has-session (IsAlive, uses exact-match target =sess-1).
-	if got, want := fr.calls[5].args, srv(hasSessionArgs("sess-1")); !reflect.DeepEqual(got, want) {
+	// Call 5: set-option remain-on-exit off, so a finished process cannot leave
+	// its session standing for a later probe to mistake for a live one.
+	if got, want := fr.calls[5].args, srv(setRemainOnExitOffArgs(fakeInstanceID)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("call[5] = %#v, want %#v", got, want)
+	}
+
+	// Call 6: has-session (IsAlive, uses exact-match target =sess-1).
+	if got, want := fr.calls[6].args, srv(hasSessionArgs(fakeInstanceID)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("call[6] = %#v, want %#v", got, want)
 	}
 }
 
@@ -789,6 +815,9 @@ func (f *fakeRunnerSelectiveErr) Run(_ context.Context, env []string, name strin
 	f.calls = append(f.calls, runnerCall{env: append([]string(nil), env...), name: name, args: append([]string(nil), args...)})
 	if subcommandOf(args) == f.exitErrOn {
 		return f.errOutput, &exec.ExitError{}
+	}
+	if subcommandOf(args) == "new-session" {
+		return []byte(fakeInstanceID + "\n"), nil
 	}
 	if subcommandOf(args) == "display-message" {
 		return []byte("/tmp/ws\n"), nil

@@ -3,6 +3,7 @@ package workflow
 import (
 	stdctx "context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -42,6 +43,12 @@ const reviewerStallGrace = 20 * time.Second
 // capacity retry from a real fix-cycle N+1 (which instead requires
 // fixStep.State == waiting with a fresh fingerprint).
 const reviewCapacityRetryDurablePhase = "review_capacity_retry"
+
+// errReviewAuthorityLost is a guarded write that did not land because the review
+// run it was being applied for is no longer the step's authority. It is a
+// control signal, not a failure: the caller abandons its decision and whoever
+// owns the step now decides instead.
+var errReviewAuthorityLost = errors.New("workflow: this review run is no longer the step's authority")
 
 // observeReviewStep is the single fact-based review-step evaluation function,
 // used both by GetRun (opportunistic observation) and by boot Reconcile,
@@ -92,7 +99,7 @@ func (c *Coordinator) observeReviewStep(ctx stdctx.Context, run domain.WorkflowR
 		return step, nil
 	}
 
-	updated, handled, err := c.applyTerminalReviewRun(ctx, run, step, reviewRun)
+	updated, handled, err := c.applyTerminalReviewRun(ctx, run, step, reviewRun, "")
 	if err != nil {
 		return step, err
 	}
@@ -118,6 +125,7 @@ func (c *Coordinator) applyTerminalReviewRun(
 	run domain.WorkflowRun,
 	step domain.WorkflowStep,
 	reviewRun domain.ReviewRun,
+	authorityRunID string,
 ) (domain.WorkflowStep, bool, error) {
 	// The verdict decides first, and it is read through EffectiveVerdict so that
 	// a reviewer's answer drives the same cascade whichever column holds it.
@@ -128,7 +136,7 @@ func (c *Coordinator) applyTerminalReviewRun(
 	switch reviewRun.EffectiveVerdict() {
 	case domain.VerdictApproved:
 		updated, err := c.recordReviewOutcome(ctx, run, step,
-			domain.WorkflowStepCompleted, domain.WorkflowRunWaiting, "verify", string(reviewRun.EffectiveVerdict()), "")
+			domain.WorkflowStepCompleted, domain.WorkflowRunWaiting, "verify", string(reviewRun.EffectiveVerdict()), "", authorityRunID)
 		return updated, true, err
 
 	case domain.VerdictChangesRequested:
@@ -168,7 +176,7 @@ func (c *Coordinator) applyTerminalReviewRun(
 			// happens to exist (review dispatch never creates one).
 			updated, err := c.stopReview(ctx, run, step, ReasonFixBudgetExhausted,
 				fmt.Sprintf("fix_budget_exhausted: the reviewer still requests changes after %d review cycles (max_fix_cycles=%d)", cycleCount, policy.MaxFixCycles),
-				string(reviewRun.EffectiveVerdict()), domain.WorkflowErrorFixBudgetExhausted)
+				string(reviewRun.EffectiveVerdict()), domain.WorkflowErrorFixBudgetExhausted, authorityRunID)
 			return updated, true, err
 		}
 		// Within budget: rest at waiting. next_action "fix" is
@@ -178,7 +186,7 @@ func (c *Coordinator) applyTerminalReviewRun(
 		// invoke within the same call, per Checkpoint 8D's automatic-
 		// progression design.
 		updated, err := c.recordReviewOutcome(ctx, run, step,
-			domain.WorkflowStepWaiting, domain.WorkflowRunWaiting, "fix", string(reviewRun.EffectiveVerdict()), "")
+			domain.WorkflowStepWaiting, domain.WorkflowRunWaiting, "fix", string(reviewRun.EffectiveVerdict()), "", authorityRunID)
 		return updated, true, err
 
 	}
@@ -198,7 +206,7 @@ func (c *Coordinator) applyTerminalReviewRun(
 		updated, err := c.recordReviewOutcome(ctx, run, step,
 			domain.WorkflowStepFailed, domain.WorkflowRunNeedsAttention,
 			fmt.Sprintf("review run ended as %s", reviewRun.Status), string(reviewRun.Verdict),
-			domain.WorkflowErrorReviewerLaunchFailed)
+			domain.WorkflowErrorReviewerLaunchFailed, authorityRunID)
 		if err != nil {
 			return updated, true, err
 		}
@@ -247,7 +255,7 @@ func (c *Coordinator) stopReviewAmbiguous(
 	if err := assertAmbiguousEvidence(raised.ErrorClass(), raised); err != nil {
 		return step, err
 	}
-	return c.stopReview(ctx, run, step, reason, detail, verdict, raised.ErrorClass())
+	return c.stopReview(ctx, run, step, reason, detail, verdict, raised.ErrorClass(), "")
 }
 
 func (c *Coordinator) stopReview(
@@ -256,9 +264,10 @@ func (c *Coordinator) stopReview(
 	step domain.WorkflowStep,
 	reason, detail, verdict string,
 	errClass domain.WorkflowErrorClass,
+	authorityRunID string,
 ) (domain.WorkflowStep, error) {
 	updated, err := c.recordReviewOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunNeedsAttention,
-		detail, verdict, errClass)
+		detail, verdict, errClass, authorityRunID)
 	if err != nil {
 		return updated, err
 	}
@@ -275,11 +284,32 @@ func (c *Coordinator) recordReviewOutcome(
 	nextAction string,
 	verdict string,
 	errClass domain.WorkflowErrorClass,
+	// authorityRunID, when set, makes the step transition valid ONLY while that
+	// review run is still the step's authority pointer. Empty keeps the
+	// unguarded transition every pre-existing caller relies on: observation has
+	// already read the run THROUGH the pointer in the same pass. Late-verdict
+	// adoption sets it, because its writes span a window in which a replacement
+	// can take the step.
+	authorityRunID string,
 ) (domain.WorkflowStep, error) {
 	now := c.clock()
 
 	if domain.ValidWorkflowStepTransition(step.State, nextStep) {
-		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, step.State, nextStep, now); err != nil {
+		var err error
+		if authorityRunID != "" {
+			var moved bool
+			moved, err = c.store.UpdateWorkflowStepStateIfReviewRun(
+				ctx, step.ID, step.State, nextStep, authorityRunID, now)
+			if err == nil && !moved {
+				// The pointer moved, or the step left the state this decision
+				// was made against. This verdict no longer speaks for this step,
+				// so nothing further may be applied on its behalf.
+				return step, errReviewAuthorityLost
+			}
+		} else {
+			_, err = c.store.UpdateWorkflowStepState(ctx, step.ID, step.State, nextStep, now)
+		}
+		if err != nil {
 			return step, err
 		}
 		step.State = nextStep
@@ -438,6 +468,27 @@ func (c *Coordinator) handleReviewerCapacityStall(ctx stdctx.Context, run domain
 	// The row count alone would not be proof either: the cancel is keyed by
 	// (session, harness), not by this run's id, so it can report rows for a
 	// sibling run. The durable proof is re-reading THIS run.
+	// The EXTERNAL reviewer first, through the same restart-safe protocol a
+	// losing replacement uses. Marking the row cancelled while its process keeps
+	// running is the orphan this protocol exists to prevent — and it is exactly
+	// what this path did: a stalled reviewer's pane outlived every retry, and
+	// the replacement was launched beside it.
+	//
+	// The cancellation is durable-intent-first, so a crash anywhere in it is
+	// finished by the next pass rather than lost.
+	if identity, known := c.reviewerIdentityFor(ctx, run, step, reviewRun.ID); known {
+		if xerr := c.cancelReviewerExternally(ctx, run, step, reviewRun.ID, identity,
+			"the reviewer stalled without producing a verdict"); xerr != nil {
+			// Leave the row alone: a review_run called cancelled over a reviewer
+			// AO could not terminate is the lie this ordering removes. The next
+			// pass retries the termination.
+			if c.log != nil {
+				c.log.Warn("workflow: could not terminate a stalled reviewer; leaving its run open",
+					"run", run.ID, "step", step.ID, "reviewRun", reviewRun.ID, "err", xerr)
+			}
+			return step, nil
+		}
+	}
 	if _, cerr := c.reviewRuns.CancelRunningReviewRunsBySessionAndHarness(ctx, reviewRun.SessionID, reviewRun.Harness,
 		"reviewer_capacity: session went idle with no verdict after dispatch — treated as provider capacity exhaustion, never fabricated as an approved verdict from pane text"); cerr != nil {
 		// AO cannot prove the cancellation won, so it may not act as if it did.
@@ -467,7 +518,7 @@ func (c *Coordinator) handleReviewerCapacityStall(ctx stdctx.Context, run domain
 		// `handled` false means it concluded nothing after all (still running):
 		// no verdict to apply, and no proof the cancellation won, so nothing is
 		// parked and nothing is retried.
-		updated, handled, aerr := c.applyTerminalReviewRun(ctx, run, step, fresh)
+		updated, handled, aerr := c.applyTerminalReviewRun(ctx, run, step, fresh, "")
 		if aerr != nil {
 			return step, aerr
 		}
