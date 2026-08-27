@@ -17,6 +17,18 @@ type PlanArtifact struct {
 	ProjectID          string           `json:"projectId"`
 	PolicyVersion      string           `json:"policyVersion"`
 	Verification       VerificationPlan `json:"verification"`
+	// WriteIntent is the planned task's declared write intent, carried into the
+	// EXECUTION run's own plan step so the completion classifier can read it
+	// from a durable row rather than from the master run it may not be able to
+	// reach.
+	//
+	// This is the propagation hop that makes the semantic restart-safe: the
+	// artifact is persisted in workflow_steps.artifact_json at dispatch, so a
+	// daemon that comes back up mid-run resolves the same intent, and therefore
+	// the same completion verdict, that it would have resolved before the
+	// crash. Empty for every standalone objective and every legacy plan, which
+	// is Unspecified, which is treated as mutating.
+	WriteIntent domain.WorkflowWriteIntent `json:"writeIntent,omitempty"`
 }
 
 type VerificationPlan struct {
@@ -103,12 +115,31 @@ func BuildWorkStepPromptWithSpec(artifact PlanArtifact, effectiveSpec string) st
 	for _, c := range artifact.AcceptanceCriteria {
 		criteria += "- " + c + "\n"
 	}
+	// A task the plan declared read-only is told so, and told it in place of
+	// the "implement a concrete code change" instruction rather than after it:
+	// handing a verification task both sentences is handing it a contradiction,
+	// and the honest readings of that prompt disagree about what to do. The
+	// mutating text is byte-identical to what it always was, so every task that
+	// declares nothing produces exactly the prompt it produced before.
+	task := `Your task: implement the objective above as a concrete, reviewable code
+change in this worktree.`
+	extraGuardrail := ""
+	if artifact.WriteIntent.ReadOnly() {
+		task = `Your task: carry out the objective above as a READ-ONLY task. Its accepted
+outcome is that this worktree is left exactly as you found it: run the checks,
+inspect what you were asked to inspect, and report what you found.`
+		extraGuardrail = `
+- This task is READ-ONLY. Do NOT create, edit or delete any file, and do NOT
+  commit or stage anything. Any pre-existing uncommitted changes in this
+  worktree must be left exactly as they are. AO verifies this independently by
+  comparing the worktree against the state you were handed, so an unexpected
+  change stops the run for a person to look at.`
+	}
 	return fmt.Sprintf(`You are the worker agent for an AO-managed workflow run.
 
 Objective: %s
 
-Your task: implement the objective above as a concrete, reviewable code
-change in this worktree.
+%s
 
 Acceptance criteria:
 %s%s
@@ -118,13 +149,13 @@ Guardrails (follow all of these):
   considering the task done.
 - Do NOT push, do NOT merge, and do NOT modify any branch other than the
   current one.
-- Do NOT open, request, or interact with any pull request.
+- Do NOT open, request, or interact with any pull request.%s
 
 When you are done (or if you get stuck), report the outcome clearly in your
 final message: what changed, what you tested, and whether it succeeded. This
 report is informational only — AO verifies your work independently from the
 actual state of the worktree, not from what you say here, so be honest about
-partial progress or failures.`, artifact.Objective, criteria, effectiveSpec)
+partial progress or failures.`, artifact.Objective, task, criteria, effectiveSpec, extraGuardrail)
 }
 
 // promptForRun reconstructs the work step's task prompt from the plan step's

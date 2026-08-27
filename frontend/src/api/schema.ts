@@ -4555,6 +4555,7 @@ export interface components {
             safeWriteOverlaps?: components["schemas"]["WorkflowPlannedSafeOverlap"][];
             title: string;
             verify: components["schemas"]["WorkflowVerificationPlanType2"];
+            writeIntent?: string;
         };
         WorkflowQuestionChoiceResponse: {
             id: string;

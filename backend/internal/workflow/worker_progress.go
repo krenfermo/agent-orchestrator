@@ -63,6 +63,19 @@ const (
 	WorkerTerminated           WorkerProgress = "worker_terminated"
 	WorkerFailed               WorkerProgress = "worker_failed"
 	WorkerResultAvailable      WorkerProgress = "worker_result_available"
+	// WorkerReadOnlyVerified is a worker whose task the plan declared
+	// read-only, which finished, and whose worktree AO has git-verified to be
+	// exactly as it was at dispatch. It is a SUCCESS, and it is deliberately a
+	// different word from WorkerResultAvailable: the two are reached from
+	// opposite evidence -- one from a change AO can point at, the other from
+	// the proven absence of one -- and a ledger that called them the same thing
+	// would make the second unreadable.
+	WorkerReadOnlyVerified WorkerProgress = "worker_read_only_verified"
+	// WorkerReadOnlyViolated is the other half: a task declared read-only whose
+	// worktree changed anyway. Not an ambiguity (AO can prove exactly what
+	// happened) and not a worker error class -- a person has to decide what the
+	// unexpected change is.
+	WorkerReadOnlyViolated WorkerProgress = "worker_read_only_violated"
 )
 
 // workerNeedsInputCorroborationWindow bounds how long an UNCORROBORATED
@@ -115,6 +128,13 @@ type WorkStepDecision struct {
 // this call (see observationThrottle) or otherwise could not be obtained;
 // obs is only read when workspaceAvailable is true.
 //
+// readOnly is the plan's own declaration that this task must not change the
+// workspace, plus the git-verified verdict on whether it did. It is the ONLY
+// thing that can turn "the worker finished and nothing changed" into a success,
+// it is inert for every task whose plan did not declare it (which is every
+// legacy plan and every standalone objective), and it can never make a
+// mutation-required task complete on no evidence. See read_only_completion.go.
+//
 // humanInputProven is the corroboration gate on the needs-input family, and it
 // is the whole of Checkpoint 8P-E.15's invariant: AO may never park a run on
 // "the worker needs you" because the worker is merely still alive, or because
@@ -130,6 +150,7 @@ func evaluateWorkStepProgress(
 	dispatchedAt time.Time,
 	humanInputProven bool,
 	evidence workerEvidence,
+	readOnly readOnlyExpectation,
 ) WorkStepDecision {
 	// hasWorkEvidence checks the AO guardrail prompt explicitly tells the
 	// worker not to commit/push/merge (Checkpoint 8B §4), so real, verifiable
@@ -152,6 +173,19 @@ func evaluateWorkStepProgress(
 	terminatedOrExited := !sessionFound || session.IsTerminated || session.Activity.State == domain.ActivityExited
 
 	if terminatedOrExited {
+		// The read-only verdict outranks hasWorkEvidence() in both directions,
+		// and it has to. A task whose plan permits a pre-existing dirty
+		// baseline is observed dirty whether or not the worker touched
+		// anything, so "the tree is dirty" cannot decide it -- only the
+		// comparison against the dispatch-time fingerprint can. sessionFound
+		// is required for the success half: a session row AO cannot see at all
+		// is not evidence that a worker ran to completion.
+		if readOnly.Violated() {
+			return readOnlyViolationDecision(readOnly)
+		}
+		if sessionFound && readOnly.Satisfied() {
+			return readOnlyVerifiedDecision()
+		}
 		if hasWorkEvidence() {
 			return WorkStepDecision{
 				Progress:   WorkerResultAvailable,
@@ -210,6 +244,12 @@ func evaluateWorkStepProgress(
 		// user — a claim AO has no evidence for and which sends the person to
 		// look for a prompt that may not exist. Bounded and reopenable by a
 		// normal Continue, like every other ambiguous stop.
+		if readOnly.Violated() {
+			return readOnlyViolationDecision(readOnly)
+		}
+		if readOnly.Satisfied() {
+			return readOnlyVerifiedDecision()
+		}
 		if hasWorkEvidence() {
 			return WorkStepDecision{
 				Progress:   WorkerResultAvailable,
@@ -227,6 +267,26 @@ func evaluateWorkStepProgress(
 			AttentionReason: ReasonWorkerDispatchAmbiguous,
 		}
 	case domain.ActivityIdle:
+		// The read-only rule is consulted first, and only for a worker that
+		// demonstrably STARTED (a first signal). Both halves matter:
+		//
+		//   - first, because for a read-only task the dirty/untracked flags
+		//     hasWorkEvidence() reads may be nothing but the pre-existing
+		//     baseline the plan explicitly told the worker to preserve, so
+		//     completing on them would be completing on the wrong fact;
+		//   - only when started, because a worker that never produced a first
+		//     signal has not been shown to have run at all, and "the tree is
+		//     unchanged" is exactly what a worker that never started leaves
+		//     behind. That case belongs to the startup reconciliation below,
+		//     which weighs evidence this rule does not have.
+		if !session.FirstSignalAt.IsZero() {
+			if readOnly.Violated() {
+				return readOnlyViolationDecision(readOnly)
+			}
+			if readOnly.Satisfied() {
+				return readOnlyVerifiedDecision()
+			}
+		}
 		// Real, git-verified work evidence always wins, regardless of
 		// FirstSignalAt: a worker can (and often does) finish its turn and go
 		// idle before AO ever observes an intermediate hook signal, and that
@@ -280,6 +340,43 @@ func evaluateWorkStepProgress(
 	default:
 		// Unknown/unspecified activity: make no change rather than guess.
 		return WorkStepDecision{Progress: WorkerCreated, NoChange: true}
+	}
+}
+
+// readOnlyVerifiedDecision is the single construction of the accepted
+// no-change completion.
+//
+// It lands on the SAME transition an implementation task's completion lands on,
+// with the same "start_review" next action, and that is deliberate: everything
+// downstream -- the review dispatch's target fingerprint, the review policy,
+// and above all the verification step that actually runs the plan's declared
+// commands and file checks -- must behave identically. A read-only task is not
+// trusted here; it is merely allowed to reach the thing that judges it.
+func readOnlyVerifiedDecision() WorkStepDecision {
+	return WorkStepDecision{
+		Progress:   WorkerReadOnlyVerified,
+		NextStep:   domain.WorkflowStepCompleted,
+		NextRun:    domain.WorkflowRunWaiting,
+		NextAction: "start_review",
+	}
+}
+
+// readOnlyViolationDecision is the other single construction: a task the plan
+// declared read-only whose worktree changed anyway.
+//
+// It carries no error class on purpose. An error class asserts that an attempt
+// failed for a reason AO can name in the failure vocabulary; what happened here
+// is that a declared contract was broken, AO can say exactly how, and a person
+// has to decide whether the change is wanted. That is an attention reason, in
+// the same shape blockedOnHumanDecision uses -- and, like that one, it leaves
+// the step Waiting so an ordinary Continue can reopen it.
+func readOnlyViolationDecision(e readOnlyExpectation) WorkStepDecision {
+	return WorkStepDecision{
+		Progress:        WorkerReadOnlyViolated,
+		NextStep:        domain.WorkflowStepWaiting,
+		NextRun:         domain.WorkflowRunNeedsAttention,
+		NextAction:      e.Detail,
+		AttentionReason: ReasonReadOnlyWorkspaceMutated,
 	}
 }
 
@@ -376,7 +473,20 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 			ctx, run, found, sess, obs, workspaceAvailable, baseSHA, dispatchedAt)
 	}
 
-	decision := evaluateWorkStepProgress(found, sess, workspaceAvailable, obs, baseSHA, now, dispatchedAt, humanInputProven, evidence)
+	// The read-only expectation is resolved only for an observation it could
+	// actually decide: a session that has ended, or one sitting idle/uncorroborated
+	// with a fresh observation in hand. A healthy run polling an active worker
+	// pays for none of it.
+	//
+	// It is resolved AFTER the forced observation above, so the fingerprint it
+	// compares is the same one the decision is taken on rather than a throttled
+	// older reading.
+	var readOnly readOnlyExpectation
+	if terminalish || sess.Activity.State == domain.ActivityIdle || sess.Activity.State == domain.ActivityWaitingInput {
+		readOnly = c.resolveReadOnlyExpectation(ctx, run, step, workspaceAvailable, obs)
+	}
+
+	decision := evaluateWorkStepProgress(found, sess, workspaceAvailable, obs, baseSHA, now, dispatchedAt, humanInputProven, evidence, readOnly)
 	if missingFirstSignal {
 		// The reconciliation's verdict is durable whether or not it changes any
 		// state: "AO looked again and decided to keep waiting" is exactly the
@@ -418,6 +528,22 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 	}
 	if err := assertAmbiguousEvidence(decision.ErrorClass, ambiguity); err != nil {
 		return step, err
+	}
+
+	// A read-only outcome is a conclusion drawn from a comparison of two
+	// fingerprints, so both sides of that comparison are written down before
+	// the transition that stands on them. Best-effort: unlike the ambiguity
+	// gate, failing to record this must not strand a step that AO can prove
+	// finished correctly -- the decision itself is re-derivable from the
+	// dispatch record and a fresh observation, which is exactly what the
+	// ambiguity snapshot is not.
+	// Gated on the DECISION rather than on the expectation: a read-only verdict
+	// that was resolved but not acted on (e.g. satisfied, but with no session
+	// row, so the terminated path still failed the step) decided nothing, and
+	// recording it would put a conclusion on the ledger that no transition
+	// stands on.
+	if decision.Progress == WorkerReadOnlyVerified || decision.Progress == WorkerReadOnlyViolated {
+		c.recordReadOnlyCompletionEvidence(ctx, run, step, readOnly)
 	}
 
 	if !domain.ValidWorkflowStepTransition(step.State, decision.NextStep) {

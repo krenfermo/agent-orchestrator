@@ -32,6 +32,17 @@ type PlannedStep struct {
 	Dependencies       []string         `json:"dependencies"`
 	AcceptanceCriteria []string         `json:"acceptanceCriteria"`
 	Verify             VerificationPlan `json:"verify"`
+	// WriteIntent is the step's OPTIONAL declaration of whether it is expected
+	// to change the workspace at all (domain.WorkflowWriteIntent:
+	// "mutating" or "read_only").
+	//
+	// It is the durable semantic that lets AO tell a read-only verification /
+	// inspection step, whose accepted outcome is an UNCHANGED workspace, apart
+	// from an implementation step that produced nothing. Absent, it is
+	// Unspecified, which is treated exactly as "mutating" -- so a plan that
+	// says nothing about it behaves exactly as it did before this field
+	// existed, and serializes (and therefore hashes) exactly the same.
+	WriteIntent domain.WorkflowWriteIntent `json:"writeIntent,omitempty"`
 	// Files and Packages are the step's OPTIONAL explicit scope declaration:
 	// the files it will touch when the planner knows them, and the
 	// packages/components it expects to touch. They feed the task-graph
@@ -170,6 +181,18 @@ func NormalizeAndValidatePlan(plan MasterPlan, objective string, maxSteps int) (
 		}
 		if len(s.SafeWriteOverlaps) == 0 {
 			s.SafeWriteOverlaps = nil
+		}
+		// An intent AO cannot read is not silently downgraded to "mutating":
+		// a planner that meant read_only and mistyped it would otherwise have
+		// its declaration disappear, and the plan would look like it never
+		// made one. Unreadable is a plan error; ABSENT is fine and stays
+		// Unspecified.
+		if raw := strings.TrimSpace(string(s.WriteIntent)); raw != "" {
+			if intent := domain.NormalizeWorkflowWriteIntent(raw); intent == domain.WorkflowWriteIntentUnspecified {
+				add(fmt.Sprintf("step %q has an unrecognized writeIntent %q", s.ID, raw))
+			} else {
+				s.WriteIntent = intent
+			}
 		}
 		if s.Verify.Commands == nil {
 			s.Verify.Commands = []VerificationCommandCheck{}

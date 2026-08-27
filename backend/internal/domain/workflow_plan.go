@@ -264,6 +264,17 @@ type WorkflowTaskScope struct {
 	// ExecutionStrategy is how this task may be scheduled against its
 	// siblings.
 	ExecutionStrategy WorkflowTaskExecutionStrategy `json:"executionStrategy"`
+	// WriteIntent is the plan's declaration of whether this task is expected to
+	// change the workspace at all. It is carried here, on the durable scope,
+	// because it is a fact about the task's REQUIRED OUTCOME rather than about
+	// its estimated footprint -- and because it must survive a daemon restart
+	// intact, so the completion classifier reaches the same verdict after a
+	// crash as it did before one.
+	//
+	// Omitempty, so a plan that declares nothing serializes byte-for-byte as it
+	// did before this field existed. Empty means Unspecified, which every
+	// reader treats as mutating. See domain.WorkflowWriteIntent.
+	WriteIntent WorkflowWriteIntent `json:"writeIntent,omitempty"`
 	// WaitingReason is the dispatcher's durable explanation for why this task
 	// is currently held. Empty means it has not been evaluated as blocked.
 	WaitingReason WorkflowTaskWaitingReason `json:"waitingReason,omitempty"`

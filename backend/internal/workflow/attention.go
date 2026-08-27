@@ -173,7 +173,17 @@ const (
 	ReasonRecoveryInterrupted     = "recovery_interrupted"
 	ReasonWorkerDispatchAmbiguous = "worker_dispatch_ambiguous"
 	ReasonWorkerBlocked           = "worker_blocked"
-	ReasonDispatchFailed          = "dispatch_failed"
+	// ReasonReadOnlyWorkspaceMutated is a task the plan declared read-only
+	// (domain.WorkflowWriteIntentReadOnly) whose worktree changed anyway,
+	// measured against the workspace fingerprint recorded at dispatch.
+	//
+	// It is deliberately NOT ReasonWorkerDispatchAmbiguous. That reason means AO
+	// could not prove what happened; here AO proved exactly what happened and
+	// the two fingerprints are on the ledger. The remedy is different too: the
+	// question is not "did the worker do anything", it is "this change was not
+	// supposed to exist -- do you want it?".
+	ReasonReadOnlyWorkspaceMutated = "read_only_workspace_mutated"
+	ReasonDispatchFailed           = "dispatch_failed"
 	// ReasonWorkerLaunchRetry is a worker spawn that failed transiently before
 	// any worker session existed and that AO has already scheduled its own
 	// bounded retry for (worker_launch_recovery.go). Self-remediable: it is
@@ -335,6 +345,9 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonWorkerBlocked: {
 		HumanAction: "The worker is waiting on input inside its own session (often an interactive trust or auth prompt). Answer it in the session, then continue this run.",
+	},
+	ReasonReadOnlyWorkspaceMutated: {
+		HumanAction: "This task was planned as read-only, but its worktree changed while it ran. Inspect the change (the checkpoint names the dispatch-time and current workspace fingerprints), then keep it and continue this run, or revert it and continue.",
 	},
 	ReasonCapacityRetryExhausted: {
 		HumanAction: "Every automatic retry ran out while the provider was still at capacity. Wait and continue this run, switch provider, or cancel it.",

@@ -70,6 +70,7 @@ func taskScopeInputs(plan MasterPlan, tasks []domain.WorkflowTask, idByPlan map[
 			DeclaredPackages:   s.Packages,
 			ObservedWritePaths: observed[id],
 			SafeWriteOverlaps:  safeOverlapsForStep(s, idByPlan),
+			WriteIntent:        s.WriteIntent,
 		})
 	}
 	return out

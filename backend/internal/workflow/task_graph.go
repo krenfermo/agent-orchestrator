@@ -76,6 +76,13 @@ type TaskScopeInput struct {
 	// task ids. Absent any waiver, an overlapping write set is a probable
 	// conflict -- see ClassifyTaskRelations.
 	SafeWriteOverlaps []domain.WorkflowTaskSafeOverlap
+	// WriteIntent is the plan's own declaration of whether this task is
+	// expected to change the workspace. The classifier does not infer it and
+	// does not argue with it: it copies it onto the scope so it becomes
+	// durable, because a semantic that decides whether a stopped run is a
+	// failure has to be a declaration, not an estimate. Empty means the plan
+	// declared nothing, which every reader treats as mutating.
+	WriteIntent domain.WorkflowWriteIntent
 }
 
 // TaskGraphInput is one whole plan, as handed to the classifier.
@@ -278,7 +285,17 @@ func discoverRepoRoots(tasks []TaskScopeInput) []string {
 // declared explicitly, and -- when the task has already run -- what it
 // actually wrote.
 func estimateTaskScope(t TaskScopeInput, objective string, roots []string) domain.WorkflowTaskScope {
-	scope := domain.WorkflowTaskScope{Version: TaskGraphPolicyVersion, Source: domain.WorkflowTaskScopeEstimated}
+	scope := domain.WorkflowTaskScope{
+		Version: TaskGraphPolicyVersion,
+		Source:  domain.WorkflowTaskScopeEstimated,
+		// Carried, never derived. Every other field on this scope is the
+		// classifier's guess about text; this one is the plan's statement of
+		// what the task must produce, and re-deriving it from the same prose
+		// the guesses come from would make the completion rule depend on a
+		// heuristic. Normalized so an unreadable value cannot become a
+		// read-only declaration by accident.
+		WriteIntent: domain.NormalizeWorkflowWriteIntent(string(t.WriteIntent)),
+	}
 	writes := map[string]bool{}
 	reads := map[string]bool{}
 

@@ -12503,6 +12503,8 @@ components:
           type: string
         verify:
           $ref: '#/components/schemas/WorkflowVerificationPlanType2'
+        writeIntent:
+          type: string
       required:
       - id
       - title

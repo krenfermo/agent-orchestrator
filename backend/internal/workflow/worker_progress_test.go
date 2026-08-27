@@ -36,10 +36,12 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 		dispatchedAt       time.Time
 		humanInputProven   bool
 		evidence           workerEvidence
+		readOnly           readOnlyExpectation
 		wantNoChange       bool
 		wantStep           domain.WorkflowStepState
 		wantRun            domain.WorkflowRunState
 		wantErrorClass     domain.WorkflowErrorClass
+		wantAttention      string
 		// wantAmbiguous is the ambiguous_worker_state conclusion WITHOUT the
 		// error class: the pure evaluator states it, and observeWorkStep is
 		// obliged to collect the evidence snapshot before it can become one.
@@ -221,6 +223,109 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 			wantStep:           domain.WorkflowStepCompleted,
 			wantRun:            domain.WorkflowRunWaiting,
 		},
+		// ---------------------------------------------------------------
+		// Declared read-only tasks. The production incident: a plan whose
+		// task was "Verify current repository state (build, tests, vet, git
+		// status)", whose criteria forbade every edit, and whose worker was
+		// classified ambiguous_worker_state for leaving the tree alone.
+		//
+		// The declaration is what changes the verdict, and ONLY the
+		// declaration: every case above passes readOnlyExpectation{}, which
+		// is what every legacy plan and every standalone objective resolves
+		// to, and none of their expectations move.
+		// ---------------------------------------------------------------
+		{
+			name:               "read-only task, idle, worktree git-verified unchanged -> completed",
+			sessionFound:       true,
+			session:            activeSession(domain.ActivityIdle, false),
+			workspaceAvailable: true,
+			obs:                ports.WorkspaceObservation{HeadSHA: "base-sha"},
+			baseSHA:            "base-sha",
+			readOnly:           readOnlyExpectation{Declared: true, Verdict: readOnlyWorkspaceUnchanged, Detail: "unchanged"},
+			wantStep:           domain.WorkflowStepCompleted,
+			wantRun:            domain.WorkflowRunWaiting,
+		},
+		{
+			// The known dirty baseline the plan explicitly told the worker to
+			// preserve. hasWorkEvidence() reads it as "work"; the fingerprint
+			// comparison knows better, and it is the comparison that decides.
+			name:               "read-only task, idle, pre-existing dirty baseline preserved -> completed",
+			sessionFound:       true,
+			session:            activeSession(domain.ActivityIdle, false),
+			workspaceAvailable: true,
+			obs:                ports.WorkspaceObservation{HeadSHA: "base-sha", Dirty: true, Untracked: true},
+			baseSHA:            "base-sha",
+			readOnly:           readOnlyExpectation{Declared: true, Verdict: readOnlyWorkspaceUnchanged, Detail: "unchanged"},
+			wantStep:           domain.WorkflowStepCompleted,
+			wantRun:            domain.WorkflowRunWaiting,
+		},
+		{
+			name:               "read-only task, idle, worktree mutated -> waiting, needs_attention, not ambiguous",
+			sessionFound:       true,
+			session:            activeSession(domain.ActivityIdle, false),
+			workspaceAvailable: true,
+			obs:                ports.WorkspaceObservation{HeadSHA: "base-sha", Dirty: true},
+			baseSHA:            "base-sha",
+			readOnly:           readOnlyExpectation{Declared: true, Verdict: readOnlyWorkspaceMutated, Detail: "the task is declared read-only but the worktree changed since dispatch"},
+			wantStep:           domain.WorkflowStepWaiting,
+			wantRun:            domain.WorkflowRunNeedsAttention,
+			wantAttention:      ReasonReadOnlyWorkspaceMutated,
+		},
+		{
+			name:               "read-only task, session terminated, worktree unchanged -> completed",
+			sessionFound:       true,
+			session:            activeSession(domain.ActivityExited, true),
+			workspaceAvailable: true,
+			obs:                ports.WorkspaceObservation{HeadSHA: "base-sha"},
+			baseSHA:            "base-sha",
+			readOnly:           readOnlyExpectation{Declared: true, Verdict: readOnlyWorkspaceUnchanged, Detail: "unchanged"},
+			wantStep:           domain.WorkflowStepCompleted,
+			wantRun:            domain.WorkflowRunWaiting,
+		},
+		{
+			// No session row at all is not evidence a worker ran to
+			// completion, whatever the plan declared.
+			name:           "read-only task, no session row, worktree unchanged -> still failed",
+			sessionFound:   false,
+			readOnly:       readOnlyExpectation{Declared: true, Verdict: readOnlyWorkspaceUnchanged, Detail: "unchanged"},
+			wantStep:       domain.WorkflowStepFailed,
+			wantRun:        domain.WorkflowRunNeedsAttention,
+			wantErrorClass: domain.WorkflowErrorWorkerTerminatedUnexpectedly,
+		},
+		{
+			// A worker that never produced a first signal has not been shown
+			// to have run, and "the tree is unchanged" is exactly what a
+			// worker that never started leaves behind. The startup
+			// reconciliation owns this, not the read-only rule.
+			name:               "read-only task, idle, no first signal -> startup path, not a read-only completion",
+			sessionFound:       true,
+			session:            domain.SessionRecord{ID: "sess-1", Activity: domain.Activity{State: domain.ActivityIdle}},
+			workspaceAvailable: true,
+			obs:                ports.WorkspaceObservation{HeadSHA: "base-sha"},
+			baseSHA:            "base-sha",
+			now:                fixedNow,
+			dispatchedAt:       fixedNow.Add(-(workStepFirstSignalTimeout + time.Minute)),
+			evidence:           workerEvidence{ProbeKnown: true, ProbeAlive: false},
+			readOnly:           readOnlyExpectation{Declared: true, Verdict: readOnlyWorkspaceUnchanged, Detail: "unchanged"},
+			wantStep:           domain.WorkflowStepFailed,
+			wantRun:            domain.WorkflowRunNeedsAttention,
+			wantErrorClass:     domain.WorkflowErrorAgentStartFailed,
+		},
+		{
+			// Declared read-only, but AO could not obtain the comparison. The
+			// declaration alone proves nothing, so the pre-existing verdict
+			// stands untouched.
+			name:               "read-only task with an unknown workspace verdict -> unchanged behaviour (ambiguous)",
+			sessionFound:       true,
+			session:            activeSession(domain.ActivityIdle, false),
+			workspaceAvailable: true,
+			obs:                ports.WorkspaceObservation{HeadSHA: "base-sha"},
+			baseSHA:            "base-sha",
+			readOnly:           readOnlyExpectation{Declared: true, Verdict: readOnlyWorkspaceUnknown},
+			wantStep:           domain.WorkflowStepWaiting,
+			wantRun:            domain.WorkflowRunNeedsAttention,
+			wantAmbiguous:      true,
+		},
 		{
 			name:               "idle, truly no changes at all -> waiting, ambiguous",
 			sessionFound:       true,
@@ -240,7 +345,7 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 			if now.IsZero() {
 				now = fixedNow
 			}
-			got := evaluateWorkStepProgress(tc.sessionFound, tc.session, tc.workspaceAvailable, tc.obs, tc.baseSHA, now, tc.dispatchedAt, tc.humanInputProven, tc.evidence)
+			got := evaluateWorkStepProgress(tc.sessionFound, tc.session, tc.workspaceAvailable, tc.obs, tc.baseSHA, now, tc.dispatchedAt, tc.humanInputProven, tc.evidence, tc.readOnly)
 			if got.NoChange != tc.wantNoChange {
 				t.Fatalf("NoChange = %v, want %v", got.NoChange, tc.wantNoChange)
 			}
@@ -258,6 +363,9 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 			}
 			if got.Ambiguous != tc.wantAmbiguous {
 				t.Errorf("Ambiguous = %v, want %v", got.Ambiguous, tc.wantAmbiguous)
+			}
+			if tc.wantAttention != "" && got.AttentionReason != tc.wantAttention {
+				t.Errorf("AttentionReason = %q, want %q", got.AttentionReason, tc.wantAttention)
 			}
 			// The evaluator may never hand back the class itself: it has no
 			// evidence snapshot, so it has no right to it.

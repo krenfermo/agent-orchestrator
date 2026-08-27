@@ -1099,6 +1099,15 @@ func (c *Coordinator) dispatchMasterTask(ctx stdctx.Context, parent domain.Workf
 
 	artifact := BuildPlanArtifact(parent.ProjectID, objective, policyVersionV1, verify)
 	artifact.AcceptanceCriteria = criteria
+	// The plan's write intent travels with the criteria it belongs to. Read
+	// from the task's own durable scope rather than re-read from the plan JSON,
+	// so a re-dispatch after a restart resolves the same declaration the first
+	// dispatch did. A scope that will not parse yields Unspecified, which is
+	// treated as mutating -- the conservative answer, and the same one every
+	// pre-existing task gets.
+	if scope, serr := UnmarshalTaskScope(task.ScopeJSON); serr == nil {
+		artifact.WriteIntent = domain.NormalizeWorkflowWriteIntent(string(scope.WriteIntent))
+	}
 	parentID, taskID := parent.ID, task.ID
 	child, err := c.createSingleTaskRun(ctx, parent.ProjectID, objective, &parentID, &taskID, verify)
 	if err != nil {
