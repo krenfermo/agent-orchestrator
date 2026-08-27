@@ -35,14 +35,25 @@ type Resolver struct {
 	Owners   OwnerStore
 	Profiles ProfileStore
 	DataDir  string
-	// TrustedLocal mirrors config.Config.TrustedLocalMode. When true, a
-	// resolved owner with no matching profile is NOT blocked (today's
-	// desktop UX keeps working exactly as before this checkpoint --
-	// otherwise every existing single-user install would suddenly refuse
-	// to launch anything the moment it upgrades, having never been asked
-	// to "connect" a provider it already uses via its real, already-
-	// authenticated CLI). When false (real multi-user mode), a resolved
-	// owner with no matching profile blocks the launch with
+	// TrustedLocal mirrors config.Config.TrustedLocalMode -- the
+	// single-user desktop application. When true, provider launches keep
+	// the HOST/local CLI runtime and its already-authenticated
+	// credentials, whether or not a ProviderProfile exists:
+	//
+	//   - no matching profile: the launch is NOT blocked (an existing
+	//     single-user install must not suddenly refuse to launch the
+	//     moment it upgrades, having never been asked to "connect" a
+	//     provider it already uses via its real CLI); and
+	//   - a matching enabled profile: the profile ID is still reported
+	//     for routing/capacity/health scoping, but NO isolated
+	//     runtime-home is prepared and NO env override is returned, so the
+	//     subprocess keeps the desktop user's real HOME / CLAUDE_CONFIG_DIR
+	//     / CODEX_HOME (and, on macOS, their real login keychain, which is
+	//     where the host CLI's OAuth credential actually lives).
+	//
+	// When false (real multi-user mode) nothing here applies: a matching
+	// profile always yields a strictly isolated per-user runtime env, and
+	// a resolved owner with no matching profile blocks the launch with
 	// ports.ErrProviderProfileRequired -- multi-user mode never inherits
 	// the daemon's own credentials.
 	TrustedLocal bool
@@ -93,6 +104,24 @@ func (r *Resolver) ResolveForOwner(ctx context.Context, owner domain.UserID, har
 			return nil, "", nil
 		}
 		return nil, "", ports.ErrProviderProfileRequired
+	}
+
+	// Trusted-local (single-user desktop) keeps the HOST CLI runtime even
+	// when a matching profile exists. The profile is still reported (so
+	// routing/capacity/health scoping keep their ProviderProfileID), but no
+	// isolated runtime-home is prepared and no env override is returned:
+	// the launch inherits the desktop user's real, already-authenticated
+	// CLI credentials -- which is exactly the compatibility policy this
+	// type's TrustedLocal field documents. Preparing a runtime-home here
+	// would redirect the subprocess onto an AO-owned macOS login keychain
+	// that does not contain the host's Claude OAuth credential, so the
+	// planner/worker/reviewer would fail to launch (and macOS would prompt
+	// for a keychain password) on a desktop install that was working.
+	//
+	// Multi-user mode (TrustedLocal=false) is unchanged: strict per-user
+	// isolation, never inheriting the daemon host's credentials.
+	if r.TrustedLocal {
+		return nil, profile.ID, nil
 	}
 
 	home, err := runtimehome.Prepare(r.DataDir, owner)
