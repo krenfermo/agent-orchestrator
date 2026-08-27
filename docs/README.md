@@ -22,6 +22,7 @@ Start with [architecture.md](architecture.md) for the current backend model and
 | [development.md](development.md)                       | Prerequisites, build steps, running tests, and troubleshooting for local development.                                 |
 | [STATUS.md](STATUS.md)                                 | What is shipped on `main` today and what is still in flight.                                                          |
 | [workflow-lifecycle-mapping.md](workflow-lifecycle-mapping.md) | Canonical mapping from persisted workflow-engine tables to the UI lifecycle vocabulary; contract for the backend projection and workflow UI. |
+| [worker-lifecycle-audit.md](worker-lifecycle-audit.md) | Audit of the work step's durable dispatch→launch→confirmation→running→completion→review path: every durable write point, every crash window between them, the ambiguous states each produces, and the generation-conditioned CAS model proposed to close them. |
 | [stack.md](stack.md)                                   | Accepted library/runtime choices, pending stack decisions, and dependencies explicitly avoided for V1.                |
 | [telemetry.md](telemetry.md)                           | Telemetry collection, privacy safeguards, and configuration.                                                           |
 | [posthog-cost-controls.md](posthog-cost-controls.md)   | PostHog event-name migration, ingestion drop rules, and dashboard queries for reducing telemetry spend.              |
