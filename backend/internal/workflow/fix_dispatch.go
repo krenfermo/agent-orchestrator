@@ -146,6 +146,15 @@ type promptDeliveryRecord struct {
 	// session received THIS cycle's prompt rather than some other message. See
 	// fix_delivery_recovery.go.
 	PromptReceipt string `json:"promptReceipt,omitempty"`
+	// Findings is the durable proof of WHICH reviewer findings this prompt
+	// carried, and whether they are in it verbatim. See
+	// fix_findings_evidence.go — it is the field that lets an operator tell a
+	// worker that ignored its findings from a worker that never got them.
+	Findings FixFindingsEvidence `json:"findings"`
+	// FixAttemptID names the workflow_attempt row this delivery produced, so a
+	// fix attempt is durably bound to the delivery record that authorized it.
+	// Empty on the intent record, which is written before the attempt exists.
+	FixAttemptID string `json:"fixAttemptId,omitempty"`
 }
 
 func newPromptDeliveryRecord(prompt string, cycleNumber, transportAttempt int, contextPack bool) promptDeliveryRecord {
@@ -207,7 +216,7 @@ func (c *Coordinator) fixTransportRetryCount(ctx stdctx.Context, runID, stepID s
 // already exists (mirrors dispatchWorkStep's SessionID guard / dispatchReviewStep's
 // ReviewRunID guard, adapted to a step that is dispatched repeatedly across
 // cycles rather than once).
-func (c *Coordinator) dispatchFixStep(ctx stdctx.Context, run domain.WorkflowRun, workStep, fixStep domain.WorkflowStep, reviewRun domain.ReviewRun, cycleNumber int, prompt string) (domain.WorkflowStep, error) {
+func (c *Coordinator) dispatchFixStep(ctx stdctx.Context, run domain.WorkflowRun, workStep, fixStep domain.WorkflowStep, reviewRun domain.ReviewRun, cycleNumber int, prompt string, findings fixFindingsRef) (domain.WorkflowStep, error) {
 	if run.State.Terminal() || fixStep.State.Terminal() {
 		return fixStep, nil
 	}
@@ -249,7 +258,7 @@ func (c *Coordinator) dispatchFixStep(ctx stdctx.Context, run domain.WorkflowRun
 
 	switch entry.Status {
 	case domain.WorkflowOutboxPending:
-		return c.dispatchFixFromPending(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt)
+		return c.dispatchFixFromPending(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt, findings)
 	case domain.WorkflowOutboxDispatched, domain.WorkflowOutboxAcknowledged:
 		// Boundary B: a previous attempt got at least as far as "about to call
 		// Send". Send still has no idempotency key, so this must never call it
@@ -260,7 +269,7 @@ func (c *Coordinator) dispatchFixStep(ctx stdctx.Context, run domain.WorkflowRun
 		// prove it was, and escalates only what is genuinely unprovable — once.
 		// Before this, every pass through here parked the run and wrote another
 		// identical checkpoint, which is the wf-6528a538 incident.
-		return c.resolveFixDeliveryAfterRestart(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt)
+		return c.resolveFixDeliveryAfterRestart(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt, findings)
 	case domain.WorkflowOutboxFailed:
 		return fixStep, nil
 	default:
@@ -277,6 +286,7 @@ func (c *Coordinator) dispatchFixFromPending(
 	cycleNumber int,
 	transportAttempt int,
 	prompt string,
+	findings fixFindingsRef,
 ) (domain.WorkflowStep, error) {
 	now := c.clock()
 	if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, domain.WorkflowOutboxPending, domain.WorkflowOutboxDispatched, now, ""); err != nil {
@@ -284,7 +294,7 @@ func (c *Coordinator) dispatchFixFromPending(
 	}
 	entry.Status = domain.WorkflowOutboxDispatched
 
-	return c.deliverFixPrompt(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt)
+	return c.deliverFixPrompt(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt, findings)
 }
 
 // runFixStep puts the fix step into the state a delivery is made from. Both
@@ -327,6 +337,7 @@ func (c *Coordinator) deliverFixPrompt(
 	cycleNumber int,
 	transportAttempt int,
 	prompt string,
+	findings fixFindingsRef,
 ) (domain.WorkflowStep, error) {
 	fixStep, err := c.runFixStep(ctx, fixStep)
 	if err != nil {
@@ -337,6 +348,11 @@ func (c *Coordinator) deliverFixPrompt(
 	// reached exactly once per real cycle dispatch, never once per poll.
 	prompt, contextPack := c.applyFixLifecycleDecision(ctx, run, fixStep, reviewRun, cycleNumber, prompt)
 	delivery := newPromptDeliveryRecord(prompt, cycleNumber, transportAttempt, contextPack)
+	// Computed against the FINAL prompt — after applyFixLifecycleDecision may
+	// have prepended a context pack — so `Embedded` is a statement about the
+	// exact bytes deliverAndConfirm is about to write, not about what the
+	// builder intended.
+	delivery.Findings = findings.evidence(prompt)
 
 	// The durable pre-delivery record, written STRICTLY before Send and fatal
 	// if it fails. Its presence or absence is the fact recovery reasons from
@@ -400,9 +416,16 @@ func (c *Coordinator) recordFixDispatchSuccess(
 				fixHarness = h
 			}
 		}
-		if _, err := c.store.CreateWorkflowAttempt(ctx, "wfa-"+c.newID(), fixStep.ID, fixHarness, "", now); err != nil {
+		attempt, err := c.store.CreateWorkflowAttempt(ctx, "wfa-"+c.newID(), fixStep.ID, fixHarness, "", now)
+		if err != nil {
 			return fixStep, err
 		}
+		delivery.FixAttemptID = attempt.ID
+	} else if len(attempts) > 0 {
+		// Recovery re-entered a cycle whose attempt row already exists. Bind
+		// the record to THAT row rather than leaving the field blank, so the
+		// delivery and the attempt stay one traceable pair either way.
+		delivery.FixAttemptID = attempts[len(attempts)-1].ID
 	}
 
 	if entry.Status != domain.WorkflowOutboxAcknowledged {
@@ -421,6 +444,7 @@ func (c *Coordinator) recordFixDispatchSuccess(
 		ProjectID:         run.ProjectID,
 		SessionID:         &sid,
 		ReviewRunID:       &rid,
+		ReviewVerdict:     string(reviewRun.EffectiveVerdict()),
 		FingerprintBefore: reviewRun.TargetSHA,
 		NextAction:        "fix_dispatched: awaiting a genuinely new workspace fingerprint",
 		DurablePhase:      fixDispatchedPhase,
@@ -571,6 +595,7 @@ func (c *Coordinator) recordFixPromptNotSubmitted(
 		ProjectID:         run.ProjectID,
 		SessionID:         &sid,
 		ReviewRunID:       &rid,
+		ReviewVerdict:     string(reviewRun.EffectiveVerdict()),
 		FingerprintBefore: reviewRun.TargetSHA,
 		NextAction:        detail,
 		DurablePhase:      fixPromptNotSubmittedPhase,

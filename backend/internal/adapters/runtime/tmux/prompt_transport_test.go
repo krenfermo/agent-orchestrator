@@ -330,3 +330,42 @@ func containsArgContaining(args []string, want string) bool {
 	}
 	return false
 }
+
+// TestSendMessageLargePromptPastesWithBracketedPasteMarkers is the regression
+// test for incident wf-a816d7fe: a multi-line fix prompt delivered without -p
+// is not delivered as a message at all.
+//
+// tmux replaces every LF in a paste buffer with a carriage return by default.
+// An agent TUI reads its input in raw mode, where CR is Enter — so without the
+// bracketed-paste markers -p adds, a 90-line prompt is submitted to the agent
+// as ~90 separate one-line messages, and only the final fragment survives as
+// the message the agent actually answers. Everything upstream still reports
+// success: tmux exits 0, and the composer-empty probe says "submitted" because
+// every fragment really was submitted.
+//
+// The reviewer's findings live in the MIDDLE of a fix prompt, which is why the
+// failure presented as "the fix worker ignored the review".
+func TestSendMessageLargePromptPastesWithBracketedPasteMarkers(t *testing.T) {
+	r, fr, _ := newBufferTestRuntime(t)
+	// Multi-line and over the inline budget: exactly the shape of a fix prompt.
+	message := strings.Repeat("a line of reviewer findings\n", 400)
+
+	if err := r.SendMessage(context.Background(), ports.RuntimeHandle{ID: "sess-1"}, message); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	paste, ok := argsOf(fr, "paste-buffer")
+	if !ok {
+		t.Fatal("expected a paste-buffer call")
+	}
+	if !containsArg(paste, "-p") {
+		t.Fatalf("paste-buffer args = %v, want -p: without it tmux converts every LF to CR "+
+			"and a raw-mode agent TUI reads each CR as Enter, submitting the prompt line by line "+
+			"so only its last fragment reaches the agent", paste)
+	}
+	// -r would suppress the LF->CR replacement entirely. It is deliberately NOT
+	// used: a real terminal paste carries CR for its line breaks too, and inside
+	// bracketed-paste markers those CRs are literal text rather than submits.
+	if containsArg(paste, "-r") {
+		t.Fatalf("paste-buffer args = %v, want no -r (bracketed CRs are correct; see pasteBufferArgs)", paste)
+	}
+}

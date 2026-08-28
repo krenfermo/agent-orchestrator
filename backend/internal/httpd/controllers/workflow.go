@@ -141,6 +141,86 @@ type WorkflowStepView struct {
 	// for a step kind that never routes (e.g. verify/advance) or one that
 	// hasn't dispatched yet.
 	Routing *RoutingDecisionView `json:"routing,omitempty"`
+	// FixDelivery surfaces the durable evidence for this fix step's newest
+	// dispatched cycle — which review verdict authorized it, which findings
+	// travelled and whether they were embedded verbatim in the delivered
+	// prompt, the attempt/session it is bound to, and what the transport could
+	// prove about the submit. Read back verbatim from the dispatch checkpoints;
+	// nothing here is recomputed for display and no prompt text is exposed.
+	// Nil for a non-fix step or one that has never dispatched.
+	FixDelivery *FixDeliveryView `json:"fixDelivery,omitempty"`
+}
+
+// FixDeliveryView is the wire shape of workflow.FixDeliveryReport. It is
+// deliberately all non-secret: identifiers, counts, sizes, digests and a
+// bounded findings snippet no longer than the review step's own
+// findingsSummary. The fix prompt itself is never persisted or returned.
+type FixDeliveryView struct {
+	State        string    `json:"state" enum:"intent_recorded,dispatched,transport_retry,loaded_not_submitted"`
+	DispatchedAt time.Time `json:"dispatchedAt"`
+
+	ReviewRunID     string `json:"reviewRunId,omitempty"`
+	ReviewVerdict   string `json:"reviewVerdict,omitempty" enum:",approved,changes_requested"`
+	ReviewTargetSHA string `json:"reviewTargetSha,omitempty"`
+
+	FindingsSource   string `json:"findingsSource,omitempty" enum:",review_run,verification"`
+	FindingsCount    int    `json:"findingsCount"`
+	FindingsBytes    int    `json:"findingsBytes"`
+	FindingsDigest   string `json:"findingsDigest,omitempty"`
+	FindingsEmbedded bool   `json:"findingsEmbedded"`
+	FindingsSnippet  string `json:"findingsSnippet,omitempty"`
+
+	CycleNumber      int    `json:"cycleNumber"`
+	FixAttemptID     string `json:"fixAttemptId,omitempty"`
+	TransportAttempt int    `json:"transportAttempt,omitempty"`
+	SessionID        string `json:"sessionId,omitempty"`
+
+	PromptBytes   int    `json:"promptBytes"`
+	Transport     string `json:"transport,omitempty"`
+	ContextPack   bool   `json:"contextPack"`
+	PromptReceipt string `json:"promptReceipt,omitempty"`
+	Submission    string `json:"submission,omitempty"`
+	Acknowledged  bool   `json:"acknowledged"`
+	ReceiptMatch  string `json:"receiptMatch,omitempty" enum:",match,other,none"`
+
+	TerminalErrorClass string `json:"terminalErrorClass,omitempty"`
+	TerminalOutcome    string `json:"terminalOutcome,omitempty"`
+	NextAction         string `json:"nextAction,omitempty"`
+	Reason             string `json:"reason,omitempty"`
+}
+
+func fixDeliveryView(r *workflowcore.FixDeliveryReport) *FixDeliveryView {
+	if r == nil {
+		return nil
+	}
+	return &FixDeliveryView{
+		State:              string(r.State),
+		DispatchedAt:       r.DispatchedAt,
+		ReviewRunID:        r.ReviewRunID,
+		ReviewVerdict:      r.ReviewVerdict,
+		ReviewTargetSHA:    r.ReviewTargetSHA,
+		FindingsSource:     r.FindingsSource,
+		FindingsCount:      r.FindingsCount,
+		FindingsBytes:      r.FindingsBytes,
+		FindingsDigest:     r.FindingsDigest,
+		FindingsEmbedded:   r.FindingsEmbedded,
+		FindingsSnippet:    r.FindingsSnippet,
+		CycleNumber:        r.CycleNumber,
+		FixAttemptID:       r.FixAttemptID,
+		TransportAttempt:   r.TransportAttempt,
+		SessionID:          r.SessionID,
+		PromptBytes:        r.PromptBytes,
+		Transport:          string(r.Transport),
+		ContextPack:        r.ContextPack,
+		PromptReceipt:      r.PromptReceipt,
+		Submission:         string(r.Submission),
+		Acknowledged:       r.Acknowledged,
+		ReceiptMatch:       r.ReceiptMatch,
+		TerminalErrorClass: string(r.TerminalErrorClass),
+		TerminalOutcome:    string(r.TerminalOutcome),
+		NextAction:         r.NextAction,
+		Reason:             r.Reason,
+	}
 }
 
 // RoutingProfileView is safe, display-only metadata for a provider profile
@@ -604,6 +684,7 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 			Verification:    verification,
 			ReviewPolicy:    sd.ReviewPolicy,
 			Routing:         routing,
+			FixDelivery:     fixDeliveryView(sd.FixDelivery),
 		})
 	}
 	runView := workflowRunView(detail.Run, detail.NextAction)

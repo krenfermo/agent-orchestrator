@@ -7551,6 +7551,90 @@ components:
       - fallbackBehavior
       - reviewIndependence
       type: object
+    ControllersFixDeliveryView:
+      properties:
+        acknowledged:
+          type: boolean
+        contextPack:
+          type: boolean
+        cycleNumber:
+          type: integer
+        dispatchedAt:
+          format: date-time
+          type: string
+        findingsBytes:
+          type: integer
+        findingsCount:
+          type: integer
+        findingsDigest:
+          type: string
+        findingsEmbedded:
+          type: boolean
+        findingsSnippet:
+          type: string
+        findingsSource:
+          enum:
+          - ""
+          - review_run
+          - verification
+          type: string
+        fixAttemptId:
+          type: string
+        nextAction:
+          type: string
+        promptBytes:
+          type: integer
+        promptReceipt:
+          type: string
+        reason:
+          type: string
+        receiptMatch:
+          enum:
+          - ""
+          - match
+          - other
+          - none
+          type: string
+        reviewRunId:
+          type: string
+        reviewTargetSha:
+          type: string
+        reviewVerdict:
+          enum:
+          - ""
+          - approved
+          - changes_requested
+          type: string
+        sessionId:
+          type: string
+        state:
+          enum:
+          - intent_recorded
+          - dispatched
+          - transport_retry
+          - loaded_not_submitted
+          type: string
+        submission:
+          type: string
+        terminalErrorClass:
+          type: string
+        terminalOutcome:
+          type: string
+        transport:
+          type: string
+        transportAttempt:
+          type: integer
+      required:
+      - state
+      - dispatchedAt
+      - findingsCount
+      - findingsBytes
+      - findingsEmbedded
+      - cycleNumber
+      - promptBytes
+      - contextPack
+      - acknowledged
+      type: object
     ControllersIncidentActionSpecBody:
       properties:
         detail:
@@ -12854,6 +12938,8 @@ components:
           type: string
         findingsSummary:
           type: string
+        fixDelivery:
+          $ref: '#/components/schemas/ControllersFixDeliveryView'
         headSha:
           type: string
         id:

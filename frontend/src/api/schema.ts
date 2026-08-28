@@ -2703,6 +2703,39 @@ export interface components {
             updatedAt?: string;
             workerPriority: string[];
         };
+        ControllersFixDeliveryView: {
+            acknowledged: boolean;
+            contextPack: boolean;
+            cycleNumber: number;
+            /** Format: date-time */
+            dispatchedAt: string;
+            findingsBytes: number;
+            findingsCount: number;
+            findingsDigest?: string;
+            findingsEmbedded: boolean;
+            findingsSnippet?: string;
+            /** @enum {string} */
+            findingsSource?: "" | "review_run" | "verification";
+            fixAttemptId?: string;
+            nextAction?: string;
+            promptBytes: number;
+            promptReceipt?: string;
+            reason?: string;
+            /** @enum {string} */
+            receiptMatch?: "" | "match" | "other" | "none";
+            reviewRunId?: string;
+            reviewTargetSha?: string;
+            /** @enum {string} */
+            reviewVerdict?: "" | "approved" | "changes_requested";
+            sessionId?: string;
+            /** @enum {string} */
+            state: "intent_recorded" | "dispatched" | "transport_retry" | "loaded_not_submitted";
+            submission?: string;
+            terminalErrorClass?: string;
+            terminalOutcome?: string;
+            transport?: string;
+            transportAttempt?: number;
+        };
         ControllersIncidentActionSpecBody: {
             detail?: string;
             kind: string;
@@ -4677,6 +4710,7 @@ export interface components {
             createdAt: string;
             dependsOnStepId?: string;
             findingsSummary?: string;
+            fixDelivery?: components["schemas"]["ControllersFixDeliveryView"];
             headSha?: string;
             id: string;
             /** @enum {string} */

@@ -158,11 +158,48 @@ func loadBufferArgs(buffer, path string) []string {
 	return []string{"load-buffer", "-b", buffer, path}
 }
 
-// pasteBufferArgs builds args for `tmux paste-buffer -d -b <buffer> -t <id>`,
-// which delivers the buffer's bytes to the pane as input. -d deletes the buffer
-// once pasted, so a prompt never lingers in the tmux server's buffer stack.
+// pasteBufferArgs builds args for
+// `tmux paste-buffer -d -p -b <buffer> -t <id>`, which delivers the buffer's
+// bytes to the pane as input. -d deletes the buffer once pasted, so a prompt
+// never lingers in the tmux server's buffer stack.
+//
+// -p IS THE PROMPT. Without it, tmux replaces every LF in the buffer with a
+// carriage return before writing it to the pane (its documented default; -r
+// would suppress the replacement). A pane running a shell never notices,
+// because the tty line discipline maps CR back to NL — but an agent TUI runs
+// in raw mode, where a bare CR is not a line separator, it is ENTER. So a
+// multi-line prompt pasted without -p is not delivered as one message at all:
+// the agent is handed each line followed by a submit, and everything before
+// the final fragment is entered and cleared one line at a time.
+//
+// That is incident wf-a816d7fe (2026-08-27), and it is worth stating exactly
+// because every layer above it reported success. AO built a correct 4600-byte
+// fix prompt (its recorded promptReceipt digest matches a byte-exact
+// reconstruction), the transport exited 0, and the composer-empty probe
+// returned `submitted` — the composer WAS empty, because all ~90 fragments had
+// been submitted. What reached the agent was the last 510 bytes: the closing
+// guardrails paragraph. The reviewer's findings sit in the middle of the
+// prompt and never arrived at all. The worker replied "your message arrived
+// truncated (it starts mid-word), and I read it as a restatement of the
+// guardrails rather than a new task", changed nothing, and AO correctly but
+// unhelpfully stopped the run on ambiguous_worker_state.
+//
+// -p wraps the payload in bracketed-paste control codes (ESC[200~ … ESC[201~)
+// when the application has requested bracketed paste mode, which every agent
+// TUI AO drives does. Inside those markers the CRs are literal pasted text
+// rather than submits, so the whole prompt lands in the composer as one
+// message and SendMessage's own trailing Enter submits it exactly once.
+//
+// Verified against tmux 3.7b by reading the bytes the pane actually receives:
+//
+//	paste-buffer -d      -> "AAA\rBBB\rCCC\r"
+//	paste-buffer -d -p   -> "\x1b[200~AAA\rBBB\rCCC\r\x1b[201~"
+//
+// -r is deliberately NOT added alongside it: a real terminal paste carries CR
+// for its line breaks too, so keeping the replacement is what makes this
+// byte-identical to a human pasting the same text into the same pane.
 func pasteBufferArgs(buffer, id string) []string {
-	return []string{"paste-buffer", "-d", "-b", buffer, "-t", id}
+	return []string{"paste-buffer", "-d", "-p", "-b", buffer, "-t", id}
 }
 
 // deleteBufferArgs builds args for `tmux delete-buffer -b <buffer>`, used to

@@ -733,6 +733,39 @@ type StepDetail struct {
 	// checkpoint exists for it — read live, mirroring ReviewPolicy's own
 	// pattern.
 	Routing *domain.RoutingDecision
+	// FixDelivery is the read-time projection of the newest fix-cycle delivery
+	// recorded for a fix step: which review verdict authorized it, which
+	// findings travelled (digest/count/size and whether they were embedded in
+	// the delivered prompt), which attempt and session it is bound to, and what
+	// the transport could prove. Nil for a non-fix step or a fix step that has
+	// never been dispatched. See fix_delivery_report.go.
+	FixDelivery *FixDeliveryReport
+}
+
+// annotateFixDeliveryReceipt fills in FixDeliveryReport.ReceiptMatch by asking
+// the worker session what prompt it last recorded receiving and comparing it
+// against the digest AO wrote down before delivering.
+//
+// Read-only and best-effort by construction: it writes nothing, and every
+// failure to obtain an answer leaves the field empty rather than guessing. The
+// comparison is exact because both sides are bounded by the same
+// domain.BoundLatestUserPrompt — see promptReceiptDigest.
+func (c *Coordinator) annotateFixDeliveryReceipt(ctx stdctx.Context, report *FixDeliveryReport) {
+	if report == nil || c.sessionFacts == nil || report.SessionID == "" || report.PromptReceipt == "" {
+		return
+	}
+	sess, found, err := c.sessionFacts.GetSession(ctx, domain.SessionID(report.SessionID))
+	if err != nil || !found {
+		return
+	}
+	switch {
+	case sess.Metadata.LatestUserPrompt == "":
+		report.ReceiptMatch = "none"
+	case promptReceiptDigest(sess.Metadata.LatestUserPrompt) == report.PromptReceipt:
+		report.ReceiptMatch = "match"
+	default:
+		report.ReceiptMatch = "other"
+	}
 }
 
 // ReviewSummary is a read-time-only projection of a review step's review_run
@@ -942,6 +975,17 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 	}
 
 	if checkpoints, cperr := c.store.ListWorkflowCheckpoints(ctx, runID); cperr == nil {
+		// The fix-delivery projection, derived from the same rows the loop
+		// below already reads. Done here rather than per step so the ledger is
+		// listed once, exactly like every other run-level derivation.
+		for i := range detail.Steps {
+			if detail.Steps[i].Step.Kind != domain.WorkflowStepFix {
+				continue
+			}
+			detail.Steps[i].FixDelivery = BuildFixDeliveryReport(
+				detail.Steps[i].Step, detail.Steps[i].Attempts, checkpoints)
+			c.annotateFixDeliveryReceipt(ctx, detail.Steps[i].FixDelivery)
+		}
 		for _, cp := range checkpoints {
 			// Checkpoint 8P-E.18: incident-ledger rows describe a stop, they are
 			// never one. See isBookkeepingPhase.

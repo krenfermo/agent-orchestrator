@@ -287,12 +287,13 @@ func (c *Coordinator) resumeUnstartedFixCycle(ctx stdctx.Context, run domain.Wor
 	if err != nil {
 		return run, false, err
 	}
+	findings := reviewFindingsRef(reviewRun)
 	prompt := BuildFixPrompt(FixPromptInput{
 		Objective:          run.Objective,
 		AcceptanceCriteria: artifact.AcceptanceCriteria,
 		EffectiveSpec:      RenderEffectiveSpecification(c.effectiveTaskSpecification(ctx, run, artifact.AcceptanceCriteria)),
 		ReviewRunID:        reviewRun.ID,
-		Findings:           reviewRun.EffectiveBody(),
+		Findings:           findings.Body,
 		CycleNumber:        cycleNumber,
 	})
 
@@ -385,7 +386,7 @@ func (c *Coordinator) resumeUnstartedFixCycle(ctx stdctx.Context, run domain.Wor
 	// point — a re-delivered cycle and a first-pass cycle must leave IDENTICAL
 	// durable state, and it creates no second attempt row because
 	// recordFixDispatchSuccess only creates one when len(attempts) < cycleNumber.
-	if _, err := c.deliverFixPrompt(ctx, run, *workStep, *fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt); err != nil {
+	if _, err := c.deliverFixPrompt(ctx, run, *workStep, *fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt, findings); err != nil {
 		return run, true, err
 	}
 	if refreshed, ok, rerr := c.store.GetWorkflowRun(ctx, run.ID); rerr == nil && ok {

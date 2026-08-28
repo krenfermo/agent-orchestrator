@@ -175,9 +175,10 @@ func (c *Coordinator) recordFixDispatchIntent(
 		ProjectID:         run.ProjectID,
 		SessionID:         &sid,
 		ReviewRunID:       &rid,
+		ReviewVerdict:     string(reviewRun.EffectiveVerdict()),
 		FingerprintBefore: fingerprintBefore,
-		NextAction: fmt.Sprintf("fix_dispatch_intent: delivering fix cycle %d (%d bytes) to session %s",
-			delivery.CycleNumber, delivery.PromptBytes, sid),
+		NextAction: fmt.Sprintf("fix_dispatch_intent: delivering fix cycle %d (%d bytes, %d findings) to session %s",
+			delivery.CycleNumber, delivery.PromptBytes, delivery.Findings.Count, sid),
 		DurablePhase:   fixDispatchIntentPhase,
 		PayloadVersion: "v1",
 		RetryState:     delivery.json(),
@@ -335,6 +336,7 @@ func (c *Coordinator) resolveFixDeliveryAfterRestart(
 	reviewRun domain.ReviewRun,
 	cycleNumber, transportAttempt int,
 	prompt string,
+	findings fixFindingsRef,
 ) (domain.WorkflowStep, error) {
 	intent, intentRec, intentFound := c.findFixDispatchIntent(ctx, run.ID, fixStep.ID, cycleNumber, transportAttempt)
 	verdict, evidence := c.classifyFixDelivery(ctx, reviewRun.SessionID, cycleNumber, transportAttempt,
@@ -348,7 +350,7 @@ func (c *Coordinator) resolveFixDeliveryAfterRestart(
 			c.log.Info("workflow: fix prompt was provably never delivered; delivering once",
 				"run", run.ID, "step", fixStep.ID, "cycle", cycleNumber)
 		}
-		return c.deliverFixPrompt(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt)
+		return c.deliverFixPrompt(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt, findings)
 
 	case fixDeliveryDelivered:
 		// The agent has it. Finish the bookkeeping the crash interrupted and

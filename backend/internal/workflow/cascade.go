@@ -274,13 +274,17 @@ func (c *Coordinator) maybeDispatchFix(ctx stdctx.Context, run domain.WorkflowRu
 	if err != nil {
 		return fixStep, err
 	}
+	// One read of the findings, used for both the prompt and the durable
+	// evidence about it. Reading twice would let the two disagree, which is
+	// precisely the claim the evidence exists to make unfalsifiable.
+	findings := reviewFindingsRef(reviewRun)
 	prompt := BuildFixPrompt(FixPromptInput{
 		Objective:          run.Objective,
 		AcceptanceCriteria: artifact.AcceptanceCriteria,
 		EffectiveSpec:      RenderEffectiveSpecification(c.effectiveTaskSpecification(ctx, run, artifact.AcceptanceCriteria)),
 		ReviewRunID:        reviewRun.ID,
 		// The reviewer's actual findings, from whichever column carries them.
-		Findings:    reviewRun.EffectiveBody(),
+		Findings:    findings.Body,
 		CycleNumber: cycleCount,
 	})
 
@@ -291,7 +295,7 @@ func (c *Coordinator) maybeDispatchFix(ctx stdctx.Context, run domain.WorkflowRu
 	// once per cycle (guarded by the outbox idempotency key). Computing/
 	// persisting the decision here would create a duplicate checkpoint per
 	// poll instead of exactly one per real dispatch.
-	return c.dispatchFixStep(ctx, run, workStep, fixStep, reviewRun, cycleCount, prompt)
+	return c.dispatchFixStep(ctx, run, workStep, fixStep, reviewRun, cycleCount, prompt, findings)
 }
 
 // applyFixLifecycleDecision evaluates SessionLifecyclePolicy for the fix

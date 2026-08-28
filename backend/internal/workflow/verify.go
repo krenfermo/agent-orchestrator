@@ -841,15 +841,18 @@ func (c *Coordinator) maybeDispatchVerifyFix(ctx stdctx.Context, run domain.Work
 	if err != nil {
 		return fixStep, err
 	}
+	// The findings here are AO's own verification output, not the reviewer's,
+	// and the durable evidence says so — see FixFindingsSourceVerification.
+	findings := verifyFindingsRef(reviewRun, renderVerifyFindings(result))
 	prompt := BuildFixPrompt(FixPromptInput{
 		Objective:          run.Objective,
 		AcceptanceCriteria: artifact.AcceptanceCriteria,
 		EffectiveSpec:      RenderEffectiveSpecification(c.effectiveTaskSpecification(ctx, run, artifact.AcceptanceCriteria)),
 		ReviewRunID:        reviewRun.ID,
-		Findings:           renderVerifyFindings(result),
+		Findings:           findings.Body,
 		CycleNumber:        cycleNumber,
 	})
-	return c.dispatchFixStep(ctx, run, workStep, fixStep, reviewRun, cycleNumber, prompt)
+	return c.dispatchFixStep(ctx, run, workStep, fixStep, reviewRun, cycleNumber, prompt, findings)
 }
 
 // renderVerifyFindings turns a failed VerifyResult into the findings text a fix
