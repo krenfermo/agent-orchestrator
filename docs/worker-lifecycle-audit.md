@@ -180,6 +180,31 @@ table-generic, but **no reviewer code is copied**: the reviewer's semantics
 (review runs, authority pointer, cycles, fresh-review epochs) do not apply to a
 worker and must not be transplanted.
 
+**Classification.** Every class carries an explicit verdict, in the two terms
+the objective names:
+
+- **Resolvable** — a durable mechanism can decide the state correctly without a
+  human, once the CAS in §6 exists. The ambiguity is an artifact of missing
+  generation identity, not of missing information.
+- **Must remain fail-closed** — no amount of durable bookkeeping can decide it,
+  because the deciding fact lives outside workflow's authority (a live session
+  owned by another component, an unreadable runtime) or because acting on a
+  guess is worse than stopping. These route to `needs_attention` with evidence,
+  by design, and the implementation step must not "fix" them.
+
+Most classes are *mixed*: a resolvable bulk with a narrow fail-closed residue.
+The residue is what stays after §6 lands, and it is stated per class so a later
+reader does not read a remaining `needs_attention` as an unfinished bug.
+
+| Class | Verdict | Fail-closed residue that must survive §6 |
+| --- | --- | --- |
+| 4.1 `running_without_dispatch` | **Resolvable** | The step owns a live session: reconciliation may not release another component's ownership (`dispatch_reconcile.go:757-771`) |
+| 4.2 `worker_completed_but_attempt_open` | **Resolvable** | An attempt whose generation or owning session is unreadable — the reaper's four proofs stay mandatory (`attempt_reaper.go:30-47`) |
+| 4.3 stale / phantom running | **Mixed** — *stale* resolvable, *phantom* fail-closed | A proven-gone execution whose step owns a session is a human decision; an unreadable runtime instance stays `Unprovable` and stops (`dispatch_reconcile.go:257-259`, `:639`) |
+| 4.4 child running while parent `needs_attention` | **Resolvable — already resolved**, and out of scope | A child stop that cannot be positively classified as self-remediable: the mirror is held, deliberately |
+| 4.5 repeated wake / reconcile | **Resolvable** | Budget exhaustion after the bounded generations are genuinely spent — that is a decision, not an ambiguity |
+| 4.6 terminal-evidence-before-crash | **Resolvable** | Rows already `completed` with no completion checkpoint when §6 lands: the evidence never existed, so `ambiguous_review_state` remains the only honest answer (`review_dispatch.go:534`) |
+
 ### 4.1 `running_without_dispatch`
 
 **What.** `workflow_steps.state = 'running'` with no durable confirmation
@@ -206,6 +231,15 @@ updates zero rows and returns "not mine" — which is a no-op, not an error,
 exactly as the reviewer's `ReleaseDispatchedWorkflowOutboxGeneration` result is
 read. RUNNING then means *this* generation's confirmed launch, not "some
 confirmation exists".
+
+**Classification: resolvable.** Nothing here is unknowable — the durable record
+of which generation confirmed the launch simply is not written. Once W15–W20
+form one generation-conditioned sequence, RUNNING means "this generation's
+confirmed launch" and a stale writer cannot manufacture the state at all, so the
+class stops being produced rather than being cleaned up after. **Fail-closed
+residue:** the sub-case where the contradicted step owns a live session. There
+the attempt is closed but the retry is withheld, because re-dispatching would
+put a second worker on a worktree AO cannot prove is free.
 
 ### 4.2 `worker_completed_but_attempt_open`
 
@@ -238,6 +272,16 @@ and a stale one can conclude an attempt a live dispatch is using.
 3. W25's error stops being discarded: an attempt that could not be finalized
    is exactly the fossil the reaper then has to clean up, and that is worth a
    log line and a retry on the next observation rather than silence.
+
+**Classification: resolvable.** The deciding fact — which dispatch generation
+opened this attempt — is one the worker path can simply write down and has not.
+Once W6 stamps it and the close conditions on it, "is this attempt still owed?"
+stops being a 30-minute inference from four circumstantial proofs and becomes a
+row comparison. **Fail-closed residue:** an attempt whose generation is
+unreadable, or whose owning session AO cannot read, is never closed on a guess.
+The reaper's proofs stay exactly as conservative as they are today, because a
+wrongly-reaped attempt tells every downstream guard the tree is quiet while an
+agent is writing to it.
 
 ### 4.3 stale / phantom running
 
@@ -276,6 +320,18 @@ an unreadable one stays `Unprovable` and stops. This is the worker's form of the
 reviewer's `errReviewerInstanceUnproven` rule (`review_launch_phases.go:57-67`)
 — stated for the worker, implemented independently.
 
+**Classification: mixed — *stale* resolvable, *phantom* must remain
+fail-closed.** The stale half is a missing durable fence and nothing more: a
+runtime instance id on the attempt turns "is the recorded execution still the
+running one?" into an equality test, and that closes C8 without a human.
+**The phantom half must not be automated.** When the execution is proven gone
+but the step still owns a session, the retry is genuinely unavailable — dispatch
+refuses to launch over an associated session, and no reconciler may release
+another component's ownership. Closing the attempt (removing the fossil) is
+correct and already done; re-dispatching is not AO's call. Equally fail-closed:
+an unreadable runtime instance is `Unprovable`, never "gone" — the gap between
+`Live()` and `ProvenGone()` is load-bearing and must stay open.
+
 ### 4.4 child running while parent `needs_attention`
 
 **What.** A master run durably stopped on `child_needs_attention` while the
@@ -302,6 +358,15 @@ mirror will faithfully hold.
 **out of scope** for the worker CAS change, and the audit records it here so
 the implementation step does not "fix" it twice. The correct contribution is
 indirect: fewer unprovable child states ⇒ fewer mirrored stops.
+
+**Classification: resolvable — and already resolved.** The rule at
+`attention.go:770` decides this correctly today by re-deriving the mirror from
+the children's current durable states rather than trusting a historical fact.
+No worker CAS is needed and none should be added. **Fail-closed residue, kept
+deliberately:** a child stop that cannot be positively classified as
+self-remediable holds the mirror. "Not being able to name a child's stop" is not
+evidence the child recovered, and the implementation step must not relax that
+into an optimistic clear.
 
 ### 4.5 repeated wake / reconcile
 
@@ -344,6 +409,15 @@ tokens; the worker path has not.
    generation it is about, and a repeat pass treats "boundary present, remedy
    not applied for this generation" as *still owed* rather than as answered.
 
+**Classification: resolvable, in full.** This is the class the reviewer path
+already proved out end to end, and the only one with no fail-closed residue.
+Duplicate passes are not an information problem — every racing writer has all
+the facts — they are an authority problem, and a claim token settles authority
+outright: the winner acts, the loser updates zero rows and returns a no-op.
+The single-winner index does the same for the human reset. What remains after
+§6 is not ambiguity but policy: once the bounded generations are genuinely
+spent by real failures, stopping for a person is the intended answer.
+
 ### 4.6 terminal-evidence-before-crash
 
 **What.** The worker produced real, git-verifiable work (a commit past the
@@ -382,6 +456,17 @@ generation-conditioned CAS. A crash between them leaves a `running` step with a
 completion checkpoint under it — which the next observation re-derives
 identically and finishes — instead of a `completed` step with no evidence,
 which nothing can finish.
+
+**Classification: resolvable, by ordering rather than by CAS.** The decision
+itself is already a pure function of durable and observable facts, so replay
+re-derives it identically — this class is ambiguous only in the one window where
+a mutating transition (W21) precedes the evidence that licenses the next step
+(W23). Inverting that order closes it with no new state. **Fail-closed
+residue:** a step that is *already* `completed` with no completion checkpoint
+when the inversion lands cannot be recovered — the branch, worktree and
+fingerprint the review needs were never written, and inventing them would send a
+reviewer at an unverified tree. `ambiguous_review_state` stays the honest
+answer for those rows.
 
 ---
 
@@ -573,3 +658,12 @@ stuck at `ready`), C12 (a completed step with no completion evidence), C15 (a
 reconciliation boundary that makes its own remedy skippable), and C16/C20 (a
 budget spent by crashes and races rather than by decisions) — are exactly the
 five that require a generation-conditioned CAS to close. §6 is that CAS.
+
+On the six ambiguous classes (§4), the verdict is that **five are resolvable**
+— 4.1, 4.2, 4.4 (already resolved upstream), 4.5 and 4.6 — and **one is mixed**:
+4.3's *stale* half is resolvable by a durable runtime-instance fence, while its
+*phantom* half **must remain fail-closed**. Each resolvable class also keeps a
+narrow fail-closed residue, listed in §4's table. Those residues are the design,
+not a backlog: whenever the deciding fact is a live session AO does not own, or
+a runtime it cannot read, stopping for a person with the full evidence is the
+correct terminal state and the implementation step must preserve it.
