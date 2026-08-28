@@ -134,13 +134,71 @@ func verificationTargetKey(fingerprint string, plan VerificationPlan) string {
 // still being the same attempt every time this generation is re-entered.
 // Generation 0 hashes exactly what it always did, so no existing attempt id
 // changes.
-func verifyAttemptID(stepID, targetKey string, recoveryGeneration int) string {
+//
+// fixGeneration widens it by the second and last dimension: how many
+// verify-driven fix cycles this run has DELIVERED. A verification that failed,
+// sent its findings to a fix worker and got a changed worktree back is history
+// for a state that no longer exists, and the next verification is a genuinely
+// new question about a genuinely new tree — but it is a question about the SAME
+// approved target, because the approval is what makes a verification mean
+// anything and a fix does not confer one.
+//
+// This is what replaced the old answer. maybeVerify used to keep the attempt
+// identity fixed and move the TARGET instead, promoting the fingerprint the fix
+// delivered to the thing being verified — which made a run completable on a tree
+// no reviewer had read. Widening the attempt identity gives the re-verification
+// its own row without touching whose authority it runs under: the verification
+// re-runs, finds the workspace no longer matches the approval, and asks for a
+// review of what is actually there. Generation 0 again hashes exactly what it
+// always did.
+func verifyAttemptID(stepID, targetKey string, recoveryGeneration, fixGeneration int) string {
 	seed := stepID + "\n" + targetKey
 	if recoveryGeneration > 0 {
 		seed += fmt.Sprintf("\nrecovery=%d", recoveryGeneration)
 	}
+	if fixGeneration > 0 {
+		seed += fmt.Sprintf("\nfix=%d", fixGeneration)
+	}
 	sum := sha256.Sum256([]byte(seed))
 	return "wfa-verify-" + hex.EncodeToString(sum[:12])
+}
+
+// verifyFixDeliveries counts the verify-driven fix cycles this run has actually
+// DELIVERED: verify_fix_reentry checkpoints that a later fix delivery answered.
+//
+// Derived from append-only rows, like every other generation counter here, so a
+// restart recomputes the same value and the attempt identity is stable across
+// one. A re-entry that has been written but not yet answered deliberately does
+// not count: the tree has not moved yet, so the verification in flight is still
+// the same question.
+func (c *Coordinator) verifyFixDeliveries(ctx stdctx.Context, runID string) int {
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		// Unreadable: claim no advance rather than invent one. The verification
+		// then reuses its existing attempt, which is the conservative direction.
+		return 0
+	}
+	var reentries, deliveries []time.Time
+	for _, cp := range cps {
+		switch cp.DurablePhase {
+		case ReasonVerifyFixReentry:
+			reentries = append(reentries, cp.CreatedAt)
+		case "fix_observed_" + string(domain.WorkflowStepWaiting):
+			if cp.FingerprintAfter != "" {
+				deliveries = append(deliveries, cp.CreatedAt)
+			}
+		}
+	}
+	n := 0
+	for _, r := range reentries {
+		for _, d := range deliveries {
+			if d.After(r) {
+				n++
+				break
+			}
+		}
+	}
+	return n
 }
 
 func (p VerificationPlan) allCommandsRetrySafe() bool {
@@ -270,16 +328,36 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 		}
 	}
 
-	// Checkpoint 8P-E.13 Phase 5: after a verify-driven fix cycle, the approved
-	// review's target SHA is no longer the fingerprint that must be verified —
-	// the fix deliberately changed the worktree. The new target is the
-	// fingerprint the fix actually delivered, taken from the fix step's own
-	// observation checkpoint. Without this the very next verification would
-	// fail with verify_workspace_changed, which is how "fix it and try again"
-	// would have quietly become an infinite, always-failing loop.
-	if delivered, ok := c.verifyTargetAfterFix(ctx, run.ID); ok {
-		reviewed = delivered
-	}
+	// THE REVIEW AUTHORITY INVARIANT.
+	//
+	// `reviewed` is the fingerprint an approving REVIEW was given for, and from
+	// here to the end of this function nothing may replace it with a state no
+	// reviewer read. Verification certifies work; a target AO chose for itself
+	// is a certificate of nothing.
+	//
+	// This is where that used to be given away. A verify-driven fix cycle
+	// deliberately changes the worktree, so the approval no longer describes it
+	// — and the code answered that by promoting the fingerprint THE FIX
+	// DELIVERED to the verification target (verifyTargetAfterFix), silently, on
+	// no reviewer's authority at all. A run could therefore reach `completed`
+	// on a tree whose last mutation nobody had reviewed:
+	//
+	//	approved(A) -> verify(A) fails -> fix -> HEAD=B -> verify(B) -> completed
+	//
+	// The remedy is not to verify A either — A is gone. It is to notice that
+	// the approval went stale, say so, and go and get a new one: verification
+	// proceeds against the approved target, finds the workspace no longer
+	// matches it, attributes the difference to this run's own authorized fix
+	// worker (workspace_provenance.go), and requests ONE bounded fresh review of
+	// what is actually there. Only that review's approval becomes the next
+	// verification target — through authorizeFreshReviewTarget below, which is
+	// the single audited door a target may advance through.
+	//
+	//	approved(A) -> verify(A) fails -> fix -> HEAD=B
+	//	            -> review(B) -> approved(B) -> verify(B)
+	//
+	// Same loop, same bounds, one more reviewer verdict — and no path from an
+	// approval of A to a verification of B.
 
 	artifact, err := c.planArtifactForRun(ctx, run)
 	if err != nil {
@@ -322,18 +400,23 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 	if recovering {
 		recoveryGeneration = recovery.Generation
 	}
+	fixGeneration := c.verifyFixDeliveries(ctx, run.ID)
 
 	latest, hasAttempt, err := c.store.GetLatestWorkflowAttempt(ctx, verifyStep.ID)
 	if err != nil {
 		return run, verifyStep, err
 	}
-	// The finished attempt of a superseded recovery generation is history, not a
-	// decision about this one. Keyed on the attempt's IDENTITY rather than on
-	// timestamps, so re-entering this generation any number of times (a repeat
-	// Continue, a poll, a restart) finds its own attempt and never opens a
-	// second: verifyAttemptID is a pure function of step, target and generation.
-	if hasAttempt && recovering && latest.Outcome != "" &&
-		latest.ID != verifyAttemptID(verifyStep.ID, targetKey, recoveryGeneration) {
+	// The finished attempt of a superseded generation is history, not a decision
+	// about this one. Keyed on the attempt's IDENTITY rather than on timestamps,
+	// so re-entering this generation any number of times (a repeat Continue, a
+	// poll, a restart) finds its own attempt and never opens a second:
+	// verifyAttemptID is a pure function of step, target and the two generations.
+	//
+	// Only ever applied while a generation is actually open. At recovery 0 and
+	// fix 0 the identity is bit-for-bit the pre-generation one, so no attempt
+	// written by an older binary can be reopened by this rule.
+	if hasAttempt && (recovering || fixGeneration > 0) && latest.Outcome != "" &&
+		latest.ID != verifyAttemptID(verifyStep.ID, targetKey, recoveryGeneration, fixGeneration) {
 		hasAttempt = false
 		latest = domain.WorkflowAttempt{}
 	}
@@ -399,7 +482,7 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 
 	now := c.clock()
 	if !hasAttempt {
-		attemptID := verifyAttemptID(verifyStep.ID, targetKey, recoveryGeneration)
+		attemptID := verifyAttemptID(verifyStep.ID, targetKey, recoveryGeneration, fixGeneration)
 		latest, err = c.store.CreateWorkflowAttempt(ctx, attemptID, verifyStep.ID, "local-verify", targetKey, now)
 		if err != nil {
 			return run, verifyStep, err
@@ -674,65 +757,6 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 	return c.completeVerifiedRun(ctx, run, verifyStep)
 }
 
-// verifyTargetAfterFix returns the workspace fingerprint a verify-driven fix
-// cycle delivered, when the run's durable timeline shows one: a
-// verify_fix_reentry checkpoint followed by a fix observation that recorded a
-// new fingerprint. Returns ok=false when no verify-driven fix has happened, so
-// the ordinary path (verify against the approved review's target) is untouched.
-//
-// Reading the timeline rather than storing a "current verify target" column is
-// deliberate: both checkpoints already exist, they are append-only, and
-// deriving from them means a restart in the middle of this cycle recovers the
-// same answer without a migration.
-func (c *Coordinator) verifyTargetAfterFix(ctx stdctx.Context, runID string) (string, bool) {
-	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
-	if err != nil {
-		return "", false
-	}
-	var reentryAt time.Time
-	var delivered string
-	var deliveredAt time.Time
-	var reviewedAt time.Time
-	for _, cp := range cps {
-		switch cp.DurablePhase {
-		case ReasonVerifyFixReentry:
-			if cp.CreatedAt.After(reentryAt) {
-				reentryAt = cp.CreatedAt
-			}
-		case "fix_observed_" + string(domain.WorkflowStepWaiting):
-			if cp.FingerprintAfter != "" && cp.CreatedAt.After(deliveredAt) {
-				delivered, deliveredAt = cp.FingerprintAfter, cp.CreatedAt
-			}
-		case reviewDispatchedDurablePhase:
-			if cp.CreatedAt.After(reviewedAt) {
-				reviewedAt = cp.CreatedAt
-			}
-		}
-	}
-	if reentryAt.IsZero() || delivered == "" || !deliveredAt.After(reentryAt) {
-		return "", false
-	}
-	// A review dispatched AFTER the fix delivery outranks it, and this override
-	// must stand down.
-	//
-	// The override exists for one situation: a verify-driven fix changed the
-	// worktree, so the approved review's target no longer names what has to be
-	// verified. That reasoning holds only while the approval predates the fix.
-	// Once AO has asked a reviewer again — an integration fresh review, a
-	// stale-approval recovery, an amended criterion — the answer to "what is to
-	// be verified" is that newer review's target, and returning the fix's
-	// fingerprint here would hand maybeVerify a target key identical to the
-	// spent attempt's. It would then read the run as already answered, decline
-	// to open a new attempt, and the run would sit at waiting forever with an
-	// approved review and a verification that never runs. wf-04e8309d did
-	// exactly that: a fix delivered at 07:02, a fresh review approved at 13:15,
-	// and no verify attempt in between.
-	if reviewedAt.After(deliveredAt) {
-		return "", false
-	}
-	return delivered, true
-}
-
 // verifyTargetAdvancedByFix reports whether a verify-driven fix cycle was
 // authorized after the given attempt started — the one legitimate reason the
 // verification target may differ from the one that attempt recorded.
@@ -818,14 +842,21 @@ func (c *Coordinator) maybeDispatchVerifyFix(ctx stdctx.Context, run domain.Work
 	// so a later checkpoint written by any other observer cannot mask a
 	// re-entry that has not been answered yet — and a re-entry that HAS been
 	// answered can never be answered twice however often this is re-entered.
-	attempts, err := c.store.ListWorkflowAttempts(ctx, fixStep.ID)
+	//
+	// The predicate lives in fix_authority.go because the delivery gate applies
+	// the identical rule: an approved review authorizes a fix cycle only while
+	// its re-entry is unanswered. Two copies of that rule could disagree, and
+	// the one that said "authorized" would win by being the one that sends.
+	open, _, err := c.unansweredVerifyFixReentry(ctx, run.ID, fixStep.ID)
 	if err != nil {
 		return fixStep, err
 	}
-	for _, a := range attempts {
-		if !a.StartedAt.Before(cp.CreatedAt) {
-			return fixStep, nil
-		}
+	if !open {
+		return fixStep, nil
+	}
+	attempts, err := c.store.ListWorkflowAttempts(ctx, fixStep.ID)
+	if err != nil {
+		return fixStep, err
 	}
 
 	reviewRun, ok, err := c.reviewRuns.GetReviewRun(ctx, *reviewStep.ReviewRunID)
@@ -955,6 +986,46 @@ func (c *Coordinator) verifyFixCycleCount(ctx stdctx.Context, runID string) int 
 	return n
 }
 
+// fixCycleAccounting renders how much fixing this run has actually done, from
+// the durable rows rather than from one of the two counters.
+//
+// The stop line used to read "after %d fix cycles" and pass `used` — the count
+// of verify_fix_reentry checkpoints, i.e. VERIFY-driven fix cycles only. For
+// wf-a21d98aa that was 0, and it was printed on a run that had completed two
+// reviewer-requested fix cycles, delivered by two finished attempts on the fix
+// step. Both numbers were individually right and the sentence was wrong, which
+// is worse than either: the operator reading it concluded nothing had touched
+// the tree since the work step.
+//
+// So the line names both, and both come from durable rows: the fix step's own
+// finished attempts (every cycle actually delivered, whoever asked for it) and
+// the verify-driven subset that the fix budget here is spent against.
+func (c *Coordinator) fixCycleAccounting(ctx stdctx.Context, runID string, verifyDriven int) string {
+	delivered := -1
+	if steps, err := c.store.ListWorkflowSteps(ctx, runID); err == nil {
+		for _, s := range steps {
+			if s.Kind != domain.WorkflowStepFix {
+				continue
+			}
+			attempts, aerr := c.store.ListWorkflowAttempts(ctx, s.ID)
+			if aerr != nil {
+				break
+			}
+			delivered = 0
+			for _, a := range attempts {
+				if a.Outcome == domain.WorkflowAttemptSucceeded {
+					delivered++
+				}
+			}
+		}
+	}
+	if delivered < 0 {
+		// Unreadable. Say only what is still provable rather than invent a total.
+		return fmt.Sprintf("%d verify-driven fix cycles", verifyDriven)
+	}
+	return fmt.Sprintf("%d delivered fix cycles (%d of them verify-driven)", delivered, verifyDriven)
+}
+
 func (c *Coordinator) finishVerifyFailure(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, attempt domain.WorkflowAttempt, result VerifyResult, reason string) (domain.WorkflowRun, domain.WorkflowStep, error) {
 	result.Passed = false
 	if len(result.Checks) == 0 && reason != "" {
@@ -1049,7 +1120,7 @@ func (c *Coordinator) finishVerifyFailure(ctx stdctx.Context, run domain.Workflo
 	// everything the budget allows" from "no fix cycle could have helped" —
 	// two different situations with two different remedies.
 	stopReason := ReasonVerifyUnrepairable
-	detail := fmt.Sprintf("verify failed (%s) after %d fix cycles: %s", result.ErrorClass, used, reason)
+	detail := fmt.Sprintf("verify failed (%s) after %s: %s", result.ErrorClass, c.fixCycleAccounting(ctx, run.ID, used), reason)
 	switch {
 	case result.StopReason != "":
 		// A stop the failing site already named precisely. Its detail is that

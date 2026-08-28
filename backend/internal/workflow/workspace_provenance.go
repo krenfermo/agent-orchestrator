@@ -249,6 +249,17 @@ func (c *Coordinator) classifyWorkspaceDrift(
 	//    and a moved HEAD is a different question from uncommitted drift.
 	approvedHead := c.approvedHeadSHA(ctx, run.ID, reviewStep.ID, reviewed, workCP)
 	rec.ApprovedHeadSHA = approvedHead
+	if approvedHead == "" && obs.HeadSHA != "" {
+		// The worktree HAS a commit identity and AO cannot name the one the
+		// approval was given for. Everything below this point is reasoning about
+		// UNCOMMITTED work, and it is only sound once "the history did not move"
+		// has been established. It has not been, so this is UNKNOWN — not a
+		// silent promotion to the uncommitted-drift branch.
+		rec.Rationale = fmt.Sprintf(
+			"AO holds no durable record of the commit the approved fingerprint %s was read at, so it cannot tell a moved history from uncommitted work",
+			shortFingerprint(reviewed))
+		return rec
+	}
 	if approvedHead != "" && obs.HeadSHA != "" && obs.HeadSHA != approvedHead {
 		git := integration.NewExecGit("")
 		contained, err := git.IsAncestor(ctx, workCP.WorktreePath, approvedHead, obs.HeadSHA)
@@ -308,6 +319,35 @@ func (c *Coordinator) classifyWorkspaceDrift(
 				dispatchedAt.UTC().Format(time.RFC3339), workCP.WorktreePath, shortFingerprint(reviewed))
 			return rec
 		}
+	}
+
+	// 4b. The APPROVAL ITSELF names this run's own fix step's output, at this
+	//     same head.
+	//
+	//     Rule 4 asks whether a fix cycle was dispatched at or after the approval,
+	//     because that is the shape wf-cd5bad10 had. wf-a21d98aa has the other
+	//     one: fix cycle 2 delivered b0910a3d at 20:16:55, review cycle 3 read and
+	//     APPROVED exactly that fingerprint, and the same worker kept writing to
+	//     the same tree while the reviewer was reading it. The dispatch that
+	//     produced the drift therefore predates the approval, and rule 4 cannot
+	//     see it — so a run whose drift was entirely its own authorized fix worker
+	//     stopped as unattributable.
+	//
+	//     What is provable here is narrower than "who wrote the new bytes", and it
+	//     is enough: the state the approval was given for is a state AO ITSELF
+	//     observed at the end of this run's own fix cycle, in this run's own
+	//     worktree, and HEAD has not moved since. The only agent AO ever pointed
+	//     at that tree at that head is that fix worker, and everything after it at
+	//     the same head is the same cycle still landing. It is still code no
+	//     reviewer has read yet, so the remedy is still a review — never a
+	//     verification of it, and never a stop.
+	if phase, stepID, ok := c.authorizedMutationForFingerprint(ctx, run.ID, reviewed); ok && phase == "fix" {
+		rec.Class = ProvenanceAuthorizedFix
+		rec.MutationPhase, rec.MutationStepID = "fix", stepID
+		rec.Rationale = fmt.Sprintf(
+			"the approved fingerprint %s is itself this run's own fix step's recorded output in %s, and HEAD has not moved since — the further uncommitted difference is that same authorized fix cycle still landing",
+			shortFingerprint(reviewed), workCP.WorktreePath)
+		return rec
 	}
 
 	// 5. Was the difference already there when this task was dispatched? A

@@ -128,7 +128,7 @@ func (c *Coordinator) observeFixStep(ctx stdctx.Context, run domain.WorkflowRun,
 		fp := WorkspaceFingerprint(obs)
 		if fp != fingerprintBefore {
 			return c.recordFixOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunWaiting,
-				fp, true, "fix delivered (worker session ended) — awaiting next review cycle", "")
+				fp, true, "fix delivered (worker session ended) — awaiting next review cycle", "", &obs)
 		}
 		return c.stopFix(ctx, run, step, domain.WorkflowStepFailed, ReasonFixNoVerifiableChange,
 			"fix worker session terminated with no verifiable change (no dirty, staged, or untracked change, and fingerprint unchanged)",
@@ -148,7 +148,7 @@ func (c *Coordinator) observeFixStep(ctx stdctx.Context, run domain.WorkflowRun,
 		if observedOK {
 			if fp := WorkspaceFingerprint(obs); fp != fingerprintBefore {
 				return c.recordFixOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunWaiting,
-					fp, true, "fix delivered — awaiting next review cycle", "")
+					fp, true, "fix delivered — awaiting next review cycle", "", &obs)
 			}
 		}
 		if now.Sub(latestCP.CreatedAt) <= fixCyclePickupTimeout {
@@ -175,7 +175,7 @@ func (c *Coordinator) observeFixStep(ctx stdctx.Context, run domain.WorkflowRun,
 		fp := WorkspaceFingerprint(obs)
 		if fp != fingerprintBefore {
 			return c.recordFixOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunWaiting,
-				fp, true, "fix delivered — awaiting next review cycle", "")
+				fp, true, "fix delivered — awaiting next review cycle", "", &obs)
 		}
 		// As with the initial work step, idle is the persisted default before
 		// the first TUI hook signal. A restart during that initialization window
@@ -235,7 +235,7 @@ func (c *Coordinator) stopFix(
 	errClass domain.WorkflowErrorClass,
 ) (domain.WorkflowStep, error) {
 	updated, err := c.recordFixOutcome(ctx, run, step, nextStep, domain.WorkflowRunNeedsAttention,
-		"", false, detail, errClass)
+		"", false, detail, errClass, nil)
 	if err != nil {
 		return updated, err
 	}
@@ -275,6 +275,7 @@ func (c *Coordinator) recordFixOutcome(
 	resolved bool,
 	nextAction string,
 	errClass domain.WorkflowErrorClass,
+	observed *ports.WorkspaceObservation,
 ) (domain.WorkflowStep, error) {
 	now := c.clock()
 
@@ -298,11 +299,28 @@ func (c *Coordinator) recordFixOutcome(
 	}
 
 	stepID := step.ID
+	// The workspace identity the fingerprint was computed FROM, not just the
+	// fingerprint. A WorkspaceFingerprint hashes head_sha among its inputs, so
+	// a fingerprint names exactly one commit — but only this row can say which
+	// one. Without it, the only durable (fingerprint -> HEAD) binding AO held
+	// was the work step's own completion checkpoint, and every fix cycle that
+	// committed left that binding silently stale. That is the whole of the
+	// wf-a21d98aa incident: verification resolved the approved commit of a
+	// third-cycle approval to the FIRST cycle's HEAD, concluded the branch had
+	// advanced when it had not, and parked a run whose drift was its own
+	// authorized fix worker's. See approvedHeadSHA.
+	headSHA, branch, worktreePath := "", "", ""
+	if observed != nil {
+		headSHA, branch, worktreePath = observed.HeadSHA, observed.Branch, observed.Path
+	}
 	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
 		ID:               "wfc-" + c.newID(),
 		WorkflowRunID:    run.ID,
 		WorkflowStepID:   &stepID,
 		ProjectID:        run.ProjectID,
+		Branch:           branch,
+		WorktreePath:     worktreePath,
+		HeadSHA:          headSHA,
 		FingerprintAfter: fingerprintAfter,
 		NextAction:       nextAction,
 		DurablePhase:     "fix_observed_" + string(nextStep),

@@ -202,7 +202,7 @@ func (f *mutableWorkspaceFacts) ObserveWorkspace(_ context.Context, _ ports.Work
 }
 
 func verifyReentryFixture(t *testing.T, runner workflowcore.VerifyRunner) (
-	*workflowcore.Coordinator, *fakeStore, *fakeClock, *mutableWorkspaceFacts, *fakeSessionFacts, *fakeMessageSender, string,
+	*workflowcore.Coordinator, *fakeStore, *fakeClock, *mutableWorkspaceFacts, *fakeSessionFacts, *fakeMessageSender, *fakeReviewRuns, string,
 ) {
 	t.Helper()
 	dir := t.TempDir()
@@ -236,7 +236,7 @@ func verifyReentryFixture(t *testing.T, runner workflowcore.VerifyRunner) (
 	workStepID := "work"
 	store.checkpoints[runID] = []domain.WorkflowCheckpoint{{
 		ID: "work-cp", WorkflowRunID: runID, WorkflowStepID: &workStepID, ProjectID: "project-1",
-		SessionID: &sid, Branch: "feature", WorktreePath: dir,
+		SessionID: &sid, Branch: "feature", WorktreePath: dir, HeadSHA: approved.HeadSHA,
 		FingerprintAfter: workflowcore.WorkspaceFingerprint(approved), CreatedAt: now,
 	}}
 
@@ -259,24 +259,36 @@ func verifyReentryFixture(t *testing.T, runner workflowcore.VerifyRunner) (
 	ids := 0
 	c := workflowcore.New(workflowcore.Deps{
 		Store: store, ReviewRuns: reviews, WorkspaceFacts: ws, SessionFacts: facts,
-		Verifier: runner, MessageSender: sender,
+		ReviewerLauncher: &fakeReviewerLauncher{},
+		Verifier:         runner, MessageSender: sender,
 		Clock: clk.Now, NewID: func() string { ids++; return fmt.Sprintf("vr%d", ids) },
 	})
-	return c, store, clk, ws, facts, sender, runID
+	return c, store, clk, ws, facts, sender, reviews, runID
 }
 
 // TestVerifyFailureRentersFixAndVerifiesAgain is Checkpoint 8P-E.13 Phase 5's
-// headline: the debt 8P-E.12 left explicit.
+// headline, as the review-authority invariant reshaped it.
 //
 // A verification that fails on a real, repairable check used to end the run in
 // needs_attention with the verify step durably `failed` — a terminal step state
 // with zero outgoing transitions, so the run could never be verified again no
-// matter what anyone did. It now hands the findings back to the fix worker and
-// re-verifies against the fingerprint that fix delivered.
+// matter what anyone did. It now hands the findings back to the fix worker.
+//
+// What it does NOT do any more is verify what that fix delivered. The approval
+// AO holds was given for the tree BEFORE the fix; promoting the fix's own
+// fingerprint to the verification target — which is what this test used to
+// assert — let a run reach `completed` on code no reviewer had ever read. So the
+// cycle is now:
+//
+//	approved(A) -> verify(A) fails -> fix -> B
+//	            -> review(B) -> approved(B) -> verify(B) -> completed
+//
+// and this test pins every arrow of it, including the one in the middle that
+// must not be skipped.
 func TestVerifyFailureReentersFixAndVerifiesAgain(t *testing.T) {
 	ctx := context.Background()
 	runner := &fakeVerifyRunner{result: workflowcore.VerifyCommandExecution{ExitCode: 2}}
-	c, store, clk, ws, facts, sender, runID := verifyReentryFixture(t, runner)
+	c, store, clk, ws, facts, sender, reviews, runID := verifyReentryFixture(t, runner)
 
 	// 1. Verification runs and fails on the command's exit code.
 	detail, err := c.GetRun(ctx, runID)
@@ -315,25 +327,92 @@ func TestVerifyFailureReentersFixAndVerifiesAgain(t *testing.T) {
 	}
 
 	// 3. The fix lands: the worker goes idle and the worktree fingerprint moves.
-	ws.obs = ports.WorkspaceObservation{Path: ws.obs.Path, Branch: "feature", HeadSHA: "fixed456"}
+	//    HEAD does not move — the workers are told not to commit — so the whole
+	//    difference is this run's own authorized fix worker's uncommitted output.
+	approvedFingerprint := workflowcore.WorkspaceFingerprint(ws.obs)
+	ws.obs = ports.WorkspaceObservation{
+		Path: ws.obs.Path, Branch: "feature", HeadSHA: ws.obs.HeadSHA,
+		Dirty: true, Changes: []ports.WorkspaceChange{{Path: "fixed.go", Status: " M"}},
+	}
+	fixedFingerprint := workflowcore.WorkspaceFingerprint(ws.obs)
+	if fixedFingerprint == approvedFingerprint {
+		t.Fatal("fixture is not exercising the fix: the fingerprint did not move")
+	}
 	facts.put(domain.SessionRecord{
 		ID: "sess-verify", ProjectID: "project-1",
 		Activity:      domain.Activity{State: domain.ActivityIdle},
 		FirstSignalAt: clk.Now(),
 		Metadata:      domain.SessionMetadata{Branch: "feature", WorkspacePath: ws.obs.Path},
 	})
-	// 4. Verification now passes against the fingerprint the fix delivered.
+
+	// 4. Verification would now PASS on the fixed tree — and must not run on it.
+	//    The only approval AO holds was given for the tree before the fix.
 	runner.result = workflowcore.VerifyCommandExecution{ExitCode: 0}
+	callsBefore := runner.calls
 	clk.Advance(10 * time.Minute)
 	detail, err = c.GetRun(ctx, runID)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if detail.Run.State == domain.WorkflowRunCompleted {
+		t.Fatalf("run completed on a fingerprint (%s) no review ever approved (approved: %s)",
+			fixedFingerprint, approvedFingerprint)
+	}
+	if runner.calls != callsBefore {
+		t.Fatalf("verification commands ran %d more times on an unreviewed tree; want 0",
+			runner.calls-callsBefore)
+	}
+	// Instead AO attributed the difference to its own fix worker and asked for
+	// ONE fresh review of what is actually there.
+	var freshReview *domain.WorkflowCheckpoint
+	for i, cp := range store.checkpoints[runID] {
+		if cp.DurablePhase == "verify_provenance_fresh_review" {
+			freshReview = &store.checkpoints[runID][i]
+		}
+	}
+	if freshReview == nil {
+		t.Fatalf("no fresh review was requested for the fix's tree (steps: %s)", stepStates(detail))
+	}
+	if freshReview.FingerprintBefore != approvedFingerprint || freshReview.FingerprintAfter != fixedFingerprint {
+		t.Fatalf("fresh review before/after = %s/%s, want %s/%s",
+			freshReview.FingerprintBefore, freshReview.FingerprintAfter, approvedFingerprint, fixedFingerprint)
+	}
+
+	// 5. The stale approval no longer stands: the review step is reopened and a
+	//    fresh reviewer is dispatched at the fix's tree, which it then approves.
+	clk.Advance(time.Minute)
+	detail, err = c.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review := stepFromDetail(t, detail, domain.WorkflowStepReview)
+	if review.Step.ReviewRunID == nil {
+		t.Fatalf("no fresh review run was dispatched (steps: %s)", stepStates(detail))
+	}
+	fresh := reviews.runs[*review.Step.ReviewRunID]
+	if fresh.ID == "review-verify" {
+		t.Fatal("the stale approval was reused; a fresh review must be a different review run")
+	}
+	if fresh.TargetSHA != fixedFingerprint {
+		t.Fatalf("fresh review target = %s, want the tree the fix actually delivered (%s)", fresh.TargetSHA, fixedFingerprint)
+	}
+	reviews.setStatus(fresh.ID, domain.ReviewRunComplete, domain.VerdictApproved)
+
+	// 6. Only now does verification run — against exactly what was approved.
+	clk.Advance(time.Minute)
+	detail, err = c.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if detail.Run.State != domain.WorkflowRunCompleted {
-		t.Fatalf("run = %q after a successful re-verification, want completed (steps: %s)",
+		t.Fatalf("run = %q after the fresh review approved, want completed (steps: %s)",
 			detail.Run.State, stepStates(detail))
 	}
-	_ = store
+	verify = stepFromDetail(t, detail, domain.WorkflowStepVerify)
+	last := verify.Attempts[len(verify.Attempts)-1]
+	if last.Model != "" && last.Outcome != domain.WorkflowAttemptSucceeded {
+		t.Fatalf("last verify attempt = %+v, want a success", last)
+	}
 }
 
 // TestVerifyEnvironmentFailureDoesNotEnterAFixCycle: a failure no diff could
@@ -342,7 +421,7 @@ func TestVerifyFailureReentersFixAndVerifiesAgain(t *testing.T) {
 func TestVerifyEnvironmentFailureDoesNotEnterAFixCycle(t *testing.T) {
 	ctx := context.Background()
 	runner := &fakeVerifyRunner{err: fmt.Errorf("exec: \"go\": executable file not found in $PATH")}
-	c, _, _, _, _, sender, runID := verifyReentryFixture(t, runner)
+	c, _, _, _, _, sender, _, runID := verifyReentryFixture(t, runner)
 
 	detail, err := c.GetRun(ctx, runID)
 	if err != nil {

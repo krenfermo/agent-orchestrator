@@ -239,31 +239,71 @@ func (c *Coordinator) attributableWorkspaceDrift(
 }
 
 // approvedHeadSHA resolves the commit the approved review was actually given
-// for.
+// for — and answers "" rather than a commit it cannot prove.
 //
-// First choice is the review step's own review_target_observed checkpoint for
-// that exact fingerprint — the record dispatchReviewStep writes naming what the
-// reviewer was about to read. Second is the work step's completion checkpoint,
-// which is the same commit whenever review followed work without the repository
-// moving in between. Returns "" when neither exists, which the predicate above
-// treats as a refusal.
+// A WorkspaceFingerprint hashes head_sha among its inputs, so a fingerprint
+// names exactly one commit. That is the whole warrant this function rests on:
+// ANY durable row of this run that recorded both a fingerprint and the HEAD it
+// was observed at is authoritative for that fingerprint's commit, and no row
+// that recorded a DIFFERENT fingerprint says anything about it at all.
+//
+// The rows are consulted in order of how directly they speak about the review:
+//
+//  1. the review step's own review_target_observed — the first-cycle target pin
+//     dispatchReviewStep writes, naming what the reviewer was about to read;
+//  2. its review_target_head_observed counterpart for every later cycle;
+//  3. any other observation of this run that recorded this exact fingerprint
+//     together with a HEAD — in practice the fix step's delivery observation,
+//     which is where a committing fix cycle's head is written down;
+//  4. the work step's completion checkpoint, and ONLY when that checkpoint's own
+//     fingerprint is the reviewed one.
+//
+// Step 4 is the fix for incident wf-a21d98aa. It used to be an unconditional
+// fallback, and an unconditional fallback is a claim: "the reviewed state is at
+// the commit work finished on". That is false for every run whose fix cycles
+// commit. wf-a21d98aa approved its THIRD review cycle's fingerprint (head
+// 095bf89f) and AO answered 77aad8d6 — the commit the work step had finished on,
+// two fix cycles earlier. Verification compared the live HEAD against that,
+// concluded the branch had advanced past the approval, and parked a run whose
+// branch had not moved since the approval at all.
+//
+// Returning "" is not a degradation: every caller treats an unknown approved
+// head as a refusal, which is the fail-closed answer an unprovable baseline has
+// always deserved.
 func (c *Coordinator) approvedHeadSHA(ctx stdctx.Context, runID, reviewStepID, reviewedFingerprint string, workCP domain.WorkflowCheckpoint) string {
-	if reviewedFingerprint != "" {
-		if cps, err := c.store.ListWorkflowCheckpoints(ctx, runID); err == nil {
-			for _, cp := range cps {
-				if cp.DurablePhase != reviewTargetDurablePhase || cp.HeadSHA == "" {
-					continue
-				}
-				if cp.WorkflowStepID == nil || *cp.WorkflowStepID != reviewStepID {
-					continue
-				}
-				if cp.FingerprintAfter == reviewedFingerprint {
-					return cp.HeadSHA
-				}
+	if reviewedFingerprint == "" {
+		// No fingerprint to bind anything to. The only honest source left is the
+		// work checkpoint's own head, which is what the review-SKIPPED path
+		// reviews against by construction.
+		return workCP.HeadSHA
+	}
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		return ""
+	}
+	ownStep := func(cp domain.WorkflowCheckpoint) bool {
+		return cp.WorkflowStepID != nil && *cp.WorkflowStepID == reviewStepID
+	}
+	// 1 and 2 — the review step's own pins, in that order.
+	for _, phase := range []string{reviewTargetDurablePhase, reviewTargetHeadDurablePhase} {
+		for _, cp := range cps {
+			if cp.DurablePhase == phase && cp.HeadSHA != "" && ownStep(cp) && cp.FingerprintAfter == reviewedFingerprint {
+				return cp.HeadSHA
 			}
 		}
 	}
-	return workCP.HeadSHA
+	// 3 — any other observation of this run that saw this exact fingerprint and
+	// wrote down the commit it was at.
+	for _, cp := range cps {
+		if cp.HeadSHA != "" && cp.FingerprintAfter == reviewedFingerprint {
+			return cp.HeadSHA
+		}
+	}
+	// 4 — the work step's completion, conditional on it being the same state.
+	if workCP.FingerprintAfter == reviewedFingerprint {
+		return workCP.HeadSHA
+	}
+	return ""
 }
 
 // requestFreshReviewForRecovery is the transition itself: it turns a refused

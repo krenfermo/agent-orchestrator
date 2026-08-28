@@ -339,6 +339,20 @@ func (c *Coordinator) deliverFixPrompt(
 	prompt string,
 	findings fixFindingsRef,
 ) (domain.WorkflowStep, error) {
+	// The last gate before a worktree is deliberately changed: is the authority
+	// this cycle was derived from still the authority the run holds? An approved
+	// review, or a review the step no longer speaks for, does not authorize a
+	// mutation — see fix_authority.go. Refusing is inert: nothing durable has
+	// moved yet, the outbox entry stays where it is, and the next poll re-derives
+	// the cycle from whatever authority is current then.
+	if refusal := c.fixAuthorityRefusal(ctx, run, fixStep, reviewRun); refusal != "" {
+		if c.log != nil {
+			c.log.Info("workflow: refusing a fix delivery whose review authority is stale",
+				"run", run.ID, "step", fixStep.ID, "cycle", cycleNumber, "reason", refusal)
+		}
+		return fixStep, nil
+	}
+
 	fixStep, err := c.runFixStep(ctx, fixStep)
 	if err != nil {
 		return fixStep, err

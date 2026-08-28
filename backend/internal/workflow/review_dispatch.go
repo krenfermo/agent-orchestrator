@@ -903,6 +903,13 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 	}
 	if firstCycleTarget {
 		targetSHA = c.reviewTargetFingerprint(ctx, run, reviewStep, workCP, dispatchKey, cycleNumber, targetSHA)
+	} else {
+		// Every OTHER cycle pins the head too. The target itself must not be
+		// re-observed here (a fix-driven cycle's target is the fingerprint the
+		// fix step delivered, and adoption looks the in-flight review_run up by
+		// it), but the commit that fingerprint names still has to be written
+		// down — see pinReviewTargetHead.
+		c.pinReviewTargetHead(ctx, run, reviewStep, workCP, dispatchKey, cycleNumber, targetSHA)
 	}
 
 	now := c.clock()
@@ -1020,6 +1027,102 @@ func (c *Coordinator) reviewTargetFingerprint(ctx stdctx.Context, run domain.Wor
 		return fallback
 	}
 	return target
+}
+
+// reviewTargetHeadDurablePhase records the commit a review cycle's target
+// fingerprint names, for the cycles that do not pin the target themselves.
+//
+// reviewTargetFingerprint writes review_target_observed only for a FIRST-cycle
+// dispatch — the one that is allowed to re-observe and pin the live workspace.
+// Every later cycle inherits its target from the fix step's delivery
+// observation, so before this phase existed no row anywhere said which commit
+// that fingerprint was read at. approvedHeadSHA then fell back to the WORK
+// step's completion commit, which is stale the moment any fix cycle commits.
+//
+// That is exactly what parked wf-a21d98aa: its third review cycle approved a
+// fingerprint whose head was 095bf89f, AO resolved the approved commit to the
+// first cycle's 77aad8d6, and verification concluded the branch had advanced
+// past an approval when the branch had not moved since the approval at all.
+//
+// A separate phase rather than a second review_target_observed row: the latter
+// is a target PIN that reviewTargetFingerprint/recordedReviewTarget arbitrate
+// per dispatch identity, and adding rows to it from here would let a head
+// observation answer a question about which fingerprint to review.
+const reviewTargetHeadDurablePhase = "review_target_head_observed"
+
+// pinReviewTargetHead durably binds this cycle's already-resolved target
+// fingerprint to the commit it names, and writes NOTHING when it cannot prove
+// the binding.
+//
+// The proof is the fingerprint itself: WorkspaceFingerprint hashes head_sha
+// among its inputs, so a live observation whose fingerprint equals the target
+// is an observation of exactly the state the target names, and its HeadSHA is
+// that state's commit. An observation that hashes to anything else is a
+// workspace that has already moved on, and it says nothing about the target —
+// so no row is written, approvedHeadSHA answers "unknown", and every consumer
+// of that answer refuses rather than guesses.
+func (c *Coordinator) pinReviewTargetHead(ctx stdctx.Context, run domain.WorkflowRun, reviewStep domain.WorkflowStep, workCP domain.WorkflowCheckpoint, dispatchKey string, cycleNumber int, targetSHA string) {
+	if targetSHA == "" || c.workspaceFacts == nil || workCP.WorktreePath == "" || workCP.SessionID == nil || *workCP.SessionID == "" {
+		return
+	}
+	if _, already := c.recordedReviewTargetHead(ctx, run.ID, reviewStep.ID, targetSHA); already {
+		return
+	}
+	obs, err := c.workspaceFacts.ObserveWorkspace(ctx, ports.WorkspaceInfo{
+		Path:      workCP.WorktreePath,
+		Branch:    workCP.Branch,
+		SessionID: domain.SessionID(*workCP.SessionID),
+		ProjectID: domain.ProjectID(run.ProjectID),
+	})
+	if err != nil || obs.HeadSHA == "" || WorkspaceFingerprint(obs) != targetSHA {
+		return
+	}
+	stepID := reviewStep.ID
+	stateJSON, _ := json.Marshal(map[string]any{"cycle": cycleNumber, "dispatchKey": dispatchKey})
+	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+		ID:                "wfc-" + c.newID(),
+		WorkflowRunID:     run.ID,
+		WorkflowStepID:    &stepID,
+		ProjectID:         run.ProjectID,
+		SessionID:         workCP.SessionID,
+		Branch:            workCP.Branch,
+		WorktreePath:      workCP.WorktreePath,
+		HeadSHA:           obs.HeadSHA,
+		FingerprintBefore: targetSHA,
+		FingerprintAfter:  targetSHA,
+		NextAction: fmt.Sprintf("review_target_head_observed: review cycle %d reads %s, which is commit %s",
+			cycleNumber, shortFingerprint(targetSHA), shortFingerprint(obs.HeadSHA)),
+		DurablePhase:   reviewTargetHeadDurablePhase,
+		PayloadVersion: "v1",
+		RetryState:     string(stateJSON),
+		CreatedAt:      c.clock(),
+	}); err != nil && c.log != nil {
+		c.log.Warn("workflow: pinning the review target's head failed", "run", run.ID, "step", reviewStep.ID, "err", err)
+	}
+}
+
+// recordedReviewTargetHead reports the commit already durably bound to this
+// review step's given target fingerprint, if any.
+func (c *Coordinator) recordedReviewTargetHead(ctx stdctx.Context, runID, reviewStepID, targetSHA string) (string, bool) {
+	if targetSHA == "" {
+		return "", false
+	}
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		return "", false
+	}
+	for _, cp := range cps {
+		if cp.DurablePhase != reviewTargetHeadDurablePhase || cp.HeadSHA == "" {
+			continue
+		}
+		if cp.WorkflowStepID == nil || *cp.WorkflowStepID != reviewStepID {
+			continue
+		}
+		if cp.FingerprintAfter == targetSHA {
+			return cp.HeadSHA, true
+		}
+	}
+	return "", false
 }
 
 // recordedReviewTarget returns the fingerprint already durably recorded for
