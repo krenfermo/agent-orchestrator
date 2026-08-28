@@ -192,15 +192,21 @@ the objective names:
   guess is worse than stopping. These route to `needs_attention` with evidence,
   by design, and the implementation step must not "fix" them.
 
-Most classes are *mixed*: a resolvable bulk with a narrow fail-closed residue.
-The residue is what stays after §6 lands, and it is stated per class so a later
-reader does not read a remaining `needs_attention` as an unfinished bug.
+**All six are resolvable**, each with a narrow fail-closed residue. The residue
+is never a whole class and never a whole *case* — it is always the same
+predicate applied to that case: **AO converges when it can name the generation
+and positively prove the state; it stops when the evidence is unreadable, the
+identity is absent or mismatched, or the deciding fact belongs to something AO
+cannot prove is finished.** The residue is what stays after §6 lands, stated per
+class so a later reader does not read a remaining `needs_attention` as an
+unfinished bug — and, equally, does not read a provable case as one that was
+meant to stop.
 
 | Class | Verdict | Fail-closed residue that must survive §6 |
 | --- | --- | --- |
-| 4.1 `running_without_dispatch` | **Resolvable** | The step owns a live session: reconciliation may not release another component's ownership (`dispatch_reconcile.go:757-771`) |
-| 4.2 `worker_completed_but_attempt_open` | **Resolvable** | An attempt whose generation or owning session is unreadable — the reaper's four proofs stay mandatory (`attempt_reaper.go:30-47`) |
-| 4.3 stale / phantom running | **Mixed** — *stale* resolvable, *phantom* fail-closed | A proven-gone execution whose step owns a session is a human decision; an unreadable runtime instance stays `Unprovable` and stops (`dispatch_reconcile.go:257-259`, `:639`) |
+| 4.1 `running_without_dispatch` | **Resolvable** | The step owns a session whose execution AO cannot prove has ended — reconciliation may not release ownership it cannot name as dead (`dispatch_reconcile.go:757-771`). A binding whose own generation can prove the execution behind it ended converges instead, via §4.3's R3R |
+| 4.2 `worker_completed_but_attempt_open` | **Resolvable** — by the evidence-driven close rule (§4.2 rule 4), not by generation-stamping alone | An attempt whose `dispatch_generation` is unreadable, absent or mismatched, or for which no canonical terminal record can be read: left open, and the reaper's four proofs stay mandatory (`attempt_reaper.go:30-47`) |
+| 4.3 stale / phantom running | **Resolvable** — *stale*, and *phantom* whenever proof obligation P holds: the reconciling generation owns the claim, the attempt and the binding, **and** the execution named by the attempt's `runtime_instance_id` is positively gone (§4.3, transition R3R in §6.5) | Any part of P absent, unreadable or mismatched: an `Unprovable` runtime/ownership read (`dispatch_reconcile.go:257-259`, `:639`), an unstamped instance id or binding generation, a binding written by another generation, or a conditional clear that updates zero rows. All stop as `ambiguous_worker_state` |
 | 4.4 child running while parent `needs_attention` | **Resolvable — already resolved**, and out of scope | A child stop that cannot be positively classified as self-remediable: the mirror is held, deliberately |
 | 4.5 repeated wake / reconcile | **Resolvable** | Budget exhaustion after the bounded generations are genuinely spent — that is a decision, not an ambiguity |
 | 4.6 terminal-evidence-before-crash | **Resolvable** | Rows already `completed` with no completion checkpoint when §6 lands: the evidence never existed, so `ambiguous_review_state` remains the only honest answer (`review_dispatch.go:534`) |
@@ -237,9 +243,13 @@ of which generation confirmed the launch simply is not written. Once W15–W20
 form one generation-conditioned sequence, RUNNING means "this generation's
 confirmed launch" and a stale writer cannot manufacture the state at all, so the
 class stops being produced rather than being cleaned up after. **Fail-closed
-residue:** the sub-case where the contradicted step owns a live session. There
-the attempt is closed but the retry is withheld, because re-dispatching would
-put a second worker on a worktree AO cannot prove is free.
+residue:** the sub-case where the contradicted step owns a session whose
+execution AO **cannot prove has ended**. There the attempt is closed but the
+retry is withheld, because re-dispatching would put a second worker on a
+worktree AO cannot prove is free. Note the boundary carefully: it is
+*unprovability*, not the mere presence of a session, that withholds the retry —
+a binding whose own generation can positively prove the execution behind it
+ended converges instead, through the audited clear (§4.3, R3R).
 
 ### 4.2 `worker_completed_but_attempt_open`
 
@@ -272,16 +282,46 @@ and a stale one can conclude an attempt a live dispatch is using.
 3. W25's error stops being discarded: an attempt that could not be finalized
    is exactly the fossil the reaper then has to clean up, and that is worth a
    log line and a retry on the next observation rather than silence.
+4. **An evidence-driven close rule, because 1–3 are not one.** Generation
+   identity establishes *who may* close the attempt; it does not cause the close
+   and is not itself proof that the close is owed. A crash after W21/W23 and
+   before W25 still leaves an open attempt under a completed step, and no
+   amount of stamping changes that. What closes it deterministically is a rule
+   that derives the outcome from evidence that is already canonical:
 
-**Classification: resolvable.** The deciding fact — which dispatch generation
-opened this attempt — is one the worker path can simply write down and has not.
-Once W6 stamps it and the close conditions on it, "is this attempt still owed?"
-stops being a 30-minute inference from four circumstantial proofs and becomes a
-row comparison. **Fail-closed residue:** an attempt whose generation is
-unreadable, or whose owning session AO cannot read, is never closed on a guess.
-The reaper's proofs stay exactly as conservative as they are today, because a
-wrongly-reaped attempt tells every downstream guard the tree is quiet while an
-agent is writing to it.
+   > **Same-generation completion close.** On any observation or reconcile
+   > pass, an attempt with `outcome IS NULL` is closed, with the outcome read
+   > off the evidence, when **both** hold: (a) its `dispatch_generation` equals
+   > the step's current dispatch generation — the attempt belongs to the
+   > lifecycle being observed, not to a superseded one; and (b) a canonical
+   > terminal record exists for that same generation — the W23 completion
+   > checkpoint (`worker_observed_*`, which already carries the branch, base
+   > and head SHAs and the outcome), or a terminal dispatch boundary for it.
+
+   The rule is a pure function of durable rows, so replay re-derives the same
+   answer and a duplicate pass updates zero rows. It needs no settle window and
+   no elapsed time, because it never infers "the agent must be finished" from
+   silence — it reads a record the agent's own completion wrote. This is the
+   same shape as §4.6: evidence first, transition conditioned on it.
+
+**Classification: resolvable — by the close rule (4), not by stamping alone.**
+It is worth being precise about which piece does the work, because the two are
+easy to conflate. Stamping (1–2) supplies *authority*: it makes the close safe,
+idempotent, and impossible for a stale writer to perform on a live attempt. It
+does **not** supply *causation* — a generation-conditioned close still has to be
+called by somebody, and the C13 crash window is precisely the case where nobody
+does. Rule (4) supplies the causation: the next pass over the step closes the
+attempt from the completion evidence that already exists, so the row converges
+without a human and without waiting out a timer.
+
+**Fail-closed residue:** an attempt whose `dispatch_generation` is unreadable,
+absent (legacy), or unequal to the step's current generation, and any attempt
+for which no canonical terminal record can be read, is **never** closed by rule
+(4) — it is left open and falls through to `attemptReaper`'s four proofs,
+unchanged. That fallback stays mandatory: a wrongly-reaped attempt tells every
+downstream guard the tree is quiet while an agent is writing to it, which is the
+one failure mode the guards exist to prevent. Rule (4) narrows how often the
+reaper is the only answer; it does not retire it (§6.7).
 
 ### 4.3 stale / phantom running
 
@@ -320,17 +360,72 @@ an unreadable one stays `Unprovable` and stops. This is the worker's form of the
 reviewer's `errReviewerInstanceUnproven` rule (`review_launch_phases.go:57-67`)
 — stated for the worker, implemented independently.
 
-**Classification: mixed — *stale* resolvable, *phantom* must remain
-fail-closed.** The stale half is a missing durable fence and nothing more: a
-runtime instance id on the attempt turns "is the recorded execution still the
-running one?" into an equality test, and that closes C8 without a human.
-**The phantom half must not be automated.** When the execution is proven gone
-but the step still owns a session, the retry is genuinely unavailable — dispatch
-refuses to launch over an associated session, and no reconciler may release
-another component's ownership. Closing the attempt (removing the fossil) is
-correct and already done; re-dispatching is not AO's call. Equally fail-closed:
-an unreadable runtime instance is `Unprovable`, never "gone" — the gap between
-`Live()` and `ProvenGone()` is load-bearing and must stay open.
+**Classification: resolvable — for the *provable* case; fail-closed only on
+the unprovable residue.** The split runs on **provability**, not on
+stale-vs-phantom, and the runtime-instance fence is what moves the line.
+
+*Stale* (C8) is a missing durable fence and nothing more: an instance id on the
+attempt turns "is the recorded execution still the running one?" into an
+equality test, and that closes C8 without a human.
+
+***Phantom is resolvable too*** — but only under a proof obligation stated in
+full, because the session binding is the one piece of worker state AO must never
+touch on an inference. Today the phantom routes to a person, and the reason is a
+limitation of the *evidence*, not of AO's authority: the AO session id survives
+a daemon restart while the process behind it does not (migration `0134`'s own
+note), so a session row that still reads as a usable worker might be a live
+worker, and refusing to touch it is correct **under that uncertainty**. The
+fence removes the uncertainty — but only when every part of the identity chain
+is named, and these are *different* identities that must not be conflated:
+
+> `dispatch_generation` is the identity of a **claim** (which dispatch owns this
+> step right now). `runtime_instance_id` is the identity of an **execution**
+> (which launched process the confirmation was about). The first says who may
+> act; the second says what is being proven about. Neither substitutes for the
+> other, and no predicate below ever compares one against the other.
+
+**Proof obligation P — all four parts required, evaluated by the reconciling
+generation G:**
+
+1. **G holds the claim.** The outbox row's `dispatch_generation` is `G`.
+2. **The attempt is G's.** The open attempt `A` under the step has
+   `A.dispatch_generation = G`.
+3. **The binding is G's own.** The step's `session_id = S` **and**
+   `session_dispatch_generation = G` (§6.2) — G is releasing a binding *it
+   wrote*, never one another generation wrote.
+4. **The execution behind that binding is positively gone.** `A.runtime_instance_id`
+   is non-empty and readable, and the runtime, read for `S`, reports either a
+   *different* instance id or ownership `Missing`. A read that fails or is
+   unwired is `Unavailable` ⇒ `Unprovable` ⇒ **stop**.
+
+When P holds, there is no live owner to protect: G is retiring AO's own record
+of an execution AO can prove ended. That is sufficient durable authority for
+deterministic convergence, and the transition is audited as **R3R** in §6.5 —
+clear the binding conditioned on `(stepID, S, G)`, close the attempt under G,
+release the claim under G. The retry then proceeds under a **new** generation
+`G'`, so the dead generation cannot re-bind: its claim is gone, and every write
+it might still attempt names `G`.
+
+**Fail-closed residue**, which must survive unchanged — any part of P failing
+stops as `ambiguous_worker_state`:
+- **Unreadable evidence.** An unreadable runtime or ownership read is
+  `Unprovable`, never "gone". The gap between `Live()` and `ProvenGone()` is
+  load-bearing and must stay open.
+- **Missing identity.** An empty `runtime_instance_id` or an unstamped
+  `session_dispatch_generation` (legacy rows) is unprovable by construction.
+- **Mismatched identity.** A binding written by a generation other than the one
+  reconciling, or an attempt belonging to a superseded generation. "Proven gone"
+  is a claim about *one named execution*; it licenses nothing about an execution
+  AO cannot name.
+- **A clear that updates zero rows.** Somebody changed the binding between the
+  read and the write ⇒ stop; never retry the clear with a widened predicate.
+
+The rule, stated once: **positive proof of one named execution's death, by the
+generation that bound it, converges; anything absent, unreadable, or mismatched
+stops.** Preserving the human-decision route for the *provable* case would
+preserve exactly the ambiguity the fence exists to remove; widening the clear
+beyond P would re-create the double-worker hazard the session guard exists to
+prevent.
 
 ### 4.4 child running while parent `needs_attention`
 
@@ -492,9 +587,20 @@ against the worker path:
    (`review_authority.go:37-46`). The worker's analogue is
    `workflow_steps.session_id`, and it is **not** rebindable: a session is a
    live process on a worktree owned by another component, and no workflow code
-   may release it (`dispatch_reconcile.go:757-771`). The worker model therefore
-   gets *stale-writer rejection* but never *supersession* — a worker generation
-   that lost its claim stops; it never replaces the winner.
+   may release it while it is live (`dispatch_reconcile.go:757-771`). The worker
+   model therefore gets *stale-writer rejection* but never *supersession* — a
+   worker generation that lost its claim stops; it never replaces the winner.
+
+   The distinction that makes this precise, and that §4.3 turns on: **rebinding
+   is repointing a binding at a new owner; releasing is retiring a binding whose
+   owner is proven dead.** The reviewer rebinds — `review_run_id` is moved from
+   one review run to another, and that is how a replacement is authorized. The
+   worker never does that: `session_id` is only ever cleared back to NULL, by
+   the generation that wrote it, under proof that the execution behind it ended
+   (R3R, §6.5). A subsequent dispatch then binds a *fresh* session under a
+   *new* generation through the ordinary W17 path — it does not inherit, adopt
+   or repoint the old one. So the worker model has release without supersession,
+   and no worker generation ever speaks for a step another generation bound.
 2. **The reviewer's cycle/epoch vocabulary is review-specific.** Review cycles,
    fresh-review generations and reset epochs exist because a review step is
    re-dispatched many times against changing fingerprints. A work step
@@ -531,9 +637,10 @@ signature. The worker path adopts them as-is:
 | `0139` (same file) | `ALTER TABLE workflow_attempts ADD COLUMN runtime_instance_id TEXT NOT NULL DEFAULT ''` | The generation fence for the *execution*, from `SessionOwnershipEvidence.RuntimeLaunchID`. A recorded instance id that no longer matches the observed one is positive evidence the execution is gone (§4.3). Empty means "not recorded" and always fails closed — never "no instance" |
 | `0140_worker_dispatch_generation.sql` | `ALTER TABLE workflow_dispatch_checkpoints ADD COLUMN dispatch_generation TEXT NOT NULL DEFAULT ''` | Makes every launch boundary attributable to a claim, so reconciliation can tell "the confirmation for the generation I am holding" from "a confirmation" |
 | `0140` (same file) | `CREATE UNIQUE INDEX idx_workflow_dispatch_confirmation ON workflow_dispatch_checkpoints (workflow_step_id, dispatch_generation) WHERE phase = 'worker_dispatched' AND dispatch_generation <> ''` | One confirmation per generation, enforced by SQLite. A replayed confirmation loses the insert and is read as "already confirmed" — idempotent replay without a read-then-write |
+| `0139` (same file) | `ALTER TABLE workflow_steps ADD COLUMN session_dispatch_generation TEXT NOT NULL DEFAULT ''` | Records **which generation bound the step's session**, stamped by W17. Without it, "release my own binding" (§4.3, part 3 of P) is not expressible as a predicate, and R3R could not be distinguished from releasing another generation's ownership. Empty means "bound before this protocol" and always fails closed |
 | `0141_worker_launch_reset_single_winner.sql` | Backfill `head_sha = 'worker-launch-reset-legacy-' \|\| id` for existing `worker_launch_human_retry` rows, then `CREATE UNIQUE INDEX … ON workflow_checkpoints (workflow_step_id, head_sha) WHERE durable_phase = 'worker_launch_human_retry'` | Single-winner human reset per failed generation (§4.5). The backfill is mandatory and must run first, exactly as in `0136`: this phase is not new, existing databases already hold colliding rows, and `CREATE UNIQUE INDEX` would wedge startup on precisely the installations that have used the path most |
 
-All five changes are strictly additive: nullable or `DEFAULT ''`, nothing
+All six changes are strictly additive: nullable or `DEFAULT ''`, nothing
 backfilled except the `0141` legacy namespacing, and every legacy row reads back
 with an empty token that fails closed.
 
@@ -576,11 +683,13 @@ id>`) identifies which *failure* a human reopen is resuming, stamped into
 | W4 claim | `ClaimWorkflowOutboxDispatch(id, now, gen.token)` — `WHERE id = ? AND status = 'pending'`, stamping `dispatch_generation` | somebody else owns the claim ⇒ return, no-op. Never an error |
 | W6 attempt open | `dispatch_generation = gen.token` stamped at insert; an existing open attempt is reused **only** when its `dispatch_generation` matches, else the dispatch refuses (fail closed) | refuse the launch and reconcile |
 | W8/W25/R2 attempt close | `UpdateWorkflowAttemptOutcomeIfOpen(id, gen.token)` — `WHERE id = ? AND outcome IS NULL AND dispatch_generation = ?` | already closed, or not ours ⇒ no-op |
+| **W25R** same-generation completion close (§4.2 rule 4) — the recovery that fires when W25 never ran | the same `UpdateWorkflowAttemptOutcomeIfOpen`, called from the observation/reconcile pass once a canonical terminal record for `gen.token` is readable and the attempt's generation equals the step's current one; outcome derived from that record | evidence unreadable, generation absent/mismatched, or no terminal record ⇒ **leave the attempt open** and fall through to `attemptReaper` |
+| **R3R** proven-gone release (§4.3) — the audited session-clear, and the **only** transition permitted to clear `session_id` | **new** `ClearWorkflowStepSessionIfGeneration(stepID, sessionID, gen.token, now)` — `WHERE id = ? AND session_id = ? AND session_dispatch_generation = ?`, setting both columns back to NULL/`''`. Called **only** after proof obligation P (§4.3) holds in full: G owns the claim, the attempt is G's, the binding is G's, and the attempt's `runtime_instance_id` is non-empty, readable, and differs from the observed instance for `S` (or ownership reads `Missing`). The two identities are checked separately and never compared to each other. Followed by the attempt close under G and the claim release under G; the retry runs under a new generation | any part of P absent, unreadable, or mismatched ⇒ **no clear, no retry**; stop as `ambiguous_worker_state`. Zero rows updated ⇒ the binding changed under us ⇒ stop; never widen the predicate and retry |
 | W12 retryable release | `ReleaseDispatchedWorkflowOutboxGeneration(id, class, gen.token)` | claim lost ⇒ **do not schedule a wake, do not park the run**; another writer owns this step |
 | W13 permanent fail | `FailWorkflowOutboxWithGeneration(id, dispatched, now, class, failureGen, gen.token)` | claim lost ⇒ no-op; the step is not failed, the run is not parked |
 | W15 confirmation | insert with `dispatch_generation`; unique index makes a replay lose | insert conflict ⇒ read as "already confirmed for this generation", continue to W16 |
 | W16 ledger marker | written only after W15 succeeded **or** conflicted (both mean confirmed) | — |
-| W17 session write | **new** `UpdateWorkflowStepSessionIfUnset(stepID, sessionID, now)` — `WHERE id = ? AND (session_id IS NULL OR session_id = ?)` | a different session already owns the step ⇒ **stop, do not overwrite.** This is the one write whose loss would put two workers on one worktree |
+| W17 session write | **new** `UpdateWorkflowStepSessionIfUnset(stepID, sessionID, gen.token, now)` — `WHERE id = ? AND (session_id IS NULL OR session_id = ?)`, stamping `session_dispatch_generation = gen.token` alongside the session so the binding records its author (§4.3 P, part 3) | a different session already owns the step ⇒ **stop, do not overwrite.** This is the one write whose loss would put two workers on one worktree |
 | W19 acknowledge | generation-conditioned acknowledge (`WHERE dispatch_generation = ?`), clearing the token | claim lost ⇒ no-op |
 | W20 RUNNING | `UpdateWorkflowStepStateIfSession(stepID, ready, running, sessionID, now)` — the worker's analogue of `UpdateWorkflowStepStateIfReviewRun`, conditioned on the session this generation just wrote | not ours ⇒ no-op |
 | W21 completion transition | moved **after** W23; conditioned on `(stepID, expected=running, session_id = ?)` | benign race ⇒ skip, as today |
@@ -590,9 +699,14 @@ id>`) identifies which *failure* a human reopen is resuming, stamped into
 
 1. **RUNNING ⟹ a durable confirmation for the generation that owns the step's
    session.** (Today: RUNNING ⟹ *a* confirmation exists.)
-2. **An open attempt row ⟹ a live claim.** No attempt may be open whose
-   `dispatch_generation` is not the outbox row's current `dispatch_generation`,
-   or whose step has moved past the work it described.
+2. **An open attempt row ⟹ a live claim, or a bounded convergence path to
+   closing it.** No attempt may be open whose `dispatch_generation` is not the
+   outbox row's current `dispatch_generation`, or whose step has moved past the
+   work it described. This is an invariant the system *converges to*, not one
+   every instant satisfies: the C13 window transiently violates it by
+   construction, and W25R is what restores it on the next pass. Where W25R
+   cannot fire — unreadable or mismatched identity — the row stays open and
+   visible to the reaper rather than being closed on an assumption.
 3. **A worker path write that lost its claim writes nothing and reports
    nothing.** Losing a claim is a no-op, never an error and never an attention
    stop — a lost claim means another writer is handling the step.
@@ -604,8 +718,21 @@ id>`) identifies which *failure* a human reopen is resuming, stamped into
    `workerLaunchRecoveryGenerations`.
 6. **Evidence before transition, without exception.** W23 before W21 closes the
    last inversion in the path (§4.6).
-7. **The session is never rebound.** A worker generation that lost its claim
-   stops; it never supersedes the winner (§5, difference 1).
+7. **The session is never rebound; it is cleared only by its own generation
+   under proof.** No write ever repoints `session_id` from one session to
+   another — the reviewer's authority-pointer rebinding has no worker analogue
+   (§5, difference 1), and a worker generation that lost its claim stops rather
+   than superseding the winner. The single transition permitted to *clear* the
+   column is **R3R** (§6.5), and it is bounded by four conditions that must all
+   hold (proof obligation P, §4.3): the clearing generation owns the claim, owns
+   the open attempt, is the generation that wrote the binding
+   (`session_dispatch_generation`), and can positively prove the execution named
+   by that attempt's `runtime_instance_id` has ended. `dispatch_generation` and
+   `runtime_instance_id` are separate identities and are never compared against
+   each other. If any condition is absent, unreadable, or mismatched — or if the
+   conditional clear updates zero rows — the binding is untouchable and the step
+   stops as `ambiguous_worker_state`. No other code path, reconciler or
+   otherwise, may write NULL to `session_id`.
 
 ### 6.7 Explicitly out of scope for the implementation step
 
@@ -638,6 +765,25 @@ CAS refusal, not merely the happy path:
    observation with an identical decision.
 6. A legacy, unstamped outbox row remains reopenable by a writer that observed
    it unstamped, and is not reopenable by one that observed a token.
+7. **W25R, both directions (§4.2).** A crash after W23 and before W25 leaves an
+   open same-generation attempt; the next observation closes it with the outcome
+   read off the completion checkpoint, and a second pass updates zero rows.
+   Conversely, the same fixture with the attempt's `dispatch_generation` cleared,
+   set to another generation, or with the terminal record unreadable leaves the
+   attempt **open** and raises nothing — the reaper remains its only route.
+8. **R3R, both directions (§4.3).** With proof obligation P satisfied in full —
+   the reconciling generation owns the claim, the open attempt and the binding
+   (`session_dispatch_generation`), and the attempt's `runtime_instance_id` is
+   non-empty and differs from the observed instance for the session (or
+   ownership reads back `Missing`) — the step converges without a human: attempt
+   closed, `session_id` cleared, retry dispatched under a *new* generation that
+   binds a fresh session. Then one case per way P can fail, each asserting the
+   binding is **untouched** and the step stops as `ambiguous_worker_state`:
+   empty `runtime_instance_id`; unreadable/`Unavailable` runtime read; empty or
+   foreign `session_dispatch_generation`; attempt belonging to another
+   generation; and a concurrent binding change making the conditional clear
+   update zero rows. Both directions are required — a test that asserts only the
+   fail-closed half would pass on today's code and prove nothing.
 
 ---
 
@@ -659,11 +805,20 @@ reconciliation boundary that makes its own remedy skippable), and C16/C20 (a
 budget spent by crashes and races rather than by decisions) — are exactly the
 five that require a generation-conditioned CAS to close. §6 is that CAS.
 
-On the six ambiguous classes (§4), the verdict is that **five are resolvable**
-— 4.1, 4.2, 4.4 (already resolved upstream), 4.5 and 4.6 — and **one is mixed**:
-4.3's *stale* half is resolvable by a durable runtime-instance fence, while its
-*phantom* half **must remain fail-closed**. Each resolvable class also keeps a
-narrow fail-closed residue, listed in §4's table. Those residues are the design,
-not a backlog: whenever the deciding fact is a live session AO does not own, or
-a runtime it cannot read, stopping for a person with the full evidence is the
-correct terminal state and the implementation step must preserve it.
+On the six ambiguous classes (§4), the verdict is that **all six are
+resolvable** — 4.1, 4.2, 4.4 (already resolved upstream), 4.5, 4.6, and 4.3 in
+both halves: *stale* by the durable runtime-instance fence, and *phantom*
+whenever that fence lets AO prove, under a matching generation identity, that
+the execution it launched is gone.
+
+Each class keeps a narrow fail-closed residue, listed in §4's table, and every
+residue reduces to one predicate: **provability of a named thing by the
+generation entitled to act on it**. AO
+converges deterministically when it can name the generation and positively prove
+the execution's state; it stops as `ambiguous_worker_state` when the evidence is
+unreadable, the identity is absent or mismatched, or the deciding fact belongs
+to a component AO does not own and cannot prove is finished. Those residues are
+the design, not a backlog. The inverse is equally binding: a case AO *can* prove
+must not be routed to a person out of caution, because a stop that a durable
+fact could have answered is the same defect as a guess — it just fails in the
+other direction.

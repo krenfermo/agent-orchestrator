@@ -1814,16 +1814,29 @@ func (r *Runtime) SessionFacts(ctx context.Context, handle ports.RuntimeHandle) 
 	}
 	facts.Owner, facts.OwnerKnown = owner, ownerKnown
 
-	panePID, ok, perr := r.instancePanePID(ctx, instance)
+	panePID, panePIDState, perr := r.instancePanePID(ctx, instance)
 	if perr != nil {
 		return ports.SessionFacts{}, true, perr
 	}
-	if !ok {
+	switch panePIDState {
+	case panePIDInstanceGone:
 		// The instance is gone. Not facts about it, and not facts about whatever
 		// holds its former name.
 		return ports.SessionFacts{}, false, nil
+	case panePIDUnreadable:
+		// The incarnation is there and answered, but its pane will not name a
+		// process. Liveness is therefore UNKNOWN -- the one honest verdict --
+		// and the observation continues: ownership was already read from this
+		// same instance, and the revalidation below still proves the whole
+		// observation is about one incarnation.
+		//
+		// It is emphatically not an error. An unreadable pane pid is a routine
+		// stale-runtime fact, and raising it as a failure made it fatal to every
+		// caller sharing the pass rather than to the one run it describes.
+		facts.WorkloadAlive, facts.WorkloadKnown = false, false
+	default:
+		facts.WorkloadAlive, facts.WorkloadKnown = r.workloadAliveForPane(ctx, panePID)
 	}
-	facts.WorkloadAlive, facts.WorkloadKnown = r.workloadAliveForPane(ctx, panePID)
 
 	// FINAL EXACT-INSTANCE REVALIDATION.
 	//
@@ -1949,25 +1962,56 @@ func (r *Runtime) instanceOwner(ctx context.Context, instance string) (owner str
 	return owner, true, nil
 }
 
+// panePIDStatus is what a pane-pid read of one exact incarnation can mean.
+//
+// Three outcomes, deliberately kept apart. Collapsing the last two is what made
+// a single malformed pane fact fatal: an UNREADABLE pid is not proof the
+// instance is gone, and it is not grounds for failing every caller that shares
+// the pass.
+type panePIDStatus int
+
+const (
+	// panePIDRead: tmux answered with a usable pid.
+	panePIDRead panePIDStatus = iota
+	// panePIDInstanceGone: the incarnation no longer exists. Proven absence.
+	panePIDInstanceGone
+	// panePIDUnreadable: the incarnation answered, but not with a pid AO can
+	// use -- an empty `#{pane_pid}`, a non-numeric one, a non-positive one.
+	// tmux emits an empty value for a session whose active pane is being torn
+	// down, and for stale/half-dead panes generally. It is an UNTRUSTED runtime
+	// observation: it licenses nothing, and it is never an error.
+	panePIDUnreadable
+)
+
 // instancePanePID reads the pane root pid of ONE EXACT incarnation.
-func (r *Runtime) instancePanePID(ctx context.Context, instance string) (int, bool, error) {
+//
+// A pid AO cannot parse is reported as `panePIDUnreadable`, not as an error.
+// The distinction matters because this feeds SessionFacts, whose contract is
+// already three-valued (alive / exited / cannot tell): "cannot tell" is the
+// honest answer for a pane that will not name its process, and it fails closed
+// at every decision downstream -- no adoption, no termination, no fabricated
+// pid. Returning an error instead made one stale pane abort boot
+// reconciliation for every unrelated run and turned a workflow read into a 500.
+//
+// Genuine transport failures -- an unreachable server, a tmux that could not be
+// executed -- remain errors: those are not facts about the pane at all.
+func (r *Runtime) instancePanePID(ctx context.Context, instance string) (int, panePIDStatus, error) {
 	out, err := r.run(ctx, panePIDArgs(instance)...)
 	if err != nil {
 		if sessionMissingOutput(string(out)) {
-			return 0, false, nil
+			return 0, panePIDInstanceGone, nil
 		}
 		if serverUnreachableOutput(string(out)) {
-			return 0, false, fmt.Errorf("tmux runtime: read pane pid of instance %s: %w: %s",
+			return 0, panePIDUnreadable, fmt.Errorf("tmux runtime: read pane pid of instance %s: %w: %s",
 				instance, ports.ErrRuntimeUnavailable, strings.TrimSpace(string(out)))
 		}
-		return 0, false, fmt.Errorf("tmux runtime: read pane pid of instance %s: %w", instance, err)
+		return 0, panePIDUnreadable, fmt.Errorf("tmux runtime: read pane pid of instance %s: %w", instance, err)
 	}
 	pid, perr := strconv.Atoi(strings.TrimSpace(string(out)))
 	if perr != nil || pid <= 0 {
-		return 0, false, fmt.Errorf("tmux runtime: invalid pane pid %q for instance %s",
-			strings.TrimSpace(string(out)), instance)
+		return 0, panePIDUnreadable, nil
 	}
-	return pid, true, nil
+	return pid, panePIDRead, nil
 }
 
 // workloadAliveForPane applies the process-tree rule (see PaneProcessAlive) to a

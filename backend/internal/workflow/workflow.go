@@ -32,6 +32,20 @@ var (
 	// toward running.
 	ErrAlreadyTerminal = errors.New("workflow: run is already terminal")
 	ErrPlanLocked      = errors.New("workflow: plan is already accepted or generation is in progress")
+	// ErrUnrecoverable marks a failure that WILL NOT change on retry: AO asked,
+	// got a deterministic answer it refuses to act on, and nothing AO can do by
+	// itself makes the next answer different. Today that is the fail-closed
+	// runtime-ownership class -- a session AO can neither prove it owns nor
+	// prove is gone.
+	//
+	// It exists for the wake scheduler. Every failure used to be "transient",
+	// so a run whose runtime was permanently unclassifiable was re-driven on
+	// every wake forever, each attempt producing the identical error and the
+	// identical reschedule. Marking the class lets the poller close the wake out
+	// and leave the run parked for a person instead of spinning on it all night.
+	//
+	// It never licenses an action. It only says retrying is pointless.
+	ErrUnrecoverable = errors.New("workflow: unrecoverable without a person")
 )
 
 // workflowStepPolicyV1 is the fixed Checkpoint 8A seeding policy: a strict

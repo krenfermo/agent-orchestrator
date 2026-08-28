@@ -767,12 +767,40 @@ func (c *Coordinator) cancelReviewerExternally(
 	// Terminate ONLY what AO can prove is its own. A name collision or a stale
 	// shell must never be destroyed on AO's behalf, so an unprovable identity
 	// leaves the intent open rather than killing something unrelated.
-	if obs, perr := ensurer.ProbeReviewer(ctx, ref); perr == nil && obs.Presence == ReviewerPresenceForeign {
+	//
+	// The classification is made HERE, on one probe, and every unprovable answer
+	// ends this pass without an error. Handing an `unknown` identity to
+	// CancelReviewer instead used to surface as a hard failure ("refusing to
+	// terminate a session AO cannot prove it owns") from a path that runs on
+	// boot reconciliation, on every wake, and on an ordinary workflow READ — so
+	// a single stale pane failed all three. The obligation is durable; it does
+	// not need an error to survive, and the bounded unproven-reviewer ledger is
+	// what carries it to a person.
+	obs, perr := ensurer.ProbeReviewer(ctx, ref)
+	if obs.InstanceID != "" {
+		// Anything destructive below addresses the incarnation THIS probe
+		// identified, never a re-resolution of the name.
+		ref.InstanceID = obs.InstanceID
+	}
+	switch {
+	case perr == nil && obs.Presence == ReviewerPresenceForeign:
 		if c.log != nil {
 			c.log.Warn("workflow: refusing to terminate a session AO cannot prove it owns",
 				"run", run.ID, "step", reviewStep.ID, "identity", identity)
 		}
-		return nil
+		return c.recordUnprovenReviewer(ctx, run, reviewStep, reviewRunID, identity,
+			obs.Presence, "a session AO can prove is not its own holds this reviewer identity")
+	case perr == nil && obs.Presence == ReviewerPresenceAbsent:
+		// Proven gone. The cancellation is discharged by evidence, with nothing
+		// to kill -- and emphatically not whatever answers to its name now.
+		return c.recordReviewCancelPhase(ctx, run, reviewStep, reviewRunID, ref,
+			reviewCancelConfirmedPhase, "review_cancel_confirmed: reviewer "+ref.String()+" is gone")
+	case perr != nil || !obs.Presence.LicensesTermination():
+		// UNKNOWN, or the probe itself failed -- a runtime that will not name
+		// the pane's process is the common case. AO cannot prove ownership, so
+		// it destroys nothing, records the observation, and converges THIS run
+		// (and only this run) to needs_attention once the probe budget is spent.
+		return c.escalateUnprovenReviewer(ctx, run, reviewStep, reviewRunID, identity, obs.Presence, perr)
 	}
 	if err := ensurer.CancelReviewer(ctx, ref); err != nil {
 		return err

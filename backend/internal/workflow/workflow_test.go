@@ -65,6 +65,12 @@ type fakeStore struct {
 	// transition fails (Checkpoint 8P-E13A.1).
 	listStepsErr error
 
+	// listStepsErrFor injects a storage failure scoped to ONE run, so a test can
+	// prove that a run AO cannot reconcile does not take every other run down
+	// with it (the stale-runtime-pane regression: boot reconciliation used to
+	// abort on the first failure and leave the rest of the fleet unrecovered).
+	listStepsErrFor map[string]error
+
 	// reviewRuns lets the fake honour ReleaseWorkflowStepReviewRunIfNoLateVerdict's
 	// real condition (the run's late verdict) rather than pretending it away.
 	// Nil means "no late verdicts exist", which is true for every fixture that
@@ -231,6 +237,9 @@ func (f *fakeStore) UpdateWorkflowRunState(_ context.Context, id string, expecte
 func (f *fakeStore) ListWorkflowSteps(_ context.Context, runID string) ([]domain.WorkflowStep, error) {
 	if f.listStepsErr != nil {
 		return nil, f.listStepsErr
+	}
+	if err := f.listStepsErrFor[runID]; err != nil {
+		return nil, err
 	}
 	return append([]domain.WorkflowStep{}, f.steps[runID]...), nil
 }

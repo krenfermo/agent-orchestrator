@@ -169,8 +169,18 @@ const (
 	// the plan can move. It is deliberately distinct from
 	// ReasonChildNeedsAttention: the child run finished perfectly well, and
 	// what is stopped is the integration of its result.
-	ReasonTaskParked              = "task_integration_attention"
-	ReasonRecoveryInterrupted     = "recovery_interrupted"
+	ReasonTaskParked          = "task_integration_attention"
+	ReasonRecoveryInterrupted = "recovery_interrupted"
+	// ReasonRecoveryUnreconcilable is a run whose durable state AO could not
+	// reconcile against its runtime at all -- the runtime would not answer, or
+	// answered with something AO refuses to act on (a pane that will not name
+	// its process, a session it cannot prove it owns).
+	//
+	// It is deliberately not self-remediable. The whole point of parking the
+	// run is that re-driving it produced the same unprovable answer every time,
+	// and something outside AO has to change before it can produce a different
+	// one. Parking is scoped to this run: every other run reconciles normally.
+	ReasonRecoveryUnreconcilable  = "recovery_unreconcilable"
 	ReasonWorkerDispatchAmbiguous = "worker_dispatch_ambiguous"
 	ReasonWorkerBlocked           = "worker_blocked"
 	// ReasonReadOnlyWorkspaceMutated is a task the plan declared read-only
@@ -281,6 +291,9 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonReviewStateAmbiguous: {
 		HumanAction: "AO could not prove what the review concluded. Inspect the reviewer session, then continue or cancel this run.",
+	},
+	ReasonRecoveryUnreconcilable: {
+		HumanAction: "AO could not reconcile this run against its runtime (its session or reviewer pane cannot be classified, so AO will neither adopt nor kill it). Check whether that session is still running and close it out, then continue or cancel this run.",
 	},
 	ReasonReviewerLaunchFailed: {
 		HumanAction: "The reviewer could not be launched. Check the reviewer provider's auth and installation, then continue this run.",

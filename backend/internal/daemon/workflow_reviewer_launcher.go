@@ -262,14 +262,18 @@ func (l *workflowReviewerLauncher) CancelReviewer(ctx context.Context, ref workf
 	// and killing something on that basis is the one failure worse than leaving
 	// an orphan.
 	if !presence.LicensesTermination() {
-		return fmt.Errorf("reviewer %s is %s; refusing to terminate a session AO cannot prove it owns",
-			handleID, presence)
+		// Deterministic, and deterministically refused: AO cannot prove this
+		// session is its own, so it will not kill it -- now or on any retry.
+		// Marked unrecoverable so the wake scheduler stops re-driving the run
+		// into the identical refusal instead of parking it for a person.
+		return fmt.Errorf("%w: reviewer %s is %s; refusing to terminate a session AO cannot prove it owns",
+			workflowcore.ErrUnrecoverable, handleID, presence)
 	}
 	reader, ok := l.sessionFactsReader()
 	if !ok || instance == "" {
 		return fmt.Errorf(
-			"reviewer %s cannot be terminated: AO has no stable identity for the session it verified",
-			handleID)
+			"%w: reviewer %s cannot be terminated: AO has no stable identity for the session it verified",
+			workflowcore.ErrUnrecoverable, handleID)
 	}
 
 	// REVALIDATE IMMEDIATELY BEFORE THE DESTRUCTIVE ACT. The verdict above was

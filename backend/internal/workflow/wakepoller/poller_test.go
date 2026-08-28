@@ -3,6 +3,7 @@ package wakepoller_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"testing"
 	"time"
@@ -442,5 +443,100 @@ func TestPoller_SequentialCallsNeverDoubleClaim(t *testing.T) {
 	}
 	if nB != 0 {
 		t.Fatalf("expected instance B to claim 0 while A's lease is fresh, got %d", nB)
+	}
+}
+
+// A DETERMINISTIC FAILURE IS NOT A RETRY CANDIDATE.
+//
+// Production evidence (wf-9405592d): a stale tmux pane made every
+// autonomous_progress wake fail with the identical, unchanging error, and the
+// poller rescheduled it on that basis all night --
+//
+//	wakepoller: wake rescheduled after transient error
+//	err="tmux runtime: invalid pane pid \"\" for instance $34"
+//
+// Nothing about that condition was transient: AO had asked, been answered, and
+// refused to act on the answer. A failure marked workflow.ErrUnrecoverable must
+// therefore CLOSE the wake -- the run is already parked for a person, and only a
+// person continuing it schedules a fresh one.
+func TestPoller_UnrecoverableFailureIsNotRescheduled(t *testing.T) {
+	store := sqlitetest.MustOpen(t)
+	clk := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	sched := wake.New(store, clk.now, newIDSeq(), wake.Config{})
+	stale := fmt.Errorf("%w: tmux runtime: invalid pane pid %q for instance $34",
+		workflowcore.ErrUnrecoverable, "")
+	resumer := &fakeResumer{next: func(int) error { return stale }}
+	poller := wakepoller.New(sched, resumer, wakepoller.Config{})
+	ctx := context.Background()
+
+	if _, err := sched.Schedule(ctx, "wf-1", nil, wake.ReasonAutonomousProgress, nil); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	next, err := sched.NextForRun(ctx, "wf-1")
+	if err != nil || next == nil {
+		t.Fatalf("expected an open wake, got %+v err=%v", next, err)
+	}
+	clk.advance(next.ScheduledAt.Sub(clk.now()) + time.Second)
+
+	n, err := poller.RunDueOnce(ctx)
+	if err != nil {
+		t.Fatalf("RunDueOnce: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("claims = %d, want 1", n)
+	}
+
+	// The wake is closed out, not rescheduled with a backoff.
+	if open, oerr := sched.NextForRun(ctx, "wf-1"); oerr != nil {
+		t.Fatalf("NextForRun: %v", oerr)
+	} else if open != nil {
+		t.Fatalf("a deterministic failure was rescheduled for %s; that is the overnight spin", open.ScheduledAt)
+	}
+
+	// And it stays closed: no amount of elapsed time brings it back.
+	clk.advance(24 * time.Hour)
+	if n, err = poller.RunDueOnce(ctx); err != nil {
+		t.Fatalf("RunDueOnce after a day: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("claims after a day = %d, want 0", n)
+	}
+	if len(resumer.calls) != 1 {
+		t.Fatalf("ContinueRun fired %d times for one unrecoverable condition, want exactly 1", len(resumer.calls))
+	}
+	// This is NOT the capacity-exhaustion path: nothing about it is a budget.
+	if len(resumer.exhaustedCalls) != 0 {
+		t.Fatalf("a deterministic runtime failure was reported as capacity exhaustion: %v", resumer.exhaustedCalls)
+	}
+}
+
+// The same failure WITHOUT the marker is still an ordinary transient one, and
+// still gets the scheduler's backoff. Pinned so the branch above cannot quietly
+// widen into "every error stops retrying".
+func TestPoller_UnmarkedFailureStillReschedules(t *testing.T) {
+	store := sqlitetest.MustOpen(t)
+	clk := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	sched := wake.New(store, clk.now, newIDSeq(), wake.Config{})
+	resumer := &fakeResumer{next: func(int) error { return errors.New("provider hiccup") }}
+	poller := wakepoller.New(sched, resumer, wakepoller.Config{})
+	ctx := context.Background()
+
+	if _, err := sched.Schedule(ctx, "wf-1", nil, wake.ReasonAutonomousProgress, nil); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	next, err := sched.NextForRun(ctx, "wf-1")
+	if err != nil || next == nil {
+		t.Fatalf("expected an open wake, got %+v err=%v", next, err)
+	}
+	clk.advance(next.ScheduledAt.Sub(clk.now()) + time.Second)
+	if _, err := poller.RunDueOnce(ctx); err != nil {
+		t.Fatalf("RunDueOnce: %v", err)
+	}
+	open, oerr := sched.NextForRun(ctx, "wf-1")
+	if oerr != nil {
+		t.Fatalf("NextForRun: %v", oerr)
+	}
+	if open == nil {
+		t.Fatal("a transient failure closed its wake; the run would never be retried")
 	}
 }

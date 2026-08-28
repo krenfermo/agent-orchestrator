@@ -69,6 +69,12 @@ type scriptedTmux struct {
 	// garbleCreateOutput models new-session succeeding without reporting a
 	// usable session id.
 	garbleCreateOutput bool
+	// panePIDText, when set, is what `#{pane_pid}` answers instead of the
+	// session's real pid. It models the two shapes tmux actually produces for a
+	// pane AO cannot inspect: an EMPTY value (a session whose active pane is
+	// being torn down, the state behind the production `invalid pane pid ""`
+	// failure) and a non-numeric one.
+	panePIDText *string
 	// afterOwnerRead fires once the ownership read has been answered, so a test
 	// can restore the original incarnation and produce a true ABA: the name is
 	// surrendered, a stranger answers one query, and the original returns before
@@ -240,6 +246,9 @@ func (s *scriptedTmux) Run(_ context.Context, _ []string, name string, args ...s
 				hook := s.afterPanePIDRead
 				s.afterPanePIDRead = nil
 				defer hook()
+			}
+			if s.panePIDText != nil {
+				return []byte(*s.panePIDText + "\n"), nil
 			}
 			return []byte(strconv.Itoa(sess.panePID) + "\n"), nil
 		case "#{session_id}":

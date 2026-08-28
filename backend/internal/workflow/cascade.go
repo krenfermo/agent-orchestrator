@@ -2,6 +2,7 @@ package workflow
 
 import (
 	stdctx "context"
+	"errors"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
@@ -81,7 +82,27 @@ func (c *Coordinator) advanceReviewFixCycle(ctx stdctx.Context, run domain.Workf
 		// it first means nothing below reasons about a reviewer that should not
 		// exist.
 		if cerr := c.finishPendingReviewCancellations(ctx, run, *reviewStep); cerr != nil {
-			return run, cerr
+			if !errors.Is(cerr, ErrUnrecoverable) {
+				return run, cerr
+			}
+			// A DETERMINISTIC refusal -- a reviewer session AO can neither prove
+			// it owns nor prove is gone. Failing the whole cascade on it made
+			// every reader of this run fail with it: boot reconciliation, every
+			// wake, and an ordinary GET, which is how one stale pane turned into
+			// a repeating 500 on a run nobody could even look at.
+			//
+			// Nothing is adopted and nothing is destroyed. The obligation stays
+			// durable, the run is parked with a reason a person can act on, and
+			// the cascade continues so the rest of this run's state is still
+			// read and reported.
+			if c.log != nil {
+				c.log.Warn("workflow: a reviewer obligation could not be classified; parking this run and continuing",
+					"run", run.ID, "step", reviewStep.ID, "err", cerr)
+			}
+			c.parkUnreconcilableRun(ctx, run, cerr, c.clock())
+			if err := refreshRun(); err != nil {
+				return run, err
+			}
 		}
 		outcome, updatedStep, updatedRun, err := c.ReconcileReviewAuthority(ctx, run, *reviewStep)
 		if err != nil {

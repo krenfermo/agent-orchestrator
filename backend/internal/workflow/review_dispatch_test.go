@@ -297,6 +297,12 @@ type fakeReviewerLauncher struct {
 	// ownedWithoutInstance models a launcher that reports a live reviewer it
 	// cannot pin to an incarnation — the one answer a confirmation must refuse.
 	ownedWithoutInstance bool
+	// strictOwnership makes CancelReviewer behave exactly as the production
+	// launcher does: an identity AO cannot PROVE it owns is refused, with the
+	// deterministic marker that tells the wake scheduler retrying is pointless.
+	// Without it this fake would happily destroy a session production would
+	// never touch, and every test built on it would be testing the fake.
+	strictOwnership bool
 	// afterProbe fires once an observation has been produced, so a test can
 	// replace the session in the window a second look-up would fall into.
 	afterProbe     func()
@@ -908,6 +914,12 @@ func (f *fakeReviewerLauncher) ProbeReviewer(_ context.Context, ref workflowcore
 func (f *fakeReviewerLauncher) CancelReviewer(_ context.Context, ref workflowcore.ReviewerRef) error {
 	handleID := ref.HandleID
 	f.cancelCalls++
+	if f.strictOwnership && (f.probeUnknown || f.foreign[handleID] ||
+		!(f.externalLive[handleID] || f.externalExited[handleID])) {
+		// Production's refusal, verbatim in shape: proof of ownership or nothing
+		// happens, and the refusal is marked deterministic.
+		return fmt.Errorf("%w: reviewer %s cannot be proven AO's own", workflowcore.ErrUnrecoverable, handleID)
+	}
 	if ref.Known() && f.instances[handleID] != ref.InstanceID {
 		// The incarnation AO verified is gone; whatever holds the name now is
 		// not it, and must not be destroyed.

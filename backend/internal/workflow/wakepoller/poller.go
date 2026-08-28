@@ -163,6 +163,14 @@ func (p *Poller) loop(ctx context.Context, done chan<- struct{}) {
 //     resume, ever again, for this run — Complete closes the wake out (a
 //     terminal/missing run can't legally re-park, so no supersession race
 //     is possible here).
+//   - ContinueRun returns workflow.ErrUnrecoverable: the failure is
+//     deterministic -- AO asked, got an answer it refuses to act on, and no
+//     amount of retrying changes it (see that sentinel). Rescheduling would
+//     re-drive the run into the identical error on every tick, forever, which
+//     is exactly the overnight spin this branch exists to stop. The wake is
+//     COMPLETED, not failed: the run is already parked in needs_attention by
+//     whoever raised the condition, and a person continuing the run schedules a
+//     fresh wake.
 //   - ContinueRun returns any other (transient) error: Fail reschedules the
 //     wake with the scheduler's own backoff/budget bookkeeping, exactly as
 //     it does for any other firing failure.
@@ -174,9 +182,16 @@ func (p *Poller) RunDueOnce(ctx context.Context) (int, error) {
 	for _, sch := range claimed {
 		_, resumeErr := p.resumer.ContinueRun(ctx, string(sch.WorkflowRunID))
 		switch {
-		case resumeErr == nil, errors.Is(resumeErr, workflow.ErrNotFound), errors.Is(resumeErr, workflow.ErrAlreadyTerminal):
+		case resumeErr == nil, errors.Is(resumeErr, workflow.ErrNotFound), errors.Is(resumeErr, workflow.ErrAlreadyTerminal),
+			errors.Is(resumeErr, workflow.ErrUnrecoverable):
 			if cerr := p.scheduler.Complete(ctx, sch.ID); cerr != nil {
 				p.logger.Warn("wakepoller: complete wake failed", "wake", sch.ID, "run", sch.WorkflowRunID, "err", cerr)
+				continue
+			}
+			if errors.Is(resumeErr, workflow.ErrUnrecoverable) {
+				// Said plainly, once: this run is not coming back on a timer.
+				p.logger.Warn("wakepoller: deterministic failure, wake closed without rescheduling",
+					"wake", sch.ID, "run", sch.WorkflowRunID, "reason", sch.Reason, "err", resumeErr)
 				continue
 			}
 			p.logger.Info("wakepoller: wake completed", "wake", sch.ID, "run", sch.WorkflowRunID, "reason", sch.Reason, "resumeErr", resumeErr)
