@@ -212,6 +212,10 @@ type masterPlanStore interface {
 	GetWorkflowPlan(ctx stdctx.Context, runID string) (domain.WorkflowPlanRecord, bool, error)
 	StartWorkflowPlanCommand(ctx stdctx.Context, runID, provider, model, manifest string, now time.Time) (bool, error)
 	PersistWorkflowPlanResponse(ctx stdctx.Context, runID, planJSON string, now time.Time) (bool, error)
+	// PersistNormalizedWorkflowPlan re-persists the normalized plan under a
+	// CAS conditioned on the bytes the caller read (P9). false means the row
+	// moved on and this writer is stale.
+	PersistNormalizedWorkflowPlan(ctx stdctx.Context, runID, expected, normalized string, now time.Time) (bool, error)
 	FinishWorkflowPlan(ctx stdctx.Context, runID string, status domain.WorkflowPlanStatus, command domain.WorkflowPlanCommandStatus, validationJSON, hash, errorClass string, now time.Time) (bool, error)
 	InsertWorkflowTasks(ctx stdctx.Context, tasks []domain.WorkflowTask) error
 	ListWorkflowTasks(ctx stdctx.Context, runID string) ([]domain.WorkflowTask, error)
@@ -806,6 +810,62 @@ func (c *Coordinator) CreateRun(ctx stdctx.Context, projectID, objective string,
 }
 
 func (c *Coordinator) createSingleTaskRun(ctx stdctx.Context, projectID, objective string, parentWorkflowID, plannedTaskID *string, verification ...VerificationPlan) (RunDetail, error) {
+	return c.createRunWithPlanArtifact(ctx, projectID, objective, parentWorkflowID, plannedTaskID, nil, verification...)
+}
+
+// plannedTaskArtifact carries the parts of a master plan's task that must be
+// bound into its child run's plan step *at creation*, not one write later.
+//
+// This is CP21 in docs/worker-lifecycle-audit.md, the highest-severity window
+// in the plan segment. dispatchMasterTask used to create the child with
+// BuildPlanArtifact's generic boilerplate and then overwrite the artifact
+// with the planner's real criteria and write intent as a separate statement.
+// A crash in between left a child that looked complete and correct -- owned,
+// policy-frozen, plan step present -- and whose artifact was simply the wrong
+// one. Recovery goes straight to StartRun, which builds the worker prompt
+// from that artifact, so the worker ran against generic acceptance criteria,
+// and an empty WriteIntent (Unspecified) meant a task the plan declared
+// read-only was verified and classified as mutating. Nothing downstream could
+// tell: a plausible artifact is indistinguishable from the right one.
+//
+// Passing it through creation removes the window instead of guarding it: the
+// artifact is part of the same CreateWorkflowRun transaction as the run and
+// its steps, so no crash can separate them.
+type plannedTaskArtifact struct {
+	AcceptanceCriteria []string
+	WriteIntent        domain.WorkflowWriteIntent
+}
+
+func (o *plannedTaskArtifact) applyTo(artifact *PlanArtifact) {
+	if o == nil {
+		return
+	}
+	artifact.AcceptanceCriteria = o.AcceptanceCriteria
+	artifact.WriteIntent = o.WriteIntent
+}
+
+// matches reports whether artifact already carries exactly this task's
+// semantics -- used by recovery to tell a correctly-bound child from one
+// created before this fix (or by a crash) with the generic artifact.
+func (o *plannedTaskArtifact) matches(artifact PlanArtifact) bool {
+	if o == nil {
+		return true
+	}
+	if artifact.WriteIntent != o.WriteIntent {
+		return false
+	}
+	if len(artifact.AcceptanceCriteria) != len(o.AcceptanceCriteria) {
+		return false
+	}
+	for i := range o.AcceptanceCriteria {
+		if artifact.AcceptanceCriteria[i] != o.AcceptanceCriteria[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Coordinator) createRunWithPlanArtifact(ctx stdctx.Context, projectID, objective string, parentWorkflowID, plannedTaskID *string, overlay *plannedTaskArtifact, verification ...VerificationPlan) (RunDetail, error) {
 	if projectID == "" {
 		return RunDetail{}, fmt.Errorf("%w: project id is required", ErrInvalid)
 	}
@@ -822,7 +882,13 @@ func (c *Coordinator) createSingleTaskRun(ctx stdctx.Context, projectID, objecti
 
 	now := c.clock()
 	runID := "wf-" + c.newID()
-	policySnapshot, err := json.Marshal(domain.DefaultWorkflowPolicy())
+	// CP3: creation records that the execution-policy freeze is still OWED,
+	// in the same statement that creates the run. Without that marker a run
+	// whose freeze was lost to a crash is byte-identical to a run that
+	// legitimately carries the default policy, and the silent downgrade of an
+	// autonomous objective to manual is unrecoverable because it is
+	// undetectable. See domain.ExecutionPolicyProvenance.
+	policySnapshot, err := json.Marshal(unfrozenExecutionPolicy(domain.DefaultWorkflowPolicy(), now))
 	if err != nil {
 		return RunDetail{}, fmt.Errorf("marshal default workflow policy: %w", err)
 	}
@@ -841,6 +907,10 @@ func (c *Coordinator) createSingleTaskRun(ctx stdctx.Context, projectID, objecti
 
 	steps := make([]domain.WorkflowStep, 0, len(workflowStepPolicyV1))
 	planArtifact := BuildPlanArtifact(projectID, objective, policyVersionV1, verification...)
+	// CP21: the planned task's real criteria and write intent are bound here,
+	// inside the same transaction that writes the run and its six steps --
+	// never as a follow-up UPDATE a crash can lose.
+	overlay.applyTo(&planArtifact)
 	planArtifactJSON, err := MarshalPlanArtifact(planArtifact)
 	if err != nil {
 		return RunDetail{}, err
@@ -1109,15 +1179,6 @@ func (c *Coordinator) StartRun(ctx stdctx.Context, runID string) (RunDetail, err
 	if run.State.Terminal() {
 		return RunDetail{}, fmt.Errorf("%w: workflow run %q is already %s", ErrAlreadyTerminal, runID, run.State)
 	}
-	if run.State != domain.WorkflowRunPending {
-		return c.GetRun(ctx, runID)
-	}
-
-	now := c.clock()
-	if _, err := c.store.UpdateWorkflowRunState(ctx, runID, domain.WorkflowRunPending, domain.WorkflowRunRunning, now); err != nil {
-		return RunDetail{}, err
-	}
-	run.State = domain.WorkflowRunRunning
 
 	steps, err := c.store.ListWorkflowSteps(ctx, runID)
 	if err != nil {
@@ -1132,9 +1193,51 @@ func (c *Coordinator) StartRun(ctx stdctx.Context, runID string) (RunDetail, err
 			workStep = &steps[i]
 		}
 	}
+
+	// CP24-CP27 (docs/worker-lifecycle-audit.md): StartRun used to refuse
+	// re-entry on `run.State != pending` -- the state its OWN first write
+	// produces. Every one of the four writes that follow that transition is
+	// therefore a crash window with no way back: the run sits `running` with
+	// a `ready`/`running`/`completed` plan step and a `pending` work step,
+	// forever. Boot recovery cannot see it either, because nothing is
+	// contradicting anything; the state is merely unreachable. CP27 is the
+	// purest form: a durably completed producer whose consumer was never
+	// unblocked.
+	//
+	// Re-entry is now conditioned on the OBLIGATION rather than on the
+	// caller's history: if the plan->work unblock this call owes is still
+	// outstanding, StartRun re-enters and finishes it, however many times it
+	// takes. Every write below is a compare-and-set against the state this
+	// call actually observed, so a second concurrent caller loses its CAS and
+	// is rejected rather than double-driving the run.
+	resuming := false
+	if run.State != domain.WorkflowRunPending {
+		if planStep == nil || workStep == nil || !planUnblockOwed(*planStep, *workStep) || !startResumableRunState(run.State) {
+			return c.GetRun(ctx, runID)
+		}
+		resuming = true
+	}
 	if planStep == nil || workStep == nil {
 		return RunDetail{}, fmt.Errorf("%w: workflow run %q is missing its plan/work step", ErrInvalid, runID)
 	}
+
+	now := c.clock()
+	if run.State != domain.WorkflowRunRunning {
+		moved, err := c.store.UpdateWorkflowRunState(ctx, runID, run.State, domain.WorkflowRunRunning, now)
+		if err != nil {
+			return RunDetail{}, err
+		}
+		if !moved {
+			// Someone else moved this run between the read above and here.
+			// Losing the CAS means this writer is stale: it must not carry on
+			// driving a run from a state that no longer exists.
+			return c.GetRun(ctx, runID)
+		}
+	}
+	if resuming {
+		c.recordStartResumed(ctx, run, *planStep, *workStep)
+	}
+	run.State = domain.WorkflowRunRunning
 
 	artifact, err := UnmarshalPlanArtifact(planStep.ArtifactJSON)
 	if err != nil {
@@ -1148,23 +1251,61 @@ func (c *Coordinator) StartRun(ctx stdctx.Context, runID string) (RunDetail, err
 		return RunDetail{}, err
 	}
 
-	if planStep.State == domain.WorkflowStepReady {
-		if _, err := c.store.UpdateWorkflowStepState(ctx, planStep.ID, domain.WorkflowStepReady, domain.WorkflowStepRunning, now); err != nil {
+	planState := planStep.State
+	if planState == domain.WorkflowStepReady {
+		moved, err := c.store.UpdateWorkflowStepState(ctx, planStep.ID, domain.WorkflowStepReady, domain.WorkflowStepRunning, now)
+		if err != nil {
 			return RunDetail{}, err
+		}
+		if moved {
+			planState = domain.WorkflowStepRunning
 		}
 	}
 	if _, err := c.store.UpdateWorkflowStepArtifact(ctx, planStep.ID, artifactJSON, now); err != nil {
 		return RunDetail{}, err
 	}
-	if _, err := c.store.UpdateWorkflowStepState(ctx, planStep.ID, domain.WorkflowStepRunning, domain.WorkflowStepCompleted, now); err != nil {
-		return RunDetail{}, err
+	// CP25/CP26: the plan step is not always `running` on re-entry. Boot
+	// recovery's generic interrupted-step fallback moves a `running` non-work
+	// step to `waiting`, so a resumed StartRun can find it there -- and the
+	// old unconditional running->completed CAS silently matched zero rows,
+	// leaving the plan step parked and the work step about to be dispatched
+	// underneath it. Complete it from wherever it actually is, and treat a
+	// lost CAS as a stale writer rather than as success.
+	if planState != domain.WorkflowStepCompleted {
+		moved, err := c.store.UpdateWorkflowStepState(ctx, planStep.ID, planState, domain.WorkflowStepCompleted, now)
+		if err != nil {
+			return RunDetail{}, err
+		}
+		if !moved {
+			current, ok, gerr := c.getWorkflowStep(ctx, runID, planStep.ID)
+			if gerr != nil {
+				return RunDetail{}, gerr
+			}
+			if !ok || current.State != domain.WorkflowStepCompleted {
+				return RunDetail{}, fmt.Errorf("%w: workflow run %q plan step could not be completed from %s", ErrInvalid, runID, planState)
+			}
+		}
 	}
 
 	if workStep.State == domain.WorkflowStepPending {
-		if _, err := c.store.UpdateWorkflowStepState(ctx, workStep.ID, domain.WorkflowStepPending, domain.WorkflowStepReady, now); err != nil {
+		moved, err := c.store.UpdateWorkflowStepState(ctx, workStep.ID, domain.WorkflowStepPending, domain.WorkflowStepReady, now)
+		if err != nil {
 			return RunDetail{}, err
 		}
-		workStep.State = domain.WorkflowStepReady
+		if !moved {
+			// Another caller unblocked it first; re-read rather than
+			// dispatching against a state this call never observed.
+			current, ok, gerr := c.getWorkflowStep(ctx, runID, workStep.ID)
+			if gerr != nil {
+				return RunDetail{}, gerr
+			}
+			if !ok {
+				return c.GetRun(ctx, runID)
+			}
+			workStep = &current
+		} else {
+			workStep.State = domain.WorkflowStepReady
+		}
 	}
 
 	prompt := BuildWorkStepPromptWithSpec(artifact,
@@ -1255,6 +1396,14 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		if plan, isMaster, perr := c.planStore.GetWorkflowPlan(ctx, runID); perr == nil && isMaster {
 			if plan.Status == domain.WorkflowPlanPending {
 				return c.GeneratePlan(ctx, runID)
+			}
+			// CP11/CP12: this is the wake poller's only entry point, so a
+			// validated-but-never-approved autonomous objective has to be
+			// resolvable from here too -- not only at boot. Without it the
+			// heartbeat wakes, finds a non-pending plan, delegates to GetRun,
+			// and GetRun reconciles nothing because the plan is not approved.
+			if _, aerr := c.resumeValidatedPlan(ctx, run, plan); aerr != nil {
+				return RunDetail{}, aerr
 			}
 			return c.GetRun(ctx, runID)
 		}

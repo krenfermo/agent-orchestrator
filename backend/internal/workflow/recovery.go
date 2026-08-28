@@ -112,6 +112,21 @@ func (c *Coordinator) Reconcile(ctx stdctx.Context) error {
 // one run's failure. Returning early from it is the same "this run is done for
 // this pass" the loop's `continue` used to mean.
 func (c *Coordinator) reconcileRun(ctx stdctx.Context, run domain.WorkflowRun, now time.Time) error {
+	// CP3: before ANY decision is taken from this run's policy, make sure the
+	// policy is one somebody actually chose. A run whose creation recorded
+	// that the execution-policy freeze was owed, and whose freeze never
+	// landed, is re-frozen here from its owner's stored policy; a run that
+	// cannot be re-proven is refused, and the caller parks it. Legacy and
+	// unowned runs are untouched. Everything below -- the autonomous kickoff,
+	// the validated-plan resume, child inheritance -- reads
+	// policyForRun(run), and reading a substituted default there is exactly
+	// how an autonomous objective silently became a manual one.
+	healed, perr := c.ensureFrozenExecutionPolicy(ctx, run)
+	if perr != nil {
+		return perr
+	}
+	run = healed
+
 	if c.planStore != nil {
 		if plan, master, planErr := c.planStore.GetWorkflowPlan(ctx, run.ID); planErr != nil {
 			return planErr
@@ -139,6 +154,19 @@ func (c *Coordinator) reconcileRun(ctx stdctx.Context, run domain.WorkflowRun, n
 				}
 				c.recordAttentionStop(ctx, run, nil, ReasonPlannerAmbiguous,
 					"the planner command was in flight when the daemon restarted, and AO cannot prove whether it produced a plan")
+			case plan.Status == domain.WorkflowPlanValidated:
+				// CP11/CP12: a validated plan that should have auto-approved
+				// had NO resolver at all. Boot recovery's switch had no
+				// `validated` case, getMasterRun reconciles only once
+				// approved, and ContinueRun delegated to GetRun, which does
+				// the same nothing -- so an autonomous objective stalled
+				// silently at "plan ready" and never dispatched a task. For a
+				// MANUAL run the same state is correct (it is the approval
+				// prompt), which is why the stall was invisible; that case is
+				// still left exactly alone here.
+				if _, err := c.resumeValidatedPlan(ctx, run, plan); err != nil {
+					return err
+				}
 			case plan.Status == domain.WorkflowPlanApproved:
 				if err := c.reconcileMasterTasks(ctx, run); err != nil {
 					return err
@@ -147,6 +175,15 @@ func (c *Coordinator) reconcileRun(ctx stdctx.Context, run domain.WorkflowRun, n
 			return nil
 		}
 	}
+	// CP24-CP27: finish an interrupted StartRun before the generic per-step
+	// rules below get a chance to park the run for a crash that is fully
+	// re-derivable. See resumeInterruptedStart.
+	resumed, rerr := c.resumeInterruptedStart(ctx, run)
+	if rerr != nil {
+		return rerr
+	}
+	run = resumed
+
 	steps, err := c.store.ListWorkflowSteps(ctx, run.ID)
 	if err != nil {
 		return err

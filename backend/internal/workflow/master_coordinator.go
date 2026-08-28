@@ -32,7 +32,10 @@ func (c *Coordinator) CreateObjectiveRun(ctx stdctx.Context, projectID, objectiv
 	}
 	now := c.clock()
 	runID := "wf-" + c.newID()
-	snapshot, _ := json.Marshal(domain.DefaultWorkflowPolicy())
+	// CP3: same freeze-owed marker as createRunWithPlanArtifact -- an
+	// objective is exactly where the silent autonomous->manual downgrade
+	// hurts most.
+	snapshot, _ := json.Marshal(unfrozenExecutionPolicy(domain.DefaultWorkflowPolicy(), now))
 	run := domain.WorkflowRun{ID: runID, ProjectID: projectID, Objective: strings.TrimSpace(objective), State: domain.WorkflowRunPending, PolicyVersion: policyVersionV1, PolicySnapshot: string(snapshot), CreatedAt: now, UpdatedAt: now}
 	step := domain.WorkflowStep{ID: "wfs-" + c.newID(), WorkflowRunID: runID, Kind: domain.WorkflowStepPlan, Ordinal: 1, State: domain.WorkflowStepReady, ArtifactJSON: "{}", CreatedAt: now, UpdatedAt: now}
 	if _, _, err := c.store.CreateWorkflowRun(ctx, run, []domain.WorkflowStep{step}); err != nil {
@@ -195,8 +198,30 @@ func (c *Coordinator) finalizeGeneratedPlan(ctx stdctx.Context, run domain.Workf
 	generated, validation, hash := NormalizeAndValidatePlan(generated, run.Objective, MaxPlanSteps)
 	validationJSON, _ := json.Marshal(validation)
 	normalizedJSON, _ := json.Marshal(generated)
+	// P9: this write used to be a guaranteed no-op -- it reused
+	// PersistWorkflowPlanResponse, whose CAS requires command_status =
+	// 'running', which the response write itself has already moved to
+	// 'responded'. Zero rows, every time, result discarded. It is now a
+	// dedicated statement whose CAS matches the state that actually holds and
+	// is additionally conditioned on the exact bytes this call read, so a
+	// stale writer cannot clobber a newer plan. The result is checked: a
+	// refusal that is not already the value we wanted is a stale writer, and
+	// this call must not continue as if its normalization had landed.
 	if string(normalizedJSON) != record.GeneratedPlanJSON {
-		_, _ = c.planStore.PersistWorkflowPlanResponse(ctx, run.ID, string(normalizedJSON), c.clock())
+		moved, perr := c.planStore.PersistNormalizedWorkflowPlan(ctx, run.ID, record.GeneratedPlanJSON, string(normalizedJSON), c.clock())
+		if perr != nil {
+			return RunDetail{}, perr
+		}
+		if !moved {
+			current, found, gerr := c.planStore.GetWorkflowPlan(ctx, run.ID)
+			if gerr != nil {
+				return RunDetail{}, gerr
+			}
+			if !found || current.GeneratedPlanJSON != string(normalizedJSON) {
+				return RunDetail{}, fmt.Errorf("%w: normalized plan for run %s lost the compare-and-set; another writer moved it", ErrPlanLocked, run.ID)
+			}
+		}
+		record.GeneratedPlanJSON = string(normalizedJSON)
 	}
 	if !validation.Valid {
 		_, _ = c.planStore.FinishWorkflowPlan(ctx, run.ID, domain.WorkflowPlanInvalid, domain.WorkflowPlanCommandFailed, string(validationJSON), hash, "planner_policy_violation", c.clock())
@@ -206,9 +231,31 @@ func (c *Coordinator) finalizeGeneratedPlan(ctx stdctx.Context, run domain.Workf
 		c.stopPlanningStep(ctx, run.ID)
 		return c.GetRun(ctx, run.ID)
 	}
+	// CP9(b): the task identity a replay computes must be the identity the
+	// first pass persisted, or the FK-bound relationship insert below names
+	// rows that do not exist and this objective is parked forever. Two
+	// sources, in priority order, and neither of them is a fresh id:
+	//
+	//  1. whatever is already persisted under this run's natural key
+	//     (workflow_run_id, plan_step_id) — authoritative, and what keeps a
+	//     plan written before this fix (random ids) replaying correctly;
+	//  2. canonicalTaskID, derived from that same natural key, for a task
+	//     that has never been written.
+	existingTasks, err := c.planStore.ListWorkflowTasks(ctx, run.ID)
+	if err != nil {
+		return RunDetail{}, err
+	}
+	persistedTaskID := make(map[string]string, len(existingTasks))
+	for _, t := range existingTasks {
+		persistedTaskID[t.PlanStepID] = t.ID
+	}
 	idByPlan := map[string]string{}
 	for _, s := range generated.Steps {
-		idByPlan[s.ID] = "wft-" + c.newID()
+		if id, ok := persistedTaskID[s.ID]; ok {
+			idByPlan[s.ID] = id
+			continue
+		}
+		idByPlan[s.ID] = canonicalTaskID(run.ID, s.ID)
 	}
 	tasks := make([]domain.WorkflowTask, 0, len(generated.Steps))
 	now := c.clock()
@@ -256,6 +303,17 @@ func (c *Coordinator) finalizeGeneratedPlan(ctx stdctx.Context, run domain.Workf
 	for i := range graph.Relationships {
 		graph.Relationships[i].CreatedAt = now
 	}
+	// CP9(b), second half: relationship rows are FK-bound to workflow_tasks,
+	// so before writing them, prove against the durable rows -- not against
+	// the in-memory `tasks` slice this pass just built -- that every endpoint
+	// resolves. Re-reading is what turns "the insert exploded on a foreign
+	// key and parked the run forever" into a named, actionable refusal, and
+	// with canonical ids above it is expected to pass on every replay.
+	if err := c.verifyRelationshipEndpoints(ctx, run.ID, graph.Relationships); err != nil {
+		return RunDetail{}, err
+	}
+	// The upsert is keyed on (task_id, related_task_id), so re-running this
+	// with the same canonical ids rewrites the same verdicts in place.
 	if err := c.planStore.ReplaceWorkflowTaskRelationships(ctx, graph.Relationships); err != nil {
 		return RunDetail{}, err
 	}
@@ -1072,6 +1130,27 @@ func (c *Coordinator) dispatchMasterTask(ctx stdctx.Context, parent domain.Workf
 		if perr := c.stampChildOwnership(ctx, id, parent); perr != nil {
 			return perr
 		}
+		// CP19: the recovery branch used to stamp ownership and go straight to
+		// StartRun, never re-running the policy inheritance. A crash between
+		// the child's creation and inheritExecutionPolicySnapshot therefore
+		// left the child of an autonomous objective durably NON-autonomous,
+		// routing on default priorities, permanently and silently. The
+		// inheritance is idempotent, so re-running it here costs nothing and
+		// closes the window; requireInheritedExecutionPolicy then refuses to
+		// dispatch a child whose policy provenance cannot be proven against
+		// its parent's.
+		if perr := c.inheritExecutionPolicySnapshot(ctx, id, parent); perr != nil {
+			return perr
+		}
+		if perr := c.requireInheritedExecutionPolicy(ctx, id, parent); perr != nil {
+			return perr
+		}
+		// CP21: heal a child whose plan step carries the generic artifact --
+		// either created before criteria travelled through creation, or by a
+		// crash in that old two-write window.
+		if perr := c.healPlannedTaskArtifact(ctx, id, task); perr != nil {
+			return perr
+		}
 		if perr := c.requireChildOwnershipForDispatch(ctx, id, parent); perr != nil {
 			return perr
 		}
@@ -1097,19 +1176,11 @@ func (c *Coordinator) dispatchMasterTask(ctx stdctx.Context, parent domain.Workf
 		}
 	}
 
-	artifact := BuildPlanArtifact(parent.ProjectID, objective, policyVersionV1, verify)
-	artifact.AcceptanceCriteria = criteria
-	// The plan's write intent travels with the criteria it belongs to. Read
-	// from the task's own durable scope rather than re-read from the plan JSON,
-	// so a re-dispatch after a restart resolves the same declaration the first
-	// dispatch did. A scope that will not parse yields Unspecified, which is
-	// treated as mutating -- the conservative answer, and the same one every
-	// pre-existing task gets.
-	if scope, serr := UnmarshalTaskScope(task.ScopeJSON); serr == nil {
-		artifact.WriteIntent = domain.NormalizeWorkflowWriteIntent(string(scope.WriteIntent))
-	}
+	overlay := plannedTaskArtifactFor(task, criteria)
 	parentID, taskID := parent.ID, task.ID
-	child, err := c.createSingleTaskRun(ctx, parent.ProjectID, objective, &parentID, &taskID, verify)
+	// CP21: criteria + write intent travel INTO creation, so the child's plan
+	// step never durably exists carrying the generic artifact.
+	child, err := c.createRunWithPlanArtifact(ctx, parent.ProjectID, objective, &parentID, &taskID, overlay, verify)
 	if err != nil {
 		return err
 	}
@@ -1128,6 +1199,9 @@ func (c *Coordinator) dispatchMasterTask(ctx stdctx.Context, parent domain.Workf
 	if perr := c.inheritExecutionPolicySnapshot(ctx, child.Run.ID, parent); perr != nil {
 		return perr
 	}
+	if perr := c.requireInheritedExecutionPolicy(ctx, child.Run.ID, parent); perr != nil {
+		return perr
+	}
 	if len(task.Dependencies) > 0 {
 		decision := domain.SessionLifecycleDecision{
 			Action: domain.LifecycleNewSession, Role: domain.WorkflowRoleWorker,
@@ -1138,13 +1212,6 @@ func (c *Coordinator) dispatchMasterTask(ctx stdctx.Context, parent domain.Workf
 			decision.ContextPackHash = depPack.ContentHash()
 		}
 		_ = c.persistSessionLifecycleDecision(ctx, child.Run, nil, decision, depPack)
-	}
-	// Replace the deterministic generic criteria with the planner's accepted criteria.
-	for _, s := range child.Steps {
-		if s.Step.Kind == domain.WorkflowStepPlan {
-			raw, _ := MarshalPlanArtifact(artifact)
-			_, _ = c.store.UpdateWorkflowStepArtifact(ctx, s.Step.ID, raw, c.clock())
-		}
 	}
 	if _, err := c.planStore.SetWorkflowTaskExecutionRun(ctx, task.ID, child.Run.ID, c.clock()); err != nil {
 		return err

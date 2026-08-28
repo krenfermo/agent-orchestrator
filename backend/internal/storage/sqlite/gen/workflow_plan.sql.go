@@ -419,6 +419,32 @@ func (q *Queries) ParkWorkflowTaskForAttention(ctx context.Context, arg ParkWork
 	return result.RowsAffected()
 }
 
+const persistNormalizedWorkflowPlan = `-- name: PersistNormalizedWorkflowPlan :execrows
+UPDATE workflow_plans SET generated_plan_json = ?, updated_at = ?
+WHERE workflow_run_id = ? AND status = 'running' AND command_status = 'responded'
+    AND generated_plan_json = ?
+`
+
+type PersistNormalizedWorkflowPlanParams struct {
+	GeneratedPlanJson string
+	UpdatedAt         time.Time
+	WorkflowRunID     string
+	ExpectedPlanJson  string
+}
+
+func (q *Queries) PersistNormalizedWorkflowPlan(ctx context.Context, arg PersistNormalizedWorkflowPlanParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, persistNormalizedWorkflowPlan,
+		arg.GeneratedPlanJson,
+		arg.UpdatedAt,
+		arg.WorkflowRunID,
+		arg.ExpectedPlanJson,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const persistWorkflowPlanResponse = `-- name: PersistWorkflowPlanResponse :execrows
 UPDATE workflow_plans SET command_status = 'responded', generated_plan_json = ?, generated_at = ?, updated_at = ?
 WHERE workflow_run_id = ? AND status = 'running' AND command_status = 'running'

@@ -16,6 +16,20 @@ WHERE workflow_run_id = ? AND status = 'pending' AND command_status IN ('idle','
 UPDATE workflow_plans SET command_status = 'responded', generated_plan_json = ?, generated_at = ?, updated_at = ?
 WHERE workflow_run_id = ? AND status = 'running' AND command_status = 'running';
 
+-- name: PersistNormalizedWorkflowPlan :execrows
+-- P9 (docs/worker-lifecycle-audit.md): re-persisting the NORMALIZED plan is a
+-- distinct write from PersistWorkflowPlanResponse and must not reuse its CAS.
+-- The response write moves command_status running -> responded; by the time
+-- normalization has run, command_status is already 'responded', so the old
+-- statement matched zero rows every time and the normalized form only ever
+-- survived in memory. This one is conditioned on the state that actually
+-- holds (running/responded) AND on the exact bytes the caller read, so a
+-- writer working from a stale read of generated_plan_json is rejected rather
+-- than clobbering a newer plan.
+UPDATE workflow_plans SET generated_plan_json = ?, updated_at = ?
+WHERE workflow_run_id = ? AND status = 'running' AND command_status = 'responded'
+    AND generated_plan_json = ?;
+
 -- name: FinishWorkflowPlan :execrows
 UPDATE workflow_plans SET status = ?, command_status = ?, validation_json = ?, plan_hash = ?,
     error_class = ?, updated_at = ?

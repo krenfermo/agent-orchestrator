@@ -183,10 +183,18 @@ func TestReconcile_OneUnreconcilableRunDoesNotAbortTheOthers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	planStep := other.Steps[0].Step
-	if ok, uerr := f.store.UpdateWorkflowStepState(ctx, planStep.ID,
+	// The verify step, not the plan step: since CP24-CP27 an interrupted plan
+	// step is re-derivable and boot recovery finishes it instead of parking the
+	// run. Verify is still a step kind with no independent fact source, which
+	// is the condition this test needs.
+	interruptedStep := other.Steps[4].Step
+	if ok, uerr := f.store.UpdateWorkflowStepState(ctx, interruptedStep.ID,
+		domain.WorkflowStepPending, domain.WorkflowStepReady, f.clk.Now()); uerr != nil || !ok {
+		t.Fatalf("seed ready verify step: ok=%v err=%v", ok, uerr)
+	}
+	if ok, uerr := f.store.UpdateWorkflowStepState(ctx, interruptedStep.ID,
 		domain.WorkflowStepReady, domain.WorkflowStepRunning, f.clk.Now()); uerr != nil || !ok {
-		t.Fatalf("seed running plan step: ok=%v err=%v", ok, uerr)
+		t.Fatalf("seed running verify step: ok=%v err=%v", ok, uerr)
 	}
 	if ok, uerr := f.store.UpdateWorkflowRunState(ctx, other.Run.ID,
 		domain.WorkflowRunPending, domain.WorkflowRunRunning, f.clk.Now()); uerr != nil || !ok {
@@ -220,8 +228,8 @@ func TestReconcile_OneUnreconcilableRunDoesNotAbortTheOthers(t *testing.T) {
 	if serr != nil {
 		t.Fatalf("ListWorkflowSteps(other): %v", serr)
 	}
-	if otherSteps[0].State != domain.WorkflowStepWaiting {
-		t.Fatalf("unrelated plan step = %q, want waiting", otherSteps[0].State)
+	if otherSteps[4].State != domain.WorkflowStepWaiting {
+		t.Fatalf("unrelated verify step = %q, want waiting", otherSteps[4].State)
 	}
 
 	// The failing run is parked with a reason a person can act on, rather than

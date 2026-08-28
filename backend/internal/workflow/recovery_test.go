@@ -19,14 +19,22 @@ func TestReconcileMovesInterruptedStepsAndRunToNeedsAttention(t *testing.T) {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	runID := detail.Run.ID
-	firstStepID := detail.Steps[0].Step.ID
+	// The VERIFY step, not the plan step: since CP24-CP27 the plan step is no
+	// longer an example of "mid-execution with no independent fact source" --
+	// its work is a pure template expansion boot recovery now re-derives and
+	// finishes (see resumeInterruptedStart). The generic interrupted-step rule
+	// this test covers is unchanged, and verify is a step kind it still owns.
+	interruptedStepID := detail.Steps[4].Step.ID
 
 	now := time.Now().UTC()
 	if _, err := store.UpdateWorkflowRunState(ctx, runID, domain.WorkflowRunPending, domain.WorkflowRunRunning, now); err != nil {
 		t.Fatalf("force run running: %v", err)
 	}
-	if _, err := store.UpdateWorkflowStepState(ctx, firstStepID, domain.WorkflowStepReady, domain.WorkflowStepRunning, now); err != nil {
-		t.Fatalf("force step running: %v", err)
+	if ok, err := store.UpdateWorkflowStepState(ctx, interruptedStepID, domain.WorkflowStepPending, domain.WorkflowStepReady, now); err != nil || !ok {
+		t.Fatalf("force step ready: ok=%v err=%v", ok, err)
+	}
+	if ok, err := store.UpdateWorkflowStepState(ctx, interruptedStepID, domain.WorkflowStepReady, domain.WorkflowStepRunning, now); err != nil || !ok {
+		t.Fatalf("force step running: ok=%v err=%v", ok, err)
 	}
 
 	if err := c.Reconcile(ctx); err != nil {
@@ -40,8 +48,8 @@ func TestReconcileMovesInterruptedStepsAndRunToNeedsAttention(t *testing.T) {
 	if got.Run.State != domain.WorkflowRunNeedsAttention {
 		t.Fatalf("run state after reconcile = %q, want needs_attention", got.Run.State)
 	}
-	if got.Steps[0].Step.State != domain.WorkflowStepWaiting {
-		t.Fatalf("step state after reconcile = %q, want waiting", got.Steps[0].Step.State)
+	if got.Steps[4].Step.State != domain.WorkflowStepWaiting {
+		t.Fatalf("step state after reconcile = %q, want waiting", got.Steps[4].Step.State)
 	}
 
 	// Idempotent: running Reconcile a second time changes nothing further.
@@ -52,7 +60,7 @@ func TestReconcileMovesInterruptedStepsAndRunToNeedsAttention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRun after second reconcile: %v", err)
 	}
-	if again.Run.State != domain.WorkflowRunNeedsAttention || again.Steps[0].Step.State != domain.WorkflowStepWaiting {
+	if again.Run.State != domain.WorkflowRunNeedsAttention || again.Steps[4].Step.State != domain.WorkflowStepWaiting {
 		t.Fatalf("state changed on second reconcile: run=%q step=%q", again.Run.State, again.Steps[0].Step.State)
 	}
 }
@@ -83,14 +91,20 @@ func TestReconcileAfterRestartRealStore(t *testing.T) {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	runID := detail.Run.ID
-	firstStepID := detail.Steps[0].Step.ID
+	// See TestReconcileMovesInterruptedStepsAndRunToNeedsAttention: the verify
+	// step is the one with no independent fact source now that the plan step's
+	// interrupted start is re-derivable.
+	interruptedStepID := detail.Steps[4].Step.ID
 
 	now := time.Now().UTC()
 	if _, err := store1.UpdateWorkflowRunState(ctx, runID, domain.WorkflowRunPending, domain.WorkflowRunRunning, now); err != nil {
 		t.Fatalf("force run running: %v", err)
 	}
-	if _, err := store1.UpdateWorkflowStepState(ctx, firstStepID, domain.WorkflowStepReady, domain.WorkflowStepRunning, now); err != nil {
-		t.Fatalf("force step running: %v", err)
+	if ok, err := store1.UpdateWorkflowStepState(ctx, interruptedStepID, domain.WorkflowStepPending, domain.WorkflowStepReady, now); err != nil || !ok {
+		t.Fatalf("force step ready: ok=%v err=%v", ok, err)
+	}
+	if ok, err := store1.UpdateWorkflowStepState(ctx, interruptedStepID, domain.WorkflowStepReady, domain.WorkflowStepRunning, now); err != nil || !ok {
+		t.Fatalf("force step running: ok=%v err=%v", ok, err)
 	}
 	if err := store1.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
@@ -114,8 +128,8 @@ func TestReconcileAfterRestartRealStore(t *testing.T) {
 	if got.Run.State != domain.WorkflowRunNeedsAttention {
 		t.Fatalf("run state after restart reconcile = %q, want needs_attention", got.Run.State)
 	}
-	if got.Steps[0].Step.State != domain.WorkflowStepWaiting {
-		t.Fatalf("step state after restart reconcile = %q, want waiting", got.Steps[0].Step.State)
+	if got.Steps[4].Step.State != domain.WorkflowStepWaiting {
+		t.Fatalf("step state after restart reconcile = %q, want waiting", got.Steps[4].Step.State)
 	}
 
 	if err := coord2.Reconcile(ctx); err != nil {
@@ -125,7 +139,7 @@ func TestReconcileAfterRestartRealStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRun after second restart reconcile: %v", err)
 	}
-	if again.Run.State != domain.WorkflowRunNeedsAttention || again.Steps[0].Step.State != domain.WorkflowStepWaiting {
-		t.Fatalf("state changed on second post-restart reconcile: run=%q step=%q", again.Run.State, again.Steps[0].Step.State)
+	if again.Run.State != domain.WorkflowRunNeedsAttention || again.Steps[4].Step.State != domain.WorkflowStepWaiting {
+		t.Fatalf("state changed on second post-restart reconcile: run=%q step=%q", again.Run.State, again.Steps[4].Step.State)
 	}
 }

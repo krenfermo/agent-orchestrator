@@ -60,6 +60,19 @@ func (s *Store) PersistWorkflowPlanResponse(ctx context.Context, runID, planJSON
 	return n > 0, err
 }
 
+// PersistNormalizedWorkflowPlan re-persists the normalized form of an
+// already-responded plan, conditioned on the exact bytes the caller read
+// (expected). Returns false when the row moved on -- a different plan status,
+// a different command status, or a concurrent writer that already replaced
+// the JSON -- so the caller can refuse rather than assume its write landed.
+// See P9 in docs/worker-lifecycle-audit.md.
+func (s *Store) PersistNormalizedWorkflowPlan(ctx context.Context, runID, expected, normalized string, now time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	n, err := s.qw.PersistNormalizedWorkflowPlan(ctx, gen.PersistNormalizedWorkflowPlanParams{GeneratedPlanJson: normalized, UpdatedAt: now, WorkflowRunID: runID, ExpectedPlanJson: expected})
+	return n > 0, err
+}
+
 func (s *Store) FinishWorkflowPlan(ctx context.Context, runID string, status domain.WorkflowPlanStatus, command domain.WorkflowPlanCommandStatus, validationJSON, hash, errorClass string, now time.Time) (bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()

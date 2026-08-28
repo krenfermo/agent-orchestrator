@@ -1,5 +1,7 @@
 package domain
 
+import "time"
+
 // WorkflowPolicy is the centralized, versioned set of tunable knobs a
 // workflow run's execution obeys (Checkpoint 8D). It is serialized into
 // workflow_runs.policy_snapshot at CreateRun time and read back from there by
@@ -87,6 +89,83 @@ type ExecutionPolicySnapshot struct {
 	DecisionResolverPriority []ProviderProfileID `json:"decisionResolverPriority"`
 	FallbackBehavior         FallbackBehavior    `json:"fallbackBehavior"`
 	ReviewIndependence       ReviewIndependence  `json:"reviewIndependence"`
+	// Provenance records HOW this snapshot came to hold these values. It
+	// exists because the freeze is a second write that follows run creation,
+	// and a crash in between used to leave a run carrying
+	// DefaultWorkflowPolicy() -- AutonomousMode=false, no routing priorities
+	// -- with absolutely nothing on disk saying that was an accident rather
+	// than the owner's choice (CP3/CP19 in docs/worker-lifecycle-audit.md).
+	// An objective a person created as autonomous became durably manual, and
+	// a child of an autonomous objective became durably non-autonomous, and
+	// no reader could tell. Recording the source makes the difference
+	// provable, which is what lets recovery heal it and lets dispatch refuse
+	// when it cannot.
+	//
+	// Zero value (Source == "") is a snapshot written before provenance
+	// existed. It is never treated as a defect and never healed: legacy runs
+	// behave exactly as they did.
+	Provenance ExecutionPolicyProvenance `json:"provenance,omitempty"`
+}
+
+// ExecutionPolicyProvenanceSource names how a run's frozen execution policy
+// was obtained.
+type ExecutionPolicyProvenanceSource string
+
+const (
+	// ExecutionPolicyUnfrozen is stamped by run creation itself: "this run
+	// exists, and the freeze that belongs to it is still owed". A run left in
+	// this state by a crash is exactly CP3's window, and it is distinguishable
+	// from a legacy snapshot (Source == "") precisely because creation said so.
+	ExecutionPolicyUnfrozen ExecutionPolicyProvenanceSource = "unfrozen"
+	// ExecutionPolicyFrozen is the normal freeze, from the resolved owner's
+	// stored (or bootstrap-default) execution policy at creation time.
+	ExecutionPolicyFrozen ExecutionPolicyProvenanceSource = "frozen"
+	// ExecutionPolicyRecovered is a freeze performed by recovery, after a
+	// crash lost the original one. It is a separate source on purpose: it
+	// re-derives from the owner's stored policy, which is the best provable
+	// answer, but it is NOT the create request's own per-run choice and must
+	// never claim to be.
+	ExecutionPolicyRecovered ExecutionPolicyProvenanceSource = "recovered"
+	// ExecutionPolicyInherited is a master task's child run, which copies its
+	// parent objective's already-frozen policy verbatim and records which
+	// parent it came from.
+	ExecutionPolicyInherited ExecutionPolicyProvenanceSource = "inherited"
+)
+
+// ExecutionPolicyProvenance is the durable record of where a run's frozen
+// execution policy came from. It is evidence, never a substitute for the
+// policy itself: nothing here is ever synthesized to make a run look proven.
+type ExecutionPolicyProvenance struct {
+	Source ExecutionPolicyProvenanceSource `json:"source,omitempty"`
+	// OwnerID is the identity the freeze was resolved against, for frozen and
+	// recovered snapshots.
+	OwnerID UserID `json:"ownerId,omitempty"`
+	// ParentRunID is the objective a child inherited from, for inherited
+	// snapshots.
+	ParentRunID string `json:"parentRunId,omitempty"`
+	// AutonomousRequested is the create request's explicit per-run
+	// Manual/Autonomous choice, when there was one. nil means the owner's
+	// stored/default policy decided it.
+	AutonomousRequested *bool `json:"autonomousRequested,omitempty"`
+	// At is when this provenance was recorded.
+	At time.Time `json:"at,omitempty"`
+}
+
+// Proven reports whether this snapshot's execution policy can be traced to a
+// real source. A legacy snapshot (Source == "") is deliberately NOT proven and
+// deliberately never refused -- see Unproven.
+func (p ExecutionPolicyProvenance) Proven() bool {
+	switch p.Source {
+	case ExecutionPolicyFrozen, ExecutionPolicyRecovered, ExecutionPolicyInherited:
+		return true
+	}
+	return false
+}
+
+// Unproven reports the one state that is a defect rather than history: run
+// creation recorded that a freeze was owed, and it never landed.
+func (p ExecutionPolicyProvenance) Unproven() bool {
+	return p.Source == ExecutionPolicyUnfrozen
 }
 
 // ExecutionPolicySnapshotFrom captures a point-in-time copy of a

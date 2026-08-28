@@ -3,6 +3,8 @@ package workflow
 import (
 	stdctx "context"
 	"encoding/json"
+	"fmt"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/registry"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -134,6 +136,15 @@ func (c *Coordinator) ApplyExecutionPolicySnapshot(ctx stdctx.Context, runID str
 	if autonomousOverride != nil {
 		execution.AutonomousMode = *autonomousOverride
 	}
+	// CP3: record where these values came from, in the same write that
+	// installs them. A run whose provenance says "frozen" can never be
+	// mistaken later for one whose freeze was lost.
+	execution.Provenance = domain.ExecutionPolicyProvenance{
+		Source:              domain.ExecutionPolicyFrozen,
+		OwnerID:             userID,
+		AutonomousRequested: autonomousOverride,
+		At:                  c.clock(),
+	}
 	policy.Execution = execution
 	snapshotJSON, err := json.Marshal(policy)
 	if err != nil {
@@ -181,7 +192,19 @@ func (c *Coordinator) maybeKickoffAutonomousPlanning(ctx stdctx.Context, run dom
 // child has no ownership of its own to resolve these profile IDs against.
 func (c *Coordinator) inheritExecutionPolicySnapshot(ctx stdctx.Context, childRunID string, parent domain.WorkflowRun) error {
 	parentPolicy := policyForRun(parent)
-	if !snapshotHasPriorities(parentPolicy.Execution) {
+	// CP19: the old guard returned early whenever the parent's snapshot had
+	// no routing priorities, which meant AutonomousMode was NOT inherited for
+	// exactly the parents most likely to be autonomous-but-profile-less. The
+	// whole frozen execution policy is copied now; routingInputsForRole
+	// already handles a priority-less snapshot by resolving fresh, so copying
+	// one changes no routing decision, and it stops the child from silently
+	// disagreeing with its parent about autonomy.
+	//
+	// Nothing is copied from a parent that predates provenance AND carries no
+	// priorities: that is a pure legacy default, and rewriting the child's
+	// snapshot from it would change no value while inventing a provenance
+	// record for history that has none.
+	if parentPolicy.Execution.Provenance.Source == "" && !snapshotHasPriorities(parentPolicy.Execution) {
 		return nil
 	}
 	child, ok, err := c.store.GetWorkflowRun(ctx, childRunID)
@@ -190,12 +213,136 @@ func (c *Coordinator) inheritExecutionPolicySnapshot(ctx stdctx.Context, childRu
 	}
 	childPolicy := policyForRun(child)
 	childPolicy.Execution = parentPolicy.Execution
+	childPolicy.Execution.Provenance = domain.ExecutionPolicyProvenance{
+		Source:              domain.ExecutionPolicyInherited,
+		OwnerID:             parentPolicy.Execution.Provenance.OwnerID,
+		ParentRunID:         parent.ID,
+		AutonomousRequested: parentPolicy.Execution.Provenance.AutonomousRequested,
+		At:                  c.clock(),
+	}
 	snapshotJSON, err := json.Marshal(childPolicy)
 	if err != nil {
 		return err
 	}
 	_, err = c.store.UpdateWorkflowRunPolicySnapshot(ctx, childRunID, string(snapshotJSON), c.clock())
 	return err
+}
+
+// requireInheritedExecutionPolicy is CP19's fail-closed gate: a master task's
+// child must never dispatch a provider process while it cannot PROVE it is
+// running under its parent objective's frozen execution policy.
+//
+// It is deliberately scoped by what the parent itself can prove. A parent
+// whose own snapshot predates provenance has nothing to inherit and nothing
+// to check, so this is a no-op for every pre-existing run -- the compatibility
+// stance stampChildOwnership/requireChildOwnershipForDispatch already take.
+// When the parent IS proven, the child must carry an "inherited" record
+// naming that parent, and must agree with it on autonomy. Anything else means
+// the inheritance write did not land, and the child would otherwise run under
+// a substituted default while every durable row looked healthy.
+func (c *Coordinator) requireInheritedExecutionPolicy(ctx stdctx.Context, childRunID string, parent domain.WorkflowRun) error {
+	parentPolicy := policyForRun(parent)
+	if !parentPolicy.Execution.Provenance.Proven() {
+		return nil
+	}
+	child, ok, err := c.store.GetWorkflowRun(ctx, childRunID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: child run %s", ErrNotFound, childRunID)
+	}
+	childPolicy := policyForRun(child)
+	prov := childPolicy.Execution.Provenance
+	if prov.Source != domain.ExecutionPolicyInherited || prov.ParentRunID != parent.ID {
+		return fmt.Errorf("%w: child run %s cannot prove it inherited parent %s's frozen execution policy (source=%q parent=%q)",
+			ErrInvalid, childRunID, parent.ID, prov.Source, prov.ParentRunID)
+	}
+	if childPolicy.Execution.AutonomousMode != parentPolicy.Execution.AutonomousMode {
+		return fmt.Errorf("%w: child run %s autonomy (%t) disagrees with parent %s (%t)",
+			ErrInvalid, childRunID, childPolicy.Execution.AutonomousMode, parent.ID, parentPolicy.Execution.AutonomousMode)
+	}
+	return nil
+}
+
+// unfrozenExecutionPolicy stamps the "freeze still owed" marker onto a policy
+// at run-creation time. See domain.ExecutionPolicyUnfrozen.
+func unfrozenExecutionPolicy(policy domain.WorkflowPolicy, now time.Time) domain.WorkflowPolicy {
+	policy.Execution.Provenance = domain.ExecutionPolicyProvenance{Source: domain.ExecutionPolicyUnfrozen, At: now}
+	return policy
+}
+
+// ensureFrozenExecutionPolicy is CP3's recovery half: heal a run whose
+// creation recorded that a freeze was owed and whose freeze never landed, and
+// refuse to keep driving it if the heal cannot prove a policy.
+//
+// Three populations, three answers:
+//
+//   - Provenance already proven, or a legacy snapshot (Source == ""): no-op.
+//     Legacy runs are never touched and never refused.
+//   - Unfrozen with no resolved owner: also a no-op. There is no identity to
+//     freeze against, so the default policy is the honest answer and this is
+//     exactly pre-existing behaviour.
+//   - Unfrozen and owned: the crash window. Re-freeze from the owner's stored
+//     policy and record it as "recovered", never as the original create-time
+//     freeze -- the create request's own per-run autonomy choice was never
+//     durable and is not invented here. If the re-freeze still cannot produce
+//     a proven snapshot, this returns an error and the caller parks the run,
+//     rather than letting it run on a policy nobody chose.
+//
+// A child run is skipped entirely: its policy comes from its parent, not from
+// its owner's live settings, and dispatchMasterTask's recovery branch is what
+// re-runs that inheritance.
+func (c *Coordinator) ensureFrozenExecutionPolicy(ctx stdctx.Context, run domain.WorkflowRun) (domain.WorkflowRun, error) {
+	if run.ParentWorkflowID != nil {
+		return run, nil
+	}
+	if !policyForRun(run).Execution.Provenance.Unproven() {
+		return run, nil
+	}
+	owner := c.runOwner(ctx, run.ID)
+	if owner == "" {
+		return run, nil
+	}
+	if err := c.applyRecoveredExecutionPolicySnapshot(ctx, run, owner); err != nil {
+		return run, err
+	}
+	refreshed, ok, err := c.store.GetWorkflowRun(ctx, run.ID)
+	if err != nil {
+		return run, err
+	}
+	if !ok {
+		return run, nil
+	}
+	if !policyForRun(refreshed).Execution.Provenance.Proven() {
+		return refreshed, fmt.Errorf("%w: run %s is owned by %s but its execution policy was never frozen and cannot be re-proven",
+			ErrInvalid, run.ID, owner)
+	}
+	return refreshed, nil
+}
+
+// applyRecoveredExecutionPolicySnapshot writes the recovery freeze. It is a
+// sibling of ApplyExecutionPolicySnapshot rather than a call into it, because
+// the two must not claim the same provenance: this one re-derives from the
+// owner's stored policy after the fact and says so.
+func (c *Coordinator) applyRecoveredExecutionPolicySnapshot(ctx stdctx.Context, run domain.WorkflowRun, owner domain.UserID) error {
+	policy := policyForRun(run)
+	execution := c.executionPolicyForSnapshot(ctx, owner)
+	execution.Provenance = domain.ExecutionPolicyProvenance{
+		Source:  domain.ExecutionPolicyRecovered,
+		OwnerID: owner,
+		At:      c.clock(),
+	}
+	policy.Execution = execution
+	snapshotJSON, err := json.Marshal(policy)
+	if err != nil {
+		return err
+	}
+	if _, err := c.store.UpdateWorkflowRunPolicySnapshot(ctx, run.ID, string(snapshotJSON), c.clock()); err != nil {
+		return err
+	}
+	c.maybeKickoffAutonomousPlanning(ctx, run, policy.Execution)
+	return nil
 }
 
 // snapshotHasPriorities reports whether snapshot carries at least one

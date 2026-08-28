@@ -1642,6 +1642,22 @@ the step can be planned from this document without re-deriving it:
 | 9 | **CP1** — a master run with no plan row is permanently inert | One transaction for P1′ + P2 |
 | 10 | **CP7** — a planner in flight across a restart is discarded rather than adopted | A planner adoption path (intent record + subprocess identity), the planner's analogue of `adoptLiveLaunch`. The largest of the ten and the least urgent: `planner_ambiguous` is already correct, only wasteful |
 
+**Implementation status (P0-A).** Priorities 1–5 and 8, plus the P9 no-op, are
+implemented on this branch. What each one now does, and where:
+
+| Finding | State | Where |
+| --- | --- | --- |
+| CP21 | **Fixed.** The planned task's criteria and write intent travel *into* `createRunWithPlanArtifact`, so the child's plan step is written in the same transaction as the run. `healPlannedTaskArtifact` re-binds a child created before the fix (or by a crash in the old two-write window) from its durable task row | `workflow.go` (`plannedTaskArtifact`), `child_task_artifact.go`, `master_coordinator.go` |
+| CP24–CP27 | **Fixed.** `StartRun` re-enters on the *obligation* (`planUnblockOwed`: work step still `pending`, plan step not terminal) rather than on `run.State == pending`, completing the plan step from whatever state it is actually in; boot recovery calls `resumeInterruptedStart` before the generic interrupted-step fallback can park the run | `start_resume.go`, `workflow.go`, `recovery.go` |
+| CP19 | **Fixed.** `inheritExecutionPolicySnapshot` runs in the recovery branch too, copies the whole frozen policy (not only priority-bearing ones), and `requireInheritedExecutionPolicy` refuses to dispatch a child that cannot prove it inherited its parent's | `execution_policy_resolve.go`, `master_coordinator.go` |
+| CP9(b) | **Fixed.** Task identity is the natural key: whatever is already persisted for `(workflow_run_id, plan_step_id)`, else `canonicalTaskID` derived from it. Relationship endpoints are verified against the durable rows before the FK-bound insert | `plan_identity.go`, `master_coordinator.go` |
+| CP11/CP12 | **Fixed.** `resumeValidatedPlan` is reachable from boot `reconcileRun`'s new `validated` case and from `ContinueRun` (the wake poller's entry point). A manual objective is still left for its person | `validated_plan_resume.go`, `recovery.go`, `workflow.go` |
+| CP3 | **Fixed.** Run creation stamps `provenance.source = "unfrozen"` in the same statement as the run; the freeze stamps `"frozen"`; recovery re-freezes an owned-but-unfrozen run as `"recovered"` and **fails closed** (parking the run) when it cannot. Legacy and unowned runs are untouched | `domain/workflow_policy.go`, `execution_policy_resolve.go`, `recovery.go` |
+| P9 | **Corrected, not removed.** The normalized re-persist has its own statement (`PersistNormalizedWorkflowPlan`) whose CAS matches the state that actually holds (`running`/`responded`) and is additionally conditioned on the exact bytes the caller read; the result is checked, and a stale writer is refused | `queries/workflow_plan.sql`, `store/workflow_plan_store.go`, `master_coordinator.go` |
+
+Priorities 6, 7, 9 and 10 (CP13/CP14, CP30–CP32, CP1, CP7) are **not**
+implemented and remain exactly as described above.
+
 Nothing above is a licence to change the reviewer lifecycle, and nothing above
 is in the §6 implementation step.
 
