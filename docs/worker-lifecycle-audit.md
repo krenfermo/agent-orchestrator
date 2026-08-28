@@ -5,6 +5,21 @@ lifecycle work implements against. It changes no behaviour by itself; every
 "proposed" item below is a commitment about what the next implementation step
 writes, not a description of what the code does today.
 
+**Reviewer scope.** This audit is about the *worker* lifecycle. It takes the
+merged reviewer generation-conditioned CAS model as its reference and it
+**proposes no change to the reviewer lifecycle** — not to `review_launch_*`, not
+to `review_authority.go`, not to migrations `0135`–`0138`, and not to the
+reviewer's semantics of cycles, epochs or the authority pointer. Where the
+worker path needs the same primitive, it adopts the existing table-generic store
+method rather than editing, generalising or re-shaping the reviewer's use of it
+(§6.1). The single condition under which that stance changes is narrow and
+evidential: **if a later implementation step's tests prove a shared regression**
+— that is, a worker-side change demonstrably breaking reviewer behaviour, or a
+defect shown by test to live in a primitive both paths share — then the reviewer
+lifecycle may be touched, and only as far as that proof reaches. Absent such a
+test, no reviewer lifecycle change is in scope, and nothing in §6 may be read as
+authorising one.
+
 **Scope:** the work step's end-to-end path —
 plan → dispatch intent → launch → dispatch confirmation → RUNNING → worker
 terminal/idle → completion evidence → review transition — as it stands on
@@ -23,6 +38,9 @@ files that own the path are:
 | `backend/internal/workflow/attempt_reaper.go` | Closing attempt rows abandoned by a crash |
 | `backend/internal/workflow/work_adoption.go` | Adopting an existing commit as a work step's result |
 | `backend/internal/workflow/review_dispatch.go`, `cascade.go` | The review transition that consumes the work step's completion evidence |
+| `backend/internal/workflow/fix_dispatch.go` | The fix-cycle dispatch: per-cycle outbox key, prompt delivery into the work step's **existing** session, the fix attempt row |
+| `backend/internal/workflow/fix_progress.go` | Fix-cycle observation, the fix step/run transition, and the fix attempt's finalization |
+| `backend/internal/workflow/fix_delivery_recovery.go` | Restart classification for a fix delivery that crossed a crash |
 
 The reviewer counterparts the comparison in §5 is taken from:
 `review_launch_phases.go`, `review_launch_recovery.go`, `review_authority.go`,
@@ -101,6 +119,42 @@ actually made under today.
 | A1 | `attempt_reaped_orphaned` checkpoint, then the attempt row closed `cancelled` | `attempt_reaper.go` | checkpoint keyed to attempt id ⇒ exactly-once |
 | A2 | `work_commit_adopted` checkpoint, then the step completes | `work_adoption.go` | bounded generation counter in the record |
 
+### 2.1 The fix-cycle writes
+
+The fix cycle is not a second launch. It reuses the work step's **already-live
+session** — `Send` targets `reviewRun.SessionID`, which is the worker's session,
+never a new one (`fix_dispatch.go:404-412`) — so it has no intent/confirmation
+boundary, no ownership probe and no `workflow_dispatch_checkpoints` row at all.
+What it does have is its own outbox row, its own attempt row and its own
+observation, and those three are what §4.7 is about. `F#` labels are used by §3
+and §4.7.
+
+| # | Write | Site | Guard today |
+| --- | --- | --- | --- |
+| F0 | Fix outbox row enqueued under a **per-cycle, per-transport** key `workflow-step-fix:<stepID>:cycle<N>[:transport<M>]` | `dispatchFixStep`, `fix_dispatch.go:246`; key built at `fixStepOutboxIdempotencyKey`, `:103` | Natural key. Unlike the worker's single reused row, each cycle gets a **fresh** row — the one structural advantage the fix path has over the work path |
+| F1 | Fix outbox claim `pending → dispatched` | `dispatchFixFromPending`, `fix_dispatch.go:292` | `(entryID, expected=pending)` |
+| F2 | Prompt delivered into the work step's existing session | `deliverFixPrompt`, `fix_dispatch.go:331`; `deliverAndConfirm`, `:66` | Transport-level. `ports.ErrPromptUndelivered` (refused before any transport side effect) is the only failure that may be retried durably (`:372`) |
+| F3 | **Fix attempt row opened** (`outcome IS NULL`), harness copied from the work step's last attempt | `recordFixDispatchSuccess`, `fix_dispatch.go:419` | `len(attempts) < cycleNumber` — a **count comparison** against the cycle number. Not an identity check, not a CAS |
+| F4 | `FixAttemptID` written into the delivery record — the only durable binding between a cycle and the attempt row it opened | `fix_dispatch.go:423` (new row) / `:428` (re-entered cycle) | none; it rides in F6's `RetryState` JSON |
+| F5 | Fix outbox `dispatched → acknowledged` | `fix_dispatch.go:432` | `(entryID, expected=entry.Status)` |
+| F6 | `fix_dispatched` checkpoint: session id, review run id, `fingerprint_before`, delivery record | `fix_dispatch.go:440` | none (append) |
+| F7 | Fix step/run transition from observation (`running → waiting` on delivery, `→ failed` on no verifiable change) | `recordFixOutcome`, `fix_progress.go:282` (step), `:292` (run) | `(stepID, expected=step.State)` / `(runID, expected=run.State)`, behind the `ValidWorkflow*Transition` guards |
+| F8 | `fix_observed_<state>` checkpoint carrying `fingerprint_after` | `fix_progress.go:301` | none (append) — written **after** F7, the same inversion §4.6 catalogues for W21/W23 |
+| F9 | **Fix attempt finalized** (`succeeded` / `failed` + error class) | `recordFixOutcome`, `fix_progress.go:317` (lookup) and `:336` (update) | none — `GetLatestWorkflowAttempt(step.ID)` picks the row **by recency, not by identity**, and the update's error is discarded (`_ =`) |
+| F10 | Fix-delivery restart classification, for a cycle whose outbox row was already `dispatched`/`acknowledged` when the process died | `resolveFixDeliveryAfterRestart`, `fix_dispatch.go:272`; `fix_delivery_recovery.go` | Reads F6's delivery record; refuses to conclude when it cannot read one |
+
+Three properties of F3/F4/F9 together are what produce §4.7:
+
+1. **F3's guard is a count, not an identity.** `len(attempts) < cycleNumber`
+   answers "does this step have fewer attempt rows than cycles?", which is true
+   or false about the *set* of rows and says nothing about whether *this* cycle
+   owns one.
+2. **F4 records the right binding and F9 does not read it.** The delivery record
+   already names the attempt row the cycle opened. The close ignores it and
+   takes the latest row on the step instead.
+3. **F9 is unconditional and lossy.** No predicate, and a discarded error: a
+   close that fails leaves an open attempt and no trace that it was attempted.
+
 ### What is already right
 
 The ordering discipline is sound and should be preserved verbatim by the CAS
@@ -165,12 +219,16 @@ actually cleans it up, if any.
 | C18 | W12 (outbox → pending) → wake scheduled | Outbox pending, no wake | Step waits for any other dispatch entry point; `workerLaunchRetryDelay` floor still applies | boot `Reconcile` / capacity wake |
 | C19 | Master: child run moves out of `needs_attention` → parent mirror cleared | Parent durably `child_needs_attention`, child running | **child running while parent needs_attention** | `reconcileMirroredChildStop` (`attention.go:770` (`reconcileMirroredChildStop`)), driven by the parent's own heartbeat, which the mirror deliberately does not kill |
 | C20 | Two `Reconcile`/wake passes overlapping in one process, or two processes | Both read the same coarse state and both act | **repeated wake/reconcile** | Partly: R1's boundary and `owned.Live()` short-circuit. Not closed for W4/W12/W13/H1, which CAS on `(id, expected)` only |
+| CF1 | F1 → F3 | Fix outbox `dispatched`, the prompt possibly already in the session, **no attempt row** | A fix cycle in flight that nothing durable counts | `resolveFixDeliveryAfterRestart` (`fix_dispatch.go:272`) re-enters from `dispatched`/`acknowledged` and `fix_delivery_recovery.go` classifies; F0's per-cycle key means the re-entry cannot be confused with a different cycle |
+| CF2 | F3 → F6 | Attempt open; **no `fix_dispatched` checkpoint** | Fix step stuck RUNNING with an open attempt | **none.** `observeFixStep` finds no checkpoint carrying a session id and returns "nothing to observe" (`fix_progress.go:102-107`), and `attemptReaper`'s proof 2 excludes a `running` step, so neither resolver can fire |
+| CF3 | F7/F8 → F9 | Fix step terminal-for-the-cycle (`waiting` on delivery, `failed` otherwise), `fix_observed_*` written, **attempt still open** | **`fix_completed_but_attempt_open`** | `attemptReaper` only, after 30 min + four proofs — and proof 3 needs evidence on a *different* step written after the attempt opened, which a run parked by this very cycle may never produce |
+| CF4 | Cycle N's observation runs after cycle N+1's F3 opened a new row | F9 closes cycle **N+1**'s live row and leaves cycle N's open | **`fix_completed_but_attempt_open`**, cross-cycle variant: a live attempt closed and a dead one left open | **none.** This is not a crash window at all — it is reachable with no crash, purely from `GetLatestWorkflowAttempt` picking by recency |
 
 ---
 
 ## 4. The ambiguous state classes
 
-Six classes, as named in the objective. For each: what it is, which windows
+Seven classes, as named in the objective. For each: what it is, which windows
 produce it, what resolves it today, and the CAS resolution proposed for the
 implementation step. The resolutions reuse the reviewer's *principles*
 (§5) — durable generation identity, ownership proof, generation-conditioned
@@ -192,7 +250,7 @@ the objective names:
   guess is worse than stopping. These route to `needs_attention` with evidence,
   by design, and the implementation step must not "fix" them.
 
-**All six are resolvable**, each with a narrow fail-closed residue. The residue
+**All seven are resolvable**, each with a narrow fail-closed residue. The residue
 is never a whole class and never a whole *case* — it is always the same
 predicate applied to that case: **AO converges when it can name the generation
 and positively prove the state; it stops when the evidence is unreadable, the
@@ -210,6 +268,7 @@ meant to stop.
 | 4.4 child running while parent `needs_attention` | **Resolvable — already resolved**, and out of scope | A child stop that cannot be positively classified as self-remediable: the mirror is held, deliberately |
 | 4.5 repeated wake / reconcile | **Resolvable** | Budget exhaustion after the bounded generations are genuinely spent — that is a decision, not an ambiguity |
 | 4.6 terminal-evidence-before-crash | **Resolvable** | Rows already `completed` with no completion checkpoint when §6 lands: the evidence never existed, so `ambiguous_review_state` remains the only honest answer (`review_dispatch.go:534`) |
+| 4.7 `fix_completed_but_attempt_open` | **Resolvable** — by binding the close to the attempt the cycle actually opened (F4's `FixAttemptID`), not to the latest row | A cycle whose delivery record is unreadable or names no attempt id, and CF2's pre-checkpoint window, where the step is `running` with no `fix_dispatched` record: neither the observer nor the reaper may act, and the step stops as `ambiguous_worker_state` rather than being closed on a guess |
 
 ### 4.1 `running_without_dispatch`
 
@@ -563,6 +622,115 @@ fingerprint the review needs were never written, and inventing them would send a
 reviewer at an unverified tree. `ambiguous_review_state` stays the honest
 answer for those rows.
 
+### 4.7 `fix_completed_but_attempt_open`
+
+**What.** The fix-cycle counterpart of §4.2: `workflow_attempts.outcome IS NULL`
+on a **fix** step after the cycle that opened the row has ended. It is a
+separate class rather than a case of §4.2 because the fix path reaches it by a
+different route, and one of those routes needs no crash at all.
+
+**Windows.** CF2, CF3, CF4.
+
+**Today.** Only `attemptReaper`, and it is a worse fit here than on the work
+step:
+
+- CF3 (crash between F7/F8 and F9) leaves a terminal-for-the-cycle fix step
+  with an open attempt. The reaper's proof 2 is satisfied (`waiting`/`failed`
+  are neither `running` nor `ready`), but **proof 3 requires durable evidence on
+  a *different* step, written strictly after the attempt opened, showing the run
+  moved on** (`attempt_reaper.go:41-44`). A fix cycle that ended by parking the
+  run — `stopFix` / `stopFixAmbiguous`, `fix_progress.go:200`, `:229` — is
+  exactly the case where the run does *not* move on, so the evidence proof 3
+  wants may never be written. The row stays open indefinitely, and every guard
+  that asks "could something still be writing to this tree?" keeps answering yes
+  (`verify_branch_advanced.go` proof 5, `work_adoption.go` proof 4). This is the
+  fix path's own version of the fossil the reaper exists to clear, in the one
+  shape the reaper cannot clear.
+- CF2 (crash between F3 and F6) is worse still and has **no resolver at all**.
+  The attempt is open, the step is `running`, and there is no `fix_dispatched`
+  checkpoint. `observeFixStep` requires that checkpoint to carry a session id
+  and otherwise returns "nothing to observe" (`fix_progress.go:102-107`), so
+  observation never advances the step; and because the step is `running`, the
+  reaper's proof 2 refuses it. Neither mechanism can move, and nothing else
+  looks at the pair.
+- CF4 needs no crash. `recordFixOutcome` closes
+  `GetLatestWorkflowAttempt(step.ID)` (`fix_progress.go:317`, `:336`) — the most
+  recent attempt row on the fix step, chosen by recency. A fix step accumulates
+  one attempt row per cycle (F3's `len(attempts) < cycleNumber` guard), so as
+  soon as cycle N's observation is delayed past cycle N+1's dispatch, the close
+  lands on N+1's live row: the newer attempt is finalized while its cycle is
+  still running, and cycle N's row is left open forever. One misattribution
+  therefore produces both failure modes at once — a live attempt wrongly
+  closed, and an abandoned one never closed.
+
+**Gap vs. the reviewer CAS model.** Three of the six principles are missing
+here, and the missing pieces are not the same ones as §4.2's:
+
+| Principle | Fix path today |
+| --- | --- |
+| Generation identity (1) | **Partially present, and unused.** F4 already writes `FixAttemptID` into the durable delivery record — the fix path *does* record which attempt row belongs to which cycle. F9 simply does not read it. The identity exists and the write ignores it |
+| Generation-conditioned CAS (3) | **Missing.** `UpdateWorkflowAttemptOutcome` takes an id and no predicate; nothing conditions on the row being open or on the cycle owning it |
+| Stale-writer rejection (4) | **Missing, and reachable without a crash** (CF4). A late observation from a superseded cycle wins a write against the current cycle's row |
+| Idempotent replay (5) | **Absent by construction.** The close is a blind overwrite of whichever row is newest, so a replayed observation does not re-derive the same answer — it re-targets |
+| Fail-closed provenance (6) | **Fail-open.** `_ =` on the update (`fix_progress.go:336`) discards the error: a close that did not happen is indistinguishable from one that did |
+| Ownership proof (2) | Not applicable in the launch sense — the fix cycle proves nothing about a session because it launches none; it borrows the work step's. `fixCycleStarted` (`fix_progress.go:44`) is the fix path's analogue and is sound |
+
+**Proposed CAS resolution.** Small, and mostly a matter of using a binding that
+already exists:
+
+1. **Close the attempt the cycle named, not the newest one.** `recordFixOutcome`
+   resolves its target from the cycle's own `fix_dispatched` delivery record
+   (`promptDeliveryRecord.FixAttemptID`, read back via
+   `promptDeliveryRecordFromJSON`) instead of `GetLatestWorkflowAttempt`. This
+   alone closes CF4 outright — with no schema change, because F4 already writes
+   the field.
+2. **Condition the close.** The same
+   `UpdateWorkflowAttemptOutcomeIfOpen(attemptID, generation)` §4.2 introduces,
+   with the fix cycle's identity in the generation column: `WHERE id = ? AND
+   outcome IS NULL AND dispatch_generation = ?`. Zero rows updated means the row
+   is already closed or is not this cycle's — a no-op, never an error.
+3. **Stamp F3.** The attempt row created at `fix_dispatch.go:419` records the
+   cycle's identity in the same `dispatch_generation` column §6.2 adds, so (2)
+   has something to condition on and so the reaper can tell a fix attempt's
+   owner from its recency.
+4. **Stop discarding the error.** As with W25 (§4.2 item 3), a close that failed
+   is a fossil someone has to clear later; it is worth a log line and a retry on
+   the next observation rather than silence.
+5. **Extend §4.2's same-generation completion close to fix steps.** The `F8`
+   `fix_observed_<state>` checkpoint is already the canonical terminal record
+   for a cycle and already carries `fingerprint_after`. When it exists for a
+   cycle whose attempt is still open and whose generation matches, the next
+   observation or reconcile pass closes that attempt with the outcome read off
+   the checkpoint. Pure function of durable rows, so replay re-derives the same
+   answer; this is what closes CF3 without waiting on the reaper's proof 3.
+6. **Invert F7/F8, as §4.6 inverts W21/W23.** Writing the `fix_observed_*`
+   checkpoint before the step/run transition makes (5) able to fire on every
+   crash in the window, rather than only on those that got past the checkpoint.
+
+**Classification: resolvable.** CF4 is resolvable by item 1 alone and is not
+even ambiguous — the correct row is durably named, and the current code declines
+to read it. CF3 is resolvable by items 5–6, on exactly the argument §4.2 makes:
+the deciding fact is a record the cycle's own completion wrote, so no inference
+from silence is involved and no settle window is needed.
+
+**Fail-closed residue.** Two cases stay `needs_attention` by design:
+
+- **A cycle whose delivery record is unreadable or names no attempt id.** F4
+  leaves `FixAttemptID` empty when a cycle re-entered recovery with no attempt
+  rows at all, and a corrupt or missing `RetryState` reads back as nothing. With
+  no named row, item 1 has no target — and falling back to "the newest row" is
+  precisely the defect being removed. The attempt stays open and visible to the
+  reaper; the observation raises nothing.
+- **CF2's pre-checkpoint window.** A fix step `running` with an open attempt and
+  no `fix_dispatched` record cannot be decided: AO does not know whether the
+  prompt reached the session, so it cannot know whether a worker is at that
+  moment writing to the tree. Closing the attempt would tell every downstream
+  guard the tree is quiet on no evidence. The honest answer is
+  `ambiguous_worker_state` with the evidence snapshot, via the existing
+  `stopFixAmbiguous` gate (`fix_progress.go:200`) — which is a change from
+  today's behaviour of doing nothing at all, but it is a change toward stopping
+  visibly, not toward guessing.
+
 ---
 
 ## 5. Side by side: the approved reviewer CAS model vs. the worker path today
@@ -738,7 +906,24 @@ id>`) identifies which *failure* a human reopen is resuming, stamped into
 
 - The parent/child attention mirror (§4.4) — already correct, and derived per
   pass by design.
-- Reviewer, verify, fix and planner dispatch paths.
+- **The reviewer lifecycle, entirely.** No change to `review_launch_phases.go`,
+  `review_launch_recovery.go`, `review_authority.go`, or migrations
+  `0135`–`0138`; no generalisation of the reviewer's helpers to serve the
+  worker; no alteration of review cycles, epochs or the authority pointer. The
+  worker adopts the *table-generic* outbox CAS methods as they already are
+  (§6.1) and writes its own Go vocabulary over them. **The one exception is
+  evidential and comes later, not now: if a later step's tests prove a shared
+  regression** — a worker-side change breaking reviewer behaviour under test, or
+  a defect a test localises inside a primitive both paths share — the reviewer
+  lifecycle may be changed, scoped to what that test proves and no further.
+  Nothing in this document proposes such a change, and none may be made on
+  reasoning alone.
+- Verify and planner dispatch paths.
+- The fix path, **except** for the four narrow changes §4.7 names: binding the
+  attempt close to the cycle's own `FixAttemptID`, conditioning that close,
+  stamping the fix attempt row, and inverting F7/F8. Fix *dispatch* — the
+  per-cycle outbox key, prompt delivery, transport retry, and
+  `resolveFixDeliveryAfterRestart` — is untouched.
 - The 30 s settle windows (`dispatchReconcileSettleWindow`,
   `adoptOrMarkAmbiguous`'s in-flight window) — they answer "could this be
   happening right now?", which CAS does not answer, and they must keep agreeing
@@ -771,7 +956,16 @@ CAS refusal, not merely the happy path:
    Conversely, the same fixture with the attempt's `dispatch_generation` cleared,
    set to another generation, or with the terminal record unreadable leaves the
    attempt **open** and raises nothing — the reaper remains its only route.
-8. **R3R, both directions (§4.3).** With proof obligation P satisfied in full —
+8. **The fix attempt close, both directions (§4.7).** Two cycles on one fix
+   step, cycle N's observation arriving after cycle N+1's dispatch: cycle N's
+   close lands on cycle N's own row and cycle N+1's row is **untouched and still
+   open** — the assertion that fails on today's code. Plus a CF3 fixture (crash
+   between the `fix_observed_*` checkpoint and the close) finished by the next
+   pass with the outcome read off that checkpoint, a second pass updating zero
+   rows, and a CF2 fixture (attempt open, step `running`, no `fix_dispatched`
+   record) asserting the attempt stays **open** and the step stops as
+   `ambiguous_worker_state` rather than being closed.
+9. **R3R, both directions (§4.3).** With proof obligation P satisfied in full —
    the reconciling generation owns the claim, the open attempt and the binding
    (`session_dispatch_generation`), and the attempt's `runtime_instance_id` is
    non-empty and differs from the observed instance for the session (or
@@ -805,11 +999,21 @@ reconciliation boundary that makes its own remedy skippable), and C16/C20 (a
 budget spent by crashes and races rather than by decisions) — are exactly the
 five that require a generation-conditioned CAS to close. §6 is that CAS.
 
-On the six ambiguous classes (§4), the verdict is that **all six are
-resolvable** — 4.1, 4.2, 4.4 (already resolved upstream), 4.5, 4.6, and 4.3 in
-both halves: *stale* by the durable runtime-instance fence, and *phantom*
+On the seven ambiguous classes (§4), the verdict is that **all seven are
+resolvable** — 4.1, 4.2, 4.4 (already resolved upstream), 4.5, 4.6, 4.7, and 4.3
+in both halves: *stale* by the durable runtime-instance fence, and *phantom*
 whenever that fence lets AO prove, under a matching generation identity, that
-the execution it launched is gone.
+the execution it launched is gone. 4.7 —
+`fix_completed_but_attempt_open` — is the cheapest of the seven and the only one
+reachable with no crash at all: the fix path already writes the binding it needs
+(`FixAttemptID`) and simply closes the newest attempt row instead of the named
+one.
+
+The stance on the reviewer path is unchanged from the header: this audit reads
+the reviewer model, adopts its principles and its already-generic store
+primitives, and **proposes no reviewer lifecycle change** — unless and until a
+later step's tests prove a shared regression, and then only as far as that proof
+reaches.
 
 Each class keeps a narrow fail-closed residue, listed in §4's table, and every
 residue reduces to one predicate: **provability of a named thing by the
