@@ -103,7 +103,7 @@ the phased machine:
 | Field | Type / source | Written | Read as identity | Gap |
 | --- | --- | --- | --- | --- |
 | **Run id** | `wf-<id>`, `workflow_runs.id` | `CreateRun`; `CreateObjectiveRun` (`master_coordinator.go:38`) | Everywhere | None |
-| **Task id** | `workflow_tasks.id` (master path only) | `finalizeGeneratedPlan` (`master_coordinator.go:193`) | `reconcileMasterTasksOnce` (`:701`), `dispatchMasterTask` (`:1120`) | **Bound to the child run, then dropped.** The two-way binding is durable and sound (§2.1); what is missing is that *no later task write names it* — every `UpdateWorkflowTaskState` / `ParkWorkflowTaskForAttention` on the convergence path is `id + expected_state` only |
+| **Task id** | `workflow_tasks.id` (master path only) | `finalizeGeneratedPlan` (`master_coordinator.go:193`) | `reconcileMasterTasksOnce` (`:701`), `dispatchMasterTask` (`:1120`) | **Binding sound; one ABA on the park/resume cycle.** The two-way task↔run binding is unique and monotonic, and the terminal mirrors are irreversible, so those need nothing (§2.1). The gap is that `running` recurs across park/resume and no predicate names *which* attempt — the counter that would, `WorkflowTaskAttention.Attempt`, is durable but unread |
 | **Step id** | `wfs-<id>` | run creation | The dispatch **natural key**: `workStepOutboxIdempotencyKey(stepID)` (`dispatch.go:90`) and `workStepIssueID(stepID)` (`:67`) | None |
 | **Attempt id** | `wfa-<id>`, `workflow_attempts.id` | `openWorkerAttempt` (`dispatch_state_machine.go:446`) | Carried on the intent boundary and in the confirm boundary's `evidence["attemptId"]` (`dispatch.go:731`) | **No generation.** "The open attempt" is positional — `attempts[len(attempts)-1].Outcome == ""` (`dispatch_state_machine.go:456`) — so two concurrent passes can both believe they hold it |
 | **Attempt generation** | — | — | — | **Does not exist for workers.** The reviewer has the equivalent via `workflow_outbox.dispatch_generation` + the `review_dispatch_authorized` checkpoint id (`review_dispatch.go:1149`); the worker path has nothing |
@@ -125,7 +125,8 @@ worker stages S0–S13 never see it. The path, exactly:
 | T1 | Child run created with `planned_task_id = task.ID` and `parent_workflow_id = parent.ID` | `dispatchMasterTask` (`master_coordinator.go:1183`) → `createRunWithPlanArtifact` (`workflow.go:868`), field set at `workflow.go:905`, written by `CreateWorkflowRun` **in the same transaction as the run's six step rows** | **Partial unique index** `idx_workflow_runs_planned_task` on `workflow_runs(planned_task_id) WHERE planned_task_id IS NOT NULL` (migration `0101_workflow_master_plan.sql:7-8`). At most one child run per task, enforced by the schema |
 | T2 | Task row bound to the child: `execution_run_id = child`, `state → running` | `SetWorkflowTaskExecutionRun` (`master_coordinator.go:1216`; SQL `queries/workflow_plan.sql:107-109`) | `id = ? AND execution_run_id IS NULL AND state = 'eligible'` — a genuine claim |
 | T3 | Recovery re-bind after a crash between T1 and T2 | `dispatchMasterTask`'s `FindWorkflowRunByPlannedTask` branch (`master_coordinator.go:1121-1124`), and the same lookup in `reconcileMasterTasksOnce` (`:743-747`) | Same T2 claim, but **its boolean result is discarded** (`_, _ =` at `:1124`) |
-| T4 | Convergence: the child's terminal state is mirrored onto the task | `reconcileMasterTasksOnce` `:860` (`running → completed`), `:872` (`→ failed`), `:896` (`→ cancelled`); `syncCancelledTask` (`branch_lock_recovery.go:111`); `ParkWorkflowTaskForAttention` (`task_integration_route.go:570`); `ResumeWorkflowTaskFromAttention` (`:667`) | `id = ? AND state = ?` — **the child run id appears nowhere in the predicate** |
+| T4a | Convergence: a **terminal** child run state mirrored onto the task | `reconcileMasterTasksOnce` `:860` (`running → completed`), `:872` (`→ failed`), `:896` (`→ cancelled`); `syncCancelledTask` (`branch_lock_recovery.go:111`) | `id = ? AND state = ?` — sufficient, because the source state is irreversible |
+| T4b/c | Park and resume: the task's own **re-enterable** state | `ParkWorkflowTaskForAttention` (`task_integration_route.go:570`); `ResumeWorkflowTaskFromAttention` (`:667`) | `id = ? AND state = ?` — **`running` recurs across the cycle, so this matches every generation of it** |
 
 Two properties of this binding are already strong and should be preserved rather
 than re-engineered:
@@ -145,37 +146,68 @@ than re-engineered:
 
 Those two properties settle the *binding* races outright: a second child run for
 one task, or a second task for one child run, is refused by the schema, and no
-statement can re-point a binding once taken. **Neither property covers T4**, and
-that is the real gap.
+statement can re-point a binding once taken. They also settle most of T4, and it
+is worth being explicit about why, because it removes a fence a reader might
+otherwise expect this document to propose:
 
-T4's predicates name the task and its expected state and nothing else, so the
-provenance of the advance — *which execution's verdict is this?* — is an
-assumption the write does not check. `reconcileMasterTasksOnce` re-reads `child`
-on every pass and several entry points reach it (the wake poller, the autonomous
-heartbeat, boot recovery, an HTTP-driven continue), so two overlapping passes
-over one objective is the ordinary case rather than an exotic one; each carries
-its own `child` snapshot, and `state = expected_state` only arbitrates the ones
-that happen to collide on the same source state. `syncCancelledTask`
-(`branch_lock_recovery.go:111`) writes the same transition from an entirely
-different call path, reading `run.PlannedTaskID` and never looking at the task's
-binding at all.
+- **`execution_run_id` must NOT be added to the T4 predicates.** It is written
+  once and never changed, so for the whole life of a task it is a constant. A
+  constant in a WHERE clause cannot change the outcome of any write: every
+  candidate writer reads the same value, so it accepts and rejects exactly the
+  writers `id + expected_state` already accepts and rejects. It would look like
+  provenance and fence nothing.
+- **The three terminal mirrors are already sound.** `:860` (`→ completed`),
+  `:872` (`→ failed`), `:896` (`→ cancelled`) and `syncCancelledTask`
+  (`branch_lock_recovery.go:111`) all fire on a *terminal* child run state, and
+  terminal run states have no outgoing transitions at all —
+  `ValidWorkflowRunTransition`'s switch has no arm for them and falls to
+  `default: return false` (`domain/workflow.go:87-88`). A verdict read from a
+  terminal child is therefore permanently true; a pass holding a stale copy of it
+  is holding a fact that has not aged. `id + expected_state` is sufficient, and
+  the task's own terminal states (`domain/workflow_plan.go:83-85`) make the write
+  once-only besides.
 
-Adding `execution_run_id = <the child run this verdict was read from>` to those
-predicates is cheap and it changes an unchecked assumption into a checked one: a
-writer whose verdict came from a run that is not the one bound to this task
-updates zero rows instead of mirroring a foreign execution's outcome. T3 is the
-same omission one level up — it *re-claims* on the recovery path (`_, _ =` at
-`master_coordinator.go:1124`, and again at `:746`) and discards the answer, so a
-task already bound to a run other than the one `FindWorkflowRunByPlannedTask`
-returned produces no error, no stop and no log line. Under the unique indexes
-that disagreement should be impossible; the point of checking it is that if it
-ever happens, the current code is structurally incapable of telling anyone.
+**The one genuinely mutable state, and the actual gap, is the park/resume
+cycle.** `WorkflowTaskNeedsAttention` is deliberately non-terminal and its only
+exit is a person (`domain/workflow_plan.go:73-79`), so a task can travel
+`running → needs_attention → running` and back again without bound:
+`ParkWorkflowTaskForAttention` (`task_integration_route.go:570`) takes it out,
+`ResumeWorkflowTaskFromAttention` (`:667`, targeting `WorkflowTaskRunning`) puts
+it back. Both predicates are `id = ? AND state = ?`, and `state = 'running'` is
+satisfied by *every* generation of running. That is an ABA: a pass that observed
+the conflict of integration attempt N and then paused — a slow git probe, a
+rebase, a re-scheduled poll — can land its park after a human has already resumed
+the task into attempt N+1, parking the new attempt for the old attempt's
+conflict and overwriting the new attempt's `attention_json` with stale SHAs.
 
-The asymmetry is the finding, and it is the same one on both paths: **AO records
-every identity it needs and predicates on almost none of them.** Every worker
-transition off `dispatched` is `id + expected_status`; every task transition off
-`running` is `id + expected_state`. Both are predicates that any concurrent pass
-satisfies.
+**The value that distinguishes those generations already exists.**
+`WorkflowTaskAttention.Attempt` (`domain/workflow_plan.go:121-124`) lives in
+`workflow_tasks.attention_json`, is incremented by the parking caller itself
+(`task_integration_route.go:568`, `task.Attention.Attempt + 1`), and — decisively
+— **survives a resume**: `ResumeWorkflowTaskFromAttention`
+(`queries/workflow_plan.sql:74-77`) clears `attention_reason` and `attention_at`
+and leaves `attention_json` alone. Its own doc comment already claims the
+property this predicate would make true — *"the resume produced exactly one new
+attempt"* — and today nothing in the storage layer checks it.
+
+T3 is a smaller, different problem and should not be conflated with this one: it
+*re-claims* on the recovery path (`_, _ =` at `master_coordinator.go:1124`, and
+again at `:746`) and discards the answer, so a task already bound to a run other
+than the one `FindWorkflowRunByPlannedTask` returned produces no error, no stop
+and no log line. Under the unique indexes above that disagreement should be
+impossible. The point of checking it is not that it is likely — it is that if the
+impossible ever happens, the current code is structurally incapable of telling
+anyone.
+
+The two paths therefore end up in different places, and the audit should not
+flatten them. **The master-task path is mostly sound**: its bindings are
+schema-enforced and its convergence reads irreversible states, leaving one real
+ABA (T4b/T4c) whose discriminator is already durable and merely unread. **The
+worker path is not**: every transition off `dispatched` is `id +
+expected_status`, a predicate any concurrent pass satisfies, over a launch whose
+generation nothing records at all. That is where the weight of §4 falls, and it
+is why `attempt_generation` — not `task_id` — is the field this block has to
+invent.
 
 ---
 
@@ -355,10 +387,10 @@ should do:
 3. Stop treating it as *permanent*. `planner_ambiguous` is a statement about one
    crossed restart, not about the objective, yet it lands as
    `WorkflowPlanInvalid`, which `GeneratePlan:66` refuses forever. It should be
-   reopenable by an explicit human action — under the **generation-less**
-   contract specified in §3.6, not by analogy to the reviewer's named-generation
-   reopen. The planner has no launch identity to name, and this block does not
-   invent one.
+   reopenable by an explicit human action — under the **generation-less,
+   observed-version** contract specified in §3.6, not by analogy to the
+   reviewer's named-generation reopen. The planner has no launch identity to
+   name, and this block does not invent one.
 
 ### 3.6 The CP7 fail-closed reopen contract (generation-less, and why)
 
@@ -370,26 +402,26 @@ failure F1 could arrive after F1 had been resumed, redispatched and failed again
 as F2 — reopening a launch and a fresh budget epoch nobody asked for. The token
 is what distinguishes F1 from F2 in a row that cannot distinguish them itself.
 
-**The plan row is not that shape**, and this is the load-bearing difference:
+**A generation fence is impossible here, and this block does not invent one.** A
+generation has to be minted by the thing it fences. The outbox token is minted by
+the dispatch that claims the row; a planner generation would have to be minted by
+the planner launch — and nothing durably records a planner subprocess: no intent
+row, no launch id, no handle, no natural key (§3.5). There is no field to name
+and no writer to name it, so **the rule for this block is generation-less**, and
+§4.2 and §5 say so in the same words.
 
-- The ambiguous-terminal state is the conjunction
-  `(status='invalid', command_status='failed', error_class='planner_ambiguous')`.
-- Exactly one code path writes it: `recovery.go:151`. Nothing else in the package
-  sets `error_class` to `planner_ambiguous`.
-- **It is a dead end.** Every other statement over `workflow_plans` is fenced on
-  a status this row does not have: `StartWorkflowPlanCommand` needs `pending`
-  (`queries/workflow_plan.sql:13`), `PersistWorkflowPlanResponse` and
-  `FinishWorkflowPlan` need `running` (`:17`, `:36`), `ApproveWorkflowPlan` needs
-  `validated` (`:40`). Exactly two statements can fire against it:
-  `RejectWorkflowPlan` (`:48`, which accepts `invalid` and moves the row to
-  `rejected`), and `SetWorkflowPlanApprovalMode` (`:44`), which touches only
-  `approval_mode` and none of the three columns the predicate reads.
+What *is* available is the plan row's own version. `workflow_plans.updated_at`
+(migration `0101_workflow_master_plan.sql:25`) is written by every statement that
+touches the row, including RP2's `FinishWorkflowPlan`
+(`queries/workflow_plan.sql:33-36`), so **the second ambiguity writes a different
+`updated_at` than the first**. That makes the reopen an ordinary
+**observed-version compare-and-swap** — the human's action carries the exact row
+version their view was rendered from — rather than a token that names a planner
+attempt. The distinction is not pedantic: it is the difference between "this is
+the row I looked at" and "this is the planner run I looked at", and only the
+first is knowable today.
 
-So the state is **self-identifying**: the only transitions that can move this row
-are the reject above and the reopen below, and both leave the predicate
-unsatisfied. The predicate is therefore its own fence, and a stale reopen
-targeting a row that has since been rejected or already reopened matches zero
-rows. Concretely, Task 3 should implement:
+Concretely, Task 3 should implement:
 
 ```sql
 -- ReopenAmbiguousWorkflowPlan
@@ -399,8 +431,20 @@ UPDATE workflow_plans
  WHERE workflow_run_id = ?
    AND status = 'invalid'
    AND command_status = 'failed'
-   AND error_class = 'planner_ambiguous';
+   AND error_class = 'planner_ambiguous'
+   AND updated_at = sqlc.arg(observed_updated_at);
 ```
+
+**The three state columns alone would NOT be sufficient, and an earlier revision
+of this document wrongly said they were.** `SetWorkflowPlanApprovalMode`
+(`queries/workflow_plan.sql:42-44`) is fenced only on `status != 'approved'`, so
+it fires happily against an ambiguous row, updating `approval_mode` and
+`updated_at` and leaving `status`, `command_status` and `error_class` exactly as
+they were. A predicate on those three columns still matches afterwards, and would
+still match after a second ambiguity, which writes the identical triple. The
+three columns are a **type check** — "this row is in the ambiguous-terminal
+state" — and `updated_at` is the part that makes it *this* ambiguous-terminal
+state. Both halves are required.
 
 - **Target state chosen deliberately:** `pending`/`idle` is the exact state
   `StartWorkflowPlanCommand`'s own CAS arms from
@@ -408,9 +452,16 @@ UPDATE workflow_plans
   switch falls through to real generation on — the same reasoning
   `parkPlanForCapacity` records at `master_coordinator.go:369-372`. The reopen
   therefore re-enters the ordinary path, never a parallel one.
-- **Idempotent:** a double-submit reopens once. The second call finds
-  `error_class` cleared, matches zero rows, and its caller no-ops — the same
-  `moved == false` convention `ApprovePlan:528` and `retryPlanOrFail` already use.
+- **Idempotent:** a double-submit reopens once. The second call carries a version
+  the row no longer has (and finds `error_class` cleared besides), matches zero
+  rows, and its caller no-ops — the same `moved == false` convention
+  `ApprovePlan:528` and `retryPlanOrFail` already use.
+- **Every false answer is a refusal, never an accept.** `SetWorkflowPlanApprovalMode`
+  bumping `updated_at` under a human who is mid-decision makes their reopen match
+  zero rows; so does any other write to the row. The human re-reads and
+  re-submits. A reopen that should have succeeded and did not is a nuisance; a
+  reopen that lands on a state nobody looked at is the failure this predicate
+  exists to prevent.
 - **Non-looping, and bounded:** the reopen is reachable **only** from an explicit
   human action. `reconcileRun` must not call it, no wake reason may schedule it,
   and the autonomous heartbeat must not reach it — otherwise restart → reopen →
@@ -422,18 +473,25 @@ UPDATE workflow_plans
 - **Ordering:** the reopen writes the plan row **last**, after its own
   human-readable checkpoint — the same rule CP30/CP31/CP32 exist to enforce.
 
-**What this contract does NOT guarantee, stated plainly.** Two successive
-ambiguities produce byte-identical plan rows. A reopen submitted against
-ambiguity #1 that arrives after a restart has produced ambiguity #2 will reopen
-#2. A generation would catch that; this predicate cannot, because there is no
-durable value that distinguishes the two — the planner subprocess has no id AO
-records, which is CP7's root cause and not something a predicate can paper over.
-The consequences are bounded rather than eliminated: the outcome of that
-mis-targeted reopen is *one extra planner run*, charged against the bound above,
-on a plan that was going to need a human decision either way. That is the honest
-scope of the fail-closed handling this block delivers; the named-generation
-guarantee arrives only with the planner launch identity, which is out of scope
-here (§5, §6).
+**What this contract does and does not guarantee, stated plainly.** With
+`updated_at` in the predicate, the ambiguity-#1-versus-#2 replay *is* caught: the
+two ambiguities differ in the one column the reopen compares, so a stale reopen
+matches zero rows and refuses. What remains is narrower and is a property of
+timestamps, not of the rule:
+
+- **Two writes that land on an identical stored `updated_at` are
+  indistinguishable.** The value comes from the injected `c.clock()`, so a test
+  clock that does not advance between two ambiguities, or a storage precision
+  coarser than the interval between them, collapses two versions into one. In
+  production the two are separated by a daemon restart, so the practical exposure
+  is negligible — but Task 3 must implement and describe this as a **row version**,
+  never as a generation or a unique token, because it is neither.
+- **It identifies the row, not the planner run.** Nothing here tells anyone
+  whether the discarded planner produced a plan; the reopen only decides *which
+  observed state* is being reopened. Recovering the planner's own work still
+  requires the launch identity CP7 lacks, which is out of scope for this block
+  (§5, §6) — and the remedy for that residue is that identity, not a cleverer
+  predicate over the columns that exist.
 
 ---
 
@@ -453,10 +511,13 @@ Every worker-launch transition should name, at minimum:
   is read from `run.PlannedTaskID`, stamped inside the child-run creation
   transaction (`workflow.go:905`) and made unique by
   `idx_workflow_runs_planned_task`. Its reverse binding is
-  `workflow_tasks.execution_run_id` (§2.1). Every write that advances a task
-  must name **both** halves — the task id and the execution run whose evidence
-  justifies the advance — because the task row alone cannot say which execution
-  a verdict came from.
+  `workflow_tasks.execution_run_id` (§2.1). Because that binding is unique and
+  monotonic, `task_id` needs **no** generation of its own to identify an
+  execution — the pair is already 1:1 for life, which is why §2.1 rejects adding
+  `execution_run_id` to the task-state predicates. What `task_id` does need, on
+  the one state it can re-enter, is an **attempt** discriminator:
+  `WorkflowTaskAttention.Attempt` for the `running → needs_attention → running`
+  cycle.
 - **`attempt_generation`** is the new field. Definition, chosen so it needs no
   new column: **the id of the `intent` dispatch-boundary record written by
   `beginWorkerDispatch`** (`dispatch_state_machine.go:426`). It is durable before
@@ -502,9 +563,11 @@ proposes.
 | **T1** child-run creation | `createRunWithPlanArtifact`, `workflow.go:868`, stamp at `:905` | run + steps in one transaction; `planned_task_id` unique via `idx_workflow_runs_planned_task` | ✓ — the strongest binding in the master path. Do not touch it |
 | **T2** task → child-run binding | `SetWorkflowTaskExecutionRun`, `master_coordinator.go:1216` | `id = ? AND execution_run_id IS NULL AND state = 'eligible'` | ✓ predicate. **Check the returned boolean**: a claim that moved zero rows on the creation path means somebody else bound this task, and the caller must not proceed to `StartRun` as if it had won |
 | **T3** recovery re-bind | `dispatchMasterTask`, `master_coordinator.go:1121-1124`; `reconcileMasterTasksOnce`, `:743-747` | same T2 claim, **result discarded** (`_, _ =`) | **Verify instead of claim.** Read the task row; if `execution_run_id` is non-NULL and ≠ the run `FindWorkflowRunByPlannedTask` returned, that is a contradiction between two durable bindings and must stop with a readable reason, not be silently ignored |
-| **T4** task-state convergence | `reconcileMasterTasksOnce` `:860`/`:872`/`:896`; `syncCancelledTask`, `branch_lock_recovery.go:111` | `id = ? AND state = ?` | **`… AND execution_run_id = <the child run this verdict was read from>`** — this is the predicate that stops a stale master-task writer from advancing a task on the strength of an execution that is no longer the one bound to it |
-| **T4** task park / resume | `ParkWorkflowTaskForAttention`, `task_integration_route.go:570`; `ResumeWorkflowTaskFromAttention`, `:667` | `id = ? AND state = ?` | **same addition.** Both already handle a `false` return as "somebody else decided" (`:575-580`, `:671-673`), so tightening the predicate needs no new caller-side branch |
-| **CP7** ambiguous plan reopen | new `ReopenAmbiguousWorkflowPlan` (§3.6) | does not exist; the state is permanently `invalid` | **`workflow_run_id = ? AND status='invalid' AND command_status='failed' AND error_class='planner_ambiguous'`** — generation-less on purpose: the conjunction is self-identifying and self-clearing (§3.6). Human-initiated only, bounded by the run's `planner_ambiguous` stop count, and it does **not** claim the named-generation guarantee the outbox reopen has |
+| **T4a** terminal mirror | `reconcileMasterTasksOnce` `:860`/`:872`/`:896`; `syncCancelledTask`, `branch_lock_recovery.go:111` | `id = ? AND state = ?` | ✓ **sufficient — change nothing.** The source state is a terminal child run, which is irreversible (`domain/workflow.go:87-88`), so a stale read of it is still true. Do **not** add `execution_run_id`: it is constant for the life of the task and would fence nothing (§2.1) |
+| **T4b** task park | `ParkWorkflowTaskForAttention`, `task_integration_route.go:570` | `id = ? AND state = 'running'` — satisfied by *every* generation of running | **`… AND <attempt counter> = <the attempt this conflict was observed on>`**, so a park computed for attempt N cannot land on attempt N+1 after a human resume. The counter is `WorkflowTaskAttention.Attempt`, already written at `:568` and already preserved across resume (`queries/workflow_plan.sql:74-77`) |
+| **T4c** task resume | `ResumeWorkflowTaskFromAttention`, `task_integration_route.go:667` | `id = ? AND state = 'needs_attention'` | **same addition, symmetric**: resume the stop the human read, not whichever one is current. Both callers already treat a `false` return as "somebody else decided" (`:575-580`, `:671-673`), so tightening the predicate needs no new caller-side branch |
+| — | *implementation note for T4b/T4c* | `Attempt` lives inside `attention_json` | Reaching it from a predicate needs either `json_extract(attention_json,'$.attempt')` or promoting the counter to its own column. This is the one place in the master path where a new column may be the better answer than reusing what exists — the counter is already computed by the caller, only unenforced |
+| **CP7** ambiguous plan reopen | new `ReopenAmbiguousWorkflowPlan` (§3.6) | does not exist; the state is permanently `invalid` | **`workflow_run_id = ? AND status='invalid' AND command_status='failed' AND error_class='planner_ambiguous' AND updated_at = <observed>`** — **generation-less by necessity** (nothing mints a planner generation, §3.6); the three state columns are the type check and `updated_at` is the observed-version CAS. Human-initiated only, bounded by the run's `planner_ambiguous` stop count. It is a row version, **not** a generation, and must not be described as one |
 
 ### 4.3 The invariant these predicates buy
 
@@ -529,8 +592,8 @@ proven nothing, and no predicate can rescue that.
 | CP31 | `master_coordinator.go:477` before `:487` | **Fix.** Reorder: reason before terminal row |
 | CP32 | `recovery.go:151` before `:155` | **Fix.** Same reorder |
 | CP1 | `master_coordinator.go:41`/`:44` | **Fix** by one transaction if the store allows; otherwise a boot healer that defaults the approval mode to `manual` and records that it did. Never infer the mode silently |
-| CP7 | `master_coordinator.go:109`–`:182`; remedy at `recovery.go:149` | **Fail closed.** Keep `planner_ambiguous`; fix its order (CP32); make it reopenable under the **generation-less, human-only, bounded** contract in §3.6 — explicitly *not* a named-generation guarantee, since the planner has no launch identity to name. A planner adoption path is a separate block |
-| Task identity absent from convergence predicates | `master_coordinator.go:860`/`:872`/`:896`; `branch_lock_recovery.go:111`; `task_integration_route.go:570`/`:667` | **Fix.** Add `execution_run_id` to every T4 predicate (§2.1, §4.2) |
+| CP7 | `master_coordinator.go:109`–`:182`; remedy at `recovery.go:149` | **Fail closed.** Keep `planner_ambiguous`; fix its order (CP32); make it reopenable under the **generation-less, observed-version, human-only, bounded** contract in §3.6 — CAS on the three state columns **plus `updated_at`**. Explicitly *not* a named generation: nothing mints one for a planner run. A planner adoption path is a separate block |
+| Task park/resume ABA — `running` recurs and no predicate names the attempt | `task_integration_route.go:570`, `:667` | **Fix.** Add the `WorkflowTaskAttention.Attempt` discriminator to the park and resume predicates (§2.1, §4.2 T4b/T4c). The terminal mirrors (T4a) need **no** change, and `execution_run_id` must **not** be added anywhere — it is constant and would fence nothing |
 | Recovery re-bind discards its own claim result | `master_coordinator.go:1124`, `:746` | **Fix.** Verify the existing binding and stop on a mismatch instead of re-claiming into a discarded boolean |
 | Worker attempt generation absent | `dispatch_state_machine.go:446`; `dispatch.go:248`/`:794`/`:817` | **Fix.** Adopt the existing outbox generation columns and store methods; no migration, no reviewer change |
 | Attempt finalization last-writer-wins | `worker_progress.go:682`, `dispatch.go:578` | **Fix.** Switch to `ClaimWorkflowAttemptOutcome` |
