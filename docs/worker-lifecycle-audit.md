@@ -5,7 +5,9 @@ lifecycle work implements against. It changes no behaviour by itself; every
 "proposed" item below is a commitment about what the next implementation step
 writes, not a description of what the code does today.
 
-**Reviewer scope.** This audit is about the *worker* lifecycle. It takes the
+**Reviewer scope.** This audit covers the whole path that produces a work
+step's result and hands it to a reviewer — see **Scope** below; what it is *not*
+about is the reviewer's own lifecycle. It takes the
 merged reviewer generation-conditioned CAS model as its reference and it
 **proposes no change to the reviewer lifecycle** — not to `review_launch_*`, not
 to `review_authority.go`, not to migrations `0135`–`0138`, and not to the
@@ -20,10 +22,34 @@ lifecycle may be touched, and only as far as that proof reaches. Absent such a
 test, no reviewer lifecycle change is in scope, and nothing in §6 may be read as
 authorising one.
 
-**Scope:** the work step's end-to-end path —
-plan → dispatch intent → launch → dispatch confirmation → RUNNING → worker
-terminal/idle → completion evidence → review transition — as it stands on
-`feat/engineering-control-center`.
+**Scope:** the whole path a unit of work travels, from the moment an objective
+exists to the moment a reviewer is dispatched against its result —
+
+> objective/workflow creation → plan generation → plan persistence/approval →
+> workflow run/step state changes → task becomes dispatchable → worker dispatch
+> intent → launch → dispatch confirmation → RUNNING → worker terminal/idle →
+> completion evidence → review transition
+
+— as it stands on `feat/engineering-control-center`. Nothing in that span is
+out of scope for the *audit*; §6.7 scopes only what the **implementation** step
+is allowed to change, and §6.9 states, write by write, which plan-segment gaps
+that step closes and which it deliberately does not.
+
+**Two entry paths reach the same work step**, and both are audited:
+
+- **Path A — standalone run.** `CreateRun` → `StartRun`. The plan step is a
+  deterministic template expansion with no model call at all
+  (`BuildPlanArtifact`, `plan.go:58`), executed synchronously inside `StartRun`.
+- **Path B — master objective.** `CreateObjectiveRun` → `GeneratePlan` (a real
+  planner subprocess) → `finalizeGeneratedPlan` → `ApprovePlan` →
+  `reconcileMasterTasksOnce` → `dispatchMasterTask` → `createSingleTaskRun` →
+  `StartRun`. Every child run of a master objective re-enters Path A's
+  `StartRun` at its last hop, so Path B is a prefix of Path A, not an
+  alternative to it.
+
+**Label map.** `P#` is the plan segment (§2.0), `W#`/`R#`/`H#`/`A#` the
+work-step launch segment (§2.1), `F#` the fix cycle (§2.3). Crash windows are
+`CP#` for the plan segment (§3.0) and `C#`/`CF#` for the rest (§3.1).
 
 **Primary sources.** Every claim below is anchored to code on this branch. The
 files that own the path are:
@@ -42,6 +68,21 @@ files that own the path are:
 | `backend/internal/workflow/fix_progress.go` | Fix-cycle observation, the fix step/run transition, and the fix attempt's finalization |
 | `backend/internal/workflow/fix_delivery_recovery.go` | Restart classification for a fix delivery that crossed a crash |
 
+
+The plan segment's own owners, added in this revision because the audit now
+starts where the objective does:
+
+| File | What it owns |
+| --- | --- |
+| `backend/internal/httpd/controllers/workflow.go` | The create request: which constructor runs, then the owner stamp and the policy freeze that follow it (`create`, `:888-933`; `stampOwner`, `:827`) |
+| `backend/internal/workflow/workflow.go` | `createSingleTaskRun` (the run + its six step rows), `StartRun` (the plan step's synchronous execution and the plan→work unblock), `ContinueRun` (the resume entry point every wake uses) |
+| `backend/internal/workflow/plan.go` | The plan artifact itself: deterministic construction, marshalling, the work prompt, and `promptForRun`'s restart-safe rebuild |
+| `backend/internal/workflow/master_coordinator.go` | The objective path: plan command arming, planner invocation, validation/finalization into task rows, approval, the per-pass task reconcile, and child-run dispatch |
+| `backend/internal/workflow/execution_policy_resolve.go` | `ApplyExecutionPolicySnapshot` (the one-time policy freeze) and `maybeKickoffAutonomousPlanning` (the autonomous kickoff wake) |
+| `backend/internal/workflow/child_ownership.go` | The child run's owner stamp and the hard pre-dispatch ownership gate |
+| `backend/internal/workflow/recovery.go` | Boot reconciliation's **plan branch** — the planner's only crash resolver (`reconcileRun`, `:114-147`) — and the work-step branch that re-enters dispatch |
+| `backend/internal/storage/sqlite/queries/workflow_plan.sql` | Every plan/task predicate quoted in §2.0, verbatim |
+
 The reviewer counterparts the comparison in §5 is taken from:
 `review_launch_phases.go`, `review_launch_recovery.go`, `review_authority.go`,
 and migrations `0135`–`0138`.
@@ -50,7 +91,8 @@ and migrations `0135`–`0138`.
 
 ## 1. The durable substrate
 
-Seven durable homes carry worker lifecycle state. Nothing else is state; every
+Twelve durable homes carry the state of this path. The first seven carry the
+work step's own lifecycle; the last five carry the plan segment that produces it. Nothing else is state; every
 in-memory value in the dispatch path is a derivation of these.
 
 | Home | Rows written by the worker path | Mutable? |
@@ -62,6 +104,11 @@ in-memory value in the dispatch path is a derivation of these.
 | `workflow_steps` | `state`, `session_id`, `review_run_id` | Mutable |
 | `workflow_runs` | `state` | Mutable |
 | `branch_locks`, `sessions` | Execution ownership outside workflow's own tables | Mutable, owned elsewhere |
+| `workflow_plans` | One row per master objective, created `pending`/`idle` (`workflow_plan.sql:1-5`). Carries `status`, `command_status`, the context manifest, the generated plan JSON, the validation verdict, the plan hash and the approval mode | **Yes** — `pending → running → validated → approved`, plus `invalid`/`rejected`, and back to `pending` on a capacity park or a bounded planner retry. Reused forever: one row per objective |
+| `workflow_tasks` (+ `workflow_task_dependencies`, `workflow_task_relationships`) | One row per planned task, written once by `InsertWorkflowTasks`; `state`, `scope_json` (write intent, waiting reason, execution strategy) and `execution_run_id` are mutated afterwards | Mutable. `UNIQUE(workflow_run_id, plan_step_id)`, `UNIQUE(execution_run_id)` (`0101_workflow_master_plan.sql:45-47`) — the natural keys every plan-segment recovery reads from |
+| `workflow_runs.user_id`, `workflow_runs.policy_snapshot` | The owner stamp and the frozen execution policy, both written **after** the run row exists, by a second and a third statement | Mutable in principle; written exactly once by contract (`UpdateWorkflowRunPolicySnapshot`'s own comment, `workflow.sql:75-82`) |
+| `workflow_wake_schedules` | The durable wake that carries every unattended resume — the autonomous kickoff, the planner capacity park, the bounded planner retry, the master heartbeat | Mutable, upserted by idempotency key. Every write to it is **best-effort**: `scheduleWake` logs and swallows (`dispatch.go:416-422`) |
+| `workflow_task_worktrees` | The task's isolated worktree record, in the parallel-worktree execution mode | Mutable, and **not written by this path**: `internal/workspace` owns it, and the workflow side's port exposes only `MarkIntegrated`/`Cleanup`/`Preserve`/`Reconcile` (`workflow.go:450-462`). It is named here so §2.0 is not read as claiming the plan segment provisions worktrees — it does not |
 
 Two properties of this substrate drive everything below:
 
@@ -80,14 +127,185 @@ Two properties of this substrate drive everything below:
 
 ## 2. Durable write points, in path order
 
-`W#` labels are used by §3 and §6. "Guard" is the predicate the write is
-actually made under today.
+Three segments, in the order a unit of work travels them: the plan segment
+(§2.0), the work-step launch segment (§2.1), and the fix cycle (§2.3). "Guard"
+is, throughout, the predicate the write is actually made under **today**.
+
+### 2.0 The plan segment (P writes)
+
+Everything from "an objective exists" to "the work step is `ready` and dispatch
+is entered". `P#` labels are used by §3.0, §5.1 and §6.9. **Path** is A
+(standalone run), B (master objective) or both; the rows are in execution
+order, and where the two paths interleave differently the row says so.
+
+The same rule §3 applies to the rest of the document applies here: **no row
+collapses two durable mutations that a crash between them would leave in
+distinguishable persisted states.** Where a helper writes more than one row
+(`recordAttentionStopWithState`, `stopPlanningStep`), each row is its own `P`.
+
+#### 2.0.1 Group 1 — objective / workflow creation
+
+| # | Path | Write | Site | Guard today |
+| --- | --- | --- | --- | --- |
+| P1 | A | Run row + **all six** step rows (`plan`, `work`, `review`, `fix`, `verify`, `advance`), run `pending`, step 1 `ready`, the plan step already carrying its `artifact_json` | `createSingleTaskRun`, `workflow.go:872` → `store.CreateWorkflowRun`, `workflow_store.go:30` | Insert. **Atomic**: run and steps share one `inTx`, so no crash can leave a run without its steps |
+| P1′ | B | Run row + **one** step row (`plan`, `ready`, `artifact_json = "{}"`) | `CreateObjectiveRun`, `master_coordinator.go:38` | Same single transaction. A master run deliberately has no work/review step of its own |
+| P2 | B | `workflow_plans` row, `status='pending'`, `command_status='idle'` | `master_coordinator.go:41` → `InsertWorkflowPlan`, `workflow_plan.sql:1-5` | Insert. **Separate transaction from P1′** — this is the segment's first real crash boundary (CP1) |
+| P3 | both | Run owner stamped | `stampOwner`, `httpd/controllers/workflow.go:835` → `SetWorkflowRunOwner` | Unconditional overwrite by run id. Skipped entirely when no identity is resolvable |
+| P4 | both | **Execution policy frozen** into `policy_snapshot` — the routing priorities and `AutonomousMode` this run will obey for its whole life | `ApplyExecutionPolicySnapshot`, `execution_policy_resolve.go:142` → `UpdateWorkflowRunPolicySnapshot`, `workflow.sql:75-82` | `WHERE id = ?` — **no expected value, no generation**. By contract written exactly once; nothing enforces that |
+| P5 | B | Autonomous kickoff wake (`ReasonAutonomousProgress`) — the only thing that ever starts an autonomous objective | `maybeKickoffAutonomousPlanning`, `execution_policy_resolve.go:171` → `scheduleWake` | Best-effort upsert by idempotency key; a failure is logged and swallowed (`dispatch.go:416-422`). Gated on the snapshot P4 just wrote |
+
+#### 2.0.2 Group 2 — plan generation (Path B only)
+
+`GeneratePlan` is re-entered from an HTTP request and from the wake poller via
+`ContinueRun` (`workflow.go:1254-1259`), so every row below must be read as
+something two callers can reach.
+
+| # | Write | Site | Guard today |
+| --- | --- | --- | --- |
+| P6 | **Plan command armed**: `status pending → running`, `command_status → running`, provider/model/context manifest recorded | `master_coordinator.go:106` → `StartWorkflowPlanCommand`, `workflow_plan.sql:10-13` | **A real CAS**: `WHERE workflow_run_id = ? AND status='pending' AND command_status IN ('idle','pending')`. A lost race returns `ErrPlanLocked`, never a second planner. This is the plan segment's strongest predicate — and it is *coarse-state*, not generation-conditioned: it cannot tell one arming from the next |
+| P7 | Plan step `ready → running` | `master_coordinator.go:115` | `(stepID, expected=ready)` |
+| — | **The planner subprocess runs** (`c.planner.Generate`, `:127`) | — | **Not a durable workflow write.** Minutes long, on a workflow-owned context that survives the caller's; the irreducible ambiguity of this segment (CP6) |
+| P8 | Planner response persisted: `command_status running → responded`, `generated_plan_json` set | `master_coordinator.go:179` → `PersistWorkflowPlanResponse`, `workflow_plan.sql:15-17` | CAS on `status='running' AND command_status='running'`. `!moved` ⇒ `ErrPlanLocked`, nothing overwritten |
+| P9 | **Normalized** plan re-persisted, when normalization changed the bytes | `finalizeGeneratedPlan`, `master_coordinator.go:199` | Same CAS — but on `status='running' AND command_status='running'`, which P8 has already left at `responded`. **This statement therefore updates zero rows every time it runs**, and its result is discarded (`_, _ =`). The row keeps the planner's raw JSON; the normalized form survives only in memory for the rest of this call. Functionally benign — `NormalizeAndValidatePlan` is pure, so every later reader (including RP1) re-derives the identical normalized plan from the raw bytes — but recorded as its own row because a reader must not infer from this line that the stored plan is the normalized one, and because a future non-deterministic normalizer would turn this from cosmetic into a correctness bug |
+| P10 | **Task rows + dependency edges** inserted (`state = 'eligible'` for the first task with no dependencies, `'blocked'` for the rest), each carrying its `scope_json` — the classified write set, execution strategy and **write intent** | `master_coordinator.go:253` → `InsertWorkflowTasks`, `workflow_plan_store.go:70` | Insert-or-ignore inside **one transaction** covering tasks and edges. Idempotent under replay only in the weak sense §3.0 CP9 describes: the ids are freshly minted on every pass, so a replay's rows lose to `UNIQUE(workflow_run_id, plan_step_id)` and are silently dropped |
+| P11 | Pairwise task relationships (`functional_dependency` / `probable_write_conflict` / `independent`) — what parallel dispatch reads to decide whether two tasks may run at once | `master_coordinator.go:259` → `ReplaceWorkflowTaskRelationships`, `workflow_plan_store.go:264` | Upsert on `(task_id, related_task_id)`, one transaction. **FK-bound** to `workflow_tasks(id)` with `foreign_keys(ON)` (`db.go:37`) — see CP9 |
+| P12 | Plan finished: `status → validated`, `command_status → completed`, validation verdict + plan hash | `master_coordinator.go:262` → `FinishWorkflowPlan`, `workflow_plan.sql:19-22` | CAS on `status='running' AND command_status IN ('running','responded')` |
+| P13 | Approval mode rewritten to `auto` when it was *policy*, not the client, that decided | `master_coordinator.go:278` → `SetWorkflowPlanApprovalMode` | `WHERE workflow_run_id = ? AND status != 'approved'`. Deliberate: an auto-approval must be inspectable as one |
+| P14 | **Invalid-plan branch**: `status → invalid`, `command_status → failed`, error class `planner_policy_violation` | `master_coordinator.go:202` | Same CAS as P12. `invalid` is terminal — `GeneratePlan`'s own switch treats it as a permanent no-op |
+| P15 | Invalid-plan branch: run `pending → needs_attention` | `master_coordinator.go:204` | `(runID, expected=run.State)`, only from `pending` |
+| P16 | Invalid-plan branch: plan step `running → waiting` | `stopPlanningStep`, `master_coordinator.go:440` | `(stepID, expected=running)` |
+
+#### 2.0.3 Group 3 — plan persistence / approval
+
+| # | Write | Site | Guard today |
+| --- | --- | --- | --- |
+| P17 | Manual hold: run `pending → waiting` (a validated plan awaiting a person) | `master_coordinator.go:283` | `(runID, expected=run.State)` |
+| P18 | Manual hold: plan step `running → waiting` | `master_coordinator.go:287` | `(stepID, expected=running)` |
+| P19 | **Plan approved**: `status validated → approved`, `approved_at` set | `ApprovePlan`, `master_coordinator.go:466` → `ApproveWorkflowPlan`, `workflow_plan.sql:24-26` | CAS on `status='validated'`. `!moved` ⇒ return the current detail, no error. The single durable fact that licenses task dispatch |
+| P20 | Plan step `waiting → running` | `master_coordinator.go:476` | `(stepID, expected=waiting)` |
+| P21 | Plan step `running → completed` | `master_coordinator.go:478` | `(stepID, expected=running)` |
+| P22 | Run `waiting`/`pending → running` | `master_coordinator.go:481` | `(runID, expected=run.State)` |
+| P23 | Plan rejected: `status → rejected`, then the run is cancelled | `RejectPlan`, `master_coordinator.go:497` → `RejectWorkflowPlan`, `workflow_plan.sql:32-34`, then `CancelRun` | CAS on `status IN ('pending','validated','invalid')`; the result is discarded (`_, _ =`) and the cancel runs regardless |
+
+#### 2.0.4 Group 4 — a task becomes dispatchable
+
+Everything below runs inside `reconcileMasterTasksOnce`, which is re-entered on
+**every** `GetRun` of an approved master run (`getMasterRun`, `:503`), from boot
+recovery, and from the autonomous heartbeat. It is the plan segment's only
+continuously-running loop, and it holds no lock.
+
+| # | Write | Site | Guard today |
+| --- | --- | --- | --- |
+| P24 | Waiting reason persisted into `scope_json` (`dependency` / `conflict` / cleared) | `persistTaskWaitingReason`, `master_coordinator.go:1022` → `UpdateWorkflowTaskScope` | `WHERE id = ?` — unconditional; read-modify-write of the whole scope blob, so two overlapping passes can each write a stale scope back |
+| P25 | Task `eligible → blocked`, when a conflicting sibling is active | `master_coordinator.go:937` | `(taskID, expected=eligible)` |
+| P26 | Task `blocked → eligible` | `master_coordinator.go:947` | `(taskID, expected=blocked)` |
+
+#### 2.0.5 Group 5 — child run creation and dispatch intent
+
+`dispatchMasterTask` has two entry branches: a **recovery** branch taken when
+`FindWorkflowRunByPlannedTask` already finds a child (`:1063-1079`), and the
+**fresh** branch below. The two branches do *not* write the same rows — which is
+what CP20–CP22 are about.
+
+| # | Write | Site | Guard today |
+| --- | --- | --- | --- |
+| P27 | **Child run + its six step rows** created, `planned_task_id` = this task, `parent_workflow_id` = the objective | `dispatchMasterTask`, `master_coordinator.go:1112` → `createSingleTaskRun` → P1 | P1's transaction. `planned_task_id` is the **natural key** every recovery in this group reads back through `FindWorkflowRunByPlannedTask` (`workflow_plan.sql:97-98`) |
+| P28 | Child owner stamped from the **parent's** owner — never the request identity | `stampChildOwnership`, `master_coordinator.go:1121` → `child_ownership.go:31` | Unconditional overwrite; idempotent. Re-run by the recovery branch (`:1072`) before any `StartRun`, which is what closes CP19 |
+| P29 | Child `policy_snapshot` overwritten with the **parent's frozen execution policy** | `inheritExecutionPolicySnapshot`, `master_coordinator.go:1128` → `execution_policy_resolve.go:197` | `WHERE id = ?`. **Not re-run by the recovery branch** — see CP20 |
+| P30 | `session_lifecycle_decision` checkpoint for the task boundary (+ the dependency context pack and its hash), for a task with dependencies | `master_coordinator.go:1140` → `persistSessionLifecycleDecision`, `session_context_pack.go:162` | Append. Best-effort (`_ =`). **Not re-run by the recovery branch** — see CP21 |
+| P31 | **Child plan-step artifact overwritten** with the planner's real acceptance criteria and the task's declared `WriteIntent` | `master_coordinator.go:1146` → `UpdateWorkflowStepArtifact`, `workflow.sql:121-127` | `WHERE id = ?` — unconditional. **Not re-run by the recovery branch**, and this is the most consequential omission in the segment — see CP22 |
+| P32 | **Task bound to its execution run**: `execution_run_id` set and `state → running` | `master_coordinator.go:1149` → `SetWorkflowTaskExecutionRun`, `workflow_plan.sql:93-95` | A real CAS: `WHERE id = ? AND execution_run_id IS NULL AND state = 'eligible'`. The bool result is discarded at both call sites (`:688`, `:1066`, `:1149`), so a lost CAS is silent |
+
+#### 2.0.6 Group 6 — `StartRun`: the plan step completes and the work step unblocks
+
+Both paths converge here. Path B reaches it at `master_coordinator.go:1078`
+(recovery branch) or `:1155` (fresh branch); Path A reaches it from the API.
+
+| # | Write | Site | Guard today |
+| --- | --- | --- | --- |
+| P33 | Run `pending → running` | `StartRun`, `workflow.go:1117` | `(runID, expected=pending)`. **This is also the point of no return for re-entry**: every later `StartRun` on this run sees a non-`pending` state and returns `GetRun` without doing anything (`workflow.go:1112-1114`) |
+| P34 | Plan step `ready → running` | `workflow.go:1152` | `(stepID, expected=ready)` |
+| P35 | Plan step artifact rewritten (the artifact re-marshalled, or rebuilt from the run's objective when it was empty) | `workflow.go:1156` | `WHERE id = ?` — unconditional |
+| P36 | **Plan step `running → completed`** — the plan's own completion write | `workflow.go:1159` | `(stepID, expected=running)` |
+| P37 | **Work step `pending → ready`** — the plan→work unblock, the "one-off hardcoded edge" `StartRun`'s comment names | `workflow.go:1164` | `(stepID, expected=pending)` |
+| — | `dispatchWorkStep` entered with the prompt built from the artifact | `workflow.go:1170-1172` | Continues at **W0** (§2.1) |
+
+#### 2.0.7 Group 7 — planner failure, park and retry branches
+
+Each of these is a distinct multi-row remedy, and each row is separately
+crashable.
+
+| # | Write | Site | Guard today |
+| --- | --- | --- | --- |
+| P38 | Capacity park: plan reset to `status='pending'`, `command_status='idle'` (**not** `failed`, or the next arming would `ErrPlanLocked` forever) | `parkPlanForCapacity`, `master_coordinator.go:315` | P12's CAS. Result discarded |
+| P39 | Capacity park: `planner_capacity_wait` checkpoint | `master_coordinator.go:316` | Append; result discarded |
+| P40 | Capacity park: `ReasonPlannerCapacity` wake | `master_coordinator.go:326` | Best-effort |
+| P41 | Bounded retry: plan reset to `pending`/`idle` | `retryPlanOrFail`, `master_coordinator.go:373` | P12's CAS. Result discarded |
+| P42 | Bounded retry: plan step `running → waiting` | `stopPlanningStep`, via `:374` | `(stepID, expected=running)` |
+| P43 | Bounded retry: `planner_retry_scheduled` attention stop, carrying the attempt evidence | `master_coordinator.go:375` | Once-per-occurrence dedupe. **This row is also the retry budget**: `plannerRetryCount` counts these checkpoints (`:401-415`) rather than storing a counter |
+| P44 | Bounded retry: `ReasonTransientRetry` wake | `master_coordinator.go:383` | Best-effort |
+| P45 | Permanent failure: `status → invalid`, `command_status → failed`, error class | `failPlan`, `master_coordinator.go:419` | P12's CAS. Result discarded |
+| P46 | Permanent failure: run `pending → needs_attention` | `master_coordinator.go:421` | `(runID, expected=run.State)`, only from `pending` |
+| P47 | Permanent failure: plan step `running → waiting` | `stopPlanningStep`, via `:423` | `(stepID, expected=running)` |
+| P48 | Permanent failure: attention stop with the class and the planner evidence | `master_coordinator.go:429` | Once-per-occurrence dedupe |
+| RP1 | **Boot recovery, responded-but-unfinalized**: `finalizeGeneratedPlan` re-entered, replaying P9–P13 | `reconcileRun`, `recovery.go:130-133` | As P9–P13. **Mandatory**: its error aborts this run's reconciliation and parks it |
+| RP2 | **Boot recovery, planner in flight**: `status → invalid`, `command_status → failed`, class `planner_ambiguous` | `recovery.go:136` | P12's CAS. Result discarded |
+| RP3 | Boot recovery: run `pending`/`waiting`/`running → needs_attention` | `recovery.go:138` | `(runID, expected=run.State)` |
+| RP4 | Boot recovery: `planner_ambiguous` attention stop | `recovery.go:140` | Once-per-occurrence dedupe |
+| RP5 | Boot recovery, plan still `pending`: the kickoff wake re-ensured | `recovery.go:129` → `maybeKickoffAutonomousPlanning` | Best-effort, idempotent. Reads `policyForRun(run)` — so it heals CP4 and **cannot** heal CP2/CP3 |
+
+#### 2.0.8 What the plan segment already gets right
+
+Four properties are genuinely good and the CAS work must not regress them:
+
+- **P6 is a true CAS on a two-column predicate.** `status='pending' AND
+  command_status IN ('idle','pending')` means two callers racing to start one
+  planner produce exactly one subprocess, and the loser gets `ErrPlanLocked`
+  rather than a duplicate. Every plan-command transition (P8, P12) is likewise
+  conditioned on the state it expects, which is more than the worker path's
+  outbox claim does with respect to *which* dispatch it is.
+- **P27's `planned_task_id` is a durable natural key**, written in the same
+  transaction as the child run. It is what makes "did I already create a child
+  for this task?" answerable after a crash without any generation token at all —
+  the one place in the whole document where the *identity* problem §2's "what is
+  missing" describes is already solved, by a unique key rather than by a claim.
+- **P28 is re-run before every dispatch**, in both branches, precisely so the
+  window between P27 and P28 cannot leave an unowned child that then launches a
+  provider process. `requireChildOwnershipForDispatch` (`child_ownership.go:49`)
+  is the hard gate behind it, and it fails closed in multi-user mode.
+- **RP2 is fail-closed by construction**: a planner that was in flight when the
+  daemon died is `planner_ambiguous`, never "assume it did not run". That is
+  principle 6 applied correctly, and it is the same instinct the worker path's
+  `ContradictionUnprovable` has.
+
+#### 2.0.9 What the plan segment is missing
+
+The same sentence as §2's, with one addition:
+
+> **No plan-segment durable write names the plan generation, approval or task
+> dispatch it belongs to** — and, unlike the work path, several of its
+> multi-row remedies have **no re-entry at all** once their first row has
+> landed.
+
+The second half is the sharper problem. The work path is re-entered from four
+places and its outbox row is the re-entry point; the plan segment's re-entry
+points are `GeneratePlan`'s status switch, `ApprovePlan`'s
+`status='validated'` CAS, and `StartRun`'s `state='pending'` check — and **each
+of those is a one-way door**. A crash after the first row of `ApprovePlan` or of
+`StartRun` leaves a state that the same function, called again, declines to
+touch. §3.0 names each one.
+
+### 2.1 The work-step launch segment (W, R, H, A writes)
+
+`W#` labels are used by §3 and §6. Dispatch is entered from **P37**'s `ready`
+work step; W0 is the first write it makes.
 
 | # | Write | Site | Guard today |
 | --- | --- | --- | --- |
 | W0 | Outbox row enqueued (insert-or-get, idempotent on the step key) | `dispatch.go:149` | Natural key |
 | W1 | `routing_decision` checkpoint (which provider was chosen / capacity wait) | `routing_dispatch.go:50` | none (append) |
-| W2 | Branch lock acquired (direct-branch mode) | `branch_execution.go:95` | Lock table's own CAS |
+| W2 | Branch lock acquired (direct-branch mode) | `ensureBranchLock`, `branch_execution.go:95`; the acquire itself at `:100` | Lock table's own CAS |
+| W2.5 | Resolved run-stop cleared (a run parked by a capacity or branch wait that is demonstrably gone) | `clearResolvedStop`, `dispatch.go:231` | Human decisions are never cleared here |
 | W3 | Run `waiting → running` when capacity came back | `dispatch.go:243` | `(runID, expected=waiting)` |
 | W4 | **Outbox claim** `pending → dispatched` | `dispatch.go:248` | `(entryID, expected=pending)` — **no claim token** |
 | W5 | `session_lifecycle_decision` checkpoint | `dispatch.go:292` | none (append) |
@@ -97,12 +315,18 @@ actually made under today.
 | W9 | Launch-failure boundary (`LaunchOutcomeFailed`) | `dispatch_state_machine.go:536` | none (append, best-effort) |
 | W10 | Ambiguous-launch boundary (launcher returned no session id) | `dispatch_state_machine.go:565` | none (append, best-effort) |
 | W11 | `worker_launch_error` checkpoint (classification + deep error + attempt count) | `worker_launch_recovery.go:287` | none (append) |
-| W12 | Retryable path: outbox `dispatched → pending` + durable wake + attention stop | `worker_launch_recovery.go:310` | `(entryID, expected=entry.Status)` — **no generation** |
-| W13 | Permanent path: outbox → `failed`, step → `failed`, run → `needs_attention`, attention stop | `dispatch.go:815-845` | `(id, expected)` per row — **no generation** |
-| W14 | Unconfirmed-launch boundary **and** `worker_launch_unconfirmed` checkpoint (two homes) | `dispatch_state_machine.go:671`, `:710` | none (append, best-effort both) |
+| W12a | Retryable path: outbox `dispatched → pending` under the **same** idempotency key | `worker_launch_recovery.go:310` | `(entryID, expected=entry.Status)` — **no generation** |
+| W12b | Durable wake row that carries the retry | `worker_launch_recovery.go:313` | none (best-effort) |
+| W12c | Attention stop `worker_launch_retry` | `worker_launch_recovery.go:314` | once-per-occurrence dedupe |
+| W13a | Permanent path: outbox → `failed` | `dispatch.go:817` | `(entryID, expected=entry.Status)` — **no generation** |
+| W13b | Step `running`/`ready` → `failed` | `dispatch.go:829` | `(stepID, expected=step.State)` |
+| W13c | Run `running` → `needs_attention` | `dispatch.go:835` | `(runID, expected=running)` |
+| W13d | Attention stop (`dispatch_failed` or `worker_launch_retries_exhausted`) | `dispatch.go:842` | once-per-occurrence dedupe |
+| W14a | Unconfirmed-launch boundary (`LaunchOutcomeUnconfirmed`) | `dispatch_state_machine.go:671` | none (append, best-effort — a failure is logged and the path continues) |
+| W14b | `worker_launch_unconfirmed` checkpoint (the second durable home) | `dispatch_state_machine.go:710` | none (append, best-effort) |
 | W15 | **Confirmation boundary** (`LaunchOutcomeDispatched`) — the gate RUNNING stands on | `dispatch.go:734` | none (append); requires `ownership.Observed` |
 | W16 | `worker_dispatched` ledger checkpoint (the phase marker other readers key off) | `dispatch.go:762` | none (append) |
-| W17 | **Step session written** (`workflow_steps.session_id`) | `dispatch.go:780` | none — unconditional |
+| W17 | **Step session written** (`workflow_steps.session_id`) | `dispatch.go:780` | `(stepID, session_id IS NULL)` — `UpdateWorkflowStepSession` refuses to clobber an already-associated session (`workflow.sql:129-136`). It does **not** name the generation that bound it, which is what §4.3's proof obligation P needs and what §6.5's replacement adds |
 | W18 | Branch lock re-pointed at the session | `dispatch.go:790` | best-effort |
 | W19 | Outbox `dispatched → acknowledged` | `dispatch.go:794` | `(entryID, expected=entry.Status)` |
 | W20 | **Step `ready → running`** | `dispatch.go:799` | `(stepID, expected=ready)` |
@@ -111,51 +335,161 @@ actually made under today.
 | W23 | **Completion checkpoint** — `worker_observed_*` with `branch`, `worktree_path`, `base_sha`, `head_sha`, and (on completion) `fingerprint_after` | `worker_progress.go:604` | none (append) |
 | W24 | Attention stop checkpoint when observation parks the run | `worker_progress.go:637` | once-per-occurrence dedupe |
 | W25 | **Attempt finalized** (`succeeded` / `failed` + error class) | `worker_progress.go:682` | none — unconditional, error ignored |
-| W26 | Review dispatch reads W23 (`GetLatestWorkflowCheckpointByStep`) for session/branch/worktree/target fingerprint | `review_dispatch.go:528-541` | Gated on `workStep.State == completed` |
+| W26 | **The review transition's evidence gate**: `dispatchReviewStep` refuses to do anything at all until the work step is durably `completed` (`review_dispatch.go:519`), then reads W23 (`GetLatestWorkflowCheckpointByStep`) for the session, branch, worktree and target fingerprint | `review_dispatch.go:528-541` | Gated on `workStep.State == completed`; a completed step with no session-bearing checkpoint raises `ambiguous_review_state` rather than reviewing an unknown target (`:534`) |
+| W27 | Review policy decision persisted (cycle 1 only, before any reviewer exists) | `persistReviewPolicyDecision`, `review_dispatch.go:577` | Append; its failure aborts the dispatch |
+| W28 | **Review step `pending → ready`** — the work→review unblock, the exact mirror of P37's plan→work unblock | `review_dispatch.go:604` | `(stepID, expected=pending)` |
 | R1 | Reconciliation boundary (`worker_dispatch_reconciled`) | `dispatch_reconcile.go:903` | none (append); **mandatory**, not best-effort |
-| R2 | Reconciliation retry: attempt closed, step `waiting → running`, then W11/W12 | `dispatch_reconcile.go:748-822` | `(id, expected)` per row |
-| R3 | Reconciliation stop: evidence snapshot **first**, then attempt closed, step → `waiting`, attention stop | `dispatch_reconcile.go:838-891` | evidence gate refuses the raise if the snapshot cannot be made durable |
+| R2a | Reconciliation retry — the reconciliation boundary (`LaunchOutcomeFailed`) | `dispatch_reconcile.go:787` | none (append); **mandatory** |
+| R2b | Attempt closed `failed`/`runtime_failed`, **before** the retry is scheduled, so no guard reads a fossil as a live writer | `dispatch_reconcile.go:795` | none — unconditional |
+| R2c | Step `waiting → running` (the state dispatch re-enters) | `dispatch_reconcile.go:807` | `(stepID, expected=waiting)` |
+| R2d | Then the whole of W11 + W12a–W12c, via `recordWorkerLaunchFailure` | `dispatch_reconcile.go:816` | as W11/W12 |
+| R3a | Reconciliation stop — the reconciliation boundary (`LaunchOutcomeAmbiguous`), recorded **first** so the snapshot below contains it | `dispatch_reconcile.go:855` | none (append); **mandatory** |
+| R3b | Evidence snapshot + the `ambiguous_worker_state` raise | `dispatch_reconcile.go:861` | **the gate**: if the snapshot cannot be made durable the raise is refused, nothing below runs, and the step is left exactly as it was |
+| R3c | Attempt closed with the raise's error class | `dispatch_reconcile.go:873` | none — unconditional |
+| R3d | Step `running`/`ready` → `waiting` | `dispatch_reconcile.go:879` | `(stepID, expected=step.State)` |
+| R3e | Attention stop `worker_dispatch_ambiguous` | `dispatch_reconcile.go:885` | once-per-occurrence dedupe |
 | H1 | Human reopen: `worker_launch_human_retry` checkpoint, then `ReopenFailedWorkflowStep`, then outbox `failed → pending`, then unpark | `worker_launch_recovery.go:583-615` | `(id, expected=failed)` per row — **no generation, no single-winner index** |
 | A1 | `attempt_reaped_orphaned` checkpoint, then the attempt row closed `cancelled` | `attempt_reaper.go` | checkpoint keyed to attempt id ⇒ exactly-once |
 | A2 | `work_commit_adopted` checkpoint, then the step completes | `work_adoption.go` | bounded generation counter in the record |
 
-### 2.1 The fix-cycle writes
+**W28 is this audit's terminus.** Everything after it — the reviewer's own
+outbox claim, its launch phases, its authority pointer and its generation
+model — is the reviewer lifecycle, which this document reads as its reference
+(§5) and proposes no change to (§6.7).
+
+### 2.2 The fix-cycle writes
 
 The fix cycle is not a second launch. It reuses the work step's **already-live
 session** — `Send` targets `reviewRun.SessionID`, which is the worker's session,
-never a new one (`fix_dispatch.go:404-412`) — so it has no intent/confirmation
-boundary, no ownership probe and no `workflow_dispatch_checkpoints` row at all.
-What it does have is its own outbox row, its own attempt row and its own
-observation, and those three are what §4.7 is about. `F#` labels are used by §3
-and §4.7.
+never a new one (`fix_dispatch.go:404-412`) — so it makes no ownership probe and
+writes no `workflow_dispatch_checkpoints` row at all.
 
-| # | Write | Site | Guard today |
+It does, however, have **its own intent boundary**, and that boundary's contract
+is *stronger* than the work path's W7. `recordFixDispatchIntent`
+(`fix_delivery_recovery.go:160`) writes a `fix_dispatch_intent` checkpoint
+carrying the session id, the review run id, `FingerprintBefore`, and the full
+delivery record, **strictly before `Send`, and its failure is fatal to the pass**
+(`fix_dispatch.go:361-363`): a delivery AO could not first write down is a
+delivery AO does not make. What the fix cycle lacks is the work path's
+*confirmation* half — there is no ownership read-back, because there is nothing
+newly owned. F8 is its confirmation analogue.
+
+`F#` labels are used by §3 and §4.7. The order below is the order
+`deliverFixPrompt` actually executes.
+
+| # | Write | Site | Durable? / guard today |
 | --- | --- | --- | --- |
-| F0 | Fix outbox row enqueued under a **per-cycle, per-transport** key `workflow-step-fix:<stepID>:cycle<N>[:transport<M>]` | `dispatchFixStep`, `fix_dispatch.go:246`; key built at `fixStepOutboxIdempotencyKey`, `:103` | Natural key. Unlike the worker's single reused row, each cycle gets a **fresh** row — the one structural advantage the fix path has over the work path |
-| F1 | Fix outbox claim `pending → dispatched` | `dispatchFixFromPending`, `fix_dispatch.go:292` | `(entryID, expected=pending)` |
-| F2 | Prompt delivered into the work step's existing session | `deliverFixPrompt`, `fix_dispatch.go:331`; `deliverAndConfirm`, `:66` | Transport-level. `ports.ErrPromptUndelivered` (refused before any transport side effect) is the only failure that may be retried durably (`:372`) |
-| F3 | **Fix attempt row opened** (`outcome IS NULL`), harness copied from the work step's last attempt | `recordFixDispatchSuccess`, `fix_dispatch.go:419` | `len(attempts) < cycleNumber` — a **count comparison** against the cycle number. Not an identity check, not a CAS |
-| F4 | `FixAttemptID` written into the delivery record — the only durable binding between a cycle and the attempt row it opened | `fix_dispatch.go:423` (new row) / `:428` (re-entered cycle) | none; it rides in F6's `RetryState` JSON |
-| F5 | Fix outbox `dispatched → acknowledged` | `fix_dispatch.go:432` | `(entryID, expected=entry.Status)` |
-| F6 | `fix_dispatched` checkpoint: session id, review run id, `fingerprint_before`, delivery record | `fix_dispatch.go:440` | none (append) |
-| F7 | Fix step/run transition from observation (`running → waiting` on delivery, `→ failed` on no verifiable change) | `recordFixOutcome`, `fix_progress.go:282` (step), `:292` (run) | `(stepID, expected=step.State)` / `(runID, expected=run.State)`, behind the `ValidWorkflow*Transition` guards |
-| F8 | `fix_observed_<state>` checkpoint carrying `fingerprint_after` | `fix_progress.go:301` | none (append) — written **after** F7, the same inversion §4.6 catalogues for W21/W23 |
-| F9 | **Fix attempt finalized** (`succeeded` / `failed` + error class) | `recordFixOutcome`, `fix_progress.go:317` (lookup) and `:336` (update) | none — `GetLatestWorkflowAttempt(step.ID)` picks the row **by recency, not by identity**, and the update's error is discarded (`_ =`) |
-| F10 | Fix-delivery restart classification, for a cycle whose outbox row was already `dispatched`/`acknowledged` when the process died | `resolveFixDeliveryAfterRestart`, `fix_dispatch.go:272`; `fix_delivery_recovery.go` | Reads F6's delivery record; refuses to conclude when it cannot read one |
+| F0 | Fix outbox row enqueued under a **per-cycle, per-transport** key `workflow-step-fix:<stepID>:cycle<N>[:transport<M>]` | `dispatchFixStep`, `fix_dispatch.go:246`; key built at `fixStepOutboxIdempotencyKey`, `:103` | Durable. Natural key. Unlike the worker's single reused row, each cycle gets a **fresh** row — the one structural advantage the fix path has over the work path. Preceded by a hard re-entry guard at `:237`: `len(attempts) >= cycleNumber` ⇒ this cycle already has its attempt row, never dispatch again |
+| F1 | Fix outbox claim `pending → dispatched` | `dispatchFixFromPending`, `fix_dispatch.go:292` | Durable. `(entryID, expected=pending)` |
+| F2 | Fix step `pending → ready` | `runFixStep`, `fix_dispatch.go:306` | Durable. `(stepID, expected=pending)` |
+| F3 | Fix step `ready`/`waiting` → `running` | `runFixStep`, `fix_dispatch.go:314` | Durable. `(stepID, expected=step.State)`. Both delivery entry points — first pass and post-restart adoption — go through `runFixStep`, so a recovered cycle leaves the step identically |
+| F4 | Session lifecycle decision (+ context pack, when the decision is `compact`) | `applyFixLifecycleDecision`, `cascade.go:328`; persisted at `:374` | Durable, **run-level**, best-effort (`_ =`). Deliberately **not** associated with the step (`cascade.go:366-374`) precisely so it cannot shadow the step's latest checkpoint — which is what keeps F5 readable as "the latest checkpoint for this step" |
+| F5 | **`fix_dispatch_intent` checkpoint** — session id, review run id, `FingerprintBefore`, prompt receipt digest, delivery record | `recordFixDispatchIntent`, `fix_delivery_recovery.go:160`; called at `fix_dispatch.go:361` | Durable, append, and **mandatory**: a write failure aborts the pass and `Send` is never called. This is the fix path's intent-before-action boundary |
+| — | `Send` — the prompt handed to the transport | `deliverAndConfirm`, `fix_dispatch.go:66`, called at `:365` | **Not a durable workflow write.** A transport side effect with no idempotency key; this is the one irreducible ambiguity in the path (CF2) |
+| F6 | **Fix attempt row opened** (`outcome IS NULL`), harness copied from the work step's last attempt | `recordFixDispatchSuccess`, `fix_dispatch.go:419` | Durable. Guard is `len(attempts) < cycleNumber` — a **count comparison** against the cycle number. Not an identity check, not a CAS |
+| — | `delivery.FixAttemptID = attempt.ID` | `fix_dispatch.go:423` (new row) / `:428` (re-entered cycle) | **Not a durable write — a local Go assignment.** The binding between a cycle and the attempt row it opened becomes durable only when F8 serializes the record. A crash between F6 and F8 leaves the attempt row with nothing naming it |
+| F7 | Fix outbox `dispatched → acknowledged` | `fix_dispatch.go:432` | Durable. `(entryID, expected=entry.Status)` |
+| F8 | **`fix_dispatched` checkpoint** — session id, review run id, `FingerprintBefore`, and the delivery record **including `FixAttemptID`** | `fix_dispatch.go:440` | Durable, append. The point at which the cycle→attempt binding first exists on disk |
+| F9 | Fix step/run transition from observation (`running → waiting` on delivery, `→ failed` on no verifiable change) | `recordFixOutcome`, `fix_progress.go:282` (step), `:292` (run) | Durable. `(stepID, expected=step.State)` / `(runID, expected=run.State)`, behind the `ValidWorkflow*Transition` guards |
+| F10 | `fix_observed_<state>` checkpoint carrying `fingerprint_after` | `fix_progress.go:301` | Durable, append — written **after** F9, the same inversion §4.6 catalogues for W21/W23 |
+| F11 | **Fix attempt finalized** (`succeeded` / `failed` + error class) | `recordFixOutcome`, `fix_progress.go:317` (lookup) and `:336` (update) | Durable. No predicate: `GetLatestWorkflowAttempt(step.ID)` picks the row **by recency, not by identity**, and the update's error is discarded (`_ =`) |
+| F12 | Fix-delivery restart classification, for a cycle whose outbox row was already `dispatched`/`acknowledged` when the process died | `resolveFixDeliveryAfterRestart`, `fix_delivery_recovery.go:331`; entered from `fix_dispatch.go:272` | Reads **F5**, not F8. `fixDeliveryNotSent` on absent intent, `fixDeliveryDelivered` on a receipt-digest match or a turn boundary after the intent's timestamp, `fixDeliveryUnproven` otherwise (`classifyFixDelivery`, `:248`). **But see §2.3: "absent intent" and "the intent ledger could not be read" are the same value here, and the path fails open on the second** |
+| F13 | Adoption of a proven delivery: `runFixStep` again, the parked stop cleared, then the ordinary F6–F8 bookkeeping the crash interrupted | `adoptDeliveredFix`, `fix_delivery_recovery.go:377` | Durable. Reuses `recordFixDispatchSuccess` deliberately, so a recovered dispatch and a first-pass dispatch leave **identical** durable state |
 
-Three properties of F3/F4/F9 together are what produce §4.7:
+**What is already right in the fix path**, and must be preserved:
 
-1. **F3's guard is a count, not an identity.** `len(attempts) < cycleNumber`
+- **F5 before `Send`, fatally.** This is the same "intent before action"
+  discipline the work path has at W7, held to a stricter standard: W7's failure
+  refuses the launch, and F5's failure refuses the pass. It is what makes
+  "crashed before send" distinguishable from "crashed after send" at all.
+- **F12 reads evidence, not state — on the session half.**
+  `classifyFixDelivery` decides from the intent record plus the session's own
+  facts (a receipt digest recorded at intent time, a turn boundary compared
+  against the intent's timestamp) and returns `fixDeliveryUnproven` rather than
+  guessing when the **session** is unreadable or missing
+  (`fix_delivery_recovery.go:271-280`). That half is principle 6 correctly
+  applied. The **ledger** half is not — see §2.3.
+- **F0's re-entry guard.** `len(attempts) >= cycleNumber` at `fix_dispatch.go:237`
+  means a cycle that got as far as F6 is never re-dispatched, whatever its outbox
+  row says. Dispatch and observation therefore cannot both be acting on one
+  cycle.
+- **The per-cycle outbox key.** Each cycle and each bounded transport retry gets
+  its own row, so the fix path is structurally free of the reused-row problem
+  that §1 identifies as the root of the work path's gaps.
+
+**What actually produces §4.7** is narrower than a missing intent boundary, and
+it is entirely downstream of delivery:
+
+1. **F6's guard is a count, not an identity.** `len(attempts) < cycleNumber`
    answers "does this step have fewer attempt rows than cycles?", which is true
    or false about the *set* of rows and says nothing about whether *this* cycle
    owns one.
-2. **F4 records the right binding and F9 does not read it.** The delivery record
-   already names the attempt row the cycle opened. The close ignores it and
-   takes the latest row on the step instead.
-3. **F9 is unconditional and lossy.** No predicate, and a discarded error: a
+2. **F8 records the right binding and F11 does not read it.** The delivery
+   record names the attempt row the cycle opened. The close ignores it and takes
+   the latest row on the step instead — so a delayed observation from a
+   superseded cycle closes the current cycle's live row.
+3. **The binding is durable later than the row it names.** F6 creates the
+   attempt; F8 records which cycle owns it. Between them the row exists and
+   nothing on disk names it.
+4. **F11 is unconditional and lossy.** No predicate, and a discarded error: a
    close that fails leaves an open attempt and no trace that it was attempted.
 
-### What is already right
+### 2.3 The fix-intent ledger read fails open
+
+`classifyFixDelivery`'s rule 1 is the strongest rule in the path: *no
+pre-delivery record ⇒ PROVEN not sent*, and nothing may outrank it, because F5
+is written before `Send` and its failure is fatal. That inference is sound —
+**but only when the absence was established by a read that succeeded.**
+
+It is not, today. `findFixDispatchIntent` returns a plain three-tuple, and
+`found = false` is returned for **two different facts**
+(`fix_delivery_recovery.go:197-205`):
+
+1. `ListWorkflowCheckpoints` succeeded and no intent row for this step/cycle/
+   transport attempt exists — genuine, provable absence; and
+2. `ListWorkflowCheckpoints` **failed** — AO knows nothing at all.
+
+`resolveFixDeliveryAfterRestart` passes that single boolean straight into
+`classifyFixDelivery` (`:341-343`), whose `!intentFound` branch returns
+`fixDeliveryNotSent` (`:265-266`), and the caller then **re-delivers the prompt**
+(`:346-353`). So a transient store read failure is currently read as proof that
+`Send` never ran, and the fix findings can be sent a second time into a session
+that may already be acting on them.
+
+The function's own comment says the opposite:
+
+> *"A read failure is not evidence of absence. Returning 'found' with a zero
+> record would be a lie; returning 'not found' would license a resend on no
+> information at all. The caller treats the third state — see
+> `resolveFixDeliveryAfterRestart`'s readFailed branch."*
+> — `fix_delivery_recovery.go:200-204`
+
+**There is no `readFailed` branch.** `readFailed` appears exactly once in the
+package, in that comment. The intended tri-state was documented and never
+implemented, so the comment reads as a description of behaviour that does not
+exist. This is the one place in the fix path where the design intent and the
+code disagree, and the disagreement fails in the unsafe direction.
+
+**Gap vs. reviewer fail-closed provenance (principle 6).** This is precisely the
+inversion the reviewer path forbids. `reviewLaunchFailureForEntry` returns "no
+generation" on an unreadable ledger and treats that as a refusal to act —
+"cannot prove must never become the newest one" (`review_launch_recovery.go:643`)
+— and `workerLaunchRecoveryGenerations` returns the budget **maximum** on a read
+error rather than 0. Here the same unreadable-ledger condition returns the value
+that licenses the most destructive action available on the path. It is the same
+defect §6.6 invariant 5 already names for `workerLaunchAttemptCount`
+(`worker_launch_recovery.go:396-398`), in a place where the consequence is a
+duplicated prompt rather than a mis-sized budget.
+
+**Consequence for the classification of CF1** (§3): CF1 is deterministically
+resolvable **only on the successful-read path**. When the ledger read fails, the
+correct answer is not "not sent" and not "delivered" — it is `unproven`, and the
+run should park exactly as CF2 does. Until an implementation step adds a real
+tri-state result, **the read-failure case is a fail-open defect, not a
+fail-closed residue**, and it is classified in §4.7 as `needs_attention`-by-right
+that the code does not currently deliver.
+
+### 2.4 What the work and fix paths already get right
 
 The ordering discipline is sound and should be preserved verbatim by the CAS
 work:
@@ -175,7 +509,7 @@ work:
   `ownedExecution.Unprovable()` is a first-class outcome that stops rather than
   guesses (`dispatch_reconcile.go:169-262`).
 
-### What is missing
+### 2.5 What the work and fix paths are missing
 
 Everything in this document that follows is a consequence of one gap:
 
@@ -193,14 +527,72 @@ of the cycle earlier.
 
 ## 3. Crash windows
 
-Each window is the interval between two adjacent durable writes. "Produces"
-names the ambiguous state class from §4. "Resolver today" is the code that
-actually cleans it up, if any.
+Two tables: §3.0 for the plan segment, §3.1 for the work step and the fix
+cycle. Each window in both is the interval between **two adjacent durable
+writes** — no window below spans a write. Where an earlier draft of this table collapsed several
+writes into one row (`W0 → W4` over W1–W3, `W4 → W6` over W5, and the composite
+W12/W13/W14/R2/R3 remedies), the row is now split into its actual adjacent
+boundaries, lettered so every cross-reference to the original label still
+resolves. Failure and retry branches are enumerated alongside the success path.
+
+"Produces" names the ambiguous state class from §4. "Resolver today" is the code
+that actually cleans it up, if any. **Sub-lettered rows are counted as one
+window each** in §7's totals.
+
+### 3.0 Plan-segment windows (CP)
+
+Same rule as §3.1: each row is the interval between two **adjacent** durable
+writes from §2.0, and no row spans a write. "Resolver today" is the code that
+actually cleans it up, if any — and for this segment the honest answer is
+"boot `Reconcile`'s plan branch, or nothing", because `GetRun`'s continuous
+reconcile only runs once the plan is **approved**.
+
+| # | Window | Durable state left behind | Consequence | Resolver today |
+| --- | --- | --- | --- | --- |
+| CP1 | P1′ → P2 (master) | A run with a `plan` step and **no `workflow_plans` row** | The run is not recognisable as a master objective by anything: `GetWorkflowPlan` reports "not master", so `getMasterRun` never runs, `ContinueRun` falls through to the work/review lookup and returns `ErrInvalid` (`workflow.go:1276-1278`), and boot `reconcileRun` falls through to the step loop and finds no work step | **None.** A permanently inert run. The two writes are in separate transactions for no reason the code states |
+| CP2 | P2 → P3 | Run + plan row exist; **no owner** | Multi-user visibility falls back to "unowned"; `requireChildOwnershipForDispatch` has nothing to enforce later | None, and none is needed for a standalone run. For a master run this is CP3's precondition |
+| CP3 | P3 → P4 | Owner stamped; `policy_snapshot` still `DefaultWorkflowPolicy()` — whose `Execution` is the zero value, i.e. **`AutonomousMode = false`** and no routing priorities | An objective the user created as autonomous is durably manual, and routes on default priorities. Nothing ever says so | **None.** RP5 re-ensures the *wake*, but it reads `policyForRun(run)` from this same snapshot (`recovery.go:129`), so it reads `AutonomousMode=false` and does nothing. The run waits for a person who was never told to come |
+| CP4 | P4 → P5 | Snapshot frozen autonomous; **no kickoff wake** | An autonomous objective with nothing scheduled to start it | **RP5**, explicitly (`recovery.go:120-129` and its comment). The one window in this group that was designed for |
+| CP5 | P5 → P6 | Wake scheduled, plan `pending` | none — steady state | The poller calls `ContinueRun`, which routes a `pending`-plan master run straight into `GeneratePlan` (`workflow.go:1256`) |
+| CP6 | P6 → P7 | Plan command armed (`running`/`running`); plan step still `ready` | The plan is armed over a step that does not say so | **RP2–RP4**, fail-closed. Residue: the ambiguous branch does **not** call `stopPlanningStep`, and `stopPlanningStep` only moves `running → waiting` anyway, so the step is left at `ready` under an `invalid` plan |
+| CP7 | **P7 → planner subprocess → P8** — the segment's irreducible window, and its C5 analogue | Plan `running`/`running`, step `running`, and a planner process that may have run for minutes and may have produced a complete plan | Whether the objective was planned is not knowable from workflow's own tables | **RP2, fail-closed and lossy.** Unlike the worker path, which adopts a live launch by natural key and ownership probe (`adoptLiveLaunch`), the planner has **no adoption path**: the plan is marked `invalid` — which `GeneratePlan`'s switch treats as permanent — and a person must act. Correct in direction, expensive in fact: a whole planner invocation is discarded rather than re-read |
+| CP8 | P8 → P9 | Response persisted (`responded`); normalization not re-persisted | none (P9 is already a no-op, §2.0.2) | RP1 re-enters `finalizeGeneratedPlan` and re-derives the same normalized plan |
+| CP9 | P9 → P10 → P11 | Two distinct states. **(a)** No task rows: RP1 replays cleanly and the plan finalizes. **(b)** Task rows written, relationships not | (b) is the dangerous one. RP1's replay mints **fresh task ids** (`idByPlan[s.ID] = "wft-" + c.newID()`, `master_coordinator.go:211`), the `INSERT OR IGNORE` loses to `UNIQUE(workflow_run_id, plan_step_id)` and silently drops them, and P11 then inserts relationship rows naming ids that do not exist. With `foreign_keys(ON)` (`db.go:37`) that insert **fails** | **Fail-closed, and permanently stuck.** `ReplaceWorkflowTaskRelationships`' error propagates out of `finalizeGeneratedPlan` → `reconcileRun` → `parkUnreconcilableRun` (`recovery.go:105`), so the objective is parked with `recovery_unreconcilable` and every subsequent boot reproduces the identical failure. Reachable for any plan with two or more tasks, since `ClassifyTaskRelations` emits exactly one row per pair (`task_graph.go:180-181`). The fix is a natural key on the task id (derive it from `workflow_run_id` + `plan_step_id`), not a generation token |
+| CP10 | P11 → P12 | Tasks + relationships written; plan still `running`/`responded` | The plan is complete on disk and unusable: `ApprovePlan` requires `validated`, and nothing dispatches from `running` | RP1, subject to CP9(b)'s failure mode |
+| CP11 | P12 → P13/P19 (autonomous or `approval_mode=auto`) | Plan `validated`, never approved | **No task ever dispatches.** Boot `reconcileRun`'s switch has no `validated` case; `getMasterRun` reconciles only when `approved`; `ContinueRun` sees a non-`pending` plan and delegates to `GetRun`, which does the same nothing. The autonomous heartbeat is only rescheduled from inside `reconcileMasterTasks`, which never runs | **None.** An autonomous objective stalls silently at "plan ready". For a **manual** run the same state is correct and expected — it is the approval prompt — which is exactly why the stall is invisible |
+| CP12 | P13 → P19 | Approval mode durably `auto`, plan still `validated` | Same as CP11, now with a record that says it should have been approved automatically | **None** |
+| CP13 | P19 → P20/P21 | Plan `approved`; plan step still `waiting`/`running` | Tasks dispatch normally (they gate on the plan row, not the step), but the objective's own plan step never reads `completed` | **None**: `ApprovePlan` re-entered returns at its `status == approved` early exit (`master_coordinator.go:459-461`) before reaching the step writes. Cosmetic — nothing gates on a master run's plan-step state — but it is a durable lie in the ledger |
+| CP14 | P21 → P22 | Plan approved, plan step `completed`, **run still `pending`/`waiting`** | `reconcileMasterTasksOnce` dispatches tasks, but every branch that parks or completes the objective is gated on `run.State == running` (`:786`, `:828`, `:982`, and `completeRun` at `:877-879`). The objective can never complete or report a stop | **None**, for the same early-exit reason as CP13. This is CP13's consequential twin |
+| CP15 | P17 → P18 (manual hold) | Run `waiting`, plan step still `running` | none | `ApprovePlan` handles both `waiting` and `running` step states (`:475-479`) |
+| CP16 | P24 → P25/P26 | Waiting reason persisted, task state not yet moved | none | The next reconcile pass re-derives both. Idempotent |
+| CP17 | P26 → P27 | Task `eligible`, no child run | none | Next pass re-enters `dispatchMasterTask`; `FindWorkflowRunByPlannedTask` finds nothing and the fresh branch creates one |
+| CP18 | P27 → P28 | Child run exists; **no owner** | A child that could dispatch a provider process unowned | **Closed by design.** The recovery branch re-stamps unconditionally before `StartRun` (`master_coordinator.go:1066-1077`), and `stampChildOwnership`'s doc comment names this exact window |
+| CP19 | P28 → P29 | Child owned; `policy_snapshot` still the **default** | The child of an autonomous objective is durably non-autonomous and routes on default priorities — the CP3 failure, one level down | **None.** The recovery branch (`:1063-1079`) calls `stampChildOwnership`, `requireChildOwnershipForDispatch` and `StartRun`, and **never** `inheritExecutionPolicySnapshot`. The divergence is permanent and silent |
+| CP20 | P29 → P30 | Policy inherited; **no `session_lifecycle_decision` checkpoint** | The task-boundary decision and the dependency context pack hash are lost, so the provenance of "why this task got a new session" is not recoverable | **None**, and the write is best-effort anyway (`_ =`). Provenance gap, not a state gap |
+| CP21 | P30 → P31 | Child exists, owned, policy-correct — and its plan step still carries the **generic** artifact `createSingleTaskRun` wrote: `BuildPlanArtifact`'s three boilerplate acceptance criteria and an **empty `WriteIntent`** | **The most severe window in this segment.** The recovery branch goes straight to `StartRun`, which reads that artifact (`workflow.go:1139-1147`) and builds the worker prompt from it. The worker is therefore dispatched against generic criteria instead of the planner's, and a task the plan declared **read-only** is prompted, verified and classified as **mutating** (`WriteIntent` empty ⇒ `Unspecified` ⇒ treated as mutating, `plan.go:27-30`). Nothing downstream can tell: the artifact is a plausible artifact, it is simply the wrong one | **None.** The fix is ordering — bind the task's real criteria into the child at creation (pass them through `createSingleTaskRun`) rather than overwriting them one write later |
+| CP22 | P31 → P32 | Artifact correct; task not bound to its execution run (`execution_run_id` NULL, state still `eligible`) | none | **Closed by the natural key.** `FindWorkflowRunByPlannedTask` finds the child by `planned_task_id`, the recovery branch re-binds via P32's CAS (still `eligible`, so it lands) and calls `StartRun` |
+| CP23 | P32 → P33 | Task `running` with an execution run; child run still `pending` | none | The recovery branch's `StartRun` (`:1078`), which is idempotent for a `pending` run |
+| CP24 | P33 → P34 | Run `running`; plan step still `ready`; work step still `pending` | **A dead end.** `StartRun` re-entered returns at `run.State != pending` (`workflow.go:1112-1114`) without touching either step. Boot recovery's step loop skips a work step that is not `ready`/`running` (`recovery.go:192-193`) and its generic interrupted-fallback skips a step that is not `running`. `ContinueRun` dispatches only from `ready`/`running` (`workflow.go:1366`) | **None.** The run sits `running` with a `ready` plan step and a `pending` work step forever. Nothing raises attention, because nothing is contradicting anything — the state is merely unreachable |
+| CP25 | P34 → P35 | Plan step `running`, artifact not rewritten | Same dead end as CP24 for the forward path — but the plan step is now `running`, which boot recovery's generic fallback **does** see: it moves it `running → waiting` and parks the run `needs_attention` with `recovery_interrupted` (`recovery.go:227-229`, `:262-273`) | **Partial**: a person is told, with a reason. Nothing resumes the plan→work unblock, and no later call will — `StartRun` still refuses |
+| CP26 | P35 → P36 | Artifact rewritten, plan step still `running` | As CP25 | As CP25 |
+| CP27 | P36 → P37 | **Plan step `completed`, work step still `pending`** | The purest form of the dead end: the plan is durably done and the work step is durably blocked on an edge that will never be re-evaluated. Boot recovery sees no `running` step, so not even `recovery_interrupted` fires | **None.** This is the plan segment's C12: a completed producer whose consumer was never unblocked |
+| CP28 | P37 → W0 | Work step `ready`, dispatch not yet entered | none | Every dispatch entry point re-enters from `ready`: boot `Reconcile`, `ContinueRun`, the next `GetRun`-driven master pass. **The segment's one clean hand-off** |
+| CP29 | P38 → P39 → P40 (capacity park) | Plan reset to `pending`/`idle` with, in turn, no checkpoint and no wake | The plan is armable again but nothing is scheduled to arm it | The master heartbeat (`maybeScheduleAutonomousHeartbeat`) for an autonomous run; a person otherwise. Benign because P38 leaves the plan in exactly the state `GeneratePlan` re-enters from |
+| CP30 | P41 → P42 → P43 → P44 (bounded retry) | Four separately-crashable rows | **P43 is the budget.** A crash between P41 and P43 resets the plan for another attempt *without* recording the retry, so `plannerRetryCount` (`:401-415`) under-counts and the budget of 3 is silently widened by every such crash. A crash between P43 and P44 records the retry with no wake to carry it | None. The reviewer's `review_launch_attempt` reasoning — allocate the budget **before** the work the attempt performs — is exactly what P41/P43's order gets backwards |
+| CP31 | P45 → P46 → P47 → P48 (permanent failure) | Plan `invalid` with, in turn, a still-`pending` run, a still-`running` step, and no attention stop | A permanently invalid plan under a run that says `pending` and a ledger that says nothing | None. The plan-segment twin of C21a–C21c, with the same shape: the terminal row lands first and the explanation last |
+| CP32 | RP2 → RP3 → RP4 | Plan `invalid` with, in turn, no run transition and no stop | An objective stopped with no reason a person can read | None. `planner_ambiguous` is the right verdict recorded in the wrong order — the same defect C21c names for the worker path |
+
+### 3.1 Work-step and fix-cycle windows (C, CF)
 
 | # | Window | Durable state left behind | Produces | Resolver today |
 | --- | --- | --- | --- | --- |
-| C1 | W0 → W4 | Outbox `pending`, no attempt, no boundary | none (a step that has not started) | `dispatchWorkStep` re-enters from `pending` |
-| C2 | W4 → W6 | Outbox `dispatched`, **no boundary at all**, no attempt | **stale/phantom dispatched command** | `adoptOrMarkAmbiguous` (`dispatch.go:586`) after a 30 s settle window; reconciliation explicitly defers to it (`dispatch_reconcile.go:624`) |
+| C1a | W0 → W1 | Outbox `pending`; no routing decision recorded | none (a step that has not started) | `dispatchWorkStep` re-enters from `pending`; routing is re-evaluated against fresh capacity |
+| C1b | W1 → W2 | Routing decision recorded; **no branch lock** | none | Re-entry re-routes and re-acquires. A routing decision is advisory, not a claim on anything |
+| C1c | W2 → W2.5 | Branch lock **held** by a run that is about to stop existing as a dispatcher | Orphaned branch lock | `branch_lock_recovery.go` — the lock table's own recovery, outside this path's authority |
+| C1d | W2.5 → W3 | Resolved stop cleared; run still `waiting` | none | Re-entry clears again (idempotent) and re-transitions |
+| C1e | W3 → W4 | Run `running`, outbox still `pending` | none — a run that says running over a step that has not been claimed | Re-entry claims. Benign: `pending` is the re-entry point, and the run transition is CAS'd on `waiting` so the replay is a no-op |
+| C2a | W4 → W5 | Outbox `dispatched`, **no boundary at all**, no lifecycle decision, no attempt | **stale/phantom dispatched command** | `adoptOrMarkAmbiguous` (`dispatch.go:586`) after a 30 s settle window; reconciliation explicitly defers to it (`dispatch_reconcile.go:624`) |
+| C2b | W5 → W6 | As C2a, plus a `session_lifecycle_decision` checkpoint naming a session that was never created | **stale/phantom dispatched command** | Same as C2a. The lifecycle checkpoint is step-associated (`applyWorkLifecycleDecision`, `dispatch.go:292`), so it is the latest step checkpoint until W7 — but no reader treats it as launch evidence, so it misleads nothing |
 | C3 | W6 → W7 | Attempt open, no intent boundary | **worker_completed_but_attempt_open** (degenerate: attempt open over nothing) | `attemptReaper` only, and only after 30 min + four proofs. Reconciliation sees `WorkerDispatchNone` + open attempt + step not running ⇒ falls through to `running_without_evidence` only if the step says RUNNING |
 | C4 | W7 → launcher return | Intent boundary newest, attempt open, step still `ready` | **running_without_dispatch** precursor | `ContradictionIntentNeverLaunched` (a), gated by `dispatchReconcileSettleWindow` = 30 s so a live launch is never cut off |
 | C5 | Launcher returned, process exists, **before W14/W15** | Process alive; no confirmation; outbox `dispatched`; step has no session | **launch unconfirmed** — the one window that cannot be closed by ordering | `adoptLiveLaunch` (c) via natural key + ownership probe. This is the single-write-wide window the design accepts |
@@ -212,17 +604,39 @@ actually cleans it up, if any.
 | C11 | Worker exits **after** producing work, before W21 | Session row terminated; git evidence present; step still RUNNING; attempt open | **terminal-evidence-before-crash** | `observeWorkStep` on the next pass re-derives from facts. Correct *because* the decision is a pure function of durable/observable facts — the only lifecycle decision in this path that is genuinely idempotent by construction |
 | C12 | W21 → W23 | Step `completed`; **no completion checkpoint** | Review transition starves: `dispatchReviewStep` requires a checkpoint with a session id and raises `ambiguous_review_state` when it is absent (`review_dispatch.go:534`) | none — a human decision on a run whose work actually succeeded |
 | C13 | W23 → W25 | Step `completed`, checkpoint written, **attempt still open** | **worker_completed_but_attempt_open** | `attemptReaper` after 30 min + four proofs (`attempt_reaper.go:36-49`). Until then every guard that asks "could something still be writing to this tree?" answers yes — `verify_branch_advanced.go` proof 5, `work_adoption.go` proof 4 |
-| C14 | W25 → review dispatch | Complete and consistent | none | `cascade.go:180` |
+| C14a | W25 → W26 | Complete and consistent; the review transition has not been entered | none | `advanceReviewFixCycle` step 4, `cascade.go:194-201` → `dispatchReviewStep`, whose evidence gate is `workStep.State == completed` (`review_dispatch.go:519`) |
+| C14b | W26 → W27 | Evidence read; **no durable state changed at all** | none | Pure re-derivation: the gate and the checkpoint read are both reads, and `EvaluateReviewPolicy` is a pure function of facts recomputed on the next pass |
+| C14c | W27 → W28 | Review policy decision durable; review step still `pending` | The work→review unblock is pending on a caller that will supply `includeCycle1Unblock` | **Partial, and asymmetric with P37.** Only `ContinueRun` passes `true` (`workflow.go:1518`); boot `Reconcile` (`recovery.go:250`) and `GetRun` (`workflow.go:941`) pass `false` by design, so cycle 1's unblock waits for an explicit Continue — which the master path issues automatically for a child whose work is done and whose review is pending (`master_coordinator.go:718-724`), and which a standalone run waits for a person or a wake to issue. A replay also appends a second policy-decision record; the decision is deterministic, so the duplicate is a ledger artifact, not a divergence |
 | C15 | R1 → R2/R3 | Reconciliation boundary is newest; nothing else moved | Repeat pass sees `DispatchPhaseWorkerDispatchReconciled` as newest and returns "already reconciled" (`dispatch_reconcile.go:538`) — **the remedy is skipped entirely** | none. The boundary is written before the remedy precisely so a duplicate wake is a no-op, but a crash in the same window makes the *first* remedy a no-op too |
 | C16 | H1 checkpoint → `ReopenFailedWorkflowStep` | Human-retry checkpoint written; step still `failed`; outbox still `failed` | **repeated wake/reconcile**: the generation is counted (it bounds `maxWorkerLaunchRecoveryGenerations`) but nothing was reopened. A second Continue burns a second generation | documented as intentional (`worker_launch_recovery.go:505-513`); the budget is spent by crashes rather than by decisions |
 | C17 | `ReopenFailedWorkflowStep` → outbox reopen | Step `ready`, outbox `failed` | Step ready over a failed command | Next Continue finishes it (`worker_launch_recovery.go:513`) |
-| C18 | W12 (outbox → pending) → wake scheduled | Outbox pending, no wake | Step waits for any other dispatch entry point; `workerLaunchRetryDelay` floor still applies | boot `Reconcile` / capacity wake |
+| C18a | W12a → W12b (outbox back to `pending`, wake not yet scheduled) | Outbox pending, no wake | Step waits for any other dispatch entry point; `workerLaunchRetryDelay` floor still applies | boot `Reconcile` / capacity wake |
+| C18b | W12b → W12c (wake scheduled, attention stop not written) | Retry is pending and will fire; the run shows no `worker_launch_retry` marker | none — a cosmetic gap in the ledger, not a state | The retry proceeds; the next failure writes its own stop |
 | C19 | Master: child run moves out of `needs_attention` → parent mirror cleared | Parent durably `child_needs_attention`, child running | **child running while parent needs_attention** | `reconcileMirroredChildStop` (`attention.go:770` (`reconcileMirroredChildStop`)), driven by the parent's own heartbeat, which the mirror deliberately does not kill |
-| C20 | Two `Reconcile`/wake passes overlapping in one process, or two processes | Both read the same coarse state and both act | **repeated wake/reconcile** | Partly: R1's boundary and `owned.Live()` short-circuit. Not closed for W4/W12/W13/H1, which CAS on `(id, expected)` only |
-| CF1 | F1 → F3 | Fix outbox `dispatched`, the prompt possibly already in the session, **no attempt row** | A fix cycle in flight that nothing durable counts | `resolveFixDeliveryAfterRestart` (`fix_dispatch.go:272`) re-enters from `dispatched`/`acknowledged` and `fix_delivery_recovery.go` classifies; F0's per-cycle key means the re-entry cannot be confused with a different cycle |
-| CF2 | F3 → F6 | Attempt open; **no `fix_dispatched` checkpoint** | Fix step stuck RUNNING with an open attempt | **none.** `observeFixStep` finds no checkpoint carrying a session id and returns "nothing to observe" (`fix_progress.go:102-107`), and `attemptReaper`'s proof 2 excludes a `running` step, so neither resolver can fire |
-| CF3 | F7/F8 → F9 | Fix step terminal-for-the-cycle (`waiting` on delivery, `failed` otherwise), `fix_observed_*` written, **attempt still open** | **`fix_completed_but_attempt_open`** | `attemptReaper` only, after 30 min + four proofs — and proof 3 needs evidence on a *different* step written after the attempt opened, which a run parked by this very cycle may never produce |
-| CF4 | Cycle N's observation runs after cycle N+1's F3 opened a new row | F9 closes cycle **N+1**'s live row and leaves cycle N's open | **`fix_completed_but_attempt_open`**, cross-cycle variant: a live attempt closed and a dead one left open | **none.** This is not a crash window at all — it is reachable with no crash, purely from `GetLatestWorkflowAttempt` picking by recency |
+| C20 | Two `Reconcile`/wake passes overlapping in one process, or two processes | Both read the same coarse state and both act | **repeated wake/reconcile** | Partly: R1's boundary and `owned.Live()` short-circuit. Not closed for W4/W12a/W13a/H1, which CAS on `(id, expected)` only |
+| C21a | W13a → W13b (outbox `failed`, step not yet `failed`) | A failed command under a step still `running`/`ready` | Step stalls: `dispatchWorkStep` finds a `failed` outbox row and returns without retrying (`dispatch.go:180-186`), and nothing re-fails the step | none. The way back out is H1, whose `ReopenFailedWorkflowStep` has its CAS **hard-coded to expect `failed`** (`workflow.go:81-95`) and so reports false on a step still `running`/`ready` — the run is stuck until reconciliation reads the contradiction |
+| C21b | W13b → W13c (step `failed`, run still `running`) | A failed step under a running run | Run never parks; the cascade sees a terminal step and stops advancing | `cascade.go`'s next pass derives the run state from its steps |
+| C21c | W13c → W13d (run `needs_attention`, no attention stop) | A parked run with **no reason recorded** | A stop a person cannot read | none — this is the unevidenced dead end §4.3's evidence gate exists to abolish, and W13 is not behind that gate. **Fail-closed by design is not what this is**: it is a genuine ledger gap, listed here so the CAS step does not mistake it for one |
+| C22 | W14a → W14b | Unconfirmed boundary in the dispatch table; **no `worker_launch_unconfirmed` checkpoint** | Split-brain across the two durable homes, the unconfirmed-side twin of C7 | `WorkerDispatchStatusForStep` reads the dispatch table and answers `Unconfirmed` correctly; `latestUnconfirmedLaunchRecord` (the checkpoint reader) sees nothing. Both W14a and W14b are best-effort, so this window also opens when *either* write simply fails |
+| C23a | R2a → R2b (reconciliation boundary written, attempt not yet closed) | Boundary says "retry scheduled"; the attempt row is still open | Every downstream guard still reads a live writer in the tree | C15's problem in miniature: a repeat pass returns "already reconciled" and the close never happens. **The attempt stays open** |
+| C23b | R2b → R2c (attempt closed, step still `waiting`) | Closed attempt under a `waiting` step | A step parked at `waiting` is never re-entered by dispatch, so a retry scheduled over one would never fire | none, for the same C15 reason |
+| C23c | R2c → R2d (step `running`, outbox not yet back to `pending`) | Step `running`, outbox still `dispatched`, no attempt | **stale/phantom running** | `ContradictionStaleRunning`, on a later pass that gets past C15's "already reconciled" short-circuit |
+| C24a | R3a → R3b (reconciliation boundary written, evidence snapshot not yet durable) | Boundary recorded; nothing moved | Repeat pass short-circuits on C15 | **Correct by design.** The gate refuses the raise if the snapshot cannot be made durable and leaves the step exactly as it was (`dispatch_reconcile.go:864-869`) — an unevidenced stop would be permanent, an unresolved contradiction is still true in three seconds |
+| C24b | R3b → R3c (raise durable, attempt not yet closed) | `ambiguous_worker_state` raised with evidence; attempt still open | **worker_completed_but_attempt_open**, over a step a person is already looking at | `attemptReaper`, whose proof 2 admits the step only once it has left `running`/`ready` — which R3d has not yet done |
+| C24c | R3c → R3d (attempt closed, step still `running`) | Raised, attempt closed, step still says RUNNING | **stale/phantom running** on a step already parked for attention | Next reconcile pass; the raise is already durable so the second pass is idempotent |
+| C24d | R3d → R3e (step `waiting`, no attention stop) | Step parked; the raise exists but the stop reason does not | A parked step whose *reason* is only in the raise, not the stop ledger | `raiseAmbiguousWorkerState` already wrote the evidence, so unlike C21c the reason is recoverable — this is a duplicate-record gap, not an unevidenced stop |
+| CF1a | F1 → F2 (outbox claimed, fix step not yet `ready`) | Fix outbox `dispatched`; step still `pending`; no intent record | none — provable non-delivery | **Resolved deterministically, on a successful ledger read.** `classifyFixDelivery` returns `fixDeliveryNotSent` on an absent intent (`fix_delivery_recovery.go:265-266`) and `resolveFixDeliveryAfterRestart` delivers exactly once. F5's fatal-on-failure contract licenses the inference: no intent ⇒ `Send` never ran |
+| CF1b | F2 → F3 (step `ready`, not yet `running`) | As CF1a, step `ready` | none — provable non-delivery | Same. `runFixStep` re-runs on both delivery entry points and is idempotent across `pending`/`ready`/`waiting` (`fix_dispatch.go:303-318`) |
+| CF1c | F3 → F4 (step `running`, no lifecycle decision) | Step `running` with no intent record | none — provable non-delivery | Same. A `running` fix step with no session-bearing checkpoint is the one case `observeFixStep` returns "nothing to observe" for (`fix_progress.go:102-107`), so observation stands aside and recovery decides |
+| CF1d | F4 → F5 (lifecycle decision written, intent not yet) | Run-level lifecycle checkpoint exists; still no step-associated intent | none — provable non-delivery | Same. F4's deliberate run-level scoping (`cascade.go:366-374`) is what keeps it from being mistaken for the step's dispatch evidence |
+| **CF1-R** | **Any of CF1a–CF1d, when the intent ledger read itself fails** | Indistinguishable, to the current code, from CF1a–CF1d | **Duplicate prompt delivery** — the findings are re-sent into a session that may already be acting on them | **none, and this fails open.** `findFixDispatchIntent` returns `found=false` on a `ListWorkflowCheckpoints` error exactly as it does on genuine absence (`fix_delivery_recovery.go:197-205`), so rule 1 fires on no information. See §2.3. The correct behaviour is `unproven` + park, as CF2; the code does not do it |
+| CF2 | **F5 → `Send` returns** — the one window `Send`'s lack of an idempotency key makes irreducible | Intent record present; whether the prompt reached the agent is not knowable from workflow's own tables | Ambiguous delivery | **Evidence-decided, with a fail-closed floor.** `classifyFixDelivery` proves delivery from the session's own facts — the intent-time receipt digest matching `sess.Metadata.LatestUserPrompt`, or a turn boundary after the intent's timestamp (`:293-307`) — and adopts via `adoptDeliveredFix`. When the session is unreadable, missing, or shows neither signal, `fixDeliveryUnproven` → `markFixDeliveryUnproven` parks the run **once**, with the evidence. This is fail-closed by design, not a gap |
+| CF3 | `Send` returned → F6 (attempt row) | From disk, indistinguishable from CF2: intent present, no attempt | Ambiguous delivery | Same as CF2, and correctly so — the durable state *is* the same, and the resolver reasons from session evidence rather than from which side of the return the crash fell |
+| CF4 | F6 → F7 (attempt open, outbox still `dispatched`) | Attempt row exists; outbox not acknowledged; **no `fix_dispatched` checkpoint**; step `running`; **intent record is the latest step checkpoint** | none | **Converges today.** Dispatch cannot re-enter (F0's `len(attempts) >= cycleNumber` guard, `fix_dispatch.go:237`), and observation does not need F8: `observeFixStep` accepts *any* latest step checkpoint carrying a non-empty session id (`fix_progress.go:102-107`), and F5 carries one — plus the same `FingerprintBefore` (`reviewRun.TargetSHA`) F8 would have. F4's run-level scoping is what guarantees the intent is the latest *step* checkpoint. Residue: the outbox row stays `dispatched` forever, which nothing reads again |
+| CF5 | F7 → F8 (attempt open, outbox acknowledged, no `fix_dispatched`) | As CF4, plus the acknowledgement; the cycle→attempt binding **never became durable** | none | **Converges today**, by the same route as CF4. But the binding §4.7 proposes to close on does not exist for this cycle, so the fix must fail closed here rather than fall back to recency |
+| CF6a | F9 → F10 | Fix step/run **terminal-for-the-cycle with no `fix_observed_*` checkpoint at all**; attempt still open | **`fix_completed_but_attempt_open`**, in its unrecoverable form | **none, and it must stay that way.** The canonical terminal record the close would read was never written, so there is no durable statement of what the cycle produced — no `fingerprint_after`, no outcome. This is the fix-cycle twin of C12 and of §4.6's residue: the evidence never existed, and synthesising it would be inventing a verdict. **Fail-closed by design**; the attempt stays open for the reaper and the cycle stays `needs_attention` |
+| CF6b | F10 → F11 | Terminal-for-the-cycle **with** the `fix_observed_*` checkpoint written; attempt still open | **`fix_completed_but_attempt_open`**, in its recoverable form | `attemptReaper` only today, after 30 min + four proofs — and proof 3 needs evidence on a *different* step written after the attempt opened, which a run parked by this very cycle may never produce. **Deterministically recoverable** by §4.7 item 5: the checkpoint *is* the canonical terminal record, so the outcome can be read off it |
+| CF7 | Cycle N's observation runs after cycle N+1's F6 opened a new row | F11 closes cycle **N+1**'s live row and leaves cycle N's open | **`fix_completed_but_attempt_open`**, cross-cycle variant: a live attempt closed and a dead one left open | **none.** This is not a crash window at all — it is reachable with no crash, purely from `GetLatestWorkflowAttempt` picking by recency |
 
 ---
 
@@ -268,7 +682,7 @@ meant to stop.
 | 4.4 child running while parent `needs_attention` | **Resolvable — already resolved**, and out of scope | A child stop that cannot be positively classified as self-remediable: the mirror is held, deliberately |
 | 4.5 repeated wake / reconcile | **Resolvable** | Budget exhaustion after the bounded generations are genuinely spent — that is a decision, not an ambiguity |
 | 4.6 terminal-evidence-before-crash | **Resolvable** | Rows already `completed` with no completion checkpoint when §6 lands: the evidence never existed, so `ambiguous_review_state` remains the only honest answer (`review_dispatch.go:534`) |
-| 4.7 `fix_completed_but_attempt_open` | **Resolvable** — by binding the close to the attempt the cycle actually opened (F4's `FixAttemptID`), not to the latest row | A cycle whose delivery record is unreadable or names no attempt id, and CF2's pre-checkpoint window, where the step is `running` with no `fix_dispatched` record: neither the observer nor the reaper may act, and the step stops as `ambiguous_worker_state` rather than being closed on a guess |
+| 4.7 `fix_completed_but_attempt_open` | **Resolvable for CF6b and CF7** — by binding the close to the attempt the cycle actually opened (F8's `FixAttemptID`, stamped onto the row itself at F6) and reading the outcome off the terminal checkpoint. **CF6a is fail-closed by design** | **CF6a**: a cycle whose `fix_observed_*` checkpoint was never written — no outcome exists to read, so the attempt stays open and the cycle stays `needs_attention`. An attempt row that cannot be attributed to a cycle: left open for the reaper, never closed by falling back to recency. In the *delivery* half, CF2 — a written intent whose `Send` outcome cannot be proven from session facts — parks once via `markFixDeliveryUnproven`, irreducible because `Send` has no idempotency key. **And one row that is a defect, not a residue: CF1-R** (§2.3), where an unreadable intent ledger currently licenses a resend instead of parking |
 
 ### 4.1 `running_without_dispatch`
 
@@ -629,13 +1043,26 @@ on a **fix** step after the cycle that opened the row has ended. It is a
 separate class rather than a case of §4.2 because the fix path reaches it by a
 different route, and one of those routes needs no crash at all.
 
-**Windows.** CF2, CF3, CF4.
+**Windows.** CF6a, CF6b and CF7. The delivery-path windows (CF1a–CF5) all
+converge or fail closed on their own — **with one exception that is a defect
+rather than a residue, CF1-R**, the ledger-read failure documented in §2.3, which
+is tracked here because it is the fix path's one fail-open hole even though it
+produces a duplicate prompt rather than an open attempt.
 
-**Today.** Only `attemptReaper`, and it is a worse fit here than on the work
-step:
+Stating the boundary precisely matters, because the attempt-close failure is
+**not** a missing intent record or missing session evidence: the fix path has
+both, F5 writes the intent before `Send` and treats a failed write as fatal, and
+`observeFixStep` reads that intent happily. The failure is downstream of
+delivery, in how the attempt row is closed. And CF6 splits: **CF6a** (no
+terminal checkpoint) and **CF6b** (terminal checkpoint present) look alike on
+disk but are not alike in what can be proven, and only CF6b is recoverable.
 
-- CF3 (crash between F7/F8 and F9) leaves a terminal-for-the-cycle fix step
-  with an open attempt. The reaper's proof 2 is satisfied (`waiting`/`failed`
+**Today.**
+
+- **CF6b** (crash between F10 and F11) leaves a terminal-for-the-cycle fix
+  step with an open attempt *and* the `fix_observed_*` checkpoint that says what
+  the cycle produced. Only `attemptReaper` can clear it, and it is a
+  worse fit here than on the work step: proof 2 is satisfied (`waiting`/`failed`
   are neither `running` nor `ready`), but **proof 3 requires durable evidence on
   a *different* step, written strictly after the attempt opened, showing the run
   moved on** (`attempt_reaper.go:41-44`). A fix cycle that ended by parking the
@@ -643,106 +1070,142 @@ step:
   exactly the case where the run does *not* move on, so the evidence proof 3
   wants may never be written. The row stays open indefinitely, and every guard
   that asks "could something still be writing to this tree?" keeps answering yes
-  (`verify_branch_advanced.go` proof 5, `work_adoption.go` proof 4). This is the
-  fix path's own version of the fossil the reaper exists to clear, in the one
-  shape the reaper cannot clear.
-- CF2 (crash between F3 and F6) is worse still and has **no resolver at all**.
-  The attempt is open, the step is `running`, and there is no `fix_dispatched`
-  checkpoint. `observeFixStep` requires that checkpoint to carry a session id
-  and otherwise returns "nothing to observe" (`fix_progress.go:102-107`), so
-  observation never advances the step; and because the step is `running`, the
-  reaper's proof 2 refuses it. Neither mechanism can move, and nothing else
-  looks at the pair.
-- CF4 needs no crash. `recordFixOutcome` closes
+  (`verify_branch_advanced.go` proof 5, `work_adoption.go` proof 4).
+- **CF7** needs no crash. `recordFixOutcome` closes
   `GetLatestWorkflowAttempt(step.ID)` (`fix_progress.go:317`, `:336`) — the most
   recent attempt row on the fix step, chosen by recency. A fix step accumulates
-  one attempt row per cycle (F3's `len(attempts) < cycleNumber` guard), so as
+  one attempt row per cycle (F6's `len(attempts) < cycleNumber` guard), so as
   soon as cycle N's observation is delayed past cycle N+1's dispatch, the close
   lands on N+1's live row: the newer attempt is finalized while its cycle is
   still running, and cycle N's row is left open forever. One misattribution
   therefore produces both failure modes at once — a live attempt wrongly
   closed, and an abandoned one never closed.
 
-**Gap vs. the reviewer CAS model.** Three of the six principles are missing
-here, and the missing pieces are not the same ones as §4.2's:
+**Gap vs. the reviewer CAS model.** The fix path scores *better* than the work
+path on the two principles the delivery half exercises, and worse on the three
+the close half exercises:
 
 | Principle | Fix path today |
 | --- | --- |
-| Generation identity (1) | **Partially present, and unused.** F4 already writes `FixAttemptID` into the durable delivery record — the fix path *does* record which attempt row belongs to which cycle. F9 simply does not read it. The identity exists and the write ignores it |
+| Ownership proof (2) | **Present, in the form the path admits.** The fix cycle proves nothing about a *session* because it launches none — it borrows the work step's. What it must prove is *delivery*, and `classifyFixDelivery` does exactly that from the session's own facts (`fix_delivery_recovery.go:248`), with `fixCycleStarted` (`fix_progress.go:44`) guarding the observation side |
+| Fail-closed provenance (6) | **Absent on both of the paths that matter, in different ways.** The *session* read is correct: `classifyFixDelivery` returns `fixDeliveryUnproven` on an unreadable or missing session and parks once with evidence. The *ledger* read is not: an unreadable checkpoint list collapses into the same `found=false` as genuine absence and licenses a resend (§2.3) — the exact inversion of `review_launch_recovery.go:643`'s "cannot prove must never become the newest one". And the close discards its error (`_ =`, `fix_progress.go:336`), so a close that did not happen is indistinguishable from one that did |
+| Generation identity (1) | **Recorded, unused, and late.** F8 writes `FixAttemptID` into the durable delivery record, so the path *does* record which attempt row belongs to which cycle — F11 simply does not read it. And the binding becomes durable one write *after* the row it names (F6 → F8), so CF5 leaves a row nothing names |
 | Generation-conditioned CAS (3) | **Missing.** `UpdateWorkflowAttemptOutcome` takes an id and no predicate; nothing conditions on the row being open or on the cycle owning it |
-| Stale-writer rejection (4) | **Missing, and reachable without a crash** (CF4). A late observation from a superseded cycle wins a write against the current cycle's row |
-| Idempotent replay (5) | **Absent by construction.** The close is a blind overwrite of whichever row is newest, so a replayed observation does not re-derive the same answer — it re-targets |
-| Fail-closed provenance (6) | **Fail-open.** `_ =` on the update (`fix_progress.go:336`) discards the error: a close that did not happen is indistinguishable from one that did |
-| Ownership proof (2) | Not applicable in the launch sense — the fix cycle proves nothing about a session because it launches none; it borrows the work step's. `fixCycleStarted` (`fix_progress.go:44`) is the fix path's analogue and is sound |
+| Stale-writer rejection (4) | **Missing, and reachable without a crash** (CF7). A late observation from a superseded cycle wins a write against the current cycle's row |
+| Idempotent replay (5) | **Absent by construction** in the close. It is a blind overwrite of whichever row is newest, so a replayed observation does not re-derive the same answer — it re-targets. (The *delivery* half is properly idempotent: F13 adopts through the same `recordFixDispatchSuccess` a first pass would have used, so recovered and first-pass dispatches leave identical state) |
 
-**Proposed CAS resolution.** Small, and mostly a matter of using a binding that
-already exists:
+**Proposed CAS resolution.** Small, and confined to the close:
 
 1. **Close the attempt the cycle named, not the newest one.** `recordFixOutcome`
    resolves its target from the cycle's own `fix_dispatched` delivery record
    (`promptDeliveryRecord.FixAttemptID`, read back via
    `promptDeliveryRecordFromJSON`) instead of `GetLatestWorkflowAttempt`. This
-   alone closes CF4 outright — with no schema change, because F4 already writes
+   alone closes CF7 outright — with no schema change, because F8 already writes
    the field.
 2. **Condition the close.** The same
    `UpdateWorkflowAttemptOutcomeIfOpen(attemptID, generation)` §4.2 introduces,
    with the fix cycle's identity in the generation column: `WHERE id = ? AND
    outcome IS NULL AND dispatch_generation = ?`. Zero rows updated means the row
    is already closed or is not this cycle's — a no-op, never an error.
-3. **Stamp F3.** The attempt row created at `fix_dispatch.go:419` records the
+3. **Stamp F6.** The attempt row created at `fix_dispatch.go:419` records the
    cycle's identity in the same `dispatch_generation` column §6.2 adds, so (2)
-   has something to condition on and so the reaper can tell a fix attempt's
-   owner from its recency.
+   has something to condition on, so the reaper can tell a fix attempt's owner
+   from its recency, and — importantly — so the binding is durable *with* the
+   row rather than one write later. This is what shrinks CF5's residue: an
+   attempt stamped at creation names its cycle even when F8 never ran.
 4. **Stop discarding the error.** As with W25 (§4.2 item 3), a close that failed
    is a fossil someone has to clear later; it is worth a log line and a retry on
    the next observation rather than silence.
-5. **Extend §4.2's same-generation completion close to fix steps.** The `F8`
+5. **Extend §4.2's same-generation completion close to fix steps.** The F10
    `fix_observed_<state>` checkpoint is already the canonical terminal record
    for a cycle and already carries `fingerprint_after`. When it exists for a
    cycle whose attempt is still open and whose generation matches, the next
    observation or reconcile pass closes that attempt with the outcome read off
    the checkpoint. Pure function of durable rows, so replay re-derives the same
-   answer; this is what closes CF3 without waiting on the reaper's proof 3.
-6. **Invert F7/F8, as §4.6 inverts W21/W23.** Writing the `fix_observed_*`
+   answer; this is what closes **CF6b** without waiting on the reaper's proof 3.
+   It cannot close CF6a, and must not try: with no checkpoint there is no
+   outcome to read.
+6. **Invert F9/F10, as §4.6 inverts W21/W23.** Writing the `fix_observed_*`
    checkpoint before the step/run transition makes (5) able to fire on every
    crash in the window, rather than only on those that got past the checkpoint.
 
-**Classification: resolvable.** CF4 is resolvable by item 1 alone and is not
-even ambiguous — the correct row is durably named, and the current code declines
-to read it. CF3 is resolvable by items 5–6, on exactly the argument §4.2 makes:
-the deciding fact is a record the cycle's own completion wrote, so no inference
-from silence is involved and no settle window is needed.
+7. **Give `findFixDispatchIntent` the tri-state its own comment already
+   describes** (§2.3). It must distinguish "read succeeded, no intent" from
+   "read failed", and `classifyFixDelivery` must fire rule 1 only on the former.
+   A read failure becomes `fixDeliveryUnproven`, which the existing
+   `markFixDeliveryUnproven` path already handles correctly — parking once with
+   the evidence, exactly as CF2 does. This is the smallest change in this
+   document and the only one that removes a fail-*open* rather than tightening a
+   fail-closed one, so it should land first and independently of the
+   generation-stamping work: it needs no migration and no new column.
 
-**Fail-closed residue.** Two cases stay `needs_attention` by design:
+Note what is **not** proposed: apart from item 7, nothing in the delivery half.
+F5's intent contract, F12's *session*-side evidence rules, F13's adoption, the
+per-cycle outbox key and F0's re-entry guard are all correct and stay exactly as
+they are.
 
-- **A cycle whose delivery record is unreadable or names no attempt id.** F4
-  leaves `FixAttemptID` empty when a cycle re-entered recovery with no attempt
-  rows at all, and a corrupt or missing `RetryState` reads back as nothing. With
-  no named row, item 1 has no target — and falling back to "the newest row" is
-  precisely the defect being removed. The attempt stays open and visible to the
-  reaper; the observation raises nothing.
-- **CF2's pre-checkpoint window.** A fix step `running` with an open attempt and
-  no `fix_dispatched` record cannot be decided: AO does not know whether the
-  prompt reached the session, so it cannot know whether a worker is at that
-  moment writing to the tree. Closing the attempt would tell every downstream
-  guard the tree is quiet on no evidence. The honest answer is
-  `ambiguous_worker_state` with the evidence snapshot, via the existing
-  `stopFixAmbiguous` gate (`fix_progress.go:200`) — which is a change from
-  today's behaviour of doing nothing at all, but it is a change toward stopping
-  visibly, not toward guessing.
+**Classification: mostly resolvable, with one window that must stay
+fail-closed.**
+
+- **CF7 — deterministically provable.** Resolvable by item 1 alone, and not even
+  ambiguous: the correct row is durably named, and the current code declines to
+  read it.
+- **CF6b — deterministically provable.** Resolvable by items 5–6, on exactly the
+  argument §4.2 makes: the deciding fact is a record the cycle's own completion
+  wrote, so no inference from silence is involved and no settle window is needed.
+- **CF6a — fail-closed by design, stays `needs_attention`.** The canonical
+  terminal record was never written. There is no durable statement of what the
+  cycle produced, and the only way to close the attempt would be to assume an
+  outcome. Item 6 (inverting F9/F10) shrinks the window that *creates* new CF6a
+  rows to nothing, but it cannot retroactively give evidence to rows already on
+  disk — the same limit §4.6 states for work steps already `completed` with no
+  completion checkpoint.
+- **CF1-R — currently fail-open; a defect, not a residue.** The correct
+  classification is `needs_attention` (park with evidence, as CF2). The code
+  instead re-sends. Item 7 makes the correct classification reachable; until it
+  lands, this row is the one place in the fix path where AO acts on no
+  information at all.
+
+**Fail-closed residue.** Two cases stay `needs_attention` or stay open by
+design, and neither is about missing intent evidence:
+
+- **CF2, and only CF2, in the delivery half.** A cycle whose intent was written
+  and whose `Send` outcome cannot be proven from session facts — an unreadable
+  or missing session, no receipt-digest match, no turn boundary after the intent
+  — parks the run once via `markFixDeliveryUnproven`. This is irreducible:
+  `Send` has no idempotency key, so the only alternatives are re-sending
+  findings into a session that may already be acting on them, or dropping a
+  cycle that may never have been delivered. Stopping with the evidence is the
+  correct third answer, and item 3 above does not change it.
+- **CF6a: a cycle whose terminal checkpoint was never written.** Rows already on
+  disk in this shape cannot be recovered, for the same reason §4.6's residue
+  cannot: inventing a `fingerprint_after` and an outcome would be fabricating
+  the very evidence the close is supposed to read.
+- **A cycle whose attempt row cannot be attributed.** After item 3, this is
+  narrow: a row created before the stamping exists, or one whose stamp is
+  unreadable. Falling back to "the newest row on the step" is precisely the
+  defect being removed, so the close must not — the attempt stays open and
+  visible to the reaper, and the observation raises nothing. The pre-stamping
+  shape of this is CF5, where F8 never ran and F11 has no durable name to
+  resolve; today the recency fallback happens to hit the right row there
+  *because* F0's re-entry guard prevents a later cycle from opening one first,
+  but "happens to be right because another guard holds" is not a property to
+  build a close on.
 
 ---
 
-## 5. Side by side: the approved reviewer CAS model vs. the worker path today
+## 5. Side by side: the approved reviewer CAS model vs. this path today
 
 The reviewer model is already merged and is the reference. Its six principles,
-against the worker path:
+first against the work-step launch segment (§2.1), then — in §5.1 — against the
+plan segment (§2.0), and finally, in §5.2, as the explicit ledger of what is
+fixed, what remains, and what must stay stopped:
 
 | # | Reviewer principle | Reviewer implementation | Worker path today | Verdict |
 | --- | --- | --- | --- | --- |
 | 1 | **Durable generation / attempt identity** | `reviewLaunchGeneration{OutboxID, IdempotencyKey, RecordID, Cycle, Epoch, Stamped}` (`review_launch_recovery.go:577`); `review_launch_attempt` checkpoint allocates the budget *before* any work the attempt performs (`:750`) | No generation value exists. Attempt budget is *counted* by scanning checkpoints after the fact (`workerLaunchAttemptCount`, `worker_launch_recovery.go:392`), so an attempt that crashes before writing its failure record is invisible and the budget is not spent | **Missing** |
 | 2 | **Ownership proof before the state is believed** | `review_launch_intent` / `review_launch_confirmed` markers; a `review_run` row is explicitly *not* proof of a launch (`review_launch_phases.go:22-41`); `errReviewerInstanceUnproven` refuses a confirmation that names only a reusable session | Structurally present and good: `SessionOwnershipEvidence` with `Observed` / `Missing` / `Unavailable` kept apart, both halves required to confirm, `LicensesRunning()` gating RUNNING | **Present** — the one principle the worker already satisfies |
-| 3 | **Generation-conditioned CAS transitions** | `ClaimWorkflowOutboxDispatch`, `FailWorkflowOutboxWithGeneration`, `ReleaseDispatchedWorkflowOutboxGeneration`, `ReopenFailedWorkflowOutboxGeneration` (`workflow.go:131-157`); `UpdateWorkflowStepStateIfReviewRun` for the authority pointer | Every mutation is `(id, expected_state)`; `UpdateWorkflowStepSession` has no predicate at all | **Missing** |
+| 3 | **Generation-conditioned CAS transitions** | `ClaimWorkflowOutboxDispatch`, `FailWorkflowOutboxWithGeneration`, `ReleaseDispatchedWorkflowOutboxGeneration`, `ReopenFailedWorkflowOutboxGeneration` (`workflow.go:131-157`); `UpdateWorkflowStepStateIfReviewRun` for the authority pointer | Every mutation is `(id, expected_state)`; `UpdateWorkflowStepSession`'s predicate is `session_id IS NULL`, which prevents a clobber but names no writer — so it cannot express "release the binding I made" | **Missing** |
 | 4 | **Stale-writer rejection** | Migration `0138`: a dispatch that pauses, loses its claim to recovery, and wakes up to fail the row updates zero rows because the token no longer matches. Migration `0137`: a resume validated against failure F1 cannot reopen F2 | A stale worker dispatch that wakes after a reconcile-driven retry finds the outbox back at `dispatched` (by the retry) and its `(id, expected)` predicate matches. It can then fail a generation it does not own, or confirm a launch that was superseded | **Missing** |
 | 5 | **Idempotent replay** | Cancel is intent → act → confirm, and "cancelling something already gone is success" (`review_launch_phases.go:103-112`); claims and resets are insert-or-lose, never error | Partly. Append-only boundaries replay harmlessly; `attemptReaper` and `work_adoption` are exactly-once by keyed checkpoint. But W17/W20/W25 replay by overwriting, and C15 makes a *first* remedy skippable | **Partial** |
 | 6 | **Fail closed on unprovable provenance** | `reviewLaunchFailureForEntry` returns "no generation" on an unreadable ledger — "cannot prove must never become the newest one" (`review_launch_recovery.go:643`); a legacy reset naming no generation fails closed (`0136`) | Strong in reconciliation (`ContradictionUnprovable`, `!status.Readable` ⇒ conclude nothing, no dispatch recorder ⇒ reconcile nothing). Weak in recovery: `workerLaunchAttemptCount` returns **0** on a read error (`worker_launch_recovery.go:396-398`), which is fail-*open* on the budget, while `workerLaunchRecoveryGenerations` correctly returns the maximum on the same error (`:418`) | **Inconsistent** |
@@ -775,6 +1238,144 @@ against the worker path:
    dispatches once and is re-dispatched only on failure. The worker generation
    needs no cycle dimension, and adding one would be inventing state nothing
    reads.
+
+### 5.1 The plan segment against the same six principles
+
+The reviewer model is the reference for the whole path, not only for the launch
+segment. Applied to §2.0:
+
+| # | Reviewer principle | Plan segment today | Verdict |
+| --- | --- | --- | --- |
+| 1 | **Durable generation / attempt identity** | Partly, and by a better mechanism than a token where it exists: `planned_task_id` (`UNIQUE`, written in P27's own transaction) identifies a task's child run for all time, and `UNIQUE(workflow_run_id, plan_step_id)` identifies a task. But **no plan-command arming, approval or `StartRun` has an identity**: P6 can tell `pending` from `running`, never arming *N* from arming *N+1*, and the planner retry budget is counted from checkpoints after the fact (P43), exactly the `workerLaunchAttemptCount` shape principle 1 rejects | **Partial** |
+| 2 | **Ownership proof before the state is believed** | **Present and strong** for the child run: P28 stamps the owner from the parent, both dispatch branches re-stamp before any launch, and `requireChildOwnershipForDispatch` refuses to dispatch an unowned or mismatched child (`child_ownership.go:49-66`). Absent for the *plan*: nothing proves a planner subprocess belongs to the arming that started it — CP7's whole problem | **Mixed** |
+| 3 | **Generation-conditioned CAS transitions** | Coarse-state CAS throughout (P6, P8, P12, P19, P32 are all real predicates), generation-conditioned nowhere. P4, P24, P29, P31 and P35 have no predicate at all beyond the row existing | **Missing** |
+| 4 | **Stale-writer rejection** | Not expressible: with no generation there is nothing to reject. The exposure is lower than the worker path's only because the plan row's states are mostly one-way (`pending → running → validated → approved`) — except where they are not, and P38/P41 deliberately reset `running → pending` so the reused-row problem §1 describes exists here too | **Missing** |
+| 5 | **Idempotent replay** | **The segment's weakest principle.** Replay is not merely lossy, it is *refused*: `ApprovePlan` (CP13/CP14) and `StartRun` (CP24–CP27) both early-exit on the state their own first write produced, so a crash mid-remedy is unrecoverable by the same call. RP1 replays `finalizeGeneratedPlan`, and CP9(b) shows that replay can fail permanently on its own fresh ids | **Missing** |
+| 6 | **Fail closed on unprovable provenance** | **Present at the one place it matters most** — RP2's `planner_ambiguous` is the correct refusal, and it is recorded with a reason a person can read. Undermined by ordering (CP31/CP32 write the terminal row before the explanation) and by the two silent divergences that fail *open* rather than closed: CP3 and CP19 both substitute a default execution policy for the real one and say nothing, and CP21 substitutes generic acceptance criteria and an empty write intent for the planner's — a read-only task silently becomes a mutating one | **Inconsistent** |
+
+**The structural difference that must not be copied, for this segment.** The
+plan segment's re-entry points are *functions with state preconditions*
+(`GeneratePlan`'s status switch, `ApprovePlan`'s `validated` CAS, `StartRun`'s
+`pending` check), not a durable command row. The worker path re-enters from the
+outbox: a row whose status *is* the re-entry point, so re-entry is a read, not a
+precondition on the caller's history. Any repair of CP24–CP27 should move the
+plan→work unblock behind that same idea — a durable statement of "this run's
+plan has completed and its work step must be `ready`" that any caller can
+re-derive — rather than adding a generation token to `StartRun`.
+
+### 5.2 The explicit gap ledger
+
+The six questions the objective asks, answered for the whole audited path.
+Every row names the §3 window or §2 write it comes from, so nothing here is a
+summary of a summary.
+
+#### Worker gaps already fixed (on this branch, verified in code)
+
+| Gap | What closed it |
+| --- | --- |
+| RUNNING meaning "AO intended to launch" | The phased launch: RUNNING is licensed only by a durable confirmation (`LicensesRunning`, `dispatch_state_machine.go:820`), and the step deliberately does not move at the outbox claim (`dispatch.go:257-259`) |
+| A launcher's word taken as proof | Both halves required to confirm — a session identity **and** an observed ownership read-back (`dispatch.go:720-733`); anything less routes to the unconfirmed state |
+| Silence read as an answer | `SessionOwnershipEvidence.Missing` kept distinct from `Unavailable`, and `ownedExecution.Unprovable()` a first-class stop (`dispatch_reconcile.go:169-262`) |
+| An unevidenced ambiguous stop | R3b's gate: the raise is refused if its evidence snapshot cannot be made durable, and the step is left exactly as it was (`dispatch_reconcile.go:864-869`) |
+| A launch failure retried forever, or not at all | Classification + bounded automatic retry + an explicit human reopen (`worker_launch_recovery.go`), with the retry pacing floor that stops other entry points front-running the wake (`dispatch.go:170-172`) |
+| A child run dispatching a provider process unowned | P28 + `requireChildOwnershipForDispatch`, re-stamped in both branches (CP18) |
+| A stale tmux pane adopted as a live worker | `583b2eefc`'s pane recovery hardening, upstream of this audit |
+| Composite crash windows hidden inside one table row | This document's own §3, split to adjacent boundaries — which is what surfaced C21a/C21c/C22/C23a/C23b |
+
+#### Worker gaps still remaining
+
+| Gap | Where | Disposition |
+| --- | --- | --- |
+| No mutating write names its launch generation | W4, W12a, W13a, W15–W20, W25, H1 (§2.5) | §6 — the CAS model |
+| Split-brain between the two confirmation homes | C7, C22 | §6.5 (W15's unique index, W16 written only after) |
+| A session-owning step stuck at `ready` | C9 | §6.5 (W20 conditioned on the session this generation wrote) |
+| A completed step with no completion evidence | C12 | Fail-closed residue (§4.6); `ambiguous_review_state` stays the honest answer |
+| A reconciliation boundary that makes its own remedy skippable | C15, C23a, C23b | §6 ordering discipline inside the composite remedies |
+| A budget spent by crashes and races rather than decisions | C16, C20 | §6.3's `worker_launch_attempt` phase + §6.2's single-winner index |
+| Outbox `failed` under a step still `running`/`ready`, unreopenable | C21a | §6.5 (H1's CAS widened to the state it actually observed) |
+| A parked run with no reason on the ledger | C21c, and its plan-segment twins CP31/CP32 | §6 ordering; the plan-segment twins are **out of scope** (§6.9) |
+| Fix-cycle attempt closed by recency, not identity | CF6b, CF7 | §4.7 |
+| An unreadable fix-intent ledger licensing a resend | CF1-R | §2.3 — the smallest fix in the document, and the first that should land |
+| **Plan segment: no re-entry after the first row of a multi-row remedy** | CP13, CP14, CP24–CP27 | **Documented, not scheduled** (§6.9) |
+| **Plan segment: silent substitution of default policy / generic criteria** | CP3, CP19, CP21 | **Documented, not scheduled** (§6.9); CP21 is the highest-severity finding in this revision |
+| **Plan segment: `finalizeGeneratedPlan` replay can fail permanently** | CP9(b) | **Documented, not scheduled** (§6.9) |
+
+#### Generation ownership requirements
+
+1. Every mutating worker write conditions on the generation token that owns the
+   claim (§6.5), and the token is allocated **before** the claim (§6.3's
+   `worker_dispatch_authorized`), never derived after the fact.
+2. An attempt row belongs to exactly one generation (`dispatch_generation`,
+   §6.2) and may be reused by a re-entering dispatch only when the stamps match.
+3. The step's session binding records **which generation bound it**
+   (`session_dispatch_generation`), because "release my own binding" is not
+   otherwise expressible as a predicate (§6.6 invariant 7).
+4. `dispatch_generation` and `runtime_instance_id` are separate identities and
+   are never compared to each other: one names a claim, the other an execution.
+5. No token is ever a wildcard. An unstamped legacy row is a distinct state and
+   is movable only by a writer that observed it unstamped (§6.6 invariant 4).
+6. In the plan segment the equivalent obligation is already met **by natural
+   key** wherever it is met at all — `planned_task_id`, `UNIQUE(workflow_run_id,
+   plan_step_id)` — and any future work there should extend that mechanism
+   (CP9's fix is a derived task id) rather than introduce a second, token-shaped
+   one.
+
+#### Stale writer rejection requirements
+
+1. A writer whose claim was released and re-taken across a full `dispatched →
+   failed → pending → dispatched` turn must update **zero rows** at W12, W13,
+   W17, W19 and W20 (§6.8 test 1).
+2. Losing a claim is a **no-op, never an error and never an attention stop**
+   (§6.6 invariant 3): a lost claim means another writer is handling the step.
+3. A confirmation replayed for the same generation loses its insert to the
+   unique index and is read as "already confirmed" — idempotent replay without a
+   read-then-write (§6.5, W15).
+4. A human reopen resumes exactly the failure a person looked at
+   (`failure_generation`), and two concurrent Continues produce one reopen
+   (§6.8 test 2).
+5. W17 is the one write whose loss would put two workers on one worktree: on a
+   mismatch it **stops**, it never overwrites.
+
+#### Recovery rules
+
+1. **Intent before action, everywhere** — W7 before the launcher, R1 before its
+   remedy, H1 before the reopen, A1 before the close, A2 before the step moves,
+   F5 before `Send`. In the plan segment this rule is inverted twice (CP30's
+   budget row after the reset, CP31/CP32's explanation after the terminal row).
+2. **Evidence before transition** — W23 before W21 (§6.6 invariant 6), and the
+   same inversion fixed for F9/F10.
+3. **Re-entry must be a read of durable state, not a precondition on the
+   caller** — the outbox row is the worker path's re-entry point, and it is what
+   the plan segment lacks (§5.1's structural difference).
+4. **A remedy's first row must not make the rest skippable** — C15's lesson,
+   applied to R2/R3 and to every plan-segment multi-row remedy.
+5. **Bounded, and bounded by decisions rather than by crashes** — the retry
+   budget is allocated durably at the start of the attempt, not counted from
+   whatever records survived it.
+6. **Adopt before relaunch** — reconciliation runs before dispatch at every
+   entry point (`recovery.go:174`, `workflow.go:1291`), so a live worker AO
+   has not yet recognised is adopted before anything can start a second one over
+   it. The planner has no equivalent, which is precisely CP7.
+
+#### Provenance / fail-closed cases
+
+These must **stay** stopped, and the implementation step must not "fix" them:
+
+| Case | Why it cannot be decided |
+| --- | --- |
+| C5 / the launch-unconfirmed window | One durable write wide by construction; adoption by natural key + ownership probe is the answer, and an unprovable probe stops |
+| C12 | The completion evidence never existed; synthesising it would invent a verdict |
+| §4.3's residue (`Unprovable` runtime or ownership read, absent or foreign generation, a conditional clear that updates zero rows) | The deciding fact belongs to a component AO does not own and cannot prove is finished |
+| §4.2's residue (unreadable, absent or mismatched `dispatch_generation`; no readable canonical terminal record) | The attempt stays open for the reaper rather than being closed on an assumption |
+| CF2 | `Send` has no idempotency key; an unprovable delivery parks once with its evidence |
+| CF6a | No `fix_observed_*` checkpoint was ever written, so there is no outcome to read and none may be invented |
+| **CP7** | The planner subprocess's outcome is not knowable from workflow's tables. `planner_ambiguous` is correct — and expensive, which is an argument for an adoption path later, not for guessing now |
+| **CP9(b)** | Fail-closed by accident rather than by design: the park is right, the permanence is not. Listed here so it is not mistaken for a considered residue |
+
+And the two that fail **open** and are therefore defects, not residues:
+**CF1-R** (§2.3, an unreadable intent ledger licensing a resend) and
+**CP3/CP19/CP21** (a default policy or a generic artifact silently substituted
+for the real one, with no record that a substitution happened).
 
 ---
 
@@ -853,8 +1454,8 @@ id>`) identifies which *failure* a human reopen is resuming, stamped into
 | W8/W25/R2 attempt close | `UpdateWorkflowAttemptOutcomeIfOpen(id, gen.token)` — `WHERE id = ? AND outcome IS NULL AND dispatch_generation = ?` | already closed, or not ours ⇒ no-op |
 | **W25R** same-generation completion close (§4.2 rule 4) — the recovery that fires when W25 never ran | the same `UpdateWorkflowAttemptOutcomeIfOpen`, called from the observation/reconcile pass once a canonical terminal record for `gen.token` is readable and the attempt's generation equals the step's current one; outcome derived from that record | evidence unreadable, generation absent/mismatched, or no terminal record ⇒ **leave the attempt open** and fall through to `attemptReaper` |
 | **R3R** proven-gone release (§4.3) — the audited session-clear, and the **only** transition permitted to clear `session_id` | **new** `ClearWorkflowStepSessionIfGeneration(stepID, sessionID, gen.token, now)` — `WHERE id = ? AND session_id = ? AND session_dispatch_generation = ?`, setting both columns back to NULL/`''`. Called **only** after proof obligation P (§4.3) holds in full: G owns the claim, the attempt is G's, the binding is G's, and the attempt's `runtime_instance_id` is non-empty, readable, and differs from the observed instance for `S` (or ownership reads `Missing`). The two identities are checked separately and never compared to each other. Followed by the attempt close under G and the claim release under G; the retry runs under a new generation | any part of P absent, unreadable, or mismatched ⇒ **no clear, no retry**; stop as `ambiguous_worker_state`. Zero rows updated ⇒ the binding changed under us ⇒ stop; never widen the predicate and retry |
-| W12 retryable release | `ReleaseDispatchedWorkflowOutboxGeneration(id, class, gen.token)` | claim lost ⇒ **do not schedule a wake, do not park the run**; another writer owns this step |
-| W13 permanent fail | `FailWorkflowOutboxWithGeneration(id, dispatched, now, class, failureGen, gen.token)` | claim lost ⇒ no-op; the step is not failed, the run is not parked |
+| W12a retryable release | `ReleaseDispatchedWorkflowOutboxGeneration(id, class, gen.token)` | claim lost ⇒ **do not schedule a wake, do not park the run**; another writer owns this step |
+| W13a permanent fail | `FailWorkflowOutboxWithGeneration(id, dispatched, now, class, failureGen, gen.token)` | claim lost ⇒ no-op; the step is not failed, the run is not parked |
 | W15 confirmation | insert with `dispatch_generation`; unique index makes a replay lose | insert conflict ⇒ read as "already confirmed for this generation", continue to W16 |
 | W16 ledger marker | written only after W15 succeeded **or** conflicted (both mean confirmed) | — |
 | W17 session write | **new** `UpdateWorkflowStepSessionIfUnset(stepID, sessionID, gen.token, now)` — `WHERE id = ? AND (session_id IS NULL OR session_id = ?)`, stamping `session_dispatch_generation = gen.token` alongside the session so the binding records its author (§4.3 P, part 3) | a different session already owns the step ⇒ **stop, do not overwrite.** This is the one write whose loss would put two workers on one worktree |
@@ -918,10 +1519,12 @@ id>`) identifies which *failure* a human reopen is resuming, stamped into
   lifecycle may be changed, scoped to what that test proves and no further.
   Nothing in this document proposes such a change, and none may be made on
   reasoning alone.
-- Verify and planner dispatch paths.
+- Verify dispatch. **The plan segment is *not* out of scope for the audit** —
+  §2.0, §3.0 and §5.1 document it in full — but no §6 change touches it; §6.9
+  states why, and carries its backlog.
 - The fix path, **except** for the four narrow changes §4.7 names: binding the
   attempt close to the cycle's own `FixAttemptID`, conditioning that close,
-  stamping the fix attempt row, and inverting F7/F8. Fix *dispatch* — the
+  stamping the fix attempt row, and inverting F9/F10. Fix *dispatch* — the
   per-cycle outbox key, prompt delivery, transport retry, and
   `resolveFixDeliveryAfterRestart` — is untouched.
 - The 30 s settle windows (`dispatchReconcileSettleWindow`,
@@ -957,15 +1560,33 @@ CAS refusal, not merely the happy path:
    set to another generation, or with the terminal record unreadable leaves the
    attempt **open** and raises nothing — the reaper remains its only route.
 8. **The fix attempt close, both directions (§4.7).** Two cycles on one fix
-   step, cycle N's observation arriving after cycle N+1's dispatch: cycle N's
-   close lands on cycle N's own row and cycle N+1's row is **untouched and still
-   open** — the assertion that fails on today's code. Plus a CF3 fixture (crash
-   between the `fix_observed_*` checkpoint and the close) finished by the next
-   pass with the outcome read off that checkpoint, a second pass updating zero
-   rows, and a CF2 fixture (attempt open, step `running`, no `fix_dispatched`
-   record) asserting the attempt stays **open** and the step stops as
-   `ambiguous_worker_state` rather than being closed.
-9. **R3R, both directions (§4.3).** With proof obligation P satisfied in full —
+   step, cycle N's observation arriving after cycle N+1's dispatch (CF7): cycle
+   N's close lands on cycle N's own row and cycle N+1's row is **untouched and
+   still open** — the assertion that fails on today's code. Plus a CF6 fixture
+   (crash between the `fix_observed_*` checkpoint and the close) finished by the
+   next pass with the outcome read off that checkpoint, and a second pass
+   updating zero rows. Then the fail-closed half: an attempt row with no
+   readable cycle stamp is left **open** and the observation raises nothing —
+   asserting specifically that the close does *not* fall back to
+   `GetLatestWorkflowAttempt`. Separately, a **CF6a** fixture (terminal-for-the-
+   cycle, attempt open, **no** `fix_observed_*` checkpoint) must leave the
+   attempt open and raise nothing — asserting the close does not synthesise an
+   outcome it cannot read.
+   Two **regression** tests guard what §4.7 does not touch, because the first
+   draft of this audit got them wrong: a CF4/CF5 fixture (attempt open, step
+   `running`, no `fix_dispatched` checkpoint, intent record present) must still
+   be observed normally off the `fix_dispatch_intent` checkpoint and must reach
+   a terminal-for-the-cycle state without human attention; and a CF1a fixture
+   (outbox `dispatched`, no intent record, **read succeeding**) must still be
+   delivered exactly once by `classifyFixDelivery`'s `fixDeliveryNotSent` path.
+9. **The fix-intent ledger tri-state (§2.3, §4.7 item 7).** With
+   `ListWorkflowCheckpoints` made to fail, `resolveFixDeliveryAfterRestart` must
+   **not** call `Send` — it must park the run once via `markFixDeliveryUnproven`
+   with the read failure in the evidence. The companion assertion is that a
+   *successful* read returning no intent still delivers exactly once, so the fix
+   does not turn a provable non-delivery into a stall. This test fails on today's
+   code, which is the point: the current path re-sends.
+10. **R3R, both directions (§4.3).** With proof obligation P satisfied in full —
    the reconciling generation owns the claim, the open attempt and the binding
    (`session_dispatch_generation`), and the attempt's `runtime_instance_id` is
    non-empty and differs from the observed instance for the session (or
@@ -979,35 +1600,169 @@ CAS refusal, not merely the happy path:
    update zero rows. Both directions are required — a test that asserts only the
    fail-closed half would pass on today's code and prove nothing.
 
+
+### 6.9 The plan segment: audited in full, changed by nothing here
+
+§2.0, §3.0 and §5.1 audit the plan segment to the same standard as the launch
+segment — every durable write, every crash boundary between adjacent writes,
+and the same six reviewer principles applied. **The implementation step §6
+describes changes none of it.** That is a scoping decision about the *fix*, not
+a gap in the *audit*, and the difference matters: an undocumented path cannot be
+scheduled, and this one now can be.
+
+Two reasons, both narrow:
+
+1. **Nothing in §6 needs it.** The worker CAS model is about a reused outbox row
+   and a generation-less claim. The plan segment has neither: its identity
+   problem is already solved where it is solved at all, by natural keys
+   (`planned_task_id`, `UNIQUE(workflow_run_id, plan_step_id)`), and its real
+   defects are *ordering* and *re-entry* defects (§5.1, principle 5), which a
+   generation token would not fix.
+2. **Its highest-severity finding is not a CAS problem.** CP21 — a child run
+   dispatched against generic acceptance criteria and an empty write intent
+   because a crash fell between P31 and the recovery branch that does not repeat
+   it — is fixed by passing the planner's criteria into `createSingleTaskRun`
+   so the child is *created* correct, not by conditioning the overwrite. Mixing
+   that into the CAS step would couple two unrelated changes.
+
+The plan-segment work is therefore its own step, and this is its backlog, in
+severity order. Each row names the window it closes and the shape of the fix, so
+the step can be planned from this document without re-deriving it:
+
+| Priority | Finding | Fix shape |
+| --- | --- | --- |
+| 1 | **CP21** — a recovered child dispatches on generic criteria and `WriteIntent` Unspecified; a read-only task is silently treated as mutating | Build the child with its real artifact: pass criteria + write intent through `createSingleTaskRun` so P27 and P31 are one transaction. Removes the window rather than guarding it |
+| 2 | **CP24–CP27** — a crash inside `StartRun` leaves the plan→work unblock unreachable by every entry point | Make the unblock re-derivable: a durable "plan completed, work must be `ready`" fact any caller can act on, or a `StartRun` that re-enters on `(run running ∧ plan step completed ∧ work step pending)` instead of on `run pending` |
+| 3 | **CP19** — a recovered child keeps the default execution policy instead of the parent's | Call `inheritExecutionPolicySnapshot` in the recovery branch too; it is already idempotent |
+| 4 | **CP9(b)** — `finalizeGeneratedPlan`'s replay mints fresh task ids, loses them to the unique key, then fails the FK-bound relationship insert forever | Derive the task id from `(workflow_run_id, plan_step_id)` so a replay computes the same ids it computed the first time |
+| 5 | **CP11/CP12** — an autonomous objective stalls at `validated` with no resolver | A `validated` case in boot `reconcileRun`'s plan switch, and an approval re-entry from the heartbeat, for `approval_mode = auto` only |
+| 6 | **CP13/CP14** — `ApprovePlan`'s early exit skips the run/step transitions its own first write made necessary | Move the early exit after the transitions, or make them re-derivable from `plan.status = approved` |
+| 7 | **CP30/CP31/CP32** — the retry budget recorded after the reset, the explanation after the terminal row | Reorder: allocate the budget and write the reason first, exactly as `review_launch_attempt` does |
+| 8 | **CP3** — a crash before the policy freeze silently downgrades an autonomous objective to manual | Freeze the policy in the same transaction as the run, or make `RP5` read the requested mode from a durable field rather than from the snapshot it is trying to heal |
+| 9 | **CP1** — a master run with no plan row is permanently inert | One transaction for P1′ + P2 |
+| 10 | **CP7** — a planner in flight across a restart is discarded rather than adopted | A planner adoption path (intent record + subprocess identity), the planner's analogue of `adoptLiveLaunch`. The largest of the ten and the least urgent: `planner_ambiguous` is already correct, only wasteful |
+
+Nothing above is a licence to change the reviewer lifecycle, and nothing above
+is in the §6 implementation step.
+
 ---
 
 ## 7. Summary
 
-The worker path already has the two hardest things right: **ordering** (every
-durable record precedes the action it describes, and RUNNING is gated on a
-confirmation) and **honest evidence** (`observed` / `missing` / `unavailable`
-kept apart, with `unprovable` a first-class outcome that stops). What it lacks
-is the one thing the reviewer path added and proved: a **durable generation
-token that every mutating write conditions on**, so that a writer which paused
-across a turn of the reused outbox row cannot win a write it no longer owns.
+This audit covers the whole path — objective/workflow creation → plan
+generation → plan persistence/approval → run/step transitions → a task becoming
+dispatchable → dispatch intent → launch → confirmation → RUNNING → terminal/idle
+→ completion evidence → review transition — with every durable write named
+(§2.0, §2.1, §2.2) and every crash boundary between two *adjacent* writes named
+(§3.0, §3.1).
 
-Twenty crash windows are enumerated in §3. Fifteen of them are already resolved
-by reconciliation, the reaper, or pure re-derivation. The five that are not —
-C7 (split-brain between the two confirmation homes), C9 (a session-owning step
-stuck at `ready`), C12 (a completed step with no completion evidence), C15 (a
-reconciliation boundary that makes its own remedy skippable), and C16/C20 (a
-budget spent by crashes and races rather than by decisions) — are exactly the
-five that require a generation-conditioned CAS to close. §6 is that CAS.
+The **work-step launch segment** already has the two hardest things right:
+**ordering** (every durable record precedes the action it describes, and RUNNING
+is gated on a confirmation) and **honest evidence** (`observed` / `missing` /
+`unavailable` kept apart, with `unprovable` a first-class outcome that stops).
+What it lacks is the one thing the reviewer path added and proved: a **durable
+generation token that every mutating write conditions on**, so that a writer
+which paused across a turn of the reused outbox row cannot win a write it no
+longer owns.
+
+The **plan segment** has the opposite profile. Its identity problem is largely
+solved — by natural keys rather than by tokens (`planned_task_id`,
+`UNIQUE(workflow_run_id, plan_step_id)`) — and its CAS predicates are real
+(P6, P8, P12, P19, P32). What it lacks is **re-entry**: `ApprovePlan` and
+`StartRun` both refuse to act on the state their own first write produced, so a
+crash inside either remedy is unrecoverable by the same call, and three of its
+windows substitute a default for the real thing — a default execution policy
+(CP3, CP19) or a generic plan artifact with an empty write intent (CP21) —
+without recording that a substitution happened.
+
+**Eighty-three windows are enumerated in §3**, each one the interval between two
+*adjacent* durable writes: **thirty-two on the plan segment** (CP1–CP32, §3.0),
+**thirty-nine on the work path** (C1a–C1e, C2a–C2b, C3–C13, C14a–C14c, C15–C17,
+C18a–C18b, C19–C20, C21a–C21c, C22, C23a–C23c, C24a–C24d) and **twelve on the
+fix cycle**
+(CF1a–CF1d, CF1-R, CF2–CF5, CF6a–CF6b, CF7). Sub-lettered rows count as one
+window each. The three sets are counted separately throughout, because they are
+different paths with different resolvers; §3's tables are the authority, and
+these are counts of *table rows*, not of the ambiguous classes in §4, which group
+several windows each. The **fifty-four durable writes of the plan segment** (P1,
+P1′, P2–P48, plus RP1–RP5 for boot recovery) are enumerated the same way, and no row of §2.0
+collapses two mutations a crash between them would leave distinguishable.
+
+On the work path most windows are already resolved by reconciliation, the
+reaper, or pure re-derivation. **Eleven are not**, and they are named rather
+than counted off so each can be checked against §3: C7 (split-brain between the
+two confirmation homes), C9 (a session-owning step stuck at `ready`), C12 (a
+completed step with no completion evidence), C15 (a reconciliation boundary that
+makes its own remedy skippable), the pair C16/C20 (a budget spent by crashes and
+races rather than by decisions), and five that splitting the composite remedies
+exposed — C21a (a failed outbox row under a step still `running`, which H1's
+`failed`-only CAS cannot reopen), C21c (a parked run with no reason on the
+ledger), C22 (the unconfirmed-side twin of C7's split-brain), and C23a/C23b (a
+reconciliation retry whose attempt-close and step transition are both skippable
+by C15's short-circuit). C14c is deliberately not among them: cycle 1's review
+unblock waiting for an explicit Continue is a design decision (`recovery.go:250`
+and `workflow.go:941` both pass `includeCycle1Unblock=false` on purpose), and the
+master path issues that Continue itself. Those eleven are what a
+generation-conditioned CAS,
+plus ordering discipline *inside* the composite remedies, has to close. §6 is
+that CAS — and C21a/C21c/C22/C23a/C23b are new to this revision, surfaced only
+because the composite rows were split into their real boundaries.
+
+On the fix cycle the split is different and mostly favourable. **Seven of the
+twelve converge today** — CF1a–CF1d because F5's fatal intent-before-`Send`
+contract makes "never delivered" provable on a successful read, CF3 because
+`classifyFixDelivery` decides from session evidence rather than from where the
+crash fell, and CF4/CF5 because `observeFixStep` reads the *intent* checkpoint
+and does not require `fix_dispatched`. **Two are fail-closed by design**: CF2
+(`Send` has no idempotency key, so an unprovable delivery parks once with its
+evidence) and **CF6a** (no terminal checkpoint was ever written, so there is no
+outcome to read and none may be invented). **Two are open and fixable** — CF6b
+and CF7, §4.7's subject. **One is a defect** — CF1-R, below.
+
+**One row is neither resolved nor a residue: CF1-R.** An unreadable intent
+ledger currently returns the same value as a proven absent intent and licenses a
+re-send of the fix findings (§2.3). That is a fail-*open* defect against
+principle 6, and §4.7 item 7 — the tri-state `findFixDispatchIntent` its own
+comment already describes — is the smallest fix in this document. It needs no
+migration and no new column, and it should land before the generation work.
+
+On the plan segment, **thirteen of the thirty-two windows are unresolved**, and
+they are named rather than counted so each can be checked against §3.0: CP1 (a
+master run with no plan row, permanently inert), CP3 and CP19 (an autonomous
+objective, and then a child of one, silently downgraded to the default execution
+policy), CP9(b) (a `finalizeGeneratedPlan` replay that mints fresh ids, loses
+them to the unique key and then fails its FK-bound relationship insert on every
+boot thereafter), CP11 and CP12 (an autonomous plan stalled at `validated` with
+no resolver), CP13 and CP14 (`ApprovePlan`'s early exit skipping the run and step
+transitions its own approval made necessary), **CP21** (the severest: a recovered
+child dispatched against generic acceptance criteria and an empty write intent,
+so a read-only task is prompted and classified as mutating), CP24–CP27 (a crash
+inside `StartRun` leaving the plan→work unblock unreachable from every entry
+point), and CP30–CP32 (a retry budget recorded after the reset it bounds, and a
+stop recorded after the terminal row it explains). Two more are fail-closed and
+correct — CP7, the planner-in-flight window, which `planner_ambiguous` refuses
+rather than guesses, and CP6's residue — and the rest converge by design: CP4 and
+CP18 are the two windows the code was explicitly written to heal, and CP22/CP23
+converge on `planned_task_id`, the one natural key in this document that does
+what a generation token would. §6.9 carries the backlog in severity order; none
+of it is in the §6 implementation step, and saying so is a scoping decision about
+the fix, not a limit on the audit.
 
 On the seven ambiguous classes (§4), the verdict is that **all seven are
 resolvable** — 4.1, 4.2, 4.4 (already resolved upstream), 4.5, 4.6, 4.7, and 4.3
 in both halves: *stale* by the durable runtime-instance fence, and *phantom*
 whenever that fence lets AO prove, under a matching generation identity, that
 the execution it launched is gone. 4.7 —
-`fix_completed_but_attempt_open` — is the cheapest of the seven and the only one
-reachable with no crash at all: the fix path already writes the binding it needs
-(`FixAttemptID`) and simply closes the newest attempt row instead of the named
-one.
+`fix_completed_but_attempt_open` — is resolvable in its CF6b and CF7 halves and
+fail-closed in its CF6a half; it is the cheapest of the seven, and its CF7 part
+is the only case in this document reachable with no crash at all: the fix path
+already writes the binding it needs (`FixAttemptID`) and simply closes the newest
+attempt row instead of the named one. Its scope is narrow and worth stating
+plainly, because the delivery half of the fix path is *stronger* than the work
+path's, not weaker — F5 writes its intent before `Send` and treats a failed write
+as fatal, F12 decides from evidence and fails closed, and F13 makes a recovered
+dispatch leave state identical to a first-pass one. Nothing in §4.7 touches any
+of that.
 
 The stance on the reviewer path is unchanged from the header: this audit reads
 the reviewer model, adopts its principles and its already-generic store
