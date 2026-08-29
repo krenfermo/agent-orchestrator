@@ -68,7 +68,7 @@ func (c *WorkflowQuestionsController) runVisible(ctx context.Context, runID stri
 	if err != nil {
 		return false
 	}
-	return !(owner != nil && *owner != current)
+	return owner == nil || *owner == current
 }
 
 // Register mounts the question routes on the supplied router.

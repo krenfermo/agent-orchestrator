@@ -340,7 +340,7 @@ func RunWithConfig(cfg config.Config) error {
 		NewID:    uuid.NewString,
 	})
 
-	sessionSvc, reviewSvc, sessMgr, rawSessionMgr, workspaceObserver, err := startSession(ctx, cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, agents, managedPreview, browserBroker, browserAuthority, chatLauncher{svc: chatSvc}, settingsSvc, log)
+	sessions, err := startSession(ctx, cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, agents, managedPreview, browserBroker, browserAuthority, chatLauncher{svc: chatSvc}, settingsSvc, log)
 	if err != nil {
 		stop()
 		lcStack.Stop()
@@ -349,6 +349,8 @@ func RunWithConfig(cfg config.Config) error {
 		}
 		return fmt.Errorf("wire session service: %w", err)
 	}
+	sessionSvc, reviewSvc, sessMgr := sessions.Service, sessions.Review, sessions.Lifecycle
+	rawSessionMgr, workspaceObserver := sessions.Manager, sessions.Workspace
 	sessMgr.SetTerminalInputGate(termMgr)
 	lifecycleMessenger.Bind(sessionLifecycleMessenger{sessMgr})
 	lcStack.LCM.SetCompletionTerminator(sessMgr)

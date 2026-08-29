@@ -121,7 +121,7 @@ func applyResolverEnrichment(out WorkflowQuestionResponse, resolution domain.Wor
 		return out
 	}
 	out.ResolverHarness = string(resolution.ResolverHarness)
-	out.ResolverProvider = string(domain.ProviderForHarness(resolution.ResolverHarness))
+	out.ResolverProvider = domain.ProviderForHarness(resolution.ResolverHarness)
 	out.ResolverReasonSummary = resolution.ReasonSummary
 	out.ResolverEvidenceReferences = resolution.EvidenceReferences
 	if resolution.RequiresHuman {
@@ -139,12 +139,4 @@ func applyResolverEnrichment(out WorkflowQuestionResponse, resolution domain.Wor
 // questions, pending questions never routed through the resolver).
 func resolverEnrichmentEligible(q domain.WorkflowQuestion) bool {
 	return q.ResolvingRunID != nil
-}
-
-func workflowQuestionResponses(qs []domain.WorkflowQuestion) []WorkflowQuestionResponse {
-	out := make([]WorkflowQuestionResponse, 0, len(qs))
-	for _, q := range qs {
-		out = append(out, workflowQuestionResponse(q))
-	}
-	return out
 }

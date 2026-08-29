@@ -32,8 +32,8 @@ func newServerCommand() *cobra.Command {
 			if err != nil {
 				return usageError{err}
 			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "AO headless web server: http://%s\n", cfg.Addr())
-			fmt.Fprintf(cmd.ErrOrStderr(), "Data directory: %s\nFrontend assets: %s\n", cfg.DataDir, cfg.WebRoot)
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "AO headless web server: http://%s\n", cfg.Addr())
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Data directory: %s\nFrontend assets: %s\n", cfg.DataDir, cfg.WebRoot)
 			return daemon.RunWithConfig(cfg)
 		},
 	}

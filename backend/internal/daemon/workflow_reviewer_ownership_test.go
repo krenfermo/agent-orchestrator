@@ -32,10 +32,6 @@ type sessionIncarnation struct {
 	instanceID string
 	owner      string // "" = carries no ownership token
 	dead       bool   // the WORKLOAD process has exited
-	// foreground records what the reviewer happens to be running. It exists to
-	// prove the classification does NOT consult it: a reviewer running `cat`
-	// must stay live.
-	foreground string
 	// workloadUnknown models a runtime that cannot determine liveness.
 	workloadUnknown bool
 }

@@ -146,10 +146,9 @@ func TestAuthOwnershipIDOR(t *testing.T) {
 	if unknownBody.code != wrongPassBody.code || unknownBody.message != wrongPassBody.message {
 		t.Fatalf("login failure must not distinguish unknown account from wrong password: %+v vs %+v", unknownBody, wrongPassBody)
 	}
-	if strings.Contains(strings.ToLower(unknownBody.raw), "password") == false {
-		// message text is allowed to mention "password" generically (e.g.
-		// "invalid ... password") -- what matters is it never echoes a hash.
-	}
+	// The message text is allowed to mention "password" generically (e.g.
+	// "invalid ... password"); what matters is that it never echoes a hash,
+	// which is what the loop below actually checks.
 	for _, raw := range []string{unknownBody.raw, wrongPassBody.raw} {
 		if strings.Contains(raw, "$2a$") || strings.Contains(raw, "$2b$") { // bcrypt hash prefix
 			t.Fatalf("response leaked a bcrypt hash: %s", raw)

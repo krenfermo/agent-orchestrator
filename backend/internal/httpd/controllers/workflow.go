@@ -617,6 +617,31 @@ func executionModeForRun(run domain.WorkflowRun) string {
 	return "manual"
 }
 
+// WorkflowsController owns the /workflows routes. A nil Svc returns 501.
+type WorkflowsController struct {
+	Svc workflowsvc.Manager
+	// UsageReader backs Checkpoint 8J's Usage section. Optional: nil leaves
+	// WorkflowRunDetailView.Usage unset rather than failing the request, so
+	// a headless/test daemon without usage wiring keeps working unchanged.
+	UsageReader SessionUsageLookup
+	// QuestionsReader backs Checkpoint 8K-A's Questions section, embedded
+	// into every run-detail response the same way UsageReader is. Optional:
+	// nil leaves WorkflowRunDetailView.Questions unset.
+	QuestionsReader WorkflowQuestionsService
+	// Ownership backs Checkpoint 8P-A's ownership scoping. Nil preserves
+	// pre-8P-A unscoped behavior exactly.
+	Ownership WorkflowOwnershipStore
+	// TrustedLocal mirrors config.Config.TrustedLocalMode; scoping is only
+	// enforced when this is false — see ProjectsController's own field for
+	// the identical reasoning.
+	TrustedLocal bool
+	// ProviderProfiles backs Checkpoint 8P-C.1's routing-decision profile
+	// display metadata (safe fields only -- see RoutingProfileView). Nil
+	// leaves every StepDetail.Routing.*Profile field unset; the raw
+	// harness/reason-code fields still surface.
+	ProviderProfiles providerprofilesvc.Manager
+}
+
 func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail workflowcore.RunDetail) WorkflowRunDetailView {
 	// Checkpoint 8P-C.1: resolve the run owner's provider profiles ONCE
 	// (never per-step) for routing-decision display metadata. Unresolvable
@@ -823,31 +848,6 @@ type WorkflowRunOriginView struct {
 	ApprovedBy       string `json:"approvedBy,omitempty"`
 }
 
-// WorkflowsController owns the /workflows routes. A nil Svc returns 501.
-type WorkflowsController struct {
-	Svc workflowsvc.Manager
-	// UsageReader backs Checkpoint 8J's Usage section. Optional: nil leaves
-	// WorkflowRunDetailView.Usage unset rather than failing the request, so
-	// a headless/test daemon without usage wiring keeps working unchanged.
-	UsageReader SessionUsageLookup
-	// QuestionsReader backs Checkpoint 8K-A's Questions section, embedded
-	// into every run-detail response the same way UsageReader is. Optional:
-	// nil leaves WorkflowRunDetailView.Questions unset.
-	QuestionsReader WorkflowQuestionsService
-	// Ownership backs Checkpoint 8P-A's ownership scoping. Nil preserves
-	// pre-8P-A unscoped behavior exactly.
-	Ownership WorkflowOwnershipStore
-	// TrustedLocal mirrors config.Config.TrustedLocalMode; scoping is only
-	// enforced when this is false — see ProjectsController's own field for
-	// the identical reasoning.
-	TrustedLocal bool
-	// ProviderProfiles backs Checkpoint 8P-C.1's routing-decision profile
-	// display metadata (safe fields only -- see RoutingProfileView). Nil
-	// leaves every StepDetail.Routing.*Profile field unset; the raw
-	// harness/reason-code fields still surface.
-	ProviderProfiles providerprofilesvc.Manager
-}
-
 func (c *WorkflowsController) scopingEnforced() bool {
 	return !c.TrustedLocal && c.Ownership != nil
 }
@@ -879,7 +879,7 @@ func (c *WorkflowsController) runVisible(ctx context.Context, id string, current
 	if err != nil {
 		return false
 	}
-	return !(owner != nil && *owner != current)
+	return owner == nil || *owner == current
 }
 
 // Register mounts the workflow routes on the supplied router.

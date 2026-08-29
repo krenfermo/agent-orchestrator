@@ -32,7 +32,7 @@ func (p *staticPlannerHTTP) Descriptor() (string, string) { return "fake", "fake
 type staticContextHTTP struct{}
 
 func (staticContextHTTP) Build(_ context.Context, proj domain.ProjectRecord) (workflowcore.PlannerContext, error) {
-	return workflowcore.PlannerContext{Version: "v1", ProjectID: string(proj.ID), ProjectPath: proj.Path, Documents: []workflowcore.PlannerDocument{}}, nil
+	return workflowcore.PlannerContext{Version: "v1", ProjectID: proj.ID, ProjectPath: proj.Path, Documents: []workflowcore.PlannerDocument{}}, nil
 }
 
 func twoStepMasterPlanHTTP() workflowcore.MasterPlan {

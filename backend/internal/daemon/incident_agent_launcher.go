@@ -138,7 +138,7 @@ func (l *incidentAgentLauncher) LaunchDiagnostic(ctx context.Context, req workfl
 		return workflowcore.IncidentAgentResult{}, errors.New("incident diagnostic produced an empty command")
 	}
 
-	env := l.runtimeEnv(ctx, req, sessionID, argv)
+	env := l.runtimeEnv(ctx, req, argv)
 	handle, err := l.runtime.Create(ctx, ports.RuntimeConfig{
 		SessionID:     domain.SessionID(sessionID),
 		WorkspacePath: workspace,
@@ -215,7 +215,7 @@ func (l *incidentAgentLauncher) buildArgv(ctx context.Context, agent ports.Agent
 // runtimeEnv mirrors decisionResolverLauncher.runtimeEnv: the same PATH pinning
 // and AO-shim fallback, so the bare `ao incident submit ...` the prompt asks for
 // resolves regardless of what the daemon binary is called.
-func (l *incidentAgentLauncher) runtimeEnv(ctx context.Context, req workflowcore.IncidentAgentRequest, sessionID string, argv []string) map[string]string {
+func (l *incidentAgentLauncher) runtimeEnv(ctx context.Context, req workflowcore.IncidentAgentRequest, argv []string) map[string]string {
 	env := map[string]string{}
 	env["AO_INCIDENT_ID"] = req.IncidentID
 	env["AO_INCIDENT_RUN_ID"] = req.RunID

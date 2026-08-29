@@ -1000,6 +1000,15 @@ func (c *SessionsController) rename(w http.ResponseWriter, r *http.Request) {
 	envelope.WriteJSON(w, http.StatusOK, RenameSessionResponse{OK: true, SessionID: sessionID(r), DisplayName: displayName})
 }
 
+// setMergePolicy and setAutoInjectReviewPolicy below are structurally
+// identical, and deliberately stay that way. They are two independently
+// versioned PATCH endpoints with their own request and response DTOs, which
+// the generated OpenAPI schema is derived from; the resemblance is the shape
+// of a one-boolean policy endpoint, not shared logic. Collapsing them behind a
+// generic helper would couple two API surfaces that must be free to diverge,
+// and would cost more indirection than the eight lines it saves.
+//
+//nolint:dupl // distinct endpoints with their own DTOs; see the comment above.
 func (c *SessionsController) setMergePolicy(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "PATCH", "/api/v1/sessions/{sessionId}/merge-policy")
@@ -1026,6 +1035,7 @@ func (c *SessionsController) setMergePolicy(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+//nolint:dupl // see setMergePolicy: distinct endpoint, distinct DTOs.
 func (c *SessionsController) setAutoInjectReviewPolicy(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "PATCH", "/api/v1/sessions/{sessionId}/auto-inject-review")

@@ -180,17 +180,3 @@ func (m *Manager) composerDetectorFor(harness domain.AgentHarness) (ports.EmptyC
 	detector, ok := agent.(ports.EmptyComposerDetector)
 	return detector, ok
 }
-
-// describePromptSubmission renders a verdict for a log line or a durable record.
-func describePromptSubmission(s ports.PromptSubmission) string {
-	switch s {
-	case ports.PromptSubmitted:
-		return "the composer emptied, so the prompt was submitted"
-	case ports.PromptLoadedNotSubmitted:
-		return "the prompt is still sitting in the agent's composer, unsubmitted"
-	case ports.PromptSubmissionAmbiguous:
-		return "AO could not read the composer, so the submission is unproven"
-	default:
-		return "no submission check applied"
-	}
-}

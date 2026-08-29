@@ -258,6 +258,12 @@ func loginSourceKey(r *http.Request) string {
 // preview-file cookie (auth.go's maybeSetPreviewAuthCookie) handles the same
 // loopback-vs-network distinction.
 func setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expiresAt time.Time) {
+	// Secure is conditional by design, and HttpOnly/SameSite are always set:
+	// the loopback desktop daemon serves plain http, and an unconditionally
+	// Secure cookie would simply never be stored there, breaking sign-in on
+	// the primary deployment. requestIsSecure sets it for every request that
+	// did arrive over TLS or through a proxy that declares it did.
+	//nolint:gosec // G124: HttpOnly+SameSite always set; Secure tracks the actual scheme.
 	http.SetCookie(w, &http.Cookie{
 		Name:     identity.SessionCookieName,
 		Value:    token,
@@ -270,6 +276,12 @@ func setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expi
 }
 
 func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	// Secure is conditional by design, and HttpOnly/SameSite are always set:
+	// the loopback desktop daemon serves plain http, and an unconditionally
+	// Secure cookie would simply never be stored there, breaking sign-in on
+	// the primary deployment. requestIsSecure sets it for every request that
+	// did arrive over TLS or through a proxy that declares it did.
+	//nolint:gosec // G124: HttpOnly+SameSite always set; Secure tracks the actual scheme.
 	http.SetCookie(w, &http.Cookie{
 		Name:     identity.SessionCookieName,
 		Value:    "",

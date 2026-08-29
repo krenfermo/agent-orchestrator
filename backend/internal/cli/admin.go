@@ -69,7 +69,7 @@ func (c *commandContext) adminResetPassword(cmd *cobra.Command, opts adminResetP
 	password := opts.password
 	if password == "" {
 		var err error
-		password, err = c.promptPassword(cmd)
+		password, err = c.promptPassword()
 		if err != nil {
 			return err
 		}
@@ -85,25 +85,25 @@ func (c *commandContext) adminResetPassword(cmd *cobra.Command, opts adminResetP
 	}, &out); err != nil {
 		return err
 	}
-	fmt.Fprintf(c.deps.Out, "Password reset for %s. Existing sessions were signed out.\n", email)
+	_, _ = fmt.Fprintf(c.deps.Out, "Password reset for %s. Existing sessions were signed out.\n", email)
 	return nil
 }
 
 // promptPassword reads a password twice (with confirmation) from the
 // terminal without echoing it. Falls back to a plain (echoed) read if
 // stdin isn't an interactive terminal, e.g. under test or when piped.
-func (c *commandContext) promptPassword(cmd *cobra.Command) (string, error) {
-	fmt.Fprint(c.deps.Out, "New password: ")
-	pw1, err := readSecretLine(c.deps.In, c.deps.Out)
+func (c *commandContext) promptPassword() (string, error) {
+	_, _ = fmt.Fprint(c.deps.Out, "New password: ")
+	pw1, err := readSecretLine(c.deps.In)
 	if err != nil {
 		return "", err
 	}
-	fmt.Fprint(c.deps.Out, "\nConfirm password: ")
-	pw2, err := readSecretLine(c.deps.In, c.deps.Out)
+	_, _ = fmt.Fprint(c.deps.Out, "\nConfirm password: ")
+	pw2, err := readSecretLine(c.deps.In)
 	if err != nil {
 		return "", err
 	}
-	fmt.Fprintln(c.deps.Out)
+	_, _ = fmt.Fprintln(c.deps.Out)
 	if pw1 != pw2 {
 		return "", fmt.Errorf("passwords did not match")
 	}
@@ -113,7 +113,7 @@ func (c *commandContext) promptPassword(cmd *cobra.Command) (string, error) {
 // readSecretLine reads one line without echoing it when stdin is a real
 // terminal (via golang.org/x/term); otherwise it reads a plain line, so
 // scripted/non-interactive callers (tests, pipes) still work.
-func readSecretLine(in interface{ Read([]byte) (int, error) }, out interface{ Write([]byte) (int, error) }) (string, error) {
+func readSecretLine(in interface{ Read([]byte) (int, error) }) (string, error) {
 	if f, ok := in.(interface{ Fd() uintptr }); ok && term.IsTerminal(int(f.Fd())) {
 		b, err := term.ReadPassword(int(f.Fd()))
 		if err != nil {
@@ -132,8 +132,13 @@ func readSecretLine(in interface{ Read([]byte) (int, error) }, out interface{ Wr
 			line = append(line, buf[0])
 		}
 		if err != nil {
+			// EOF (or any read error) ends the line. What was read before it is
+			// still what the caller typed, so the read error is not propagated:
+			// a password terminated by EOF rather than a newline is a password,
+			// and the confirmation compare above is what rejects a truncated one.
 			break
 		}
 	}
+	//nolint:nilerr // a read error ends the line; the bytes read are still the answer.
 	return strings.TrimRight(string(line), "\r"), nil
 }
