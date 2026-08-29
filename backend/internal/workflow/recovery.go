@@ -127,6 +127,19 @@ func (c *Coordinator) reconcileRun(ctx stdctx.Context, run domain.WorkflowRun, n
 	}
 	run = healed
 
+	// P1-A: the same argument, for the same reason, about execution strategy.
+	// A run created before the strategy model has one recorded here, mapped
+	// from the durable facts it does have (planned child / owns a plan row /
+	// neither) and stamped `recovered` so nothing later mistakes the mapping
+	// for somebody's choice. A run that already carries a selection is
+	// untouched, which is what makes "a restart cannot select a different
+	// strategy" true by construction.
+	strategyHealed, serr := c.ensureRecordedExecutionStrategy(ctx, run)
+	if serr != nil {
+		return serr
+	}
+	run = strategyHealed
+
 	if c.planStore != nil {
 		if plan, master, planErr := c.planStore.GetWorkflowPlan(ctx, run.ID); planErr != nil {
 			return planErr

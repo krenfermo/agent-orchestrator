@@ -3466,6 +3466,10 @@ export interface components {
             totalTokens: number;
         };
         CreateWorkflowRunRequest: {
+            /** @description Acceptance criteria for a task-strategy run. */
+            acceptanceCriteria?: string[];
+            /** @enum {string} */
+            approvalPolicy?: "automatic" | "manual";
             /** @description Explicit per-run autonomous/manual override; omit to inherit the caller's execution policy. */
             autonomous?: null | boolean;
             /** @description Generate a provider-neutral master plan before execution. */
@@ -3474,7 +3478,12 @@ export interface components {
             objective: string;
             /** @enum {string} */
             planApprovalMode?: "manual" | "auto";
+            /** @enum {string} */
+            strategy?: "task" | "autonomous" | "master" | "auto";
+            strategySignals?: components["schemas"]["WorkflowStrategySignals"];
             verification?: components["schemas"]["WorkflowVerificationPlan"];
+            /** @enum {string} */
+            writeIntent?: "mutating" | "read_only";
         };
         DegradedProject: {
             id: string;
@@ -4583,6 +4592,18 @@ export interface components {
             reason: "provider_health_stale" | "provider_cooldown" | "provider_unavailable" | "no_eligible_provider";
             role?: string;
         };
+        WorkflowExecutionStrategyView: {
+            depth?: number;
+            /** @enum {string} */
+            effectiveStrategy: "task" | "autonomous" | "master";
+            parentRunId?: string;
+            policyVersion?: string;
+            reasonCode?: string;
+            /** @enum {string} */
+            requestedStrategy?: "task" | "autonomous" | "master" | "auto";
+            /** @enum {string} */
+            selectionSource: "explicit" | "policy" | "inherited" | "recovered";
+        };
         WorkflowIntegrationFreshReviewException: {
             approvedBy: string;
             childRunId?: string;
@@ -4722,6 +4743,7 @@ export interface components {
             createdAt: string;
             /** @enum {string} */
             executionMode: "autonomous" | "manual";
+            executionStrategy?: components["schemas"]["WorkflowExecutionStrategyView"];
             id: string;
             /** Format: date-time */
             lastActivityAt: string;
@@ -4779,6 +4801,20 @@ export interface components {
             verdict?: "" | "approved" | "changes_requested";
             verification?: components["schemas"]["WorkflowVerifyResult"];
             worktreePath?: string;
+        };
+        WorkflowStrategySignals: {
+            /** @description Caller's step estimate; 0 means no estimate. */
+            expectedSteps?: number;
+            /** @description Several coordinated workstreams under one initiative. */
+            multiWorkstream?: boolean;
+            /** @description How many repositories the work spans. */
+            repositoryCount?: number;
+            /** @description The objective must be broken down before anything can execute. */
+            requiresDecomposition?: boolean;
+            /** @enum {string} */
+            size?: "small" | "medium" | "large";
+            /** @description The caller already supplied a plan/objective hierarchy. */
+            suppliedPlanHierarchy?: boolean;
         };
         WorkflowTaskDowngradeView: {
             conflicts?: string[];

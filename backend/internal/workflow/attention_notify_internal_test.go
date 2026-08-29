@@ -34,7 +34,7 @@ func childRun(t *testing.T, c *Coordinator, ctx stdctx.Context, objective string
 		t.Fatalf("CreateRun(parent): %v", err)
 	}
 	parentID, taskID := parent.Run.ID, "task-1"
-	detail, err := c.createSingleTaskRun(ctx, "p", objective, &parentID, &taskID)
+	detail, err := c.createSingleTaskRun(ctx, "p", objective, &parentID, &taskID, c.defaultTaskStrategy())
 	if err != nil {
 		t.Fatalf("createSingleTaskRun: %v", err)
 	}

@@ -159,7 +159,7 @@ func TestMasterIntegration_CapacityWaitThenWake_Task2SeesTask1BeforeItWrites(t *
 	// unexported constructor reconcileMasterTasks itself uses), dispatched
 	// for real through StartRun.
 	taskID2 := "task-2"
-	created2, err := coord.createSingleTaskRun(ctx, "p", "task 2", &master.ID, &taskID2)
+	created2, err := coord.createSingleTaskRun(ctx, "p", "task 2", &master.ID, &taskID2, coord.defaultTaskStrategy())
 	if err != nil {
 		t.Fatalf("createSingleTaskRun task 2: %v", err)
 	}

@@ -172,11 +172,34 @@ func (c *Coordinator) ApplyExecutionPolicySnapshot(ctx stdctx.Context, runID str
 // non-master run, a manual-mode run, or an already-generated plan are all
 // silent no-ops.
 func (c *Coordinator) maybeKickoffAutonomousPlanning(ctx stdctx.Context, run domain.WorkflowRun, execution domain.ExecutionPolicySnapshot) {
-	if !execution.AutonomousMode || c.planStore == nil || c.wakeScheduler == nil {
+	if !execution.AutonomousMode || c.wakeScheduler == nil {
 		return
 	}
-	plan, isMaster, err := c.planStore.GetWorkflowPlan(ctx, run.ID)
-	if err != nil || !isMaster || plan.Status != domain.WorkflowPlanPending {
+	if c.planStore != nil {
+		plan, isMaster, err := c.planStore.GetWorkflowPlan(ctx, run.ID)
+		if err != nil {
+			return
+		}
+		if isMaster {
+			if plan.Status == domain.WorkflowPlanPending {
+				c.scheduleWake(ctx, run, nil, wake.ReasonAutonomousProgress, "")
+			}
+			return
+		}
+	}
+	// P1-A: the same kickoff for a `task` run, which has no plan to generate
+	// and would otherwise sit at `pending` until a person pressed Start --
+	// leaving the new strategy usable only by hand. The wake poller calls
+	// ContinueRun, which starts a pending autonomous task run (see
+	// ContinueRun's own task branch).
+	//
+	// Deliberately gated on a RECORDED task selection rather than a resolved
+	// one: a legacy run maps to `task` too, and a pre-P1-A single-task run
+	// must keep waiting for its person exactly as it always has.
+	if run.ParentWorkflowID != nil || run.State != domain.WorkflowRunPending {
+		return
+	}
+	if sel, ok := recordedStrategy(run); !ok || sel.Effective != domain.ExecutionStrategyTask {
 		return
 	}
 	c.scheduleWake(ctx, run, nil, wake.ReasonAutonomousProgress, "")

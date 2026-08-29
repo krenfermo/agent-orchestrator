@@ -64,6 +64,63 @@ type CreateWorkflowRunRequest struct {
 	// overrides AutonomousMode in this run's own frozen policy snapshot only
 	// -- it never writes back to the caller's stored UserExecutionPolicy.
 	Autonomous *bool `json:"autonomous,omitempty" description:"Explicit per-run autonomous/manual override; omit to inherit the caller's execution policy."`
+	// Strategy is P1-A's canonical execution strategy for this run:
+	// "task", "autonomous", "master", or "auto" to have AO select one under
+	// its deterministic policy. Omitted (the zero value) preserves pre-P1-A
+	// behaviour exactly: masterPlan=true creates a planner-driven autonomous
+	// objective, masterPlan=false creates a bounded task -- which is what
+	// each of those already did.
+	Strategy string `json:"strategy,omitempty" enum:"task,autonomous,master,auto"`
+	// StrategySignals are the deterministic inputs AUTO selection reads. They
+	// are ignored for an explicit strategy, and every one of them is a fact
+	// the caller already knows -- no model is consulted to choose a strategy.
+	StrategySignals *WorkflowStrategySignals `json:"strategySignals,omitempty"`
+	// ApprovalPolicy is the approval concern, kept deliberately separate from
+	// execution strategy: "automatic" runs unattended, "manual" waits for a
+	// person to approve the plan and drive the run. Omitted preserves the
+	// legacy planApprovalMode/autonomous pair exactly as sent.
+	ApprovalPolicy string `json:"approvalPolicy,omitempty" enum:"automatic,manual"`
+	// AcceptanceCriteria and WriteIntent apply to the "task" strategy, whose
+	// run has no planner to derive them. WriteIntent must be declared for a
+	// read-only task: unspecified is treated as mutating everywhere, so a
+	// task that correctly changes nothing would otherwise park as ambiguous.
+	AcceptanceCriteria []string `json:"acceptanceCriteria,omitempty" description:"Acceptance criteria for a task-strategy run."`
+	WriteIntent        string   `json:"writeIntent,omitempty" enum:"mutating,read_only"`
+}
+
+// WorkflowStrategySignals is the bounded, deterministic input to AUTO
+// execution-strategy selection.
+type WorkflowStrategySignals struct {
+	ExpectedSteps         int    `json:"expectedSteps,omitempty" description:"Caller's step estimate; 0 means no estimate."`
+	RequiresDecomposition bool   `json:"requiresDecomposition,omitempty" description:"The objective must be broken down before anything can execute."`
+	RepositoryCount       int    `json:"repositoryCount,omitempty" description:"How many repositories the work spans."`
+	MultiWorkstream       bool   `json:"multiWorkstream,omitempty" description:"Several coordinated workstreams under one initiative."`
+	SuppliedPlanHierarchy bool   `json:"suppliedPlanHierarchy,omitempty" description:"The caller already supplied a plan/objective hierarchy."`
+	Size                  string `json:"size,omitempty" enum:"small,medium,large"`
+}
+
+// WorkflowExecutionStrategyView is the read-only projection of a run's frozen
+// execution-strategy selection. Every field answers a question a lifecycle
+// component or an operator may ask about a run in flight: what was asked for,
+// what is actually running, who decided, under which rules, and why.
+type WorkflowExecutionStrategyView struct {
+	// RequestedStrategy is what the create request asked for, including
+	// "auto". Empty for an inherited or recovered selection, which nobody
+	// requested.
+	RequestedStrategy string `json:"requestedStrategy,omitempty" enum:"task,autonomous,master,auto"`
+	// EffectiveStrategy is what this run executes under. It never changes.
+	EffectiveStrategy string `json:"effectiveStrategy" enum:"task,autonomous,master"`
+	// SelectionSource is how EffectiveStrategy was decided: chosen by a
+	// caller, selected by policy, inherited from a parent, or recovered by
+	// mapping a pre-P1-A run from its own durable facts.
+	SelectionSource string `json:"selectionSource" enum:"explicit,policy,inherited,recovered"`
+	// PolicyVersion is the selection-policy version in force at the decision.
+	PolicyVersion string `json:"policyVersion,omitempty"`
+	// ReasonCode is the stable explanation code for the decision.
+	ReasonCode string `json:"reasonCode,omitempty"`
+	// ParentRunID and Depth place a child inside its bounded hierarchy.
+	ParentRunID string `json:"parentRunId,omitempty"`
+	Depth       int    `json:"depth,omitempty"`
 }
 
 // WorkflowVerificationPlan is the API projection of a task's verification
@@ -352,6 +409,11 @@ type WorkflowRunView struct {
 	// frozen execution policy snapshot: "autonomous" or "manual", decided at
 	// run creation time and never re-derived from a later Settings change.
 	ExecutionMode string `json:"executionMode" enum:"autonomous,manual"`
+	// ExecutionStrategy is P1-A's frozen execution-strategy selection for this
+	// run. Absent only for a pre-P1-A run this response could not map without
+	// a second query -- the run's next boot reconciliation records the
+	// mapping durably and it is present from then on.
+	ExecutionStrategy *WorkflowExecutionStrategyView `json:"executionStrategy,omitempty"`
 	// BranchWait is Checkpoint 8P-E.11's structured waiting_for_branch state
 	// for a direct-branch run queued behind another workflow. Present only
 	// while the run is genuinely waiting on a branch, so the board renders a
@@ -597,6 +659,29 @@ func workflowRunView(run domain.WorkflowRun, nextAction string) WorkflowRunView 
 		ArchivedAt:    run.ArchivedAt,
 		NextAction:    nextAction,
 		ExecutionMode: executionModeForRun(run),
+		// Recorded-only here: a summary view has no plan-row fact in hand and
+		// must not go and fetch one per run just to label a list. A legacy run
+		// simply omits the field until boot reconciliation records its mapping.
+		ExecutionStrategy: executionStrategyView(workflowcore.RecordedExecutionStrategy(run)),
+	}
+}
+
+// executionStrategyView projects a frozen selection, or nil when there is
+// none to project. It never substitutes a default: a run with no recorded
+// strategy is a run whose strategy this response cannot state, and saying so
+// is the honest answer.
+func executionStrategyView(sel domain.ExecutionStrategySelection, recorded bool) *WorkflowExecutionStrategyView {
+	if !recorded {
+		return nil
+	}
+	return &WorkflowExecutionStrategyView{
+		RequestedStrategy: string(sel.Requested),
+		EffectiveStrategy: string(sel.Effective),
+		SelectionSource:   string(sel.Source),
+		PolicyVersion:     sel.PolicyVersion,
+		ReasonCode:        string(sel.Reason),
+		ParentRunID:       sel.ParentRunID,
+		Depth:             sel.Depth,
 	}
 }
 
@@ -741,6 +826,13 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 		})
 	}
 	runView := workflowRunView(detail.Run, detail.NextAction)
+	// The detail response DOES have the one extra durable fact the legacy
+	// mapping needs -- whether this run owns a plan row -- so it can state a
+	// pre-P1-A run's strategy without a second query and without guessing.
+	if runView.ExecutionStrategy == nil {
+		runView.ExecutionStrategy = executionStrategyView(
+			workflowcore.LegacyExecutionStrategy(detail.Run, detail.Plan != nil, detail.Run.UpdatedAt), true)
+	}
 	runView.NextWakeAt = detail.NextWakeAt
 	runView.WaitReason = detail.WaitReason
 	runView.WakeAttemptCount = detail.WakeAttemptCount
@@ -941,15 +1033,43 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 	for _, check := range in.Verification.Files {
 		verification.Files = append(verification.Files, workflowcore.VerificationFileCheck{Path: check.Path, Exists: check.Exists, ExactContent: check.ExactContent, SHA256: check.SHA256})
 	}
+	// P1-A: resolve the execution strategy BEFORE anything is created, so the
+	// run's creation write is the one that freezes it. An invalid request is
+	// rejected here rather than producing a run nobody can explain.
+	strategy, invalid := resolveCreateStrategy(in, time.Now().UTC())
+	if invalid != "" {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_EXECUTION_STRATEGY", invalid, nil)
+		return
+	}
+	approvalMode, autonomousOverride, invalidApproval := resolveApprovalPolicy(in)
+	if invalidApproval != "" {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_APPROVAL_POLICY", invalidApproval, nil)
+		return
+	}
+
 	var detail workflowcore.RunDetail
 	var err error
-	if in.MasterPlan {
+	strategySvc, hasStrategySvc := c.Svc.(workflowsvc.StrategyManager)
+	if strategy.Effective.Planned() {
 		plannerSvc, ok := c.Svc.(workflowsvc.PlannerManager)
 		if !ok {
 			apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/projects/{projectId}/workflows")
 			return
 		}
-		detail, err = plannerSvc.CreateObjectiveRun(r.Context(), projectID, strings.TrimSpace(in.Objective), in.PlanApprovalMode)
+		if hasStrategySvc {
+			detail, err = strategySvc.CreateObjectiveRunWithStrategy(r.Context(), projectID, strings.TrimSpace(in.Objective), approvalMode, strategy)
+		} else {
+			detail, err = plannerSvc.CreateObjectiveRun(r.Context(), projectID, strings.TrimSpace(in.Objective), approvalMode)
+		}
+	} else if hasStrategySvc {
+		detail, err = strategySvc.CreateTaskRun(r.Context(), workflowcore.TaskRunRequest{
+			ProjectID:          projectID,
+			Objective:          strings.TrimSpace(in.Objective),
+			Strategy:           strategy,
+			AcceptanceCriteria: in.AcceptanceCriteria,
+			WriteIntent:        domain.NormalizeWorkflowWriteIntent(in.WriteIntent),
+			Verification:       verification,
+		})
 	} else {
 		detail, err = c.Svc.CreateRun(r.Context(), projectID, strings.TrimSpace(in.Objective), verification)
 	}
@@ -957,7 +1077,7 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowError(w, r, err)
 		return
 	}
-	c.stampOwner(r, detail.Run.ID, in.Autonomous)
+	c.stampOwner(r, detail.Run.ID, autonomousOverride)
 	// Re-fetch after stampOwner: it just wrote the caller's (possibly
 	// per-run-overridden) execution policy into this run's policy_snapshot
 	// and may have scheduled an autonomous-kickoff wake -- `detail` above
@@ -969,6 +1089,91 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 		detail = refreshed
 	}
 	envelope.WriteJSON(w, http.StatusCreated, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+
+// resolveCreateStrategy turns a create request into the frozen selection the
+// run will carry, or returns a human-readable reason the request is invalid.
+//
+// Two populations, and neither is guessed at:
+//
+//   - A request that names a strategy (or "auto") goes through
+//     domain.SelectExecutionStrategy, the whole deterministic policy.
+//   - A request that names none is a pre-P1-A client. Its `masterPlan` flag
+//     already decided the same thing implicitly, so it is mapped to the
+//     strategy that flag has always meant -- a planner-driven autonomous
+//     objective, or a bounded task -- and recorded as a policy selection.
+//     Nothing about what those clients get changes; it is only written down.
+func resolveCreateStrategy(in CreateWorkflowRunRequest, now time.Time) (domain.ExecutionStrategySelection, string) {
+	if in.WriteIntent != "" && domain.NormalizeWorkflowWriteIntent(in.WriteIntent) == domain.WorkflowWriteIntentUnspecified {
+		return domain.ExecutionStrategySelection{}, "writeIntent must be one of: mutating, read_only"
+	}
+	if raw := strings.TrimSpace(in.Strategy); raw != "" {
+		requested := domain.NormalizeRequestedExecutionStrategy(raw)
+		if !requested.Valid() {
+			return domain.ExecutionStrategySelection{}, "strategy must be one of: task, autonomous, master, auto"
+		}
+		signals, serr := strategySignals(in.StrategySignals)
+		if serr != "" {
+			return domain.ExecutionStrategySelection{}, serr
+		}
+		return domain.SelectExecutionStrategy(requested, signals, now), ""
+	}
+	sel := domain.ExecutionStrategySelection{
+		Source:        domain.ExecutionStrategyPolicy,
+		PolicyVersion: domain.ExecutionStrategyPolicyVersion,
+		At:            now,
+	}
+	if in.MasterPlan {
+		sel.Effective, sel.Reason = domain.ExecutionStrategyAutonomous, domain.ExecutionStrategyReasonMultiStepProject
+	} else {
+		sel.Effective, sel.Reason = domain.ExecutionStrategyTask, domain.ExecutionStrategyReasonBoundedWork
+	}
+	return sel, ""
+}
+
+// strategySignals validates and converts the AUTO inputs.
+func strategySignals(in *WorkflowStrategySignals) (domain.ExecutionStrategySignals, string) {
+	if in == nil {
+		return domain.ExecutionStrategySignals{}, ""
+	}
+	size := domain.NormalizeExecutionWorkSize(in.Size)
+	if !size.Valid() {
+		return domain.ExecutionStrategySignals{}, "strategySignals.size must be one of: small, medium, large"
+	}
+	if in.ExpectedSteps < 0 || in.RepositoryCount < 0 {
+		return domain.ExecutionStrategySignals{}, "strategySignals counts must not be negative"
+	}
+	return domain.ExecutionStrategySignals{
+		ExpectedSteps:         in.ExpectedSteps,
+		RequiresDecomposition: in.RequiresDecomposition,
+		RepositoryCount:       in.RepositoryCount,
+		MultiWorkstream:       in.MultiWorkstream,
+		SuppliedPlanHierarchy: in.SuppliedPlanHierarchy,
+		Size:                  size,
+	}, ""
+}
+
+// resolveApprovalPolicy is the OTHER half of P1-A's separation: approval is
+// not a strategy. "automatic" means the plan is approved and the run proceeds
+// unattended; "manual" means a person approves the plan and drives the run.
+//
+// It maps onto the two durable facts that already carry that meaning -- the
+// plan's approval mode and the frozen AutonomousMode flag -- so no new column
+// is invented for a concept the storage already holds. A request that omits
+// approvalPolicy keeps sending those two fields itself, exactly as before.
+func resolveApprovalPolicy(in CreateWorkflowRunRequest) (domain.WorkflowPlanApprovalMode, *bool, string) {
+	switch strings.ToLower(strings.TrimSpace(in.ApprovalPolicy)) {
+	case "":
+		return in.PlanApprovalMode, in.Autonomous, ""
+	case "automatic":
+		automatic := true
+		return domain.WorkflowPlanApprovalAuto, &automatic, ""
+	case "manual":
+		manual := false
+		return domain.WorkflowPlanApprovalManual, &manual, ""
+	default:
+		return "", nil, "approvalPolicy must be one of: automatic, manual"
+	}
 }
 
 func (c *WorkflowsController) generatePlan(w http.ResponseWriter, r *http.Request) {

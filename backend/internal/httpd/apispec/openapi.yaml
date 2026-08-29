@@ -9619,6 +9619,16 @@ components:
       type: object
     CreateWorkflowRunRequest:
       properties:
+        acceptanceCriteria:
+          description: Acceptance criteria for a task-strategy run.
+          items:
+            type: string
+          type: array
+        approvalPolicy:
+          enum:
+          - automatic
+          - manual
+          type: string
         autonomous:
           description: Explicit per-run autonomous/manual override; omit to inherit
             the caller's execution policy.
@@ -9636,8 +9646,22 @@ components:
           - manual
           - auto
           type: string
+        strategy:
+          enum:
+          - task
+          - autonomous
+          - master
+          - auto
+          type: string
+        strategySignals:
+          $ref: '#/components/schemas/WorkflowStrategySignals'
         verification:
           $ref: '#/components/schemas/WorkflowVerificationPlan'
+        writeIntent:
+          enum:
+          - mutating
+          - read_only
+          type: string
       required:
       - objective
       type: object
@@ -12583,6 +12607,40 @@ components:
       required:
       - reason
       type: object
+    WorkflowExecutionStrategyView:
+      properties:
+        depth:
+          type: integer
+        effectiveStrategy:
+          enum:
+          - task
+          - autonomous
+          - master
+          type: string
+        parentRunId:
+          type: string
+        policyVersion:
+          type: string
+        reasonCode:
+          type: string
+        requestedStrategy:
+          enum:
+          - task
+          - autonomous
+          - master
+          - auto
+          type: string
+        selectionSource:
+          enum:
+          - explicit
+          - policy
+          - inherited
+          - recovered
+          type: string
+      required:
+      - effectiveStrategy
+      - selectionSource
+      type: object
     WorkflowIntegrationFreshReviewException:
       properties:
         approvedBy:
@@ -12960,6 +13018,8 @@ components:
           - autonomous
           - manual
           type: string
+        executionStrategy:
+          $ref: '#/components/schemas/WorkflowExecutionStrategyView'
         id:
           type: string
         lastActivityAt:
@@ -13134,6 +13194,30 @@ components:
       - createdAt
       - updatedAt
       - attempts
+      type: object
+    WorkflowStrategySignals:
+      properties:
+        expectedSteps:
+          description: Caller's step estimate; 0 means no estimate.
+          type: integer
+        multiWorkstream:
+          description: Several coordinated workstreams under one initiative.
+          type: boolean
+        repositoryCount:
+          description: How many repositories the work spans.
+          type: integer
+        requiresDecomposition:
+          description: The objective must be broken down before anything can execute.
+          type: boolean
+        size:
+          enum:
+          - small
+          - medium
+          - large
+          type: string
+        suppliedPlanHierarchy:
+          description: The caller already supplied a plan/objective hierarchy.
+          type: boolean
       type: object
     WorkflowTaskDowngradeView:
       properties:

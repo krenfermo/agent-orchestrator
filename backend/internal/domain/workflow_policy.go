@@ -73,6 +73,19 @@ type WorkflowPolicy struct {
 	// disabled/deleted profile referenced here is simply skipped, never
 	// force-used (checkpoint brief §10).
 	Execution ExecutionPolicySnapshot `json:"execution,omitempty"`
+	// Strategy is P1-A's frozen execution-strategy selection: which of
+	// task/autonomous/master this run executes under, whether a person chose
+	// it or policy selected it, and under which policy version. Embedded here
+	// for the same reason Routing/Wake/Execution are -- one snapshot per run
+	// holds the whole decision-making configuration -- and stamped by run
+	// creation itself rather than by a follow-up write, so no crash window
+	// can leave a run whose strategy nobody recorded.
+	//
+	// A snapshot decoded from before P1-A has this at its zero value.
+	// Callers must never read it directly for a decision: use
+	// workflow.Coordinator's effective-strategy resolution, which maps a
+	// legacy run from durable facts and records the mapping as `recovered`.
+	Strategy ExecutionStrategySelection `json:"strategy,omitempty"`
 }
 
 // ExecutionPolicySnapshot is the run-creation-time copy of a

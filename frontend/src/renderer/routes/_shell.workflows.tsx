@@ -3,7 +3,13 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useExecutionPolicy } from "../hooks/useExecutionPolicy";
 import { useProjectsList } from "../hooks/useProjectsList";
-import { useWorkflowRuns } from "../hooks/useWorkflowRuns";
+import {
+	APPROVAL_POLICIES,
+	EXECUTION_STRATEGIES,
+	useWorkflowRuns,
+	type ApprovalPolicy,
+	type ExecutionStrategy,
+} from "../hooks/useWorkflowRuns";
 import { useUiStore } from "../stores/ui-store";
 import { Button } from "../components/ui/button";
 import {
@@ -39,15 +45,46 @@ export function WorkflowsList() {
 	const openGlobalSettings = useUiStore((state) => state.openGlobalSettings);
 	const [projectId, setProjectId] = useState(initialProjectIdFromSearch);
 	const [objective, setObjective] = useState("");
-	// Checkpoint 8P-D.1: the create-workflow UI must let the user
-	// deliberately pick Manual vs Autonomous for THIS run -- it must not be
-	// an invisible consequence of the caller's global Settings →
-	// Execution Policy toggle. `autonomousChoice` starts undefined so the
-	// radio defaults to whatever the caller's stored policy says once it
-	// loads, but any explicit click always wins from then on.
-	const [autonomousChoice, setAutonomousChoice] = useState<boolean | undefined>(undefined);
-	const autonomousDefault = executionPolicy?.autonomousMode ?? false;
-	const autonomous = autonomousChoice ?? autonomousDefault;
+	// P1-A: two independent choices, deliberately not one.
+	//
+	// Execution strategy is how much orchestration this run gets — a bounded
+	// Task, an Autonomous plan, or a Master initiative broken into
+	// workstreams. Autonomous is the default for normal project work.
+	//
+	// Approval is who approves and drives. Checkpoint 8P-D.1's requirement is
+	// unchanged and now lives here alone: the user must be able to pick it
+	// deliberately for THIS run rather than inherit it invisibly from the
+	// global Settings → Execution Policy toggle. `approvalChoice` starts
+	// undefined so the radio reflects the stored policy once it loads, and
+	// any explicit click wins from then on.
+	const [strategy, setStrategy] = useState<ExecutionStrategy>("autonomous");
+	const [approvalChoice, setApprovalChoice] = useState<ApprovalPolicy | undefined>(undefined);
+	const approvalDefault: ApprovalPolicy = executionPolicy?.autonomousMode ? "automatic" : "manual";
+	const approvalPolicy = approvalChoice ?? approvalDefault;
+	const strategyLabels: Record<ExecutionStrategy, { label: string; explainer: string }> = {
+		task: {
+			label: t("shell.workflowsStrategyTaskLabel"),
+			explainer: t("shell.workflowsStrategyTaskExplainer"),
+		},
+		autonomous: {
+			label: t("shell.workflowsStrategyAutonomousLabel"),
+			explainer: t("shell.workflowsStrategyAutonomousExplainer"),
+		},
+		master: {
+			label: t("shell.workflowsStrategyMasterLabel"),
+			explainer: t("shell.workflowsStrategyMasterExplainer"),
+		},
+	};
+	const approvalLabels: Record<ApprovalPolicy, { label: string; explainer: string }> = {
+		automatic: {
+			label: t("shell.workflowsApprovalAutomaticLabel"),
+			explainer: t("shell.workflowsApprovalAutomaticExplainer"),
+		},
+		manual: {
+			label: t("shell.workflowsApprovalManualLabel"),
+			explainer: t("shell.workflowsApprovalManualExplainer"),
+		},
+	};
 
 	// The preselected project from a deep link may not (yet) be in the loaded
 	// list; keep the select controlled either way, it just shows no match.
@@ -56,7 +93,12 @@ export function WorkflowsList() {
 	const onSubmit = (event: React.FormEvent) => {
 		event.preventDefault();
 		if (!projectId.trim() || !objective.trim()) return;
-		void createRun({ projectId: projectId.trim(), objective: objective.trim(), autonomous }).then(() => {
+		void createRun({
+			projectId: projectId.trim(),
+			objective: objective.trim(),
+			strategy,
+			approvalPolicy,
+		}).then(() => {
 			setObjective("");
 		});
 	};
@@ -114,28 +156,49 @@ export function WorkflowsList() {
 							value={objective}
 						/>
 					</label>
-					<fieldset className="flex flex-col gap-2" disabled={policyLoading}>
-						<legend className="text-sm">{t("shell.workflowsMode")}</legend>
-						{([false, true] as const).map((value) => (
+					<fieldset className="flex flex-col gap-2">
+						<legend className="text-sm">{t("shell.workflowsStrategy")}</legend>
+						{EXECUTION_STRATEGIES.map((value) => (
 							<label
 								className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
-									autonomous === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
+									strategy === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
 								}`}
-								key={String(value)}
+								key={value}
 							>
 								<span className="flex items-center gap-2 font-medium text-foreground">
 									<input
-										checked={autonomous === value}
-										name="workflow-execution-mode"
-										onChange={() => setAutonomousChoice(value)}
+										checked={strategy === value}
+										name="workflow-execution-strategy"
+										onChange={() => setStrategy(value)}
 										type="radio"
-										value={String(value)}
+										value={value}
 									/>
-									{value ? t("shell.workflowsModeAutonomousLabel") : t("shell.workflowsModeManualLabel")}
+									{strategyLabels[value].label}
 								</span>
-								<span className="pl-5 text-muted-foreground">
-									{value ? t("shell.workflowsModeAutonomousExplainer") : t("shell.workflowsModeManualExplainer")}
+								<span className="pl-5 text-muted-foreground">{strategyLabels[value].explainer}</span>
+							</label>
+						))}
+					</fieldset>
+					<fieldset className="flex flex-col gap-2" disabled={policyLoading}>
+						<legend className="text-sm">{t("shell.workflowsApproval")}</legend>
+						{APPROVAL_POLICIES.map((value) => (
+							<label
+								className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
+									approvalPolicy === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
+								}`}
+								key={value}
+							>
+								<span className="flex items-center gap-2 font-medium text-foreground">
+									<input
+										checked={approvalPolicy === value}
+										name="workflow-approval-policy"
+										onChange={() => setApprovalChoice(value)}
+										type="radio"
+										value={value}
+									/>
+									{approvalLabels[value].label}
 								</span>
+								<span className="pl-5 text-muted-foreground">{approvalLabels[value].explainer}</span>
 							</label>
 						))}
 					</fieldset>

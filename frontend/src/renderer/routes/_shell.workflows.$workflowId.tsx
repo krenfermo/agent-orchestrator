@@ -32,6 +32,19 @@ export const Route = createFileRoute("/_shell/workflows/$workflowId")({
 
 type TranslateFn = (key: string, opts?: Record<string, unknown>) => string;
 
+// The three canonical execution strategies, mapped to their catalog keys.
+// Exhaustive on purpose: a strategy the UI has no name for must be a
+// compile-time problem, not a raw enum value leaking onto the page.
+const executionStrategyKeys = {
+	task: "shell.workflowsStrategyTaskLabel",
+	autonomous: "shell.workflowsStrategyAutonomousLabel",
+	master: "shell.workflowsStrategyMasterLabel",
+} as const;
+
+function executionStrategyLabel(t: TranslateFn, strategy: keyof typeof executionStrategyKeys): string {
+	return t(executionStrategyKeys[strategy]);
+}
+
 function statusLabelText(t: TranslateFn, label: NonNullable<ReturnType<typeof useWorkflowStatusLabel>>): string {
 	if (typeof label === "object") {
 		return t("shell.workflowsStatusExecutingTask", { current: label.current, total: label.total });
@@ -223,6 +236,16 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 					{t("shell.workflowsRunHeader", { projectId: workflow.run.projectId, state: workflow.run.state })}
 				</p>
 				<p className="text-sm text-muted-foreground">
+					{/* P1-A: strategy and approval are two facts, shown as two.
+					    executionMode is the approval axis (who drives); the
+					    strategy is the durable orchestration choice, absent only
+					    for a pre-P1-A run the daemon has not reconciled yet. */}
+					{workflow.run.executionStrategy && (
+						<>
+							{t("shell.workflowsStrategyLabel")}: {executionStrategyLabel(t as TranslateFn, workflow.run.executionStrategy.effectiveStrategy)}
+							{" · "}
+						</>
+					)}
 					{t("shell.workflowsMode")}:{" "}
 					{workflow.run.executionMode === "autonomous"
 						? t("shell.workflowsModeAutonomous")

@@ -24,6 +24,10 @@ vi.mock("../hooks/useProjectsList", () => ({
 
 vi.mock("../hooks/useWorkflowRuns", () => ({
 	useWorkflowRuns: useWorkflowRunsMock,
+	// The strategy/approval vocabularies are plain data the form renders from;
+	// mocking only the hook would leave them undefined at render time.
+	EXECUTION_STRATEGIES: ["task", "autonomous", "master"] as const,
+	APPROVAL_POLICIES: ["automatic", "manual"] as const,
 }));
 
 vi.mock("../hooks/useExecutionPolicy", () => ({
@@ -101,7 +105,7 @@ describe("WorkflowsList", () => {
 		expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ projectId: "proj-b" }));
 	});
 
-	it("lets the user deliberately choose Autonomous per run, independent of the global execution policy", async () => {
+	it("offers the three execution strategies as a first-class choice and sends the one picked", async () => {
 		const createRun = vi.fn().mockResolvedValue({});
 		useWorkflowRunsMock.mockReturnValue({
 			runs: [],
@@ -111,8 +115,39 @@ describe("WorkflowsList", () => {
 			creating: false,
 			createError: undefined,
 		});
-		// Global policy defaults to manual; the create form must still offer
-		// an explicit Autonomous choice for this one run (Checkpoint 8P-D.1).
+		useProjectsListMock.mockReturnValue({ projects: PROJECTS, isLoading: false, error: undefined });
+		render(<WorkflowsList />);
+
+		// All three are offered. The strategy is the run's orchestration
+		// choice, not something inferred from an approval toggle.
+		expect(screen.getByRole("radio", { name: /^Task/ })).toBeInTheDocument();
+		expect(screen.getByRole("radio", { name: /^Autonomous/ })).toBeInTheDocument();
+		expect(screen.getByRole("radio", { name: /^Master/ })).toBeInTheDocument();
+		// Autonomous is the default for normal project work.
+		expect(screen.getByRole("radio", { name: /^Autonomous/ })).toBeChecked();
+
+		await userEvent.click(screen.getByRole("combobox", { name: "Project" }));
+		await userEvent.click(await screen.findByText("Project B"));
+		await userEvent.type(screen.getByLabelText(/objective/i), "Rename the flag");
+		await userEvent.click(screen.getByRole("radio", { name: /^Task/ }));
+		await userEvent.click(screen.getByRole("button", { name: /create/i }));
+
+		expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ strategy: "task" }));
+	});
+
+	it("keeps approval independent of execution strategy", async () => {
+		const createRun = vi.fn().mockResolvedValue({});
+		useWorkflowRunsMock.mockReturnValue({
+			runs: [],
+			isLoading: false,
+			error: undefined,
+			createRun,
+			creating: false,
+			createError: undefined,
+		});
+		// Global policy defaults to manual approval; the create form must still
+		// offer an explicit per-run choice (Checkpoint 8P-D.1), and choosing it
+		// must not disturb the strategy.
 		useExecutionPolicyMock.mockReturnValue({ policy: { autonomousMode: false }, isLoading: false, error: undefined });
 		useProjectsListMock.mockReturnValue({ projects: PROJECTS, isLoading: false, error: undefined });
 		render(<WorkflowsList />);
@@ -120,9 +155,36 @@ describe("WorkflowsList", () => {
 		await userEvent.click(screen.getByRole("combobox", { name: "Project" }));
 		await userEvent.click(await screen.findByText("Project B"));
 		await userEvent.type(screen.getByLabelText(/objective/i), "Ship the thing");
-		await userEvent.click(screen.getByRole("radio", { name: /autonomous workflow/i }));
+		await userEvent.click(screen.getByRole("radio", { name: /^Master/ }));
+		await userEvent.click(screen.getByRole("radio", { name: /^Automatic/ }));
 		await userEvent.click(screen.getByRole("button", { name: /create/i }));
 
-		expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ autonomous: true }));
+		expect(createRun).toHaveBeenCalledWith(
+			expect.objectContaining({ strategy: "master", approvalPolicy: "automatic" }),
+		);
+	});
+
+	it("defaults approval to the caller's stored execution policy", async () => {
+		const createRun = vi.fn().mockResolvedValue({});
+		useWorkflowRunsMock.mockReturnValue({
+			runs: [],
+			isLoading: false,
+			error: undefined,
+			createRun,
+			creating: false,
+			createError: undefined,
+		});
+		useExecutionPolicyMock.mockReturnValue({ policy: { autonomousMode: true }, isLoading: false, error: undefined });
+		useProjectsListMock.mockReturnValue({ projects: PROJECTS, isLoading: false, error: undefined });
+		render(<WorkflowsList />);
+
+		expect(screen.getByRole("radio", { name: /^Automatic/ })).toBeChecked();
+
+		await userEvent.click(screen.getByRole("combobox", { name: "Project" }));
+		await userEvent.click(await screen.findByText("Project B"));
+		await userEvent.type(screen.getByLabelText(/objective/i), "Ship the thing");
+		await userEvent.click(screen.getByRole("button", { name: /create/i }));
+
+		expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ approvalPolicy: "automatic" }));
 	});
 });

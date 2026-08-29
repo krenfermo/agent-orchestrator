@@ -836,11 +836,65 @@ const reviewFindingsSummaryMaxLen = 500
 // automatic execution happens; a future checkpoint decides when to actually
 // run it.
 func (c *Coordinator) CreateRun(ctx stdctx.Context, projectID, objective string, verification ...VerificationPlan) (RunDetail, error) {
-	return c.createSingleTaskRun(ctx, projectID, objective, nil, nil, verification...)
+	return c.createSingleTaskRun(ctx, projectID, objective, nil, nil, c.defaultTaskStrategy(), verification...)
 }
 
-func (c *Coordinator) createSingleTaskRun(ctx stdctx.Context, projectID, objective string, parentWorkflowID, plannedTaskID *string, verification ...VerificationPlan) (RunDetail, error) {
-	return c.createRunWithPlanArtifact(ctx, projectID, objective, parentWorkflowID, plannedTaskID, nil, verification...)
+// TaskRunRequest is P1-A's create-a-task entry point: everything a bounded
+// TASK run needs, and nothing a planned objective would.
+//
+// It is a struct rather than more parameters on CreateRun because a task is
+// now a thing a caller deliberately asks for, with its own acceptance
+// criteria, its own declared write intent and its own frozen strategy --
+// while CreateRun keeps its signature for the ~50 existing call sites that
+// mean "a single bounded chain" and nothing more.
+type TaskRunRequest struct {
+	ProjectID string
+	Objective string
+	// Strategy is the frozen selection to record. An unrecorded selection
+	// falls back to defaultTaskStrategy rather than being invented.
+	Strategy domain.ExecutionStrategySelection
+	// AcceptanceCriteria is what "done" means for this task. Optional; the
+	// generic artifact's criteria are used when it is empty.
+	AcceptanceCriteria []string
+	// WriteIntent declares whether the task is expected to change the
+	// workspace. Unspecified is treated as mutating everywhere, exactly as
+	// it is for a planned task -- a read-only task must SAY so, which is what
+	// lets a correctly-unchanged workspace complete instead of parking as
+	// ambiguous_worker_state.
+	WriteIntent  domain.WorkflowWriteIntent
+	Verification VerificationPlan
+}
+
+// CreateTaskRun creates a bounded TASK run: the ordinary durable
+// plan/work/review/fix/verify/advance chain, with no objective planner, no
+// decomposition and no hierarchy -- and with its strategy, acceptance
+// criteria and write intent all bound by the SAME creation transaction, so
+// no crash can separate a task from what it was asked to do (the CP21
+// argument, applied to a standalone task).
+func (c *Coordinator) CreateTaskRun(ctx stdctx.Context, req TaskRunRequest) (RunDetail, error) {
+	strategy := req.Strategy
+	if !strategy.Recorded() {
+		strategy = c.defaultTaskStrategy()
+	}
+	if strategy.Effective != domain.ExecutionStrategyTask {
+		return RunDetail{}, fmt.Errorf("%w: CreateTaskRun cannot create a %q run", ErrInvalid, strategy.Effective)
+	}
+	var overlay *plannedTaskArtifact
+	if len(req.AcceptanceCriteria) > 0 || req.WriteIntent != domain.WorkflowWriteIntentUnspecified {
+		criteria := req.AcceptanceCriteria
+		if len(criteria) == 0 {
+			// applyTo replaces the criteria wholesale (CP21 needs it to, for a
+			// planned task), so a caller who declared only a write intent must
+			// not silently lose the default criteria along the way.
+			criteria = BuildPlanArtifact(req.ProjectID, req.Objective, policyVersionV1).AcceptanceCriteria
+		}
+		overlay = &plannedTaskArtifact{AcceptanceCriteria: criteria, WriteIntent: req.WriteIntent}
+	}
+	return c.createRunWithPlanArtifact(ctx, req.ProjectID, req.Objective, nil, nil, overlay, strategy, req.Verification)
+}
+
+func (c *Coordinator) createSingleTaskRun(ctx stdctx.Context, projectID, objective string, parentWorkflowID, plannedTaskID *string, strategy domain.ExecutionStrategySelection, verification ...VerificationPlan) (RunDetail, error) {
+	return c.createRunWithPlanArtifact(ctx, projectID, objective, parentWorkflowID, plannedTaskID, nil, strategy, verification...)
 }
 
 // plannedTaskArtifact carries the parts of a master plan's task that must be
@@ -895,7 +949,7 @@ func (o *plannedTaskArtifact) matches(artifact PlanArtifact) bool {
 	return true
 }
 
-func (c *Coordinator) createRunWithPlanArtifact(ctx stdctx.Context, projectID, objective string, parentWorkflowID, plannedTaskID *string, overlay *plannedTaskArtifact, verification ...VerificationPlan) (RunDetail, error) {
+func (c *Coordinator) createRunWithPlanArtifact(ctx stdctx.Context, projectID, objective string, parentWorkflowID, plannedTaskID *string, overlay *plannedTaskArtifact, strategy domain.ExecutionStrategySelection, verification ...VerificationPlan) (RunDetail, error) {
 	if projectID == "" {
 		return RunDetail{}, fmt.Errorf("%w: project id is required", ErrInvalid)
 	}
@@ -918,7 +972,10 @@ func (c *Coordinator) createRunWithPlanArtifact(ctx stdctx.Context, projectID, o
 	// legitimately carries the default policy, and the silent downgrade of an
 	// autonomous objective to manual is unrecoverable because it is
 	// undetectable. See domain.ExecutionPolicyProvenance.
-	policySnapshot, err := json.Marshal(unfrozenExecutionPolicy(domain.DefaultWorkflowPolicy(), now))
+	// P1-A: the execution strategy is frozen HERE, in the same marshalled
+	// snapshot as the freeze-owed marker, so a run can never durably exist
+	// without one. Nothing downstream recomputes it.
+	policySnapshot, err := json.Marshal(withStrategy(unfrozenExecutionPolicy(domain.DefaultWorkflowPolicy(), now), strategy))
 	if err != nil {
 		return RunDetail{}, fmt.Errorf("marshal default workflow policy: %w", err)
 	}
@@ -1436,6 +1493,18 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 				return RunDetail{}, aerr
 			}
 			return c.GetRun(ctx, runID)
+		}
+	}
+
+	// P1-A: an autonomous `task` run is created pending, with no planner to
+	// kick it off, so this -- the wake poller's only entry point, and the
+	// Continue button's -- is where it starts. StartRun is idempotent, so a
+	// repeated wake cannot start a second worker, and every other run shape
+	// falls straight through unchanged.
+	if run.State == domain.WorkflowRunPending && run.ParentWorkflowID == nil {
+		if sel, ok := recordedStrategy(run); ok && sel.Effective == domain.ExecutionStrategyTask &&
+			policyForRun(run).Execution.AutonomousMode {
+			return c.StartRun(ctx, runID)
 		}
 	}
 

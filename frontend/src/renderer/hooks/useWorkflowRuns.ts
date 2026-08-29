@@ -4,6 +4,18 @@ import { apiClient, apiErrorMessage, hasTrustedApiBaseUrl } from "../lib/api-cli
 
 export type WorkflowRunView = components["schemas"]["WorkflowRunView"];
 
+/**
+ * The canonical execution strategies a run may be created under. "auto" is a
+ * valid API request value too, but the create form always states a choice, so
+ * it is deliberately not offered here.
+ */
+export const EXECUTION_STRATEGIES = ["task", "autonomous", "master"] as const;
+export type ExecutionStrategy = (typeof EXECUTION_STRATEGIES)[number];
+
+/** Approval is a separate axis from strategy: who approves and drives the run. */
+export const APPROVAL_POLICIES = ["automatic", "manual"] as const;
+export type ApprovalPolicy = (typeof APPROVAL_POLICIES)[number];
+
 export function workflowRunsQueryKey(projectId?: string) {
 	return ["workflow-runs", projectId ?? ""] as const;
 }
@@ -28,14 +40,22 @@ export function useWorkflowRuns(projectId?: string) {
 	});
 
 	const create = useMutation({
-		mutationFn: async (input: { projectId: string; objective: string; autonomous: boolean }) => {
+		mutationFn: async (input: {
+			projectId: string;
+			objective: string;
+			strategy: ExecutionStrategy;
+			approvalPolicy: ApprovalPolicy;
+		}) => {
 			const { data, error } = await apiClient.POST("/api/v1/projects/{projectId}/workflows", {
 				params: { path: { projectId: input.projectId } },
 				body: {
 					objective: input.objective,
-					masterPlan: true,
-					planApprovalMode: input.autonomous ? "auto" : "manual",
-					autonomous: input.autonomous,
+					// P1-A: strategy and approval are two independent axes, and the
+					// daemon owns both decisions. The renderer no longer derives
+					// masterPlan/planApprovalMode/autonomous itself — those were the
+					// implicit flags the execution-strategy model replaces.
+					strategy: input.strategy,
+					approvalPolicy: input.approvalPolicy,
 				},
 			});
 			if (error) throw error;

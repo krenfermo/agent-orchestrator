@@ -331,6 +331,8 @@ var schemaNames = map[string]string{
 	"WorkflowVerifyResult":                        "WorkflowVerifyResult",
 	"WorkflowVerifyCheckResult":                   "WorkflowVerifyCheckResult",
 	"ControllersWorkflowRunView":                  "WorkflowRunView",
+	"ControllersWorkflowStrategySignals":          "WorkflowStrategySignals",
+	"ControllersWorkflowExecutionStrategyView":    "WorkflowExecutionStrategyView",
 	"ControllersWorkflowBranchWaitView":           "WorkflowBranchWaitView",
 	"ControllersWorkflowCapacityWaitView":         "WorkflowCapacityWaitView",
 	"ControllersWorkflowCapacityWaitProviderView": "WorkflowCapacityWaitProviderView",

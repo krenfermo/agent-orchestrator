@@ -103,6 +103,25 @@ type ExecutionPolicyApplier interface {
 	ApplyExecutionPolicySnapshot(ctx context.Context, runID string, userID domain.UserID, autonomousOverride *bool) error
 }
 
+// StrategyManager is P1-A's execution-strategy surface: creating a run under
+// an explicitly chosen (or policy-selected) strategy, and reading back the
+// strategy a run is durably executing under.
+//
+// Optional and type-asserted, exactly like PlannerManager/BoardReader, so a
+// Manager implementation or test double that predates P1-A keeps compiling and
+// simply degrades to the pre-P1-A create paths.
+type StrategyManager interface {
+	// CreateTaskRun creates a bounded TASK run: no objective planner, no
+	// decomposition, ordinary review/verify.
+	CreateTaskRun(ctx context.Context, req workflowcore.TaskRunRequest) (workflowcore.RunDetail, error)
+	// CreateObjectiveRunWithStrategy creates an AUTONOMOUS or MASTER
+	// objective, freezing the selection into the run at creation.
+	CreateObjectiveRunWithStrategy(ctx context.Context, projectID, objective string, mode domain.WorkflowPlanApprovalMode, strategy domain.ExecutionStrategySelection) (workflowcore.RunDetail, error)
+	// EffectiveStrategy answers "which strategy is this run using", mapping a
+	// pre-P1-A run from its own durable facts rather than guessing.
+	EffectiveStrategy(ctx context.Context, runID string) (domain.ExecutionStrategySelection, error)
+}
+
 // BoardReader is Checkpoint 8P-E.12's project Board projection. Optional
 // (type-asserted by the controller, mirroring PlannerManager) so a Manager
 // implementation or test double that predates it keeps compiling unchanged.
@@ -154,6 +173,21 @@ func (s *Service) CreateObjectiveRun(ctx context.Context, projectID, objective s
 // ApplyExecutionPolicySnapshot implements ExecutionPolicyApplier.
 func (s *Service) ApplyExecutionPolicySnapshot(ctx context.Context, runID string, userID domain.UserID, autonomousOverride *bool) error {
 	return s.coordinator.ApplyExecutionPolicySnapshot(ctx, runID, userID, autonomousOverride)
+}
+
+// CreateTaskRun implements StrategyManager.
+func (s *Service) CreateTaskRun(ctx context.Context, req workflowcore.TaskRunRequest) (workflowcore.RunDetail, error) {
+	return s.coordinator.CreateTaskRun(ctx, req)
+}
+
+// CreateObjectiveRunWithStrategy implements StrategyManager.
+func (s *Service) CreateObjectiveRunWithStrategy(ctx context.Context, projectID, objective string, mode domain.WorkflowPlanApprovalMode, strategy domain.ExecutionStrategySelection) (workflowcore.RunDetail, error) {
+	return s.coordinator.CreateObjectiveRunWithStrategy(ctx, projectID, objective, mode, strategy)
+}
+
+// EffectiveStrategy implements StrategyManager.
+func (s *Service) EffectiveStrategy(ctx context.Context, runID string) (domain.ExecutionStrategySelection, error) {
+	return s.coordinator.EffectiveStrategy(ctx, runID)
 }
 
 // GeneratePlan invokes the planner for a run and persists the plan it returns.

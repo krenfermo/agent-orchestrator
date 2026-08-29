@@ -17,6 +17,26 @@ import (
 // under the given approval mode. It refuses when no planner is wired: a master
 // run with nothing that can plan it would be a run that can never start.
 func (c *Coordinator) CreateObjectiveRun(ctx stdctx.Context, projectID, objective string, mode domain.WorkflowPlanApprovalMode) (RunDetail, error) {
+	return c.CreateObjectiveRunWithStrategy(ctx, projectID, objective, mode, c.defaultObjectiveStrategy())
+}
+
+// CreateObjectiveRunWithStrategy is CreateObjectiveRun carrying P1-A's frozen
+// execution-strategy selection. Both autonomous and master objectives are
+// created through it: they share the durable planner/plan/child machinery, and
+// what the strategy records is which of the two a person or the policy chose --
+// a fact no later reader can re-derive from the rows themselves, which is
+// precisely why it is written down.
+//
+// A task selection is refused rather than quietly upgraded: creating a planner
+// objective for a run whose strategy says it must not be planned would be the
+// implicit-flag behaviour this model replaces.
+func (c *Coordinator) CreateObjectiveRunWithStrategy(ctx stdctx.Context, projectID, objective string, mode domain.WorkflowPlanApprovalMode, strategy domain.ExecutionStrategySelection) (RunDetail, error) {
+	if !strategy.Recorded() {
+		strategy = c.defaultObjectiveStrategy()
+	}
+	if !strategy.Effective.Planned() {
+		return RunDetail{}, fmt.Errorf("%w: the %q execution strategy does not create a planned objective", ErrInvalid, strategy.Effective)
+	}
 	if c.planStore == nil || c.planner == nil || c.plannerContextBuilder == nil {
 		return RunDetail{}, fmt.Errorf("%w: planner is unavailable", ErrInvalid)
 	}
@@ -39,7 +59,8 @@ func (c *Coordinator) CreateObjectiveRun(ctx stdctx.Context, projectID, objectiv
 	// CP3: same freeze-owed marker as createRunWithPlanArtifact -- an
 	// objective is exactly where the silent autonomous->manual downgrade
 	// hurts most.
-	snapshot, _ := json.Marshal(unfrozenExecutionPolicy(domain.DefaultWorkflowPolicy(), now))
+	// P1-A: an objective's strategy is frozen by this same creation write.
+	snapshot, _ := json.Marshal(withStrategy(unfrozenExecutionPolicy(domain.DefaultWorkflowPolicy(), now), strategy))
 	run := domain.WorkflowRun{ID: runID, ProjectID: projectID, Objective: strings.TrimSpace(objective), State: domain.WorkflowRunPending, PolicyVersion: policyVersionV1, PolicySnapshot: string(snapshot), CreatedAt: now, UpdatedAt: now}
 	step := domain.WorkflowStep{ID: "wfs-" + c.newID(), WorkflowRunID: runID, Kind: domain.WorkflowStepPlan, Ordinal: 1, State: domain.WorkflowStepReady, ArtifactJSON: "{}", CreatedAt: now, UpdatedAt: now}
 	// CP1: the run, its plan step and its plan row land together or not at all.
@@ -184,6 +205,14 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 	}
 	if !ok {
 		return RunDetail{}, fmt.Errorf("%w: run is not a master objective", ErrInvalid)
+	}
+	// P1-A: a run frozen as `task` never runs the planner, whoever asks and
+	// however many times the daemon restarts in between. This is what makes
+	// the strategy an execution fact rather than a label -- and it is checked
+	// against the run's own durable snapshot, so a stale writer holding an
+	// older view of the run cannot talk AO into master planning.
+	if serr := c.requirePlannedStrategy(ctx, run); serr != nil {
+		return RunDetail{}, serr
 	}
 	switch plan.Status {
 	case domain.WorkflowPlanValidated, domain.WorkflowPlanInvalid:
@@ -1393,7 +1422,13 @@ func (c *Coordinator) dispatchMasterTask(ctx stdctx.Context, parent domain.Workf
 	parentID, taskID := parent.ID, task.ID
 	// CP21: criteria + write intent travel INTO creation, so the child's plan
 	// step never durably exists carrying the generic artifact.
-	child, err := c.createRunWithPlanArtifact(ctx, parent.ProjectID, objective, &parentID, &taskID, overlay, verify)
+	// P1-A: the child's execution strategy is decided from the parent's own
+	// frozen selection and stamped by the child's creation statement. A child
+	// is never master and never deeper than
+	// domain.ExecutionStrategyMaxChildDepth, so a master objective decomposes
+	// exactly once and cannot fan out without bound.
+	childStrategy := domain.ChildExecutionStrategy(c.strategyForRun(ctx, parent), parent.ID, c.clock())
+	child, err := c.createRunWithPlanArtifact(ctx, parent.ProjectID, objective, &parentID, &taskID, overlay, childStrategy, verify)
 	if err != nil {
 		return err
 	}
