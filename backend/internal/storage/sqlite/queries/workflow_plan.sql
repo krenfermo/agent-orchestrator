@@ -49,16 +49,57 @@ WHERE workflow_run_id = ? AND status IN ('pending','validated','invalid');
 
 -- name: InsertWorkflowTask :exec
 INSERT OR IGNORE INTO workflow_tasks (id, workflow_run_id, plan_step_id, ordinal, title, description,
-    acceptance_criteria_json, verify_json, scope_json, state, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    acceptance_criteria_json, verify_json, scope_json, state, plan_revision, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: InsertWorkflowTaskDependency :exec
 INSERT OR IGNORE INTO workflow_task_dependencies (workflow_task_id, depends_on_task_id) VALUES (?, ?);
 
 -- name: ListWorkflowTasks :many
+-- P1-B: scoped to the plan's CURRENT revision, so every existing reader
+-- (reconcile, convergence, the Board, integration) becomes revision-aware
+-- without a single call-site change. A task minted for a superseded plan is
+-- structurally invisible here -- which is what makes "a stale old-plan child
+-- cannot regain authority" a property of the schema rather than of a check
+-- somebody has to remember to write. The rows themselves are retained and
+-- remain auditable through ListWorkflowTasksAtRevision.
+--
+-- COALESCE(p.revision, 1): a task row whose run has no plan row at all cannot
+-- happen today, but reading it as revision 1 keeps this query total rather
+-- than silently dropping such a row.
 SELECT t.*, COALESCE((SELECT json_group_array(d.depends_on_task_id)
     FROM workflow_task_dependencies d WHERE d.workflow_task_id = t.id), '[]') AS dependencies_json
-FROM workflow_tasks t WHERE t.workflow_run_id = ? ORDER BY t.ordinal;
+FROM workflow_tasks t
+LEFT JOIN workflow_plans p ON p.workflow_run_id = t.workflow_run_id
+WHERE t.workflow_run_id = ? AND t.plan_revision = COALESCE(p.revision, 1)
+ORDER BY t.ordinal;
+
+-- name: ListWorkflowTasksAtRevision :many
+-- The audit view: one superseded revision's tasks, exactly as they were.
+SELECT t.*, COALESCE((SELECT json_group_array(d.depends_on_task_id)
+    FROM workflow_task_dependencies d WHERE d.workflow_task_id = t.id), '[]') AS dependencies_json
+FROM workflow_tasks t
+WHERE t.workflow_run_id = ? AND t.plan_revision = ?
+ORDER BY t.ordinal;
+
+-- name: RegenerateWorkflowPlan :execrows
+-- P1-B: mint a new plan revision. See Store.RegenerateWorkflowPlan.
+UPDATE workflow_plans
+SET revision = revision + 1,
+    status = 'pending',
+    command_status = 'idle',
+    provider = '',
+    model = '',
+    generated_plan_json = '{}',
+    validation_json = '{}',
+    plan_hash = '',
+    error_class = '',
+    generated_at = NULL,
+    approved_at = NULL,
+    rejected_at = NULL,
+    updated_at = ?
+WHERE workflow_run_id = ? AND revision = ?
+  AND status IN ('validated','approved','invalid','rejected');
 
 -- name: UpdateWorkflowTaskState :execrows
 UPDATE workflow_tasks SET state = sqlc.arg(state), updated_at = sqlc.arg(updated_at),

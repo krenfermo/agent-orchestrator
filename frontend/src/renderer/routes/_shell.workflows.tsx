@@ -6,9 +6,11 @@ import { useProjectsList } from "../hooks/useProjectsList";
 import {
 	APPROVAL_POLICIES,
 	EXECUTION_STRATEGIES,
+	REPAIR_POLICIES,
 	useWorkflowRuns,
 	type ApprovalPolicy,
 	type ExecutionStrategy,
+	type RepairPolicy,
 } from "../hooks/useWorkflowRuns";
 import { useUiStore } from "../stores/ui-store";
 import { Button } from "../components/ui/button";
@@ -75,6 +77,24 @@ export function WorkflowsList() {
 			explainer: t("shell.workflowsStrategyMasterExplainer"),
 		},
 	};
+	// P1-B: auto-repair is a third independent axis, frozen at creation.
+	// "suggest" is the default because a repair writes code, and opting into
+	// that unattended should be a decision somebody made.
+	const [repairPolicy, setRepairPolicy] = useState<RepairPolicy>("suggest");
+	const repairLabels: Record<RepairPolicy, { label: string; explainer: string }> = {
+		disabled: {
+			label: t("shell.workflowsRepairPolicyDisabledLabel"),
+			explainer: t("shell.workflowsRepairPolicyDisabledExplainer"),
+		},
+		suggest: {
+			label: t("shell.workflowsRepairPolicySuggestLabel"),
+			explainer: t("shell.workflowsRepairPolicySuggestExplainer"),
+		},
+		automatic: {
+			label: t("shell.workflowsRepairPolicyAutomaticLabel"),
+			explainer: t("shell.workflowsRepairPolicyAutomaticExplainer"),
+		},
+	};
 	const approvalLabels: Record<ApprovalPolicy, { label: string; explainer: string }> = {
 		automatic: {
 			label: t("shell.workflowsApprovalAutomaticLabel"),
@@ -98,6 +118,7 @@ export function WorkflowsList() {
 			objective: objective.trim(),
 			strategy,
 			approvalPolicy,
+			repairPolicy,
 		}).then(() => {
 			setObjective("");
 		});
@@ -199,6 +220,29 @@ export function WorkflowsList() {
 									{approvalLabels[value].label}
 								</span>
 								<span className="pl-5 text-muted-foreground">{approvalLabels[value].explainer}</span>
+							</label>
+						))}
+					</fieldset>
+					<fieldset className="flex flex-col gap-2">
+						<legend className="text-sm">{t("shell.workflowsRepairPolicy")}</legend>
+						{REPAIR_POLICIES.map((value) => (
+							<label
+								className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
+									repairPolicy === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
+								}`}
+								key={value}
+							>
+								<span className="flex items-center gap-2 font-medium text-foreground">
+									<input
+										checked={repairPolicy === value}
+										name="workflow-repair-policy"
+										onChange={() => setRepairPolicy(value)}
+										type="radio"
+										value={value}
+									/>
+									{repairLabels[value].label}
+								</span>
+								<span className="pl-5 text-muted-foreground">{repairLabels[value].explainer}</span>
 							</label>
 						))}
 					</fieldset>

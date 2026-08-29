@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkflowsList } from "./_shell.workflows";
@@ -28,6 +28,7 @@ vi.mock("../hooks/useWorkflowRuns", () => ({
 	// mocking only the hook would leave them undefined at render time.
 	EXECUTION_STRATEGIES: ["task", "autonomous", "master"] as const,
 	APPROVAL_POLICIES: ["automatic", "manual"] as const,
+	REPAIR_POLICIES: ["disabled", "suggest", "automatic"] as const,
 }));
 
 vi.mock("../hooks/useExecutionPolicy", () => ({
@@ -120,16 +121,16 @@ describe("WorkflowsList", () => {
 
 		// All three are offered. The strategy is the run's orchestration
 		// choice, not something inferred from an approval toggle.
-		expect(screen.getByRole("radio", { name: /^Task/ })).toBeInTheDocument();
-		expect(screen.getByRole("radio", { name: /^Autonomous/ })).toBeInTheDocument();
-		expect(screen.getByRole("radio", { name: /^Master/ })).toBeInTheDocument();
+		expect(within(screen.getByRole("group", { name: "Execution strategy" })).getByRole("radio", { name: /^Task/ })).toBeInTheDocument();
+		expect(within(screen.getByRole("group", { name: "Execution strategy" })).getByRole("radio", { name: /^Autonomous/ })).toBeInTheDocument();
+		expect(within(screen.getByRole("group", { name: "Execution strategy" })).getByRole("radio", { name: /^Master/ })).toBeInTheDocument();
 		// Autonomous is the default for normal project work.
-		expect(screen.getByRole("radio", { name: /^Autonomous/ })).toBeChecked();
+		expect(within(screen.getByRole("group", { name: "Execution strategy" })).getByRole("radio", { name: /^Autonomous/ })).toBeChecked();
 
 		await userEvent.click(screen.getByRole("combobox", { name: "Project" }));
 		await userEvent.click(await screen.findByText("Project B"));
 		await userEvent.type(screen.getByLabelText(/objective/i), "Rename the flag");
-		await userEvent.click(screen.getByRole("radio", { name: /^Task/ }));
+		await userEvent.click(within(screen.getByRole("group", { name: "Execution strategy" })).getByRole("radio", { name: /^Task/ }));
 		await userEvent.click(screen.getByRole("button", { name: /create/i }));
 
 		expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ strategy: "task" }));
@@ -155,13 +156,39 @@ describe("WorkflowsList", () => {
 		await userEvent.click(screen.getByRole("combobox", { name: "Project" }));
 		await userEvent.click(await screen.findByText("Project B"));
 		await userEvent.type(screen.getByLabelText(/objective/i), "Ship the thing");
-		await userEvent.click(screen.getByRole("radio", { name: /^Master/ }));
-		await userEvent.click(screen.getByRole("radio", { name: /^Automatic/ }));
+		await userEvent.click(within(screen.getByRole("group", { name: "Execution strategy" })).getByRole("radio", { name: /^Master/ }));
+		await userEvent.click(within(screen.getByRole("group", { name: "Approval" })).getByRole("radio", { name: /^Automatic/ }));
 		await userEvent.click(screen.getByRole("button", { name: /create/i }));
 
 		expect(createRun).toHaveBeenCalledWith(
 			expect.objectContaining({ strategy: "master", approvalPolicy: "automatic" }),
 		);
+	});
+
+	it("offers the repair policy and defaults it to suggest", async () => {
+		const createRun = vi.fn().mockResolvedValue({});
+		useWorkflowRunsMock.mockReturnValue({
+			runs: [],
+			isLoading: false,
+			error: undefined,
+			createRun,
+			creating: false,
+			createError: undefined,
+		});
+		useProjectsListMock.mockReturnValue({ projects: PROJECTS, isLoading: false, error: undefined });
+		render(<WorkflowsList />);
+
+		// Suggest is the default: a repair writes code, and opting into that
+		// unattended must be a decision somebody made.
+		expect(within(screen.getByRole("group", { name: "Automatic repair" })).getByRole("radio", { name: /^Suggest/ })).toBeChecked();
+
+		await userEvent.click(screen.getByRole("combobox", { name: "Project" }));
+		await userEvent.click(await screen.findByText("Project B"));
+		await userEvent.type(screen.getByLabelText(/objective/i), "Ship the thing");
+		await userEvent.click(within(screen.getByRole("group", { name: "Automatic repair" })).getByRole("radio", { name: /^Automatic/ }));
+		await userEvent.click(screen.getByRole("button", { name: /create/i }));
+
+		expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ repairPolicy: "automatic" }));
 	});
 
 	it("defaults approval to the caller's stored execution policy", async () => {
@@ -178,7 +205,7 @@ describe("WorkflowsList", () => {
 		useProjectsListMock.mockReturnValue({ projects: PROJECTS, isLoading: false, error: undefined });
 		render(<WorkflowsList />);
 
-		expect(screen.getByRole("radio", { name: /^Automatic/ })).toBeChecked();
+		expect(within(screen.getByRole("group", { name: "Approval" })).getByRole("radio", { name: /^Automatic/ })).toBeChecked();
 
 		await userEvent.click(screen.getByRole("combobox", { name: "Project" }));
 		await userEvent.click(await screen.findByText("Project B"));

@@ -6478,6 +6478,54 @@ paths:
       summary: Generate and deterministically validate a durable master plan
       tags:
       - workflows
+  /api/v1/workflows/{workflowId}/plan/regenerate:
+    post:
+      operationId: regenerateWorkflowPlan
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRunResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P1-B: mint a new durable plan revision for an objective whose plan
+        cannot be reused. The superseded revision stays auditable and its tasks stop
+        being authoritative. Bounded, and a compare-and-set on the revision the caller
+        observed.'
+      tags:
+      - workflows
   /api/v1/workflows/{workflowId}/plan/reject:
     post:
       operationId: rejectWorkflowPlan
@@ -6564,6 +6612,53 @@ paths:
         Planning starts over from scratch: nothing is adopted from the discarded planner.
         The request must carry the plan''s observed updatedAt, and a reopen of a state
         that has since changed is refused. Human-only and bounded.'
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/plan/reuse:
+    post:
+      operationId: reuseWorkflowPlan
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRunResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P1-B: execute this objective''s existing durable plan revision as
+        it stands. Refused unless the plan''s identity and its project context both
+        still hold — a stale plan is never run silently.'
       tags:
       - workflows
   /api/v1/workflows/{workflowId}/questions:
@@ -6740,6 +6835,125 @@ paths:
         independent review of the workspace as it stands. It never infers or attests
         an approved commit and never verifies code no reviewer has read. Human-only
         and bounded.
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/recovery:
+    get:
+      operationId: getWorkflowRecovery
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRecoveryResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P1-B: the deterministic recovery assessment for a run — the one recommended
+        action, why, whether AO may take it automatically, whether the durable plan
+        is reusable, and whether a bounded Repair Agent is available. Derived entirely
+        from durable facts; no model is consulted.'
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/repair:
+    post:
+      operationId: repairWorkflowRun
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRepairResponse'
+          description: Accepted
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P1-B: launch a bounded Repair Agent for a repairable technical stop.
+        Refused with the full repair plan (and why) for any condition AO must not
+        aim a code-writing agent at, for a spent repair budget, or under a disabled
+        repair policy.'
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/resume:
+    post:
+      operationId: resumeWorkflowRun
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRunResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P1-B: discharge exactly the run''s outstanding durable obligation,
+        and report which one it was. Idempotent; an obligation only a person can discharge
+        is reported rather than driven.'
       tags:
       - workflows
   /api/v1/workflows/{workflowId}/start:
@@ -9645,6 +9859,12 @@ components:
           enum:
           - manual
           - auto
+          type: string
+        repairPolicy:
+          enum:
+          - disabled
+          - suggest
+          - automatic
           type: string
         strategy:
           enum:
@@ -12691,6 +12911,31 @@ components:
       - summary
       - steps
       type: object
+    WorkflowPlanReuseView:
+      properties:
+        contextDrift:
+          type: string
+        planHash:
+          type: string
+        reason:
+          type: string
+        reusability:
+          enum:
+          - not_applicable
+          - exact
+          - stale_but_revalidatable
+          - not_reusable
+          type: string
+        revision:
+          format: int64
+          type: integer
+        taskCount:
+          type: integer
+      required:
+      - reusability
+      - revision
+      - taskCount
+      type: object
     WorkflowPlanValidation:
       properties:
         errors:
@@ -12891,6 +13136,217 @@ components:
       required:
       - question
       type: object
+    WorkflowRecoveryResponse:
+      properties:
+        plan:
+          $ref: '#/components/schemas/WorkflowPlanReuseView'
+        recovery:
+          $ref: '#/components/schemas/WorkflowRecoveryView'
+        repair:
+          $ref: '#/components/schemas/WorkflowRepairPlanView'
+      required:
+      - recovery
+      - repair
+      - plan
+      type: object
+    WorkflowRecoveryView:
+      properties:
+        automaticAllowed:
+          type: boolean
+        blockingCondition:
+          type: string
+        explanation:
+          type: string
+        obligation:
+          enum:
+          - none
+          - plan_generation
+          - plan_approval
+          - plan_dispatch
+          - work_dispatch
+          - work_observation
+          - review_dispatch
+          - review_observation
+          - fix_delivery
+          - fix_observation
+          - verify
+          - convergence
+          - terminal
+          type: string
+        obligationDetail:
+          type: string
+        planReusable:
+          enum:
+          - not_applicable
+          - exact
+          - stale_but_revalidatable
+          - not_reusable
+          type: string
+        reasonCode:
+          type: string
+        recommendedAction:
+          enum:
+          - resume
+          - reuse_plan
+          - regenerate_plan
+          - repair
+          - authenticate
+          - inspect_repository
+          - operator_action
+          - restart_required
+          - abandon
+          - terminal
+          - unrecoverable
+          type: string
+        repairAvailable:
+          type: boolean
+        repairEligibility:
+          enum:
+          - eligible
+          - ineligible
+          - budget_exhausted
+          - policy_disabled
+          - unknown_condition
+          type: string
+        stepId:
+          type: string
+        strategy:
+          enum:
+          - task
+          - autonomous
+          - master
+          type: string
+        targetRunId:
+          type: string
+        taskId:
+          type: string
+        version:
+          type: string
+      required:
+      - recommendedAction
+      - automaticAllowed
+      - planReusable
+      - repairAvailable
+      - repairEligibility
+      type: object
+    WorkflowRepairIntentView:
+      properties:
+        acceptanceCriteria:
+          items:
+            type: string
+          type: array
+        authorizedBy:
+          type: string
+        conditionReason:
+          type: string
+        evidenceDigest:
+          type: string
+        generation:
+          type: integer
+        id:
+          type: string
+        mode:
+          enum:
+          - disabled
+          - suggest
+          - automatic
+          type: string
+        policyVersion:
+          type: string
+        projectId:
+          type: string
+        repairRunId:
+          type: string
+        strategy:
+          enum:
+          - task
+          - autonomous
+          - master
+          type: string
+        targetRunId:
+          type: string
+        targetStepId:
+          type: string
+      required:
+      - id
+      - targetRunId
+      - conditionReason
+      - evidenceDigest
+      - generation
+      - projectId
+      - strategy
+      type: object
+    WorkflowRepairPlanView:
+      properties:
+        automaticAllowed:
+          type: boolean
+        budget:
+          type: integer
+        eligibility:
+          enum:
+          - eligible
+          - ineligible
+          - budget_exhausted
+          - policy_disabled
+          - unknown_condition
+          type: string
+        intent:
+          $ref: '#/components/schemas/WorkflowRepairIntentView'
+        mode:
+          enum:
+          - disabled
+          - suggest
+          - automatic
+          type: string
+        reason:
+          type: string
+        spent:
+          type: integer
+      required:
+      - eligibility
+      - mode
+      - spent
+      - budget
+      - automaticAllowed
+      type: object
+    WorkflowRepairResponse:
+      properties:
+        intent:
+          $ref: '#/components/schemas/WorkflowRepairIntentView'
+        repair:
+          $ref: '#/components/schemas/WorkflowRepairPlanView'
+        workflow:
+          $ref: '#/components/schemas/WorkflowRunDetailView'
+      required:
+      - repair
+      - workflow
+      type: object
+    WorkflowResumeView:
+      properties:
+        obligation:
+          enum:
+          - none
+          - plan_generation
+          - plan_approval
+          - plan_dispatch
+          - work_dispatch
+          - work_observation
+          - review_dispatch
+          - review_observation
+          - fix_delivery
+          - fix_observation
+          - verify
+          - convergence
+          - terminal
+          type: string
+        obligationDetail:
+          type: string
+        performed:
+          type: boolean
+      required:
+      - obligation
+      - performed
+      type: object
     WorkflowReviewPolicyDecision:
       properties:
         complexity:
@@ -12949,10 +13405,14 @@ components:
           $ref: '#/components/schemas/ControllersWorkflowIntegrationStateView'
         plan:
           $ref: '#/components/schemas/WorkflowPlanView'
+        planReuse:
+          $ref: '#/components/schemas/WorkflowPlanReuseView'
         questions:
           items:
             $ref: '#/components/schemas/WorkflowQuestionResponse'
           type: array
+        resume:
+          $ref: '#/components/schemas/WorkflowResumeView'
         run:
           $ref: '#/components/schemas/WorkflowRunView'
         steps:
@@ -13055,6 +13515,8 @@ components:
           type: string
         projectId:
           type: string
+        recovery:
+          $ref: '#/components/schemas/WorkflowRecoveryView'
         state:
           enum:
           - pending

@@ -122,6 +122,32 @@ type StrategyManager interface {
 	EffectiveStrategy(ctx context.Context, runID string) (domain.ExecutionStrategySelection, error)
 }
 
+// RecoveryManager is P1-B's recovery surface: assessing a stopped run,
+// discharging its outstanding obligation, deciding what happens to its plan,
+// and launching a bounded Repair Agent.
+//
+// Optional and type-asserted, exactly like PlannerManager/StrategyManager, so
+// a Manager implementation or test double that predates P1-B keeps compiling
+// and its deployment answers 501 rather than doing something weaker.
+type RecoveryManager interface {
+	// AssessRecovery is the deterministic "what should I do about this run".
+	// It writes nothing.
+	AssessRecovery(ctx context.Context, runID string) (workflowcore.RecoveryAssessment, error)
+	// ResumeRun states the durable obligation and discharges only that one.
+	ResumeRun(ctx context.Context, runID string) (workflowcore.RunDetail, workflowcore.ResumeReport, error)
+	// ReusePlan executes an existing plan revision, refusing anything but an
+	// exact match.
+	ReusePlan(ctx context.Context, runID string) (workflowcore.RunDetail, workflowcore.PlanReuseAssessment, error)
+	// RegeneratePlan mints a new durable plan revision.
+	RegeneratePlan(ctx context.Context, runID string) (workflowcore.RunDetail, workflowcore.PlanReuseAssessment, error)
+	// PlanRepair computes what a repair would do, without doing it.
+	PlanRepair(ctx context.Context, runID string) (workflowcore.RepairPlan, error)
+	// LaunchRepair creates the bounded repair run on a named authority.
+	LaunchRepair(ctx context.Context, runID, authorizedBy string) (domain.RepairIntent, error)
+	// ApplyRepairPolicy freezes a just-created run's auto-repair mode.
+	ApplyRepairPolicy(ctx context.Context, runID string, mode domain.RepairMode) error
+}
+
 // BoardReader is Checkpoint 8P-E.12's project Board projection. Optional
 // (type-asserted by the controller, mirroring PlannerManager) so a Manager
 // implementation or test double that predates it keeps compiling unchanged.
@@ -188,6 +214,41 @@ func (s *Service) CreateObjectiveRunWithStrategy(ctx context.Context, projectID,
 // EffectiveStrategy implements StrategyManager.
 func (s *Service) EffectiveStrategy(ctx context.Context, runID string) (domain.ExecutionStrategySelection, error) {
 	return s.coordinator.EffectiveStrategy(ctx, runID)
+}
+
+// AssessRecovery implements RecoveryManager.
+func (s *Service) AssessRecovery(ctx context.Context, runID string) (workflowcore.RecoveryAssessment, error) {
+	return s.coordinator.AssessRecovery(ctx, runID)
+}
+
+// ResumeRun implements RecoveryManager.
+func (s *Service) ResumeRun(ctx context.Context, runID string) (workflowcore.RunDetail, workflowcore.ResumeReport, error) {
+	return s.coordinator.ResumeRun(ctx, runID)
+}
+
+// ReusePlan implements RecoveryManager.
+func (s *Service) ReusePlan(ctx context.Context, runID string) (workflowcore.RunDetail, workflowcore.PlanReuseAssessment, error) {
+	return s.coordinator.ReusePlan(ctx, runID)
+}
+
+// RegeneratePlan implements RecoveryManager.
+func (s *Service) RegeneratePlan(ctx context.Context, runID string) (workflowcore.RunDetail, workflowcore.PlanReuseAssessment, error) {
+	return s.coordinator.RegeneratePlan(ctx, runID)
+}
+
+// PlanRepair implements RecoveryManager.
+func (s *Service) PlanRepair(ctx context.Context, runID string) (workflowcore.RepairPlan, error) {
+	return s.coordinator.PlanRepair(ctx, runID)
+}
+
+// LaunchRepair implements RecoveryManager.
+func (s *Service) LaunchRepair(ctx context.Context, runID, authorizedBy string) (domain.RepairIntent, error) {
+	return s.coordinator.LaunchRepair(ctx, runID, authorizedBy)
+}
+
+// ApplyRepairPolicy implements RecoveryManager.
+func (s *Service) ApplyRepairPolicy(ctx context.Context, runID string, mode domain.RepairMode) error {
+	return s.coordinator.ApplyRepairPolicy(ctx, runID, mode)
 }
 
 // GeneratePlan invokes the planner for a run and persists the plan it returns.

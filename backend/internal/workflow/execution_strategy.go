@@ -176,11 +176,19 @@ func (c *Coordinator) ensureRecordedExecutionStrategy(ctx stdctx.Context, run do
 
 // withStrategy stamps sel into policy, filling in the policy version so no
 // caller can record a decision without saying which rules produced it.
+//
+// P1-B: it also stamps the run's auto-repair policy, in the same write and for
+// the same reason -- a run must never durably exist without one, and the
+// default it gets (suggest) must be a recorded decision rather than a fallback
+// every reader has to re-derive.
 func withStrategy(policy domain.WorkflowPolicy, sel domain.ExecutionStrategySelection) domain.WorkflowPolicy {
 	if sel.PolicyVersion == "" {
 		sel.PolicyVersion = domain.ExecutionStrategyPolicyVersion
 	}
 	policy.Strategy = sel
+	if !policy.Repair.Recorded() {
+		policy.Repair = domain.DefaultRepairPolicy(sel.At)
+	}
 	return policy
 }
 

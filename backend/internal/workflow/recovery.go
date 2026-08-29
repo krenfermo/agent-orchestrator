@@ -140,6 +140,16 @@ func (c *Coordinator) reconcileRun(ctx stdctx.Context, run domain.WorkflowRun, n
 	}
 	run = strategyHealed
 
+	// P1-B: close the repair loop before anything else reads this run's state.
+	// A repair run that finished while the daemon was down has to be folded in
+	// (exactly once -- reconcileRepairOutcome is idempotent over its own
+	// ledger rows) before reconciliation decides what the origin run still
+	// owes. maybeAutoRepair is the ONLY automatic launch, and it is gated on
+	// the run's own frozen policy saying `automatic`, on an explicitly
+	// repairable condition, and on an unspent budget.
+	c.reconcileRepairOutcome(ctx, run)
+	c.maybeAutoRepair(ctx, run)
+
 	if c.planStore != nil {
 		if plan, master, planErr := c.planStore.GetWorkflowPlan(ctx, run.ID); planErr != nil {
 			return planErr

@@ -51,6 +51,27 @@ type AttentionDisposition struct {
 	// run-state's flat "needs_attention". Empty means "keep the derived
 	// phase".
 	Phase Phase
+	// Recovery is P1-B's canonical recommendation for this stop: the ONE thing
+	// AO advises doing about it. The zero value means "derive it" -- a
+	// self-remediable stop resumes, a nonrecoverable one needs a restart, and
+	// anything else is an operator action (see recoveryActionFor).
+	//
+	// It is on the disposition rather than computed elsewhere because this
+	// table is already the single place a stop site is forced to answer "and
+	// what does the user do about it?". Adding a second table would recreate
+	// exactly the three-way disagreement this file was written to end.
+	Recovery domain.RecoveryAction
+	// Repairable marks a stop whose remedy is a bounded code change AO could
+	// aim a Repair Agent at.
+	//
+	// The default is false, and that default is the safety property. A stop
+	// nobody has explicitly marked repairable -- including every stop AO cannot
+	// classify at all -- can never have a code-writing agent pointed at it. The
+	// classes that must NEVER be repaired (unprovable provenance, unknown
+	// approved HEAD, credentials, external permissions, destructive ambiguity,
+	// policy refusals, repository identity) are excluded by construction rather
+	// than by a deny-list that could fall out of date.
+	Repairable bool
 }
 
 // Canonical attention reason codes. These are the exact strings written into
@@ -273,6 +294,7 @@ var attentionDispositions = map[string]AttentionDisposition{
 
 	// ---- Human decisions ---------------------------------------------------
 	"dirty_worktree": {
+		Recovery:    domain.RecoveryInspectRepository,
 		HumanAction: "Commit, stash or discard the local changes in the target repository, then continue this run.",
 	},
 	"autonomous_local_commit_failed": {
@@ -297,9 +319,15 @@ var attentionDispositions = map[string]AttentionDisposition{
 		HumanAction: "Resolve the integration conflict for the completed task, then continue this run.",
 	},
 	ReasonFixBudgetExhausted: {
+		// Repairable: the reviewer is still naming concrete changes and the
+		// remedy is a bounded code change AO holds the findings for.
+		Repairable:  true,
 		HumanAction: "The review/fix budget is exhausted and the reviewer is still requesting changes. Read the latest findings and either raise the fix budget, apply the changes yourself, or cancel this run.",
 	},
 	ReasonVerifyBudgetExhausted: {
+		// Repairable: deterministic checks are failing and their output says
+		// how. This is the build/test failure class P1-B §E names first.
+		Repairable:  true,
 		HumanAction: "Verification kept failing after every automatic fix attempt. Read the verify output and either fix it yourself, adjust the verification commands, or cancel this run.",
 	},
 	ReasonVerifyUnrepairable: {
@@ -319,9 +347,11 @@ var attentionDispositions = map[string]AttentionDisposition{
 		HumanAction:    "Verification has been reopened the maximum number of times and still fails on AO's own verification infrastructure rather than on the code. Read the latest verify output, correct the verification configuration or the host, then start a fresh run — or cancel this one.",
 	},
 	ReasonVerifyApprovedHeadUnprovable: {
+		Recovery:    domain.RecoveryInspectRepository,
 		HumanAction: "AO cannot prove which commit the approved review was given for, and could not recover it from this branch's history, so it will not verify against that approval. Inspect the worktree; if the work in it is what you want reviewed, recover this run's review provenance — AO discards the unlocatable approval and asks for exactly one fresh review of what is there now.",
 	},
 	ReasonVerifyWorkspaceUnattributable: {
+		Recovery:    domain.RecoveryInspectRepository,
 		HumanAction: "Verification was reopened, but the worktree no longer matches what review approved and AO cannot attribute the difference to this task's own uncommitted work (its branch or its HEAD moved). Inspect the worktree, restore it or commit the intended state, then continue or cancel this run.",
 	},
 	ReasonReviewStateAmbiguous: {
@@ -334,6 +364,7 @@ var attentionDispositions = map[string]AttentionDisposition{
 		HumanAction: "The reviewer could not be launched. Check the reviewer provider's auth and installation, then continue this run.",
 	},
 	ReasonReviewerAuthInvalid: {
+		Recovery:    domain.RecoveryAuthenticate,
 		HumanAction: "The reviewer provider rejected its credentials. Reconnect that provider's profile, then continue this run.",
 	},
 	ReasonReviewerBinaryMissing: {
@@ -349,6 +380,9 @@ var attentionDispositions = map[string]AttentionDisposition{
 		HumanAction: "The fix worker is waiting on input inside its own session. Answer it in the session, then continue this run.",
 	},
 	ReasonFixNoVerifiableChange: {
+		// Repairable: the findings are known and nothing was written against
+		// them. A repair agent has an unambiguous, bounded job.
+		Repairable:  true,
 		HumanAction: "The fix worker finished without changing anything AO can verify. Inspect the worktree, then continue or cancel this run.",
 	},
 	ReasonFixCycleNotStarted: {
@@ -362,6 +396,7 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonPlannerExhausted: {
 		Nonrecoverable: true,
+		Recovery:       domain.RecoveryRegeneratePlan,
 		HumanAction:    "The planner failed on every allowed retry. Retry planning, simplify the objective, or switch the planner provider.",
 	},
 	ReasonPlannerStartFailed: {
@@ -370,10 +405,12 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonPlannerPolicyViolation: {
 		Nonrecoverable: true,
+		Recovery:       domain.RecoveryRegeneratePlan,
 		HumanAction:    "The generated plan violated AO's plan policy. Rephrase the objective and retry planning.",
 	},
 	ReasonPlannerAmbiguous: {
 		Nonrecoverable: true,
+		Recovery:       domain.RecoveryRegeneratePlan,
 		HumanAction:    "The planner's state could not be recovered after a restart. Reopen planning for this objective (AO will not do it on its own), or cancel it.",
 	},
 	ReasonObjectivePlanRecovered: {
@@ -401,16 +438,26 @@ var attentionDispositions = map[string]AttentionDisposition{
 		HumanAction: "The worker is waiting on input inside its own session (often an interactive trust or auth prompt). Answer it in the session, then continue this run.",
 	},
 	ReasonReadOnlyWorkspaceMutated: {
+		Recovery:    domain.RecoveryInspectRepository,
 		HumanAction: "This task was planned as read-only, but its worktree changed while it ran. Inspect the change (the checkpoint names the dispatch-time and current workspace fingerprints), then keep it and continue this run, or revert it and continue.",
 	},
 	ReasonCapacityRetryExhausted: {
 		HumanAction: "Every automatic retry ran out while the provider was still at capacity. Wait and continue this run, switch provider, or cancel it.",
 	},
 	ReasonProviderAuthRequired: {
+		Recovery:    domain.RecoveryAuthenticate,
 		HumanAction: "The provider reported that its credentials are not usable, so an unattended launch would have stopped at a login prompt. Sign that provider profile in, then continue this run.",
 	},
 	ReasonProviderWorkspaceTrustRequired: {
 		HumanAction: "The provider has no recorded trust for this workspace, so an unattended launch would have stopped at its \"do you trust this folder?\" prompt. Trust the directory through the provider's own configuration (never by answering the prompt for an agent), then continue this run.",
+	},
+	// P1-B: automatic repair is spent for this run. It is a real stop with a
+	// real remedy, so it is registered here like any other -- and it is
+	// deliberately NOT repairable, because the whole point of the escalation is
+	// that repairing is no longer on the table.
+	repairEscalatedPhase: {
+		Recovery:    domain.RecoveryOperatorAction,
+		HumanAction: "AO has used every automatic repair this run is allowed. Read the latest repair run's review and verification output, then apply the change yourself, raise the repair budget for a fresh run, or cancel this one.",
 	},
 	ReasonProviderPreflightFailed: {
 		HumanAction: "The provider would have asked the operator something before it could work — usually a permission mode that cannot run unattended. Correct the provider configuration, then continue this run.",

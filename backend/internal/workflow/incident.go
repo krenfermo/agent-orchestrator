@@ -253,7 +253,18 @@ func isBookkeepingPhase(phase string) bool {
 		// run would once again be unable to say why it stopped — with, this
 		// time, a checkpoint full of evidence sitting next to it saying nothing
 		// about the decision. See ambiguous_worker_state.go.
-		phase == AmbiguousWorkerStateEvidencePhase
+		phase == AmbiguousWorkerStateEvidencePhase ||
+		// P1-B's own ledger rows have the same shape and the same hazard: a
+		// repair dispatch, a repair resolution and a plan revision decision are
+		// all written WHILE the run is stopped for its own reason, so counting
+		// them would displace that reason and the run would once again be
+		// unable to say why it stopped. The repair ESCALATION is deliberately
+		// absent from this list: it is a genuine stop with its own registered
+		// disposition, and it is meant to become the run's reason.
+		phase == repairDispatchPhase ||
+		phase == repairResolvedPhase ||
+		phase == planRegeneratedPhase ||
+		phase == planReusedPhase
 }
 
 func isIncidentLedgerPhase(phase string) bool {

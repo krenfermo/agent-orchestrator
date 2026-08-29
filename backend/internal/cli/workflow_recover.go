@@ -58,6 +58,10 @@ func newWorkflowCommand(ctx *commandContext) *cobra.Command {
 		Short: "Operate on AO workflow runs",
 	}
 	cmd.AddCommand(newWorkflowRecoverCommand(ctx))
+	// P1-B: the ordinary way back, alongside the two fail-closed recoveries.
+	cmd.AddCommand(newWorkflowResumeCommand(ctx))
+	cmd.AddCommand(newWorkflowRepairCommand(ctx))
+	cmd.AddCommand(newWorkflowPlanCommand(ctx))
 	return cmd
 }
 
@@ -68,6 +72,7 @@ func newWorkflowRecoverCommand(ctx *commandContext) *cobra.Command {
 		Long: "Each subcommand discards exactly one unprovable fact and re-enters the ordinary path.\n" +
 			"None of them infers the missing fact, and none of them skips a review or a verification.",
 	}
+	cmd.AddCommand(newRecoverStatusCommand(ctx))
 	cmd.AddCommand(newRecoverReviewProvenanceCommand(ctx))
 	cmd.AddCommand(newRecoverPlanCommand(ctx))
 	return cmd

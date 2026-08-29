@@ -86,6 +86,37 @@ type WorkflowPolicy struct {
 	// workflow.Coordinator's effective-strategy resolution, which maps a
 	// legacy run from durable facts and records the mapping as `recovered`.
 	Strategy ExecutionStrategySelection `json:"strategy,omitempty"`
+	// Repair is P1-B's frozen auto-repair policy: whether AO may point a
+	// bounded Repair Agent at this run's repairable stops by itself, and how
+	// many it may spend. Frozen at creation for the same reason Strategy is --
+	// a later Settings change must not widen what an in-flight run is allowed
+	// to do to itself, and a restart must not change the answer.
+	//
+	// A snapshot decoded from before P1-B has this at its zero value; callers
+	// must use EffectiveRepairPolicy, never read Repair directly.
+	Repair RepairPolicySnapshot `json:"repair,omitempty"`
+}
+
+// EffectiveRepairPolicy returns p.Repair, falling back to the safe default
+// (suggest, default budget) when the snapshot predates P1-B or recorded no
+// mode. Mirrors EffectiveRoutingPolicy/EffectiveWakePolicy's own
+// forward-compatible zero-value fallback exactly.
+//
+// The fallback is deliberately `suggest` rather than `automatic`: a run
+// created before anybody could choose a repair policy never opted into having
+// code written for it unattended.
+func (p WorkflowPolicy) EffectiveRepairPolicy() RepairPolicySnapshot {
+	repair := p.Repair
+	if !repair.Mode.Valid() {
+		repair.Mode = RepairModeSuggest
+	}
+	if repair.Version == "" {
+		repair.Version = RepairPolicyVersion
+	}
+	if repair.MaxRepairCycles <= 0 {
+		repair.MaxRepairCycles = DefaultMaxRepairCycles
+	}
+	return repair
 }
 
 // ExecutionPolicySnapshot is the run-creation-time copy of a

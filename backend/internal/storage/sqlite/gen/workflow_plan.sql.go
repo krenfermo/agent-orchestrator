@@ -74,7 +74,7 @@ func (q *Queries) FinishWorkflowPlan(ctx context.Context, arg FinishWorkflowPlan
 }
 
 const getWorkflowPlan = `-- name: GetWorkflowPlan :one
-SELECT workflow_run_id, status, approval_mode, provider, model, prompt_context_version, context_manifest_json, generated_plan_json, validation_json, plan_hash, command_status, error_class, created_at, updated_at, generated_at, approved_at, rejected_at FROM workflow_plans WHERE workflow_run_id = ?
+SELECT workflow_run_id, status, approval_mode, provider, model, prompt_context_version, context_manifest_json, generated_plan_json, validation_json, plan_hash, command_status, error_class, created_at, updated_at, generated_at, approved_at, rejected_at, revision FROM workflow_plans WHERE workflow_run_id = ?
 `
 
 func (q *Queries) GetWorkflowPlan(ctx context.Context, workflowRunID string) (WorkflowPlan, error) {
@@ -98,6 +98,7 @@ func (q *Queries) GetWorkflowPlan(ctx context.Context, workflowRunID string) (Wo
 		&i.GeneratedAt,
 		&i.ApprovedAt,
 		&i.RejectedAt,
+		&i.Revision,
 	)
 	return i, err
 }
@@ -106,7 +107,7 @@ const insertWorkflowPlan = `-- name: InsertWorkflowPlan :one
 INSERT INTO workflow_plans (workflow_run_id, status, approval_mode, prompt_context_version,
     command_status, created_at, updated_at)
 VALUES (?, 'pending', ?, ?, 'idle', ?, ?)
-RETURNING workflow_run_id, status, approval_mode, provider, model, prompt_context_version, context_manifest_json, generated_plan_json, validation_json, plan_hash, command_status, error_class, created_at, updated_at, generated_at, approved_at, rejected_at
+RETURNING workflow_run_id, status, approval_mode, provider, model, prompt_context_version, context_manifest_json, generated_plan_json, validation_json, plan_hash, command_status, error_class, created_at, updated_at, generated_at, approved_at, rejected_at, revision
 `
 
 type InsertWorkflowPlanParams struct {
@@ -144,14 +145,15 @@ func (q *Queries) InsertWorkflowPlan(ctx context.Context, arg InsertWorkflowPlan
 		&i.GeneratedAt,
 		&i.ApprovedAt,
 		&i.RejectedAt,
+		&i.Revision,
 	)
 	return i, err
 }
 
 const insertWorkflowTask = `-- name: InsertWorkflowTask :exec
 INSERT OR IGNORE INTO workflow_tasks (id, workflow_run_id, plan_step_id, ordinal, title, description,
-    acceptance_criteria_json, verify_json, scope_json, state, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    acceptance_criteria_json, verify_json, scope_json, state, plan_revision, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertWorkflowTaskParams struct {
@@ -165,6 +167,7 @@ type InsertWorkflowTaskParams struct {
 	VerifyJson             string
 	ScopeJson              string
 	State                  string
+	PlanRevision           int64
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
 }
@@ -181,6 +184,7 @@ func (q *Queries) InsertWorkflowTask(ctx context.Context, arg InsertWorkflowTask
 		arg.VerifyJson,
 		arg.ScopeJson,
 		arg.State,
+		arg.PlanRevision,
 		arg.CreatedAt,
 		arg.UpdatedAt,
 	)
@@ -320,9 +324,12 @@ func (q *Queries) ListWorkflowTaskRelationships(ctx context.Context, workflowRun
 }
 
 const listWorkflowTasks = `-- name: ListWorkflowTasks :many
-SELECT t.id, t.workflow_run_id, t.plan_step_id, t.ordinal, t.title, t.description, t.acceptance_criteria_json, t.verify_json, t.scope_json, t.state, t.attention_reason, t.attention_json, t.attention_at, t.execution_run_id, t.created_at, t.updated_at, t.completed_at, COALESCE((SELECT json_group_array(d.depends_on_task_id)
+SELECT t.id, t.workflow_run_id, t.plan_step_id, t.ordinal, t.title, t.description, t.acceptance_criteria_json, t.verify_json, t.scope_json, t.state, t.attention_reason, t.attention_json, t.attention_at, t.execution_run_id, t.created_at, t.updated_at, t.completed_at, t.plan_revision, COALESCE((SELECT json_group_array(d.depends_on_task_id)
     FROM workflow_task_dependencies d WHERE d.workflow_task_id = t.id), '[]') AS dependencies_json
-FROM workflow_tasks t WHERE t.workflow_run_id = ? ORDER BY t.ordinal
+FROM workflow_tasks t
+LEFT JOIN workflow_plans p ON p.workflow_run_id = t.workflow_run_id
+WHERE t.workflow_run_id = ? AND t.plan_revision = COALESCE(p.revision, 1)
+ORDER BY t.ordinal
 `
 
 type ListWorkflowTasksRow struct {
@@ -343,9 +350,21 @@ type ListWorkflowTasksRow struct {
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
 	CompletedAt            sql.NullTime
+	PlanRevision           int64
 	DependenciesJson       interface{}
 }
 
+// P1-B: scoped to the plan's CURRENT revision, so every existing reader
+// (reconcile, convergence, the Board, integration) becomes revision-aware
+// without a single call-site change. A task minted for a superseded plan is
+// structurally invisible here -- which is what makes "a stale old-plan child
+// cannot regain authority" a property of the schema rather than of a check
+// somebody has to remember to write. The rows themselves are retained and
+// remain auditable through ListWorkflowTasksAtRevision.
+//
+// COALESCE(p.revision, 1): a task row whose run has no plan row at all cannot
+// happen today, but reading it as revision 1 keeps this query total rather
+// than silently dropping such a row.
 func (q *Queries) ListWorkflowTasks(ctx context.Context, workflowRunID string) ([]ListWorkflowTasksRow, error) {
 	rows, err := q.db.QueryContext(ctx, listWorkflowTasks, workflowRunID)
 	if err != nil {
@@ -373,6 +392,86 @@ func (q *Queries) ListWorkflowTasks(ctx context.Context, workflowRunID string) (
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.CompletedAt,
+			&i.PlanRevision,
+			&i.DependenciesJson,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkflowTasksAtRevision = `-- name: ListWorkflowTasksAtRevision :many
+SELECT t.id, t.workflow_run_id, t.plan_step_id, t.ordinal, t.title, t.description, t.acceptance_criteria_json, t.verify_json, t.scope_json, t.state, t.attention_reason, t.attention_json, t.attention_at, t.execution_run_id, t.created_at, t.updated_at, t.completed_at, t.plan_revision, COALESCE((SELECT json_group_array(d.depends_on_task_id)
+    FROM workflow_task_dependencies d WHERE d.workflow_task_id = t.id), '[]') AS dependencies_json
+FROM workflow_tasks t
+WHERE t.workflow_run_id = ? AND t.plan_revision = ?
+ORDER BY t.ordinal
+`
+
+type ListWorkflowTasksAtRevisionParams struct {
+	WorkflowRunID string
+	PlanRevision  int64
+}
+
+type ListWorkflowTasksAtRevisionRow struct {
+	ID                     string
+	WorkflowRunID          string
+	PlanStepID             string
+	Ordinal                int64
+	Title                  string
+	Description            string
+	AcceptanceCriteriaJson string
+	VerifyJson             string
+	ScopeJson              string
+	State                  string
+	AttentionReason        string
+	AttentionJson          string
+	AttentionAt            sql.NullTime
+	ExecutionRunID         sql.NullString
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	CompletedAt            sql.NullTime
+	PlanRevision           int64
+	DependenciesJson       interface{}
+}
+
+// The audit view: one superseded revision's tasks, exactly as they were.
+func (q *Queries) ListWorkflowTasksAtRevision(ctx context.Context, arg ListWorkflowTasksAtRevisionParams) ([]ListWorkflowTasksAtRevisionRow, error) {
+	rows, err := q.db.QueryContext(ctx, listWorkflowTasksAtRevision, arg.WorkflowRunID, arg.PlanRevision)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListWorkflowTasksAtRevisionRow{}
+	for rows.Next() {
+		var i ListWorkflowTasksAtRevisionRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkflowRunID,
+			&i.PlanStepID,
+			&i.Ordinal,
+			&i.Title,
+			&i.Description,
+			&i.AcceptanceCriteriaJson,
+			&i.VerifyJson,
+			&i.ScopeJson,
+			&i.State,
+			&i.AttentionReason,
+			&i.AttentionJson,
+			&i.AttentionAt,
+			&i.ExecutionRunID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CompletedAt,
+			&i.PlanRevision,
 			&i.DependenciesJson,
 		); err != nil {
 			return nil, err
@@ -473,6 +572,40 @@ func (q *Queries) PersistWorkflowPlanResponse(ctx context.Context, arg PersistWo
 		arg.UpdatedAt,
 		arg.WorkflowRunID,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const regenerateWorkflowPlan = `-- name: RegenerateWorkflowPlan :execrows
+UPDATE workflow_plans
+SET revision = revision + 1,
+    status = 'pending',
+    command_status = 'idle',
+    provider = '',
+    model = '',
+    generated_plan_json = '{}',
+    validation_json = '{}',
+    plan_hash = '',
+    error_class = '',
+    generated_at = NULL,
+    approved_at = NULL,
+    rejected_at = NULL,
+    updated_at = ?
+WHERE workflow_run_id = ? AND revision = ?
+  AND status IN ('validated','approved','invalid','rejected')
+`
+
+type RegenerateWorkflowPlanParams struct {
+	UpdatedAt     time.Time
+	WorkflowRunID string
+	Revision      int64
+}
+
+// P1-B: mint a new plan revision. See Store.RegenerateWorkflowPlan.
+func (q *Queries) RegenerateWorkflowPlan(ctx context.Context, arg RegenerateWorkflowPlanParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, regenerateWorkflowPlan, arg.UpdatedAt, arg.WorkflowRunID, arg.Revision)
 	if err != nil {
 		return 0, err
 	}

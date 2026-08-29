@@ -14,6 +14,7 @@ import { WorkflowBranchWaitBanner } from "../components/workflow-branch-wait-ban
 import { WorkflowRoutingSummary } from "../components/workflow-routing-summary";
 import { WorkflowIncidentDialog } from "../components/workflow-incident-dialog";
 import { WorkflowResumeButton } from "../components/workflow-resume-button";
+import { WorkflowRecoveryPanel } from "../components/workflow-recovery-panel";
 import {
 	translateDynamic,
 	WorkflowActivityPanel,
@@ -223,6 +224,13 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				</div>
 			)}
 			<WorkflowCapacityWaitBanner run={workflow.run} />
+			{/* P1-B §L: the recovery panel. It renders the backend's assessment
+			    and offers only the operations that assessment authorises — it
+			    never decides for itself whether an action is safe. It shows
+			    itself only for a run that is stopped or blocked; a healthy run
+			    has no recovery question, and asking for the assessment costs a
+			    planner-context probe. */}
+			<WorkflowRecoveryPanel run={workflow.run} />
 			<WorkflowBranchWaitBanner run={workflow.run} />
 			<div className="flex flex-col gap-1">
 				<div className="flex items-start gap-2">

@@ -86,6 +86,13 @@ type CreateWorkflowRunRequest struct {
 	// task that correctly changes nothing would otherwise park as ambiguous.
 	AcceptanceCriteria []string `json:"acceptanceCriteria,omitempty" description:"Acceptance criteria for a task-strategy run."`
 	WriteIntent        string   `json:"writeIntent,omitempty" enum:"mutating,read_only"`
+	// RepairPolicy is P1-B's frozen auto-repair mode for this run: "disabled"
+	// (AO never starts a Repair Agent), "suggest" (AO offers the action and
+	// waits) or "automatic" (AO may start one itself, and only for an
+	// explicitly repairable condition). Omitted freezes the safe default,
+	// "suggest" -- a repair writes code, and opting into that unattended
+	// should be a decision somebody made.
+	RepairPolicy string `json:"repairPolicy,omitempty" enum:"disabled,suggest,automatic"`
 }
 
 // WorkflowStrategySignals is the bounded, deterministic input to AUTO
@@ -414,6 +421,12 @@ type WorkflowRunView struct {
 	// a second query -- the run's next boot reconciliation records the
 	// mapping durably and it is present from then on.
 	ExecutionStrategy *WorkflowExecutionStrategyView `json:"executionStrategy,omitempty"`
+	// Recovery is P1-B's deterministic recovery assessment. It is populated
+	// only by the routes a person explicitly took -- recovery, resume,
+	// continue, plan reuse/regenerate, repair -- because deciding it probes
+	// the project's planner context, and doing that on every Board poll would
+	// be a real cost for an answer nobody asked for.
+	Recovery *WorkflowRecoveryView `json:"recovery,omitempty"`
 	// BranchWait is Checkpoint 8P-E.11's structured waiting_for_branch state
 	// for a direct-branch run queued behind another workflow. Present only
 	// while the run is genuinely waiting on a branch, so the board renders a
@@ -581,6 +594,13 @@ type WorkflowRunDetailView struct {
 	// IntegrationState is Checkpoint 8M.1's git integration summary — present
 	// only for master runs (Plan != nil).
 	IntegrationState *WorkflowIntegrationStateView `json:"integrationState,omitempty"`
+	// Resume is P1-B's report of what a resume actually did: the durable
+	// obligation that was outstanding and whether AO discharged it. Present
+	// only on a resume response.
+	Resume *WorkflowResumeView `json:"resume,omitempty"`
+	// PlanReuse is the plan's reuse classification. Present only on a plan
+	// reuse/regenerate response.
+	PlanReuse *WorkflowPlanReuseView `json:"planReuse,omitempty"`
 }
 
 // WorkflowIntegrationStateView is Checkpoint 8M.1's read-only surface of
@@ -985,6 +1005,15 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	r.Get("/projects/{projectId}/board/history", c.boardHistory)
 	r.Post("/workflows/{workflowId}/start", c.start)
 	r.Post("/workflows/{workflowId}/continue", c.continueRun)
+
+	// P1-B: the recovery surface, as named operations rather than one
+	// ambiguous continue. /continue keeps working unchanged and now reports
+	// which recovery action it took.
+	r.Get("/workflows/{workflowId}/recovery", c.getRecovery)
+	r.Post("/workflows/{workflowId}/resume", c.resume)
+	r.Post("/workflows/{workflowId}/plan/reuse", c.reusePlan)
+	r.Post("/workflows/{workflowId}/plan/regenerate", c.regeneratePlan)
+	r.Post("/workflows/{workflowId}/repair", c.repair)
 	r.Post("/workflows/{workflowId}/tasks/{taskId}/resume", c.resumeTask)
 	r.Post("/workflows/{workflowId}/tasks/{taskId}/fresh-review-exception", c.authorizeFreshReviewException)
 	r.Post("/workflows/{workflowId}/tasks/{taskId}/criteria/amend", c.amendTaskCriterion)
@@ -1046,6 +1075,15 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_APPROVAL_POLICY", invalidApproval, nil)
 		return
 	}
+	var repairMode domain.RepairMode
+	if raw := strings.TrimSpace(in.RepairPolicy); raw != "" {
+		repairMode = domain.NormalizeRepairMode(raw)
+		if !repairMode.Valid() {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_REPAIR_POLICY",
+				"repairPolicy must be one of: disabled, suggest, automatic", nil)
+			return
+		}
+	}
 
 	var detail workflowcore.RunDetail
 	var err error
@@ -1078,6 +1116,15 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.stampOwner(r, detail.Run.ID, autonomousOverride)
+	// P1-B: freeze this run's auto-repair mode, immediately after creation and
+	// before anything can run, mirroring the execution-policy stamp above.
+	// Creation already wrote the safe default, so a request that named nothing
+	// (or a deployment without the capability) is unaffected.
+	if repairMode != "" {
+		if svc, ok := c.Svc.(workflowsvc.RecoveryManager); ok {
+			_ = svc.ApplyRepairPolicy(r.Context(), detail.Run.ID, repairMode)
+		}
+	}
 	// Re-fetch after stampOwner: it just wrote the caller's (possibly
 	// per-run-overridden) execution policy into this run's policy_snapshot
 	// and may have scheduled an autonomous-kickoff wake -- `detail` above
@@ -1344,12 +1391,23 @@ func (c *WorkflowsController) continueRun(w http.ResponseWriter, r *http.Request
 		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/continue")
 		return
 	}
-	detail, err := c.Svc.ContinueRun(r.Context(), chi.URLParam(r, "workflowId"))
+	runID := chi.URLParam(r, "workflowId")
+	detail, err := c.Svc.ContinueRun(r.Context(), runID)
 	if err != nil {
 		writeWorkflowError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+	view := c.workflowRunDetailView(r.Context(), detail)
+	// P1-B §K: /continue stays exactly as compatible as it was, and stops
+	// being undocumented magic -- its response now says which recovery action
+	// AO took and what, if anything, is still owed. Best-effort: a deployment
+	// without the recovery capability answers precisely as it did before.
+	if svc, ok := c.Svc.(workflowsvc.RecoveryManager); ok {
+		if assessment, aerr := svc.AssessRecovery(r.Context(), runID); aerr == nil {
+			view.Run.Recovery = workflowRecoveryView(assessment)
+		}
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: view})
 }
 
 // resumeTask releases one task parked in needs_attention after a person has

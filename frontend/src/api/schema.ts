@@ -2287,6 +2287,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflowId}/plan/regenerate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P1-B: mint a new durable plan revision for an objective whose plan cannot be reused. The superseded revision stays auditable and its tasks stop being authoritative. Bounded, and a compare-and-set on the revision the caller observed. */
+        post: operations["regenerateWorkflowPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workflows/{workflowId}/plan/reject": {
         parameters: {
             query?: never;
@@ -2315,6 +2332,23 @@ export interface paths {
         put?: never;
         /** Reopen planning for an objective whose planner command was in flight when the daemon restarted, so AO could not prove whether it produced a plan. Planning starts over from scratch: nothing is adopted from the discarded planner. The request must carry the plan's observed updatedAt, and a reopen of a state that has since changed is refused. Human-only and bounded. */
         post: operations["reopenAmbiguousWorkflowPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/plan/reuse": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P1-B: execute this objective's existing durable plan revision as it stands. Refused unless the plan's identity and its project context both still hold — a stale plan is never run silently. */
+        post: operations["reuseWorkflowPlan"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2383,6 +2417,57 @@ export interface paths {
         put?: never;
         /** Recover a run stopped because AO cannot prove which commit its approved review target was read at, and could not reconstruct it from the branch's history. Discards that unlocatable approval and asks for exactly one fresh independent review of the workspace as it stands. It never infers or attests an approved commit and never verifies code no reviewer has read. Human-only and bounded. */
         post: operations["recoverWorkflowReviewProvenance"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/recovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P1-B: the deterministic recovery assessment for a run — the one recommended action, why, whether AO may take it automatically, whether the durable plan is reusable, and whether a bounded Repair Agent is available. Derived entirely from durable facts; no model is consulted. */
+        get: operations["getWorkflowRecovery"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/repair": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P1-B: launch a bounded Repair Agent for a repairable technical stop. Refused with the full repair plan (and why) for any condition AO must not aim a code-writing agent at, for a spent repair budget, or under a disabled repair policy. */
+        post: operations["repairWorkflowRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P1-B: discharge exactly the run's outstanding durable obligation, and report which one it was. Idempotent; an obligation only a person can discharge is reported rather than driven. */
+        post: operations["resumeWorkflowRun"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3478,6 +3563,8 @@ export interface components {
             objective: string;
             /** @enum {string} */
             planApprovalMode?: "manual" | "auto";
+            /** @enum {string} */
+            repairPolicy?: "disabled" | "suggest" | "automatic";
             /** @enum {string} */
             strategy?: "task" | "autonomous" | "master" | "auto";
             strategySignals?: components["schemas"]["WorkflowStrategySignals"];
@@ -4623,6 +4710,16 @@ export interface components {
             summary: string;
             version: string;
         };
+        WorkflowPlanReuseView: {
+            contextDrift?: string;
+            planHash?: string;
+            reason?: string;
+            /** @enum {string} */
+            reusability: "not_applicable" | "exact" | "stale_but_revalidatable" | "not_reusable";
+            /** Format: int64 */
+            revision: number;
+            taskCount: number;
+        };
         WorkflowPlanValidation: {
             errors: string[];
             valid: boolean;
@@ -4694,6 +4791,72 @@ export interface components {
         WorkflowQuestionResponseBody: {
             question: components["schemas"]["WorkflowQuestionResponse"];
         };
+        WorkflowRecoveryResponse: {
+            plan: components["schemas"]["WorkflowPlanReuseView"];
+            recovery: components["schemas"]["WorkflowRecoveryView"];
+            repair: components["schemas"]["WorkflowRepairPlanView"];
+        };
+        WorkflowRecoveryView: {
+            automaticAllowed: boolean;
+            blockingCondition?: string;
+            explanation?: string;
+            /** @enum {string} */
+            obligation?: "none" | "plan_generation" | "plan_approval" | "plan_dispatch" | "work_dispatch" | "work_observation" | "review_dispatch" | "review_observation" | "fix_delivery" | "fix_observation" | "verify" | "convergence" | "terminal";
+            obligationDetail?: string;
+            /** @enum {string} */
+            planReusable: "not_applicable" | "exact" | "stale_but_revalidatable" | "not_reusable";
+            reasonCode?: string;
+            /** @enum {string} */
+            recommendedAction: "resume" | "reuse_plan" | "regenerate_plan" | "repair" | "authenticate" | "inspect_repository" | "operator_action" | "restart_required" | "abandon" | "terminal" | "unrecoverable";
+            repairAvailable: boolean;
+            /** @enum {string} */
+            repairEligibility: "eligible" | "ineligible" | "budget_exhausted" | "policy_disabled" | "unknown_condition";
+            stepId?: string;
+            /** @enum {string} */
+            strategy?: "task" | "autonomous" | "master";
+            targetRunId?: string;
+            taskId?: string;
+            version?: string;
+        };
+        WorkflowRepairIntentView: {
+            acceptanceCriteria?: string[];
+            authorizedBy?: string;
+            conditionReason: string;
+            evidenceDigest: string;
+            generation: number;
+            id: string;
+            /** @enum {string} */
+            mode?: "disabled" | "suggest" | "automatic";
+            policyVersion?: string;
+            projectId: string;
+            repairRunId?: string;
+            /** @enum {string} */
+            strategy: "task" | "autonomous" | "master";
+            targetRunId: string;
+            targetStepId?: string;
+        };
+        WorkflowRepairPlanView: {
+            automaticAllowed: boolean;
+            budget: number;
+            /** @enum {string} */
+            eligibility: "eligible" | "ineligible" | "budget_exhausted" | "policy_disabled" | "unknown_condition";
+            intent?: components["schemas"]["WorkflowRepairIntentView"];
+            /** @enum {string} */
+            mode: "disabled" | "suggest" | "automatic";
+            reason?: string;
+            spent: number;
+        };
+        WorkflowRepairResponse: {
+            intent?: components["schemas"]["WorkflowRepairIntentView"];
+            repair: components["schemas"]["WorkflowRepairPlanView"];
+            workflow: components["schemas"]["WorkflowRunDetailView"];
+        };
+        WorkflowResumeView: {
+            /** @enum {string} */
+            obligation: "none" | "plan_generation" | "plan_approval" | "plan_dispatch" | "work_dispatch" | "work_observation" | "review_dispatch" | "review_observation" | "fix_delivery" | "fix_observation" | "verify" | "convergence" | "terminal";
+            obligationDetail?: string;
+            performed: boolean;
+        };
         WorkflowReviewPolicyDecision: {
             complexity: string;
             decision: string;
@@ -4715,7 +4878,9 @@ export interface components {
         WorkflowRunDetailView: {
             integrationState?: components["schemas"]["ControllersWorkflowIntegrationStateView"];
             plan?: components["schemas"]["WorkflowPlanView"];
+            planReuse?: components["schemas"]["WorkflowPlanReuseView"];
             questions?: components["schemas"]["WorkflowQuestionResponse"][];
+            resume?: components["schemas"]["WorkflowResumeView"];
             run: components["schemas"]["WorkflowRunView"];
             steps: components["schemas"]["WorkflowStepView"][];
             tasks?: components["schemas"]["WorkflowTaskView"][];
@@ -4755,6 +4920,7 @@ export interface components {
             /** @enum {string} */
             phase: "queued" | "planning" | "running" | "reviewing" | "fixing" | "verifying" | "waiting" | "waiting_for_capacity" | "retrying" | "blocked" | "needs_attention" | "completed" | "failed" | "cancelled";
             projectId: string;
+            recovery?: components["schemas"]["WorkflowRecoveryView"];
             /** @enum {string} */
             state: "pending" | "running" | "waiting" | "needs_attention" | "completed" | "failed" | "cancelled";
             /** Format: date-time */
@@ -13275,6 +13441,65 @@ export interface operations {
             };
         };
     };
+    regenerateWorkflowPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     rejectWorkflowPlan: {
         parameters: {
             query?: never;
@@ -13361,6 +13586,65 @@ export interface operations {
             };
             /** @description Unprocessable Entity */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    reuseWorkflowPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -13560,6 +13844,147 @@ export interface operations {
             };
             /** @description Unprocessable Entity */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowRecovery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRecoveryResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    repairWorkflowRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRepairResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    resumeWorkflowRun: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

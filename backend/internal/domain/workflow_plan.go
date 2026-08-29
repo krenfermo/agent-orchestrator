@@ -65,11 +65,16 @@ type WorkflowPlanRecord struct {
 	PlanHash             string
 	CommandStatus        WorkflowPlanCommandStatus
 	ErrorClass           string
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
-	GeneratedAt          *time.Time
-	ApprovedAt           *time.Time
-	RejectedAt           *time.Time
+	// Revision is P1-B's durable plan generation, 1-based. A regeneration
+	// bumps it; every task row records the revision it was minted for, and
+	// only the current revision's tasks are authoritative. Zero from a store
+	// that predates the column, which callers read as revision 1.
+	Revision    int64
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	GeneratedAt *time.Time
+	ApprovedAt  *time.Time
+	RejectedAt  *time.Time
 }
 
 // WorkflowTaskState is the state of a single planned task within a plan. It is
@@ -174,9 +179,14 @@ type WorkflowTask struct {
 	AttentionReason string
 	Attention       WorkflowTaskAttention
 	AttentionAt     *time.Time
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	CompletedAt     *time.Time
+	// PlanRevision is the plan generation this task was minted for (P1-B).
+	// Only the tasks whose revision matches their plan row's current revision
+	// are authoritative; the rest are retained history. Zero from a store that
+	// predates the column, which readers treat as revision 1.
+	PlanRevision int64
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	CompletedAt  *time.Time
 }
 
 // WorkflowTaskCriterionDisposition is what an amendment did to a criterion.

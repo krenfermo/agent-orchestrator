@@ -28,6 +28,19 @@ type crashStore struct {
 	swallowPolicyWrite  bool
 	swallowApprove      bool
 	swallowApprovalMode bool
+	// mutatePlan lets a P1-B test present a plan row whose stored bytes or
+	// recorded context no longer match what the row claims, without reaching
+	// past the store into raw SQL. Every production reader still goes through
+	// GetWorkflowPlan, so what the test changes is exactly what they see.
+	mutatePlan func(domain.WorkflowPlanRecord) domain.WorkflowPlanRecord
+}
+
+func (s *crashStore) GetWorkflowPlan(ctx context.Context, runID string) (domain.WorkflowPlanRecord, bool, error) {
+	record, ok, err := s.Store.GetWorkflowPlan(ctx, runID)
+	if ok && err == nil && s.mutatePlan != nil {
+		record = s.mutatePlan(record)
+	}
+	return record, ok, err
 }
 
 func (s *crashStore) ReplaceWorkflowTaskRelationships(ctx context.Context, rels []domain.WorkflowTaskRelationship) error {

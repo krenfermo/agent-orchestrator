@@ -752,6 +752,7 @@ type WorkflowPlan struct {
 	GeneratedAt          sql.NullTime
 	ApprovedAt           sql.NullTime
 	RejectedAt           sql.NullTime
+	Revision             int64
 }
 
 type WorkflowQuestion struct {
@@ -852,6 +853,7 @@ type WorkflowTask struct {
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
 	CompletedAt            sql.NullTime
+	PlanRevision           int64
 }
 
 type WorkflowTaskCriterionAmendment struct {

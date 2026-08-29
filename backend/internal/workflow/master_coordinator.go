@@ -397,17 +397,23 @@ func (c *Coordinator) finalizeGeneratedPlan(ctx stdctx.Context, run domain.Workf
 	if err != nil {
 		return RunDetail{}, err
 	}
+	// P1-B: every identity below is scoped to THIS plan revision. Revision 1
+	// computes exactly what it always did; a later revision's rows are
+	// distinct from the superseded ones by construction, which is what lets
+	// the old rows stay on disk as an audit trail without a regenerated plan
+	// silently inheriting them (see plan_revision.go).
+	revision := planRevisionOf(record)
 	persistedTaskID := make(map[string]string, len(existingTasks))
 	for _, t := range existingTasks {
 		persistedTaskID[t.PlanStepID] = t.ID
 	}
 	idByPlan := map[string]string{}
 	for _, s := range generated.Steps {
-		if id, ok := persistedTaskID[s.ID]; ok {
+		if id, ok := persistedTaskID[planStepIDForRevision(revision, s.ID)]; ok {
 			idByPlan[s.ID] = id
 			continue
 		}
-		idByPlan[s.ID] = canonicalTaskID(run.ID, s.ID)
+		idByPlan[s.ID] = canonicalTaskIDAtRevision(run.ID, revision, s.ID)
 	}
 	tasks := make([]domain.WorkflowTask, 0, len(generated.Steps))
 	now := c.clock()
@@ -422,7 +428,7 @@ func (c *Coordinator) finalizeGeneratedPlan(ctx stdctx.Context, run domain.Workf
 		if len(deps) == 0 && i == 0 {
 			state = domain.WorkflowTaskEligible
 		}
-		tasks = append(tasks, domain.WorkflowTask{ID: idByPlan[s.ID], WorkflowRunID: run.ID, PlanStepID: s.ID, Ordinal: int64(i + 1), Title: s.Title, Description: s.Description, AcceptanceCriteriaJSON: string(criteria), VerifyJSON: string(verify), State: state, Dependencies: deps, CreatedAt: now, UpdatedAt: now})
+		tasks = append(tasks, domain.WorkflowTask{ID: idByPlan[s.ID], WorkflowRunID: run.ID, PlanStepID: planStepIDForRevision(revision, s.ID), Ordinal: ordinalForRevision(revision, i), Title: s.Title, Description: s.Description, AcceptanceCriteriaJSON: string(criteria), VerifyJSON: string(verify), State: state, Dependencies: deps, PlanRevision: revision, CreatedAt: now, UpdatedAt: now})
 	}
 	// Classify the task DAG before the tasks are written, so a task row never
 	// exists without the scope estimate that belongs to it. The pair verdicts

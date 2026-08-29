@@ -21,6 +21,7 @@ func workflowPlanFromRow(r gen.WorkflowPlan) domain.WorkflowPlanRecord {
 		ContextManifestJSON: r.ContextManifestJson, GeneratedPlanJSON: r.GeneratedPlanJson,
 		ValidationJSON: r.ValidationJson, PlanHash: r.PlanHash,
 		CommandStatus: domain.WorkflowPlanCommandStatus(r.CommandStatus), ErrorClass: r.ErrorClass,
+		Revision:  r.Revision,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, GeneratedAt: nullTimeToTimePtr(r.GeneratedAt),
 		ApprovedAt: nullTimeToTimePtr(r.ApprovedAt), RejectedAt: nullTimeToTimePtr(r.RejectedAt),
 	}
@@ -109,7 +110,13 @@ func (s *Store) InsertWorkflowTasks(ctx context.Context, tasks []domain.Workflow
 			if scope == "" {
 				scope = "{}"
 			}
-			if err := q.InsertWorkflowTask(ctx, gen.InsertWorkflowTaskParams{ID: task.ID, WorkflowRunID: task.WorkflowRunID, PlanStepID: task.PlanStepID, Ordinal: task.Ordinal, Title: task.Title, Description: task.Description, AcceptanceCriteriaJson: task.AcceptanceCriteriaJSON, VerifyJson: task.VerifyJSON, ScopeJson: scope, State: string(task.State), CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt}); err != nil {
+			revision := task.PlanRevision
+			if revision <= 0 {
+				// A caller that predates plan revisions means revision 1, which
+				// is what every row already on disk is.
+				revision = 1
+			}
+			if err := q.InsertWorkflowTask(ctx, gen.InsertWorkflowTaskParams{ID: task.ID, WorkflowRunID: task.WorkflowRunID, PlanStepID: task.PlanStepID, Ordinal: task.Ordinal, Title: task.Title, Description: task.Description, AcceptanceCriteriaJson: task.AcceptanceCriteriaJSON, VerifyJson: task.VerifyJSON, ScopeJson: scope, State: string(task.State), PlanRevision: revision, CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt}); err != nil {
 				return err
 			}
 		}
@@ -125,6 +132,12 @@ func (s *Store) InsertWorkflowTasks(ctx context.Context, tasks []domain.Workflow
 }
 
 // ListWorkflowTasks returns a run's planned tasks in plan order.
+//
+// P1-B: the query is scoped to the plan row's CURRENT revision, so every
+// caller becomes revision-aware without changing. A task minted for a
+// superseded plan revision is not returned here at all -- it is retained,
+// auditable through ListWorkflowTasksAtRevision, and structurally unable to
+// make a stale child authoritative again.
 func (s *Store) ListWorkflowTasks(ctx context.Context, runID string) ([]domain.WorkflowTask, error) {
 	rows, err := s.qr.ListWorkflowTasks(ctx, runID)
 	if err != nil {
@@ -132,27 +145,108 @@ func (s *Store) ListWorkflowTasks(ctx context.Context, runID string) ([]domain.W
 	}
 	out := make([]domain.WorkflowTask, 0, len(rows))
 	for _, r := range rows {
-		var deps []string
-		var raw []byte
-		switch v := r.DependenciesJson.(type) {
-		case string:
-			raw = []byte(v)
-		case []byte:
-			raw = v
-		}
-		if len(raw) > 0 {
-			_ = json.Unmarshal(raw, &deps)
-		}
-		var attention domain.WorkflowTaskAttention
-		if r.AttentionJson != "" {
-			// A body that will not unmarshal must not lose the task. The reason
-			// column is the load-bearing part (it is what the CHECK guarantees
-			// a parked task has); the detail is a convenience.
-			_ = json.Unmarshal([]byte(r.AttentionJson), &attention)
-		}
-		out = append(out, domain.WorkflowTask{ID: r.ID, WorkflowRunID: r.WorkflowRunID, PlanStepID: r.PlanStepID, Ordinal: r.Ordinal, Title: r.Title, Description: r.Description, AcceptanceCriteriaJSON: r.AcceptanceCriteriaJson, VerifyJSON: r.VerifyJson, ScopeJSON: r.ScopeJson, State: domain.WorkflowTaskState(r.State), ExecutionRunID: nullStringToPtr(r.ExecutionRunID), Dependencies: deps, AttentionReason: r.AttentionReason, Attention: attention, AttentionAt: nullTimeToTimePtr(r.AttentionAt), CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, CompletedAt: nullTimeToTimePtr(r.CompletedAt)})
+		out = append(out, workflowTaskFromRow(workflowTaskRow{
+			ID: r.ID, WorkflowRunID: r.WorkflowRunID, PlanStepID: r.PlanStepID, Ordinal: r.Ordinal,
+			Title: r.Title, Description: r.Description, AcceptanceCriteriaJson: r.AcceptanceCriteriaJson,
+			VerifyJson: r.VerifyJson, ScopeJson: r.ScopeJson, State: r.State,
+			ExecutionRunID: r.ExecutionRunID, AttentionReason: r.AttentionReason,
+			AttentionJson: r.AttentionJson, AttentionAt: r.AttentionAt, PlanRevision: r.PlanRevision,
+			CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, CompletedAt: r.CompletedAt,
+			DependenciesJson: r.DependenciesJson,
+		}))
 	}
 	return out, nil
+}
+
+// ListWorkflowTasksAtRevision is the audit view: the tasks of ONE plan
+// revision, including superseded ones. Nothing in the execution path reads it
+// -- that is the point.
+func (s *Store) ListWorkflowTasksAtRevision(ctx context.Context, runID string, revision int64) ([]domain.WorkflowTask, error) {
+	rows, err := s.qr.ListWorkflowTasksAtRevision(ctx, gen.ListWorkflowTasksAtRevisionParams{WorkflowRunID: runID, PlanRevision: revision})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.WorkflowTask, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, workflowTaskFromRow(workflowTaskRow{
+			ID: r.ID, WorkflowRunID: r.WorkflowRunID, PlanStepID: r.PlanStepID, Ordinal: r.Ordinal,
+			Title: r.Title, Description: r.Description, AcceptanceCriteriaJson: r.AcceptanceCriteriaJson,
+			VerifyJson: r.VerifyJson, ScopeJson: r.ScopeJson, State: r.State,
+			ExecutionRunID: r.ExecutionRunID, AttentionReason: r.AttentionReason,
+			AttentionJson: r.AttentionJson, AttentionAt: r.AttentionAt, PlanRevision: r.PlanRevision,
+			CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, CompletedAt: r.CompletedAt,
+			DependenciesJson: r.DependenciesJson,
+		}))
+	}
+	return out, nil
+}
+
+// RegenerateWorkflowPlan mints a new plan revision for a run whose existing
+// plan cannot be reused, conditioned on the revision the caller observed.
+//
+// A false result is a refusal, never a silent accept: either somebody else
+// already regenerated (so a second revision must not be minted for the same
+// request) or the plan is in a status that has nothing to regenerate. That
+// compare-and-set is what makes repeated regeneration bounded and idempotent.
+//
+// The superseded revision's rows are left exactly where they are. They are the
+// audit trail, and deleting them would also delete the FK-bound relationship,
+// worktree and amendment rows that reference them.
+func (s *Store) RegenerateWorkflowPlan(ctx context.Context, runID string, expectedRevision int64, now time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	n, err := s.qw.RegenerateWorkflowPlan(ctx, gen.RegenerateWorkflowPlanParams{
+		UpdatedAt: now, WorkflowRunID: runID, Revision: expectedRevision,
+	})
+	return n > 0, err
+}
+
+// workflowTaskRow is the shape both task listings share, so the row -> domain
+// mapping exists once. sqlc generates a distinct row struct per query even
+// when the columns are identical.
+type workflowTaskRow struct {
+	ID, WorkflowRunID, PlanStepID      string
+	Ordinal                            int64
+	Title, Description                 string
+	AcceptanceCriteriaJson, VerifyJson string
+	ScopeJson, State                   string
+	ExecutionRunID                     sql.NullString
+	AttentionReason, AttentionJson     string
+	AttentionAt                        sql.NullTime
+	PlanRevision                       int64
+	CreatedAt, UpdatedAt               time.Time
+	CompletedAt                        sql.NullTime
+	DependenciesJson                   interface{}
+}
+
+func workflowTaskFromRow(r workflowTaskRow) domain.WorkflowTask {
+	var deps []string
+	var raw []byte
+	switch v := r.DependenciesJson.(type) {
+	case string:
+		raw = []byte(v)
+	case []byte:
+		raw = v
+	}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &deps)
+	}
+	var attention domain.WorkflowTaskAttention
+	if r.AttentionJson != "" {
+		// A body that will not unmarshal must not lose the task. The reason
+		// column is the load-bearing part (it is what the CHECK guarantees
+		// a parked task has); the detail is a convenience.
+		_ = json.Unmarshal([]byte(r.AttentionJson), &attention)
+	}
+	return domain.WorkflowTask{
+		ID: r.ID, WorkflowRunID: r.WorkflowRunID, PlanStepID: r.PlanStepID, Ordinal: r.Ordinal,
+		Title: r.Title, Description: r.Description, AcceptanceCriteriaJSON: r.AcceptanceCriteriaJson,
+		VerifyJSON: r.VerifyJson, ScopeJSON: r.ScopeJson, State: domain.WorkflowTaskState(r.State),
+		ExecutionRunID: nullStringToPtr(r.ExecutionRunID), Dependencies: deps,
+		AttentionReason: r.AttentionReason, Attention: attention,
+		AttentionAt: nullTimeToTimePtr(r.AttentionAt), PlanRevision: r.PlanRevision,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, CompletedAt: nullTimeToTimePtr(r.CompletedAt),
+	}
 }
 
 // ParkWorkflowTaskForAttention moves a task into the durable needs_attention

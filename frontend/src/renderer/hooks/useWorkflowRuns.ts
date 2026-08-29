@@ -16,6 +16,14 @@ export type ExecutionStrategy = (typeof EXECUTION_STRATEGIES)[number];
 export const APPROVAL_POLICIES = ["automatic", "manual"] as const;
 export type ApprovalPolicy = (typeof APPROVAL_POLICIES)[number];
 
+/**
+ * P1-B: the run's frozen auto-repair policy. A third independent axis — it
+ * decides what AO may do to a run unattended when a repairable technical stop
+ * happens, and it is frozen at creation like the other two.
+ */
+export const REPAIR_POLICIES = ["disabled", "suggest", "automatic"] as const;
+export type RepairPolicy = (typeof REPAIR_POLICIES)[number];
+
 export function workflowRunsQueryKey(projectId?: string) {
 	return ["workflow-runs", projectId ?? ""] as const;
 }
@@ -45,6 +53,7 @@ export function useWorkflowRuns(projectId?: string) {
 			objective: string;
 			strategy: ExecutionStrategy;
 			approvalPolicy: ApprovalPolicy;
+			repairPolicy: RepairPolicy;
 		}) => {
 			const { data, error } = await apiClient.POST("/api/v1/projects/{projectId}/workflows", {
 				params: { path: { projectId: input.projectId } },
@@ -56,6 +65,7 @@ export function useWorkflowRuns(projectId?: string) {
 					// implicit flags the execution-strategy model replaces.
 					strategy: input.strategy,
 					approvalPolicy: input.approvalPolicy,
+					repairPolicy: input.repairPolicy,
 				},
 			});
 			if (error) throw error;
