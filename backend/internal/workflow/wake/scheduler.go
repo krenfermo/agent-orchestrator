@@ -30,6 +30,9 @@ import (
 // workflow_wake_schedules.reason CHECK enum (migration 0106).
 type Reason string
 
+// The reason vocabulary. Keep in sync with the migration's CHECK enum: a
+// reason this package can write but the schema rejects is a wake that silently
+// never gets scheduled.
 const (
 	ReasonCapacityReset            Reason = "capacity_reset"
 	ReasonCapacityProbe            Reason = "capacity_probe"
@@ -68,6 +71,9 @@ const (
 // mirroring the workflow_wake_schedules.status CHECK enum.
 type Status string
 
+// The wake lifecycle. Claimed is the single-flight slot -- exactly one poller
+// may move a wake out of pending -- and completed and cancelled are both
+// terminal, distinguishing a wake that fired from one that was withdrawn.
 const (
 	StatusPending   Status = "pending"
 	StatusClaimed   Status = "claimed"

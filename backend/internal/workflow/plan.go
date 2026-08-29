@@ -31,11 +31,16 @@ type PlanArtifact struct {
 	WriteIntent domain.WorkflowWriteIntent `json:"writeIntent,omitempty"`
 }
 
+// VerificationPlan is how a planned task says it can be checked: commands that
+// must succeed, and files that must (or must not) be there afterwards.
 type VerificationPlan struct {
 	Commands []VerificationCommandCheck `json:"commands,omitempty"`
 	Files    []VerificationFileCheck    `json:"files,omitempty"`
 }
 
+// VerificationCommandCheck is one command a verification runs. RetrySafe marks
+// a command AO may run more than once -- a verification that is not retry-safe
+// must not be re-run to resolve an ambiguous result.
 type VerificationCommandCheck struct {
 	Command          string   `json:"command"`
 	Args             []string `json:"args,omitempty"`
@@ -45,6 +50,9 @@ type VerificationCommandCheck struct {
 	RetrySafe        bool     `json:"retrySafe"`
 }
 
+// VerificationFileCheck is one artifact assertion. Exists false asserts the
+// path is absent; ExactContent and SHA256 assert what is in it when it is
+// present.
 type VerificationFileCheck struct {
 	Path         string  `json:"path"`
 	Exists       bool    `json:"exists"`

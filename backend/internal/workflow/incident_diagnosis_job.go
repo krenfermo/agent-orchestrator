@@ -42,25 +42,25 @@ const incidentDiagnosisStartedPhase = "incident_diagnosis_started"
 type IncidentDiagnosisState string
 
 const (
-	// DiagnosisQueued: AO intends to investigate and has not started.
+	// DiagnosisQueued means AO intends to investigate and has not started.
 	DiagnosisQueued IncidentDiagnosisState = "queued"
-	// DiagnosisStarting: a launch was requested and no session has been
+	// DiagnosisStarting means a launch was requested and no session has been
 	// recorded yet — the window in which a launch can still fail.
 	DiagnosisStarting IncidentDiagnosisState = "starting"
-	// DiagnosisRunning: an agent session exists and is doing something.
+	// DiagnosisRunning means an agent session exists and is doing something.
 	DiagnosisRunning IncidentDiagnosisState = "running"
-	// DiagnosisWaitingForProvider: AO wants to run and no provider has
+	// DiagnosisWaitingForProvider means AO wants to run and no provider has
 	// capacity. Self-remediable; a wake is pending.
 	DiagnosisWaitingForProvider IncidentDiagnosisState = "waiting_for_provider"
-	// DiagnosisWaitingForUser: the agent is blocked on an interactive prompt —
+	// DiagnosisWaitingForUser means the agent is blocked on an interactive prompt —
 	// a trust dialog, a permission dialog, a login. This is the state the
 	// incident was actually in while AO reported "Investigando", and it is the
 	// whole reason this vocabulary exists.
 	DiagnosisWaitingForUser IncidentDiagnosisState = "waiting_for_user"
-	// DiagnosisCompleted: a diagnosis (including a refusal, which is a
+	// DiagnosisCompleted means a diagnosis (including a refusal, which is a
 	// first-class answer) has been recorded.
 	DiagnosisCompleted IncidentDiagnosisState = "completed"
-	// DiagnosisFailed: the launch is durably known to have failed, or the
+	// DiagnosisFailed means the launch is durably known to have failed, or the
 	// session ended without answering.
 	DiagnosisFailed IncidentDiagnosisState = "failed"
 )

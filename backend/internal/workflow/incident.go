@@ -62,22 +62,22 @@ import (
 type IncidentClass string
 
 const (
-	// IncidentAutoRecoverable: the stop has a known, bounded remedy that AO
+	// IncidentAutoRecoverable means the stop has a known, bounded remedy that AO
 	// already implements, and the evidence for it is present. The only action
 	// this class may propose is one of the allow-listed recoveries in
 	// incident_policy.go — never a code change, never a git operation.
 	IncidentAutoRecoverable IncidentClass = "auto_recoverable"
-	// IncidentRepairAO: the stop is caused by a defect in AO itself. The remedy
+	// IncidentRepairAO means the stop is caused by a defect in AO itself. The remedy
 	// is a code change to this repository, which means a Repair Agent, an
 	// independent reviewer and deterministic verification — never an inline fix
 	// by whoever diagnosed it.
 	IncidentRepairAO IncidentClass = "repair_ao"
-	// IncidentHumanDecision: AO has the evidence and there is genuinely a choice
+	// IncidentHumanDecision means AO has the evidence and there is genuinely a choice
 	// only a person can make (which of two acceptable outcomes, whether to spend
 	// more budget, whether the reviewer is right). The Advisor presents concrete
 	// options and takes none of them.
 	IncidentHumanDecision IncidentClass = "human_decision_required"
-	// IncidentUnsafeOrInsufficient: acting would be unsafe, or the evidence does
+	// IncidentUnsafeOrInsufficient means acting would be unsafe, or the evidence does
 	// not support any conclusion. This is a first-class successful outcome of a
 	// diagnosis, not a failure of one: naming the missing evidence is the whole
 	// value, and it is what stops the other three classes from absorbing cases
@@ -112,23 +112,23 @@ func (c IncidentClass) RequiresHumanApproval() bool {
 type IncidentState string
 
 const (
-	// IncidentOpen: AO has recorded that this run is stopped and a person may
+	// IncidentOpen means AO has recorded that this run is stopped and a person may
 	// ask about it. Nothing has been spent yet.
 	IncidentOpen IncidentState = "open"
-	// IncidentDiagnosing: a Diagnostic Agent is running against a context pack.
+	// IncidentDiagnosing means a Diagnostic Agent is running against a context pack.
 	IncidentDiagnosing IncidentState = "diagnosing"
-	// IncidentDiagnosed: a classification and a proposed action exist.
+	// IncidentDiagnosed means a classification and a proposed action exist.
 	IncidentDiagnosed IncidentState = "diagnosed"
-	// IncidentAwaitingApproval: the proposed action needs a person to say yes.
+	// IncidentAwaitingApproval means the proposed action needs a person to say yes.
 	IncidentAwaitingApproval IncidentState = "awaiting_approval"
-	// IncidentExecuting: an approved (or auto-authorized) action is running.
+	// IncidentExecuting means an approved (or auto-authorized) action is running.
 	IncidentExecuting IncidentState = "executing"
-	// IncidentResolved: the action ran and the run is no longer stopped on this.
+	// IncidentResolved means the action ran and the run is no longer stopped on this.
 	IncidentResolved IncidentState = "resolved"
-	// IncidentRefused: AO declined to act, and said what evidence was missing.
+	// IncidentRefused means AO declined to act, and said what evidence was missing.
 	// Terminal for this incident; a person may open a new one.
 	IncidentRefused IncidentState = "refused"
-	// IncidentClosed: the stop went away on its own (someone continued the run,
+	// IncidentClosed means the stop went away on its own (someone continued the run,
 	// the child recovered). Terminal, and it is why the Advisor re-derives the
 	// live stop instead of trusting its own record.
 	IncidentClosed IncidentState = "closed"

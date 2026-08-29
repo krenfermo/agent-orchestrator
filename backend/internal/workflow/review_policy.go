@@ -22,6 +22,9 @@ const largeChangeFileThreshold = 6
 // ReviewRiskFacts snapshot against the current ReviewPolicy.
 type ReviewDecision string
 
+// The three review outcomes. Optional and skipped are distinct: optional means
+// a review may run and its verdict counts, skipped means none was warranted at
+// all, and only the second lets a run proceed with no verdict on record.
 const (
 	ReviewRequired ReviewDecision = "required"
 	ReviewOptional ReviewDecision = "optional"
@@ -33,6 +36,9 @@ const (
 // and testable.
 type ReviewReason string
 
+// The closed reason vocabulary. Each names the specific fact in the snapshot
+// that forced the decision, so a decision taken today stays explainable against
+// the rules that produced it.
 const (
 	ReasonAuthOrSecurityPath     ReviewReason = "auth_or_security_path"
 	ReasonMigrationOrSchemaPath  ReviewReason = "migration_or_schema_path"
@@ -141,6 +147,7 @@ type ReviewPolicyDecision struct {
 // REQUIRED-trigger checks already gate.
 type TaskComplexity string
 
+// The three complexity bands, cheapest first.
 const (
 	ComplexityTrivial  TaskComplexity = "trivial"
 	ComplexityNormal   TaskComplexity = "normal"

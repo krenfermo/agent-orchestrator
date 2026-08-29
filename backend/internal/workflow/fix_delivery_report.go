@@ -27,17 +27,17 @@ import (
 type FixDeliveryState string
 
 const (
-	// FixDeliveryStateIntent: AO wrote the pre-delivery record and has not yet
+	// FixDeliveryStateIntent means AO wrote the pre-delivery record and has not yet
 	// recorded an outcome. After a restart this is the window recovery reasons
 	// about; steady-state it means the send is in flight.
 	FixDeliveryStateIntent FixDeliveryState = "intent_recorded"
-	// FixDeliveryStateDispatched: the prompt was delivered and the cycle's
+	// FixDeliveryStateDispatched means the prompt was delivered and the cycle's
 	// attempt row exists.
 	FixDeliveryStateDispatched FixDeliveryState = "dispatched"
-	// FixDeliveryStateTransportRetry: the transport refused the prompt before
+	// FixDeliveryStateTransportRetry means the transport refused the prompt before
 	// any of it reached the agent; AO is re-sending on its own.
 	FixDeliveryStateTransportRetry FixDeliveryState = "transport_retry"
-	// FixDeliveryStateNotSubmitted: the prompt is in the agent's composer and
+	// FixDeliveryStateNotSubmitted means the prompt is in the agent's composer and
 	// was never submitted.
 	FixDeliveryStateNotSubmitted FixDeliveryState = "loaded_not_submitted"
 )

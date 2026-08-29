@@ -13,6 +13,9 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/workflow/wake"
 )
 
+// CreateObjectiveRun creates a master run for an objective and its plan row,
+// under the given approval mode. It refuses when no planner is wired: a master
+// run with nothing that can plan it would be a run that can never start.
 func (c *Coordinator) CreateObjectiveRun(ctx stdctx.Context, projectID, objective string, mode domain.WorkflowPlanApprovalMode) (RunDetail, error) {
 	if c.planStore == nil || c.planner == nil || c.plannerContextBuilder == nil {
 		return RunDetail{}, fmt.Errorf("%w: planner is unavailable", ErrInvalid)
@@ -164,6 +167,9 @@ func (c *Coordinator) healOrphanedObjectiveRun(ctx stdctx.Context, run domain.Wo
 	return true, nil
 }
 
+// GeneratePlan invokes the planner for a run and persists the plan it returns,
+// validated and hashed. It is single-flight through the plan row's own command
+// status, so a repeated call while one is in flight does not launch a second.
 func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail, error) {
 	run, ok, err := c.store.GetWorkflowRun(ctx, runID)
 	if err != nil {
@@ -640,6 +646,9 @@ func (c *Coordinator) stopPlanningStep(ctx stdctx.Context, runID string) {
 	}
 }
 
+// ApprovePlan approves a run's validated plan and materialises its tasks, so
+// the run may begin dispatching work. It is idempotent: approving an
+// already-approved plan returns the current detail rather than approving twice.
 func (c *Coordinator) ApprovePlan(ctx stdctx.Context, runID string) (RunDetail, error) {
 	run, ok, err := c.store.GetWorkflowRun(ctx, runID)
 	if err != nil {
@@ -736,6 +745,7 @@ func (c *Coordinator) convergeApprovedPlan(ctx stdctx.Context, run domain.Workfl
 	}
 }
 
+// RejectPlan refuses a run's plan, ending the run without dispatching any work.
 func (c *Coordinator) RejectPlan(ctx stdctx.Context, runID string) (RunDetail, error) {
 	run, ok, err := c.store.GetWorkflowRun(ctx, runID)
 	if err != nil {

@@ -24,6 +24,8 @@ const verifyResultVersion = "v1"
 // any target, because it never got as far as having one.
 const verifyUnexecutedTarget = "invalid-target"
 
+// VerifyCommandRequest is one command a VerifyRunner is asked to execute, with
+// the directory and timeout it must be executed under.
 type VerifyCommandRequest struct {
 	Command   string
 	Args      []string
@@ -31,6 +33,9 @@ type VerifyCommandRequest struct {
 	Timeout   time.Duration
 }
 
+// VerifyCommandExecution is what actually happened when a command ran. TimedOut
+// is distinct from a non-zero ExitCode on purpose: a timeout says nothing about
+// whether the work passed, only that AO stopped waiting.
 type VerifyCommandExecution struct {
 	ExitCode   int    `json:"exitCode"`
 	DurationMS int64  `json:"durationMs"`
@@ -39,10 +44,14 @@ type VerifyCommandExecution struct {
 	TimedOut   bool   `json:"timedOut,omitempty"`
 }
 
+// VerifyRunner executes one verification command. It is the only seam through
+// which verification touches the host.
 type VerifyRunner interface {
 	Run(ctx stdctx.Context, req VerifyCommandRequest) (VerifyCommandExecution, error)
 }
 
+// VerifyCheckResult is the durable record of one check: what was asked, what
+// happened, and -- when it failed -- why, in terms a person can re-check.
 type VerifyCheckResult struct {
 	Kind   string `json:"kind"`
 	Label  string `json:"label"`
@@ -60,6 +69,10 @@ type VerifyCheckResult struct {
 	FailureReason string `json:"failureReason,omitempty"`
 }
 
+// VerifyResult is the durable outcome of one verification pass. It pins the
+// target it verified and the fingerprints it verified between, so a later
+// reader can tell whether the result still describes the workspace rather than
+// having to re-derive that from a tree that may since have moved.
 type VerifyResult struct {
 	Version             string                    `json:"version"`
 	TargetKey           string                    `json:"targetKey"`

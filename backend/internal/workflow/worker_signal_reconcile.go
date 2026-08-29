@@ -76,23 +76,23 @@ const (
 type WorkerLifecycleState string
 
 const (
-	// WorkerLifecycleStarting: dispatched, inside the ordinary startup grace,
+	// WorkerLifecycleStarting means dispatched, inside the ordinary startup grace,
 	// no first signal yet. Nothing is wrong.
 	WorkerLifecycleStarting WorkerLifecycleState = "starting"
-	// WorkerLifecycleRunning: the worker has proven it is working — a first
+	// WorkerLifecycleRunning means the worker has proven it is working — a first
 	// signal, activity since dispatch, or observable work in the tree.
 	WorkerLifecycleRunning WorkerLifecycleState = "running"
-	// WorkerLifecycleSignalDelayed: past the startup grace with no first
+	// WorkerLifecycleSignalDelayed means past the startup grace with no first
 	// signal, but AO holds positive evidence that the worker is alive or
 	// working. Explicitly NOT a failure; explicitly not "healthy" either.
 	WorkerLifecycleSignalDelayed WorkerLifecycleState = "signal_delayed"
-	// WorkerLifecycleReconciling: past the startup grace, no first signal, and
+	// WorkerLifecycleReconciling means past the startup grace, no first signal, and
 	// AO could not obtain the evidence it needs either way. It keeps looking,
 	// bounded by workStepSignalReconcileTimeout.
 	WorkerLifecycleReconciling WorkerLifecycleState = "reconciling"
-	// WorkerLifecycleCompleted: the worker produced verifiable work.
+	// WorkerLifecycleCompleted means the worker produced verifiable work.
 	WorkerLifecycleCompleted WorkerLifecycleState = "completed"
-	// WorkerLifecycleFailed: AO can prove the worker did not start and left
+	// WorkerLifecycleFailed means AO can prove the worker did not start and left
 	// nothing behind.
 	WorkerLifecycleFailed WorkerLifecycleState = "failed"
 )

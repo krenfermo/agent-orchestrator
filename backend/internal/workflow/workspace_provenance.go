@@ -51,26 +51,26 @@ import (
 type WorkspaceProvenanceClass string
 
 const (
-	// ProvenanceAuthorizedWork: this run's own work step produced it, in this
+	// ProvenanceAuthorizedWork means this run's own work step produced it, in this
 	// run's own worktree, on this run's own branch.
 	ProvenanceAuthorizedWork WorkspaceProvenanceClass = "AUTHORIZED_WORK"
-	// ProvenanceAuthorizedFix: this run's own fix step produced it, under a
+	// ProvenanceAuthorizedFix means this run's own fix step produced it, under a
 	// reviewer-requested or verify-driven fix cycle AO itself dispatched.
 	ProvenanceAuthorizedFix WorkspaceProvenanceClass = "AUTHORIZED_FIX"
-	// ProvenancePreexisting: the difference was already there when this task was
+	// ProvenancePreexisting means the difference was already there when this task was
 	// dispatched. Not this task's work, and not new either.
 	ProvenancePreexisting WorkspaceProvenanceClass = "PREEXISTING"
-	// ProvenanceOtherAOTask: another AO task owns this worktree or this branch.
+	// ProvenanceOtherAOTask means another AO task owns this worktree or this branch.
 	// AO knows exactly who, and it is not this run.
 	ProvenanceOtherAOTask WorkspaceProvenanceClass = "OTHER_AO_TASK"
-	// ProvenanceExternal: the worktree or the branch is not the one this run was
+	// ProvenanceExternal means the worktree or the branch is not the one this run was
 	// authorized to work in at all.
 	ProvenanceExternal WorkspaceProvenanceClass = "EXTERNAL"
-	// ProvenanceConflicting: the history AO certified is no longer reachable —
+	// ProvenanceConflicting means the history AO certified is no longer reachable —
 	// an amend, a reset or a rebase dropped it. The reviewed work is not on the
 	// branch, and only a person can say what that means.
 	ProvenanceConflicting WorkspaceProvenanceClass = "CONFLICTING"
-	// ProvenanceUnknown: AO cannot attribute the difference. The default, and
+	// ProvenanceUnknown means AO cannot attribute the difference. The default, and
 	// the honest answer whenever any required fact could not be read.
 	ProvenanceUnknown WorkspaceProvenanceClass = "UNKNOWN"
 )

@@ -12,12 +12,19 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
+// MasterPlanVersion is the plan-format version stamped into every plan AO
+// generates; MaxPlanSteps is the default ceiling on how many steps one plan may
+// contain, and PlannerContextVersion versions the context manifest a plan was
+// generated from, so a stored manifest stays interpretable after the shape
+// changes.
 const (
 	MasterPlanVersion     = "v1"
 	MaxPlanSteps          = 12
 	PlannerContextVersion = "v1"
 )
 
+// MasterPlan is a planner's whole answer to one objective: the ordered steps
+// it proposes, and the summary it proposes them under.
 type MasterPlan struct {
 	Version   string        `json:"version"`
 	Objective string        `json:"objective"`
@@ -25,6 +32,13 @@ type MasterPlan struct {
 	Steps     []PlannedStep `json:"steps"`
 }
 
+// PlannedStep is one step of a MasterPlan as the planner wrote it -- what to
+// do, how to tell it is done, and the optional declarations (write intent,
+// scope, waivers) that let AO schedule it against its siblings.
+//
+// Every optional field is omitempty and nil when undeclared, so a plan that
+// says nothing about them serializes -- and therefore hashes -- exactly as it
+// did before they existed.
 type PlannedStep struct {
 	ID                 string           `json:"id"`
 	Title              string           `json:"title"`
@@ -80,11 +94,17 @@ type PlannedSafeOverlap struct {
 	Reason string `json:"reason"`
 }
 
+// PlanValidation is the structural verdict on a generated plan. Errors is
+// non-empty exactly when Valid is false, and says what a person would have to
+// change for the plan to be executable.
 type PlanValidation struct {
 	Valid  bool     `json:"valid"`
 	Errors []string `json:"errors"`
 }
 
+// PlannerContext is the repository state a plan was generated against, pinned
+// so a stored plan can be read back against the world it was written for.
+// Version is PlannerContextVersion.
 type PlannerContext struct {
 	Version     string            `json:"version"`
 	ProjectID   string            `json:"projectId"`
@@ -95,11 +115,16 @@ type PlannerContext struct {
 	Documents   []PlannerDocument `json:"documents"`
 }
 
+// PlannerDocument is one planning document included in a PlannerContext, with
+// the digest of the content that was actually sent.
 type PlannerDocument struct {
 	Path    string `json:"path"`
 	SHA256  string `json:"sha256"`
 	Content string `json:"content"`
 }
+
+// PlannerRequest is one invocation of a Planner: the objective, the project,
+// the pinned context, and the step ceiling to plan within.
 type PlannerRequest struct {
 	Objective string
 	Project   domain.ProjectRecord
@@ -113,22 +138,36 @@ type PlannerRequest struct {
 	// checkpoint).
 	RuntimeEnv map[string]string
 }
+
+// PlannerResponse is a Planner's output together with the provider and model
+// that produced it, so the plan can be attributed after the fact.
 type PlannerResponse struct {
 	Plan     MasterPlan
 	Provider string
 	Model    string
 }
 
+// Planner turns an objective into a MasterPlan. It returns an error rather
+// than a partial plan: a plan AO cannot fully parse is not one it may execute.
 type Planner interface {
 	Generate(ctx stdctx.Context, request PlannerRequest) (PlannerResponse, error)
 }
+
+// PlannerDescriptor is the optional capability a Planner may also implement to
+// name the provider and model it will use, without being invoked.
 type PlannerDescriptor interface {
 	Descriptor() (provider, model string)
 }
+
+// PlannerContextBuilder assembles the PlannerContext a plan is generated from.
 type PlannerContextBuilder interface {
 	Build(ctx stdctx.Context, project domain.ProjectRecord) (PlannerContext, error)
 }
 
+// NormalizeAndValidatePlan puts a planner's raw plan into canonical form and
+// checks it is executable. It returns the normalized plan, the verdict, and the
+// plan hash -- the hash being what a later approval pins, so an approval can
+// prove which plan it approved.
 func NormalizeAndValidatePlan(plan MasterPlan, objective string, maxSteps int) (MasterPlan, PlanValidation, string) {
 	if maxSteps <= 0 {
 		maxSteps = MaxPlanSteps

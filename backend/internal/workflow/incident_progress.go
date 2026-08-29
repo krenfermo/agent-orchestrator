@@ -23,36 +23,39 @@ import (
 type IncidentProgress string
 
 const (
-	// IncidentProgressAnalyzing: AO has an incident and no diagnosis yet.
+	// IncidentProgressAnalyzing means AO has an incident and no diagnosis yet.
 	IncidentProgressAnalyzing IncidentProgress = "analyzing"
-	// IncidentProgressWaitingCapacity: AO wants to run a diagnostic agent and
+	// IncidentProgressWaitingCapacity means AO wants to run a diagnostic agent and
 	// no provider currently has capacity. Self-remediable; a wake is pending.
 	IncidentProgressWaitingCapacity IncidentProgress = "waiting_capacity"
-	// IncidentProgressDiagnosing: a Diagnostic Agent is running.
+	// IncidentProgressDiagnosing means a Diagnostic Agent is running.
 	IncidentProgressDiagnosing IncidentProgress = "diagnosing"
-	// IncidentProgressDiagnosisBlocked: a Diagnostic Agent was launched and is
+	// IncidentProgressDiagnosisBlocked means a Diagnostic Agent was launched and is
 	// waiting on a person inside its own session — a trust dialog, a permission
 	// prompt, a login. It is deliberately NOT "diagnosing": that is where this
 	// state used to hide, and reporting an investigation as making progress
 	// while it waits for input nobody knows to give is the whole of incident F.
 	IncidentProgressDiagnosisBlocked IncidentProgress = "diagnosis_blocked"
-	// IncidentProgressDiagnosed: a diagnosis exists and proposes nothing to run.
+	// IncidentProgressDiagnosed means a diagnosis exists and proposes nothing to run.
 	IncidentProgressDiagnosed IncidentProgress = "diagnosed"
-	// IncidentProgressAwaitingApproval: a diagnosis proposes an action that
+	// IncidentProgressAwaitingApproval means a diagnosis proposes an action that
 	// needs a person to say yes.
 	IncidentProgressAwaitingApproval IncidentProgress = "awaiting_approval"
-	// IncidentProgressRepairing / Reviewing / Verifying track the repair run's
-	// own steps, so the modal shows where the repair actually is.
+	// IncidentProgressRepairing means the repair run's work step is running.
 	IncidentProgressRepairing IncidentProgress = "repairing"
+	// IncidentProgressReviewing means the repair is under review.
 	IncidentProgressReviewing IncidentProgress = "reviewing"
+	// IncidentProgressVerifying means the repair is being verified. Repairing,
+	// reviewing and verifying track the repair run's own steps, so the modal
+	// shows where the repair actually is.
 	IncidentProgressVerifying IncidentProgress = "verifying"
-	// IncidentProgressResolved: AO did something attributable and it verified.
+	// IncidentProgressResolved means AO did something attributable and it verified.
 	IncidentProgressResolved IncidentProgress = "resolved"
-	// IncidentProgressClosed: the condition went away by another route.
+	// IncidentProgressClosed means the condition went away by another route.
 	IncidentProgressClosed IncidentProgress = "closed"
-	// IncidentProgressRefused: AO declined to act and said why.
+	// IncidentProgressRefused means AO declined to act and said why.
 	IncidentProgressRefused IncidentProgress = "refused"
-	// IncidentProgressNeedsDecision: the diagnosis is a human decision with
+	// IncidentProgressNeedsDecision means the diagnosis is a human decision with
 	// options, and none of them is AO's to take.
 	IncidentProgressNeedsDecision IncidentProgress = "needs_decision"
 )

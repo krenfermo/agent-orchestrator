@@ -28,7 +28,7 @@ import "strings"
 type IncidentActionKind string
 
 const (
-	// IncidentActionNone: nothing to do. The honest proposal for a
+	// IncidentActionNone means nothing to do. The honest proposal for a
 	// human_decision_required or unsafe_or_insufficient_evidence diagnosis,
 	// and the default when an agent proposes something unrecognised.
 	IncidentActionNone IncidentActionKind = "none"
@@ -52,7 +52,7 @@ const (
 	// but it ends work, so it always needs a person.
 	IncidentActionCancelRun IncidentActionKind = "cancel_run"
 
-	// IncidentActionAwaitHuman: the remedy is something only the person can do
+	// IncidentActionAwaitHuman means the remedy is something only the person can do
 	// outside AO (install a tool, fix credentials, resolve their own dirty
 	// worktree). AO records the advice and does nothing.
 	IncidentActionAwaitHuman IncidentActionKind = "await_human"
@@ -187,14 +187,6 @@ func incidentActionNeedsApproval(class IncidentClass, kind IncidentActionKind) b
 	return !policy.AutoAuthorized
 }
 
-// DescribeIncidentAction is the API's single source for how an action must be
-// presented and whether it may be offered as a one-click control.
-//
-// It exists so the frontend never re-derives any of this. A UI that inferred
-// "does this need approval" from a classification string would eventually infer
-// it differently from authorizeIncidentAction — and the executor is the one
-// holding the permission, so the two disagreeing means either a button that
-// errors or, far worse, a button that looks safe and is not.
 // IncidentActionDescription is everything the UI needs to render one incident
 // action: what it says it does, what it costs, and whether it may be offered.
 type IncidentActionDescription struct {
@@ -216,6 +208,14 @@ type IncidentActionDescription struct {
 	Refusal string
 }
 
+// DescribeIncidentAction is the API's single source for how an action must be
+// presented and whether it may be offered as a one-click control.
+//
+// It exists so the frontend never re-derives any of this. A UI that inferred
+// "does this need approval" from a classification string would eventually infer
+// it differently from authorizeIncidentAction — and the executor is the one
+// holding the permission, so the two disagreeing means either a button that
+// errors or, far worse, a button that looks safe and is not.
 func DescribeIncidentAction(class IncidentClass, kind IncidentActionKind) IncidentActionDescription {
 	resolved, policy := lookupIncidentAction(kind)
 	out := IncidentActionDescription{

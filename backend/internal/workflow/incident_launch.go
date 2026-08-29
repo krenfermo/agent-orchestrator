@@ -63,12 +63,12 @@ func incidentDiagnoseIdempotencyKey(incidentID string, generation int) string {
 type IncidentLaunchOutcome string
 
 const (
-	// IncidentLaunched: a Diagnostic Agent pane was created by this call.
+	// IncidentLaunched means a Diagnostic Agent pane was created by this call.
 	IncidentLaunched IncidentLaunchOutcome = "launched"
-	// IncidentAlreadyRunning: this generation was already launched (by a poll,
+	// IncidentAlreadyRunning means this generation was already launched (by a poll,
 	// a double click, or a pass before a restart). Nothing new was started.
 	IncidentAlreadyRunning IncidentLaunchOutcome = "already_running"
-	// IncidentWaitingForCapacity: routing found no eligible provider right now.
+	// IncidentWaitingForCapacity means routing found no eligible provider right now.
 	// A durable wake is scheduled; nobody has a decision to make.
 	IncidentWaitingForCapacity IncidentLaunchOutcome = "waiting_for_capacity"
 )

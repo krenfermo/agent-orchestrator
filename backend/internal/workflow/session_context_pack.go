@@ -36,6 +36,8 @@ func RenderContextPackForRole(pack domain.SessionContextPack) string {
 // mechanism, never a truncation one.
 type ContextPackField string
 
+// The fields a context pack may declare it omitted, each legitimate only while
+// the same content is present in full elsewhere in the message.
 const (
 	ContextPackObjective          ContextPackField = "objective"
 	ContextPackAcceptanceCriteria ContextPackField = "acceptanceCriteria"

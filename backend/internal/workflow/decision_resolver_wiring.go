@@ -83,10 +83,7 @@ func (c *Coordinator) dispatchDecisionResolver(ctx stdctx.Context, run domain.Wo
 	if c.decisionResolverLauncher == nil {
 		return "waiting_for_capacity: resolver unavailable (no launcher configured)", nil
 	}
-	selection, err := c.selectDecisionResolverProvider(ctx, run, q.AskingHarness)
-	if err != nil {
-		return "", err
-	}
+	selection := c.selectDecisionResolverProvider(ctx, run, q.AskingHarness)
 	if !selection.Available {
 		return "waiting_for_capacity: resolver unavailable", nil
 	}

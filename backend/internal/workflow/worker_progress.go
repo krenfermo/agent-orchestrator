@@ -37,6 +37,8 @@ const workStepFirstSignalTimeout = 10 * time.Minute
 // checkpoint next_action text are what gets stored.
 type WorkerProgress string
 
+// The observable worker states, in the order a healthy worker passes through
+// them.
 const (
 	WorkerCreated WorkerProgress = "worker_created"
 	WorkerStarted WorkerProgress = "worker_started"

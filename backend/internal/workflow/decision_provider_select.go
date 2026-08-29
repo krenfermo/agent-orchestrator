@@ -28,7 +28,7 @@ type DecisionProviderSelection struct {
 // (never an error) means the caller leaves the question at state=resolving
 // and retries on the next reconcile pass rather than escalating to
 // human_required.
-func (c *Coordinator) selectDecisionResolverProvider(ctx stdctx.Context, run domain.WorkflowRun, asking domain.AgentHarness) (DecisionProviderSelection, error) {
+func (c *Coordinator) selectDecisionResolverProvider(ctx stdctx.Context, run domain.WorkflowRun, asking domain.AgentHarness) DecisionProviderSelection {
 	owner := c.runOwner(ctx, run.ID)
 	snapshot := policyForRun(run).EffectiveExecutionPolicy()
 	policy, eligible, ineligible, capacity := c.routingInputsForRole(ctx, owner, domain.WorkflowRoleDecisionResolver, snapshot)
@@ -44,8 +44,8 @@ func (c *Coordinator) selectDecisionResolverProvider(ctx stdctx.Context, run dom
 	stepID := (*string)(nil)
 	_ = c.persistRoutingDecision(ctx, run, stepID, decision)
 	if decision.Waiting || decision.SelectedHarness == "" {
-		return DecisionProviderSelection{}, nil
+		return DecisionProviderSelection{}
 	}
 	sameProvider := domain.ProviderForHarness(decision.SelectedHarness) == domain.ProviderForHarness(asking)
-	return DecisionProviderSelection{Harness: decision.SelectedHarness, Available: true, SameProvider: sameProvider}, nil
+	return DecisionProviderSelection{Harness: decision.SelectedHarness, Available: true, SameProvider: sameProvider}
 }

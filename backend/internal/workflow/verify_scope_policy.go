@@ -34,6 +34,7 @@ const VerifyScopePolicyVersion = "v1"
 // file, REPOSITORY runs the Planner's commands completely unmodified.
 type VerifyScope string
 
+// The three scopes, cheapest first.
 const (
 	VerifyScopeTargeted   VerifyScope = "targeted"
 	VerifyScopeModule     VerifyScope = "module"
@@ -45,6 +46,7 @@ const (
 // created today remains explainable later (mirrors ReviewReason).
 type VerifyScopeReason string
 
+// The closed reason vocabulary, persisted alongside the scope it explains.
 const (
 	VerifyScopeReasonSensitiveRequiredReview     VerifyScopeReason = "sensitive_change_requires_repository_gate"
 	VerifyScopeReasonFinalIntegrationTask        VerifyScopeReason = "final_or_integration_task"

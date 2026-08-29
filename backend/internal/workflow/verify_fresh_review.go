@@ -91,6 +91,10 @@ const (
 	freshReviewPurposeAmendment      = "amendment"
 )
 
+// VerifyFreshReviewRecord is the durable payload of both fresh-review
+// checkpoints. It names the generation it belongs to and pins every fact the
+// decision was made from, so a restart re-reads the decision instead of
+// re-deriving it against a workspace that has since moved.
 type VerifyFreshReviewRecord struct {
 	// Purpose names the mechanism that authorized this fresh review: a verify
 	// recovery, an integration replay, a branch advance, an amended criterion.
