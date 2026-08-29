@@ -34,7 +34,7 @@ import (
 // but lets the caller choose the asking harness — needed for E2E 2 (Codex
 // asks), where seedRunningWorkStep's hardcoded "claude-code" session harness
 // doesn't apply.
-func seedRunningWorkStepHarness(t *testing.T, ctx context.Context, coord *workflowcore.Coordinator, store *sqlite.Store, sessionFacts *fakeSessionFacts, activity domain.ActivityState, harness domain.AgentHarness) (runID string, workStepID string, sessionID domain.SessionID) {
+func seedRunningWorkStepHarness(ctx context.Context, t *testing.T, coord *workflowcore.Coordinator, store *sqlite.Store, sessionFacts *fakeSessionFacts, activity domain.ActivityState, harness domain.AgentHarness) (runID string, workStepID string, sessionID domain.SessionID) {
 	t.Helper()
 	rec, err := store.CreateSession(ctx, domain.SessionRecord{
 		ProjectID: "p",
@@ -203,7 +203,7 @@ func TestDecisionResolverE2E_ClaudeAsksCodexResolves(t *testing.T) {
 	ctx := context.Background()
 	launcher := &fakeDecisionResolverLauncher{}
 	coord, store, sessionFacts, sender, _ := newDecisionResolverFixture(t, autoResolvableDiscoveryPaneText(), launcher)
-	runID, _, askingSessionID := seedRunningWorkStep(t, ctx, coord, store, sessionFacts, domain.ActivityWaitingInput)
+	runID, _, askingSessionID := seedRunningWorkStep(ctx, t, coord, store, sessionFacts, domain.ActivityWaitingInput)
 	srv := newDecisionsHTTPServer(t, store, sender)
 
 	var resolverGotAnswerHint bool
@@ -330,7 +330,7 @@ func TestDecisionResolverE2E_CodexAsksClaudeResolves(t *testing.T) {
 	ctx := context.Background()
 	launcher := &fakeDecisionResolverLauncher{}
 	coord, store, sessionFacts, sender, _ := newDecisionResolverFixture(t, codexDiscoveryPaneText(), launcher)
-	runID, _, askingSessionID := seedRunningWorkStepHarness(t, ctx, coord, store, sessionFacts, domain.ActivityWaitingInput, domain.HarnessCodex)
+	runID, _, askingSessionID := seedRunningWorkStepHarness(ctx, t, coord, store, sessionFacts, domain.ActivityWaitingInput, domain.HarnessCodex)
 	srv := newDecisionsHTTPServer(t, store, sender)
 
 	launcher.onLaunch = func(req workflowcore.DecisionResolverLaunchRequest) {
@@ -393,7 +393,7 @@ func TestDecisionResolverE2E_HumanSafetyNoResolverForBusinessQuestion(t *testing
 	ctx := context.Background()
 	launcher := &fakeDecisionResolverLauncher{}
 	coord, store, sessionFacts, sender, _ := newDecisionResolverFixture(t, businessTradeoffPaneText(), launcher)
-	runID, _, askingSessionID := seedRunningWorkStep(t, ctx, coord, store, sessionFacts, domain.ActivityWaitingInput)
+	runID, _, askingSessionID := seedRunningWorkStep(ctx, t, coord, store, sessionFacts, domain.ActivityWaitingInput)
 	srv := newDecisionsHTTPServer(t, store, sender)
 
 	if _, err := coord.GetRun(ctx, runID); err != nil {

@@ -124,7 +124,7 @@ func autoResolvableDiscoveryPaneText() string {
 // store keeps the fixture consistent). Returns the run and the real step id
 // (workflow_checkpoints.workflow_step_id has a FK to workflow_steps, so a
 // fabricated step id cannot be used).
-func seedRunWithPolicy(t *testing.T, ctx context.Context, store *sqlite.Store, policyJSON string) (domain.WorkflowRun, string) {
+func seedRunWithPolicy(ctx context.Context, t *testing.T, store *sqlite.Store, policyJSON string) (domain.WorkflowRun, string) {
 	t.Helper()
 	now := time.Now().UTC()
 	runID := "wf-" + t.Name()
@@ -159,7 +159,7 @@ func seedRunWithPolicy(t *testing.T, ctx context.Context, store *sqlite.Store, p
 // state=resolving question directly, simulating what Detect would have
 // produced for an auto_resolvable question — used by the provider-selection
 // tests below, which test dispatch in isolation from real pane detection.
-func seedResolvingQuestion(t *testing.T, ctx context.Context, store *sqlite.Store, runID, stepIDStr string, askingHarness domain.AgentHarness) domain.WorkflowQuestion {
+func seedResolvingQuestion(ctx context.Context, t *testing.T, store *sqlite.Store, runID, stepIDStr string, askingHarness domain.AgentHarness) domain.WorkflowQuestion {
 	t.Helper()
 	now := time.Now().UTC()
 	stepID := domain.WorkflowStepID(stepIDStr)
@@ -205,8 +205,8 @@ func TestDecisionProviderSelect_ClaudeAsksCodexPreferred(t *testing.T) {
 	coord, store, _, _, _ := newDecisionResolverFixture(t, "", launcher)
 	ctx := context.Background()
 
-	run, stepID := seedRunWithPolicy(t, ctx, store, `{"version":"v1","maxFixCycles":3}`)
-	seedResolvingQuestion(t, ctx, store, run.ID, stepID, domain.HarnessClaudeCode)
+	run, stepID := seedRunWithPolicy(ctx, t, store, `{"version":"v1","maxFixCycles":3}`)
+	seedResolvingQuestion(ctx, t, store, run.ID, stepID, domain.HarnessClaudeCode)
 
 	if _, err := coord.GetRun(ctx, run.ID); err != nil {
 		t.Fatalf("GetRun: %v", err)
@@ -224,8 +224,8 @@ func TestDecisionProviderSelect_CodexAsksClaudePreferred(t *testing.T) {
 	coord, store, _, _, _ := newDecisionResolverFixture(t, "", launcher)
 	ctx := context.Background()
 
-	run, stepID := seedRunWithPolicy(t, ctx, store, `{"version":"v1","maxFixCycles":3}`)
-	seedResolvingQuestion(t, ctx, store, run.ID, stepID, domain.HarnessCodex)
+	run, stepID := seedRunWithPolicy(ctx, t, store, `{"version":"v1","maxFixCycles":3}`)
+	seedResolvingQuestion(ctx, t, store, run.ID, stepID, domain.HarnessCodex)
 
 	if _, err := coord.GetRun(ctx, run.ID); err != nil {
 		t.Fatalf("GetRun: %v", err)
@@ -243,8 +243,8 @@ func TestDecisionProviderSelect_PreferredUnavailableNoSameProviderWaitsForCapaci
 	coord, store, _, _, clock := newDecisionResolverFixture(t, "", launcher)
 	ctx := context.Background()
 
-	run, stepID := seedRunWithPolicy(t, ctx, store, `{"version":"v1","maxFixCycles":3}`) // AllowSameProviderResolver defaults false
-	seedResolvingQuestion(t, ctx, store, run.ID, stepID, domain.HarnessClaudeCode)
+	run, stepID := seedRunWithPolicy(ctx, t, store, `{"version":"v1","maxFixCycles":3}`) // AllowSameProviderResolver defaults false
+	seedResolvingQuestion(ctx, t, store, run.ID, stepID, domain.HarnessClaudeCode)
 
 	if _, err := store.RecordAgentHealthEvent(ctx, domain.AgentHealthEvent{
 		ID: "ahe-1", Harness: domain.HarnessCodex, State: domain.AgentHealthUnavailable, Reason: "test", CreatedAt: clock.Now(),
@@ -315,11 +315,11 @@ func TestDecisionProviderSelect_PreferredUnavailableSameProviderAllowedFallsBack
 		t.Fatalf("UpsertUserExecutionPolicy: %v", err)
 	}
 
-	run, stepID := seedRunWithPolicy(t, ctx, store, `{"version":"v1","maxFixCycles":3}`)
+	run, stepID := seedRunWithPolicy(ctx, t, store, `{"version":"v1","maxFixCycles":3}`)
 	if _, err := store.SetWorkflowRunOwner(ctx, run.ID, userID); err != nil {
 		t.Fatalf("SetWorkflowRunOwner: %v", err)
 	}
-	seedResolvingQuestion(t, ctx, store, run.ID, stepID, domain.HarnessClaudeCode)
+	seedResolvingQuestion(ctx, t, store, run.ID, stepID, domain.HarnessClaudeCode)
 
 	if _, err := store.RecordAgentHealthEvent(ctx, domain.AgentHealthEvent{
 		ID: "ahe-1", Harness: domain.HarnessCodex, UserID: userID, ProviderProfileID: codexProfile.ID, State: domain.AgentHealthUnavailable, Reason: "test", CreatedAt: clock.Now(),
@@ -352,7 +352,7 @@ func TestDecisionResolver_EndToEnd_DetectDispatchCallbackDeliver(t *testing.T) {
 	ctx := context.Background()
 	launcher := &fakeDecisionResolverLauncher{}
 	coord, store, sessionFacts, sender, _ := newDecisionResolverFixture(t, autoResolvableDiscoveryPaneText(), launcher)
-	runID, _, askingSessionID := seedRunningWorkStep(t, ctx, coord, store, sessionFacts, domain.ActivityWaitingInput)
+	runID, _, askingSessionID := seedRunningWorkStep(ctx, t, coord, store, sessionFacts, domain.ActivityWaitingInput)
 
 	// Real HTTP server backed by the real router/service/store, exactly what
 	// a live daemon would expose for `ao decision resolve` to call.
@@ -469,7 +469,7 @@ func TestDecisionResolver_RestartRecoveryFreshCoordinatorDoesNotDoubleLaunch(t *
 	ctx := context.Background()
 	launcher := &fakeDecisionResolverLauncher{}
 	coord, store, sessionFacts, sender, _ := newDecisionResolverFixture(t, autoResolvableDiscoveryPaneText(), launcher)
-	runID, _, _ := seedRunningWorkStep(t, ctx, coord, store, sessionFacts, domain.ActivityWaitingInput)
+	runID, _, _ := seedRunningWorkStep(ctx, t, coord, store, sessionFacts, domain.ActivityWaitingInput)
 
 	if _, err := coord.GetRun(ctx, runID); err != nil {
 		t.Fatalf("GetRun (dispatch): %v", err)
@@ -506,7 +506,7 @@ func TestDecisionResolver_NeverAnsweredWithoutResolverResponseGoesHumanRequired(
 	ctx := context.Background()
 	launcher := &fakeDecisionResolverLauncher{} // no onLaunch: resolver "never calls back"
 	coord, store, sessionFacts, sender, clock := newDecisionResolverFixture(t, autoResolvableDiscoveryPaneText(), launcher)
-	runID, _, _ := seedRunningWorkStep(t, ctx, coord, store, sessionFacts, domain.ActivityWaitingInput)
+	runID, _, _ := seedRunningWorkStep(ctx, t, coord, store, sessionFacts, domain.ActivityWaitingInput)
 
 	if _, err := coord.GetRun(ctx, runID); err != nil {
 		t.Fatalf("GetRun (dispatch): %v", err)

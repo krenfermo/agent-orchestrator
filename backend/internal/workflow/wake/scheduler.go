@@ -139,6 +139,10 @@ func New(st Store, clock func() time.Time, newID func() string, cfg Config) *Sch
 	}
 	rng := cfg.Rand
 	if rng == nil {
+		// Retry jitter only: this spreads competing wakes apart so they do not
+		// all fire on the same tick. Nothing here is a secret, a token or a
+		// key, so a cryptographic source would buy nothing.
+		//nolint:gosec // G404: jitter for retry spreading, not security.
 		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	}
 	return &Scheduler{store: st, clock: clock, newID: newID, cfg: cfg, rng: rng}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
@@ -190,15 +189,6 @@ func runHasActiveWork(steps []domain.WorkflowStep) (string, bool) {
 type verifyClaimsState struct {
 	verifyClaimsMu sync.Mutex
 	verifyClaims   map[string]struct{}
-}
-
-// clockOrNow is a small helper for callers that may run before the coordinator
-// clock is wired in tests.
-func (c *Coordinator) clockOrNow() time.Time {
-	if c.clock == nil {
-		return time.Time{}
-	}
-	return c.clock()
 }
 
 // ---- test seams -------------------------------------------------------------

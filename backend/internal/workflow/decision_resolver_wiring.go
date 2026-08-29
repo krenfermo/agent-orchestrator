@@ -33,12 +33,12 @@ func (c *Coordinator) reconcileDecisionResolvers(ctx stdctx.Context, run domain.
 	if c.questionsStore == nil || run.State.Terminal() {
 		return "", nil
 	}
-	questions, err := c.questionsStore.ListWorkflowQuestionsByRun(ctx, run.ID)
+	openQuestions, err := c.questionsStore.ListWorkflowQuestionsByRun(ctx, run.ID)
 	if err != nil {
 		return "", err
 	}
 	waitingForCapacity := ""
-	for _, q := range questions {
+	for _, q := range openQuestions {
 		if q.State != domain.QuestionStateResolving {
 			continue
 		}
@@ -83,7 +83,7 @@ func (c *Coordinator) dispatchDecisionResolver(ctx stdctx.Context, run domain.Wo
 	if c.decisionResolverLauncher == nil {
 		return "waiting_for_capacity: resolver unavailable (no launcher configured)", nil
 	}
-	selection, err := c.selectDecisionResolverProvider(ctx, run, q.AskingHarness, now)
+	selection, err := c.selectDecisionResolverProvider(ctx, run, q.AskingHarness)
 	if err != nil {
 		return "", err
 	}

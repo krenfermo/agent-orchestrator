@@ -28,7 +28,7 @@ func directBranchLocks(repoPath string) *fakeBranchLocks {
 // A launch retry must queue behind the branch's real holder, exactly like a
 // first dispatch does — never "the retry is owed, so take the branch".
 func TestWorkerLaunchRetry_StillWaitsForTheBranchItDoesNotOwn(t *testing.T) {
-	spawn := &launchSpawner{failWith: tmuxNoSuchSessionErr, failCount: 1}
+	spawn := &launchSpawner{failWith: errTmuxNoSuchSession, failCount: 1}
 	locks := directBranchLocks("/repo")
 	f := newLaunchFixtureWithLocks(t, spawn, locks)
 	f.start()
@@ -118,7 +118,7 @@ func TestWorkerLaunchReopen_StillRefusesADirtyPrimaryCheckout(t *testing.T) {
 // smart_parallel_worktrees: no repo+branch target to own) is unaffected by any
 // of this — the retry path adds no new ownership requirement and removes none.
 func TestWorkerLaunchRetry_IsolatedWorktreeProjectsAreUnaffected(t *testing.T) {
-	spawn := &launchSpawner{failWith: tmuxNoSuchSessionErr, failCount: 1}
+	spawn := &launchSpawner{failWith: errTmuxNoSuchSession, failCount: 1}
 	locks := newFakeBranchLocks() // no targets => not direct-branch
 	f := newLaunchFixtureWithLocks(t, spawn, locks)
 	f.start()

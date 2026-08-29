@@ -44,6 +44,7 @@ func (c *Coordinator) healPlannedTaskArtifact(ctx stdctx.Context, childRunID str
 	if err := unmarshalJSONIfPresent(task.AcceptanceCriteriaJSON, &criteria); err != nil {
 		// A criteria blob that will not parse is not something to guess at.
 		// Leave the child exactly as it is rather than substituting anything.
+		//nolint:nilerr // unparseable criteria heals nothing; it is not a heal failure.
 		return nil
 	}
 	overlay := plannedTaskArtifactFor(task, criteria)

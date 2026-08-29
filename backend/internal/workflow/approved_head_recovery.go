@@ -509,7 +509,7 @@ func (c *Coordinator) RecoverUnprovableApprovedHead(ctx stdctx.Context, runID st
 	// The identical, idempotent reopen every fresh-review mechanism in this
 	// package ends on: review out of `completed`, verify out of `failed`, run
 	// out of `needs_attention`, resting at `waiting` on a reviewer.
-	_, reopened, err := c.applyFreshReviewReopen(ctx, run, *reviewStep, *verifyStep, rec.freshReviewRecord())
+	_, reopened, err := c.applyFreshReviewReopen(ctx, run, *reviewStep, *verifyStep)
 	if err != nil {
 		return RunDetail{}, err
 	}

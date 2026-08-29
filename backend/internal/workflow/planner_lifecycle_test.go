@@ -25,7 +25,7 @@ type documentContext struct {
 func (b documentContext) Build(_ context.Context, p domain.ProjectRecord) (workflowcore.PlannerContext, error) {
 	docs := make([]workflowcore.PlannerDocument, len(b.docs))
 	copy(docs, b.docs)
-	return workflowcore.PlannerContext{Version: "v1", ProjectID: string(p.ID), ProjectPath: p.Path, Documents: docs}, nil
+	return workflowcore.PlannerContext{Version: "v1", ProjectID: p.ID, ProjectPath: p.Path, Documents: docs}, nil
 }
 
 // recordingPlanner captures the request and context it was handed, and can

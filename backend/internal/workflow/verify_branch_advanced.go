@@ -131,6 +131,10 @@ type branchAdvancedRecord struct {
 // already speaks, so a branch advance is served by the SAME dispatch branch as
 // a verify recovery, an integration replay and a criterion amendment, rather
 // than by a fourth one of its own.
+// reviewStep and priorReviewRun satisfy freshReviewLedgerEntry.
+func (r branchAdvancedRecord) reviewStep() string     { return r.ReviewStepID }
+func (r branchAdvancedRecord) priorReviewRun() string { return r.PriorReviewRunID }
+
 func (r branchAdvancedRecord) freshReviewRecord() VerifyFreshReviewRecord {
 	return VerifyFreshReviewRecord{
 		Purpose:             freshReviewPurposeBranchAdvance,
@@ -528,6 +532,7 @@ func (c *Coordinator) resumeBranchAdvancedVerify(ctx stdctx.Context, run domain.
 	})
 	if err != nil {
 		// Unreadable is not "unchanged". The run stays where it is.
+		//nolint:nilerr // an unobservable workspace licenses nothing; retry next pass.
 		return run, false, nil
 	}
 	current := WorkspaceFingerprint(obs)
@@ -548,7 +553,7 @@ func (c *Coordinator) resumeBranchAdvancedVerify(ctx stdctx.Context, run domain.
 	// `failed`, run out of `needs_attention`, resting at `waiting` on a
 	// reviewer. Sharing it is what keeps the two mechanisms converging on one
 	// resting state instead of two nearly-identical ones.
-	run, reopened, err := c.applyFreshReviewReopen(ctx, run, *reviewStep, *verifyStep, rec.freshReviewRecord())
+	run, reopened, err := c.applyFreshReviewReopen(ctx, run, *reviewStep, *verifyStep)
 	if err != nil {
 		return run, false, err
 	}
@@ -570,45 +575,5 @@ func (c *Coordinator) resumeBranchAdvancedVerify(ctx stdctx.Context, run domain.
 // a second ledger — the moment a new review run is linked, the request is
 // answered, and no restart, poll or repeated Continue can produce a second.
 func (c *Coordinator) pendingBranchAdvancedFreshReview(ctx stdctx.Context, runID, reviewStepID string) (VerifyFreshReviewRecord, bool) {
-	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
-	if err != nil {
-		return VerifyFreshReviewRecord{}, false
-	}
-	var newest *branchAdvancedRecord
-	var newestAt time.Time
-	for i := range cps {
-		cp := &cps[i]
-		if cp.DurablePhase != verifyBranchAdvancedPhase {
-			continue
-		}
-		var rec branchAdvancedRecord
-		if json.Unmarshal([]byte(cp.RetryState), &rec) != nil {
-			continue
-		}
-		if rec.ReviewStepID != "" && rec.ReviewStepID != reviewStepID {
-			continue
-		}
-		if newest == nil || !cp.CreatedAt.Before(newestAt) {
-			copied := rec
-			newest, newestAt = &copied, cp.CreatedAt
-		}
-	}
-	if newest == nil {
-		return VerifyFreshReviewRecord{}, false
-	}
-	// Self-closing: once the step points at a review run other than the stale
-	// approval, the fresh review has been dispatched and nothing is owed.
-	steps, err := c.store.ListWorkflowSteps(ctx, runID)
-	if err != nil {
-		return VerifyFreshReviewRecord{}, false
-	}
-	for _, s := range steps {
-		if s.ID != reviewStepID || s.ReviewRunID == nil {
-			continue
-		}
-		if *s.ReviewRunID != newest.PriorReviewRunID {
-			return VerifyFreshReviewRecord{}, false
-		}
-	}
-	return newest.freshReviewRecord(), true
+	return pendingFreshReviewFromPhase[branchAdvancedRecord](c, ctx, runID, reviewStepID, verifyBranchAdvancedPhase)
 }

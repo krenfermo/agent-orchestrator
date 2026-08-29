@@ -325,7 +325,7 @@ func (c *Coordinator) maybeDispatchFix(ctx stdctx.Context, run domain.WorkflowRu
 // reused session gets a fresh fact anchor instead of relying purely on
 // accumulated conversation state across many cycles. Never changes which
 // session receives the prompt.
-func (c *Coordinator) applyFixLifecycleDecision(ctx stdctx.Context, run domain.WorkflowRun, fixStep domain.WorkflowStep, reviewRun domain.ReviewRun, cycleCount int, prompt string) (string, bool) {
+func (c *Coordinator) applyFixLifecycleDecision(ctx stdctx.Context, run domain.WorkflowRun, reviewRun domain.ReviewRun, cycleCount int, prompt string) (string, bool) {
 	health := domain.SessionHealthUnknown
 	if c.sessionFacts != nil {
 		rec, found, err := c.sessionFacts.GetSession(ctx, reviewRun.SessionID)

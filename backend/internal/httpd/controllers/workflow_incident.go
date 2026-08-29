@@ -349,13 +349,13 @@ func incidentView(inc workflowcore.Incident, pack *workflowcore.IncidentContextP
 		})
 	}
 	if d.Action != nil {
-		describe, risk, needs, endsWork, writesCode, executable, refusal := workflowcore.DescribeIncidentAction(d.Class, d.Action.Kind)
+		desc := workflowcore.DescribeIncidentAction(d.Class, d.Action.Kind)
 		dv.Action = &IncidentActionView{
 			Kind: string(d.Action.Kind), Rationale: d.Action.Reason,
-			Describe: describe, Risk: risk, NeedsApproval: needs,
-			Destructive: endsWork, WritesCode: writesCode,
-			Executable:    executable && inc.CanExecute() && !inc.Stale,
-			RefusalReason: refusal,
+			Describe: desc.Describe, Risk: desc.Risk, NeedsApproval: desc.NeedsApproval,
+			Destructive: desc.EndsWork, WritesCode: desc.WritesCode,
+			Executable:    desc.Executable && inc.CanExecute() && !inc.Stale,
+			RefusalReason: desc.Refusal,
 		}
 	}
 	v.Diagnosis = dv

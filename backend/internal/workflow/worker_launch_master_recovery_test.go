@@ -25,7 +25,7 @@ func TestMasterClearsChildNeedsAttentionAfterAWorkerLaunchRecovery(t *testing.T)
 
 	// The runtime refuses to start a worker — the incident's own error, used
 	// here as an ordinary input.
-	fx.spawner.failWith = tmuxNoSuchSessionErr
+	fx.spawner.failWith = errTmuxNoSuchSession
 	_, childID := dispatchedChild(t, fx, masterID)
 
 	// Drive the daemon until the child has spent its bounded launch budget and

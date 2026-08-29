@@ -41,10 +41,12 @@ import (
 // set of touched paths changes the hash.
 func WorkspaceFingerprint(obs ports.WorkspaceObservation) string {
 	lines := make([]string, 0, len(obs.Changes)+4)
-	lines = append(lines, "head_sha="+obs.HeadSHA)
-	lines = append(lines, "dirty="+strconv.FormatBool(obs.Dirty))
-	lines = append(lines, "staged="+strconv.FormatBool(obs.Staged))
-	lines = append(lines, "untracked="+strconv.FormatBool(obs.Untracked))
+	lines = append(lines,
+		"head_sha="+obs.HeadSHA,
+		"dirty="+strconv.FormatBool(obs.Dirty),
+		"staged="+strconv.FormatBool(obs.Staged),
+		"untracked="+strconv.FormatBool(obs.Untracked),
+	)
 
 	changes := make([]string, 0, len(obs.Changes))
 	for _, ch := range obs.Changes {

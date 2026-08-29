@@ -64,14 +64,15 @@ func BuildTaskCheckpointSummary(in TaskCheckpointSummaryInput) domain.TaskCheckp
 
 	matchedTask := false
 	for _, task := range detail.Tasks {
-		if task.ExecutionRunID != nil && *task.ExecutionRunID == detail.Run.ID {
-			summary.Task = task.Title
-			var criteria []string
-			_ = json.Unmarshal([]byte(task.AcceptanceCriteriaJSON), &criteria)
-			summary.AcceptanceCriteria = criteria
-			matchedTask = true
-			break
+		if task.ExecutionRunID == nil || *task.ExecutionRunID != detail.Run.ID {
+			continue
 		}
+		summary.Task = task.Title
+		var criteria []string
+		_ = json.Unmarshal([]byte(task.AcceptanceCriteriaJSON), &criteria)
+		summary.AcceptanceCriteria = criteria
+		matchedTask = true
+		break
 	}
 	if !matchedTask && in.Artifact != nil {
 		// Single-task (non-master-plan) runs have no workflow_tasks row at

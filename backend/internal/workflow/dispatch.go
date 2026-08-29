@@ -408,7 +408,7 @@ func (c *Coordinator) scheduleQuestionResolverCapacityWake(ctx stdctx.Context, r
 // no longer Waiting (already recovered by some other path, or already
 // terminal) is left untouched: this is a best-effort, idempotent nudge, not
 // a state machine transition that must always apply.
-func (c *Coordinator) MarkCapacityRetryExhausted(ctx stdctx.Context, runID string, reason string) error {
+func (c *Coordinator) MarkCapacityRetryExhausted(ctx stdctx.Context, runID, reason string) error {
 	run, ok, err := c.store.GetWorkflowRun(ctx, runID)
 	if err != nil {
 		return err

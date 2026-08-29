@@ -233,8 +233,8 @@ func narrowGoWildcardCommand(check VerificationCommandCheck, packageDir string) 
 // other command (any non-Go tool, any command the Planner already scoped to
 // a subdirectory, any file check) passes through byte-identical. REPOSITORY
 // always returns plan unchanged. This function never invents a command that
-// was not already in the Planner's plan (checkpoint brief §13: "no inventes
-// comandos arbitrarios").
+// was not already in the Planner's plan (checkpoint brief §13, translated from
+// the Spanish: "do not invent arbitrary commands").
 func NarrowVerificationPlan(plan VerificationPlan, decision VerifyScopeDecision) (VerificationPlan, []string) {
 	if decision.Scope == VerifyScopeRepository || decision.PackageDir == "" {
 		return plan, nil

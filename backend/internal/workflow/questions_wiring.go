@@ -179,6 +179,9 @@ func (c *Coordinator) detectQuestionForStep(ctx stdctx.Context, run domain.Workf
 	}
 	paneText, err := c.paneReader.GetOutput(ctx, handle, questions.PaneCaptureRangeLines)
 	if err != nil {
+		// A pane AO cannot read yields no question. That is the same outcome as
+		// a pane with no question in it, and both must leave the run alone.
+		//nolint:nilerr // an unreadable pane observes nothing; it is not a failure.
 		return nil
 	}
 

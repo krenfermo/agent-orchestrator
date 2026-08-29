@@ -198,6 +198,8 @@ func (c *Coordinator) reconcileVerifiedIntegrationBaseline(
 		ProjectID: domain.ProjectID(run.ProjectID),
 	})
 	if err != nil {
+		// Unobservable is not verified. Proof 3 simply does not hold.
+		//nolint:nilerr // an unreadable workspace fails the proof, it does not error.
 		return false, nil
 	}
 	if obs.Path != "" && obs.Path != workCP.WorktreePath {

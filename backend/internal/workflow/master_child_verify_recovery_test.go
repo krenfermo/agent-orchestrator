@@ -23,10 +23,10 @@ import (
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 )
 
-// verifierHostFailure is what a host that cannot start the verifier says. It
+// errVerifierHost is what a host that cannot start the verifier says. It
 // classifies as a transient runtime infrastructure failure — never a code
 // defect — which is the class this recovery exists for.
-var verifierHostFailure = errors.New("fork/exec go: cannot allocate memory")
+var errVerifierHost = errors.New("fork/exec go: cannot allocate memory")
 
 func TestChildVerifyRecoveryUnblocksItsMasterObjective(t *testing.T) {
 	fx, ctx, masterID := startAutonomousObjective(t, twoTaskDependentPlan())
@@ -34,7 +34,7 @@ func TestChildVerifyRecoveryUnblocksItsMasterObjective(t *testing.T) {
 
 	// 1. AO's own verifier cannot run on this host. The child's work is fine and
 	// its review is approved; verification simply never delivers a verdict.
-	fx.verifier.err = verifierHostFailure
+	fx.verifier.err = errVerifierHost
 	driveUntil(t, fx, 40, func() bool { return runState(t, fx, childID) == domain.WorkflowRunNeedsAttention })
 	driveCycles(t, fx, 10, func(int) {
 		if _, active, ok := activeChildRunID(t, fx, masterID); ok {
@@ -124,7 +124,7 @@ func TestChildFreshReviewRecoveryUnblocksItsMasterObjective(t *testing.T) {
 	_, childID := dispatchedChild(t, fx, masterID)
 
 	// 1. Same starting point as the test above: AO's verifier cannot run.
-	fx.verifier.err = verifierHostFailure
+	fx.verifier.err = errVerifierHost
 	driveUntil(t, fx, 40, func() bool { return runState(t, fx, childID) == domain.WorkflowRunNeedsAttention })
 	driveCycles(t, fx, 10, func(int) {
 		if _, active, ok := activeChildRunID(t, fx, masterID); ok {
@@ -209,7 +209,7 @@ func TestChildWorkspaceChangeRecoveryUnblocksItsMasterObjective(t *testing.T) {
 	_, childID := dispatchedChild(t, fx, masterID)
 
 	// 1. AO's verifier cannot run; the child stops and the parent mirrors it.
-	fx.verifier.err = verifierHostFailure
+	fx.verifier.err = errVerifierHost
 	driveUntil(t, fx, 40, func() bool { return runState(t, fx, childID) == domain.WorkflowRunNeedsAttention })
 	driveCycles(t, fx, 10, func(int) {
 		if _, active, ok := activeChildRunID(t, fx, masterID); ok {

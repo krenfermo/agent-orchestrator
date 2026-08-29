@@ -3,7 +3,6 @@ package workflow
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -192,24 +191,24 @@ func BuildIncidentContextPack(in IncidentPackInput) IncidentContextPack {
 		IncidentID: in.IncidentID,
 		RunID:      in.Detail.Run.ID,
 		MasterID:   in.MasterID,
-		ProjectID:  string(in.Detail.Run.ProjectID),
+		ProjectID:  in.Detail.Run.ProjectID,
 		StopReason: in.StopReason,
 		StopDetail: in.StopDetail,
 		Signature:  in.Signature,
 		MaxBytes:   incidentPackMaxBytes,
 	}
 
-	add := func(priority int, title, body string, cap int) {
+	add := func(priority int, title, body string, limit int) {
 		body = strings.TrimSpace(body)
 		if body == "" {
 			return
 		}
 		section := IncidentPackSection{Title: title, Priority: priority}
-		if cap <= 0 || cap > incidentPackMaxSectionBytes {
-			cap = incidentPackMaxSectionBytes
+		if limit <= 0 || limit > incidentPackMaxSectionBytes {
+			limit = incidentPackMaxSectionBytes
 		}
-		if len(body) > cap {
-			body = body[:cap]
+		if len(body) > limit {
+			body = body[:limit]
 			section.Truncated = true
 		}
 		section.Body = body
@@ -444,36 +443,4 @@ func oneLine(s string) string {
 func contentDigest(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
-}
-
-// packJSON renders the pack for the durable record. The SECTION BODIES are
-// deliberately excluded: they are large, they are reconstructible, and the
-// ledger's job is to record what was given and how big it was, not to store a
-// second copy of it.
-func (p IncidentContextPack) packJSON() string {
-	type summary struct {
-		Version         string   `json:"version"`
-		Digest          string   `json:"digest"`
-		Bytes           int      `json:"bytes"`
-		MaxBytes        int      `json:"maxBytes"`
-		EstimatedTokens int      `json:"estimatedTokens"`
-		Sections        []string `json:"sections"`
-		Dropped         []string `json:"droppedSections,omitempty"`
-	}
-	s := summary{
-		Version: p.Version, Digest: p.Digest, Bytes: p.Bytes,
-		MaxBytes: p.MaxBytes, EstimatedTokens: p.EstimatedTokens,
-		Dropped: p.DroppedSections,
-	}
-	for _, sec := range p.Sections {
-		if sec.Dropped {
-			continue
-		}
-		s.Sections = append(s.Sections, sec.Title)
-	}
-	b, err := json.Marshal(s)
-	if err != nil {
-		return "{}"
-	}
-	return string(b)
 }

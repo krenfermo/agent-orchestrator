@@ -394,10 +394,7 @@ func (c *Coordinator) RequestIncidentDiagnosis(ctx stdctx.Context, runID string)
 	// Provider selection through AO's ordinary routing — health, capacity,
 	// profile eligibility and the operator's own priority list all apply, and a
 	// shortage becomes the ordinary self-remediable wait.
-	decision, err := c.selectIncidentDiagnosticProvider(ctx, run, c.incumbentHarnessFor(ctx, runID))
-	if err != nil {
-		return inc, pack, err
-	}
+	decision := c.selectIncidentDiagnosticProvider(ctx, run, c.incumbentHarnessFor(ctx, runID))
 	if decision.Waiting || decision.SelectedHarness == "" {
 		c.recordIncidentCapacityWait(ctx, run, inc, decision)
 		inc.LaunchOutcome = IncidentWaitingForCapacity

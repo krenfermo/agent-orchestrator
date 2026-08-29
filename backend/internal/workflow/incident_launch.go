@@ -111,7 +111,7 @@ func (c *Coordinator) diagnosisGeneration(inc Incident, now time.Time) (generati
 // same independence argument the reviewer rests on — and it already has a
 // priority list an operator can configure (decisionResolverPriority). A new
 // role would have duplicated all three and agreed with none of them.
-func (c *Coordinator) selectIncidentDiagnosticProvider(ctx stdctx.Context, run domain.WorkflowRun, incumbent domain.AgentHarness) (domain.RoutingDecision, error) {
+func (c *Coordinator) selectIncidentDiagnosticProvider(ctx stdctx.Context, run domain.WorkflowRun, incumbent domain.AgentHarness) domain.RoutingDecision {
 	owner := c.runOwner(ctx, run.ID)
 	snapshot := policyForRun(run).EffectiveExecutionPolicy()
 	policy, eligible, ineligible, capacity := c.routingInputsForRole(ctx, owner, domain.WorkflowRoleDecisionResolver, snapshot)
@@ -130,7 +130,7 @@ func (c *Coordinator) selectIncidentDiagnosticProvider(ctx stdctx.Context, run d
 	// bug as the incident ledger itself (see isIncidentLedgerPhase). The
 	// decision is audited inside the incident's own row instead, where it
 	// belongs and where it cannot leak.
-	return decision, nil
+	return decision
 }
 
 // recordIncidentCapacityWait parks the investigation on the ordinary
@@ -185,16 +185,32 @@ func (c *Coordinator) incumbentHarnessFor(ctx stdctx.Context, runID string) doma
 // and cycle. A row that comes back anything other than `pending` means someone
 // else already got as far as launching this generation, and this pass must not.
 func (c *Coordinator) claimIncidentLaunch(ctx stdctx.Context, run domain.WorkflowRun, inc Incident, generation int) (domain.WorkflowOutboxEntry, bool, error) {
+	return c.claimIncidentOutboxSlot(ctx, run,
+		incidentDiagnoseIdempotencyKey(inc.ID, generation),
+		fmt.Sprintf(`{"incidentId":%q,"generation":%d}`, inc.ID, generation))
+}
+
+// claimIncidentOutboxSlot is the single-flight claim both incident spawns take:
+// enqueue the idempotency key, and win only if the row that comes back is the
+// one this pass just created. A row in any other status means another pass
+// already got as far as launching this generation, and this one must not.
+//
+// The two callers differ only in the key they claim and the payload they carry,
+// which is exactly why they share this: a second copy of the claim protocol is
+// a second place for "pending means mine" to drift.
+func (c *Coordinator) claimIncidentOutboxSlot(
+	ctx stdctx.Context, run domain.WorkflowRun, idempotencyKey, payload string,
+) (domain.WorkflowOutboxEntry, bool, error) {
 	entry, _, err := c.store.EnqueueWorkflowOutboxEntry(ctx, domain.WorkflowOutboxEntry{
 		ID:             "wfo-" + c.newID(),
 		WorkflowRunID:  run.ID,
-		IdempotencyKey: incidentDiagnoseIdempotencyKey(inc.ID, generation),
+		IdempotencyKey: idempotencyKey,
 		// spawn_worker_session is what this genuinely is — a session is being
 		// spawned — and reusing it keeps the command vocabulary (and its CHECK
 		// constraint) unchanged rather than requiring a schema migration for a
 		// synonym.
 		CommandType: domain.WorkflowOutboxSpawnWorkerSession,
-		Payload:     fmt.Sprintf(`{"incidentId":%q,"generation":%d}`, inc.ID, generation),
+		Payload:     payload,
 		CreatedAt:   c.clock(),
 	})
 	if err != nil {

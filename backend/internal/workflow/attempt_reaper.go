@@ -43,7 +43,10 @@ import (
 //     dispatched a review, ran a verification, moved on. An attempt the run
 //     never went past is not abandoned; it is simply unfinished, and it stays;
 //  4. the agent that owned it is not running and has been quiet longer than the
-//     settle window. A session AO cannot read refuses: "AO does not know what
+//     settle window -- humanFixSettleWindow, reached through
+//     agentMayStillBeDelivering rather than restated here, so this and the
+//     human-applied-fix path cannot drift apart on how long an agent takes to
+//     go quiet. A session AO cannot read refuses: "AO does not know what
 //     its worker is doing" is precisely the ambiguity this must exclude.
 //
 // Durability and exactly-once: the reap is written as a checkpoint keyed to the
@@ -68,11 +71,6 @@ const (
 	// run that stays parked a little longer, and the cost of being wrong is
 	// reaping an attempt whose agent is still writing.
 	attemptReapMinimumAge = 30 * time.Minute
-	// attemptReapSettleWindow is how long the owning agent must have been quiet.
-	// It mirrors humanFixSettleWindow for the same reason
-	// branchAdvancedSettleWindow does: the three answer the same question and
-	// must not disagree about how long an agent takes to go quiet.
-	attemptReapSettleWindow = humanFixSettleWindow
 )
 
 // attemptReapRecord is the durable payload: what was closed, and the evidence

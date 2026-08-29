@@ -36,10 +36,10 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/workflow/wakepoller"
 )
 
-// tmuxNoSuchSessionErr is the verbatim runtime error from the incident. It is
+// errTmuxNoSuchSession is the verbatim runtime error from the incident. It is
 // used as an ordinary input, never matched on: nothing in the fix knows this
 // string, and these tests would pass just as well with any other runtime error.
-var tmuxNoSuchSessionErr = errors.New(
+var errTmuxNoSuchSession = errors.New(
 	"spawn agent-orchestrator-29: runtime: tmux runtime: set status agent-orchestrator-29: exit status 1: no such session: agent-orchestrator-29")
 
 // launchSpawner is a Spawner whose failures are programmable per call and whose
@@ -258,7 +258,7 @@ func (f *launchFixture) sessionCount() int {
 // ---------------------------------------------------------------------------
 
 func TestWorkerLaunchFailure_TransientSpawnFailureRetriesExactlyOnce(t *testing.T) {
-	spawn := &launchSpawner{failWith: tmuxNoSuchSessionErr, failCount: 1}
+	spawn := &launchSpawner{failWith: errTmuxNoSuchSession, failCount: 1}
 	f := newLaunchFixture(t, spawn)
 	f.start()
 
@@ -327,7 +327,7 @@ func TestWorkerLaunchFailure_TransientSpawnFailureRetriesExactlyOnce(t *testing.
 // ---------------------------------------------------------------------------
 
 func TestWorkerLaunchRetry_RepeatedReconcileAndContinueNeverDuplicateAWorker(t *testing.T) {
-	spawn := &launchSpawner{failWith: tmuxNoSuchSessionErr, failCount: 1}
+	spawn := &launchSpawner{failWith: errTmuxNoSuchSession, failCount: 1}
 	f := newLaunchFixture(t, spawn)
 	f.start()
 
@@ -380,7 +380,7 @@ func TestWorkerLaunchRetry_RepeatedReconcileAndContinueNeverDuplicateAWorker(t *
 // ---------------------------------------------------------------------------
 
 func TestWorkerLaunchRetry_SurvivesDaemonRestartWithoutDuplicating(t *testing.T) {
-	spawn := &launchSpawner{failWith: tmuxNoSuchSessionErr, failCount: 1}
+	spawn := &launchSpawner{failWith: errTmuxNoSuchSession, failCount: 1}
 	f := newLaunchFixture(t, spawn)
 	f.start()
 	if len(spawn.calls) != 1 {
@@ -453,7 +453,7 @@ func TestWorkerLaunch_AmbiguousDispatchNeverSpawnsASecondWorker(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestWorkerLaunchRecovery_AdoptsAnExistingSessionInsteadOfRespawning(t *testing.T) {
-	spawn := &launchSpawner{failWith: tmuxNoSuchSessionErr, failCount: -1}
+	spawn := &launchSpawner{failWith: errTmuxNoSuchSession, failCount: -1}
 	f := newLaunchFixture(t, spawn)
 	f.start()
 	f.exhaustLaunchBudget()
@@ -545,7 +545,7 @@ func (f *launchFixture) markProvidersAvailable(seq int) {
 // ---------------------------------------------------------------------------
 
 func TestWorkerLaunchRetry_BudgetExhaustionReachesTruthfulNeedsAttention(t *testing.T) {
-	spawn := &launchSpawner{failWith: tmuxNoSuchSessionErr, failCount: -1}
+	spawn := &launchSpawner{failWith: errTmuxNoSuchSession, failCount: -1}
 	f := newLaunchFixture(t, spawn)
 	f.start()
 	f.exhaustLaunchBudget()
@@ -799,7 +799,7 @@ func (f *launchFixture) startWithoutDispatch() {
 // The human reopen is bounded too: a person pressing Continue on a cause that
 // was never transient must not be an unbounded session factory.
 func TestWorkerLaunchRecovery_HumanReopenIsBounded(t *testing.T) {
-	spawn := &launchSpawner{failWith: tmuxNoSuchSessionErr, failCount: -1}
+	spawn := &launchSpawner{failWith: errTmuxNoSuchSession, failCount: -1}
 	f := newLaunchFixture(t, spawn)
 	f.start()
 	f.exhaustLaunchBudget()

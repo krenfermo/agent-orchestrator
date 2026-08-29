@@ -32,12 +32,12 @@ import (
 // Idempotent by construction: ApprovePlan CASes `validated -> approved` and
 // returns the current detail when the plan is already approved, so N restarts
 // converge to one approval.
-func (c *Coordinator) resumeValidatedPlan(ctx stdctx.Context, run domain.WorkflowRun, plan domain.WorkflowPlanRecord) (bool, error) {
+func (c *Coordinator) resumeValidatedPlan(ctx stdctx.Context, run domain.WorkflowRun, plan domain.WorkflowPlanRecord) error {
 	if plan.Status != domain.WorkflowPlanValidated {
-		return false, nil
+		return nil
 	}
 	if plan.ApprovalMode != domain.WorkflowPlanApprovalAuto && !policyForRun(run).Execution.AutonomousMode {
-		return false, nil
+		return nil
 	}
 	// Keep the record honest the same way finalizeGeneratedPlan does: when it
 	// is the frozen policy (not the client) that decided this, say so, so
@@ -47,7 +47,7 @@ func (c *Coordinator) resumeValidatedPlan(ctx stdctx.Context, run domain.Workflo
 		_, _ = c.planStore.SetWorkflowPlanApprovalMode(ctx, run.ID, domain.WorkflowPlanApprovalAuto, c.clock())
 	}
 	if _, err := c.ApprovePlan(ctx, run.ID); err != nil {
-		return false, err
+		return err
 	}
-	return true, nil
+	return nil
 }

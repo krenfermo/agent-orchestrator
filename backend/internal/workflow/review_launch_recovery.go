@@ -1049,34 +1049,6 @@ func (c *Coordinator) reviewLaunchAttempts(
 	return h, nil
 }
 
-// reviewLaunchAttemptCount reports how much of one cycle's retry budget is
-// already spent, failing closed on anything it cannot read or decode.
-func (c *Coordinator) reviewLaunchAttemptCount(
-	ctx stdctx.Context, runID, stepID string, cycleNumber int,
-) (int, error) {
-	h, err := c.reviewLaunchAttempts(ctx, runID, stepID)
-	if err != nil {
-		return 0, err
-	}
-	return h.spentIn(cycleNumber), nil
-}
-
-// recordReviewLaunchAttempt durably consumes one attempt against the DISPATCH
-// CLAIM, before the work that attempt performs.
-//
-// Idempotent per (claim, attempt): a replay that already allocated this attempt
-// does not allocate it twice.
-func (c *Coordinator) recordReviewLaunchAttempt(
-	ctx stdctx.Context, run domain.WorkflowRun, reviewStep domain.WorkflowStep,
-	entry domain.WorkflowOutboxEntry, cycle, attempt int, reviewRunID, why string,
-) error {
-	h, err := c.reviewLaunchAttempts(ctx, run.ID, reviewStep.ID)
-	if err != nil {
-		return err
-	}
-	return c.recordReviewLaunchAttemptInEpoch(ctx, run, reviewStep, entry, cycle, attempt, h.epoch, reviewRunID, why)
-}
-
 // recordReviewLaunchAttemptInEpoch writes the attempt against an epoch the
 // caller has already resolved, so allocation reads the history exactly once.
 func (c *Coordinator) recordReviewLaunchAttemptInEpoch(
@@ -1256,7 +1228,7 @@ func (c *Coordinator) resumeReviewLaunchAfterFailure(
 			Cycle:            rec.Cycle,
 			Epoch:            h.epoch + 1,
 			FailedGeneration: generation,
-			ResumedFrom:      string(rec.Class),
+			ResumedFrom:      rec.Class,
 		})
 		_, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
 			ID:             "wfc-" + c.newID(),
@@ -1313,7 +1285,7 @@ func (c *Coordinator) resumeReviewLaunchAfterFailure(
 	// whether the failed state being reopened is still the observed one; if it is
 	// not, zero rows change and this is an idempotent no-op.
 	moved, err := c.store.ReopenFailedWorkflowOutboxGeneration(
-		ctx, entry.ID, string(rec.Class), observed.casValue())
+		ctx, entry.ID, rec.Class, observed.casValue())
 	if err != nil || !moved {
 		// Not moved means this generation is no longer the row's failed state —
 		// already reopened, or replaced by a later failure. Either way it is the
@@ -1433,22 +1405,6 @@ func (c *Coordinator) allocateReviewLaunchAttempt(
 		return 0, werr
 	}
 	return attempt, nil
-}
-
-// reviewLaunchAttemptForClaim reads back the attempt a claim was allocated.
-//
-// A claim with no allocation on record is not attempt 1 by default — that is the
-// assumption this whole mechanism exists to remove — so it reports the cycle's
-// spend plus one only when the ledger is otherwise readable, and errors when it
-// is not.
-func (c *Coordinator) reviewLaunchAttemptForClaim(
-	ctx stdctx.Context, runID, stepID, idempotencyKey string, cycleNumber int,
-) (int, error) {
-	h, err := c.reviewLaunchAttempts(ctx, runID, stepID)
-	if err != nil {
-		return 0, err
-	}
-	return h.attemptForClaim(idempotencyKey, cycleNumber), nil
 }
 
 // attemptForClaim is that read against an already-loaded history: the attempt

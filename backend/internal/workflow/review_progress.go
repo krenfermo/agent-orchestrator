@@ -73,7 +73,7 @@ func (c *Coordinator) observeReviewStep(ctx stdctx.Context, run domain.WorkflowR
 	if !found {
 		// Defensive: the id we hold does not resolve. Surface ambiguity
 		// rather than guessing.
-		return c.stopReviewAmbiguous(ctx, run, step, ReasonReviewStateAmbiguous,
+		return c.stopReviewAmbiguous(ctx, run, step,
 			"ambiguous_review_state: review run referenced by this step no longer exists", "")
 	}
 
@@ -92,7 +92,7 @@ func (c *Coordinator) observeReviewStep(ctx stdctx.Context, run domain.WorkflowR
 			}
 		}
 		if hasCP && elapsed > reviewStalenessThreshold {
-			return c.stopReviewAmbiguous(ctx, run, step, ReasonReviewStateAmbiguous,
+			return c.stopReviewAmbiguous(ctx, run, step,
 				"ambiguous_review_state: review has been running longer than expected with no verdict", "")
 		}
 		// Still genuinely working (or too fresh to judge): no change.
@@ -198,7 +198,7 @@ func (c *Coordinator) applyTerminalReviewRun(
 		// Concluded with an empty/invalid verdict should not happen given
 		// submitOne's own validation, but defend anyway rather than silently
 		// treating it as approved.
-		updated, err := c.stopReviewAmbiguous(ctx, run, step, ReasonReviewStateAmbiguous,
+		updated, err := c.stopReviewAmbiguous(ctx, run, step,
 			"ambiguous_review_state: review run completed with no valid verdict", string(reviewRun.Verdict))
 		return updated, true, err
 
@@ -236,7 +236,7 @@ func (c *Coordinator) stopReviewAmbiguous(
 	ctx stdctx.Context,
 	run domain.WorkflowRun,
 	step domain.WorkflowStep,
-	reason, detail, verdict string,
+	detail, verdict string,
 ) (domain.WorkflowStep, error) {
 	// A review step has no worktree of its own to observe, but it does have a
 	// reviewer session — so the one reading AO can take here (is that runtime
@@ -247,6 +247,8 @@ func (c *Coordinator) stopReviewAmbiguous(
 	// reading it probed nothing, recorded nothing, and left the stop with a
 	// liveness field permanently unavailable for a session that plainly exists.
 	// The identity lives on this step's own checkpoints.
+	// The reason is fixed: this helper exists for exactly one stop.
+	const reason = ReasonReviewStateAmbiguous
 	raised, err := c.raiseAmbiguousWorkerState(ctx, run, step, reason, detail,
 		c.observedWorkerFactsFor(ctx, c.DurableSessionForStep(ctx, run.ID, step), nil))
 	if err != nil {

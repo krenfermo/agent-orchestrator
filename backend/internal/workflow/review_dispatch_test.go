@@ -20,7 +20,6 @@ import (
 type fakeReviewRuns struct {
 	reviews map[string]domain.Review    // by "sessionID|harness"
 	runs    map[string]domain.ReviewRun // by run id
-	seq     int
 
 	// insertCalls counts InsertReviewRun invocations, used to assert a
 	// review is created exactly once across repeated dispatch calls.
@@ -915,7 +914,7 @@ func (f *fakeReviewerLauncher) CancelReviewer(_ context.Context, ref workflowcor
 	handleID := ref.HandleID
 	f.cancelCalls++
 	if f.strictOwnership && (f.probeUnknown || f.foreign[handleID] ||
-		!(f.externalLive[handleID] || f.externalExited[handleID])) {
+		(!f.externalLive[handleID] && !f.externalExited[handleID])) {
 		// Production's refusal, verbatim in shape: proof of ownership or nothing
 		// happens, and the refusal is marked deterministic.
 		return fmt.Errorf("%w: reviewer %s cannot be proven AO's own", workflowcore.ErrUnrecoverable, handleID)

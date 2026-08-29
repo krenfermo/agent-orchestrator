@@ -179,7 +179,7 @@ func (c *Coordinator) reconcileRun(ctx stdctx.Context, run domain.WorkflowRun, n
 				// MANUAL run the same state is correct (it is the approval
 				// prompt), which is why the stall was invisible; that case is
 				// still left exactly alone here.
-				if _, err := c.resumeValidatedPlan(ctx, run, plan); err != nil {
+				if err := c.resumeValidatedPlan(ctx, run, plan); err != nil {
 					return err
 				}
 			case plan.Status == domain.WorkflowPlanApproved:
@@ -322,11 +322,11 @@ func (c *Coordinator) reconcileRun(ctx stdctx.Context, run domain.WorkflowRun, n
 	// been explicitly unblocked (no ContinueRun call yet, still
 	// "pending") stays untouched by boot recovery.
 	if !run.State.Terminal() {
-		if updatedRun, err := c.advanceReviewFixCycle(ctx, run, steps, false); err != nil {
+		updatedRun, err := c.advanceReviewFixCycle(ctx, run, steps, false)
+		if err != nil {
 			return err
-		} else {
-			run = updatedRun
 		}
+		run = updatedRun
 	}
 
 	if !interrupted {

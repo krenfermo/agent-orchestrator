@@ -229,7 +229,7 @@ func (p VerificationPlan) validate() error {
 			return fmt.Errorf("%w: verify timeout must be between 0 and 3600 seconds", ErrInvalid)
 		}
 		if err := ValidateVerifyCommand(check.Command, check.Args); err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalid, err)
+			return fmt.Errorf("%w: %w", ErrInvalid, err)
 		}
 	}
 	for _, check := range p.Files {
@@ -1300,15 +1300,15 @@ func secureWorktreePath(root, relative string) (string, error) {
 	if !info.IsDir() {
 		return "", errors.New("verify working directory is not a directory")
 	}
-	real, err := filepath.EvalSymlinks(candidate)
+	resolved, err := filepath.EvalSymlinks(candidate)
 	if err != nil {
 		return "", err
 	}
-	realRel, err := filepath.Rel(rootReal, real)
+	realRel, err := filepath.Rel(rootReal, resolved)
 	if err != nil || realRel == ".." || strings.HasPrefix(realRel, ".."+string(filepath.Separator)) {
 		return "", errors.New("verify path symlink escapes the worktree")
 	}
-	return real, nil
+	return resolved, nil
 }
 
 // secureVerifyArtifactPath is secureWorktreePath's counterpart for a file an
@@ -1352,7 +1352,7 @@ func secureVerifyArtifactPath(root, relative string) (string, error) {
 	// the worktree once symlinks are resolved. Everything below it does not
 	// exist yet, so no link on that part of the path can redirect the read.
 	for probe := candidate; ; probe = filepath.Dir(probe) {
-		real, evalErr := filepath.EvalSymlinks(probe)
+		resolvedProbe, evalErr := filepath.EvalSymlinks(probe)
 		if evalErr != nil {
 			if os.IsNotExist(evalErr) {
 				if filepath.Clean(probe) == filepath.Clean(rootAbs) {
@@ -1366,7 +1366,7 @@ func secureVerifyArtifactPath(root, relative string) (string, error) {
 			}
 			return "", evalErr
 		}
-		realRel, relErr := filepath.Rel(rootReal, real)
+		realRel, relErr := filepath.Rel(rootReal, resolvedProbe)
 		if relErr != nil || realRel == ".." || strings.HasPrefix(realRel, ".."+string(filepath.Separator)) {
 			return "", errors.New("artifact symlink escapes the worktree")
 		}

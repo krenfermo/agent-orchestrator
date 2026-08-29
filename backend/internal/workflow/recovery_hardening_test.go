@@ -755,8 +755,8 @@ func TestExistingSafetyGuaranteesAreIntact(t *testing.T) {
 			workflowcore.IncidentActionCancelRun,
 			workflowcore.IncidentActionRepairAgent,
 		} {
-			_, _, needsApproval, endsWork, writesCode, _, _ := workflowcore.DescribeIncidentAction(
-				workflowcore.IncidentAutoRecoverable, kind)
+			desc := workflowcore.DescribeIncidentAction(workflowcore.IncidentAutoRecoverable, kind)
+			needsApproval, endsWork, writesCode := desc.NeedsApproval, desc.EndsWork, desc.WritesCode
 			if !needsApproval {
 				t.Fatalf("%s no longer requires human approval", kind)
 			}

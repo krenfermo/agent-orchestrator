@@ -390,7 +390,7 @@ func (c *Coordinator) lateVerdictAdoptionState(
 	runID string,
 	step domain.WorkflowStep,
 	reviewRun domain.ReviewRun,
-) (marker bool, reflected bool, err error) {
+) (marker, reflected bool, err error) {
 	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
 	if err != nil {
 		return false, false, err

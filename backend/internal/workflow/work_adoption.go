@@ -62,11 +62,6 @@ const (
 	// run whose work has now been landed by hand three times without ever
 	// reaching a verdict is not being helped by a fourth silent adoption.
 	maxWorkAdoptions = 3
-	// workAdoptionStabilityWindow is how long the two observations this function
-	// makes must agree for the worktree to count as stable. It is deliberately
-	// tiny: this is a check against a write landing DURING the proofs, not a
-	// second settle window — settling is proof 4's job.
-	workAdoptionStabilityWindow = 0
 )
 
 // workAdoptionRecord is the durable evidence. Every field is something AO

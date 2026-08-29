@@ -195,19 +195,42 @@ func incidentActionNeedsApproval(class IncidentClass, kind IncidentActionKind) b
 // it differently from authorizeIncidentAction — and the executor is the one
 // holding the permission, so the two disagreeing means either a button that
 // errors or, far worse, a button that looks safe and is not.
-func DescribeIncidentAction(class IncidentClass, kind IncidentActionKind) (
-	describe, risk string, needsApproval, endsWork, writesCode, executable bool, refusal string,
-) {
+// IncidentActionDescription is everything the UI needs to render one incident
+// action: what it says it does, what it costs, and whether it may be offered.
+type IncidentActionDescription struct {
+	// Describe and Risk are the human-readable label and risk band.
+	Describe string
+	Risk     string
+	// NeedsApproval reports whether a named human must approve before the
+	// action may run.
+	NeedsApproval bool
+	// EndsWork and WritesCode say what the action does to the run: whether it
+	// terminates the work, and whether it may change the workspace.
+	EndsWork   bool
+	WritesCode bool
+	// Executable reports whether the action is offerable once approved --
+	// asked of the real authorization gate, not re-derived here, so the button
+	// and the permission cannot disagree.
+	Executable bool
+	// Refusal is why Executable is false, and empty when it is true.
+	Refusal string
+}
+
+func DescribeIncidentAction(class IncidentClass, kind IncidentActionKind) IncidentActionDescription {
 	resolved, policy := lookupIncidentAction(kind)
-	describe, risk = policy.Describe, string(policy.Risk)
-	endsWork, writesCode = policy.EndsWork, policy.WritesCode
-	needsApproval = incidentActionNeedsApproval(class, resolved)
+	out := IncidentActionDescription{
+		Describe:      policy.Describe,
+		Risk:          string(policy.Risk),
+		EndsWork:      policy.EndsWork,
+		WritesCode:    policy.WritesCode,
+		NeedsApproval: incidentActionNeedsApproval(class, resolved),
+	}
 	if resolved != kind {
-		return describe, risk, needsApproval, endsWork, writesCode, false,
-			"AO does not recognise the proposed action, so it will not run it"
+		out.Refusal = "AO does not recognise the proposed action, so it will not run it"
+		return out
 	}
 	// Ask the real gate, with an approval present, so "executable" means "this
 	// is offerable once approved" rather than "this would run right now".
-	allowed, why := authorizeIncidentAction(class, resolved, "human")
-	return describe, risk, needsApproval, endsWork, writesCode, allowed, why
+	out.Executable, out.Refusal = authorizeIncidentAction(class, resolved, "human")
+	return out
 }

@@ -972,22 +972,6 @@ func TestAbandon_AuthorityLossWritesTheIntentBeforeFailing(t *testing.T) {
 	}
 }
 
-// failedRunsWithoutAbandonIntent counts review runs that were closed out as
-// failed with no abandon intent behind them — the unattributable state.
-func failedRunsWithoutAbandonIntent(t *testing.T, f *reviewAuthorityFixture) int {
-	t.Helper()
-	n := 0
-	for id, run := range f.reviewRuns.runs {
-		if run.Status != domain.ReviewRunFailed {
-			continue
-		}
-		if !f.hasAbandonIntentFor(id) {
-			n++
-		}
-	}
-	return n
-}
-
 // The fail-closed branch itself: the failed-row recovery reaches the point of
 // asking for its evidence, and THAT read is the one that fails.
 //

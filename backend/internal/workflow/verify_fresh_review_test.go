@@ -200,17 +200,6 @@ func (fx *freshReviewFixture) stepState(t *testing.T, kind domain.WorkflowStepKi
 	return ""
 }
 
-func (fx *freshReviewFixture) reviewStep(t *testing.T) domain.WorkflowStep {
-	t.Helper()
-	for _, s := range fx.store.steps[fx.runID] {
-		if s.Kind == domain.WorkflowStepReview {
-			return s
-		}
-	}
-	t.Fatal("no review step")
-	return domain.WorkflowStep{}
-}
-
 func (fx *freshReviewFixture) phaseCount(phase string) int {
 	return len(checkpointsByPhase(fx.store, fx.runID, phase))
 }

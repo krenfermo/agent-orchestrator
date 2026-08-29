@@ -143,14 +143,6 @@ func (e fixDeliveryEvidence) line() string {
 		e.CycleNumber, e.SessionID, receipt, turn, session)
 }
 
-func (e fixDeliveryEvidence) json() string {
-	b, err := json.Marshal(e)
-	if err != nil {
-		return "{}"
-	}
-	return string(b)
-}
-
 // recordFixDispatchIntent writes the durable pre-delivery record.
 //
 // Ordering is the entire contract, and it is why this returns an error the
@@ -190,18 +182,6 @@ func (c *Coordinator) recordFixDispatchIntent(
 		CreatedAt:      c.clock(),
 	})
 	return err
-}
-
-// findFixDispatchIntent returns the pre-delivery record for exactly this
-// logical dispatch — this step, this cycle, this transport attempt.
-//
-// Scoping to the transport attempt matters: a bounded prompt-transport retry
-// (recordFixTransportRetry) is a genuinely new delivery with its own outbox
-// key, and it must not inherit the previous attempt's intent as proof that it
-// itself got as far as Send.
-func (c *Coordinator) findFixDispatchIntent(ctx stdctx.Context, runID, stepID string, cycleNumber, transportAttempt int) (domain.WorkflowCheckpoint, promptDeliveryRecord, bool) {
-	newest, rec, _, found := c.findFixDispatchIntents(ctx, runID, stepID, cycleNumber, transportAttempt)
-	return newest, rec, found
 }
 
 // findFixDispatchIntents is the same lookup, also returning EVERY matching

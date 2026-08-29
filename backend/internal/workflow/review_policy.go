@@ -173,7 +173,7 @@ func matchesAny(haystack string, patterns []string) bool {
 	return false
 }
 
-func allPathsHaveAnySuffix(paths []string, suffixes []string) bool {
+func allPathsHaveAnySuffix(paths, suffixes []string) bool {
 	if len(paths) == 0 {
 		return false
 	}

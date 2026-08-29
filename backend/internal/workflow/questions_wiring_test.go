@@ -74,7 +74,7 @@ func newQuestionsFixture(t *testing.T, paneText string) (*workflowcore.Coordinat
 // "running" with a session attached — bypassing StartRun's real dispatch
 // (no Spawner wired in this fixture), matching how existing tests in this
 // package build fixtures via direct store calls.
-func seedRunningWorkStep(t *testing.T, ctx context.Context, coord *workflowcore.Coordinator, store *sqlite.Store, sessionFacts *fakeSessionFacts, activity domain.ActivityState) (runID string, workStepID string, sessionID domain.SessionID) {
+func seedRunningWorkStep(ctx context.Context, t *testing.T, coord *workflowcore.Coordinator, store *sqlite.Store, sessionFacts *fakeSessionFacts, activity domain.ActivityState) (runID string, workStepID string, sessionID domain.SessionID) {
 	t.Helper()
 	rec, err := store.CreateSession(ctx, domain.SessionRecord{
 		ProjectID: "p",
@@ -141,7 +141,7 @@ func stringPtr(s string) *string { return &s }
 func TestReconcileQuestions_PolicyResolvableAutoAnswersAndDispatchResumes(t *testing.T) {
 	ctx := context.Background()
 	coord, store, sessionFacts, sender, _, _ := newQuestionsFixture(t, policyPushToMainPaneText())
-	runID, workStepID, sessID := seedRunningWorkStep(t, ctx, coord, store, sessionFacts, domain.ActivityWaitingInput)
+	runID, workStepID, sessID := seedRunningWorkStep(ctx, t, coord, store, sessionFacts, domain.ActivityWaitingInput)
 
 	detail, err := coord.GetRun(ctx, runID)
 	if err != nil {
@@ -196,7 +196,7 @@ func TestReconcileQuestions_PolicyResolvableAutoAnswersAndDispatchResumes(t *tes
 func TestReconcileQuestions_HumanRequiredSetsWaitingForDecisionAndBlocksDispatch(t *testing.T) {
 	ctx := context.Background()
 	coord, store, sessionFacts, sender, _, _ := newQuestionsFixture(t, ambiguousCooldownPaneText())
-	runID, _, _ := seedRunningWorkStep(t, ctx, coord, store, sessionFacts, domain.ActivityBlocked)
+	runID, _, _ := seedRunningWorkStep(ctx, t, coord, store, sessionFacts, domain.ActivityBlocked)
 
 	detail, err := coord.GetRun(ctx, runID)
 	if err != nil {
@@ -241,7 +241,7 @@ func TestReconcileQuestions_HumanRequiredSetsWaitingForDecisionAndBlocksDispatch
 func TestReconcileQuestions_NoRedundantCaptureOnceOpenQuestionExists(t *testing.T) {
 	ctx := context.Background()
 	coord, store, sessionFacts, _, paneReader, _ := newQuestionsFixture(t, ambiguousCooldownPaneText())
-	runID, _, _ := seedRunningWorkStep(t, ctx, coord, store, sessionFacts, domain.ActivityBlocked)
+	runID, _, _ := seedRunningWorkStep(ctx, t, coord, store, sessionFacts, domain.ActivityBlocked)
 
 	if _, err := coord.GetRun(ctx, runID); err != nil {
 		t.Fatalf("GetRun (1): %v", err)
@@ -262,7 +262,7 @@ func TestReconcileQuestions_NoRedundantCaptureOnceOpenQuestionExists(t *testing.
 func TestCancelRun_CancelsOpenQuestionsAndSkipsDelivery(t *testing.T) {
 	ctx := context.Background()
 	coord, store, sessionFacts, sender, _, _ := newQuestionsFixture(t, ambiguousCooldownPaneText())
-	runID, _, _ := seedRunningWorkStep(t, ctx, coord, store, sessionFacts, domain.ActivityBlocked)
+	runID, _, _ := seedRunningWorkStep(ctx, t, coord, store, sessionFacts, domain.ActivityBlocked)
 
 	if _, err := coord.GetRun(ctx, runID); err != nil {
 		t.Fatalf("GetRun: %v", err)

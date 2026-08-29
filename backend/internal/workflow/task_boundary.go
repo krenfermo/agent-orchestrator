@@ -18,9 +18,9 @@ import (
 // Reconcile/GetRun already rely on everywhere else in this package. A
 // single unreadable dependency is skipped, never fails the whole dispatch —
 // the new task still gets its own objective/acceptance criteria regardless.
-func (c *Coordinator) priorTaskContextBlock(ctx stdctx.Context, allTasks []domain.WorkflowTask, task domain.WorkflowTask) (string, *domain.SessionContextPack, error) {
+func (c *Coordinator) priorTaskContextBlock(ctx stdctx.Context, allTasks []domain.WorkflowTask, task domain.WorkflowTask) (string, *domain.SessionContextPack) {
 	if len(task.Dependencies) == 0 {
-		return "", nil, nil
+		return "", nil
 	}
 	byID := make(map[string]domain.WorkflowTask, len(allTasks))
 	for _, t := range allTasks {
@@ -45,7 +45,7 @@ func (c *Coordinator) priorTaskContextBlock(ctx stdctx.Context, allTasks []domai
 		blocks = append(blocks, "Completed dependency task \""+dep.Title+"\":\n"+RenderContextPackForRole(pack))
 	}
 	if len(blocks) == 0 {
-		return "", nil, nil
+		return "", nil
 	}
-	return "Prior completed dependency tasks — facts only, NOT their session history or conversation:\n\n" + strings.Join(blocks, "\n\n"), firstPack, nil
+	return "Prior completed dependency tasks — facts only, NOT their session history or conversation:\n\n" + strings.Join(blocks, "\n\n"), firstPack
 }

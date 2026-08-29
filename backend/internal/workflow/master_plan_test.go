@@ -93,7 +93,7 @@ func (p *staticPlanner) Descriptor() (string, string) { return "fake", "fake-v1"
 type staticContext struct{}
 
 func (staticContext) Build(_ context.Context, p domain.ProjectRecord) (workflowcore.PlannerContext, error) {
-	return workflowcore.PlannerContext{Version: "v1", ProjectID: string(p.ID), ProjectPath: p.Path, Documents: []workflowcore.PlannerDocument{}}, nil
+	return workflowcore.PlannerContext{Version: "v1", ProjectID: p.ID, ProjectPath: p.Path, Documents: []workflowcore.PlannerDocument{}}, nil
 }
 
 func TestInvalidGeneratedPlanCreatesNoTasksOrWorkers(t *testing.T) {

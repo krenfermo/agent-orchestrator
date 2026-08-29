@@ -97,18 +97,6 @@ func newLaunchFailureFixture(t *testing.T, launchErr, preflightErr error) launch
 	return launchFailureFixture{c: c, store: store, clk: clk, wakes: wakes, reviews: reviews, launcher: launcher, runID: created.Run.ID}
 }
 
-func (f launchFailureFixture) reviewStepID(t *testing.T) string {
-	t.Helper()
-	steps, _ := f.store.ListWorkflowSteps(context.Background(), f.runID)
-	for _, s := range steps {
-		if s.Kind == domain.WorkflowStepReview {
-			return s.ID
-		}
-	}
-	t.Fatalf("no review step for run %s", f.runID)
-	return ""
-}
-
 // runningReviewRuns is the orphan detector: how many review_run rows are still
 // "running". After a failed launch this must be zero, forever.
 func (f launchFailureFixture) runningReviewRuns() int {

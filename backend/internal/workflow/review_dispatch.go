@@ -419,8 +419,9 @@ func reviewDispatchIdempotencyKey(stepID string, cycleNumber int, harness domain
 // completedReviewCycles returns the count of Claude-Code review_runs already
 // created for a worker session — Checkpoint 8D's natural cycle counter,
 // reusing review_run row cardinality as the iteration count rather than
-// adding a new counter column ("usa attempts/review_runs/checkpoints para
-// representar iteraciones, no columnas fix1/fix2/fix3"). Callers derive the
+// adding a new counter column (checkpoint brief, translated from the Spanish:
+// "use attempts/review_runs/checkpoints to represent iterations, not fix1/
+// fix2/fix3 columns"). Callers derive the
 // actual next/current cycle number from this count per their own call site's
 // semantics (see dispatchReviewStep and cascade.go's maybeDispatchFix).
 func (c *Coordinator) completedReviewCycles(ctx stdctx.Context, sessionID domain.SessionID, harness domain.ReviewerHarness) (int, error) {

@@ -4,6 +4,7 @@ import (
 	stdctx "context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -53,7 +54,12 @@ import (
 //   - It never redispatches the worker. The work step is not the thing that went
 //     stale; the approval is.
 //   - It never runs twice. One fresh review per recovery generation, bounded by
-//     the same append-only-checkpoint counting every other bound here uses.
+//     the same append-only-checkpoint counting every other bound here uses --
+//     the ledger's freshReviewRequested flag IS the bound, so there is no
+//     separate counter that could disagree with it. A second would mean the
+//     workspace moved again during the fresh review itself, which is no longer
+//     "AO's own upgrade left the approval behind": it is a workspace nobody can
+//     hold still, and that is a person's problem, not a retry.
 
 const (
 	// verifyFreshReviewRequiredPhase is the durable decision: this recovery
@@ -69,12 +75,6 @@ const (
 	// verify_reopened is split from verify_recovery_requested — so the ledger can
 	// tell "asked" from "answered" without comparing timestamps.
 	verifyFreshReviewApprovedPhase = "verify_fresh_review_approved"
-	// maxFreshReviewsPerRecovery bounds how many times ONE recovery generation may
-	// re-ask the reviewer. One. A second would mean the workspace moved again
-	// during the fresh review itself, which is no longer "AO's own upgrade left
-	// the approval behind" — it is a workspace nobody can hold still, and that is
-	// a person's problem, not a retry.
-	maxFreshReviewsPerRecovery = 1
 )
 
 // VerifyFreshReviewRecord is the durable payload of both fresh-review
@@ -479,7 +479,7 @@ func (c *Coordinator) resumeWorkspaceChangedVerifyRecovery(ctx stdctx.Context, r
 		if led.freshReviewApproved {
 			return run, false, nil
 		}
-		return c.applyFreshReviewReopen(ctx, run, *reviewStep, *verifyStep, led.freshReview)
+		return c.applyFreshReviewReopen(ctx, run, *reviewStep, *verifyStep)
 	}
 
 	// From here this is a first-time decision, and every proof must hold.
@@ -554,6 +554,7 @@ func (c *Coordinator) resumeWorkspaceChangedVerifyRecovery(ctx stdctx.Context, r
 		// the next Continue try again once the host answers.
 		c.recordAttentionStopOnce(ctx, run, &verifyStep.ID, ReasonVerifyWorkspaceUnattributable,
 			"verification was reopened, but the worktree could not be observed: "+err.Error())
+		//nolint:nilerr // the failure is recorded as an attention stop, not propagated.
 		return run, false, nil
 	}
 	current := WorkspaceFingerprint(obs)
@@ -598,7 +599,7 @@ func (c *Coordinator) resumeWorkspaceChangedVerifyRecovery(ctx stdctx.Context, r
 	)); err != nil {
 		return run, false, err
 	}
-	return c.applyFreshReviewReopen(ctx, run, *reviewStep, *verifyStep, record)
+	return c.applyFreshReviewReopen(ctx, run, *reviewStep, *verifyStep)
 }
 
 // applyFreshReviewReopen is the idempotent state mutation both fresh-review
@@ -608,7 +609,7 @@ func (c *Coordinator) resumeWorkspaceChangedVerifyRecovery(ctx stdctx.Context, r
 // Every write is a compare-and-swap on the exact state it expects, so
 // re-entering this from a repeated Continue, a poll or a restart in any order
 // converges on the same place and can never produce a second of anything.
-func (c *Coordinator) applyFreshReviewReopen(ctx stdctx.Context, run domain.WorkflowRun, reviewStep, verifyStep domain.WorkflowStep, record VerifyFreshReviewRecord) (domain.WorkflowRun, bool, error) {
+func (c *Coordinator) applyFreshReviewReopen(ctx stdctx.Context, run domain.WorkflowRun, reviewStep, verifyStep domain.WorkflowStep) (domain.WorkflowRun, bool, error) {
 	now := c.clock()
 	if _, err := c.store.ReopenCompletedWorkflowStep(ctx, reviewStep.ID, now); err != nil {
 		return run, false, err
@@ -787,4 +788,68 @@ func shortFingerprint(v string) string {
 		return v
 	}
 	return v[:12] + "…"
+}
+
+// freshReviewLedgerEntry is what the reason-specific fresh-review ledger records
+// (a branch advance, an attributable provenance change) have in common: they
+// name the review step they belong to, the approval they found stale, and the
+// fresh-review record they resolve to.
+type freshReviewLedgerEntry interface {
+	reviewStep() string
+	priorReviewRun() string
+	freshReviewRecord() VerifyFreshReviewRecord
+}
+
+// pendingFreshReviewFromPhase is the shared read behind every reason-specific
+// "does this step still owe a fresh review?" lookup: take the newest record
+// written under `phase` for this step, and report it outstanding only while the
+// step still points at the approval that went stale.
+//
+// That last clause is what makes the answer SELF-CLOSING without a second
+// ledger: the moment a new review run is linked, the request is answered, so no
+// restart, poll or repeated Continue can produce a second fresh review. It is
+// shared rather than copied per reason precisely because that argument is
+// subtle -- a second copy is a second place for it to drift.
+func pendingFreshReviewFromPhase[T freshReviewLedgerEntry](
+	c *Coordinator, ctx stdctx.Context, runID, reviewStepID, phase string,
+) (VerifyFreshReviewRecord, bool) {
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		return VerifyFreshReviewRecord{}, false
+	}
+	var newest *T
+	var newestAt time.Time
+	for i := range cps {
+		cp := &cps[i]
+		if cp.DurablePhase != phase {
+			continue
+		}
+		var rec T
+		if json.Unmarshal([]byte(cp.RetryState), &rec) != nil {
+			continue
+		}
+		if rec.reviewStep() != "" && rec.reviewStep() != reviewStepID {
+			continue
+		}
+		if newest == nil || !cp.CreatedAt.Before(newestAt) {
+			copied := rec
+			newest, newestAt = &copied, cp.CreatedAt
+		}
+	}
+	if newest == nil {
+		return VerifyFreshReviewRecord{}, false
+	}
+	steps, err := c.store.ListWorkflowSteps(ctx, runID)
+	if err != nil {
+		return VerifyFreshReviewRecord{}, false
+	}
+	for _, s := range steps {
+		if s.ID != reviewStepID || s.ReviewRunID == nil {
+			continue
+		}
+		if *s.ReviewRunID != (*newest).priorReviewRun() {
+			return VerifyFreshReviewRecord{}, false
+		}
+	}
+	return (*newest).freshReviewRecord(), true
 }

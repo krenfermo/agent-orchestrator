@@ -36,8 +36,6 @@ package workflow_test
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -45,20 +43,6 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 )
-
-// authorityAt renders one workspace state: a real file on disk (so the
-// fingerprint hashes real bytes, as in production) at a named commit.
-func authorityAt(t *testing.T, dir, head, body string) ports.WorkspaceObservation {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, "frontend", "src", "Board.tsx"), []byte(body), 0o644); err != nil {
-		t.Fatalf("write Board.tsx: %v", err)
-	}
-	return ports.WorkspaceObservation{
-		Path: dir, Branch: "feat/engineering-control-center", HeadSHA: head,
-		Dirty: true, Untracked: true,
-		Changes: []ports.WorkspaceChange{{Path: "frontend/src/Board.tsx", Status: "??"}},
-	}
-}
 
 // authorityCleanAt is the same, committed: HEAD moved, nothing outstanding.
 func authorityCleanAt(dir, head string) ports.WorkspaceObservation {

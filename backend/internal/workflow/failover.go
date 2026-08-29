@@ -76,15 +76,6 @@ func effectiveMaxWorkProviderAttempts(p domain.WorkflowPolicy) int {
 	return domain.DefaultWorkflowPolicy().MaxWorkProviderAttempts
 }
 
-// effectiveMaxReviewProviderAttempts mirrors effectiveMaxWorkProviderAttempts
-// for the review role.
-func effectiveMaxReviewProviderAttempts(p domain.WorkflowPolicy) int {
-	if p.MaxReviewProviderAttempts > 0 {
-		return p.MaxReviewProviderAttempts
-	}
-	return domain.DefaultWorkflowPolicy().MaxReviewProviderAttempts
-}
-
 // selectFallbackForWork decides whether a work-step dispatch failure should
 // fail over to a different harness (Checkpoint 8H §4/§8): the failure class
 // must be failover-eligible, the step must still be within its policy
@@ -253,10 +244,10 @@ func (c *Coordinator) ReportWorkStepProviderFailure(ctx stdctx.Context, runID, s
 	// (agent_switching.go already bounds/fingerprints this exact field; no
 	// second handoff mechanism is built here).
 	decision := DecideSessionLifecycle(SessionLifecycleRequest{
-		Role: domain.WorkflowRoleWorker, CurrentSessionID: string(*step.SessionID),
+		Role: domain.WorkflowRoleWorker, CurrentSessionID: *step.SessionID,
 		SessionHealth: domain.SessionHealthRunning, ProviderSwitch: true, Policy: policyForRun(run),
 	})
-	decision.ToSessionID = string(*step.SessionID)
+	decision.ToSessionID = *step.SessionID
 	var pack *domain.SessionContextPack
 	if artifact, aerr := c.planArtifactForRun(ctx, run); aerr == nil {
 		facts := BuildTaskCheckpointSummary(TaskCheckpointSummaryInput{Detail: RunDetail{Run: run}, Artifact: &artifact})
@@ -299,7 +290,7 @@ func (c *Coordinator) ReportWorkStepProviderFailure(ctx stdctx.Context, runID, s
 	c.recordAgentHealthSuccess(ctx, fallback, healthScope{userID: fbOwner, profileID: fbProfileID}, now)
 
 	stepID2 := step.ID
-	sid := string(*step.SessionID)
+	sid := *step.SessionID
 	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
 		ID:             "wfc-" + c.newID(),
 		WorkflowRunID:  run.ID,

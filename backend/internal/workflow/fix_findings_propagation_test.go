@@ -561,11 +561,12 @@ func TestShreddedFixPromptIsVisibleAsAReceiptMismatch(t *testing.T) {
 	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
 	workspaceFacts := &fakeWorkspaceFacts{}
 	reviewRuns := newFakeReviewRuns()
-	c, store, clk := newCoordinatorWithFix(spawner, sessionFacts, workspaceFacts, reviewRuns, &fakeReviewerLauncher{}, nil)
+	_, store, clk := newCoordinatorWithFix(spawner, sessionFacts, workspaceFacts, reviewRuns, &fakeReviewerLauncher{}, nil)
 	// The coordinator is rebuilt with the shredding sender: newCoordinatorWithFix
-	// takes a *fakeMessageSender specifically, so wire this one directly.
+	// takes a *fakeMessageSender specifically, so wire this one directly. Only
+	// the store and clock it built are reused.
 	var idSeq int
-	c = workflowcore.New(workflowcore.Deps{
+	c := workflowcore.New(workflowcore.Deps{
 		Store: store, Spawner: spawner, SessionFacts: sessionFacts, WorkspaceFacts: workspaceFacts,
 		ReviewRuns: reviewRuns, ReviewerLauncher: &fakeReviewerLauncher{}, MessageSender: sender,
 		Clock: clk.Now, NewID: func() string { idSeq++; return fmt.Sprintf("id%d", idSeq) },

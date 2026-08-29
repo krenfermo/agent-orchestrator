@@ -2,7 +2,6 @@ package workflow
 
 import (
 	stdctx "context"
-	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
@@ -29,7 +28,7 @@ type DecisionProviderSelection struct {
 // (never an error) means the caller leaves the question at state=resolving
 // and retries on the next reconcile pass rather than escalating to
 // human_required.
-func (c *Coordinator) selectDecisionResolverProvider(ctx stdctx.Context, run domain.WorkflowRun, asking domain.AgentHarness, now time.Time) (DecisionProviderSelection, error) {
+func (c *Coordinator) selectDecisionResolverProvider(ctx stdctx.Context, run domain.WorkflowRun, asking domain.AgentHarness) (DecisionProviderSelection, error) {
 	owner := c.runOwner(ctx, run.ID)
 	snapshot := policyForRun(run).EffectiveExecutionPolicy()
 	policy, eligible, ineligible, capacity := c.routingInputsForRole(ctx, owner, domain.WorkflowRoleDecisionResolver, snapshot)

@@ -270,16 +270,3 @@ func TestFixAuthorityIsGenerationConditional(t *testing.T) {
 		t.Fatal("a stale review generation authorized a fix cycle under an open re-entry")
 	}
 }
-
-// authorityReviewRuns answers only the question the authority check asks. The
-// embedded interface is nil on purpose: any OTHER method reaching this fake is a
-// test asserting something it did not mean to, and a panic says so immediately.
-type authorityReviewRuns struct {
-	ReviewRuns
-	runs map[string]domain.ReviewRun
-}
-
-func (f *authorityReviewRuns) GetReviewRun(_ stdctx.Context, id string) (domain.ReviewRun, bool, error) {
-	r, ok := f.runs[id]
-	return r, ok, nil
-}

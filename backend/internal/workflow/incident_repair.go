@@ -224,25 +224,9 @@ func incidentDiagnosisSummary(inc Incident) string {
 
 // claimIncidentRepair takes the single-flight slot for one repair generation.
 func (c *Coordinator) claimIncidentRepair(ctx stdctx.Context, run domain.WorkflowRun, inc Incident, generation int) (domain.WorkflowOutboxEntry, bool, error) {
-	entry, _, err := c.store.EnqueueWorkflowOutboxEntry(ctx, domain.WorkflowOutboxEntry{
-		ID:             "wfo-" + c.newID(),
-		WorkflowRunID:  run.ID,
-		IdempotencyKey: incidentRepairIdempotencyKey(inc.ID, generation),
-		CommandType:    domain.WorkflowOutboxSpawnWorkerSession,
-		Payload:        fmt.Sprintf(`{"incidentId":%q,"repairGeneration":%d}`, inc.ID, generation),
-		CreatedAt:      c.clock(),
-	})
-	if err != nil {
-		return domain.WorkflowOutboxEntry{}, false, err
-	}
-	if entry.Status != domain.WorkflowOutboxPending {
-		return entry, false, nil
-	}
-	if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID,
-		domain.WorkflowOutboxPending, domain.WorkflowOutboxDispatched, c.clock(), ""); err != nil {
-		return entry, false, err
-	}
-	return entry, true, nil
+	return c.claimIncidentOutboxSlot(ctx, run,
+		incidentRepairIdempotencyKey(inc.ID, generation),
+		fmt.Sprintf(`{"incidentId":%q,"repairGeneration":%d}`, inc.ID, generation))
 }
 
 func (c *Coordinator) releaseIncidentRepairClaim(ctx stdctx.Context, entry domain.WorkflowOutboxEntry, cause error) {

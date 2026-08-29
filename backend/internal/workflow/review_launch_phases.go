@@ -348,19 +348,6 @@ func (c *Coordinator) recordReviewLaunchIntentPlanned(
 	return err
 }
 
-// recordReviewLaunchIntent records that a review identity exists and nothing has
-// been launched for it. A failure here aborts the dispatch BEFORE the launch,
-// which is the safe direction: an unrecorded identity with no reviewer behind it
-// is recoverable, an unrecordable launch is not.
-func (c *Coordinator) recordReviewLaunchIntent(
-	ctx stdctx.Context, run domain.WorkflowRun, reviewStep domain.WorkflowStep,
-	reviewRun domain.ReviewRun, targetSHA string,
-) error {
-	return c.recordReviewLaunchPhase(ctx, run, reviewStep, reviewRun,
-		reviewLaunchIntentPhase, "", "", targetSHA,
-		fmt.Sprintf("review_launch_intent: review run %s created; no reviewer launched yet", reviewRun.ID))
-}
-
 // recordReviewLaunchConfirmed records that a reviewer process demonstrably
 // exists, with the handle that identifies it.
 func (c *Coordinator) recordReviewLaunchConfirmed(
@@ -519,6 +506,9 @@ func (c *Coordinator) upgradeLegacyLaunchIdentity(
 	// answer is used to LEARN the instance, never to act by name.
 	obs, perr := ensurer.ProbeReviewer(ctx, ReviewerRef{HandleID: ref.HandleID})
 	if perr != nil {
+		// An unanswered probe cannot upgrade a legacy record. Unknown presence
+		// is the honest answer, and the next pass asks again.
+		//nolint:nilerr // an unanswered probe learns nothing; it is not a failure.
 		return ReviewerRef{}, ReviewerPresenceUnknown, nil
 	}
 	if !obs.Presence.LicensesAdoption() || obs.InstanceID == "" {
@@ -813,6 +803,7 @@ func (c *Coordinator) cancelReviewerExternally(
 	// open so the next pass tries again — an orphan that is still alive in three
 	// seconds is still an orphan, while a confirmation AO cannot stand behind is
 	// permanent.
+	//nolint:nilerr // only PROOF of absence confirms; an unanswered probe retries.
 	if obs, perr := ensurer.ProbeReviewer(ctx, ref); perr != nil || !obs.Presence.LicensesLaunch() {
 		return nil
 	}
@@ -1425,8 +1416,7 @@ func (c *Coordinator) escalateUnprovenReviewer(
 		identity, reviewRunID, attempt, why)
 	// Through the evidence gate, like every other ambiguity: the stop carries a
 	// collected snapshot or it is not taken at all.
-	if _, serr := c.stopReviewAmbiguous(ctx, run, reviewStep,
-		ReasonReviewStateAmbiguous, detail, ""); serr != nil {
+	if _, serr := c.stopReviewAmbiguous(ctx, run, reviewStep, detail, ""); serr != nil {
 		if c.log != nil {
 			c.log.Warn("workflow: could not raise the unproven-reviewer incident; it will be retried",
 				"run", run.ID, "step", reviewStep.ID, "reviewer", identity, "err", serr)

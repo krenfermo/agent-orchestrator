@@ -341,7 +341,7 @@ func TestReviewerCapacityWake_HeadlessPollerLaunchesReviewerExactlyOnce(t *testi
 // always has — seedRunWithPolicy's own minimal single-step fixture is fine
 // for tests that only ever call GetRun, but the wake-integration tests here
 // resume via the poller's ContinueRun call, so they need the second step too.
-func seedRunWithPolicyAndReviewStep(t *testing.T, ctx context.Context, store *sqlite.Store, policyJSON string) (domain.WorkflowRun, string) {
+func seedRunWithPolicyAndReviewStep(ctx context.Context, t *testing.T, store *sqlite.Store, policyJSON string) (domain.WorkflowRun, string) {
 	t.Helper()
 	now := time.Now().UTC()
 	runID := "wf-" + t.Name()
@@ -400,8 +400,8 @@ func TestDecisionResolverCapacityWake_HeadlessPollerRetriesExactlyOnce(t *testin
 		Clock:                    clk.Now,
 	})
 
-	run, stepID := seedRunWithPolicyAndReviewStep(t, ctx, store, `{"version":"v1","maxFixCycles":3}`)
-	seedResolvingQuestion(t, ctx, store, run.ID, stepID, domain.HarnessClaudeCode)
+	run, stepID := seedRunWithPolicyAndReviewStep(ctx, t, store, `{"version":"v1","maxFixCycles":3}`)
+	seedResolvingQuestion(ctx, t, store, run.ID, stepID, domain.HarnessClaudeCode)
 
 	// Codex (the only cross-provider resolver option, same-provider not
 	// allowed by default policy) is unavailable.
@@ -579,8 +579,8 @@ func TestHumanRequiredQuestion_NeverSchedulesWake(t *testing.T) {
 		Clock:          clk.Now,
 	})
 
-	run, stepID := seedRunWithPolicyAndReviewStep(t, ctx, store, `{"version":"v1","maxFixCycles":3}`)
-	q := seedResolvingQuestion(t, ctx, store, run.ID, stepID, domain.HarnessClaudeCode)
+	run, stepID := seedRunWithPolicyAndReviewStep(ctx, t, store, `{"version":"v1","maxFixCycles":3}`)
+	q := seedResolvingQuestion(ctx, t, store, run.ID, stepID, domain.HarnessClaudeCode)
 	if _, err := store.TransitionWorkflowQuestionState(ctx, string(q.ID), domain.QuestionStateResolving, domain.QuestionStateHumanRequired, "test forced", clk.Now()); err != nil {
 		t.Fatalf("force human_required: %v", err)
 	}

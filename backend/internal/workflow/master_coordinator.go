@@ -1373,7 +1373,7 @@ func (c *Coordinator) dispatchMasterTask(ctx stdctx.Context, parent domain.Workf
 	// BuildWorkStepPrompt (no second prompt-assembly path).
 	var depPack *domain.SessionContextPack
 	if allTasks, tasksErr := c.planStore.ListWorkflowTasks(ctx, parent.ID); tasksErr == nil {
-		if depBlock, pack, blockErr := c.priorTaskContextBlock(ctx, allTasks, task); blockErr == nil && depBlock != "" {
+		if depBlock, pack := c.priorTaskContextBlock(ctx, allTasks, task); depBlock != "" {
 			objective = objective + "\n\n" + depBlock
 			depPack = pack
 		}

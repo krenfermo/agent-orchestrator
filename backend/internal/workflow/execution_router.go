@@ -251,8 +251,8 @@ func routeCrossProvider(decision domain.RoutingDecision, priority []domain.Provi
 	}
 	allowSameProvider := req.Policy.ReviewIndependence == domain.ReviewIndependenceAllowSameProviderFallback && req.Complexity != ComplexityHighRisk
 	if allowSameProvider {
-		any := func(domain.ProviderProfile) bool { return true }
-		if sel, idx, ok := selectFromPriority(priority, req, any); ok {
+		anyProfile := func(domain.ProviderProfile) bool { return true }
+		if sel, idx, ok := selectFromPriority(priority, req, anyProfile); ok {
 			decision.SelectedProfileID = sel.ID
 			decision.SelectedHarness = sel.Harness
 			decision.ReasonCodes = []domain.RoutingReason{domain.RoutingReasonReviewIndependenceRequired, domain.RoutingReasonPreferredUnavailable, domain.RoutingReasonSameProviderFallbackAllowed}

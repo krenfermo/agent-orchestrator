@@ -14,7 +14,6 @@ import (
 // Scheduler without a real database.
 type fakeStore struct {
 	rows map[string]store.WorkflowWakeSchedule
-	seq  int
 }
 
 func newFakeStore() *fakeStore {

@@ -1038,12 +1038,12 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 	// dispatch (work-just-completed, review step still "pending") stays
 	// ContinueRun's explicit job, exactly as Checkpoint 8C originally scoped
 	// it (see TestReviewStepUntouchedAfterWorkCompletion).
-	if updatedRun, err := c.advanceReviewFixCycle(ctx, run, steps, false); err != nil {
+	updatedRun, err := c.advanceReviewFixCycle(ctx, run, steps, false)
+	if err != nil {
 		return RunDetail{}, err
-	} else {
-		run = updatedRun
-		detail.Run = run
 	}
+	run = updatedRun
+	detail.Run = run
 
 	for _, step := range steps {
 		attempts, err := c.store.ListWorkflowAttempts(ctx, step.ID)
@@ -1432,7 +1432,7 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 			// resolvable from here too -- not only at boot. Without it the
 			// heartbeat wakes, finds a non-pending plan, delegates to GetRun,
 			// and GetRun reconciles nothing because the plan is not approved.
-			if _, aerr := c.resumeValidatedPlan(ctx, run, plan); aerr != nil {
+			if aerr := c.resumeValidatedPlan(ctx, run, plan); aerr != nil {
 				return RunDetail{}, aerr
 			}
 			return c.GetRun(ctx, runID)
@@ -1524,7 +1524,7 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 	// durable evidence. Crucially it runs BEFORE the dispatch below, so an
 	// adoptable changeset can never have a second writer started over it.
 	// See work_adoption.go.
-	adopted := false
+	var adopted bool
 	if run, adopted, err = c.resumeAdoptedTaskCommit(ctx, run, steps); err != nil {
 		return RunDetail{}, err
 	}
@@ -1535,9 +1535,6 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 		for i := range steps {
 			if steps[i].Kind == domain.WorkflowStepWork {
 				workStep = &steps[i]
-			}
-			if steps[i].Kind == domain.WorkflowStepReview {
-				reviewStep = &steps[i]
 			}
 		}
 	}
@@ -1570,7 +1567,7 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 	// re-delivers the same findings to the same session when, and only when, it
 	// still holds. A no-op for every other run, including one stopped on the
 	// same reason whose worker did in fact start. See fix_cycle_resume.go.
-	resumedFix := false
+	var resumedFix bool
 	if run, resumedFix, err = c.resumeUnstartedFixCycle(ctx, run); err != nil {
 		return RunDetail{}, err
 	}
@@ -1588,7 +1585,7 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 	// changed after the budget ran out and re-opens an INDEPENDENT review of
 	// what is actually there, without raising the budget, consuming a fix cycle
 	// or skipping the reviewer. See human_applied_fix.go.
-	humanFixed := false
+	var humanFixed bool
 	if run, humanFixed, err = c.resumeHumanAppliedFix(ctx, run); err != nil {
 		return RunDetail{}, err
 	}
@@ -1639,9 +1636,9 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 	// thing that was broken". resumeStaleVerifyFailure decides on the run's own
 	// durable evidence whether that licence applies; when it does not, it is a
 	// no-op and everything below behaves exactly as it always did.
-	reopened, rerr := false, error(nil)
-	if run, reopened, rerr = c.resumeStaleVerifyFailure(ctx, run, steps); rerr != nil {
-		return RunDetail{}, rerr
+	var reopened bool
+	if run, reopened, err = c.resumeStaleVerifyFailure(ctx, run, steps); err != nil {
+		return RunDetail{}, err
 	}
 	// Checkpoint 8P-E.14D: the same person, on the same button, for the state one
 	// step further along — a workspace mismatch an OLDER daemon already decided
@@ -1687,11 +1684,11 @@ func (c *Coordinator) ContinueRun(ctx stdctx.Context, runID string) (RunDetail, 
 	if reopened {
 		// The verify step is no longer terminal and the run is no longer parked;
 		// the cascade below must see that, not the snapshot read at entry.
-		if refreshed, err := c.store.ListWorkflowSteps(ctx, runID); err != nil {
+		refreshed, err := c.store.ListWorkflowSteps(ctx, runID)
+		if err != nil {
 			return RunDetail{}, err
-		} else {
-			steps = refreshed
 		}
+		steps = refreshed
 	}
 
 	if _, err := c.advanceReviewFixCycle(ctx, run, steps, true); err != nil {
@@ -1821,19 +1818,19 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 		// CancelOpenWorkflowQuestionsByRun only ever touched
 		// pending/human_required, so state=resolving needs its own pass
 		// here. No resolver-launch, no delivery follows either transition.
-		if all, err := c.questionsStore.ListWorkflowQuestionsByRun(ctx, runID); err != nil {
+		all, err := c.questionsStore.ListWorkflowQuestionsByRun(ctx, runID)
+		if err != nil {
 			return RunDetail{}, err
-		} else {
-			for _, q := range all {
-				if q.State != domain.QuestionStateResolving {
-					continue
-				}
-				if _, err := c.questionsStore.CancelRunningResolutionsByQuestion(ctx, string(q.ID), now); err != nil {
-					return RunDetail{}, err
-				}
-				if _, err := c.questionsStore.TransitionWorkflowQuestionState(ctx, string(q.ID), domain.QuestionStateResolving, domain.QuestionStateCancelled, "workflow run cancelled", now); err != nil {
-					return RunDetail{}, err
-				}
+		}
+		for _, q := range all {
+			if q.State != domain.QuestionStateResolving {
+				continue
+			}
+			if _, err := c.questionsStore.CancelRunningResolutionsByQuestion(ctx, string(q.ID), now); err != nil {
+				return RunDetail{}, err
+			}
+			if _, err := c.questionsStore.TransitionWorkflowQuestionState(ctx, string(q.ID), domain.QuestionStateResolving, domain.QuestionStateCancelled, "workflow run cancelled", now); err != nil {
+				return RunDetail{}, err
 			}
 		}
 		if _, err := c.questionsStore.CancelOpenWorkflowQuestionsByRun(ctx, runID); err != nil {
