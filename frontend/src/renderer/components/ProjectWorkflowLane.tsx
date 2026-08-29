@@ -198,7 +198,7 @@ export function WorkflowBoardCard({
 			<p
 				className="font-mono text-[10px] text-muted-foreground/70"
 				data-testid="workflow-run-id"
-				title="Autonomous workflow run ID"
+				title={t("board.runIdTitle")}
 			>
 				{t("board.runId", { runId: workflow.workflowId })}
 			</p>

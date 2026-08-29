@@ -229,6 +229,35 @@ type PlacementManager interface {
 	AdmissionState(ctx context.Context, runID string) (workflowcore.AdmissionStateView, error)
 }
 
+// PlacementOverrideManager is P1-E's operator WRITE surface over the same
+// frozen placement: the per-task override request, and the explicit generation
+// transition.
+//
+// It is a separate interface from PlacementManager on purpose, and the split is
+// not stylistic. PlacementManager's contract is that nothing behind it can move
+// a placement, which is what lets a deployment expose the diagnostic view
+// without exposing the ability to re-point a running obligation. Folding two
+// writes into it would silently retire that guarantee for every existing
+// implementation.
+//
+// Optional and type-asserted, exactly like PlacementManager, so an
+// implementation predating P1-E keeps compiling and answers 501.
+type PlacementOverrideManager interface {
+	// RequestPlacementOverride records what an operator wants this
+	// obligation's placement to be. Before the freeze it is an input to
+	// selection; after it, it is recorded and inert until a transition
+	// consumes it, and the outcome says which of the two happened.
+	RequestPlacementOverride(ctx context.Context, req workflowcore.PlacementOverrideRequestInput) (workflowcore.PlacementOverrideOutcome, error)
+	// TransitionPlacement replaces one frozen placement generation with
+	// another, after proving no authority still owns the old one. A refusal is
+	// a normal outcome with a named authority, never an error.
+	TransitionPlacement(ctx context.Context, req workflowcore.PlacementTransitionInput) (workflowcore.PlacementTransitionOutcome, error)
+	// ListPlacementOverrides and ListPlacementTransitions are the audit trail:
+	// what was asked, what was applied, and what AO refused and why.
+	ListPlacementOverrides(ctx context.Context, runID string) ([]workflowcore.PlacementOverrideView, error)
+	ListPlacementTransitions(ctx context.Context, runID string) ([]workflowcore.PlacementTransitionView, error)
+}
+
 // CreateObjectiveRunWithStrategy implements StrategyManager.
 func (s *Service) CreateObjectiveRunWithStrategy(ctx context.Context, projectID, objective string, mode domain.WorkflowPlanApprovalMode, strategy domain.ExecutionStrategySelection) (workflowcore.RunDetail, error) {
 	return s.coordinator.CreateObjectiveRunWithStrategy(ctx, projectID, objective, mode, strategy)
@@ -420,4 +449,24 @@ func (s *Service) ListProviderAttempts(ctx context.Context, runID string) ([]wor
 // AdmissionState implements PlacementManager.
 func (s *Service) AdmissionState(ctx context.Context, runID string) (workflowcore.AdmissionStateView, error) {
 	return s.coordinator.AdmissionState(ctx, runID)
+}
+
+// RequestPlacementOverride implements PlacementOverrideManager.
+func (s *Service) RequestPlacementOverride(ctx context.Context, req workflowcore.PlacementOverrideRequestInput) (workflowcore.PlacementOverrideOutcome, error) {
+	return s.coordinator.RequestPlacementOverride(ctx, req)
+}
+
+// TransitionPlacement implements PlacementOverrideManager.
+func (s *Service) TransitionPlacement(ctx context.Context, req workflowcore.PlacementTransitionInput) (workflowcore.PlacementTransitionOutcome, error) {
+	return s.coordinator.TransitionPlacement(ctx, req)
+}
+
+// ListPlacementOverrides implements PlacementOverrideManager.
+func (s *Service) ListPlacementOverrides(ctx context.Context, runID string) ([]workflowcore.PlacementOverrideView, error) {
+	return s.coordinator.ListPlacementOverrides(ctx, runID)
+}
+
+// ListPlacementTransitions implements PlacementOverrideManager.
+func (s *Service) ListPlacementTransitions(ctx context.Context, runID string) ([]workflowcore.PlacementTransitionView, error) {
+	return s.coordinator.ListPlacementTransitions(ctx, runID)
 }

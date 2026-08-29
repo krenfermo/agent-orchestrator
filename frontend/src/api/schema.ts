@@ -2287,6 +2287,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflowId}/placement/override": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P1-E: ask for a particular execution placement for one task. This is a REQUEST, not a move: before anything is frozen it is the input the freeze uses; once a placement IS frozen it is recorded and changes nothing until a transition consumes it, and the response says which of the two happened. `auto` withdraws a standing override and defers to selection policy. */
+        post: operations["requestWorkflowPlacementOverride"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/placement/transition": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P1-E: replace one frozen placement generation with another. Refused with 409 and the refusing AUTHORITY named unless every one of them has provably let go — the run is live, no authoritative provider attempt, no outstanding capacity claim, no runtime-bound claim, no held branch lock, and no outstanding integration authority. Quiescence is proved from durable rows, never inferred from the filesystem. Repeating a transition that already happened returns it rather than minting a second generation, and there is no operation here that re-points a running obligation. */
+        post: operations["transitionWorkflowPlacement"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workflows/{workflowId}/plan": {
         parameters: {
             query?: never;
@@ -4029,6 +4063,80 @@ export interface components {
             status: "needs_review" | "running" | "up_to_date" | "changes_requested" | "ineligible";
             targetSha: string;
             title: string;
+        };
+        PlacementOverrideRequestBody: {
+            /** @enum {string} */
+            placement: "auto" | "direct_branch" | "isolated_worktree";
+            reason?: string;
+            taskId?: string;
+        };
+        PlacementOverrideResponse: {
+            appliesAtFreeze: boolean;
+            currentPlacement?: components["schemas"]["ControllersExecutionPlacementView"];
+            override: components["schemas"]["PlacementOverrideView"];
+            requiresTransition: boolean;
+        };
+        PlacementOverrideView: {
+            /** Format: int64 */
+            appliedGeneration?: number;
+            detail?: string;
+            /** @enum {string} */
+            placement: "auto" | "direct_branch" | "isolated_worktree";
+            reason?: string;
+            requestedBy?: string;
+            /** @enum {string} */
+            state: "requested" | "applied" | "superseded" | "refused";
+            taskId?: string;
+        };
+        PlacementQuiescenceView: {
+            digest?: string;
+            noBranchAuthority: boolean;
+            noCapacityClaim: boolean;
+            noIntegrationAuthority: boolean;
+            noLiveRuntime: boolean;
+            noProviderAttempt: boolean;
+            quiesced: boolean;
+            runActive: boolean;
+        };
+        PlacementTransitionRequestBody: {
+            /** Format: int64 */
+            expectedGeneration?: number;
+            /** @enum {string} */
+            expectedState?: "selected" | "waiting" | "preparing" | "ready" | "active" | "reviewing" | "integrating" | "integrated" | "conflict" | "preserved" | "terminal";
+            /** @enum {string} */
+            placement: "auto" | "direct_branch" | "isolated_worktree";
+            reason?: string;
+            taskId?: string;
+        };
+        PlacementTransitionResponse: {
+            alreadyApplied: boolean;
+            applied: boolean;
+            from?: components["schemas"]["ControllersExecutionPlacementView"];
+            quiescence: components["schemas"]["PlacementQuiescenceView"];
+            to?: components["schemas"]["ControllersExecutionPlacementView"];
+            transition: components["schemas"]["PlacementTransitionView"];
+        };
+        PlacementTransitionView: {
+            detail?: string;
+            expectedState?: string;
+            /** Format: int64 */
+            fromGeneration: number;
+            /** @enum {string} */
+            fromType?: "direct_branch" | "isolated_worktree";
+            /** @enum {string} */
+            placement: "auto" | "direct_branch" | "isolated_worktree";
+            quiescence?: string;
+            reason?: string;
+            /** @enum {string} */
+            refusalReason?: "no_operator_authority" | "unknown_placement_request" | "no_frozen_placement" | "placement_not_current" | "lifecycle_state_drifted" | "active_provider_attempt" | "held_capacity_claim" | "live_runtime" | "held_branch_authority" | "outstanding_integration" | "run_is_terminal" | "authority_unreadable";
+            requestedBy?: string;
+            /** @enum {string} */
+            state: "requested" | "applied" | "refused";
+            taskId?: string;
+            /** Format: int64 */
+            toGeneration?: number;
+            /** @enum {string} */
+            toType?: "direct_branch" | "isolated_worktree";
         };
         PreviewServerStatusResponse: {
             configuration?: string;
@@ -13593,6 +13701,123 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    requestWorkflowPlacementOverride: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlacementOverrideRequestBody"];
+            };
+        };
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlacementOverrideResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    transitionWorkflowPlacement: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlacementTransitionRequestBody"];
+            };
+        };
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlacementTransitionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

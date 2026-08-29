@@ -6472,6 +6472,113 @@ paths:
         no token is exposed and nothing here can move a placement.'
       tags:
       - workflows
+  /api/v1/workflows/{workflowId}/placement/override:
+    post:
+      operationId: requestWorkflowPlacementOverride
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlacementOverrideRequestBody'
+        required: true
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlacementOverrideResponse'
+          description: Accepted
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P1-E: ask for a particular execution placement for one task. This
+        is a REQUEST, not a move: before anything is frozen it is the input the freeze
+        uses; once a placement IS frozen it is recorded and changes nothing until
+        a transition consumes it, and the response says which of the two happened.
+        `auto` withdraws a standing override and defers to selection policy.'
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/placement/transition:
+    post:
+      operationId: transitionWorkflowPlacement
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlacementTransitionRequestBody'
+        required: true
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlacementTransitionResponse'
+          description: Accepted
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P1-E: replace one frozen placement generation with another. Refused
+        with 409 and the refusing AUTHORITY named unless every one of them has provably
+        let go — the run is live, no authoritative provider attempt, no outstanding
+        capacity claim, no runtime-bound claim, no held branch lock, and no outstanding
+        integration authority. Quiescence is proved from durable rows, never inferred
+        from the filesystem. Repeating a transition that already happened returns
+        it rather than minting a second generation, and there is no operation here
+        that re-points a running obligation.'
+      tags:
+      - workflows
   /api/v1/workflows/{workflowId}/plan:
     get:
       operationId: getWorkflowPlan
@@ -11056,6 +11163,207 @@ components:
       - title
       - targetSha
       - status
+      type: object
+    PlacementOverrideRequestBody:
+      properties:
+        placement:
+          enum:
+          - auto
+          - direct_branch
+          - isolated_worktree
+          type: string
+        reason:
+          type: string
+        taskId:
+          type: string
+      required:
+      - placement
+      type: object
+    PlacementOverrideResponse:
+      properties:
+        appliesAtFreeze:
+          type: boolean
+        currentPlacement:
+          $ref: '#/components/schemas/ControllersExecutionPlacementView'
+        override:
+          $ref: '#/components/schemas/PlacementOverrideView'
+        requiresTransition:
+          type: boolean
+      required:
+      - override
+      - appliesAtFreeze
+      - requiresTransition
+      type: object
+    PlacementOverrideView:
+      properties:
+        appliedGeneration:
+          format: int64
+          type: integer
+        detail:
+          type: string
+        placement:
+          enum:
+          - auto
+          - direct_branch
+          - isolated_worktree
+          type: string
+        reason:
+          type: string
+        requestedBy:
+          type: string
+        state:
+          enum:
+          - requested
+          - applied
+          - superseded
+          - refused
+          type: string
+        taskId:
+          type: string
+      required:
+      - placement
+      - state
+      type: object
+    PlacementQuiescenceView:
+      properties:
+        digest:
+          type: string
+        noBranchAuthority:
+          type: boolean
+        noCapacityClaim:
+          type: boolean
+        noIntegrationAuthority:
+          type: boolean
+        noLiveRuntime:
+          type: boolean
+        noProviderAttempt:
+          type: boolean
+        quiesced:
+          type: boolean
+        runActive:
+          type: boolean
+      required:
+      - quiesced
+      - runActive
+      - noProviderAttempt
+      - noCapacityClaim
+      - noLiveRuntime
+      - noBranchAuthority
+      - noIntegrationAuthority
+      type: object
+    PlacementTransitionRequestBody:
+      properties:
+        expectedGeneration:
+          format: int64
+          type: integer
+        expectedState:
+          enum:
+          - selected
+          - waiting
+          - preparing
+          - ready
+          - active
+          - reviewing
+          - integrating
+          - integrated
+          - conflict
+          - preserved
+          - terminal
+          type: string
+        placement:
+          enum:
+          - auto
+          - direct_branch
+          - isolated_worktree
+          type: string
+        reason:
+          type: string
+        taskId:
+          type: string
+      required:
+      - placement
+      type: object
+    PlacementTransitionResponse:
+      properties:
+        alreadyApplied:
+          type: boolean
+        applied:
+          type: boolean
+        from:
+          $ref: '#/components/schemas/ControllersExecutionPlacementView'
+        quiescence:
+          $ref: '#/components/schemas/PlacementQuiescenceView'
+        to:
+          $ref: '#/components/schemas/ControllersExecutionPlacementView'
+        transition:
+          $ref: '#/components/schemas/PlacementTransitionView'
+      required:
+      - applied
+      - alreadyApplied
+      - transition
+      - quiescence
+      type: object
+    PlacementTransitionView:
+      properties:
+        detail:
+          type: string
+        expectedState:
+          type: string
+        fromGeneration:
+          format: int64
+          type: integer
+        fromType:
+          enum:
+          - direct_branch
+          - isolated_worktree
+          type: string
+        placement:
+          enum:
+          - auto
+          - direct_branch
+          - isolated_worktree
+          type: string
+        quiescence:
+          type: string
+        reason:
+          type: string
+        refusalReason:
+          enum:
+          - no_operator_authority
+          - unknown_placement_request
+          - no_frozen_placement
+          - placement_not_current
+          - lifecycle_state_drifted
+          - active_provider_attempt
+          - held_capacity_claim
+          - live_runtime
+          - held_branch_authority
+          - outstanding_integration
+          - run_is_terminal
+          - authority_unreadable
+          type: string
+        requestedBy:
+          type: string
+        state:
+          enum:
+          - requested
+          - applied
+          - refused
+          type: string
+        taskId:
+          type: string
+        toGeneration:
+          format: int64
+          type: integer
+        toType:
+          enum:
+          - direct_branch
+          - isolated_worktree
+          type: string
+      required:
+      - fromGeneration
+      - placement
+      - state
       type: object
     PreviewServerStatusResponse:
       properties:

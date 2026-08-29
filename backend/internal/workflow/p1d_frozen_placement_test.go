@@ -47,8 +47,12 @@ func newPlacementFixtureWithMode(t *testing.T, mode domain.ExecutionMode) *place
 	coord := workflowcore.New(workflowcore.Deps{
 		Store: store, Projects: store,
 		Placements: store, ProviderAttempts: store, TaskWorktreeRecords: store,
-		BranchLocks:   cessionBranchLocks{mgr: locks},
-		InstanceToken: "daemon-p1d",
+		// P1-E's override/transition authority rides on the same store, exactly
+		// as the daemon wires it: a placement and the operator decision that
+		// replaced it have to be readable in one consistent view after a crash.
+		PlacementOverrides: store,
+		BranchLocks:        cessionBranchLocks{mgr: locks},
+		InstanceToken:      "daemon-p1d",
 	})
 	created, err := coord.CreateTaskRun(ctx, workflowcoreTaskRequest(t, "place this work"))
 	if err != nil {

@@ -1014,6 +1014,12 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	// admission answer to "why has this not launched" -- one route, because
 	// they are three legs of one question.
 	r.Get("/workflows/{workflowId}/placement", c.getPlacement)
+	// P1-E: the two WRITE routes over that same placement. An override is a
+	// request consumed at the freeze; a transition is an explicit, quiesced,
+	// audited replacement of one generation by another. Neither can re-point a
+	// running obligation -- see workflow_placement_override.go.
+	r.Post("/workflows/{workflowId}/placement/override", c.requestPlacementOverride)
+	r.Post("/workflows/{workflowId}/placement/transition", c.transitionPlacement)
 	r.Post("/workflows/{workflowId}/resume", c.resume)
 	r.Post("/workflows/{workflowId}/plan/reuse", c.reusePlan)
 	r.Post("/workflows/{workflowId}/plan/regenerate", c.regeneratePlan)

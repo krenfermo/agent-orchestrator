@@ -3,10 +3,10 @@ package workflow
 import (
 	stdctx "context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
-	"github.com/aoagents/agent-orchestrator/backend/internal/workspace"
 )
 
 // execution_placement.go — P1-D §A/§B: the FROZEN execution placement, and the
@@ -135,6 +135,16 @@ func (c *Coordinator) EnsureExecutionPlacement(ctx stdctx.Context, run domain.Wo
 	if err != nil {
 		return domain.ExecutionPlacement{}, false, err
 	}
+	if created {
+		// P1-E §B.2: the request is discharged by the generation that consumed
+		// it, so a standing override cannot be applied twice and the row names
+		// which placement it produced. Only the pass that actually froze
+		// resolves it -- a pass that lost the race consumed nothing.
+		if pending, ok := c.pendingPlacementOverride(ctx, scope); ok {
+			c.resolveConsumedOverride(ctx, pending, proposed.PlacementGeneration,
+				"consumed by the freeze of placement generation "+strconv.FormatInt(proposed.PlacementGeneration, 10))
+		}
+	}
 	if !created {
 		// Another pass froze first. That pass's record is the authority; this
 		// one adopts it rather than retrying with its own proposal, which is
@@ -185,6 +195,13 @@ func (c *Coordinator) selectExecutionPlacement(ctx stdctx.Context, run domain.Wo
 		}
 	}
 	placementType := domain.PlacementTypeForExecutionMode(mode)
+	// P1-E §B.1: an operator's per-task override is an input to SELECTION, and
+	// only to selection. It is consulted here -- once, before anything is
+	// mutated -- and never again: after the freeze the stored record wins, so a
+	// request that arrives later changes nothing until a transition consumes it.
+	if pending, ok := c.pendingPlacementOverride(ctx, scope); ok && pending.Requested.Explicit() {
+		placementType = pending.Requested.PlacementType()
+	}
 	target := project.Config.WithDefaults().DefaultBranch
 
 	placement := domain.ExecutionPlacement{
@@ -210,7 +227,7 @@ func (c *Coordinator) selectExecutionPlacement(ctx stdctx.Context, run domain.Wo
 		// HERE so the frozen record names the branch before it exists. The
 		// worktree PATH is deliberately not: at freeze time the checkout does
 		// not exist, so a path would be a plan recorded as a fact.
-		placement.ExecutionBranch = workspace.BranchFor(scope.runID, placementTaskKey(scope))
+		placement.ExecutionBranch = placementExecutionBranch(scope, generation)
 	} else {
 		placement.ExecutionBranch = target
 	}
@@ -586,6 +603,49 @@ func (c *Coordinator) adoptWorktreeIdentityForPlacement(ctx stdctx.Context, run 
 		}
 		return
 	}
+}
+
+// retirePlacementsForTerminalRun retires everything a run that has just
+// reached a terminal state still holds.
+//
+// P1-E §O found the gap this closes. A terminal run returned its capacity slots
+// at the instant it finished (P1-C, completeRun/CancelRun) but its PLACEMENT was
+// only retired by reconcilePlacementsForRun, which is reached from
+// Coordinator.Reconcile — and the daemon runs that at BOOT. On a long-lived
+// daemon the retirement therefore never happened during ordinary operation, so
+// a finished run's placement sat `active` forever.
+//
+// That is not merely untidy. The placement sweep will only remove an isolated
+// checkout when the record says `integrated` and names the commit its work
+// landed at, so a placement stuck in `active` is one the sweep is right to
+// refuse — and every run that completed without integrating (a direct-branch
+// run, a read-only task, a cancelled run) left an AO worktree that nothing
+// would ever collect until the next restart.
+//
+// The fix is the argument P1-C already made for capacity, applied to the other
+// authority: a run that is over releases what it holds at the moment it is
+// over, not at the next boot. It reuses reconcilePlacementsForRun rather than
+// repeating its rules, so "preserved when the work never landed, terminal
+// otherwise" has exactly one definition. Best-effort and idempotent: every
+// write inside is a CAS on the state it read, so a second pass matches nothing
+// and a failure costs a retirement the next reconcile performs anyway.
+func (c *Coordinator) retirePlacementsForTerminalRun(ctx stdctx.Context, runID string, state domain.WorkflowRunState) {
+	if !c.placementEnabled() || runID == "" || !state.Terminal() {
+		return
+	}
+	run, found, err := c.store.GetWorkflowRun(ctx, runID)
+	if err != nil || !found {
+		if err != nil && c.log != nil {
+			c.log.Warn("workflow: could not read a terminal run to retire its placements", "run", runID, "err", err)
+		}
+		return
+	}
+	// The caller has just CAS'd the transition, so the row may or may not have
+	// been re-read since. Use the state the caller proved rather than whatever
+	// the read returned, so a retirement can never be skipped because of a
+	// stale read of the very transition that triggered it.
+	run.State = state
+	c.reconcilePlacementsForRun(ctx, run)
 }
 
 // reconcilePlacementsForRun is the recovery half, run once per run per

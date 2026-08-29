@@ -39,6 +39,12 @@ func (c *Coordinator) completeRun(ctx context.Context, run domain.WorkflowRun, e
 	// sweep is a slot the queue could have used now.
 	c.releaseCapacityForRun(ctx, run.ID, "run completed")
 	c.abandonProviderAttemptsForRun(ctx, run.ID, "the run completed")
+	// P1-E §O: and the frozen placement, for the same reason and behind the
+	// same CAS. Leaving it live until the next Coordinator.Reconcile means
+	// leaving it live until the next daemon BOOT, and the placement sweep
+	// correctly refuses to collect a checkout whose record still says `active`
+	// -- so a finished run's worktree would survive every sweep in between.
+	c.retirePlacementsForTerminalRun(ctx, run.ID, domain.WorkflowRunCompleted)
 	c.notifyRunCompleted(ctx, run)
 	return true, nil
 }

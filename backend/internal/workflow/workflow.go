@@ -478,6 +478,15 @@ type Deps struct {
 	Placements       ExecutionPlacements
 	ProviderAttempts ProviderAttemptLedger
 
+	// PlacementOverrides is P1-E's operator write surface over the same frozen
+	// placement: the per-task override REQUEST consumed at the freeze, and the
+	// explicit, quiesced, audited generation TRANSITION that is the only way an
+	// already-frozen placement moves (placement_override.go). Optional on the
+	// same convention -- a nil store means no override can be recorded and no
+	// transition performed, and both refuse by name rather than doing nothing
+	// quietly. The daemon always wires it.
+	PlacementOverrides PlacementOverrides
+
 	// InstanceToken names this daemon incarnation in the placement records it
 	// freezes, exactly as branchlock.Deps.OwnerToken does for locks: it is what
 	// makes restart reconciliation decidable without guessing from timestamps.
@@ -666,6 +675,9 @@ type Coordinator struct {
 	// see execution_placement.go and provider_attempt.go.
 	placements       ExecutionPlacements
 	providerAttempts ProviderAttemptLedger
+	// placementOverrides is P1-E's operator write surface over the same
+	// placement; see placement_override.go.
+	placementOverrides PlacementOverrides
 	// instanceToken names this daemon incarnation in the records it writes.
 	instanceToken string
 
@@ -736,6 +748,7 @@ func New(d Deps) *Coordinator {
 		commitHistory:            d.CommitHistory,
 		placements:               d.Placements,
 		providerAttempts:         d.ProviderAttempts,
+		placementOverrides:       d.PlacementOverrides,
 		instanceToken:            instanceToken,
 		probeGate:                &capacityProbeGate{attempts: make(map[capacityProbeKey]time.Time)},
 		clock:                    clock,
@@ -1916,6 +1929,13 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 	// exactly the reason the branch release moved up here.
 	c.releaseCapacityForRun(ctx, runID, "workflow run cancelled")
 	c.abandonProviderAttemptsForRun(ctx, runID, "the run was cancelled")
+	// P1-E §O: and the placement. A cancelled isolated run's checkout is
+	// PRESERVED rather than made terminal -- the agent's commits on that branch
+	// may be the only copy of work somebody cancelled mid-flight, and a cancel
+	// is exactly when they will want to read them. reconcilePlacementsForRun
+	// owns that distinction; this only makes sure it happens now rather than at
+	// the next boot.
+	c.retirePlacementsForTerminalRun(ctx, runID, domain.WorkflowRunCancelled)
 
 	steps, err := c.store.ListWorkflowSteps(ctx, runID)
 	if err != nil {

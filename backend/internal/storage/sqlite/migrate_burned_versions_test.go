@@ -146,6 +146,7 @@ var shippedMigrations = map[int64]string{
 	140: "0140_capacity_claims.sql",
 	141: "0141_session_runtime_ownership.sql",
 	142: "0142_execution_placements_and_provider_attempts.sql",
+	143: "0143_execution_placement_overrides.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

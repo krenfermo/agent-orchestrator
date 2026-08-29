@@ -604,7 +604,7 @@ function CreateProjectFolderDialog({
 									className="w-full rounded-md border border-[var(--color-border-import-modal)] bg-[var(--color-bg-settings-input)] px-3 py-2 font-mono text-[13px] text-[var(--color-text-import-title)] outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
 									disabled={disabled}
 									onChange={(event) => onManualPathChange(event.target.value)}
-									placeholder="/Users/you/code/my-repo"
+									placeholder={t("createProject.manualPathPlaceholder")}
 									spellCheck={false}
 									value={manualPath}
 								/>

@@ -327,7 +327,13 @@ func newAutonomousCoordinator(store *sqlite.Store, clk *fakeClock, spawner *auto
 		// so a placement that wrongly refused a launch -- or wrongly admitted
 		// one -- breaks the whole suite rather than only its own tests.
 		Placements: store, ProviderAttempts: store, TaskWorktreeRecords: store,
-		InstanceToken: "test-daemon",
+		// P1-E: the operator override/transition authority over that same
+		// placement, wired here for the same reason -- every autonomous test in
+		// this package then runs with it present, so an override path that
+		// wrongly consumed a request, or a freeze that wrongly ignored one,
+		// breaks the whole suite rather than only its own tests.
+		PlacementOverrides: store,
+		InstanceToken:      "test-daemon",
 		Notifications: notify.New(notify.Deps{
 			Store:   store,
 			Emailer: emails,

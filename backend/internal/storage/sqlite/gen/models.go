@@ -294,6 +294,49 @@ type ExecutionPlacement struct {
 	FinalizedAt         sql.NullTime
 }
 
+type ExecutionPlacementOverride struct {
+	ID                 string
+	WorkflowRunID      string
+	TaskID             string
+	WorkflowStepID     string
+	ProjectID          string
+	RequestedPlacement string
+	RequestedBy        string
+	Reason             string
+	State              string
+	AppliedGeneration  int64
+	Detail             string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	ResolvedAt         sql.NullTime
+}
+
+type ExecutionPlacementTransition struct {
+	ID                  string
+	WorkflowRunID       string
+	TaskID              string
+	WorkflowStepID      string
+	ProjectID           string
+	FromGeneration      int64
+	ToGeneration        int64
+	FromPlacementType   string
+	FromRepoPath        string
+	FromExecutionBranch string
+	FromWorktreePath    string
+	FromBaseSha         string
+	RequestedPlacement  string
+	ToPlacementType     string
+	RequestedBy         string
+	Reason              string
+	ExpectedState       string
+	QuiescenceDigest    string
+	State               string
+	RefusalReason       string
+	Detail              string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
 type ModelUsageEvent struct {
 	ID                  int64
 	BindingID           int64

@@ -288,8 +288,9 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		// transaction boundary, because a placement and the capacity claim that
 		// authorizes launching into it have to be readable in one consistent
 		// view after a crash.
-		Placements:       store,
-		ProviderAttempts: store,
+		Placements:         store,
+		ProviderAttempts:   store,
+		PlacementOverrides: store,
 		// The SAME token the branch-lock manager stamps on every lock, so a
 		// placement and the lock protecting it name one daemon incarnation.
 		InstanceToken: branchLocks.OwnerToken(),

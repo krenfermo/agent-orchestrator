@@ -81,6 +81,26 @@ type AgentMessenger interface {
 // liveness probing for reapers and terminal attachment.
 type Runtime interface {
 	Create(ctx context.Context, cfg RuntimeConfig) (RuntimeHandle, error)
+	// Destroy is addressed by NAME, and a name is not an identity.
+	//
+	// UNSAFE AND NON-AUTHORITATIVE, deliberately and permanently. A runtime
+	// session name is reusable: the session AO looked at and the session this
+	// call reaches can be different incarnations, because the first can exit
+	// and a second can take the name in between. That is the ABA, and no
+	// amount of checking before the call closes it — the check and the destroy
+	// are two moments.
+	//
+	// It therefore may NOT be used to make an ownership decision. A caller that
+	// is deciding whether a runtime is AO's to remove — a sweeper, the capacity
+	// scheduler, a recovery pass — must use SessionFactsReader.DestroyInstance,
+	// which names one immutable incarnation and leaves a replacement under the
+	// same name alive. TestOwnershipSensitivePathsNeverUseNameOnlyDestroy
+	// enforces that boundary over the packages where it matters.
+	//
+	// What remains legitimate is destruction that is not an ownership decision
+	// at all: tearing down a handle in AO's own namespace immediately before
+	// recreating it, where destroying a stranger that had somehow taken the
+	// name is the same outcome as the create that follows.
 	Destroy(ctx context.Context, handle RuntimeHandle) error
 	GetOutput(ctx context.Context, handle RuntimeHandle, lines int) (string, error)
 	IsAlive(ctx context.Context, handle RuntimeHandle) (bool, error)

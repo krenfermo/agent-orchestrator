@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { installFakeAgent, installFakeBridge } from "./support/fake-bridge";
+import { installFakeAgent, installFakeBridge, installFakeIdentity } from "./support/fake-bridge";
 
 // INS/DMN/BRD/SET RENDERER SMOKE (issue #2483, renderer slice).
 //
@@ -23,6 +23,19 @@ import { installFakeAgent, installFakeBridge } from "./support/fake-bridge";
 // ── INS: install / first run ────────────────────────────────────────────────
 
 // #2483 INS-001.
+
+// Every renderer spec boots past identity resolution first.
+//
+// The renderer resolves the current user on mount and renders the sign-in
+// screen IN PLACE OF the shell for any answer it cannot read as a user — and
+// these specs run with no daemon, so an unstubbed identity turns every
+// assertion in this file into "element not found" against a login form. The
+// hook is here rather than inside each test because a spec that forgets it does
+// not fail loudly; it fails describing the wrong thing.
+test.beforeEach(async ({ page }) => {
+	await installFakeIdentity(page);
+});
+
 test("renderer: packaged bundle launches and paints @T0 @INS", async ({ page }) => {
 	// The real "deb/zip installs cleanly on the reference image" check is a pod
 	// packaging step with no renderer surface. The renderer-observable proof that
