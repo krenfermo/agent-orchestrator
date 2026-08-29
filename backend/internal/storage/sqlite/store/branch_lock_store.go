@@ -249,3 +249,31 @@ func branchLockFromRow(r gen.BranchLock) domain.BranchLock {
 		UpdatedAt:      r.UpdatedAt,
 	}
 }
+
+// CedeBranchLock transfers a held lock from one run to another, conditioned on
+// the run that currently holds it (P1-D §L).
+//
+// A false result is a refusal, never a silent accept: either the lock is no
+// longer held, or somebody other than `fromRunID` holds it now. Both mean this
+// caller's view of ownership is stale, and acting on a stale view of who owns a
+// branch is exactly the lock-stealing this must never do.
+//
+// The row stays 'held' throughout, so the branch is never momentarily
+// unowned -- a release-then-acquire would open a window for a third run to
+// take it, which is the same bug with extra steps.
+func (s *Store) CedeBranchLock(ctx context.Context, lockID, fromRunID, toRunID, toStepID string, at time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	n, err := s.qw.CedeBranchLock(ctx, gen.CedeBranchLockParams{
+		WorkflowRunID:   toRunID,
+		WorkflowStepID:  sql.NullString{String: toStepID, Valid: toStepID != ""},
+		RenewedAt:       at,
+		UpdatedAt:       at,
+		ID:              lockID,
+		WorkflowRunID_2: fromRunID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("cede branch lock: %w", err)
+	}
+	return n > 0, nil
+}

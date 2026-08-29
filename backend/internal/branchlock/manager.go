@@ -59,6 +59,11 @@ type Store interface {
 	ReleaseBranchLocksByRun(ctx context.Context, runID, reason string, at time.Time) (int64, error)
 	RenewBranchLock(ctx context.Context, id, runID, stepID, sessionID string, at time.Time) (bool, error)
 	AdoptBranchLock(ctx context.Context, id, ownerToken string, at time.Time) (bool, error)
+	// CedeBranchLock transfers a held lock from one run to another, CAS'd on
+	// the run that currently holds it (P1-D §L). It is what lets a Repair
+	// Agent work on a direct branch without the deadlock of queueing behind
+	// the very run it exists to unblock.
+	CedeBranchLock(ctx context.Context, lockID, fromRunID, toRunID, toStepID string, at time.Time) (bool, error)
 	GetProject(ctx context.Context, id string) (domain.ProjectRecord, bool, error)
 	ListWorkspaceRepos(ctx context.Context, projectID string) ([]domain.WorkspaceRepoRecord, error)
 	GetWorkflowRun(ctx context.Context, id string) (domain.WorkflowRun, bool, error)
@@ -154,6 +159,16 @@ func New(deps Deps) *Manager {
 	}
 	return m
 }
+
+// OwnerToken is this daemon instance's identity, as recorded on every lock it
+// holds.
+//
+// It is exported so the workflow coordinator can freeze its execution
+// placements under the SAME token (P1-D §A). Two independently generated
+// tokens would let boot reconciliation believe it owns the lock protecting a
+// placement and not the placement itself, which is precisely the kind of
+// half-owned state the token exists to make impossible.
+func (m *Manager) OwnerToken() string { return m.ownerToken }
 
 // Target is one repository+branch pair a direct-branch run will write.
 type Target struct {
@@ -516,6 +531,26 @@ func (m *Manager) ReleaseLock(ctx context.Context, lockID, reason string) (bool,
 		return false, nil
 	}
 	return m.store.ReleaseBranchLock(ctx, lockID, reason, m.clock())
+}
+
+// Cede transfers one held lock from the run that currently holds it to another
+// run (P1-D §L).
+//
+// It is a transfer and never a steal. The store statement is conditioned on
+// fromRunID still holding the lock, so a caller working from a stale view of
+// ownership matches zero rows and is refused — and the row never leaves the
+// `held` state, so there is no instant at which the branch is unowned and a
+// third run could take it.
+//
+// The manager deliberately adds no policy of its own here: WHO may cede to
+// whom, and on what generation, is a lifecycle question and belongs to the
+// caller that owns those generations (see workflow/repair_branch_cession.go).
+// What belongs here is only that the transfer is atomic and conditional.
+func (m *Manager) Cede(ctx context.Context, lockID, fromRunID, toRunID, toStepID string) (bool, error) {
+	if strings.TrimSpace(lockID) == "" || strings.TrimSpace(fromRunID) == "" || strings.TrimSpace(toRunID) == "" {
+		return false, nil
+	}
+	return m.store.CedeBranchLock(ctx, lockID, fromRunID, toRunID, toStepID, m.clock())
 }
 
 // ReleaseRun frees every lock a run holds. It is called on completion,

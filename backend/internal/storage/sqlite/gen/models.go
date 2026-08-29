@@ -267,6 +267,33 @@ type ConversationTurn struct {
 	PromotedToTurnID     sql.NullString
 }
 
+type ExecutionPlacement struct {
+	ID                  string
+	WorkflowRunID       string
+	TaskID              string
+	WorkflowStepID      string
+	ProjectID           string
+	PlacementGeneration int64
+	LifecycleGeneration int64
+	PlacementType       string
+	RepoPath            string
+	BaseBranch          string
+	BaseSha             string
+	ExecutionBranch     string
+	WorktreePath        string
+	WorktreeRecordID    string
+	MergeTarget         string
+	OwnerToken          string
+	State               string
+	Provenance          string
+	WaitingReason       string
+	IntegratedSha       string
+	Detail              string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	FinalizedAt         sql.NullTime
+}
+
 type ModelUsageEvent struct {
 	ID                  int64
 	BindingID           int64
@@ -416,6 +443,31 @@ type Project struct {
 	OwnerUserID   *domain.UserID
 }
 
+type ProviderAttempt struct {
+	ID                     string
+	WorkflowRunID          string
+	WorkflowStepID         string
+	TaskID                 string
+	ProjectID              string
+	LifecycleGeneration    int64
+	PlacementGeneration    int64
+	Ordinal                int64
+	Provider               string
+	ProfileID              string
+	State                  string
+	FailureReason          string
+	FailureClass           string
+	FailoverSafety         string
+	MutationEvidenceDigest string
+	RuntimeSessionID       string
+	CapacityClaimID        string
+	PredecessorAttemptID   string
+	SuccessorAttemptID     string
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	TerminalAt             sql.NullTime
+}
+
 type ProviderProfile struct {
 	ID               string
 	UserID           string
@@ -508,6 +560,8 @@ type Session struct {
 	AutoReviewEnabled         bool
 	OwnerUserID               *domain.UserID
 	TurnCompletedAt           sql.NullTime
+	RuntimeInstanceID         string
+	RuntimeOwnerToken         string
 }
 
 type SessionCleanupFact struct {

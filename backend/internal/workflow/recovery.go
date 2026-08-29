@@ -156,6 +156,11 @@ func (c *Coordinator) reconcileRun(ctx stdctx.Context, run domain.WorkflowRun, n
 	// whose capacity state cannot be reasoned about must not stop every other
 	// run from being scheduled.
 	c.reconcileCapacityForRun(ctx, run)
+	// P1-D: the same pass, for the same reason. A placement whose generation
+	// was superseded by a crashed replacement, or one belonging to a run that
+	// is over, must stop being an authority — and boot is where a stale one is
+	// most likely to be found.
+	c.reconcilePlacementsForRun(ctx, run)
 
 	if c.planStore != nil {
 		if plan, master, planErr := c.planStore.GetWorkflowPlan(ctx, run.ID); planErr != nil {

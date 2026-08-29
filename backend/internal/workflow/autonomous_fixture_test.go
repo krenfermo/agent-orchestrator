@@ -320,6 +320,14 @@ func newAutonomousCoordinator(store *sqlite.Store, clk *fakeClock, spawner *auto
 		// control, so a scheduler that wrongly refused (or wrongly granted)
 		// would break the whole suite rather than only its own tests.
 		Capacity: store, CapacityLimits: capacityLimits,
+		// P1-D: the frozen placement authority and the durable provider-attempt
+		// ledger, wired into the shared fixture for exactly the reason the
+		// scheduler above is. Every autonomous test in this package therefore
+		// runs through the unified admission gate against real placement rows,
+		// so a placement that wrongly refused a launch -- or wrongly admitted
+		// one -- breaks the whole suite rather than only its own tests.
+		Placements: store, ProviderAttempts: store, TaskWorktreeRecords: store,
+		InstanceToken: "test-daemon",
 		Notifications: notify.New(notify.Deps{
 			Store:   store,
 			Emailer: emails,

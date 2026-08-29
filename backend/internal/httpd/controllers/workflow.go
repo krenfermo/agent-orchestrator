@@ -1010,6 +1010,10 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	// ambiguous continue. /continue keeps working unchanged and now reports
 	// which recovery action it took.
 	r.Get("/workflows/{workflowId}/recovery", c.getRecovery)
+	// P1-D: the frozen placement, the provider-attempt chain, and the one
+	// admission answer to "why has this not launched" -- one route, because
+	// they are three legs of one question.
+	r.Get("/workflows/{workflowId}/placement", c.getPlacement)
 	r.Post("/workflows/{workflowId}/resume", c.resume)
 	r.Post("/workflows/{workflowId}/plan/reuse", c.reusePlan)
 	r.Post("/workflows/{workflowId}/plan/regenerate", c.regeneratePlan)

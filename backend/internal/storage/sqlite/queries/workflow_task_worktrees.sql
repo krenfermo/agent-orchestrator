@@ -38,3 +38,6 @@ SELECT * FROM workflow_task_worktrees
 WHERE state IN ('creating', 'active', 'integrated')
    OR (state = 'released' AND branch_deleted = 0)
 ORDER BY task_id;
+
+-- name: ListTaskWorktrees :many
+SELECT * FROM workflow_task_worktrees ORDER BY created_at, task_id;

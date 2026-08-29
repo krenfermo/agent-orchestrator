@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -467,6 +468,22 @@ type Deps struct {
 	// spawning straight into whatever the provider does.
 	WorkerPreflight WorkerPreflight
 
+	// Placements and ProviderAttempts are P1-D's two durable authorities: the
+	// FROZEN execution placement (execution_placement.go) and the provider-
+	// attempt ledger (provider_attempt.go). Both optional, like everything else
+	// here -- a nil dependency means that authority is simply not enforced,
+	// which is the pre-P1-D behaviour every existing test double gets. The
+	// daemon always wires both, and TestDaemonWiresPlacementAndProviderAttempts
+	// asserts that, so the guarantees hold everywhere they can.
+	Placements       ExecutionPlacements
+	ProviderAttempts ProviderAttemptLedger
+
+	// InstanceToken names this daemon incarnation in the placement records it
+	// freezes, exactly as branchlock.Deps.OwnerToken does for locks: it is what
+	// makes restart reconciliation decidable without guessing from timestamps.
+	// Optional; a per-process value is derived when it is empty.
+	InstanceToken string
+
 	// CommitHistory lists a worktree's reachable commits, and is what lets AO
 	// reconstruct the commit an approved review target was read at for runs
 	// whose ledger predates that pin (approved_head_recovery.go). Optional: nil
@@ -644,6 +661,14 @@ type Coordinator struct {
 	// commitHistoryOrDefault.
 	commitHistory CommitHistory
 
+	// placements is P1-D's frozen execution placement authority, and
+	// providerAttempts is its durable provider-attempt ledger. Both optional;
+	// see execution_placement.go and provider_attempt.go.
+	placements       ExecutionPlacements
+	providerAttempts ProviderAttemptLedger
+	// instanceToken names this daemon incarnation in the records it writes.
+	instanceToken string
+
 	// plannerExec owns the execution contexts in-flight planner calls run on,
 	// so a minutes-long plan generation outlives the request or poller tick
 	// that entered it without outliving the daemon or the run. See
@@ -660,6 +685,14 @@ func New(d Deps) *Coordinator {
 	newID := d.NewID
 	if newID == nil {
 		newID = uuid.NewString
+	}
+	instanceToken := strings.TrimSpace(d.InstanceToken)
+	if instanceToken == "" {
+		// Derived once per coordinator rather than per write, so every record
+		// one daemon incarnation freezes carries the SAME token -- which is the
+		// only property that makes "did I write this, or did a previous boot"
+		// answerable after a restart.
+		instanceToken = "daemon-" + clock().UTC().Format("20060102T150405.000000000")
 	}
 	return &Coordinator{
 		store:                    d.Store,
@@ -701,6 +734,9 @@ func New(d Deps) *Coordinator {
 		workerLiveness:           d.WorkerLiveness,
 		workerPreflight:          d.WorkerPreflight,
 		commitHistory:            d.CommitHistory,
+		placements:               d.Placements,
+		providerAttempts:         d.ProviderAttempts,
+		instanceToken:            instanceToken,
 		probeGate:                &capacityProbeGate{attempts: make(map[capacityProbeKey]time.Time)},
 		clock:                    clock,
 		newID:                    newID,
@@ -1879,6 +1915,7 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 	// holds goes back immediately -- before the fallible bookkeeping below, for
 	// exactly the reason the branch release moved up here.
 	c.releaseCapacityForRun(ctx, runID, "workflow run cancelled")
+	c.abandonProviderAttemptsForRun(ctx, runID, "the run was cancelled")
 
 	steps, err := c.store.ListWorkflowSteps(ctx, runID)
 	if err != nil {

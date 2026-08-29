@@ -35,6 +35,20 @@ type SessionMetadata struct {
 	DiffBaseRef       string `json:"diffBaseRef,omitempty"`
 	RuntimeHandleID   string `json:"runtimeHandleId,omitempty"`
 	RuntimeLaunchID   string `json:"runtimeLaunchId,omitempty"`
+	// RuntimeInstanceID is the immutable incarnation the runtime was created
+	// as (tmux's `$N`). RuntimeHandleID is a reusable NAME and is only a
+	// discovery key; this is the authority key, and it is what a destructive
+	// action must be addressed to. Empty for every session created before
+	// P1-D, which is an honest "AO cannot address this exact incarnation"
+	// rather than a reason to guess.
+	RuntimeInstanceID string `json:"runtimeInstanceId,omitempty"`
+	// RuntimeOwnerToken is the ownership marker attached ATOMICALLY at runtime
+	// creation, binding the runtime to this session and to this launch
+	// generation. Reading it back off a live runtime proves not merely "AO
+	// made this" but "AO made this for this session's launch N" -- which is
+	// what stops a stale handle adopting a replacement. Empty means unowned,
+	// and unowned is never ownership.
+	RuntimeOwnerToken string `json:"runtimeOwnerToken,omitempty"`
 	AgentSessionID    string `json:"agentSessionId,omitempty"`
 	Prompt            string `json:"prompt,omitempty"`
 	// LatestUserPrompt is the latest real user-authored task direction observed
@@ -181,4 +195,37 @@ type Session struct {
 	// They feed status derivation and are surfaced on the API read model. Not
 	// serialized here: the HTTP boundary maps them to the curated wire shape.
 	PRs []PRFacts `json:"-"`
+}
+
+// SessionRuntimeOwnerToken is the ownership marker AO attaches to a session's
+// runtime at creation.
+//
+// It binds two things, and both are load-bearing:
+//
+//   - the SESSION, so a runtime can be attributed to the work it belongs to;
+//   - the LAUNCH generation, so a runtime created for launch N is
+//     distinguishable from one created for launch N+1 of the same session.
+//
+// A marker whose value is the session's own name would prove only that
+// something wrote the name back, which any process could do. Binding the launch
+// is what makes a stale handle unable to adopt — or destroy — a replacement.
+//
+// Empty inputs produce an empty token: a session AO cannot fence has no
+// ownership marker rather than a weak one.
+func SessionRuntimeOwnerToken(sessionID SessionID, launchID string) string {
+	if sessionID == "" || launchID == "" {
+		return ""
+	}
+	return "ao-session:" + string(sessionID) + ":" + launchID
+}
+
+// RuntimeOwnedBySession reports whether an ownership token read back from a
+// live runtime proves it is the one AO created for this session and launch.
+//
+// It is a strict equality on purpose. A prefix or "contains" check would let a
+// token from a different launch of the same session pass, which is exactly the
+// stale-generation adoption the token exists to prevent.
+func RuntimeOwnedBySession(observedToken string, sessionID SessionID, launchID string) bool {
+	expected := SessionRuntimeOwnerToken(sessionID, launchID)
+	return expected != "" && observedToken == expected
 }

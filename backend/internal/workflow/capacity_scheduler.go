@@ -648,6 +648,31 @@ func (c *Coordinator) plannerClaimIsStale(ctx stdctx.Context, run domain.Workflo
 	return plan.Status != domain.WorkflowPlanRunning
 }
 
+// P1-D §W — why a reviewer's slot is NOT released at its verdict.
+//
+// P1-C deferred this, and P1-D audited it and is leaving it unchanged. The
+// reason is specific, and it was established by making the change and watching
+// it break:
+//
+// The only witness available at this layer is the review STEP's state, and a
+// step sitting at `waiting` does not mean "this cycle's reviewer has finished".
+// It is also the state the step is in immediately BEFORE the next cycle's
+// reviewer is dispatched. Releasing on it therefore frees a slot whose claim
+// the imminent dispatch then finds released — and a released claim is refused,
+// by design, because launching under one is the false-free-slot the whole model
+// exists to prevent. The run parks itself, and a master objective stops
+// converging (caught by TestParentReconcilesStaleChildAttentionWhenTheChildResumes).
+//
+// The sufficient witness is the review RUN's own terminal verdict, which lives
+// in the review store and is not read on this path. Plumbing it here would mean
+// a new read on every reconciliation of every run, and a second place that
+// decides when a review is over — for a slot that is, in practice, released one
+// cycle later anyway. That trade is not worth making for capacity aesthetics,
+// which is exactly what §W warns against.
+//
+// The current rule stands: a reviewer claim is released when a newer cycle
+// supersedes it, or when its step or run reaches a terminal state.
+
 // stepKindKey groups a run's claims by the launch they belong to: one step,
 // one kind of runtime.
 type stepKindKey struct {

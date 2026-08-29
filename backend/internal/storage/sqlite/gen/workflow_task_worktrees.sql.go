@@ -40,6 +40,51 @@ func (q *Queries) GetTaskWorktree(ctx context.Context, taskID string) (WorkflowT
 	return i, err
 }
 
+const listTaskWorktrees = `-- name: ListTaskWorktrees :many
+SELECT task_id, workflow_run_id, project_id, repo_path, worktree_path, branch, target_branch, base_sha, dependencies_json, execution_mode, state, integrated_sha, branch_deleted, detail, created_at, updated_at, released_at FROM workflow_task_worktrees ORDER BY created_at, task_id
+`
+
+func (q *Queries) ListTaskWorktrees(ctx context.Context) ([]WorkflowTaskWorktree, error) {
+	rows, err := q.db.QueryContext(ctx, listTaskWorktrees)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []WorkflowTaskWorktree{}
+	for rows.Next() {
+		var i WorkflowTaskWorktree
+		if err := rows.Scan(
+			&i.TaskID,
+			&i.WorkflowRunID,
+			&i.ProjectID,
+			&i.RepoPath,
+			&i.WorktreePath,
+			&i.Branch,
+			&i.TargetBranch,
+			&i.BaseSha,
+			&i.DependenciesJson,
+			&i.ExecutionMode,
+			&i.State,
+			&i.IntegratedSha,
+			&i.BranchDeleted,
+			&i.Detail,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ReleasedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTaskWorktreesByRun = `-- name: ListTaskWorktreesByRun :many
 SELECT task_id, workflow_run_id, project_id, repo_path, worktree_path, branch, target_branch, base_sha, dependencies_json, execution_mode, state, integrated_sha, branch_deleted, detail, created_at, updated_at, released_at FROM workflow_task_worktrees WHERE workflow_run_id = ? ORDER BY task_id
 `

@@ -38,6 +38,7 @@ func (c *Coordinator) completeRun(ctx context.Context, run domain.WorkflowRun, e
 	// terminal run's claims), but a slot that stays occupied until the next
 	// sweep is a slot the queue could have used now.
 	c.releaseCapacityForRun(ctx, run.ID, "run completed")
+	c.abandonProviderAttemptsForRun(ctx, run.ID, "the run completed")
 	c.notifyRunCompleted(ctx, run)
 	return true, nil
 }

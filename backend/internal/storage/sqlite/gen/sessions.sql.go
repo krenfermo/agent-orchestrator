@@ -115,7 +115,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
     reviewer_harness, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
-    latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled
+    latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled,
+    runtime_instance_id, runtime_owner_token
 FROM sessions WHERE id = ?
 `
 
@@ -160,6 +161,8 @@ type GetSessionRow struct {
 	AutoInjectReview          bool
 	AutoInjectCI              bool
 	AutoReviewEnabled         bool
+	RuntimeInstanceID         string
+	RuntimeOwnerToken         string
 }
 
 func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessionRow, error) {
@@ -206,6 +209,8 @@ func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessi
 		&i.AutoInjectReview,
 		&i.AutoInjectCI,
 		&i.AutoReviewEnabled,
+		&i.RuntimeInstanceID,
+		&i.RuntimeOwnerToken,
 	)
 	return i, err
 }
@@ -219,7 +224,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
     reviewer_harness, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
-    latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled
+    latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled,
+    runtime_instance_id, runtime_owner_token
 FROM sessions WHERE project_id = ? AND issue_id = ? ORDER BY created_at DESC, num DESC LIMIT 1
 `
 
@@ -269,6 +275,8 @@ type GetSessionByProjectAndIssueIDRow struct {
 	AutoInjectReview          bool
 	AutoInjectCI              bool
 	AutoReviewEnabled         bool
+	RuntimeInstanceID         string
+	RuntimeOwnerToken         string
 }
 
 // Workflow (Checkpoint 8B) uses issue_id as a durable natural key to find a
@@ -321,6 +329,8 @@ func (q *Queries) GetSessionByProjectAndIssueID(ctx context.Context, arg GetSess
 		&i.AutoInjectReview,
 		&i.AutoInjectCI,
 		&i.AutoReviewEnabled,
+		&i.RuntimeInstanceID,
+		&i.RuntimeOwnerToken,
 	)
 	return i, err
 }
@@ -334,12 +344,14 @@ INSERT INTO sessions (
     latest_user_prompt, latest_assistant_update, native_transcript_path,
     preview_url, preview_revision, terminate_on_pr_merge, cleanup_generation, browser_capability_verifier,
     session_mode, provider_conversation_id, controller_generation,
-    created_at, updated_at, is_pinned, pinned_at, auto_inject_review, auto_inject_ci
+    created_at, updated_at, is_pinned, pinned_at, auto_inject_review, auto_inject_ci,
+    runtime_instance_id, runtime_owner_token
 ) VALUES (
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+    ?, ?
 )
 `
 
@@ -384,6 +396,8 @@ type InsertSessionParams struct {
 	PinnedAt                  sql.NullTime
 	AutoInjectReview          bool
 	AutoInjectCI              bool
+	RuntimeInstanceID         string
+	RuntimeOwnerToken         string
 }
 
 func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) error {
@@ -428,6 +442,8 @@ func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) er
 		arg.PinnedAt,
 		arg.AutoInjectReview,
 		arg.AutoInjectCI,
+		arg.RuntimeInstanceID,
+		arg.RuntimeOwnerToken,
 	)
 	return err
 }
@@ -441,7 +457,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
     reviewer_harness, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
-    latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled
+    latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled,
+    runtime_instance_id, runtime_owner_token
 FROM sessions ORDER BY project_id, num
 `
 
@@ -486,6 +503,8 @@ type ListAllSessionsRow struct {
 	AutoInjectReview          bool
 	AutoInjectCI              bool
 	AutoReviewEnabled         bool
+	RuntimeInstanceID         string
+	RuntimeOwnerToken         string
 }
 
 func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, error) {
@@ -538,6 +557,8 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, er
 			&i.AutoInjectReview,
 			&i.AutoInjectCI,
 			&i.AutoReviewEnabled,
+			&i.RuntimeInstanceID,
+			&i.RuntimeOwnerToken,
 		); err != nil {
 			return nil, err
 		}
@@ -561,7 +582,8 @@ SELECT id, project_id, num, issue_id, kind, harness,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
     reviewer_harness, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
-    latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled
+    latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled,
+    runtime_instance_id, runtime_owner_token
 FROM sessions WHERE project_id = ? ORDER BY num
 `
 
@@ -606,6 +628,8 @@ type ListSessionsByProjectRow struct {
 	AutoInjectReview          bool
 	AutoInjectCI              bool
 	AutoReviewEnabled         bool
+	RuntimeInstanceID         string
+	RuntimeOwnerToken         string
 }
 
 func (q *Queries) ListSessionsByProject(ctx context.Context, projectID domain.ProjectID) ([]ListSessionsByProjectRow, error) {
@@ -658,6 +682,8 @@ func (q *Queries) ListSessionsByProject(ctx context.Context, projectID domain.Pr
 			&i.AutoInjectReview,
 			&i.AutoInjectCI,
 			&i.AutoReviewEnabled,
+			&i.RuntimeInstanceID,
+			&i.RuntimeOwnerToken,
 		); err != nil {
 			return nil, err
 		}
@@ -896,7 +922,8 @@ UPDATE sessions SET
     preview_url = ?, preview_revision = ?, terminate_on_pr_merge = ?,
     cleanup_generation = ?, browser_capability_verifier = ?,
     provider_conversation_id = ?, controller_generation = ?, updated_at = ?,
-    is_pinned = ?, pinned_at = ?, auto_inject_review = ?, auto_inject_ci = ?
+    is_pinned = ?, pinned_at = ?, auto_inject_review = ?, auto_inject_ci = ?,
+    runtime_instance_id = ?, runtime_owner_token = ?
 WHERE id = ?
 `
 
@@ -936,6 +963,8 @@ type UpdateSessionParams struct {
 	PinnedAt                  sql.NullTime
 	AutoInjectReview          bool
 	AutoInjectCI              bool
+	RuntimeInstanceID         string
+	RuntimeOwnerToken         string
 	ID                        domain.SessionID
 }
 
@@ -976,6 +1005,8 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) er
 		arg.PinnedAt,
 		arg.AutoInjectReview,
 		arg.AutoInjectCI,
+		arg.RuntimeInstanceID,
+		arg.RuntimeOwnerToken,
 		arg.ID,
 	)
 	return err

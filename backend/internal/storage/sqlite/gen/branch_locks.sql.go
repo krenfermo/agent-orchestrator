@@ -43,6 +43,48 @@ func (q *Queries) AdoptBranchLock(ctx context.Context, arg AdoptBranchLockParams
 	return result.RowsAffected()
 }
 
+const cedeBranchLock = `-- name: CedeBranchLock :execrows
+UPDATE branch_locks
+SET workflow_run_id = ?, workflow_step_id = ?, session_id = '', renewed_at = ?, updated_at = ?
+WHERE id = ? AND state = 'held' AND workflow_run_id = ?
+`
+
+type CedeBranchLockParams struct {
+	WorkflowRunID   string
+	WorkflowStepID  sql.NullString
+	RenewedAt       time.Time
+	UpdatedAt       time.Time
+	ID              string
+	WorkflowRunID_2 string
+}
+
+// P1-D: hand a held direct-branch lock from its current holder to another run,
+// conditioned on WHO holds it right now.
+//
+// It is a transfer and never a steal: the predicate names the run that must
+// currently hold the lock, so a pass working from a stale view of ownership
+// matches zero rows and is refused. The lock row itself never leaves the
+// 'held' state, so no window exists in which the branch has no owner and a
+// third run could acquire it.
+//
+// The reverse hand-back is the same statement with the two run ids swapped,
+// which is why there is one query rather than two: cession and return are the
+// same operation, and giving them separate SQL would let them drift apart.
+func (q *Queries) CedeBranchLock(ctx context.Context, arg CedeBranchLockParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, cedeBranchLock,
+		arg.WorkflowRunID,
+		arg.WorkflowStepID,
+		arg.RenewedAt,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.WorkflowRunID_2,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getBranchLock = `-- name: GetBranchLock :one
 SELECT id, lock_key, project_id, repo_path, repo_name, branch,
        workflow_run_id, workflow_step_id, session_id, owner_token, state,

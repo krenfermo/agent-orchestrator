@@ -206,6 +206,29 @@ func (s *Service) CreateTaskRun(ctx context.Context, req workflowcore.TaskRunReq
 	return s.coordinator.CreateTaskRun(ctx, req)
 }
 
+// PlacementManager is P1-D's observability surface: the frozen execution
+// placement, the durable provider-attempt ledger, and the one admission answer
+// to "why has this not launched".
+//
+// Optional and type-asserted, exactly like RecoveryManager above, so a Manager
+// implementation or test double that predates P1-D keeps compiling and its
+// deployment answers 501 rather than showing a placement it does not have.
+//
+// Read-only by construction. There is deliberately no method here that freezes,
+// replaces or retires a placement: those happen on the dispatch path, where the
+// generation and the capacity claim that authorize them exist. An API that
+// could move a placement would be an API that could point a running agent at a
+// different checkout.
+type PlacementManager interface {
+	// ListPlacements returns every placement recorded for a run, with the
+	// current generation per obligation flagged.
+	ListPlacements(ctx context.Context, runID string) ([]workflowcore.PlacementView, error)
+	// ListProviderAttempts returns the run's provider-attempt chain.
+	ListProviderAttempts(ctx context.Context, runID string) ([]workflowcore.ProviderAttemptView, error)
+	// AdmissionState answers why the run has not launched.
+	AdmissionState(ctx context.Context, runID string) (workflowcore.AdmissionStateView, error)
+}
+
 // CreateObjectiveRunWithStrategy implements StrategyManager.
 func (s *Service) CreateObjectiveRunWithStrategy(ctx context.Context, projectID, objective string, mode domain.WorkflowPlanApprovalMode, strategy domain.ExecutionStrategySelection) (workflowcore.RunDetail, error) {
 	return s.coordinator.CreateObjectiveRunWithStrategy(ctx, projectID, objective, mode, strategy)
@@ -382,4 +405,19 @@ func (s *Service) ResumeTask(ctx context.Context, runID, taskID string) (workflo
 		return workflowcore.RunDetail{}, err
 	}
 	return s.coordinator.GetRun(ctx, runID)
+}
+
+// ListPlacements implements PlacementManager.
+func (s *Service) ListPlacements(ctx context.Context, runID string) ([]workflowcore.PlacementView, error) {
+	return s.coordinator.ListPlacements(ctx, runID)
+}
+
+// ListProviderAttempts implements PlacementManager.
+func (s *Service) ListProviderAttempts(ctx context.Context, runID string) ([]workflowcore.ProviderAttemptView, error) {
+	return s.coordinator.ListProviderAttempts(ctx, runID)
+}
+
+// AdmissionState implements PlacementManager.
+func (s *Service) AdmissionState(ctx context.Context, runID string) (workflowcore.AdmissionStateView, error) {
+	return s.coordinator.AdmissionState(ctx, runID)
 }

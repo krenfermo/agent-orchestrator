@@ -146,10 +146,21 @@ var legacyActorlessUserCLICommands = map[string]struct{}{
 	"ao workflow plan regenerate": {},
 	// P1-C's operator commands. Inspecting capacity and sweeping runtimes are
 	// both things a person does deliberately.
-	"ao capacity":            {},
-	"ao capacity status":     {},
-	"ao runtime":             {},
-	"ao runtime gc":          {},
+	"ao capacity":        {},
+	"ao capacity status": {},
+	"ao runtime":         {},
+	"ao runtime gc":      {},
+	// P1-D: the placement surface. Same sweep, same proofs, named for the
+	// checkouts an operator is thinking about.
+	"ao worktree":      {},
+	"ao worktree list": {},
+	"ao worktree gc":   {},
+	// P1-D's read-only diagnosis commands. A person asking "where is this run's
+	// work happening and why has it not started" is user activity: neither
+	// command runs on a timer and neither is invoked by AO itself.
+	"ao workflow placement":  {},
+	"ao provider":            {},
+	"ao provider attempts":   {},
 	"ao launch":              {},
 	"ao orchestrator":        {},
 	"ao orchestrator done":   {},

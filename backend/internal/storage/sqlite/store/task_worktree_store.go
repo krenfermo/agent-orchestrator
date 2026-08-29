@@ -74,6 +74,23 @@ func (s *Store) GetTaskWorktree(ctx context.Context, taskID string) (domain.Task
 	return taskWorktreeFromGen(row), true, nil
 }
 
+// ListTaskWorktrees returns every AO-managed task worktree record (P1-D §X).
+//
+// Unfiltered on purpose: the placement sweep has to see the records it must
+// REFUSE in order to report them, and a query that returned only removable
+// rows would hide the state an operator most wants to see.
+func (s *Store) ListTaskWorktrees(ctx context.Context) ([]domain.TaskWorktreeRecord, error) {
+	rows, err := s.qr.ListTaskWorktrees(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list task worktrees: %w", err)
+	}
+	out := make([]domain.TaskWorktreeRecord, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, taskWorktreeFromGen(row))
+	}
+	return out, nil
+}
+
 // ListTaskWorktreesByRun returns every worktree record for a run, ordered by
 // task id.
 func (s *Store) ListTaskWorktreesByRun(ctx context.Context, runID string) ([]domain.TaskWorktreeRecord, error) {

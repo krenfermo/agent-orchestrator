@@ -110,13 +110,28 @@ const (
 	// OrphanUnprovableOwnership is a session AO cannot attribute. Never
 	// cleaned, always reported -- operator territory.
 	OrphanUnprovableOwnership OrphanClass = "unprovable_ownership"
+	// OrphanIntegratedWorktree is P1-D §X: an AO-managed task worktree whose
+	// work has provably landed on its target. Auto-cleanable -- the checkout
+	// is a copy, and the commits it held are reachable from the recorded
+	// integration SHA.
+	OrphanIntegratedWorktree OrphanClass = "integrated_worktree"
+	// OrphanTerminatedSession is P1-D's worker case: a session AO durably
+	// records as terminated, whose runtime it can prove is the exact one it
+	// created for that session's launch. Auto-cleanable.
+	//
+	// It exists because P1-C could not reclaim workers at all. Reviewer panes
+	// carried an ownership token and workers did not, so a finished worker's
+	// tmux session was provably AO's only when a capacity claim happened to
+	// name it, and everything else was reported unprovable forever.
+	OrphanTerminatedSession OrphanClass = "terminated_session"
 )
 
 // AutoCleanable reports whether this class may be reclaimed automatically once
 // the sweep's three proofs hold. Ownership it cannot prove never can be.
 func (c OrphanClass) AutoCleanable() bool {
 	switch c {
-	case OrphanReleasedClaim, OrphanSupersededGeneration, OrphanTerminalRun, OrphanUnreferenced:
+	case OrphanReleasedClaim, OrphanSupersededGeneration, OrphanTerminalRun,
+		OrphanUnreferenced, OrphanTerminatedSession, OrphanIntegratedWorktree:
 		return true
 	default:
 		return false
@@ -192,6 +207,30 @@ type ClaimReader interface {
 	ListCapacityClaimsForRun(ctx context.Context, runID string) ([]domain.CapacityClaim, error)
 }
 
+// SessionReader is the durable session state a sweep reasons from (P1-D §C).
+//
+// It is what makes a WORKER runtime reclaimable: the session row records the
+// incarnation AO created and the ownership token it created it with, so a
+// terminated session's runtime can be proven AO's own without relying on a
+// capacity claim having named it.
+type SessionReader interface {
+	ListAllSessions(ctx context.Context) ([]domain.SessionRecord, error)
+}
+
+// WorktreeReader is the durable placement state a sweep reasons from (P1-D
+// §X). Optional: without it there is no worktree sweep, only a runtime one.
+type WorktreeReader interface {
+	ListTaskWorktrees(ctx context.Context) ([]domain.TaskWorktreeRecord, error)
+}
+
+// WorktreeReleaser removes one AO-managed worktree, by the identity the record
+// carries. It is separate from the reader for the same reason
+// SessionFactsReader separates reading from destroying: enumerating is how
+// candidates are found, and proving one is safe is a different question.
+type WorktreeReleaser interface {
+	ReleaseTaskWorktree(ctx context.Context, runID, taskID string) error
+}
+
 // RunReader answers whether the authority behind a runtime is still live.
 type RunReader interface {
 	GetWorkflowRun(ctx context.Context, id string) (domain.WorkflowRun, bool, error)
@@ -209,8 +248,18 @@ type Sweeper struct {
 	Facts     ports.SessionFactsReader
 	Claims    ClaimReader
 	Runs      RunReader
-	Log       *slog.Logger
-	Now       func() time.Time
+	// Sessions is P1-D's worker-ownership source. Optional: without it the
+	// sweep simply has one fewer way to prove ownership, and reports the
+	// sessions it cannot attribute rather than acting on them.
+	Sessions SessionReader
+	// Worktrees and WorktreeGC are P1-D §X's repository-placement sweep. Both
+	// optional and both required together: reading without releasing finds
+	// candidates nothing can act on, and releasing without reading has nothing
+	// to act on.
+	Worktrees  WorktreeReader
+	WorktreeGC WorktreeReleaser
+	Log        *slog.Logger
+	Now        func() time.Time
 }
 
 // Options tune one sweep.
@@ -267,8 +316,21 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 		}
 		report.count(s.resolve(ctx, f, opts))
 	}
+	for _, f := range s.sessionCandidates(ctx, protected) {
+		if _, dup := seen[f.InstanceID]; dup && f.InstanceID != "" {
+			continue
+		}
+		if f.InstanceID != "" {
+			seen[f.InstanceID] = struct{}{}
+		}
+		report.count(s.resolve(ctx, f, opts))
+	}
 	for _, f := range s.inventoryCandidates(ctx, protected, seen) {
 		report.count(s.resolve(ctx, f, opts))
+	}
+
+	for _, f := range s.worktreeCandidates(ctx, opts) {
+		report.count(f)
 	}
 
 	report.FinishedAt = s.now()
@@ -434,6 +496,73 @@ func (s *Sweeper) inventoryCandidates(ctx context.Context, protected map[string]
 	return findings
 }
 
+// sessionCandidates derives candidates from durable SESSION state: a session
+// AO records as terminated, whose runtime incarnation and ownership token it
+// recorded when it created it (P1-D §C).
+//
+// This is the strongest proof available for a worker, and it is what closes
+// P1-C's deferral. The token is not merely "AO made something": it names the
+// session AND the launch generation, so it cannot match a later launch's
+// replacement runtime.
+//
+// A session with no recorded incarnation or no recorded token is a pre-P1-D
+// session. It is reported unprovable and never touched: this closes the gap
+// going forward and deliberately does not fabricate ownership backwards.
+func (s *Sweeper) sessionCandidates(ctx context.Context, protected map[string]domain.CapacityClaim) []Finding {
+	if s.Sessions == nil {
+		return nil
+	}
+	sessions, err := s.Sessions.ListAllSessions(ctx)
+	if err != nil {
+		s.log().Warn("runtime gc: could not read sessions; no session-derived candidates this sweep", "err", err)
+		return nil
+	}
+	var findings []Finding
+	for _, sess := range sessions {
+		instance := sess.Metadata.RuntimeInstanceID
+		token := sess.Metadata.RuntimeOwnerToken
+		if instance == "" || token == "" {
+			// Pre-P1-D. Not reported here: the inventory pass is what sees
+			// whatever is actually still on the runtime, and reporting a row
+			// with no runtime behind it would be noise rather than evidence.
+			continue
+		}
+		if !domain.RuntimeOwnedBySession(token, sess.ID, sess.Metadata.RuntimeLaunchID) {
+			// The recorded token does not match the recorded launch. AO cannot
+			// say which incarnation this row describes, so it says so.
+			findings = append(findings, Finding{
+				Handle: sess.Metadata.RuntimeHandleID, InstanceID: instance,
+				Class: OrphanUnprovableOwnership, Disposition: DispositionUnprovable,
+				Reason: "the session's recorded ownership token does not match its recorded launch generation",
+			})
+			continue
+		}
+		if claim, live := protected[instance]; live {
+			findings = append(findings, Finding{
+				Handle: sess.Metadata.RuntimeHandleID, InstanceID: instance,
+				Class: OrphanNone, Disposition: DispositionLive,
+				Reason:        "a held capacity claim is still paying for this runtime",
+				WorkflowRunID: claim.WorkflowRunID, DispatchKey: claim.DispatchKey,
+			})
+			continue
+		}
+		if !sess.IsTerminated {
+			findings = append(findings, Finding{
+				Handle: sess.Metadata.RuntimeHandleID, InstanceID: instance,
+				Class: OrphanNone, Disposition: DispositionLive,
+				Reason: "the session is not terminated",
+			})
+			continue
+		}
+		findings = append(findings, Finding{
+			Handle: sess.Metadata.RuntimeHandleID, InstanceID: instance,
+			Class:  OrphanTerminatedSession,
+			Reason: "AO created this exact runtime for a session it has since recorded as terminated",
+		})
+	}
+	return findings
+}
+
 // resolve turns a candidate into an outcome, applying the three proofs
 // immediately before acting.
 //
@@ -507,4 +636,91 @@ func (s *Sweeper) resolve(ctx context.Context, f Finding, opts Options) Finding 
 		"instance", f.InstanceID, "handle", f.Handle, "class", f.Class,
 		"run", f.WorkflowRunID, "reason", f.Reason)
 	return f
+}
+
+// worktreeCandidates is P1-D §X: reclaiming AO-managed task worktrees.
+//
+// The safety rule is the same one the runtime sweep obeys, applied to a
+// checkout instead of a session, and it is stricter in one respect: a worktree
+// can hold the ONLY copy of an agent's work. So the single condition that
+// licenses removal is proof that the work already landed somewhere else.
+//
+// Removed only when ALL of these hold:
+//
+//   - the record's state is `integrated` -- AO's own durable statement that
+//     the task's work reached its target;
+//   - IntegratedSHA is recorded, so "it landed" names a commit rather than
+//     being a state nobody can check;
+//   - the workflow run is terminal, so nothing is still reviewing, fixing or
+//     verifying in it.
+//
+// Never removed, and each of these is a separate refusal rather than a
+// fall-through:
+//
+//   - `active` or `creating` -- the task is using it;
+//   - `preserved` -- AO's explicit durable "do not clean this up", which is
+//     what a failed or abandoned task's unintegrated work gets;
+//   - `failed` -- the record of an attempt a person still has to look at;
+//   - any record whose run is not terminal, which covers a worktree under
+//     review, under a fix cycle, awaiting verification, or blocked on an
+//     unresolved merge conflict;
+//   - anything AO did not create, which it never sees: this walks AO's own
+//     durable records, not the filesystem, so a human's worktree is not merely
+//     spared, it is invisible.
+//
+// Removal is delegated to the workspace manager, which owns the git side and
+// addresses the worktree by its record identity (run + task) rather than by
+// path -- so a path reused by something else cannot be removed by a stale
+// candidate.
+func (s *Sweeper) worktreeCandidates(ctx context.Context, opts Options) []Finding {
+	if s.Worktrees == nil || s.WorktreeGC == nil || s.Runs == nil {
+		return nil
+	}
+	records, err := s.Worktrees.ListTaskWorktrees(ctx)
+	if err != nil {
+		s.log().Warn("runtime gc: could not read task worktrees; no placement sweep this pass", "err", err)
+		return nil
+	}
+	var findings []Finding
+	for _, rec := range records {
+		f := Finding{
+			Handle: rec.Path, WorkflowRunID: rec.WorkflowRunID,
+		}
+		switch {
+		case rec.State == domain.TaskWorktreePreserved:
+			f.Class, f.Disposition = OrphanNone, DispositionLive
+			f.Reason = "the record says this work was deliberately preserved; its commits may be the only copy"
+		case rec.State != domain.TaskWorktreeIntegrated:
+			f.Class, f.Disposition = OrphanNone, DispositionLive
+			f.Reason = "the worktree is " + string(rec.State) + "; only work AO can prove has landed is removed"
+		case rec.IntegratedSHA == "":
+			f.Class, f.Disposition = OrphanUnprovableOwnership, DispositionUnprovable
+			f.Reason = "the record claims integration but names no commit, so AO cannot prove the work is safe elsewhere"
+		default:
+			run, found, rerr := s.Runs.GetWorkflowRun(ctx, rec.WorkflowRunID)
+			switch {
+			case rerr != nil || !found:
+				f.Class, f.Disposition = OrphanUnprovableOwnership, DispositionUnprovable
+				f.Reason = "the workflow run this worktree belongs to could not be read"
+			case !run.State.Terminal():
+				f.Class, f.Disposition = OrphanNone, DispositionLive
+				f.Reason = "the workflow run is still " + string(run.State) + "; review, fix or verification may still need this checkout"
+			default:
+				f.Class = OrphanIntegratedWorktree
+				f.Reason = "the task's work landed at " + rec.IntegratedSHA + " and its run has ended"
+				if opts.DryRun {
+					f.Disposition = DispositionCandidate
+				} else if rerr := s.WorktreeGC.ReleaseTaskWorktree(ctx, rec.WorkflowRunID, rec.TaskID); rerr != nil {
+					f.Disposition, f.Err = DispositionError, rerr.Error()
+					f.Reason = "removing this worktree failed; it was left alone and the sweep continued"
+				} else {
+					f.Disposition = DispositionCleaned
+					s.log().Info("runtime gc: removed a task worktree whose work provably landed",
+						"run", rec.WorkflowRunID, "task", rec.TaskID, "path", rec.Path, "integratedSha", rec.IntegratedSHA)
+				}
+			}
+		}
+		findings = append(findings, f)
+	}
+	return findings
 }

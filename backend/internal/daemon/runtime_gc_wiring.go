@@ -8,6 +8,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runtimegc"
 	sqlitestore "github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
+	taskworkspace "github.com/aoagents/agent-orchestrator/backend/internal/workspace"
 )
 
 // runtime_gc_wiring.go — P1-C §R: when Runtime GC runs.
@@ -43,13 +44,19 @@ const runtimeGCInterval = 15 * time.Minute
 // stance every optional dependency in this daemon takes, and it is the right
 // one here specifically: a sweeper that could not prove ownership would have
 // to skip everything anyway.
-func newRuntimeGC(runtime any, store *sqlitestore.Store, log *slog.Logger) *runtimegc.Sweeper {
+func newRuntimeGC(runtime any, store *sqlitestore.Store, worktrees runtimegc.WorktreeReleaser, log *slog.Logger) *runtimegc.Sweeper {
 	inventory, hasInventory := runtime.(ports.RuntimeInventory)
 	facts, hasFacts := runtime.(ports.SessionFactsReader)
 	if !hasInventory && !hasFacts {
 		return nil
 	}
-	sweeper := &runtimegc.Sweeper{Claims: store, Runs: store, Log: log}
+	sweeper := &runtimegc.Sweeper{Claims: store, Runs: store, Sessions: store, Log: log}
+	// P1-D §X: the placement sweep. Both halves or neither -- reading records
+	// nothing can act on finds candidates it cannot reclaim, and a releaser
+	// with no records has nothing to reclaim.
+	if worktrees != nil {
+		sweeper.Worktrees, sweeper.WorktreeGC = store, worktrees
+	}
 	if hasInventory {
 		sweeper.Inventory = inventory
 	}
@@ -92,4 +99,21 @@ func startRuntimeGC(ctx context.Context, sweeper *runtimegc.Sweeper, log *slog.L
 		}
 	}()
 	return finished
+}
+
+// worktreeReleaser adapts the workspace manager's task-keyed Release to the
+// (run, task) shape the sweeper uses.
+//
+// The run id is carried but not passed down: the manager resolves the record
+// by task id, which is its primary key, and a worktree belongs to exactly one
+// run. Keeping the run in the sweeper's own signature is what makes a finding
+// attributable in a report; the manager does not need it to act.
+type worktreeReleaser struct{ mgr *taskworkspace.Manager }
+
+func (w worktreeReleaser) ReleaseTaskWorktree(ctx context.Context, _, taskID string) error {
+	if w.mgr == nil {
+		return nil
+	}
+	_, _, err := w.mgr.Release(ctx, taskID)
+	return err
 }

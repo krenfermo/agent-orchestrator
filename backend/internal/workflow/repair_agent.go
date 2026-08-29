@@ -329,12 +329,26 @@ func (c *Coordinator) LaunchRepair(ctx stdctx.Context, runID, authorizedBy strin
 		return domain.RepairIntent{}, fmt.Errorf("%w: this run's repair policy is %q, so a repair needs an operator's authorization", ErrInvalid, plan.Mode)
 	}
 
-	// A repair must not queue behind the run it exists to unblock. On the
-	// user's own checkout the stopped run still owns the branch, so a second
-	// run against it would wait forever -- fail closed and say so rather than
-	// creating a run that can never start.
-	if c.projectExecutionMode(ctx, plan.Intent.ProjectID).DirectBranch() {
-		return domain.RepairIntent{}, ErrRepairUnsafeTarget
+	// P1-D §L: direct-branch repairs.
+	//
+	// P1-B refused these outright, because on the user's own checkout the
+	// stopped run holds the branch lock for its whole life and a second run
+	// against it would queue behind the very run it exists to unblock. The
+	// refusal was correct and it left the most common single-developer setup
+	// unable to use the feature at all.
+	//
+	// The lock now MOVES instead, on terms both sides can prove (see
+	// repair_branch_cession.go). What is checked here is only that the move is
+	// possible at all; the transfer itself happens after the repair run exists,
+	// because a cession to a run that does not exist yet would leave the branch
+	// owned by nothing.
+	directBranch := c.projectExecutionMode(ctx, plan.Intent.ProjectID).DirectBranch()
+	if directBranch {
+		if _, ok := c.branchLocks.(branchLockCeder); !ok || c.branchLocks == nil {
+			// No way to transfer authority, so the deadlock P1-B named is
+			// still real. Fail closed, exactly as before.
+			return domain.RepairIntent{}, ErrRepairUnsafeTarget
+		}
 	}
 
 	intent := plan.Intent
@@ -429,6 +443,25 @@ func (c *Coordinator) LaunchRepair(ctx stdctx.Context, runID, authorizedBy strin
 	}); err != nil {
 		c.releaseIncidentRepairClaim(ctx, entry, err)
 		return domain.RepairIntent{}, err
+	}
+
+	// P1-D §L: hand the branch over BEFORE the repair run starts, and only
+	// after the intent is durable. Ordering is the whole safety property here:
+	// a repair that started before it held the branch would either block or
+	// write without authority, and a cession recorded before the intent would
+	// describe a transfer to a repair nobody can account for.
+	//
+	// A failed cession is a refusal, not a warning: the repair run exists and
+	// is linked, but it must not start without the authority it needs, and the
+	// origin keeps the branch it still holds.
+	if directBranch {
+		if _, cerr := c.cedeBranchLockToRepair(ctx, detail.Run, intent); cerr != nil {
+			if c.log != nil {
+				c.log.Warn("workflow: direct-branch repair could not take the branch; it will not be started",
+					"run", runID, "repairRun", created.Run.ID, "err", cerr)
+			}
+			return domain.RepairIntent{}, cerr
+		}
 	}
 
 	if _, err := c.StartRun(ctx, created.Run.ID); err != nil {
@@ -567,10 +600,22 @@ func (c *Coordinator) reconcileRepairOutcome(ctx stdctx.Context, run domain.Work
 			continue
 		}
 		if repairRun.State != domain.WorkflowRunCompleted {
+			// A repair that ended without repairing still has to give the
+			// branch back: the origin owns it again either way, and a failed
+			// repair holding a branch forever is the deadlock in a new hat.
+			if rerr := c.returnBranchLockFromRepair(ctx, run, intent); rerr != nil && c.log != nil {
+				c.log.Warn("workflow: failed repair could not return the branch lock", "run", run.ID, "err", rerr)
+			}
 			c.recordRepairResolution(ctx, run, intent, string(repairRun.State),
 				fmt.Sprintf("repair run %s ended %s without repairing %s; the next step is a person's",
 					intent.RepairRunID, repairRun.State, intent.ConditionReason))
 			continue
+		}
+		// P1-D §L: the branch comes back before the origin is resumed, and
+		// only if this repair generation is still current. Resuming a run that
+		// does not hold its own branch would be resuming it into a refusal.
+		if rerr := c.returnBranchLockFromRepair(ctx, run, intent); rerr != nil && c.log != nil {
+			c.log.Warn("workflow: repair could not return the branch lock", "run", run.ID, "err", rerr)
 		}
 		c.recordRepairResolution(ctx, run, intent, "completed",
 			fmt.Sprintf("repair run %s completed; resuming the obligation it was blocking", intent.RepairRunID))

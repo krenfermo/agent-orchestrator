@@ -265,7 +265,12 @@ func isBookkeepingPhase(phase string) bool {
 		phase == repairResolvedPhase ||
 		phase == planRegeneratedPhase ||
 		phase == planReusedPhase ||
-		phase == repairRunOriginPhase
+		phase == repairRunOriginPhase ||
+		// P1-D: a branch cession describes who may WRITE, never why a run
+		// stopped. Counting it would displace the stop's own reason at the
+		// exact moment an operator most needs to read it.
+		phase == branchLockCededPhase ||
+		phase == branchLockReturnedPhase
 }
 
 func isIncidentLedgerPhase(phase string) bool {

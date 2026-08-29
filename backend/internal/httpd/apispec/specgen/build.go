@@ -859,6 +859,16 @@ func workflowOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/placement", id: "getWorkflowPlacement", tag: "workflows",
+			summary:    "P1-D: where this run's work happens and why it has not launched — the FROZEN execution placement and its own generation, the durable provider-attempt chain with what each attempt could prove about mutation, and the single admission verdict naming which authority is withholding the launch (capacity, branch, placement, provider or dependency). Read-only, derived from durable rows; no token is exposed and nothing here can move a placement.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowPlacementResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/resume", id: "resumeWorkflowRun", tag: "workflows",
 			summary:    "P1-B: discharge exactly the run's outstanding durable obligation, and report which one it was. Idempotent; an obligation only a person can discharge is reported rather than driven.",
 			pathParams: []any{controllers.WorkflowIDParam{}},

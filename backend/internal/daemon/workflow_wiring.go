@@ -89,6 +89,17 @@ func (w workflowBranchLocks) Renew(ctx context.Context, runID, stepID, sessionID
 	w.mgr.Renew(ctx, runID, stepID, sessionID)
 }
 
+// Cede forwards P1-D §L's generation-safe branch-lock transfer.
+//
+// It is on the ADAPTER and not only on the manager because the coordinator
+// holds the adapter: workflow type-asserts its branchLocks dependency for this
+// capability, and an adapter that did not forward it would leave every
+// direct-branch repair silently refused with the P1-B error, in production
+// only, while every test that used the manager directly passed.
+func (w workflowBranchLocks) Cede(ctx context.Context, lockID, fromRunID, toRunID, toStepID string) (bool, error) {
+	return w.mgr.Cede(ctx, lockID, fromRunID, toRunID, toStepID)
+}
+
 func (w workflowBranchLocks) RecoverStale(ctx context.Context, runID string) (int64, error) {
 	return w.mgr.RecoverStale(ctx, runID)
 }
@@ -271,6 +282,17 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		// store (test doubles only) simply admits everything, as AO did before.
 		Capacity:       store,
 		CapacityLimits: cfg.CapacityLimits,
+		// P1-D: the frozen execution placement and the durable provider-attempt
+		// ledger. Both are the same *sqlite.Store every other durable authority
+		// uses -- there is deliberately no second database and no second
+		// transaction boundary, because a placement and the capacity claim that
+		// authorizes launching into it have to be readable in one consistent
+		// view after a crash.
+		Placements:       store,
+		ProviderAttempts: store,
+		// The SAME token the branch-lock manager stamps on every lock, so a
+		// placement and the lock protecting it name one daemon incarnation.
+		InstanceToken: branchLocks.OwnerToken(),
 		// The AO-owned worktree lifecycle. It is what records a task's work as
 		// landed, cleans the worktree and its ao/* branch up afterwards,
 		// preserves both when the task did not land, and -- at boot, from
@@ -377,6 +399,26 @@ func contextRouterFor(log *slog.Logger) *contextrouter.Router {
 // other optional dependency above: without it AO creates no task worktrees to
 // clean up in the first place, and a daemon that refused to boot over its
 // housekeeping would be trading a working orchestrator for a tidy one.
+// taskWorkspaceManager builds the AO-owned task worktree lifecycle manager, or
+// nil when it cannot be constructed. It is exposed separately from
+// taskWorkspaces so P1-D's placement GC can reach the concrete manager: the
+// workflow port only needs the narrow interface, and the sweep needs the
+// release path.
+func taskWorkspaceManager(cfg config.Config, store *sqlite.Store, log *slog.Logger) *taskworkspace.Manager {
+	mgr, err := taskworkspace.New(taskworkspace.Options{
+		Root:  filepath.Join(cfg.DataDir, "worktrees"),
+		Git:   worktree.NewExecGit(""),
+		Store: store,
+	})
+	if err != nil {
+		if log != nil {
+			log.Error("workflow: AO task worktree lifecycle unavailable", "err", err)
+		}
+		return nil
+	}
+	return mgr
+}
+
 func taskWorkspaces(cfg config.Config, store *sqlite.Store, log *slog.Logger) workflowcore.TaskWorkspaces {
 	mgr, err := taskworkspace.New(taskworkspace.Options{
 		Root:  filepath.Join(cfg.DataDir, "worktrees"),

@@ -116,3 +116,86 @@ func (c *Coordinator) AllocateReviewLaunchAttemptForTest(
 // applies, so a test asserts against the real limit rather than a copy of it
 // that would keep passing if the limit changed.
 const MaxReviewerLaunchAttemptsForTest = maxReviewerLaunchAttempts
+
+// ReturnBranchLockFromRepairForTest exposes P1-D's branch-lock return so a test
+// can drive the generation refusal directly.
+//
+// Reaching it through a real direct-branch repair would mean staging a project
+// on a real checkout, a held lock, a repairable stop and two repair
+// generations, and would still be testing the same one predicate. The
+// production function is called; nothing is reimplemented.
+func (c *Coordinator) ReturnBranchLockFromRepairForTest(ctx stdctx.Context, origin domain.WorkflowRun, intent domain.RepairIntent) error {
+	return c.returnBranchLockFromRepair(ctx, origin, intent)
+}
+
+// PlacementIsCurrentForTest exposes P1-D's single staleness predicate.
+//
+// It is the one gate every authority-bearing operation passes through, so the
+// six matrix rows about what a stale placement generation may NOT do are
+// assertions about this function. Driving each of them through a full dispatch
+// would stage six different launches to exercise one predicate, and would test
+// the staging rather than the rule.
+func (c *Coordinator) PlacementIsCurrentForTest(ctx stdctx.Context, run domain.WorkflowRun, generation int64) bool {
+	return c.PlacementIsCurrent(ctx, placementScopeFor(run), generation)
+}
+
+// RequireCurrentPlacementForTest exposes the guard itself, which returns the
+// record a caller was authorized against rather than merely a boolean.
+func (c *Coordinator) RequireCurrentPlacementForTest(ctx stdctx.Context, run domain.WorkflowRun, generation int64) (domain.ExecutionPlacement, error) {
+	return c.requireCurrentPlacement(ctx, run, generation)
+}
+
+// AdmitForTest exposes P1-D's unified admission gate.
+//
+// The gate is the single place capacity, branch authority, placement, provider
+// eligibility and the lifecycle generation are combined, and its whole value is
+// the REASON it returns. Driving each reason through a full dispatch would
+// stage five different worlds to read one field, and several of the reasons
+// (dependency, strategy) are decided by callers that never reach dispatch at
+// all — so the gate is exercised directly, with the real store behind it.
+func (c *Coordinator) AdmitForTest(
+	ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep,
+	harness domain.AgentHarness, providerWaiting, dependenciesReady, strategyPermits bool,
+) (domain.AdmissionDecision, error) {
+	return c.Admit(ctx, AdmissionRequest{
+		Run: run, Step: step, Harness: harness,
+		ProviderWaiting: providerWaiting, DependenciesReady: dependenciesReady,
+		StrategyPermits: strategyPermits,
+		Capacity:        c.workerCapacityRequest(ctx, run, step),
+	})
+}
+
+// RecordAdmissionWaitForTest exposes the parking half, so a test can assert
+// that a refusal is durably classified and survives a restart.
+func (c *Coordinator) RecordAdmissionWaitForTest(
+	ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, decision domain.AdmissionDecision,
+) error {
+	_, err := c.recordAdmissionWait(ctx, run, step, decision)
+	return err
+}
+
+// EnsureProviderAttemptForTest exposes the ledger's front door.
+func (c *Coordinator) EnsureProviderAttemptForTest(
+	ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep,
+	placement domain.ExecutionPlacement, harness domain.AgentHarness,
+) (domain.ProviderAttempt, bool, error) {
+	return c.EnsureProviderAttempt(ctx, run, step, placement, harness, "")
+}
+
+// AdvanceProviderAttemptForTest exposes the CAS every attempt transition goes
+// through, so a test can place an attempt in a state the production path would
+// otherwise need a whole launch to reach.
+func (c *Coordinator) AdvanceProviderAttemptForTest(
+	ctx stdctx.Context, attempt domain.ProviderAttempt, next domain.ProviderAttemptState,
+) bool {
+	return c.advanceProviderAttempt(ctx, attempt, next, "", "", "", "")
+}
+
+// ProveNoMutationForTest exposes §H's proof assembly against a real store, so a
+// test can assert which conditions a given world actually satisfies rather than
+// asserting the AND of a struct it filled in itself.
+func (c *Coordinator) ProveNoMutationForTest(
+	ctx stdctx.Context, attempt domain.ProviderAttempt, placement domain.ExecutionPlacement, launchFingerprint string,
+) MutationProof {
+	return c.ProveNoMutation(ctx, attempt, placement, launchFingerprint)
+}

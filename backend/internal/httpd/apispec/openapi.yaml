@@ -6434,6 +6434,44 @@ paths:
         human approval
       tags:
       - workflows
+  /api/v1/workflows/{workflowId}/placement:
+    get:
+      operationId: getWorkflowPlacement
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersWorkflowPlacementResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P1-D: where this run''s work happens and why it has not launched —
+        the FROZEN execution placement and its own generation, the durable provider-attempt
+        chain with what each attempt could prove about mutation, and the single admission
+        verdict naming which authority is withholding the launch (capacity, branch,
+        placement, provider or dependency). Read-only, derived from durable rows;
+        no token is exposed and nothing here can move a placement.'
+      tags:
+      - workflows
   /api/v1/workflows/{workflowId}/plan:
     get:
       operationId: getWorkflowPlan
@@ -7742,6 +7780,40 @@ components:
       required:
       - ok
       type: object
+    ControllersAdmissionStateView:
+      properties:
+        autoResume:
+          type: boolean
+        capacityClaimId:
+          type: string
+        currentAttemptId:
+          type: string
+        detail:
+          type: string
+        placementGeneration:
+          format: int64
+          type: integer
+        placementReady:
+          type: boolean
+        placementState:
+          type: string
+        spendsRetryBudget:
+          type: boolean
+        waitingReason:
+          enum:
+          - capacity_wait
+          - branch_wait
+          - placement_wait
+          - provider_wait
+          - dependency_wait
+          - lifecycle_superseded
+          - strategy_refused
+          type: string
+      required:
+      - autoResume
+      - spendsRetryBudget
+      - placementReady
+      type: object
     ControllersAmendTaskCriterionRequest:
       properties:
         amendedCriterion:
@@ -7946,6 +8018,68 @@ components:
       required:
       - incidentId
       - approve
+      type: object
+    ControllersExecutionPlacementView:
+      properties:
+        baseBranch:
+          type: string
+        baseSha:
+          type: string
+        current:
+          type: boolean
+        detail:
+          type: string
+        executionBranch:
+          type: string
+        integratedSha:
+          type: string
+        lifecycleGeneration:
+          format: int64
+          type: integer
+        mergeTarget:
+          type: string
+        placementGeneration:
+          format: int64
+          type: integer
+        provenance:
+          enum:
+          - frozen_at_selection
+          - recovered_from_durable_facts
+          type: string
+        repoPath:
+          type: string
+        state:
+          enum:
+          - selected
+          - waiting
+          - preparing
+          - ready
+          - active
+          - reviewing
+          - integrating
+          - integrated
+          - conflict
+          - preserved
+          - terminal
+          type: string
+        taskId:
+          type: string
+        type:
+          enum:
+          - direct_branch
+          - isolated_worktree
+          type: string
+        waitingReason:
+          type: string
+        worktreePath:
+          type: string
+      required:
+      - type
+      - placementGeneration
+      - lifecycleGeneration
+      - state
+      - provenance
+      - current
       type: object
     ControllersExecutionPolicyResponse:
       properties:
@@ -8416,6 +8550,68 @@ components:
           $ref: '#/components/schemas/ControllersUserView'
       required:
       - status
+      type: object
+    ControllersProviderAttemptView:
+      properties:
+        authoritative:
+          type: boolean
+        capacityClaimId:
+          type: string
+        failureClass:
+          type: string
+        failureReason:
+          type: string
+        id:
+          type: string
+        lifecycleGeneration:
+          format: int64
+          type: integer
+        mutationEvidence:
+          type: string
+        ordinal:
+          format: int64
+          type: integer
+        placementGeneration:
+          format: int64
+          type: integer
+        predecessorAttemptId:
+          type: string
+        profile:
+          type: string
+        provider:
+          type: string
+        runtimeSessionId:
+          type: string
+        safety:
+          enum:
+          - safe_before_execution
+          - safe_after_proven_no_mutation
+          - ambiguous_execution
+          - completed_execution
+          type: string
+        state:
+          enum:
+          - planned
+          - admitted
+          - launching
+          - running
+          - completed
+          - failed_safe
+          - failed_ambiguous
+          - superseded
+          - abandoned
+          type: string
+        successorAttemptId:
+          type: string
+        workflowStepId:
+          type: string
+      required:
+      - id
+      - ordinal
+      - state
+      - lifecycleGeneration
+      - placementGeneration
+      - authoritative
       type: object
     ControllersProviderDescriptorView:
       properties:
@@ -9209,6 +9405,23 @@ components:
       - refName
       - tasksIntegrated
       - status
+      type: object
+    ControllersWorkflowPlacementResponse:
+      properties:
+        admission:
+          $ref: '#/components/schemas/ControllersAdmissionStateView'
+        placements:
+          items:
+            $ref: '#/components/schemas/ControllersExecutionPlacementView'
+          type: array
+        providerAttempts:
+          items:
+            $ref: '#/components/schemas/ControllersProviderAttemptView'
+          type: array
+      required:
+      - placements
+      - providerAttempts
+      - admission
       type: object
     ControllersWorkflowQuestionResolutionResponse:
       properties:

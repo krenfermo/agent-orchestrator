@@ -217,37 +217,48 @@ func (c *Coordinator) dispatchFromPending(ctx stdctx.Context, run domain.Workflo
 	if err != nil {
 		return step, err
 	}
-	if decision.Waiting {
-		return c.markRunWaitingForCapacity(ctx, run, step)
-	}
 
-	// Checkpoint 8P-E.11: in direct-branch mode the run must own its
-	// repository+branch pair before anything is spawned into it. Like the
-	// capacity check above, this runs BEFORE the outbox CAS, so a run that
-	// has to wait for the branch leaves the entry Pending and the next
-	// wake/reconcile pass re-evaluates it cleanly -- never "dispatched" with
-	// nothing actually spawned. A nil branch-lock dependency, or a project in
-	// isolated-worktree mode, passes straight through.
-	if ok, err := c.ensureBranchLock(ctx, run, step); err != nil {
-		return step, err
-	} else if !ok {
-		return step, nil
-	}
-
-	// P1-C: runtime admission. Placed here for exactly the reasons the two
-	// gates above are: BEFORE the outbox CAS, so a run that has to wait for a
-	// slot leaves its entry Pending and the next wake/reconcile pass
-	// re-evaluates it cleanly, never "dispatched" with nothing spawned.
+	// P1-D §C: ONE admission decision.
 	//
-	// A refusal is not a failure: markRunWaitingForCapacity parks the run in
-	// Waiting under the same durable wake the provider-capacity wait uses, and
-	// spends no retry budget.
+	// This replaces three separate gates that used to sit here in sequence —
+	// the routing wait, ensureBranchLock, and acquireCapacity. Each still owns
+	// its own authority and its own durable records; what changed is that they
+	// are now consulted in a fixed order behind a single call that names WHICH
+	// one withheld the launch. A run queued behind a branch and a run whose
+	// machine is full are no longer the same "waiting".
+	//
+	// Placed here for exactly the reason all three gates were: BEFORE the
+	// outbox CAS, so a run that has to wait leaves its entry Pending and the
+	// next wake/reconcile pass re-evaluates it cleanly, never "dispatched" with
+	// nothing spawned. A refusal is not a failure and spends no retry budget
+	// (domain.AdmissionWaitReason.SpendsRetryBudget is false for every value).
 	capReq := c.workerCapacityRequest(ctx, run, step)
-	if admitted, cerr := c.acquireCapacity(ctx, capReq); cerr != nil {
-		return step, cerr
-	} else if !admitted {
-		return c.markRunWaitingForCapacity(ctx, run, step)
+	admission, aerr := c.Admit(ctx, AdmissionRequest{
+		Run: run, Step: step,
+		Harness: decision.SelectedHarness, Profile: decision.SelectedProfileID,
+		ProviderWaiting: decision.Waiting,
+		// The task graph and the strategy gate a work step long before dispatch
+		// is entered — an ineligible task is never handed to this function — so
+		// both are satisfied by the time we get here. They are passed
+		// explicitly rather than assumed inside Admit so that the reviewer and
+		// master paths, which have their own answers, cannot accidentally
+		// inherit this one.
+		DependenciesReady: true,
+		StrategyPermits:   true,
+		Capacity:          capReq,
+	})
+	if aerr != nil {
+		return step, aerr
 	}
+	if !admission.Admitted {
+		return c.recordAdmissionWait(ctx, run, step, admission)
+	}
+	// The placement is authoritative and this launch is the one materialising
+	// it. Marking it active BEFORE the outbox claim is deliberate: a crash
+	// between the two leaves a placement that says "a launch was authorized
+	// here", which reconciliation can resolve, rather than a launched worker in
+	// a placement still calling itself unstarted.
+	c.activateAdmittedPlacement(ctx, run, admission)
 
 	now := c.clock()
 	// Checkpoint 8P-E.13A.2: the same argument as 8N.1's below, for the other
@@ -594,8 +605,13 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 		// otherwise, never launch a second worker over the first.
 		c.recordAmbiguousLaunchBoundary(ctx, run, step, entry, intent)
 		if c.log != nil {
-			c.log.Warn("workflow: worker launch reported success without a session identity",
-				"step", step.ID, "harness", harness)
+			// P1-D §R: name the state, so "AO does not fail over after an
+			// ambiguous launch" is a thing an operator can read in the log and
+			// a test can assert, rather than a property of where a return
+			// statement happens to sit.
+			c.log.Warn("workflow: worker launch reported success without a session identity; not failing over",
+				"step", step.ID, "harness", harness,
+				"failoverSafety", ClassifyFailoverSafety(nil, false, false))
 		}
 		return step, nil
 	}
@@ -610,8 +626,15 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 		}
 		c.recordLaunchFailureBoundary(ctx, run, step, entry, intent, domain.LaunchStageSpawn, classification.Class, err)
 		if fallback, ok := c.selectFallbackForWork(ctx, run, step.ID, harness, attemptNumber, classification); ok {
+			// The launcher's contract -- a session record, or an error having
+			// created none -- is what makes this hop provably safe. The
+			// ambiguous shape never reaches here: it returned above.
+			safety := ClassifyFailoverSafety(err, false, false)
 			if c.log != nil {
-				c.log.Warn("workflow: work step failing over to fallback harness", "step", step.ID, "from", harness, "to", fallback, "class", classification.Class)
+				c.log.Warn("workflow: work step failing over to fallback harness",
+					"step", step.ID, "from", harness, "to", fallback,
+					"class", classification.Class, "failoverSafety", safety,
+					"failoverOrdinal", attemptNumber)
 			}
 			return c.attemptWorkHarness(ctx, run, step, entry, prompt, fallback, attemptNumber+1, generation)
 		}

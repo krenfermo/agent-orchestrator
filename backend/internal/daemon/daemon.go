@@ -39,6 +39,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/previewserver"
 	"github.com/aoagents/agent-orchestrator/backend/internal/push"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
+	"github.com/aoagents/agent-orchestrator/backend/internal/runtimegc"
 	"github.com/aoagents/agent-orchestrator/backend/internal/secretbox"
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
 	authsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/authsvc"
@@ -512,10 +513,15 @@ func RunWithConfig(cfg config.Config) error {
 	// token is this daemon instance's identity -- it is what lets boot
 	// reconciliation tell a lock this instance still owns from one a crashed
 	// predecessor left behind, without ever guessing from timestamps.
+	// P1-D reuses this same token for the execution placements the workflow
+	// coordinator freezes, so a placement and the lock protecting it name the
+	// SAME daemon incarnation. Two independently generated tokens would mean
+	// boot reconciliation could believe it owns the lock and not the placement.
+	daemonInstanceToken := uuid.NewString()
 	branchLocks := branchlock.New(branchlock.Deps{
 		Store:      store,
 		Preflight:  workspaceObserver,
-		OwnerToken: uuid.NewString(),
+		OwnerToken: daemonInstanceToken,
 		NewID:      uuid.NewString,
 		Logger:     log,
 	})
@@ -558,7 +564,13 @@ func RunWithConfig(cfg config.Config) error {
 	// mid-launch and a crashed daemon's orphans are most likely to exist, and
 	// then on a low-frequency timer. It destroys only runtimes whose
 	// ownership, exact incarnation and terminality it can prove.
-	runtimeGC := newRuntimeGC(runtimeAdapter, store, log)
+	// P1-D §X: the sweep also reclaims AO-managed task worktrees whose work
+	// provably landed. A nil manager narrows the sweep to runtimes only.
+	var placementGC runtimegc.WorktreeReleaser
+	if wsMgr := taskWorkspaceManager(cfg, store, log); wsMgr != nil {
+		placementGC = worktreeReleaser{mgr: wsMgr}
+	}
+	runtimeGC := newRuntimeGC(runtimeAdapter, store, placementGC, log)
 	lcStack.runtimeGCDone = startRuntimeGC(ctx, runtimeGC, log)
 	autoReview := autoreview.New(store, reviewSvc, autoreview.Config{Logger: log})
 	lcStack.autoReviewDone = autoReview.Start(ctx)

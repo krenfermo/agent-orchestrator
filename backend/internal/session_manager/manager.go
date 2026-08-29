@@ -909,11 +909,24 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: prepare launch: %w", id, err)
 	}
 	defer m.lcm.CancelLaunch(id, launchID)
+	// P1-D §C: the ownership marker is attached ATOMICALLY with creation, the
+	// way reviewer panes already do it. It binds the runtime to this session
+	// AND to this launch generation, so a token read back off a live runtime
+	// proves "AO made this, for this session's launch N" -- which is what lets
+	// Runtime GC reclaim a finished worker without ever having to guess from a
+	// session name, and what stops a stale handle adopting a replacement.
+	//
+	// It is passed to Create rather than written afterwards for the reason
+	// ports.RuntimeConfig.Owner documents: a marker written after Create
+	// returns leaves a window in which a live runtime exists that AO cannot
+	// identify -- unadoptable, unterminatable, and therefore permanent.
+	ownerToken := domain.SessionRuntimeOwnerToken(id, launchID)
 	handle, err := m.runtime.Create(ctx, ports.RuntimeConfig{
 		SessionID:     id,
 		WorkspacePath: ws.Path,
 		Argv:          argv,
 		Env:           env,
+		Owner:         ownerToken,
 	})
 	if err != nil {
 		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, true)
@@ -925,6 +938,8 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		WorkspacePath:             ws.Path,
 		WorkspaceRepoPath:         ws.RepoPath,
 		RuntimeHandleID:           handle.ID,
+		RuntimeInstanceID:         handle.InstanceID,
+		RuntimeOwnerToken:         ownerToken,
 		RuntimeLaunchID:           launchID,
 		Prompt:                    prompt,
 		LatestUserPrompt:          prompt,
@@ -1820,11 +1835,17 @@ func (m *Manager) relaunchSessionWithPolicy(ctx context.Context, operation strin
 		return RestoreResult{}, fmt.Errorf("%s %s: prepare launch: %w", operation, rec.ID, err)
 	}
 	defer m.lcm.CancelLaunch(rec.ID, launchID)
+	// P1-D §C: a restore is a NEW launch of the same session, so it gets a new
+	// launch id and therefore a new ownership token. That is the point: the
+	// runtime a restore creates must not be confusable with the one the
+	// previous launch created, even though the session id is the same.
+	restoreOwnerToken := domain.SessionRuntimeOwnerToken(rec.ID, launchID)
 	runtimeCfg := ports.RuntimeConfig{
 		SessionID:     rec.ID,
 		WorkspacePath: ws.Path,
 		Argv:          argv,
 		Env:           env,
+		Owner:         restoreOwnerToken,
 	}
 	var handle ports.RuntimeHandle
 	if restartHandle == nil {
@@ -1841,6 +1862,8 @@ func (m *Manager) relaunchSessionWithPolicy(ctx context.Context, operation strin
 		WorkspacePath:             ws.Path,
 		WorkspaceRepoPath:         ws.RepoPath,
 		RuntimeHandleID:           handle.ID,
+		RuntimeInstanceID:         handle.InstanceID,
+		RuntimeOwnerToken:         restoreOwnerToken,
 		RuntimeLaunchID:           launchID,
 		AgentSessionID:            rec.Metadata.AgentSessionID,
 		Prompt:                    rec.Metadata.Prompt,

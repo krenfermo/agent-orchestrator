@@ -2270,6 +2270,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflowId}/placement": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P1-D: where this run's work happens and why it has not launched — the FROZEN execution placement and its own generation, the durable provider-attempt chain with what each attempt could prove about mutation, and the single admission verdict naming which authority is withholding the launch (capacity, branch, placement, provider or dependency). Read-only, derived from durable rows; no token is exposed and nothing here can move a placement. */
+        get: operations["getWorkflowPlacement"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workflows/{workflowId}/plan": {
         parameters: {
             query?: never;
@@ -2787,6 +2804,19 @@ export interface components {
         ControllersAdminResetPasswordResponse: {
             ok: boolean;
         };
+        ControllersAdmissionStateView: {
+            autoResume: boolean;
+            capacityClaimId?: string;
+            currentAttemptId?: string;
+            detail?: string;
+            /** Format: int64 */
+            placementGeneration?: number;
+            placementReady: boolean;
+            placementState?: string;
+            spendsRetryBudget: boolean;
+            /** @enum {string} */
+            waitingReason?: "capacity_wait" | "branch_wait" | "placement_wait" | "provider_wait" | "dependency_wait" | "lifecycle_superseded" | "strategy_refused";
+        };
         ControllersAmendTaskCriterionRequest: {
             amendedCriterion?: string;
             approvedBy: string;
@@ -2867,6 +2897,29 @@ export interface components {
         ControllersExecuteIncidentRequest: {
             approve: boolean;
             incidentId: string;
+        };
+        ControllersExecutionPlacementView: {
+            baseBranch?: string;
+            baseSha?: string;
+            current: boolean;
+            detail?: string;
+            executionBranch?: string;
+            integratedSha?: string;
+            /** Format: int64 */
+            lifecycleGeneration: number;
+            mergeTarget?: string;
+            /** Format: int64 */
+            placementGeneration: number;
+            /** @enum {string} */
+            provenance: "frozen_at_selection" | "recovered_from_durable_facts";
+            repoPath?: string;
+            /** @enum {string} */
+            state: "selected" | "waiting" | "preparing" | "ready" | "active" | "reviewing" | "integrating" | "integrated" | "conflict" | "preserved" | "terminal";
+            taskId?: string;
+            /** @enum {string} */
+            type: "direct_branch" | "isolated_worktree";
+            waitingReason?: string;
+            worktreePath?: string;
         };
         ControllersExecutionPolicyResponse: {
             policy: components["schemas"]["ControllersExecutionPolicyView"];
@@ -3045,6 +3098,30 @@ export interface components {
             /** @enum {string} */
             status: "authenticated" | "trusted-local" | "no_user";
             user?: components["schemas"]["ControllersUserView"];
+        };
+        ControllersProviderAttemptView: {
+            authoritative: boolean;
+            capacityClaimId?: string;
+            failureClass?: string;
+            failureReason?: string;
+            id: string;
+            /** Format: int64 */
+            lifecycleGeneration: number;
+            mutationEvidence?: string;
+            /** Format: int64 */
+            ordinal: number;
+            /** Format: int64 */
+            placementGeneration: number;
+            predecessorAttemptId?: string;
+            profile?: string;
+            provider?: string;
+            runtimeSessionId?: string;
+            /** @enum {string} */
+            safety?: "safe_before_execution" | "safe_after_proven_no_mutation" | "ambiguous_execution" | "completed_execution";
+            /** @enum {string} */
+            state: "planned" | "admitted" | "launching" | "running" | "completed" | "failed_safe" | "failed_ambiguous" | "superseded" | "abandoned";
+            successorAttemptId?: string;
+            workflowStepId?: string;
         };
         ControllersProviderDescriptorView: {
             authMethods: string[];
@@ -3330,6 +3407,11 @@ export interface components {
             refName: string;
             status: string;
             tasksIntegrated: number;
+        };
+        ControllersWorkflowPlacementResponse: {
+            admission: components["schemas"]["ControllersAdmissionStateView"];
+            placements: components["schemas"]["ControllersExecutionPlacementView"][];
+            providerAttempts: components["schemas"]["ControllersProviderAttemptView"][];
         };
         ControllersWorkflowQuestionResolutionResponse: {
             answer?: string;
@@ -13470,6 +13552,47 @@ export interface operations {
             };
             /** @description Unprocessable Entity */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowPlacement: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersWorkflowPlacementResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

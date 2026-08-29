@@ -228,9 +228,54 @@ func (c *Coordinator) ReportWorkStepProviderFailure(ctx stdctx.Context, runID, s
 	_, curOwner, curProfileID, _ := c.resolveRuntimeEnv(ctx, run.ID, currentHarness)
 	c.recordAgentHealthFailure(ctx, currentHarness, healthScope{userID: curOwner, profileID: curProfileID}, classification, now)
 
+	// P1-D §H: this is a MID-EXECUTION failure. The session exists — the guard
+	// above refused a step without one — so the launch-contract argument that
+	// makes a before-execution failover safe does not apply here, and the
+	// question is the harder one: did this provider touch anything?
+	//
+	// AO answers it with positive proof or not at all. mutationSafetyForLive
+	// assembles MutationProof (exact runtime identity, that runtime provably
+	// stopped, the attempt terminal, the workspace fingerprint unchanged since
+	// launch, and no durable mutation evidence) and anything short of ALL of
+	// them classifies as ambiguous_execution — which never fails over.
+	//
+	// The gate applies only where the ledger is wired. A deployment without it
+	// has no durable attempt to classify and nowhere to record the class, so it
+	// keeps the pre-P1-D behaviour exactly -- the same nil-optional-dependency
+	// convention every other capability in this package follows. The daemon
+	// always wires it.
+	safety, proof, ledgerAttempt := c.mutationSafetyForLive(ctx, run, step, *step.SessionID)
+	if c.providerAttemptsEnabled() && !safety.PermitsFailover() {
+		if ledgerAttempt.ID != "" {
+			c.advanceProviderAttempt(ctx, ledgerAttempt, domain.ProviderAttemptFailedAmbiguous,
+				"mid-execution failure with no proof the workspace is unchanged", classification.Class, safety, "")
+		}
+		return c.failLiveWorkAttempt(ctx, run, step, current, classification,
+			"mid-execution failure AO cannot prove was mutation-free; failing over would start a second provider over a state nobody can describe", now)
+	}
+
 	fallback, eligible := c.selectFallbackForWork(ctx, run, step.ID, currentHarness, int(current.AttemptNumber), classification)
 	if !eligible {
 		return c.failLiveWorkAttempt(ctx, run, step, current, classification, "not eligible for automatic failover, or budget/health exhausted", now)
+	}
+	// The durable gate. It is separate from selectFallbackForWork on purpose:
+	// that function answers "is there a healthy provider to go to", this one
+	// answers "is this obligation ALLOWED another hop" from rows a restart
+	// cannot reset. Both must agree.
+	var successor domain.ProviderAttempt
+	if ledgerAttempt.ID != "" {
+		_, fbOwnerForProfile, fbProfile, _ := c.resolveRuntimeEnv(ctx, run.ID, fallback)
+		_ = fbOwnerForProfile
+		next, hopped, ferr := c.FailoverProviderAttempt(ctx, run, step, ledgerAttempt, fallback, fbProfile,
+			safety, classification.Class, "mid-execution provider failure: "+string(classification.Class), proof.Digest())
+		if ferr != nil {
+			return c.failLiveWorkAttempt(ctx, run, step, current, classification, "provider failover refused: "+ferr.Error(), now)
+		}
+		if !hopped {
+			return c.failLiveWorkAttempt(ctx, run, step, current, classification,
+				"the durable provider-attempt ledger refused another hop (budget spent, or every provider already tried)", now)
+		}
+		successor = next
 	}
 	if c.switcher == nil {
 		return c.failLiveWorkAttempt(ctx, run, step, current, classification, "no agent switcher configured", now)
@@ -285,6 +330,14 @@ func (c *Coordinator) ReportWorkStepProviderFailure(ctx stdctx.Context, runID, s
 	}
 	if _, err := c.store.CreateWorkflowAttempt(ctx, "wfa-"+c.newID(), step.ID, string(fallback), "", now); err != nil {
 		return step, err
+	}
+	// §I: the successor inherits the SAME frozen placement and the SAME live
+	// session. Nothing about the placement changed — the provider did — so the
+	// new attempt is bound to the runtime that already exists rather than being
+	// given a fresh one.
+	if successor.ID != "" {
+		c.bindProviderAttemptRuntime(ctx, successor, *step.SessionID, "")
+		c.advanceProviderAttempt(ctx, successor, domain.ProviderAttemptRunning, "", "", "", "")
 	}
 	_, fbOwner, fbProfileID, _ := c.resolveRuntimeEnv(ctx, run.ID, fallback)
 	c.recordAgentHealthSuccess(ctx, fallback, healthScope{userID: fbOwner, profileID: fbProfileID}, now)

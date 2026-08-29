@@ -133,32 +133,7 @@ func newRuntimeGCCommand(ctx *commandContext) *cobra.Command {
 			"--dry-run classifies everything and destroys nothing, using the identical predicates.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			var res runtimeGCEnvelope
-			body := struct {
-				DryRun bool `json:"dryRun"`
-			}{DryRun: dryRun}
-			if err := ctx.postJSON(cmd.Context(), "runtime/gc", body, &res); err != nil {
-				return err
-			}
-			out := cmd.OutOrStdout()
-			verb := "cleaned"
-			if res.DryRun {
-				verb = "would clean"
-			}
-			_, _ = fmt.Fprintf(out, "%s %d of %d candidates\n", verb, res.Cleaned+boolCount(res.DryRun, res.Candidates), res.Candidates)
-			_, _ = fmt.Fprintf(out, "skipped: %d live, %d unprovable, %d foreign, %d already gone, %d errors\n",
-				res.SkippedLive, res.SkippedUnprovable, res.SkippedForeign, res.Absent, res.Errors)
-			for _, f := range res.Findings {
-				line := fmt.Sprintf("  %-10s %-28s %s", f.Disposition, f.Handle, f.Reason)
-				if f.Error != "" {
-					line += " (" + f.Error + ")"
-				}
-				_, _ = fmt.Fprintln(out, strings.TrimRight(line, " "))
-			}
-			if res.Errors > 0 {
-				return errors.New("runtime gc: some candidates could not be handled; see the findings above")
-			}
-			return nil
+			return runRuntimeGC(ctx, cmd, dryRun, nil)
 		},
 	}
 	cmd.Flags().SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
@@ -175,4 +150,98 @@ func boolCount(dryRun bool, candidates int) int {
 		return candidates
 	}
 	return 0
+}
+
+// newWorktreeCommand is P1-D §AE's placement surface.
+//
+// `gc` here is the SAME sweep `ao runtime gc` runs, against the same endpoint,
+// with the same proofs -- exposed under the noun an operator thinking about
+// checkouts will reach for. Two commands, one decision: a second sweep with its
+// own rules is how two safety models end up disagreeing.
+func newWorktreeCommand(ctx *commandContext) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "worktree",
+		Short: "Inspect and reclaim the git worktrees AO manages",
+		Long: "AO-managed worktrees live under the AO data dir, never inside a user project, and each one belongs to\n" +
+			"exactly one task of one workflow.",
+	}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "Show every AO-managed worktree and whether it is reclaimable",
+		Long: "Runs the placement sweep in dry-run mode and prints what it found. Nothing is removed, and the\n" +
+			"classification is the identical one a real sweep uses.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runRuntimeGC(ctx, cmd, true, isWorktreeFinding)
+		},
+	})
+	cmd.AddCommand(newWorktreeGCCommand(ctx))
+	return cmd
+}
+
+func newWorktreeGCCommand(ctx *commandContext) *cobra.Command {
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:   "gc",
+		Short: "Reclaim AO-managed worktrees whose work provably landed",
+		Long: "Removes a worktree only when AO can prove its work is safe elsewhere: the record says integrated, it\n" +
+			"names the commit the work landed at, and the workflow run has ended.\n\n" +
+			"It never removes a worktree that is active, preserved, failed, or that belongs to a run still going --\n" +
+			"a checkout can hold the only copy of an agent's work. Human worktrees are not merely spared: the sweep\n" +
+			"walks AO's own records, so it never sees them.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runRuntimeGC(ctx, cmd, dryRun, isWorktreeFinding)
+		},
+	}
+	cmd.Flags().SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
+		return pflag.NormalizedName(strings.ReplaceAll(name, "_", "-"))
+	})
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Classify every worktree and remove nothing")
+	return cmd
+}
+
+// isWorktreeFinding narrows which findings are PRINTED under `ao worktree`.
+//
+// It never narrows what the sweep did. The daemon decides what is reclaimable;
+// a filter that changed that would be the CLI deciding safety, which is exactly
+// what must not happen.
+func isWorktreeFinding(class string) bool {
+	return strings.HasSuffix(class, "_worktree")
+}
+
+// runRuntimeGC drives the one sweep both `ao runtime gc` and `ao worktree gc`
+// use. Having a single caller is the point: a preview and a real sweep, and a
+// runtime view and a worktree view, are the same decision seen through
+// different filters rather than different code that could disagree.
+func runRuntimeGC(ctx *commandContext, cmd *cobra.Command, dryRun bool, include func(class string) bool) error {
+	var res runtimeGCEnvelope
+	body := struct {
+		DryRun bool `json:"dryRun"`
+	}{DryRun: dryRun}
+	if err := ctx.postJSON(cmd.Context(), "runtime/gc", body, &res); err != nil {
+		return err
+	}
+	out := cmd.OutOrStdout()
+	verb := "cleaned"
+	if res.DryRun {
+		verb = "would clean"
+	}
+	_, _ = fmt.Fprintf(out, "%s %d of %d candidates\n", verb, res.Cleaned+boolCount(res.DryRun, res.Candidates), res.Candidates)
+	_, _ = fmt.Fprintf(out, "skipped: %d live, %d unprovable, %d foreign, %d already gone, %d errors\n",
+		res.SkippedLive, res.SkippedUnprovable, res.SkippedForeign, res.Absent, res.Errors)
+	for _, f := range res.Findings {
+		if include != nil && !include(f.Class) {
+			continue
+		}
+		line := fmt.Sprintf("  %-10s %-28s %s", f.Disposition, f.Handle, f.Reason)
+		if f.Error != "" {
+			line += " (" + f.Error + ")"
+		}
+		_, _ = fmt.Fprintln(out, strings.TrimRight(line, " "))
+	}
+	if res.Errors > 0 {
+		return errors.New("runtime gc: some candidates could not be handled; see the findings above")
+	}
+	return nil
 }
