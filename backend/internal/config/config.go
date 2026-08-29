@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
 const (
@@ -163,6 +165,16 @@ type Config struct {
 	// controls how the non-rejecting identity middleware resolves an
 	// application-level "current user".
 	TrustedLocalMode bool
+	// CapacityLimits is P1-C's runtime scheduler bound: how many agent
+	// runtimes AO may have running at once, globally, per execution kind, and
+	// per workflow. Zero-valued fields normalize to the shipped defaults
+	// (domain.DefaultCapacityLimits), so a partial configuration reads as a
+	// default rather than as "no slots, nothing may ever run".
+	//
+	// Overridable per field: AO_CAPACITY_GLOBAL, AO_CAPACITY_WORKERS,
+	// AO_CAPACITY_REVIEWERS, AO_CAPACITY_PLANNERS, AO_CAPACITY_REPAIRS,
+	// AO_CAPACITY_PER_WORKFLOW.
+	CapacityLimits domain.CapacityLimits
 	// TmuxSocket names the isolated tmux server (`tmux -L <TmuxSocket>`) the
 	// tmux runtime (Darwin/Linux) issues every session command against, so AO
 	// never shares — and never touches — the operator's own default tmux
@@ -209,6 +221,24 @@ func (c Config) Addr() string {
 //	AO_TRUSTED_LOCAL_MODE  application-identity trust mode off|on (default on)
 //
 // The bind host is not configurable: the daemon is loopback-only by design.
+// envPositiveInt reads a positive integer from the environment, returning 0
+// for anything unset, unparseable or non-positive. Callers normalize 0 to
+// their own default, so a misconfiguration degrades to the default rather than
+// to a bound nobody chose.
+func envPositiveInt(name string) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// Load reads the daemon's configuration from the environment, applying the
+// documented defaults for everything unset.
 func Load() (Config, error) {
 	cfg := Config{
 		Host:             LoopbackHost,
@@ -316,6 +346,21 @@ func Load() (Config, error) {
 	if raw := os.Getenv("AO_TELEMETRY_APP_VERSION"); raw != "" {
 		cfg.Telemetry.AppVersion = strings.TrimSpace(raw)
 	}
+
+	// P1-C runtime capacity. Every bound is read the same way: an unset or
+	// unparseable value leaves the field zero, and domain.CapacityLimits
+	// .Normalize turns zero into the shipped default. A typo can therefore
+	// never produce a zero-slot scheduler that deadlocks the daemon.
+	cfg.CapacityLimits = domain.CapacityLimits{
+		Global:      envPositiveInt("AO_CAPACITY_GLOBAL"),
+		PerWorkflow: envPositiveInt("AO_CAPACITY_PER_WORKFLOW"),
+		PerKind: map[domain.ExecutionKind]int{
+			domain.ExecutionKindWorker:   envPositiveInt("AO_CAPACITY_WORKERS"),
+			domain.ExecutionKindReviewer: envPositiveInt("AO_CAPACITY_REVIEWERS"),
+			domain.ExecutionKindPlanner:  envPositiveInt("AO_CAPACITY_PLANNERS"),
+			domain.ExecutionKindRepair:   envPositiveInt("AO_CAPACITY_REPAIRS"),
+		},
+	}.Normalize()
 
 	if raw, ok := os.LookupEnv("AO_GITLAB_ALLOWED_HOSTS"); ok && raw != "" {
 		hosts := make([]string, 0, 4)

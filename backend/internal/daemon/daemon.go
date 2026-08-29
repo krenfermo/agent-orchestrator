@@ -554,6 +554,12 @@ func RunWithConfig(cfg config.Config) error {
 	workflowCoordinator.SetExecutionLifetime(ctx)
 	wakePoller := wakepoller.New(wakeScheduler, workflowCoordinator, wakepoller.Config{Logger: log})
 	lcStack.wakePollerDone = wakePoller.Start(ctx)
+	// P1-C: Runtime GC. It runs once here, at the one moment nothing is
+	// mid-launch and a crashed daemon's orphans are most likely to exist, and
+	// then on a low-frequency timer. It destroys only runtimes whose
+	// ownership, exact incarnation and terminality it can prove.
+	runtimeGC := newRuntimeGC(runtimeAdapter, store, log)
+	lcStack.runtimeGCDone = startRuntimeGC(ctx, runtimeGC, log)
 	autoReview := autoreview.New(store, reviewSvc, autoreview.Config{Logger: log})
 	lcStack.autoReviewDone = autoReview.Start(ctx)
 	// Push-device registry: persisted phones that receive OS push notifications.
@@ -620,13 +626,16 @@ func RunWithConfig(cfg config.Config) error {
 	}
 
 	srv, err := httpd.NewWithDeps(cfg, log, termMgr, httpd.APIDeps{
-		Projects:           projectSvc,
-		Agents:             agentSvc,
-		Environment:        environmentSvc,
-		Sessions:           sessionSvc,
-		PRs:                prActions,
-		Reviews:            reviewSvc,
-		Workflows:          workflowSvc,
+		Projects:    projectSvc,
+		Agents:      agentSvc,
+		Environment: environmentSvc,
+		Sessions:    sessionSvc,
+		PRs:         prActions,
+		Reviews:     reviewSvc,
+		Workflows:   workflowSvc,
+		// P1-C's observability: what is holding the machine, and what GC did.
+		Scheduler:          workflowCoordinator,
+		RuntimeGC:          runtimeGC,
 		Notifications:      notifier,
 		NotificationStream: notificationHub,
 		Push:               pushRegistry,

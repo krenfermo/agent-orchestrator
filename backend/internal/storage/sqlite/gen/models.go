@@ -120,6 +120,27 @@ type BranchLock struct {
 	OwnershipKind  string
 }
 
+type CapacityClaim struct {
+	ID                  string
+	ExecutionKind       string
+	State               string
+	WorkflowRunID       string
+	WorkflowStepID      string
+	TaskID              string
+	LifecycleGeneration int64
+	DispatchKey         string
+	OwnerID             string
+	ProjectID           string
+	RuntimeHandle       string
+	RuntimeInstanceID   string
+	Priority            int64
+	EnqueuedAt          time.Time
+	HeldAt              sql.NullTime
+	ReleasedAt          sql.NullTime
+	ReleaseReason       string
+	UpdatedAt           time.Time
+}
+
 type ChangeLog struct {
 	Seq       int64
 	ProjectID domain.ProjectID

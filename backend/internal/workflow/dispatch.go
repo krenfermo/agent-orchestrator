@@ -234,6 +234,21 @@ func (c *Coordinator) dispatchFromPending(ctx stdctx.Context, run domain.Workflo
 		return step, nil
 	}
 
+	// P1-C: runtime admission. Placed here for exactly the reasons the two
+	// gates above are: BEFORE the outbox CAS, so a run that has to wait for a
+	// slot leaves its entry Pending and the next wake/reconcile pass
+	// re-evaluates it cleanly, never "dispatched" with nothing spawned.
+	//
+	// A refusal is not a failure: markRunWaitingForCapacity parks the run in
+	// Waiting under the same durable wake the provider-capacity wait uses, and
+	// spends no retry budget.
+	capReq := c.workerCapacityRequest(ctx, run, step)
+	if admitted, cerr := c.acquireCapacity(ctx, capReq); cerr != nil {
+		return step, cerr
+	} else if !admitted {
+		return c.markRunWaitingForCapacity(ctx, run, step)
+	}
+
 	now := c.clock()
 	// Checkpoint 8P-E.13A.2: the same argument as 8N.1's below, for the other
 	// state a blocked run can be parked in. A run that reached this line has

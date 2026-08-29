@@ -150,6 +150,13 @@ func (c *Coordinator) reconcileRun(ctx stdctx.Context, run domain.WorkflowRun, n
 	c.reconcileRepairOutcome(ctx, run)
 	c.maybeAutoRepair(ctx, run)
 
+	// P1-C: return whatever runtime capacity this run no longer legitimately
+	// holds -- everything, if it is terminal; a superseded generation's claim,
+	// if the lifecycle moved past it. Per-run and best-effort on purpose: a run
+	// whose capacity state cannot be reasoned about must not stop every other
+	// run from being scheduled.
+	c.reconcileCapacityForRun(ctx, run)
+
 	if c.planStore != nil {
 		if plan, master, planErr := c.planStore.GetWorkflowPlan(ctx, run.ID); planErr != nil {
 			return planErr

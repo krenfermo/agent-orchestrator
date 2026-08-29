@@ -1556,6 +1556,19 @@ func sessionMissingOutput(out string) bool {
 		strings.Contains(s, "session not found")
 }
 
+// noServerOutput reports the one unreachable-server answer that is CONCLUSIVE
+// for an inventory: AO's own tmux server is not running, so it hosts no
+// sessions at all.
+//
+// It is deliberately narrower than serverUnreachableOutput. For a single
+// session's liveness "no server running" is still inconclusive -- the server
+// could be restarting under a session AO must not assume is gone -- but for
+// "list everything AO owns" it is a complete and correct answer: nothing.
+// Anything else (a connection error) stays inconclusive and is reported.
+func noServerOutput(out string) bool {
+	return strings.Contains(strings.ToLower(out), "no server running")
+}
+
 // serverUnreachableOutput reports whether a non-zero tmux exit means the
 // server itself could not be reached, which is inconclusive for any single
 // session's liveness.
@@ -2141,4 +2154,59 @@ func isKeepAliveCommand(command string) bool {
 		return false
 	}
 	return filepath.Base(fields[0]) == "cat"
+}
+
+// ListSessions implements ports.RuntimeInventory: every session on AO's own
+// tmux server, each with its immutable incarnation and its ownership token.
+//
+// Three things about it are deliberate.
+//
+// It reads AO's OWN socket (`tmux -L <AO_TMUX_SOCKET>`), never the operator's
+// default server. That is a property of r.run, not of this function, and it is
+// why enumerating at all is safe: nothing here can even see the sessions a
+// person is working in.
+//
+// It returns the incarnation, so every decision a caller makes afterwards is
+// addressed to `$N`. A listing of names would be a listing of things that can
+// become somebody else's between being listed and being acted on.
+//
+// A session whose owner cannot be read is returned with OwnerKnown false
+// rather than omitted. "AO could not tell" is a fact a GC pass must SEE in
+// order to skip it; dropping it here would silently turn an unprovable session
+// into an absent one.
+func (r *Runtime) ListSessions(ctx context.Context) ([]ports.RuntimeSessionSummary, error) {
+	out, err := r.run(ctx, listSessionsArgs()...)
+	if err != nil {
+		text := string(out)
+		// No server, or no sessions on it, is an empty inventory -- not a
+		// failure. A GC pass must not abort because there was nothing to sweep.
+		if sessionMissingOutput(text) || noServerOutput(text) {
+			return nil, nil
+		}
+		if serverUnreachableOutput(text) {
+			return nil, fmt.Errorf("tmux runtime: list sessions: %w: %s",
+				ports.ErrRuntimeUnavailable, strings.TrimSpace(text))
+		}
+		return nil, fmt.Errorf("tmux runtime: list sessions: %w", err)
+	}
+	var summaries []ports.RuntimeSessionSummary
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		instance, name, ok := strings.Cut(line, "\t")
+		if !ok || !isSessionInstanceID(instance) {
+			// A line AO cannot parse into an incarnation is not a session it
+			// may act on. Skipped rather than guessed at.
+			continue
+		}
+		summary := ports.RuntimeSessionSummary{ID: name, InstanceID: instance}
+		owner, known, oerr := r.instanceOwner(ctx, instance)
+		if oerr == nil {
+			summary.Owner, summary.OwnerKnown = owner, known
+		}
+		summaries = append(summaries, summary)
+	}
+	return summaries, nil
 }

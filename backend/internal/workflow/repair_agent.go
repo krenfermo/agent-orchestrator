@@ -393,6 +393,22 @@ func (c *Coordinator) LaunchRepair(ctx stdctx.Context, runID, authorizedBy strin
 	}
 	intent.RepairRunID = created.Run.ID
 
+	// P1-C: mark the repair run as a repair BEFORE it is started, so the
+	// scheduler meters its worker dispatch against the repair budget rather
+	// than the ordinary worker one. Written first for the same reason the
+	// intent is: a run that starts before anything says what it is would be
+	// charged to the wrong meter, and the repair limit is the narrower budget.
+	_, _ = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+		ID:             "wfc-" + c.newID(),
+		WorkflowRunID:  created.Run.ID,
+		ProjectID:      created.Run.ProjectID,
+		DurablePhase:   repairRunOriginPhase,
+		NextAction:     fmt.Sprintf("repair run for %s (%s), generation %d", intent.TargetRunID, intent.ConditionReason, intent.Generation),
+		PayloadVersion: "v1",
+		RetryState:     fmt.Sprintf(`{"originRunId":%q,"generation":%d}`, intent.WorkflowRunID, intent.Generation),
+		CreatedAt:      c.clock(),
+	})
+
 	// The intent is durable BEFORE the repair run is started, so a crash
 	// between the two leaves a discoverable repair and a spent generation --
 	// recovery finds a repair, never an orphan and never a free retry.

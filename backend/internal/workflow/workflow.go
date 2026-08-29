@@ -428,6 +428,18 @@ type Deps struct {
 	// CapacityProber). Optional.
 	CapacityProber CapacityProber
 
+	// Capacity and CapacityLimits are P1-C's runtime scheduler: the durable
+	// capacity-claim store, and the concurrency bounds it grants under. A nil
+	// Capacity disables admission control entirely (every launch proceeds, as
+	// it did before P1-C); zero-valued limits normalize to the shipped
+	// defaults, so a partially configured limit set can never read as "no
+	// slots, nothing may ever run".
+	//
+	// This is NOT the provider capacity CapacityProber answers about. See
+	// capacity_scheduler.go's header for why the two are separate and compose.
+	Capacity       CapacityStore
+	CapacityLimits domain.CapacityLimits
+
 	// TaskWorkspaces is the AO-owned worktree lifecycle (internal/workspace):
 	// what records a task's work as landed, what cleans up after it, what
 	// preserves it when it did not land, and what reconciles all three after a
@@ -587,6 +599,13 @@ type Coordinator struct {
 	executionPolicies ExecutionPolicies
 	trustedLocal      bool
 
+	// capacity and capacityLimits are P1-C's runtime admission control: the
+	// durable claim store, and the bounds it grants under. Optional, like every
+	// other dependency here -- a nil store means no admission control, which is
+	// what a pre-P1-C test double gets. The daemon always wires it.
+	capacity       CapacityStore
+	capacityLimits domain.CapacityLimits
+
 	// integrationLocks is the target-integration lane every task's work passes
 	// through on its way onto a target ref (internal/integration). It is
 	// separate from branchLocks because the two answer different questions:
@@ -674,6 +693,8 @@ func New(d Deps) *Coordinator {
 		providerProfiles:         d.ProviderProfiles,
 		executionPolicies:        d.ExecutionPolicies,
 		trustedLocal:             d.TrustedLocal,
+		capacity:                 d.Capacity,
+		capacityLimits:           d.CapacityLimits,
 		capacityProber:           d.CapacityProber,
 		taskWorkspaces:           d.TaskWorkspaces,
 		taskWorktreeRecords:      d.TaskWorktreeRecords,
@@ -1102,11 +1123,19 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 	run = updatedRun
 	detail.Run = run
 
+	// P1-C: the generation and terminality of every step, collected as the
+	// loop below already reads them, so a slot whose step has finished comes
+	// back on the next read of the run rather than at the next daemon restart.
+	stepGeneration := make(map[string]int64, len(steps))
+	stepTerminal := make(map[string]bool, len(steps))
+
 	for _, step := range steps {
 		attempts, err := c.store.ListWorkflowAttempts(ctx, step.ID)
 		if err != nil {
 			return RunDetail{}, err
 		}
+		stepGeneration[step.ID] = int64(len(attempts))
+		stepTerminal[step.ID] = step.State.Terminal()
 		var cpPtr *domain.WorkflowCheckpoint
 		if cp, hasCP, cperr := c.store.GetLatestWorkflowCheckpointByStep(ctx, step.ID); cperr == nil && hasCP {
 			cp := cp
@@ -1244,6 +1273,13 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 	if detail.Run.ParentWorkflowID == nil {
 		c.maybeScheduleAutonomousHeartbeat(ctx, runID)
 	}
+
+	// P1-C: return any runtime slot this run no longer legitimately holds --
+	// a claim whose step finished, or whose dispatch generation was superseded.
+	// It reuses the step facts gathered above, and it is deliberately last:
+	// releasing a slot wakes whatever was queued for it, and that must happen
+	// after this read has finished deciding what this run is doing.
+	c.reconcileCapacityWithSteps(ctx, detail.Run, steps, stepGeneration, stepTerminal)
 
 	return detail, nil
 }
@@ -1837,6 +1873,12 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 	// where it is in the repository: releasing the lock gives up ownership, it
 	// never reverts anything.
 	c.releaseBranchLocks(ctx, runID, "workflow run cancelled")
+
+	// P1-C: and the same argument for the run's runtime slots. A cancelled run
+	// can never launch anything again under any generation, so everything it
+	// holds goes back immediately -- before the fallible bookkeeping below, for
+	// exactly the reason the branch release moved up here.
+	c.releaseCapacityForRun(ctx, runID, "workflow run cancelled")
 
 	steps, err := c.store.ListWorkflowSteps(ctx, runID)
 	if err != nil {

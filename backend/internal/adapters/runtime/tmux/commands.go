@@ -306,3 +306,14 @@ func sessionInstanceArgs(id string) []string {
 func killSessionInstanceArgs(instanceID string) []string {
 	return []string{"kill-session", "-t", instanceID}
 }
+
+// listSessionsArgs enumerates every session on AO's own tmux server, emitting
+// the incarnation and the name together on one line.
+//
+// The incarnation comes FIRST and is what callers key on: a listing that
+// returned only names would hand every later decision back to whatever holds
+// the name at the moment it is used, which is the ABA this whole adapter is
+// built to exclude.
+func listSessionsArgs() []string {
+	return []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}
+}

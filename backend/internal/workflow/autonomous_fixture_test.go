@@ -156,6 +156,11 @@ type autonomousFixture struct {
 	// notification per real event, however many times a poll re-derives it —
 	// lives in the store's durable dedupe index, not in the sink.
 	emails *autoEmailer
+	// newID is this fixture's id sequence. It is held here, not created per
+	// coordinator, so rebuilding the coordinator (withCapacityLimits) keeps
+	// minting fresh ids instead of restarting the sequence and colliding with
+	// rows the store already holds.
+	newID func() string
 }
 
 // autoEmailer is attention_notify_internal_test.go's recordingEmailer, for the
@@ -261,16 +266,39 @@ func newAutonomousFixture(t *testing.T, plan workflowcore.MasterPlan) *autonomou
 	verifier := &fakeVerifyRunner{result: workflowcore.VerifyCommandExecution{ExitCode: 0}}
 	sender := &fakeMessageSender{}
 	emails := &autoEmailer{}
-	coord := newAutonomousCoordinator(store, clk, spawner, planner, ws, launcher, verifier, sender, wakeSched, emails)
+	newID := autoIDSeq("id")
+	coord := newAutonomousCoordinator(store, clk, spawner, planner, ws, launcher, verifier, sender, wakeSched, emails, newID)
 	poller := wakepoller.New(wakeSched, coord, wakepoller.Config{Clock: clk.Now})
 	return &autonomousFixture{
 		store: store, clk: clk, wake: wakeSched, poller: poller, coord: coord,
 		spawner: spawner, planner: planner, ws: ws, launcher: launcher, verifier: verifier, sender: sender,
-		emails: emails,
+		emails: emails, newID: newID,
 	}
 }
 
-func newAutonomousCoordinator(store *sqlite.Store, clk *fakeClock, spawner *autoSpawner, planner *staticPlanner, ws *fakeWorkspaceFacts, launcher *fakeReviewerLauncher, verifier *fakeVerifyRunner, sender *fakeMessageSender, wakeSched *wake.Scheduler, emails *autoEmailer) *workflowcore.Coordinator {
+// withCapacityLimits rebuilds this fixture's coordinator under tighter
+// scheduler bounds, over the SAME durable store. It is how a capacity test
+// makes the machine "full" without spawning six real runtimes: the limits are
+// configuration, and the durable claims are the same ones production writes.
+func (fx *autonomousFixture) withCapacityLimits(limits domain.CapacityLimits) *workflowcore.Coordinator {
+	coord := newAutonomousCoordinator(fx.store, fx.clk, fx.spawner, fx.planner, fx.ws,
+		fx.launcher, fx.verifier, fx.sender, fx.wake, fx.emails, fx.newID, limits)
+	fx.coord = coord
+	// The poller drives the coordinator it was built with, so it has to be
+	// rebuilt too -- otherwise the daemon's own driving loop keeps running
+	// under the OLD limits and the new ones apply to nothing the test does.
+	fx.poller = wakepoller.New(fx.wake, coord, wakepoller.Config{Clock: fx.clk.Now})
+	return coord
+}
+
+func newAutonomousCoordinator(store *sqlite.Store, clk *fakeClock, spawner *autoSpawner, planner *staticPlanner, ws *fakeWorkspaceFacts, launcher *fakeReviewerLauncher, verifier *fakeVerifyRunner, sender *fakeMessageSender, wakeSched *wake.Scheduler, emails *autoEmailer, newID func() string, limits ...domain.CapacityLimits) *workflowcore.Coordinator {
+	capacityLimits := domain.CapacityLimits{}
+	if len(limits) > 0 {
+		capacityLimits = limits[0]
+	}
+	if newID == nil {
+		newID = autoIDSeq("id")
+	}
 	return workflowcore.New(workflowcore.Deps{
 		// Task 5: every ready task now reaches its target through the
 		// Integration Coordinator, which takes the lane first. A fixture
@@ -286,13 +314,19 @@ func newAutonomousCoordinator(store *sqlite.Store, clk *fakeClock, spawner *auto
 		ProviderProfiles:  store,
 		ExecutionPolicies: store,
 		RuntimeIsolation:  &identityRuntimeIsolation{store: store},
+		// P1-C: the real capacity scheduler, under the real default limits.
+		// Wiring it into the shared autonomous fixture is deliberate: it means
+		// every autonomous test in this package now runs through admission
+		// control, so a scheduler that wrongly refused (or wrongly granted)
+		// would break the whole suite rather than only its own tests.
+		Capacity: store, CapacityLimits: capacityLimits,
 		Notifications: notify.New(notify.Deps{
 			Store:   store,
 			Emailer: emails,
 			Logger:  slog.Default(),
 			Clock:   clk.Now,
 		}),
-		Clock: clk.Now, NewID: autoIDSeq("id"),
+		Clock: clk.Now, NewID: newID,
 	})
 }
 

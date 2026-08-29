@@ -1017,6 +1017,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/runtime/capacity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P1-C: runtime capacity. The configured concurrency limits, what currently holds each slot, and the queue in scheduling order. This is the machine's capacity (how many agent runtimes may run at once), not a provider's rate limit. */
+        get: operations["getRuntimeCapacity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/runtime/gc": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P1-C: sweep the runtime artifacts AO left behind. Destroys only runtimes whose ownership, exact incarnation and terminality AO can prove; everything else is reported and left alone. dryRun classifies without destroying, using the identical predicates. */
+        post: operations["runRuntimeGC"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions": {
         parameters: {
             query?: never;
@@ -2684,6 +2718,33 @@ export interface components {
             ok: boolean;
             sessionId: string;
         };
+        CapacityClaimView: {
+            /** Format: date-time */
+            enqueuedAt: string;
+            /** Format: date-time */
+            heldAt?: null | string;
+            id: string;
+            /** @enum {string} */
+            kind: "planner" | "worker" | "reviewer" | "repair";
+            /** Format: int64 */
+            lifecycleGeneration: number;
+            /** Format: int64 */
+            priority: number;
+            projectId?: string;
+            runtimeHandle?: string;
+            /** @enum {string} */
+            state: "queued" | "held" | "released";
+            taskId?: string;
+            workflowRunId: string;
+            workflowStepId?: string;
+        };
+        CapacityUsageView: {
+            held: number;
+            /** @enum {string} */
+            kind?: "planner" | "worker" | "reviewer" | "repair";
+            limit: number;
+            queued: number;
+        };
         ClaimPRRequest: {
             allowTakeover?: null | boolean;
             pr: string;
@@ -4122,6 +4183,44 @@ export interface components {
             killed?: boolean;
             ok: boolean;
             sessionId: string;
+        };
+        RuntimeGCFindingView: {
+            class?: string;
+            /** @enum {string} */
+            disposition: "cleaned" | "candidate" | "live" | "unprovable" | "foreign" | "absent" | "error";
+            error?: string;
+            handle?: string;
+            instanceId?: string;
+            reason?: string;
+            workflowRunId?: string;
+        };
+        RuntimeGCReportResponse: {
+            absent: number;
+            candidates: number;
+            cleaned: number;
+            dryRun: boolean;
+            errors: number;
+            findings: components["schemas"]["RuntimeGCFindingView"][];
+            /** Format: date-time */
+            finishedAt: string;
+            skippedForeign: number;
+            skippedLive: number;
+            skippedUnprovable: number;
+            /** Format: date-time */
+            startedAt: string;
+            trigger?: string;
+        };
+        RuntimeGCRequest: {
+            dryRun?: boolean;
+        };
+        SchedulerStatusResponse: {
+            global: components["schemas"]["CapacityUsageView"];
+            held: components["schemas"]["CapacityClaimView"][];
+            /** Format: date-time */
+            observedAt: string;
+            perKind: components["schemas"]["CapacityUsageView"][];
+            perWorkflowLimit: number;
+            queued: components["schemas"]["CapacityClaimView"][];
         };
         SendConversationMessageRequest: {
             attachments?: components["schemas"]["ConversationImageContentRequest"][];
@@ -8481,6 +8580,68 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getRuntimeCapacity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SchedulerStatusResponse"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    runRuntimeGC: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["RuntimeGCRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimeGCReportResponse"];
                 };
             };
             /** @description Not Implemented */

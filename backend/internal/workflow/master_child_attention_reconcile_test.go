@@ -247,7 +247,7 @@ func TestDaemonRestartHealsAStaleParentMirror(t *testing.T) {
 	spawnsBefore := len(fx.spawner.calls)
 
 	// A brand-new Coordinator over the same durable rows: the daemon restart.
-	restarted := newAutonomousCoordinator(fx.store, fx.clk, fx.spawner, fx.planner, fx.ws, fx.launcher, fx.verifier, fx.sender, fx.wake, fx.emails)
+	restarted := newAutonomousCoordinator(fx.store, fx.clk, fx.spawner, fx.planner, fx.ws, fx.launcher, fx.verifier, fx.sender, fx.wake, fx.emails, fx.newID)
 	if err := restarted.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile after restart: %v", err)
 	}

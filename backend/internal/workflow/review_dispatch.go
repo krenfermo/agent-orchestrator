@@ -1184,6 +1184,28 @@ func (c *Coordinator) dispatchReviewFromPending(
 	harness domain.ReviewerHarness,
 	cycleNumber int,
 ) (domain.WorkflowStep, error) {
+	// P1-C: runtime admission, in the PENDING branch only.
+	//
+	// The placement matters as much as the check. dispatchReviewStep is
+	// re-entered on every pass over a run, including passes where this cycle's
+	// launch already happened and its outbox row is `dispatched`. Asking for
+	// capacity there would mint a fresh claim per pass -- the step's attempt
+	// count grows, so the generation and therefore the claim key change -- and
+	// a single review would silently accumulate slots until the run hit its own
+	// per-workflow bound and parked itself. Here it is asked exactly once per
+	// launch that is actually about to happen, which is the same discipline
+	// dispatchFromPending follows.
+	//
+	// A refusal parks the run in Waiting under the reviewer-capacity wake and
+	// leaves the outbox entry Pending, so the next pass re-derives the
+	// identical dispatch key and tries again.
+	capReq := c.reviewerCapacityRequest(run, reviewStep, entry.IdempotencyKey, cycleNumber)
+	if admitted, cerr := c.acquireCapacity(ctx, capReq); cerr != nil {
+		return reviewStep, cerr
+	} else if !admitted {
+		return c.markRunWaitingForCapacity(ctx, run, reviewStep)
+	}
+
 	now := c.clock()
 	// Checkpoint 8P-E.13A.2: same fix as dispatchFromPending (dispatch.go) for
 	// a run parked in needs_attention rather than Waiting — a reviewer that is

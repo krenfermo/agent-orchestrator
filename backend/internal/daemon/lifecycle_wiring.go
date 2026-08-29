@@ -51,6 +51,9 @@ type lifecycleStack struct {
 	scmDone        <-chan struct{}
 	trackerDone    <-chan struct{}
 	wakePollerDone <-chan struct{}
+	// runtimeGCDone is P1-C's periodic Runtime GC loop, awaited on shutdown
+	// like every other background loop here.
+	runtimeGCDone <-chan struct{}
 }
 
 // startLifecycle constructs the Lifecycle Manager over the store and starts the
@@ -115,6 +118,9 @@ func (l *lifecycleStack) Stop() {
 	}
 	if l.trackerDone != nil {
 		<-l.trackerDone
+	}
+	if l.runtimeGCDone != nil {
+		<-l.runtimeGCDone
 	}
 	if l.wakePollerDone != nil {
 		<-l.wakePollerDone

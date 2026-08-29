@@ -292,7 +292,7 @@ func TestAutonomous_RestartNoDuplicateWork(t *testing.T) {
 
 	// Simulate a daemon restart: a brand-new Coordinator + Poller, same
 	// store/planner/spawner/wake scheduler underneath.
-	restarted := newAutonomousCoordinator(fx.store, fx.clk, fx.spawner, fx.planner, fx.ws, fx.launcher, fx.verifier, fx.sender, fx.wake, fx.emails)
+	restarted := newAutonomousCoordinator(fx.store, fx.clk, fx.spawner, fx.planner, fx.ws, fx.launcher, fx.verifier, fx.sender, fx.wake, fx.emails, fx.newID)
 	if err := restarted.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile after restart: %v", err)
 	}

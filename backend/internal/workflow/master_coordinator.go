@@ -258,6 +258,18 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 	if d, ok := c.planner.(PlannerDescriptor); ok {
 		provider, model = d.Descriptor()
 	}
+	// P1-C: a planner is a runtime like any other, so it is admitted like one.
+	// The claim is taken BEFORE StartWorkflowPlanCommand: that CAS is what
+	// marks the plan row as running, and a plan row claiming a planner nobody
+	// was allowed to start is worse than a plan that waits. A refusal reuses
+	// the planner-capacity park the provider-capacity path already has.
+	planCap := c.plannerCapacityRequest(run, int64(c.plannerRetryCount(ctx, runID)+1))
+	if admitted, cerr := c.acquireCapacity(ctx, planCap); cerr != nil {
+		return RunDetail{}, cerr
+	} else if !admitted {
+		return c.parkPlanForCapacity(ctx, run, errNoRuntimeCapacity)
+	}
+
 	started, err := c.planStore.StartWorkflowPlanCommand(ctx, runID, provider, model, string(manifestJSON), c.clock())
 	if err != nil {
 		return RunDetail{}, err
@@ -287,6 +299,10 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 	plannerCtx, releasePlannerCtx := c.plannerExecutionContext(ctx, run.ID)
 	response, err := c.planner.Generate(plannerCtx, PlannerRequest{Objective: run.Objective, Project: project, Context: contextValue, MaxSteps: MaxPlanSteps, RuntimeEnv: runtimeEnv})
 	releasePlannerCtx()
+	// P1-C: the planner slot goes back the instant the planner returns,
+	// whatever it returned. A planner that failed still finished, and its
+	// retry is a new launch intent with its own claim.
+	c.releaseCapacity(ctx, planCap, "planner invocation finished")
 	if err != nil {
 		// Checkpoint 8N.1: a capacity/rate-limit-shaped planner failure must
 		// never be treated the same as a real permanent failure (parse

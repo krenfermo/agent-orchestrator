@@ -263,6 +263,14 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		// human happens to run it, which is how an authenticated Codex reviewer
 		// could sit unusable while a high-risk independent review waited.
 		CapacityProber: capacityprobe.New(),
+		// P1-C: runtime admission control. This is a DIFFERENT capacity from
+		// CapacityProber's -- that one answers "is this provider usable", this
+		// one answers "may AO start one more runtime on this machine at all".
+		// Wiring it here is what makes "no runtime launch without an
+		// authoritative capacity claim" true in every real deployment; a nil
+		// store (test doubles only) simply admits everything, as AO did before.
+		Capacity:       store,
+		CapacityLimits: cfg.CapacityLimits,
 		// The AO-owned worktree lifecycle. It is what records a task's work as
 		// landed, cleans the worktree and its ao/* branch up afterwards,
 		// preserves both when the task did not land, and -- at boot, from

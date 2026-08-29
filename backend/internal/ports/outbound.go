@@ -452,6 +452,37 @@ type SessionFactsReader interface {
 	DestroyInstance(ctx context.Context, instanceID string) error
 }
 
+// RuntimeSessionSummary is one session as the runtime's own inventory sees it.
+//
+// It carries the incarnation and the ownership token together, for the same
+// reason SessionFacts does: a name plus a separately-read owner describes two
+// moments, and a session can be surrendered and reclaimed between them.
+type RuntimeSessionSummary struct {
+	// ID is the reusable session name. It is a discovery key and never an
+	// authority key.
+	ID string
+	// InstanceID is the immutable incarnation (tmux's `$N`). Destructive
+	// actions must target this.
+	InstanceID string
+	// Owner is the ownership token attached at creation; OwnerKnown is false
+	// when the session carries none, which is NOT proof it is a stranger's --
+	// only proof that AO cannot tell from the session alone.
+	Owner      string
+	OwnerKnown bool
+}
+
+// RuntimeInventory is the optional runtime capability that enumerates the
+// sessions on AO's own runtime server.
+//
+// It exists for Runtime GC, and it is deliberately read-only: enumerating is
+// how orphans are FOUND, and proving one is safe to destroy is a separate
+// question answered per-session by SessionFacts. A runtime without this
+// capability simply has no orphan sweep, which is a missing feature rather
+// than an unsafe one.
+type RuntimeInventory interface {
+	ListSessions(ctx context.Context) ([]RuntimeSessionSummary, error)
+}
+
 // WorkspaceConfig is the spec for creating or restoring a session's workspace.
 type WorkspaceConfig struct {
 	ProjectID domain.ProjectID

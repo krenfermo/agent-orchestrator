@@ -264,7 +264,8 @@ func isBookkeepingPhase(phase string) bool {
 		phase == repairDispatchPhase ||
 		phase == repairResolvedPhase ||
 		phase == planRegeneratedPhase ||
-		phase == planReusedPhase
+		phase == planReusedPhase ||
+		phase == repairRunOriginPhase
 }
 
 func isIncidentLedgerPhase(phase string) bool {

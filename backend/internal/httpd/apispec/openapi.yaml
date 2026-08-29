@@ -2530,6 +2530,55 @@ paths:
       summary: Report a reviewer-owned hook signal
       tags:
       - reviews
+  /api/v1/runtime/capacity:
+    get:
+      operationId: getRuntimeCapacity
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchedulerStatusResponse'
+          description: OK
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P1-C: runtime capacity. The configured concurrency limits, what currently
+        holds each slot, and the queue in scheduling order. This is the machine''s
+        capacity (how many agent runtimes may run at once), not a provider''s rate
+        limit.'
+      tags:
+      - workflows
+  /api/v1/runtime/gc:
+    post:
+      operationId: runRuntimeGC
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RuntimeGCRequest'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeGCReportResponse'
+          description: OK
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P1-C: sweep the runtime artifacts AO left behind. Destroys only runtimes
+        whose ownership, exact incarnation and terminality AO can prove; everything
+        else is reported and left alone. dryRun classifies without destroying, using
+        the identical predicates.'
+      tags:
+      - workflows
   /api/v1/sessions:
     get:
       operationId: listSessions
@@ -7515,6 +7564,76 @@ components:
       - ok
       - sessionId
       type: object
+    CapacityClaimView:
+      properties:
+        enqueuedAt:
+          format: date-time
+          type: string
+        heldAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        id:
+          type: string
+        kind:
+          enum:
+          - planner
+          - worker
+          - reviewer
+          - repair
+          type: string
+        lifecycleGeneration:
+          format: int64
+          type: integer
+        priority:
+          format: int64
+          type: integer
+        projectId:
+          type: string
+        runtimeHandle:
+          type: string
+        state:
+          enum:
+          - queued
+          - held
+          - released
+          type: string
+        taskId:
+          type: string
+        workflowRunId:
+          type: string
+        workflowStepId:
+          type: string
+      required:
+      - id
+      - kind
+      - state
+      - workflowRunId
+      - lifecycleGeneration
+      - priority
+      - enqueuedAt
+      type: object
+    CapacityUsageView:
+      properties:
+        held:
+          type: integer
+        kind:
+          enum:
+          - planner
+          - worker
+          - reviewer
+          - repair
+          type: string
+        limit:
+          type: integer
+        queued:
+          type: integer
+      required:
+      - limit
+      - held
+      - queued
+      type: object
     ClaimPRRequest:
       properties:
         allowTakeover:
@@ -11317,6 +11436,110 @@ components:
       required:
       - ok
       - sessionId
+      type: object
+    RuntimeGCFindingView:
+      properties:
+        class:
+          type: string
+        disposition:
+          enum:
+          - cleaned
+          - candidate
+          - live
+          - unprovable
+          - foreign
+          - absent
+          - error
+          type: string
+        error:
+          type: string
+        handle:
+          type: string
+        instanceId:
+          type: string
+        reason:
+          type: string
+        workflowRunId:
+          type: string
+      required:
+      - disposition
+      type: object
+    RuntimeGCReportResponse:
+      properties:
+        absent:
+          type: integer
+        candidates:
+          type: integer
+        cleaned:
+          type: integer
+        dryRun:
+          type: boolean
+        errors:
+          type: integer
+        findings:
+          items:
+            $ref: '#/components/schemas/RuntimeGCFindingView'
+          type: array
+        finishedAt:
+          format: date-time
+          type: string
+        skippedForeign:
+          type: integer
+        skippedLive:
+          type: integer
+        skippedUnprovable:
+          type: integer
+        startedAt:
+          format: date-time
+          type: string
+        trigger:
+          type: string
+      required:
+      - dryRun
+      - startedAt
+      - finishedAt
+      - candidates
+      - cleaned
+      - skippedLive
+      - skippedUnprovable
+      - skippedForeign
+      - absent
+      - errors
+      - findings
+      type: object
+    RuntimeGCRequest:
+      properties:
+        dryRun:
+          type: boolean
+      type: object
+    SchedulerStatusResponse:
+      properties:
+        global:
+          $ref: '#/components/schemas/CapacityUsageView'
+        held:
+          items:
+            $ref: '#/components/schemas/CapacityClaimView'
+          type: array
+        observedAt:
+          format: date-time
+          type: string
+        perKind:
+          items:
+            $ref: '#/components/schemas/CapacityUsageView'
+          type: array
+        perWorkflowLimit:
+          type: integer
+        queued:
+          items:
+            $ref: '#/components/schemas/CapacityClaimView'
+          type: array
+      required:
+      - global
+      - perKind
+      - perWorkflowLimit
+      - held
+      - queued
+      - observedAt
       type: object
     SendConversationMessageRequest:
       properties:

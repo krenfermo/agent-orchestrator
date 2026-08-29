@@ -49,6 +49,10 @@ type APIDeps struct {
 	// the other optional surfaces. Checkpoint 8A: durable foundation only, no
 	// execution.
 	Workflows workflowsvc.Manager
+	// Scheduler and RuntimeGC back P1-C's capacity and runtime-GC surfaces.
+	// Optional like every other surface here: nil answers 501.
+	Scheduler controllers.SchedulerService
+	RuntimeGC controllers.RuntimeGCService
 	// Questions backs Checkpoint 8K-A's durable question detection/answer
 	// API. Optional: nil leaves the /questions routes and the run-detail
 	// Questions field both answering 501/absent, matching the other
@@ -173,6 +177,7 @@ type API struct {
 	dev              *controllers.DevController
 	browser          *controllers.BrowserController
 	workflows        *controllers.WorkflowsController
+	scheduler        *controllers.SchedulerController
 	events           *EventsController
 	auth             *controllers.AuthController
 	providerProfiles *controllers.ProviderProfilesController
@@ -239,6 +244,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			TrustedLocal:     cfg.TrustedLocalMode,
 			ProviderProfiles: deps.ProviderProfiles,
 		},
+		scheduler:        &controllers.SchedulerController{Scheduler: deps.Scheduler, GC: deps.RuntimeGC},
 		events:           &EventsController{Source: deps.CDC, Live: deps.Events},
 		auth:             &controllers.AuthController{Mgr: deps.Auth, TrustedLocal: cfg.TrustedLocalMode},
 		providerProfiles: &controllers.ProviderProfilesController{Mgr: deps.ProviderProfiles, Setup: deps.ProviderSetup},
@@ -283,6 +289,7 @@ func (a *API) Register(root chi.Router) {
 			a.dev.Register(r)
 			a.browser.Register(r)
 			a.workflows.Register(r)
+			a.scheduler.Register(r)
 			a.auth.Register(r)
 			a.providerProfiles.Register(r)
 			a.executionPolicy.Register(r)
