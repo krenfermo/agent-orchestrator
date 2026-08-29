@@ -60,6 +60,9 @@ type Manager interface {
 	ResumeAmendedTaskReview(ctx context.Context, runID, taskID string) (workflowcore.RunDetail, error)
 }
 
+// PlannerManager is the optional capability a Manager may also implement when
+// the deployment has a planner wired. Controllers type-assert for it, so a
+// build without one degrades to an unsupported-operation response.
 type PlannerManager interface {
 	Manager
 	CreateObjectiveRun(ctx context.Context, projectID, objective string, mode domain.WorkflowPlanApprovalMode) (workflowcore.RunDetail, error)
@@ -142,6 +145,8 @@ func (s *Service) CreateRun(ctx context.Context, projectID, objective string, ve
 	return s.coordinator.CreateRun(ctx, projectID, objective, verification)
 }
 
+// CreateObjectiveRun creates a run for an objective under the given approval
+// mode.
 func (s *Service) CreateObjectiveRun(ctx context.Context, projectID, objective string, mode domain.WorkflowPlanApprovalMode) (workflowcore.RunDetail, error) {
 	return s.coordinator.CreateObjectiveRun(ctx, projectID, objective, mode)
 }
@@ -150,12 +155,18 @@ func (s *Service) CreateObjectiveRun(ctx context.Context, projectID, objective s
 func (s *Service) ApplyExecutionPolicySnapshot(ctx context.Context, runID string, userID domain.UserID, autonomousOverride *bool) error {
 	return s.coordinator.ApplyExecutionPolicySnapshot(ctx, runID, userID, autonomousOverride)
 }
+
+// GeneratePlan invokes the planner for a run and persists the plan it returns.
 func (s *Service) GeneratePlan(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
 	return s.coordinator.GeneratePlan(ctx, runID)
 }
+
+// ApprovePlan approves a run's validated plan so its tasks may be dispatched.
 func (s *Service) ApprovePlan(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
 	return s.coordinator.ApprovePlan(ctx, runID)
 }
+
+// RejectPlan refuses a run's plan, ending it without dispatching any work.
 func (s *Service) RejectPlan(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
 	return s.coordinator.RejectPlan(ctx, runID)
 }

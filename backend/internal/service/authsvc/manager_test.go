@@ -104,7 +104,6 @@ func TestRegisterFirstUser_Concurrent(t *testing.T) {
 	successes := make(chan domain.User, n)
 	wg.Add(n)
 	for i := 0; i < n; i++ {
-		i := i
 		go func() {
 			defer wg.Done()
 			email := emailFor(i)

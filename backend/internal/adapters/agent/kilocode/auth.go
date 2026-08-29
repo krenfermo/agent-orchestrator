@@ -33,6 +33,8 @@ var _ ports.AgentAuthChecker = (*Plugin)(nil)
 // admits it does not know.
 var authProbeTimeout = 3 * time.Second
 
+// AuthStatus reports whether the kilocode CLI on this host is signed in, by
+// resolving the binary and asking it.
 func (p *Plugin) AuthStatus(ctx context.Context) (ports.AgentAuthStatus, error) {
 	binary, err := p.ResolveBinary(ctx)
 	if err != nil {

@@ -15,10 +15,16 @@ import (
 
 const maxContextDocumentBytes = 48 * 1024
 
+// ContextBuilder assembles the planner's PlannerContext from a project on
+// disk. It holds no state: everything it needs comes from the project record
+// and the filesystem, so one value is safe to share.
 type ContextBuilder struct{}
 
+// Build reads the project's planning documents and returns the context the
+// planner prompt is rendered from, stamped with PlannerContextVersion so a
+// stored manifest stays interpretable after the format changes.
 func (ContextBuilder) Build(ctx context.Context, project domain.ProjectRecord) (workflowcore.PlannerContext, error) {
-	out := workflowcore.PlannerContext{Version: workflowcore.PlannerContextVersion, ProjectID: string(project.ID), ProjectPath: project.Path, Documents: []workflowcore.PlannerDocument{}}
+	out := workflowcore.PlannerContext{Version: workflowcore.PlannerContextVersion, ProjectID: project.ID, ProjectPath: project.Path, Documents: []workflowcore.PlannerDocument{}}
 	git := func(args ...string) string {
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Dir = project.Path

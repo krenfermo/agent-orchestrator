@@ -215,6 +215,11 @@ func (o WorkflowAttemptOutcome) Valid() bool {
 // WorkflowErrorClass classifies why a workflow attempt did not succeed.
 type WorkflowErrorClass string
 
+// The error classes a workflow attempt can end in. Verify's failures are split
+// rather than folded into one "verify failed" because the run's next move
+// differs: a failed command is the work's problem, a timeout or environment
+// error is the host's, and a missing or mismatched artifact means the evidence
+// itself cannot be trusted.
 const (
 	// WorkflowErrorRateLimited means the harness hit a provider rate limit.
 	WorkflowErrorRateLimited WorkflowErrorClass = "rate_limited"

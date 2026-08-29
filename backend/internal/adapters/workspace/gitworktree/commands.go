@@ -137,7 +137,8 @@ func lsFilesTempIndexArgs(worktree string) []string {
 // updateIndexForceRemoveTempIndexArgs unstages the given paths from the temp
 // index without touching the working tree. GIT_INDEX_FILE must be set.
 func updateIndexForceRemoveTempIndexArgs(worktree string, paths []string) []string {
-	args := []string{"-C", worktree, "update-index", "--force-remove", "--"}
+	args := make([]string, 0, 5+len(paths))
+	args = append(args, "-C", worktree, "update-index", "--force-remove", "--")
 	return append(args, paths...)
 }
 

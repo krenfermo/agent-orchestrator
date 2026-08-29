@@ -178,9 +178,6 @@ func (s *Store) ArchiveWorkflowRun(ctx context.Context, id string, now time.Time
 	return rows > 0, nil
 }
 
-// UpdateWorkflowRunState compare-and-swaps a workflow run's state. A false
-// result means the expected state no longer matched (already advanced by
-// another caller, or already terminal).
 // UpdateWorkflowRunPolicySnapshot overwrites a run's policy_snapshot
 // (Checkpoint 8P-C: embedding the owner's execution policy right after
 // creation). Callers must only ever call this once, immediately after
@@ -200,6 +197,9 @@ func (s *Store) UpdateWorkflowRunPolicySnapshot(ctx context.Context, id, policyS
 	return rows > 0, nil
 }
 
+// UpdateWorkflowRunState compare-and-swaps a workflow run's state. A false
+// result means the expected state no longer matched (already advanced by
+// another caller, or already terminal).
 func (s *Store) UpdateWorkflowRunState(
 	ctx context.Context,
 	id string,

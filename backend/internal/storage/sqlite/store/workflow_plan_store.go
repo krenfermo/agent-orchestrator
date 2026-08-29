@@ -26,6 +26,9 @@ func workflowPlanFromRow(r gen.WorkflowPlan) domain.WorkflowPlanRecord {
 	}
 }
 
+// CreateWorkflowPlan inserts the plan row for a run in its initial pending
+// state, recording the approval mode and prompt-context version it will be
+// generated under.
 func (s *Store) CreateWorkflowPlan(ctx context.Context, runID string, mode domain.WorkflowPlanApprovalMode, contextVersion string, now time.Time) (domain.WorkflowPlanRecord, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -36,6 +39,8 @@ func (s *Store) CreateWorkflowPlan(ctx context.Context, runID string, mode domai
 	return workflowPlanFromRow(r), nil
 }
 
+// GetWorkflowPlan reads a run's plan row. The bool reports whether one exists;
+// a run that has never been planned is not an error.
 func (s *Store) GetWorkflowPlan(ctx context.Context, runID string) (domain.WorkflowPlanRecord, bool, error) {
 	r, err := s.qr.GetWorkflowPlan(ctx, runID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -47,6 +52,10 @@ func (s *Store) GetWorkflowPlan(ctx context.Context, runID string) (domain.Workf
 	return workflowPlanFromRow(r), true, nil
 }
 
+// StartWorkflowPlanCommand marks the planner invocation as running and records
+// the provider, model and context manifest it was launched with. A false
+// result means the row was not in a state that allows starting, which is how a
+// duplicate dispatch is refused.
 func (s *Store) StartWorkflowPlanCommand(ctx context.Context, runID, provider, model, manifest string, now time.Time) (bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -54,6 +63,9 @@ func (s *Store) StartWorkflowPlanCommand(ctx context.Context, runID, provider, m
 	return n > 0, err
 }
 
+// PersistWorkflowPlanResponse stores the planner's raw output against the run,
+// separately from finishing the plan, so a crash between the response arriving
+// and it being validated does not lose the response.
 func (s *Store) PersistWorkflowPlanResponse(ctx context.Context, runID, planJSON string, now time.Time) (bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -74,6 +86,10 @@ func (s *Store) PersistNormalizedWorkflowPlan(ctx context.Context, runID, expect
 	return n > 0, err
 }
 
+// FinishWorkflowPlan writes the terminal outcome of a planner invocation: the
+// plan status, the command status, the validation result, the plan hash and an
+// error class if it failed. A false result means the expected row was not
+// there to finish.
 func (s *Store) FinishWorkflowPlan(ctx context.Context, runID string, status domain.WorkflowPlanStatus, command domain.WorkflowPlanCommandStatus, validationJSON, hash, errorClass string, now time.Time) (bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -81,6 +97,9 @@ func (s *Store) FinishWorkflowPlan(ctx context.Context, runID string, status dom
 	return n > 0, err
 }
 
+// InsertWorkflowTasks writes a plan's tasks in one transaction. All of them
+// land or none do: a partially inserted plan would be a DAG with missing
+// nodes, which nothing downstream could execute correctly.
 func (s *Store) InsertWorkflowTasks(ctx context.Context, tasks []domain.WorkflowTask) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -105,6 +124,7 @@ func (s *Store) InsertWorkflowTasks(ctx context.Context, tasks []domain.Workflow
 	})
 }
 
+// ListWorkflowTasks returns a run's planned tasks in plan order.
 func (s *Store) ListWorkflowTasks(ctx context.Context, runID string) ([]domain.WorkflowTask, error) {
 	rows, err := s.qr.ListWorkflowTasks(ctx, runID)
 	if err != nil {
@@ -237,6 +257,9 @@ func (s *Store) ResumeWorkflowTaskFromAttention(ctx context.Context, id string, 
 	return n > 0, nil
 }
 
+// UpdateWorkflowTaskState compare-and-swaps a task's state. A false result
+// means the expected state no longer matched, which is what keeps two
+// reconcilers from both advancing the same task.
 func (s *Store) UpdateWorkflowTaskState(ctx context.Context, id string, expected, next domain.WorkflowTaskState, now time.Time) (bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -382,6 +405,9 @@ func (s *Store) ListWorkflowTaskRelationships(ctx context.Context, runID string)
 	return out, nil
 }
 
+// SetWorkflowTaskExecutionRun binds a planned task to the child run executing
+// it. A false result means the task already had one, so a second dispatch
+// cannot overwrite the first.
 func (s *Store) SetWorkflowTaskExecutionRun(ctx context.Context, taskID, executionRunID string, now time.Time) (bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -389,6 +415,8 @@ func (s *Store) SetWorkflowTaskExecutionRun(ctx context.Context, taskID, executi
 	return n > 0, err
 }
 
+// FindWorkflowRunByPlannedTask returns the child run id bound to a planned
+// task. The bool reports whether one is bound.
 func (s *Store) FindWorkflowRunByPlannedTask(ctx context.Context, taskID string) (string, bool, error) {
 	id, err := s.qr.FindWorkflowRunByPlannedTask(ctx, sql.NullString{String: taskID, Valid: true})
 	if errors.Is(err, sql.ErrNoRows) {
@@ -397,6 +425,8 @@ func (s *Store) FindWorkflowRunByPlannedTask(ctx context.Context, taskID string)
 	return id, err == nil, err
 }
 
+// ApproveWorkflowPlan marks a validated plan approved. A false result means
+// the plan was not in a state that may be approved.
 func (s *Store) ApproveWorkflowPlan(ctx context.Context, runID string, now time.Time) (bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -417,6 +447,8 @@ func (s *Store) SetWorkflowPlanApprovalMode(ctx context.Context, runID string, m
 	return n > 0, err
 }
 
+// RejectWorkflowPlan marks a plan rejected. A false result means the plan was
+// not in a state that may be rejected.
 func (s *Store) RejectWorkflowPlan(ctx context.Context, runID string, now time.Time) (bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()

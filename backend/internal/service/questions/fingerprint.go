@@ -15,7 +15,7 @@ import (
 // across poll cycles (or after a daemon restart, before the state
 // transitions again) hashes identically and is deduped by the store's
 // unique index / INSERT OR IGNORE.
-func Fingerprint(runID domain.WorkflowRunID, stepID string, questionText string, choices []domain.QuestionChoice, policyVersion, workspaceFingerprint string) string {
+func Fingerprint(runID domain.WorkflowRunID, stepID, questionText string, choices []domain.QuestionChoice, policyVersion, workspaceFingerprint string) string {
 	h := sha256.New()
 	parts := []string{
 		string(runID),

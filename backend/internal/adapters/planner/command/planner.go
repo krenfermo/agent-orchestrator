@@ -65,6 +65,9 @@ const parseRetryBackoff = 500 * time.Millisecond
 // full malformed plan body.
 const outputSnippetLimit = 500
 
+// Planner runs an external command-line agent to produce a plan. Binary and
+// Model identify the provider invocation; the zero value is not usable, since
+// Generate refuses an empty Binary.
 type Planner struct {
 	Binary  string
 	Model   string
@@ -98,6 +101,8 @@ func (p Planner) logAttempt(evidence workflowcore.PlannerAttemptEvidence, err er
 	p.Logger.Warn("planner attempt failed", append(evidence.LogArgs(), "err", err)...)
 }
 
+// Descriptor returns the provider and model this planner will record on the
+// plan it generates, so a run can be attributed without invoking anything.
 func (p Planner) Descriptor() (string, string) {
 	model := p.Model
 	if model == "" {
@@ -117,26 +122,29 @@ func (p Planner) Descriptor() (string, string) {
 // It stays a bound, not a blind global bump: base is unchanged, max is
 // unchanged, and a small objective planned into a handful of steps still gets
 // a budget close to the floor it always had.
-func scaledTimeout(base, max time.Duration, payloadSize, maxSteps int) time.Duration {
+func scaledTimeout(base, ceiling time.Duration, payloadSize, maxSteps int) time.Duration {
 	if base <= 0 {
 		base = defaultTimeout
 	}
-	if max <= 0 {
-		max = defaultMaxTimeout
+	if ceiling <= 0 {
+		ceiling = defaultMaxTimeout
 	}
-	if max < base {
-		max = base
+	if ceiling < base {
+		ceiling = base
 	}
 	t := base + time.Duration(payloadSize/bytesPerExtraMinute)*time.Minute
 	if maxSteps > 0 {
 		t += time.Duration(maxSteps) * perStepAllowance
 	}
-	if t > max {
-		t = max
+	if t > ceiling {
+		t = ceiling
 	}
 	return t
 }
 
+// Generate invokes the planner binary for one request and parses its output
+// into a PlannerResponse. It returns an error rather than a partial plan: a
+// plan AO cannot fully parse is not a plan it may execute.
 func (p Planner) Generate(ctx context.Context, req workflowcore.PlannerRequest) (workflowcore.PlannerResponse, error) {
 	if p.Binary == "" {
 		return workflowcore.PlannerResponse{}, fmt.Errorf("planner binary is required")
@@ -228,6 +236,10 @@ func (p Planner) attempt(ctx context.Context, args []string, dir string, env []s
 	b, err := run(callCtx, p.Binary, args, dir, env)
 	evidence := shape
 	evidence.DurationMS = time.Since(started).Milliseconds()
+	// The zero MasterPlan is structural: fail mirrors attempt's own return
+	// signature so callers can `return fail(...)`, and a failed attempt has no
+	// plan by definition.
+	//nolint:unparam // result 0 is always the zero plan; the signature must match attempt's.
 	fail := func(class string, err error) (workflowcore.MasterPlan, string, string, workflowcore.PlannerAttemptEvidence, error) {
 		evidence.Classification = class
 		return workflowcore.MasterPlan{}, "", "", evidence, err
@@ -246,23 +258,23 @@ func (p Planner) attempt(ctx context.Context, args []string, dir string, env []s
 		if callCtx.Err() != nil {
 			return fail(workflowcore.PlannerAttemptTimeout, fmt.Errorf("planner timeout: %w: %w", ports.ErrPlannerTimeout, callCtx.Err()))
 		}
-		return fail(workflowcore.PlannerAttemptCommandFailed, fmt.Errorf("planner command: %w: %s", err, strings.TrimSpace(snippet(b, outputSnippetLimit))))
+		return fail(workflowcore.PlannerAttemptCommandFailed, fmt.Errorf("planner command: %w: %s", err, strings.TrimSpace(snippet(b))))
 	}
 
 	envelope, envErr := extractEnvelope(b)
 	if envErr != nil {
-		return fail(workflowcore.PlannerAttemptMalformed, fmt.Errorf("planner parse envelope: %w: %w: output=%q", ports.ErrPlannerOutputMalformed, envErr, snippet(b, outputSnippetLimit)))
+		return fail(workflowcore.PlannerAttemptMalformed, fmt.Errorf("planner parse envelope: %w: %w: output=%q", ports.ErrPlannerOutputMalformed, envErr, snippet(b)))
 	}
 	raw := envelope.StructuredOutput
 	if len(raw) == 0 && envelope.Result != "" {
 		raw = []byte(envelope.Result)
 	}
 	if len(raw) == 0 {
-		return fail(workflowcore.PlannerAttemptMalformed, fmt.Errorf("planner output missing structured plan: %w: output=%q", ports.ErrPlannerOutputMalformed, snippet(b, outputSnippetLimit)))
+		return fail(workflowcore.PlannerAttemptMalformed, fmt.Errorf("planner output missing structured plan: %w: output=%q", ports.ErrPlannerOutputMalformed, snippet(b)))
 	}
 	var plan workflowcore.MasterPlan
 	if err := json.Unmarshal(raw, &plan); err != nil {
-		return fail(workflowcore.PlannerAttemptMalformed, fmt.Errorf("planner parse plan: %w: %w: output=%q", ports.ErrPlannerOutputMalformed, err, snippet(raw, outputSnippetLimit)))
+		return fail(workflowcore.PlannerAttemptMalformed, fmt.Errorf("planner parse plan: %w: %w: output=%q", ports.ErrPlannerOutputMalformed, err, snippet(raw)))
 	}
 	evidence.Classification = workflowcore.PlannerAttemptOK
 	return plan, "anthropic", model, evidence, nil
@@ -340,10 +352,14 @@ func firstBalancedJSONObject(b []byte) ([]byte, bool) {
 	return nil, false
 }
 
-func snippet(b []byte, limit int) string {
+// snippet trims command output down to outputSnippetLimit bytes for inclusion
+// in an error message. The bound is fixed rather than a parameter: every caller
+// is building the same kind of diagnostic, and a per-call limit would only be a
+// way for one of them to quietly log more than the others.
+func snippet(b []byte) string {
 	s := strings.TrimSpace(string(b))
-	if len(s) > limit {
-		return s[:limit] + "…"
+	if len(s) > outputSnippetLimit {
+		return s[:outputSnippetLimit] + "…"
 	}
 	return s
 }

@@ -12,6 +12,9 @@ const RoutingPolicyVersion = "v1"
 // §15): reasons must remain comparable across runs and testable.
 type RoutingReason string
 
+// The reason codes. Each is written onto the RoutingDecision it explains, and
+// stays valid for that decision forever -- a later checkpoint may add codes but
+// must not repurpose one.
 const (
 	RoutingReasonPreferredForComplexity      RoutingReason = "preferred_for_complexity"
 	RoutingReasonCrossProviderReview         RoutingReason = "cross_provider_review"

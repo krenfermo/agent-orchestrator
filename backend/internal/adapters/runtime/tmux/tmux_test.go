@@ -342,7 +342,7 @@ func TestContaminatedFromShowEnvironment(t *testing.T) {
 // propagate as a caller-visible failure.
 func TestContaminatedEnvVars_NoServerYet(t *testing.T) {
 	rt, fr := newTestRuntime(0)
-	fr.err = errors.New("no server running on ...")
+	fr.err = errors.New("no server running on")
 	if got := rt.ContaminatedEnvVars(context.Background()); got != nil {
 		t.Fatalf("ContaminatedEnvVars = %v, want nil when the server doesn't exist yet", got)
 	}

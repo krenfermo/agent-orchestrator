@@ -21,6 +21,9 @@ const SessionLifecyclePolicyVersion = "v1"
 // (e.g. session facts unreadable) and the caller must not guess.
 type SessionLifecycleAction string
 
+// The four decisions the policy can reach. Unknown is not a default: it is the
+// explicit refusal to decide when session facts could not be read, and callers
+// must park rather than guess.
 const (
 	LifecycleReuse      SessionLifecycleAction = "reuse"
 	LifecycleCompact    SessionLifecycleAction = "compact"
@@ -34,6 +37,8 @@ const (
 // closed-enum contract.
 type SessionLifecycleReason string
 
+// The closed V1 reason set. Keep in sync with Valid below -- a reason that is
+// not listed there is not part of the enum, however plausible it looks.
 const (
 	LifecycleReasonSameTaskHealthy       SessionLifecycleReason = "same_task_healthy"
 	LifecycleReasonTaskBoundary          SessionLifecycleReason = "task_boundary"
@@ -65,6 +70,9 @@ func (r SessionLifecycleReason) Valid() bool {
 // itself being marked terminated — an inconsistency, not a guessed timeout.
 type SessionHealth string
 
+// The four health states. Stale is the inconsistency described above (a
+// terminal-shaped activity signal on a session nothing marked terminated),
+// never an elapsed-time guess.
 const (
 	SessionHealthRunning    SessionHealth = "running"
 	SessionHealthWaiting    SessionHealth = "waiting"

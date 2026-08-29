@@ -89,6 +89,7 @@ func TestAdd_AllowedRoots_RejectsSymlinkEscape(t *testing.T) {
 	if os.Getenv("CI") != "" {
 		// Symlink creation can be restricted in some sandboxed CI runners; this
 		// case is exercised locally and is not essential to gate merges on.
+		t.Skip("symlink creation may be restricted on CI runners")
 	}
 	parent := t.TempDir()
 	root := filepath.Join(parent, "allowed")

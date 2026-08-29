@@ -125,6 +125,10 @@ func (s *Store) ListPendingWorkflowQuestions(ctx context.Context, states []strin
 		placeholders[i] = "?"
 		args[i] = st
 	}
+	// The only thing concatenated in is a run of "?" placeholders, one per
+	// state, and every state travels as a bound argument -- so there is no
+	// caller-controlled text in the statement text at all.
+	//nolint:gosec // G202: concatenates generated placeholders only; values are bound.
 	query := `SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        asking_harness, asking_role, fingerprint, question_text, structured_choices,
        capture_provider, capture_parser_version, capture_range_lines,
@@ -138,7 +142,7 @@ ORDER BY created_at`
 	if err != nil {
 		return nil, fmt.Errorf("list pending workflow questions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	out := make([]domain.WorkflowQuestion, 0)
 	for rows.Next() {

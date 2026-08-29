@@ -19,6 +19,9 @@ import (
 // the agent ports for an unrelated capability.
 type GitHubAuthState string
 
+// The GitHub authentication states AO reports for a host. Unauthenticated and
+// unknown are distinct on purpose: the first is an answer, the second means the
+// probe itself could not be completed.
 const (
 	GitHubAuthStateAuthenticated   GitHubAuthState = "authenticated"
 	GitHubAuthStateUnauthenticated GitHubAuthState = "unauthenticated"

@@ -66,10 +66,14 @@ type CreateWorkflowRunRequest struct {
 	Autonomous *bool `json:"autonomous,omitempty" description:"Explicit per-run autonomous/manual override; omit to inherit the caller's execution policy."`
 }
 
+// WorkflowVerificationPlan is the API projection of a task's verification
+// plan: the commands to run and the files expected to exist.
 type WorkflowVerificationPlan struct {
 	Commands []WorkflowVerificationCommand `json:"commands,omitempty"`
 	Files    []WorkflowVerificationFile    `json:"files,omitempty"`
 }
+
+// WorkflowVerificationCommand is one command in a verification plan.
 type WorkflowVerificationCommand struct {
 	Command          string   `json:"command"`
 	Args             []string `json:"args,omitempty"`
@@ -78,6 +82,8 @@ type WorkflowVerificationCommand struct {
 	RequiredExitCode int      `json:"requiredExitCode"`
 	RetrySafe        bool     `json:"retrySafe"`
 }
+
+// WorkflowVerificationFile is one file a verification plan expects to find.
 type WorkflowVerificationFile struct {
 	Path         string  `json:"path"`
 	Exists       bool    `json:"exists"`
@@ -526,6 +532,7 @@ type WorkflowIntegrationStateView struct {
 	ErrorClass      string `json:"errorClass,omitempty"`
 }
 
+// WorkflowPlanView is the API projection of a run's plan record.
 type WorkflowPlanView struct {
 	Status               domain.WorkflowPlanStatus       `json:"status"`
 	ApprovalMode         domain.WorkflowPlanApprovalMode `json:"approvalMode"`
@@ -548,6 +555,7 @@ type WorkflowPlanView struct {
 	Validation *workflowcore.PlanValidation `json:"validation,omitempty"`
 }
 
+// WorkflowTaskView is the API projection of a single planned task.
 type WorkflowTaskView struct {
 	ID                  string                        `json:"id"`
 	Number              int64                         `json:"number"`

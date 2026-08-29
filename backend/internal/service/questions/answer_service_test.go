@@ -2,6 +2,7 @@ package questions_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -57,7 +58,7 @@ func TestAnswerService_Answer_HumanPathDeliversExactlyOnce(t *testing.T) {
 
 	// Double answer must be rejected, not silently overwritten.
 	custom := "something else"
-	if _, err := svc.Answer(ctx, "run-svc-1", string(saved.ID), nil, &custom); err != questions.ErrNotAnswerable {
+	if _, err := svc.Answer(ctx, "run-svc-1", string(saved.ID), nil, &custom); !errors.Is(err, questions.ErrNotAnswerable) {
 		t.Fatalf("second Answer err = %v, want ErrNotAnswerable", err)
 	}
 	if sender.calls != 1 {
@@ -86,7 +87,7 @@ func TestAnswerService_Answer_InvalidChoiceRejected(t *testing.T) {
 
 	svc := &questions.AnswerService{Store: store, Runs: store}
 	badChoice := "does-not-exist"
-	if _, err := svc.Answer(ctx, "run-svc-2", string(saved.ID), &badChoice, nil); err != questions.ErrInvalidChoice {
+	if _, err := svc.Answer(ctx, "run-svc-2", string(saved.ID), &badChoice, nil); !errors.Is(err, questions.ErrInvalidChoice) {
 		t.Fatalf("err = %v, want ErrInvalidChoice", err)
 	}
 }
@@ -107,10 +108,10 @@ func TestAnswerService_Answer_AmbiguousBodyRejected(t *testing.T) {
 
 	choice := "a"
 	custom := "b"
-	if _, err := svc.Answer(ctx, "run-svc-3", string(saved.ID), &choice, &custom); err != questions.ErrAmbiguousAnswer {
+	if _, err := svc.Answer(ctx, "run-svc-3", string(saved.ID), &choice, &custom); !errors.Is(err, questions.ErrAmbiguousAnswer) {
 		t.Fatalf("both set: err = %v, want ErrAmbiguousAnswer", err)
 	}
-	if _, err := svc.Answer(ctx, "run-svc-3", string(saved.ID), nil, nil); err != questions.ErrAmbiguousAnswer {
+	if _, err := svc.Answer(ctx, "run-svc-3", string(saved.ID), nil, nil); !errors.Is(err, questions.ErrAmbiguousAnswer) {
 		t.Fatalf("neither set: err = %v, want ErrAmbiguousAnswer", err)
 	}
 }
@@ -129,7 +130,7 @@ func TestAnswerService_Answer_WrongRunRejected(t *testing.T) {
 	}
 	svc := &questions.AnswerService{Store: store, Runs: store}
 	custom := "answer"
-	if _, err := svc.Answer(ctx, "some-other-run", string(saved.ID), nil, &custom); err != questions.ErrWrongRun {
+	if _, err := svc.Answer(ctx, "some-other-run", string(saved.ID), nil, &custom); !errors.Is(err, questions.ErrWrongRun) {
 		t.Fatalf("err = %v, want ErrWrongRun", err)
 	}
 }

@@ -86,15 +86,15 @@ const (
 	// (an empty nudge, a chat-mode send, a harness with no composer probe).
 	// It is not a verdict and must never be read as one.
 	PromptSubmissionUnset PromptSubmission = ""
-	// PromptSubmitted: the composer was observed empty after the submit, so
+	// PromptSubmitted means the composer was observed empty after the submit, so
 	// the payload left the composer. Positive evidence.
 	PromptSubmitted PromptSubmission = "submitted"
-	// PromptLoadedNotSubmitted: the payload reached the composer and is still
+	// PromptLoadedNotSubmitted means the payload reached the composer and is still
 	// sitting there. Positive evidence too — of the failure. A caller must
 	// never re-paste on this verdict; the bytes are already in the draft, and
 	// pasting again is exactly what appends a second copy.
 	PromptLoadedNotSubmitted PromptSubmission = "loaded_not_submitted"
-	// PromptSubmissionAmbiguous: the check could not be made (no styled pane
+	// PromptSubmissionAmbiguous means the check could not be made (no styled pane
 	// read, no detector for this harness, a read error). Missing evidence,
 	// never evidence of either outcome.
 	PromptSubmissionAmbiguous PromptSubmission = "ambiguous"

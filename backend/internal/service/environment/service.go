@@ -27,6 +27,9 @@ const (
 // probe results — never invented.
 type CapabilityState string
 
+// The capability states. Ready and unavailable are observations; anything else
+// records why the observation could not be made, so a caller never reads an
+// unprobed capability as a working one.
 const (
 	CapabilityReady        CapabilityState = "ready"
 	CapabilityUnavailable  CapabilityState = "unavailable"

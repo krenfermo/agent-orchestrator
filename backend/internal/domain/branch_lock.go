@@ -16,12 +16,18 @@ type BranchLockState string
 // isolated task branches remain independent.
 type BranchLockOwnershipKind string
 
+// The three surfaces a run can hold. Direct-branch and target-integration
+// writers contend for the same repository+branch pair; an isolated task
+// workspace is its own branch and therefore contends with nothing.
 const (
 	BranchLockOwnershipDirectBranch      BranchLockOwnershipKind = "direct_branch"
 	BranchLockOwnershipTaskWorkspace     BranchLockOwnershipKind = "isolated_task_workspace"
 	BranchLockOwnershipTargetIntegration BranchLockOwnershipKind = "target_integration"
 )
 
+// WithDefault resolves the zero value to BranchLockOwnershipDirectBranch, so a
+// lock row written before the kind was recorded reads as the most restrictive
+// surface rather than as an unclassified one.
 func (k BranchLockOwnershipKind) WithDefault() BranchLockOwnershipKind {
 	if k == "" {
 		return BranchLockOwnershipDirectBranch

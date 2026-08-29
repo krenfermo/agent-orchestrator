@@ -163,6 +163,8 @@ func New(store Store, now func() time.Time) *Service {
 
 var _ Manager = (*Service)(nil)
 
+// CreateUser creates a user with the given role and credentials, rejecting a
+// username or email already in use.
 func (s *Service) CreateUser(ctx context.Context, in CreateUserInput) (domain.User, error) {
 	displayName := strings.TrimSpace(in.DisplayName)
 	email := strings.ToLower(strings.TrimSpace(in.Email))
@@ -206,6 +208,9 @@ func (s *Service) CreateUser(ctx context.Context, in CreateUserInput) (domain.Us
 	return created, nil
 }
 
+// Authenticate verifies a password against the user identified by username or
+// email. Every failure returns the same INVALID_CREDENTIALS error, so a caller
+// cannot use the response to learn whether an account exists.
 func (s *Service) Authenticate(ctx context.Context, usernameOrEmail, password, sourceKey string) (domain.User, error) {
 	invalid := apierr.Unauthorized("INVALID_CREDENTIALS", "invalid username/email or password")
 
@@ -243,6 +248,9 @@ func (s *Service) Authenticate(ctx context.Context, usernameOrEmail, password, s
 	return u, nil
 }
 
+// CreateSession issues a new session for a user and returns the raw token
+// alongside the stored record. The raw token is returned here and never again:
+// only its hash is persisted.
 func (s *Service) CreateSession(ctx context.Context, userID domain.UserID) (string, domain.AuthSession, error) {
 	raw, err := randomToken()
 	if err != nil {
@@ -264,6 +272,8 @@ func (s *Service) CreateSession(ctx context.Context, userID domain.UserID) (stri
 	return raw, created, nil
 }
 
+// ResolveSession returns the user behind a raw session token, rejecting a
+// token that is empty, unknown, revoked or expired.
 func (s *Service) ResolveSession(ctx context.Context, rawToken string) (domain.User, error) {
 	if strings.TrimSpace(rawToken) == "" {
 		return domain.User{}, apierr.NotFound("SESSION_NOT_FOUND", "no session")
@@ -288,6 +298,9 @@ func (s *Service) ResolveSession(ctx context.Context, rawToken string) (domain.U
 	return u, nil
 }
 
+// RevokeSession invalidates a raw session token. Revoking an unknown token is
+// not an error: the postcondition the caller wants -- that the token no longer
+// authenticates -- already holds.
 func (s *Service) RevokeSession(ctx context.Context, rawToken string) error {
 	if strings.TrimSpace(rawToken) == "" {
 		return nil
@@ -299,6 +312,8 @@ func (s *Service) RevokeSession(ctx context.Context, rawToken string) error {
 	return nil
 }
 
+// Bootstrap creates the first owner on an empty instance. It refuses once any
+// user exists, so it cannot be used to add a privileged account later.
 func (s *Service) Bootstrap(ctx context.Context, email, password string) (BootstrapResult, error) {
 	count, err := s.store.CountUsers(ctx)
 	if err != nil {
@@ -338,6 +353,8 @@ func (s *Service) Bootstrap(ctx context.Context, email, password string) (Bootst
 	}, nil
 }
 
+// BootstrapAdmin promotes an existing user to owner when an instance has users
+// but no owner. The bool reports whether a promotion actually happened.
 func (s *Service) BootstrapAdmin(ctx context.Context) (domain.User, bool, error) {
 	users, err := s.store.ListUsers(ctx)
 	if err != nil {
@@ -357,6 +374,8 @@ func (s *Service) BootstrapAdmin(ctx context.Context) (domain.User, bool, error)
 	return earliest, found, nil
 }
 
+// EnsureOwnerExists reports whether the instance has at least one owner,
+// creating none: it is a check, not a repair.
 func (s *Service) EnsureOwnerExists(ctx context.Context) (bool, error) {
 	owners, err := s.store.CountOwners(ctx)
 	if err != nil {
@@ -384,6 +403,8 @@ func (s *Service) EnsureOwnerExists(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// SetupRequired reports whether the instance still has no users and therefore
+// needs first-run setup.
 func (s *Service) SetupRequired(ctx context.Context) (bool, error) {
 	count, err := s.store.CountUsers(ctx)
 	if err != nil {
@@ -392,6 +413,9 @@ func (s *Service) SetupRequired(ctx context.Context) (bool, error) {
 	return count == 0, nil
 }
 
+// RegisterFirstUser creates the instance's first user as an owner. The role is
+// forced here rather than taken from the input, so the first-run endpoint
+// cannot be used to create a non-owner and leave the instance ownerless.
 func (s *Service) RegisterFirstUser(ctx context.Context, in CreateUserInput) (domain.User, error) {
 	in.Role = domain.UserRoleOwner
 	u, err := s.CreateUser(ctx, in)
@@ -407,6 +431,7 @@ func (s *Service) RegisterFirstUser(ctx context.Context, in CreateUserInput) (do
 	return u, nil
 }
 
+// ResetPassword replaces the password of the user with the given email.
 func (s *Service) ResetPassword(ctx context.Context, email, newPassword string) error {
 	notFound := apierr.NotFound("USER_NOT_FOUND", "no user with that email")
 

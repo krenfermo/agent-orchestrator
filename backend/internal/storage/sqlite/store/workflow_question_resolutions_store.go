@@ -188,7 +188,7 @@ func (s *Store) ListWorkflowQuestionResolutionsByRun(ctx context.Context, runID 
 // TransitionResolutionStatus's CAS transition (that query has no
 // resolver_session_id column) so the pending->running transition and this
 // identity write are two small, independently-idempotent statements.
-func (s *Store) SetResolutionResolverSessionID(ctx context.Context, id string, resolverSessionID string) (bool, error) {
+func (s *Store) SetResolutionResolverSessionID(ctx context.Context, id, resolverSessionID string) (bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	n, err := s.qw.SetResolutionResolverSessionID(ctx, gen.SetResolutionResolverSessionIDParams{

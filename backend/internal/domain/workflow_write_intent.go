@@ -30,6 +30,12 @@ import "strings"
 // treated exactly as WriteIntentMutating: fail closed. Nothing about the
 // mutation-required path changes unless a plan has explicitly and durably
 // declared otherwise.
+
+// WorkflowWriteIntent is the plan's declaration of whether a task is expected to
+// change the workspace. It is what lets AO tell a read-only task that correctly
+// changed nothing from a mutating task that produced no evidence; see the file
+// comment above for why the plan, not the worker's behaviour, is the only place
+// that answer can come from.
 type WorkflowWriteIntent string
 
 const (

@@ -415,7 +415,7 @@ func (r *Runtime) failUnownableCreate(
 	if !isSessionInstanceID(instance) {
 		removeScript()
 		return ports.RuntimeHandle{}, fmt.Errorf(
-			"%w: session %s could not be identified, so it was not destroyed (%v)",
+			"%w: session %s could not be identified, so it was not destroyed (%w)",
 			ports.ErrRuntimeOrphanedSession, id, cause)
 	}
 	destroyErr := r.DestroyInstance(cleanupCtx, instance)
@@ -430,8 +430,13 @@ func (r *Runtime) failUnownableCreate(
 		removeScript()
 		return ports.RuntimeHandle{}, cause
 	case probeErr == nil && alive:
+		// destroyErr is legitimately nil on this branch -- the destroy was
+		// issued and reported success, and the session survived it anyway --
+		// so it is formatted with %v, not %w: wrapping a nil error would put
+		// "%!w(<nil>)" in the message a person reads while chasing an orphan.
+		//nolint:errorlint // destroyErr may be nil here; only `cause` is wrapped.
 		return ports.RuntimeHandle{}, fmt.Errorf(
-			"%w: session %s (%s) is still running and carries no AO ownership token (%v; destroy: %v)",
+			"%w: session %s (%s) is still running and carries no AO ownership token (%w; destroy: %v)",
 			ports.ErrRuntimeOrphanedSession, id, instance, cause, destroyErr)
 	default:
 		// The probe itself could not answer, so AO does not know whether it
@@ -444,6 +449,10 @@ func (r *Runtime) failUnownableCreate(
 	}
 }
 
+// Create starts a new tmux session for cfg and returns the handle that
+// identifies it. The handle carries the exact incarnation, not just the
+// session name, so a later session reusing the name is never mistaken for
+// this one.
 func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
 	id, err := tmuxSessionName(cfg.SessionID)
 	if err != nil {
@@ -1946,7 +1955,6 @@ func (r *Runtime) instanceOwner(ctx context.Context, instance string) (owner str
 		}
 		return "", false, nil
 	}
-	err = nil
 	line := strings.TrimSpace(string(out))
 	if line == "" || strings.HasPrefix(line, "-") {
 		return "", false, nil
@@ -2009,6 +2017,13 @@ func (r *Runtime) instancePanePID(ctx context.Context, instance string) (int, pa
 	}
 	pid, perr := strconv.Atoi(strings.TrimSpace(string(out)))
 	if perr != nil || pid <= 0 {
+		// An empty, malformed, zero or negative pane_pid on a session that
+		// provably still exists is UNKNOWN liveness, never an error and never
+		// death: tmux answered, so the session is there; it just did not give a
+		// pid this read can use. Returning perr here would turn a live session
+		// into a failed probe, which is what escalates a reconcile that should
+		// simply try again.
+		//nolint:nilerr // unreadable pane pid is unknown liveness, not a failure.
 		return 0, panePIDUnreadable, nil
 	}
 	return pid, panePIDRead, nil
@@ -2016,7 +2031,7 @@ func (r *Runtime) instancePanePID(ctx context.Context, instance string) (int, pa
 
 // workloadAliveForPane applies the process-tree rule (see PaneProcessAlive) to a
 // pane root pid the caller has already resolved.
-func (r *Runtime) workloadAliveForPane(ctx context.Context, panePID int) (alive bool, known bool) {
+func (r *Runtime) workloadAliveForPane(ctx context.Context, panePID int) (alive, known bool) {
 	processOut, err := r.runCommand(ctx, "ps", "-ww", "-axo", "pid=,ppid=,args=")
 	if err != nil {
 		return false, false
@@ -2077,7 +2092,7 @@ func (r *Runtime) workloadAliveForPane(ctx context.Context, panePID int) (alive 
 //
 // `known` false means AO could not obtain an answer. Callers must treat that as
 // uncertainty, never as death.
-func (r *Runtime) PaneProcessAlive(ctx context.Context, handle ports.RuntimeHandle) (alive bool, known bool, err error) {
+func (r *Runtime) PaneProcessAlive(ctx context.Context, handle ports.RuntimeHandle) (alive, known bool, err error) {
 	entries, panePID, terr := r.supervisedProcessTree(ctx, handle)
 	if terr != nil {
 		return false, false, terr

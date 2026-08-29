@@ -71,6 +71,9 @@ type staticDataDir string
 
 func (d staticDataDir) DataDir() string { return string(d) }
 
+// Run loads configuration, wires the daemon's dependencies and serves until
+// the process is signalled to stop. It is the whole of the daemon binary's
+// behaviour, and returns the first error that makes serving impossible.
 func Run() error {
 	cfg, err := config.Load()
 	if err != nil {
