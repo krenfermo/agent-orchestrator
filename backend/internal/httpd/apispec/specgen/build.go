@@ -865,6 +865,39 @@ func workflowOperations() []operation {
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
 		},
+		// The two operator-only recovery operations. They are separate from
+		// /continue because /continue is also the wake poller's entry point, and
+		// each of these DISCARDS something AO deliberately refused to act on.
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/recover/review-provenance", id: "recoverWorkflowReviewProvenance", tag: "workflows",
+			summary: "Recover a run stopped because AO cannot prove which commit its approved review target was read at, and could not reconstruct it from the branch's history. " +
+				"Discards that unlocatable approval and asks for exactly one fresh independent review of the workspace as it stands. " +
+				"It never infers or attests an approved commit and never verifies code no reviewer has read. Human-only and bounded.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/plan/reopen", id: "reopenAmbiguousWorkflowPlan", tag: "workflows",
+			summary: "Reopen planning for an objective whose planner command was in flight when the daemon restarted, so AO could not prove whether it produced a plan. " +
+				"Planning starts over from scratch: nothing is adopted from the discarded planner. " +
+				"The request must carry the plan's observed updatedAt, and a reopen of a state that has since changed is refused. Human-only and bounded.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			reqBody:    controllers.ReopenAmbiguousPlanRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowRunResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
 		// Checkpoint 8P-E.18 — the Incident Advisor. Four operations, mirroring
 		// the four routes: the split between proposing and executing is the
 		// authorization boundary, not a REST style choice.

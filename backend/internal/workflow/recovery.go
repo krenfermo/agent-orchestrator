@@ -147,13 +147,28 @@ func (c *Coordinator) reconcileRun(ctx stdctx.Context, run domain.WorkflowRun, n
 					return err
 				}
 			case plan.Status == domain.WorkflowPlanRunning:
+				// CP32, the plan-segment twin of CP31: the explanation is
+				// durable BEFORE the terminal row. FinishWorkflowPlan(invalid,
+				// failed) is permanent for GeneratePlan, so a crash between
+				// these two writes in the old order left a permanently invalid
+				// plan under a run still saying `pending`, with nothing on the
+				// ledger anyone could read. The reason row is harmless if the
+				// terminal row never lands; the terminal row is not harmless
+				// without the reason.
+				//
+				// CP7: the verdict itself is unchanged and stays fail-closed --
+				// AO cannot prove whether the discarded planner produced a
+				// plan, and guessing would put a fabricated plan under a real
+				// objective. What is no longer PERMANENT is the state: see
+				// ReopenAmbiguousWorkflowPlan, the human-only, bounded,
+				// observed-version reopen that gives this run a way back.
 				validation := `{"valid":false,"errors":["planner state is ambiguous after daemon restart"]}`
+				c.recordAttentionStop(ctx, run, nil, ReasonPlannerAmbiguous,
+					"the planner command was in flight when the daemon restarted, and AO cannot prove whether it produced a plan; a person may reopen planning for this objective")
 				_, _ = c.planStore.FinishWorkflowPlan(ctx, run.ID, domain.WorkflowPlanInvalid, domain.WorkflowPlanCommandFailed, validation, "", "planner_ambiguous", now)
 				if run.State == domain.WorkflowRunPending || run.State == domain.WorkflowRunWaiting || run.State == domain.WorkflowRunRunning {
 					_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, now)
 				}
-				c.recordAttentionStop(ctx, run, nil, ReasonPlannerAmbiguous,
-					"the planner command was in flight when the daemon restarted, and AO cannot prove whether it produced a plan")
 			case plan.Status == domain.WorkflowPlanValidated:
 				// CP11/CP12: a validated plan that should have auto-approved
 				// had NO resolver at all. Boot recovery's switch had no
@@ -168,10 +183,33 @@ func (c *Coordinator) reconcileRun(ctx stdctx.Context, run domain.WorkflowRun, n
 					return err
 				}
 			case plan.Status == domain.WorkflowPlanApproved:
+				// CP13/CP14: an approved plan whose plan step or run row was
+				// left behind by a crash inside ApprovePlan's write set is
+				// healed here, and ONLY here -- nothing re-enters ApprovePlan
+				// once a plan is approved. CP14 is the consequential half: an
+				// objective whose run row never reached `running` dispatches
+				// tasks forever and can never complete or report a stop,
+				// because every branch of reconcileMasterTasksOnce that parks
+				// or completes it is gated on run.State == running. So the
+				// convergence runs BEFORE the task reconciliation that depends
+				// on it, and the run is re-read afterwards.
+				c.convergeApprovedPlan(ctx, run)
+				if refreshed, ok, gerr := c.store.GetWorkflowRun(ctx, run.ID); gerr == nil && ok {
+					run = refreshed
+				}
 				if err := c.reconcileMasterTasks(ctx, run); err != nil {
 					return err
 				}
 			}
+			return nil
+		}
+		// CP1: a run with a `plan` step and NO workflow_plans row. See
+		// healOrphanedObjectiveRun -- it is a master objective nothing can
+		// recognise as one, so it is not resumable, not completable and not
+		// explicable until this heals or parks it.
+		if healed, herr := c.healOrphanedObjectiveRun(ctx, run, now); herr != nil {
+			return herr
+		} else if healed {
 			return nil
 		}
 	}

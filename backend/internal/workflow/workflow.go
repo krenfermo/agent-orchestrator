@@ -168,6 +168,24 @@ type Store interface {
 	// False means zero rows matched: already reopened, or superseded. Both are
 	// idempotent no-ops, never errors.
 	ReopenFailedWorkflowOutboxGeneration(ctx stdctx.Context, id string, errorClass, generation string) (bool, error)
+	// AcknowledgeWorkflowOutboxDispatch completes a dispatch --
+	// dispatched -> acknowledged -- for the exact dispatch that holds the
+	// claim, and is the fourth ownership-dependent transition off
+	// `dispatched`. Without it, RUNNING could be licensed by a confirmation
+	// that belongs to a different launch of the same step. An empty
+	// generation matches only an unclaimed row, which is what completes the
+	// entries written before the worker path claimed with a token.
+	AcknowledgeWorkflowOutboxDispatch(ctx stdctx.Context, id string, expected domain.WorkflowOutboxStatus, now time.Time, dispatchGeneration string) (bool, error)
+	// ClaimOpenWorkflowAttempt returns the step's open attempt, creating one
+	// atomically when there is none. It replaces the positional
+	// "attempts[len-1].Outcome == \"\"" read that let two concurrent passes
+	// both believe they held one open attempt.
+	ClaimOpenWorkflowAttempt(ctx stdctx.Context, id, stepID, harness, model string, startedAt time.Time) (domain.WorkflowAttempt, bool, error)
+	// StartWorkflowStepForSession moves a work step ready -> running only
+	// while it durably holds the session the caller just confirmed, so
+	// RUNNING is licensed by that confirmation rather than by order of
+	// execution.
+	StartWorkflowStepForSession(ctx stdctx.Context, id, sessionID string, now time.Time) (bool, error)
 	// ListWorkflowOutboxByRun is what lets a superseded dispatch be retired
 	// rather than left to be re-adopted. See supersedeReviewDispatch.
 	ListWorkflowOutboxByRun(ctx stdctx.Context, runID string) ([]domain.WorkflowOutboxEntry, error)
@@ -232,8 +250,8 @@ type masterPlanStore interface {
 	// only two transitions in and out of the durable task-level parked state
 	// (migration 0130). Both are conditional on the state they expect, which is
 	// what makes parking race-free and resuming idempotent.
-	ParkWorkflowTaskForAttention(ctx stdctx.Context, id string, expected domain.WorkflowTaskState, reason string, attention domain.WorkflowTaskAttention, now time.Time) (bool, error)
-	ResumeWorkflowTaskFromAttention(ctx stdctx.Context, id string, next domain.WorkflowTaskState, now time.Time) (bool, error)
+	ParkWorkflowTaskForAttention(ctx stdctx.Context, id string, expected domain.WorkflowTaskState, expectedAttempt int, reason string, attention domain.WorkflowTaskAttention, now time.Time) (bool, error)
+	ResumeWorkflowTaskFromAttention(ctx stdctx.Context, id string, next domain.WorkflowTaskState, expectedAttempt int, now time.Time) (bool, error)
 	// AmendWorkflowTaskCriterion / ListWorkflowTaskCriterionAmendments back the
 	// Plan / Acceptance Criteria Amendment mechanism (migration 0132): a
 	// human-approved, append-only change to a criterion that has stopped
@@ -436,6 +454,13 @@ type Deps struct {
 	// (provider_preflight.go). Optional: nil keeps the pre-8P-E.24 behavior of
 	// spawning straight into whatever the provider does.
 	WorkerPreflight WorkerPreflight
+
+	// CommitHistory lists a worktree's reachable commits, and is what lets AO
+	// reconstruct the commit an approved review target was read at for runs
+	// whose ledger predates that pin (approved_head_recovery.go). Optional: nil
+	// uses a plain `git rev-list` reader, and a repository that cannot be read
+	// produces no candidates, which fails closed.
+	CommitHistory CommitHistory
 }
 
 // TaskWorktreeRecords lists the AO worktree records belonging to one master
@@ -596,6 +621,10 @@ type Coordinator struct {
 	workerLiveness  WorkerLivenessProbe
 	workerPreflight WorkerPreflight
 
+	// commitHistory backs the approved-head reconstruction. Optional; see
+	// commitHistoryOrDefault.
+	commitHistory CommitHistory
+
 	// plannerExec owns the execution contexts in-flight planner calls run on,
 	// so a minutes-long plan generation outlives the request or poller tick
 	// that entered it without outliving the daemon or the run. See
@@ -650,6 +679,7 @@ func New(d Deps) *Coordinator {
 		taskWorktreeRecords:      d.TaskWorktreeRecords,
 		workerLiveness:           d.WorkerLiveness,
 		workerPreflight:          d.WorkerPreflight,
+		commitHistory:            d.CommitHistory,
 		probeGate:                &capacityProbeGate{attempts: make(map[capacityProbeKey]time.Time)},
 		clock:                    clock,
 		newID:                    newID,

@@ -68,6 +68,29 @@ type PlannerManager interface {
 	RejectPlan(ctx context.Context, runID string) (workflowcore.RunDetail, error)
 }
 
+// OperatorRecoverer is the operator-only recovery surface: the two actions a
+// person may take on a run AO has deliberately fail-closed on, and that nothing
+// automatic is allowed to take on their behalf.
+//
+// It is an optional, type-asserted interface (mirroring ExecutionPolicyApplier)
+// so a Manager implementation or test double that predates it keeps compiling
+// unchanged, and a deployment without it answers 501 rather than doing
+// something weaker.
+//
+// Both are bounded, both write their authorization durably before they move
+// anything, and neither invents a fact AO could not prove:
+//
+//   - RecoverUnprovableApprovedHead discards an approval whose commit AO cannot
+//     locate and asks for one fresh review of the live workspace. It never
+//     attests a commit and never verifies unreviewed code.
+//   - ReopenAmbiguousPlan returns an objective whose planner was interrupted by
+//     a restart to ordinary, from-scratch planning. It adopts nothing from the
+//     discarded planner.
+type OperatorRecoverer interface {
+	RecoverUnprovableApprovedHead(ctx context.Context, runID string) (workflowcore.RunDetail, error)
+	ReopenAmbiguousPlan(ctx context.Context, runID string, observedUpdatedAt time.Time) (workflowcore.RunDetail, error)
+}
+
 // ExecutionPolicyApplier is Checkpoint 8P-C's optional post-creation step:
 // embed the caller's execution policy into a just-created run's policy
 // snapshot. Optional (type-asserted by the controller, mirroring
@@ -180,6 +203,21 @@ func (s *Service) ProjectBoardHistory(ctx context.Context, projectID string, lim
 // work step has completed (idempotently); a no-op otherwise.
 func (s *Service) ContinueRun(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
 	return s.coordinator.ContinueRun(ctx, runID)
+}
+
+// RecoverUnprovableApprovedHead implements OperatorRecoverer: the explicit,
+// human-only recovery for a run parked because AO cannot prove which commit its
+// approved review target was read at.
+func (s *Service) RecoverUnprovableApprovedHead(ctx context.Context, runID string) (workflowcore.RunDetail, error) {
+	return s.coordinator.RecoverUnprovableApprovedHead(ctx, runID)
+}
+
+// ReopenAmbiguousPlan implements OperatorRecoverer: CP7's human-only, bounded,
+// observed-version reopen of an objective whose planner was in flight across a
+// daemon restart. observedUpdatedAt is the plan row version the caller's own
+// view was rendered from, and a stale one is refused rather than accepted.
+func (s *Service) ReopenAmbiguousPlan(ctx context.Context, runID string, observedUpdatedAt time.Time) (workflowcore.RunDetail, error) {
+	return s.coordinator.ReopenAmbiguousPlan(ctx, runID, observedUpdatedAt)
 }
 
 // TaskCriterionAmendment is one human-approved amendment, at the service

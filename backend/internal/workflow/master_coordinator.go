@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -38,6 +39,28 @@ func (c *Coordinator) CreateObjectiveRun(ctx stdctx.Context, projectID, objectiv
 	snapshot, _ := json.Marshal(unfrozenExecutionPolicy(domain.DefaultWorkflowPolicy(), now))
 	run := domain.WorkflowRun{ID: runID, ProjectID: projectID, Objective: strings.TrimSpace(objective), State: domain.WorkflowRunPending, PolicyVersion: policyVersionV1, PolicySnapshot: string(snapshot), CreatedAt: now, UpdatedAt: now}
 	step := domain.WorkflowStep{ID: "wfs-" + c.newID(), WorkflowRunID: runID, Kind: domain.WorkflowStepPlan, Ordinal: 1, State: domain.WorkflowStepReady, ArtifactJSON: "{}", CreatedAt: now, UpdatedAt: now}
+	// CP1: the run, its plan step and its plan row land together or not at all.
+	//
+	// A crash between the run insert and the plan insert used to leave a run
+	// with a `plan` step and no workflow_plans row -- a master objective
+	// nothing can recognise as one. GetWorkflowPlan reports master == false,
+	// so getMasterRun never runs, ContinueRun falls through its master branch
+	// into the work/review lookup and errors, and boot recovery falls through
+	// to a step loop that finds no work step: the run is not resumable, not
+	// completable, and not explicable.
+	//
+	// A transaction rather than a healer because the approval mode is a
+	// parameter of THIS request and lives nowhere on the run, so a healer can
+	// only default it and record that it guessed. Stores that cannot span both
+	// tables keep the two-write path and are covered by
+	// healOrphanedObjectiveRun, which is also what heals the rows a pre-fix
+	// daemon already left on disk.
+	if atomic, ok := c.planStore.(objectiveRunCreator); ok {
+		if _, _, _, err := atomic.CreateObjectiveRunWithPlan(ctx, run, []domain.WorkflowStep{step}, mode, PlannerContextVersion, now); err != nil {
+			return RunDetail{}, err
+		}
+		return c.GetRun(ctx, runID)
+	}
 	if _, _, err := c.store.CreateWorkflowRun(ctx, run, []domain.WorkflowStep{step}); err != nil {
 		return RunDetail{}, err
 	}
@@ -45,6 +68,100 @@ func (c *Coordinator) CreateObjectiveRun(ctx stdctx.Context, projectID, objectiv
 		return RunDetail{}, err
 	}
 	return c.GetRun(ctx, runID)
+}
+
+// objectiveRunCreator is the optional store capability that makes a master
+// objective's three creation writes one transaction. It is an assertion at the
+// call site rather than a method on masterPlanStore so a store (or a test
+// double) that does not have it keeps working exactly as before -- with the
+// CP1 window open and healOrphanedObjectiveRun as its remedy.
+type objectiveRunCreator interface {
+	CreateObjectiveRunWithPlan(
+		ctx stdctx.Context,
+		run domain.WorkflowRun,
+		steps []domain.WorkflowStep,
+		mode domain.WorkflowPlanApprovalMode,
+		contextVersion string,
+		now time.Time,
+	) (domain.WorkflowRun, []domain.WorkflowStep, domain.WorkflowPlanRecord, error)
+}
+
+// orphanedObjectivePlanHealedPhase records that a run with a `plan` step and no
+// plan row was recognised and repaired, and on what terms.
+const orphanedObjectivePlanHealedPhase = "objective_plan_row_healed"
+
+// healOrphanedObjectiveRun is CP1's remedy for the rows already on disk: a run
+// whose ONLY step is `plan` and which has no workflow_plans row.
+//
+// The shape is unambiguous. A standalone run always gets its full step set in
+// the same transaction as the run (createRunWithPlanArtifact), so a lone plan
+// step can only have come from CreateObjectiveRun -- and an objective with no
+// plan row is exactly the crash window between its two writes.
+//
+// What it recovers, and what it refuses to:
+//
+//   - The plan row is recreated, so the run becomes a master objective again
+//     and every reader that was structurally blind to it can see it.
+//   - The APPROVAL MODE is NOT recoverable. It was a parameter of the create
+//     request and no durable row survived to name it, so the healer defaults it
+//     to `manual` -- the mode that waits for a person -- and records, in the
+//     canonical attention vocabulary, that it defaulted. Inferring `auto` would
+//     start an unattended planner nobody asked for, which is the one outcome
+//     this healer must never produce.
+//
+// It returns true when it recognised the shape, whether or not the repair
+// itself succeeded: either way this run's pass is over, because a run that has
+// just become a master objective must be reconciled as one on the NEXT pass,
+// against a plan row that is durably there.
+func (c *Coordinator) healOrphanedObjectiveRun(ctx stdctx.Context, run domain.WorkflowRun, now time.Time) (bool, error) {
+	if c.planStore == nil || run.State.Terminal() {
+		return false, nil
+	}
+	steps, err := c.store.ListWorkflowSteps(ctx, run.ID)
+	if err != nil {
+		return false, err
+	}
+	if len(steps) != 1 || steps[0].Kind != domain.WorkflowStepPlan {
+		return false, nil
+	}
+	// A child run is never an objective, whatever its steps look like.
+	if run.PlannedTaskID != nil || run.ParentWorkflowID != nil {
+		return false, nil
+	}
+	// The reason row first, for the same ordering reason as CP31/CP32: the
+	// plan row is what makes this run reachable again, and a run repaired on a
+	// defaulted approval mode with nothing on the ledger saying so is a silent
+	// substitution of somebody's choice.
+	c.recordAttentionStopWithState(ctx, run, nil, ReasonObjectivePlanRecovered, fmt.Sprintf(
+		"this objective was created without its plan row (the daemon stopped between the two writes); AO recreated it, "+
+			"but the approval mode was never recorded anywhere and defaults to %q — start planning yourself, or recreate the objective if it should have been autonomous",
+		domain.WorkflowPlanApprovalManual), "{}")
+	if _, err := c.planStore.CreateWorkflowPlan(ctx, run.ID, domain.WorkflowPlanApprovalManual, PlannerContextVersion, now); err != nil {
+		if c.log != nil {
+			c.log.Error("workflow: could not heal an objective run with no plan row", "run", run.ID, "err", err)
+		}
+		return true, nil
+	}
+	stepID := steps[0].ID
+	_, _ = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+		ID:             "wfc-" + c.newID(),
+		WorkflowRunID:  run.ID,
+		WorkflowStepID: &stepID,
+		ProjectID:      run.ProjectID,
+		NextAction: "objective_plan_row_healed: a plan row was recreated for an objective that had none; " +
+			"the approval mode could not be recovered and was defaulted to manual",
+		DurablePhase:   orphanedObjectivePlanHealedPhase,
+		PayloadVersion: "v1",
+		RetryState:     `{"approvalMode":"manual","approvalModeRecovered":false}`,
+		// After the stop above, not at the caller's `now`: the ledger is read in
+		// created_at order and the substitution has to be announced before the
+		// repair that depends on it, exactly as in CP31/CP32.
+		CreatedAt: c.clock(),
+	})
+	if c.log != nil {
+		c.log.Warn("workflow: healed an objective run that had no plan row; approval mode defaulted to manual", "run", run.ID)
+	}
+	return true, nil
 }
 
 func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail, error) {
@@ -425,15 +542,28 @@ func (c *Coordinator) retryPlanOrFail(ctx stdctx.Context, run domain.WorkflowRun
 
 	now := c.clock()
 	validation, _ := json.Marshal(PlanValidation{Valid: false, Errors: []string{class + ": " + cause.Error()}})
+	// CP30. The budget row is written FIRST, before the reset it bounds.
+	//
+	// plannerRetryCount derives the budget by counting durable
+	// planner_retry_scheduled checkpoints, so the order of these two writes
+	// decides what a crash between them costs. Arming the next attempt first
+	// and recording the retry second means a crash in that window re-arms the
+	// planner with the retry unrecorded -- the budget of three is silently
+	// widened by one, for every such crash, forever. Recording first means a
+	// crash costs one unit of budget for an attempt that never ran, which is
+	// conservative in the only direction that terminates.
+	//
+	// recordWorkerLaunchFailure (worker_launch_recovery.go) already has this
+	// order for the same reason; this function had it backwards.
+	c.recordAttentionStopWithState(ctx, run, nil, ReasonPlannerRetryScheduled, fmt.Sprintf(
+		"%s (retry %d of %d): %s — AO will retry planning automatically, no action needed",
+		class, attempts+1, maxPlannerRetries, cause.Error(),
+	), plannerEvidenceState(cause))
 	// Same CAS-safety reasoning as parkPlanForCapacity: command_status must
 	// reset to idle, not failed, or StartWorkflowPlanCommand permanently
 	// ErrPlanLocks every retry.
 	_, _ = c.planStore.FinishWorkflowPlan(ctx, run.ID, domain.WorkflowPlanPending, domain.WorkflowPlanCommandIdle, string(validation), "", class, now)
 	c.stopPlanningStep(ctx, run.ID)
-	c.recordAttentionStopWithState(ctx, run, nil, ReasonPlannerRetryScheduled, fmt.Sprintf(
-		"%s (retry %d of %d): %s — AO will retry planning automatically, no action needed",
-		class, attempts+1, maxPlannerRetries, cause.Error(),
-	), plannerEvidenceState(cause))
 	// transient_retry is the existing wake reason for exactly this shape of
 	// wait (a bounded retry of something that failed once), and its backoff
 	// grows per attempt off the wake row's own attempt_count. No new reason,
@@ -474,17 +604,28 @@ func (c *Coordinator) plannerRetryCount(ctx stdctx.Context, runID string) int {
 
 func (c *Coordinator) failPlan(ctx stdctx.Context, run domain.WorkflowRun, class string, cause error) (RunDetail, error) {
 	validation, _ := json.Marshal(PlanValidation{Valid: false, Errors: []string{cause.Error()}})
-	_, _ = c.planStore.FinishWorkflowPlan(ctx, run.ID, domain.WorkflowPlanInvalid, domain.WorkflowPlanCommandFailed, string(validation), "", class, c.clock())
-	if run.State == domain.WorkflowRunPending {
-		_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, c.clock())
-	}
-	c.stopPlanningStep(ctx, run.ID)
+	// CP31. The explanation is durable BEFORE the terminal row.
+	//
+	// FinishWorkflowPlan(invalid, failed) is permanent: GeneratePlan's status
+	// switch treats `invalid` as a no-op forever after. Writing it first meant
+	// a crash before the checkpoint left a permanently invalid plan under a run
+	// that still said `pending`, with nothing on the ledger a person could
+	// read. The asymmetry is the whole argument: a reason row whose terminal
+	// row never lands is harmless (the next pass re-derives and overwrites the
+	// state it describes), while a terminal row with no reason is an
+	// unexplained dead end that only a person can unpick.
+	//
 	// Checkpoint 8P-E.13: a failed plan records WHY in the canonical
 	// vocabulary, so the Board can name the stop and the action instead of
 	// falling through to an unnamed needs_attention. When the failure came
 	// from a planner attempt, the checkpoint also carries that attempt's
 	// measurements: the budget it was given, what it sent and how it ended.
 	c.recordAttentionStopWithState(ctx, run, nil, class, cause.Error(), plannerEvidenceState(cause))
+	_, _ = c.planStore.FinishWorkflowPlan(ctx, run.ID, domain.WorkflowPlanInvalid, domain.WorkflowPlanCommandFailed, string(validation), "", class, c.clock())
+	if run.State == domain.WorkflowRunPending {
+		_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, c.clock())
+	}
+	c.stopPlanningStep(ctx, run.ID)
 	detail, getErr := c.GetRun(ctx, run.ID)
 	if getErr != nil {
 		return RunDetail{}, getErr
@@ -514,31 +655,85 @@ func (c *Coordinator) ApprovePlan(ctx stdctx.Context, runID string) (RunDetail, 
 	if !ok {
 		return RunDetail{}, ErrInvalid
 	}
-	if plan.Status == domain.WorkflowPlanApproved {
-		return c.GetRun(ctx, runID)
-	}
-	if plan.Status != domain.WorkflowPlanValidated {
+	// CP13/CP14. The four writes below are W1 (the plan CAS) followed by
+	// W2-W4 (the plan step to completed, the run to running). The early exits
+	// used to test the state W1 itself produces, so a crash anywhere inside
+	// W1..W4 made the function refuse to finish its own write set: the plan
+	// read back `approved`, `:=` returned at the top, and W2-W4 never ran
+	// again. CP13 left a durable lie in the ledger (plan approved, plan step
+	// still waiting); CP14 was worse -- the run stayed `pending`, and every
+	// branch of reconcileMasterTasksOnce that parks or completes an objective
+	// is gated on run.State == running, so the objective dispatched tasks
+	// forever and could never complete or report a stop.
+	//
+	// The remedy is that `approved` is now a state this function CONVERGES
+	// from rather than returns on: W2-W4 are fully re-derivable from
+	// plan.status = 'approved' with no external evidence and no ambiguity, so
+	// every entry falls THROUGH to them. See convergeApprovedPlan.
+	switch plan.Status {
+	case domain.WorkflowPlanApproved:
+		// W1 already landed (this call, an earlier one, or a crashed one).
+	case domain.WorkflowPlanValidated:
+		moved, err := c.planStore.ApproveWorkflowPlan(ctx, runID, c.clock())
+		if err != nil {
+			return RunDetail{}, err
+		}
+		if !moved {
+			// The CAS lost. That is the same condition the `approved` arm
+			// above describes, reached through the CAS instead of the read --
+			// but only if the winner really did approve it, so the plan is
+			// re-read rather than assumed.
+			current, ok, rerr := c.planStore.GetWorkflowPlan(ctx, runID)
+			if rerr != nil {
+				return RunDetail{}, rerr
+			}
+			if !ok || current.Status != domain.WorkflowPlanApproved {
+				return c.GetRun(ctx, runID)
+			}
+		}
+	default:
 		return RunDetail{}, fmt.Errorf("%w: plan is not valid", ErrInvalid)
 	}
+	c.convergeApprovedPlan(ctx, run)
+	return c.GetRun(ctx, runID)
+}
+
+// convergeApprovedPlan re-derives W2-W4 -- the plan step's completion and the
+// run's move to running -- from the single durable fact that licenses them:
+// this run's plan row is `approved`.
+//
+// It is idempotent by construction. Every write is a compare-and-swap on the
+// state it is moving out of, so a step already completed and a run already
+// running match nothing and change nothing; a step or run left mid-way by a
+// crash is finished. That is what makes it safe to call from ApprovePlan's
+// every entry AND from boot recovery's approved-plan arm, which is the only
+// place a CP14 crash would otherwise be healed: nothing else re-enters
+// ApprovePlan once a plan is approved.
+//
+// It writes best-effort and returns nothing. A failed CAS here is either a
+// concurrent writer (whose write is as good as this one) or a store error the
+// next pass repeats; neither is a reason to refuse an approval that is already
+// durable.
+func (c *Coordinator) convergeApprovedPlan(ctx stdctx.Context, run domain.WorkflowRun) {
 	now := c.clock()
-	moved, err := c.planStore.ApproveWorkflowPlan(ctx, runID, now)
-	if err != nil {
-		return RunDetail{}, err
-	}
-	if !moved {
-		return c.GetRun(ctx, runID)
-	}
-	steps, _ := c.store.ListWorkflowSteps(ctx, runID)
-	if len(steps) > 0 {
+	steps, err := c.store.ListWorkflowSteps(ctx, run.ID)
+	if err == nil && len(steps) > 0 {
+		// W2 then W3. Both conditional: the plan step of an approved plan is
+		// completed, whichever of waiting/running a crash left it in.
 		if steps[0].State == domain.WorkflowStepWaiting {
 			_, _ = c.store.UpdateWorkflowStepState(ctx, steps[0].ID, domain.WorkflowStepWaiting, domain.WorkflowStepRunning, now)
 		}
 		_, _ = c.store.UpdateWorkflowStepState(ctx, steps[0].ID, domain.WorkflowStepRunning, domain.WorkflowStepCompleted, now)
 	}
-	if run.State == domain.WorkflowRunWaiting || run.State == domain.WorkflowRunPending {
-		_, _ = c.store.UpdateWorkflowRunState(ctx, runID, run.State, domain.WorkflowRunRunning, now)
+	// W4, from the run as it stands NOW rather than as the caller read it: a
+	// converging pass may be running minutes after the read that reached it.
+	current, ok, rerr := c.store.GetWorkflowRun(ctx, run.ID)
+	if rerr != nil || !ok {
+		return
 	}
-	return c.GetRun(ctx, runID)
+	if current.State == domain.WorkflowRunWaiting || current.State == domain.WorkflowRunPending {
+		_, _ = c.store.UpdateWorkflowRunState(ctx, run.ID, current.State, domain.WorkflowRunRunning, now)
+	}
 }
 
 func (c *Coordinator) RejectPlan(ctx stdctx.Context, runID string) (RunDetail, error) {
@@ -743,7 +938,12 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 			if id, ok, err := c.planStore.FindWorkflowRunByPlannedTask(ctx, task.ID); err != nil {
 				return err
 			} else if ok {
-				_, _ = c.planStore.SetWorkflowTaskExecutionRun(ctx, task.ID, id, c.clock())
+				// T3: re-bind after a crash between the child's creation and
+				// its owner stamp. The claim's answer is CHECKED now rather
+				// than discarded into `_, _ =`.
+				if berr := c.bindTaskToChildRun(ctx, *task, id); berr != nil {
+					return berr
+				}
 				task.ExecutionRunID = &id
 			} else {
 				return fmt.Errorf("task %s running without execution run", task.ID)
@@ -1121,7 +1321,10 @@ func (c *Coordinator) dispatchMasterTask(ctx stdctx.Context, parent domain.Workf
 	if id, ok, err := c.planStore.FindWorkflowRunByPlannedTask(ctx, task.ID); err != nil {
 		return err
 	} else if ok {
-		_, _ = c.planStore.SetWorkflowTaskExecutionRun(ctx, task.ID, id, c.clock())
+		// T3, checked. See bindTaskToChildRun.
+		if berr := c.bindTaskToChildRun(ctx, task, id); berr != nil {
+			return berr
+		}
 		// Checkpoint 8P-C.1: re-entering this branch means either a normal
 		// re-dispatch (StartRun is idempotent) or restart recovery after a
 		// crash between the child's creation and its owner stamp below --
@@ -1213,12 +1416,109 @@ func (c *Coordinator) dispatchMasterTask(ctx stdctx.Context, parent domain.Workf
 		}
 		_ = c.persistSessionLifecycleDecision(ctx, child.Run, nil, decision, depPack)
 	}
-	if _, err := c.planStore.SetWorkflowTaskExecutionRun(ctx, task.ID, child.Run.ID, c.clock()); err != nil {
+	// T2, and its answer is USED. `id = ? AND execution_run_id IS NULL AND
+	// state = 'eligible'` is a genuine claim, and a claim that moved zero rows
+	// means somebody else bound this task while this pass was creating a run for
+	// it. Going on to StartRun as if this pass had won would start a worker for
+	// a task whose execution is somebody else's -- and the partial unique index
+	// on planned_task_id means the run just created is the one that is now
+	// orphaned, not the winner's.
+	bound, err := c.planStore.SetWorkflowTaskExecutionRun(ctx, task.ID, child.Run.ID, c.clock())
+	if err != nil {
 		return err
+	}
+	if !bound {
+		return c.reportTaskBindingContradiction(ctx, parent, task, child.Run.ID,
+			"the task could not be bound to the child run this pass created, so another pass had already claimed it")
 	}
 	if perr := c.requireChildOwnershipForDispatch(ctx, child.Run.ID, parent); perr != nil {
 		return perr
 	}
 	_, err = c.StartRun(ctx, child.Run.ID)
 	return err
+}
+
+// taskBindingContradictionPhase records a disagreement between two durable
+// bindings that the schema says cannot happen.
+const taskBindingContradictionPhase = "task_binding_contradiction"
+
+// bindTaskToChildRun is T3: the RECOVERY re-bind of a task to the child run
+// FindWorkflowRunByPlannedTask returned, with its answer checked instead of
+// discarded.
+//
+// It verifies before it claims, which is the actual change. The old code called
+// SetWorkflowTaskExecutionRun and threw the boolean away (`_, _ =`), so a task
+// already bound to a run OTHER than the one the lookup returned produced no
+// error, no stop and no log line at all.
+//
+// Under the schema that disagreement is impossible: `planned_task_id` carries a
+// partial unique index, `workflow_tasks.execution_run_id` carries a UNIQUE
+// constraint, and SetWorkflowTaskExecutionRun is the only statement in the whole
+// schema that writes that column and never writes NULL. So one task names at
+// most one run, one run is named by at most one task, and once named the name is
+// final. The point of checking is not that it is likely. It is that if the
+// impossible ever happens, the previous code was structurally incapable of
+// telling anyone — and two tasks sharing one execution is the shape that puts
+// two workers on one worktree.
+//
+// A claim that simply does not move (already bound to THIS run, or no longer
+// `eligible`) is not a contradiction and is not an error: the binding is
+// monotonic, so an existing binding to the same run is the outcome this call
+// wanted.
+func (c *Coordinator) bindTaskToChildRun(ctx stdctx.Context, task domain.WorkflowTask, runID string) error {
+	if task.ExecutionRunID != nil && *task.ExecutionRunID != runID {
+		return fmt.Errorf(
+			"%w: task %s is durably bound to run %s but the planned-task index names run %s; AO will not act on two disagreeing bindings",
+			ErrInvalid, task.ID, *task.ExecutionRunID, runID)
+	}
+	if _, err := c.planStore.SetWorkflowTaskExecutionRun(ctx, task.ID, runID, c.clock()); err != nil {
+		return err
+	}
+	// Re-read rather than trust the claim's boolean: `false` here covers both
+	// "already bound to this same run" (fine, and the common recovery case) and
+	// "bound to a different one" (a contradiction), and only the row can tell
+	// those apart.
+	tasks, err := c.planStore.ListWorkflowTasks(ctx, task.WorkflowRunID)
+	if err != nil {
+		return err
+	}
+	for _, t := range tasks {
+		if t.ID != task.ID || t.ExecutionRunID == nil || *t.ExecutionRunID == runID {
+			continue
+		}
+		return fmt.Errorf(
+			"%w: task %s is bound to run %s while the planned-task index names run %s; AO will not act on two disagreeing bindings",
+			ErrInvalid, task.ID, *t.ExecutionRunID, runID)
+	}
+	return nil
+}
+
+// reportTaskBindingContradiction records a lost creation-path claim durably and
+// stops this task's dispatch, rather than starting a worker for an execution
+// that belongs to another pass.
+//
+// It records before it returns for the same reason every other stop in this
+// package does: a refusal nobody can read is indistinguishable from a hang.
+func (c *Coordinator) reportTaskBindingContradiction(
+	ctx stdctx.Context, parent domain.WorkflowRun, task domain.WorkflowTask, runID, detail string,
+) error {
+	state, _ := json.Marshal(map[string]string{
+		"taskId": task.ID, "createdRunId": runID, "detail": detail,
+	})
+	_, _ = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+		ID:            "wfc-" + c.newID(),
+		WorkflowRunID: parent.ID,
+		ProjectID:     parent.ProjectID,
+		NextAction: fmt.Sprintf("task_binding_contradiction: task %s (%s) — %s; nothing was started for it",
+			task.ID, task.Title, detail),
+		DurablePhase:   taskBindingContradictionPhase,
+		PayloadVersion: "v1",
+		RetryState:     string(state),
+		CreatedAt:      c.clock(),
+	})
+	if c.log != nil {
+		c.log.Error("workflow: refusing to dispatch a task whose execution binding is contested",
+			"parent", parent.ID, "task", task.ID, "run", runID, "detail", detail)
+	}
+	return fmt.Errorf("%w: task %s: %s", ErrInvalid, task.ID, detail)
 }

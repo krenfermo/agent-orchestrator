@@ -168,6 +168,23 @@ func (c *Coordinator) dispatchWorkStep(ctx stdctx.Context, run domain.WorkflowRu
 		// burn the whole attempt budget inside one second, before the transient
 		// condition it is waiting out had any chance to clear.
 		if rec, ok := c.latestWorkerLaunchRecord(ctx, run.ID, step.ID); ok && !rec.dueForRetry(c.clock()) && !humanResume {
+			// Backing off is only safe if something will actually come back.
+			// recordWorkerLaunchFailure schedules the wake that carries this
+			// retry, but that write is best-effort by construction (a nil
+			// scheduler, a store hiccup) and a crash can land between the
+			// release and it -- leaving an outbox row pending, a retry floor
+			// that every entry point respects, and nothing whatsoever due to
+			// fire. Work steps are not re-entered by read-time polling, so that
+			// state waits for the next daemon boot.
+			//
+			// Re-ensuring here costs nothing and closes it: Schedule is
+			// idempotent per (run, step, reason) and leaves a row that is
+			// already pending completely untouched -- it does not bump the
+			// attempt count and does not push the due time out, which is the
+			// exact regression the wake scheduler's own pending branch exists to
+			// prevent. So N backed-off passes produce at most one row and, after
+			// the first, no writes at all.
+			c.scheduleWake(ctx, run, stepIDPtr(step.ID), wake.ReasonTransientRetry, step.AssignedHarness)
 			return step, nil
 		}
 		return c.dispatchFromPending(ctx, run, step, entry, prompt)
@@ -245,8 +262,38 @@ func (c *Coordinator) dispatchFromPending(ctx stdctx.Context, run domain.Workflo
 		}
 		run.State = domain.WorkflowRunRunning
 	}
-	if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, domain.WorkflowOutboxPending, domain.WorkflowOutboxDispatched, now, ""); err != nil {
+	// S4/S5: the claim, and the token it is taken under.
+	//
+	// The generation is minted here, BEFORE the row is claimed, and is the id
+	// the intent dispatch-boundary record is then written under -- so the token
+	// on the outbox row and the durable record naming this launch are the same
+	// identity, reconstructable from either side. A crash between the claim and
+	// the intent write leaves a claimed row whose record is missing, which
+	// reconciliation already reads as "intended, never confirmed" and resolves;
+	// the reverse order would leave a record for a claim nobody holds, which is
+	// worse because it looks like ownership.
+	//
+	// ClaimWorkflowOutboxDispatch replaces the plain status CAS, which
+	// deliberately CLEARS both generation columns. That clearing is right for a
+	// transition that ends a claim and wrong for one that takes it: an
+	// unclaimed `dispatched` row is a launch nothing owns, and every later
+	// transition off it -- fail, release, acknowledge -- was then satisfiable by
+	// any pass at all.
+	generation := "wfd-" + c.newID()
+	claimed, err := c.store.ClaimWorkflowOutboxDispatch(ctx, entry.ID, now, generation)
+	if err != nil {
 		return step, err
+	}
+	if !claimed {
+		// Somebody else took this row between the read that found it pending and
+		// this statement. That pass owns the launch; this one must not launch a
+		// second worker over it, and must not report a failure for a dispatch it
+		// does not hold. The next pass re-reads the row and does the right thing
+		// with whatever state the winner leaves behind.
+		if c.log != nil {
+			c.log.Debug("workflow: another pass claimed this work dispatch first", "run", run.ID, "step", step.ID)
+		}
+		return step, nil
 	}
 	// Keep the in-memory entry in sync with the CAS update above: the success/
 	// failure recorders further down use entry.Status as the *expected* value
@@ -254,13 +301,14 @@ func (c *Coordinator) dispatchFromPending(ctx stdctx.Context, run domain.Workflo
 	// against the DB row (which is genuinely already "dispatched"), leaving
 	// the outbox permanently stuck instead of advancing to acknowledged/failed.
 	entry.Status = domain.WorkflowOutboxDispatched
+	entry.DispatchGeneration = generation
 	// The step deliberately does NOT move to running here. It moves in
 	// recordDispatchSuccess, strictly after the dispatch confirmation is
 	// durable -- see dispatch_state_machine.go. Marking it running at this
 	// line is what used to make "running" mean "AO intended to launch".
 
 	prompt = c.applyWorkLifecycleDecision(ctx, run, step, prompt)
-	return c.attemptWorkHarness(ctx, run, step, entry, prompt, decision.SelectedHarness, 1)
+	return c.attemptWorkHarness(ctx, run, step, entry, prompt, decision.SelectedHarness, 1, generation)
 }
 
 // applyWorkLifecycleDecision is dispatchFromPending's Checkpoint 8N.1
@@ -435,12 +483,25 @@ func (c *Coordinator) scheduleWake(ctx stdctx.Context, run domain.WorkflowRun, s
 // entered by StartRun and boot Reconcile, never by GetRun's read-time
 // polling, so a mid-uptime Spawn failure has no other opportunity to retry
 // before the checkpoint's own attempt budget would otherwise go unused.
-func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, entry domain.WorkflowOutboxEntry, prompt string, harness domain.AgentHarness, attemptNumber int) (domain.WorkflowStep, error) {
+//
+// generation is the claim token dispatchFromPending took the outbox row under,
+// and it is threaded through every provider attempt of THIS claim -- including
+// a fallback. A fallback is a second provider under one claim, not a second
+// claim, so it must not mint its own token: doing so would fence the fallback
+// out of the very row its predecessor holds.
+func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, entry domain.WorkflowOutboxEntry, prompt string, harness domain.AgentHarness, attemptNumber int, generation string) (domain.WorkflowStep, error) {
 	// PHASE 1 -- INTENT. Durable before anything is invoked: the attempt row
 	// and the dispatch-intent record. A store that cannot write this cannot
 	// launch, because a launch AO holds no record of is a launch no restart can
 	// reconcile. See dispatch_state_machine.go.
-	intent, err := c.beginWorkerDispatch(ctx, run, step, entry, harness)
+	// The intent record's own id is the generation ONLY on the first provider
+	// attempt of this claim -- that is the record the token names. A fallback
+	// writes its own intent row under a fresh id while carrying the same token.
+	intentRecordID := ""
+	if attemptNumber == 1 {
+		intentRecordID = generation
+	}
+	intent, err := c.beginWorkerDispatch(ctx, run, step, entry, harness, generation, intentRecordID)
 	if err != nil {
 		if intent.attempt.ID != "" {
 			// The attempt row was opened before the intent write failed; it
@@ -537,7 +598,7 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 			if c.log != nil {
 				c.log.Warn("workflow: work step failing over to fallback harness", "step", step.ID, "from", harness, "to", fallback, "class", classification.Class)
 			}
-			return c.attemptWorkHarness(ctx, run, step, entry, prompt, fallback, attemptNumber+1)
+			return c.attemptWorkHarness(ctx, run, step, entry, prompt, fallback, attemptNumber+1, generation)
 		}
 		// Every provider this attempt was allowed to try has now failed, and
 		// none of them left a worker behind: the launcher either returns a
@@ -575,7 +636,16 @@ func (c *Coordinator) resolveRuntimeEnv(ctx stdctx.Context, runID string, harnes
 // rows per provider attempt — one open forever, describing a launch that
 // already failed.
 func (c *Coordinator) concludeWorkerAttemptFailure(ctx stdctx.Context, intent workerDispatchIntent, errClass domain.WorkflowErrorClass, now time.Time) error {
-	return c.store.UpdateWorkflowAttemptOutcome(ctx, intent.attempt.ID, now, domain.WorkflowAttemptFailed, errClass)
+	// ClaimWorkflowAttemptOutcome, not UpdateWorkflowAttemptOutcome. The
+	// unconditional update is last-writer-wins over a row whose whole job is to
+	// say whether work is in flight, so a slow pass could overwrite the outcome
+	// a faster one had already recorded -- turning a succeeded attempt into a
+	// failed one, or one provider's failure class into another's. The claim
+	// matches only `finished_at IS NULL`, so exactly one caller concludes the
+	// attempt and the rest are no-ops. Losing is not an error: it means somebody
+	// else already closed this attempt, which is the outcome this call wanted.
+	_, err := c.store.ClaimWorkflowAttemptOutcome(ctx, intent.attempt.ID, now, domain.WorkflowAttemptFailed, errClass)
+	return err
 }
 
 // adoptOrMarkAmbiguous handles a retry/recovery call that found the outbox
@@ -665,7 +735,13 @@ func (c *Coordinator) recordDispatchSuccess(ctx stdctx.Context, run domain.Workf
 	if err != nil {
 		return step, err
 	}
-	intent := workerDispatchIntent{attempt: attempt, harness: rec.Harness}
+	// The adoption joins the claim that is ALREADY on the row rather than
+	// minting one: this entry was claimed by the dispatch whose launch is being
+	// adopted, and re-stamping it would make the adopter look like a different
+	// launch to every generation-fenced transition below. An entry claimed
+	// before the worker path stamped tokens carries "", and an empty token is
+	// exactly what completes an unclaimed row.
+	intent := workerDispatchIntent{attempt: attempt, harness: rec.Harness, generation: entry.DispatchGeneration}
 	ownership := c.sessionOwnershipOrDefault().ObserveSessionOwnership(ctx, rec.ID)
 	return c.confirmWorkerDispatch(ctx, run, step, entry, intent, WorkerLaunchResult{Session: rec}, ownership)
 }
@@ -692,6 +768,22 @@ func (c *Coordinator) confirmWorkerDispatch(
 ) (domain.WorkflowStep, error) {
 	now := c.clock()
 	rec := result.Session
+	// PHASE 3, PRECONDITION -- do we still own the launch we are about to
+	// confirm?
+	//
+	// Everything below runs on state read some calls ago, across a real process
+	// launch. A pass can lose its claim in that window: reconciliation releases
+	// a dispatch it judged stale, a second pass reclaims the row, and this pass
+	// then wakes up holding a session whose row is owned by somebody else.
+	// Confirming there would license RUNNING off a confirmation belonging to a
+	// different launch of the same step. The generation-fenced acknowledge below
+	// is the durable arbiter; this read is what stops the writes BEFORE it from
+	// landing on a launch this pass no longer holds.
+	if !c.stillOwnsWorkerDispatch(ctx, run, entry, intent) {
+		c.recordUnconfirmedLaunch(ctx, run, step, entry, intent, result, ownership,
+			unconfirmedClaimLost, nil)
+		return step, nil
+	}
 	branch, worktree, baseSHA := launchWorkspaceFacts(result, ownership)
 	fingerprint := ""
 	if c.workspaceFacts != nil && worktree != "" {
@@ -728,8 +820,9 @@ func (c *Coordinator) confirmWorkerDispatch(
 		launchedAt = &at
 	}
 	evidence := map[string]string{
-		"attemptId": intent.attempt.ID,
-		"ownership": ownershipEvidenceStatus(ownership),
+		"attemptId":         intent.attempt.ID,
+		"attemptGeneration": intent.generation,
+		"ownership":         ownershipEvidenceStatus(ownership),
 	}
 	if err := c.recordDispatchBoundary(ctx, dispatchBoundary{
 		run: run, step: step, entry: entry, attempt: intent.attempt.ID, harness: rec.Harness,
@@ -776,7 +869,33 @@ func (c *Coordinator) confirmWorkerDispatch(
 		return step, err
 	}
 
-	// PHASE 4 -- RUNNING. Only now.
+	// PHASE 4 -- RUNNING. Only now, and only through the claim.
+	//
+	// The acknowledge comes BEFORE the session write and the step transition,
+	// and it names the generation. That ordering is the durable arbiter of the
+	// whole phase: a pass that no longer holds the claim matches zero rows here
+	// and stops, having written only append-only evidence -- rather than
+	// stamping a session and a RUNNING state for a launch that is not its own.
+	//
+	// A crash between the acknowledge and the session write leaves an
+	// acknowledged entry with no session on the step, which dispatchWorkStep's
+	// `acknowledged` arm already resolves by idempotent re-adoption.
+	if entry.Status != domain.WorkflowOutboxAcknowledged {
+		acked, err := c.store.AcknowledgeWorkflowOutboxDispatch(ctx, entry.ID, entry.Status, now, intent.generation)
+		if err != nil {
+			return step, err
+		}
+		if !acked {
+			// The claim moved. Everything written above is evidence and stays;
+			// nothing that asserts ownership is written. The surviving state --
+			// a launched session named on the ledger, no session on the step --
+			// is exactly the shape adoption resolves.
+			c.recordUnconfirmedLaunch(ctx, run, step, entry, intent, result, ownership,
+				unconfirmedClaimLost, nil)
+			return step, nil
+		}
+		entry.Status = domain.WorkflowOutboxAcknowledged
+	}
 	if _, err := c.store.UpdateWorkflowStepSession(ctx, step.ID, sessID, now); err != nil {
 		return step, err
 	}
@@ -790,18 +909,66 @@ func (c *Coordinator) confirmWorkerDispatch(
 		c.branchLocks.Renew(ctx, run.ID, step.ID, sessID)
 	}
 
-	if entry.Status != domain.WorkflowOutboxAcknowledged {
-		if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, entry.Status, domain.WorkflowOutboxAcknowledged, now, ""); err != nil {
+	if step.State == domain.WorkflowStepReady {
+		// Licensed by the confirmation, and by the session that confirmation
+		// wrote -- not merely by order of execution. See
+		// StartWorkflowStepForSession.
+		started, err := c.store.StartWorkflowStepForSession(ctx, step.ID, sessID, now)
+		if err != nil {
 			return step, err
 		}
-	}
-	if step.State == domain.WorkflowStepReady {
-		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, domain.WorkflowStepReady, domain.WorkflowStepRunning, now); err != nil {
-			return step, err
+		if !started {
+			// The step is no longer ready, or holds a session that is not the
+			// one this pass confirmed. Either way this pass may not call it
+			// running; the ledger keeps everything it wrote, and the next
+			// reconciliation reads the state that actually exists.
+			if c.log != nil {
+				c.log.Warn("workflow: refusing to mark a work step running over a session this pass did not confirm",
+					"run", run.ID, "step", step.ID, "session", sessID)
+			}
+			return step, nil
 		}
 		step.State = domain.WorkflowStepRunning
 	}
 	return step, nil
+}
+
+// stillOwnsWorkerDispatch re-reads this step's outbox entry and reports whether
+// the claim this pass took is still the claim on the row.
+//
+// An entry that has already reached `acknowledged` is treated as still owned:
+// that is this same launch's own completed confirmation being re-entered
+// idempotently (the crash-between-acknowledge-and-session-write window), not a
+// different pass's claim.
+//
+// A read it cannot perform answers TRUE. This is a pre-check whose job is to
+// stop obviously-lost passes early; the durable arbiter is the generation-fenced
+// acknowledge, and failing closed here would turn an unreadable outbox into a
+// refusal to confirm a launch that is genuinely this pass's own.
+func (c *Coordinator) stillOwnsWorkerDispatch(
+	ctx stdctx.Context, run domain.WorkflowRun, entry domain.WorkflowOutboxEntry, intent workerDispatchIntent,
+) bool {
+	entries, err := c.store.ListWorkflowOutboxByRun(ctx, run.ID)
+	if err != nil {
+		return true
+	}
+	for _, e := range entries {
+		if e.ID != entry.ID {
+			continue
+		}
+		// Only a PROVEN disagreement refuses. A row still `dispatched` under a
+		// different token is somebody else's live launch and this pass must not
+		// confirm over it. Every other shape -- already acknowledged (this same
+		// launch's own confirmation being re-entered idempotently), or a
+		// `failed` row an adoption is legitimately completing -- is left to the
+		// generation-fenced acknowledge, which compare-and-swaps against the
+		// exact status its caller read.
+		if e.Status == domain.WorkflowOutboxDispatched && e.DispatchGeneration != intent.generation {
+			return false
+		}
+		return true
+	}
+	return true
 }
 
 // recordDispatchFailure writes the terminal-for-AO shape of a failed work
@@ -812,10 +979,32 @@ func (c *Coordinator) confirmWorkerDispatch(
 // ReasonWorkerLaunchRetriesExhausted when the cause was transient but the
 // automatic budget is spent. Both are reopenable by an explicit human
 // Continue; see resumeWorkerLaunchAfterFailure.
-func (c *Coordinator) recordDispatchFailure(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, entry domain.WorkflowOutboxEntry, errClass domain.WorkflowErrorClass, reason string, cause error) (domain.WorkflowStep, error) {
+//
+// failureGeneration is the id of the durable launch record that explains this
+// failure, and it is stamped onto the row IN THE SAME STATEMENT as the failure
+// itself. Two properties come from that. First, ownership: `id + status` is not
+// proof, because a dispatch that paused after recording its launch error can
+// find the row dispatched again to somebody else, and would then fail a live
+// generation and stamp its own failure onto it. Second, resumability: a human
+// resume must reopen the failure the person actually saw, and a token written
+// after the state it describes would leave a crash window where a failed row
+// exists whose generation nobody can prove.
+func (c *Coordinator) recordDispatchFailure(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, entry domain.WorkflowOutboxEntry, errClass domain.WorkflowErrorClass, reason string, cause error, failureGeneration string) (domain.WorkflowStep, error) {
 	now := c.clock()
-	if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, entry.Status, domain.WorkflowOutboxFailed, now, string(errClass)); err != nil {
+	failed, err := c.store.FailWorkflowOutboxWithGeneration(
+		ctx, entry.ID, entry.Status, now, string(errClass), failureGeneration, entry.DispatchGeneration)
+	if err != nil {
 		return step, err
+	}
+	if !failed {
+		// The claim moved out from under this pass. It may not fail, park or
+		// stop a launch it does not own; the evidence it already wrote stands,
+		// and whoever holds the row settles it.
+		if c.log != nil {
+			c.log.Warn("workflow: a work dispatch failure could not be stamped on a claim it no longer holds",
+				"run", run.ID, "step", step.ID, "class", errClass)
+		}
+		return step, nil
 	}
 	// The failing (and any tried-and-failed fallback) attempt row was
 	// already concluded by attemptWorkHarness/concludeWorkerAttemptFailure

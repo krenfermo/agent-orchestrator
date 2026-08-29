@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -142,7 +143,30 @@ func (s *Store) ListWorkflowTasks(ctx context.Context, runID string) ([]domain.W
 // that has since been cancelled must not be revived by a late conflict report.
 // A false return means the task was not in the expected state, which the caller
 // must treat as "somebody else already decided", not as an error.
-func (s *Store) ParkWorkflowTaskForAttention(ctx context.Context, id string, expected domain.WorkflowTaskState, reason string, attention domain.WorkflowTaskAttention, now time.Time) (bool, error) {
+//
+// expectedAttempt is the second half of the predicate, and it closes the one
+// genuine ABA in the master-task path. `needs_attention` is deliberately
+// non-terminal and its only exit is a person, so a task travels
+// running -> needs_attention -> running without bound, and `state = 'running'`
+// is satisfied by EVERY generation of running. A pass that observed the
+// conflict of integration attempt N and then paused -- a slow git probe, a
+// rebase, a re-scheduled poll -- could land its park after a human had already
+// resumed the task into attempt N+1: parking the new attempt for the old
+// attempt's conflict, and overwriting the new attempt's attention_json with
+// stale SHAs.
+//
+// The discriminator was already durable and merely unread.
+// WorkflowTaskAttention.Attempt is incremented by the parking caller itself and
+// SURVIVES a resume (ResumeWorkflowTaskFromAttention clears attention_reason and
+// attention_at and leaves attention_json alone), so it counts generations of
+// running exactly. Reading it from the predicate is what turns the doc comment's
+// claim -- "the resume produced exactly one new attempt" -- into something the
+// storage layer checks.
+//
+// A task whose attention_json has no attempt (an older row, or one never parked)
+// reads as 0, and a caller that observed no attempt passes 0: the historical
+// rows keep exactly the fence they always had.
+func (s *Store) ParkWorkflowTaskForAttention(ctx context.Context, id string, expected domain.WorkflowTaskState, expectedAttempt int, reason string, attention domain.WorkflowTaskAttention, now time.Time) (bool, error) {
 	if reason == "" {
 		// The schema refuses this too; failing here names the caller instead of
 		// surfacing a CHECK violation from three layers down.
@@ -154,12 +178,25 @@ func (s *Store) ParkWorkflowTaskForAttention(ctx context.Context, id string, exp
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	n, err := s.qw.ParkWorkflowTaskForAttention(ctx, gen.ParkWorkflowTaskForAttentionParams{
-		AttentionReason: reason, AttentionJson: string(body),
-		AttentionAt: sql.NullTime{Time: now, Valid: true}, UpdatedAt: now,
-		ID: id, ExpectedState: string(expected),
-	})
-	return n > 0, err
+	res, err := s.writeDB.ExecContext(ctx,
+		`UPDATE workflow_tasks
+		    SET state = 'needs_attention',
+		        attention_reason = ?,
+		        attention_json = ?,
+		        attention_at = ?,
+		        updated_at = ?
+		  WHERE id = ?
+		    AND state = ?
+		    AND COALESCE(json_extract(attention_json, '$.attempt'), 0) = ?`,
+		reason, string(body), sql.NullTime{Time: now, Valid: true}, now, id, string(expected), expectedAttempt)
+	if err != nil {
+		return false, fmt.Errorf("park workflow task %s: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("park workflow task %s: %w", id, err)
+	}
+	return n > 0, nil
 }
 
 // ResumeWorkflowTaskFromAttention is the one exit from the parked state, and
@@ -170,13 +207,34 @@ func (s *Store) ParkWorkflowTaskForAttention(ctx context.Context, id string, exp
 // The attention body is deliberately kept and only the reason and timestamp
 // are released. What the task was parked on is what tells the next attempt it
 // is a retry rather than a first try.
-func (s *Store) ResumeWorkflowTaskFromAttention(ctx context.Context, id string, next domain.WorkflowTaskState, now time.Time) (bool, error) {
+//
+// expectedAttempt is the symmetric half of the park's own discriminator: resume
+// the stop the person actually read, not whichever stop is current. Without it,
+// `state = 'needs_attention'` matches any stop of this task, so a resume issued
+// against attempt N's conflict could release a task that had since been resumed,
+// re-integrated, and parked again on a different conflict as attempt N+1 --
+// clearing a stop nobody looked at.
+func (s *Store) ResumeWorkflowTaskFromAttention(ctx context.Context, id string, next domain.WorkflowTaskState, expectedAttempt int, now time.Time) (bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	n, err := s.qw.ResumeWorkflowTaskFromAttention(ctx, gen.ResumeWorkflowTaskFromAttentionParams{
-		State: string(next), UpdatedAt: now, ID: id,
-	})
-	return n > 0, err
+	res, err := s.writeDB.ExecContext(ctx,
+		`UPDATE workflow_tasks
+		    SET state = ?,
+		        attention_reason = '',
+		        attention_at = NULL,
+		        updated_at = ?
+		  WHERE id = ?
+		    AND state = 'needs_attention'
+		    AND COALESCE(json_extract(attention_json, '$.attempt'), 0) = ?`,
+		string(next), now, id, expectedAttempt)
+	if err != nil {
+		return false, fmt.Errorf("resume workflow task %s: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("resume workflow task %s: %w", id, err)
+	}
+	return n > 0, nil
 }
 
 func (s *Store) UpdateWorkflowTaskState(ctx context.Context, id string, expected, next domain.WorkflowTaskState, now time.Time) (bool, error) {
@@ -364,4 +422,179 @@ func (s *Store) RejectWorkflowPlan(ctx context.Context, runID string, now time.T
 	defer s.writeMu.Unlock()
 	n, err := s.qw.RejectWorkflowPlan(ctx, gen.RejectWorkflowPlanParams{RejectedAt: sql.NullTime{Time: now, Valid: true}, UpdatedAt: now, WorkflowRunID: runID})
 	return n > 0, err
+}
+
+// CreateObjectiveRunWithPlan inserts a master objective's run row, its plan
+// step and its workflow_plans row in ONE transaction.
+//
+// CP1: those writes used to be two independent transactions in
+// Coordinator.CreateObjectiveRun, and a crash between them left a run with a
+// `plan` step and no plan row. Nothing could then recognise it as a master
+// objective — GetWorkflowPlan reports master == false, so getMasterRun never
+// runs, ContinueRun falls through its master branch into the work/review lookup
+// and errors, and boot recovery falls through to a step loop that finds no work
+// step. The run was not resumable, not completable and not explicable.
+//
+// The window is closed rather than healed because the approval mode is a
+// parameter of the create request and lives nowhere on the run: a healer can
+// only default it (to `manual`, never `auto`, since inferring `auto` would
+// start an unattended planner nobody asked for) and say that it did. Not
+// splitting the writes means no run ever needs that guess.
+// healOrphanedObjectiveRun still exists for the rows a pre-fix daemon left on
+// disk.
+func (s *Store) CreateObjectiveRunWithPlan(
+	ctx context.Context,
+	run domain.WorkflowRun,
+	steps []domain.WorkflowStep,
+	mode domain.WorkflowPlanApprovalMode,
+	contextVersion string,
+	now time.Time,
+) (domain.WorkflowRun, []domain.WorkflowStep, domain.WorkflowPlanRecord, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	var (
+		insertedRun   domain.WorkflowRun
+		insertedSteps = make([]domain.WorkflowStep, 0, len(steps))
+		insertedPlan  domain.WorkflowPlanRecord
+	)
+	err := s.inTx(ctx, "create objective run with plan", func(q *gen.Queries) error {
+		row, err := q.InsertWorkflowRun(ctx, gen.InsertWorkflowRunParams{
+			ID:               run.ID,
+			ProjectID:        domain.ProjectID(run.ProjectID),
+			Objective:        run.Objective,
+			State:            run.State,
+			PolicyVersion:    run.PolicyVersion,
+			PolicySnapshot:   run.PolicySnapshot,
+			CreatedAt:        run.CreatedAt,
+			UpdatedAt:        run.UpdatedAt,
+			ParentWorkflowID: stringPtrToNullString(run.ParentWorkflowID),
+			PlannedTaskID:    stringPtrToNullString(run.PlannedTaskID),
+		})
+		if err != nil {
+			return fmt.Errorf("insert workflow run: %w", err)
+		}
+		insertedRun = workflowRunFromRow(row)
+		for _, step := range steps {
+			artifactJSON := step.ArtifactJSON
+			if artifactJSON == "" {
+				artifactJSON = "{}"
+			}
+			stepRow, serr := q.InsertWorkflowStep(ctx, gen.InsertWorkflowStepParams{
+				ID:              step.ID,
+				WorkflowRunID:   step.WorkflowRunID,
+				Kind:            step.Kind,
+				Ordinal:         step.Ordinal,
+				DependsOnStepID: stringPtrToNullString(step.DependsOnStepID),
+				State:           step.State,
+				CreatedAt:       step.CreatedAt,
+				UpdatedAt:       step.UpdatedAt,
+				ArtifactJson:    artifactJSON,
+			})
+			if serr != nil {
+				return fmt.Errorf("insert workflow step %d: %w", step.Ordinal, serr)
+			}
+			insertedSteps = append(insertedSteps, workflowStepFromRow(stepRow))
+		}
+		planRow, perr := q.InsertWorkflowPlan(ctx, gen.InsertWorkflowPlanParams{
+			WorkflowRunID:        run.ID,
+			ApprovalMode:         string(mode),
+			PromptContextVersion: contextVersion,
+			CreatedAt:            now,
+			UpdatedAt:            now,
+		})
+		if perr != nil {
+			return fmt.Errorf("insert workflow plan: %w", perr)
+		}
+		insertedPlan = workflowPlanFromRow(planRow)
+		return nil
+	})
+	if err != nil {
+		return domain.WorkflowRun{}, nil, domain.WorkflowPlanRecord{}, err
+	}
+	return insertedRun, insertedSteps, insertedPlan, nil
+}
+
+// ReopenAmbiguousWorkflowPlan is CP7's fail-closed way back out of
+// `planner_ambiguous`.
+//
+// A planner that was in flight when the daemon restarted leaves a plan AO
+// cannot judge: it may have produced a complete plan and it may have produced
+// nothing, and no durable row distinguishes the two. recovery.go's verdict —
+// invalid/failed/planner_ambiguous — is therefore correct and stays. What was
+// wrong is that it was PERMANENT: GeneratePlan's own status switch treats
+// `invalid` as a no-op forever after, so a whole objective died of one crossed
+// restart.
+//
+// This statement makes that state REOPENABLE, and nothing more. It does not
+// adopt the discarded planner's work, does not decide whether a plan was
+// produced, and does not run anything. It returns the row to `pending`/`idle` —
+// the exact state StartWorkflowPlanCommand's own CAS arms from, and the state
+// GeneratePlan falls through to real generation on — so the reopen re-enters
+// the ordinary path rather than a parallel one.
+//
+// THE PREDICATE IS AN OBSERVED-VERSION COMPARE-AND-SWAP, NOT A GENERATION.
+// The distinction is not pedantic and this comment must not be softened. A
+// generation has to be minted by the thing it fences; the outbox's token is
+// minted by the dispatch that claims the row, and a planner generation would
+// have to be minted by the planner launch — but nothing durably records a
+// planner subprocess at all: no intent row, no launch id, no handle, no natural
+// key. There is no field to name and no writer to name it. So what the human's
+// action carries is the plan ROW's version, `updated_at`, which every statement
+// touching the row rewrites — including the FinishWorkflowPlan that wrote the
+// ambiguity. That makes a second ambiguity a different version, so a reopen
+// computed against the first matches zero rows and refuses.
+//
+// The three state columns alone would NOT be sufficient.
+// SetWorkflowPlanApprovalMode is fenced only on status != 'approved', so it
+// fires happily against an ambiguous row, changing approval_mode and updated_at
+// and leaving status, command_status and error_class exactly as they were — and
+// a second ambiguity writes the identical triple. The three columns are the
+// TYPE CHECK ("this row is in the ambiguous-terminal state"); updated_at is what
+// makes it THIS ambiguous-terminal state. Both halves are required.
+//
+// What it does not guarantee, stated plainly: two writes that land on an
+// identical stored updated_at are indistinguishable, because the value comes
+// from an injected clock and a test clock that does not advance (or a coarser
+// storage precision) collapses two versions into one. In production the two
+// ambiguities are separated by a daemon restart, so the exposure is negligible
+// — but this is a row version, never a unique token, and never a generation.
+//
+// Hand-written rather than generated for the same reason
+// ClaimWorkflowAttemptOutcome is: sqlc is not part of the build here, and the
+// statement is deliberately trivial so it stays readable next to the generated
+// ones.
+func (s *Store) ReopenAmbiguousWorkflowPlan(
+	ctx context.Context,
+	runID string,
+	observedUpdatedAt time.Time,
+	validationJSON string,
+	now time.Time,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if strings.TrimSpace(validationJSON) == "" {
+		validationJSON = "{}"
+	}
+	res, err := s.writeDB.ExecContext(ctx,
+		`UPDATE workflow_plans
+		    SET status = 'pending',
+		        command_status = 'idle',
+		        error_class = '',
+		        validation_json = ?,
+		        updated_at = ?
+		  WHERE workflow_run_id = ?
+		    AND status = 'invalid'
+		    AND command_status = 'failed'
+		    AND error_class = 'planner_ambiguous'
+		    AND updated_at = ?`,
+		validationJSON, now, runID, observedUpdatedAt)
+	if err != nil {
+		return false, fmt.Errorf("reopen ambiguous workflow plan %s: %w", runID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("reopen ambiguous workflow plan %s: %w", runID, err)
+	}
+	return n == 1, nil
 }

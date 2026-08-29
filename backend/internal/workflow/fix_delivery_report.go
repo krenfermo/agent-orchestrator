@@ -81,11 +81,25 @@ type FixDeliveryReport struct {
 
 	// --- the fix attempt itself ---
 
-	// CycleNumber is the fix generation; FixAttemptID names the workflow_attempt
-	// row this delivery produced.
+	// CycleNumber is the fix cycle ordinal; FixAttemptID names the
+	// workflow_attempt row this delivery produced.
 	CycleNumber      int
 	FixAttemptID     string
 	TransportAttempt int
+	// Generation is the durable identity of the dispatch that produced this
+	// record — the token stamped on its outbox row and named by every CAS that
+	// completed it (fix_generation.go). Empty for a delivery recorded before
+	// fix dispatch had an identity, which is itself the fact an operator needs:
+	// a generation-less row is one whose ownership AO can only prove by
+	// deterministic mapping, never by token.
+	Generation string
+	// ReviewGeneration is the review authority token this fix generation was
+	// bound to. A fix whose ReviewGeneration no longer matches its review run's
+	// current one was authorized by a review that has since been superseded.
+	ReviewGeneration string
+	// Redelivery is the re-delivery ordinal: 0 for the original dispatch, N for
+	// the Nth operator-initiated re-delivery of the same cycle.
+	Redelivery int
 	// SessionID is the worker session the prompt was written into.
 	SessionID string
 
@@ -206,6 +220,9 @@ func BuildFixDeliveryReport(step domain.WorkflowStep, attempts []domain.Workflow
 		CycleNumber:      rec.CycleNumber,
 		FixAttemptID:     rec.FixAttemptID,
 		TransportAttempt: rec.TransportAttempt,
+		Generation:       rec.Generation.ID,
+		ReviewGeneration: rec.Generation.ReviewGeneration,
+		Redelivery:       rec.Generation.Redelivery,
 		PromptBytes:      rec.PromptBytes,
 		Transport:        rec.Transport,
 		ContextPack:      rec.ContextPack,

@@ -679,7 +679,27 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 			if decision.ErrorClass != "" {
 				errClass = decision.ErrorClass
 			}
-			_ = c.store.UpdateWorkflowAttemptOutcome(ctx, latestAttempt.ID, finishedAt, outcome, errClass)
+			// Two different writes share this line, and only one of them is a
+			// finalization.
+			//
+			// When the attempt is still OPEN this is the finalization, and it
+			// goes through the claim: exactly one caller may conclude an
+			// attempt, and last-writer-wins over the row that says whether work
+			// is in flight is how one pass's verdict came to overwrite
+			// another's. A losing caller is a no-op, which is the outcome it
+			// wanted anyway.
+			//
+			// When the attempt is already CONCLUDED this is a deliberate
+			// REFINEMENT of its recorded error class (e.g. to
+			// ambiguous_worker_state) by a later fact-based observation, and it
+			// must still land — the claim would match zero rows and silently
+			// drop it, hiding the ambiguity from the UI exactly as the stranded
+			// row above used to.
+			if latestAttempt.Outcome == "" && latestAttempt.FinishedAt == nil {
+				_, _ = c.store.ClaimWorkflowAttemptOutcome(ctx, latestAttempt.ID, finishedAt, outcome, errClass)
+			} else {
+				_ = c.store.UpdateWorkflowAttemptOutcome(ctx, latestAttempt.ID, finishedAt, outcome, errClass)
+			}
 		}
 	}
 

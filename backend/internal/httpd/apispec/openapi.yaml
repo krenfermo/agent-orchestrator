@@ -6505,6 +6505,67 @@ paths:
       summary: Reject and cancel a master plan
       tags:
       - workflows
+  /api/v1/workflows/{workflowId}/plan/reopen:
+    post:
+      operationId: reopenAmbiguousWorkflowPlan
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersReopenAmbiguousPlanRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRunResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unprocessable Entity
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Reopen planning for an objective whose planner command was in flight
+        when the daemon restarted, so AO could not prove whether it produced a plan.
+        Planning starts over from scratch: nothing is adopted from the discarded planner.
+        The request must carry the plan''s observed updatedAt, and a reopen of a state
+        that has since changed is refused. Human-only and bounded.'
+      tags:
+      - workflows
   /api/v1/workflows/{workflowId}/questions:
     get:
       operationId: listWorkflowQuestions
@@ -6629,6 +6690,56 @@ paths:
           description: Not Implemented
       summary: Submit a human answer for a question that is awaiting one (Checkpoint
         8K-A)
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/recover/review-provenance:
+    post:
+      operationId: recoverWorkflowReviewProvenance
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowRunResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unprocessable Entity
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Recover a run stopped because AO cannot prove which commit its approved
+        review target was read at, and could not reconstruct it from the branch's
+        history. Discards that unlocatable approval and asks for exactly one fresh
+        independent review of the workspace as it stands. It never infers or attests
+        an approved commit and never verifies code no reviewer has read. Human-only
+        and bounded.
       tags:
       - workflows
   /api/v1/workflows/{workflowId}/start:
@@ -7580,6 +7691,8 @@ components:
           type: string
         fixAttemptId:
           type: string
+        generation:
+          type: string
         nextAction:
           type: string
         promptBytes:
@@ -7594,6 +7707,10 @@ components:
           - match
           - other
           - none
+          type: string
+        redelivery:
+          type: integer
+        reviewGeneration:
           type: string
         reviewRunId:
           type: string
@@ -8112,6 +8229,16 @@ components:
       - displayName
       - email
       - password
+      type: object
+    ControllersReopenAmbiguousPlanRequest:
+      properties:
+        observedPlanUpdatedAt:
+          description: The plan's updatedAt as your view read it. A reopen carrying
+            a version the row no longer has is refused.
+          format: date-time
+          type: string
+      required:
+      - observedPlanUpdatedAt
       type: object
     ControllersResolveDecisionRequest:
       properties:
@@ -12522,6 +12649,8 @@ components:
       properties:
         approvalMode:
           type: string
+        commandStatus:
+          type: string
         errorClass:
           type: string
         generated:
@@ -12536,12 +12665,16 @@ components:
           type: string
         status:
           type: string
+        updatedAt:
+          format: date-time
+          type: string
         validation:
           $ref: '#/components/schemas/WorkflowPlanValidation'
       required:
       - status
       - approvalMode
       - promptContextVersion
+      - updatedAt
       type: object
     WorkflowPlannedSafeOverlap:
       properties:

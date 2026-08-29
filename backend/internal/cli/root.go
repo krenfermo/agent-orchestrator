@@ -211,6 +211,7 @@ func NewRootCommand(deps Deps) *cobra.Command {
 	root.AddCommand(newReviewCommand(ctx))
 	root.AddCommand(newDecisionCommand(ctx))
 	root.AddCommand(newIncidentCommand(ctx))
+	root.AddCommand(newWorkflowCommand(ctx))
 	root.AddCommand(newAdminCommand(ctx))
 	root.AddCommand(newCompletionCommand())
 	root.AddCommand(newVersionCommand())

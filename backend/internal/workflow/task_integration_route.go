@@ -567,8 +567,13 @@ func (c *Coordinator) recordTaskIntegrationConflict(
 		// than an intention.
 		Attempt: task.Attention.Attempt + 1,
 	}
+	// The park names the attempt this conflict was OBSERVED on, so it cannot
+	// land on a later one. task.Attention.Attempt is the value read with the
+	// task this pass computed its conflict against; attention.Attempt is that
+	// value plus one, which is what the row will carry afterwards. See
+	// ParkWorkflowTaskForAttention.
 	parked, err := c.planStore.ParkWorkflowTaskForAttention(ctx, task.ID,
-		domain.WorkflowTaskRunning, string(att.Reason), attention, c.clock())
+		domain.WorkflowTaskRunning, task.Attention.Attempt, string(att.Reason), attention, c.clock())
 	if err != nil {
 		return err
 	}
@@ -664,7 +669,10 @@ func (c *Coordinator) ResumeTaskAfterAttention(ctx stdctx.Context, runID, taskID
 	if !ok {
 		return fmt.Errorf("%w: run %s", ErrNotFound, runID)
 	}
-	resumed, err := c.planStore.ResumeWorkflowTaskFromAttention(ctx, taskID, domain.WorkflowTaskRunning, c.clock())
+	// The resume names the attempt whose stop the person read, so a resume
+	// computed against attempt N cannot release a task that has since been
+	// resumed and parked again as N+1.
+	resumed, err := c.planStore.ResumeWorkflowTaskFromAttention(ctx, taskID, domain.WorkflowTaskRunning, target.Attention.Attempt, c.clock())
 	if err != nil {
 		return err
 	}

@@ -303,6 +303,11 @@ func (c *Coordinator) resumeUnstartedFixCycle(ctx stdctx.Context, run domain.Wor
 	// or an earlier crashed pass already claimed it, this pass sends nothing.
 	transportAttempt := c.fixTransportRetryCount(ctx, run.ID, fixStep.ID, cycleNumber)
 	now := c.clock()
+	// A re-delivery is its own dispatch generation, distinguished from the
+	// original by the Redelivery ordinal — the same ordinal that already makes
+	// its outbox key its own command. Without it the two would share a binding
+	// and a recovery could adopt one for the other.
+	gen := c.newFixDispatchGeneration(run, *fixStep, reviewRun, cycleNumber, transportAttempt, redeliveries+1, findings)
 	entry, _, err := c.store.EnqueueWorkflowOutboxEntry(ctx, domain.WorkflowOutboxEntry{
 		ID:             "wfo-" + c.newID(),
 		WorkflowRunID:  run.ID,
@@ -368,11 +373,18 @@ func (c *Coordinator) resumeUnstartedFixCycle(ctx stdctx.Context, run domain.Wor
 		fmt.Sprintf("worker session %s never started fix cycle %d and the workspace is unchanged, so the same findings are being re-delivered",
 			sessionID, cycleNumber))
 
-	if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID,
-		domain.WorkflowOutboxPending, domain.WorkflowOutboxDispatched, now, ""); err != nil {
+	// The claim, under this re-delivery's own token. A losing claim sends
+	// nothing at all: the run has already been unparked above, which is
+	// harmless and idempotent, and the pass that holds the claim owns the send.
+	claimed, err := c.store.ClaimWorkflowOutboxDispatch(ctx, entry.ID, now, gen.ID)
+	if err != nil {
 		return run, false, err
 	}
+	if !claimed {
+		return run, false, nil
+	}
 	entry.Status = domain.WorkflowOutboxDispatched
+	entry.DispatchGeneration = gen.ID
 
 	if c.log != nil {
 		c.log.Info("workflow: re-delivering a fix cycle the worker never started",
@@ -386,7 +398,7 @@ func (c *Coordinator) resumeUnstartedFixCycle(ctx stdctx.Context, run domain.Wor
 	// point — a re-delivered cycle and a first-pass cycle must leave IDENTICAL
 	// durable state, and it creates no second attempt row because
 	// recordFixDispatchSuccess only creates one when len(attempts) < cycleNumber.
-	if _, err := c.deliverFixPrompt(ctx, run, *workStep, *fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt, findings); err != nil {
+	if _, err := c.deliverFixPrompt(ctx, run, *workStep, *fixStep, entry, reviewRun, prompt, findings, gen); err != nil {
 		return run, true, err
 	}
 	if refreshed, ok, rerr := c.store.GetWorkflowRun(ctx, run.ID); rerr == nil && ok {
@@ -448,7 +460,15 @@ func (c *Coordinator) adoptSubmittedPendingFixPrompt(
 	delivery.CycleNumber = cycleNumber
 	delivery.Submission = ports.PromptSubmitted
 	delivery.Reason = "submitted a prompt that was already loaded in the composer; nothing was re-sent"
-	if _, err := c.recordFixDispatchSuccess(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, delivery); err != nil {
+	// The generation is ADOPTED from the dispatch record this submit is
+	// completing — this is the SAME delivery finally being given its turn, so
+	// minting a new identity for it would be a lie about how many deliveries
+	// there were. A record written before generations existed adopts as legacy
+	// (empty token), which is exactly what the ownership CAS needs for a row
+	// claimed before the column existed.
+	gen := delivery.Generation
+	gen.CycleNumber = cycleNumber
+	if _, err := c.recordFixDispatchSuccess(ctx, run, workStep, fixStep, entry, reviewRun, gen, delivery); err != nil {
 		return run, false, err
 	}
 	if c.log != nil {

@@ -284,8 +284,14 @@ func (c *Coordinator) recordWorkerLaunchFailure(
 		Attempt: attempt, Class: string(cls.Class), Certainty: string(cls.Certainty),
 		Retryable: retry, Stage: string(stage), Harness: string(harness), Error: deep,
 	})
+	// The launch record's own id becomes the FAILURE generation: it is minted
+	// before the row is written, is durable before any state moves, and is the
+	// exact artifact a later human resume reopens against. Same shape as the
+	// dispatch generation one layer up -- an id that names the durable record of
+	// the thing it fences, rather than a token invented for the fence.
+	failureGeneration := "wfc-" + c.newID()
 	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
-		ID:             "wfc-" + c.newID(),
+		ID:             failureGeneration,
 		WorkflowRunID:  run.ID,
 		WorkflowStepID: &stepID,
 		ProjectID:      run.ProjectID,
@@ -307,8 +313,40 @@ func (c *Coordinator) recordWorkerLaunchFailure(
 		// launch AO is about to redo is a stop, and moving the run to
 		// needs_attention here is precisely what used to make the master mirror
 		// a hiccup as a human decision.
-		if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, entry.Status, domain.WorkflowOutboxPending, now, string(cls.Class)); err != nil {
-			return step, err
+		// The claim is RELEASED rather than reset. A plain status CAS is
+		// `id + status = dispatched`, which any pass satisfies: a dispatch that
+		// paused after recording its launch error can wake to find the row
+		// released and reclaimed by a second dispatch, and would then hand a
+		// LIVE launch's claim back to the pending pool -- a third dispatch, and
+		// two workers on one worktree. Naming the generation makes a stale
+		// release change nothing.
+		//
+		// An entry that carries no token (claimed before the worker path
+		// stamped one) is released by a caller that also carries none, which is
+		// the only correct owner of an unclaimed row.
+		// A row that is ALREADY pending has nothing to release -- the claim was
+		// given back by an earlier pass, or was never taken (reconciliation
+		// reaches this path with whatever state it found). That is the state
+		// this branch is trying to produce, so it is a success, and the wake
+		// below still has to be scheduled or the retry has nothing to carry it.
+		released := entry.Status == domain.WorkflowOutboxPending
+		if !released {
+			var rerr error
+			released, rerr = c.store.ReleaseDispatchedWorkflowOutboxGeneration(ctx, entry.ID, string(cls.Class), entry.DispatchGeneration)
+			if rerr != nil {
+				return step, rerr
+			}
+		}
+		if !released {
+			// The claim is not this pass's any more, so the retry is not this
+			// pass's to schedule. The launch record above stays -- it is
+			// evidence, and evidence is never conditional on ownership -- but
+			// nothing that moves state is written.
+			if c.log != nil {
+				c.log.Warn("workflow: a worker launch failure could not release a claim it no longer holds",
+					"run", run.ID, "step", step.ID, "class", cls.Class)
+			}
+			return step, nil
 		}
 		c.scheduleWake(ctx, run, stepIDPtr(step.ID), wake.ReasonTransientRetry, string(harness))
 		c.recordAttentionStop(ctx, run, &stepID, ReasonWorkerLaunchRetry, detail)
@@ -334,7 +372,7 @@ func (c *Coordinator) recordWorkerLaunchFailure(
 		c.log.Warn("workflow: worker launch failed permanently",
 			"step", step.ID, "stage", stage, "class", cls.Class, "reason", reason, "attempt", attempt, "err", cause)
 	}
-	return c.recordDispatchFailure(ctx, run, step, entry, cls.Class, reason, cause)
+	return c.recordDispatchFailure(ctx, run, step, entry, cls.Class, reason, cause, failureGeneration)
 }
 
 // workerLaunchRetryAllowed is the bounded-retry policy itself, as one
@@ -448,6 +486,12 @@ type preWorkDispatchEvidence struct {
 	Stage      string `json:"stage"`
 	Source     string `json:"source"`
 	Error      string `json:"error,omitempty"`
+	// FailureGeneration is the outbox row's own failure token, read at the
+	// moment this evidence was gathered. It is what the reopen compare-and-swaps
+	// against, so the resume acts on the failure the person was looking at and
+	// on no other. Empty for a row failed before the token existed, which is
+	// reopened by an equally empty predicate -- the historical fence, unchanged.
+	FailureGeneration string `json:"failureGeneration,omitempty"`
 }
 
 // workerLaunchFailureEvidence decides whether a work step's durable state is
@@ -477,6 +521,7 @@ func (c *Coordinator) workerLaunchFailureEvidence(
 	if rec, ok := c.latestWorkerLaunchRecord(ctx, run.ID, step.ID); ok {
 		return preWorkDispatchEvidence{
 			Class: rec.Class, Stage: rec.Stage, Source: "launch_record", Error: rec.Error,
+			FailureGeneration: entry.FailureGeneration,
 		}, true
 	}
 	reason, ok := c.latestCanonicalStopReason(ctx, run.ID)
@@ -485,6 +530,7 @@ func (c *Coordinator) workerLaunchFailureEvidence(
 	}
 	return preWorkDispatchEvidence{
 		Class: entry.ErrorClass, Stage: string(workerLaunchStageSpawn), Source: "legacy_dispatch_failed",
+		FailureGeneration: entry.FailureGeneration,
 	}, true
 }
 
@@ -604,8 +650,32 @@ func (c *Coordinator) resumeWorkerLaunchAfterFailure(
 
 	// 5. Outbox back to Pending under the SAME idempotency key: no second row,
 	// no second command, one dispatch.
-	if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, domain.WorkflowOutboxFailed, domain.WorkflowOutboxPending, c.clock(), evidence.Class); err != nil {
-		return run, step, false, err
+	//
+	// The reopen names the failure GENERATION this resume observed, not merely
+	// "failed". The outbox row is reused across every retry -- pending ->
+	// dispatched -> failed -> pending -> ... -- so `status = 'failed'` is
+	// satisfied by ANY failure of this row: a person who read failure F1 and
+	// arrived after F1 had been resumed, redispatched and failed again as F2
+	// would reopen F2, granting a launch and a fresh budget epoch nobody asked
+	// for. With the generation in the predicate such a resume matches zero rows
+	// and this caller no-ops.
+	//
+	// A failure recorded before generations were stamped carries "", and is
+	// reopened by a resume whose evidence also carries "" -- the historical rows
+	// keep working, with exactly the fence they always had.
+	reopened, rerr := c.store.ReopenFailedWorkflowOutboxGeneration(ctx, entry.ID, evidence.Class, evidence.FailureGeneration)
+	if rerr != nil {
+		return run, step, false, rerr
+	}
+	if !reopened {
+		// Somebody else moved this row since the evidence was read. The
+		// authorization checkpoint above stays -- it is an honest record of a
+		// person having asked -- and nothing else is touched.
+		if c.log != nil {
+			c.log.Info("workflow: a human retry observed a work dispatch failure that is no longer current; nothing was reopened",
+				"run", run.ID, "step", step.ID, "class", evidence.Class)
+		}
+		return run, step, false, nil
 	}
 
 	// 6. Un-park, so the redispatch is not immediately dropped as an invalid

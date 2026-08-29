@@ -22,6 +22,7 @@ package workflow_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -490,10 +491,17 @@ func (f *fixRecoveryFixture) crashAfterSend(ev deliveryEvidence) {
 	dispatchedAt := f.intentCreatedAt()
 
 	delete(f.store.attempts, f.fixStepID)
+	// The claim token comes back with the status. A dispatch that never
+	// acknowledged still HOLDS its outbox row -- only the acknowledge/fail
+	// transitions clear the token -- so a rollback that restored `dispatched`
+	// without it would model a row released to nobody, which is a different
+	// (and, for the ownership CAS, correctly refused) state.
+	claim := f.dispatchGenerationFromIntent()
 	for key, entry := range f.store.outbox {
 		if entry.WorkflowStepID != nil && *entry.WorkflowStepID == f.fixStepID {
 			entry.Status = domain.WorkflowOutboxDispatched
 			entry.AcknowledgedAt = nil
+			entry.DispatchGeneration = claim
 			f.store.outbox[key] = entry
 		}
 	}
@@ -536,6 +544,34 @@ func (f *fixRecoveryFixture) intentCreatedAt() time.Time {
 	}
 	f.t.Fatal("no fix_dispatch_intent checkpoint: the dispatch never recorded what it was about to deliver")
 	return time.Time{}
+}
+
+// dispatchGenerationFromIntent reads the fix dispatch generation off the newest
+// pre-delivery record — the token the claim stamped on the outbox row and the
+// ledger recorded strictly before Send. Empty for a generation-less record.
+func (f *fixRecoveryFixture) dispatchGenerationFromIntent() string {
+	f.t.Helper()
+	var (
+		newest time.Time
+		gen    string
+	)
+	for _, cp := range f.store.checkpoints[f.runID] {
+		if cp.DurablePhase != "fix_dispatch_intent" {
+			continue
+		}
+		var rec struct {
+			Generation struct {
+				ID string `json:"id"`
+			} `json:"generation"`
+		}
+		if json.Unmarshal([]byte(cp.RetryState), &rec) != nil {
+			continue
+		}
+		if gen == "" || !cp.CreatedAt.Before(newest) {
+			newest, gen = cp.CreatedAt, rec.Generation.ID
+		}
+	}
+	return gen
 }
 
 func (f *fixRecoveryFixture) mutateSession(mutate func(*domain.SessionRecord)) {

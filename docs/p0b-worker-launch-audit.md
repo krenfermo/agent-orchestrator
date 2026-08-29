@@ -1,8 +1,12 @@
 # P0-B — worker launch / attempt state machine audit
 
-**Status:** design contract for the P0-B block (steps 2–6). It changes no
-behaviour. Every "proposed" item below is a commitment about what a later step in
-this block writes, not a description of what the code does today.
+**Status: IMPLEMENTED.** This document was written as the design contract for
+the P0-B block (steps 2–6), and every "proposed" item in it has since been
+built. It is kept verbatim as the rationale — the *why* behind each predicate is
+still the load-bearing part — with one addition: §7 below records what shipped,
+where, and the two places the implementation deliberately differs from what §4.2
+proposed. Where this document says "proposed", read "implemented as described
+unless §7 says otherwise".
 
 **Branch audited:** `feat/engineering-control-center`, at the state of this
 commit. Line numbers are given as `file:line` where a claim depends on a specific
@@ -616,3 +620,122 @@ proven nothing, and no predicate can rescue that.
 - Do not add a column where an existing table-generic one already carries the
   same meaning. `workflow_outbox.dispatch_generation` and `.failure_generation`
   are already the right shape for the worker path.
+
+
+---
+
+## 7. What shipped, and where it differs
+
+Every row of §5's disposition table is implemented. This section is the map from
+the contract to the code, and it exists mainly for the two rows where the
+implementation is not literally what §4.2 wrote down.
+
+### 7.1 The plan segment
+
+| Defect | Where it landed |
+| --- | --- |
+| CP13 / CP14 | `master_coordinator.go` — `ApprovePlan` now `switch`es on the plan status and falls THROUGH to `convergeApprovedPlan`, which re-derives W2–W4 from `plan.status='approved'` alone. `recovery.go`'s approved-plan arm calls it too, and that is the only place a CP14 crash is ever healed: nothing re-enters `ApprovePlan` once a plan is approved |
+| CP30 | `retryPlanOrFail` — the `planner_retry_scheduled` checkpoint is written before `FinishWorkflowPlan` re-arms the plan |
+| CP31 | `failPlan` — `recordAttentionStopWithState` before the terminal `FinishWorkflowPlan` |
+| CP32 | `recovery.go` — `recordAttentionStop(planner_ambiguous)` before the terminal `FinishWorkflowPlan` |
+| CP1 | Closed rather than healed for new objectives: `Store.CreateObjectiveRunWithPlan` writes the run, its plan step and its `workflow_plans` row in ONE transaction, asserted at the call site through the optional `objectiveRunCreator` interface. `healOrphanedObjectiveRun` (`master_coordinator.go`, called from `reconcileRun`) still heals the rows a pre-fix daemon left on disk, defaulting the unrecoverable approval mode to `manual` and recording `objective_plan_recovered` that it did |
+| CP7 | `planner_ambiguous_reopen.go` + `Store.ReopenAmbiguousWorkflowPlan`. Human-only, bounded at `maxAmbiguousPlanReopens`, and an observed-version compare-and-swap on `updated_at` — **not** a generation, for the reasons §3.6 gives. Reachable only from `POST /api/v1/workflows/{id}/plan/reopen` and `ao workflow recover plan`; nothing in `reconcileRun`, `ContinueRun`, any wake reason or the heartbeat can reach it |
+
+### 7.2 The worker segment
+
+`attempt_generation` is exactly what §4.1 defines: the id of the `intent`
+dispatch-boundary record, minted in `dispatchFromPending` before the row is
+claimed and used as that record's own id, stamped into
+`workflow_outbox.dispatch_generation` by `ClaimWorkflowOutboxDispatch`. No new
+column, no migration, no reviewer change.
+
+Every transition off `dispatched` now names it: the confirmation
+(`stillOwnsWorkerDispatch` plus the fenced acknowledge), the acknowledge
+(`AcknowledgeWorkflowOutboxDispatch`), the failure
+(`FailWorkflowOutboxWithGeneration`), the bounded retry's release
+(`ReleaseDispatchedWorkflowOutboxGeneration`) and the human resume
+(`ReopenFailedWorkflowOutboxGeneration`). `openWorkerAttempt` is
+store-enforced through `ClaimOpenWorkflowAttempt`; attempt finalization goes
+through `ClaimWorkflowAttemptOutcome`; `adoptLiveLaunch` refuses a session whose
+`RuntimeLaunchID` disagrees with the launch AO recorded.
+
+**Difference 1 — a fallback provider does not mint a second generation.** §4.2
+describes one generation per launch pass and is silent on
+`attemptWorkHarness`'s fallback recursion. The generation is minted per
+**claim**, not per provider attempt, and threaded through the fallback: a
+fallback is a second provider under ONE claim, and minting a second token for it
+would fence the fallback out of the very row its own predecessor holds. The
+fallback still writes its own `intent` record, under a fresh record id.
+
+**Difference 2 — `AcknowledgeWorkflowOutboxDispatch` takes the expected status.**
+§4.2 writes the acknowledge as a transition from `dispatched`. It is also
+reached from `failed`, by `resumeWorkerLaunchAfterFailure`'s adoption of a
+session that turned up after a durable failure. Both are real transitions to
+`acknowledged`, so the statement compare-and-swaps against the status its caller
+actually read. The generation fence is unchanged and is vacuous on the `failed`
+path by construction: a failed row carries no claim.
+
+Two smaller points worth naming because they are not in §4.2:
+
+- **`worker_progress.go`'s attempt write is two different writes.** The
+  finalization goes through the claim; the deliberate later REFINEMENT of an
+  already-concluded attempt's error class (to `ambiguous_worker_state`) keeps the
+  unconditional update, because the claim would match zero rows and silently drop
+  it — hiding the ambiguity from the UI, which is the bug that write exists to
+  fix.
+- **RUNNING is a predicate, not an ordering.** `StartWorkflowStepForSession`
+  moves the step `ready → running` only while it durably holds the session the
+  confirmation just wrote.
+
+### 7.3 The master-task segment
+
+T1 and T4a are untouched, as §4.2 requires. T2's claim result is checked and a
+lost claim stops instead of proceeding to `StartRun`; T3 verifies the existing
+binding and refuses on a disagreement (`bindTaskToChildRun`,
+`reportTaskBindingContradiction`) instead of discarding a boolean. T4b/T4c carry
+the `WorkflowTaskAttention.Attempt` discriminator, read from the predicate with
+`json_extract(attention_json,'$.attempt')` — the reuse option §4.2's
+implementation note offers, not a new column. `execution_run_id` was added
+nowhere.
+
+### 7.4 The approved-head provenance gap
+
+Not in the original audit, and the production failure this block was finished
+under: a run whose review approved a target, whose fix cycles advanced the
+branch, and whose verification then stopped because AO could not name the commit
+that approval was read at. `pinReviewTargetHead` had already closed it for new
+cycles; the runs already on disk were permanently inert.
+
+`approved_head_recovery.go` adds exactly two mechanisms and nothing between
+them:
+
+- **Reconstruction.** A clean worktree's `WorkspaceFingerprint` is a pure
+  function of its commit, so the commit is recovered by recomputing that same
+  function forwards over the branch until it matches. It is a proof, not an
+  inference, it cannot produce a false positive (including for an approval read
+  at a dirty tree, whose fingerprint no clean-tree hash can equal), and its
+  answer is recorded so rule 3 of `approvedHeadSHA` resolves it thereafter like
+  any other observation. It runs as rule 5, after every durable lookup.
+- **An operator recovery** (`RecoverUnprovableApprovedHead`) when it is not:
+  human-only, bounded, and it DISCARDS the unlocatable approval and asks for one
+  fresh review of the live workspace. It never attests a commit, never verifies
+  code no reviewer read, and never changes what AO proved — the provenance record
+  still says `UNKNOWN`.
+
+Where the head genuinely cannot be proved the behaviour is unchanged and
+fail-closed. What changed is that the stop is now named
+(`verify_approved_head_unprovable`), carries a human action, and has a way out.
+
+### 7.5 Deferred, deliberately
+
+- **A planner launch identity.** CP7 is fail-closed, not adopted, exactly as
+  §3.5 concludes: giving the plan row the planner's own launch id plus a
+  subprocess handle is a migration and a new adapter contract, and it is the only
+  thing that would let a discarded planner's work be recovered rather than
+  redone. Its own block.
+- **`errLaunchWithoutEvidence`.** Still ambiguous, still never resolved by
+  launching, and no predicate can rescue it (§4.3).
+- **The `ownedExecution.Live()` reading of an unanswered liveness probe.**
+  Unchanged on purpose: `AGENTS.md`'s hard rule is that a failed or unknown
+  runtime probe is never proof a session is dead, and the launch-id fence added
+  here refuses a stated disagreement rather than converting silence into one.

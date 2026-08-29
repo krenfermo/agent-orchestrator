@@ -119,7 +119,19 @@ const (
 	// because naming it separately is what keeps a plain verify_workspace_changed
 	// OUTSIDE a recovery reading exactly as it always did.
 	ReasonVerifyWorkspaceUnattributable = "verify_workspace_unattributable"
-	ReasonReviewStateAmbiguous          = "review_state_ambiguous"
+	// ReasonVerifyApprovedHeadUnprovable is the ONE fact whose absence makes
+	// every other question about a changed workspace unanswerable: AO cannot
+	// name the commit the approved review target was read at.
+	//
+	// It is deliberately distinct from ReasonVerifyWorkspaceUnattributable,
+	// which says "AO looked and could not attribute the change". Here AO never
+	// got as far as looking: a moved history and uncommitted work cannot be
+	// told apart without the approval's own commit, so the classification stops
+	// before it starts. The two need separate names because they need separate
+	// remedies -- this one has an explicit operator recovery
+	// (RecoverUnprovableApprovedHead), and that one does not.
+	ReasonVerifyApprovedHeadUnprovable = "verify_approved_head_unprovable"
+	ReasonReviewStateAmbiguous         = "review_state_ambiguous"
 	// ReasonFixDispatchAmbiguous is a fix cycle whose delivery to the worker
 	// session AO could not prove either way after a restart — and only after
 	// fix_delivery_recovery.go has exhausted every durable fact that could have
@@ -157,11 +169,31 @@ const (
 	// here AO can see the text sitting in the draft, so the remedy is a submit,
 	// never another send — the payload is already there and re-sending appends a
 	// second copy.
-	ReasonFixPromptNotSubmitted  = "fix_prompt_not_submitted"
-	ReasonPlannerExhausted       = "planner_retries_exhausted"
-	ReasonPlannerStartFailed     = "planner_start_failed"
-	ReasonPlannerPolicyViolation = "planner_policy_violation"
-	ReasonPlannerAmbiguous       = "planner_ambiguous"
+	ReasonFixPromptNotSubmitted = "fix_prompt_not_submitted"
+	// ReasonFixGenerationUnprovable is durable fix-cycle dispatch state that AO
+	// cannot map onto exactly one dispatch generation: two different generations
+	// recorded against one cycle, a claim token that disagrees with the
+	// pre-delivery record it should match, a generation-less delivery whose
+	// findings or review run are not the ones this pass derived.
+	//
+	// It is deliberately NOT ReasonFixDispatchAmbiguous. That reason says "AO
+	// cannot prove whether the prompt arrived" — a question about the session.
+	// This one says "AO cannot prove which dispatch the state on disk belongs
+	// to" — a question about the ledger, which no amount of looking at the
+	// worker will answer. Fail-closed and inert: nothing is sent, no attempt is
+	// opened, no state advances, and no retry is scheduled, because nothing AO
+	// can do by itself would change the answer. See markFixGenerationUnprovable.
+	ReasonFixGenerationUnprovable = "fix_generation_unprovable"
+	ReasonPlannerExhausted        = "planner_retries_exhausted"
+	ReasonPlannerStartFailed      = "planner_start_failed"
+	ReasonPlannerPolicyViolation  = "planner_policy_violation"
+	ReasonPlannerAmbiguous        = "planner_ambiguous"
+	// ReasonObjectivePlanRecovered is CP1's healer speaking: an objective run
+	// that had no plan row got one, and the approval mode that row should have
+	// carried was never recorded anywhere. It is NOT a failure — the run works
+	// again — but it is a substitution of somebody's choice, so it is on the
+	// ledger with the action that undoes it.
+	ReasonObjectivePlanRecovered = "objective_plan_recovered"
 	ReasonChildNeedsAttention    = "child_needs_attention"
 	ReasonChildFailed            = "child_failed"
 	// ReasonTaskParked is the objective's own stop when one or more of its
@@ -286,6 +318,9 @@ var attentionDispositions = map[string]AttentionDisposition{
 		Nonrecoverable: true,
 		HumanAction:    "Verification has been reopened the maximum number of times and still fails on AO's own verification infrastructure rather than on the code. Read the latest verify output, correct the verification configuration or the host, then start a fresh run — or cancel this one.",
 	},
+	ReasonVerifyApprovedHeadUnprovable: {
+		HumanAction: "AO cannot prove which commit the approved review was given for, and could not recover it from this branch's history, so it will not verify against that approval. Inspect the worktree; if the work in it is what you want reviewed, recover this run's review provenance — AO discards the unlocatable approval and asks for exactly one fresh review of what is there now.",
+	},
 	ReasonVerifyWorkspaceUnattributable: {
 		HumanAction: "Verification was reopened, but the worktree no longer matches what review approved and AO cannot attribute the difference to this task's own uncommitted work (its branch or its HEAD moved). Inspect the worktree, restore it or commit the intended state, then continue or cancel this run.",
 	},
@@ -319,6 +354,9 @@ var attentionDispositions = map[string]AttentionDisposition{
 	ReasonFixCycleNotStarted: {
 		HumanAction: "The reviewer's findings reached the worker session but the worker never started on them. Check that the session is alive and responsive, then continue this run — AO re-checks its own evidence first and re-delivers the cycle by itself when it can prove that is safe.",
 	},
+	ReasonFixGenerationUnprovable: {
+		HumanAction: "AO cannot tell which fix dispatch the durable state for this cycle belongs to, so it will not send the findings, open a fix attempt or advance the run on it. The checkpoint names exactly what disagrees. Inspect the worker session to see whether it already has these findings, then continue this run if it does not, or cancel it.",
+	},
 	ReasonFixPromptNotSubmitted: {
 		HumanAction: "The reviewer's findings are sitting unsubmitted in the worker session's composer. Continue this run and AO will submit what is already there (it never re-sends the text, so the prompt cannot be duplicated); if that keeps failing, open the session and submit it yourself.",
 	},
@@ -336,7 +374,10 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonPlannerAmbiguous: {
 		Nonrecoverable: true,
-		HumanAction:    "The planner's state could not be recovered after a restart. Retry planning for this objective.",
+		HumanAction:    "The planner's state could not be recovered after a restart. Reopen planning for this objective (AO will not do it on its own), or cancel it.",
+	},
+	ReasonObjectivePlanRecovered: {
+		HumanAction: "This objective was created without its plan row and AO recreated it. The approval mode could not be recovered and defaults to manual: start planning yourself, or recreate the objective if it was meant to run autonomously.",
 	},
 	ReasonChildNeedsAttention: {
 		HumanAction: "The running task stopped and needs a decision. Open that task's run to see what it is waiting on.",

@@ -106,7 +106,7 @@ func newExceptionFixture(t *testing.T, attemptsUsed int) *exceptionFixture {
 		}
 	}
 	// Parked, on the one reason this mechanism answers.
-	if _, err := store.ParkWorkflowTaskForAttention(ctx, task.ID, domain.WorkflowTaskRunning,
+	if _, err := store.ParkWorkflowTaskForAttention(ctx, task.ID, domain.WorkflowTaskRunning, 0,
 		string(integration.ReasonStaleReviewAfterRebase), domain.WorkflowTaskAttention{Attempt: 2}, now); err != nil {
 		t.Fatal(err)
 	}
@@ -278,10 +278,10 @@ func TestExceptionRefusesWhileTheOrdinaryBudgetRemains(t *testing.T) {
 // A task parked for a different reason has a different remedy.
 func TestExceptionRefusesATaskParkedForAnotherReason(t *testing.T) {
 	fx := newExceptionFixture(t, maxIntegrationFreshReviews)
-	if _, err := fx.store.ResumeWorkflowTaskFromAttention(fx.ctx, fx.taskID, domain.WorkflowTaskRunning, time.Now().UTC()); err != nil {
+	if _, err := fx.store.ResumeWorkflowTaskFromAttention(fx.ctx, fx.taskID, domain.WorkflowTaskRunning, 2, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fx.store.ParkWorkflowTaskForAttention(fx.ctx, fx.taskID, domain.WorkflowTaskRunning,
+	if _, err := fx.store.ParkWorkflowTaskForAttention(fx.ctx, fx.taskID, domain.WorkflowTaskRunning, 2,
 		string(integration.ReasonVerificationFailed), domain.WorkflowTaskAttention{}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +293,7 @@ func TestExceptionRefusesATaskParkedForAnotherReason(t *testing.T) {
 // A task that is not parked has nothing to unblock.
 func TestExceptionRefusesATaskThatIsNotParked(t *testing.T) {
 	fx := newExceptionFixture(t, maxIntegrationFreshReviews)
-	if _, err := fx.store.ResumeWorkflowTaskFromAttention(fx.ctx, fx.taskID, domain.WorkflowTaskRunning, time.Now().UTC()); err != nil {
+	if _, err := fx.store.ResumeWorkflowTaskFromAttention(fx.ctx, fx.taskID, domain.WorkflowTaskRunning, 2, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fx.authorize("joaquin", "please"); !errors.Is(err, ErrInvalid) {

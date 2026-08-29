@@ -381,6 +381,67 @@ func (f *fakeStore) CreateWorkflowAttempt(_ context.Context, id, stepID, harness
 	return attempt, nil
 }
 
+// ClaimOpenWorkflowAttempt mirrors the store's atomic read-then-insert: the
+// step's open attempt if it has one, a new row otherwise.
+func (f *fakeStore) ClaimOpenWorkflowAttempt(ctx context.Context, id, stepID, harness, model string, startedAt time.Time) (domain.WorkflowAttempt, bool, error) {
+	f.attemptMu.Lock()
+	defer f.attemptMu.Unlock()
+	list := f.attempts[stepID]
+	if len(list) > 0 && list[len(list)-1].Outcome == "" {
+		return list[len(list)-1], false, nil
+	}
+	attempt, err := f.CreateWorkflowAttempt(ctx, id, stepID, harness, model, startedAt)
+	return attempt, err == nil, err
+}
+
+// StartWorkflowStepForSession mirrors the store's session-predicated
+// ready -> running transition.
+func (f *fakeStore) StartWorkflowStepForSession(ctx context.Context, id, sessionID string, now time.Time) (bool, error) {
+	for runID, steps := range f.steps {
+		for i := range steps {
+			if steps[i].ID != id {
+				continue
+			}
+			if steps[i].State != domain.WorkflowStepReady ||
+				steps[i].SessionID == nil || *steps[i].SessionID != sessionID {
+				return false, nil
+			}
+			return f.UpdateWorkflowStepState(ctx, id, domain.WorkflowStepReady, domain.WorkflowStepRunning, now)
+		}
+		_ = runID
+	}
+	return false, nil
+}
+
+// AcknowledgeWorkflowOutboxDispatch mirrors the store's generation-fenced
+// dispatched -> acknowledged transition.
+func (f *fakeStore) AcknowledgeWorkflowOutboxDispatch(_ context.Context, id string, expected domain.WorkflowOutboxStatus, now time.Time, dispatchGeneration string) (bool, error) {
+	if f.outboxCASErr != nil {
+		return false, f.outboxCASErr
+	}
+	if hook := f.beforeOutboxCAS; hook != nil {
+		f.beforeOutboxCAS = nil
+		hook(id, expected, domain.WorkflowOutboxAcknowledged)
+	}
+	for key, entry := range f.outbox {
+		if entry.ID != id {
+			continue
+		}
+		if entry.Status != expected || entry.DispatchGeneration != dispatchGeneration {
+			return false, nil
+		}
+		t := now
+		entry.Status = domain.WorkflowOutboxAcknowledged
+		entry.AcknowledgedAt = &t
+		entry.ErrorClass = ""
+		entry.FailureGeneration = ""
+		entry.DispatchGeneration = ""
+		f.outbox[key] = entry
+		return true, nil
+	}
+	return false, nil
+}
+
 func (f *fakeStore) GetLatestWorkflowAttempt(_ context.Context, stepID string) (domain.WorkflowAttempt, bool, error) {
 	list := f.attempts[stepID]
 	if len(list) == 0 {

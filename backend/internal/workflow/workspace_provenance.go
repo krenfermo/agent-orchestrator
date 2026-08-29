@@ -156,6 +156,16 @@ type WorkspaceProvenanceRecord struct {
 	PriorReviewRunID string `json:"priorReviewRunId,omitempty"`
 	TargetKey        string `json:"targetKey,omitempty"`
 
+	// ApprovedHeadUnprovable marks the ONE missing fact that makes the whole
+	// classification impossible rather than merely inconclusive: AO cannot name
+	// the commit the approval was given for. Everything downstream of step 2 is
+	// reasoning about uncommitted work, and that reasoning is only sound once
+	// "the history did not move" has been established — which needs this
+	// commit. It is a separate flag rather than a class because the class is
+	// still honestly UNKNOWN; what this adds is that there is a specific,
+	// bounded, human recovery for it. See RecoverUnprovableApprovedHead.
+	ApprovedHeadUnprovable bool `json:"approvedHeadUnprovable,omitempty"`
+
 	// Rationale states, in words, exactly what AO proved. It is never a guess:
 	// an unproven attribution is UNKNOWN with a rationale saying which fact was
 	// missing.
@@ -255,9 +265,17 @@ func (c *Coordinator) classifyWorkspaceDrift(
 		// UNCOMMITTED work, and it is only sound once "the history did not move"
 		// has been established. It has not been, so this is UNKNOWN — not a
 		// silent promotion to the uncommitted-drift branch.
+		// approvedHeadSHA has already tried every durable row AND the
+		// reconstruction from this branch's history (approved_head_recovery.go),
+		// so this is the genuinely unrecoverable case rather than a lookup that
+		// was never attempted. It stays fail-closed — but it is named, so it can
+		// be acted on instead of being an unexplained dead end.
+		rec.ApprovedHeadUnprovable = true
 		rec.Rationale = fmt.Sprintf(
-			"AO holds no durable record of the commit the approved fingerprint %s was read at, so it cannot tell a moved history from uncommitted work",
-			shortFingerprint(reviewed))
+			"AO holds no durable record of the commit the approved fingerprint %s was read at, and could not reconstruct it from the last %d commits of %s, "+
+				"so it cannot tell a moved history from uncommitted work. AO will not verify against an approval it cannot locate; "+
+				"a person may recover this run's review provenance, which discards that approval and asks for one fresh review of what is in the worktree now",
+			shortFingerprint(reviewed), maxApprovedHeadSearchCommits, workCP.WorktreePath)
 		return rec
 	}
 	if approvedHead != "" && obs.HeadSHA != "" && obs.HeadSHA != approvedHead {
@@ -813,7 +831,17 @@ func (c *Coordinator) resumeProvenanceWorkspaceChange(ctx stdctx.Context, run do
 	// The stop must be one of the verification stops. Every other human-owned
 	// stop is left exactly where it is.
 	reason, _, ok := c.stopReason(ctx, run)
-	if !ok || (!recoverableVerifyStopReasons[reason] && reason != ReasonVerifyWorkspaceUnattributable) {
+	// verify_approved_head_unprovable joins the two attribution stops here on
+	// purpose. It names a run that parked because AO could not locate its
+	// approval's commit -- and the classification below is re-derived from
+	// scratch, against a daemon that can now RECONSTRUCT that commit from the
+	// branch's own history (approved_head_recovery.go). A run parked on a fact
+	// AO can now prove must be able to move on its own, without a person; the
+	// operator recovery exists for the runs where the fact is still unprovable,
+	// not for the ones a newer daemon can simply answer.
+	if !ok || (!recoverableVerifyStopReasons[reason] &&
+		reason != ReasonVerifyWorkspaceUnattributable &&
+		reason != ReasonVerifyApprovedHeadUnprovable) {
 		return run, false, nil
 	}
 	// And the failure must actually be a workspace change.

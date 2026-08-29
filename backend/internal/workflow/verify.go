@@ -595,6 +595,14 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 		if perr := c.recordWorkspaceProvenance(ctx, run, verifyStep.ID, prov); perr != nil && c.log != nil {
 			c.log.Warn("workflow: recording workspace provenance failed", "run", run.ID, "err", perr)
 		}
+		// Name the ONE stop that has its own explicit recovery. Without this the
+		// run parks under the flat verify_unrepairable, whose human action is
+		// "inspect and continue" -- and continuing re-derives the same missing
+		// fact and parks again, which is exactly how these runs became
+		// permanently useless. See RecoverUnprovableApprovedHead.
+		if prov.ApprovedHeadUnprovable {
+			result.StopReason = ReasonVerifyApprovedHeadUnprovable
+		}
 		return c.finishVerifyFailure(ctx, run, verifyStep, latest, result,
 			"workspace fingerprint no longer matches the approved review target ("+string(prov.Class)+": "+prov.Rationale+")")
 	}

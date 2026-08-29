@@ -3,6 +3,7 @@ package workflow
 import (
 	stdctx "context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -690,6 +691,30 @@ func (c *Coordinator) adoptLiveLaunch(
 		// one this whole file defaults to: leave the live worker alone.
 		return result, run, nil
 	}
+	// Adopt the launch that is ALIVE -- not merely a session row under the same
+	// dispatch key.
+	//
+	// A session id survives a daemon restart; the process behind it does not.
+	// RuntimeLaunchID is the only identity that separates those two: the
+	// supervisor carries it in its own argv, so the runtime can answer "is the
+	// process I started still running" rather than "does a pane with this name
+	// exist". If the durable launch evidence names a launch id and the session
+	// now carries a different one, this row has been relaunched by something
+	// that is not the launch AO recorded, and confirming it would bind this
+	// step's attempt to an execution nobody here authorized.
+	//
+	// Silence is not a mismatch. Evidence or a session row that names no launch
+	// id at all (an older row, a runtime that does not report one) is not
+	// contradicted by anything, and adoption proceeds on the liveness proof it
+	// always did -- the fence refuses only a stated DISAGREEMENT.
+	if recorded := c.recordedLaunchIDForStep(ctx, run.ID, step.ID); recorded != "" &&
+		rec.Metadata.RuntimeLaunchID != "" && recorded != rec.Metadata.RuntimeLaunchID {
+		result.Contradiction = ContradictionUnprovable
+		result.Detail = fmt.Sprintf(
+			"session %s is alive under runtime launch %s, but the launch AO recorded for this step was %s — this is not the execution AO started, and reconciliation may not adopt it",
+			owned.SessionID, shortFingerprint(rec.Metadata.RuntimeLaunchID), shortFingerprint(recorded))
+		return c.stopReconciledDispatch(ctx, run, step, attempt, hasAttempt, owned, result)
+	}
 	entry, err := c.dispatchOutboxEntry(ctx, run, step)
 	if err != nil {
 		return result, run, err
@@ -722,7 +747,12 @@ func (c *Coordinator) adoptLiveLaunch(
 		}
 		step.State = domain.WorkflowStepRunning
 	}
-	intent := workerDispatchIntent{attempt: attempt, harness: rec.Harness}
+	// The adoption joins the claim ALREADY on the row -- it is the claim the
+	// launch being adopted was made under, and re-stamping it would make this
+	// adopter look like a different launch to every generation-fenced
+	// transition. An entry claimed before the worker path stamped tokens carries
+	// "", which is what completes an unclaimed row.
+	intent := workerDispatchIntent{attempt: attempt, harness: rec.Harness, generation: entry.DispatchGeneration}
 	_, err = c.confirmWorkerDispatch(ctx, run, step, entry, intent,
 		WorkerLaunchResult{Session: rec}, owned.Evidence)
 	if err != nil {
@@ -792,7 +822,10 @@ func (c *Coordinator) retryReconciledDispatch(
 		// The attempt row is what claims work is in flight. It is closed BEFORE
 		// the retry is scheduled, so no guard downstream can read a fossil as a
 		// live writer while the retry is pending.
-		if aerr := c.store.UpdateWorkflowAttemptOutcome(ctx, attempt.ID, c.clock(),
+		// The claim form: exactly one caller may conclude an attempt, and a
+		// pass that loses is a no-op rather than an overwriter of somebody
+		// else's outcome. See concludeWorkerAttemptFailure.
+		if _, aerr := c.store.ClaimWorkflowAttemptOutcome(ctx, attempt.ID, c.clock(),
 			domain.WorkflowAttemptFailed, domain.WorkflowErrorRuntimeFailed); aerr != nil {
 			return result, run, aerr
 		}
@@ -870,7 +903,7 @@ func (c *Coordinator) stopReconciledDispatch(
 	}
 	now := c.clock()
 	if hasAttempt {
-		if aerr := c.store.UpdateWorkflowAttemptOutcome(ctx, attempt.ID, now,
+		if _, aerr := c.store.ClaimWorkflowAttemptOutcome(ctx, attempt.ID, now,
 			domain.WorkflowAttemptFailed, raise.ErrorClass()); aerr != nil {
 			return result, run, aerr
 		}
@@ -1168,4 +1201,29 @@ func (c *Coordinator) getWorkflowStep(
 		}
 	}
 	return domain.WorkflowStep{}, false, nil
+}
+
+// recordedLaunchIDForStep returns the runtime launch id AO durably recorded for
+// this step's newest launch, or "" when nothing recorded one.
+//
+// It reads the dispatch table first because that is where a confirmation and an
+// unconfirmed launch both write the id, and falls back to the ledger's own
+// unconfirmed record for the one case the dispatch table cannot hold (the write
+// that failed BECAUSE that table refused it). "" means AO holds no statement
+// about which launch this step's session should be running under, which is a
+// different fact from a mismatch and is never treated as one.
+func (c *Coordinator) recordedLaunchIDForStep(ctx stdctx.Context, runID, stepID string) string {
+	if ps, ok := c.provenanceStore(); ok && stepID != "" {
+		if records, err := ps.ListWorkflowDispatchCheckpointsByStep(ctx, stepID); err == nil {
+			for i := len(records) - 1; i >= 0; i-- {
+				if id := strings.TrimSpace(records[i].RuntimeLaunchID); id != "" {
+					return id
+				}
+			}
+		}
+	}
+	if rec, ok := c.latestUnconfirmedLaunchRecord(ctx, runID, stepID); ok {
+		return strings.TrimSpace(rec.RuntimeLaunchID)
+	}
+	return ""
 }

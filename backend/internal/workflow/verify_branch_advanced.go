@@ -491,7 +491,17 @@ func (c *Coordinator) resumeBranchAdvancedVerify(ctx stdctx.Context, run domain.
 	// The stop must be one of the verification stops. Every human-owned stop is
 	// left exactly where it is.
 	reason, _, ok := c.stopReason(ctx, run)
-	if !ok || (!recoverableVerifyStopReasons[reason] && reason != ReasonVerifyWorkspaceUnattributable) {
+	// verify_approved_head_unprovable joins the two attribution stops here on
+	// purpose. It names a run that parked because AO could not locate its
+	// approval's commit -- and the classification below is re-derived from
+	// scratch, against a daemon that can now RECONSTRUCT that commit from the
+	// branch's own history (approved_head_recovery.go). A run parked on a fact
+	// AO can now prove must be able to move on its own, without a person; the
+	// operator recovery exists for the runs where the fact is still unprovable,
+	// not for the ones a newer daemon can simply answer.
+	if !ok || (!recoverableVerifyStopReasons[reason] &&
+		reason != ReasonVerifyWorkspaceUnattributable &&
+		reason != ReasonVerifyApprovedHeadUnprovable) {
 		return run, false, nil
 	}
 	// And the failure must actually be a workspace change.

@@ -256,7 +256,12 @@ func (c *Coordinator) attributableWorkspaceDrift(
 //     together with a HEAD — in practice the fix step's delivery observation,
 //     which is where a committing fix cycle's head is written down;
 //  4. the work step's completion checkpoint, and ONLY when that checkpoint's own
-//     fingerprint is the reviewed one.
+//     fingerprint is the reviewed one;
+//  5. failing all of those, a RECONSTRUCTION from this branch's own history —
+//     see approved_head_recovery.go. It is last because it is the only source
+//     that is computed rather than read, and it is sound because it is a
+//     recomputation of the same fingerprint function forwards until it matches,
+//     never an inference backwards.
 //
 // Step 4 is the fix for incident wf-a21d98aa. It used to be an unconditional
 // fallback, and an unconditional fallback is a claim: "the reviewed state is at
@@ -302,6 +307,15 @@ func (c *Coordinator) approvedHeadSHA(ctx stdctx.Context, runID, reviewStepID, r
 	// 4 — the work step's completion, conditional on it being the same state.
 	if workCP.FingerprintAfter == reviewedFingerprint {
 		return workCP.HeadSHA
+	}
+	// 5 — nothing in the ledger names this fingerprint's commit. That is the
+	// state every run whose rows predate pinReviewTargetHead is in, and it is
+	// what made those runs permanently unverifiable. Try to recover the commit
+	// by recomputing the fingerprint over this branch's history; a clean-tree
+	// approval has exactly one preimage there, and anything else finds nothing
+	// and still answers "".
+	if run, ok, err := c.store.GetWorkflowRun(ctx, runID); err == nil && ok {
+		return c.reconstructApprovedHead(ctx, run, reviewStepID, reviewedFingerprint, workCP)
 	}
 	return ""
 }

@@ -447,6 +447,68 @@ func (s *Store) ClaimWorkflowOutboxDispatch(
 	return rows > 0, nil
 }
 
+// AcknowledgeWorkflowOutboxDispatch completes a dispatch — dispatched ->
+// acknowledged — for the EXACT dispatch that holds the claim.
+//
+// It is the last of the four ownership-dependent transitions off `dispatched`
+// (the other three being fail, release and reopen) and it exists for the same
+// reason they do: `id + status = dispatched` is satisfied by ANY dispatch of
+// this row, so a pass that paused after launching, lost its claim to a
+// reconciler's release, and woke up to find the row reclaimed by a second
+// dispatch would otherwise acknowledge somebody else's live launch as its own —
+// and the step would go RUNNING over a confirmation that belongs to a different
+// worker.
+//
+// The claim token is cleared by the transition: an acknowledged row is no
+// longer claimable, and the token described the claim, not the row.
+//
+// A caller holding an EMPTY generation matches only a row whose generation is
+// also empty. That is exactly right for the rows on disk from before the worker
+// path claimed with a token: they are unclaimed, so an unclaimed acknowledge is
+// the only one that may complete them, and a token-holding pass cannot. It is
+// also what lets the ADOPTION path complete a `failed` row: a failed entry
+// carries no claim (FailWorkflowOutboxWithGeneration clears it), so the status
+// compare-and-swap is the whole arbiter there and the token fence is vacuous by
+// construction rather than by exception.
+//
+// expected is the status the caller holds, not a constant: a launch confirms
+// from `dispatched`, while resumeWorkerLaunchAfterFailure adopts an existing
+// session from `failed`. Both are real transitions to `acknowledged` and both
+// must stay compare-and-swapped against the state their caller actually read.
+//
+// Hand-written for the same reason ClaimWorkflowAttemptOutcome is: sqlc is not
+// part of the build here, and the statement stays readable next to the
+// generated ones.
+func (s *Store) AcknowledgeWorkflowOutboxDispatch(
+	ctx context.Context,
+	id string,
+	expected domain.WorkflowOutboxStatus,
+	now time.Time,
+	dispatchGeneration string,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	res, err := s.writeDB.ExecContext(ctx,
+		`UPDATE workflow_outbox
+		    SET status = 'acknowledged',
+		        acknowledged_at = ?,
+		        error_class = '',
+		        failure_generation = '',
+		        dispatch_generation = ''
+		  WHERE id = ?
+		    AND status = ?
+		    AND dispatch_generation = ?`,
+		sql.NullTime{Time: now, Valid: true}, id, expected, dispatchGeneration)
+	if err != nil {
+		return false, fmt.Errorf("acknowledge workflow outbox %s dispatch: %w", id, err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("acknowledge workflow outbox %s dispatch: %w", id, err)
+	}
+	return rows == 1, nil
+}
+
 // FailWorkflowOutboxWithGeneration moves an entry to `failed`, stamps the
 // identity of the failure that did it, and PROVES the caller still owns the
 // dispatch — all in the SAME statement.
@@ -652,6 +714,103 @@ func (s *Store) CreateWorkflowAttempt(
 		return domain.WorkflowAttempt{}, fmt.Errorf("insert workflow attempt for step %s: %w", stepID, err)
 	}
 	return workflowAttemptFromRow(row), nil
+}
+
+// StartWorkflowStepForSession moves a step ready -> running ONLY while it
+// durably holds the session the caller confirmed.
+//
+// The session is part of the predicate rather than a thing checked just before
+// it. `id = ? AND state = 'ready'` licenses RUNNING by ORDER OF EXECUTION: any
+// pass that happens to reach the statement satisfies it, so a step could enter
+// RUNNING under a confirmation belonging to a different launch of the same step
+// -- which is the precise shape of "running means AO intended to launch" that
+// the phased dispatch exists to remove. Naming the session makes RUNNING
+// licensed by the confirmation that wrote it and by nothing else.
+//
+// It reports whether it moved; a false answer means the step is no longer ready,
+// or is holding somebody else's session, and the caller must not treat the step
+// as running.
+//
+// Hand-written for the same reason ClaimWorkflowAttemptOutcome is.
+func (s *Store) StartWorkflowStepForSession(
+	ctx context.Context,
+	id, sessionID string,
+	now time.Time,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	res, err := s.writeDB.ExecContext(ctx,
+		`UPDATE workflow_steps
+		    SET state = 'running', updated_at = ?
+		  WHERE id = ?
+		    AND state = 'ready'
+		    AND session_id = ?`,
+		now, id, sessionID)
+	if err != nil {
+		return false, fmt.Errorf("start workflow step %s for session %s: %w", id, sessionID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("start workflow step %s for session %s: %w", id, sessionID, err)
+	}
+	return n == 1, nil
+}
+
+// ClaimOpenWorkflowAttempt returns the step's currently OPEN attempt, creating
+// one only if there is none — atomically, under the store's write lock.
+//
+// It replaces a read-then-decide that lived in the coordinator:
+// "attempts[len-1].Outcome == \"\"" is a positional test made outside any
+// transaction, so two passes entering dispatch together could both read the same
+// open attempt and both believe they held it, or both find none and both create
+// one. An attempt row is what claims that work is in flight, so two passes
+// holding "the" open attempt is precisely how one launch's failure came to
+// conclude another launch's attempt.
+//
+// Serialising the read and the insert under writeMu makes "the open attempt" a
+// single durable fact rather than a coincidence of timing: exactly one caller
+// creates, and everyone else is handed the row that caller created. The bool
+// reports which of the two happened, so a caller that needs to know whether it
+// opened this attempt (rather than joining one) can tell.
+//
+// It deliberately does NOT reuse an attempt whose outcome is set: Checkpoint
+// 8H's rule that a prior provider's failed attempt is never overwritten by its
+// fallback's is unchanged.
+//
+// Hand-written for the same reason ClaimWorkflowAttemptOutcome is.
+func (s *Store) ClaimOpenWorkflowAttempt(
+	ctx context.Context,
+	id, stepID, harness, model string,
+	startedAt time.Time,
+) (domain.WorkflowAttempt, bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.ListWorkflowAttemptsByStep(ctx, stepID)
+	if err != nil {
+		return domain.WorkflowAttempt{}, false, fmt.Errorf("list workflow attempts for step %s: %w", stepID, err)
+	}
+	if len(rows) > 0 {
+		latest := workflowAttemptFromRow(rows[len(rows)-1])
+		if latest.Outcome == "" {
+			return latest, false, nil
+		}
+	}
+	maxAttempt, err := s.qw.GetMaxWorkflowAttemptNumber(ctx, stepID)
+	if err != nil {
+		return domain.WorkflowAttempt{}, false, fmt.Errorf("get max workflow attempt number for step %s: %w", stepID, err)
+	}
+	row, err := s.qw.InsertWorkflowAttempt(ctx, gen.InsertWorkflowAttemptParams{
+		ID:             id,
+		WorkflowStepID: stepID,
+		AttemptNumber:  maxAttempt + 1,
+		Harness:        harness,
+		Model:          model,
+		StartedAt:      startedAt,
+	})
+	if err != nil {
+		return domain.WorkflowAttempt{}, false, fmt.Errorf("insert workflow attempt for step %s: %w", stepID, err)
+	}
+	return workflowAttemptFromRow(row), true, nil
 }
 
 // ListWorkflowAttempts lists a step's attempts in attempt-number order.

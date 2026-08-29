@@ -155,16 +155,23 @@ type promptDeliveryRecord struct {
 	// fix attempt is durably bound to the delivery record that authorized it.
 	// Empty on the intent record, which is written before the attempt exists.
 	FixAttemptID string `json:"fixAttemptId,omitempty"`
+	// Generation is the durable identity of the dispatch that wrote this record
+	// — see fix_generation.go. It is minted before the outbox claim, stamped
+	// onto the outbox row BY that claim, and written here strictly before Send,
+	// so the row and the ledger name the same dispatch and either reconstructs
+	// the other. A zero value means a generation-less (legacy) record.
+	Generation fixDispatchGeneration `json:"generation,omitempty"`
 }
 
-func newPromptDeliveryRecord(prompt string, cycleNumber, transportAttempt int, contextPack bool) promptDeliveryRecord {
+func newPromptDeliveryRecord(prompt string, gen fixDispatchGeneration, contextPack bool) promptDeliveryRecord {
 	return promptDeliveryRecord{
 		PromptBytes:      len(prompt),
 		Transport:        ports.PromptTransportFor(len(prompt)),
 		ContextPack:      contextPack,
-		CycleNumber:      cycleNumber,
-		TransportAttempt: transportAttempt,
+		CycleNumber:      gen.CycleNumber,
+		TransportAttempt: gen.TransportAttempt,
 		PromptReceipt:    promptReceiptDigest(prompt),
+		Generation:       gen,
 	}
 }
 
@@ -234,15 +241,37 @@ func (c *Coordinator) dispatchFixStep(ctx stdctx.Context, run domain.WorkflowRun
 	if err != nil {
 		return fixStep, err
 	}
-	if int64(len(attempts)) >= int64(cycleNumber) {
+	if int64(len(attempts)) >= int64(cycleNumber) && !c.fixCycleDispatchIncomplete(ctx, run.ID, fixStep.ID, cycleNumber) {
 		// This cycle already has its attempt row: either fully dispatched
 		// and progressing, or ambiguous and awaiting attention. Either way,
 		// never re-enter dispatch for it.
+		//
+		// The one exception is crash boundary F, and it is stated as a positive
+		// shape rather than as "no dispatch record". The attempt row is created
+		// before the fix_dispatched record (that record must name the attempt),
+		// so a crash in between leaves a cycle the attempt count calls
+		// "dispatched" and that observeFixStep cannot observe at all, because
+		// the checkpoint it reads the session and fingerprint from was never
+		// written. fixCycleDispatchIncomplete recognises exactly that window —
+		// an intent record present, a dispatch record absent — and lets it fall
+		// through to the recovery branch, which completes the bookkeeping
+		// without sending anything a second time.
+		//
+		// The shape is deliberately narrow. An attempt row with NO intent record
+		// is not this window: the attempt is durable evidence that a delivery
+		// completed, so "no intent record" cannot be read as "Send was never
+		// reached" there, and falling through would license a resend on state
+		// that proves the opposite.
 		return fixStep, nil
 	}
 
 	now := c.clock()
 	transportAttempt := c.fixTransportRetryCount(ctx, run.ID, fixStep.ID, cycleNumber)
+	// The identity this pass believes the dispatch to be, derived from what it
+	// can read right now and carrying no token yet. A pending entry mints a
+	// token from it; a recovered entry compares the generation on disk against
+	// it. See fix_generation.go.
+	intended := c.intendedFixDispatchGeneration(run, fixStep, reviewRun, cycleNumber, transportAttempt, 0, findings)
 	entry, _, err := c.store.EnqueueWorkflowOutboxEntry(ctx, domain.WorkflowOutboxEntry{
 		ID:             "wfo-" + c.newID(),
 		WorkflowRunID:  run.ID,
@@ -258,7 +287,9 @@ func (c *Coordinator) dispatchFixStep(ctx stdctx.Context, run domain.WorkflowRun
 
 	switch entry.Status {
 	case domain.WorkflowOutboxPending:
-		return c.dispatchFixFromPending(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt, findings)
+		gen := intended
+		gen.ID = "wfg-" + c.newID()
+		return c.dispatchFixFromPending(ctx, run, workStep, fixStep, entry, reviewRun, prompt, findings, gen)
 	case domain.WorkflowOutboxDispatched, domain.WorkflowOutboxAcknowledged:
 		// Boundary B: a previous attempt got at least as far as "about to call
 		// Send". Send still has no idempotency key, so this must never call it
@@ -269,7 +300,7 @@ func (c *Coordinator) dispatchFixStep(ctx stdctx.Context, run domain.WorkflowRun
 		// prove it was, and escalates only what is genuinely unprovable — once.
 		// Before this, every pass through here parked the run and wrote another
 		// identical checkpoint, which is the wf-6528a538 incident.
-		return c.resolveFixDeliveryAfterRestart(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt, findings)
+		return c.resolveFixDeliveryAfterRestart(ctx, run, workStep, fixStep, entry, reviewRun, prompt, findings, intended)
 	case domain.WorkflowOutboxFailed:
 		return fixStep, nil
 	default:
@@ -283,18 +314,74 @@ func (c *Coordinator) dispatchFixFromPending(
 	workStep, fixStep domain.WorkflowStep,
 	entry domain.WorkflowOutboxEntry,
 	reviewRun domain.ReviewRun,
-	cycleNumber int,
-	transportAttempt int,
 	prompt string,
 	findings fixFindingsRef,
+	gen fixDispatchGeneration,
 ) (domain.WorkflowStep, error) {
 	now := c.clock()
-	if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, domain.WorkflowOutboxPending, domain.WorkflowOutboxDispatched, now, ""); err != nil {
+	// The claim, and the token it is taken under — the same S4/S5 shape worker
+	// dispatch uses (dispatch.go), for the same reason.
+	//
+	// ClaimWorkflowOutboxDispatch replaces the plain status CAS this path used
+	// to make. The plain CAS deliberately CLEARS both generation columns, which
+	// is right for a transition that ENDS a claim and exactly wrong for one that
+	// takes it: it left the row `dispatched` and owned by nobody, so every later
+	// transition off it — acknowledge, fail, release — was satisfiable by any
+	// pass that happened to re-derive the same cycle.
+	claimed, err := c.store.ClaimWorkflowOutboxDispatch(ctx, entry.ID, now, gen.ID)
+	if err != nil {
 		return fixStep, err
 	}
+	if !claimed {
+		// Somebody else took this row between the enqueue that found it pending
+		// and this statement. That pass owns the delivery; this one must not
+		// send a second copy of the same findings into the worker's composer,
+		// and must not report an outcome for a dispatch it does not hold.
+		if c.log != nil {
+			c.log.Debug("workflow: another pass claimed this fix dispatch first",
+				"run", run.ID, "step", fixStep.ID, "cycle", gen.CycleNumber)
+		}
+		return fixStep, nil
+	}
 	entry.Status = domain.WorkflowOutboxDispatched
+	entry.DispatchGeneration = gen.ID
 
-	return c.deliverFixPrompt(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt, findings)
+	return c.deliverFixPrompt(ctx, run, workStep, fixStep, entry, reviewRun, prompt, findings, gen)
+}
+
+// fixCycleDispatchIncomplete recognises crash boundary F for one cycle: AO
+// wrote the pre-delivery record (so Send was reached) and never wrote the
+// fix_dispatched record that completes it.
+//
+// Both halves are required. A cycle with neither record has nothing to complete;
+// a cycle with both is finished. Only "intent yes, dispatched no" is the
+// interrupted window, and saying so positively is what keeps a ledger that has
+// lost its dispatch rows for some other reason from being read as one AO may
+// deliver into again.
+func (c *Coordinator) fixCycleDispatchIncomplete(ctx stdctx.Context, runID, stepID string, cycleNumber int) bool {
+	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		// A read failure must never look like an interrupted dispatch: that
+		// would re-enter dispatch on no information at all.
+		return false
+	}
+	intent := false
+	for _, cp := range cps {
+		if cp.WorkflowStepID == nil || *cp.WorkflowStepID != stepID {
+			continue
+		}
+		switch cp.DurablePhase {
+		case fixDispatchedPhase:
+			if fixCycleNumberOf(cp) == cycleNumber {
+				return false
+			}
+		case fixDispatchIntentPhase:
+			if fixCycleNumberOf(cp) == cycleNumber {
+				intent = true
+			}
+		}
+	}
+	return intent
 }
 
 // runFixStep puts the fix step into the state a delivery is made from. Both
@@ -334,11 +421,11 @@ func (c *Coordinator) deliverFixPrompt(
 	workStep, fixStep domain.WorkflowStep,
 	entry domain.WorkflowOutboxEntry,
 	reviewRun domain.ReviewRun,
-	cycleNumber int,
-	transportAttempt int,
 	prompt string,
 	findings fixFindingsRef,
+	gen fixDispatchGeneration,
 ) (domain.WorkflowStep, error) {
+	cycleNumber, transportAttempt := gen.CycleNumber, gen.TransportAttempt
 	// The last gate before a worktree is deliberately changed: is the authority
 	// this cycle was derived from still the authority the run holds? An approved
 	// review, or a review the step no longer speaks for, does not authorize a
@@ -350,7 +437,20 @@ func (c *Coordinator) deliverFixPrompt(
 			c.log.Info("workflow: refusing a fix delivery whose review authority is stale",
 				"run", run.ID, "step", fixStep.ID, "cycle", cycleNumber, "reason", refusal)
 		}
-		return fixStep, nil
+		return c.refuseFixDelivery(ctx, fixStep, entry, gen, refusal)
+	}
+	// The generation half of the same gate. fixAuthorityRefusal asks whether the
+	// CURRENT review authorizes a fix cycle at all; this asks whether the cycle
+	// in hand is still the cycle that review authorized — the exact question a
+	// superseded review generation, a re-aimed session or a changed findings
+	// payload each answers "no" to while the first gate says yes. See
+	// fixGenerationStaleRefusal.
+	if refusal := c.fixGenerationStaleRefusal(ctx, gen, reviewRun, findings); refusal != "" {
+		if c.log != nil {
+			c.log.Info("workflow: refusing a stale fix dispatch generation",
+				"run", run.ID, "step", fixStep.ID, "generation", gen.ID, "cycle", cycleNumber, "reason", refusal)
+		}
+		return c.refuseFixDelivery(ctx, fixStep, entry, gen, refusal)
 	}
 
 	fixStep, err := c.runFixStep(ctx, fixStep)
@@ -361,7 +461,7 @@ func (c *Coordinator) deliverFixPrompt(
 	// persist it) right here — the single outbox-idempotency-guarded point
 	// reached exactly once per real cycle dispatch, never once per poll.
 	prompt, contextPack := c.applyFixLifecycleDecision(ctx, run, fixStep, reviewRun, cycleNumber, prompt)
-	delivery := newPromptDeliveryRecord(prompt, cycleNumber, transportAttempt, contextPack)
+	delivery := newPromptDeliveryRecord(prompt, gen, contextPack)
 	// Computed against the FINAL prompt — after applyFixLifecycleDecision may
 	// have prepended a context pack — so `Embedded` is a statement about the
 	// exact bytes deliverAndConfirm is about to write, not about what the
@@ -384,19 +484,49 @@ func (c *Coordinator) deliverFixPrompt(
 		// asking a human to resolve "command too long" was never a decision
 		// anyone could make. Bounded, durable, self-remediable.
 		if errors.Is(err, ports.ErrPromptUndelivered) && transportAttempt < maxFixTransportRetries {
-			return c.recordFixTransportRetry(ctx, run, fixStep, entry, delivery, err)
+			return c.recordFixTransportRetry(ctx, run, fixStep, entry, gen, delivery, err)
 		}
-		return c.recordFixDispatchFailure(ctx, run, fixStep, entry, domain.WorkflowErrorPromptDeliveryFailed, err)
+		return c.recordFixDispatchFailure(ctx, run, fixStep, entry, gen, domain.WorkflowErrorPromptDeliveryFailed, err)
 	}
 	// Checkpoint 8P-E.17: a prompt sitting in the composer is NOT a delivered
 	// fix cycle, and recording one as if it were is the whole of wf-57f90ff2.
 	// Every submit-only retry has already been spent by deliverAndConfirm, so
 	// this is a durable statement of a condition, not a place to try again.
 	if submission == ports.PromptLoadedNotSubmitted {
-		return c.recordFixPromptNotSubmitted(ctx, run, fixStep, entry, reviewRun, delivery)
+		return c.recordFixPromptNotSubmitted(ctx, run, fixStep, entry, reviewRun, gen, delivery)
 	}
 	delivery.Submission = submission
-	return c.recordFixDispatchSuccess(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, delivery)
+	return c.recordFixDispatchSuccess(ctx, run, workStep, fixStep, entry, reviewRun, gen, delivery)
+}
+
+// refuseFixDelivery is what a refused delivery leaves behind: nothing, plus the
+// claim handed back.
+//
+// Refusing is inert by design — no prompt, no attempt, no checkpoint, no state
+// change — but the outbox row has already been claimed by this pass, and a
+// claim nobody is going to use is a row the dispatch that IS current cannot
+// take. Releasing it is compare-and-swapped on this generation's own token, so
+// a pass that has since lost the claim releases nothing rather than handing a
+// live delivery's row to somebody else.
+func (c *Coordinator) refuseFixDelivery(
+	ctx stdctx.Context,
+	fixStep domain.WorkflowStep,
+	entry domain.WorkflowOutboxEntry,
+	gen fixDispatchGeneration,
+	reason string,
+) (domain.WorkflowStep, error) {
+	if entry.Status != domain.WorkflowOutboxDispatched {
+		return fixStep, nil
+	}
+	released, err := c.store.ReleaseDispatchedWorkflowOutboxGeneration(ctx, entry.ID, "", gen.ID)
+	if err != nil {
+		return fixStep, err
+	}
+	if !released && c.log != nil {
+		c.log.Debug("workflow: refused fix delivery no longer holds its outbox claim",
+			"step", fixStep.ID, "generation", gen.ID, "reason", reason)
+	}
+	return fixStep, nil
 }
 
 func (c *Coordinator) recordFixDispatchSuccess(
@@ -405,10 +535,45 @@ func (c *Coordinator) recordFixDispatchSuccess(
 	workStep, fixStep domain.WorkflowStep,
 	entry domain.WorkflowOutboxEntry,
 	reviewRun domain.ReviewRun,
-	cycleNumber int,
+	gen fixDispatchGeneration,
 	delivery promptDeliveryRecord,
 ) (domain.WorkflowStep, error) {
 	now := c.clock()
+	cycleNumber := gen.CycleNumber
+
+	// THE OWNERSHIP GATE, and it comes first on purpose.
+	//
+	// Everything below this line mutates the fix lifecycle: it opens the
+	// attempt row a fix cycle is counted by, and it writes the fix_dispatched
+	// fingerprint checkpoint that observeFixStep observes against and that
+	// dispatchReviewStep later reads as its licence to open the next review. A
+	// generation that no longer owns this delivery must be able to do none of
+	// it — which is requirement 3's "a stale generation must not open an
+	// attempt, advance fix state, or trigger review", enforced at the one place
+	// all three are written.
+	//
+	// The gate is the acknowledge CAS itself: `dispatched -> acknowledged` for
+	// the EXACT token that holds the claim. Zero rows matched means this pass
+	// does not own the delivery, and the honest response is to change nothing.
+	// An entry already `acknowledged` is crash boundary D — the ack landed and
+	// the daemon died before the attempt row — and is the one case that
+	// legitimately proceeds without a CAS of its own, because the recovery path
+	// that got here has already proven, from the pre-delivery record, that this
+	// generation is the one that acknowledged it.
+	if entry.Status != domain.WorkflowOutboxAcknowledged {
+		acked, err := c.store.AcknowledgeWorkflowOutboxDispatch(ctx, entry.ID, entry.Status, now, gen.ID)
+		if err != nil {
+			return fixStep, err
+		}
+		if !acked {
+			if c.log != nil {
+				c.log.Info("workflow: fix dispatch generation no longer owns its outbox entry; recording nothing",
+					"run", run.ID, "step", fixStep.ID, "generation", gen.ID, "cycle", cycleNumber, "status", entry.Status)
+			}
+			return fixStep, nil
+		}
+		entry.Status = domain.WorkflowOutboxAcknowledged
+	}
 
 	attempts, err := c.store.ListWorkflowAttempts(ctx, fixStep.ID)
 	if err != nil {
@@ -441,12 +606,10 @@ func (c *Coordinator) recordFixDispatchSuccess(
 		// delivery and the attempt stay one traceable pair either way.
 		delivery.FixAttemptID = attempts[len(attempts)-1].ID
 	}
-
-	if entry.Status != domain.WorkflowOutboxAcknowledged {
-		if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, entry.Status, domain.WorkflowOutboxAcknowledged, now, ""); err != nil {
-			return fixStep, err
-		}
-	}
+	// The attempt is bound to the generation on BOTH records, so recovery can
+	// answer "which attempt did this generation open?" from either side.
+	delivery.Generation = gen
+	delivery.Generation.FixAttemptID = delivery.FixAttemptID
 
 	rid := reviewRun.ID
 	sid := string(reviewRun.SessionID)
@@ -489,10 +652,22 @@ func (c *Coordinator) recordFixDispatchSuccess(
 //   - a durable wake is scheduled, so the retry happens headlessly; and
 //   - the checkpoint carries the delivery facts, so the retry budget is
 //     reconstructible after a restart.
-func (c *Coordinator) recordFixTransportRetry(ctx stdctx.Context, run domain.WorkflowRun, fixStep domain.WorkflowStep, entry domain.WorkflowOutboxEntry, delivery promptDeliveryRecord, cause error) (domain.WorkflowStep, error) {
+func (c *Coordinator) recordFixTransportRetry(ctx stdctx.Context, run domain.WorkflowRun, fixStep domain.WorkflowStep, entry domain.WorkflowOutboxEntry, gen fixDispatchGeneration, delivery promptDeliveryRecord, cause error) (domain.WorkflowStep, error) {
 	now := c.clock()
-	if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, entry.Status, domain.WorkflowOutboxFailed, now, string(domain.WorkflowErrorPromptDeliveryFailed)); err != nil {
+	// Ownership-conditioned, like every other transition off `dispatched`: a
+	// generation that has lost its claim must not stamp its own transport
+	// failure onto a live delivery, nor park a step somebody else is driving.
+	failed, err := c.store.FailWorkflowOutboxWithGeneration(
+		ctx, entry.ID, entry.Status, now, string(domain.WorkflowErrorPromptDeliveryFailed), gen.ID, gen.ID)
+	if err != nil {
 		return fixStep, err
+	}
+	if !failed {
+		if c.log != nil {
+			c.log.Info("workflow: stale fix generation cannot record a transport retry",
+				"step", fixStep.ID, "generation", gen.ID, "cycle", gen.CycleNumber)
+		}
+		return fixStep, nil
 	}
 	if fixStep.State == domain.WorkflowStepRunning {
 		if _, err := c.store.UpdateWorkflowStepState(ctx, fixStep.ID, domain.WorkflowStepRunning, domain.WorkflowStepWaiting, now); err != nil {
@@ -525,10 +700,22 @@ func (c *Coordinator) recordFixTransportRetry(ctx stdctx.Context, run domain.Wor
 	return fixStep, nil
 }
 
-func (c *Coordinator) recordFixDispatchFailure(ctx stdctx.Context, run domain.WorkflowRun, fixStep domain.WorkflowStep, entry domain.WorkflowOutboxEntry, errClass domain.WorkflowErrorClass, cause error) (domain.WorkflowStep, error) {
+func (c *Coordinator) recordFixDispatchFailure(ctx stdctx.Context, run domain.WorkflowRun, fixStep domain.WorkflowStep, entry domain.WorkflowOutboxEntry, gen fixDispatchGeneration, errClass domain.WorkflowErrorClass, cause error) (domain.WorkflowStep, error) {
 	now := c.clock()
-	if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, entry.Status, domain.WorkflowOutboxFailed, now, string(errClass)); err != nil {
+	failed, err := c.store.FailWorkflowOutboxWithGeneration(
+		ctx, entry.ID, entry.Status, now, string(errClass), gen.ID, gen.ID)
+	if err != nil {
 		return fixStep, err
+	}
+	if !failed {
+		// The claim moved on. Failing the step and parking the run for a
+		// dispatch this pass no longer owns would stop a delivery that is, as
+		// far as the ledger is concerned, still live.
+		if c.log != nil {
+			c.log.Info("workflow: stale fix generation cannot record a dispatch failure",
+				"step", fixStep.ID, "generation", gen.ID, "cycle", gen.CycleNumber, "err", cause)
+		}
+		return fixStep, nil
 	}
 	if fixStep.State == domain.WorkflowStepRunning {
 		if _, err := c.store.UpdateWorkflowStepState(ctx, fixStep.ID, domain.WorkflowStepRunning, domain.WorkflowStepFailed, now); err != nil {
@@ -576,13 +763,25 @@ func (c *Coordinator) recordFixPromptNotSubmitted(
 	fixStep domain.WorkflowStep,
 	entry domain.WorkflowOutboxEntry,
 	reviewRun domain.ReviewRun,
+	gen fixDispatchGeneration,
 	delivery promptDeliveryRecord,
 ) (domain.WorkflowStep, error) {
 	now := c.clock()
 	if entry.Status != domain.WorkflowOutboxAcknowledged {
-		if _, err := c.store.UpdateWorkflowOutboxStatus(ctx, entry.ID, entry.Status, domain.WorkflowOutboxAcknowledged, now, ""); err != nil {
+		acked, err := c.store.AcknowledgeWorkflowOutboxDispatch(ctx, entry.ID, entry.Status, now, gen.ID)
+		if err != nil {
 			return fixStep, err
 		}
+		if !acked {
+			// Not this pass's delivery to park. Whoever owns the claim owns the
+			// outcome, and this generation records nothing.
+			if c.log != nil {
+				c.log.Info("workflow: stale fix generation cannot record an unsubmitted prompt",
+					"step", fixStep.ID, "generation", gen.ID, "cycle", gen.CycleNumber)
+			}
+			return fixStep, nil
+		}
+		entry.Status = domain.WorkflowOutboxAcknowledged
 	}
 	if fixStep.State == domain.WorkflowStepRunning {
 		if _, err := c.store.UpdateWorkflowStepState(ctx, fixStep.ID, domain.WorkflowStepRunning, domain.WorkflowStepWaiting, now); err != nil {

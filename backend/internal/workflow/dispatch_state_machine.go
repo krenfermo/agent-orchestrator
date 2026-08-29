@@ -276,6 +276,12 @@ func (o sessionFactsOwnership) ObserveSessionOwnership(ctx stdctx.Context, id do
 // writes the same shape and the phases differ only in what they are entitled to
 // claim.
 type dispatchBoundary struct {
+	// id, when non-empty, is the record id the caller has already minted and
+	// committed to elsewhere. The intent boundary uses it: its id IS the
+	// attempt generation stamped on the outbox claim, so the claim and the
+	// record it names cannot disagree. Every other boundary leaves it empty and
+	// gets a fresh id.
+	id      string
 	run     domain.WorkflowRun
 	step    domain.WorkflowStep
 	entry   domain.WorkflowOutboxEntry
@@ -311,8 +317,12 @@ func (c *Coordinator) recordDispatchBoundary(ctx stdctx.Context, b dispatchBound
 		return errNoDispatchRecorder
 	}
 	stepID := b.step.ID
+	recordID := b.id
+	if recordID == "" {
+		recordID = "wfd-" + c.newID()
+	}
 	cp := domain.WorkflowDispatchCheckpoint{
-		ID:             "wfd-" + c.newID(),
+		ID:             recordID,
 		WorkflowRunID:  b.run.ID,
 		WorkflowStepID: &stepID,
 		Phase:          b.phase,
@@ -380,8 +390,27 @@ func encodeDispatchEvidence(evidence map[string]string) string {
 // attempt this launch belongs to, and the workspace facts the launch was aimed
 // at, recorded before it was attempted.
 type workerDispatchIntent struct {
-	attempt      domain.WorkflowAttempt
-	harness      domain.AgentHarness
+	attempt domain.WorkflowAttempt
+	harness domain.AgentHarness
+	// generation is THE attempt generation: the id of the `intent`
+	// dispatch-boundary record this launch pass was made under, and the token
+	// stamped into workflow_outbox.dispatch_generation by the claim that took
+	// the row.
+	//
+	// It is the field the worker path did not have. Every transition off
+	// `dispatched` used to be `id + expected_status` -- a predicate ANY
+	// concurrent pass satisfies -- over a launch whose identity nothing
+	// recorded, so a paused pass could fail, release or acknowledge a launch
+	// that was no longer its own. Naming it in each of those predicates buys the
+	// invariant the reviewer path already has: no durable transition off a
+	// launch may be taken by a pass that does not hold the generation that
+	// launch was made under.
+	//
+	// It needs no new column: workflow_outbox.dispatch_generation already exists
+	// and is already table-generic. It is empty for an adoption of a row claimed
+	// before the worker path stamped one, which is correct -- an unclaimed row is
+	// completed by an unclaimed pass and by no other.
+	generation   string
 	branch       string
 	worktreePath string
 	baseSHA      string
@@ -395,12 +424,22 @@ type workerDispatchIntent struct {
 // "an attempt row exists" must stop meaning "an attempt is running". From this
 // point on, an attempt exists whose step is NOT running and whose dispatch has
 // no confirmation, which is the state the whole file is built to make readable.
+//
+// generation is the token the outbox claim was stamped with. On the FIRST
+// provider attempt of a claim it is also the id this intent record is written
+// under, so "the generation" and "the record that names the launch it fences"
+// are literally the same row. A fallback provider attempt within the same claim
+// re-enters here with recordID empty: it is a second intent under ONE claim, and
+// minting a second generation for it would fence the fallback out of the claim
+// its own predecessor took.
 func (c *Coordinator) beginWorkerDispatch(
 	ctx stdctx.Context,
 	run domain.WorkflowRun,
 	step domain.WorkflowStep,
 	entry domain.WorkflowOutboxEntry,
 	harness domain.AgentHarness,
+	generation string,
+	recordID string,
 ) (workerDispatchIntent, error) {
 	if _, ok := c.dispatchRecorder(); !ok {
 		return workerDispatchIntent{}, errNoDispatchRecorder
@@ -408,13 +447,13 @@ func (c *Coordinator) beginWorkerDispatch(
 	now := c.clock()
 	attempt, err := c.openWorkerAttempt(ctx, step.ID, harness, now)
 	if err != nil {
-		return workerDispatchIntent{}, err
+		return workerDispatchIntent{generation: generation}, err
 	}
 	// From here on the intent is returned even when this function fails, so the
 	// caller can conclude the attempt row it just opened. An attempt left open
 	// over a dispatch that never launched would be the same "a row exists,
 	// therefore something is running" reading this whole file removes.
-	intent := workerDispatchIntent{attempt: attempt, harness: harness}
+	intent := workerDispatchIntent{attempt: attempt, harness: harness, generation: generation}
 	// The workspace facts a launch is aimed at, "when available": before a
 	// session exists AO knows the project checkout it is launching into and
 	// nothing about the worktree that launch will be given. Whatever it can
@@ -424,6 +463,7 @@ func (c *Coordinator) beginWorkerDispatch(
 		c.observedLaunchWorkspace(ctx, run, "", "", c.projectPathFor(ctx, run.ProjectID))
 
 	if err := c.recordDispatchBoundary(ctx, dispatchBoundary{
+		id:  recordID,
 		run: run, step: step, entry: entry, attempt: attempt.ID, harness: harness,
 		phase:        domain.DispatchPhaseWorkerLaunchIntent,
 		stage:        domain.LaunchStageIntent,
@@ -433,7 +473,10 @@ func (c *Coordinator) beginWorkerDispatch(
 		worktreePath: intent.worktreePath,
 		baseSHA:      intent.baseSHA,
 		fingerprint:  intent.fingerprint,
-		evidence:     map[string]string{"outboxStatus": string(entry.Status)},
+		evidence: map[string]string{
+			"outboxStatus":      string(entry.Status),
+			"attemptGeneration": generation,
+		},
 	}); err != nil {
 		return intent, err
 	}
@@ -443,20 +486,24 @@ func (c *Coordinator) beginWorkerDispatch(
 // openWorkerAttempt returns the step's open attempt, creating one when the step
 // has none or when the latest one is already terminal (Checkpoint 8H: a prior
 // provider's failed attempt is never overwritten by the fallback's).
+//
+// The read and the insert are ONE store call, and that is the fix rather than a
+// tidy-up. "The open attempt" used to be positional and computed outside any
+// transaction -- list the attempts, look at the last one, decide -- so two
+// passes entering dispatch together could both read the same open row and both
+// believe they held it, or both see none and both create one. An attempt row is
+// what claims that work is in flight, so two holders of one open attempt is
+// exactly how one launch's failure concluded another launch's attempt.
+// ClaimOpenWorkflowAttempt serialises the pair, and the loser is handed the
+// winner's row instead of a second one.
 func (c *Coordinator) openWorkerAttempt(
 	ctx stdctx.Context,
 	stepID string,
 	harness domain.AgentHarness,
 	now time.Time,
 ) (domain.WorkflowAttempt, error) {
-	attempts, err := c.store.ListWorkflowAttempts(ctx, stepID)
-	if err != nil {
-		return domain.WorkflowAttempt{}, err
-	}
-	if len(attempts) > 0 && attempts[len(attempts)-1].Outcome == "" {
-		return attempts[len(attempts)-1], nil
-	}
-	return c.store.CreateWorkflowAttempt(ctx, "wfa-"+c.newID(), stepID, string(harness), "", now)
+	attempt, _, err := c.store.ClaimOpenWorkflowAttempt(ctx, "wfa-"+c.newID(), stepID, string(harness), "", now)
+	return attempt, err
 }
 
 // observedLaunchWorkspace reads whatever workspace facts are available for a
@@ -604,6 +651,16 @@ const (
 	// unconfirmedWriteFailed is a launch AO observed in full and could not
 	// durably record, because the confirmation write itself failed.
 	unconfirmedWriteFailed unconfirmedLaunchReason = "confirmation_write_failed"
+	// unconfirmedClaimLost is a launch AO observed in full and may NOT record as
+	// this step's confirmation, because the outbox claim it was made under is no
+	// longer the claim on the row. Somebody else owns this dispatch now.
+	//
+	// It is the third distinct shape, and it belongs with the other two rather
+	// than with failure: a worker really was launched and really is out there,
+	// so the answer is adoption by whoever holds the claim, never a relaunch and
+	// never a retry. Recording it as a failure would licence exactly the second
+	// worker on one worktree this whole state machine exists to prevent.
+	unconfirmedClaimLost unconfirmedLaunchReason = "claim_lost"
 )
 
 // unconfirmedLaunchRecord is the decoded form of that checkpoint's RetryState:

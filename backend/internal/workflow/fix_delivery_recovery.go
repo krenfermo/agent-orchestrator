@@ -94,6 +94,11 @@ type fixDeliveryEvidence struct {
 	CycleNumber      int    `json:"cycleNumber"`
 	TransportAttempt int    `json:"transportAttempt,omitempty"`
 	SessionID        string `json:"sessionId"`
+	// Generation is the fix dispatch generation this evidence is about, when
+	// one is recorded. Empty means a generation-less (legacy) delivery. It is
+	// part of the dedup key by construction: two different generations of the
+	// same cycle are two different unproven conditions and are recorded as two.
+	Generation string `json:"generation,omitempty"`
 	// IntentRecorded is whether the pre-delivery record exists at all.
 	IntentRecorded bool `json:"intentRecorded"`
 	// Receipt is what the session says about the last prompt written into it:
@@ -195,17 +200,31 @@ func (c *Coordinator) recordFixDispatchIntent(
 // key, and it must not inherit the previous attempt's intent as proof that it
 // itself got as far as Send.
 func (c *Coordinator) findFixDispatchIntent(ctx stdctx.Context, runID, stepID string, cycleNumber, transportAttempt int) (domain.WorkflowCheckpoint, promptDeliveryRecord, bool) {
+	newest, rec, _, found := c.findFixDispatchIntents(ctx, runID, stepID, cycleNumber, transportAttempt)
+	return newest, rec, found
+}
+
+// findFixDispatchIntents is the same lookup, also returning EVERY matching
+// record rather than only the newest one.
+//
+// Generation resolution needs all of them. "Which generation owns the delivery
+// on disk?" is answerable only if the records agree on one, and a lookup that
+// silently kept the newest would answer it by picking a winner — which is the
+// heuristic duplicate-suppression requirement 8 rules out. Disagreement is a
+// fail-closed condition, so it has to be visible.
+func (c *Coordinator) findFixDispatchIntents(ctx stdctx.Context, runID, stepID string, cycleNumber, transportAttempt int) (domain.WorkflowCheckpoint, promptDeliveryRecord, []promptDeliveryRecord, bool) {
 	cps, err := c.store.ListWorkflowCheckpoints(ctx, runID)
 	if err != nil {
 		// A read failure is not evidence of absence. Returning "found" with a
 		// zero record would be a lie; returning "not found" would license a
 		// resend on no information at all. The caller treats the third state —
 		// see resolveFixDeliveryAfterRestart's readFailed branch.
-		return domain.WorkflowCheckpoint{}, promptDeliveryRecord{}, false
+		return domain.WorkflowCheckpoint{}, promptDeliveryRecord{}, nil, false
 	}
 	var (
 		newest domain.WorkflowCheckpoint
 		rec    promptDeliveryRecord
+		all    []promptDeliveryRecord
 		found  bool
 	)
 	for _, cp := range cps {
@@ -219,11 +238,12 @@ func (c *Coordinator) findFixDispatchIntent(ctx stdctx.Context, runID, stepID st
 		if candidate.CycleNumber != cycleNumber || candidate.TransportAttempt != transportAttempt {
 			continue
 		}
+		all = append(all, candidate)
 		if !found || !cp.CreatedAt.Before(newest.CreatedAt) {
 			newest, rec, found = cp, candidate, true
 		}
 	}
-	return newest, rec, found
+	return newest, rec, all, found
 }
 
 // classifyFixDelivery is the single decision function this file exists for. It
@@ -334,35 +354,93 @@ func (c *Coordinator) resolveFixDeliveryAfterRestart(
 	workStep, fixStep domain.WorkflowStep,
 	entry domain.WorkflowOutboxEntry,
 	reviewRun domain.ReviewRun,
-	cycleNumber, transportAttempt int,
 	prompt string,
 	findings fixFindingsRef,
+	intended fixDispatchGeneration,
 ) (domain.WorkflowStep, error) {
-	intent, intentRec, intentFound := c.findFixDispatchIntent(ctx, run.ID, fixStep.ID, cycleNumber, transportAttempt)
+	cycleNumber, transportAttempt := intended.CycleNumber, intended.TransportAttempt
+	intent, intentRec, intents, intentFound := c.findFixDispatchIntents(ctx, run.ID, fixStep.ID, cycleNumber, transportAttempt)
+
+	// WHOSE dispatch is this? Answered before anything else, because every
+	// branch below either sends or advances the lifecycle, and both are things
+	// only the generation that owns the delivery may do. A generation is
+	// ADOPTED here, never re-minted: a fresh token would be a second identity
+	// for a delivery that already happened.
+	gen, disposition, why := c.resolveOwningFixGeneration(entry, intended, intents)
+	if disposition == fixGenerationUnprovable {
+		return c.markFixGenerationUnprovable(ctx, run, fixStep, intended, why)
+	}
+
 	verdict, evidence := c.classifyFixDelivery(ctx, reviewRun.SessionID, cycleNumber, transportAttempt,
 		intent, intentRec, intentFound, prompt)
+	evidence.Generation = gen.ID
 
 	switch verdict {
 	case fixDeliveryNotSent:
 		// Provably nothing reached the agent. Deliver once, through the very
-		// same path the first attempt would have taken.
+		// same path the first attempt would have taken, under the generation
+		// that already owns the claim.
 		if c.log != nil {
 			c.log.Info("workflow: fix prompt was provably never delivered; delivering once",
-				"run", run.ID, "step", fixStep.ID, "cycle", cycleNumber)
+				"run", run.ID, "step", fixStep.ID, "cycle", cycleNumber, "generation", gen.ID)
 		}
-		return c.deliverFixPrompt(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, transportAttempt, prompt, findings)
+		return c.deliverFixPrompt(ctx, run, workStep, fixStep, entry, reviewRun, prompt, findings, gen)
 
 	case fixDeliveryDelivered:
 		// The agent has it. Finish the bookkeeping the crash interrupted and
 		// hand the cycle to observeFixStep — no second send, ever.
 		if c.log != nil {
 			c.log.Info("workflow: fix prompt delivery proven after restart; resuming observation",
-				"run", run.ID, "step", fixStep.ID, "cycle", cycleNumber, "receipt", evidence.Receipt, "turn", evidence.TurnAfterDispatch)
+				"run", run.ID, "step", fixStep.ID, "cycle", cycleNumber, "generation", gen.ID,
+				"receipt", evidence.Receipt, "turn", evidence.TurnAfterDispatch)
 		}
-		return c.adoptDeliveredFix(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, intentRec, evidence)
+		return c.adoptDeliveredFix(ctx, run, workStep, fixStep, entry, reviewRun, gen, intentRec, evidence)
 	}
 
 	return c.markFixDeliveryUnproven(ctx, run, fixStep, evidence)
+}
+
+// markFixGenerationUnprovable is requirement 9's fail-closed outcome: durable
+// fix-cycle state that AO cannot map onto exactly one dispatch generation.
+//
+// It does the opposite of a retry: the step is parked (never failed, so a person
+// can still continue the run once they have resolved it), the run is parked with
+// a named canonical reason, and the condition is recorded ONCE —
+// recordAttentionStopOnce compares against the run's newest checkpoint, so an
+// unchanged condition writes nothing on the second and every later pass. No wake
+// is scheduled and no budget is spent, because nothing AO can do by itself will
+// change the answer: the ledger is what it is.
+//
+// Fabricating a generation to get past this is the one thing it must never do.
+// A guessed identity would let a delivery nobody can account for open an
+// attempt and advance a review cycle, which is exactly the class of bug the
+// generation exists to prevent.
+func (c *Coordinator) markFixGenerationUnprovable(
+	ctx stdctx.Context,
+	run domain.WorkflowRun,
+	fixStep domain.WorkflowStep,
+	intended fixDispatchGeneration,
+	why string,
+) (domain.WorkflowStep, error) {
+	now := c.clock()
+	if fixStep.State == domain.WorkflowStepRunning || fixStep.State == domain.WorkflowStepReady {
+		if _, err := c.store.UpdateWorkflowStepState(ctx, fixStep.ID, fixStep.State, domain.WorkflowStepWaiting, now); err != nil {
+			return fixStep, err
+		}
+		fixStep.State = domain.WorkflowStepWaiting
+	}
+	if run.State == domain.WorkflowRunRunning || run.State == domain.WorkflowRunWaiting {
+		if _, err := c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, now); err != nil {
+			return fixStep, err
+		}
+	}
+	detail := why + " AO will not send this fix cycle, open an attempt for it or advance the run on it until that is resolved."
+	c.recordAttentionStopOnce(ctx, run, &fixStep.ID, ReasonFixGenerationUnprovable, detail)
+	if c.log != nil {
+		c.log.Warn("workflow: fix dispatch generation is unprovable; failing closed",
+			"run", run.ID, "step", fixStep.ID, "cycle", intended.CycleNumber, "reason", why)
+	}
+	return fixStep, nil
 }
 
 // adoptDeliveredFix completes a dispatch whose delivery AO has since proven,
@@ -380,7 +458,7 @@ func (c *Coordinator) adoptDeliveredFix(
 	workStep, fixStep domain.WorkflowStep,
 	entry domain.WorkflowOutboxEntry,
 	reviewRun domain.ReviewRun,
-	cycleNumber int,
+	gen fixDispatchGeneration,
 	intentRec promptDeliveryRecord,
 	evidence fixDeliveryEvidence,
 ) (domain.WorkflowStep, error) {
@@ -395,7 +473,8 @@ func (c *Coordinator) adoptDeliveredFix(
 	// on a question this call had already answered.
 	c.clearAmbiguousFixStop(ctx, run)
 	intentRec.Reason = "delivery proven after restart (" + evidence.Receipt + ")"
-	return c.recordFixDispatchSuccess(ctx, run, workStep, fixStep, entry, reviewRun, cycleNumber, intentRec)
+	intentRec.CycleNumber = gen.CycleNumber
+	return c.recordFixDispatchSuccess(ctx, run, workStep, fixStep, entry, reviewRun, gen, intentRec)
 }
 
 // clearAmbiguousFixStop releases a run parked on an unproven fix delivery that

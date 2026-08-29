@@ -174,6 +174,13 @@ type FixDeliveryView struct {
 	FixAttemptID     string `json:"fixAttemptId,omitempty"`
 	TransportAttempt int    `json:"transportAttempt,omitempty"`
 	SessionID        string `json:"sessionId,omitempty"`
+	// Generation is the durable identity of the dispatch that produced this
+	// delivery, and ReviewGeneration the review authority it was bound to.
+	// Empty means a delivery recorded before fix dispatch carried an identity.
+	Generation       string `json:"generation,omitempty"`
+	ReviewGeneration string `json:"reviewGeneration,omitempty"`
+	// Redelivery is 0 for the original dispatch, N for the Nth re-delivery.
+	Redelivery int `json:"redelivery,omitempty"`
 
 	PromptBytes   int    `json:"promptBytes"`
 	Transport     string `json:"transport,omitempty"`
@@ -209,6 +216,9 @@ func fixDeliveryView(r *workflowcore.FixDeliveryReport) *FixDeliveryView {
 		FixAttemptID:       r.FixAttemptID,
 		TransportAttempt:   r.TransportAttempt,
 		SessionID:          r.SessionID,
+		Generation:         r.Generation,
+		ReviewGeneration:   r.ReviewGeneration,
+		Redelivery:         r.Redelivery,
 		PromptBytes:        r.PromptBytes,
 		Transport:          string(r.Transport),
 		ContextPack:        r.ContextPack,
@@ -524,8 +534,18 @@ type WorkflowPlanView struct {
 	PromptContextVersion string                          `json:"promptContextVersion"`
 	PlanHash             string                          `json:"planHash,omitempty"`
 	ErrorClass           string                          `json:"errorClass,omitempty"`
-	Generated            *workflowcore.MasterPlan        `json:"generated,omitempty"`
-	Validation           *workflowcore.PlanValidation    `json:"validation,omitempty"`
+	// CommandStatus is the planner command's own state, which the plan status
+	// alone does not give: `invalid` + `failed` + errorClass planner_ambiguous
+	// is the exact triple the CP7 reopen is for, and a caller cannot recognise
+	// it without this field.
+	CommandStatus domain.WorkflowPlanCommandStatus `json:"commandStatus,omitempty"`
+	// UpdatedAt is the plan ROW's version, and the value a CP7 reopen must send
+	// back as observedPlanUpdatedAt. It is not a generation and not a token: it
+	// identifies the row state this view was rendered from, so a reopen computed
+	// against a state that has since been overwritten is refused.
+	UpdatedAt  time.Time                    `json:"updatedAt"`
+	Generated  *workflowcore.MasterPlan     `json:"generated,omitempty"`
+	Validation *workflowcore.PlanValidation `json:"validation,omitempty"`
 }
 
 type WorkflowTaskView struct {
@@ -716,7 +736,7 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 	runView.CapacityWait = workflowCapacityWaitView(detail.CapacityWait, time.Now().UTC())
 	view := WorkflowRunDetailView{Run: runView, Steps: steps}
 	if detail.Plan != nil {
-		pv := WorkflowPlanView{Status: detail.Plan.Status, ApprovalMode: detail.Plan.ApprovalMode, Provider: detail.Plan.Provider, Model: detail.Plan.Model, PromptContextVersion: detail.Plan.PromptContextVersion, PlanHash: detail.Plan.PlanHash, ErrorClass: detail.Plan.ErrorClass}
+		pv := WorkflowPlanView{Status: detail.Plan.Status, ApprovalMode: detail.Plan.ApprovalMode, Provider: detail.Plan.Provider, Model: detail.Plan.Model, PromptContextVersion: detail.Plan.PromptContextVersion, PlanHash: detail.Plan.PlanHash, ErrorClass: detail.Plan.ErrorClass, CommandStatus: detail.Plan.CommandStatus, UpdatedAt: detail.Plan.UpdatedAt}
 		var generated workflowcore.MasterPlan
 		if detail.Plan.GeneratedPlanJSON != "" && detail.Plan.GeneratedPlanJSON != "{}" && json.Unmarshal([]byte(detail.Plan.GeneratedPlanJSON), &generated) == nil {
 			pv.Generated = &generated
@@ -882,6 +902,16 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	r.Get("/workflows/{workflowId}/plan", c.get)
 	r.Post("/workflows/{workflowId}/plan/approve", c.approvePlan)
 	r.Post("/workflows/{workflowId}/plan/reject", c.rejectPlan)
+
+	// The operator-only recovery routes. They are separate from /continue on
+	// purpose: /continue is also the wake poller's entry point, and both of
+	// these actions DISCARD something AO deliberately refused to act on (an
+	// approval whose commit cannot be proven; a planner whose result cannot be
+	// judged). An automatic caller reaching either one turns a fail-closed stop
+	// into an unattended loop, so they are reachable only by an explicit human
+	// action and each is bounded on its own durable counter.
+	r.Post("/workflows/{workflowId}/recover/review-provenance", c.recoverReviewProvenance)
+	r.Post("/workflows/{workflowId}/plan/reopen", c.reopenAmbiguousPlan)
 	(&WorkflowQuestionsController{Svc: c.QuestionsReader, Ownership: c.Ownership, TrustedLocal: c.TrustedLocal}).Register(r)
 }
 
@@ -1265,6 +1295,57 @@ func (c *WorkflowsController) resumeAmendedTaskReview(w http.ResponseWriter, r *
 		return
 	}
 	detail, err := c.Svc.ResumeAmendedTaskReview(r.Context(), chi.URLParam(r, "workflowId"), chi.URLParam(r, "taskId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+
+// ReopenAmbiguousPlanRequest carries the plan row version the caller observed.
+//
+// It is required, and it is the entire safety property of the reopen: it says
+// "this is the row I looked at", so a second ambiguity, an approval-mode change
+// or any other write to the row since makes the reopen match nothing and
+// refuse. It is a ROW VERSION, not a generation and not a token — nothing mints
+// a generation for a planner run, and no copy of this field anywhere may
+// describe it as one.
+type ReopenAmbiguousPlanRequest struct {
+	ObservedPlanUpdatedAt time.Time `json:"observedPlanUpdatedAt" description:"The plan's updatedAt as your view read it. A reopen carrying a version the row no longer has is refused."`
+}
+
+// recoverReviewProvenance is the operator recovery for a run parked because AO
+// cannot prove — and could not reconstruct — the commit its approved review
+// target was read at. It discards that approval and asks for exactly one fresh
+// review of the live workspace; it never attests a commit.
+func (c *WorkflowsController) recoverReviewProvenance(w http.ResponseWriter, r *http.Request) {
+	svc, ok := c.Svc.(workflowsvc.OperatorRecoverer)
+	if c.Svc == nil || !ok {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/recover/review-provenance")
+		return
+	}
+	detail, err := svc.RecoverUnprovableApprovedHead(r.Context(), chi.URLParam(r, "workflowId"))
+	if err != nil {
+		writeWorkflowError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, WorkflowRunResponse{Workflow: c.workflowRunDetailView(r.Context(), detail)})
+}
+
+// reopenAmbiguousPlan is CP7's human-only reopen of an objective whose planner
+// was in flight across a daemon restart.
+func (c *WorkflowsController) reopenAmbiguousPlan(w http.ResponseWriter, r *http.Request) {
+	svc, ok := c.Svc.(workflowsvc.OperatorRecoverer)
+	if c.Svc == nil || !ok {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/workflows/{workflowId}/plan/reopen")
+		return
+	}
+	var in ReopenAmbiguousPlanRequest
+	if err := decodeJSON(r, &in); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	detail, err := svc.ReopenAmbiguousPlan(r.Context(), chi.URLParam(r, "workflowId"), in.ObservedPlanUpdatedAt)
 	if err != nil {
 		writeWorkflowError(w, r, err)
 		return

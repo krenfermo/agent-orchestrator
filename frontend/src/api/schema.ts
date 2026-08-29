@@ -2304,6 +2304,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflowId}/plan/reopen": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reopen planning for an objective whose planner command was in flight when the daemon restarted, so AO could not prove whether it produced a plan. Planning starts over from scratch: nothing is adopted from the discarded planner. The request must carry the plan's observed updatedAt, and a reopen of a state that has since changed is refused. Human-only and bounded. */
+        post: operations["reopenAmbiguousWorkflowPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workflows/{workflowId}/questions": {
         parameters: {
             query?: never;
@@ -2349,6 +2366,23 @@ export interface paths {
         put?: never;
         /** Submit a human answer for a question that is awaiting one (Checkpoint 8K-A) */
         post: operations["answerWorkflowQuestion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/recover/review-provenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Recover a run stopped because AO cannot prove which commit its approved review target was read at, and could not reconstruct it from the branch's history. Discards that unlocatable approval and asks for exactly one fresh independent review of the workspace as it stands. It never infers or attests an approved commit and never verifies code no reviewer has read. Human-only and bounded. */
+        post: operations["recoverWorkflowReviewProvenance"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2717,12 +2751,15 @@ export interface components {
             /** @enum {string} */
             findingsSource?: "" | "review_run" | "verification";
             fixAttemptId?: string;
+            generation?: string;
             nextAction?: string;
             promptBytes: number;
             promptReceipt?: string;
             reason?: string;
             /** @enum {string} */
             receiptMatch?: "" | "match" | "other" | "none";
+            redelivery?: number;
+            reviewGeneration?: string;
             reviewRunId?: string;
             reviewTargetSha?: string;
             /** @enum {string} */
@@ -2907,6 +2944,13 @@ export interface components {
             displayName: string;
             email: string;
             password: string;
+        };
+        ControllersReopenAmbiguousPlanRequest: {
+            /**
+             * Format: date-time
+             * @description The plan's updatedAt as your view read it. A reopen carrying a version the row no longer has is refused.
+             */
+            observedPlanUpdatedAt: string;
         };
         ControllersResolveDecisionRequest: {
             /** @description The resolver's answer. Required unless requiresHuman is true. */
@@ -4564,6 +4608,7 @@ export interface components {
         };
         WorkflowPlanView: {
             approvalMode: string;
+            commandStatus?: string;
             errorClass?: string;
             generated?: components["schemas"]["WorkflowMasterPlan"];
             model?: string;
@@ -4571,6 +4616,8 @@ export interface components {
             promptContextVersion: string;
             provider?: string;
             status: string;
+            /** Format: date-time */
+            updatedAt: string;
             validation?: components["schemas"]["WorkflowPlanValidation"];
         };
         WorkflowPlannedSafeOverlap: {
@@ -13224,6 +13271,78 @@ export interface operations {
             };
         };
     };
+    reopenAmbiguousWorkflowPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersReopenAmbiguousPlanRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     listWorkflowQuestions: {
         parameters: {
             query?: never;
@@ -13324,6 +13443,65 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WorkflowQuestionResponseBody"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    recoverWorkflowReviewProvenance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowRunResponse"];
                 };
             };
             /** @description Not Found */
