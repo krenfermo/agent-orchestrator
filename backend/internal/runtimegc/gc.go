@@ -156,6 +156,20 @@ type Finding struct {
 	DispatchKey   string
 	// Err is set for DispositionError.
 	Err string
+	// OwnershipProven says whether AO could prove this runtime is its own. It
+	// is the single fact that separates "AO chose not to reclaim this" from
+	// "AO is not allowed to", and an operator reading a report needs it stated
+	// rather than inferred from the class name.
+	OwnershipProven bool
+	// RecommendedAction is what a person should do about this finding, in
+	// plain words. Empty when there is nothing to do.
+	//
+	// It exists because the legacy sessions this sweep reports are permanent
+	// until somebody acts: AO will never destroy them (it cannot prove they are
+	// its own) and it must never fabricate the proof, so the report is the only
+	// thing standing between an unprovable orphan and an orphan nobody knows
+	// about. It never recommends a force-delete, because there is none.
+	RecommendedAction string
 }
 
 // Report is one sweep's whole result. It is observability, not authority:
@@ -178,8 +192,36 @@ type Report struct {
 	Errors            int
 }
 
+// describe fills in the operator-facing half of a finding: whether ownership
+// was proven, and what a person should do about it.
+//
+// Derived from the disposition and class rather than written at each site, so
+// every finding carries the same vocabulary and a new candidate source cannot
+// forget to explain itself.
+func describe(f Finding) Finding {
+	switch f.Disposition {
+	case DispositionCleaned:
+		f.OwnershipProven = true
+	case DispositionCandidate:
+		f.OwnershipProven = true
+		f.RecommendedAction = "run the same command without --dry-run to reclaim it"
+	case DispositionLive:
+		f.OwnershipProven = true
+		f.RecommendedAction = "nothing: an active authority still requires this runtime"
+	case DispositionUnprovable:
+		f.RecommendedAction = "inspect it yourself (tmux attach on AO's socket) and close it by hand if it is finished; " +
+			"AO cannot prove this runtime is its own and will never reclaim it automatically"
+	case DispositionForeign:
+		f.RecommendedAction = "nothing: this session is provably not the one AO classified"
+	case DispositionError:
+		f.RecommendedAction = "re-run the sweep; if it keeps failing, inspect this runtime by hand"
+	}
+	return f
+}
+
 // count folds a finding into the report's counters.
 func (r *Report) count(f Finding) {
+	f = describe(f)
 	r.Findings = append(r.Findings, f)
 	switch f.Disposition {
 	case DispositionCleaned:
@@ -325,7 +367,7 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 		}
 		report.count(s.resolve(ctx, f, opts))
 	}
-	for _, f := range s.inventoryCandidates(ctx, protected, seen) {
+	for _, f := range s.inventoryCandidates(ctx, protected, seen, s.liveSessionNames(ctx)) {
 		report.count(s.resolve(ctx, f, opts))
 	}
 
@@ -451,7 +493,12 @@ func (s *Sweeper) claimCandidates(ctx context.Context, protected map[string]doma
 // proves it is AO's: a session on AO's server with no token is reported as
 // unprovable and never touched, because "on my server" is not the same claim
 // as "mine to destroy".
-func (s *Sweeper) inventoryCandidates(ctx context.Context, protected map[string]domain.CapacityClaim, seen map[string]struct{}) []Finding {
+func (s *Sweeper) inventoryCandidates(
+	ctx context.Context,
+	protected map[string]domain.CapacityClaim,
+	seen map[string]struct{},
+	liveNames map[string]struct{},
+) []Finding {
 	if s.Inventory == nil {
 		return nil
 	}
@@ -477,6 +524,30 @@ func (s *Sweeper) inventoryCandidates(ctx context.Context, protected map[string]
 			})
 			continue
 		}
+		if _, live := liveNames[sess.ID]; live {
+			// A durable session record says this session is RUNNING. Nothing in
+			// this pass otherwise asks: it checks the ownership token and the
+			// capacity claims, and an interactive session has a token and never
+			// has a claim, so without this it reads as "unreferenced" — which is
+			// auto-cleanable. sessionCandidates is the only pass that consults
+			// terminality, and it can only speak for a row that recorded its
+			// runtime identity; a row that did not (every row in the incident
+			// database) produced no finding at all, so its session never entered
+			// `seen` and arrived here completely unprotected.
+			//
+			// Matched on the NAME rather than the incarnation, deliberately and
+			// only here. A name is not an authority key and must never license a
+			// destroy — but this is the opposite direction: the worst a stale or
+			// colliding name can do is protect a runtime that could have been
+			// reclaimed, which the next sweep re-derives. Refusing on a weaker
+			// key is always allowed; destroying on one never is.
+			findings = append(findings, Finding{
+				Handle: sess.ID, InstanceID: sess.InstanceID,
+				Class: OrphanNone, Disposition: DispositionLive,
+				Reason: "AO durably records this session as running",
+			})
+			continue
+		}
 		if !sess.OwnerKnown || sess.Owner == "" {
 			// Unknown is not dead. AO cannot attribute this session, so it is
 			// recorded and left exactly where it is.
@@ -494,6 +565,31 @@ func (s *Sweeper) inventoryCandidates(ctx context.Context, protected map[string]
 		})
 	}
 	return findings
+}
+
+// liveSessionNames is every session AO durably records as NOT terminated,
+// keyed by session name.
+//
+// It exists to protect, never to license: see the use site in
+// inventoryCandidates. A store it cannot read yields an empty set, which is the
+// fail-closed direction only because every other proof the sweep requires still
+// applies on top of it -- ownership, incarnation and terminality are unchanged.
+func (s *Sweeper) liveSessionNames(ctx context.Context) map[string]struct{} {
+	out := map[string]struct{}{}
+	if s.Sessions == nil {
+		return out
+	}
+	sessions, err := s.Sessions.ListAllSessions(ctx)
+	if err != nil {
+		s.log().Warn("runtime gc: could not read sessions; inventory sweep loses its liveness guard", "err", err)
+		return out
+	}
+	for _, sess := range sessions {
+		if !sess.IsTerminated {
+			out[string(sess.ID)] = struct{}{}
+		}
+	}
+	return out
 }
 
 // sessionCandidates derives candidates from durable SESSION state: a session
@@ -622,6 +718,21 @@ func (s *Sweeper) resolve(ctx context.Context, f Finding, opts Options) Finding 
 	// which a replacement would also satisfy.
 	after, stillThere, aerr := s.Facts.SessionFacts(ctx, handle)
 	switch {
+	case errors.Is(aerr, ports.ErrRuntimeUnavailable):
+		// The runtime server is no longer reachable, and the destroy this pass
+		// just issued reported success. Before a destroy, an unreachable server
+		// is inconclusive and AO refuses to act on it -- the server could be
+		// restarting under a session that is still there. AFTER one, it cannot
+		// mean the incarnation survived: a server that is not running hosts no
+		// sessions at all.
+		//
+		// The case is not hypothetical and not rare. Destroying AO's LAST
+		// session is exactly what makes tmux's server exit, so a run that
+		// finishes when nothing else is in flight always lands here. Reporting
+		// that as an error meant the ordinary single-workflow case looked like a
+		// failure; a real tmux server is what showed it, because every fake
+		// keeps answering after its last session is gone.
+		f.Disposition = DispositionCleaned
 	case aerr != nil:
 		f.Disposition, f.Err = DispositionError, aerr.Error()
 		f.Reason = "the runtime was destroyed but AO could not confirm it; the next sweep re-checks"
@@ -723,4 +834,173 @@ func (s *Sweeper) worktreeCandidates(ctx context.Context, opts Options) []Findin
 		findings = append(findings, f)
 	}
 	return findings
+}
+
+// ---------------------------------------------------------------------------
+// Terminal reclamation: one session, on demand
+// ---------------------------------------------------------------------------
+
+// ReclaimRequest names ONE session's runtime and carries the durable identity
+// that authorizes ending it.
+//
+// Every field is a durable fact the caller has already read, never a value
+// derived here: this package's whole discipline is that the proof comes from
+// rows and from the runtime, and inventing any part of it locally would be the
+// fabrication §A forbids.
+type ReclaimRequest struct {
+	// SessionID and LaunchID are the identity the OwnerToken must prove, via
+	// domain.RuntimeOwnedBySession. A token that proves anything else, or
+	// nothing, is refused.
+	SessionID string
+	LaunchID  string
+	// Handle is the reusable session NAME, used only to address a facts read.
+	// InstanceID is the immutable incarnation and the only authority key.
+	Handle     string
+	InstanceID string
+	OwnerToken string
+	// WorkflowRunID and Reason are recorded on the finding so an operator
+	// reading a report can tell an automatic terminal reclaim from a sweep.
+	WorkflowRunID string
+	Reason        string
+	// DryRun classifies without destroying, exactly as Options.DryRun does.
+	DryRun bool
+}
+
+// ReclaimSessionRuntime ends one session's runtime, addressed to one exact
+// incarnation, after the same three proofs a sweep applies.
+//
+// It exists so that a workflow reaching a terminal state can end the runtime it
+// owns AT THAT MOMENT rather than up to fifteen minutes later, WITHOUT a second
+// implementation of "prove this runtime is mine and destroy it". The caller
+// supplies the policy — which sessions, under which terminal states — and this
+// supplies the proof and the destroy, which are exactly what the periodic sweep
+// already does through the same resolve().
+//
+// Runtime GC therefore stops being the only thing that ends a finished
+// session and becomes what it was always described as: the safety net that
+// catches whatever the terminal path missed, including its own crash windows.
+//
+// The proofs, in the order they are applied:
+//
+//  1. OWNERSHIP, from durable rows: the recorded token must prove this exact
+//     session and launch generation.
+//  2. AUTHORITY: no HELD capacity claim may still be paying for this
+//     incarnation. A live claim protects its runtime absolutely, and that rule
+//     does not weaken because a run says it is finished — the claim is the
+//     thing that could still be authorizing a mutation.
+//  3. OWNERSHIP AGAIN, from the runtime itself, and INCARNATION: resolve()
+//     re-reads the live facts, refuses a name that now answers for a different
+//     incarnation, destroys `$N`, and confirms that incarnation is gone.
+//
+// Anything it cannot prove is returned as a finding explaining why, and
+// nothing is destroyed. An error is returned only when the durable state
+// needed to decide could not be read at all.
+func (s *Sweeper) ReclaimSessionRuntime(ctx context.Context, req ReclaimRequest) (Finding, error) {
+	f, err := s.reclaimSessionRuntime(ctx, req)
+	// describe() is applied here rather than at each return below for the same
+	// reason Report.count applies it to a sweep's findings: the operator-facing
+	// half of a finding is derived from its disposition, and a caller that gets
+	// one directly must not receive a less-explained version of the same
+	// outcome. It matters most for the refusals -- a legacy session AO will
+	// never reclaim is permanent until a person acts on it.
+	return describe(f), err
+}
+
+func (s *Sweeper) reclaimSessionRuntime(ctx context.Context, req ReclaimRequest) (Finding, error) {
+	f := Finding{
+		Handle: req.Handle, InstanceID: req.InstanceID,
+		WorkflowRunID: req.WorkflowRunID, Class: OrphanTerminatedSession,
+		Reason: req.Reason,
+	}
+	if f.Reason == "" {
+		f.Reason = "the workflow that owned this runtime reached a terminal state"
+	}
+	if req.InstanceID == "" || req.OwnerToken == "" {
+		// A pre-P1-D session, or one whose identity was never recorded. Not an
+		// error and not a candidate: unprovable, reported, left alone.
+		f.Class, f.Disposition = OrphanUnprovableOwnership, DispositionUnprovable
+		f.Reason = "this session recorded no runtime incarnation or no ownership token, so AO cannot prove the runtime is its own to end"
+		return f, nil
+	}
+	if !domain.RuntimeOwnedBySession(req.OwnerToken, domain.SessionID(req.SessionID), req.LaunchID) {
+		f.Class, f.Disposition = OrphanUnprovableOwnership, DispositionUnprovable
+		f.Reason = "the session's recorded ownership token does not match its recorded launch generation"
+		return f, nil
+	}
+	// A held claim outranks a terminal run. The run's own state is not the
+	// question here: the claim is what could still be paying for a live
+	// execution against this runtime, and releasing it is somebody else's job.
+	protected, err := s.protectedInstances(ctx)
+	if err != nil {
+		return f, fmt.Errorf("runtime gc: could not read live capacity claims: %w", err)
+	}
+	if claim, live := protected[req.InstanceID]; live {
+		f.Class, f.Disposition = OrphanNone, DispositionLive
+		f.Reason = "a held capacity claim is still paying for this runtime"
+		f.DispatchKey = claim.DispatchKey
+		return f, nil
+	}
+	// Ownership from the RUNTIME, not only from the row. resolve() re-reads the
+	// facts and refuses a changed incarnation, but it deliberately does not
+	// demand an ownership marker: a claim-derived candidate proves AO launched
+	// the runtime without the runtime necessarily carrying a token, and making
+	// resolve() require one would silently disable that whole candidate source.
+	//
+	// Here the token IS available on both sides, so both are checked. A live
+	// runtime whose marker disagrees with the row is the one case where the two
+	// records AO holds about a session contradict each other, and the only safe
+	// reading of a contradiction is that AO does not know what it is looking at.
+	if s.Facts != nil {
+		facts, exists, ferr := s.Facts.SessionFacts(ctx, ports.RuntimeHandle{ID: req.Handle, InstanceID: req.InstanceID})
+		switch {
+		case errors.Is(ferr, ports.ErrRuntimeUnavailable):
+			f.Disposition, f.Err = DispositionUnprovable, ferr.Error()
+			f.Reason = "the runtime could not be reached, so its state is unknown; nothing was destroyed"
+			return f, nil
+		case ferr != nil:
+			// The failure is carried in the FINDING, not in the error return.
+			// That is this package's convention and it is load-bearing: the
+			// error return means "the durable state needed to decide could not
+			// be read at all", which a caller must treat as "do not proceed",
+			// while a runtime that would not answer is one resource's problem
+			// and is reported so the next pass can re-derive it. resolve()
+			// makes the same distinction by having no error return at all.
+			f.Disposition, f.Err = DispositionError, ferr.Error()
+			f.Reason = "reading this runtime's facts failed; it was left alone"
+			return f, nil //nolint:nilerr // deliberate: a per-runtime failure is a finding, not a caller-facing error
+		case !exists:
+			f.Disposition = DispositionAbsent
+			f.Reason = "the runtime was already gone"
+			return f, nil
+		case !facts.OwnerKnown:
+			// The live runtime carries NO marker. On this path that is decisive
+			// rather than merely uninformative: a caller reaching here always
+			// holds a token from the session row, so a runtime that cannot show
+			// the matching one is not the runtime that row describes. It may be
+			// a pre-P1-D session under the same name, or somebody else's window
+			// entirely -- a real one, created with the tmux CLI, is what caught
+			// this. Both answers are the same answer: not AO's to end.
+			//
+			// The periodic sweep deliberately does NOT apply this rule, because
+			// its claim-derived candidates prove AO launched a runtime without
+			// the runtime necessarily carrying a marker. Here there is no such
+			// excuse and no such candidate.
+			f.Class, f.Disposition = OrphanUnprovableOwnership, DispositionUnprovable
+			f.Reason = "the live runtime carries no AO ownership token, so AO cannot prove it is the runtime this session recorded"
+			return f, nil
+		case facts.Owner != req.OwnerToken:
+			f.Class, f.Disposition = OrphanUnprovableOwnership, DispositionUnprovable
+			f.Reason = fmt.Sprintf("the live runtime carries ownership token %q but this session recorded %q; refusing to end a runtime AO cannot identify",
+				facts.Owner, req.OwnerToken)
+			return f, nil
+		}
+	}
+
+	resolved := s.resolve(ctx, f, Options{DryRun: req.DryRun})
+	if resolved.Disposition == DispositionCleaned {
+		s.log().Info("runtime gc: ended a terminal workflow's owned runtime",
+			"instance", req.InstanceID, "handle", req.Handle,
+			"session", req.SessionID, "run", req.WorkflowRunID)
+	}
+	return resolved, nil
 }

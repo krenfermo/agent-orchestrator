@@ -175,7 +175,7 @@ func (c coordinatorLockClassifier) ClassifyLockOwner(ctx context.Context, run do
 // it, at runtime, on every run. Pinning it here makes that a compile error.
 var _ workflowcore.DispatchRecorder = (*sqlite.Store)(nil)
 
-func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, agents ports.AgentResolver, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
+func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, agents ports.AgentResolver, terminalRuntimes workflowcore.TerminalRuntimeReclaimer, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {
 		plannerBinary = "claude"
@@ -211,6 +211,9 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		ReviewerLauncher: reviewerLauncher,
 		MessageSender:    sessionMgr,
 		Verifier:         workflowVerifyRunner{},
+		// P1-F: a terminal run ends the runtime it owns immediately, through
+		// the same sweeper that would have reclaimed it fifteen minutes later.
+		TerminalRuntimes: terminalRuntimes,
 		// Checkpoint 8P-E.10: Timeout is the floor every call gets; MaxTimeout
 		// bounds how far the adapter's own size-proportional scaling
 		// (scaledTimeout) may stretch it for a large MEDUSA-class objective +

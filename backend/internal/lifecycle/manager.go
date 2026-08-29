@@ -1505,6 +1505,23 @@ func mergeMetadata(base, in domain.SessionMetadata) domain.SessionMetadata {
 	set(&base.WorkspaceRepoPath, in.WorkspaceRepoPath)
 	set(&base.RuntimeHandleID, in.RuntimeHandleID)
 	base.RuntimeLaunchID = in.RuntimeLaunchID
+	// Assigned rather than set, and assigned TOGETHER with the launch id above,
+	// for the reason Runtime GC depends on: the incarnation and the ownership
+	// token describe ONE launch generation, and the token is only meaningful
+	// against the launch it was minted for (domain.RuntimeOwnedBySession). A
+	// `set`-style merge would carry a previous launch's incarnation forward
+	// past a relaunch, which is precisely the stale-handle adoption P1-D §C
+	// exists to prevent — and leaving them out altogether, as this function did
+	// until now, left every session row with an empty incarnation and an empty
+	// token however carefully spawn had computed them. Runtime GC reads exactly
+	// those two columns to prove a terminated worker's runtime is AO's own
+	// (runtimegc.Sweeper.sessionCandidates), so dropping them here made every
+	// worker and reviewer permanently unprovable and reclaimed nothing in
+	// production, while the sweeper's own tests passed against records built by
+	// hand. The seam is now covered by
+	// runtime_ownership_persistence_test.go, which carries the incident detail.
+	base.RuntimeInstanceID = in.RuntimeInstanceID
+	base.RuntimeOwnerToken = in.RuntimeOwnerToken
 	set(&base.AgentSessionID, in.AgentSessionID)
 	set(&base.Prompt, in.Prompt)
 	set(&base.LatestUserPrompt, in.LatestUserPrompt)

@@ -161,6 +161,11 @@ func (c *Coordinator) reconcileRun(ctx stdctx.Context, run domain.WorkflowRun, n
 	// is over, must stop being an authority — and boot is where a stale one is
 	// most likely to be found.
 	c.reconcilePlacementsForRun(ctx, run)
+	// P1-F: and the runtimes a terminal run still owns. Boot is where a run
+	// that finished while the daemon was down is found, and its agent process
+	// has been running ever since with nothing to do. Idempotent: a session
+	// already terminated is skipped, an absent runtime resolves to "absent".
+	c.reclaimTerminalRuntimesForRun(ctx, run.ID, run.State)
 
 	if c.planStore != nil {
 		if plan, master, planErr := c.planStore.GetWorkflowPlan(ctx, run.ID); planErr != nil {

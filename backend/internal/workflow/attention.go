@@ -116,6 +116,20 @@ const (
 	ReasonFixBudgetExhausted    = "fix_budget_exhausted"
 	ReasonVerifyBudgetExhausted = "verify_budget_exhausted"
 	ReasonVerifyUnrepairable    = "verify_unrepairable"
+	// ReasonVerifyFixUnavailable is a repairable verification failure with
+	// budget left that AO nevertheless cannot hand to a fix worker, because
+	// something structural prevents the fix cycle from ever running.
+	//
+	// It exists so that condition converges instead of parking. Before it,
+	// finishVerifyFailure took the re-entry branch on the strength of the
+	// failure being repairable alone, wrote its verify_fix_reentry checkpoint
+	// and left the run at `waiting` — and when the dispatcher then refused, the
+	// run rested forever on a verify step that renders as live work (incident
+	// wf-170b16ce). Distinct from ReasonVerifyBudgetExhausted because the
+	// budget is NOT the problem and raising it would change nothing, and
+	// distinct from ReasonVerifyUnrepairable because the failure itself is
+	// perfectly repairable — what is missing is the machinery to repair it.
+	ReasonVerifyFixUnavailable = "verify_fix_unavailable"
 	// The three reasons below are verify_context.go's precise replacements for
 	// ReasonVerifyUnrepairable when the failure was AO's own verification
 	// infrastructure rather than the code: a verifier configuration AO cannot
@@ -332,6 +346,15 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonVerifyUnrepairable: {
 		HumanAction: "Verification failed for a reason no fix cycle can repair (its environment or its target changed under it). Inspect the worktree, then continue or cancel this run.",
+	},
+	ReasonVerifyFixUnavailable: {
+		// Repairable in the same sense ReasonVerifyBudgetExhausted is: the
+		// verify output says what is wrong. The difference is that AO cannot
+		// dispatch the worker that would act on it, so the person is told what
+		// blocked the cycle rather than being invited to raise a budget that is
+		// not the constraint.
+		Repairable:  true,
+		HumanAction: "Verification failed and AO could not hand the findings to a fix worker (the detail names what blocked it). Read the verify output and either fix it yourself or cancel this run.",
 	},
 	ReasonVerifyConfigInvalid: {
 		HumanAction: "AO's verification configuration for this project is not a valid invocation (wrong directory or wrong command). Correct the project's verification commands, then continue this run.",

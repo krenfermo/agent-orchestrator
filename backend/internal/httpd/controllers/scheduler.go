@@ -89,6 +89,13 @@ type RuntimeGCFindingView struct {
 	Reason        string `json:"reason,omitempty"`
 	WorkflowRunID string `json:"workflowRunId,omitempty"`
 	Error         string `json:"error,omitempty"`
+	// OwnershipProven and RecommendedAction are the operator half of a
+	// finding: whether AO could prove the runtime is its own, and what a
+	// person should do about it. They matter most for the ones AO will never
+	// touch — a legacy session AO cannot prove is permanent until somebody
+	// acts, and a report that does not say so is how it stays that way.
+	OwnershipProven   bool   `json:"ownershipProven"`
+	RecommendedAction string `json:"recommendedAction,omitempty"`
 }
 
 // RuntimeGCReportResponse is the body of POST /api/v1/runtime/gc.
@@ -204,6 +211,7 @@ func (c *SchedulerController) gc(w http.ResponseWriter, r *http.Request) {
 			Handle: f.Handle, InstanceID: f.InstanceID, Class: string(f.Class),
 			Disposition: string(f.Disposition), Reason: f.Reason,
 			WorkflowRunID: f.WorkflowRunID, Error: f.Err,
+			OwnershipProven: f.OwnershipProven, RecommendedAction: f.RecommendedAction,
 		})
 	}
 	envelope.WriteJSON(w, http.StatusOK, out)

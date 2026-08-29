@@ -215,7 +215,13 @@ func (c *Coordinator) bindRuntimesToClaims(ctx stdctx.Context, claims []domain.C
 		}
 	}
 	for _, claim := range claims {
-		if claim.State != domain.CapacityClaimHeld || claim.RuntimeHandle != "" {
+		// A claim that already names BOTH halves is done. One that names only
+		// the handle is not: it is a binding written before the incarnation was
+		// durably known (or by a build that never recorded one), and leaving it
+		// alone is what makes an unprovable claim permanent. bindCapacityRuntime
+		// is idempotent and generation-fenced, so re-offering it costs nothing.
+		if claim.State != domain.CapacityClaimHeld ||
+			(claim.RuntimeHandle != "" && claim.RuntimeInstanceID != "") {
 			continue
 		}
 		sessionID, ok := sessionByStep[claim.WorkflowStepID]
@@ -226,7 +232,16 @@ func (c *Coordinator) bindRuntimesToClaims(ctx stdctx.Context, claims []domain.C
 		if err != nil || !found || rec.Metadata.RuntimeHandleID == "" {
 			continue
 		}
-		c.bindCapacityRuntime(ctx, claim, rec.Metadata.RuntimeHandleID, "")
+		// The incarnation, not just the name. Passing "" here (as this did
+		// until now) satisfied the binding's own signature while defeating its
+		// only purpose: Runtime GC skips every claim whose RuntimeInstanceID is
+		// empty, because a name is a discovery key and never an authority key.
+		// So the claim-derived candidate source — the one this function's own
+		// comment calls GC's strongest — never produced a single candidate in
+		// production. The session row is where the incarnation is durably
+		// known, which is the same fact that makes this the right place to read
+		// it from.
+		c.bindCapacityRuntime(ctx, claim, rec.Metadata.RuntimeHandleID, rec.Metadata.RuntimeInstanceID)
 	}
 }
 

@@ -837,7 +837,7 @@ func (c *Coordinator) maybeDispatchVerifyFix(ctx stdctx.Context, run domain.Work
 	// run has already stopped for a reason no fix cycle addresses, and there is
 	// nothing left to re-verify even if a fix landed.
 	if run.State.Terminal() || fixStep.State.Terminal() || verifyStep.State.Terminal() ||
-		c.reviewRuns == nil || reviewStep.ReviewRunID == nil {
+		c.reviewRuns == nil {
 		return fixStep, nil
 	}
 	if fixStep.State != domain.WorkflowStepWaiting && fixStep.State != domain.WorkflowStepPending {
@@ -880,8 +880,8 @@ func (c *Coordinator) maybeDispatchVerifyFix(ctx stdctx.Context, run domain.Work
 		return fixStep, err
 	}
 
-	reviewRun, ok, err := c.reviewRuns.GetReviewRun(ctx, *reviewStep.ReviewRunID)
-	if err != nil || !ok {
+	reviewRun, proven, err := c.verifyFixReviewAuthority(ctx, run, reviewStep)
+	if err != nil || !proven {
 		return fixStep, err
 	}
 
@@ -905,6 +905,87 @@ func (c *Coordinator) maybeDispatchVerifyFix(ctx stdctx.Context, run domain.Work
 		CycleNumber:        cycleNumber,
 	})
 	return c.dispatchFixStep(ctx, run, workStep, fixStep, reviewRun, cycleNumber, prompt, findings)
+}
+
+// verifyFixReviewAuthority resolves the review authority a verify-driven fix
+// cycle is delivered under, for BOTH ways a review step reaches "completed".
+//
+// The incident it exists for (wf-170b16ce, task 1 of wf-e1339e29): the review
+// policy skipped the review of a docs-only change, so the review step completed
+// with no review_run at all. Verification then failed repairably, wrote its
+// verify_fix_reentry checkpoint, and parked the run at `waiting` — and
+// maybeDispatchVerifyFix returned immediately on `reviewStep.ReviewRunID ==
+// nil`. Nothing else in the cascade acts on a waiting verify step, so the run
+// sat there with a re-entry no code path could ever answer. The verify step's
+// kind and its non-terminal state are what the UI renders, so it showed
+// "verifying" for 49 minutes over a verification that had finished, and failed,
+// in 298 milliseconds.
+//
+// maybeVerify already resolves exactly this fork — an approving review run, or
+// a durably recorded ReviewSkipped decision — and deliberately treats the two
+// as equally eligible. The re-entry path simply never learned the second half.
+// It is the same proof, demanded in the same order, so the two cannot disagree
+// about whether a policy-skipped review authorizes what follows it.
+//
+// The returned ReviewRun is zero for the skipped case, and that is the honest
+// value: there is no reviewer and no verdict to name. The authorization is the
+// unanswered verify_fix_reentry checkpoint itself, which fixAuthorityRefusal
+// applies as the same one-fix-per-re-entry rule it applies to an approved
+// review. proven=false means AO could not establish either authority, which is
+// left alone rather than guessed at, exactly as before.
+func (c *Coordinator) verifyFixReviewAuthority(
+	ctx stdctx.Context, run domain.WorkflowRun, reviewStep domain.WorkflowStep,
+) (domain.ReviewRun, bool, error) {
+	if reviewStep.ReviewRunID != nil {
+		reviewRun, ok, err := c.reviewRuns.GetReviewRun(ctx, *reviewStep.ReviewRunID)
+		if err != nil || !ok {
+			return domain.ReviewRun{}, false, err
+		}
+		return reviewRun, true, nil
+	}
+	decision, ok := c.reviewPolicyDecisionForStep(ctx, run.ID, reviewStep.ID)
+	if !ok || decision.Decision != ReviewSkipped {
+		return domain.ReviewRun{}, false, nil
+	}
+	return domain.ReviewRun{}, true, nil
+}
+
+// verifyFixReentryBlocker names the PERMANENT reason this run's open
+// verify_fix_reentry can never be answered, or "" when nothing proves that.
+//
+// It is the convergence half of the invariant the incident above violated: a
+// verify step may rest in a non-terminal state only while some path can still
+// move it. finishVerifyFailure parks the run at `waiting` on the strength of
+// "a fix cycle will pick this up", and until now nothing checked that claim —
+// so any gap between the parking condition and the dispatching condition became
+// a run that waits forever with no process, no wake and no next action.
+//
+// It reports ONLY structurally permanent blockers, never transient ones. A
+// missing message sender, an open question, a fix step mid-dispatch and a
+// capacity queue are all reasons the cycle has not started YET, and calling any
+// of them a dead end would stop runs that were about to make progress. What it
+// reports instead are conditions no later poll can change: a fix step that is
+// already terminal, and an authority that cannot be established at all. Those
+// are the same two facts maybeDispatchVerifyFix requires, read through the same
+// helpers, so "parked" and "dispatchable" cannot drift apart again.
+func (c *Coordinator) verifyFixReentryBlocker(
+	ctx stdctx.Context, run domain.WorkflowRun, fixStep, reviewStep domain.WorkflowStep,
+) (string, error) {
+	if fixStep.State.Terminal() {
+		return fmt.Sprintf("the fix step is already %s, so the fix cycle verification asked for can never run", fixStep.State), nil
+	}
+	if c.reviewRuns == nil {
+		return "", nil
+	}
+	_, proven, err := c.verifyFixReviewAuthority(ctx, run, reviewStep)
+	if err != nil {
+		return "", err
+	}
+	if !proven {
+		return "AO cannot establish the review authority a fix cycle would be delivered under: " +
+			"the review step names no review run and no durable review-policy decision explains why", nil
+	}
+	return "", nil
 }
 
 // renderVerifyFindings turns a failed VerifyResult into the findings text a fix
@@ -1084,7 +1165,32 @@ func (c *Coordinator) finishVerifyFailure(ctx stdctx.Context, run domain.Workflo
 	// it never reaches a fix worker — however repairable its error class would
 	// otherwise look. This is the guard whose absence turned "AO ran go build
 	// from the wrong directory" into "the worker's code is broken".
-	if result.InfraFailure == nil && repairableVerifyFailure(result.ErrorClass) && used < budget && c.messageSender != nil {
+	// The parking condition must imply the dispatching condition. Parking at
+	// `waiting` is a promise that a fix cycle will collect these findings, and
+	// a promise AO cannot keep is worse than a stop: the run shows its verify
+	// step as live work forever, with nothing running and nothing scheduled.
+	// So the re-entry is only taken when it is provably answerable; anything
+	// that permanently prevents the fix cycle falls through to the attention
+	// branch below, which names the blocker and converges.
+	reentryBlocked := ""
+	if steps, serr := c.store.ListWorkflowSteps(ctx, run.ID); serr == nil {
+		var fixStep, reviewStep domain.WorkflowStep
+		for _, s := range steps {
+			switch s.Kind {
+			case domain.WorkflowStepFix:
+				fixStep = s
+			case domain.WorkflowStepReview:
+				reviewStep = s
+			}
+		}
+		if fixStep.ID != "" {
+			if blocker, berr := c.verifyFixReentryBlocker(ctx, run, fixStep, reviewStep); berr == nil {
+				reentryBlocked = blocker
+			}
+		}
+	}
+	if result.InfraFailure == nil && repairableVerifyFailure(result.ErrorClass) && used < budget &&
+		c.messageSender != nil && reentryBlocked == "" {
 		if step.State == domain.WorkflowStepRunning {
 			if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, domain.WorkflowStepRunning, domain.WorkflowStepWaiting, now); err != nil {
 				return run, step, err
@@ -1154,6 +1260,12 @@ func (c *Coordinator) finishVerifyFailure(ctx stdctx.Context, run domain.Workflo
 		// fix the verifier rather than to go read a diff that is not at fault.
 		stopReason = infraAttentionReason(result.InfraFailure.Kind)
 		detail = result.InfraFailure.Reason()
+	case reentryBlocked != "" && repairableVerifyFailure(result.ErrorClass):
+		// Budget was not the constraint, so do not say it was. Naming the
+		// blocker is the whole point: this is the stop that replaces a run
+		// waiting forever on a fix cycle that could never be dispatched.
+		stopReason = ReasonVerifyFixUnavailable
+		detail = fmt.Sprintf("verify failed (%s): %s — %s", result.ErrorClass, reason, reentryBlocked)
 	case repairableVerifyFailure(result.ErrorClass):
 		stopReason = ReasonVerifyBudgetExhausted
 	}
@@ -1399,8 +1511,49 @@ func verifyFile(root string, pathCtx VerifyPathContext, check VerificationFileCh
 		return cr, domain.WorkflowErrorVerifyEnvironment
 	}
 	data, err := os.ReadFile(path)
+	// The namespace is a good guess about where a relative path was MEANT, and
+	// it is not proof about where the file IS. wf-6528a538 was a spec whose
+	// file check belonged to its commands' module; incident wf-170b16ce was the
+	// mirror image — a repository-root artifact (`docs/…`) declared alongside a
+	// single Go command, so the context resolved to `backend/`, the check
+	// stat'd `backend/docs/…`, and a file that existed exactly where the plan
+	// said it did was reported "required artifact is missing". That false
+	// negative is what put the run into a fix cycle it did not need.
+	//
+	// Both readings of a relative path are plausible, so AO consults the only
+	// thing that settles it: which one is actually there. Existence is
+	// evidence, not a heuristic — the fallback can only ever turn a file AO
+	// could not see into a file AO can read, never the reverse, and the
+	// durable ResolvedPath records which reading was used. When neither exists
+	// the answer is unchanged: missing, reported against the namespace, exactly
+	// as before.
+	//
+	// The must-be-ABSENT case deliberately does not use this: "absent" has to
+	// mean absent in both readings, or a check whose whole purpose is to prove
+	// a file is gone would pass while the file sits at the other path. That
+	// asymmetry is handled below, where the alternate is re-read.
+	alternate := normalizeRel(check.Path)
+	if os.IsNotExist(err) && check.Exists && alternate != resolved {
+		if altPath, altErr := secureVerifyArtifactPath(root, alternate); altErr == nil {
+			if altData, readErr := os.ReadFile(altPath); readErr == nil {
+				cr.ResolvedPath, data, err = alternate, altData, nil
+			}
+		}
+	}
 	if !check.Exists {
 		if os.IsNotExist(err) {
+			// Absent in the namespace. It must also be absent in the reading
+			// the plan may have meant, or "prove this file is gone" passes on a
+			// file that is still there under the other interpretation.
+			if alternate != resolved {
+				if altPath, altErr := secureVerifyArtifactPath(root, alternate); altErr == nil {
+					if _, statErr := os.Stat(altPath); statErr == nil {
+						cr.ResolvedPath = alternate
+						cr.FailureReason = "artifact exists but must be absent"
+						return cr, domain.WorkflowErrorVerifyArtifactMismatch
+					}
+				}
+			}
 			cr.Passed = true
 			return cr, ""
 		}

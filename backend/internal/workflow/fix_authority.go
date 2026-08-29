@@ -64,6 +64,31 @@ func (c *Coordinator) fixAuthorityRefusal(
 		return ""
 	}
 	if reviewStep.ReviewRunID == nil {
+		// A review the POLICY skipped never created a review run, so "the step
+		// names none" is its normal resting state rather than evidence that an
+		// authority moved. The cycle in front of us must then be a verify-driven
+		// one — it carries no reviewer verdict either (reviewRun is the zero
+		// value verifyFixReviewAuthority returns) — and its authorization is the
+		// unanswered verify_fix_reentry checkpoint, checked below by the same
+		// rule an approved review's re-entry is checked by.
+		//
+		// Everything else keeps the old refusal: a cycle derived from a REAL
+		// review run whose step no longer points anywhere has genuinely lost
+		// its authority.
+		if reviewRun.ID == "" {
+			decision, ok := c.reviewPolicyDecisionForStep(ctx, run.ID, reviewStep.ID)
+			if !ok || decision.Decision != ReviewSkipped {
+				return "the review step names no review run and no durable review-policy decision explains why, so nothing authorizes a fix cycle"
+			}
+			open, reason, err := c.unansweredVerifyFixReentry(ctx, run.ID, fixStep.ID)
+			if err != nil {
+				return "AO could not read this run's verify re-entry ledger to prove a policy-skipped review's fix cycle is authorized"
+			}
+			if open {
+				return ""
+			}
+			return fmt.Sprintf("this run's review was skipped by policy and %s, so nothing authorizes a fix cycle", reason)
+		}
 		return fmt.Sprintf("the review step no longer points at any review run, so review %s cannot authorize a fix cycle", reviewRun.ID)
 	}
 	if *reviewStep.ReviewRunID != reviewRun.ID {

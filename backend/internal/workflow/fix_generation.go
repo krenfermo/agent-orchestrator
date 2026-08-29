@@ -183,12 +183,31 @@ func (c *Coordinator) intendedFixDispatchGeneration(
 	if run.PlannedTaskID != nil {
 		taskID = *run.PlannedTaskID
 	}
+	// A verify-driven cycle under a policy-SKIPPED review has no review run,
+	// and therefore no review generation to be superseded by. Minting a token
+	// over the zero value would produce a fence with nothing on the other side
+	// of it: fixGenerationStaleRefusal would go and read review run "", fail to
+	// find it, and refuse the delivery forever — which is exactly what happened
+	// once maybeDispatchVerifyFix started (correctly) dispatching these cycles.
+	//
+	// The empty token is the honest value and the branch that handles it already
+	// exists: fixGenerationStaleRefusal treats "no authority token" as "there is
+	// simply no token to compare", and says in the same breath that
+	// fixAuthorityRefusal is not weakened by it. That is true here — the
+	// authority for this cycle is the unanswered verify_fix_reentry checkpoint,
+	// which fixAuthorityRefusal checks under the same one-fix-per-re-entry rule
+	// it applies to an approved review. The session and findings fences below
+	// are unaffected and still apply.
+	reviewGeneration := ""
+	if reviewRun.ID != "" {
+		reviewGeneration = reviewGenerationToken(reviewRun)
+	}
 	return fixDispatchGeneration{
 		WorkflowRunID:    run.ID,
 		TaskID:           taskID,
 		FixStepID:        fixStep.ID,
 		ReviewRunID:      reviewRun.ID,
-		ReviewGeneration: reviewGenerationToken(reviewRun),
+		ReviewGeneration: reviewGeneration,
 		CycleNumber:      cycleNumber,
 		TransportAttempt: transportAttempt,
 		Redelivery:       redelivery,

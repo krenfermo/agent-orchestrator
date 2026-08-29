@@ -533,7 +533,18 @@ func RunWithConfig(cfg config.Config) error {
 	// Checkpoint 8P-E.14A: lifecycle drives the same locks at the session's turn
 	// boundaries, through the re-acquire variant (see sessionTurnBranchLocks).
 	lcStack.LCM.SetBranchLocks(sessionTurnBranchLocks{mgr: branchLocks})
-	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, incidentAgentLauncher, notificationWriter, agents, log)
+	// Runtime GC is built BEFORE the workflow coordinator because the
+	// coordinator now depends on it: a terminal run ends the runtime it owns
+	// through the sweeper's own ReclaimSessionRuntime, so that the immediate
+	// terminal path and the periodic sweep apply one implementation of the
+	// ownership/incarnation proofs rather than two. Its own boot and periodic
+	// sweeps are still started further down, at the point they were before.
+	var placementGC runtimegc.WorktreeReleaser
+	if wsMgr := taskWorkspaceManager(cfg, store, log); wsMgr != nil {
+		placementGC = worktreeReleaser{mgr: wsMgr}
+	}
+	runtimeGC := newRuntimeGC(runtimeAdapter, store, placementGC, log)
+	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, incidentAgentLauncher, notificationWriter, agents, newTerminalRuntimeReclaimer(runtimeGC, lcStack.LCM, log), log)
 	// Checkpoint 8P-E.13A: reconciliation can only decide a stopped owner's
 	// lock once it can ask what that stop means, and only the coordinator knows
 	// (branchlock/retention.go). The coordinator needs the lock manager to
@@ -566,11 +577,6 @@ func RunWithConfig(cfg config.Config) error {
 	// ownership, exact incarnation and terminality it can prove.
 	// P1-D §X: the sweep also reclaims AO-managed task worktrees whose work
 	// provably landed. A nil manager narrows the sweep to runtimes only.
-	var placementGC runtimegc.WorktreeReleaser
-	if wsMgr := taskWorkspaceManager(cfg, store, log); wsMgr != nil {
-		placementGC = worktreeReleaser{mgr: wsMgr}
-	}
-	runtimeGC := newRuntimeGC(runtimeAdapter, store, placementGC, log)
 	lcStack.runtimeGCDone = startRuntimeGC(ctx, runtimeGC, log)
 	autoReview := autoreview.New(store, reviewSvc, autoreview.Config{Logger: log})
 	lcStack.autoReviewDone = autoReview.Start(ctx)

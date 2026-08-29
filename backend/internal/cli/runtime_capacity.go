@@ -58,13 +58,15 @@ type runtimeGCEnvelope struct {
 	Absent            int  `json:"absent"`
 	Errors            int  `json:"errors"`
 	Findings          []struct {
-		Handle        string `json:"handle"`
-		InstanceID    string `json:"instanceId"`
-		Class         string `json:"class"`
-		Disposition   string `json:"disposition"`
-		Reason        string `json:"reason"`
-		WorkflowRunID string `json:"workflowRunId"`
-		Error         string `json:"error"`
+		Handle            string `json:"handle"`
+		InstanceID        string `json:"instanceId"`
+		Class             string `json:"class"`
+		Disposition       string `json:"disposition"`
+		Reason            string `json:"reason"`
+		WorkflowRunID     string `json:"workflowRunId"`
+		Error             string `json:"error"`
+		OwnershipProven   bool   `json:"ownershipProven"`
+		RecommendedAction string `json:"recommendedAction"`
 	} `json:"findings"`
 }
 
@@ -234,11 +236,24 @@ func runRuntimeGC(ctx *commandContext, cmd *cobra.Command, dryRun bool, include 
 		if include != nil && !include(f.Class) {
 			continue
 		}
-		line := fmt.Sprintf("  %-10s %-28s %s", f.Disposition, f.Handle, f.Reason)
+		proof := "unprovable"
+		if f.OwnershipProven {
+			proof = "owned"
+		}
+		line := fmt.Sprintf("  %-10s %-28s %-11s %s", f.Disposition, f.Handle, proof, f.Reason)
+		if f.WorkflowRunID != "" {
+			line += " [run " + f.WorkflowRunID + "]"
+		}
 		if f.Error != "" {
 			line += " (" + f.Error + ")"
 		}
 		_, _ = fmt.Fprintln(out, strings.TrimRight(line, " "))
+		// The recommendation is printed only where there is something for a
+		// person to do, so an ordinary sweep stays a short report and the
+		// sessions AO will never reclaim are the ones that stand out.
+		if f.RecommendedAction != "" && !f.OwnershipProven {
+			_, _ = fmt.Fprintf(out, "             -> %s\n", f.RecommendedAction)
+		}
 	}
 	if res.Errors > 0 {
 		return errors.New("runtime gc: some candidates could not be handled; see the findings above")

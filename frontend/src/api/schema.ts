@@ -4381,7 +4381,9 @@ export interface components {
             error?: string;
             handle?: string;
             instanceId?: string;
+            ownershipProven: boolean;
             reason?: string;
+            recommendedAction?: string;
             workflowRunId?: string;
         };
         RuntimeGCReportResponse: {

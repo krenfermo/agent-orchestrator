@@ -475,6 +475,13 @@ type Deps struct {
 	// which is the pre-P1-D behaviour every existing test double gets. The
 	// daemon always wires both, and TestDaemonWiresPlacementAndProviderAttempts
 	// asserts that, so the guarantees hold everywhere they can.
+	// TerminalRuntimeReclaimer ends the runtime a terminal run owns, at the
+	// moment it becomes terminal rather than up to a sweep interval later. See
+	// terminal_runtime.go. Optional: nil leaves finished runtimes to Runtime
+	// GC's periodic pass, which reclaims exactly the same things a little
+	// later, on exactly the same proofs.
+	TerminalRuntimes TerminalRuntimeReclaimer
+
 	Placements       ExecutionPlacements
 	ProviderAttempts ProviderAttemptLedger
 
@@ -675,6 +682,7 @@ type Coordinator struct {
 	// see execution_placement.go and provider_attempt.go.
 	placements       ExecutionPlacements
 	providerAttempts ProviderAttemptLedger
+	terminalRuntimes TerminalRuntimeReclaimer
 	// placementOverrides is P1-E's operator write surface over the same
 	// placement; see placement_override.go.
 	placementOverrides PlacementOverrides
@@ -748,6 +756,7 @@ func New(d Deps) *Coordinator {
 		commitHistory:            d.CommitHistory,
 		placements:               d.Placements,
 		providerAttempts:         d.ProviderAttempts,
+		terminalRuntimes:         d.TerminalRuntimes,
 		placementOverrides:       d.PlacementOverrides,
 		instanceToken:            instanceToken,
 		probeGate:                &capacityProbeGate{attempts: make(map[capacityProbeKey]time.Time)},
@@ -1329,6 +1338,14 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 	// releasing a slot wakes whatever was queued for it, and that must happen
 	// after this read has finished deciding what this run is doing.
 	c.reconcileCapacityWithSteps(ctx, detail.Run, steps, stepGeneration, stepTerminal)
+	// And the runtimes the run owns, once capacity has been returned. The
+	// ordering is load-bearing in one direction only: a HELD claim protects its
+	// runtime absolutely, so releasing first is what lets a terminal run end
+	// the runtime its own claim was paying for. The reverse ordering cannot
+	// produce a false free slot -- the slot was already released above, and
+	// the released claim can no longer authorize a mutation in a runtime this
+	// call is about to destroy by incarnation.
+	c.reclaimTerminalRuntimes(ctx, detail.Run, steps)
 
 	return detail, nil
 }
@@ -1929,6 +1946,13 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 	// exactly the reason the branch release moved up here.
 	c.releaseCapacityForRun(ctx, runID, "workflow run cancelled")
 	c.abandonProviderAttemptsForRun(ctx, runID, "the run was cancelled")
+	// The runtimes too, on the same reasoning and in the same position: after
+	// the claims are back, before the fallible bookkeeping. A cancelled run can
+	// never launch again under any generation, so an agent process still
+	// running for it is doing work nobody will ever read. The worktree and every
+	// durable record are preserved exactly as the placement comment below
+	// describes -- only the process ends.
+	c.reclaimTerminalRuntimesForRun(ctx, runID, domain.WorkflowRunCancelled)
 	// P1-E §O: and the placement. A cancelled isolated run's checkout is
 	// PRESERVED rather than made terminal -- the agent's commits on that branch
 	// may be the only copy of work somebody cancelled mid-flight, and a cancel

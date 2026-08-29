@@ -11978,12 +11978,17 @@ components:
           type: string
         instanceId:
           type: string
+        ownershipProven:
+          type: boolean
         reason:
+          type: string
+        recommendedAction:
           type: string
         workflowRunId:
           type: string
       required:
       - disposition
+      - ownershipProven
       type: object
     RuntimeGCReportResponse:
       properties:

@@ -45,6 +45,14 @@ func (c *Coordinator) completeRun(ctx context.Context, run domain.WorkflowRun, e
 	// correctly refuses to collect a checkout whose record still says `active`
 	// -- so a finished run's worktree would survive every sweep in between.
 	c.retirePlacementsForTerminalRun(ctx, run.ID, domain.WorkflowRunCompleted)
+	// And the runtime, for the third time the same argument: a completed run's
+	// worker is a live agent process with nothing left to do, and leaving it for
+	// the periodic sweep leaves it for up to fifteen minutes. Deliberately after
+	// the capacity release, because a held claim protects its runtime and this
+	// run's own claim is the one that was paying for it. Everything durable the
+	// run produced -- worktree, branch, checkpoints, attempts, findings --
+	// outlives the process and is untouched here.
+	c.reclaimTerminalRuntimesForRun(ctx, run.ID, domain.WorkflowRunCompleted)
 	c.notifyRunCompleted(ctx, run)
 	return true, nil
 }
