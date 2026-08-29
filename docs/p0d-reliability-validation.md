@@ -227,11 +227,12 @@ Leak check after ten rounds:
   hours old, not created by the tests.
 - **the operator's default tmux server: untouched** (`no server running`).
 
-Dead socket *files* do accumulate in `/private/tmp/tmux-501/` (one per test,
-~277 after these runs). Those are inodes with no server behind them, and they
-are the deliberate price of per-test server isolation. Production uses one
-socket per data dir (`config.TmuxSocket`), not one per session, so this does not
-translate into a runtime leak. Noted as test hygiene, not a defect.
+Dead socket *files* do accumulate in the OS per-user tmux socket directory
+(one per test, a few hundred after these runs). Those are inodes with no server
+behind them, and they are the deliberate price of per-test server isolation.
+Production uses one socket per data dir (`config.TmuxSocket`), not one per
+session, so this does not translate into a runtime leak. Noted as test hygiene,
+not a defect.
 
 ---
 
