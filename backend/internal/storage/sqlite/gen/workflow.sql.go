@@ -39,6 +39,36 @@ func (q *Queries) ArchiveWorkflowRun(ctx context.Context, arg ArchiveWorkflowRun
 	return result.RowsAffected()
 }
 
+const claimWorkflowOutboxDispatch = `-- name: ClaimWorkflowOutboxDispatch :execrows
+UPDATE workflow_outbox
+SET status = 'dispatched',
+    dispatched_at = ?1,
+    error_class = '',
+    failure_generation = '',
+    dispatch_generation = ?2
+WHERE id = ?3 AND status = 'pending'
+`
+
+type ClaimWorkflowOutboxDispatchParams struct {
+	DispatchedAt       sql.NullTime
+	DispatchGeneration string
+	ID                 string
+}
+
+// The launch-ownership claim: pending -> dispatched, stamping WHO owns it.
+//
+// The token is the id of the review_dispatch_authorized checkpoint written
+// immediately before this statement, so ownership is durable, reconstructable,
+// and named by the same artifact the rest of the launch protocol reads. Every
+// ownership-dependent transition off dispatched then names it back.
+func (q *Queries) ClaimWorkflowOutboxDispatch(ctx context.Context, arg ClaimWorkflowOutboxDispatchParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, claimWorkflowOutboxDispatch, arg.DispatchedAt, arg.DispatchGeneration, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const claimWorkflowStepReviewRunIfUnset = `-- name: ClaimWorkflowStepReviewRunIfUnset :execrows
 UPDATE workflow_steps
 SET review_run_id = ?1, updated_at = ?2
@@ -68,6 +98,54 @@ func (q *Queries) ClaimWorkflowStepReviewRunIfUnset(ctx context.Context, arg Cla
 		arg.UpdatedAt,
 		arg.ID,
 		arg.PredecessorReviewRunID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const failWorkflowOutboxWithGeneration = `-- name: FailWorkflowOutboxWithGeneration :execrows
+UPDATE workflow_outbox
+SET status = 'failed',
+    failed_at = ?1,
+    error_class = ?2,
+    failure_generation = ?3,
+    dispatch_generation = ''
+WHERE id = ?4
+  AND status = ?5
+  AND dispatch_generation = ?6
+`
+
+type FailWorkflowOutboxWithGenerationParams struct {
+	FailedAt           sql.NullTime
+	ErrorClass         string
+	FailureGeneration  string
+	ID                 string
+	ExpectedStatus     domain.WorkflowOutboxStatus
+	DispatchGeneration string
+}
+
+// Move an outbox entry to failed AND stamp the failure that did it, in one
+// statement. The stamp is what a later human resume compare-and-swaps against,
+// so it must land with the state it describes -- never afterwards, where a
+// crash would leave a failed row nobody can prove the generation of.
+//
+// It also PROVES OWNERSHIP, in the same statement. id + status = dispatched is
+// not proof: a dispatch that paused after recording its launch error can find
+// the row dispatched again to somebody else -- released by recovery, reclaimed
+// by a second dispatch -- and would then fail a live generation and stamp its
+// own failure onto it, which a human resume could later reopen. So the claim
+// token this caller was given is part of the predicate: a caller that no longer
+// owns the row changes nothing.
+func (q *Queries) FailWorkflowOutboxWithGeneration(ctx context.Context, arg FailWorkflowOutboxWithGenerationParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, failWorkflowOutboxWithGeneration,
+		arg.FailedAt,
+		arg.ErrorClass,
+		arg.FailureGeneration,
+		arg.ID,
+		arg.ExpectedStatus,
+		arg.DispatchGeneration,
 	)
 	if err != nil {
 		return 0, err
@@ -1224,6 +1302,35 @@ func (q *Queries) RebindWorkflowStepReviewRunFrom(ctx context.Context, arg Rebin
 	return result.RowsAffected()
 }
 
+const releaseDispatchedWorkflowOutboxGeneration = `-- name: ReleaseDispatchedWorkflowOutboxGeneration :execrows
+UPDATE workflow_outbox
+SET status = 'pending',
+    dispatched_at = NULL,
+    error_class = ?1,
+    failure_generation = '',
+    dispatch_generation = ''
+WHERE id = ?2
+  AND status = 'dispatched'
+  AND dispatch_generation = ?3
+`
+
+type ReleaseDispatchedWorkflowOutboxGenerationParams struct {
+	ErrorClass         string
+	ID                 string
+	DispatchGeneration string
+}
+
+// Give a claim back: dispatched -> pending, for the EXACT dispatch that holds
+// it. The mirror of the fail above and ownership-dependent for the same reason
+// -- a stale release would hand the claim of a live dispatch to somebody else.
+func (q *Queries) ReleaseDispatchedWorkflowOutboxGeneration(ctx context.Context, arg ReleaseDispatchedWorkflowOutboxGenerationParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, releaseDispatchedWorkflowOutboxGeneration, arg.ErrorClass, arg.ID, arg.DispatchGeneration)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const releaseWorkflowStepReviewRunIfNoLateVerdict = `-- name: ReleaseWorkflowStepReviewRunIfNoLateVerdict :execrows
 UPDATE workflow_steps
 SET review_run_id = NULL, updated_at = ?1
@@ -1254,6 +1361,42 @@ type ReleaseWorkflowStepReviewRunIfNoLateVerdictParams struct {
 // and the caller must re-read rather than proceed.
 func (q *Queries) ReleaseWorkflowStepReviewRunIfNoLateVerdict(ctx context.Context, arg ReleaseWorkflowStepReviewRunIfNoLateVerdictParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, releaseWorkflowStepReviewRunIfNoLateVerdict, arg.UpdatedAt, arg.ID, arg.ReviewRunID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const reopenFailedWorkflowOutboxGeneration = `-- name: ReopenFailedWorkflowOutboxGeneration :execrows
+UPDATE workflow_outbox
+SET status = 'pending',
+    failed_at = NULL,
+    error_class = ?1,
+    failure_generation = ''
+WHERE id = ?2
+  AND status = 'failed'
+  AND failure_generation = ?3
+`
+
+type ReopenFailedWorkflowOutboxGenerationParams struct {
+	ErrorClass        string
+	ID                string
+	FailureGeneration string
+}
+
+// The human resume reopen: failed -> pending for ONE named failed generation.
+//
+// The generation is part of THIS statement, not of a check preceding it. That
+// is the whole point: id + status = failed is satisfied by any failure of
+// this row, so a resume that observed failure F1 and arrived after F1 had been
+// resumed, redispatched and failed again as F2 would reopen F2 -- a launch and
+// a fresh budget epoch nobody asked for. With the generation in the predicate,
+// such a resume updates zero rows and its caller no-ops.
+//
+// The reopened row carries no generation: it is no longer failed, and the next
+// failure will stamp its own.
+func (q *Queries) ReopenFailedWorkflowOutboxGeneration(ctx context.Context, arg ReopenFailedWorkflowOutboxGenerationParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, reopenFailedWorkflowOutboxGeneration, arg.ErrorClass, arg.ID, arg.FailureGeneration)
 	if err != nil {
 		return 0, err
 	}
@@ -1314,161 +1457,6 @@ func (q *Queries) UpdateWorkflowAttemptOutcome(ctx context.Context, arg UpdateWo
 		arg.Outcome,
 		arg.ErrorClass,
 		arg.ID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
-const claimWorkflowOutboxDispatch = `-- name: ClaimWorkflowOutboxDispatch :execrows
-UPDATE workflow_outbox
-SET status = 'dispatched',
-    dispatched_at = ?1,
-    error_class = '',
-    failure_generation = '',
-    dispatch_generation = ?2
-WHERE id = ?3 AND status = 'pending'
-`
-
-type ClaimWorkflowOutboxDispatchParams struct {
-	DispatchedAt       sql.NullTime
-	DispatchGeneration string
-	ID                 string
-}
-
-// The launch-ownership claim: pending -> dispatched, stamping WHO owns it.
-//
-// The token is the id of the review_dispatch_authorized checkpoint written
-// immediately before this statement, so ownership is durable, reconstructable,
-// and named by the same artifact the rest of the launch protocol reads. Every
-// ownership-dependent transition off dispatched then names it back.
-func (q *Queries) ClaimWorkflowOutboxDispatch(ctx context.Context, arg ClaimWorkflowOutboxDispatchParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, claimWorkflowOutboxDispatch,
-		arg.DispatchedAt,
-		arg.DispatchGeneration,
-		arg.ID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
-const failWorkflowOutboxWithGeneration = `-- name: FailWorkflowOutboxWithGeneration :execrows
-UPDATE workflow_outbox
-SET status = 'failed',
-    failed_at = ?1,
-    error_class = ?2,
-    failure_generation = ?3,
-    dispatch_generation = ''
-WHERE id = ?4
-  AND status = ?5
-  AND dispatch_generation = ?6
-`
-
-type FailWorkflowOutboxWithGenerationParams struct {
-	FailedAt           sql.NullTime
-	ErrorClass         string
-	FailureGeneration  string
-	ID                 string
-	ExpectedStatus     domain.WorkflowOutboxStatus
-	DispatchGeneration string
-}
-
-// Move an outbox entry to failed AND stamp the failure that did it, in one
-// statement. The stamp is what a later human resume compare-and-swaps against,
-// so it must land with the state it describes -- never afterwards, where a
-// crash would leave a failed row nobody can prove the generation of.
-//
-// It also PROVES OWNERSHIP, in the same statement. id + status = dispatched is
-// not proof: a dispatch that paused after recording its launch error can find
-// the row dispatched again to somebody else -- released by recovery, reclaimed
-// by a second dispatch -- and would then fail a live generation and stamp its
-// own failure onto it, which a human resume could later reopen. So the claim
-// token this caller was given is part of the predicate: a caller that no longer
-// owns the row changes nothing.
-func (q *Queries) FailWorkflowOutboxWithGeneration(ctx context.Context, arg FailWorkflowOutboxWithGenerationParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, failWorkflowOutboxWithGeneration,
-		arg.FailedAt,
-		arg.ErrorClass,
-		arg.FailureGeneration,
-		arg.ID,
-		arg.ExpectedStatus,
-		arg.DispatchGeneration,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
-const releaseDispatchedWorkflowOutboxGeneration = `-- name: ReleaseDispatchedWorkflowOutboxGeneration :execrows
-UPDATE workflow_outbox
-SET status = 'pending',
-    dispatched_at = NULL,
-    error_class = ?1,
-    failure_generation = '',
-    dispatch_generation = ''
-WHERE id = ?2
-  AND status = 'dispatched'
-  AND dispatch_generation = ?3
-`
-
-type ReleaseDispatchedWorkflowOutboxGenerationParams struct {
-	ErrorClass         string
-	ID                 string
-	DispatchGeneration string
-}
-
-// Give a claim back: dispatched -> pending, for the EXACT dispatch that holds
-// it. The mirror of the fail above and ownership-dependent for the same reason
-// -- a stale release would hand the claim of a live dispatch to somebody else.
-func (q *Queries) ReleaseDispatchedWorkflowOutboxGeneration(ctx context.Context, arg ReleaseDispatchedWorkflowOutboxGenerationParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, releaseDispatchedWorkflowOutboxGeneration,
-		arg.ErrorClass,
-		arg.ID,
-		arg.DispatchGeneration,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
-const reopenFailedWorkflowOutboxGeneration = `-- name: ReopenFailedWorkflowOutboxGeneration :execrows
-UPDATE workflow_outbox
-SET status = 'pending',
-    failed_at = NULL,
-    error_class = ?1,
-    failure_generation = ''
-WHERE id = ?2
-  AND status = 'failed'
-  AND failure_generation = ?3
-`
-
-type ReopenFailedWorkflowOutboxGenerationParams struct {
-	ErrorClass        string
-	ID                string
-	FailureGeneration string
-}
-
-// The human resume reopen: failed -> pending for ONE named failed generation.
-//
-// The generation is part of THIS statement, not of a check preceding it. That
-// is the whole point: id + status = failed is satisfied by any failure of
-// this row, so a resume that observed failure F1 and arrived after F1 had been
-// resumed, redispatched and failed again as F2 would reopen F2 -- a launch and
-// a fresh budget epoch nobody asked for. With the generation in the predicate,
-// such a resume updates zero rows and its caller no-ops.
-//
-// The reopened row carries no generation: it is no longer failed, and the next
-// failure will stamp its own.
-func (q *Queries) ReopenFailedWorkflowOutboxGeneration(ctx context.Context, arg ReopenFailedWorkflowOutboxGenerationParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, reopenFailedWorkflowOutboxGeneration,
-		arg.ErrorClass,
-		arg.ID,
-		arg.FailureGeneration,
 	)
 	if err != nil {
 		return 0, err

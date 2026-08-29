@@ -420,9 +420,9 @@ func (q *Queries) ParkWorkflowTaskForAttention(ctx context.Context, arg ParkWork
 }
 
 const persistNormalizedWorkflowPlan = `-- name: PersistNormalizedWorkflowPlan :execrows
-UPDATE workflow_plans SET generated_plan_json = ?, updated_at = ?
-WHERE workflow_run_id = ? AND status = 'running' AND command_status = 'responded'
-    AND generated_plan_json = ?
+UPDATE workflow_plans SET generated_plan_json = ?1, updated_at = ?2
+WHERE workflow_run_id = ?3 AND status = 'running' AND command_status = 'responded'
+    AND generated_plan_json = ?4
 `
 
 type PersistNormalizedWorkflowPlanParams struct {
@@ -432,6 +432,15 @@ type PersistNormalizedWorkflowPlanParams struct {
 	ExpectedPlanJson  string
 }
 
+// P9 (docs/worker-lifecycle-audit.md): re-persisting the NORMALIZED plan is a
+// distinct write from PersistWorkflowPlanResponse and must not reuse its CAS.
+// The response write moves command_status running -> responded; by the time
+// normalization has run, command_status is already 'responded', so the old
+// statement matched zero rows every time and the normalized form only ever
+// survived in memory. This one is conditioned on the state that actually
+// holds (running/responded) AND on the exact bytes the caller read, so a
+// writer working from a stale read of generated_plan_json is rejected rather
+// than clobbering a newer plan.
 func (q *Queries) PersistNormalizedWorkflowPlan(ctx context.Context, arg PersistNormalizedWorkflowPlanParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, persistNormalizedWorkflowPlan,
 		arg.GeneratedPlanJson,

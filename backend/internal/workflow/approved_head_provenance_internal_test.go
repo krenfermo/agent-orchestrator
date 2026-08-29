@@ -169,7 +169,6 @@ func TestARealBranchAdvanceIsStillNotAttributedAsUncommittedDrift(t *testing.T) 
 	}
 }
 
-
 // (j) The stop line's fix-cycle accounting must match the durable rows.
 //
 // wf-a21d98aa's stop read "verify failed (verify_workspace_changed) after 0 fix

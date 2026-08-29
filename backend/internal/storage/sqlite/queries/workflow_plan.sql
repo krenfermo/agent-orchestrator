@@ -26,9 +26,9 @@ WHERE workflow_run_id = ? AND status = 'running' AND command_status = 'running';
 -- holds (running/responded) AND on the exact bytes the caller read, so a
 -- writer working from a stale read of generated_plan_json is rejected rather
 -- than clobbering a newer plan.
-UPDATE workflow_plans SET generated_plan_json = ?, updated_at = ?
-WHERE workflow_run_id = ? AND status = 'running' AND command_status = 'responded'
-    AND generated_plan_json = ?;
+UPDATE workflow_plans SET generated_plan_json = sqlc.arg(generated_plan_json), updated_at = sqlc.arg(updated_at)
+WHERE workflow_run_id = sqlc.arg(workflow_run_id) AND status = 'running' AND command_status = 'responded'
+    AND generated_plan_json = sqlc.arg(expected_plan_json);
 
 -- name: FinishWorkflowPlan :execrows
 UPDATE workflow_plans SET status = ?, command_status = ?, validation_json = ?, plan_hash = ?,
