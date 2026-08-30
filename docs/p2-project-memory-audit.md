@@ -47,7 +47,7 @@ the worker is a *configured* rules channel, not a repo-file one: `AgentRules` /
 
 | Source | Built by | Rescanned per run? | Durable? |
 | --- | --- | --- | --- |
-| `AGENTS.md`, `README.md`, `go.mod`, `package.json`, `docs/architecture.md`, `docs/STATUS.md` (48 KiB cap each) | `adapters/planner/command.ContextBuilder.Build` (`context.go:26-52`) | **Yes — full re-read from disk on every planner call** | The resulting `PlannerContext` manifest is persisted with the plan (`workflow/task_graph_wiring.go:26`), so it is durable *as a record*, never reused *as a cache* |
+| `AGENTS.md`, `README.md`, `go.mod`, `package.json`, `docs/architecture.md`, `docs/STATUS.md` (48 KiB cap each) | `adapters/planner/command.ContextBuilder.Build` (`context.go:26-52`) | **Yes — full re-read from disk on every planner call** | A **content-free** `PlannerContext` manifest is built and persisted by `Coordinator.GeneratePlan` (`workflow/master_coordinator.go:194-273`) into `workflow_plans.context_manifest_json` via `planStore.StartWorkflowPlanCommand` (`storage/sqlite/store/workflow_plan_store.go:60-64`). Durable *as a record*, never reusable *as a cache* — see below |
 | Branch, HEAD SHA, dirty flag | same builder, three `git` subprocesses (`context.go:28-38`) | Yes | Recorded in the manifest |
 | Routed selection (optional) | `contextrouter/wfrouter.InstrumentPlanner` (`wfrouter.go:91-175`) | Yes | No — transient per dispatch |
 
@@ -56,6 +56,18 @@ override, no hash-gated skip, and no reuse across runs of the same project: two
 objectives created back to back re-read and re-hash the same six files. The
 builder *does* compute a SHA-256 per document (`PlannerDocument.SHA256`) — the
 mechanism a cache would need already exists and is simply never consulted.
+
+The persisted manifest cannot close that gap by itself, and it is worth being
+exact about why. `GeneratePlan` deliberately blanks every `Document.Content` before
+marshalling, over a **copy** of the slice — the aliasing bug that shared the
+backing array is incident wf-80dc9f12, which stripped the repository context out
+of every planner call (`master_coordinator.go:239-255`). So the durable manifest
+holds paths and hashes and no bodies. Two consequences for P2-A: the manifest can
+never serve as a document *cache*, and its hashes are exactly the gate a real
+cache would need. The only current reader is
+`repoRootsFromContextManifest` (`workflow/task_graph_wiring.go:22-36`), which
+recovers repository-root directory names from those paths for the task
+classifier — a read, not a write, and the manifest's only consumer today.
 
 ### 2.2 Worker
 
@@ -68,7 +80,7 @@ mechanism a cache would need already exists and is simply never consulted.
 | Task prompt (objective + acceptance criteria + guardrails, ± read-only variant, ± effective spec) | `workflow.BuildWorkStepPromptWithSpec` (`plan.go:121`) — pure, no IO | N/A (template expansion) | Persisted in `workflow_steps.artifact_json`; rebuilt byte-identically after a restart via `promptForRun` (`plan.go:175`) |
 | `SpawnConfig.IssueContext` — pre-fetched tracker issue body, wrapped in an explicit trust boundary | tracker adapters; framed by `issueContextSection` / `issueContextTrustBoundary` (`prompt.go:169-173`) and folded into the task prompt by `buildTaskPrompt` (`prompt.go:53-75`) | Per spawn | No |
 | Routed selection replacing `IssueContext` (optional) | `contextrouter/wfrouter.InstrumentSpawner` (`wfrouter.go:186-247`) | Per spawn | No |
-| **Everything else** — repo conventions (`AGENTS.md`/`CLAUDE.md`), source, git history | the harness itself, in the worktree | Per session, uncontrolled | No |
+| **Everything else** — repo conventions (`AGENTS.md`/`CLAUDE.md`), source, and **git history** (`git log`/`git show`/`git diff`, agent-initiated — see §3) | the harness itself, in the worktree | Per session, uncontrolled | No |
 
 Two things matter here. First, the worker prompt itself is pure and
 deterministic, which is what makes it restart-safe — and also why AO passes it
@@ -97,7 +109,7 @@ conflating them is easy:
 | --- | --- | --- | --- |
 | Objective, acceptance criteria, effective spec, worker session id, branch, worktree path, base SHA, workspace fingerprint, review run id, available dependencies, future planned tasks | `workflow.BuildReviewPrompt` (`review_prompt.go:53`), fed by `review_dispatch.go:1434-1447` | N/A — pure, no IO | Inputs come from durable rows (plan artifact, task graph, workspace fingerprints) |
 | Standing reviewer role | **none** — `ReviewerLaunchRequest.SystemPrompt` (`review_dispatch.go:267`) exists but has no producer in `workflow`, so `ports.ReviewInvocation.SystemPrompt` is passed through empty at `daemon/workflow_reviewer_launcher.go:335` | — | — |
-| The diff under review | **the reviewer agent runs `git status`/`git diff`/`git log` itself** — the prompt instructs it to, and the adapter's allowlist permits it (`adapters/reviewer/claudecode/claudecode.go:47-58`) | Per review, per cycle | No |
+| The diff **and the commit history** under review | **the reviewer agent runs `git status`/`git diff`/`git log`/`git show` itself** — the prompt instructs it to, and the adapter's allowlist permits it (`adapters/reviewer/claudecode/claudecode.go:47-58`); see §3 for the full history audit | Per review, per cycle | No |
 
 `BuildReviewPrompt` documents why it does not reuse `internal/review`'s
 PR-centric prompt (`review_prompt.go:34-52`; the reciprocal note is at
@@ -132,6 +144,7 @@ are different.
 | --- | --- | --- | --- |
 | Run detail, step states, checkpoints, stop reason/detail, signature | `BuildIncidentContextPack` (`incident_context_pack.go:188`) from `IncidentPackInput` (`:113`) | Per incident | All from durable workflow rows |
 | Branch, HEAD, porcelain status, bounded diff, worktree path | `incident_advisor.go:322-332` via `workspaceFacts` observation | Per incident | Observation is transient |
+| *(not carried)* commit history | the same observation already holds `Commits` — a bounded 20-commit log (§3) — but `IncidentPackInput` has no field for it, so it is dropped before the pack is built | — | — |
 | Session facts (harness, activity, last-activity, terminated) | `sessionFacts.GetSession` (`incident_advisor.go:310-320`) | Per incident | From durable session rows |
 | Newest reviewer verdict, newest verify output, provider notes | `attachIncidentReviewFacts` and siblings | Per incident | Durable sources |
 | `EvidenceSnapshot`, `ChildEvidence` | `evidence_snapshot.go`, `incident_child_pack.go:79` | Per incident | Rendered from durable facts |
@@ -160,7 +173,7 @@ important correction in this audit, because it moves the extension point.
 | --- | --- | --- | --- |
 | Stopped run id, condition reason, affected step, generation/budget, `plan.Reason` ("what AO knows about the stop") | `buildRepairObjective` (`repair_agent.go:526`) from a `RepairIntent` + `RepairPlan` (`planRepairFor`, `:191`) | Per repair generation | Objective persisted on the created run; intents durable |
 | Acceptance criteria, written by AO from the condition and explicitly **not** by the agent being judged | `repairAcceptanceCriteria` (`repair_agent.go:291`) | N/A | Persisted with the run |
-| Everything else | the worker path (§2.2) plus the harness in the worktree | Per spawn | — |
+| Everything else, including any git history it chooses to read | the worker path (§2.2) plus the harness in the worktree (§3) | Per spawn | — |
 
 **(b) Incident Repair Agent (8P-E.18, `incident_repair.go`).**
 
@@ -168,7 +181,7 @@ important correction in this audit, because it moves the extension point.
 | --- | --- | --- | --- |
 | Approved diagnosis: summary, what happened, why AO stopped, evidence list, approval reason | `buildIncidentRepairObjective` (`incident_repair.go:189-215`), passed to `CreateRun` at `:133` | Per repair | Objective persisted on the repair run; the diagnosis is durable |
 | **Not** the context pack, the ledger, or the diagnostic session | stated explicitly at `incident_repair.go:182-188` | — | — |
-| Everything else | the worker path (§2.2) plus the harness in the worktree | Per spawn | — |
+| Everything else, including any git history it chooses to read | the worker path (§2.2) plus the harness in the worktree (§3) | Per spawn | — |
 
 Note also that `BuildIncidentRepairPrompt` (`incident_prompt.go:87-133`) — whose
 doc comment likewise says "it carries the diagnosis rather than the pack" — has
@@ -184,19 +197,31 @@ own bookkeeping; the output never becomes agent context) versus
 **agent-initiated history inspection** (the agent runs git inside the worktree;
 the output is context AO neither sizes nor sees).
 
-**AO lifecycle reads — none of these feed any role's context:**
+**AO lifecycle reads — every one of these is bookkeeping; none feeds any
+role's context.** Each row names its consumer, its bound, when it runs, and
+whether its result is kept.
 
-| Call | Where | Purpose | Bounded? | Durable? |
-| --- | --- | --- | --- | --- |
-| `git rev-list --max-count=<n> HEAD` | `workflow/approved_head_recovery.go:75-77`, `CommitHistory`/`execCommitHistory` (`:63-88`) | Reconstruct the commit an approved fingerprint was read at | Yes — `maxApprovedHeadSearchCommits = 500` (`:106-112`) | **Yes** — the outcome is checkpointed under `approved_head_reconstructed` (`:98-105`) so success becomes the row every later read resolves through and failure stops re-running the subprocess |
-| `git rev-list --merges --max-count=1 base..head` | `integration/git.go:225` (`HasMergeCommits`) | Integration merge detection | Yes | Consumed by the integration coordinator |
-| `git branch --show-current`, `git rev-parse HEAD`, `git status --porcelain` | `adapters/planner/command/context.go:28-38` | Stamp the planner manifest | N/A | Recorded in the manifest |
-| `git diff --name-status --find-renames <base>` | `contextrouter.GitDiffSource.Changes` (`sources.go:57-78`) | The router's diff evidence | Name-status only, no patch bodies | **No** — re-run per routed request, and a request may run twice (compact, then expanded) |
-| Porcelain status + HEAD observation | `incident_advisor.go:322-332` via `workspaceFacts` | Incident pack evidence | Bounded in the pack | Observation transient |
+| Call | Where | Consumer | Bound | Lifecycle | Result durable? |
+| --- | --- | --- | --- | --- | --- |
+| `git rev-list --max-count=<n> HEAD` | `workflow/approved_head_recovery.go:75-77`, behind the `CommitHistory` port with `execCommitHistory` as the default (`:63-88`) | Reconstructs the commit a durable **approved workspace fingerprint** was read at, so a review target is addressable as a real SHA | **Yes — `maxApprovedHeadSearchCommits = 500`** (`:106-112`); a target beyond the bound is reported unreconstructible rather than guessed | Runs from the approved-head resolution path, at most **once per approval question** | **Yes, and uniquely so.** The outcome is checkpointed under `approved_head_reconstructed` (`:98-105`) keyed by the fingerprint that was asked about. A success becomes the row every later read resolves through; a **failure is recorded too**, precisely so subsequent polls stop re-running the subprocess to re-derive the same "no" |
+| `git log -n 20 --pretty=format:...` | `adapters/workspace/directbranch/workspace.go:376` and `adapters/workspace/gitworktree/workspace.go:778`, filling `ports.WorkspaceObservation.Commits` | `workflow/worker_signal_reconcile.go:297-303` counts `CommitsSinceDispatch` as worker-progress evidence; `workflow/work_adoption.go:361-366` records `<sha> <subject>` lines on the adoption record; `session_manager/agent_switching.go:1162` copies them onto a session fact | **Yes — `maxObservedWorkspaceCommits = 20`** (`directbranch:37`, `gitworktree:742`) | Runs on **every workspace observation**, so repeatedly per task | **Partly.** Transient in the observation itself; the subject lines that survive are the ones persisted on the work-adoption record |
+| `git rev-list --merges --max-count=1 base..head` | `integration/git.go:225` (`HasMergeCommits`) | Integration merge detection | Yes — `--max-count=1` | Per integration attempt | Consumed by the integration coordinator, not stored as history |
+| `git merge-base [--is-ancestor]` | `integration/git.go:197,211`; `worktree/git.go:180` | Ancestry/base resolution for integration and worktree lifecycle | Single answer | Per operation | No |
+| `git branch --show-current`, `git rev-parse HEAD`, `git status --porcelain` | `adapters/planner/command/context.go:28-38` | Stamps the planner manifest | N/A | Per planner call | Recorded in the manifest (paths/hashes/refs only, §2.1) |
+| `git diff --name-status --find-renames <base>` | `contextrouter.GitDiffSource.Changes` (`sources.go:57-78`) | The router's diff evidence — the one history-adjacent read that **does** become agent context | Name-status only, no patch bodies | Per routed request, and a request may run twice (compact, then expanded) | **No** |
+| Porcelain status + HEAD observation | `incident_advisor.go:322-332` via `workspaceFacts` | Incident pack evidence for the Diagnostic Agent | Bounded inside the pack | Per incident | Observation transient |
 
-`approved_head_recovery.go` is the only history read in AO with a durable
-result-cache, and it is worth naming as the in-repo precedent for "run git once,
-checkpoint the answer, never re-derive it".
+Two things to carry into P2-A. First, **`approved_head_recovery.go` is the only
+history read in AO whose answer is cached durably**, and it is the in-repo
+precedent for the whole design: run git once, checkpoint the answer *including
+the negative one*, never re-derive it. Second, the workspace `git log -n 20` is
+the counter-example directly beside it — the same class of read, run on every
+observation, with only a fragment of its result surviving.
+
+Note also what is absent from the AO side: **no `git log`, `git blame`, or
+`git show` output is ever assembled into a payload for the Planner, Worker,
+Reviewer or either Repair Agent.** The router's name-status diff is the sole
+git-derived input to any AO-assembled context.
 
 **Agent-initiated history inspection — unmeasured context for the roles that
 have it:**
@@ -217,8 +242,8 @@ meant to expose, and precisely the kind of fact a durable memory item
 
 | Package | What it is | Durability | Populated in production? |
 | --- | --- | --- | --- |
-| `internal/codegraph` | Provider-agnostic symbol/edge graph; native AST indexer; hash-gated incremental update (`FilesParsed`/`FilesSkipped`/`FilesRenamed` is its audit trail); per-project JSON graph at `<data dir>/codegraph/<key>/graph.json` | **Durable** | **No** |
-| `internal/projectmemory` | Durable per-project facts: `MemoryItem{Scope,Type,Content,Source,SourceCommit,Confidence,Stale,StaleReason,ContentHash}` (`memory.go:101-144`); content-hash idempotent upsert; staleness against HEAD/file hashes; `<data dir>/project-memory/items/<key>/memory.json` | **Durable** | **No** |
+| `internal/codegraph` | Provider-agnostic symbol/edge graph; native AST indexer; hash-gated incremental update (`FilesParsed`/`FilesSkipped`/`FilesRenamed` is its audit trail); per-project JSON graph at `<data dir>/codegraph/projects/<key>/graph.json` | **Durable** | **No** |
+| `internal/projectmemory` | Durable per-project facts: `MemoryItem{Scope,Type,Content,Source,SourceCommit,Confidence,Stale,StaleReason,ContentHash}` (`memory.go:101-144`); content-hash idempotent upsert; staleness against HEAD/file hashes; `<data dir>/project-memory/items/projects/<key>/memory.json` | **Durable** | **No** |
 | `internal/contextrouter` | Role-aware assembler: per-role section ordering (`router.go:30-35`), per-role token budgets, compact→expanded escalation, hard-cap enforcement, `AO_CONTEXT_ROUTER` flag (off by default) | Transient per dispatch | Only behind the flag |
 
 `internal/observe/projectmemory` is a different thing despite the name: it is
@@ -230,39 +255,78 @@ evidence file per dispatch with `FilesInspected`, `RepeatedReads`,
 Store locations, precisely (`codegraph/store.go:26-51`,
 `projectmemory/store.go:29-54`): both resolve `DataDir()` as `AO_DATA_DIR` when
 set, otherwise **`~/.ao/data`** — *not* `~/.ao` — and both refuse OS-default
-app-data locations via `forbiddenPathSegments`. So the default roots are
-`~/.ao/data/codegraph` and `~/.ao/data/project-memory/items`, with a per-project
-directory and a single `graph.json` / `memory.json` beneath each. Project memory
-sits beside, not inside, the baseline evidence directory, because evidence is a
-prunable input and memory is the durable output (`projectmemory/store.go:18-21`).
+app-data locations via `forbiddenPathSegments`. So the default store roots are
+`~/.ao/data/codegraph` and `~/.ao/data/project-memory/items`. Beneath each root,
+`PathFor` interposes a literal `projects/` segment before the per-project key
+(`codegraph/store.go:166-168`, `projectmemory/store.go:168-170`), so a project's
+file resolves by default to:
 
-### 4.1 Graphify / Grae: what was and was not found
+- `~/.ao/data/codegraph/projects/<key>/graph.json`
+- `~/.ao/data/project-memory/items/projects/<key>/memory.json`
 
-- **Graphify — found as a named integration target, not as an implementation.**
-  `internal/codegraph` exists specifically so AO is never hard-wired to one
-  graph tool: `CodeGraphProvider` (`codegraph.go:66-81`) publishes three verbs
-  (index a project, apply a git diff, ask a question) and its package doc names
-  Graphify as an example of a third-party tool that "can be plugged in by
-  implementing `CodeGraphProvider`" (`codegraph.go:1-14`, restated in
-  [code-graph.md](code-graph.md)). `Name()`'s own comment gives `"graphify"` as
-  a sample provider name. **No Graphify client, adapter, dependency, config key
-  or network call exists in the repository.** `NativeIndexer`
-  (`ProviderNameNative = "native"`) is the only implementation.
-- **Grae — not found.** A repository-wide search across Go, TypeScript, Markdown
-  and JSON (excluding `node_modules`) returns **zero** matches for "Grae" in any
-  casing. There is no Grae implementation, adapter, reference, vendored module
-  or documentation note to extend or to conflict with.
-- **Therefore P2-A extends, and does not duplicate.** The provider boundary that
-  a Graphify integration would attach to already exists, is tested, and is
-  already consumed read-only by the router
-  (`contextrouter.GraphQuerier`, `sources.go:25-32`, narrowed deliberately so
-  routing can never index as a side effect). Adding a second graph or indexing
-  abstraction would mean two provider boundaries competing for the same
-  `Query`/`Index`/`IncrementalUpdate` contract and two per-project stores under
-  the data dir. The same reasoning applies to `projectmemory` (the durable fact
-  store, whose `MemorySource` interface is satisfied as-is by `*Store`) and to
-  `contextrouter` (the role-aware assembler): P2-A adds **producers and call
-  sites** to these three packages, not replacements for them.
+The per-project directory is the whole of the multi-project isolation guarantee
+in both stores: there is no shared file for two projects to leak entries
+through. Project memory sits beside, not inside, the baseline evidence
+directory, because evidence is a prunable input and memory is the durable
+output (`projectmemory/store.go:18-21`).
+
+### 4.1 Graphify / Grae: the explicit determination
+
+**Search performed.** Case-insensitive, repository-wide, across `*.go`, `*.ts`,
+`*.tsx`, `*.md` and `*.json`, excluding `node_modules`, for both names. Results
+in full:
+
+| Name | Matches | What they are |
+| --- | --- | --- |
+| **Graphify** | 2 | `backend/internal/codegraph/codegraph.go:5` (package doc) and `docs/code-graph.md:5` — both **prose naming it as an example** of a third-party tool that could be plugged in |
+| **Grae** | **0** | none, in any casing |
+
+**Graphify — named as a possible future adapter, not integrated.** The two hits
+are documentation sentences, not code. There is **no Graphify client, adapter,
+SDK dependency, module requirement, config key, environment variable, endpoint
+or network call anywhere in the repository**, and `Name()`'s comment offers
+`"graphify"` only as a sample provider string (`codegraph.go:67-69`). Nothing
+would break, and nothing would be reused, if the name were deleted tomorrow.
+
+**Grae — no integration and no abstraction exists.** Zero matches. There is no
+Grae implementation, adapter, reference, vendored module, feature flag or
+documentation note to extend, and therefore nothing for P2-A to conflict with or
+adopt. Recorded here as a definite negative rather than left unstated.
+
+**What *does* exist, and is a different thing from the above.** These are real,
+in-tree, tested abstractions — the distinction the two rows above are meant to
+draw is precisely that the boundary is shipped while Graphify is only mentioned:
+
+| Abstraction | Where | Status |
+| --- | --- | --- |
+| `CodeGraphProvider` — provider-neutral boundary: `Name`, `Index`, `IncrementalUpdate`, `Query`, with documented invariants (queries are read-only and must never lazily rebuild; persisted state must live under the data dir) | `codegraph/codegraph.go:60-81` | **Shipped**, with a published contract |
+| `NativeIndexer` (`ProviderNameNative = "native"`) — the in-tree implementation: Go-stdlib AST parsing, no external process or network, per-file and per-symbol hashing for incremental update | `codegraph/native.go:35-98` | **Shipped**, and the *only* implementation |
+| `codegraph.Store` — per-project persisted graph with multirepo isolation | `codegraph/store.go` | **Shipped** |
+| `projectmemory` — durable fact store with provenance, content-hash idempotent upsert, and commit/file-hash staleness | `projectmemory/` | **Shipped** |
+| `contextrouter` — role-aware, budgeted assembler reading a diff source, a `GraphQuerier` and a `MemorySource` | `contextrouter/` | **Shipped**, behind `AO_CONTEXT_ROUTER` |
+
+**Precisely which abstractions P2-A extends.** Three, and no new one:
+
+1. **`codegraph.CodeGraphProvider` + `codegraph.Store`** — for indexing. A
+   Graphify (or LSP-backed, or hosted) indexer is added as an *implementation of
+   the existing interface*, alongside `NativeIndexer`. What P2-A must supply is
+   the missing **producer**: a production caller of `Index`/`IncrementalUpdate`
+   (§4.2).
+2. **`projectmemory.Store`** — for durable facts. Its `MemoryItem` schema,
+   identity/idempotency rules and staleness model are already what a memory
+   system needs; `MemorySource` is satisfied by `*Store` as-is
+   (`contextrouter/sources.go:36-40`). What is missing is a production
+   **writer** and a caller of `RefreshStaleness`.
+3. **`contextrouter` (+ `wfrouter`)** — for delivery. Role budgets and section
+   ordering already exist for all five roles; what is missing is wrapping the
+   reviewer and fix surfaces (§5).
+
+Duplicating any of the three would mean two provider boundaries competing for
+the same `Query`/`Index`/`IncrementalUpdate` contract, two per-project stores
+under the same data dir, and two budgeted assemblers on the dispatch path — with
+the second of each necessarily unmeasured by the existing baseline recorder and
+the `ctxregress` harness. P2-A therefore adds **producers, providers and call
+sites** to these packages, not replacements for them.
 
 ### 4.2 The finding that matters most: nothing writes to either durable store
 
@@ -332,6 +396,9 @@ path.** No new surface is needed to reach them.
   per routed request, and a routed request may run twice.
 - The reviewer's own `git status`/`git diff`/`git log`, inside the agent, per
   review cycle (§3).
+- `git log -n 20` on every workspace observation, in both workspace adapters
+  (`directbranch/workspace.go:376`, `gitworktree/workspace.go:778`) — repeated
+  per observation, with only the adopted subject lines kept (§3).
 - The incident advisor's workspace observation, per incident.
 - Everything the harness reads inside the worktree, per session — unbounded and
   unmeasured unless the baseline recorder is on.
@@ -342,10 +409,14 @@ path.** No new surface is needed to reach them.
   cheap and reports `FilesSkipped`. Never populated (§4.2).
 - `projectmemory` items — content-hash idempotent, commit-stamped, staleness-
   aware. Never populated (§4.2).
-- Plan artifacts, `PlannerContext` manifests, checkpoints, review runs, repair
-  intents, workspace fingerprints, the `approved_head_reconstructed` checkpoint
-  — durable in SQLite, and already the sources the pure prompt builders read
-  from.
+- Plan artifacts, the content-free `PlannerContext` manifest
+  (`workflow_plans.context_manifest_json`, §2.1), checkpoints, review runs,
+  repair intents, workspace fingerprints, work-adoption records — durable in
+  SQLite, and already the sources the pure prompt builders read from.
+- **The `approved_head_reconstructed` checkpoint** — the single existing example
+  of a git scan whose answer, positive *and* negative, is written down so it is
+  never re-run (`workflow/approved_head_recovery.go:98-112`). It is the model
+  P2-A should follow for any scan it introduces.
 
 **Durable but not context:** the baseline evidence files are an audit trail, not
 a retrieval source; nothing reads them back at dispatch time except the
