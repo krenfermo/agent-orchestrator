@@ -47,8 +47,9 @@ the worker is a *configured* rules channel, not a repo-file one: `AgentRules` /
 
 | Source | Built by | Rescanned per run? | Durable? |
 | --- | --- | --- | --- |
-| `AGENTS.md`, `README.md`, `go.mod`, `package.json`, `docs/architecture.md`, `docs/STATUS.md` (48 KiB cap each) | `adapters/planner/command.ContextBuilder.Build` (`context.go:26-52`) | **Yes — full re-read from disk on every planner call** | A **content-free** `PlannerContext` manifest is built and persisted by `Coordinator.GeneratePlan` (`workflow/master_coordinator.go:194-273`) into `workflow_plans.context_manifest_json` via `planStore.StartWorkflowPlanCommand` (`storage/sqlite/store/workflow_plan_store.go:60-64`). Durable *as a record*, never reusable *as a cache* — see below |
-| Branch, HEAD SHA, dirty flag | same builder, three `git` subprocesses (`context.go:28-38`) | Yes | Recorded in the manifest |
+| `AGENTS.md`, `README.md`, `go.mod`, `package.json`, `docs/architecture.md`, `docs/STATUS.md` (48 KiB cap each) | `adapters/planner/command.ContextBuilder.Build` (`context.go:26-52`) | **Yes — full re-read from disk on every planner call, *and* on every plan-reuse assessment** (see the drift row below) | A **content-free** `PlannerContext` manifest is built and persisted by `Coordinator.GeneratePlan` (`workflow/master_coordinator.go:194-273`) into `workflow_plans.context_manifest_json` via `planStore.StartWorkflowPlanCommand` (`storage/sqlite/store/workflow_plan_store.go:60-64`). Durable, and genuinely *reused* — as a comparison artifact, not as a body cache. See below |
+| Branch, HEAD SHA, dirty flag | same builder, three `git` subprocesses (`context.go:28-38`) | Yes, on both paths above | Recorded in the manifest |
+| **Planner-context drift check** — rebuilds the whole context and diffs it against the stored manifest | `Coordinator.plannerContextDrift` (`workflow/plan_reuse.go:152-181`), called from `assessPlanReuse` (`:129-145`) | **Yes — the full six-document read plus three git probes runs again on every assessment** | Consumes the durable manifest as drift evidence; the rebuilt copy is discarded |
 | Routed selection (optional) | `contextrouter/wfrouter.InstrumentPlanner` (`wfrouter.go:91-175`) | Yes | No — transient per dispatch |
 
 The document list is hard-coded (`context.go:40`). There is no per-project
@@ -58,16 +59,50 @@ builder *does* compute a SHA-256 per document (`PlannerDocument.SHA256`) — the
 mechanism a cache would need already exists and is simply never consulted.
 
 The persisted manifest cannot close that gap by itself, and it is worth being
-exact about why. `GeneratePlan` deliberately blanks every `Document.Content` before
-marshalling, over a **copy** of the slice — the aliasing bug that shared the
-backing array is incident wf-80dc9f12, which stripped the repository context out
-of every planner call (`master_coordinator.go:239-255`). So the durable manifest
-holds paths and hashes and no bodies. Two consequences for P2-A: the manifest can
-never serve as a document *cache*, and its hashes are exactly the gate a real
-cache would need. The only current reader is
-`repoRootsFromContextManifest` (`workflow/task_graph_wiring.go:22-36`), which
-recovers repository-root directory names from those paths for the task
-classifier — a read, not a write, and the manifest's only consumer today.
+exact about why. `GeneratePlan` deliberately blanks every `Document.Content`
+before marshalling, over a **copy** of the slice — the aliasing bug that shared
+the backing array is incident wf-80dc9f12, which stripped the repository context
+out of every planner call (`master_coordinator.go:239-255`). So the durable
+manifest holds paths and hashes and no bodies.
+
+**The manifest is not a body cache, but it is not inert either — it is a durable
+comparison artifact, and it has two production consumers.** The distinction
+matters for P2-A, so both are inventoried:
+
+1. **`repoRootsFromContextManifest`** (`workflow/task_graph_wiring.go:22-36`) —
+   recovers repository-root directory names from the manifest's paths for the
+   task classifier. A pure read of already-captured facts, costing no IO.
+2. **`Coordinator.plannerContextDrift`** (`workflow/plan_reuse.go:152-181`) —
+   the manifest's load-bearing use. `assessPlanReuse` (`:129-145`) asks whether
+   the project AO would plan against *today* is the project it planned against
+   *then*. `plannerContextDrift` answers by calling
+   `plannerContextBuilder.Build` **again**, blanking the bodies the same way,
+   marshalling, and comparing the result to `record.ContextManifestJSON` by
+   exact string equality. Equal ⇒ `PlanReuseExact`; different ⇒
+   `stale_revalidatable` / `context_changed`; unable to rebuild ⇒
+   `known=false` ⇒ `stale_revalidatable` / `unverifiable`, which routes to a
+   person rather than guessing (`plan_reuse.go:129-141`).
+
+So the manifest **is** durable evidence that is really reused, and the reuse is
+sound: comparing hashes rather than bodies is what lets AO prove context
+stability cheaply *in storage*. What it does not save is the **read**. `Build`
+has no hash-only mode, so the drift check re-reads all six documents in full,
+with bodies, up to the 48 KiB cap each, hashes them, blanks the bodies, and
+throws them away — paying the entire scan cost to produce a string comparison.
+
+Two consequences for P2-A. The manifest can never serve as a document *cache*
+(no bodies are stored), yet its **stored hashes are exactly the gate that would
+make the re-read unnecessary** — a `Build` variant that stats and hashes without
+loading bodies, or that short-circuits on unchanged mtime/size, would make the
+drift check nearly free. And this is not a rare path: `assessPlanReuse` is
+re-derived on demand "precisely so it can never be stale"
+(`plan_reuse.go:77-79`), reached from `AssessRecovery` — which writes nothing so
+that "a poll, a page load and an operator's terminal can all ask freely"
+(`recovery_assessment.go:75-85`) and is served over HTTP at
+`httpd/controllers/workflow_recovery.go:211` and `httpd/controllers/workflow.go:1416`
+— as well as from `resume_obligation.go:210,236` and the reuse/regenerate
+commands (`plan_reuse.go:204,279,307,314`). **Every one of those reads spawns
+three git subprocesses and six file reads.**
 
 ### 2.2 Worker
 
@@ -207,7 +242,7 @@ whether its result is kept.
 | `git log -n 20 --pretty=format:...` | `adapters/workspace/directbranch/workspace.go:376` and `adapters/workspace/gitworktree/workspace.go:778`, filling `ports.WorkspaceObservation.Commits` | `workflow/worker_signal_reconcile.go:297-303` counts `CommitsSinceDispatch` as worker-progress evidence; `workflow/work_adoption.go:361-366` records `<sha> <subject>` lines on the adoption record; `session_manager/agent_switching.go:1162` copies them onto a session fact | **Yes — `maxObservedWorkspaceCommits = 20`** (`directbranch:37`, `gitworktree:742`) | Runs on **every workspace observation**, so repeatedly per task | **Partly.** Transient in the observation itself; the subject lines that survive are the ones persisted on the work-adoption record |
 | `git rev-list --merges --max-count=1 base..head` | `integration/git.go:225` (`HasMergeCommits`) | Integration merge detection | Yes — `--max-count=1` | Per integration attempt | Consumed by the integration coordinator, not stored as history |
 | `git merge-base [--is-ancestor]` | `integration/git.go:197,211`; `worktree/git.go:180` | Ancestry/base resolution for integration and worktree lifecycle | Single answer | Per operation | No |
-| `git branch --show-current`, `git rev-parse HEAD`, `git status --porcelain` | `adapters/planner/command/context.go:28-38` | Stamps the planner manifest | N/A | Per planner call | Recorded in the manifest (paths/hashes/refs only, §2.1) |
+| `git branch --show-current`, `git rev-parse HEAD`, `git status --porcelain` | `adapters/planner/command/context.go:28-38` | Stamps the planner manifest; and, via `plannerContextDrift`, decides plan reusability | N/A | Per planner call **and per plan-reuse assessment** — the latter reached from `AssessRecovery`, an HTTP read path a poll or page load may hit freely (§2.1) | Recorded in the manifest (paths/hashes/refs only, §2.1), which is then reused as durable drift evidence |
 | `git diff --name-status --find-renames <base>` | `contextrouter.GitDiffSource.Changes` (`sources.go:57-78`) | The router's diff evidence — the one history-adjacent read that **does** become agent context | Name-status only, no patch bodies | Per routed request, and a request may run twice (compact, then expanded) | **No** |
 | Porcelain status + HEAD observation | `incident_advisor.go:322-332` via `workspaceFacts` | Incident pack evidence for the Diagnostic Agent | Bounded inside the pack | Per incident | Observation transient |
 
@@ -388,6 +423,14 @@ path.** No new surface is needed to reach them.
 
 - The planner's six documents and three `git` calls, per planner invocation
   (`adapters/planner/command/context.go`).
+- **The same six documents and three `git` calls again, per plan-reuse
+  assessment** — `plannerContextDrift` rebuilds the whole planner context only
+  to blank the bodies and compare the manifest string
+  (`workflow/plan_reuse.go:152-181`). Because `assessPlanReuse` is deliberately
+  re-derived on demand and is reached from the `AssessRecovery` HTTP read path,
+  this is the most frequently repeated scan in the system: a poll or page load
+  can trigger it (§2.1). It is also the one with the clearest fix — the manifest
+  already stores the hashes that would make the re-read unnecessary.
 - `Config.AgentRulesFile`, re-read from disk per worker spawn
   (`session_manager/prompt.go:133-142`).
 - The whole worker/reviewer system prompt, rebuilt per launch — cheap, and
@@ -409,10 +452,15 @@ path.** No new surface is needed to reach them.
   cheap and reports `FilesSkipped`. Never populated (§4.2).
 - `projectmemory` items — content-hash idempotent, commit-stamped, staleness-
   aware. Never populated (§4.2).
-- Plan artifacts, the content-free `PlannerContext` manifest
-  (`workflow_plans.context_manifest_json`, §2.1), checkpoints, review runs,
-  repair intents, workspace fingerprints, work-adoption records — durable in
-  SQLite, and already the sources the pure prompt builders read from.
+- Plan artifacts, checkpoints, review runs, repair intents, workspace
+  fingerprints, work-adoption records — durable in SQLite, and already the
+  sources the pure prompt builders read from.
+- **The content-free `PlannerContext` manifest**
+  (`workflow_plans.context_manifest_json`) — durable *and genuinely reused*, as
+  the comparison artifact `plannerContextDrift` proves plan reusability against,
+  and as the repo-root signal `repoRootsFromContextManifest` reads (§2.1). It is
+  the closest thing AO already has to a durable context-stability cache: the
+  comparison is cheap, only the re-derivation of its inputs is not.
 - **The `approved_head_reconstructed` checkpoint** — the single existing example
   of a git scan whose answer, positive *and* negative, is written down so it is
   never re-run (`workflow/approved_head_recovery.go:98-112`). It is the model
