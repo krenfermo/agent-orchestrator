@@ -119,19 +119,28 @@ three git subprocesses and six file reads.**
 | **Provider-failover switch note** — a Worker-role `SessionContextPack` appended to the agent-switch note handed to the replacement provider (never the failed provider's transcript), reusing 8H's bounded/idempotent `Note`→`UserNote` handoff | `workflow.(*Coordinator).ReportWorkStepProviderFailure` (`failover.go:172`, pack built at `:289-302`), from `planArtifactForRun` + `BuildTaskCheckpointSummary` + `BuildSessionContextPack` | Only on an automatic work-step provider failover | **Yes** — the pack and its hash are persisted in the lifecycle checkpoint (`failover.go:304`); the rendered note itself is bounded/fingerprinted by `agent_switching.go` |
 | **Everything else** — repo conventions (`AGENTS.md`/`CLAUDE.md`), source, and **git history** (`git log`/`git show`/`git diff`, agent-initiated — see §3) | the harness itself, in the worktree | Per session, uncontrolled | No |
 
-Three things matter here. First, the worker *prompt* is pure and deterministic,
-which is what makes it restart-safe: `BuildWorkStepPromptWithSpec` carries no
-project-specific knowledge, and at spawn time the variable AO-side evidence
-channels are the system prompt's project-rules section and `IssueContext`.
-Second, AO does nevertheless hand the Worker durable, task-derived context
-outside the prompt builder — the prior-dependency recap folded into the child
-objective at a task boundary, and the failover switch note — both of them
-`SessionContextPack`s built from checkpoint facts and both persisted with their
-content hash. They are AO-assembled, not harness-initiated repository
-inspection, and they are the two existing proofs that project-derived facts can
-reach a Worker without touching the pure prompt contract (§8, item 6). Third,
-`AgentRulesFile` is the one repo file AO re-reads per worker spawn, and it is
-read without a hash gate.
+Three things matter here. First, the worker prompt *builder* is pure and
+deterministic, which is what makes it restart-safe: `BuildWorkStepPromptWithSpec`
+performs no IO and holds no project-specific knowledge of its own. Purity of the
+builder is not emptiness of the prompt, though — its *input* varies, because
+`promptForRun` rebuilds the prompt from `run.Objective` (`plan.go:184`), and at a
+task boundary that objective already carries the prior-dependency recap. So the
+AO-side evidence channels that vary per worker spawn are three, not two: the
+system prompt's project-rules section, `IssueContext` (or the routed selection
+that replaces it), and the run objective itself.
+
+Second, the two `SessionContextPack` paths differ in *when* and *how* they reach
+the Worker, and P2-A should not conflate them. The prior-dependency recap is
+assembled once at child-run creation and then travels inside the ordinary
+prompt, so the worker has it at spawn and it survives a restart along with the
+objective. The failover switch note is assembled mid-session and delivered
+outside the prompt entirely, as the `Note`→`UserNote` handoff to the replacement
+provider. Both are built from checkpoint facts and persisted with their content
+hash, and both are AO-assembled rather than harness-initiated repository
+inspection. Together they are the existing proof that project-derived facts can
+reach a Worker without editing a prompt builder — one by varying its input, one
+by bypassing it (§8, item 6). Third, `AgentRulesFile` is the one repo file AO
+re-reads per worker spawn, and it is read without a hash gate.
 
 ### 2.3 Reviewer
 
