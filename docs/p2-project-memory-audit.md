@@ -115,12 +115,21 @@ three git subprocesses and six file reads.**
 | Task prompt (objective + acceptance criteria + guardrails, ± read-only variant, ± effective spec) | `workflow.BuildWorkStepPromptWithSpec` (`plan.go:121`) — pure, no IO | N/A (template expansion) | Persisted in `workflow_steps.artifact_json`; rebuilt byte-identically after a restart via `promptForRun` (`plan.go:175`) |
 | `SpawnConfig.IssueContext` — pre-fetched tracker issue body, wrapped in an explicit trust boundary | tracker adapters; framed by `issueContextSection` / `issueContextTrustBoundary` (`prompt.go:169-173`) and folded into the task prompt by `buildTaskPrompt` (`prompt.go:53-75`) | Per spawn | No |
 | Routed selection replacing `IssueContext` (optional) | `contextrouter/wfrouter.InstrumentSpawner` (`wfrouter.go:186-247`) | Per spawn | No |
+| **Prior-dependency task recap** — one `SessionContextPack` per already-completed dependency task, rendered fact-only (never that task's session or transcript) and appended to the child run's *objective*, so it flows through the existing `BuildPlanArtifact`/`BuildWorkStepPrompt` path with no second prompt-assembly surface | `workflow.priorTaskContextBlock` (`task_boundary.go:21-50`) over `BuildTaskCheckpointSummary` + `BuildSessionContextPack` + `RenderContextPackForRole`; called from `master_coordinator.go:1435-1441` at child-run creation | Rebuilt once per task boundary, from durable dependency-run detail (`GetRun`) — not per spawn | **Yes** — the objective text is persisted on the child run, and the first pack plus its `ContentHash()` are persisted with the `LifecycleReasonTaskBoundary` lifecycle decision (`master_coordinator.go:1475-1484`) |
+| **Provider-failover switch note** — a Worker-role `SessionContextPack` appended to the agent-switch note handed to the replacement provider (never the failed provider's transcript), reusing 8H's bounded/idempotent `Note`→`UserNote` handoff | `workflow.(*Coordinator).ReportWorkStepProviderFailure` (`failover.go:172`, pack built at `:289-302`), from `planArtifactForRun` + `BuildTaskCheckpointSummary` + `BuildSessionContextPack` | Only on an automatic work-step provider failover | **Yes** — the pack and its hash are persisted in the lifecycle checkpoint (`failover.go:304`); the rendered note itself is bounded/fingerprinted by `agent_switching.go` |
 | **Everything else** — repo conventions (`AGENTS.md`/`CLAUDE.md`), source, and **git history** (`git log`/`git show`/`git diff`, agent-initiated — see §3) | the harness itself, in the worktree | Per session, uncontrolled | No |
 
-Two things matter here. First, the worker prompt itself is pure and
-deterministic, which is what makes it restart-safe — and also why AO passes it
-no project-specific knowledge: the only *variable* AO-side evidence channels are
-the system prompt's project-rules section and `IssueContext`. Second,
+Three things matter here. First, the worker *prompt* is pure and deterministic,
+which is what makes it restart-safe: `BuildWorkStepPromptWithSpec` carries no
+project-specific knowledge, and at spawn time the variable AO-side evidence
+channels are the system prompt's project-rules section and `IssueContext`.
+Second, AO does nevertheless hand the Worker durable, task-derived context
+outside the prompt builder — the prior-dependency recap folded into the child
+objective at a task boundary, and the failover switch note — both of them
+`SessionContextPack`s built from checkpoint facts and both persisted with their
+content hash. They are AO-assembled, not harness-initiated repository
+inspection, and they are the two existing proofs that project-derived facts can
+reach a Worker without touching the pure prompt contract (§8, item 6). Third,
 `AgentRulesFile` is the one repo file AO re-reads per worker spawn, and it is
 read without a hash gate.
 
@@ -159,12 +168,16 @@ about the project. **Neither reviewer path is routed** — see §5.
 | --- | --- | --- | --- |
 | Objective, criteria, effective spec, cycle number | `workflow.BuildFixPrompt` (`fix_prompt.go:29`) — pure, no IO | N/A | From durable rows |
 | Reviewer findings body | fetched live from the `ReviewRuns` port at dispatch (`fix_dispatch.go`); referenced by id, never copied into a workflow table | Per cycle | The review run is durable; the fix prompt is not stored |
-| Role-scoped context pack | `RenderContextPackForRoleExcluding` (`session_context_pack.go:55`) over a `TaskCheckpointSummary`, minus the three fields the fix prompt already carries verbatim (`fixPromptDuplicateFields`, `:47-51`) | Per delivery, **no second fetch** (`:11-19`) | Derived from durable checkpoint facts |
+| Role-scoped context pack (**conditional**) | `RenderContextPackForRoleExcluding` (`session_context_pack.go:55`) over a `TaskCheckpointSummary`, minus the three fields the fix prompt already carries verbatim (`fixPromptDuplicateFields`, `:47-51`) | **Not every delivery**: built and prepended only when `DecideSessionLifecycle` returns `LifecycleCompact` *and* the plan artifact loads; otherwise the fix prompt is sent alone (`cascade.go:342-365`). When it is built, it reuses the already-gathered facts — **no second fetch** (`session_context_pack.go:11-19`) | Derived from durable checkpoint facts; the pack is persisted whole even though the prepended block is de-duplicated |
 
 `RenderContextPackForRoleExcluding` is the closest thing AO has to a working
 memory-injection pattern: one computed fact set, several role-scoped views,
 explicit de-duplication against the prompt. It is worth copying rather than
-reinventing.
+reinventing. Note the gate, though: on a `LifecycleNewSession`/`LifecycleReuse`
+decision, or when `planArtifactForRun` fails, the fix worker receives
+`BuildFixPrompt`'s output *only*. Anything P2-A routes through this pack must
+therefore either move the gate or carry its own fallback — the fix role is not
+unconditionally reached today.
 
 ### 2.5 Diagnostic Agent (read-only) — *not* a Repair Agent
 
@@ -307,23 +320,32 @@ output (`projectmemory/store.go:18-21`).
 
 ### 4.1 Graphify / Grae: the explicit determination
 
-**Search performed.** Case-insensitive, repository-wide, across `*.go`, `*.ts`,
-`*.tsx`, `*.md` and `*.json`, excluding `node_modules`, for both names. Results
-in full:
+**Search performed.** Reproducible as (this audit file is excluded, so the
+counts do not change every time the audit itself is edited):
 
-| Name | Matches | What they are |
+```
+grep -rIin 'graphify' --include='*.go' --include='*.ts' --include='*.tsx' \
+  --include='*.md' --include='*.json' . \
+  | grep -v node_modules | grep -v 'docs/p2-project-memory-audit.md'
+grep -rIinw 'grae'    --include='*.go' --include='*.ts' --include='*.tsx' \
+  --include='*.md' --include='*.json' . \
+  | grep -v node_modules | grep -v 'docs/p2-project-memory-audit.md'
+```
+
+| Name | Matching lines | What they are |
 | --- | --- | --- |
-| **Graphify** | 2 | `backend/internal/codegraph/codegraph.go:5` (package doc) and `docs/code-graph.md:5` — both **prose naming it as an example** of a third-party tool that could be plugged in |
-| **Grae** | **0** | none, in any casing |
+| **Graphify** | 4 in 3 files | `backend/internal/codegraph/codegraph.go:5` (package doc) and `:67` (a sample provider string in `Name()`'s comment), `docs/code-graph.md:5` — all **prose naming it as an example** of a third-party tool that could be plugged in — plus `docs/README.md:38`, which is this audit's own row in the docs index and describes this determination rather than any integration |
+| **Grae** | 1 in 1 file | `docs/README.md:38` only — again this audit's own index row. **Zero** occurrences anywhere else, in any casing |
 
-**Graphify — named as a possible future adapter, not integrated.** The two hits
-are documentation sentences, not code. There is **no Graphify client, adapter,
+**Graphify — named as a possible future adapter, not integrated.** Every hit is
+a documentation sentence or a comment, not code. There is **no Graphify client, adapter,
 SDK dependency, module requirement, config key, environment variable, endpoint
 or network call anywhere in the repository**, and `Name()`'s comment offers
 `"graphify"` only as a sample provider string (`codegraph.go:67-69`). Nothing
 would break, and nothing would be reused, if the name were deleted tomorrow.
 
-**Grae — no integration and no abstraction exists.** Zero matches. There is no
+**Grae — no integration and no abstraction exists.** Zero matches outside this
+audit's own index row. There is no
 Grae implementation, adapter, reference, vendored module, feature flag or
 documentation note to extend, and therefore nothing for P2-A to conflict with or
 adopt. Recorded here as a definite negative rather than left unstated.
@@ -455,6 +477,14 @@ path.** No new surface is needed to reach them.
 - Plan artifacts, checkpoints, review runs, repair intents, workspace
   fingerprints, work-adoption records — durable in SQLite, and already the
   sources the pure prompt builders read from.
+- **The three `SessionContextPack` handoffs** — the task-boundary recap folded
+  into a child run's objective (`task_boundary.go:21-50`), the provider-failover
+  switch note (`failover.go:289-302`), and the conditional fix-worker pack
+  (`cascade.go:342-365`). All three are *derived* from durable checkpoint facts,
+  computed once per event rather than per spawn, and persisted with a
+  `ContentHash()` on the lifecycle decision — so they are durable **and**
+  reused, and they are the existing template for delivering project-derived
+  facts without touching a pure prompt builder.
 - **The content-free `PlannerContext` manifest**
   (`workflow_plans.context_manifest_json`) — durable *and genuinely reused*, as
   the comparison artifact `plannerContextDrift` proves plan reusability against,
@@ -531,9 +561,18 @@ contract, no new storage code, no violation of its stated invariants.
    better, letting the existing planner routing wrapper inject them so the
    builder keeps its single job. Its hard-coded six-file list is the other
    cheapest rescan to eliminate.
-6. **`workflow.BuildFixPrompt` + `RenderContextPackForRoleExcluding`.** Memory
-   would enter as additional `TaskCheckpointSummary`-derived facts, keeping the
-   "one fact set, role-scoped views, explicit de-duplication" property intact.
+6. **`BuildSessionContextPack` / `BuildTaskCheckpointSummary` — the pack
+   builders, already consumed on three paths.** Memory would enter as
+   additional `TaskCheckpointSummary`-derived facts, keeping the "one fact set,
+   role-scoped views, explicit de-duplication" property intact, and would then
+   reach all three existing consumers with no new surface: the fix worker via
+   `RenderContextPackForRoleExcluding` (`cascade.go:342-365`, **but only on a
+   `LifecycleCompact` decision** — §2.4), the Worker's prior-dependency recap
+   (`task_boundary.go:21-50`), and the failover switch note
+   (`failover.go:289-302`). The first is conditional and the third is
+   event-driven, so neither is a substitute for the routed `IssueContext`
+   channel (item 2); the second is the only one that fires on the normal
+   task-boundary path.
 7. **`BuildIncidentContextPack`.** Via a new plain input field only, and
    understanding that it reaches the Diagnostic Agent alone (§7).
 8. **`BuildWorkStepPrompt`.** Last, and possibly never. Its purity is what makes
