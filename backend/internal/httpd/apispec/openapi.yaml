@@ -14070,6 +14070,32 @@ components:
       - repair
       - workflow
       type: object
+    WorkflowRepairStateView:
+      properties:
+        active:
+          type: boolean
+        attempt:
+          type: integer
+        budget:
+          type: integer
+        exhausted:
+          type: boolean
+        quiescenceReason:
+          type: string
+        quiescent:
+          type: boolean
+        runId:
+          type: string
+        waitingForFreshReview:
+          type: boolean
+      required:
+      - active
+      - attempt
+      - budget
+      - exhausted
+      - waitingForFreshReview
+      - quiescent
+      type: object
     WorkflowResumeView:
       properties:
         obligation:
@@ -14266,6 +14292,8 @@ components:
           type: string
         recovery:
           $ref: '#/components/schemas/WorkflowRecoveryView'
+        repair:
+          $ref: '#/components/schemas/WorkflowRepairStateView'
         state:
           enum:
           - pending

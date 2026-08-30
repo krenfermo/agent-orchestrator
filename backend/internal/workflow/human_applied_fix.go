@@ -97,29 +97,65 @@ func (r humanAppliedFixRecord) json() string {
 	return string(b)
 }
 
+// externalFixAdoption is what evaluateExternalAppliedFix concluded, WITHOUT
+// having changed anything. Splitting the decision from the write is what lets
+// the same rule answer two different questions with one implementation: "should
+// this Continue re-open review?" (resumeHumanAppliedFix, which then writes) and
+// "is there an unreviewed authoritative state this run is being held away from?"
+// (head_convergence.go's read-only probe, which then routes the run into the one
+// mutating path rather than opening a second one).
+type externalFixAdoption struct {
+	// Adoptable is true only when every precondition below holds right now.
+	Adoptable bool
+	// Reason names, in AO's own words, what was concluded — including why not.
+	Reason string
+
+	OldFingerprint string
+	NewFingerprint string
+	PreviousReview domain.ReviewRun
+	Generation     int
+	StoppedAt      time.Time
+
+	session domain.SessionRecord
+	fixStep domain.WorkflowStep
+	silent  time.Duration
+}
+
 // resumeHumanAppliedFix reopens review for a run whose workspace changed after
 // its fix budget ran out.
 //
-// It lives in ContinueRun and nowhere else, for the same reason every other
-// resume rule here does: THIS call is a person saying "I have dealt with it",
-// and a rule that re-opens review must never fire off a 2s read poll. It is a
-// no-op for every run without the exact durable shape below, and every
-// precondition is re-derived now rather than trusted from the recorded stop.
+// It is the ONLY writer for this transition, and every entry point — the
+// person's Continue, the parent objective's reconcile, boot recovery — reaches
+// it through ContinueRun rather than duplicating it, so one new authoritative
+// state can never produce two fresh reviews. Every precondition is re-derived
+// now rather than trusted from the recorded stop.
 func (c *Coordinator) resumeHumanAppliedFix(ctx stdctx.Context, run domain.WorkflowRun) (domain.WorkflowRun, bool, error) {
+	decision, err := c.evaluateExternalAppliedFix(ctx, run)
+	if err != nil || !decision.Adoptable {
+		return run, false, err
+	}
+	return c.adoptExternalAppliedFix(ctx, run, decision)
+}
+
+// evaluateExternalAppliedFix decides, and writes nothing.
+func (c *Coordinator) evaluateExternalAppliedFix(ctx stdctx.Context, run domain.WorkflowRun) (externalFixAdoption, error) {
+	no := func(reason string) (externalFixAdoption, error) {
+		return externalFixAdoption{Reason: reason}, nil
+	}
 	if run.State != domain.WorkflowRunNeedsAttention {
-		return run, false, nil
+		return no("the run is not parked, so there is no stop to recover from")
 	}
 	if c.sessionFacts == nil || c.workspaceFacts == nil || c.reviewRuns == nil {
-		return run, false, nil
+		return no("this configuration has no session/workspace/review facts to decide on")
 	}
 	reason, _, ok := c.stopReason(ctx, run)
 	if !ok || reason != ReasonFixBudgetExhausted {
-		return run, false, nil
+		return no("the run is not stopped on fix_budget_exhausted")
 	}
 
 	steps, err := c.store.ListWorkflowSteps(ctx, run.ID)
 	if err != nil {
-		return run, false, err
+		return externalFixAdoption{}, err
 	}
 	var workStep, reviewStep, fixStep, verifyStep *domain.WorkflowStep
 	for i := range steps {
@@ -135,7 +171,7 @@ func (c *Coordinator) resumeHumanAppliedFix(ctx stdctx.Context, run domain.Workf
 		}
 	}
 	if workStep == nil || reviewStep == nil || fixStep == nil {
-		return run, false, nil
+		return no("this run has no work/review/fix step triple to recover")
 	}
 	// The exact resting shape of a budget-exhausted stop. Anything in motion —
 	// a running fix, a running review, a work step still going — means the run
@@ -143,71 +179,73 @@ func (c *Coordinator) resumeHumanAppliedFix(ctx stdctx.Context, run domain.Workf
 	if workStep.State != domain.WorkflowStepCompleted ||
 		reviewStep.State != domain.WorkflowStepWaiting ||
 		fixStep.State != domain.WorkflowStepWaiting {
-		return run, false, nil
+		return no("the run's steps are not at the resting shape of a budget-exhausted stop")
 	}
 	if verifyStep != nil && verifyStep.State == domain.WorkflowStepRunning {
-		return run, false, nil
+		return no("verification is running, so the run is not waiting on anybody")
 	}
-	if open, qerr := c.hasOpenQuestion(ctx, run.ID, nil); qerr != nil || open {
-		return run, false, qerr
+	if open, qerr := c.hasOpenQuestion(ctx, run.ID, nil); qerr != nil {
+		return externalFixAdoption{}, qerr
+	} else if open {
+		return no("this run has an open question, which is a person's to answer first")
 	}
 
 	// There must be a previous review that asked for changes: this recovery is
 	// about a finding somebody addressed, not about a run that never got one.
 	if reviewStep.ReviewRunID == nil {
-		return run, false, nil
+		return no("the review step names no review run, so there is no verdict to supersede")
 	}
 	prevReview, found, err := c.reviewRuns.GetReviewRun(ctx, *reviewStep.ReviewRunID)
 	if err != nil {
-		return run, false, err
+		return externalFixAdoption{}, err
 	}
 	if !found || prevReview.EffectiveVerdict() != domain.VerdictChangesRequested {
-		return run, false, nil
+		return no("the authoritative review did not request changes")
 	}
 
 	// The workspace, read now, must belong to this run and must differ from
 	// what the last review judged.
 	workCP, hasCP, err := c.store.GetLatestWorkflowCheckpointByStep(ctx, workStep.ID)
 	if err != nil {
-		return run, false, err
+		return externalFixAdoption{}, err
 	}
 	if !hasCP || workCP.SessionID == nil || *workCP.SessionID == "" {
-		return run, false, nil
+		return no("AO has no durable record of which session owns this run's workspace")
 	}
 	sessionID := *workCP.SessionID
 	sess, sfound, err := c.sessionFacts.GetSession(ctx, domain.SessionID(sessionID))
 	if err != nil {
-		return run, false, err
+		return externalFixAdoption{}, err
 	}
 	if !sfound {
-		return run, false, nil
+		return no("the session that owns this run's workspace no longer exists")
 	}
 	obs, obsOK := c.observeFixWorkspace(ctx, sess)
 	if !obsOK {
 		// Cannot read the workspace, so cannot prove anything changed. Failing
 		// to read is never evidence.
-		return run, false, nil
+		return no("AO could not read the workspace, and failing to read is never evidence that it changed")
 	}
 	newFingerprint := WorkspaceFingerprint(obs)
 	oldFingerprint := c.fingerprintThatExhaustedTheBudget(ctx, run.ID, fixStep.ID, prevReview)
 	if oldFingerprint == "" || newFingerprint == "" || newFingerprint == oldFingerprint {
-		return run, false, nil
+		return no("the workspace is exactly the state the last review judged")
 	}
 	// The worktree and branch must be the ones this run worked in. A change in
 	// some other tree is not this run's fix.
 	if !sameWorkspaceIdentity(sess, workCP) {
-		return run, false, nil
+		return no("the observed workspace is not the one this run owns")
 	}
 
 	stoppedAt, hasStop := c.stopRecordedAt(ctx, run.ID, ReasonFixBudgetExhausted)
 	if !hasStop {
-		return run, false, nil
+		return no("AO has no durable record of when this run stopped")
 	}
 	// "Not something of AO's that is still moving." AO cannot see the edit
 	// itself, but it can see whether its own worker could still be delivering.
 	// If it could, the change is ambiguous and this rule must not adopt it.
 	if agentMayStillBeDelivering(sess, c.clock()) {
-		return run, false, nil
+		return no("this run's own worker may still be delivering, so the change's provenance is ambiguous")
 	}
 
 	// Idempotence: one fingerprint, at most one fresh review. A repeated
@@ -215,31 +253,52 @@ func (c *Coordinator) resumeHumanAppliedFix(ctx stdctx.Context, run domain.Workf
 	// finds it already recorded.
 	generation, alreadyRecorded := c.humanAppliedFixState(ctx, run.ID, newFingerprint)
 	if alreadyRecorded {
-		return run, false, nil
+		return no("this exact workspace state has already been adopted and reviewed")
 	}
 	if generation > maxHumanAppliedFixRecoveries {
-		return run, false, nil
+		return no(fmt.Sprintf("this run has already used its %d external-fix recoveries", maxHumanAppliedFixRecoveries))
 	}
 	// And the reviewer must not already be looking at exactly this content.
 	if prevReview.TargetSHA == newFingerprint {
-		return run, false, nil
+		return no("the authoritative review already targets exactly this workspace state")
 	}
 
+	return externalFixAdoption{
+		Adoptable:      true,
+		Reason:         "the workspace changed after the budget was exhausted, so a fresh independent review is due",
+		OldFingerprint: oldFingerprint,
+		NewFingerprint: newFingerprint,
+		PreviousReview: prevReview,
+		Generation:     generation,
+		StoppedAt:      stoppedAt,
+		session:        sess,
+		fixStep:        *fixStep,
+		silent:         workerSilence(sess, c.clock()),
+	}, nil
+}
+
+// adoptExternalAppliedFix writes the adoption and un-parks the run. It is
+// reached only from resumeHumanAppliedFix, so the ledger has exactly one writer
+// for this transition.
+func (c *Coordinator) adoptExternalAppliedFix(
+	ctx stdctx.Context, run domain.WorkflowRun, d externalFixAdoption,
+) (domain.WorkflowRun, bool, error) {
+	sess := d.session
 	rec := humanAppliedFixRecord{
-		OldFingerprint: oldFingerprint, NewFingerprint: newFingerprint,
-		PreviousReviewRunID: prevReview.ID,
+		OldFingerprint: d.OldFingerprint, NewFingerprint: d.NewFingerprint,
+		PreviousReviewRunID: d.PreviousReview.ID,
 		Attribution:         "external intervention (AO observed the change; it cannot attribute it to a person)",
-		ObservedAt:          c.clock(), Generation: generation, StoppedAt: stoppedAt,
-		SilentFor: workerSilence(sess, c.clock()).Round(time.Second).String(),
-		SessionID: sessionID, Branch: sess.Metadata.Branch, Worktree: sess.Metadata.WorkspacePath,
+		ObservedAt:          c.clock(), Generation: d.Generation, StoppedAt: d.StoppedAt,
+		SilentFor: d.silent.Round(time.Second).String(),
+		SessionID: string(sess.ID), Branch: sess.Metadata.Branch, Worktree: sess.Metadata.WorkspacePath,
 	}
 	// Written on the FIX step, carrying the new fingerprint, because that is
 	// precisely the durable fact the next review's gate reads. It is NOT a fix
 	// attempt: no workflow_attempt row, no cycle consumed, no budget touched.
 	// The ledger says an external change was observed, which is what happened.
-	stepID := fixStep.ID
-	rid := prevReview.ID
-	sid := sessionID
+	stepID := d.fixStep.ID
+	rid := d.PreviousReview.ID
+	sid := string(sess.ID)
 	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
 		ID:                "wfc-" + c.newID(),
 		WorkflowRunID:     run.ID,
@@ -247,11 +306,11 @@ func (c *Coordinator) resumeHumanAppliedFix(ctx stdctx.Context, run domain.Workf
 		ProjectID:         run.ProjectID,
 		SessionID:         &sid,
 		ReviewRunID:       &rid,
-		FingerprintBefore: oldFingerprint,
-		FingerprintAfter:  newFingerprint,
+		FingerprintBefore: d.OldFingerprint,
+		FingerprintAfter:  d.NewFingerprint,
 		NextAction: fmt.Sprintf(
 			"human_applied_fix_observed: the workspace changed after the fix budget was exhausted (recovery %d of %d) — re-opening an independent review of what is there now; no fix cycle was consumed",
-			generation, maxHumanAppliedFixRecoveries),
+			d.Generation, maxHumanAppliedFixRecoveries),
 		DurablePhase:   humanAppliedFixPhase,
 		PayloadVersion: "v1",
 		RetryState:     rec.json(),
@@ -260,13 +319,12 @@ func (c *Coordinator) resumeHumanAppliedFix(ctx stdctx.Context, run domain.Workf
 		return run, false, err
 	}
 
-	run = c.unparkRun(ctx, run, ReasonFixBudgetExhausted,
-		"the workspace changed after the budget was exhausted, so a fresh independent review is due")
+	run = c.unparkRun(ctx, run, ReasonFixBudgetExhausted, d.Reason)
 	if c.log != nil {
 		c.log.Info("workflow: observed an externally applied fix after the fix budget was exhausted",
-			"run", run.ID, "generation", generation,
-			"oldFingerprint", shortFingerprint(oldFingerprint), "newFingerprint", shortFingerprint(newFingerprint),
-			"previousReview", prevReview.ID)
+			"run", run.ID, "generation", d.Generation,
+			"oldFingerprint", shortFingerprint(d.OldFingerprint), "newFingerprint", shortFingerprint(d.NewFingerprint),
+			"previousReview", d.PreviousReview.ID)
 	}
 	if refreshed, ok2, rerr := c.store.GetWorkflowRun(ctx, run.ID); rerr == nil && ok2 {
 		run = refreshed

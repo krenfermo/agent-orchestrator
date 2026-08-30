@@ -1045,6 +1045,24 @@ func (c *Coordinator) reconcileMasterTasksOnce(ctx stdctx.Context, run domain.Wo
 				}
 			}
 		}
+		// And the state childCanAdvance is right to exclude and wrong to leave
+		// there: a child stopped on a HUMAN-owned reason whose own workspace has
+		// since moved past the review that stopped it. fix_budget_exhausted is
+		// human-owned by disposition, so the gate above skipped it on every one
+		// of this objective's 185 heartbeats while the branch already held the
+		// commit the reviewer had asked for (head_convergence.go). The probe is
+		// read-only and answers "no" for every other stop; when it answers
+		// "yes" the child goes through the same ContinueRun a person's button
+		// enters, so a heartbeat and a person racing produce one fresh review.
+		if !childCanAdvance && child.Run.State == domain.WorkflowRunNeedsAttention {
+			converged, cerr := c.converge(ctx, child.Run)
+			if cerr != nil {
+				return cerr
+			}
+			if converged != nil {
+				child = *converged
+			}
+		}
 		// Checkpoint 8P-E.13 Phase 6: every child outcome now has an explicit
 		// answer for what happens to its task row. Previously only the
 		// completed case did, so a child that failed, was cancelled, or stopped

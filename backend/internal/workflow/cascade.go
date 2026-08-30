@@ -274,6 +274,12 @@ func (c *Coordinator) maybeDispatchFix(ctx stdctx.Context, run domain.WorkflowRu
 		return fixStep, nil
 	}
 
+	// The CYCLE NUMBER is derived from the review runs this worker session has
+	// had, and must stay that way: it is this cycle's NAME, not its cost. It
+	// feeds the outbox idempotency key, so it has to be identical on every poll
+	// that re-derives the same pending cycle — a number that counted dispatches
+	// instead would change the instant the first one landed and let the next
+	// poll dispatch the same cycle again under a new key.
 	cycleCount := 0
 	runs, err := c.reviewRuns.ListReviewRunsBySession(ctx, reviewRun.SessionID)
 	if err != nil {
@@ -284,10 +290,18 @@ func (c *Coordinator) maybeDispatchFix(ctx stdctx.Context, run domain.WorkflowRu
 			cycleCount++
 		}
 	}
-	policy := policyForRun(run)
-	if cycleCount == 0 || cycleCount > policy.MaxFixCycles {
-		// No data yet, or budget already exhausted (recorded elsewhere): do
-		// not dispatch.
+	if cycleCount == 0 {
+		// No data yet: do not dispatch.
+		return fixStep, nil
+	}
+	// The BUDGET is a different question with a different answer, counted the
+	// one way AO counts it: fix cycles actually dispatched, folded out of the
+	// append-only ledger (fix_budget.go). This guard and observeReviewStep's
+	// must agree exactly, or one of them becomes the path that spends a cycle
+	// the other already refused. An unreadable budget is never a licence to
+	// mutate a worktree.
+	budget := c.fixBudget(ctx, run)
+	if !budget.Known || budget.Exhausted() {
 		return fixStep, nil
 	}
 

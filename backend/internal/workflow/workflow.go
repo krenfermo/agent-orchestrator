@@ -827,6 +827,49 @@ type RunDetail struct {
 	// state, one entry per element of Tasks and in the same order. Empty for a
 	// run that has no planned tasks.
 	TaskPlanner []TaskPlannerView
+	// Repair is what AO's repair machinery is doing about this run's stop:
+	// whether a generation is in flight, which of how many it is, whether the
+	// budget is spent, and whether the run is currently waiting on a fresh
+	// authoritative review of a state adopted after the stop. Every field is a
+	// fold over durable rows (see head_convergence.go's repairLifecycleFor).
+	//
+	// It exists so a person, and the UI, can tell the three states wf-724a1e97
+	// made indistinguishable apart: a repair working, a repair spent, and a run
+	// waiting for the review of a change AO has already adopted.
+	Repair RepairLifecycle
+}
+
+// RepairLifecycle is the durable projection of one run's repair state.
+type RepairLifecycle struct {
+	// Active reports a repair generation whose run exists and has not reached a
+	// terminal state. While it is true, Resume and Repair both converge on the
+	// generation that already exists rather than opening a second one.
+	Active bool
+	// Attempt is the newest repair generation (1-based); 0 when none.
+	Attempt int
+	// Budget is policy.MaxRepairCycles: the N in "attempt N of M".
+	Budget int
+	// RunID names the repair run, when there is one.
+	RunID string
+	// Exhausted reports that every repair attempt is spent, so the next step is
+	// a person's.
+	Exhausted bool
+	// WaitingForFreshReview reports that AO adopted a workspace state that
+	// appeared after the stop and is waiting for its one fresh authoritative
+	// review to conclude. It is neither "stopped" nor "fixing": it is AO
+	// re-asking the question about a state nobody has judged.
+	WaitingForFreshReview bool
+	// Quiescent reports a repair generation that exists, is not finished, and
+	// has been PROVEN unable to write: parked for a person, nothing executing,
+	// no slot held, no dispatch in flight, its branch handed back
+	// (repair_quiescence.go). It is deliberately distinct from both Active and
+	// Exhausted — the repair is still a person's to answer, and the origin is
+	// no longer waiting on it. Re-derived on every read, never latched.
+	Quiescent bool
+	// QuiescenceReason is AO's own sentence about why the newest generation
+	// counts as live or as quiescent, so a person reading "repair_active" can
+	// see which of the eight facts is holding it there.
+	QuiescenceReason string
 }
 
 // SessionLifecycleAuditEntry is one durable session-lifecycle decision plus
@@ -1307,6 +1350,11 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 	// after the wake lookup above because it reports that wake's next attempt
 	// and attempt count as part of one coherent answer.
 	detail.CapacityWait = c.deriveCapacityWait(ctx, detail)
+
+	// The repair/fresh-review projection, folded from the same ledger. Read
+	// here rather than derived in DeriveLifecycle so the derivation stays a
+	// pure function of RunDetail, exactly like every other field above.
+	detail.Repair = c.repairLifecycleFor(ctx, detail.Run)
 
 	// Checkpoint 8P-E.11: surface the structured branch wait, read the same
 	// live way. Guarded on the run actually being in Waiting so a checkpoint

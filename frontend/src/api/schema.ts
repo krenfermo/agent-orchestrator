@@ -5142,6 +5142,16 @@ export interface components {
             repair: components["schemas"]["WorkflowRepairPlanView"];
             workflow: components["schemas"]["WorkflowRunDetailView"];
         };
+        WorkflowRepairStateView: {
+            active: boolean;
+            attempt: number;
+            budget: number;
+            exhausted: boolean;
+            quiescenceReason?: string;
+            quiescent: boolean;
+            runId?: string;
+            waitingForFreshReview: boolean;
+        };
         WorkflowResumeView: {
             /** @enum {string} */
             obligation: "none" | "plan_generation" | "plan_approval" | "plan_dispatch" | "work_dispatch" | "work_observation" | "review_dispatch" | "review_observation" | "fix_delivery" | "fix_observation" | "verify" | "convergence" | "terminal";
@@ -5212,6 +5222,7 @@ export interface components {
             phase: "queued" | "planning" | "running" | "reviewing" | "fixing" | "verifying" | "waiting" | "waiting_for_capacity" | "retrying" | "blocked" | "needs_attention" | "completed" | "failed" | "cancelled";
             projectId: string;
             recovery?: components["schemas"]["WorkflowRecoveryView"];
+            repair?: components["schemas"]["WorkflowRepairStateView"];
             /** @enum {string} */
             state: "pending" | "running" | "waiting" | "needs_attention" | "completed" | "failed" | "cancelled";
             /** Format: date-time */

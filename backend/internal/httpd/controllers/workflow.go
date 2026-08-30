@@ -462,6 +462,39 @@ type WorkflowRunView struct {
 	// health evidence with its age. Present only while the run is genuinely
 	// parked on capacity.
 	CapacityWait *WorkflowCapacityWaitView `json:"capacityWait,omitempty"`
+	// Repair is what AO's repair machinery is doing about this run's stop. It
+	// is present on every run (a run with no repair reports zeroes) so the UI
+	// can tell three states apart that wf-724a1e97 rendered identically: a
+	// repair working, a repair spent, and a run waiting for the fresh
+	// authoritative review of a change AO has already adopted.
+	Repair *WorkflowRepairStateView `json:"repair,omitempty"`
+}
+
+// WorkflowRepairStateView is the wire form of workflow.RepairLifecycle.
+type WorkflowRepairStateView struct {
+	// Active reports a repair generation still in flight. While it is true,
+	// duplicate Resume/Repair requests converge on this generation instead of
+	// creating another.
+	Active bool `json:"active"`
+	// Attempt/Budget are the "attempt N of M" a person reads.
+	Attempt int `json:"attempt"`
+	Budget  int `json:"budget"`
+	// RunID names the repair run, when there is one.
+	RunID string `json:"runId,omitempty"`
+	// Exhausted reports every repair attempt spent: the next step is a person's.
+	Exhausted bool `json:"exhausted"`
+	// WaitingForFreshReview reports that AO adopted a workspace state that
+	// appeared after the stop and is waiting for its one fresh authoritative
+	// review. Neither stopped nor fixing.
+	WaitingForFreshReview bool `json:"waitingForFreshReview"`
+	// Quiescent reports a repair that exists, is unfinished, and has been
+	// proven unable to write: parked for a person, with its branch handed back
+	// and its origin no longer waiting on it. Distinct from both active and
+	// exhausted, and re-derived on every read rather than latched.
+	Quiescent bool `json:"quiescent"`
+	// QuiescenceReason is AO's own sentence about why the newest generation
+	// counts as live or as quiescent.
+	QuiescenceReason string `json:"quiescenceReason,omitempty"`
 }
 
 // WorkflowCapacityWaitView is the wire form of workflow.CapacityWait.
@@ -879,6 +912,13 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 	}
 	runView.AttentionWorkflowID = life.AttentionWorkflowID
 	runView.CapacityWait = workflowCapacityWaitView(detail.CapacityWait, time.Now().UTC())
+	runView.Repair = &WorkflowRepairStateView{
+		Active: detail.Repair.Active, Attempt: detail.Repair.Attempt, Budget: detail.Repair.Budget,
+		RunID: detail.Repair.RunID, Exhausted: detail.Repair.Exhausted,
+		WaitingForFreshReview: detail.Repair.WaitingForFreshReview,
+		Quiescent:             detail.Repair.Quiescent,
+		QuiescenceReason:      detail.Repair.QuiescenceReason,
+	}
 	view := WorkflowRunDetailView{Run: runView, Steps: steps}
 	if detail.Plan != nil {
 		pv := WorkflowPlanView{Status: detail.Plan.Status, ApprovalMode: detail.Plan.ApprovalMode, Provider: detail.Plan.Provider, Model: detail.Plan.Model, PromptContextVersion: detail.Plan.PromptContextVersion, PlanHash: detail.Plan.PlanHash, ErrorClass: detail.Plan.ErrorClass, CommandStatus: detail.Plan.CommandStatus, UpdatedAt: detail.Plan.UpdatedAt}

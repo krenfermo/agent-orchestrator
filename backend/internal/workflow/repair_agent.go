@@ -243,6 +243,26 @@ func (c *Coordinator) planRepairFor(ctx stdctx.Context, detail RunDetail) (Repai
 		reason, disp = childReason, childDisp
 	}
 
+	// §F, the structural half: A REPAIR IS NEVER ITSELF REPAIRED.
+	//
+	// A repair run is an ordinary bounded task run, which is exactly what makes
+	// it repairable-looking: it has a work step, a reviewer, a fix budget, and
+	// it can stop on fix_budget_exhausted like anything else. Nothing before
+	// this said no, so `task -> repair -> repair -> repair` was reachable, each
+	// level minting a budget of its own and none of them owing an answer to the
+	// incident that started it. That is the cascade the semantics forbid: an
+	// incident gets ONE bounded repair generation sequence, and a repair that
+	// did not repair returns its result to the ORIGINAL incident rather than
+	// spawning a descendant of its own.
+	//
+	// Checked on the resolved TARGET, not on `detail`, so an objective whose
+	// affected child is a repair run is refused for the same reason directly.
+	if c.isRepairRun(ctx, target.Run) {
+		out.Eligibility = domain.RepairIneligible
+		out.Reason = "This run IS a repair agent's run. A repair that did not succeed returns its result to the incident that authorized it; it never becomes the parent of another repair."
+		return out, nil
+	}
+
 	// The CONDITION is judged before any policy or budget, so no policy
 	// setting anywhere can make an unrepairable stop repairable.
 	out.Eligibility = repairEligibility(disp, policy, spent)
@@ -311,6 +331,35 @@ func repairAcceptanceCriteria(reason string) []string {
 // policy-authorized automatic repair, and that distinction is recorded on the
 // intent rather than inferred later.
 func (c *Coordinator) LaunchRepair(ctx stdctx.Context, runID, authorizedBy string) (domain.RepairIntent, error) {
+	run, ok, err := c.store.GetWorkflowRun(ctx, runID)
+	if err != nil {
+		return domain.RepairIntent{}, err
+	}
+	if !ok {
+		return domain.RepairIntent{}, fmt.Errorf("%w: workflow run %q", ErrNotFound, runID)
+	}
+	// Fold in any repair generation that has already finished before deciding
+	// whether this run needs another one.
+	//
+	// THE INCIDENT (wf-724a1e97). Generation 1 completed at 01:03:38. Twenty-
+	// five seconds later generation 2 was minted for the same evidence digest,
+	// because the single-flight guard below only refuses while the previous
+	// generation's repair run is NON-terminal, and nothing had yet folded
+	// generation 1's completion into the origin. Its result was then thrown
+	// away: reconcileRepairOutcome, running for the first time hours later,
+	// found generation 1 behind the current count and recorded it "superseded
+	// ... and will not resume anything". A repair that WORKED was discarded by
+	// a repair that was launched because nobody had looked at it yet.
+	//
+	// Reconciling first makes that unrepresentable. A completed generation
+	// discharges the origin's obligation here, in this call, before eligibility
+	// is judged -- so either the run is no longer stopped and there is nothing
+	// to repair, or it is still stopped for a reason generation 1 did not fix
+	// and generation 2 is genuinely the next attempt. Idempotent over its own
+	// ledger rows, so calling it here costs nothing when there is nothing to
+	// fold.
+	c.reconcileRepairOutcome(ctx, run)
+
 	detail, err := c.GetRun(ctx, runID)
 	if err != nil {
 		return domain.RepairIntent{}, err
@@ -590,9 +639,31 @@ func (c *Coordinator) reconcileRepairOutcome(ctx stdctx.Context, run domain.Work
 		}
 		if intent.Generation < current {
 			// A superseded generation. It is recorded as resolved so it stops
-			// being reconsidered, and it drives nothing.
+			// being reconsidered, and it drives nothing: a generation the run
+			// has already moved past must never resume a lifecycle a newer one
+			// owns.
+			//
+			// Two things it must still do. It gives the branch back, because a
+			// superseded repair holding a direct-branch lock is the original
+			// deadlock wearing a new hat -- the newer generation, and the
+			// origin after it, both queue behind a repair nobody is watching.
+			// And it says on the ledger what that repair had actually reached,
+			// because "superseded" alone reads as "it was going nowhere", which
+			// is exactly the wrong thing to record about a repair that had
+			// COMPLETED (wf-724a1e97's generation 1). LaunchRepair now folds a
+			// completed generation in before minting the next one, so this
+			// combination should no longer arise; recording it precisely is
+			// what will make it visible if it ever does again.
+			if rerr := c.returnBranchLockFromRepair(ctx, run, intent); rerr != nil && c.log != nil {
+				c.log.Warn("workflow: superseded repair could not return the branch lock", "run", run.ID, "err", rerr)
+			}
+			reached := "unknown"
+			if superseded, found, gerr := c.store.GetWorkflowRun(ctx, intent.RepairRunID); gerr == nil && found {
+				reached = string(superseded.State)
+			}
 			c.recordRepairResolution(ctx, run, intent, "superseded",
-				fmt.Sprintf("repair generation %d was superseded by generation %d and will not resume anything", intent.Generation, current))
+				fmt.Sprintf("repair generation %d (run %s, %s) was superseded by generation %d and will not resume anything",
+					intent.Generation, intent.RepairRunID, reached, current))
 			continue
 		}
 		repairRun, ok, err := c.store.GetWorkflowRun(ctx, intent.RepairRunID)

@@ -150,32 +150,24 @@ func (c *Coordinator) applyTerminalReviewRun(
 		// (stays waiting, non-terminal, resumable later).
 		//
 		// Budget enforcement lives here, at the moment a changes_requested
-		// verdict is first observed for this cycle: the count of
-		// review_runs already created for this worker session IS the
-		// cycle number this verdict just concluded (reused, not a new
-		// counter column). If it has reached policy.MaxFixCycles, the
-		// loop must hard-stop rather than dispatch another fix.
-		cycleCount := 0
-		if c.reviewRuns != nil {
-			if runs, err := c.reviewRuns.ListReviewRunsBySession(ctx, reviewRun.SessionID); err == nil {
-				for _, r := range runs {
-					if r.Harness == reviewRun.Harness {
-						cycleCount++
-					}
-				}
-			}
-		}
-		policy := policyForRun(run)
-		// Checkpoint 8P-E.12: `>` rather than `>=`, so this guard and
-		// maybeDispatchFix's own budget guard (cascade.go) agree exactly.
-		// MaxFixCycles is how many fix cycles the loop MAY run.
-		if cycleCount > 0 && cycleCount > policy.MaxFixCycles {
+		// verdict is first observed for this cycle. What it counts is FIX
+		// CYCLES ACTUALLY DISPATCHED, folded out of the append-only ledger
+		// by fix_budget.go — never review_run rows, which is what made
+		// wf-724a1e97 report "6 review cycles" against a budget of 3 and,
+		// far worse, made every post-recovery fresh review land already
+		// over budget. See fix_budget.go for the full accounting.
+		budget := c.fixBudget(ctx, run)
+		// Fail closed only in the direction that costs nothing: an
+		// unreadable budget does not manufacture a stop here (it refuses
+		// the DISPATCH instead, in maybeDispatchFix), so a store hiccup
+		// can never park a run on an exhaustion it cannot prove.
+		if budget.Exhausted() {
 			// Checkpoint 8P-E.13: stopReview records the canonical reason
 			// as its own checkpoint, so the stop is explainable from
 			// durable state alone regardless of whether an attempt row
 			// happens to exist (review dispatch never creates one).
 			updated, err := c.stopReview(ctx, run, step, ReasonFixBudgetExhausted,
-				fmt.Sprintf("fix_budget_exhausted: the reviewer still requests changes after %d review cycles (max_fix_cycles=%d)", cycleCount, policy.MaxFixCycles),
+				fmt.Sprintf("fix_budget_exhausted: the reviewer still requests changes after %d fix cycles (max_fix_cycles=%d)", budget.Spent, budget.Budget),
 				string(reviewRun.EffectiveVerdict()), domain.WorkflowErrorFixBudgetExhausted, authorityRunID)
 			return updated, true, err
 		}

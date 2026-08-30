@@ -355,6 +355,7 @@ var schemaNames = map[string]string{
 	"ControllersRuntimeGCReportResponse":          "RuntimeGCReportResponse",
 	"ControllersWorkflowBranchWaitView":           "WorkflowBranchWaitView",
 	"ControllersWorkflowCapacityWaitView":         "WorkflowCapacityWaitView",
+	"ControllersWorkflowRepairStateView":          "WorkflowRepairStateView",
 	"ControllersWorkflowCapacityWaitProviderView": "WorkflowCapacityWaitProviderView",
 	"ControllersWorkflowRunDetailView":            "WorkflowRunDetailView",
 	"ControllersWorkflowPlanView":                 "WorkflowPlanView",

@@ -263,6 +263,14 @@ func isBookkeepingPhase(phase string) bool {
 		// disposition, and it is meant to become the run's reason.
 		phase == repairDispatchPhase ||
 		phase == repairResolvedPhase ||
+		// And the quiescence row, which has the same shape and the same hazard
+		// in its sharpest form: it is written on the ORIGIN while the origin is
+		// stopped for its own reason, and if it counted it would displace
+		// `fix_budget_exhausted` as that run's stop -- which is the exact fact
+		// the convergence rule reads to decide whether a new head is due a
+		// fresh review. A fold would then silently disable the recovery it
+		// exists to enable. See repair_quiescence.go.
+		phase == repairQuiescentPhase ||
 		phase == planRegeneratedPhase ||
 		phase == planReusedPhase ||
 		phase == repairRunOriginPhase ||

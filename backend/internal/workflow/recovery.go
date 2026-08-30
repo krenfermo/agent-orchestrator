@@ -150,6 +150,22 @@ func (c *Coordinator) reconcileRun(ctx stdctx.Context, run domain.WorkflowRun, n
 	c.reconcileRepairOutcome(ctx, run)
 	c.maybeAutoRepair(ctx, run)
 
+	// And the convergence a restart is the last chance to notice: a run held
+	// shut by a changes_requested verdict about a workspace state it has since
+	// moved past (head_convergence.go). Boot is where the wf-724a1e97 shape is
+	// found -- the objective's heartbeat cannot reach a human-owned child stop,
+	// and a standalone run parked this way has no heartbeat at all. Read-only
+	// unless it can prove the case, and routed through ContinueRun so a restart
+	// mid-adoption re-derives the same fingerprint and opens no second review.
+	if run.State == domain.WorkflowRunNeedsAttention {
+		if _, cerr := c.converge(ctx, run); cerr != nil {
+			return cerr
+		}
+		if refreshed, ok, rerr := c.store.GetWorkflowRun(ctx, run.ID); rerr == nil && ok {
+			run = refreshed
+		}
+	}
+
 	// P1-C: return whatever runtime capacity this run no longer legitimately
 	// holds -- everything, if it is terminal; a superseded generation's claim,
 	// if the lifecycle moved past it. Per-run and best-effort on purpose: a run

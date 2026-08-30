@@ -126,7 +126,8 @@ func (c *Coordinator) assessPlanReuse(ctx stdctx.Context, d RunDetail, strategy 
 	// bodies -- see GeneratePlan), so comparing it says whether the project
 	// AO would plan against today is the project it planned against then,
 	// without re-reading a single document body.
-	drift, known := c.plannerContextDrift(ctx, d.Run, record)
+	detail, known := c.describePlanContextDrift(ctx, d.Run, record)
+	drift := detail.Any()
 	if !known {
 		// §M: reconstruct only from durable proof. AO cannot show the context
 		// still holds, so it does not claim it does -- and it does not throw
@@ -137,48 +138,28 @@ func (c *Coordinator) assessPlanReuse(ctx stdctx.Context, d RunDetail, strategy 
 		return out
 	}
 	if drift {
+		// §M revisited (plan_revalidation.go). A plan that went stale BECAUSE
+		// IT RAN is not a staleness signal, and wf-95d5bd82 is the case: its
+		// own task children committed on the branch, the manifest pins HEAD,
+		// and so every commit the plan authorized invalidated the plan. AO may
+		// discharge that, and ONLY that: nothing the planner reads has changed,
+		// the tree is clean, and the head is one AO recorded as this
+		// objective's own work. Every other drift is still a person's.
+		revalidated, why := c.planStalenessIsOwnAuthorizedWork(ctx, d.Run, detail)
+		if revalidated {
+			out.Reusability = domain.PlanReuseExact
+			out.ContextDrift = "revalidated_own_authorized_change"
+			out.Reason = "A validated plan exists and AO revalidated it against the project as it stands: " + why + "."
+			return out
+		}
 		out.Reusability = domain.PlanReuseStaleRevalidatable
 		out.ContextDrift = "context_changed"
-		out.Reason = "A validated plan exists, but the project context it was generated from has changed since. Revalidate it or regenerate the plan before any of it executes."
+		out.Reason = "A validated plan exists, but the project context it was generated from has changed since (" + why + "). Revalidate it or regenerate the plan before any of it executes."
 		return out
 	}
 	out.Reusability = domain.PlanReuseExact
 	out.Reason = "The stored plan matches its recorded identity and the project context it was generated from. It can be executed as it stands."
 	return out
-}
-
-// plannerContextDrift reports whether the project's planner context has moved
-// since the plan was generated, and whether that question could be answered at
-// all. It compares the CONTENT-FREE manifest, exactly the artifact
-// GeneratePlan already persists for this purpose.
-func (c *Coordinator) plannerContextDrift(ctx stdctx.Context, run domain.WorkflowRun, record domain.WorkflowPlanRecord) (drift, known bool) {
-	if c.projects == nil || c.plannerContextBuilder == nil {
-		return false, false
-	}
-	if record.ContextManifestJSON == "" || record.ContextManifestJSON == "{}" {
-		// Nothing was recorded to compare against -- a plan generated before
-		// the manifest existed, or one whose planner never started.
-		return false, false
-	}
-	project, found, err := c.projects.GetProject(ctx, run.ProjectID)
-	if err != nil || !found {
-		return false, false
-	}
-	current, err := c.plannerContextBuilder.Build(ctx, project)
-	if err != nil {
-		return false, false
-	}
-	manifest := current
-	manifest.Documents = make([]PlannerDocument, len(current.Documents))
-	for i, doc := range current.Documents {
-		doc.Content = ""
-		manifest.Documents[i] = doc
-	}
-	currentJSON, err := json.Marshal(manifest)
-	if err != nil {
-		return false, false
-	}
-	return string(currentJSON) != record.ContextManifestJSON, true
 }
 
 // ReusePlan is the explicit "keep this plan" operation.
