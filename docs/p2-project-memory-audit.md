@@ -29,8 +29,18 @@ AO's context falls into two categories that are easy to conflate:
   tools.
 
 Only the first category is routable, budgetable, or memory-backed today. The
-second is by far the larger of the two and AO can currently only *observe* it
-(`internal/observe/projectmemory`), never *supply* it.
+second is by far the larger of the two, and AO can currently neither *supply*
+nor *observe* it. **Worker, Reviewer and both Repair Agents' harness file and
+git reads stay unobserved even with `AO_PROJECT_MEMORY_BASELINE` enabled**: the
+dispatch wrappers for those roles declare only `ContextPayload` capability and
+say so explicitly — "the provider process makes its own file reads and tool
+calls, which this surface does not report"
+(`internal/observe/projectmemory/wfdispatch/wfdispatch.go:51-66` worker,
+`:91-104` reviewer, `:141-150` fix). The only wrapper that declares `FileReads`
+and calls `ObserveFileRead` is the planner's (`wfdispatch.go:247-272`), and the
+paths it reports are the planner documents *AO itself* assembled — category one,
+not category two. So `internal/observe/projectmemory` measures AO-assembled
+context only; agent-assembled context is invisible to it.
 
 Specifically, on repository instruction files: **no AO code path reads
 `AGENTS.md` or `CLAUDE.md` for the Worker, the Reviewer, or either Repair
@@ -291,9 +301,16 @@ have it:**
 
 So: **git history reaches agent context only by the agent's own initiative, on
 every task, entirely unbounded and unrecorded.** Every AO-side history read is
-for AO's bookkeeping. This is precisely the repeated-work `RepeatedReads` is
-meant to expose, and precisely the kind of fact a durable memory item
-(`Type`, `Scope`, `SourceCommit`, `Confidence`) is shaped to hold.
+for AO's bookkeeping. Note the gap that leaves in the baseline: `RepeatedReads`
+is the metric *shaped* to expose this repeated work, but it cannot see it. It is
+computed only when a dispatch declares `FileReads`
+(`observe/projectmemory/recorder.go:461-477`), which only the planner wrapper
+does; for worker, reviewer and repair dispatches it is emitted as `Unavailable`
+with the reason "this dispatch surface does not report the agent's file reads"
+(`recorder.go:450-455`). So agent-initiated `git log`/`git diff`/`git show`
+work is unrecorded whether or not the baseline recorder is on, and it is
+precisely the kind of fact a durable memory item (`Type`, `Scope`,
+`SourceCommit`, `Confidence`) is shaped to hold.
 
 ## 4. The three existing subsystems, and the explicit Graphify/Grae answer
 
@@ -307,7 +324,9 @@ meant to expose, and precisely the kind of fact a durable memory item
 the Phase-0 **measurement** recorder (`AO_PROJECT_MEMORY_BASELINE`), writing one
 evidence file per dispatch with `FilesInspected`, `RepeatedReads`,
 `SourceTokensAvailable`, `ContextSentBytes/Tokens` (`evidence.go:90-119`).
-`RepeatedReads` is the metric the durable store is supposed to reduce.
+`RepeatedReads` is the metric the durable store is supposed to reduce — but it
+is measured only on the planner dispatch, and reported as `Unavailable` on the
+worker, reviewer and repair records (§1).
 
 Store locations, precisely (`codegraph/store.go:26-51`,
 `projectmemory/store.go:29-54`): both resolve `DataDir()` as `AO_DATA_DIR` when
@@ -475,7 +494,9 @@ path.** No new surface is needed to reach them.
   per observation, with only the adopted subject lines kept (§3).
 - The incident advisor's workspace observation, per incident.
 - Everything the harness reads inside the worktree, per session — unbounded and
-  unmeasured unless the baseline recorder is on.
+  unmeasured, and it stays unmeasured **even with the baseline recorder on**:
+  the worker, reviewer and repair dispatch wrappers report only the payload AO
+  sent, never the provider's own reads (§1).
 
 **Durable / cacheable and reusable:**
 
