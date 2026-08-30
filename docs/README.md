@@ -35,6 +35,7 @@ Start with [architecture.md](architecture.md) for the current backend model and
 | [context-router-metrics.md](context-router-metrics.md) | Context-selection metrics recorded alongside the baseline evidence (potential/selected/reused/new sizes, measured vs estimated) and the disabled-vs-enabled harness that fails the build when routing changes an outcome. |
 | [project-memory-baseline.md](project-memory-baseline.md) | Phase 0 project-memory baseline: the per-dispatch context/token evidence schema, its measured/estimated/unavailable labeling rule, and the harness that produces it. |
 | [project-memory-store.md](project-memory-store.md) | Durable project memory: the item schema and its provenance fields, where items live under `~/.ao`, the content-hash idempotent upsert, staleness against HEAD/file hashes, and ingesting the baseline evidence. |
+| [context-memory-audit.md](context-memory-audit.md) | Cross-cutting audit of every context source used by the Planner, Worker, Reviewer and Repair Agent: AO-assembled vs agent-assembled context, what is rescanned per task vs durably cached, which dispatch surfaces are routed vs merely observed, which builders could consume project memory without a rewrite, and why the existing `codegraph`/`projectmemory`/`contextrouter` abstractions must be extended rather than duplicated. |
 
 ## Mental model
 
