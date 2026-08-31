@@ -17,12 +17,18 @@
 //   - A worker spawn's SpawnConfig.IssueContext — today the whole pre-fetched
 //     tracker context is sent in full.
 //
-// The reviewer, fix, and verify surfaces carry prompts (standing rules, the
-// specific correction, the command to run), not assembled context. Budgeting a
-// prompt would truncate instructions rather than evidence, so those surfaces
-// are left alone even though the router budgets their roles — a role's budget
-// exists for callers that assemble context for it, including the ones a later
-// checkpoint will add.
+// P2-A adds a third: the reviewer's SystemPrompt, which had no producer at all
+// before that checkpoint, so filling it adds standing project knowledge where
+// there was none rather than budgeting an existing instruction. See
+// reviewer.go.
+//
+// The fix and verify surfaces carry prompts (the specific correction, the
+// command to run), not assembled context. Budgeting a prompt would truncate
+// instructions rather than evidence, so those surfaces are still left alone
+// even though the router budgets their roles — a role's budget exists for
+// callers that assemble context for it, and the Repair Agents are reached
+// through the Spawner path above rather than through the fix delivery surface
+// (docs/p2-project-memory-audit.md §2.6).
 //
 // Both routed surfaces need the checkout's absolute root: it is what the diff
 // source runs git in and what the code graph is keyed by. The planner request
@@ -61,6 +67,9 @@ func Instrument(deps workflowcore.Deps, router *contextrouter.Router, log *slog.
 	}
 	deps.Planner = InstrumentPlanner(deps.Planner, router, log)
 	deps.Spawner = InstrumentSpawner(deps.Spawner, router, deps.Projects, log)
+	// P2-A: the reviewer's standing system prompt, which had no producer at
+	// all before this checkpoint (see reviewer.go).
+	deps.ReviewerLauncher = InstrumentReviewerLauncher(deps.ReviewerLauncher, router, deps.Projects, log)
 	return deps
 }
 

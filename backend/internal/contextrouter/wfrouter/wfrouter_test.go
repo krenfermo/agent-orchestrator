@@ -369,8 +369,13 @@ func TestSpawnWithoutContextIsUntouched(t *testing.T) {
 	}
 }
 
-// Instrument leaves every surface it does not route alone: the reviewer, fix,
-// and verify paths carry instructions, not assembled context.
+// Instrument leaves the surfaces it does not route alone: the fix and verify
+// paths carry instructions, not assembled context.
+//
+// P2-A moved the reviewer OUT of this list — see
+// TestInstrumentWrapsTheReviewerLauncher below. The reviewer's SystemPrompt is
+// assembled context with no producer, not an instruction, which is exactly the
+// distinction this test is about.
 func TestInstrumentLeavesUnroutedSurfacesAlone(t *testing.T) {
 	deps := workflowcore.Deps{
 		Planner:  &recordingPlanner{},
@@ -379,9 +384,6 @@ func TestInstrumentLeavesUnroutedSurfacesAlone(t *testing.T) {
 	}
 	before := deps
 	routed := Instrument(deps, testRouter(t), nil)
-	if routed.ReviewerLauncher != before.ReviewerLauncher {
-		t.Fatal("Instrument touched the reviewer launcher")
-	}
 	if routed.MessageSender != before.MessageSender {
 		t.Fatal("Instrument touched the fix message sender")
 	}
@@ -505,5 +507,108 @@ func TestPlannerIsUnroutedWithoutAnAbsoluteRoot(t *testing.T) {
 				t.Fatalf("the diff source was consulted without a root: %v", diff.roots)
 			}
 		})
+	}
+}
+
+// recordingReviewerLauncher captures the launch request the wrapper produced.
+type recordingReviewerLauncher struct {
+	got      workflowcore.ReviewerLaunchRequest
+	launched int
+}
+
+func (r *recordingReviewerLauncher) Preflight(stdctx.Context, domain.ReviewerHarness, string) error {
+	return nil
+}
+
+func (r *recordingReviewerLauncher) Launch(_ stdctx.Context, req workflowcore.ReviewerLaunchRequest) (workflowcore.ReviewerLaunchResult, error) {
+	r.got = req
+	r.launched++
+	return workflowcore.ReviewerLaunchResult{HandleID: "h1", InstanceID: "i1"}, nil
+}
+
+func (r *recordingReviewerLauncher) ReviewerIdentity(req workflowcore.ReviewerLaunchRequest) string {
+	return "reviewer:" + req.RunID
+}
+
+func (r *recordingReviewerLauncher) ProbeReviewer(stdctx.Context, workflowcore.ReviewerRef) (workflowcore.ReviewerObservation, error) {
+	return workflowcore.ReviewerObservation{}, nil
+}
+
+func (r *recordingReviewerLauncher) CancelReviewer(stdctx.Context, workflowcore.ReviewerRef) error {
+	return nil
+}
+
+func reviewerRequest() workflowcore.ReviewerLaunchRequest {
+	return workflowcore.ReviewerLaunchRequest{
+		Harness:       domain.ReviewerHarness("claude-code"),
+		ProjectID:     domain.ProjectID("proj-1"),
+		RunID:         "run-1",
+		WorkspacePath: testProjectRoot,
+		Prompt:        "Review the change against its acceptance criteria.",
+	}
+}
+
+// P2-A: the reviewer's standing system prompt had no producer at all. The
+// wrapper fills it, which is the whole of Reviewer role integration.
+func TestInstrumentWrapsTheReviewerLauncher(t *testing.T) {
+	next := &recordingReviewerLauncher{}
+	deps := workflowcore.Deps{ReviewerLauncher: next, Projects: registeredProject()}
+	routed := Instrument(deps, testRouter(t), nil)
+	if routed.ReviewerLauncher == next {
+		t.Fatal("Instrument did not wrap the reviewer launcher")
+	}
+	if _, err := routed.ReviewerLauncher.Launch(stdctx.Background(), reviewerRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if next.launched != 1 {
+		t.Fatalf("the wrapped launcher was called %d times", next.launched)
+	}
+	if strings.TrimSpace(next.got.SystemPrompt) == "" {
+		t.Fatal("the reviewer was launched with no standing context")
+	}
+	if !strings.Contains(next.got.SystemPrompt, "the worktree is correct") {
+		t.Errorf("the routed system prompt does not state the source-of-truth rule:\n%s", next.got.SystemPrompt)
+	}
+	if next.got.Prompt != reviewerRequest().Prompt {
+		t.Error("the wrapper modified the review prompt, which carries the instruction")
+	}
+}
+
+// A system prompt somebody already set is an instruction, and the wrapper is
+// not allowed to replace one.
+func TestReviewerLauncherNeverReplacesAnExistingSystemPrompt(t *testing.T) {
+	next := &recordingReviewerLauncher{}
+	routed := InstrumentReviewerLauncher(next, testRouter(t), registeredProject(), nil)
+	req := reviewerRequest()
+	req.SystemPrompt = "You are a reviewer. Do exactly this."
+	if _, err := routed.Launch(stdctx.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if next.got.SystemPrompt != req.SystemPrompt {
+		t.Fatalf("the wrapper replaced an existing system prompt with %q", next.got.SystemPrompt)
+	}
+}
+
+// A launch AO cannot resolve a checkout root for goes out exactly as it came
+// in — the same rule InstrumentSpawner applies.
+func TestReviewerLauncherWithoutARootSendsTheOriginalRequest(t *testing.T) {
+	next := &recordingReviewerLauncher{}
+	routed := InstrumentReviewerLauncher(next, testRouter(t), &stubProjects{}, nil)
+	req := reviewerRequest()
+	req.WorkspacePath = "relative/path"
+	if _, err := routed.Launch(stdctx.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if next.got.SystemPrompt != "" {
+		t.Fatalf("a launch with no resolvable root still got routed context: %q", next.got.SystemPrompt)
+	}
+}
+
+// A nil router is the flag being off, and must hand the launcher back
+// untouched rather than wrap it in a pass-through.
+func TestInstrumentReviewerLauncherIsANoOpWithoutARouter(t *testing.T) {
+	next := &recordingReviewerLauncher{}
+	if got := InstrumentReviewerLauncher(next, nil, registeredProject(), nil); got != workflowcore.ReviewerLauncher(next) {
+		t.Fatal("a nil router still produced a wrapper")
 	}
 }

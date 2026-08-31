@@ -508,6 +508,7 @@ func operations() []operation {
 	ops = append(ops, notificationOperations()...)
 	ops = append(ops, usageOperations()...)
 	ops = append(ops, capacityOperations()...)
+	ops = append(ops, projectMemoryOperations()...)
 	ops = append(ops, pushOperations()...)
 	ops = append(ops, importOperations()...)
 	ops = append(ops, devOperations()...)
@@ -1177,6 +1178,59 @@ func capacityOperations() []operation {
 			summary: "List Checkpoint 8J capacity/quota snapshots per known harness",
 			resps: []respUnit{
 				{http.StatusOK, controllers.ListCapacityResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
+}
+
+// projectMemoryOperations registers P2-A's project-memory surface: read the
+// state of a project's memory, inspect the facts in it, and the two repairs
+// that follow from a bad answer.
+func projectMemoryOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/memory", id: "getProjectMemoryStatus", tag: "projects",
+			summary:    "P2-A: project memory status per repository. What generation the memory is at, which commit it was derived from, how many facts it holds and how many of them AO can still vouch for, and whether an indexing pass is running. A repository absent from this list has never been indexed.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListProjectMemoryResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/memory/items", id: "listProjectMemoryItems", tag: "projects",
+			summary:    "P2-A: inspect the stored facts of one repository's project memory, including the stale and invalidated ones — seeing those is the point of an inspect. Bodies are omitted; this answers what AO remembers and whether it can still vouch for it.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.ListProjectMemoryItemsQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListProjectMemoryItemsResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/memory/rebuild", id: "rebuildProjectMemory", tag: "projects",
+			summary:    "P2-A: re-derive one repository's project memory. Bounded by the indexer's limits and restart-safe; purge deletes the existing facts first, which is the escape hatch for memory that is wrong in a way a re-derivation cannot fix.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			reqBody:    controllers.RebuildProjectMemoryRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.RebuildProjectMemoryResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/memory/invalidate", id: "invalidateProjectMemory", tag: "projects",
+			summary:    "P2-A: retire project memory that can no longer be vouched for. With paths, retires exactly what those paths proved. With no paths, runs drift detection and applies what it finds — the honest repair for \"something moved and I cannot say what\". Nothing is deleted; facts are marked so they stop being served.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			reqBody:    controllers.InvalidateProjectMemoryRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.InvalidateProjectMemoryResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},

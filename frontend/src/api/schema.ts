@@ -640,6 +640,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/memory": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P2-A: project memory status per repository. What generation the memory is at, which commit it was derived from, how many facts it holds and how many of them AO can still vouch for, and whether an indexing pass is running. A repository absent from this list has never been indexed. */
+        get: operations["getProjectMemoryStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/invalidate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P2-A: retire project memory that can no longer be vouched for. With paths, retires exactly what those paths proved. With no paths, runs drift detection and applies what it finds — the honest repair for "something moved and I cannot say what". Nothing is deleted; facts are marked so they stop being served. */
+        post: operations["invalidateProjectMemory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P2-A: inspect the stored facts of one repository's project memory, including the stale and invalidated ones — seeing those is the point of an inspect. Bodies are omitted; this answers what AO remembers and whether it can still vouch for it. */
+        get: operations["listProjectMemoryItems"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/rebuild": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P2-A: re-derive one repository's project memory. Bounded by the indexer's limits and restart-safe; purge deletes the existing facts first, which is the escape hatch for memory that is wrong in a way a re-derivation cannot fix. */
+        post: operations["rebuildProjectMemory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/repo-connection-test": {
         parameters: {
             query?: never;
@@ -3112,8 +3180,29 @@ export interface components {
             stopDetail?: string;
             stopReason: string;
         };
+        ControllersInvalidateProjectMemoryRequest: {
+            paths?: string[];
+            reason?: string;
+            repoPath: string;
+        };
+        ControllersInvalidateProjectMemoryResponse: {
+            driftChecked: number;
+            driftFound: number;
+            /** Format: int64 */
+            itemsInvalidated: number;
+            repoId: string;
+        };
         ControllersListCapacityResponse: {
             capacity: components["schemas"]["ControllersCapacitySnapshotResponse"][];
+        };
+        ControllersListProjectMemoryItemsResponse: {
+            items: components["schemas"]["ControllersProjectMemoryItemResponse"][];
+            repoId: string;
+            total: number;
+            truncated: boolean;
+        };
+        ControllersListProjectMemoryResponse: {
+            repositories: components["schemas"]["ControllersProjectMemoryStatusResponse"][];
         };
         ControllersListProviderProfilesResponse: {
             profiles: components["schemas"]["ControllersProviderProfileView"][];
@@ -3132,6 +3221,57 @@ export interface components {
             /** @enum {string} */
             status: "authenticated" | "trusted-local" | "no_user";
             user?: components["schemas"]["ControllersUserView"];
+        };
+        ControllersProjectMemoryItemResponse: {
+            /** Format: double */
+            confidence: number;
+            contentBytes: number;
+            /** Format: int64 */
+            generation: number;
+            id: string;
+            invalidatedAt: null | string;
+            key?: string;
+            /** @enum {string} */
+            origin: "canonical" | "task_local";
+            originRef?: string;
+            repoId: string;
+            /** @enum {string} */
+            scope: "project" | "repository" | "module" | "file" | "symbol" | "task";
+            sourceCommit?: string;
+            sourcePaths?: string[];
+            /** @enum {string} */
+            state: "valid" | "stale" | "invalidated" | "rebuilding";
+            stateReason?: string;
+            summary: string;
+            type: string;
+            updatedAt: string;
+        };
+        ControllersProjectMemoryStatusResponse: {
+            branch?: string;
+            byType?: {
+                [key: string]: number;
+            };
+            filesIndexed: number;
+            filesSkipped: number;
+            /** Format: int64 */
+            generation: number;
+            healthy: boolean;
+            indexedCommit: string;
+            invalidated: number;
+            items: number;
+            lastError?: string;
+            lastIndexedAt: null | string;
+            lastUpdatedAt: null | string;
+            /** @enum {string} */
+            phase: "idle" | "scanning" | "summarizing" | "linking" | "finalizing" | "failed";
+            rebuilding: number;
+            relations: number;
+            repoId: string;
+            repoPath: string;
+            resumeCursor?: string;
+            stale: number;
+            taskLocal: number;
+            valid: number;
         };
         ControllersProviderAttemptView: {
             authoritative: boolean;
@@ -3196,6 +3336,26 @@ export interface components {
             reviewIndependence: string;
             reviewerPriority: string[];
             workerPriority: string[];
+        };
+        ControllersRebuildProjectMemoryRequest: {
+            purge?: boolean;
+            repoPath: string;
+        };
+        ControllersRebuildProjectMemoryResponse: {
+            filesIndexed: number;
+            filesSkipped: number;
+            /** Format: int64 */
+            generation: number;
+            indexedCommit?: string;
+            itemsReconfirmed: number;
+            /** Format: int64 */
+            itemsRetired: number;
+            itemsWritten: number;
+            repoId: string;
+            skipReason?: string;
+            skipped: boolean;
+            truncated: boolean;
+            truncatedReason?: string;
         };
         ControllersRegisterRequest: {
             displayName: string;
@@ -7574,6 +7734,216 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectMemoryStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersListProjectMemoryResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    invalidateProjectMemory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersInvalidateProjectMemoryRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersInvalidateProjectMemoryResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listProjectMemoryItems: {
+        parameters: {
+            query?: {
+                /** @description Repository root to inspect. Defaults to the project's own root, which is the single-repo case. */
+                repoPath?: string;
+                /** @description Narrow to one state. Omit to see every state, including the facts AO can no longer vouch for. */
+                state?: "valid" | "stale" | "invalidated" | "rebuilding";
+                /** @description Narrow to one item type (module, convention, architecture, ...). */
+                type?: string;
+                /** @description Narrow to facts about a subtree, by repo-relative path prefix. */
+                path?: string;
+                /** @description Maximum items to return. Defaults to 200. */
+                limit?: null | number;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersListProjectMemoryItemsResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    rebuildProjectMemory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersRebuildProjectMemoryRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersRebuildProjectMemoryResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
                 headers: {
                     [name: string]: unknown;
                 };

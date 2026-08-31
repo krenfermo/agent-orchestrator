@@ -22,6 +22,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory/wfdispatch"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	durablememory "github.com/aoagents/agent-orchestrator/backend/internal/projectmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/providerpreflight"
 	"github.com/aoagents/agent-orchestrator/backend/internal/providerruntime"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
@@ -323,14 +324,20 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 	// had available and what it consumed. Off by default, and a wrapper never
 	// changes what it wraps -- see internal/observe/projectmemory.
 	deps = wfdispatch.Instrument(deps, projectMemoryBaselineRecorder(log), log)
-	// Role-aware context routing: when enabled, the two surfaces where AO
-	// itself assembles a context payload (the planner's documents, a worker
-	// spawn's pre-fetched issue context) send a bounded, role-budgeted
-	// selection instead of everything they hold. Off by default -- a disabled
-	// flag yields a nil router, and wfrouter.Instrument then hands the
-	// dependencies back untouched, so provider adapters keep receiving today's
-	// full context.
-	deps = wfrouter.Instrument(deps, contextRouterFor(log), log)
+	// Role-aware context routing: when enabled, the surfaces where AO itself
+	// assembles a context payload send a bounded, role-budgeted selection
+	// instead of everything they hold -- the planner's documents, a worker
+	// spawn's pre-fetched issue context (which is also how both Repair Agents
+	// are dispatched), and, since P2-A, the reviewer's standing system prompt,
+	// which had no producer at all before that checkpoint.
+	//
+	// `store` is passed as the durable project-memory repository, which is what
+	// gives the router real memory to route rather than an empty source.
+	//
+	// Off by default -- a disabled flag yields a nil router, and
+	// wfrouter.Instrument then hands the dependencies back untouched, so
+	// provider adapters keep receiving today's full context.
+	deps = wfrouter.Instrument(deps, contextRouterFor(log, store), log)
 	coordinator := workflowcore.New(deps)
 	return coordinator, workflowsvc.New(coordinator), wakeScheduler
 }
@@ -376,14 +383,25 @@ func projectMemoryBaselineRecorder(log *slog.Logger) *projectmemory.Recorder {
 // disables routing entirely -- an operator who mistyped a budget must get the
 // old behavior and a warning, not a payload sized by a budget they did not
 // write.
-func contextRouterFor(log *slog.Logger) *contextrouter.Router {
+//
+// P2-A: the durable project-memory repository is passed in as the router's
+// memory evidence. That single wire is the whole of role integration for the
+// Planner, the Worker and BOTH Repair Agents, because the Planner and Spawner
+// surfaces are already routed and the repairers dispatch through the Spawner
+// path (docs/p2-project-memory-audit.md §5, §8). A nil repository keeps the
+// pre-P2-A JSON-backed source, and the flag still gates everything.
+func contextRouterFor(log *slog.Logger, memoryRepo durablememory.Repository) *contextrouter.Router {
 	if !contextrouter.Enabled() {
 		return nil
 	}
-	// contextrouter.Default is the one place the shipped router is assembled,
-	// so the daemon and the disabled-vs-enabled regression harness measure the
-	// same configuration rather than two that merely look alike.
-	router, err := contextrouter.Default(log)
+	// contextrouter.DefaultWithMemory is the one place the shipped router is
+	// assembled, so the daemon and the disabled-vs-enabled regression harness
+	// measure the same configuration rather than two that merely look alike.
+	var durable contextrouter.MemorySource
+	if memoryRepo != nil {
+		durable = contextrouter.NewDurableMemorySource(memoryRepo)
+	}
+	router, err := contextrouter.DefaultWithMemory(log, durable)
 	if err != nil {
 		if log != nil {
 			log.Warn("context router: disabled", "env", contextrouter.BudgetEnv, "err", err)

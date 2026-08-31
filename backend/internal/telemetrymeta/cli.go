@@ -148,8 +148,14 @@ var legacyActorlessUserCLICommands = map[string]struct{}{
 	// both things a person does deliberately.
 	"ao capacity":        {},
 	"ao capacity status": {},
-	"ao runtime":         {},
-	"ao runtime gc":      {},
+	// P2-A project memory: operator commands, so a person is the actor.
+	"ao memory":            {},
+	"ao memory status":     {},
+	"ao memory inspect":    {},
+	"ao memory rebuild":    {},
+	"ao memory invalidate": {},
+	"ao runtime":           {},
+	"ao runtime gc":        {},
 	// P1-D: the placement surface. Same sweep, same proofs, named for the
 	// checkouts an operator is thinking about.
 	"ao worktree":      {},

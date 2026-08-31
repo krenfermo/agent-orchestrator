@@ -37,6 +37,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/presence"
 	"github.com/aoagents/agent-orchestrator/backend/internal/preview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/previewserver"
+	"github.com/aoagents/agent-orchestrator/backend/internal/projectmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/push"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runtimegc"
@@ -53,6 +54,7 @@ import (
 	notificationsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/notification"
 	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
+	projectmemorysvc "github.com/aoagents/agent-orchestrator/backend/internal/service/projectmemory"
 	providerprofilesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providerprofile"
 	providersetupsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providersetup"
 	questionssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/questions"
@@ -628,6 +630,14 @@ func RunWithConfig(cfg config.Config) error {
 	// provider connected after the policy was first saved does not stay
 	// invisible to Settings. Shared with APIDeps.ExecutionPolicy below so both
 	// surfaces read and repair the same policy through one implementation.
+	// P2-A project memory. It is constructed unconditionally because it is
+	// inert until something indexes a repository: with no completed pass every
+	// context pack comes back empty with a stated reason, and every role falls
+	// back to exactly the behaviour it had before P2-A. The graph backend is
+	// the in-tree local one; an external adapter would be composed in here
+	// with projectmemory.TeeGraph, never substituted for it.
+	projectMemory := projectmemory.NewService(store)
+
 	executionPolicySvc := &executionpolicysvc.Service{Store: store}
 	providerProfilesSvc := &providerprofilesvc.Service{
 		Store:      store,
@@ -670,6 +680,7 @@ func RunWithConfig(cfg config.Config) error {
 		UsageHooks:         usageCollector,
 		UsageSummary:       usagesvc.NewSummaryReader(store),
 		Capacity:           capacitysvc.NewReader(store),
+		ProjectMemory:      projectmemorysvc.New(projectMemory, store),
 		Questions:          &questionssvc.AnswerService{Store: store, Runs: store, Sender: rawSessionMgr},
 		Decisions:          &questionssvc.ResolverAnswerService{Store: store},
 		Telemetry:          telemetrySink,

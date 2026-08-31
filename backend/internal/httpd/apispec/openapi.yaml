@@ -1561,6 +1561,225 @@ paths:
       summary: Replace a project's per-project config
       tags:
       - projects
+  /api/v1/projects/{id}/memory:
+    get:
+      operationId: getProjectMemoryStatus
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersListProjectMemoryResponse'
+          description: OK
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P2-A: project memory status per repository. What generation the memory
+        is at, which commit it was derived from, how many facts it holds and how many
+        of them AO can still vouch for, and whether an indexing pass is running. A
+        repository absent from this list has never been indexed.'
+      tags:
+      - projects
+  /api/v1/projects/{id}/memory/invalidate:
+    post:
+      operationId: invalidateProjectMemory
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersInvalidateProjectMemoryRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersInvalidateProjectMemoryResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P2-A: retire project memory that can no longer be vouched for. With
+        paths, retires exactly what those paths proved. With no paths, runs drift
+        detection and applies what it finds — the honest repair for "something moved
+        and I cannot say what". Nothing is deleted; facts are marked so they stop
+        being served.'
+      tags:
+      - projects
+  /api/v1/projects/{id}/memory/items:
+    get:
+      operationId: listProjectMemoryItems
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Repository root to inspect. Defaults to the project's own root,
+          which is the single-repo case.
+        in: query
+        name: repoPath
+        schema:
+          description: Repository root to inspect. Defaults to the project's own root,
+            which is the single-repo case.
+          type: string
+      - description: Narrow to one state. Omit to see every state, including the facts
+          AO can no longer vouch for.
+        in: query
+        name: state
+        schema:
+          description: Narrow to one state. Omit to see every state, including the
+            facts AO can no longer vouch for.
+          enum:
+          - valid
+          - stale
+          - invalidated
+          - rebuilding
+          type: string
+      - description: Narrow to one item type (module, convention, architecture, ...).
+        in: query
+        name: type
+        schema:
+          description: Narrow to one item type (module, convention, architecture,
+            ...).
+          type: string
+      - description: Narrow to facts about a subtree, by repo-relative path prefix.
+        in: query
+        name: path
+        schema:
+          description: Narrow to facts about a subtree, by repo-relative path prefix.
+          type: string
+      - description: Maximum items to return. Defaults to 200.
+        in: query
+        name: limit
+        schema:
+          description: Maximum items to return. Defaults to 200.
+          maximum: 1000
+          minimum: 1
+          type:
+          - "null"
+          - integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersListProjectMemoryItemsResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P2-A: inspect the stored facts of one repository''s project memory,
+        including the stale and invalidated ones — seeing those is the point of an
+        inspect. Bodies are omitted; this answers what AO remembers and whether it
+        can still vouch for it.'
+      tags:
+      - projects
+  /api/v1/projects/{id}/memory/rebuild:
+    post:
+      operationId: rebuildProjectMemory
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersRebuildProjectMemoryRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersRebuildProjectMemoryResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P2-A: re-derive one repository''s project memory. Bounded by the indexer''s
+        limits and restart-safe; purge deletes the existing facts first, which is
+        the escape hatch for memory that is wrong in a way a re-derivation cannot
+        fix.'
+      tags:
+      - projects
   /api/v1/projects/{id}/repo-connection-test:
     post:
       operationId: testRepoConnection
@@ -8603,6 +8822,36 @@ components:
       - progress
       - diagnosisJob
       type: object
+    ControllersInvalidateProjectMemoryRequest:
+      properties:
+        paths:
+          items:
+            type: string
+          type: array
+        reason:
+          type: string
+        repoPath:
+          type: string
+      required:
+      - repoPath
+      type: object
+    ControllersInvalidateProjectMemoryResponse:
+      properties:
+        driftChecked:
+          type: integer
+        driftFound:
+          type: integer
+        itemsInvalidated:
+          format: int64
+          type: integer
+        repoId:
+          type: string
+      required:
+      - repoId
+      - itemsInvalidated
+      - driftChecked
+      - driftFound
+      type: object
     ControllersListCapacityResponse:
       properties:
         capacity:
@@ -8611,6 +8860,33 @@ components:
           type: array
       required:
       - capacity
+      type: object
+    ControllersListProjectMemoryItemsResponse:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/ControllersProjectMemoryItemResponse'
+          type: array
+        repoId:
+          type: string
+        total:
+          type: integer
+        truncated:
+          type: boolean
+      required:
+      - repoId
+      - items
+      - total
+      - truncated
+      type: object
+    ControllersListProjectMemoryResponse:
+      properties:
+        repositories:
+          items:
+            $ref: '#/components/schemas/ControllersProjectMemoryStatusResponse'
+          type: array
+      required:
+      - repositories
       type: object
     ControllersListProviderProfilesResponse:
       properties:
@@ -8657,6 +8933,154 @@ components:
           $ref: '#/components/schemas/ControllersUserView'
       required:
       - status
+      type: object
+    ControllersProjectMemoryItemResponse:
+      properties:
+        confidence:
+          format: double
+          type: number
+        contentBytes:
+          type: integer
+        generation:
+          format: int64
+          type: integer
+        id:
+          type: string
+        invalidatedAt:
+          type:
+          - "null"
+          - string
+        key:
+          type: string
+        origin:
+          enum:
+          - canonical
+          - task_local
+          type: string
+        originRef:
+          type: string
+        repoId:
+          type: string
+        scope:
+          enum:
+          - project
+          - repository
+          - module
+          - file
+          - symbol
+          - task
+          type: string
+        sourceCommit:
+          type: string
+        sourcePaths:
+          items:
+            type: string
+          type: array
+        state:
+          enum:
+          - valid
+          - stale
+          - invalidated
+          - rebuilding
+          type: string
+        stateReason:
+          type: string
+        summary:
+          type: string
+        type:
+          type: string
+        updatedAt:
+          type: string
+      required:
+      - id
+      - repoId
+      - type
+      - scope
+      - origin
+      - summary
+      - state
+      - confidence
+      - generation
+      - contentBytes
+      - updatedAt
+      - invalidatedAt
+      type: object
+    ControllersProjectMemoryStatusResponse:
+      properties:
+        branch:
+          type: string
+        byType:
+          additionalProperties:
+            type: integer
+          type: object
+        filesIndexed:
+          type: integer
+        filesSkipped:
+          type: integer
+        generation:
+          format: int64
+          type: integer
+        healthy:
+          type: boolean
+        indexedCommit:
+          type: string
+        invalidated:
+          type: integer
+        items:
+          type: integer
+        lastError:
+          type: string
+        lastIndexedAt:
+          type:
+          - "null"
+          - string
+        lastUpdatedAt:
+          type:
+          - "null"
+          - string
+        phase:
+          enum:
+          - idle
+          - scanning
+          - summarizing
+          - linking
+          - finalizing
+          - failed
+          type: string
+        rebuilding:
+          type: integer
+        relations:
+          type: integer
+        repoId:
+          type: string
+        repoPath:
+          type: string
+        resumeCursor:
+          type: string
+        stale:
+          type: integer
+        taskLocal:
+          type: integer
+        valid:
+          type: integer
+      required:
+      - repoId
+      - repoPath
+      - phase
+      - generation
+      - indexedCommit
+      - healthy
+      - items
+      - valid
+      - stale
+      - invalidated
+      - rebuilding
+      - taskLocal
+      - relations
+      - filesIndexed
+      - filesSkipped
+      - lastIndexedAt
+      - lastUpdatedAt
       type: object
     ControllersProviderAttemptView:
       properties:
@@ -8852,6 +9276,54 @@ components:
       - decisionResolverPriority
       - fallbackBehavior
       - reviewIndependence
+      type: object
+    ControllersRebuildProjectMemoryRequest:
+      properties:
+        purge:
+          type: boolean
+        repoPath:
+          type: string
+      required:
+      - repoPath
+      type: object
+    ControllersRebuildProjectMemoryResponse:
+      properties:
+        filesIndexed:
+          type: integer
+        filesSkipped:
+          type: integer
+        generation:
+          format: int64
+          type: integer
+        indexedCommit:
+          type: string
+        itemsReconfirmed:
+          type: integer
+        itemsRetired:
+          format: int64
+          type: integer
+        itemsWritten:
+          type: integer
+        repoId:
+          type: string
+        skipReason:
+          type: string
+        skipped:
+          type: boolean
+        truncated:
+          type: boolean
+        truncatedReason:
+          type: string
+      required:
+      - repoId
+      - generation
+      - skipped
+      - filesIndexed
+      - filesSkipped
+      - itemsWritten
+      - itemsReconfirmed
+      - itemsRetired
+      - truncated
       type: object
     ControllersRegisterRequest:
       properties:

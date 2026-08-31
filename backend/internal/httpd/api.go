@@ -49,6 +49,11 @@ type APIDeps struct {
 	// the other optional surfaces. Checkpoint 8A: durable foundation only, no
 	// execution.
 	Workflows workflowsvc.Manager
+	// ProjectMemory backs P2-A's project-memory status/inspect/rebuild/
+	// invalidate surface. Optional like every other surface here: nil answers
+	// 501, and a daemon built without it behaves exactly as it did before
+	// P2-A.
+	ProjectMemory controllers.ProjectMemoryService
 	// Scheduler and RuntimeGC back P1-C's capacity and runtime-GC surfaces.
 	// Optional like every other surface here: nil answers 501.
 	Scheduler controllers.SchedulerService
@@ -178,6 +183,7 @@ type API struct {
 	browser          *controllers.BrowserController
 	workflows        *controllers.WorkflowsController
 	scheduler        *controllers.SchedulerController
+	projectMemory    *controllers.ProjectMemoryController
 	events           *EventsController
 	auth             *controllers.AuthController
 	providerProfiles *controllers.ProviderProfilesController
@@ -216,8 +222,9 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			Ownership:    deps.SessionOwnership,
 			TrustedLocal: cfg.TrustedLocalMode,
 		},
-		capacity: &controllers.CapacityController{Svc: deps.Capacity},
-		prs:      &controllers.PRsController{Svc: deps.PRs},
+		capacity:      &controllers.CapacityController{Svc: deps.Capacity},
+		projectMemory: &controllers.ProjectMemoryController{Svc: deps.ProjectMemory},
+		prs:           &controllers.PRsController{Svc: deps.PRs},
 		reviews: &controllers.ReviewsController{
 			Svc:          deps.Reviews,
 			Ownership:    deps.SessionOwnership,
@@ -277,6 +284,7 @@ func (a *API) Register(root chi.Router) {
 			a.sessions.Register(r)
 			a.usage.Register(r)
 			a.capacity.Register(r)
+			a.projectMemory.Register(r)
 			a.prs.Register(r)
 			a.reviews.Register(r)
 			a.decisions.Register(r)

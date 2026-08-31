@@ -21,6 +21,18 @@ import (
 // because a router that silently fell back to default budgets would make an
 // operator's override look applied when it was not.
 func Default(log *slog.Logger) (*Router, error) {
+	return DefaultWithMemory(log, nil)
+}
+
+// DefaultWithMemory is Default with the project-memory evidence source
+// supplied by the caller.
+//
+// P2-A's durable memory lives in AO's SQLite database, which this package
+// cannot open for itself without reaching across the storage boundary. So the
+// composition root passes it in, and a nil argument keeps the previous
+// behaviour exactly: the JSON-backed default store, which is what the Phase-0
+// regression harness has always measured.
+func DefaultWithMemory(log *slog.Logger, durable MemorySource) (*Router, error) {
 	budgets, err := BudgetsFromEnv()
 	if err != nil {
 		return nil, err
@@ -37,10 +49,15 @@ func Default(log *slog.Logger) (*Router, error) {
 	} else {
 		opts.Graph = indexer
 	}
-	if store, memErr := memory.NewDefaultStore(); memErr != nil {
-		warn(log, "context router: memory evidence unavailable", memErr)
-	} else {
-		opts.Memory = store
+	switch {
+	case durable != nil:
+		opts.Memory = durable
+	default:
+		if store, memErr := memory.NewDefaultStore(); memErr != nil {
+			warn(log, "context router: memory evidence unavailable", memErr)
+		} else {
+			opts.Memory = store
+		}
 	}
 	return New(opts)
 }
