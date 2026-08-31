@@ -486,6 +486,95 @@ type Project struct {
 	OwnerUserID   *domain.UserID
 }
 
+type ProjectMemoryFile struct {
+	ProjectID     string
+	RepoID        string
+	Path          string
+	ContentDigest string
+	SizeBytes     int64
+	Generation    int64
+	IndexedCommit string
+	UpdatedAt     time.Time
+}
+
+type ProjectMemoryIndex struct {
+	ProjectID        string
+	RepoID           string
+	RepoPath         string
+	Generation       int64
+	Phase            string
+	IndexedCommit    string
+	PendingCommit    string
+	Branch           string
+	ResumeCursor     string
+	FilesSeen        int64
+	FilesIndexed     int64
+	FilesSkipped     int64
+	ItemsWritten     int64
+	RelationsWritten int64
+	LastError        string
+	StartedAt        sql.NullTime
+	CompletedAt      sql.NullTime
+	UpdatedAt        time.Time
+}
+
+type ProjectMemoryItem struct {
+	ID              string
+	ProjectID       string
+	RepoID          string
+	ItemType        string
+	Scope           string
+	ItemKey         string
+	Origin          string
+	OriginRef       string
+	Summary         string
+	Content         string
+	SourcePathsJson string
+	SourceCommit    string
+	SourceDigest    string
+	Generation      int64
+	State           string
+	StateReason     string
+	Confidence      float64
+	MetadataJson    string
+	ContentHash     string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	InvalidatedAt   sql.NullTime
+}
+
+type ProjectMemoryRelation struct {
+	ID              string
+	ProjectID       string
+	RepoID          string
+	FromKind        string
+	FromKey         string
+	RelationKind    string
+	ToKind          string
+	ToKey           string
+	Origin          string
+	OriginRef       string
+	SourcePathsJson string
+	SourceCommit    string
+	SourceDigest    string
+	Generation      int64
+	State           string
+	StateReason     string
+	Confidence      float64
+	MetadataJson    string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	InvalidatedAt   sql.NullTime
+}
+
+type ProjectMemorySource struct {
+	OwnerKind string
+	OwnerID   string
+	ProjectID string
+	RepoID    string
+	Path      string
+}
+
 type ProviderAttempt struct {
 	ID                     string
 	WorkflowRunID          string
