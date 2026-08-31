@@ -813,6 +813,22 @@ type RunDetail struct {
 	// state, because an idle worker during a review is not an idle workflow.
 	LatestCheckpointPhase string
 	LatestCheckpointAt    time.Time
+	// StopAuthorityPhase/StopAuthorityAt are the checkpoint that actually
+	// STOPPED this run: the newest row whose durable_phase is a canonical
+	// attention reason and that no attention_cleared row is strictly newer
+	// than. They are deliberately separate from LatestCheckpoint*: the latest
+	// checkpoint is the run's timeline, which observations belong in, and the
+	// stop authority is the reason, which they must never overwrite. Empty when
+	// the ledger records no live stop, and empty on a RunDetail built by hand
+	// without folding a ledger — see foldCheckpointAuthority and
+	// resolveAttentionReason. Set by applyCheckpointAuthority, nowhere else.
+	StopAuthorityPhase string
+	StopAuthorityAt    time.Time
+	// CheckpointsFolded records that the two fields above were computed from a
+	// real ledger. It is what separates "this run has no live stop" from "this
+	// detail was built by hand and nobody looked", and it is why the fallback
+	// in resolveAttentionReason is a fallback rather than an override.
+	CheckpointsFolded bool
 	// Questions is the run's durable question list in creation order. Empty
 	// means the run has never asked anything; it is what DeriveLifecycle reads
 	// to decide whether a stop is genuinely the user's to resolve.
@@ -870,6 +886,12 @@ type RepairLifecycle struct {
 	// counts as live or as quiescent, so a person reading "repair_active" can
 	// see which of the eight facts is holding it there.
 	QuiescenceReason string
+	// CessionChain is where this run's branch actually is, when it is not with
+	// this run: which run holds it, how many repair hops away, whether AO can
+	// bring it back by itself, and which fact is missing when it cannot. Nil
+	// when no branch of this run's is out. Re-derived on every read from the
+	// cession ledger and the lock table (branch_cession_chain.go).
+	CessionChain *BranchCessionChain
 }
 
 // SessionLifecycleAuditEntry is one durable session-lifecycle decision plus
@@ -1287,19 +1309,11 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 				detail.Steps[i].Step, detail.Steps[i].Attempts, checkpoints)
 			c.annotateFixDeliveryReceipt(ctx, detail.Steps[i].FixDelivery)
 		}
+		// One fold, shared by every projection, so the Board, the API, the CLI
+		// and the reconciler can never disagree about why a run is stopped.
+		// See checkpoint_authority.go.
+		applyCheckpointAuthority(&detail, checkpoints)
 		for _, cp := range checkpoints {
-			// Checkpoint 8P-E.18: incident-ledger rows describe a stop, they are
-			// never one. See isBookkeepingPhase.
-			if isBookkeepingPhase(cp.DurablePhase) {
-				continue
-			}
-			if cp.NextAction != "" {
-				detail.NextAction = cp.NextAction
-			}
-			if !cp.CreatedAt.Before(detail.LatestCheckpointAt) {
-				detail.LatestCheckpointPhase = cp.DurablePhase
-				detail.LatestCheckpointAt = cp.CreatedAt
-			}
 			if cp.DurablePhase == sessionLifecycleDurablePhase {
 				if rec, ok := decodeSessionLifecycleRecord(cp.RetryState); ok {
 					detail.SessionLifecycle = append(detail.SessionLifecycle, SessionLifecycleAuditEntry{

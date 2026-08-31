@@ -106,6 +106,12 @@ const (
 	// produced a verdict, it is still the authoritative pointer, and that
 	// verdict has now been adopted as the step's real outcome.
 	ReviewAuthorityLateVerdictAdopted ReviewAuthorityOutcome = "late_verdict_adopted"
+	// ReviewAuthorityLateVerdictRefused means the run produced a verdict after
+	// AO closed it out, and AO can PROVE that verdict can never become this
+	// step's outcome — the step has ended, or was never dispatched. It is
+	// recorded once as unadoptable and never retried. See
+	// late_verdict_disposition.go.
+	ReviewAuthorityLateVerdictRefused ReviewAuthorityOutcome = "late_verdict_refused"
 	// ReviewAuthorityRebindPending means the pointer names a closed-out run with
 	// no verdict of any kind, and the step has been released so the ordinary
 	// bounded review dispatch can bind exactly one replacement.
@@ -120,7 +126,8 @@ const (
 // Resolved reports whether reconciliation changed durable state.
 func (o ReviewAuthorityOutcome) Resolved() bool {
 	switch o {
-	case ReviewAuthorityLateVerdictAdopted, ReviewAuthorityRebindPending, ReviewAuthorityStopped:
+	case ReviewAuthorityLateVerdictAdopted, ReviewAuthorityLateVerdictRefused,
+		ReviewAuthorityRebindPending, ReviewAuthorityStopped:
 		return true
 	default:
 		return false
@@ -217,6 +224,22 @@ func (c *Coordinator) ReconcileReviewAuthority(
 				return ReviewAuthorityNotApplicable, reviewStep, run, err
 			}
 			return ReviewAuthorityLateVerdictAdopted, reviewStep, run, nil
+		}
+		// A verdict AO has already refused is DECIDED. Re-entering adoption for
+		// it is what turned wf-c4c84f52's unapplicable approval into a
+		// three-hour retry loop, so the refusal is checked before anything is
+		// attempted rather than rediscovered by attempting it.
+		if c.lateVerdictAlreadyDisposed(ctx, run.ID, reviewStep.ID, current.ID) {
+			return ReviewAuthorityNotApplicable, reviewStep, run, nil
+		}
+		// And a verdict that cannot legally become this step's outcome is
+		// refused ONCE, with the fact that proves it, instead of being tried
+		// again on the next pass. See late_verdict_disposition.go.
+		if reason, ok := lateVerdictAdoptable(reviewStep); !ok {
+			if rerr := c.refuseLateVerdict(ctx, run, reviewStep, current, reason); rerr != nil {
+				return ReviewAuthorityNotApplicable, reviewStep, run, rerr
+			}
+			return ReviewAuthorityLateVerdictRefused, reviewStep, run, nil
 		}
 		return c.adoptLateReviewVerdict(ctx, run, reviewStep, current)
 	}

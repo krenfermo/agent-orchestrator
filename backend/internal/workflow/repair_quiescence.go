@@ -139,15 +139,38 @@ func (c *Coordinator) proveRepairQuiescent(
 			return no("repair run %s has a %s wake scheduled, so an automatic transition is still pending", intent.RepairRunID, next.Reason)
 		}
 	}
+	// A reviewer that has not concluded is an automatic transition pending in
+	// the only sense that matters here. It does not write — which is why clause
+	// (4) treats a reviewer slot as non-mutating — but its verdict, when it
+	// lands, is observed without anybody asking and can dispatch a fix cycle
+	// into this run's own worktree. "Nothing is going to happen by itself" is
+	// false while a verdict is outstanding, so this is part of clause (2)
+	// rather than a separate leniency in clause (4).
+	steps, err := c.store.ListWorkflowSteps(ctx, intent.RepairRunID)
+	if err != nil {
+		return no("AO could not read repair run %s's steps, so it cannot prove nothing of its own is executing", intent.RepairRunID)
+	}
+	if c.reviewRuns != nil {
+		for _, step := range steps {
+			if step.Kind != domain.WorkflowStepReview || step.ReviewRunID == nil {
+				continue
+			}
+			reviewRun, found, rerr := c.reviewRuns.GetReviewRun(ctx, *step.ReviewRunID)
+			if rerr != nil || !found {
+				return no("AO could not read review run %s, so it cannot prove no verdict is outstanding for repair run %s",
+					*step.ReviewRunID, intent.RepairRunID)
+			}
+			if !reviewRunConcluded(reviewRun) {
+				return no("review run %s of repair run %s is %s with no verdict, so a verdict is still outstanding and could dispatch a fix cycle",
+					reviewRun.ID, intent.RepairRunID, reviewRun.Status)
+			}
+		}
+	}
 	proved("stop is human-owned with no automatic transition pending")
 
 	// (3) nothing of its own is executing or authorized to execute. Every step
 	// kind counts, not only the obviously-mutating ones: a verify step runs the
 	// project's own commands, and an advance step writes to a branch.
-	steps, err := c.store.ListWorkflowSteps(ctx, intent.RepairRunID)
-	if err != nil {
-		return no("AO could not read repair run %s's steps, so it cannot prove nothing of its own is executing", intent.RepairRunID)
-	}
 	for _, step := range steps {
 		if step.State == domain.WorkflowStepReady || step.State == domain.WorkflowStepRunning {
 			return no("repair run %s's %s step is %s, so it is executing or authorized to execute",
@@ -379,6 +402,16 @@ func (c *Coordinator) reconcileQuiescentRepair(ctx stdctx.Context, origin domain
 		// mislabel a repair that finished as one that merely stopped.
 		return repairQuiescence{Reason: fmt.Sprintf("repair run %s is %s, which is an outcome rather than a quiescence", intent.RepairRunID, repairRun.State)}
 	}
+	// Close the execution authority this repair can no longer use, BEFORE
+	// asking whether it can still act. The two are deliberately in this order
+	// and deliberately separate: the retirement acts only on authority it can
+	// prove is finished (a concluded review's slot, a launch claim whose launch
+	// demonstrably completed), and the proof then reads the rows as they now
+	// stand. Nothing here relaxes a clause — if an authority cannot be proven
+	// finished it stays, and the proof refuses on it exactly as before. See
+	// execution_authority_retirement.go.
+	c.retireFinishedExecutionAuthorities(ctx, repairRun)
+
 	proof := c.proveRepairQuiescent(ctx, origin, intent, repairRun)
 	if proof.Quiescent {
 		c.foldQuiescentRepair(ctx, origin, intent, proof)

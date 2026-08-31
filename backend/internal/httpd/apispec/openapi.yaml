@@ -9494,6 +9494,42 @@ components:
       - status
       - role
       type: object
+    ControllersWorkflowBranchCessionChainView:
+      properties:
+        blockedReason:
+          enum:
+          - holder_can_still_write
+          - legacy_unprovable_branch_cession
+          - previous_owner_not_authoritative
+          - branch_moved_on
+          type: string
+        branch:
+          type: string
+        currentHolderRunId:
+          type: string
+        depth:
+          type: integer
+        detail:
+          type: string
+        kind:
+          enum:
+          - ceded
+          - custody
+          type: string
+        lockId:
+          type: string
+        originRunId:
+          type: string
+        repoPath:
+          type: string
+        returnable:
+          type: boolean
+      required:
+      - originRunId
+      - currentHolderRunId
+      - depth
+      - returnable
+      type: object
     ControllersWorkflowIntegrationStateView:
       properties:
         currentSha:
@@ -14078,6 +14114,8 @@ components:
           type: integer
         budget:
           type: integer
+        cessionChain:
+          $ref: '#/components/schemas/ControllersWorkflowBranchCessionChainView'
         exhausted:
           type: boolean
         quiescenceReason:

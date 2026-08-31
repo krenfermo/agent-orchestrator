@@ -257,20 +257,10 @@ func (c *Coordinator) readOnlyDetail(ctx stdctx.Context, run domain.WorkflowRun)
 		detail.Steps = append(detail.Steps, sd)
 	}
 	if cps, cerr := c.store.ListWorkflowCheckpoints(ctx, run.ID); cerr == nil {
-		for _, cp := range cps {
-			// Checkpoint 8P-E.18: incident-ledger rows describe a stop, they are
-			// never one. See isBookkeepingPhase.
-			if isBookkeepingPhase(cp.DurablePhase) {
-				continue
-			}
-			if cp.NextAction != "" {
-				detail.NextAction = cp.NextAction
-			}
-			if !cp.CreatedAt.Before(detail.LatestCheckpointAt) {
-				detail.LatestCheckpointPhase = cp.DurablePhase
-				detail.LatestCheckpointAt = cp.CreatedAt
-			}
-		}
+		// One fold, shared by every projection, so the Board, the API, the CLI
+		// and the reconciler can never disagree about why a run is stopped.
+		// See checkpoint_authority.go.
+		applyCheckpointAuthority(&detail, cps)
 		if run.State == domain.WorkflowRunWaiting {
 			detail.BranchWait = branchWaitFromCheckpoints(cps)
 			c.enrichBranchWait(ctx, detail.BranchWait)

@@ -495,6 +495,38 @@ type WorkflowRepairStateView struct {
 	// QuiescenceReason is AO's own sentence about why the newest generation
 	// counts as live or as quiescent.
 	QuiescenceReason string `json:"quiescenceReason,omitempty"`
+	// CessionChain is where this run's branch is when a repair chain has it.
+	// Absent when no branch of this run's is out.
+	CessionChain *WorkflowBranchCessionChainView `json:"cessionChain,omitempty"`
+}
+
+// WorkflowBranchCessionChainView is the wire form of
+// workflow.BranchCessionChain: a branch handed down a chain of repairs, and
+// whether AO can bring it back by itself.
+type WorkflowBranchCessionChainView struct {
+	// OriginRunID is the run the branch unwinds back to; CurrentHolderRunID is
+	// the run that has it right now.
+	OriginRunID        string `json:"originRunId"`
+	CurrentHolderRunID string `json:"currentHolderRunId"`
+	// Depth is how many repair hops separate them: 1 for a single cession, 2
+	// for the repair-of-repair shape.
+	Depth int `json:"depth"`
+	// Returnable reports that AO can fold the deepest hop now, with no human
+	// action of any kind.
+	Returnable bool `json:"returnable"`
+	// BlockedReason names the missing fact when it cannot:
+	// holder_can_still_write, legacy_unprovable_branch_cession,
+	// previous_owner_not_authoritative, or branch_moved_on. Detail is AO's own
+	// sentence about it, including the quiescence clause that refused.
+	BlockedReason string `json:"blockedReason,omitempty" enum:"holder_can_still_write,legacy_unprovable_branch_cession,previous_owner_not_authoritative,branch_moved_on"`
+	Detail        string `json:"detail,omitempty"`
+	// LockID/Branch/RepoPath name what is held; Kind is the evidence the
+	// deepest hop rests on (`ceded` for a recorded hand-over, `custody` for a
+	// repair that took its origin's branch itself).
+	LockID   string `json:"lockId,omitempty"`
+	Branch   string `json:"branch,omitempty"`
+	RepoPath string `json:"repoPath,omitempty"`
+	Kind     string `json:"kind,omitempty" enum:"ceded,custody"`
 }
 
 // WorkflowCapacityWaitView is the wire form of workflow.CapacityWait.
@@ -918,6 +950,14 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 		WaitingForFreshReview: detail.Repair.WaitingForFreshReview,
 		Quiescent:             detail.Repair.Quiescent,
 		QuiescenceReason:      detail.Repair.QuiescenceReason,
+	}
+	if chain := detail.Repair.CessionChain; chain != nil {
+		runView.Repair.CessionChain = &WorkflowBranchCessionChainView{
+			OriginRunID: chain.OriginRunID, CurrentHolderRunID: chain.CurrentHolderRunID,
+			Depth: chain.Depth, Returnable: chain.Returnable,
+			BlockedReason: chain.BlockedReason, Detail: chain.Detail,
+			LockID: chain.LockID, Branch: chain.Branch, RepoPath: chain.RepoPath, Kind: chain.Kind,
+		}
 	}
 	view := WorkflowRunDetailView{Run: runView, Steps: steps}
 	if detail.Plan != nil {

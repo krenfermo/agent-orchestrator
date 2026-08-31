@@ -90,8 +90,13 @@ func (q *quiescenceCase) seedRepairGeneration(t *testing.T, generation int, stat
 	if _, err := q.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
 		ID: fmt.Sprintf("wfc-repair-origin-%d", generation), WorkflowRunID: repairID,
 		ProjectID: created.Run.ProjectID, DurablePhase: "workflow_repair_run_origin",
-		NextAction:     fmt.Sprintf("repair run for %s, generation %d", q.runID, generation),
-		PayloadVersion: "v1", RetryState: "{}", CreatedAt: q.clk.Now(),
+		NextAction: fmt.Sprintf("repair run for %s, generation %d", q.runID, generation),
+		// The production payload, not an empty object: this row is the repair
+		// run's own half of the binding between it and its origin, and
+		// branch_cession_chain.go reads it to prove custody of a branch.
+		PayloadVersion: "v1",
+		RetryState:     fmt.Sprintf(`{"originRunId":%q,"generation":%d}`, q.runID, generation),
+		CreatedAt:      q.clk.Now(),
 	}); err != nil {
 		t.Fatalf("seed repair origin marker: %v", err)
 	}

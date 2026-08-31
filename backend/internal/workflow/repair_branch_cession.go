@@ -69,6 +69,12 @@ type branchCessionRecord struct {
 	Branch           string    `json:"branch"`
 	RepoPath         string    `json:"repoPath"`
 	At               time.Time `json:"at"`
+	// Kind distinguishes a transfer the previous owner made (`ceded`) from one
+	// a repair made on its origin's behalf by taking the branch itself
+	// (`custody`) — see branch_cession_chain.go. Empty on every row written
+	// before the distinction existed, which reads as `ceded` and is what those
+	// rows are.
+	Kind string `json:"kind,omitempty"`
 }
 
 // cedeBranchLockToRepair moves the originating run's direct-branch locks to the
@@ -97,6 +103,7 @@ func (c *Coordinator) cedeBranchLockToRepair(ctx stdctx.Context, origin domain.W
 			LockID: lock.ID, FromRunID: origin.ID, ToRunID: intent.RepairRunID,
 			RepairIntentID: intent.ID, RepairGeneration: intent.Generation,
 			Branch: lock.Branch, RepoPath: lock.RepoPath, At: c.clock(),
+			Kind: branchCessionKindCeded,
 		}
 		// Reason first: the ledger row is durable BEFORE the transfer, so a
 		// crash between them leaves a recorded intent to move a lock that may
@@ -147,11 +154,27 @@ func (c *Coordinator) returnBranchLockFromRepair(ctx stdctx.Context, origin doma
 			ErrInvalid, intent.Generation, current)
 	}
 	for _, rec := range c.cededBranchLocks(ctx, origin.ID, intent) {
-		c.recordBranchCession(ctx, origin, branchLockReturnedPhase, rec,
-			fmt.Sprintf("branch %s returned to run %s from repair run %s", rec.Branch, origin.ID, intent.RepairRunID))
-		if _, err := ceder.Cede(ctx, rec.LockID, intent.RepairRunID, origin.ID, ""); err != nil {
+		// The transfer FIRST, the record second, which is the opposite of the
+		// cession above and for the opposite reason. A cession's dangerous
+		// crash is a branch that moved with nothing to explain it; a return's
+		// is a ledger that says the branch came back when it did not — because
+		// cededBranchLocks would then stop listing the cession and nothing
+		// would ever hand the branch back. That was the shape of the
+		// wf-c4c84f52 leak, one restart earlier. Recording second cannot lose
+		// a branch: completeBranchCessionBookkeeping re-derives the missing row
+		// from the lock table, which is the authority on who holds what.
+		moved, err := ceder.Cede(ctx, rec.LockID, intent.RepairRunID, origin.ID, "")
+		if err != nil {
 			return err
 		}
+		if !moved {
+			// The repair does not hold it: already returned, released, or
+			// somebody else's now. Nothing is forced, and the bookkeeping pass
+			// closes the row once the lock table settles the question.
+			continue
+		}
+		c.recordBranchCession(ctx, origin, branchLockReturnedPhase, rec,
+			fmt.Sprintf("branch %s returned to run %s from repair run %s", rec.Branch, origin.ID, intent.RepairRunID))
 	}
 	return nil
 }
@@ -167,7 +190,12 @@ func (c *Coordinator) cededBranchLocks(ctx stdctx.Context, runID string, intent 
 	if err != nil {
 		return nil
 	}
-	outstanding := map[string]branchCessionRecord{}
+	// Paired by IDENTITY rather than by the order the rows come back in. Two
+	// checkpoints written inside one clock tick are ordered by id, and a return
+	// that happens to sort before its own cession would resurrect a transfer
+	// that was already given back -- which is a leak, and an invisible one.
+	ceded := map[string]branchCessionRecord{}
+	returned := map[string]bool{}
 	for _, cp := range checkpoints {
 		if cp.DurablePhase != branchLockCededPhase && cp.DurablePhase != branchLockReturnedPhase {
 			continue
@@ -180,13 +208,16 @@ func (c *Coordinator) cededBranchLocks(ctx stdctx.Context, runID string, intent 
 			continue
 		}
 		if cp.DurablePhase == branchLockCededPhase {
-			outstanding[rec.LockID] = rec
+			ceded[branchCessionKey(rec)] = rec
 		} else {
-			delete(outstanding, rec.LockID)
+			returned[branchCessionKey(rec)] = true
 		}
 	}
-	out := make([]branchCessionRecord, 0, len(outstanding))
-	for _, rec := range outstanding {
+	out := make([]branchCessionRecord, 0, len(ceded))
+	for key, rec := range ceded {
+		if returned[key] {
+			continue
+		}
 		out = append(out, rec)
 	}
 	return out
@@ -197,8 +228,19 @@ func (c *Coordinator) recordBranchCession(ctx stdctx.Context, run domain.Workflo
 	if err != nil {
 		return
 	}
+	// A return's row is identified by what it is about — the lock, the repair
+	// that had it, the generation — rather than by a minted id, so a racing
+	// daemon or a restart completing the same bookkeeping collides on the
+	// primary key instead of writing a second account of one transfer. A
+	// cession keeps a minted id: each one is a distinct event, and two of them
+	// for the same lock and generation cannot happen (the second Cede would be
+	// refused).
+	id := "wfc-" + c.newID()
+	if phase == branchLockReturnedPhase {
+		id = branchCessionFoldID(rec.LockID, rec.ToRunID, rec.RepairGeneration)
+	}
 	_, _ = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
-		ID:             "wfc-" + c.newID(),
+		ID:             id,
 		WorkflowRunID:  run.ID,
 		ProjectID:      run.ProjectID,
 		DurablePhase:   phase,

@@ -50,6 +50,11 @@ type incidentE2E struct {
 	c     *workflowcore.Coordinator
 	runID string
 	idSeq int
+	// locks is wired into the Coordinator only when a test sets it before
+	// build(). Most tests on this fixture have no branch to hold; the ones that
+	// do (branch_cession_chain_test.go) need the REAL branch_locks table and
+	// its real compare-and-set, not a map.
+	locks workflowcore.BranchLocks
 }
 
 func newIncidentE2E(t *testing.T) *incidentE2E {
@@ -103,6 +108,7 @@ func (f *incidentE2E) build() {
 		// against exactly these), and wiring them here means every test on this
 		// fixture runs through them rather than around them.
 		Capacity:      f.store,
+		BranchLocks:   f.locks,
 		WakeScheduler: f.wake,
 		Clock:         f.clk.Now,
 		NewID: func() string {

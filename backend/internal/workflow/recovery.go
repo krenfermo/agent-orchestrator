@@ -150,6 +150,18 @@ func (c *Coordinator) reconcileRun(ctx stdctx.Context, run domain.WorkflowRun, n
 	c.reconcileRepairOutcome(ctx, run)
 	c.maybeAutoRepair(ctx, run)
 
+	// Close the execution authority a parked run can no longer use: a reviewer
+	// slot whose review concluded, a single-flight launch claim whose launch
+	// demonstrably completed. Both are fossils that read as live executions, and
+	// both are what made wf-f5025a7c look able to write hours after it had
+	// finished. Proof-bound and idempotent; a no-op for a run that is moving,
+	// and for one whose authority cannot be shown finished. Runs BEFORE the
+	// convergence below, because that is what the convergence's own repair
+	// quiescence proof reads. See execution_authority_retirement.go.
+	if run.State == domain.WorkflowRunNeedsAttention {
+		c.retireFinishedExecutionAuthorities(ctx, run)
+	}
+
 	// And the convergence a restart is the last chance to notice: a run held
 	// shut by a changes_requested verdict about a workspace state it has since
 	// moved past (head_convergence.go). Boot is where the wf-724a1e97 shape is
@@ -157,6 +169,17 @@ func (c *Coordinator) reconcileRun(ctx stdctx.Context, run domain.WorkflowRun, n
 	// and a standalone run parked this way has no heartbeat at all. Read-only
 	// unless it can prove the case, and routed through ContinueRun so a restart
 	// mid-adoption re-derives the same fingerprint and opens no second review.
+	// A run QUEUED for a branch its own repair chain is holding never reaches
+	// converge() below (that path is for parked runs), and it is the other half
+	// of the same deadlock: the origin is waiting for a lock that a repair
+	// parked for a person will never give back by itself. The chain fold is
+	// read-only unless it can prove every link, so running it here costs a
+	// waiting run nothing. See branch_cession_chain.go.
+	if run.State == domain.WorkflowRunWaiting {
+		c.completeBranchCessionBookkeeping(ctx, run)
+		c.reconcileBranchCessionChain(ctx, run)
+	}
+
 	if run.State == domain.WorkflowRunNeedsAttention {
 		if _, cerr := c.converge(ctx, run); cerr != nil {
 			return cerr

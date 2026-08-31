@@ -3434,6 +3434,20 @@ export interface components {
             status: "active" | "disabled";
             username: string;
         };
+        ControllersWorkflowBranchCessionChainView: {
+            /** @enum {string} */
+            blockedReason?: "holder_can_still_write" | "legacy_unprovable_branch_cession" | "previous_owner_not_authoritative" | "branch_moved_on";
+            branch?: string;
+            currentHolderRunId: string;
+            depth: number;
+            detail?: string;
+            /** @enum {string} */
+            kind?: "ceded" | "custody";
+            lockId?: string;
+            originRunId: string;
+            repoPath?: string;
+            returnable: boolean;
+        };
         ControllersWorkflowIntegrationStateView: {
             currentSha?: string;
             errorClass?: string;
@@ -5146,6 +5160,7 @@ export interface components {
             active: boolean;
             attempt: number;
             budget: number;
+            cessionChain?: components["schemas"]["ControllersWorkflowBranchCessionChainView"];
             exhausted: boolean;
             quiescenceReason?: string;
             quiescent: boolean;

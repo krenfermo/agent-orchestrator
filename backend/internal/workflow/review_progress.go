@@ -50,6 +50,13 @@ const reviewCapacityRetryDurablePhase = "review_capacity_retry"
 // owns the step now decides instead.
 var errReviewAuthorityLost = errors.New("workflow: this review run is no longer the step's authority")
 
+// reviewObservedPhase is the durable phase of a review OBSERVATION: AO read a
+// review run and recorded what it said. It is deliberately not a stop and not a
+// lifecycle transition of its own — the transition, when there is one, is the
+// step and run rows this function writes. See checkpoint_authority.go for why
+// that distinction is load-bearing rather than pedantic.
+const reviewObservedPhase = "review_observed"
+
 // observeReviewStep is the single fact-based review-step evaluation function,
 // used both by GetRun (opportunistic observation) and by boot Reconcile,
 // mirroring observeWorkStep's split of pure decision vs. store-touching
@@ -287,6 +294,7 @@ func (c *Coordinator) recordReviewOutcome(
 	authorityRunID string,
 ) (domain.WorkflowStep, error) {
 	now := c.clock()
+	movedSomething := false
 
 	if domain.ValidWorkflowStepTransition(step.State, nextStep) {
 		var err error
@@ -307,6 +315,7 @@ func (c *Coordinator) recordReviewOutcome(
 			return step, err
 		}
 		step.State = nextStep
+		movedSomething = true
 	} else if c.log != nil {
 		c.log.Info("workflow: skipping invalid review-step observation transition (benign race)",
 			"step", step.ID, "from", step.State, "to", nextStep)
@@ -316,6 +325,7 @@ func (c *Coordinator) recordReviewOutcome(
 		if _, err := c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, nextRun, now); err != nil {
 			return step, err
 		}
+		movedSomething = true
 	} else if c.log != nil && run.State != nextRun {
 		c.log.Info("workflow: skipping invalid run transition from review-step observation (benign race)",
 			"run", run.ID, "from", run.State, "to", nextRun)
@@ -327,20 +337,45 @@ func (c *Coordinator) recordReviewOutcome(
 		rid := *step.ReviewRunID
 		reviewRunIDPtr = &rid
 	}
-	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
-		ID:             "wfc-" + c.newID(),
-		WorkflowRunID:  run.ID,
-		WorkflowStepID: &stepID,
-		ProjectID:      run.ProjectID,
-		ReviewRunID:    reviewRunIDPtr,
-		ReviewVerdict:  verdict,
-		NextAction:     nextAction,
-		DurablePhase:   "review_observed",
-		PayloadVersion: "v1",
-		RetryState:     "{}",
-		CreatedAt:      now,
-	}); err != nil {
-		return step, err
+	// An observation that changed nothing and says nothing new writes nothing.
+	//
+	// wf-c4c84f52 is why. Its review step had already FAILED when its reviewer's
+	// approved verdict arrived, so every pass re-applied that verdict, found
+	// both transitions invalid (failed -> completed, needs_attention -> waiting),
+	// logged the benign race — and wrote the checkpoint anyway. 301 identical
+	// rows later, the run's own stop was buried under three hours of AO
+	// re-reading one verdict, and every reader that took "the newest checkpoint"
+	// for "what happened" lost the reason the run was parked.
+	//
+	// The ledger is still append-only and no row is ever rewritten: what is
+	// suppressed is only a row that would carry no information. The bar is
+	// deliberately narrow — nothing moved AND the newest observation of this
+	// step is already this exact one — so a real re-observation (a different
+	// verdict, a different review run, a transition that lands) is always
+	// recorded. The livelock this papers over is a separate defect and stays
+	// visible in the logs above; what it must stop doing is destroying the
+	// run's stop reason.
+	//
+	// Only the ROW is suppressed. Everything else this function does still runs,
+	// including the attempt-outcome update below, so a suppressed duplicate is
+	// exactly a no-op and never a skipped side effect.
+	redundant := !movedSomething && c.reviewObservationIsRedundant(ctx, stepID, reviewRunIDPtr, verdict, nextAction)
+	if !redundant {
+		if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+			ID:             "wfc-" + c.newID(),
+			WorkflowRunID:  run.ID,
+			WorkflowStepID: &stepID,
+			ProjectID:      run.ProjectID,
+			ReviewRunID:    reviewRunIDPtr,
+			ReviewVerdict:  verdict,
+			NextAction:     nextAction,
+			DurablePhase:   reviewObservedPhase,
+			PayloadVersion: "v1",
+			RetryState:     "{}",
+			CreatedAt:      now,
+		}); err != nil {
+			return step, err
+		}
 	}
 
 	if errClass != "" || nextStep.Terminal() {
@@ -600,4 +635,34 @@ type reviewCapacityRetryRecord struct {
 	Harness     string `json:"harness"`
 	SessionID   string `json:"sessionId"`
 	Reason      string `json:"reason"`
+}
+
+// reviewObservationIsRedundant reports whether the newest checkpoint for this
+// step is already this same observation.
+//
+// It compares only what an observation asserts: which review run, which
+// verdict, and what AO said comes next. A read failure returns false — an
+// observation AO cannot compare is one it records, because losing a real
+// observation is worse than keeping a duplicate.
+func (c *Coordinator) reviewObservationIsRedundant(
+	ctx stdctx.Context, stepID string, reviewRunID *string, verdict, nextAction string,
+) bool {
+	latest, ok, err := c.store.GetLatestWorkflowCheckpointByStep(ctx, stepID)
+	if err != nil || !ok {
+		return false
+	}
+	if latest.DurablePhase != reviewObservedPhase {
+		return false
+	}
+	if latest.ReviewVerdict != verdict || latest.NextAction != nextAction {
+		return false
+	}
+	switch {
+	case reviewRunID == nil && latest.ReviewRunID == nil:
+		return true
+	case reviewRunID == nil || latest.ReviewRunID == nil:
+		return false
+	default:
+		return *reviewRunID == *latest.ReviewRunID
+	}
 }

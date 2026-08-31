@@ -271,6 +271,12 @@ func isBookkeepingPhase(phase string) bool {
 		// fresh review. A fold would then silently disable the recovery it
 		// exists to enable. See repair_quiescence.go.
 		phase == repairQuiescentPhase ||
+		// And the retirement summary, for the same reason and with the same
+		// hazard: it is written on a run that is stopped for its own reason,
+		// and counting it would replace that reason with a bookkeeping line —
+		// which would in turn make the run's stop unreadable to the very rules
+		// (quiescence, convergence) the retirement exists to unblock.
+		phase == executionAuthorityRetiredPhase ||
 		phase == planRegeneratedPhase ||
 		phase == planReusedPhase ||
 		phase == repairRunOriginPhase ||
@@ -278,7 +284,13 @@ func isBookkeepingPhase(phase string) bool {
 		// stopped. Counting it would displace the stop's own reason at the
 		// exact moment an operator most needs to read it.
 		phase == branchLockCededPhase ||
-		phase == branchLockReturnedPhase
+		phase == branchLockReturnedPhase ||
+		// And the fold of a custody link, which has the same shape and the
+		// sharpest version of the hazard: it is written on the ORIGIN, which is
+		// parked on its own reason, and displacing that reason would make the
+		// run unreadable to head convergence — the very rule getting the branch
+		// back exists to unblock. See branch_cession_chain.go.
+		phase == branchCustodyReturnedPhase
 }
 
 func isIncidentLedgerPhase(phase string) bool {

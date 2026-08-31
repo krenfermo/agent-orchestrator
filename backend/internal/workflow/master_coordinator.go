@@ -842,20 +842,10 @@ func (c *Coordinator) getMasterRun(ctx stdctx.Context, run domain.WorkflowRun, s
 	// name a master stop — which is precisely why a planner failure surfaced as
 	// an unexplained "needs attention" on the Board.
 	if cps, cerr := c.store.ListWorkflowCheckpoints(ctx, run.ID); cerr == nil {
-		for _, cp := range cps {
-			// Checkpoint 8P-E.18: incident-ledger rows describe a stop, they are
-			// never one. See isBookkeepingPhase.
-			if isBookkeepingPhase(cp.DurablePhase) {
-				continue
-			}
-			if cp.NextAction != "" {
-				detail.NextAction = cp.NextAction
-			}
-			if !cp.CreatedAt.Before(detail.LatestCheckpointAt) {
-				detail.LatestCheckpointPhase = cp.DurablePhase
-				detail.LatestCheckpointAt = cp.CreatedAt
-			}
-		}
+		// One fold, shared by every projection, so the Board, the API, the CLI
+		// and the reconciler can never disagree about why a run is stopped.
+		// See checkpoint_authority.go.
+		applyCheckpointAuthority(&detail, cps)
 	}
 	if c.questionsStore != nil {
 		if qs, qerr := c.questionsStore.ListWorkflowQuestionsByRun(ctx, run.ID); qerr == nil {

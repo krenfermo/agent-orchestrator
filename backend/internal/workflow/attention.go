@@ -617,8 +617,24 @@ func ClassifyAttention(d RunDetail, questions []domain.WorkflowQuestion, phase P
 // attention reason is how the Board ended up showing "review_observed" as
 // though it were something a person could act on.
 func resolveAttentionReason(d RunDetail) (string, AttentionDisposition, bool) {
-	if disp, ok := attentionDispositions[d.LatestCheckpointPhase]; ok {
-		return d.LatestCheckpointPhase, disp, true
+	// The STOP AUTHORITY first: the newest checkpoint that actually stopped this
+	// run, which is not the same thing as the newest checkpoint. A run parked on
+	// reviewer_launch_failed that has since re-read the same verdict 302 times
+	// is still parked on reviewer_launch_failed. See checkpoint_authority.go.
+	if d.StopAuthorityPhase != "" {
+		if disp, ok := attentionDispositions[d.StopAuthorityPhase]; ok {
+			return d.StopAuthorityPhase, disp, true
+		}
+	}
+	// A RunDetail built by hand -- every caller that constructs one without
+	// folding a ledger, including much of this package's own test surface --
+	// carries no stop authority, and for those the newest phase is all there is.
+	// It is a strict fallback, never an override: a folded detail whose stop was
+	// cleared must not be re-explained by the phase that cleared it.
+	if !d.CheckpointsFolded {
+		if disp, ok := attentionDispositions[d.LatestCheckpointPhase]; ok {
+			return d.LatestCheckpointPhase, disp, true
+		}
 	}
 	if class := latestErrorClass(d); class != "" {
 		if disp, ok := attentionErrorClasses[class]; ok {
@@ -971,34 +987,16 @@ func (c *Coordinator) stopReason(ctx stdctx.Context, run domain.WorkflowRun) (st
 	if err != nil {
 		return "", AttentionDisposition{}, false
 	}
-	for _, cp := range cps {
-		// Checkpoint 8P-E.18: the incident ledger describes a stop, it is never
-		// itself one. Its rows are the newest thing on a run the moment anyone
-		// asks "what do I do", so counting them here would rewrite the run's
-		// stop reason to `unclassified_stop` as a side effect of opening the
-		// modal — changing the Board, the incident's own signature, and every
-		// later comparison against it. Skipping them is what keeps asking about
-		// a stop free of consequences for the stop.
-		// The same exclusion now covers the attempt reaper's own record, which
-		// is written on this very call path and would otherwise displace the
-		// stop phase it is about to be asked for. See isBookkeepingPhase.
-		if isBookkeepingPhase(cp.DurablePhase) {
-			continue
-		}
-		// NextAction carries resolveAttentionReason's legacy carrier (the
-		// pre-8P-E.13 "human_attention" literal). Without it, a run stranded by
-		// the old fix-budget code reads as unclassified here while the very
-		// same lookup on the run detail page names it — and branch-lock
-		// retention would then have to guess about a stop AO can actually
-		// explain.
-		if cp.NextAction != "" {
-			d.NextAction = cp.NextAction
-		}
-		if !cp.CreatedAt.Before(d.LatestCheckpointAt) {
-			d.LatestCheckpointPhase = cp.DurablePhase
-			d.LatestCheckpointAt = cp.CreatedAt
-		}
-	}
+	// The same fold every projection uses, so this answer and the Board's are
+	// the same answer. It excludes the incident ledger and the other
+	// bookkeeping rows for the reason they have always been excluded — they
+	// describe a stop, they are never one, and counting them would rewrite a
+	// run's reason as a side effect of opening the modal — and it additionally
+	// refuses to let an OBSERVATION displace the stop, which is what 302
+	// re-readings of one approved verdict did to wf-c4c84f52. It also carries
+	// resolveAttentionReason's legacy next_action carrier forward. See
+	// checkpoint_authority.go.
+	applyCheckpointAuthority(&d, cps)
 	if steps, serr := c.store.ListWorkflowSteps(ctx, run.ID); serr == nil {
 		for _, s := range steps {
 			attempts, aerr := c.store.ListWorkflowAttempts(ctx, s.ID)

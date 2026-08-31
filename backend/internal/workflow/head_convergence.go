@@ -196,6 +196,15 @@ func (c *Coordinator) converge(ctx stdctx.Context, run domain.WorkflowRun) (*Run
 	// so the origin gets to evaluate its own workspace instead of waiting on a
 	// repair that stopped hours ago. See repair_quiescence.go for the eight
 	// facts this requires and for why every one of them fails closed.
+	// First the ledger's own arrears: cessions whose branch has already left the
+	// repair, recorded or not. They cost nothing to close and, left open, they
+	// are what makes clause (6) of the quiescence proof refuse forever.
+	c.completeBranchCessionBookkeeping(ctx, run)
+	// Then one link of any branch of this run's that is out down a chain of
+	// repairs. One link per pass, each on its own proof; the next becomes
+	// foldable only once this one is durably done. See branch_cession_chain.go.
+	c.reconcileBranchCessionChain(ctx, run)
+
 	c.reconcileQuiescentRepair(ctx, run)
 
 	probe, err := c.probeFreshReviewConvergence(ctx, run, false)
@@ -246,6 +255,7 @@ func (c *Coordinator) repairLifecycleFor(ctx stdctx.Context, run domain.Workflow
 	out.Quiescent = proof.Quiescent
 	out.Exhausted = out.Budget > 0 && !out.Active && c.repairsSpentFor(ctx, run.ID) >= out.Budget
 	out.WaitingForFreshReview = c.waitingForFreshAuthoritativeReview(ctx, run.ID)
+	out.CessionChain = c.branchCessionChainFor(ctx, run)
 	return out
 }
 
