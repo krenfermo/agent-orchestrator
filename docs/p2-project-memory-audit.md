@@ -7,6 +7,11 @@ builders could consume project memory without being rewritten. This audit is the
 basis for **P2-A extending the abstractions that already exist** instead of
 introducing a second, parallel memory system.
 
+**Revalidated against the code at P2-A implementation (2026-08-31).** See
+[§0](#0-revalidation-status) for exactly what was re-checked, what was confirmed
+unchanged, what P1 hardening had made stale, and what P2-A itself has since
+changed. The rest of this document is the corrected text, not the original.
+
 Scope: `backend/internal` as of this document. Per-component reference docs stay
 authoritative for their own component — [code-graph.md](code-graph.md),
 [context-router.md](context-router.md),
@@ -14,6 +19,74 @@ authoritative for their own component — [code-graph.md](code-graph.md),
 [project-memory-baseline.md](project-memory-baseline.md),
 [project-memory-store.md](project-memory-store.md). This document is the
 cross-cutting view none of them has.
+
+## 0. Revalidation status
+
+This audit was written before the P1 hardening that followed it, and before
+P2-A. It has been re-checked against the current tree; this section records the
+result so a reader can tell a confirmed claim from a corrected one.
+
+**Confirmed still accurate.** The findings this audit exists for all hold:
+
+- The AO-assembled vs agent-assembled distinction, and the specific fact that
+  **Worker, Reviewer and both Repair Agents' harness file and git reads are not
+  observed by `AO_PROJECT_MEMORY_BASELINE`** (§1). Re-verified directly: the
+  worker, reviewer and fix dispatch wrappers still declare
+  `Capabilities{ContextPayload: true}` only
+  (`wfdispatch.go:58`, `:96`, `:145`), and the planner wrapper is still the only
+  one declaring `FileReads` and calling `ObserveFileRead` (`:251`, `:268`).
+  **This conclusion is unchanged and is not weakened by anything in P2-A.**
+- The planner's hard-coded six-document list and three git probes, re-read in
+  full on every planner call (`adapters/planner/command/context.go`).
+- Both Repair Agents dispatch through the *worker* path, so the routed Spawner
+  surface reaches them (§2.6, §5).
+- `approved_head_recovery.go` is still the only git read whose answer — positive
+  and negative — is checkpointed (`maxApprovedHeadSearchCommits = 500`).
+- The `git log -n 20` per workspace observation, bounded at
+  `maxObservedWorkspaceCommits = 20` in both workspace adapters.
+- The Graphify/Grae determination in §4.1: still prose-only and still absent
+  respectively. P2-A did not add an integration; see
+  [project-memory.md §9](project-memory.md#grae--graphify).
+
+**Corrected — stale after P1 hardening.** One claim, in §2.1:
+
+- The audit described the plan-reuse drift check as `plannerContextDrift`
+  (`workflow/plan_reuse.go:152-181`) comparing the rebuilt manifest to the
+  stored one by **exact string equality**. P1 replaced that with
+  `Coordinator.describePlanContextDrift`
+  (`workflow/plan_revalidation.go:96`), which compares the manifest
+  **itemwise**: structural fields, a path→SHA-256 set comparison of the
+  documents, and HEAD/dirty as separately attributable differences. §2.1 below
+  has been rewritten accordingly.
+- **The cost finding survives the correction, and is if anything sharper.** The
+  new comparison still calls `plannerContextBuilder.Build` in full
+  (`plan_revalidation.go:116`) — six documents read from disk, three git
+  subprocesses — in order to obtain digests it then compares. The stored
+  manifest already holds those digests. So the rescan this audit identified is
+  unchanged, and the code now demonstrably needs only the hashes.
+- `assessPlanReuse` is still re-derived on demand and still reached from
+  `AssessRecovery` (`recovery_assessment.go:84`), `resume_obligation.go:210,236`
+  and the reuse/regenerate commands, so it is still the most frequently repeated
+  scan in the system.
+
+**Superseded by P2-A itself.** Two findings were true when written and have
+since been acted on. They are marked inline where they appear:
+
+- §4.2's central finding — *nothing writes to either durable store in
+  production* — is now half-addressed. `internal/codegraph` still has no
+  production writer. `internal/projectmemory` now has one, but it is a **new
+  durable SQLite store** (migration 0144), not the JSON `Store` this audit
+  inventoried; that JSON store still has no production writer and remains the
+  Phase-0 measurement path.
+- §5's surface-asymmetry table and §8's item 3 said the reviewer was observed
+  but not routed. P2-A added `wfrouter.InstrumentReviewerLauncher`, which fills
+  the previously producer-less `ReviewerLaunchRequest.SystemPrompt`. The fix and
+  verify surfaces are still deliberately unrouted.
+
+**Not re-verified line by line.** Every line/range citation in §2–§8 was correct
+when written; the sample re-checked above is the load-bearing subset. A citation
+that has drifted by a few lines does not change a finding, and the audit is not
+re-numbered on every refactor.
 
 ## 1. The one distinction that governs everything below
 
@@ -59,7 +132,7 @@ the worker is a *configured* rules channel, not a repo-file one: `AgentRules` /
 | --- | --- | --- | --- |
 | `AGENTS.md`, `README.md`, `go.mod`, `package.json`, `docs/architecture.md`, `docs/STATUS.md` (48 KiB cap each) | `adapters/planner/command.ContextBuilder.Build` (`context.go:26-52`) | **Yes — full re-read from disk on every planner call, *and* on every plan-reuse assessment** (see the drift row below) | A **content-free** `PlannerContext` manifest is built and persisted by `Coordinator.GeneratePlan` (`workflow/master_coordinator.go:194-273`) into `workflow_plans.context_manifest_json` via `planStore.StartWorkflowPlanCommand` (`storage/sqlite/store/workflow_plan_store.go:60-64`). Durable, and genuinely *reused* — as a comparison artifact, not as a body cache. See below |
 | Branch, HEAD SHA, dirty flag | same builder, three `git` subprocesses (`context.go:28-38`) | Yes, on both paths above | Recorded in the manifest |
-| **Planner-context drift check** — rebuilds the whole context and diffs it against the stored manifest | `Coordinator.plannerContextDrift` (`workflow/plan_reuse.go:152-181`), called from `assessPlanReuse` (`:129-145`) | **Yes — the full six-document read plus three git probes runs again on every assessment** | Consumes the durable manifest as drift evidence; the rebuilt copy is discarded |
+| **Planner-context drift check** — rebuilds the whole context and compares it item by item against the stored manifest | `Coordinator.describePlanContextDrift` (`workflow/plan_revalidation.go:96`), called from `assessPlanReuse` (`plan_reuse.go:129`) | **Yes — the full six-document read plus three git probes runs again on every assessment** | Consumes the durable manifest as drift evidence; the rebuilt copy is discarded |
 | Routed selection (optional) | `contextrouter/wfrouter.InstrumentPlanner` (`wfrouter.go:91-175`) | Yes | No — transient per dispatch |
 
 The document list is hard-coded (`context.go:40`). There is no per-project
@@ -82,23 +155,29 @@ matters for P2-A, so both are inventoried:
 1. **`repoRootsFromContextManifest`** (`workflow/task_graph_wiring.go:22-36`) —
    recovers repository-root directory names from the manifest's paths for the
    task classifier. A pure read of already-captured facts, costing no IO.
-2. **`Coordinator.plannerContextDrift`** (`workflow/plan_reuse.go:152-181`) —
-   the manifest's load-bearing use. `assessPlanReuse` (`:129-145`) asks whether
-   the project AO would plan against *today* is the project it planned against
-   *then*. `plannerContextDrift` answers by calling
-   `plannerContextBuilder.Build` **again**, blanking the bodies the same way,
-   marshalling, and comparing the result to `record.ContextManifestJSON` by
-   exact string equality. Equal ⇒ `PlanReuseExact`; different ⇒
-   `stale_revalidatable` / `context_changed`; unable to rebuild ⇒
-   `known=false` ⇒ `stale_revalidatable` / `unverifiable`, which routes to a
-   person rather than guessing (`plan_reuse.go:129-141`).
+2. **`Coordinator.describePlanContextDrift`**
+   (`workflow/plan_revalidation.go:96`) — the manifest's load-bearing use.
+   `assessPlanReuse` (`plan_reuse.go:129`) asks whether the project AO would
+   plan against *today* is the project it planned against *then*.
+   `describePlanContextDrift` answers by calling `plannerContextBuilder.Build`
+   **again** and comparing **item by item**: the structural fields (version,
+   project id, project path, branch), the documents as a path→SHA-256 set, and
+   HEAD/dirty as separately attributable differences. Naming *what* moved is
+   what separates a staleness AO can discharge from one it cannot. Unable to
+   rebuild ⇒ `known=false` ⇒ `stale_revalidatable` / `unverifiable`, which
+   routes to a person rather than guessing.
+
+   *(P1 hardening replaced an earlier `plannerContextDrift` that compared the
+   marshalled manifests by exact string equality. The itemised form is strictly
+   better and does not change this audit's cost finding — see §0.)*
 
 So the manifest **is** durable evidence that is really reused, and the reuse is
 sound: comparing hashes rather than bodies is what lets AO prove context
 stability cheaply *in storage*. What it does not save is the **read**. `Build`
 has no hash-only mode, so the drift check re-reads all six documents in full,
-with bodies, up to the 48 KiB cap each, hashes them, blanks the bodies, and
-throws them away — paying the entire scan cost to produce a string comparison.
+with bodies, up to the 48 KiB cap each, hashes them, and throws the bodies away
+— paying the entire scan cost to produce a comparison of digests the stored
+manifest already holds.
 
 Two consequences for P2-A. The manifest can never serve as a document *cache*
 (no bodies are stored), yet its **stored hashes are exactly the gate that would
@@ -274,7 +353,7 @@ whether its result is kept.
 | `git log -n 20 --pretty=format:...` | `adapters/workspace/directbranch/workspace.go:376` and `adapters/workspace/gitworktree/workspace.go:778`, filling `ports.WorkspaceObservation.Commits` | `workflow/worker_signal_reconcile.go:297-303` counts `CommitsSinceDispatch` as worker-progress evidence; `workflow/work_adoption.go:361-366` records `<sha> <subject>` lines on the adoption record; `session_manager/agent_switching.go:1162` copies them onto a session fact | **Yes — `maxObservedWorkspaceCommits = 20`** (`directbranch:37`, `gitworktree:742`) | Runs on **every workspace observation**, so repeatedly per task | **Partly.** Transient in the observation itself; the subject lines that survive are the ones persisted on the work-adoption record |
 | `git rev-list --merges --max-count=1 base..head` | `integration/git.go:225` (`HasMergeCommits`) | Integration merge detection | Yes — `--max-count=1` | Per integration attempt | Consumed by the integration coordinator, not stored as history |
 | `git merge-base [--is-ancestor]` | `integration/git.go:197,211`; `worktree/git.go:180` | Ancestry/base resolution for integration and worktree lifecycle | Single answer | Per operation | No |
-| `git branch --show-current`, `git rev-parse HEAD`, `git status --porcelain` | `adapters/planner/command/context.go:28-38` | Stamps the planner manifest; and, via `plannerContextDrift`, decides plan reusability | N/A | Per planner call **and per plan-reuse assessment** — the latter reached from `AssessRecovery`, an HTTP read path a poll or page load may hit freely (§2.1) | Recorded in the manifest (paths/hashes/refs only, §2.1), which is then reused as durable drift evidence |
+| `git branch --show-current`, `git rev-parse HEAD`, `git status --porcelain` | `adapters/planner/command/context.go:28-38` | Stamps the planner manifest; and, via `describePlanContextDrift`, decides plan reusability | N/A | Per planner call **and per plan-reuse assessment** — the latter reached from `AssessRecovery`, an HTTP read path a poll or page load may hit freely (§2.1) | Recorded in the manifest (paths/hashes/refs only, §2.1), which is then reused as durable drift evidence |
 | `git diff --name-status --find-renames <base>` | `contextrouter.GitDiffSource.Changes` (`sources.go:57-78`) | The router's diff evidence — the one history-adjacent read that **does** become agent context | Name-status only, no patch bodies | Per routed request, and a request may run twice (compact, then expanded) | **No** |
 | Porcelain status + HEAD observation | `incident_advisor.go:322-332` via `workspaceFacts` | Incident pack evidence for the Diagnostic Agent | Bounded inside the pack | Per incident | Observation transient |
 
@@ -348,35 +427,50 @@ output (`projectmemory/store.go:18-21`).
 
 ### 4.1 Graphify / Grae: the explicit determination
 
-**Search performed.** Reproducible as (this audit file is excluded, so the
-counts do not change every time the audit itself is edited):
+**Search performed.** Reproducible as below. The documents that exist to
+*record this determination* are excluded, so the counts do not change every time
+one of them is edited — this audit, the docs index row that summarises it, and
+(since P2-A) `docs/project-memory.md`, whose §9 states the same finding and
+documents the port an adapter would implement:
 
 ```
+EXCLUDE='docs/p2-project-memory-audit.md|docs/project-memory.md|docs/README.md'
 grep -rIin 'graphify' --include='*.go' --include='*.ts' --include='*.tsx' \
   --include='*.md' --include='*.json' . \
-  | grep -v node_modules | grep -v 'docs/p2-project-memory-audit.md'
+  | grep -v node_modules | grep -vE "$EXCLUDE"
 grep -rIinw 'grae'    --include='*.go' --include='*.ts' --include='*.tsx' \
   --include='*.md' --include='*.json' . \
-  | grep -v node_modules | grep -v 'docs/p2-project-memory-audit.md'
+  | grep -v node_modules | grep -vE "$EXCLUDE"
 ```
+
+Re-run at P2-A: **unchanged**. Graphify still appears only in the three prose
+locations below; Grae still has zero occurrences outside the recording
+documents. P2-A added `projectmemory.MemoryGraph` as the port such an adapter
+would implement, and added no adapter, no client, no dependency and no config
+key.
 
 | Name | Matching lines | What they are |
 | --- | --- | --- |
-| **Graphify** | 4 in 3 files | `backend/internal/codegraph/codegraph.go:5` (package doc) and `:67` (a sample provider string in `Name()`'s comment), `docs/code-graph.md:5` — all **prose naming it as an example** of a third-party tool that could be plugged in — plus `docs/README.md:38`, which is this audit's own row in the docs index and describes this determination rather than any integration |
-| **Grae** | 1 in 1 file | `docs/README.md:38` only — again this audit's own index row. **Zero** occurrences anywhere else, in any casing |
+| **Graphify** | 6 in 4 files | Pre-P2-A: `backend/internal/codegraph/codegraph.go:5` (package doc) and `:67` (a sample provider string in `Name()`'s comment), and `docs/code-graph.md:5`. Added by P2-A: `internal/projectmemory/graph.go:17` and `internal/domain/project_memory.go:38,655`. **Every one is prose naming it as an example** of a third-party tool that could implement a port |
+| **Grae** | 7 in 4 files | All added by P2-A, and all of the same kind: `internal/projectmemory/graph.go:17,26,42,150` (the port's own doc comment, its "AO works even when Grae is unavailable" rule, its restatement of this determination, and `"grae"` as a sample value for `Name()`), `internal/domain/project_memory.go:38,655` (provider-neutrality notes), and `internal/projectmemory/pack_test.go:590`, a **test fixture that names an unavailable backend in order to prove the outage path works** |
 
-**Graphify — named as a possible future adapter, not integrated.** Every hit is
-a documentation sentence or a comment, not code. There is **no Graphify client, adapter,
-SDK dependency, module requirement, config key, environment variable, endpoint
-or network call anywhere in the repository**, and `Name()`'s comment offers
-`"graphify"` only as a sample provider string (`codegraph.go:67-69`). Nothing
-would break, and nothing would be reused, if the name were deleted tomorrow.
+**Both names are documentation, and neither is an integration.** The count grew
+at P2-A and the determination did not, which is the distinction that matters:
+every added occurrence is a doc comment on the new `MemoryGraph` port, a sample
+value in a `Name()` comment, or a test fixture that deliberately names a backend
+in order to prove the *unavailable* path works.
 
-**Grae — no integration and no abstraction exists.** Zero matches outside this
-audit's own index row. There is no
-Grae implementation, adapter, reference, vendored module, feature flag or
-documentation note to extend, and therefore nothing for P2-A to conflict with or
-adopt. Recorded here as a definite negative rather than left unstated.
+There is **no Grae or Graphify client, adapter, SDK dependency, module
+requirement, config key, environment variable, endpoint or network call
+anywhere in the repository.** Nothing would break, and nothing would be reused,
+if both names were deleted tomorrow. `go.mod` gained no entry at P2-A on their
+account, and no code path reaches either.
+
+The honest form of the P2-A position: a *port* now exists that such an adapter
+would implement, with a real, load-bearing local implementation behind it — see
+[project-memory.md §9](project-memory.md#grae--graphify). A port is not an
+integration, and this audit's original determination stands: there was nothing
+to extend, and P2-A did not manufacture one.
 
 **What *does* exist, and is a different thing from the above.** These are real,
 in-tree, tested abstractions — the distinction the two rows above are meant to
@@ -415,6 +509,18 @@ sites** to these packages, not replacements for them.
 
 ### 4.2 The finding that matters most: nothing writes to either durable store
 
+> **Superseded in part by P2-A.** This finding was correct when written and is
+> the reason P2-A exists. As of P2-A: `internal/codegraph` **still has no
+> production writer**, so everything below about the graph stands unchanged.
+> Project memory now does have one — but it is a **new durable SQLite store**
+> (migration 0144, `store.PutProjectMemoryItem`, driven by
+> `projectmemory.Indexer`), *not* the JSON `Store` inventoried here. That JSON
+> store still has no production writer and remains the Phase-0 measurement
+> path, deliberately: the baseline recorder has to keep measuring exactly what
+> it measured before, or the before/after in
+> [project-memory-baseline.md](project-memory-baseline.md) means nothing. See
+> [project-memory.md](project-memory.md).
+
 Outside tests, the only non-test call sites of `codegraph.Index` /
 `NewNativeIndexer` and of `projectmemory.Store.Upsert` /
 `BaselineReader.Ingest` are:
@@ -448,16 +554,26 @@ under the data dir and the read-side wiring all exist and are tested.
 | --- | --- | --- |
 | `Planner` | yes | **yes** (routes `PlannerContext.Documents`) |
 | `Spawner` (worker, and therefore both Repair Agents) | yes | **yes** (routes `SpawnConfig.IssueContext`) |
-| `ReviewerLauncher` | yes | no |
+| `ReviewerLauncher` | yes | **yes, as of P2-A** (fills the previously producer-less `SystemPrompt`) |
 | `MessageSender` (fix delivery) | yes | no |
 | `Verifier` | yes | no |
 
-The asymmetry is deliberate and pinned by test
-(`contextrouter/wfrouter/wfrouter_test.go:382-390` asserts the last three are
-handed back identically). It is nonetheless the boundary P2-A has to cross: the
+The asymmetry was deliberate and pinned by test
+(`TestInstrumentLeavesUnroutedSurfacesAlone` asserted the last three were handed
+back identically). It was nonetheless the boundary P2-A had to cross: the
 reviewer and the fix path are exactly the roles for which `roleSectionOrder`
-already defines an ordering (`RoleReviewer`, `RoleFix`) that nothing can
-currently reach.
+already defines an ordering (`RoleReviewer`, `RoleFix`) that nothing could
+reach.
+
+**P2-A crossed half of it, and only half, on the distinction this audit drew.**
+`wfrouter.InstrumentReviewerLauncher` now fills
+`ReviewerLaunchRequest.SystemPrompt` — a field this audit found had *no producer
+anywhere in the repository* (§2.3b). That is assembled context with nothing in
+it, not an instruction being budgeted, which is precisely why it was safe to
+route and why the fix and verify surfaces were left alone: those carry prompts,
+and budgeting a prompt truncates instructions rather than evidence. The test
+above was updated to assert the new, narrower asymmetry rather than left to pass
+incidentally on a nil fixture.
 
 Both wrappers are strictly opt-in and both default to off:
 `AO_PROJECT_MEMORY_BASELINE` (unset ⇒ nil recorder ⇒ untouched deps) and
@@ -474,8 +590,8 @@ path.** No new surface is needed to reach them.
 - The planner's six documents and three `git` calls, per planner invocation
   (`adapters/planner/command/context.go`).
 - **The same six documents and three `git` calls again, per plan-reuse
-  assessment** — `plannerContextDrift` rebuilds the whole planner context only
-  to blank the bodies and compare the manifest string
+  assessment** — `describePlanContextDrift` rebuilds the whole planner context
+  only to compare digests the stored manifest already holds
   (`workflow/plan_reuse.go:152-181`). Because `assessPlanReuse` is deliberately
   re-derived on demand and is reached from the `AssessRecovery` HTTP read path,
   this is the most frequently repeated scan in the system: a poll or page load
@@ -517,7 +633,8 @@ path.** No new surface is needed to reach them.
   facts without touching a pure prompt builder.
 - **The content-free `PlannerContext` manifest**
   (`workflow_plans.context_manifest_json`) — durable *and genuinely reused*, as
-  the comparison artifact `plannerContextDrift` proves plan reusability against,
+  the comparison artifact `describePlanContextDrift` proves plan reusability
+  against,
   and as the repo-root signal `repoRootsFromContextManifest` reads (§2.1). It is
   the closest thing AO already has to a durable context-stability cache: the
   comparison is cheap, only the re-derivation of its inputs is not.
@@ -572,14 +689,15 @@ contract, no new storage code, no violation of its stated invariants.
    `InstrumentSpawner`, so memory delivered into the routed `IssueContext`
    reaches all three with no new surface. This supersedes any notion of feeding
    the repairers through the incident pack.
-3. **`ReviewerLauncher` and `MessageSender`.** `roleSectionOrder` already
-   defines `RoleReviewer` and `RoleFix`. The work is a `wfrouter` wrapper per
-   surface, mirroring `InstrumentSpawner` — including its rule that an
-   unresolvable checkout root means *send the original payload*, never a
-   silently-thinner one (`wfrouter.go:255-280`). Both surfaces are already
-   observed by the baseline, so the before/after is measurable on day one. The
-   workflow reviewer additionally has an unused `SystemPrompt` field
-   (`review_dispatch.go:267`) available for standing project knowledge.
+3. **`ReviewerLauncher` — done in P2-A. `MessageSender` — deliberately not.**
+   `roleSectionOrder` already defines `RoleReviewer` and `RoleFix`. For the
+   reviewer the work was a `wfrouter` wrapper mirroring `InstrumentSpawner`,
+   including its rule that an unresolvable checkout root means *send the
+   original payload*, never a silently-thinner one; it fills the unused
+   `SystemPrompt` field (`review_dispatch.go:267`) with standing project
+   knowledge, which is exactly what this item proposed. The fix surface was
+   left alone: it carries the specific correction, and there is no empty
+   assembled-context field on it to fill.
 4. **`session_manager.buildProjectRules` / `buildSystemPromptText`.** Project
    rules are already a first-class, config-driven section of every worker system
    prompt. Durable memory items scoped to a project are the same shape of thing
@@ -620,18 +738,29 @@ contract, no new storage code, no violation of its stated invariants.
    repository.** `CodeGraphProvider` is the extension point a Graphify (or LSP,
    or hosted) indexer would implement. P2-A adds providers and producers behind
    that boundary rather than a parallel one (§4.1).
-3. **The gap is production writers, not readers.** Nothing indexes a real
-   project and nothing upserts a real fact. Until that changes, enabling
-   `AO_CONTEXT_ROUTER` routes on diff and documents alone.
-4. **Wire staleness with the first writer.** `RefreshStaleness` exists, is
-   tested, and has no caller. A store that accumulates facts without ever
-   invalidating them is worse than an empty one.
+3. **The gap is production writers, not readers.** *(Half closed by P2-A.)*
+   Nothing indexed a real project and nothing upserted a real fact. P2-A adds a
+   durable project-memory writer (SQLite, migration 0144) plus its indexer,
+   incremental update, CLI and API, and wires it in as the router's memory
+   evidence — so with `AO_CONTEXT_ROUTER` on, routing now has real memory to
+   route. **`internal/codegraph` still has no production writer**, so graph
+   evidence remains permanently unavailable and the router still degrades on it
+   exactly as described in §4.2.
+4. **Wire staleness with the first writer.** *(Done in P2-A, in the new
+   store.)* `RefreshStaleness` on the JSON store still has no caller, and the
+   JSON store still has no writer, so the pair remains consistent. The durable
+   store ships invalidation with its writer from day one — per-path
+   invalidation on every incremental pass, a generation retire sweep after a
+   complete walk, and an independent drift detector — because a store that
+   accumulates facts without ever invalidating them is worse than an empty one.
 5. **Reach the Repair Agents through the worker spawn path, not the incident
    pack.** Both repairers are ordinary workflow runs; the pack belongs to the
    read-only Diagnostic Agent (§2.6).
-6. **Extend `wfrouter` to the reviewer and fix surfaces** rather than adding
-   context-assembly code inside `workflow`. The role budgets already exist; the
-   nil-router-is-a-no-op discipline is what makes that safe to ship dark.
+6. **Extend `wfrouter` to the reviewer surface** rather than adding
+   context-assembly code inside `workflow`. *(Done in P2-A; the fix surface was
+   deliberately not extended — see §8 item 3.)* The role budgets already
+   existed; the nil-router-is-a-no-op discipline is what made it safe to ship
+   dark.
 7. **Git history is the clearest duplicated work.** No AO-side history read
    feeds any role's context; every role that inspects history does so itself,
    per task, unbounded. `approved_head_recovery.go` is the in-repo precedent for

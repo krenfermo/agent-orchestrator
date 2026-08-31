@@ -97,6 +97,19 @@ surface (`npm run sqlc`, `npm run api`).
   lock released because the task's turn ended).
 - Agent adapter platform under `internal/adapters/agent/` (25 adapters) with a
   registry and `ao hooks` activity dispatch.
+- **Durable project memory (P2-A)**: a bounded, provenance-carrying summary of
+  a project — modules, conventions, instructions, dependencies, build/test
+  commands, architecture documents, and per-task outcomes/decisions/risks —
+  kept in SQLite under generation-conditioned CAS, with a restart-safe bounded
+  indexer, a git-diff-driven incremental update path, drift detection with
+  four explicit states, and bounded deterministic per-role context packs for
+  Planner, Worker, Reviewer and Repair. It is a **cache, never a source of
+  truth**: where memory and the working tree disagree the working tree wins and
+  the fact is withheld rather than served. Inspectable via `ao memory
+  status|inspect|rebuild|invalidate` and `/api/v1/projects/{id}/memory`.
+  Delivery to agents rides the existing `AO_CONTEXT_ROUTER` flag and is off by
+  default; nothing schedules an indexing pass automatically yet. See
+  [`project-memory.md`](project-memory.md).
 - OpenAPI spec generated from Go DTOs; frontend TS types generated from it and
   drift-checked in CI.
 

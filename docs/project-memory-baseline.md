@@ -204,3 +204,43 @@ dispatch (`EvidenceRecord.Routing`). It is an additive extension: the field is
 omitted entirely when there is nothing to say, `EvidenceSchemaVersion` is
 unchanged, and every consumer of this schema keeps reading every record. See
 [context-router-metrics.md](context-router-metrics.md).
+
+## The P2-A memory-pack baseline
+
+P2-A adds a second, complementary measurement, and the two must not be
+conflated. This harness measures **one dispatch's payload as AO sent it**;
+`projectmemory.PackStats` measures **one role's memory pack as AO assembled
+it**. Together they are the before/after over AO-assembled context that P2-B
+needs.
+
+Per pack, the memory subsystem records: the role, the candidate item count and
+byte total selection could choose from, the selected item count and rendered
+byte/token total, how many facts were dropped and how many were reduced to their
+summary, how many were withheld because AO could no longer vouch for them, the
+source paths behind the selected facts, and the fallback reason whenever the
+pack is empty or degraded.
+
+Measured on this repository at P2-A (default limits, default 24 KiB / 40-fact
+budget, one changed path):
+
+| Role | Candidates | Candidate bytes | Selected | Selected bytes | ~Tokens | Dropped |
+| --- | --- | --- | --- | --- | --- | --- |
+| Planner | 467 | 173,108 | 40 | 5,981 | 1,496 | 427 |
+| Worker | 546 | 154,752 | 14 | 23,734 | 5,934 | 532 (+1 to summary) |
+| Reviewer | 544 | 201,300 | 40 | 15,409 | 3,853 | 504 |
+| Repair | 531 | 134,798 | 40 | 15,409 | 3,853 | 491 |
+
+Indexing the same repository: 3,333 files walked, 3,136 admitted, 31.8 MB read,
+560 facts and 589 relations written in ~780 ms. A second pass over the unchanged
+tree writes **zero** facts, reconfirms all 560, and retires none.
+
+### The same honesty rule applies
+
+`SourcesReused` lists the paths whose *summarised* content AO supplied from
+memory rather than re-deriving it this dispatch. **It is not a count of file
+reads the agent avoided, and must never be reported as one.** The `null` in the
+`filesInspected` column above is the same limitation restated: AO does not
+observe the Worker's, Reviewer's or either Repair Agent's own reads, with or
+without `AO_PROJECT_MEMORY_BASELINE`, so no P2-A number can speak for them.
+
+Full design: [project-memory.md](project-memory.md).
