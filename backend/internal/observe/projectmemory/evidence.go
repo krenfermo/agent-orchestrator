@@ -68,6 +68,12 @@ type EvidenceRecord struct {
 	// RoutingMetrics.
 	Routing *RoutingMetrics `json:"routing,omitempty"`
 
+	// Memory is what project memory decided for this dispatch (P2-B). Like
+	// Routing it is an ADDITIVE extension: a pointer with omitempty, so a
+	// dispatch with no memory story produces exactly the record this schema
+	// always produced. See MemoryMetrics.
+	Memory *MemoryMetrics `json:"memory,omitempty"`
+
 	// Notes carries harness-level remarks about how this record was produced
 	// (for example: which dispatch surfaces were exercised without a live
 	// provider). Notes never contain metrics.

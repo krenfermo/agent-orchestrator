@@ -146,6 +146,7 @@ type Span struct {
 	scanObserved bool
 
 	routing *RoutingMetrics
+	memory  *MemoryMetrics
 
 	usage         domain.UsageMetricTotals
 	usageObserved bool
@@ -253,6 +254,48 @@ func (s *Span) ObserveRoutingFromContext(ctx stdctx.Context) bool {
 	}
 	s.ObserveContextRouting(routing)
 	return true
+}
+
+// ObserveMemory records what project memory decided for this dispatch. Like
+// ObserveContextRouting it is last-write-wins: a wrapper that assembles the
+// memory twice (a compact attempt then a wider one) should describe what was
+// actually sent rather than its first attempt.
+func (s *Span) ObserveMemory(metrics MemoryMetrics) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.memory = &metrics
+}
+
+// ObserveMemoryFromContext records the memory block a dispatch call carries in
+// its context, if it carries one, and reports whether it did. It is the same
+// bridge between independent wrappers that ObserveRoutingFromContext is — see
+// WithMemory.
+func (s *Span) ObserveMemoryFromContext(ctx stdctx.Context) bool {
+	metrics, ok := MemoryFromContext(ctx)
+	if !ok {
+		return false
+	}
+	s.ObserveMemory(metrics)
+	return true
+}
+
+// memoryMetrics resolves the record's memory block.
+//
+// A dispatch that memory touched reports what it decided. Every other dispatch
+// gets NO block, and the field stays absent from the file exactly as it was
+// before P2-B. There is deliberately no "memory disabled" block invented for
+// dispatches memory never saw: an absent field is the honest statement that
+// this surface has nothing to say, and a fabricated one would make an
+// untouched dispatch look measured.
+func (s *Span) memoryMetrics() *MemoryMetrics {
+	if s.memory == nil {
+		return nil
+	}
+	metrics := *s.memory
+	return &metrics
 }
 
 // ObserveSourceScope records how much source the dispatch's declared scope
@@ -413,6 +456,7 @@ func (s *Span) build(dispatchErr error) EvidenceRecord {
 		},
 		Context:        s.contextMetrics(),
 		Routing:        s.routingMetrics(),
+		Memory:         s.memoryMetrics(),
 		ProviderTokens: s.providerTokens(),
 		Tools:          s.toolMetrics(),
 		Outcomes: OutcomeLinks{

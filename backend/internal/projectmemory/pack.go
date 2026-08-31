@@ -118,6 +118,22 @@ type PackRequest struct {
 	// pack — and only that task's. It is how a Repair Agent sees what the
 	// task before it did without any other task's uncommitted view leaking in.
 	TaskRef string
+	// CoverablePaths are legacy documents this dispatch is carrying that
+	// memory would be ALLOWED to replace.
+	//
+	// It is the difference between memory that costs bytes and memory that
+	// saves them. A fact summarising a document the dispatch is already
+	// sending can pay for itself by removing that document; a fact about
+	// something the dispatch was not going to mention can only add. So when
+	// replacement is permitted, the coverable facts are ranked first — and
+	// measurement on a real repository is what made this necessary rather than
+	// clever: without it the planner's pack spent its whole budget on module
+	// censuses and replaced exactly one of six documents.
+	//
+	// The caller sets it only in a mode that may replace. In an add-only mode
+	// covering a document buys nothing, and boosting those facts would spend
+	// the budget on the least useful ones.
+	CoverablePaths []string
 	// Budget bounds the result.
 	Budget PackBudget
 }
@@ -134,6 +150,39 @@ type SelectedItem struct {
 	// BodyIncluded reports whether the pack could afford the item's body. A
 	// false value means the summary alone is present.
 	BodyIncluded bool
+	// Freshness is how well this fact's provenance matches the memory's
+	// current state (see freshnessRank). It is the first key selection ranks
+	// on, so a fact AO re-confirmed at the commit in front of it outranks one
+	// carried over from an older pass at equal relevance.
+	Freshness int
+}
+
+// Freshness ranks, highest first. They are buckets rather than timestamps
+// because within one indexing pass every fact shares an UpdatedAt, and a
+// tie-break on raw time would be noise dressed as a signal.
+const (
+	// freshConfirmedAtCommit is a fact whose provenance names the commit the
+	// memory is currently indexed at: AO checked this file, at this version,
+	// during the pass that produced the state being served.
+	freshConfirmedAtCommit = 2
+	// freshCurrentGeneration is a fact the current pass re-confirmed but whose
+	// commit AO cannot match (a checkout with no commit, an aggregate).
+	freshCurrentGeneration = 1
+	// freshCarriedOver is a valid fact from an earlier pass. Still servable —
+	// validity is what authorises serving it — but it loses a tie.
+	freshCarriedOver = 0
+)
+
+// freshnessRank buckets one fact against the memory state being served.
+func freshnessRank(item domain.ProjectMemoryItem, indexedCommit string, generation int64) int {
+	switch {
+	case indexedCommit != "" && item.SourceCommit == indexedCommit:
+		return freshConfirmedAtCommit
+	case generation > 0 && item.Generation == generation:
+		return freshCurrentGeneration
+	default:
+		return freshCarriedOver
+	}
 }
 
 // PackSection groups selected facts under a heading, in the role's order.
@@ -318,14 +367,23 @@ func (b *PackBuilder) Build(ctx context.Context, req PackRequest) (ContextPack, 
 	for i, t := range eligible {
 		allowed[t] = i
 	}
+	coverable := make(map[string]struct{}, len(req.CoverablePaths))
+	for _, p := range req.CoverablePaths {
+		if p = normalizePath(p); p != "" {
+			coverable[p] = struct{}{}
+		}
+	}
 
 	scored := make([]SelectedItem, 0, len(candidates))
 	for _, item := range candidates {
 		if _, ok := allowed[item.Key.Type]; !ok {
 			continue
 		}
-		score, why := scoreItem(item, req)
-		scored = append(scored, SelectedItem{Item: item, Score: score, Reason: why})
+		score, why := scoreItem(item, req, coverable)
+		scored = append(scored, SelectedItem{
+			Item: item, Score: score, Reason: why,
+			Freshness: freshnessRank(item, pack.Stats.IndexedCommit, pack.Stats.Generation),
+		})
 		pack.Stats.CandidateItems++
 		pack.Stats.CandidateBytes += item.Bytes()
 	}
@@ -387,7 +445,13 @@ func (b *PackBuilder) candidates(
 		return nil, repoID, "", err
 	}
 	switch {
-	case !found || state.IndexedCommit == "":
+	case !found || state.Generation == 0 || state.CompletedAt.IsZero():
+		// No pass has finished, so there is nothing AO can vouch for. Note the
+		// gate is a COMPLETED PASS, not a known commit: a repository whose
+		// commit AO cannot read (a scratch directory, a checkout with no
+		// history) still has memory worth serving — it simply cannot prove
+		// that memory is current, which costs it the warm path rather than the
+		// memory itself.
 		return nil, repoID, "this repository has not completed a project-memory index yet", nil
 	case state.Phase == domain.IndexPhaseFailed:
 		return nil, repoID, fmt.Sprintf(
@@ -433,9 +497,20 @@ func (b *PackBuilder) filterServable(
 // The signals are combined rather than compared so that a strong weak signal
 // cannot outrank a direct hit: a changed-path match is worth more than any
 // number of keyword matches, by construction.
-func scoreItem(item domain.ProjectMemoryItem, req PackRequest) (float64, string) {
+func scoreItem(item domain.ProjectMemoryItem, req PackRequest, coverable map[string]struct{}) (float64, string) {
 	score := item.Confidence
 	reason := "general project knowledge"
+
+	// A fact that can REPLACE a document the dispatch is already carrying
+	// outranks everything else, because it is the only kind of fact that
+	// reduces the payload rather than adding to it. It must be a single-source
+	// fact: an aggregate summarises a combination and cannot stand in for any
+	// one member of it (see coverageIndex).
+	if len(coverable) > 0 && len(item.SourcePaths) == 1 {
+		if _, ok := coverable[normalizePath(item.SourcePaths[0])]; ok {
+			return score + 20, "replaces a document this dispatch was already sending"
+		}
+	}
 
 	if len(req.ChangedPaths) > 0 && matchesPaths(item, req.ChangedPaths) {
 		score += 10
@@ -454,10 +529,10 @@ func scoreItem(item domain.ProjectMemoryItem, req PackRequest) (float64, string)
 			reason = "matches a term from the objective"
 		}
 	}
-	// A narrower fact about the same subject is the more useful one, but only
-	// as a tiebreak: a project-wide convention still outranks an unrelated
-	// file summary, because the file summary earned no relevance bonus.
-	score += float64(item.Key.Scope.Specificity()) * 0.1
+	// Scope proximity is NOT folded into the score: it is a separate, later
+	// ranking key (see sortSelected), so a narrow fact about an unrelated file
+	// can never accumulate its way past a project-wide convention that the
+	// work actually touches.
 	return score, reason
 }
 
@@ -514,21 +589,37 @@ func matchesKeywords(item domain.ProjectMemoryItem, keywords []string) bool {
 	return false
 }
 
-// sortSelected imposes the deterministic ranking. Every comparison falls
-// through to the derived item id, so no two orderings of the same set are
-// possible.
+// sortSelected imposes the ranking the budget evicts from the bottom of.
+//
+// The order is the one P2-B specifies, and each key earns its position:
+//
+//  1. **Freshness.** A fact AO confirmed against the state in front of it
+//     outranks one carried over from an earlier pass. This is first because
+//     serving a less current fact in place of a more current one is the only
+//     ordering mistake here that can mislead rather than merely disappoint.
+//  2. **Relevance.** What this piece of work actually touches. Within one pass
+//     every canonical fact shares a freshness bucket, so in practice this is
+//     the key that decides most packs — which is the intent.
+//  3. **Confidence.** How directly AO observed the fact.
+//  4. **Scope proximity.** The narrower fact about the same subject.
+//  5. **A deterministic tie-break.** The section order, then the derived id.
+//
+// Every comparison falls through to the id, so no two orderings of the same
+// set are possible and a pack's digest is reproducible.
 func sortSelected(items []SelectedItem, sectionRank map[domain.ProjectMemoryType]int) {
 	sort.SliceStable(items, func(i, j int) bool {
 		a, b := items[i], items[j]
 		switch {
+		case a.Freshness != b.Freshness:
+			return a.Freshness > b.Freshness
 		case a.Score != b.Score:
 			return a.Score > b.Score
-		case sectionRank[a.Item.Key.Type] != sectionRank[b.Item.Key.Type]:
-			return sectionRank[a.Item.Key.Type] < sectionRank[b.Item.Key.Type]
 		case a.Item.Confidence != b.Item.Confidence:
 			return a.Item.Confidence > b.Item.Confidence
-		case !a.Item.UpdatedAt.Equal(b.Item.UpdatedAt):
-			return a.Item.UpdatedAt.After(b.Item.UpdatedAt)
+		case a.Item.Key.Scope.Specificity() != b.Item.Key.Scope.Specificity():
+			return a.Item.Key.Scope.Specificity() > b.Item.Key.Scope.Specificity()
+		case sectionRank[a.Item.Key.Type] != sectionRank[b.Item.Key.Type]:
+			return sectionRank[a.Item.Key.Type] < sectionRank[b.Item.Key.Type]
 		default:
 			return a.Item.ID < b.Item.ID
 		}
