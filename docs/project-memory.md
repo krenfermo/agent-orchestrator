@@ -452,6 +452,11 @@ and printing one out of context would show something no agent was ever given.
 
 ## 13. Known limitations
 
+> **Superseded by P2-B for items 1.** P2-B adds the lifecycle trigger, the
+> single-flight, the rollout modes and the measured before/after — see
+> [project-memory-optimization.md](project-memory-optimization.md). The
+> limitation below is kept because it records why P2-A stopped where it did.
+
 1. **No automatic trigger, for indexing or for task memory.** P2-A ships the
    indexer, the incremental path, the drift detector, the packs, the CLI and the
    API — and nothing in the daemon calls them on its own. Verified, not assumed:

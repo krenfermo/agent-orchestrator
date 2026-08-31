@@ -110,6 +110,19 @@ surface (`npm run sqlc`, `npm run api`).
   Delivery to agents rides the existing `AO_CONTEXT_ROUTER` flag and is off by
   default; nothing schedules an indexing pass automatically yet. See
   [`project-memory.md`](project-memory.md).
+- **Project memory in the execution cycle (P2-B)**: indexing and incremental
+  sync now happen automatically at the Planner, Worker, Reviewer and Repair
+  boundaries, coalesced so four roles cost at most one sync and a warm project
+  costs none. Memory is attached as a bounded, per-role budgeted pack and
+  deduplicated against the context AO was already sending, with three rollout
+  modes (`AO_MEMORY_MODE=off|assisted|preferred`, default **off**). A verified,
+  committed task records its bounded outcome and — only where the placement
+  proves integration — promotes it; a cancelled one discards it. Measured on
+  this repository: planner AO-assembled context 87,209 → 40,378 bytes (−53.7%)
+  in `preferred` mode, with a warm second task reading zero files. Those figures
+  cover AO-assembled context only; harness reads remain unobservable. Inspect
+  with `ao memory report`. See
+  [`project-memory-optimization.md`](project-memory-optimization.md).
 - OpenAPI spec generated from Go DTOs; frontend TS types generated from it and
   drift-checked in CI.
 
