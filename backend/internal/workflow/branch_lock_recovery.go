@@ -105,6 +105,12 @@ func (c *Coordinator) runHasUncommittedWork(ctx stdctx.Context, run domain.Workf
 // would make on its own next pass, so running both cannot produce a state
 // neither would have produced alone.
 func (c *Coordinator) syncCancelledTask(ctx stdctx.Context, run domain.WorkflowRun) {
+	// P2-B: a cancelled task's beliefs are not project knowledge. Its
+	// task-local memory is dropped here rather than left to age out, because
+	// rows nobody will ever promote are the "permanent parallel memory" the
+	// worktree rule exists to prevent. This runs before the guard below so a
+	// run with no planned task still has its memory cleaned up.
+	c.discardTaskMemory(ctx, run)
 	if c.planStore == nil || run.PlannedTaskID == nil || *run.PlannedTaskID == "" {
 		return
 	}

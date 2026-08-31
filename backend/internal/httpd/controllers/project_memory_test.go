@@ -25,6 +25,7 @@ type fakeProjectMemory struct {
 	inspection  controllers.ProjectMemoryInspection
 	rebuilt     controllers.ProjectMemoryRebuildOutcome
 	invalidated controllers.ProjectMemoryInvalidateOutcome
+	report      controllers.ProjectMemoryReport
 	gotRebuild  struct {
 		repoPath string
 		purge    bool
@@ -53,6 +54,10 @@ func (f *fakeProjectMemory) Invalidate(_ context.Context, _ domain.ProjectID, _ 
 	return f.invalidated, nil
 }
 
+func (f *fakeProjectMemory) Report(context.Context, domain.ProjectID, string) (controllers.ProjectMemoryReport, error) {
+	return f.report, nil
+}
+
 func projectMemoryRequest(t *testing.T, svc controllers.ProjectMemoryService, method, path, body string) (int, []byte) {
 	t.Helper()
 	r := chi.NewRouter()
@@ -79,6 +84,7 @@ func TestProjectMemoryRoutesAreNotImplementedWithoutAService(t *testing.T) {
 		{http.MethodGet, "/projects/p1/memory/items", ""},
 		{http.MethodPost, "/projects/p1/memory/rebuild", `{"repoPath":"/x"}`},
 		{http.MethodPost, "/projects/p1/memory/invalidate", `{"repoPath":"/x"}`},
+		{http.MethodGet, "/projects/p1/memory/report", ""},
 	} {
 		status, _ := projectMemoryRequest(t, nil, tc.method, tc.path, tc.body)
 		if status != http.StatusNotImplemented {
@@ -243,5 +249,47 @@ func TestProjectMemoryInspectCarriesStateAndReason(t *testing.T) {
 	}
 	if got.ContentBytes == 0 {
 		t.Error("the body size is not reported, so an operator cannot tell an empty fact from a large one")
+	}
+}
+
+// The report is the P2-B operational answer: is this project warm, and what is
+// memory costing each role. A warm project must be reported as such — that is
+// the optimisation's own success criterion.
+func TestProjectMemoryReportSurfacesWarmthAndPerRoleCost(t *testing.T) {
+	svc := &fakeProjectMemory{report: controllers.ProjectMemoryReport{
+		Mode: "assisted", CacheEnabled: true, SyncTimeout: "20s",
+		RepoID: "repo_abc", RepoPath: "/checkout/app",
+		Warm: true, Generation: 7, IndexedCommit: "abc123",
+		SyncKind: "none", SyncFilesRead: 0, SyncMillis: 2,
+		CacheHits: 3, CacheMisses: 1,
+		Roles: []controllers.ProjectMemoryRoleReport{
+			{Role: "planner", BudgetBytes: 24576, BudgetItems: 40, PackItems: 40,
+				PackBytes: 5981, EstimatedPackTokens: 1496, Candidates: 467, RejectedByBudget: 427},
+			{Role: "worker", BudgetBytes: 16384, BudgetItems: 24, PackItems: 14,
+				PackBytes: 15900, EstimatedPackTokens: 3975, Candidates: 546, RejectedByBudget: 532},
+		},
+	}}
+
+	status, body := projectMemoryRequest(t, svc, http.MethodGet, "/projects/p1/memory/report", "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d: %s", status, body)
+	}
+	var out controllers.ProjectMemoryReportResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatal(err)
+	}
+	switch {
+	case !out.Warm || out.SyncKind != "none":
+		t.Errorf("a warm project was not reported as warm: warm=%v kind=%q", out.Warm, out.SyncKind)
+	case out.SyncFilesRead != 0:
+		t.Errorf("a warm project reported %d files read", out.SyncFilesRead)
+	case len(out.Roles) != 2:
+		t.Fatalf("roles = %d", len(out.Roles))
+	case out.Roles[0].EstimatedPackTokens == 0:
+		t.Error("the per-role token estimate is missing")
+	case out.Roles[0].RejectedByBudget == 0:
+		t.Error("the budget's effect is not reported")
+	case out.Mode != "assisted":
+		t.Errorf("mode = %q", out.Mode)
 	}
 }

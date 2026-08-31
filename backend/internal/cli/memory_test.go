@@ -258,3 +258,62 @@ func TestMemoryCommandsRequireAProjectID(t *testing.T) {
 		}
 	}
 }
+
+// `ao memory report` is the P2-B operator answer. A warm project must read as
+// warm, and the honesty caveat must be on screen rather than only in the docs.
+func TestMemoryReportShowsWarmthAndPerRoleCost(t *testing.T) {
+	cfg := setConfigEnv(t)
+	var requests []string
+	srv := memoryServer(t, &requests, map[string]string{
+		"GET /api/v1/projects/p1/memory/report": `{"mode":"assisted","cacheEnabled":true,"syncTimeout":"20s",` +
+			`"repoId":"repo_abc","repoPath":"/checkout/app","warm":true,"generation":7,"indexedCommit":"abc123",` +
+			`"syncKind":"none","syncFilesRead":0,"syncMillis":2,"cacheHits":3,"cacheMisses":1,"roles":[` +
+			`{"role":"planner","budgetBytes":24576,"budgetItems":40,"budgetDocuments":4,"packItems":40,` +
+			`"packBytes":5981,"estimatedPackTokens":1496,"candidates":467,"rejectedByBudget":427},` +
+			`{"role":"worker","budgetBytes":16384,"budgetItems":24,"budgetDocuments":2,"packItems":14,` +
+			`"packBytes":15900,"estimatedPackTokens":3975,"candidates":546,"rejectedByBudget":532,` +
+			`"reducedToSummary":1,"staleExcluded":2}]}`,
+	})
+	writeRunFileFor(t, cfg, srv)
+
+	out, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }}, "memory", "report", "p1")
+	if err != nil {
+		t.Fatalf("memory report failed: %v stderr=%s", err, errOut)
+	}
+	for _, want := range []string{
+		"mode:        assisted (cache on, sync timeout 20s)",
+		"warm at abc123 (generation 7)",
+		"last sync:   none, 0 files read",
+		"pack cache:  3 hits, 1 misses",
+		"planner",
+		"40 items / 5981B / ~1496t",
+		"427 of 467",
+		"(+1 to summary)",
+		"2 facts withheld",
+		"AO-assembled context only",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// With memory off the report says so and tells the operator how to turn it on,
+// rather than printing an empty table that reads as "warm with nothing in it".
+func TestMemoryReportExplainsAnOffMode(t *testing.T) {
+	cfg := setConfigEnv(t)
+	var requests []string
+	srv := memoryServer(t, &requests, map[string]string{
+		"GET /api/v1/projects/p1/memory/report": `{"mode":"off","syncKind":"skipped",` +
+			`"syncReason":"project memory is switched off","roles":[]}`,
+	})
+	writeRunFileFor(t, cfg, srv)
+
+	out, _, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }}, "memory", "report", "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "switched off") || !strings.Contains(out, "AO_MEMORY_MODE=assisted") {
+		t.Fatalf("the off mode was not explained:\n%s", out)
+	}
+}

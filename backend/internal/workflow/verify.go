@@ -1378,6 +1378,11 @@ func (c *Coordinator) completeVerifiedRun(ctx stdctx.Context, run domain.Workflo
 		return c.failRunOnCommitError(ctx, run, step, err)
 	}
 	defer c.releaseBranchLocks(ctx, run.ID, "workflow run completed")
+	// P2-B: the work is now both verified and committed, which is the first
+	// moment AO can record what this task did as a durable fact and retire the
+	// memory its changes disproved. It is best-effort and never fails the run —
+	// see recordTaskMemory.
+	c.recordTaskMemory(ctx, run, step)
 	if step.State == domain.WorkflowStepRunning {
 		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, domain.WorkflowStepRunning, domain.WorkflowStepCompleted, now); err != nil {
 			return run, step, err

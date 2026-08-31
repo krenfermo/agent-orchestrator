@@ -35,11 +35,23 @@ type ProjectReader interface {
 type Service struct {
 	memory   *pm.Service
 	projects ProjectReader
+	// provisioner is the P2-B dispatch path. It is optional: with memory
+	// switched off it is nil, and the report says so rather than pretending to
+	// measure a subsystem nobody enabled.
+	provisioner *pm.Provisioner
 }
 
 // New builds the service over the memory subsystem and the project registry.
 func New(memory *pm.Service, projects ProjectReader) *Service {
 	return &Service{memory: memory, projects: projects}
+}
+
+// WithProvisioner attaches the dispatch-path provisioner, so `memory report`
+// measures the same assembly a dispatch would rather than a reconstruction of
+// it. A nil provisioner leaves the report saying memory is off.
+func (s *Service) WithProvisioner(p *pm.Provisioner) *Service {
+	s.provisioner = p
+	return s
 }
 
 // Compile-time proof that the service satisfies the controller contract.
@@ -170,4 +182,74 @@ func (s *Service) resolveRepo(ctx context.Context, projectID domain.ProjectID, r
 		}
 	}
 	return "", fmt.Errorf("%s is not a repository of project %s", requested, projectID)
+}
+
+// Report answers the P2-B operational question: is this project's memory warm,
+// and what is it costing each role right now.
+//
+// It performs a real freshness check and assembles a real pack per role,
+// through the same provisioner a dispatch uses. That is deliberate: an operator
+// surface that estimated the cost would drift from what agents actually
+// receive, and the whole point of this report is that the two are the same
+// number.
+//
+// The check it runs is the ordinary lifecycle one, so on a warm project this
+// costs a row read and no file I/O — running the report does not itself make
+// the project warm, and cannot be mistaken for having done so.
+func (s *Service) Report(ctx context.Context, projectID domain.ProjectID, repoPath string) (controllers.ProjectMemoryReport, error) {
+	resolved, err := s.resolveRepo(ctx, projectID, repoPath)
+	if err != nil {
+		return controllers.ProjectMemoryReport{}, err
+	}
+	if s.provisioner == nil {
+		// Memory is switched off. Saying so plainly is more useful than an
+		// empty report an operator would read as "warm with nothing in it".
+		return controllers.ProjectMemoryReport{
+			Mode: string(pm.ModeOff), RepoPath: resolved,
+			SyncKind: string(pm.SyncSkipped), SyncReason: "project memory is switched off",
+		}, nil
+	}
+
+	cfg := s.provisioner.Config()
+	report := controllers.ProjectMemoryReport{
+		Mode: string(cfg.Mode), CacheEnabled: cfg.CacheEnabled,
+		SyncTimeout: cfg.SyncTimeout.String(), RepoPath: resolved,
+	}
+
+	for _, role := range []pm.PackRole{pm.RolePlanner, pm.RoleWorker, pm.RoleReviewer, pm.RoleRepair} {
+		out := s.provisioner.Provision(ctx, pm.ProvisionRequest{
+			ProjectID: projectID, RepoPath: resolved, Role: role,
+			// Only the first role performs the freshness check; the rest reuse
+			// it, exactly as four dispatch boundaries would.
+			SkipSync: role != pm.RolePlanner,
+		})
+		if role == pm.RolePlanner {
+			report.RepoID = out.Freshness.RepoID
+			report.Warm = out.Freshness.Kind == pm.SyncNone
+			report.Generation = out.Metrics.Generation
+			report.IndexedCommit = out.Metrics.IndexedCommit
+			report.SyncKind = out.Metrics.SyncKind
+			report.SyncReason = out.Freshness.Reason
+			report.SyncFilesRead = out.Metrics.SyncFilesRead
+			report.SyncMillis = out.Metrics.SyncMillis
+		}
+		budget := cfg.Budgets.For(role)
+		report.Roles = append(report.Roles, controllers.ProjectMemoryRoleReport{
+			Role:                string(role),
+			BudgetBytes:         budget.MaxBytes,
+			BudgetItems:         budget.MaxItems,
+			BudgetDocuments:     budget.MaxDocuments,
+			PackItems:           out.Metrics.PackItems,
+			PackBytes:           out.Metrics.PackBytes,
+			EstimatedPackTokens: out.Metrics.EstimatedPackTokens,
+			Candidates:          out.Metrics.PackCandidates,
+			RejectedByBudget:    out.Metrics.PackRejectedByBudget,
+			ReducedToSummary:    out.Metrics.PackReducedToSummary,
+			StaleExcluded:       out.Metrics.PackStaleExcluded,
+			FallbackReason:      out.Metrics.FallbackReason,
+		})
+	}
+	stats := s.provisioner.CacheStats()
+	report.CacheHits, report.CacheMisses = stats.Hits, stats.Misses
+	return report, nil
 }

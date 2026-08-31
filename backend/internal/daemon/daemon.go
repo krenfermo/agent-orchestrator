@@ -546,7 +546,25 @@ func RunWithConfig(cfg config.Config) error {
 		placementGC = worktreeReleaser{mgr: wsMgr}
 	}
 	runtimeGC := newRuntimeGC(runtimeAdapter, store, placementGC, log)
-	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, incidentAgentLauncher, notificationWriter, agents, newTerminalRuntimeReclaimer(runtimeGC, lcStack.LCM, log), log)
+	// Project memory. It is constructed unconditionally because it is inert
+	// until something indexes a repository: with no completed pass every
+	// context pack comes back empty with a stated reason, and every role falls
+	// back to exactly the behaviour it had before P2-A. The graph backend is
+	// the in-tree local one; an external adapter would be composed in here
+	// with projectmemory.TeeGraph, never substituted for it.
+	//
+	// It is built before the workflow stack because P2-B's dispatch wrappers
+	// take it: whether they do anything is decided by AO_MEMORY_MODE inside
+	// startWorkflows, not by whether this value exists.
+	projectMemory := projectmemory.NewService(store)
+	// ONE provisioner for the whole daemon. It owns the sync single-flight and
+	// the pack cache, so constructing a second one for the API surface would
+	// give `ao memory report` its own syncer -- and a report could then trigger
+	// a sync concurrent with the one a dispatch is already running, which is
+	// precisely what the single-flight exists to prevent.
+	memoryProvisioning := memoryProvisioner(projectMemory, log)
+
+	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, projectMemory, memoryProvisioning, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, incidentAgentLauncher, notificationWriter, agents, newTerminalRuntimeReclaimer(runtimeGC, lcStack.LCM, log), log)
 	// Checkpoint 8P-E.13A: reconciliation can only decide a stopped owner's
 	// lock once it can ask what that stop means, and only the coordinator knows
 	// (branchlock/retention.go). The coordinator needs the lock manager to
@@ -630,14 +648,6 @@ func RunWithConfig(cfg config.Config) error {
 	// provider connected after the policy was first saved does not stay
 	// invisible to Settings. Shared with APIDeps.ExecutionPolicy below so both
 	// surfaces read and repair the same policy through one implementation.
-	// P2-A project memory. It is constructed unconditionally because it is
-	// inert until something indexes a repository: with no completed pass every
-	// context pack comes back empty with a stated reason, and every role falls
-	// back to exactly the behaviour it had before P2-A. The graph backend is
-	// the in-tree local one; an external adapter would be composed in here
-	// with projectmemory.TeeGraph, never substituted for it.
-	projectMemory := projectmemory.NewService(store)
-
 	executionPolicySvc := &executionpolicysvc.Service{Store: store}
 	providerProfilesSvc := &providerprofilesvc.Service{
 		Store:      store,
@@ -680,7 +690,7 @@ func RunWithConfig(cfg config.Config) error {
 		UsageHooks:         usageCollector,
 		UsageSummary:       usagesvc.NewSummaryReader(store),
 		Capacity:           capacitysvc.NewReader(store),
-		ProjectMemory:      projectmemorysvc.New(projectMemory, store),
+		ProjectMemory:      projectmemorysvc.New(projectMemory, store).WithProvisioner(memoryProvisioning),
 		Questions:          &questionssvc.AnswerService{Store: store, Runs: store, Sender: rawSessionMgr},
 		Decisions:          &questionssvc.ResolverAnswerService{Store: store},
 		Telemetry:          telemetrySink,

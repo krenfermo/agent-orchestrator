@@ -86,6 +86,38 @@ func (d planContextDrift) OnlyTheCommitPointer() bool {
 	return len(d.Structural) == 0 && len(d.DocumentsChanged) == 0 && (d.HeadMoved || d.DirtyChanged)
 }
 
+// PlannerManifestBuilder is the digest-only half of a planner context builder.
+//
+// It exists because this comparison needs DIGESTS, not documents. A builder
+// that can produce the manifest without reading the bodies — project memory's
+// digest ledger can, for a repository indexed at the commit in front of it —
+// satisfies it, and the comparison then costs a ledger read instead of six
+// file reads. A builder that cannot simply does not implement it, and the
+// comparison falls back to the full Build exactly as before.
+//
+// It is an optional interface rather than an addition to PlannerContextBuilder
+// so that every existing implementation, including the test fakes, keeps
+// compiling and keeps behaving identically.
+type PlannerManifestBuilder interface {
+	BuildManifest(ctx stdctx.Context, project domain.ProjectRecord) (PlannerContext, error)
+}
+
+// buildDriftManifest produces the context this comparison needs, preferring a
+// builder that can do it without opening the documents.
+//
+// The two paths must agree. What is compared is the manifest's structural
+// fields and its path -> digest set, and a digest-only build produces exactly
+// those with empty bodies — which is what the stored manifest holds anyway,
+// because GeneratePlan blanks the bodies before persisting it.
+func (c *Coordinator) buildDriftManifest(
+	ctx stdctx.Context, project domain.ProjectRecord,
+) (PlannerContext, error) {
+	if manifester, ok := c.plannerContextBuilder.(PlannerManifestBuilder); ok {
+		return manifester.BuildManifest(ctx, project)
+	}
+	return c.plannerContextBuilder.Build(ctx, project)
+}
+
 // describePlanContextDrift compares the recorded manifest against the one AO
 // would build now, item by item.
 //
@@ -111,7 +143,7 @@ func (c *Coordinator) describePlanContextDrift(
 	if err != nil || !found {
 		return out, false
 	}
-	current, err := c.plannerContextBuilder.Build(ctx, project)
+	current, err := c.buildDriftManifest(ctx, project)
 	if err != nil {
 		return out, false
 	}

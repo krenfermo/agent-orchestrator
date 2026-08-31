@@ -344,6 +344,11 @@ type Deps struct {
 	Verifier              VerifyRunner
 	Planner               Planner
 	PlannerContextBuilder PlannerContextBuilder
+	// TaskMemory feeds a finished task's bounded outcome back into project
+	// memory (P2-B). Nil is the ordinary state for a daemon with project
+	// memory switched off; every call site treats it as normal rather than as
+	// a degraded mode, so the coordinator behaves exactly as it did before.
+	TaskMemory TaskMemory
 
 	// Switcher backs Checkpoint 8H's live-session Codex->Claude failover
 	// (failover.go): the durable, generation-fenced session_manager agent-
@@ -602,6 +607,10 @@ type Coordinator struct {
 	verifyClaimsState
 	planner               Planner
 	plannerContextBuilder PlannerContextBuilder
+	// taskMemory feeds a finished task's bounded outcome back into project
+	// memory. Nil is the ordinary state for a daemon with memory switched off,
+	// and every call site treats it as normal rather than degraded.
+	taskMemory TaskMemory
 
 	// switcher backs Checkpoint 8H's live-session failover. Optional.
 	switcher AgentSwitcher
@@ -736,6 +745,7 @@ func New(d Deps) *Coordinator {
 		planStore:                func() masterPlanStore { s, _ := d.Store.(masterPlanStore); return s }(),
 		planner:                  d.Planner,
 		plannerContextBuilder:    d.PlannerContextBuilder,
+		taskMemory:               d.TaskMemory,
 		switcher:                 d.Switcher,
 		questionsStore:           d.QuestionsStore,
 		paneReader:               d.PaneReader,

@@ -110,7 +110,125 @@ func newMemoryCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newMemoryInspectCommand(ctx))
 	cmd.AddCommand(newMemoryRebuildCommand(ctx))
 	cmd.AddCommand(newMemoryInvalidateCommand(ctx))
+	cmd.AddCommand(newMemoryReportCommand(ctx))
 	return cmd
+}
+
+type memoryReportEnvelope struct {
+	Mode          string `json:"mode"`
+	CacheEnabled  bool   `json:"cacheEnabled"`
+	SyncTimeout   string `json:"syncTimeout"`
+	RepoID        string `json:"repoId"`
+	RepoPath      string `json:"repoPath"`
+	Warm          bool   `json:"warm"`
+	Generation    int64  `json:"generation"`
+	IndexedCommit string `json:"indexedCommit"`
+	SyncKind      string `json:"syncKind"`
+	SyncReason    string `json:"syncReason"`
+	SyncFilesRead int    `json:"syncFilesRead"`
+	SyncMillis    int64  `json:"syncMillis"`
+	Roles         []struct {
+		Role                string `json:"role"`
+		BudgetBytes         int    `json:"budgetBytes"`
+		BudgetItems         int    `json:"budgetItems"`
+		BudgetDocuments     int    `json:"budgetDocuments"`
+		PackItems           int    `json:"packItems"`
+		PackBytes           int    `json:"packBytes"`
+		EstimatedPackTokens int    `json:"estimatedPackTokens"`
+		Candidates          int    `json:"candidates"`
+		RejectedByBudget    int    `json:"rejectedByBudget"`
+		ReducedToSummary    int    `json:"reducedToSummary"`
+		StaleExcluded       int    `json:"staleExcluded"`
+		FallbackReason      string `json:"fallbackReason"`
+	} `json:"roles"`
+	CacheHits   int64 `json:"cacheHits"`
+	CacheMisses int64 `json:"cacheMisses"`
+}
+
+// newMemoryReportCommand is P2-B's answer to "is this actually helping".
+//
+// It deliberately prints what a dispatch would receive rather than a summary of
+// the store: the daemon assembles each role's pack through the same provisioner
+// the wrappers use, so an operator and an agent are looking at one number.
+func newMemoryReportCommand(ctx *commandContext) *cobra.Command {
+	var repoPath string
+	cmd := &cobra.Command{
+		Use:   "report <project-id>",
+		Short: "Show whether a project is warm and what memory costs each role",
+		Long: "Runs the ordinary lifecycle freshness check and then assembles each role's context pack exactly as a\n" +
+			"dispatch would, so the numbers printed are the ones agents actually receive rather than an estimate.\n\n" +
+			"A warm project reports sync=none and 0 files read: memory was already at the repository's current\n" +
+			"commit, which is the whole point of the optimisation. A cold or moved project reports the incremental\n" +
+			"or full pass it had to run instead.\n\n" +
+			"Token figures are ESTIMATES at four bytes per token. AO does not have the provider's tokenizer, and a\n" +
+			"number presented as exact would be wrong in a way nobody could audit.\n\n" +
+			"Everything here is AO-ASSEMBLED context only. AO does not observe what a coding harness reads inside\n" +
+			"the worktree, so nothing printed is a count of agent-side reads avoided.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := "projects/" + url.PathEscape(args[0]) + "/memory/report"
+			if strings.TrimSpace(repoPath) != "" {
+				path += "?" + url.Values{"repoPath": {repoPath}}.Encode()
+			}
+			var res memoryReportEnvelope
+			if err := ctx.getJSON(cmd.Context(), path, &res); err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			_, _ = fmt.Fprintf(out, "mode:        %s (cache %s, sync timeout %s)\n",
+				res.Mode, enabledWord(res.CacheEnabled), orDash(res.SyncTimeout))
+			if res.Mode == "off" {
+				_, _ = fmt.Fprintln(out, "\nProject memory is switched off; nothing is attached to any dispatch.")
+				_, _ = fmt.Fprintln(out, "Set AO_MEMORY_MODE=assisted to have AO attach a bounded memory pack.")
+				return nil
+			}
+			_, _ = fmt.Fprintf(out, "repository:  %s\n", orDash(res.RepoPath))
+			_, _ = fmt.Fprintf(out, "state:       %s at %s (generation %d)\n",
+				warmWord(res.Warm), orDash(res.IndexedCommit), res.Generation)
+			_, _ = fmt.Fprintf(out, "last sync:   %s, %d files read, %dms\n",
+				orDash(res.SyncKind), res.SyncFilesRead, res.SyncMillis)
+			if res.SyncReason != "" {
+				_, _ = fmt.Fprintf(out, "             %s\n", res.SyncReason)
+			}
+			_, _ = fmt.Fprintf(out, "pack cache:  %d hits, %d misses\n\n", res.CacheHits, res.CacheMisses)
+
+			_, _ = fmt.Fprintf(out, "%-9s %-24s %-24s %s\n", "role", "selected", "budget", "excluded by budget")
+			for _, r := range res.Roles {
+				selected := fmt.Sprintf("%d items / %dB / ~%dt", r.PackItems, r.PackBytes, r.EstimatedPackTokens)
+				budget := fmt.Sprintf("%d items / %dB / %d docs", r.BudgetItems, r.BudgetBytes, r.BudgetDocuments)
+				excluded := fmt.Sprintf("%d of %d", r.RejectedByBudget, r.Candidates)
+				if r.ReducedToSummary > 0 {
+					excluded += fmt.Sprintf(" (+%d to summary)", r.ReducedToSummary)
+				}
+				_, _ = fmt.Fprintf(out, "%-9s %-24s %-24s %s\n", r.Role, selected, budget, excluded)
+				if r.FallbackReason != "" {
+					_, _ = fmt.Fprintf(out, "          fallback: %s\n", r.FallbackReason)
+				}
+				if r.StaleExcluded > 0 {
+					_, _ = fmt.Fprintf(out, "          %d facts withheld because AO can no longer vouch for them\n", r.StaleExcluded)
+				}
+			}
+			_, _ = fmt.Fprintln(out, "\nToken figures are estimates, and cover AO-assembled context only.")
+			return nil
+		},
+	}
+	normalizeDashedFlags(cmd)
+	cmd.Flags().StringVar(&repoPath, "repo", "", "Repository root to report on (defaults to the project's own root)")
+	return cmd
+}
+
+func enabledWord(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
+}
+
+func warmWord(warm bool) string {
+	if warm {
+		return "warm"
+	}
+	return "cold or moved"
 }
 
 func newMemoryStatusCommand(ctx *commandContext) *cobra.Command {

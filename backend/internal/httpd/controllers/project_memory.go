@@ -40,6 +40,50 @@ type ProjectMemoryService interface {
 	// authoritative. With no paths it runs drift detection and applies what it
 	// finds, which is the "I do not know what moved" repair.
 	Invalidate(ctx context.Context, projectID domain.ProjectID, repoPath string, paths []string, reason string) (ProjectMemoryInvalidateOutcome, error)
+	// Report answers the P2-B question an operator actually has: is this
+	// project's memory warm, what is it costing per role, and what did the
+	// last freshness check have to do.
+	Report(ctx context.Context, projectID domain.ProjectID, repoPath string) (ProjectMemoryReport, error)
+}
+
+// ProjectMemoryReport is the P2-B operational view: the policy in force, how
+// warm the project is, and what a pack currently costs each role.
+//
+// The per-role figures are computed by assembling each role's pack exactly as
+// a dispatch would, so what an operator reads is what an agent would receive
+// rather than an estimate of it.
+type ProjectMemoryReport struct {
+	Mode          string
+	CacheEnabled  bool
+	SyncTimeout   string
+	RepoID        string
+	RepoPath      string
+	Warm          bool
+	Generation    int64
+	IndexedCommit string
+	SyncKind      string
+	SyncReason    string
+	SyncFilesRead int
+	SyncMillis    int64
+	Roles         []ProjectMemoryRoleReport
+	CacheHits     int64
+	CacheMisses   int64
+}
+
+// ProjectMemoryRoleReport is one role's current context cost.
+type ProjectMemoryRoleReport struct {
+	Role                string
+	BudgetBytes         int
+	BudgetItems         int
+	BudgetDocuments     int
+	PackItems           int
+	PackBytes           int
+	EstimatedPackTokens int
+	Candidates          int
+	RejectedByBudget    int
+	ReducedToSummary    int
+	StaleExcluded       int
+	FallbackReason      string
 }
 
 // ProjectMemoryInspectQuery narrows an inspect read.
@@ -95,6 +139,32 @@ func (c *ProjectMemoryController) Register(r chi.Router) {
 	r.Get("/projects/{id}/memory/items", c.inspect)
 	r.Post("/projects/{id}/memory/rebuild", c.rebuild)
 	r.Post("/projects/{id}/memory/invalidate", c.invalidate)
+	r.Get("/projects/{id}/memory/report", c.report)
+}
+
+func (c *ProjectMemoryController) report(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/projects/{id}/memory/report")
+		return
+	}
+	out, err := c.Svc.Report(r.Context(), domain.ProjectID(chi.URLParam(r, "id")),
+		strings.TrimSpace(r.URL.Query().Get("repoPath")))
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	roles := make([]ProjectMemoryRoleReportResponse, 0, len(out.Roles))
+	for _, role := range out.Roles {
+		roles = append(roles, ProjectMemoryRoleReportResponse(role))
+	}
+	envelope.WriteJSON(w, http.StatusOK, ProjectMemoryReportResponse{
+		Mode: out.Mode, CacheEnabled: out.CacheEnabled, SyncTimeout: out.SyncTimeout,
+		RepoID: out.RepoID, RepoPath: out.RepoPath, Warm: out.Warm,
+		Generation: out.Generation, IndexedCommit: out.IndexedCommit,
+		SyncKind: out.SyncKind, SyncReason: out.SyncReason,
+		SyncFilesRead: out.SyncFilesRead, SyncMillis: out.SyncMillis,
+		Roles: roles, CacheHits: out.CacheHits, CacheMisses: out.CacheMisses,
+	})
 }
 
 func (c *ProjectMemoryController) status(w http.ResponseWriter, r *http.Request) {
@@ -274,6 +344,12 @@ type ListProjectMemoryItemsQuery struct {
 	Limit    *int64 `query:"limit,omitempty" minimum:"1" maximum:"1000" description:"Maximum items to return. Defaults to 200."`
 }
 
+// GetProjectMemoryReportQuery is the query-string contract of
+// GET /api/v1/projects/{id}/memory/report.
+type GetProjectMemoryReportQuery struct {
+	RepoPath string `query:"repoPath,omitempty" description:"Repository root to report on. Defaults to the project's own root, which is the single-repo case."`
+}
+
 // ListProjectMemoryItemsResponse is the body of
 // GET /api/v1/projects/{id}/memory/items.
 type ListProjectMemoryItemsResponse struct {
@@ -374,4 +450,54 @@ func projectMemoryItemResponse(item domain.ProjectMemoryItem) ProjectMemoryItemR
 		out.InvalidatedAt = &v
 	}
 	return out
+}
+
+// ProjectMemoryReportResponse is the body of
+// GET /api/v1/projects/{id}/memory/report.
+//
+// It answers the P2-B operational question directly: is this project warm, and
+// what is memory costing each role right now. "Warm" means the freshness check
+// found memory already at the repository's current commit and therefore did no
+// work — which is the whole point of the optimisation, so it is reported as a
+// fact rather than inferred from timings.
+type ProjectMemoryReportResponse struct {
+	Mode         string `json:"mode" enum:"off,assisted,preferred"`
+	CacheEnabled bool   `json:"cacheEnabled"`
+	SyncTimeout  string `json:"syncTimeout"`
+
+	RepoID   string `json:"repoId"`
+	RepoPath string `json:"repoPath"`
+	// Warm reports that the freshness check was a no-op: memory was already at
+	// the repository's current commit.
+	Warm          bool   `json:"warm"`
+	Generation    int64  `json:"generation"`
+	IndexedCommit string `json:"indexedCommit,omitempty"`
+	// SyncKind is what the check had to do: none, incremental, full,
+	// coalesced or skipped.
+	SyncKind      string `json:"syncKind" enum:"none,incremental,full,coalesced,skipped"`
+	SyncReason    string `json:"syncReason,omitempty"`
+	SyncFilesRead int    `json:"syncFilesRead"`
+	SyncMillis    int64  `json:"syncMillis"`
+
+	Roles []ProjectMemoryRoleReportResponse `json:"roles"`
+
+	CacheHits   int64 `json:"cacheHits"`
+	CacheMisses int64 `json:"cacheMisses"`
+}
+
+// ProjectMemoryRoleReportResponse is one role's current context cost, measured
+// by assembling that role's pack exactly as a dispatch would.
+type ProjectMemoryRoleReportResponse struct {
+	Role                string `json:"role" enum:"planner,worker,reviewer,repair"`
+	BudgetBytes         int    `json:"budgetBytes"`
+	BudgetItems         int    `json:"budgetItems"`
+	BudgetDocuments     int    `json:"budgetDocuments"`
+	PackItems           int    `json:"packItems"`
+	PackBytes           int    `json:"packBytes"`
+	EstimatedPackTokens int    `json:"estimatedPackTokens"`
+	Candidates          int    `json:"candidates"`
+	RejectedByBudget    int    `json:"rejectedByBudget"`
+	ReducedToSummary    int    `json:"reducedToSummary"`
+	StaleExcluded       int    `json:"staleExcluded"`
+	FallbackReason      string `json:"fallbackReason,omitempty"`
 }

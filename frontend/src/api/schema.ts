@@ -708,6 +708,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/memory/report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P2-B: is this project's memory warm, and what is it costing each role. Runs the ordinary lifecycle freshness check (so a warm project costs a row read and no file I/O) and then assembles each role's pack exactly as a dispatch would, reporting the budget, the items and bytes selected, the estimated tokens, and what the budget excluded. syncKind=none means memory was already at the repository's current commit — the warm path the optimisation exists to produce. */
+        get: operations["getProjectMemoryReport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/repo-connection-test": {
         parameters: {
             query?: never;
@@ -3245,6 +3262,44 @@ export interface components {
             summary: string;
             type: string;
             updatedAt: string;
+        };
+        ControllersProjectMemoryReportResponse: {
+            cacheEnabled: boolean;
+            /** Format: int64 */
+            cacheHits: number;
+            /** Format: int64 */
+            cacheMisses: number;
+            /** Format: int64 */
+            generation: number;
+            indexedCommit?: string;
+            /** @enum {string} */
+            mode: "off" | "assisted" | "preferred";
+            repoId: string;
+            repoPath: string;
+            roles: components["schemas"]["ControllersProjectMemoryRoleReportResponse"][];
+            syncFilesRead: number;
+            /** @enum {string} */
+            syncKind: "none" | "incremental" | "full" | "coalesced" | "skipped";
+            /** Format: int64 */
+            syncMillis: number;
+            syncReason?: string;
+            syncTimeout: string;
+            warm: boolean;
+        };
+        ControllersProjectMemoryRoleReportResponse: {
+            budgetBytes: number;
+            budgetDocuments: number;
+            budgetItems: number;
+            candidates: number;
+            estimatedPackTokens: number;
+            fallbackReason?: string;
+            packBytes: number;
+            packItems: number;
+            reducedToSummary: number;
+            rejectedByBudget: number;
+            /** @enum {string} */
+            role: "planner" | "worker" | "reviewer" | "repair";
+            staleExcluded: number;
         };
         ControllersProjectMemoryStatusResponse: {
             branch?: string;
@@ -7931,6 +7986,50 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectMemoryReport: {
+        parameters: {
+            query?: {
+                /** @description Repository root to report on. Defaults to the project's own root, which is the single-repo case. */
+                repoPath?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProjectMemoryReportResponse"];
                 };
             };
             /** @description Internal Server Error */

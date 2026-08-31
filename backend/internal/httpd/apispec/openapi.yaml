@@ -1780,6 +1780,53 @@ paths:
         fix.'
       tags:
       - projects
+  /api/v1/projects/{id}/memory/report:
+    get:
+      operationId: getProjectMemoryReport
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Repository root to report on. Defaults to the project's own root,
+          which is the single-repo case.
+        in: query
+        name: repoPath
+        schema:
+          description: Repository root to report on. Defaults to the project's own
+            root, which is the single-repo case.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersProjectMemoryReportResponse'
+          description: OK
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P2-B: is this project''s memory warm, and what is it costing each
+        role. Runs the ordinary lifecycle freshness check (so a warm project costs
+        a row read and no file I/O) and then assembles each role''s pack exactly as
+        a dispatch would, reporting the budget, the items and bytes selected, the
+        estimated tokens, and what the budget excluded. syncKind=none means memory
+        was already at the repository''s current commit — the warm path the optimisation
+        exists to produce.'
+      tags:
+      - projects
   /api/v1/projects/{id}/repo-connection-test:
     post:
       operationId: testRepoConnection
@@ -9004,6 +9051,113 @@ components:
       - contentBytes
       - updatedAt
       - invalidatedAt
+      type: object
+    ControllersProjectMemoryReportResponse:
+      properties:
+        cacheEnabled:
+          type: boolean
+        cacheHits:
+          format: int64
+          type: integer
+        cacheMisses:
+          format: int64
+          type: integer
+        generation:
+          format: int64
+          type: integer
+        indexedCommit:
+          type: string
+        mode:
+          enum:
+          - "off"
+          - assisted
+          - preferred
+          type: string
+        repoId:
+          type: string
+        repoPath:
+          type: string
+        roles:
+          items:
+            $ref: '#/components/schemas/ControllersProjectMemoryRoleReportResponse'
+          type: array
+        syncFilesRead:
+          type: integer
+        syncKind:
+          enum:
+          - none
+          - incremental
+          - full
+          - coalesced
+          - skipped
+          type: string
+        syncMillis:
+          format: int64
+          type: integer
+        syncReason:
+          type: string
+        syncTimeout:
+          type: string
+        warm:
+          type: boolean
+      required:
+      - mode
+      - cacheEnabled
+      - syncTimeout
+      - repoId
+      - repoPath
+      - warm
+      - generation
+      - syncKind
+      - syncFilesRead
+      - syncMillis
+      - roles
+      - cacheHits
+      - cacheMisses
+      type: object
+    ControllersProjectMemoryRoleReportResponse:
+      properties:
+        budgetBytes:
+          type: integer
+        budgetDocuments:
+          type: integer
+        budgetItems:
+          type: integer
+        candidates:
+          type: integer
+        estimatedPackTokens:
+          type: integer
+        fallbackReason:
+          type: string
+        packBytes:
+          type: integer
+        packItems:
+          type: integer
+        reducedToSummary:
+          type: integer
+        rejectedByBudget:
+          type: integer
+        role:
+          enum:
+          - planner
+          - worker
+          - reviewer
+          - repair
+          type: string
+        staleExcluded:
+          type: integer
+      required:
+      - role
+      - budgetBytes
+      - budgetItems
+      - budgetDocuments
+      - packItems
+      - packBytes
+      - estimatedPackTokens
+      - candidates
+      - rejectedByBudget
+      - reducedToSummary
+      - staleExcluded
       type: object
     ControllersProjectMemoryStatusResponse:
       properties:

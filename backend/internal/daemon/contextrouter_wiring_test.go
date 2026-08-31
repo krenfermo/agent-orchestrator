@@ -15,7 +15,7 @@ func TestContextRouterDisabledByDefault(t *testing.T) {
 		t.Setenv(contextrouter.FlagEnv, "")
 		os.Unsetenv(contextrouter.FlagEnv)
 	}
-	if router := contextRouterFor(nil, nil); router != nil {
+	if router := contextRouterFor(nil, nil, nil); router != nil {
 		t.Fatalf("%s is unset yet a router was built", contextrouter.FlagEnv)
 	}
 }
@@ -23,7 +23,7 @@ func TestContextRouterDisabledByDefault(t *testing.T) {
 func TestContextRouterBuiltWhenEnabled(t *testing.T) {
 	t.Setenv("AO_DATA_DIR", t.TempDir())
 	t.Setenv(contextrouter.FlagEnv, "1")
-	router := contextRouterFor(nil, nil)
+	router := contextRouterFor(nil, nil, nil)
 	if router == nil {
 		t.Fatal("the flag is on yet no router was built")
 	}
@@ -38,7 +38,7 @@ func TestContextRouterBuiltWhenEnabled(t *testing.T) {
 func TestContextRouterBuiltWithoutDurableMemory(t *testing.T) {
 	t.Setenv("AO_DATA_DIR", t.TempDir())
 	t.Setenv(contextrouter.FlagEnv, "1")
-	if router := contextRouterFor(nil, nil); router == nil {
+	if router := contextRouterFor(nil, nil, nil); router == nil {
 		t.Fatal("no router was built without a durable memory repository")
 	}
 }
@@ -49,7 +49,7 @@ func TestContextRouterDisabledByRejectedBudgetOverride(t *testing.T) {
 	t.Setenv("AO_DATA_DIR", t.TempDir())
 	t.Setenv(contextrouter.FlagEnv, "1")
 	t.Setenv(contextrouter.BudgetEnv, "planner=30/20/10")
-	if router := contextRouterFor(nil, nil); router != nil {
+	if router := contextRouterFor(nil, nil, nil); router != nil {
 		t.Fatal("an incoherent budget override still produced a router")
 	}
 }
@@ -58,7 +58,7 @@ func TestContextRouterAppliesBudgetOverride(t *testing.T) {
 	t.Setenv("AO_DATA_DIR", t.TempDir())
 	t.Setenv(contextrouter.FlagEnv, "1")
 	t.Setenv(contextrouter.BudgetEnv, "verify=100/200/300")
-	router := contextRouterFor(nil, nil)
+	router := contextRouterFor(nil, nil, nil)
 	if router == nil {
 		t.Fatal("no router was built")
 	}

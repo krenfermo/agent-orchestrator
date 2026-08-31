@@ -23,6 +23,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory/wfdispatch"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	durablememory "github.com/aoagents/agent-orchestrator/backend/internal/projectmemory"
+	"github.com/aoagents/agent-orchestrator/backend/internal/projectmemory/wfmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/providerpreflight"
 	"github.com/aoagents/agent-orchestrator/backend/internal/providerruntime"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
@@ -176,7 +177,7 @@ func (c coordinatorLockClassifier) ClassifyLockOwner(ctx context.Context, run do
 // it, at runtime, on every run. Pinning it here makes that a compile error.
 var _ workflowcore.DispatchRecorder = (*sqlite.Store)(nil)
 
-func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, agents ports.AgentResolver, terminalRuntimes workflowcore.TerminalRuntimeReclaimer, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
+func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememory.Service, memoryProvisioning *durablememory.Provisioner, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, agents ports.AgentResolver, terminalRuntimes workflowcore.TerminalRuntimeReclaimer, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {
 		plannerBinary = "claude"
@@ -220,8 +221,17 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 		// (scaledTimeout) may stretch it for a large MEDUSA-class objective +
 		// repository context payload. Neither value is a blind global bump --
 		// small objectives still finish (or time out) inside 3 minutes.
-		Planner:                  plannercommand.Planner{Binary: plannerBinary, Model: plannerModel, Timeout: 3 * time.Minute, MaxTimeout: 12 * time.Minute, Logger: log},
-		PlannerContextBuilder:    plannercommand.ContextBuilder{},
+		Planner: plannercommand.Planner{Binary: plannerBinary, Model: plannerModel, Timeout: 3 * time.Minute, MaxTimeout: 12 * time.Minute, Logger: log},
+		// P2-B §5: the drift comparison asks this builder for DIGESTS, and the
+		// memory-backed variant answers them from the digest ledger instead of
+		// re-reading the six planner documents. Build itself is unchanged --
+		// a planner still receives full document bodies. A nil memory service
+		// makes it behave exactly as the plain builder.
+		PlannerContextBuilder: plannercommand.MemoryBackedBuilder{Memory: memory},
+		// P2-B: a verified, committed task records its bounded outcome here,
+		// and a cancelled one has its unintegrated memory discarded. Nil when
+		// memory is off, which the coordinator treats as ordinary.
+		TaskMemory:               taskMemoryFor(memory, log),
 		Switcher:                 workflowAgentSwitcher{mgr: sessionMgr},
 		QuestionsStore:           store,
 		PaneReader:               paneReader,
@@ -337,9 +347,80 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, sessionMgr *sessionm
 	// Off by default -- a disabled flag yields a nil router, and
 	// wfrouter.Instrument then hands the dependencies back untouched, so
 	// provider adapters keep receiving today's full context.
-	deps = wfrouter.Instrument(deps, contextRouterFor(log, store), log)
+	deps = wfrouter.Instrument(deps, contextRouterFor(log, store, memory), log)
+	// P2-B: project memory as part of the normal cycle. When AO_MEMORY_MODE is
+	// enabled this wrapper performs the lifecycle freshness check (coalesced
+	// across the four roles that would otherwise each trigger one) and attaches
+	// a bounded, role-budgeted pack, deduplicated against the context the
+	// dispatch was going to send anyway.
+	//
+	// It is installed AFTER the router on purpose. The router budgets what a
+	// dispatch already holds; this layer decides what memory to add to it, and
+	// running last means it sees the payload as it will actually be sent.
+	//
+	// Off by default -- a disabled mode yields a nil provisioner, and
+	// wfmemory.Instrument then hands the dependencies back untouched.
+	deps = wfmemory.Instrument(deps, memoryProvisioning, log)
 	coordinator := workflowcore.New(deps)
 	return coordinator, workflowsvc.New(coordinator), wakeScheduler
+}
+
+// memoryConfig resolves the P2-B policy, falling back to the conservative
+// default when an operator's override cannot be parsed.
+//
+// A rejected override disables memory rather than applying a policy nobody
+// wrote -- the same rule the context router's budget parser follows, and for
+// the same reason: an operator who mistyped a setting must get the previous
+// behaviour and a warning, not a dispatch shaped by a guess.
+func memoryConfig(log *slog.Logger) durablememory.Config {
+	cfg, err := durablememory.ConfigFromEnv()
+	if err != nil {
+		if log != nil {
+			log.Warn("project memory: disabled", "env", durablememory.ModeEnv, "err", err)
+		}
+		return durablememory.DefaultConfig()
+	}
+	return cfg
+}
+
+// taskMemoryFor builds the task-outcome adapter, or nil when memory is off.
+// A nil TaskMemory is the coordinator's ordinary "no memory" state.
+func taskMemoryFor(memory *durablememory.Service, log *slog.Logger) workflowcore.TaskMemory {
+	adapter := wfmemory.NewTaskMemory(memory, memoryConfig(log))
+	if adapter == nil {
+		// A typed nil in an interface is not nil, and the coordinator's guards
+		// test the interface. Returning an untyped nil is what keeps "memory
+		// off" genuinely inert rather than a nil-pointer dereference later.
+		return nil
+	}
+	return adapter
+}
+
+// memoryProvisioner builds the boundary-facing provisioner, or nil when memory
+// is switched off. A nil provisioner makes wfmemory.Instrument a no-op.
+//
+// It is called ONCE per daemon, at the composition root. The provisioner owns
+// the sync single-flight and the pack cache, and a second instance would hold
+// its own copies of both -- so two callers on one repository would no longer
+// coalesce, which is the whole point of §3.
+func memoryProvisioner(memory *durablememory.Service, log *slog.Logger) *durablememory.Provisioner {
+	if memory == nil {
+		return nil
+	}
+	cfg := memoryConfig(log)
+	if !cfg.Mode.Enabled() {
+		return nil
+	}
+	if err := cfg.Budgets.Validate(); err != nil {
+		if log != nil {
+			log.Warn("project memory: disabled by an unusable budget", "env", durablememory.BudgetEnv, "err", err)
+		}
+		return nil
+	}
+	if log != nil {
+		log.Info("project memory: participating in agent dispatch", "policy", cfg.Describe())
+	}
+	return durablememory.NewProvisioner(memory, cfg)
 }
 
 // projectMemoryBaselineEnv is the opt-in switch for baseline evidence
@@ -390,9 +471,16 @@ func projectMemoryBaselineRecorder(log *slog.Logger) *projectmemory.Recorder {
 // surfaces are already routed and the repairers dispatch through the Spawner
 // path (docs/p2-project-memory-audit.md §5, §8). A nil repository keeps the
 // pre-P2-A JSON-backed source, and the flag still gates everything.
-func contextRouterFor(log *slog.Logger, memoryRepo durablememory.Repository) *contextrouter.Router {
+func contextRouterFor(log *slog.Logger, memoryRepo durablememory.Repository, memory *durablememory.Service) *contextrouter.Router {
 	if !contextrouter.Enabled() {
 		return nil
+	}
+	// P2-B: when the memory mode is enabled, memory reaches the roles through
+	// wfmemory's bounded, deduplicated pack instead of the router's own memory
+	// section. Feeding both would attach the same facts twice in two formats,
+	// which is precisely what the deduper exists to prevent.
+	if memory != nil && memoryConfig(log).Mode.Enabled() {
+		memoryRepo = nil
 	}
 	// contextrouter.DefaultWithMemory is the one place the shipped router is
 	// assembled, so the daemon and the disabled-vs-enabled regression harness

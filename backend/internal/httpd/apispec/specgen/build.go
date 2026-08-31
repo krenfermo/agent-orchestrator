@@ -1212,6 +1212,16 @@ func projectMemoryOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/memory/report", id: "getProjectMemoryReport", tag: "projects",
+			summary:    "P2-B: is this project's memory warm, and what is it costing each role. Runs the ordinary lifecycle freshness check (so a warm project costs a row read and no file I/O) and then assembles each role's pack exactly as a dispatch would, reporting the budget, the items and bytes selected, the estimated tokens, and what the budget excluded. syncKind=none means memory was already at the repository's current commit — the warm path the optimisation exists to produce.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.GetProjectMemoryReportQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectMemoryReportResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodPost, path: "/api/v1/projects/{id}/memory/rebuild", id: "rebuildProjectMemory", tag: "projects",
 			summary:    "P2-A: re-derive one repository's project memory. Bounded by the indexer's limits and restart-safe; purge deletes the existing facts first, which is the escape hatch for memory that is wrong in a way a re-derivation cannot fix.",
 			pathParams: []any{controllers.ProjectIDParam{}},
