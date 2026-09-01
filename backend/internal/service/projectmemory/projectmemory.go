@@ -147,6 +147,83 @@ func (s *Service) Invalidate(
 	}, nil
 }
 
+// Validate runs the P2-D authority pass over one repository.
+//
+// It resolves the repository through the same guard every other write goes
+// through, so a caller cannot point a validation pass at an unrelated checkout
+// under a project's id -- which would report that project's memory as
+// unprovable on the strength of a repository it is not about.
+func (s *Service) Validate(
+	ctx context.Context, req controllers.ProjectMemoryValidateQuery,
+) (controllers.ProjectMemoryValidation, error) {
+	resolved, err := s.resolveRepo(ctx, req.ProjectID, req.RepoPath)
+	if err != nil {
+		return controllers.ProjectMemoryValidation{}, err
+	}
+	report, err := s.memory.Validate(ctx, pm.ValidateRequest{
+		ProjectID: req.ProjectID,
+		RepoPath:  resolved,
+		Apply:     req.Apply,
+		MaxChecks: req.Limit,
+	})
+	if err != nil {
+		return controllers.ProjectMemoryValidation{}, err
+	}
+	out := controllers.ProjectMemoryValidation{
+		RepoID:           report.RepoID,
+		RepoIdentity:     report.Observed.String(),
+		Applied:          req.Apply,
+		Checked:          report.Checked,
+		Provable:         report.Provable,
+		IdentityWithheld: report.IdentityWithheld,
+		LegacyClassified: report.LegacyClassified,
+		EdgesRetired:     report.EdgesRetired,
+		Truncated:        report.Truncated,
+	}
+	for _, f := range report.Findings {
+		out.Findings = append(out.Findings, controllers.ProjectMemoryValidationFinding{
+			ItemID:      f.ItemID,
+			Type:        string(f.Key.Type),
+			Scope:       string(f.Key.Scope),
+			Key:         f.Key.Key,
+			From:        string(f.From),
+			To:          string(f.To),
+			ReasonClass: f.ReasonClass,
+			Detail:      f.Detail,
+			Applied:     f.Applied,
+		})
+	}
+	return out, nil
+}
+
+// Provenance answers the whole P2-D section 27 question list for one fact:
+// why is it valid, what task produced it, which commit supports it, was it
+// repaired, where was it born, how did it become canonical, what invalidated
+// it, and what replaced it.
+//
+// The project id is checked rather than merely accepted. Item ids are derived
+// hashes and are not guessable, but a diagnostic that returned any project's
+// fact to any project's caller would be a cross-project read, and this
+// subsystem's whole argument is that one project's knowledge must not reach
+// another.
+func (s *Service) Provenance(
+	ctx context.Context, projectID domain.ProjectID, itemID string,
+) (controllers.ProjectMemoryProvenance, bool, error) {
+	prov, found, err := s.memory.Provenance(ctx, strings.TrimSpace(itemID))
+	if err != nil || !found {
+		return controllers.ProjectMemoryProvenance{}, found, err
+	}
+	if prov.Item.Key.ProjectID != projectID {
+		return controllers.ProjectMemoryProvenance{}, false, nil
+	}
+	return controllers.ProjectMemoryProvenance{
+		Item:                 prov.Item,
+		Servable:             prov.Servable,
+		AuthorityReasonClass: prov.AuthorityReasonClass,
+		Relations:            prov.Relations,
+	}, true, nil
+}
+
 // resolveRepo turns an optional repository path into a concrete one.
 //
 // An explicit path is honoured as given. An empty path resolves to the

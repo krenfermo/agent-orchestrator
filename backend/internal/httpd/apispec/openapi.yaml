@@ -1899,6 +1899,58 @@ paths:
         into the facts and reports any that no longer exist.'
       tags:
       - projects
+  /api/v1/projects/{id}/memory/provenance/{itemId}:
+    get:
+      operationId: getProjectMemoryProvenance
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Derived project-memory item id, as returned by the items or validate
+          routes.
+        in: path
+        name: itemId
+        required: true
+        schema:
+          description: Derived project-memory item id, as returned by the items or
+            validate routes.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersProjectMemoryProvenanceResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P2-D: the full evidence chain behind one fact — why it is valid, which
+        task produced it, which commit supports it, how it became canonical, what
+        withdrew it, and what replaced it. Retired edges are included: a superseded
+        decision''s supersedes edge is not in the current graph and is usually what
+        is being looked for.'
+      tags:
+      - projects
   /api/v1/projects/{id}/memory/rebuild:
     post:
       operationId: rebuildProjectMemory
@@ -1992,6 +2044,55 @@ paths:
         estimated tokens, and what the budget excluded. syncKind=none means memory
         was already at the repository''s current commit — the warm path the optimisation
         exists to produce.'
+      tags:
+      - projects
+  /api/v1/projects/{id}/memory/validate:
+    post:
+      operationId: validateProjectMemory
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersValidateProjectMemoryRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersValidateProjectMemoryResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P2-D: check which facts AO can still prove it is entitled to serve.
+        Distinct from invalidate, which asks whether a fact''s source FILES moved:
+        this asks whether its LICENCE still holds — same repository identity, a mutation-provenance
+        row behind every canonical promotion, a provenance kind this build can check.
+        Dry run unless apply is set, and it only ever demotes.'
       tags:
       - projects
   /api/v1/projects/{id}/repo-connection-test:
@@ -9176,6 +9277,14 @@ components:
       type: object
     ControllersProjectMemoryItemResponse:
       properties:
+        authority:
+          enum:
+          - authoritative
+          - unprovable
+          - legacy_unprovable
+          type: string
+        authorityReason:
+          type: string
         confidence:
           format: double
           type: number
@@ -9185,6 +9294,8 @@ components:
           format: int64
           type: integer
         id:
+          type: string
+        integratedCommit:
           type: string
         invalidatedAt:
           type:
@@ -9199,7 +9310,18 @@ components:
           type: string
         originRef:
           type: string
+        promotionAuthority:
+          type: string
+        provenanceKind:
+          enum:
+          - repo_derivation
+          - task_outcome
+          - workflow_knowledge
+          - legacy
+          type: string
         repoId:
+          type: string
+        repoIdentity:
           type: string
         scope:
           enum:
@@ -9210,6 +9332,8 @@ components:
           - symbol
           - task
           type: string
+        servable:
+          type: boolean
         sourceCommit:
           type: string
         sourcePaths:
@@ -9231,6 +9355,8 @@ components:
           type: string
         updatedAt:
           type: string
+        verifiedCommit:
+          type: string
       required:
       - id
       - repoId
@@ -9244,6 +9370,8 @@ components:
       - contentBytes
       - updatedAt
       - invalidatedAt
+      - authority
+      - servable
       type: object
     ControllersProjectMemoryKnowledgeResponse:
       properties:
@@ -9376,6 +9504,66 @@ components:
       - selectedBytes
       - estimatedTokens
       - createdAt
+      type: object
+    ControllersProjectMemoryProvenanceResponse:
+      properties:
+        authorityReasonClass:
+          type: string
+        item:
+          $ref: '#/components/schemas/ControllersProjectMemoryItemResponse'
+        relations:
+          items:
+            $ref: '#/components/schemas/ControllersProjectMemoryRelationResponse'
+          type: array
+        servable:
+          type: boolean
+      required:
+      - item
+      - servable
+      - relations
+      type: object
+    ControllersProjectMemoryRelationResponse:
+      properties:
+        authority:
+          enum:
+          - authoritative
+          - unprovable
+          - legacy_unprovable
+          type: string
+        authorityReason:
+          type: string
+        fromKey:
+          type: string
+        fromKind:
+          type: string
+        id:
+          type: string
+        kind:
+          type: string
+        sourceCommit:
+          type: string
+        state:
+          enum:
+          - valid
+          - stale
+          - invalidated
+          - rebuilding
+          type: string
+        stateReason:
+          type: string
+        toKey:
+          type: string
+        toKind:
+          type: string
+      required:
+      - id
+      - fromKind
+      - fromKey
+      - kind
+      - toKind
+      - toKey
+      - state
+      - authority
       type: object
     ControllersProjectMemoryReportResponse:
       properties:
@@ -9560,6 +9748,39 @@ components:
       - filesSkipped
       - lastIndexedAt
       - lastUpdatedAt
+      type: object
+    ControllersProjectMemoryValidationFindingResponse:
+      properties:
+        applied:
+          type: boolean
+        detail:
+          type: string
+        from:
+          type: string
+        itemId:
+          type: string
+        key:
+          type: string
+        reasonClass:
+          type: string
+        scope:
+          type: string
+        summary:
+          type: string
+        to:
+          type: string
+        type:
+          type: string
+      required:
+      - itemId
+      - type
+      - scope
+      - summary
+      - from
+      - to
+      - reasonClass
+      - detail
+      - applied
       type: object
     ControllersProviderAttemptView:
       properties:
@@ -10444,6 +10665,62 @@ components:
       - username
       - status
       - role
+      type: object
+    ControllersValidateProjectMemoryRequest:
+      properties:
+        apply:
+          description: Write the demotions. Defaults to false, so the diagnostic can
+            be run before anything changes.
+          type: boolean
+        limit:
+          description: Maximum facts to check. Defaults to 2000.
+          maximum: 20000
+          minimum: 1
+          type:
+          - "null"
+          - integer
+        repoPath:
+          description: Repository root to validate. Defaults to the project's own
+            root.
+          type: string
+      type: object
+    ControllersValidateProjectMemoryResponse:
+      properties:
+        applied:
+          type: boolean
+        checked:
+          type: integer
+        edgesRetired:
+          format: int64
+          type: integer
+        findings:
+          items:
+            $ref: '#/components/schemas/ControllersProjectMemoryValidationFindingResponse'
+          type: array
+        identityWithheld:
+          format: int64
+          type: integer
+        legacyClassified:
+          format: int64
+          type: integer
+        provable:
+          type: integer
+        repoId:
+          type: string
+        repoIdentity:
+          type: string
+        truncated:
+          type: boolean
+      required:
+      - repoId
+      - applied
+      - checked
+      - provable
+      - identityWithheld
+      - legacyClassified
+      - edgesRetired
+      - truncated
+      - findings
       type: object
     ControllersWorkflowBranchCessionChainView:
       properties:

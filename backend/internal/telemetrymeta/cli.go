@@ -154,6 +154,8 @@ var legacyActorlessUserCLICommands = map[string]struct{}{
 	"ao memory inspect":    {},
 	"ao memory rebuild":    {},
 	"ao memory invalidate": {},
+	"ao memory validate":   {},
+	"ao memory provenance": {},
 	"ao memory report":     {},
 	"ao memory knowledge":  {},
 	"ao memory decisions":  {},

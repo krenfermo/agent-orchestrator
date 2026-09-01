@@ -232,6 +232,18 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		// and a cancelled one has its unintegrated memory discarded. Nil when
 		// memory is off, which the coordinator treats as ordinary.
 		TaskMemory: taskMemoryFor(memory, log),
+		// P2-D: the durable record of the boundaries at which AO's own work
+		// changed a repository. It is the SQLite store directly rather than an
+		// adapter, because unlike TaskMemory there is no policy to translate
+		// here -- the coordinator decides what a boundary is and this only
+		// persists it.
+		//
+		// It is wired unconditionally, including when project memory is off.
+		// Mutation provenance is evidence about AO's own work, not a memory
+		// cache, and the incident that produced migration 0133 (verification
+		// could see that a fingerprint had moved and had no way to say whose
+		// change it was) has nothing to do with whether memory is enabled.
+		MutationProvenance: store,
 		// P2-C: the durable sources a finished task's risks are derived from —
 		// the Post-Run QA gate's classified findings and the pull request's
 		// normalized review threads. Both are read-only reads of rows the

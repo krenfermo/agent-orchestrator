@@ -10,6 +10,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/projectmemory"
 )
 
 // reviewTargetDurablePhase marks the checkpoint that records which workspace
@@ -1490,8 +1491,13 @@ func (c *Coordinator) dispatchReviewFromPending(
 	// entitled to. Reviewing a change against knowledge the author did not have
 	// is how a review reports a "regression" that is actually a decision the
 	// project made and the reviewer was never told about.
+	//
+	// P2-D section 17: and the commit it is about to judge travels with it, so
+	// the manifest recording what this reviewer was told can be compared
+	// against what it actually reviewed.
 	launch, adopted, err := c.ensureReviewerLaunched(
-		c.withTaskAuthority(ctx, run), launchReq, authorization.HandleID)
+		projectmemory.WithRoleHead(c.withTaskAuthority(ctx, run), targetSHA),
+		launchReq, authorization.HandleID)
 	if err != nil {
 		return c.recordReviewLaunchFailure(ctx, run, reviewStep, entry, harness, reviewRunID, targetSHA, cycleNumber, reviewLaunchStageLaunch, fmt.Errorf("launch reviewer: %w", err))
 	}

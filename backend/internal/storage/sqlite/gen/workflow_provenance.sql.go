@@ -54,7 +54,7 @@ func (q *Queries) GetLatestWorkflowDispatchCheckpointByStep(ctx context.Context,
 }
 
 const getLatestWorkflowMutationProvenanceByBranch = `-- name: GetLatestWorkflowMutationProvenanceByBranch :one
-SELECT id, workflow_run_id, workflow_step_id, attempt_id, task_id, provenance_class, harness, session_id, branch, worktree_path, base_sha, head_sha, fingerprint_before, fingerprint_after, reason, evidence_json, observed_at, created_at FROM workflow_mutation_provenance
+SELECT id, workflow_run_id, workflow_step_id, attempt_id, task_id, provenance_class, harness, session_id, branch, worktree_path, base_sha, head_sha, fingerprint_before, fingerprint_after, reason, evidence_json, observed_at, created_at, project_id, repo_identity, repo_path, placement, boundary, generation, integration_target_ref, integration_target_before_sha, integration_target_after_sha, integration_method, idempotency_key FROM workflow_mutation_provenance
 WHERE workflow_run_id = ? AND branch = ?
 ORDER BY created_at DESC, id DESC
 LIMIT 1
@@ -90,6 +90,116 @@ func (q *Queries) GetLatestWorkflowMutationProvenanceByBranch(ctx context.Contex
 		&i.EvidenceJson,
 		&i.ObservedAt,
 		&i.CreatedAt,
+		&i.ProjectID,
+		&i.RepoIdentity,
+		&i.RepoPath,
+		&i.Placement,
+		&i.Boundary,
+		&i.Generation,
+		&i.IntegrationTargetRef,
+		&i.IntegrationTargetBeforeSha,
+		&i.IntegrationTargetAfterSha,
+		&i.IntegrationMethod,
+		&i.IdempotencyKey,
+	)
+	return i, err
+}
+
+const getLatestWorkflowMutationProvenanceByTaskBoundary = `-- name: GetLatestWorkflowMutationProvenanceByTaskBoundary :one
+SELECT id, workflow_run_id, workflow_step_id, attempt_id, task_id, provenance_class, harness, session_id, branch, worktree_path, base_sha, head_sha, fingerprint_before, fingerprint_after, reason, evidence_json, observed_at, created_at, project_id, repo_identity, repo_path, placement, boundary, generation, integration_target_ref, integration_target_before_sha, integration_target_after_sha, integration_method, idempotency_key FROM workflow_mutation_provenance
+WHERE task_id = ? AND task_id <> '' AND boundary = ?
+ORDER BY generation DESC, created_at DESC, id DESC
+LIMIT 1
+`
+
+type GetLatestWorkflowMutationProvenanceByTaskBoundaryParams struct {
+	TaskID   string
+	Boundary string
+}
+
+// The current state of one boundary for one task. Newest wins: a later
+// integration supersedes an earlier one (a re-integration after a repair), and
+// promotion must be pinned to the last one AO actually observed.
+func (q *Queries) GetLatestWorkflowMutationProvenanceByTaskBoundary(ctx context.Context, arg GetLatestWorkflowMutationProvenanceByTaskBoundaryParams) (WorkflowMutationProvenance, error) {
+	row := q.db.QueryRowContext(ctx, getLatestWorkflowMutationProvenanceByTaskBoundary, arg.TaskID, arg.Boundary)
+	var i WorkflowMutationProvenance
+	err := row.Scan(
+		&i.ID,
+		&i.WorkflowRunID,
+		&i.WorkflowStepID,
+		&i.AttemptID,
+		&i.TaskID,
+		&i.ProvenanceClass,
+		&i.Harness,
+		&i.SessionID,
+		&i.Branch,
+		&i.WorktreePath,
+		&i.BaseSha,
+		&i.HeadSha,
+		&i.FingerprintBefore,
+		&i.FingerprintAfter,
+		&i.Reason,
+		&i.EvidenceJson,
+		&i.ObservedAt,
+		&i.CreatedAt,
+		&i.ProjectID,
+		&i.RepoIdentity,
+		&i.RepoPath,
+		&i.Placement,
+		&i.Boundary,
+		&i.Generation,
+		&i.IntegrationTargetRef,
+		&i.IntegrationTargetBeforeSha,
+		&i.IntegrationTargetAfterSha,
+		&i.IntegrationMethod,
+		&i.IdempotencyKey,
+	)
+	return i, err
+}
+
+const getWorkflowMutationProvenanceByIdempotencyKey = `-- name: GetWorkflowMutationProvenanceByIdempotencyKey :one
+SELECT id, workflow_run_id, workflow_step_id, attempt_id, task_id, provenance_class, harness, session_id, branch, worktree_path, base_sha, head_sha, fingerprint_before, fingerprint_after, reason, evidence_json, observed_at, created_at, project_id, repo_identity, repo_path, placement, boundary, generation, integration_target_ref, integration_target_before_sha, integration_target_after_sha, integration_method, idempotency_key FROM workflow_mutation_provenance
+WHERE idempotency_key = ? AND idempotency_key <> ''
+LIMIT 1
+`
+
+// Read back the row a duplicate write collapsed onto. Together with the
+// ON CONFLICT above this is the exactly-once pair: the caller always ends up
+// holding the one row that describes the boundary, whether it wrote it or
+// somebody else already had.
+func (q *Queries) GetWorkflowMutationProvenanceByIdempotencyKey(ctx context.Context, idempotencyKey string) (WorkflowMutationProvenance, error) {
+	row := q.db.QueryRowContext(ctx, getWorkflowMutationProvenanceByIdempotencyKey, idempotencyKey)
+	var i WorkflowMutationProvenance
+	err := row.Scan(
+		&i.ID,
+		&i.WorkflowRunID,
+		&i.WorkflowStepID,
+		&i.AttemptID,
+		&i.TaskID,
+		&i.ProvenanceClass,
+		&i.Harness,
+		&i.SessionID,
+		&i.Branch,
+		&i.WorktreePath,
+		&i.BaseSha,
+		&i.HeadSha,
+		&i.FingerprintBefore,
+		&i.FingerprintAfter,
+		&i.Reason,
+		&i.EvidenceJson,
+		&i.ObservedAt,
+		&i.CreatedAt,
+		&i.ProjectID,
+		&i.RepoIdentity,
+		&i.RepoPath,
+		&i.Placement,
+		&i.Boundary,
+		&i.Generation,
+		&i.IntegrationTargetRef,
+		&i.IntegrationTargetBeforeSha,
+		&i.IntegrationTargetAfterSha,
+		&i.IntegrationMethod,
+		&i.IdempotencyKey,
 	)
 	return i, err
 }
@@ -206,32 +316,59 @@ INSERT INTO workflow_mutation_provenance (
     id, workflow_run_id, workflow_step_id, attempt_id, task_id,
     provenance_class, harness, session_id, branch, worktree_path,
     base_sha, head_sha, fingerprint_before, fingerprint_after,
-    reason, evidence_json, observed_at, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id, workflow_run_id, workflow_step_id, attempt_id, task_id, provenance_class, harness, session_id, branch, worktree_path, base_sha, head_sha, fingerprint_before, fingerprint_after, reason, evidence_json, observed_at, created_at
+    reason, evidence_json, observed_at, created_at,
+    project_id, repo_identity, repo_path, placement, boundary, generation,
+    integration_target_ref, integration_target_before_sha,
+    integration_target_after_sha, integration_method, idempotency_key
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT DO NOTHING
+RETURNING id, workflow_run_id, workflow_step_id, attempt_id, task_id, provenance_class, harness, session_id, branch, worktree_path, base_sha, head_sha, fingerprint_before, fingerprint_after, reason, evidence_json, observed_at, created_at, project_id, repo_identity, repo_path, placement, boundary, generation, integration_target_ref, integration_target_before_sha, integration_target_after_sha, integration_method, idempotency_key
 `
 
 type InsertWorkflowMutationProvenanceParams struct {
-	ID                string
-	WorkflowRunID     string
-	WorkflowStepID    sql.NullString
-	AttemptID         sql.NullString
-	TaskID            string
-	ProvenanceClass   string
-	Harness           string
-	SessionID         sql.NullString
-	Branch            string
-	WorktreePath      string
-	BaseSha           string
-	HeadSha           string
-	FingerprintBefore string
-	FingerprintAfter  string
-	Reason            string
-	EvidenceJson      string
-	ObservedAt        sql.NullTime
-	CreatedAt         time.Time
+	ID                         string
+	WorkflowRunID              string
+	WorkflowStepID             sql.NullString
+	AttemptID                  sql.NullString
+	TaskID                     string
+	ProvenanceClass            string
+	Harness                    string
+	SessionID                  sql.NullString
+	Branch                     string
+	WorktreePath               string
+	BaseSha                    string
+	HeadSha                    string
+	FingerprintBefore          string
+	FingerprintAfter           string
+	Reason                     string
+	EvidenceJson               string
+	ObservedAt                 sql.NullTime
+	CreatedAt                  time.Time
+	ProjectID                  string
+	RepoIdentity               string
+	RepoPath                   string
+	Placement                  string
+	Boundary                   string
+	Generation                 int64
+	IntegrationTargetRef       string
+	IntegrationTargetBeforeSha string
+	IntegrationTargetAfterSha  string
+	IntegrationMethod          string
+	IdempotencyKey             string
 }
 
+// Migration 0146 added what a MEMORY PROMOTION has to be able to prove, which
+// is more than the verification path ever needed: which repository (durably,
+// not by branch name), how the work was placed, which semantic boundary this
+// row records, which generation observed it, and where an integration landed.
+//
+// ON CONFLICT DO NOTHING on the partial unique index over idempotency_key is
+// what makes a boundary record exactly-once. A duplicate completion callback
+// and a daemon that died between the mutation and the row derive the same key
+// from the same facts, so the second write is a no-op rather than a second row
+// that later reads as a second mutation. RETURNING * therefore yields no row
+// on a duplicate, and the store reads the existing one back -- see
+// RecordWorkflowMutationProvenance.
 func (q *Queries) InsertWorkflowMutationProvenance(ctx context.Context, arg InsertWorkflowMutationProvenanceParams) (WorkflowMutationProvenance, error) {
 	row := q.db.QueryRowContext(ctx, insertWorkflowMutationProvenance,
 		arg.ID,
@@ -252,6 +389,17 @@ func (q *Queries) InsertWorkflowMutationProvenance(ctx context.Context, arg Inse
 		arg.EvidenceJson,
 		arg.ObservedAt,
 		arg.CreatedAt,
+		arg.ProjectID,
+		arg.RepoIdentity,
+		arg.RepoPath,
+		arg.Placement,
+		arg.Boundary,
+		arg.Generation,
+		arg.IntegrationTargetRef,
+		arg.IntegrationTargetBeforeSha,
+		arg.IntegrationTargetAfterSha,
+		arg.IntegrationMethod,
+		arg.IdempotencyKey,
 	)
 	var i WorkflowMutationProvenance
 	err := row.Scan(
@@ -273,6 +421,17 @@ func (q *Queries) InsertWorkflowMutationProvenance(ctx context.Context, arg Inse
 		&i.EvidenceJson,
 		&i.ObservedAt,
 		&i.CreatedAt,
+		&i.ProjectID,
+		&i.RepoIdentity,
+		&i.RepoPath,
+		&i.Placement,
+		&i.Boundary,
+		&i.Generation,
+		&i.IntegrationTargetRef,
+		&i.IntegrationTargetBeforeSha,
+		&i.IntegrationTargetAfterSha,
+		&i.IntegrationMethod,
+		&i.IdempotencyKey,
 	)
 	return i, err
 }
@@ -384,7 +543,7 @@ func (q *Queries) ListWorkflowDispatchCheckpointsByStep(ctx context.Context, wor
 }
 
 const listWorkflowMutationProvenanceByRun = `-- name: ListWorkflowMutationProvenanceByRun :many
-SELECT id, workflow_run_id, workflow_step_id, attempt_id, task_id, provenance_class, harness, session_id, branch, worktree_path, base_sha, head_sha, fingerprint_before, fingerprint_after, reason, evidence_json, observed_at, created_at FROM workflow_mutation_provenance
+SELECT id, workflow_run_id, workflow_step_id, attempt_id, task_id, provenance_class, harness, session_id, branch, worktree_path, base_sha, head_sha, fingerprint_before, fingerprint_after, reason, evidence_json, observed_at, created_at, project_id, repo_identity, repo_path, placement, boundary, generation, integration_target_ref, integration_target_before_sha, integration_target_after_sha, integration_method, idempotency_key FROM workflow_mutation_provenance
 WHERE workflow_run_id = ?
 ORDER BY created_at, id
 `
@@ -417,6 +576,17 @@ func (q *Queries) ListWorkflowMutationProvenanceByRun(ctx context.Context, workf
 			&i.EvidenceJson,
 			&i.ObservedAt,
 			&i.CreatedAt,
+			&i.ProjectID,
+			&i.RepoIdentity,
+			&i.RepoPath,
+			&i.Placement,
+			&i.Boundary,
+			&i.Generation,
+			&i.IntegrationTargetRef,
+			&i.IntegrationTargetBeforeSha,
+			&i.IntegrationTargetAfterSha,
+			&i.IntegrationMethod,
+			&i.IdempotencyKey,
 		); err != nil {
 			return nil, err
 		}
@@ -432,7 +602,7 @@ func (q *Queries) ListWorkflowMutationProvenanceByRun(ctx context.Context, workf
 }
 
 const listWorkflowMutationProvenanceByStep = `-- name: ListWorkflowMutationProvenanceByStep :many
-SELECT id, workflow_run_id, workflow_step_id, attempt_id, task_id, provenance_class, harness, session_id, branch, worktree_path, base_sha, head_sha, fingerprint_before, fingerprint_after, reason, evidence_json, observed_at, created_at FROM workflow_mutation_provenance
+SELECT id, workflow_run_id, workflow_step_id, attempt_id, task_id, provenance_class, harness, session_id, branch, worktree_path, base_sha, head_sha, fingerprint_before, fingerprint_after, reason, evidence_json, observed_at, created_at, project_id, repo_identity, repo_path, placement, boundary, generation, integration_target_ref, integration_target_before_sha, integration_target_after_sha, integration_method, idempotency_key FROM workflow_mutation_provenance
 WHERE workflow_step_id = ?
 ORDER BY created_at, id
 `
@@ -465,6 +635,82 @@ func (q *Queries) ListWorkflowMutationProvenanceByStep(ctx context.Context, work
 			&i.EvidenceJson,
 			&i.ObservedAt,
 			&i.CreatedAt,
+			&i.ProjectID,
+			&i.RepoIdentity,
+			&i.RepoPath,
+			&i.Placement,
+			&i.Boundary,
+			&i.Generation,
+			&i.IntegrationTargetRef,
+			&i.IntegrationTargetBeforeSha,
+			&i.IntegrationTargetAfterSha,
+			&i.IntegrationMethod,
+			&i.IdempotencyKey,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkflowMutationProvenanceByTask = `-- name: ListWorkflowMutationProvenanceByTask :many
+SELECT id, workflow_run_id, workflow_step_id, attempt_id, task_id, provenance_class, harness, session_id, branch, worktree_path, base_sha, head_sha, fingerprint_before, fingerprint_after, reason, evidence_json, observed_at, created_at, project_id, repo_identity, repo_path, placement, boundary, generation, integration_target_ref, integration_target_before_sha, integration_target_after_sha, integration_method, idempotency_key FROM workflow_mutation_provenance
+WHERE task_id = ? AND task_id <> ''
+ORDER BY created_at, id
+`
+
+// Every boundary AO durably recorded for one planned task, oldest first.
+//
+// This is the read a memory promotion makes, and the reason migration 0146
+// indexed (task_id, boundary, created_at): promotion happens on the dispatch
+// path's tail, and it must not scan a run's whole provenance history to find
+// out whether an integration was ever recorded.
+func (q *Queries) ListWorkflowMutationProvenanceByTask(ctx context.Context, taskID string) ([]WorkflowMutationProvenance, error) {
+	rows, err := q.db.QueryContext(ctx, listWorkflowMutationProvenanceByTask, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []WorkflowMutationProvenance{}
+	for rows.Next() {
+		var i WorkflowMutationProvenance
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkflowRunID,
+			&i.WorkflowStepID,
+			&i.AttemptID,
+			&i.TaskID,
+			&i.ProvenanceClass,
+			&i.Harness,
+			&i.SessionID,
+			&i.Branch,
+			&i.WorktreePath,
+			&i.BaseSha,
+			&i.HeadSha,
+			&i.FingerprintBefore,
+			&i.FingerprintAfter,
+			&i.Reason,
+			&i.EvidenceJson,
+			&i.ObservedAt,
+			&i.CreatedAt,
+			&i.ProjectID,
+			&i.RepoIdentity,
+			&i.RepoPath,
+			&i.Placement,
+			&i.Boundary,
+			&i.Generation,
+			&i.IntegrationTargetRef,
+			&i.IntegrationTargetBeforeSha,
+			&i.IntegrationTargetAfterSha,
+			&i.IntegrationMethod,
+			&i.IdempotencyKey,
 		); err != nil {
 			return nil, err
 		}

@@ -331,6 +331,10 @@ func (r *reviewerLauncher) attach(
 		TaskRef:          auth.TaskRef,
 		WorkflowRunID:    auth.WorkflowRunID,
 		UpstreamTaskRefs: auth.UpstreamTaskRefs,
+		// The commit this reviewer is judging, when the dispatch stamped one.
+		// Recorded on the manifest and used for nothing else -- see
+		// projectmemory.WithRoleHead.
+		HeadSHA: projectmemory.RoleHeadFrom(ctx),
 	})
 	if !provisioned.Attached() {
 		logProvision(r.log, "reviewer", provisioned)

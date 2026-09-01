@@ -69,6 +69,18 @@ type ProvisionRequest struct {
 	// boundary that has already synced this exact state — a Worker launched
 	// moments after the Planner that planned it — avoids asking again.
 	SkipSync bool
+	// HeadSHA is the commit this role is reasoning about, when the boundary
+	// knows it (P2-D section 17). For a reviewer it is the reviewed SHA.
+	//
+	// It is recorded on the context manifest and used for nothing else: memory
+	// selection is not narrowed by it, because a pack assembled differently
+	// for a reviewer than for the worker whose work is being reviewed would
+	// make the two harder to compare rather than easier. What it buys is that
+	// "the pack was built for SHA A and the reviewer judged SHA B" becomes a
+	// diagnosable fact instead of an unexplained disagreement.
+	//
+	// Empty is honest and common: a planner is not reasoning about one commit.
+	HeadSHA string
 }
 
 // Provisioned is what a boundary should send.
@@ -186,7 +198,12 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 	key := CacheKey{
 		ProjectID: req.ProjectID, RepoID: out.Freshness.RepoID,
 		IndexedCommit: out.Freshness.IndexedCommit, Generation: out.Freshness.Generation,
-		Role: role, PolicyVersion: PackPolicyVersion, Budget: budget,
+		// P2-D: the epoch that moves on every out-of-band demotion. Without it
+		// a pack cached before an invalidation or an authority pass stays
+		// reachable and keeps serving a fact AO has just withheld -- see
+		// CacheKey's doc comment.
+		ChangeMark: p.changeMark(ctx, req.ProjectID, out.Freshness.RepoID),
+		Role:       role, PolicyVersion: PackPolicyVersion, Budget: budget,
 		// The sharing authority is part of the cache key. Two dispatches that
 		// differ only in which upstream tasks they may read are entitled to
 		// different packs, and a cache that ignored that would serve one
@@ -284,28 +301,64 @@ func (p *Provisioner) freeze(ctx context.Context, req ProvisionRequest, role Pac
 		return
 	}
 	ids := make([]string, 0, pack.Stats.SelectedItems)
+	// P2-D section 18: the VERSION of each fact as well as its identity.
+	//
+	// The ids alone answer "which facts was this execution told" and cannot
+	// answer "which version of them", and the reviewer incident P2-D section
+	// 17 describes is a version question. The content hash is the right
+	// version marker here rather than the generation: task knowledge is
+	// written at generation 0 and never re-indexed, so a generation would be
+	// the same number for two genuinely different revisions of a decision.
+	versions := make([]string, 0, pack.Stats.SelectedItems)
 	for _, section := range pack.Sections {
 		for _, sel := range section.Items {
 			ids = append(ids, sel.Item.ID)
+			versions = append(versions, sel.Item.ContentHash)
 		}
 	}
 	if len(ids) > domain.MaxManifestItems {
 		ids = ids[:domain.MaxManifestItems]
+		versions = versions[:domain.MaxManifestItems]
 	}
 	p.svc.RecordContextManifest(ctx, domain.MemoryContextManifest{
-		ProjectID:       req.ProjectID,
-		RepoID:          pack.RepoID,
-		WorkflowRunID:   req.WorkflowRunID,
-		TaskRef:         req.TaskRef,
-		Role:            string(role),
-		PackDigest:      pack.Digest,
-		PolicyVersion:   PackPolicyVersion,
-		Generation:      pack.Stats.Generation,
-		IndexedCommit:   pack.Stats.IndexedCommit,
-		ItemIDs:         ids,
+		ProjectID:     req.ProjectID,
+		RepoID:        pack.RepoID,
+		WorkflowRunID: req.WorkflowRunID,
+		TaskRef:       req.TaskRef,
+		Role:          string(role),
+		PackDigest:    pack.Digest,
+		PolicyVersion: PackPolicyVersion,
+		Generation:    pack.Stats.Generation,
+		IndexedCommit: pack.Stats.IndexedCommit,
+		ItemIDs:       ids,
+		ItemVersions:  versions,
+		// The head this role was reasoning about, when the caller knew it. For
+		// a reviewer it is the reviewed SHA, which is what makes "the pack was
+		// built for SHA A and the reviewer judged SHA B" a diagnosable fact
+		// rather than an unexplained disagreement.
+		RoleHeadSHA:     req.HeadSHA,
 		SelectedBytes:   pack.Stats.SelectedBytes,
 		EstimatedTokens: pack.Stats.SelectedTokens,
 	})
+}
+
+// changeMark reads the epoch the cache key is fenced by.
+//
+// A read failure yields zero, which is the SAFE direction only because zero is
+// a value the epoch also legitimately takes for an empty repository: two
+// dispatches that both fail to read it share a cache entry they would have
+// shared anyway, and any successful read afterwards produces a different key.
+// What it must never do is fail the provision -- memory is an optimisation, and
+// an unreadable epoch is a reason to cache less confidently, not to stop.
+func (p *Provisioner) changeMark(ctx context.Context, projectID domain.ProjectID, repoID string) int64 {
+	if p.svc == nil || repoID == "" {
+		return 0
+	}
+	mark, err := p.svc.ChangeMark(ctx, projectID, repoID)
+	if err != nil {
+		return 0
+	}
+	return mark.UnixNano()
 }
 
 // WithMetrics attaches this dispatch's memory record to a context, so the

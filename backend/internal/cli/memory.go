@@ -69,6 +69,13 @@ type memoryItemsEnvelope struct {
 		SourcePaths  []string `json:"sourcePaths"`
 		ContentBytes int      `json:"contentBytes"`
 		UpdatedAt    string   `json:"updatedAt"`
+		// P2-D: the second axis. A fact can be perfectly valid on the drift
+		// axis and still be withheld, so an inspect that printed only `state`
+		// would show "valid" beside a fact no agent is receiving.
+		Authority       string `json:"authority"`
+		AuthorityReason string `json:"authorityReason"`
+		Servable        bool   `json:"servable"`
+		ProvenanceKind  string `json:"provenanceKind"`
 	} `json:"items"`
 	Total     int  `json:"total"`
 	Truncated bool `json:"truncated"`
@@ -110,6 +117,8 @@ func newMemoryCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newMemoryInspectCommand(ctx))
 	cmd.AddCommand(newMemoryRebuildCommand(ctx))
 	cmd.AddCommand(newMemoryInvalidateCommand(ctx))
+	cmd.AddCommand(newMemoryValidateCommand(ctx))
+	cmd.AddCommand(newMemoryProvenanceCommand(ctx))
 	cmd.AddCommand(newMemoryReportCommand(ctx))
 	cmd.AddCommand(newMemoryKnowledgeCommand(ctx))
 	cmd.AddCommand(newMemoryDecisionsCommand(ctx))
@@ -319,21 +328,34 @@ func newMemoryInspectCommand(ctx *commandContext) *cobra.Command {
 				_, _ = fmt.Fprintln(out, "No matching facts.")
 				return nil
 			}
+			withheld := 0
 			for _, it := range res.Items {
+				// The marker is driven by SERVABLE rather than by state alone.
+				// A fact whose files are untouched but whose licence AO can no
+				// longer prove is not being handed to anyone, and printing it
+				// unmarked beside "valid" would be the one misleading thing an
+				// inspect could do.
 				marker := " "
-				if it.State != "valid" {
+				if !it.Servable {
 					marker = "!"
+					withheld++
 				}
 				_, _ = fmt.Fprintf(out, "%s %-18s %-10s %-8s conf %.2f gen %d  %s\n",
 					marker, it.Type, it.Scope, it.State, it.Confidence, it.Generation, it.Summary)
 				if it.StateReason != "" {
 					_, _ = fmt.Fprintf(out, "    reason: %s\n", it.StateReason)
 				}
+				if it.AuthorityReason != "" {
+					_, _ = fmt.Fprintf(out, "    authority: %s — %s\n", it.Authority, it.AuthorityReason)
+				}
 				if it.Origin == "task_local" {
 					_, _ = fmt.Fprintf(out, "    task-local to %s (not part of the project's canonical memory)\n", it.OriginRef)
 				}
 			}
 			_, _ = fmt.Fprintf(out, "\n%d facts", res.Total)
+			if withheld > 0 {
+				_, _ = fmt.Fprintf(out, ", %d of them withheld (marked !); `ao memory provenance` explains one", withheld)
+			}
 			if res.Truncated {
 				_, _ = fmt.Fprintf(out, " (showing the first %d; raise --limit for more)", len(res.Items))
 			}

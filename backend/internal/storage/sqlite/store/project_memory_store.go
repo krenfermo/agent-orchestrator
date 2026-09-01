@@ -332,6 +332,18 @@ func (s *Store) insertProjectMemoryItem(
 		Confidence: item.Confidence, MetadataJson: meta, ContentHash: item.ContentHash,
 		CreatedAt: created, UpdatedAt: updated,
 		InvalidatedAt: nullTimeOrZero(item.InvalidatedAt),
+		// P2-D provenance travels with the row from its first write. An item
+		// that reaches the store without it is stored without it, and the
+		// legacy classification is what later decides what that means -- the
+		// store never invents a provenance the caller did not supply.
+		Authority:       string(item.Authority),
+		AuthorityReason: item.AuthorityReason,
+		RepoIdentity:    string(item.RepoIdentity),
+		ProvenanceKind:  string(item.ProvenanceKind),
+
+		PromotionAuthority: item.PromotionAuthority,
+		VerifiedCommit:     item.VerifiedCommit,
+		IntegratedCommit:   item.IntegratedCommit,
 	})
 	if err != nil {
 		return fmt.Errorf("insert item: %w", err)
@@ -366,7 +378,15 @@ func (s *Store) updateProjectMemoryItem(
 		Generation: item.Generation, State: string(item.State), StateReason: item.StateReason,
 		Confidence: item.Confidence, MetadataJson: meta, ContentHash: item.ContentHash,
 		UpdatedAt: updated, InvalidatedAt: nullTimeOrZero(item.InvalidatedAt),
-		ID: item.ID, Generation_2: item.Generation,
+		Authority:       string(item.Authority),
+		AuthorityReason: item.AuthorityReason,
+		RepoIdentity:    string(item.RepoIdentity),
+		ProvenanceKind:  string(item.ProvenanceKind),
+
+		PromotionAuthority: item.PromotionAuthority,
+		VerifiedCommit:     item.VerifiedCommit,
+		IntegratedCommit:   item.IntegratedCommit,
+		ID:                 item.ID, Generation_2: item.Generation,
 	})
 	if err != nil {
 		return fmt.Errorf("update item: %w", err)
@@ -467,7 +487,10 @@ func (s *Store) PutProjectMemoryRelation(ctx context.Context, rel domain.Project
 			Generation: rel.Generation, State: string(rel.State), StateReason: rel.StateReason,
 			Confidence: rel.Confidence, MetadataJson: meta,
 			CreatedAt: created, UpdatedAt: updated,
-			InvalidatedAt: nullTimeOrZero(rel.InvalidatedAt),
+			InvalidatedAt:   nullTimeOrZero(rel.InvalidatedAt),
+			Authority:       string(rel.Authority),
+			AuthorityReason: rel.AuthorityReason,
+			RepoIdentity:    string(rel.RepoIdentity),
 		})
 		if err != nil {
 			return fmt.Errorf("insert relation: %w", err)
@@ -480,8 +503,11 @@ func (s *Store) PutProjectMemoryRelation(ctx context.Context, rel domain.Project
 			SourcePathsJson: paths, SourceCommit: rel.SourceCommit, SourceDigest: rel.SourceDigest,
 			Generation: rel.Generation, State: string(rel.State), StateReason: rel.StateReason,
 			Confidence: rel.Confidence, MetadataJson: meta, UpdatedAt: updated,
-			InvalidatedAt: nullTimeOrZero(rel.InvalidatedAt),
-			ID:            rel.ID, Generation_2: rel.Generation,
+			InvalidatedAt:   nullTimeOrZero(rel.InvalidatedAt),
+			Authority:       string(rel.Authority),
+			AuthorityReason: rel.AuthorityReason,
+			RepoIdentity:    string(rel.RepoIdentity),
+			ID:              rel.ID, Generation_2: rel.Generation,
 		})
 		if err != nil {
 			return fmt.Errorf("update relation: %w", err)
@@ -990,6 +1016,15 @@ func (s *Store) PutProjectMemoryContextManifest(
 	if err != nil {
 		return fmt.Errorf("encode manifest item ids: %w", err)
 	}
+	// Positionally aligned with ItemIDs, and marshalled from the same
+	// normalized manifest, so index i of one always describes index i of the
+	// other. Normalized() is what guarantees the two slices are the same
+	// length; a manifest that reached here misaligned would make the record
+	// worse than useless, so this is not a place to be lenient.
+	versions, err := json.Marshal(m.ItemVersions)
+	if err != nil {
+		return fmt.Errorf("encode manifest item versions: %w", err)
+	}
 	created := m.CreatedAt
 	if created.IsZero() {
 		created = now
@@ -997,22 +1032,24 @@ func (s *Store) PutProjectMemoryContextManifest(
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	return s.qw.UpsertProjectMemoryContextManifest(ctx, gen.UpsertProjectMemoryContextManifestParams{
-		ID:              m.ID,
-		ProjectID:       string(m.ProjectID),
-		RepoID:          m.RepoID,
-		WorkflowRunID:   m.WorkflowRunID,
-		TaskRef:         m.TaskRef,
-		Role:            m.Role,
-		PackDigest:      m.PackDigest,
-		PolicyVersion:   int64(m.PolicyVersion),
-		Generation:      m.Generation,
-		IndexedCommit:   m.IndexedCommit,
-		ItemIdsJson:     string(ids),
-		ItemCount:       int64(len(m.ItemIDs)),
-		SelectedBytes:   int64(m.SelectedBytes),
-		EstimatedTokens: int64(m.EstimatedTokens),
-		CreatedAt:       created,
-		UpdatedAt:       now,
+		ID:               m.ID,
+		ProjectID:        string(m.ProjectID),
+		RepoID:           m.RepoID,
+		WorkflowRunID:    m.WorkflowRunID,
+		TaskRef:          m.TaskRef,
+		Role:             m.Role,
+		PackDigest:       m.PackDigest,
+		PolicyVersion:    int64(m.PolicyVersion),
+		Generation:       m.Generation,
+		IndexedCommit:    m.IndexedCommit,
+		ItemIdsJson:      string(ids),
+		ItemCount:        int64(len(m.ItemIDs)),
+		SelectedBytes:    int64(m.SelectedBytes),
+		EstimatedTokens:  int64(m.EstimatedTokens),
+		CreatedAt:        created,
+		UpdatedAt:        now,
+		ItemVersionsJson: string(versions),
+		RoleHeadSha:      m.RoleHeadSHA,
 	})
 }
 
@@ -1078,6 +1115,12 @@ func projectMemoryManifestFromRow(r gen.ProjectMemoryContextManifest) (domain.Me
 			return domain.MemoryContextManifest{}, fmt.Errorf("decode manifest item ids: %w", err)
 		}
 	}
+	var versions []string
+	if strings.TrimSpace(r.ItemVersionsJson) != "" {
+		if err := json.Unmarshal([]byte(r.ItemVersionsJson), &versions); err != nil {
+			return domain.MemoryContextManifest{}, fmt.Errorf("decode manifest item versions: %w", err)
+		}
+	}
 	return domain.MemoryContextManifest{
 		ID:              r.ID,
 		ProjectID:       domain.ProjectID(r.ProjectID),
@@ -1090,6 +1133,8 @@ func projectMemoryManifestFromRow(r gen.ProjectMemoryContextManifest) (domain.Me
 		Generation:      r.Generation,
 		IndexedCommit:   r.IndexedCommit,
 		ItemIDs:         ids,
+		ItemVersions:    versions,
+		RoleHeadSHA:     r.RoleHeadSha,
 		SelectedBytes:   int(r.SelectedBytes),
 		EstimatedTokens: int(r.EstimatedTokens),
 		CreatedAt:       r.CreatedAt,
@@ -1178,6 +1223,14 @@ func projectMemoryItemFromRow(r gen.ProjectMemoryItem) (domain.ProjectMemoryItem
 		InvalidatedAt: r.InvalidatedAt.Time,
 		Metadata:      meta,
 		ContentHash:   r.ContentHash,
+
+		Authority:          domain.MemoryAuthority(r.Authority),
+		AuthorityReason:    r.AuthorityReason,
+		RepoIdentity:       domain.RepoIdentity(r.RepoIdentity),
+		ProvenanceKind:     domain.MemoryProvenanceKind(r.ProvenanceKind),
+		PromotionAuthority: r.PromotionAuthority,
+		VerifiedCommit:     r.VerifiedCommit,
+		IntegratedCommit:   r.IntegratedCommit,
 	}
 	return item, nil
 }
@@ -1230,6 +1283,10 @@ func projectMemoryRelationFromRow(r gen.ProjectMemoryRelation) (domain.ProjectMe
 		UpdatedAt:     r.UpdatedAt,
 		InvalidatedAt: r.InvalidatedAt.Time,
 		Metadata:      meta,
+
+		Authority:       domain.MemoryAuthority(r.Authority),
+		AuthorityReason: r.AuthorityReason,
+		RepoIdentity:    domain.RepoIdentity(r.RepoIdentity),
 	}, nil
 }
 

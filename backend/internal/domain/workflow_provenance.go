@@ -1,6 +1,12 @@
 package domain
 
-import "time"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"strings"
+	"time"
+)
 
 // workflow_provenance.go — the durable vocabulary for three facts that used to
 // exist only as free text inside a checkpoint's retry_state JSON: what happened
@@ -292,6 +298,185 @@ type WorkflowMutationProvenance struct {
 	// substituting its own clock would turn a gap in knowledge into a claim.
 	ObservedAt *time.Time
 	CreatedAt  time.Time
+
+	// --- P2-D: what a memory promotion has to be able to prove -----------
+	//
+	// Everything above was enough for the verification path, which only ever
+	// asked "whose change is this" about a workspace it was already standing
+	// in. A memory promotion asks a harder question from further away — "did
+	// this task's work reach the repository's own history, and is that still
+	// the same repository" — and the fields below are what make it answerable
+	// from a row rather than from an inference.
+
+	// ProjectID, RepoIdentity and RepoPath say WHICH repository. A branch name
+	// is not a repository: two projects can both have `main`, and one project
+	// can be re-checked-out at a path another used to occupy. RepoIdentity is
+	// the durable signal (see RepoIdentity); RepoPath is explanatory.
+	ProjectID    string
+	RepoIdentity RepoIdentity
+	RepoPath     string
+
+	// Placement is how the work was placed, and Boundary is which semantic
+	// moment this row records. Together they decide which promotion proof
+	// applies: an isolated worktree's `work_result` licenses nothing, and its
+	// `integrated` row licenses everything.
+	Placement WorkflowMutationPlacement
+	Boundary  WorkflowMutationBoundary
+
+	// Generation fences the writer. A stale worker, reviewer or repair
+	// callback that wakes up after a newer generation has recorded the same
+	// boundary must not append a row that later reads as the current one.
+	Generation int64
+
+	// Where an integration landed. HeadSHA (above) stays what it always was:
+	// where the SOURCE of the mutation ended up. These three are the other
+	// end, and a promotion that cannot name IntegrationTargetAfterSHA has not
+	// proven integration.
+	IntegrationTargetRef       string
+	IntegrationTargetBeforeSHA string
+	IntegrationTargetAfterSHA  string
+	// IntegrationMethod is how the source reached the target. It matters
+	// because cherry-pick produces a different SHA for the same content, so
+	// "is the source commit reachable from the target" is the right ancestry
+	// question for merge and fast-forward and the wrong one for cherry-pick.
+	IntegrationMethod WorkflowIntegrationMethod
+
+	// IdempotencyKey is derived from the facts of the boundary itself, so a
+	// duplicate callback and a restart-after-crash derive the SAME key and
+	// produce ONE row. Empty when the writer honestly could not derive one,
+	// and empty keys do not collide with each other.
+	IdempotencyKey string
+}
+
+// WorkflowMutationPlacement is where a mutation's work was placed. The two
+// values have entirely different promotion proofs, which is why a row that
+// does not say which it was can supply neither.
+type WorkflowMutationPlacement string
+
+// Workflow mutation placements.
+const (
+	// MutationPlacementDirectBranch is work committed straight onto the branch
+	// the repository's own checkout is on.
+	MutationPlacementDirectBranch WorkflowMutationPlacement = "direct_branch"
+	// MutationPlacementIsolatedWorktree is work committed to a branch of its
+	// own in an AO-owned worktree. Nothing about it is in the repository's
+	// history until an integration boundary says so.
+	MutationPlacementIsolatedWorktree WorkflowMutationPlacement = "isolated_worktree"
+)
+
+// Valid reports whether the placement is one this build writes.
+func (p WorkflowMutationPlacement) Valid() bool {
+	return p == MutationPlacementDirectBranch || p == MutationPlacementIsolatedWorktree
+}
+
+// WorkflowMutationBoundary names the semantic moment a provenance row records.
+//
+// AO records BOUNDARIES, not write syscalls (P2-D §5). A boundary is a moment
+// at which what some durable ref contains changed in a way a later reader must
+// be able to attribute — and there are only five of them, because there are
+// only five moments at which the answer to "may this become project
+// knowledge" can change.
+type WorkflowMutationBoundary string
+
+// Workflow mutation boundaries.
+const (
+	// BoundaryDispatch is the authority a mutation starts from: the tree and
+	// head AO handed an agent. It proves what was there BEFORE, which is what
+	// makes a later difference attributable at all.
+	BoundaryDispatch WorkflowMutationBoundary = "dispatch"
+	// BoundaryWorkResult is what a worker produced, observed after it finished.
+	BoundaryWorkResult WorkflowMutationBoundary = "work_result"
+	// BoundaryRepairResult is what a repair agent produced on top of a worker's
+	// result. It is a separate boundary and not another work_result because
+	// attribution must not collapse into the original worker (P2-D §16).
+	BoundaryRepairResult WorkflowMutationBoundary = "repair_result"
+	// BoundaryVerified is the head verification actually passed on. It is the
+	// strongest thing AO can say about a branch, and it is still not
+	// integration.
+	BoundaryVerified WorkflowMutationBoundary = "verified"
+	// BoundaryIntegrated is the moment the work became part of a target ref's
+	// history. It is the ONLY boundary that licenses canonical project
+	// knowledge for isolated-worktree work.
+	BoundaryIntegrated WorkflowMutationBoundary = "integrated"
+)
+
+// Valid reports whether the boundary is one this build writes.
+func (b WorkflowMutationBoundary) Valid() bool {
+	switch b {
+	case BoundaryDispatch, BoundaryWorkResult, BoundaryRepairResult, BoundaryVerified, BoundaryIntegrated:
+		return true
+	default:
+		return false
+	}
+}
+
+// WorkflowIntegrationMethod is how a source branch's work reached its target.
+type WorkflowIntegrationMethod string
+
+// Workflow integration methods.
+const (
+	// IntegrationMerge created a merge commit. The source head is an ancestor
+	// of the target head.
+	IntegrationMerge WorkflowIntegrationMethod = "merge"
+	// IntegrationFastForward moved the target ref to the source head. The
+	// source head IS the target head.
+	IntegrationFastForward WorkflowIntegrationMethod = "fast_forward"
+	// IntegrationCherryPick replayed the source's changes onto the target,
+	// producing DIFFERENT commit SHAs for the same content. Ancestry cannot
+	// prove it, so a cherry-pick promotion needs the recorded target SHAs and
+	// nothing weaker — "the files look the same" is explicitly not proof
+	// (P2-D §13).
+	IntegrationCherryPick WorkflowIntegrationMethod = "cherry_pick"
+	// IntegrationDirectCommit is direct-branch work: there was no separate
+	// integration, because the commit landed on the target ref itself.
+	IntegrationDirectCommit WorkflowIntegrationMethod = "direct_commit"
+)
+
+// Valid reports whether the method is one this build writes.
+func (m WorkflowIntegrationMethod) Valid() bool {
+	switch m {
+	case IntegrationMerge, IntegrationFastForward, IntegrationCherryPick, IntegrationDirectCommit:
+		return true
+	default:
+		return false
+	}
+}
+
+// AncestryProves reports whether, for this method, the source head being an
+// ancestor of the integrated target head is the correct proof of integration.
+//
+// It is false for cherry-pick alone, and that single exception is the reason
+// this is a method rather than an if-statement at the call site: a caller that
+// forgot it would silently refuse every legitimate cherry-pick promotion, or
+// — worse, if it inverted the check — accept every illegitimate one.
+func (m WorkflowIntegrationMethod) AncestryProves() bool {
+	return m == IntegrationMerge || m == IntegrationFastForward || m == IntegrationDirectCommit
+}
+
+// MutationIdempotencyKey derives the key that makes a boundary record
+// exactly-once across duplicate callbacks and restarts.
+//
+// Every part is a fact of the BOUNDARY, never of the writing: no clock, no
+// row id, no attempt counter. Two writers describing the same moment
+// therefore derive the same key and the unique index collapses them to one
+// row; two writers describing different moments cannot collide however close
+// together they run.
+func MutationIdempotencyKey(
+	runID, taskID string, boundary WorkflowMutationBoundary, generation int64, headSHA, targetSHA string,
+) string {
+	h := sha256.New()
+	for _, part := range []string{
+		strings.TrimSpace(runID),
+		strings.TrimSpace(taskID),
+		string(boundary),
+		fmt.Sprintf("%d", generation),
+		strings.ToLower(strings.TrimSpace(headSHA)),
+		strings.ToLower(strings.TrimSpace(targetSHA)),
+	} {
+		h.Write([]byte(part))
+		h.Write([]byte{0})
+	}
+	return "wmp_" + hex.EncodeToString(h.Sum(nil))[:32]
 }
 
 // WorkflowReviewTarget is the reviewed artifact a verify attempt is judging.

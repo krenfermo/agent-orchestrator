@@ -90,7 +90,11 @@ func (s *DurableMemorySource) List(project string) ([]memory.MemoryItem, error) 
 		if len(out) >= maxDurableMemoryItems {
 			break
 		}
-		if !item.State.Authoritative() {
+		// P2-D: evidence AND licence. Servable() composes both, so this
+		// adapter cannot drift from the pack builder's gate -- the two are the
+		// only two readers of durable memory, and a fact one of them serves
+		// and the other withholds would be the worst possible outcome.
+		if !item.Servable() {
 			continue
 		}
 		if item.Origin != domain.OriginCanonical {

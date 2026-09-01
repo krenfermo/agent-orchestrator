@@ -50,8 +50,15 @@ type TaskMemory interface {
 	InvalidatePaths(ctx stdctx.Context, projectID domain.ProjectID, repoPath string, paths []string, reason string) (int64, error)
 	// RecordOutcome persists the bounded facts of a finished task.
 	RecordOutcome(ctx stdctx.Context, outcome TaskOutcomeFacts) error
-	// PromoteTask turns one task's facts into canonical project knowledge.
-	PromoteTask(ctx stdctx.Context, projectID domain.ProjectID, taskRef, commit string) (int, error)
+	// PromoteTask turns one task's facts into canonical project knowledge,
+	// under a proof that the work is durably part of the repository.
+	//
+	// The proof travels rather than a bare commit because P2-D's whole
+	// argument is that "a commit exists" is not "the project has this work".
+	// A caller that cannot prove it passes a refusal carrying its reason, and
+	// the facts are recorded as unprovable instead of being promoted -- which
+	// is a withheld fact with an explanation, not a silent absence.
+	PromoteTask(ctx stdctx.Context, projectID domain.ProjectID, taskRef string, proof domain.MemoryPromotionProof) (int, error)
 	// DiscardTask drops one task's unintegrated facts.
 	DiscardTask(ctx stdctx.Context, projectID domain.ProjectID, taskRef string) (int64, error)
 }
@@ -84,7 +91,24 @@ type TaskOutcomeFacts struct {
 	Commit string
 	// Integrated reports whether the work is part of the repository's
 	// integrated state. Only integrated work produces canonical memory.
+	//
+	// P2-D: it is now the CONCLUSION of Promotion below rather than a reading
+	// of the project's execution mode. A direct-branch task whose verified
+	// head AO cannot locate in the branch's history is not integrated, however
+	// the project is configured.
 	Integrated bool
+	// Promotion is what AO proved about where this work landed. It is carried
+	// on the facts so that the record written for an UNPROVABLE task still
+	// says why -- see recordTaskMemory.
+	Promotion domain.MemoryPromotionProof
+	// RepoIdentity is the durable identity of the repository these facts are
+	// about, stamped onto every row so a different repository later checked
+	// out at the same path cannot inherit them (P2-D section 9).
+	RepoIdentity domain.RepoIdentity
+	// VerifiedCommit is the head verification actually passed on. It is kept
+	// apart from Commit because they answer different questions: Commit is
+	// where the content was read, VerifiedCommit is what AO vouched for.
+	VerifiedCommit string
 
 	// --- shared knowledge (P2-C) -----------------------------------------
 
@@ -154,7 +178,7 @@ func (c *Coordinator) recordTaskMemory(ctx stdctx.Context, run domain.WorkflowRu
 	if !facts.Integrated {
 		return
 	}
-	if _, err := c.taskMemory.PromoteTask(ctx, project, facts.TaskRef, facts.Commit); err != nil && c.log != nil {
+	if _, err := c.taskMemory.PromoteTask(ctx, project, facts.TaskRef, facts.Promotion); err != nil && c.log != nil {
 		c.log.Warn("project memory: could not promote a verified task's memory", "run", run.ID, "err", err)
 	}
 }
@@ -192,10 +216,25 @@ func (c *Coordinator) taskOutcomeFacts(
 		TaskRef:      taskRefFor(run),
 		WhatChanged:  run.Objective,
 		Verification: verificationSummary(step),
-		Integrated:   c.workIsIntegrated(ctx, run),
 	}
 	facts.Title, facts.Why = titleAndReason(run.Objective)
 	facts.Commit = c.completedRunCommit(ctx, run)
+	facts.RepoIdentity = c.memoryRepoIdentity(ctx, repoPath)
+
+	// P2-D: integration is now something AO proves, not something it reads off
+	// the project's configuration. directBranchPromotionProof refuses when the
+	// placement is not direct branch, so an isolated-worktree task lands on
+	// exactly the same "not integrated yet" path it took before -- carrying,
+	// now, the reason it is waiting.
+	facts.Promotion = c.directBranchPromotionProof(ctx, run, facts.TaskRef, repoPath)
+	facts.Integrated = facts.Promotion.Provable
+	facts.VerifiedCommit = facts.Promotion.VerifiedCommit
+	if facts.Integrated && facts.Commit == "" {
+		// A proven promotion names the commit the knowledge is about, so a
+		// checkpoint scan that found nothing does not leave the fact
+		// unanchored.
+		facts.Commit = facts.Promotion.IntegratedCommit
+	}
 
 	if scope, ok := c.taskScope(ctx, run); ok {
 		facts.FilesChanged = boundedPaths(scope.WritePaths)
@@ -228,21 +267,6 @@ func (c *Coordinator) taskScope(ctx stdctx.Context, run domain.WorkflowRun) (dom
 		return domain.WorkflowTaskScope{}, false
 	}
 	return c.taskScopeFor(ctx, run, *run.PlannedTaskID)
-}
-
-// workIsIntegrated reports whether this run's work is part of the repository's
-// integrated state, which is what licenses promoting its memory to canonical.
-//
-// Direct-branch execution writes to the branch the repository itself is on, so
-// a committed, verified task there IS integrated. An isolated worktree commits
-// to a branch of its own; until something merges it, its facts describe work
-// the project does not have.
-func (c *Coordinator) workIsIntegrated(ctx stdctx.Context, run domain.WorkflowRun) bool {
-	scope := placementScope{}
-	if run.PlannedTaskID != nil {
-		scope.taskID = *run.PlannedTaskID
-	}
-	return c.projectExecutionModeFor(ctx, run, scope).DirectBranch()
 }
 
 // memoryProjectRoot resolves the checkout project memory is keyed by.

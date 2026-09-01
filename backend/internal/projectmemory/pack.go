@@ -270,6 +270,19 @@ type PackStats struct {
 	// SupersededExcluded counts facts withheld because they are no longer
 	// current: a superseded decision, a resolved risk, an obsolete fact.
 	SupersededExcluded int
+	// UnprovableExcluded counts facts withheld because AO could no longer
+	// prove their LICENCE, as distinct from their evidence (P2-D). A fact
+	// whose files are untouched but whose promotion turned out not to have
+	// happened lands here and not in StaleExcluded, so "the repository moved"
+	// and "AO cannot show this was ever the project's" stay separable in the
+	// one place an operator looks.
+	UnprovableExcluded int
+	// LegacyExcluded counts facts withheld because they predate P2-D and carry
+	// no provenance at all. It is counted apart from UnprovableExcluded
+	// because it is a migration state rather than an incident, and an operator
+	// seeing a large number here should reach for a bounded rebuild, not an
+	// investigation.
+	LegacyExcluded int
 	// ConflictingExcluded counts facts withheld because AO could not order
 	// them against an incompatible peer.
 	ConflictingExcluded int
@@ -581,8 +594,23 @@ func (b *PackBuilder) filterServable(
 
 	kept := make([]domain.ProjectMemoryItem, 0, len(all))
 	for _, item := range all {
+		// P2-D: evidence AND licence, in that order, so the counter says which
+		// of the two failed. The conjunction is exactly
+		// ProjectMemoryItem.Servable(); it is spelled out here only because
+		// this reader has to attribute the exclusion to a counter, and a value
+		// of either field this build does not recognise fails both tests --
+		// which is what makes a future authority value withheld by default
+		// rather than served by default.
 		if !item.State.Authoritative() {
 			stats.StaleExcluded++
+			continue
+		}
+		if !item.Authority.Provable() {
+			if item.Authority == domain.AuthorityLegacyUnprovable {
+				stats.LegacyExcluded++
+			} else {
+				stats.UnprovableExcluded++
+			}
 			continue
 		}
 		if !b.entitled(item, req, upstream) {

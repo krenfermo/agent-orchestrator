@@ -410,6 +410,60 @@ type ProjectMemoryItem struct {
 	// ContentHash covers Summary, Content and the fields that say what the
 	// content is about. It is what makes ingestion idempotent.
 	ContentHash string
+
+	// --- P2-D provenance and authority ----------------------------------
+	//
+	// State (above) says whether the fact's EVIDENCE still holds. The five
+	// fields below say whether its LICENCE does, and they are what a fact has
+	// to be able to answer before it is served as current:
+	//
+	//	what is my source of truth   -> ProvenanceKind
+	//	which repository am I about  -> RepoIdentity
+	//	what commit supports me      -> SourceCommit / VerifiedCommit / IntegratedCommit
+	//	which generation made me      -> Generation
+	//	what authorized my promotion -> PromotionAuthority
+	//
+	// A row that cannot answer the ones its ProvenanceKind requires is
+	// Authority = AuthorityUnprovable and is withheld. See
+	// project_memory_authority.go for why this is a second axis rather than
+	// more values of State.
+
+	// Authority is whether the fact's licence is still provable. Serving
+	// requires it to be AuthorityAuthoritative, so an unrecognised or unset
+	// value withholds rather than serves.
+	Authority MemoryAuthority
+	// AuthorityReason is the class-prefixed explanation (see
+	// MemoryAuthorityReason), empty exactly when Authority is
+	// AuthorityAuthoritative.
+	AuthorityReason string
+	// RepoIdentity is the durable repository identity the fact was derived
+	// under. Empty means AO could not identify the checkout, which never
+	// matches — including another empty identity.
+	RepoIdentity RepoIdentity
+	// ProvenanceKind says which proof applies to this row.
+	ProvenanceKind MemoryProvenanceKind
+	// PromotionAuthority is the workflow_mutation_provenance row that licensed
+	// this fact's promotion to canonical, when one did. Empty for facts no
+	// promotion produced, and for promotions AO could not prove — which are
+	// also Authority = AuthorityUnprovable, so the two are never confused.
+	PromotionAuthority string
+	// VerifiedCommit is the commit verification actually passed on, and
+	// IntegratedCommit the target-branch commit the work became part of. They
+	// are separate from SourceCommit and from each other because they license
+	// different things: a worktree result has a verified commit and no
+	// integrated one until an integration is proven (P2-D §7, §13).
+	VerifiedCommit   string
+	IntegratedCommit string
+}
+
+// Servable reports whether this fact may be handed to a role as current.
+//
+// It is the whole fail-closed rule, in one predicate that every reader goes
+// through: the evidence must still hold AND the licence must still be
+// provable. Neither alone is enough, and a value of either field that this
+// build does not recognise fails both tests rather than passing by default.
+func (i ProjectMemoryItem) Servable() bool {
+	return i.State.Authoritative() && i.Authority.Provable()
 }
 
 // Bounds on one item. They are enforced in Validate rather than left to the
@@ -457,6 +511,23 @@ func (i ProjectMemoryItem) Normalized() ProjectMemoryItem {
 		i.StateReason = ""
 		i.InvalidatedAt = time.Time{}
 	}
+	// An item that names no authority is authoritative: every writer that
+	// predates P2-D, and every test fixture, means "nothing is wrong with
+	// this". What withholds a fact is a validation pass that could not prove
+	// it, not a field somebody forgot to set — and the legacy classification
+	// (projectmemory.ClassifyLegacy) is the one place that turns "no
+	// provenance recorded" into AuthorityLegacyUnprovable, deliberately, once.
+	if i.Authority == "" {
+		i.Authority = AuthorityAuthoritative
+	}
+	i.AuthorityReason = strings.TrimSpace(i.AuthorityReason)
+	if i.Authority == AuthorityAuthoritative {
+		i.AuthorityReason = ""
+	}
+	i.RepoIdentity = RepoIdentity(strings.TrimSpace(string(i.RepoIdentity)))
+	i.PromotionAuthority = strings.TrimSpace(i.PromotionAuthority)
+	i.VerifiedCommit = strings.TrimSpace(i.VerifiedCommit)
+	i.IntegratedCommit = strings.TrimSpace(i.IntegratedCommit)
 	i.SourcePaths = NormalizeMemorySourcePaths(i.SourcePaths)
 	i.Metadata = normalizeMemoryMetadata(i.Metadata)
 	i.ContentHash = i.contentHash()
@@ -777,6 +848,21 @@ type ProjectMemoryRelation struct {
 	InvalidatedAt time.Time
 	// Metadata is small, structured annotation.
 	Metadata map[string]string
+
+	// Authority, AuthorityReason and RepoIdentity mirror the item fields, for
+	// the reason P2-D §23 gives: an edge derived from a node whose licence has
+	// gone must stop being traversed as current. It is retired, never deleted
+	// — the record that two facts were once related is what an operator reads
+	// when asking why a decision was made.
+	Authority       MemoryAuthority
+	AuthorityReason string
+	RepoIdentity    RepoIdentity
+}
+
+// Traversable reports whether this edge may be followed as current. Same
+// composition as ProjectMemoryItem.Servable, for the same reason.
+func (r ProjectMemoryRelation) Traversable() bool {
+	return r.State.Authoritative() && r.Authority.Provable()
 }
 
 // RelationID derives an edge's row identity from everything that makes it the
@@ -828,6 +914,14 @@ func (r ProjectMemoryRelation) Normalized() ProjectMemoryRelation {
 		r.StateReason = ""
 		r.InvalidatedAt = time.Time{}
 	}
+	if r.Authority == "" {
+		r.Authority = AuthorityAuthoritative
+	}
+	r.AuthorityReason = strings.TrimSpace(r.AuthorityReason)
+	if r.Authority == AuthorityAuthoritative {
+		r.AuthorityReason = ""
+	}
+	r.RepoIdentity = RepoIdentity(strings.TrimSpace(string(r.RepoIdentity)))
 	r.SourcePaths = NormalizeMemorySourcePaths(r.SourcePaths)
 	r.Metadata = normalizeMemoryMetadata(r.Metadata)
 	r.ID = RelationID(r.ProjectID, r.RepoID, r.From, r.Kind, r.To, r.Origin, r.OriginRef)

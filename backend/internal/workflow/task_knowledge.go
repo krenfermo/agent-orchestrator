@@ -145,11 +145,23 @@ func (c *Coordinator) promoteIntegratedTaskMemory(
 	if c.taskMemory == nil || strings.TrimSpace(taskID) == "" || strings.TrimSpace(integratedSHA) == "" {
 		return
 	}
-	project, _, ok := c.memoryProjectRoot(ctx, parent)
+	project, repoPath, ok := c.memoryProjectRoot(ctx, parent)
 	if !ok {
 		return
 	}
-	if _, err := c.taskMemory.PromoteTask(ctx, project, taskID, integratedSHA); err != nil && c.log != nil {
+	// P2-D section 13: the integratedSHA the caller believes in is CHECKED
+	// against AO's own durable integration record rather than trusted. A
+	// worktree that was verified and never integrated has no such record, so
+	// it reaches here with a refusal and its facts stay task-local -- which is
+	// the whole point of this boundary, and was previously decided by whether
+	// this argument happened to be non-empty.
+	proof := c.worktreePromotionProof(ctx, taskID, repoPath, integratedSHA)
+	if !proof.Provable && c.log != nil {
+		c.log.Info("project memory: an integrated task's memory was not promoted because the integration could not be proven",
+			"run", parent.ID, "task", taskID, "sha", shortSHA(integratedSHA),
+			"reason", proof.ReasonClass, "detail", proof.Detail)
+	}
+	if _, err := c.taskMemory.PromoteTask(ctx, project, taskID, proof); err != nil && c.log != nil {
 		c.log.Warn("project memory: could not promote an integrated task's memory",
 			"run", parent.ID, "task", taskID, "sha", shortSHA(integratedSHA), "err", err)
 	}

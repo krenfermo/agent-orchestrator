@@ -244,6 +244,18 @@ type itemBase struct {
 	Generation int64
 	Origin     domain.ProjectMemoryOrigin
 	OriginRef  string
+	// P2-D provenance, stamped onto every fact and every edge this base
+	// produces. It lives here rather than at each producer because a fact
+	// whose provenance depends on which function happened to build it is a
+	// fact whose provenance nobody can audit: one place fills these in, so
+	// "which repository is this about" has exactly one answer per derivation.
+	//
+	// Both may be zero. An unidentifiable repository yields the empty
+	// RepoIdentity, which never matches anything and therefore fails closed;
+	// an unset ProvenanceKind is what a legacy or test-constructed fact has,
+	// and is what the legacy classification acts on.
+	RepoIdentity   domain.RepoIdentity
+	ProvenanceKind domain.MemoryProvenanceKind
 }
 
 func (b itemBase) item(
@@ -265,6 +277,14 @@ func (b itemBase) item(
 		State:        domain.MemoryStateValid,
 		Confidence:   confidence,
 		Metadata:     meta,
+
+		// Authority is left at its default (authoritative) here. A derivation
+		// that just read the repository IS provable at the moment it is
+		// written; what makes a fact unprovable is a later validation that
+		// could not reproduce the proof, and inverting that default would mean
+		// every freshly-derived fact started life withheld.
+		RepoIdentity:   b.RepoIdentity,
+		ProvenanceKind: b.ProvenanceKind,
 	}
 }
 
@@ -278,7 +298,8 @@ func (b itemBase) relation(
 		Origin: b.Origin, OriginRef: b.OriginRef,
 		SourcePaths: paths, SourceCommit: b.Commit,
 		Generation: b.Generation, State: domain.MemoryStateValid,
-		Confidence: confidence,
+		Confidence:   confidence,
+		RepoIdentity: b.RepoIdentity,
 	}
 }
 

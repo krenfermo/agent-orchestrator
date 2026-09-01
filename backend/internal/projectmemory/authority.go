@@ -88,3 +88,44 @@ func TaskAuthorityFrom(ctx stdctx.Context) TaskAuthority {
 	a, _ := ctx.Value(authorityContextKey{}).(TaskAuthority)
 	return a
 }
+
+// --- role head (P2-D §17) ---------------------------------------------------
+//
+// A reviewer judges a specific commit, and the pack it was given was assembled
+// at a specific memory generation. When those two disagree -- the pack was
+// built for SHA A and the reviewer ended up judging SHA B -- the reviewer's
+// verdict is about work it was not briefed on, and until P2-D nothing recorded
+// enough to tell.
+//
+// The head travels on the context for the same reason the sharing entitlement
+// does: the dispatch boundary knows it, the memory boundary needs it, and
+// neither should have to learn the other's model. It widens no launch port,
+// which matters because ReviewerLaunchRequest is a contract several launchers
+// implement.
+//
+// It is recorded and used for nothing else. Memory selection is deliberately
+// NOT narrowed by it: a reviewer given a different pack from the worker whose
+// work it is reviewing is the P2-C §7 problem, and narrowing here would
+// recreate it. What this buys is a manifest that can be compared.
+
+type roleHeadContextKey struct{}
+
+// WithRoleHead returns a context carrying the commit a dispatch is reasoning
+// about.
+func WithRoleHead(ctx stdctx.Context, sha string) stdctx.Context {
+	sha = strings.TrimSpace(sha)
+	if sha == "" {
+		// An empty head is the zero value, and stamping it would only add a
+		// context frame that says nothing.
+		return ctx
+	}
+	return stdctx.WithValue(ctx, roleHeadContextKey{}, sha)
+}
+
+// RoleHeadFrom reads the commit a dispatch is reasoning about, if a boundary
+// stamped one. The empty string is a complete answer: a planner is not
+// reasoning about one commit.
+func RoleHeadFrom(ctx stdctx.Context) string {
+	sha, _ := ctx.Value(roleHeadContextKey{}).(string)
+	return sha
+}

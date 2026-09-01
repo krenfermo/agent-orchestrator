@@ -30,6 +30,7 @@ type fakeTaskMemory struct {
 type promotedCall struct {
 	taskRef string
 	commit  string
+	proof   domain.MemoryPromotionProof
 }
 
 func (f *fakeTaskMemory) InvalidatePaths(stdctx.Context, domain.ProjectID, string, []string, string) (int64, error) {
@@ -42,8 +43,10 @@ func (f *fakeTaskMemory) RecordOutcome(_ stdctx.Context, out TaskOutcomeFacts) e
 	return nil
 }
 
-func (f *fakeTaskMemory) PromoteTask(_ stdctx.Context, _ domain.ProjectID, taskRef, commit string) (int, error) {
-	f.promoted = append(f.promoted, promotedCall{taskRef: taskRef, commit: commit})
+func (f *fakeTaskMemory) PromoteTask(
+	_ stdctx.Context, _ domain.ProjectID, taskRef string, proof domain.MemoryPromotionProof,
+) (int, error) {
+	f.promoted = append(f.promoted, promotedCall{taskRef: taskRef, commit: proof.IntegratedCommit, proof: proof})
 	return 1, nil
 }
 
@@ -152,9 +155,17 @@ func TestPromoteIntegratedTaskMemoryRequiresProof(t *testing.T) {
 // — memory that is wrong in a way nothing later corrects.
 func TestFinishTaskWorktreePromotesBeforeCleanup(t *testing.T) {
 	mem := &fakeTaskMemory{}
+	// P2-D: the promotion now needs a durable record that the worktree
+	// reached the target. Supplying it is what keeps this test about ORDERING;
+	// without it the promotion would be refused and the test would pass for
+	// the wrong reason.
+	prov := &fakeMutationProvenance{rows: []domain.WorkflowMutationProvenance{
+		integratedAt("task-1", "src-1", "sha-1"),
+	}}
 	c := &Coordinator{
-		taskMemory: mem,
-		projects:   fakeProjectsAt("proj-1", t.TempDir()),
+		taskMemory:         mem,
+		mutationProvenance: prov,
+		projects:           fakeProjectsAt("proj-1", t.TempDir()),
 		// taskWorkspaces deliberately nil: the cleanup half cannot run at all,
 		// which is the strongest form of "cleanup did not happen".
 	}
@@ -167,6 +178,9 @@ func TestFinishTaskWorktreePromotesBeforeCleanup(t *testing.T) {
 	if mem.promoted[0].taskRef != "task-1" || mem.promoted[0].commit != "sha-1" {
 		t.Fatalf("promoted %+v, want task-1 at sha-1", mem.promoted[0])
 	}
+	if !mem.promoted[0].proof.Provable {
+		t.Fatalf("the promotion carried an unprovable proof: %+v", mem.promoted[0].proof)
+	}
 }
 
 // TestFinishTaskWorktreeIsIdempotent covers the duplicate completion callback
@@ -176,7 +190,14 @@ func TestFinishTaskWorktreePromotesBeforeCleanup(t *testing.T) {
 // under a different task ref the second time.
 func TestFinishTaskWorktreeIsIdempotent(t *testing.T) {
 	mem := &fakeTaskMemory{}
-	c := &Coordinator{taskMemory: mem, projects: fakeProjectsAt("proj-1", t.TempDir())}
+	prov := &fakeMutationProvenance{rows: []domain.WorkflowMutationProvenance{
+		integratedAt("task-1", "src-1", "sha-1"),
+	}}
+	c := &Coordinator{
+		taskMemory:         mem,
+		mutationProvenance: prov,
+		projects:           fakeProjectsAt("proj-1", t.TempDir()),
+	}
 	parent := domain.WorkflowRun{ID: "wf-1", ProjectID: "proj-1"}
 	task := domain.WorkflowTask{ID: "task-1"}
 
@@ -190,6 +211,88 @@ func TestFinishTaskWorktreeIsIdempotent(t *testing.T) {
 		if p.taskRef != "task-1" || p.commit != "sha-1" {
 			t.Fatalf("a repeat promotion addressed %+v, want the same task and SHA every time", p)
 		}
+	}
+}
+
+// fakeMutationProvenance is the smallest MutationProvenance a promotion proof
+// can be built against: an in-memory append log with the same "newest
+// generation wins per (task, boundary)" read the store implements.
+type fakeMutationProvenance struct {
+	rows []domain.WorkflowMutationProvenance
+}
+
+func (f *fakeMutationProvenance) RecordWorkflowMutationProvenance(
+	_ stdctx.Context, p domain.WorkflowMutationProvenance,
+) (domain.WorkflowMutationProvenance, error) {
+	// The store collapses duplicates on the idempotency key; the fake has to
+	// do the same or a test of exactly-once would pass against a fake that
+	// cannot express it.
+	for _, existing := range f.rows {
+		if existing.IdempotencyKey != "" && existing.IdempotencyKey == p.IdempotencyKey {
+			return existing, nil
+		}
+	}
+	f.rows = append(f.rows, p)
+	return p, nil
+}
+
+func (f *fakeMutationProvenance) GetLatestWorkflowMutationProvenanceByTaskBoundary(
+	_ stdctx.Context, taskID string, boundary domain.WorkflowMutationBoundary,
+) (domain.WorkflowMutationProvenance, bool, error) {
+	var best domain.WorkflowMutationProvenance
+	found := false
+	for _, r := range f.rows {
+		if r.TaskID != taskID || r.Boundary != boundary {
+			continue
+		}
+		if !found || r.Generation >= best.Generation {
+			best, found = r, true
+		}
+	}
+	return best, found, nil
+}
+
+func (f *fakeMutationProvenance) ListWorkflowMutationProvenanceByTask(
+	_ stdctx.Context, taskID string,
+) ([]domain.WorkflowMutationProvenance, error) {
+	var out []domain.WorkflowMutationProvenance
+	for _, r := range f.rows {
+		if r.TaskID == taskID {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeMutationProvenance) ListWorkflowMutationProvenanceByRun(
+	_ stdctx.Context, runID string,
+) ([]domain.WorkflowMutationProvenance, error) {
+	var out []domain.WorkflowMutationProvenance
+	for _, r := range f.rows {
+		if r.WorkflowRunID == runID {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// integratedAt is the durable record that one task's worktree reached a target
+// ref. It is what a promotion proof is made of, and building it explicitly in
+// a test is the point: before P2-D, "this task integrated" was a non-empty
+// function argument.
+//
+// IntegrationMethod is cherry_pick so the proof does not reach for real git:
+// cherry-pick is the one method ancestry cannot prove, so the recorded target
+// SHAs are the whole evidence -- which is exactly what a unit test can supply.
+func integratedAt(taskID, sourceSHA, targetSHA string) domain.WorkflowMutationProvenance {
+	return domain.WorkflowMutationProvenance{
+		ID:                        "wmp-" + taskID,
+		TaskID:                    taskID,
+		Boundary:                  domain.BoundaryIntegrated,
+		Placement:                 domain.MutationPlacementIsolatedWorktree,
+		HeadSHA:                   sourceSHA,
+		IntegrationTargetAfterSHA: targetSHA,
+		IntegrationMethod:         domain.IntegrationCherryPick,
 	}
 }
 

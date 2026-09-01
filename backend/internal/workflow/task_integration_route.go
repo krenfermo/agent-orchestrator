@@ -447,6 +447,19 @@ func (c *Coordinator) handleIntegrationOutcome(
 	c.clearIntegrationAuditPending(ctx, parent, task)
 	// And so is any fresh review this integration asked for on the way here.
 	c.closeIntegrationFreshReview(ctx, child)
+	// P2-D: the integration boundary, recorded HERE rather than in either
+	// mode's tail, because this is the one place both modes agree that the
+	// target ref actually moved. It is the only boundary that licenses
+	// canonical project knowledge for isolated-worktree work, so recording it
+	// once, from the Coordinator's own Record, is what stops the two modes
+	// from ever disagreeing about whether a task integrated.
+	//
+	// Evidence before decision: the row is written before the promotion
+	// checkpoint the caller goes on to write, so a crash between them leaves
+	// AO holding proof of an integration whose promotion has not been
+	// recorded -- which a later pass can finish -- rather than a promotion
+	// whose integration it cannot prove.
+	c.recordIntegratedBoundary(ctx, parent, task, child, workCP, outcome.Record)
 	return false, nil
 }
 

@@ -39,6 +39,13 @@ type fakeProjectMemory struct {
 		paths  []string
 		reason string
 	}
+
+	validation  controllers.ProjectMemoryValidation
+	gotValidate controllers.ProjectMemoryValidateQuery
+
+	provenance      controllers.ProjectMemoryProvenance
+	provenanceFound bool
+	gotProvenanceID string
 }
 
 func (f *fakeProjectMemory) Status(context.Context, domain.ProjectID) ([]domain.ProjectMemoryStatus, error) {
@@ -71,6 +78,16 @@ func (f *fakeProjectMemory) Invalidate(_ context.Context, _ domain.ProjectID, _ 
 
 func (f *fakeProjectMemory) Report(context.Context, domain.ProjectID, string) (controllers.ProjectMemoryReport, error) {
 	return f.report, nil
+}
+
+func (f *fakeProjectMemory) Validate(_ context.Context, q controllers.ProjectMemoryValidateQuery) (controllers.ProjectMemoryValidation, error) {
+	f.gotValidate = q
+	return f.validation, nil
+}
+
+func (f *fakeProjectMemory) Provenance(_ context.Context, _ domain.ProjectID, itemID string) (controllers.ProjectMemoryProvenance, bool, error) {
+	f.gotProvenanceID = itemID
+	return f.provenance, f.provenanceFound, nil
 }
 
 func projectMemoryRequest(t *testing.T, svc controllers.ProjectMemoryService, method, path, body string) (int, []byte) {

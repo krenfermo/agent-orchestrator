@@ -44,13 +44,58 @@ ORDER BY created_at DESC, id DESC
 LIMIT 1;
 
 -- name: InsertWorkflowMutationProvenance :one
+-- Migration 0146 added what a MEMORY PROMOTION has to be able to prove, which
+-- is more than the verification path ever needed: which repository (durably,
+-- not by branch name), how the work was placed, which semantic boundary this
+-- row records, which generation observed it, and where an integration landed.
+--
+-- ON CONFLICT DO NOTHING on the partial unique index over idempotency_key is
+-- what makes a boundary record exactly-once. A duplicate completion callback
+-- and a daemon that died between the mutation and the row derive the same key
+-- from the same facts, so the second write is a no-op rather than a second row
+-- that later reads as a second mutation. RETURNING * therefore yields no row
+-- on a duplicate, and the store reads the existing one back -- see
+-- RecordWorkflowMutationProvenance.
 INSERT INTO workflow_mutation_provenance (
     id, workflow_run_id, workflow_step_id, attempt_id, task_id,
     provenance_class, harness, session_id, branch, worktree_path,
     base_sha, head_sha, fingerprint_before, fingerprint_after,
-    reason, evidence_json, observed_at, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    reason, evidence_json, observed_at, created_at,
+    project_id, repo_identity, repo_path, placement, boundary, generation,
+    integration_target_ref, integration_target_before_sha,
+    integration_target_after_sha, integration_method, idempotency_key
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT DO NOTHING
 RETURNING *;
+
+-- name: GetWorkflowMutationProvenanceByIdempotencyKey :one
+-- Read back the row a duplicate write collapsed onto. Together with the
+-- ON CONFLICT above this is the exactly-once pair: the caller always ends up
+-- holding the one row that describes the boundary, whether it wrote it or
+-- somebody else already had.
+SELECT * FROM workflow_mutation_provenance
+WHERE idempotency_key = ? AND idempotency_key <> ''
+LIMIT 1;
+
+-- name: ListWorkflowMutationProvenanceByTask :many
+-- Every boundary AO durably recorded for one planned task, oldest first.
+--
+-- This is the read a memory promotion makes, and the reason migration 0146
+-- indexed (task_id, boundary, created_at): promotion happens on the dispatch
+-- path's tail, and it must not scan a run's whole provenance history to find
+-- out whether an integration was ever recorded.
+SELECT * FROM workflow_mutation_provenance
+WHERE task_id = ? AND task_id <> ''
+ORDER BY created_at, id;
+
+-- name: GetLatestWorkflowMutationProvenanceByTaskBoundary :one
+-- The current state of one boundary for one task. Newest wins: a later
+-- integration supersedes an earlier one (a re-integration after a repair), and
+-- promotion must be pinned to the last one AO actually observed.
+SELECT * FROM workflow_mutation_provenance
+WHERE task_id = ? AND task_id <> '' AND boundary = ?
+ORDER BY generation DESC, created_at DESC, id DESC
+LIMIT 1;
 
 -- name: ListWorkflowMutationProvenanceByRun :many
 SELECT * FROM workflow_mutation_provenance

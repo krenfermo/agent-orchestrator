@@ -98,8 +98,10 @@ INSERT OR IGNORE INTO project_memory_items (
     origin, origin_ref, summary, content,
     source_paths_json, source_commit, source_digest,
     generation, state, state_reason, confidence, metadata_json, content_hash,
-    created_at, updated_at, invalidated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    created_at, updated_at, invalidated_at,
+    authority, authority_reason, repo_identity, provenance_kind,
+    promotion_authority, verified_commit, integrated_commit
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: UpdateProjectMemoryItem :execrows
 -- Generation-conditioned update: apply only if the stored row is not already
@@ -115,7 +117,9 @@ SET item_type = ?, scope = ?, item_key = ?,
     summary = ?, content = ?,
     source_paths_json = ?, source_commit = ?, source_digest = ?,
     generation = ?, state = ?, state_reason = ?, confidence = ?,
-    metadata_json = ?, content_hash = ?, updated_at = ?, invalidated_at = ?
+    metadata_json = ?, content_hash = ?, updated_at = ?, invalidated_at = ?,
+    authority = ?, authority_reason = ?, repo_identity = ?, provenance_kind = ?,
+    promotion_authority = ?, verified_commit = ?, integrated_commit = ?
 WHERE id = ? AND generation <= ?;
 
 -- name: TouchProjectMemoryItemProvenance :execrows
@@ -260,8 +264,9 @@ INSERT OR IGNORE INTO project_memory_relations (
     id, project_id, repo_id, from_kind, from_key, relation_kind, to_kind, to_key,
     origin, origin_ref, source_paths_json, source_commit, source_digest,
     generation, state, state_reason, confidence, metadata_json,
-    created_at, updated_at, invalidated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    created_at, updated_at, invalidated_at,
+    authority, authority_reason, repo_identity
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: UpdateProjectMemoryRelation :execrows
 -- Generation-conditioned, for the same reason items are: a stale indexer must
@@ -269,7 +274,8 @@ INSERT OR IGNORE INTO project_memory_relations (
 UPDATE project_memory_relations
 SET source_paths_json = ?, source_commit = ?, source_digest = ?,
     generation = ?, state = ?, state_reason = ?, confidence = ?,
-    metadata_json = ?, updated_at = ?, invalidated_at = ?
+    metadata_json = ?, updated_at = ?, invalidated_at = ?,
+    authority = ?, authority_reason = ?, repo_identity = ?
 WHERE id = ? AND generation <= ?;
 
 -- name: MarkProjectMemoryRelationsStaleByPath :execrows
@@ -378,8 +384,8 @@ INSERT INTO project_memory_context_manifests (
     id, project_id, repo_id, workflow_run_id, task_ref, role,
     pack_digest, policy_version, generation, indexed_commit,
     item_ids_json, item_count, selected_bytes, estimated_tokens,
-    created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    created_at, updated_at, item_versions_json, role_head_sha
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     repo_id = excluded.repo_id,
     pack_digest = excluded.pack_digest,
@@ -390,6 +396,8 @@ ON CONFLICT(id) DO UPDATE SET
     item_count = excluded.item_count,
     selected_bytes = excluded.selected_bytes,
     estimated_tokens = excluded.estimated_tokens,
+    item_versions_json = excluded.item_versions_json,
+    role_head_sha = excluded.role_head_sha,
     updated_at = excluded.updated_at;
 
 -- name: GetProjectMemoryContextManifest :one
@@ -407,3 +415,101 @@ ORDER BY created_at DESC, id;
 
 -- name: DeleteProjectMemoryContextManifestsForProject :execrows
 DELETE FROM project_memory_context_manifests WHERE project_id = ?;
+
+
+-- ---------------------------------------------------------------------------
+-- P2-D (migration 0146): the authority axis.
+-- ---------------------------------------------------------------------------
+
+-- name: SetProjectMemoryItemAuthority :execrows
+-- Move one fact's LICENCE, leaving its drift state and its content alone.
+--
+-- Generation-conditioned exactly like every other write, and for the sharper
+-- of the two reasons: a stale validation pass that wakes up after a rebuild
+-- must not be able to mark the REBUILT row unprovable. `<=` matches the
+-- update statement above -- a writer at the row's own generation is the same
+-- pass, and only a writer BEHIND it is stale (P2-D section 6).
+--
+-- updated_at moves because an authority change is a real change to what AO
+-- will serve; the freshness ranking should see it.
+UPDATE project_memory_items
+SET authority = ?, authority_reason = ?, updated_at = ?
+WHERE id = ? AND generation <= ?;
+
+-- name: SetProjectMemoryItemPromotionProof :execrows
+-- Record what licensed one fact's promotion to canonical, and pin it to the
+-- commits that authorize it.
+--
+-- Written by PromoteTaskMemory in the same transaction that creates the
+-- canonical row, so a fact cannot exist as canonical for even one read without
+-- the row that proves how it got there.
+UPDATE project_memory_items
+SET promotion_authority = ?, verified_commit = ?, integrated_commit = ?,
+    repo_identity = ?, provenance_kind = ?,
+    authority = ?, authority_reason = ?, updated_at = ?
+WHERE id = ? AND generation <= ?;
+
+-- name: ListProjectMemoryItemsByAuthority :many
+SELECT * FROM project_memory_items
+WHERE project_id = ? AND repo_id = ? AND authority = ?
+ORDER BY confidence DESC, scope, updated_at DESC, id;
+
+-- name: CountProjectMemoryItemsByAuthority :many
+SELECT authority, COUNT(*) AS total FROM project_memory_items
+WHERE project_id = ? AND repo_id = ? GROUP BY authority;
+
+-- name: MarkProjectMemoryItemsUnprovableByRepoIdentity :execrows
+-- The repository at this path is not the repository these facts came from.
+--
+-- This is the single most dangerous drift case (P2-D section 9), and it is the one
+-- that must NOT be scoped by path: no individual file is wrong, the whole
+-- premise is. Every fact whose recorded identity disagrees with the one now
+-- observed loses its licence in one statement -- including the rows that
+-- recorded no identity at all, because "AO could not tell" has never been
+-- permission to inherit another project's knowledge.
+--
+-- Not generation-conditioned, and deliberately so: this is not one pass's
+-- opinion about its own work, it is a fact about the checkout that is true for
+-- every generation at once.
+UPDATE project_memory_items
+SET authority = sqlc.arg(authority), authority_reason = sqlc.arg(authority_reason),
+    updated_at = sqlc.arg(updated_at)
+WHERE project_id = sqlc.arg(project_id) AND repo_id = sqlc.arg(repo_id)
+  AND authority = 'authoritative'
+  AND repo_identity <> sqlc.arg(observed_identity);
+
+-- name: MarkLegacyProjectMemoryItemsUnprovable :execrows
+-- Classify the rows an upgraded install already had (P2-D section 21).
+--
+-- A row written before 0146 has provenance_kind = '' -- not because anything
+-- went wrong, but because the column did not exist when it was written. It is
+-- withheld rather than deleted, and it is classified as LEGACY rather than as
+-- broken, because the two want different operator responses: one is an
+-- incident, the other is a migration.
+--
+-- Runs once per repository, guarded on authority still being the default, so
+-- a row a later validation pass proved (or disproved) is never reclassified
+-- back to legacy by a second sweep.
+UPDATE project_memory_items
+SET authority = 'legacy_unprovable', authority_reason = ?, updated_at = ?
+WHERE project_id = ? AND repo_id = ?
+  AND authority = 'authoritative' AND provenance_kind = '';
+
+-- name: SetProjectMemoryRelationAuthority :execrows
+-- Retire one edge's licence. Edges follow their endpoints (P2-D section 23): an edge
+-- derived from a fact that is no longer provable must not be traversed as
+-- current, and must not be deleted either.
+UPDATE project_memory_relations
+SET authority = ?, authority_reason = ?, updated_at = ?
+WHERE id = ? AND generation <= ?;
+
+-- name: MarkProjectMemoryRelationsUnprovableForNode :execrows
+-- Retire every edge that touches one node, in either direction. This is what
+-- an item losing its authority does to the graph around it.
+UPDATE project_memory_relations
+SET authority = sqlc.arg(authority), authority_reason = sqlc.arg(authority_reason),
+    updated_at = sqlc.arg(updated_at)
+WHERE project_id = sqlc.arg(project_id) AND repo_id = sqlc.arg(repo_id)
+  AND authority = 'authoritative'
+  AND ((from_kind = sqlc.arg(node_kind) AND from_key = sqlc.arg(node_key))
+    OR (to_kind = sqlc.arg(node_kind) AND to_key = sqlc.arg(node_key)));

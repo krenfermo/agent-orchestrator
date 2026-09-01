@@ -389,6 +389,13 @@ func (p *indexPass) run(ctx context.Context) error {
 		Commit:     p.req.Commit,
 		Generation: p.state.Generation,
 		Origin:     domain.OriginCanonical,
+		// P2-D: every fact this pass derives is stamped with the repository it
+		// was read from and with the proof that applies to it. RepoIdentityOf
+		// runs once per pass, not once per fact -- it shells out to git, and a
+		// pass over a large repository would otherwise pay for it thousands of
+		// times for an answer that cannot change mid-walk.
+		RepoIdentity:   RepoIdentityOf(ctx, p.req.RepoPath),
+		ProvenanceKind: domain.ProvenanceRepoDerivation,
 	}
 	p.modules = map[string]*moduleFacts{}
 	p.imports = map[string]map[string]struct{}{}

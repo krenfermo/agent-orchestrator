@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
 // git.go — the two questions project memory asks a checkout about itself.
@@ -77,4 +79,51 @@ func cleanAbs(p string) string {
 		return filepath.Clean(strings.TrimSpace(p))
 	}
 	return abs
+}
+
+// RepoIdentityOf reads a checkout's durable identity (P2-D §9).
+//
+// ProjectMemoryRepoID hashes the path, which is what a memory row is ADDRESSED
+// by and is deliberately not what it is IDENTIFIED by. A path answers neither
+// of the two questions integrity needs:
+//
+//	the same repository, moved to a new path      -> memory should follow it
+//	a different repository, at the old path       -> memory must NOT be inherited
+//
+// A path-derived id gets the first wrong safely (the moved checkout looks
+// unfamiliar and is re-indexed) and the second wrong dangerously: the new
+// project silently inherits the old project's conventions, decisions and risks
+// with nothing to say it happened.
+//
+// Both git reads follow this file's existing rule — a fact AO cannot read is
+// reported as absent, never guessed — and an identity that could not be
+// derived at all is the empty string, which matches nothing including another
+// empty string. That is what makes an unidentifiable repository fail closed.
+func RepoIdentityOf(ctx context.Context, repoPath string) domain.RepoIdentity {
+	remote := gitOutput(ctx, repoPath, "remote", "get-url", "origin")
+	if remote == "" {
+		// No `origin`, but there may be another remote. `remote -v` is the
+		// only listing form git offers, and the first URL in it is a stable
+		// choice: the list is sorted by remote name.
+		if listed := gitOutput(ctx, repoPath, "remote", "-v"); listed != "" {
+			for _, line := range strings.Split(listed, "\n") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					remote = fields[1]
+					break
+				}
+			}
+		}
+	}
+	// The root commit of the current history. `--max-parents=0` names every
+	// parentless commit; a repository with several (an unrelated history was
+	// merged in) yields them in reverse-chronological order, and the LAST is
+	// the oldest — the one that does not change when another root is grafted
+	// on later.
+	root := ""
+	if roots := gitOutput(ctx, repoPath, "rev-list", "--max-parents=0", "HEAD"); roots != "" {
+		lines := strings.Split(roots, "\n")
+		root = strings.TrimSpace(lines[len(lines)-1])
+	}
+	return domain.NewRepoIdentity(remote, root)
 }

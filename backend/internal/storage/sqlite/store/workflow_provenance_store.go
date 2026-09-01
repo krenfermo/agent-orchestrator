@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -127,7 +128,24 @@ func (s *Store) GetLatestWorkflowDispatchCheckpointByStep(
 	return workflowDispatchCheckpointFromRow(row), true, nil
 }
 
-// RecordWorkflowMutationProvenance appends one mutation-provenance record.
+// RecordWorkflowMutationProvenance appends one mutation-provenance record,
+// exactly once per boundary.
+//
+// "Exactly once" is a property of the BOUNDARY, not of the call. Two things
+// routinely try to record the same moment twice, and neither is a bug:
+//
+//   - A completion callback delivered twice (the harness retried, the outbox
+//     re-fired, a human pressed Continue).
+//   - A daemon that died between observing the mutation and writing the row,
+//     and re-observes the same mutation on restart.
+//
+// Both derive the same IdempotencyKey from the same facts (see
+// domain.MutationIdempotencyKey), the partial unique index collapses the
+// second write, and this method reads the surviving row back — so the caller
+// always ends up holding the ONE row that describes the boundary, whether it
+// wrote it or somebody else already had. A caller that could not derive a key
+// leaves it empty and gets append-only behaviour, which is the honest
+// fallback: two rows AO cannot prove are the same moment are two observations.
 func (s *Store) RecordWorkflowMutationProvenance(
 	ctx context.Context,
 	p domain.WorkflowMutationProvenance,
@@ -163,12 +181,114 @@ func (s *Store) RecordWorkflowMutationProvenance(
 		EvidenceJson:      evidence,
 		ObservedAt:        timePtrToNullTime(p.ObservedAt),
 		CreatedAt:         p.CreatedAt,
+
+		ProjectID:                  p.ProjectID,
+		RepoIdentity:               string(p.RepoIdentity),
+		RepoPath:                   p.RepoPath,
+		Placement:                  string(p.Placement),
+		Boundary:                   string(p.Boundary),
+		Generation:                 p.Generation,
+		IntegrationTargetRef:       p.IntegrationTargetRef,
+		IntegrationTargetBeforeSha: p.IntegrationTargetBeforeSHA,
+		IntegrationTargetAfterSha:  p.IntegrationTargetAfterSHA,
+		IntegrationMethod:          string(p.IntegrationMethod),
+		IdempotencyKey:             p.IdempotencyKey,
 	})
+	if errors.Is(err, sql.ErrNoRows) {
+		// ON CONFLICT DO NOTHING matched an existing row, so RETURNING yielded
+		// nothing. The boundary is already recorded; hand back the row that
+		// records it rather than a zero value the caller would read as "no
+		// provenance exists".
+		existing, found, gerr := s.getWorkflowMutationProvenanceByIdempotencyKeyLocked(ctx, p.IdempotencyKey)
+		if gerr != nil {
+			return domain.WorkflowMutationProvenance{}, gerr
+		}
+		if found {
+			return existing, nil
+		}
+		return domain.WorkflowMutationProvenance{}, fmt.Errorf(
+			"insert workflow mutation provenance for run %s: write was collapsed as a duplicate but no existing row could be read back",
+			p.WorkflowRunID)
+	}
 	if err != nil {
 		return domain.WorkflowMutationProvenance{}, fmt.Errorf(
 			"insert workflow mutation provenance for run %s: %w", p.WorkflowRunID, err)
 	}
 	return workflowMutationProvenanceFromRow(row), nil
+}
+
+// GetWorkflowMutationProvenanceByIdempotencyKey reads the row describing one
+// boundary, if AO has recorded it.
+func (s *Store) GetWorkflowMutationProvenanceByIdempotencyKey(
+	ctx context.Context, key string,
+) (domain.WorkflowMutationProvenance, bool, error) {
+	return s.getWorkflowMutationProvenanceByIdempotencyKeyLocked(ctx, key)
+}
+
+func (s *Store) getWorkflowMutationProvenanceByIdempotencyKeyLocked(
+	ctx context.Context, key string,
+) (domain.WorkflowMutationProvenance, bool, error) {
+	if strings.TrimSpace(key) == "" {
+		// An empty key is "this writer could not identify the boundary", and
+		// it must never match the other rows that could not either.
+		return domain.WorkflowMutationProvenance{}, false, nil
+	}
+	row, err := s.qr.GetWorkflowMutationProvenanceByIdempotencyKey(ctx, key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.WorkflowMutationProvenance{}, false, nil
+	}
+	if err != nil {
+		return domain.WorkflowMutationProvenance{}, false, fmt.Errorf(
+			"get workflow mutation provenance by idempotency key: %w", err)
+	}
+	return workflowMutationProvenanceFromRow(row), true, nil
+}
+
+// ListWorkflowMutationProvenanceByTask lists every boundary AO durably
+// recorded for one planned task, oldest first. Empty for a task AO never
+// observed a mutation for -- which is a complete answer, and the one that
+// makes a promotion fail closed.
+func (s *Store) ListWorkflowMutationProvenanceByTask(
+	ctx context.Context, taskID string,
+) ([]domain.WorkflowMutationProvenance, error) {
+	if strings.TrimSpace(taskID) == "" {
+		return nil, nil
+	}
+	rows, err := s.qr.ListWorkflowMutationProvenanceByTask(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("list workflow mutation provenance for task %s: %w", taskID, err)
+	}
+	out := make([]domain.WorkflowMutationProvenance, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, workflowMutationProvenanceFromRow(row))
+	}
+	return out, nil
+}
+
+// GetLatestWorkflowMutationProvenanceByTaskBoundary returns the current state
+// of one boundary for one task: the newest generation AO observed it at.
+//
+// Newest wins because a later observation supersedes an earlier one -- a
+// re-integration after a repair is the case that matters -- and a promotion
+// must be pinned to the last boundary AO actually saw, not the first.
+func (s *Store) GetLatestWorkflowMutationProvenanceByTaskBoundary(
+	ctx context.Context, taskID string, boundary domain.WorkflowMutationBoundary,
+) (domain.WorkflowMutationProvenance, bool, error) {
+	if strings.TrimSpace(taskID) == "" {
+		return domain.WorkflowMutationProvenance{}, false, nil
+	}
+	row, err := s.qr.GetLatestWorkflowMutationProvenanceByTaskBoundary(
+		ctx, gen.GetLatestWorkflowMutationProvenanceByTaskBoundaryParams{
+			TaskID: taskID, Boundary: string(boundary),
+		})
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.WorkflowMutationProvenance{}, false, nil
+	}
+	if err != nil {
+		return domain.WorkflowMutationProvenance{}, false, fmt.Errorf(
+			"get latest %s mutation provenance for task %s: %w", boundary, taskID, err)
+	}
+	return workflowMutationProvenanceFromRow(row), true, nil
 }
 
 // ListWorkflowMutationProvenanceByRun lists a run's provenance records oldest
@@ -323,5 +443,17 @@ func workflowMutationProvenanceFromRow(r gen.WorkflowMutationProvenance) domain.
 		EvidenceJSON:      r.EvidenceJson,
 		ObservedAt:        nullTimeToTimePtr(r.ObservedAt),
 		CreatedAt:         r.CreatedAt,
+
+		ProjectID:                  r.ProjectID,
+		RepoIdentity:               domain.RepoIdentity(r.RepoIdentity),
+		RepoPath:                   r.RepoPath,
+		Placement:                  domain.WorkflowMutationPlacement(r.Placement),
+		Boundary:                   domain.WorkflowMutationBoundary(r.Boundary),
+		Generation:                 r.Generation,
+		IntegrationTargetRef:       r.IntegrationTargetRef,
+		IntegrationTargetBeforeSHA: r.IntegrationTargetBeforeSha,
+		IntegrationTargetAfterSHA:  r.IntegrationTargetAfterSha,
+		IntegrationMethod:          domain.WorkflowIntegrationMethod(r.IntegrationMethod),
+		IdempotencyKey:             r.IdempotencyKey,
 	}
 }

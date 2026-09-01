@@ -487,22 +487,24 @@ type Project struct {
 }
 
 type ProjectMemoryContextManifest struct {
-	ID              string
-	ProjectID       string
-	RepoID          string
-	WorkflowRunID   string
-	TaskRef         string
-	Role            string
-	PackDigest      string
-	PolicyVersion   int64
-	Generation      int64
-	IndexedCommit   string
-	ItemIdsJson     string
-	ItemCount       int64
-	SelectedBytes   int64
-	EstimatedTokens int64
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID               string
+	ProjectID        string
+	RepoID           string
+	WorkflowRunID    string
+	TaskRef          string
+	Role             string
+	PackDigest       string
+	PolicyVersion    int64
+	Generation       int64
+	IndexedCommit    string
+	ItemIdsJson      string
+	ItemCount        int64
+	SelectedBytes    int64
+	EstimatedTokens  int64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	ItemVersionsJson string
+	RoleHeadSha      string
 }
 
 type ProjectMemoryFile struct {
@@ -538,28 +540,35 @@ type ProjectMemoryIndex struct {
 }
 
 type ProjectMemoryItem struct {
-	ID              string
-	ProjectID       string
-	RepoID          string
-	ItemType        string
-	Scope           string
-	ItemKey         string
-	Origin          string
-	OriginRef       string
-	Summary         string
-	Content         string
-	SourcePathsJson string
-	SourceCommit    string
-	SourceDigest    string
-	Generation      int64
-	State           string
-	StateReason     string
-	Confidence      float64
-	MetadataJson    string
-	ContentHash     string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	InvalidatedAt   sql.NullTime
+	ID                 string
+	ProjectID          string
+	RepoID             string
+	ItemType           string
+	Scope              string
+	ItemKey            string
+	Origin             string
+	OriginRef          string
+	Summary            string
+	Content            string
+	SourcePathsJson    string
+	SourceCommit       string
+	SourceDigest       string
+	Generation         int64
+	State              string
+	StateReason        string
+	Confidence         float64
+	MetadataJson       string
+	ContentHash        string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	InvalidatedAt      sql.NullTime
+	Authority          string
+	AuthorityReason    string
+	RepoIdentity       string
+	ProvenanceKind     string
+	PromotionAuthority string
+	VerifiedCommit     string
+	IntegratedCommit   string
 }
 
 type ProjectMemoryRelation struct {
@@ -584,6 +593,9 @@ type ProjectMemoryRelation struct {
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	InvalidatedAt   sql.NullTime
+	Authority       string
+	AuthorityReason string
+	RepoIdentity    string
 }
 
 type ProjectMemorySource struct {
@@ -923,24 +935,35 @@ type WorkflowDispatchCheckpoint struct {
 }
 
 type WorkflowMutationProvenance struct {
-	ID                string
-	WorkflowRunID     string
-	WorkflowStepID    sql.NullString
-	AttemptID         sql.NullString
-	TaskID            string
-	ProvenanceClass   string
-	Harness           string
-	SessionID         sql.NullString
-	Branch            string
-	WorktreePath      string
-	BaseSha           string
-	HeadSha           string
-	FingerprintBefore string
-	FingerprintAfter  string
-	Reason            string
-	EvidenceJson      string
-	ObservedAt        sql.NullTime
-	CreatedAt         time.Time
+	ID                         string
+	WorkflowRunID              string
+	WorkflowStepID             sql.NullString
+	AttemptID                  sql.NullString
+	TaskID                     string
+	ProvenanceClass            string
+	Harness                    string
+	SessionID                  sql.NullString
+	Branch                     string
+	WorktreePath               string
+	BaseSha                    string
+	HeadSha                    string
+	FingerprintBefore          string
+	FingerprintAfter           string
+	Reason                     string
+	EvidenceJson               string
+	ObservedAt                 sql.NullTime
+	CreatedAt                  time.Time
+	ProjectID                  string
+	RepoIdentity               string
+	RepoPath                   string
+	Placement                  string
+	Boundary                   string
+	Generation                 int64
+	IntegrationTargetRef       string
+	IntegrationTargetBeforeSha string
+	IntegrationTargetAfterSha  string
+	IntegrationMethod          string
+	IdempotencyKey             string
 }
 
 type WorkflowOutbox struct {

@@ -32,6 +32,7 @@ type Service struct {
 	repo     Repository
 	indexer  *Indexer
 	detector *Detector
+	validate *Validator
 	packs    *PackBuilder
 	graph    MemoryGraph
 	limits   IndexLimits
@@ -94,6 +95,8 @@ func NewService(repo Repository, opts ...ServiceOption) *Service {
 	s.indexer = NewIndexer(repo, s.graph, WithIndexLimits(s.limits), WithIndexClock(s.now))
 	s.detector = NewDetector(repo)
 	s.detector.now = s.now
+	s.validate = NewValidator(repo)
+	s.validate.now = s.now
 	s.packs = NewPackBuilder(repo).WithPackClock(s.now)
 	return s
 }
@@ -203,6 +206,79 @@ func (s *Service) Verify(ctx context.Context, projectID domain.ProjectID, repoPa
 	return s.detector.Check(ctx, DriftRequest{
 		ProjectID: projectID, RepoPath: repoPath, Commit: commit, Apply: apply,
 	})
+}
+
+// ChangeMark is the instant one repository's memory last changed in any way
+// that can alter what a reader is served. It is the pack cache's epoch; see
+// CacheKey.
+func (s *Service) ChangeMark(ctx context.Context, projectID domain.ProjectID, repoID string) (time.Time, error) {
+	return s.repo.ProjectMemoryChangeMark(ctx, projectID, repoID)
+}
+
+// Validate runs the P2-D authority pass. With apply false it is a dry run.
+//
+// It is a SECOND operator verb beside Verify rather than a widening of it,
+// because the two answer different questions and are repaired by different
+// actions: Verify asks whether a fact's sources still look the same, Validate
+// asks whether the thing that made it the project's knowledge is still on
+// record. An operator seeing "12 facts drifted" and an operator seeing "12
+// facts have no provable promotion" have very different next steps.
+func (s *Service) Validate(ctx context.Context, req ValidateRequest) (ValidateReport, error) {
+	return s.validate.Validate(ctx, req)
+}
+
+// ItemProvenance is everything AO can say about why one fact is, or is not,
+// being served (P2-D section 27).
+//
+// It is assembled rather than stored: every field is read off the item itself
+// or off the rows it names, so it cannot go out of date with the fact it
+// describes.
+type ItemProvenance struct {
+	Item domain.ProjectMemoryItem
+	// Servable is the single predicate the read side applies, reported here so
+	// an operator never has to re-derive it from the two axes below.
+	Servable bool
+	// AuthorityReasonClass is the class token parsed out of the stored reason,
+	// so a surface can group without parsing prose.
+	AuthorityReasonClass string
+	// Relations are the edges naming this fact, in both directions, including
+	// retired ones -- a retired edge is often exactly what explains why the
+	// fact is withheld.
+	Relations []domain.ProjectMemoryRelation
+}
+
+// Provenance answers "why is this fact valid, what produced it, what commit
+// supports it, and what invalidated it" for one item.
+func (s *Service) Provenance(ctx context.Context, id string) (ItemProvenance, bool, error) {
+	item, found, err := s.repo.GetProjectMemoryItem(ctx, id)
+	if err != nil || !found {
+		return ItemProvenance{}, found, err
+	}
+	out := ItemProvenance{
+		Item:                 item,
+		Servable:             item.Servable(),
+		AuthorityReasonClass: domain.MemoryAuthorityReasonClass(item.AuthorityReason),
+	}
+	node := knowledgeNode(item.ID)
+	// Both directions, and every state. An operator asking why a decision is
+	// not current is very often looking for the `supersedes` edge that
+	// retired it, which by definition is not in the current graph.
+	for _, state := range []domain.ProjectMemoryState{
+		domain.MemoryStateValid, domain.MemoryStateStale,
+		domain.MemoryStateInvalidated, domain.MemoryStateRebuilding,
+	} {
+		from, err := s.repo.ListProjectMemoryRelationsFrom(ctx, item.Key.ProjectID, item.Key.RepoID, node, state)
+		if err != nil {
+			return out, true, err
+		}
+		out.Relations = append(out.Relations, from...)
+		to, err := s.repo.ListProjectMemoryRelationsTo(ctx, item.Key.ProjectID, item.Key.RepoID, node, state)
+		if err != nil {
+			return out, true, err
+		}
+		out.Relations = append(out.Relations, to...)
+	}
+	return out, true, nil
 }
 
 // Invalidate marks everything derived from the named paths as no longer
@@ -411,6 +487,22 @@ type TaskOutcome struct {
 	// the default — means nobody but the task itself. Integrated work is
 	// always canonical regardless of this field.
 	Share domain.KnowledgeShare
+
+	// --- P2-D provenance -------------------------------------------------
+
+	// RepoIdentity is the durable identity of the repository this work
+	// happened in. It is stamped onto every fact the outcome produces so a
+	// different repository later checked out at the same path cannot inherit
+	// them. Empty means the caller could not identify the checkout, which
+	// never matches and therefore fails closed.
+	RepoIdentity domain.RepoIdentity
+	// VerifiedCommit is the head verification passed on, kept apart from
+	// Commit because they answer different questions.
+	VerifiedCommit string
+	// Promotion is what the calling authority PROVED about where this work
+	// landed. A refusal carries its reason, which is what lets a withheld fact
+	// explain itself instead of merely being absent.
+	Promotion domain.MemoryPromotionProof
 }
 
 // MaxRetainedTaskResults bounds how many task outcomes one repository keeps.
@@ -461,6 +553,12 @@ func (s *Service) RecordTaskOutcome(ctx context.Context, out TaskOutcome) error 
 	base := itemBase{
 		ProjectID: out.ProjectID, RepoID: repoID, Commit: out.Commit,
 		Origin: origin, OriginRef: originRef,
+		RepoIdentity: out.RepoIdentity,
+		// A task's own account of what it did, derived from durable workflow
+		// rows. The decisions and risks below carry ProvenanceWorkflowKnowledge
+		// instead -- see knowledgeWriter -- because their proof is a different
+		// row and a validator has to know which one to look for.
+		ProvenanceKind: domain.ProvenanceTaskOutcome,
 		// Task memory carries generation 0. It is not produced by an indexing
 		// pass, so fencing it against one would be meaningless — and a pass
 		// must never be able to retire it, which the retire sweep already
@@ -627,7 +725,9 @@ func (s *Service) compactTaskMemory(ctx context.Context, projectID domain.Projec
 // still there, and a second call promotes the same content to the same derived
 // identity before discarding again — so a duplicate completion callback
 // produces exactly one canonical fact, never two.
-func (s *Service) PromoteTaskMemory(ctx context.Context, projectID domain.ProjectID, taskRef, commit string) (int, error) {
+func (s *Service) PromoteTaskMemory(
+	ctx context.Context, projectID domain.ProjectID, taskRef string, proof domain.MemoryPromotionProof,
+) (int, error) {
 	items, err := s.repo.ListProjectMemoryItemsForTask(ctx, projectID, taskRef)
 	if err != nil {
 		return 0, err
@@ -637,6 +737,26 @@ func (s *Service) PromoteTaskMemory(ctx context.Context, projectID domain.Projec
 	}
 	now := s.now()
 	repoID := items[0].Key.RepoID
+
+	// P2-D section 13/14: an unproven promotion does not promote.
+	//
+	// The task-local rows are left exactly where they are -- still readable by
+	// the task that made them, still shareable to its declared dependents if
+	// their sharing scope allowed it, and still available to a later promotion
+	// that CAN prove the integration. What changes is that they are annotated
+	// with the refusal, so an operator asking "why is this task's decision not
+	// project knowledge" gets the reason rather than an absence.
+	//
+	// Nothing is discarded on this path either. Discarding is what happens
+	// when a run ends without proving its work (DiscardTaskMemory); a
+	// promotion that could not be proven is not the end of anything, and a
+	// later integration is exactly the event that resolves it.
+	if !proof.Provable {
+		s.annotateUnprovablePromotion(ctx, items, proof, now)
+		return 0, nil
+	}
+
+	commit := proof.IntegratedCommit
 	existing, err := s.repo.ListProjectMemoryItems(ctx, projectID, repoID)
 	if err != nil {
 		return 0, err
@@ -650,6 +770,18 @@ func (s *Service) PromoteTaskMemory(ctx context.Context, projectID domain.Projec
 		canonical.ID = ""
 		if commit != "" {
 			canonical.SourceCommit = commit
+		}
+		// The proof, recorded ON the row rather than beside it. A canonical
+		// fact and the evidence that it is canonical are written together, so
+		// there is no instant at which a promoted row exists without the row
+		// that explains it.
+		canonical.Authority = domain.AuthorityAuthoritative
+		canonical.AuthorityReason = ""
+		canonical.PromotionAuthority = proof.MutationProvenanceID
+		canonical.VerifiedCommit = proof.VerifiedCommit
+		canonical.IntegratedCommit = proof.IntegratedCommit
+		if proof.RepoIdentity.Known() {
+			canonical.RepoIdentity = proof.RepoIdentity
 		}
 		canonical = domain.WithKnowledgeMetadata(canonical, domain.MetaKnowledgeIntegrated, "true")
 		canonical = domain.WithKnowledgeMetadata(canonical, "promotedFromTask", taskRef)
@@ -698,6 +830,38 @@ func (s *Service) PromoteTaskMemory(ctx context.Context, projectID domain.Projec
 		return len(promoted), err
 	}
 	return len(promoted), s.compactKnowledge(ctx, projectID, repoID, now)
+}
+
+// annotateUnprovablePromotion records WHY a promotion was refused, on the
+// task-local rows it declined to promote.
+//
+// It writes the authority axis and nothing else: the rows keep their state,
+// their content and their sharing scope, so a refusal costs the task nothing
+// it already had. What it buys is that `ao memory provenance <item>` can
+// answer "this is not project knowledge because AO holds no record that the
+// worktree was ever integrated" instead of the operator finding no canonical
+// row and having to guess.
+//
+// Best-effort, and deliberately so: a promotion that was already refused must
+// not turn into an error because the explanation could not be stored.
+func (s *Service) annotateUnprovablePromotion(
+	ctx context.Context, items []domain.ProjectMemoryItem, proof domain.MemoryPromotionProof, now time.Time,
+) {
+	reason := proof.AuthorityReason()
+	for _, item := range items {
+		if item.Authority == domain.AuthorityUnprovable && item.AuthorityReason == reason {
+			// Already annotated with this exact refusal. A retried promotion
+			// re-derives the same reason, and rewriting the row would move
+			// updated_at for no new information.
+			continue
+		}
+		if _, err := s.repo.SetProjectMemoryItemAuthority(
+			ctx, item.ID, item.Generation, domain.AuthorityUnprovable, reason, now,
+		); err != nil && s.log != nil {
+			s.log.Warn("project memory: could not annotate an unprovable promotion",
+				"item", item.ID, "err", err)
+		}
+	}
 }
 
 // DiscardTaskMemory drops one task's unintegrated facts.

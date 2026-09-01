@@ -273,14 +273,14 @@ func TestPromotionAfterIntegrationMakesKnowledgeCanonical(t *testing.T) {
 		}},
 	})
 
-	first, err := svc.PromoteTaskMemory(f.ctx, testProject, "task-a", "c2")
+	first, err := svc.PromoteTaskMemory(f.ctx, testProject, "task-a", provenPromotion("c2"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first == 0 {
 		t.Fatal("promotion moved nothing")
 	}
-	second, err := svc.PromoteTaskMemory(f.ctx, testProject, "task-a", "c2")
+	second, err := svc.PromoteTaskMemory(f.ctx, testProject, "task-a", provenPromotion("c2"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +502,7 @@ func TestPromotionResolvesTheConflictItCreated(t *testing.T) {
 			Statement: "the public API speaks GraphQL", Topic: "api-protocol",
 		}},
 	})
-	if _, err := svc.PromoteTaskMemory(f.ctx, testProject, "task-b", "c2"); err != nil {
+	if _, err := svc.PromoteTaskMemory(f.ctx, testProject, "task-b", provenPromotion("c2")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1169,5 +1169,24 @@ func TestDerivedKnowledgeFromAnUnintegratedWorktreeStaysOutOfCanonical(t *testin
 	}).Render()
 	if strings.Contains(sibling, "still unresolved") {
 		t.Errorf("a sibling read an unintegrated task's derived risk:\n%s", sibling)
+	}
+}
+
+// provenPromotion is the proof a test's promotion stands on.
+//
+// Every existing promotion test predates P2-D and was written when promotion
+// took a bare commit. They are asserting what promotion DOES with facts it is
+// allowed to promote, so they get a proof that is provable — the refusal path
+// has its own tests (see promotion_proof_test.go), and weakening these to go
+// through it would silently stop them testing anything.
+func provenPromotion(commit string) domain.MemoryPromotionProof {
+	return domain.MemoryPromotionProof{
+		Provable:             true,
+		MutationProvenanceID: "wmp-test",
+		VerifiedCommit:       commit,
+		IntegratedCommit:     commit,
+		RepoIdentity:         domain.RepoIdentity("root_test"),
+		Placement:            domain.MutationPlacementDirectBranch,
+		Method:               domain.IntegrationDirectCommit,
 	}
 }

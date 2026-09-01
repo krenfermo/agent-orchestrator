@@ -89,6 +89,9 @@ type DriftReport struct {
 	// aggregates whose source is the whole tree. They are left alone, and
 	// counted here so the report never implies they were confirmed.
 	Unverifiable int
+	// EdgesRetired counts graph edges withheld because a fact they name was
+	// invalidated by this pass (P2-D section 23).
+	EdgesRetired int64
 	// Truncated reports that MaxChecks stopped the pass short, which means
 	// "no drift found" covers only what was checked.
 	Truncated bool
@@ -172,12 +175,33 @@ func (d *Detector) Check(ctx context.Context, req DriftRequest) (DriftReport, er
 			continue
 		}
 		if req.Apply {
+			now := d.now()
 			applied, err := d.repo.MarkProjectMemoryItemState(ctx, item.ID, item.Generation,
-				finding.To, finding.Reason, d.now())
+				finding.To, finding.Reason, now)
 			if err != nil {
 				return report, err
 			}
 			finding.Applied = applied
+			if applied && finding.To == domain.MemoryStateInvalidated {
+				// P2-D section 23: the graph follows its nodes. An edge
+				// derived from a fact whose subject is GONE must stop being
+				// traversed as current -- and must not be deleted, because the
+				// record that two facts were once related is what an operator
+				// reads when asking why a decision was made.
+				//
+				// Only on invalidation, not on staleness. A stale fact is one
+				// whose content moved and which the next pass will re-derive
+				// in place; retiring its edges would make every ordinary edit
+				// tear down and rebuild the graph around it. An invalidated
+				// fact is one whose sources are gone, and nothing is coming
+				// back to re-derive it.
+				n, err := d.repo.RetireProjectMemoryRelationsForNode(ctx, req.ProjectID, repoID,
+					knowledgeNode(item.ID), finding.Reason, now)
+				if err != nil {
+					return report, err
+				}
+				report.EdgesRetired += n
+			}
 		}
 		report.Findings = append(report.Findings, finding)
 	}

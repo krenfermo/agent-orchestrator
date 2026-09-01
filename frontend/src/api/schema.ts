@@ -725,6 +725,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/memory/provenance/{itemId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P2-D: the full evidence chain behind one fact — why it is valid, which task produced it, which commit supports it, how it became canonical, what withdrew it, and what replaced it. Retired edges are included: a superseded decision's supersedes edge is not in the current graph and is usually what is being looked for. */
+        get: operations["getProjectMemoryProvenance"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/memory/rebuild": {
         parameters: {
             query?: never;
@@ -753,6 +770,23 @@ export interface paths {
         get: operations["getProjectMemoryReport"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P2-D: check which facts AO can still prove it is entitled to serve. Distinct from invalidate, which asks whether a fact's source FILES moved: this asks whether its LICENCE still holds — same repository identity, a mutation-provenance row behind every canonical promotion, a provenance kind this build can check. Dry run unless apply is set, and it only ever demotes. */
+        post: operations["validateProjectMemory"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3283,20 +3317,29 @@ export interface components {
             user?: components["schemas"]["ControllersUserView"];
         };
         ControllersProjectMemoryItemResponse: {
+            /** @enum {string} */
+            authority: "authoritative" | "unprovable" | "legacy_unprovable";
+            authorityReason?: string;
             /** Format: double */
             confidence: number;
             contentBytes: number;
             /** Format: int64 */
             generation: number;
             id: string;
+            integratedCommit?: string;
             invalidatedAt: null | string;
             key?: string;
             /** @enum {string} */
             origin: "canonical" | "task_local";
             originRef?: string;
+            promotionAuthority?: string;
+            /** @enum {string} */
+            provenanceKind?: "repo_derivation" | "task_outcome" | "workflow_knowledge" | "legacy";
             repoId: string;
+            repoIdentity?: string;
             /** @enum {string} */
             scope: "project" | "repository" | "module" | "file" | "symbol" | "task";
+            servable: boolean;
             sourceCommit?: string;
             sourcePaths?: string[];
             /** @enum {string} */
@@ -3305,6 +3348,7 @@ export interface components {
             summary: string;
             type: string;
             updatedAt: string;
+            verifiedCommit?: string;
         };
         ControllersProjectMemoryKnowledgeResponse: {
             /** Format: double */
@@ -3353,6 +3397,27 @@ export interface components {
             selectedBytes: number;
             taskRef?: string;
             workflowRunId?: string;
+        };
+        ControllersProjectMemoryProvenanceResponse: {
+            authorityReasonClass?: string;
+            item: components["schemas"]["ControllersProjectMemoryItemResponse"];
+            relations: components["schemas"]["ControllersProjectMemoryRelationResponse"][];
+            servable: boolean;
+        };
+        ControllersProjectMemoryRelationResponse: {
+            /** @enum {string} */
+            authority: "authoritative" | "unprovable" | "legacy_unprovable";
+            authorityReason?: string;
+            fromKey: string;
+            fromKind: string;
+            id: string;
+            kind: string;
+            sourceCommit?: string;
+            /** @enum {string} */
+            state: "valid" | "stale" | "invalidated" | "rebuilding";
+            stateReason?: string;
+            toKey: string;
+            toKind: string;
         };
         ControllersProjectMemoryReportResponse: {
             cacheEnabled: boolean;
@@ -3418,6 +3483,18 @@ export interface components {
             stale: number;
             taskLocal: number;
             valid: number;
+        };
+        ControllersProjectMemoryValidationFindingResponse: {
+            applied: boolean;
+            detail: string;
+            from: string;
+            itemId: string;
+            key?: string;
+            reasonClass: string;
+            scope: string;
+            summary: string;
+            to: string;
+            type: string;
         };
         ControllersProviderAttemptView: {
             authoritative: boolean;
@@ -3739,6 +3816,29 @@ export interface components {
             /** @enum {string} */
             status: "active" | "disabled";
             username: string;
+        };
+        ControllersValidateProjectMemoryRequest: {
+            /** @description Write the demotions. Defaults to false, so the diagnostic can be run before anything changes. */
+            apply?: boolean;
+            /** @description Maximum facts to check. Defaults to 2000. */
+            limit?: null | number;
+            /** @description Repository root to validate. Defaults to the project's own root. */
+            repoPath?: string;
+        };
+        ControllersValidateProjectMemoryResponse: {
+            applied: boolean;
+            checked: number;
+            /** Format: int64 */
+            edgesRetired: number;
+            findings: components["schemas"]["ControllersProjectMemoryValidationFindingResponse"][];
+            /** Format: int64 */
+            identityWithheld: number;
+            /** Format: int64 */
+            legacyClassified: number;
+            provable: number;
+            repoId: string;
+            repoIdentity?: string;
+            truncated: boolean;
         };
         ControllersWorkflowBranchCessionChainView: {
             /** @enum {string} */
@@ -8163,6 +8263,58 @@ export interface operations {
             };
         };
     };
+    getProjectMemoryProvenance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Derived project-memory item id, as returned by the items or validate routes. */
+                itemId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProjectMemoryProvenanceResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     rebuildProjectMemory: {
         parameters: {
             query?: never;
@@ -8239,6 +8391,60 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ControllersProjectMemoryReportResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    validateProjectMemory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersValidateProjectMemoryRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersValidateProjectMemoryResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
                 };
             };
             /** @description Internal Server Error */

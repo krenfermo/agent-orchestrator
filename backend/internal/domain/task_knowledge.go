@@ -431,6 +431,25 @@ type MemoryContextManifest struct {
 	IndexedCommit string
 	// ItemIDs are the facts, in the order the pack presented them.
 	ItemIDs []string
+	// ItemVersions are those facts' content hashes at selection time,
+	// positionally aligned with ItemIDs (P2-D section 18).
+	//
+	// The ids alone answer "which facts" and cannot answer "which VERSION of
+	// them", and the incident shape P2-D section 17 describes is a version
+	// question: the worker was told memory of generation X, the reviewer
+	// judged SHA Z, and nothing recorded whether the two packs were assembled
+	// from the same rows. A content hash per item makes that comparable
+	// without storing the facts twice.
+	//
+	// Normalized() keeps the two slices the same length -- a manifest with
+	// four ids and three versions would make position meaningless, so a short
+	// list is padded with "" ("this version was not recorded") rather than
+	// silently shifting every later entry.
+	ItemVersions []string
+	// RoleHeadSHA is the commit the role was reasoning about, when the caller
+	// knew it. For a reviewer that is the reviewed SHA. Empty is honest and
+	// common: a planner is not reasoning about one commit.
+	RoleHeadSHA string
 	// SelectedBytes and EstimatedTokens are what the pack cost.
 	SelectedBytes   int
 	EstimatedTokens int
@@ -471,6 +490,18 @@ func (m MemoryContextManifest) Normalized() MemoryContextManifest {
 		}
 	}
 	m.ItemIDs = ids
+	// Versions are aligned to ids by POSITION, so the slice is trimmed or
+	// padded to match rather than trusted. Padding with "" records "AO did not
+	// capture this item's version", which is a fact; shifting the remaining
+	// entries by one would record several versions that are wrong.
+	versions := make([]string, len(ids))
+	for i := range versions {
+		if i < len(m.ItemVersions) {
+			versions[i] = strings.TrimSpace(m.ItemVersions[i])
+		}
+	}
+	m.ItemVersions = versions
+	m.RoleHeadSHA = strings.TrimSpace(m.RoleHeadSHA)
 	m.ID = MemoryContextManifestID(m.ProjectID, m.WorkflowRunID, m.TaskRef, m.Role, m.PackDigest)
 	return m
 }

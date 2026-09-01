@@ -350,6 +350,13 @@ type Deps struct {
 	// a degraded mode, so the coordinator behaves exactly as it did before.
 	TaskMemory TaskMemory
 
+	// MutationProvenance records the durable boundaries at which AO's own work
+	// changed a repository (P2-D). Nil means the daemon records none, which is
+	// safe but not free: a memory promotion that can find no proof withholds
+	// the fact rather than promoting it, so a daemon without this wired
+	// produces LESS canonical knowledge, never wrong knowledge.
+	MutationProvenance MutationProvenance
+
 	// Switcher backs Checkpoint 8H's live-session Codex->Claude failover
 	// (failover.go): the durable, generation-fenced session_manager agent-
 	// switching saga, reused unmodified — workflow only decides WHEN to call
@@ -619,6 +626,9 @@ type Coordinator struct {
 	// memory. Nil is the ordinary state for a daemon with memory switched off,
 	// and every call site treats it as normal rather than degraded.
 	taskMemory TaskMemory
+	// mutationProvenance is the durable mutation-boundary writer (P2-D). Nil
+	// disables recording; see mutation_provenance.go.
+	mutationProvenance MutationProvenance
 	// qaGate and reviewThreads are the durable sources a finished task's risks
 	// are derived from. Both optional; see task_knowledge_sources.go.
 	qaGate        QAGate
@@ -758,6 +768,7 @@ func New(d Deps) *Coordinator {
 		planner:                  d.Planner,
 		plannerContextBuilder:    d.PlannerContextBuilder,
 		taskMemory:               d.TaskMemory,
+		mutationProvenance:       d.MutationProvenance,
 		qaGate:                   d.QAGate,
 		reviewThreads:            d.ReviewThreads,
 		switcher:                 d.Switcher,

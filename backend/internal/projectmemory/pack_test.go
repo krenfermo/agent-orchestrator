@@ -342,7 +342,7 @@ func TestPromoteTaskMemoryMakesItCanonical(t *testing.T) {
 		t.Fatal("an unintegrated decision was visible to another task")
 	}
 
-	promoted, err := svc.PromoteTaskMemory(f.ctx, testProject, "t1", "c2")
+	promoted, err := svc.PromoteTaskMemory(f.ctx, testProject, "t1", provenPromotion("c2"))
 	if err != nil {
 		t.Fatal(err)
 	}

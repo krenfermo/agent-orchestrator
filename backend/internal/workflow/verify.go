@@ -1378,6 +1378,13 @@ func (c *Coordinator) completeVerifiedRun(ctx stdctx.Context, run domain.Workflo
 		return c.failRunOnCommitError(ctx, run, step, err)
 	}
 	defer c.releaseBranchLocks(ctx, run.ID, "workflow run completed")
+	// P2-D: the mutation boundary, BEFORE the memory it licenses. Recording
+	// the evidence first is what makes a crash between the two recoverable in
+	// the safe direction: AO ends up holding proof of work whose memory was
+	// never written (the next pass can write it) rather than memory whose
+	// proof it cannot produce (which the promotion path would have to
+	// withhold). Best-effort, like everything else in this window.
+	c.recordVerifiedBoundary(ctx, run, step, c.completedRunCommit(ctx, run))
 	// P2-B: the work is now both verified and committed, which is the first
 	// moment AO can record what this task did as a durable fact and retire the
 	// memory its changes disproved. It is best-effort and never fails the run —

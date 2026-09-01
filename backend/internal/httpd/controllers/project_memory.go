@@ -50,6 +50,63 @@ type ProjectMemoryService interface {
 	Knowledge(ctx context.Context, req ProjectMemoryKnowledgeQuery) (ProjectMemoryKnowledgeResult, error)
 	// Manifests reads what one execution was actually told (P2-C §16).
 	Manifests(ctx context.Context, req ProjectMemoryManifestQuery) (ProjectMemoryManifestResult, error)
+	// Validate runs the P2-D authority pass: which facts can AO still prove it
+	// is entitled to serve. It is a second verb beside Invalidate rather than a
+	// mode of it, because the two find different problems with different
+	// repairs — a drifted fact needs re-deriving, an unprovable one needs its
+	// promotion found or never promoting at all.
+	Validate(ctx context.Context, req ProjectMemoryValidateQuery) (ProjectMemoryValidation, error)
+	// Provenance answers, for one fact: why is this valid, what task produced
+	// it, which commit supports it, how did it become canonical, and what
+	// withdrew it (P2-D §27).
+	Provenance(ctx context.Context, projectID domain.ProjectID, itemID string) (ProjectMemoryProvenance, bool, error)
+}
+
+// ProjectMemoryValidateQuery asks for one authority pass.
+type ProjectMemoryValidateQuery struct {
+	ProjectID domain.ProjectID
+	RepoPath  string
+	// Apply writes the demotions. It defaults to false so the diagnostic is
+	// safe to run: an operator investigating an integrity question should be
+	// able to look before anything changes.
+	Apply bool
+	Limit int
+}
+
+// ProjectMemoryValidation is what an authority pass found.
+type ProjectMemoryValidation struct {
+	RepoID           string
+	RepoIdentity     string
+	Applied          bool
+	Checked          int
+	Provable         int
+	IdentityWithheld int64
+	LegacyClassified int64
+	EdgesRetired     int64
+	Truncated        bool
+	Findings         []ProjectMemoryValidationFinding
+}
+
+// ProjectMemoryValidationFinding is one fact whose licence no longer holds.
+type ProjectMemoryValidationFinding struct {
+	ItemID      string
+	Type        string
+	Scope       string
+	Key         string
+	Summary     string
+	From        string
+	To          string
+	ReasonClass string
+	Detail      string
+	Applied     bool
+}
+
+// ProjectMemoryProvenance is the full evidence chain for one fact.
+type ProjectMemoryProvenance struct {
+	Item                 domain.ProjectMemoryItem
+	Servable             bool
+	AuthorityReasonClass string
+	Relations            []domain.ProjectMemoryRelation
 }
 
 // ProjectMemoryKnowledgeQuery narrows a shared-knowledge read.
@@ -209,6 +266,90 @@ func (c *ProjectMemoryController) Register(r chi.Router) {
 	r.Get("/projects/{id}/memory/report", c.report)
 	r.Get("/projects/{id}/memory/knowledge", c.knowledge)
 	r.Get("/projects/{id}/memory/manifests", c.manifests)
+	r.Post("/projects/{id}/memory/validate", c.validate)
+	r.Get("/projects/{id}/memory/provenance/{itemId}", c.provenance)
+}
+
+// validate runs the P2-D authority pass.
+//
+// It is a POST even in its default dry-run form, because the pass is real work
+// over a repository rather than a read of stored state, and because the
+// apply/dry-run choice belongs in a body rather than in a query string that a
+// browser could follow by accident.
+func (c *ProjectMemoryController) validate(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/projects/{id}/memory/validate")
+		return
+	}
+	var req ValidateProjectMemoryRequest
+	if err := decodeJSON(r, &req); err != nil {
+		envelope.WriteError(w, r, apierr.Invalid("invalid_body", "request body is not valid JSON", nil))
+		return
+	}
+	limit := 0
+	if req.Limit != nil {
+		if *req.Limit < 0 {
+			envelope.WriteError(w, r, apierr.Invalid("invalid_limit",
+				"limit must be a non-negative integer", nil))
+			return
+		}
+		limit = int(*req.Limit)
+	}
+	res, err := c.Svc.Validate(r.Context(), ProjectMemoryValidateQuery{
+		ProjectID: domain.ProjectID(chi.URLParam(r, "id")),
+		RepoPath:  strings.TrimSpace(req.RepoPath),
+		Apply:     req.Apply,
+		Limit:     limit,
+	})
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	findings := make([]ProjectMemoryValidationFindingResponse, 0, len(res.Findings))
+	for _, f := range res.Findings {
+		findings = append(findings, ProjectMemoryValidationFindingResponse(f))
+	}
+	envelope.WriteJSON(w, http.StatusOK, ValidateProjectMemoryResponse{
+		RepoID:           res.RepoID,
+		RepoIdentity:     res.RepoIdentity,
+		Applied:          res.Applied,
+		Checked:          res.Checked,
+		Provable:         res.Provable,
+		IdentityWithheld: res.IdentityWithheld,
+		LegacyClassified: res.LegacyClassified,
+		EdgesRetired:     res.EdgesRetired,
+		Truncated:        res.Truncated,
+		Findings:         findings,
+	})
+}
+
+// provenance answers "why is this fact valid, and what produced it".
+func (c *ProjectMemoryController) provenance(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/projects/{id}/memory/provenance/{itemId}")
+		return
+	}
+	res, found, err := c.Svc.Provenance(r.Context(),
+		domain.ProjectID(chi.URLParam(r, "id")), chi.URLParam(r, "itemId"))
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	if !found {
+		envelope.WriteError(w, r, apierr.NotFound("memory_item_not_found",
+			"no project memory item with that id"))
+		return
+	}
+	rels := make([]ProjectMemoryRelationResponse, 0, len(res.Relations))
+	for _, rel := range res.Relations {
+		rels = append(rels, projectMemoryRelationResponse(rel))
+	}
+	envelope.WriteJSON(w, http.StatusOK, ProjectMemoryProvenanceResponse{
+		Item:                 projectMemoryItemResponse(res.Item),
+		Servable:             res.Servable,
+		AuthorityReasonClass: res.AuthorityReasonClass,
+		Relations:            rels,
+	})
 }
 
 // knowledge answers "what have tasks taught this project, and what of it still
@@ -495,6 +636,89 @@ type ProjectMemoryItemResponse struct {
 	ContentBytes  int      `json:"contentBytes"`
 	UpdatedAt     string   `json:"updatedAt"`
 	InvalidatedAt *string  `json:"invalidatedAt"`
+
+	// P2-D: the authority axis, reported beside the drift state rather than
+	// folded into it. Servable is the conjunction the read side actually
+	// applies, given explicitly so a surface never has to re-derive it.
+	Authority          string `json:"authority" enum:"authoritative,unprovable,legacy_unprovable"`
+	AuthorityReason    string `json:"authorityReason,omitempty"`
+	Servable           bool   `json:"servable"`
+	ProvenanceKind     string `json:"provenanceKind,omitempty" enum:"repo_derivation,task_outcome,workflow_knowledge,legacy"`
+	RepoIdentity       string `json:"repoIdentity,omitempty"`
+	PromotionAuthority string `json:"promotionAuthority,omitempty"`
+	VerifiedCommit     string `json:"verifiedCommit,omitempty"`
+	IntegratedCommit   string `json:"integratedCommit,omitempty"`
+}
+
+// ProjectMemoryRelationResponse is one graph edge on the wire.
+type ProjectMemoryRelationResponse struct {
+	ID              string `json:"id"`
+	FromKind        string `json:"fromKind"`
+	FromKey         string `json:"fromKey"`
+	Kind            string `json:"kind"`
+	ToKind          string `json:"toKind"`
+	ToKey           string `json:"toKey"`
+	State           string `json:"state" enum:"valid,stale,invalidated,rebuilding"`
+	StateReason     string `json:"stateReason,omitempty"`
+	Authority       string `json:"authority" enum:"authoritative,unprovable,legacy_unprovable"`
+	AuthorityReason string `json:"authorityReason,omitempty"`
+	SourceCommit    string `json:"sourceCommit,omitempty"`
+}
+
+// ProjectMemoryItemIDParam is the {itemId} path parameter of the provenance
+// route. Item ids are derived hashes rather than sequential keys, so a caller
+// gets them from an inspect or a validate rather than by guessing.
+type ProjectMemoryItemIDParam struct {
+	ID     string `path:"id" description:"Project identifier (registry key)."`
+	ItemID string `path:"itemId" description:"Derived project-memory item id, as returned by the items or validate routes."`
+}
+
+// ValidateProjectMemoryRequest is the body of
+// POST /api/v1/projects/{id}/memory/validate.
+type ValidateProjectMemoryRequest struct {
+	RepoPath string `json:"repoPath,omitempty" description:"Repository root to validate. Defaults to the project's own root."`
+	Apply    bool   `json:"apply,omitempty" description:"Write the demotions. Defaults to false, so the diagnostic can be run before anything changes."`
+	Limit    *int64 `json:"limit,omitempty" minimum:"1" maximum:"20000" description:"Maximum facts to check. Defaults to 2000."`
+}
+
+// ValidateProjectMemoryResponse is the body of the same route.
+type ValidateProjectMemoryResponse struct {
+	RepoID string `json:"repoId"`
+	// RepoIdentity is what the checkout identifies as right now. Empty means
+	// AO could not identify it, which is itself the answer to several
+	// questions and is why it is reported even on a clean pass.
+	RepoIdentity     string                                   `json:"repoIdentity,omitempty"`
+	Applied          bool                                     `json:"applied"`
+	Checked          int                                      `json:"checked"`
+	Provable         int                                      `json:"provable"`
+	IdentityWithheld int64                                    `json:"identityWithheld"`
+	LegacyClassified int64                                    `json:"legacyClassified"`
+	EdgesRetired     int64                                    `json:"edgesRetired"`
+	Truncated        bool                                     `json:"truncated"`
+	Findings         []ProjectMemoryValidationFindingResponse `json:"findings"`
+}
+
+// ProjectMemoryValidationFindingResponse is one withheld fact on the wire.
+type ProjectMemoryValidationFindingResponse struct {
+	ItemID      string `json:"itemId"`
+	Type        string `json:"type"`
+	Scope       string `json:"scope"`
+	Key         string `json:"key,omitempty"`
+	Summary     string `json:"summary"`
+	From        string `json:"from"`
+	To          string `json:"to"`
+	ReasonClass string `json:"reasonClass"`
+	Detail      string `json:"detail"`
+	Applied     bool   `json:"applied"`
+}
+
+// ProjectMemoryProvenanceResponse is the body of
+// GET /api/v1/projects/{id}/memory/provenance/{itemId}.
+type ProjectMemoryProvenanceResponse struct {
+	Item                 ProjectMemoryItemResponse       `json:"item"`
+	Servable             bool                            `json:"servable"`
+	AuthorityReasonClass string                          `json:"authorityReasonClass,omitempty"`
+	Relations            []ProjectMemoryRelationResponse `json:"relations"`
 }
 
 // ListProjectMemoryItemsQuery is the query-string contract of
@@ -626,11 +850,35 @@ func projectMemoryItemResponse(item domain.ProjectMemoryItem) ProjectMemoryItemR
 		ContentBytes: len(item.Content),
 		UpdatedAt:    item.UpdatedAt.Format(rfc3339Milli),
 	}
+	out.Authority = string(item.Authority)
+	out.AuthorityReason = item.AuthorityReason
+	out.Servable = item.Servable()
+	out.ProvenanceKind = string(item.ProvenanceKind)
+	out.RepoIdentity = string(item.RepoIdentity)
+	out.PromotionAuthority = item.PromotionAuthority
+	out.VerifiedCommit = item.VerifiedCommit
+	out.IntegratedCommit = item.IntegratedCommit
 	if !item.InvalidatedAt.IsZero() {
 		v := item.InvalidatedAt.Format(rfc3339Milli)
 		out.InvalidatedAt = &v
 	}
 	return out
+}
+
+func projectMemoryRelationResponse(rel domain.ProjectMemoryRelation) ProjectMemoryRelationResponse {
+	return ProjectMemoryRelationResponse{
+		ID:              rel.ID,
+		FromKind:        string(rel.From.Kind),
+		FromKey:         rel.From.Key,
+		Kind:            string(rel.Kind),
+		ToKind:          string(rel.To.Kind),
+		ToKey:           rel.To.Key,
+		State:           string(rel.State),
+		StateReason:     rel.StateReason,
+		Authority:       string(rel.Authority),
+		AuthorityReason: rel.AuthorityReason,
+		SourceCommit:    rel.SourceCommit,
+	}
 }
 
 // ProjectMemoryReportResponse is the body of

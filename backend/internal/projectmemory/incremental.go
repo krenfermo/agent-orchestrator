@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
 )
 
 // incremental.go — updating memory from a change set rather than a walk.
@@ -96,6 +97,9 @@ type UpdateOutcome struct {
 	ItemsReconfirmed int
 	ItemsInvalidated int64
 	ItemsRefused     int
+	// RenamesFollowed counts knowledge items whose evidence was carried from a
+	// moved file to its new path rather than retired with it (P2-D section 10).
+	RenamesFollowed  int
 	RelationsWritten int
 	ModulesRefreshed int
 	IndexedCommit    string
@@ -198,6 +202,13 @@ func (p *updatePass) run(ctx context.Context) error {
 		Commit:     p.req.ToCommit,
 		Generation: p.state.Generation,
 		Origin:     domain.OriginCanonical,
+		// P2-D: every fact this pass derives is stamped with the repository it
+		// was read from and with the proof that applies to it. RepoIdentityOf
+		// runs once per pass, not once per fact -- it shells out to git, and a
+		// pass over a large repository would otherwise pay for it thousands of
+		// times for an answer that cannot change mid-walk.
+		RepoIdentity:   RepoIdentityOf(ctx, p.req.RepoPath),
+		ProvenanceKind: domain.ProvenanceRepoDerivation,
 	}
 	p.touchedModules = map[string]struct{}{}
 	p.imports = map[string]map[string]struct{}{}
@@ -242,7 +253,30 @@ func (p *updatePass) apply(ctx context.Context, ch PathChange) error {
 
 	// A rename retires the old location first: whatever was filed under the
 	// previous path is a fact about a path that no longer exists.
+	//
+	// P2-D section 10: with ONE exception, which is the difference between a
+	// rename costing a re-derivation and a rename destroying knowledge. A
+	// repository derivation (a file summary, a module census) is re-derived
+	// from the new path a few lines below, so retiring it loses nothing. A
+	// decision or a risk is not: nothing re-derives it, ever, so retiring it
+	// because a file moved would silently delete the project's own reasoning
+	// on the grounds that git renamed a file.
+	//
+	// The rename is followed only where git PROVED it -- PreviousPath is set
+	// exactly when the diff reported an `R` status, never inferred from a
+	// delete plus an add that happen to look alike. An unproven rename takes
+	// the retire-and-rederive path below, which is what section 10 asks for.
+	var carried []domain.ProjectMemoryItem
 	if ch.PreviousPath != "" {
+		// Read the knowledge anchored on the old path BEFORE anything retires
+		// it, and re-anchor it AFTER the new path's own invalidation below.
+		// The order is forced: retirePath withholds by old path and the
+		// invalidation a few lines down withholds by new path, so a rewrite
+		// done at either point would immediately be undone by the other.
+		var err error
+		if carried, err = p.knowledgeAnchoredOn(ctx, ch.PreviousPath); err != nil {
+			return err
+		}
 		if err := p.retirePath(ctx, ch.PreviousPath, now,
 			fmt.Sprintf("renamed to %s at %s", ch.Path, orNone(p.req.ToCommit))); err != nil {
 			return err
@@ -269,6 +303,10 @@ func (p *updatePass) apply(ctx context.Context, ch PathChange) error {
 		return err
 	}
 	p.out.ItemsInvalidated += items
+
+	if err := p.reanchorRenamedKnowledge(ctx, carried, ch.PreviousPath, ch.Path, now); err != nil {
+		return err
+	}
 
 	content, ok, err := p.readAdmitted(ch.Path)
 	if err != nil {
@@ -318,6 +356,87 @@ func (p *updatePass) apply(ctx context.Context, ch PathChange) error {
 
 // retirePath invalidates everything derived from a path that is gone and drops
 // its ledger entry, so a later full pass does not rediscover the same deletion.
+// knowledgeAnchoredOn reads the facts a rename must carry rather than retire
+// (P2-D section 10).
+//
+// It is the three types nothing re-derives -- task results, decisions and known
+// risks -- and nothing else. A repository derivation is left to the
+// retire-and-rederive path, because re-deriving a summary from the file at its
+// new path is strictly better than rewriting a path on a summary of the old
+// one. A decision is different: no pass will ever produce it again, so
+// retiring it because git moved a file would silently delete the project's own
+// reasoning.
+//
+// Only facts that are currently valid are carried. A fact already withheld is
+// not made current again by a file moving.
+func (p *updatePass) knowledgeAnchoredOn(ctx context.Context, from string) ([]domain.ProjectMemoryItem, error) {
+	items, err := p.idx.repo.ListProjectMemoryItemsByPath(ctx, p.req.ProjectID, p.repoID, from)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.ProjectMemoryItem, 0, len(items))
+	for _, item := range items {
+		if domain.IsSharedKnowledgeType(item.Key.Type) && item.State == domain.MemoryStateValid {
+			out = append(out, item)
+		}
+	}
+	return out, nil
+}
+
+// reanchorRenamedKnowledge points carried facts at the file's new location.
+//
+// It rewrites EVIDENCE, never content. The decision still says what it said;
+// only where AO will look to check whether it still holds moves. That is the
+// whole safety argument: a rename proves a path changed and proves nothing at
+// all about whether the reasoning is still correct, so the fact stays exactly
+// as provable, and exactly as disprovable, as it was.
+//
+// It runs after the new path's own invalidation, which is what makes the
+// carried fact end up valid rather than immediately withheld again by the
+// change that accompanied the move.
+//
+// Best-effort per item: a rewrite the CAS refuses belongs to a newer
+// generation, and leaving that item retired is the conservative outcome.
+func (p *updatePass) reanchorRenamedKnowledge(
+	ctx context.Context, carried []domain.ProjectMemoryItem, from, to string, now time.Time,
+) error {
+	for _, item := range carried {
+		rewritten := false
+		paths := make([]string, 0, len(item.SourcePaths))
+		for _, sp := range item.SourcePaths {
+			if sp == from {
+				sp, rewritten = to, true
+			}
+			paths = append(paths, sp)
+		}
+		if !rewritten {
+			continue
+		}
+		next := item
+		next.SourcePaths = paths
+		next.State = domain.MemoryStateValid
+		next.StateReason = ""
+		next.InvalidatedAt = time.Time{}
+		// The digest is NOT carried over. It was computed over the file at the
+		// old path, and git reports a rename at any similarity above its
+		// threshold rather than only at 100%. Keeping it would let drift
+		// detection compare the new file against a hash of something else and
+		// report a change that is really a move. Clearing it makes the item
+		// unverifiable-but-present, which is the honest state and is how these
+		// types are treated everywhere else.
+		next.SourceDigest = ""
+		next = next.Normalized()
+		if _, err := p.idx.repo.PutProjectMemoryItem(ctx, next, now); err != nil {
+			if errors.Is(err, store.ErrProjectMemoryStaleGeneration) {
+				continue
+			}
+			return err
+		}
+		p.out.RenamesFollowed++
+	}
+	return nil
+}
+
 func (p *updatePass) retirePath(ctx context.Context, rel string, now time.Time, reason string) error {
 	items, _, err := p.idx.repo.InvalidateProjectMemoryByPath(ctx, p.req.ProjectID, p.repoID, rel,
 		domain.MemoryStateInvalidated, reason, now)

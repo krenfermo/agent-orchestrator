@@ -1267,6 +1267,29 @@ func projectMemoryOperations() []operation {
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
 		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/memory/validate", id: "validateProjectMemory", tag: "projects",
+			summary:    "P2-D: check which facts AO can still prove it is entitled to serve. Distinct from invalidate, which asks whether a fact's source FILES moved: this asks whether its LICENCE still holds — same repository identity, a mutation-provenance row behind every canonical promotion, a provenance kind this build can check. Dry run unless apply is set, and it only ever demotes.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			reqBody:    controllers.ValidateProjectMemoryRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ValidateProjectMemoryResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/memory/provenance/{itemId}", id: "getProjectMemoryProvenance", tag: "projects",
+			summary:    "P2-D: the full evidence chain behind one fact — why it is valid, which task produced it, which commit supports it, how it became canonical, what withdrew it, and what replaced it. Retired edges are included: a superseded decision's supersedes edge is not in the current graph and is usually what is being looked for.",
+			pathParams: []any{controllers.ProjectMemoryItemIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectMemoryProvenanceResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
 	}
 }
 

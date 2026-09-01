@@ -1,5 +1,11 @@
 # Project memory (P2-A)
 
+> **P2-D adds a second axis to everything below.** A fact is served only when
+> its evidence still holds (`state`, this document) **and** its licence is still
+> provable (`authority`). The authority model, the provenance and promotion
+> proofs, drift v2, repository identity and the diagnostics live in
+> [project-memory-authority.md](project-memory-authority.md).
+
 AO's durable, incremental, provenance-carrying summary of a project, so the
 Planner, Worker, Reviewer and the two Repair Agents do not re-derive the same
 facts on every task.
@@ -444,6 +450,8 @@ ao memory inspect <project-id>       # the individual facts, stale ones included
   --repo --state --type --path --limit
 ao memory rebuild <project-id>       # re-derive; --purge deletes first
 ao memory invalidate <project-id>    # --path retires those paths; no --path runs drift detection
+ao memory validate <project-id>      # P2-D: which facts can AO still PROVE it may serve
+ao memory provenance <project-id> <item-id>   # P2-D: one fact's full evidence chain
 ```
 
 HTTP: `GET /api/v1/projects/{id}/memory`, `GET …/memory/items`,
@@ -488,6 +496,9 @@ and printing one out of context would show something no agent was ever given.
 4. **Harness reads stay unobserved.** See §11. No metric here should ever be
    read as a saving in agent-side reads.
 5. **`workflow_mutation_provenance` is still empty in production.** See §14.
+   *(Closed by P2-D: it now has a production writer at three mutation
+   boundaries — see
+   [project-memory-authority.md §4](project-memory-authority.md).)*
 6. **The `internal/projectmemory` package now holds two stores**: the durable
    P2-A one and the older JSON `Store`/`BaselineReader` that feeds the Phase-0
    measurement recorder. They are deliberately separate — the baseline recorder
@@ -498,9 +509,17 @@ and printing one out of context would show something no agent was ever given.
 
 ## 14. `workflow_mutation_provenance`: deferred, with reasons
 
-**Status: deferred to P2-D.** The debt is real and unchanged: the table exists
-(migration 0133), the store method `RecordWorkflowMutationProvenance` exists,
-and **no non-test caller writes to it**, so it is empty in production.
+> **Superseded by P2-D.** The table now has a production writer, the columns a
+> memory promotion needs, and the exactly-once/generation-safe discipline this
+> section said would be needed. See
+> [project-memory-authority.md §4](project-memory-authority.md). The section
+> below is kept because it records why P2-A stopped where it did, and its
+> reasoning turned out to be right: the integration was P1-adjacent correctness
+> work, and it needed its own checkpoint.
+
+**Status (P2-A): deferred to P2-D.** The debt was real: the table existed
+(migration 0133), the store method `RecordWorkflowMutationProvenance` existed,
+and **no non-test caller wrote to it**, so it was empty in production.
 
 Project memory was assessed against it during P2-A, and the finding is:
 

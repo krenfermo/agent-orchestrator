@@ -72,6 +72,9 @@ func (a *TaskMemoryAdapter) RecordOutcome(ctx stdctx.Context, facts workflowcore
 		Verification:   facts.Verification,
 		Commit:         facts.Commit,
 		Integrated:     facts.Integrated,
+		RepoIdentity:   facts.RepoIdentity,
+		VerifiedCommit: facts.VerifiedCommit,
+		Promotion:      facts.Promotion,
 		WorkflowRunID:  facts.WorkflowRunID,
 		Share:          facts.Share,
 		DependsOnTasks: facts.DependsOnTasks,
@@ -81,15 +84,20 @@ func (a *TaskMemoryAdapter) RecordOutcome(ctx stdctx.Context, facts workflowcore
 	})
 }
 
-// PromoteTask turns one task's facts into canonical project knowledge. It is
-// called only by the boundary that can prove the work is integrated.
+// PromoteTask turns one task's facts into canonical project knowledge, under
+// the proof the calling boundary produced.
+//
+// The adapter still makes no policy: it does not inspect the proof, does not
+// second-guess a refusal, and does not construct one of its own. Whether the
+// work is durably in the repository is a workflow question answered by
+// workflow rows, and the memory service's job is to record the answer.
 func (a *TaskMemoryAdapter) PromoteTask(
-	ctx stdctx.Context, projectID domain.ProjectID, taskRef, commit string,
+	ctx stdctx.Context, projectID domain.ProjectID, taskRef string, proof domain.MemoryPromotionProof,
 ) (int, error) {
 	if a == nil {
 		return 0, nil
 	}
-	return a.svc.PromoteTaskMemory(ctx, projectID, taskRef, commit)
+	return a.svc.PromoteTaskMemory(ctx, projectID, taskRef, proof)
 }
 
 // DiscardTask drops one task's unintegrated facts.

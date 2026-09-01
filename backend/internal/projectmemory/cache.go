@@ -22,8 +22,8 @@ import (
 // The key is therefore every authority that can change the answer:
 //
 //	project, repository, indexed commit, memory generation,
-//	role, budget policy version + the role's own budget, and the
-//	selection scope (changed paths, modules, keywords, task ref)
+//	the change mark (P2-D), role, budget policy version + the role's own
+//	budget, and the selection scope (changed paths, modules, keywords, task ref)
 //
 // **Not the prompt text.** A prompt is not an authority: two dispatches with
 // identical prompts against different generations must not share a pack, and
@@ -35,6 +35,19 @@ import (
 // key derived from it, so the previous entries are simply never asked for
 // again. There is no invalidation path to forget to call, and no window in
 // which a stale pack is reachable.
+//
+// **They are not sufficient on their own**, which P2-D made visible. Both move
+// only when an INDEXING PASS runs, and every out-of-band demotion -- drift
+// invalidation, `ao memory invalidate`, an authority pass, a promotion
+// recording a refusal -- changes what a reader should be served without
+// touching either. A pack cached moments before such a demotion stayed
+// reachable and kept serving a fact AO had just withheld.
+//
+// ChangeMark closes that. It is the newest `updated_at` of the repository's
+// facts, which advances on any write that can alter what is servable and on
+// nothing else, so the same implicit-invalidation argument now covers the
+// authority axis too. It costs one indexed-prefix row read per provision,
+// which is the same order as the freshness check beside it.
 
 // cacheCapacity bounds the cache. It is small on purpose: the working set is
 // "the roles of the runs active right now", and a cache that grows past that is
@@ -47,6 +60,10 @@ type CacheKey struct {
 	RepoID        string
 	IndexedCommit string
 	Generation    int64
+	// ChangeMark is the instant this repository's memory last changed in any
+	// way that can alter what is servable. Nanoseconds, so two demotions in one
+	// millisecond are still two keys.
+	ChangeMark    int64
 	Role          PackRole
 	PolicyVersion int
 	Budget        RoleBudget
@@ -63,8 +80,8 @@ func (k CacheKey) String() string {
 	h := sha256.New()
 	// hash.Hash.Write never errors; the discard matches the idiom used
 	// throughout this package rather than a swallowed failure.
-	_, _ = fmt.Fprintf(h, "v%d\x00%s\x00%s\x00%s\x00%d\x00%s\x00%d/%d/%d\x00%s",
-		k.PolicyVersion, k.ProjectID, k.RepoID, k.IndexedCommit, k.Generation, k.Role,
+	_, _ = fmt.Fprintf(h, "v%d\x00%s\x00%s\x00%s\x00%d\x00%d\x00%s\x00%d/%d/%d\x00%s",
+		k.PolicyVersion, k.ProjectID, k.RepoID, k.IndexedCommit, k.Generation, k.ChangeMark, k.Role,
 		k.Budget.MaxBytes, k.Budget.MaxItems, k.Budget.MaxDocuments, k.Scope)
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }

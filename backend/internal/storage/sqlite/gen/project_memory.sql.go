@@ -152,6 +152,44 @@ func (q *Queries) CompleteProjectMemoryIndexPass(ctx context.Context, arg Comple
 	return result.RowsAffected()
 }
 
+const countProjectMemoryItemsByAuthority = `-- name: CountProjectMemoryItemsByAuthority :many
+SELECT authority, COUNT(*) AS total FROM project_memory_items
+WHERE project_id = ? AND repo_id = ? GROUP BY authority
+`
+
+type CountProjectMemoryItemsByAuthorityParams struct {
+	ProjectID string
+	RepoID    string
+}
+
+type CountProjectMemoryItemsByAuthorityRow struct {
+	Authority string
+	Total     int64
+}
+
+func (q *Queries) CountProjectMemoryItemsByAuthority(ctx context.Context, arg CountProjectMemoryItemsByAuthorityParams) ([]CountProjectMemoryItemsByAuthorityRow, error) {
+	rows, err := q.db.QueryContext(ctx, countProjectMemoryItemsByAuthority, arg.ProjectID, arg.RepoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CountProjectMemoryItemsByAuthorityRow{}
+	for rows.Next() {
+		var i CountProjectMemoryItemsByAuthorityRow
+		if err := rows.Scan(&i.Authority, &i.Total); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const countProjectMemoryItemsByState = `-- name: CountProjectMemoryItemsByState :many
 SELECT state, COUNT(*) AS total FROM project_memory_items
 WHERE project_id = ? AND repo_id = ? GROUP BY state
@@ -481,7 +519,7 @@ func (q *Queries) FailProjectMemoryIndexPass(ctx context.Context, arg FailProjec
 }
 
 const getProjectMemoryContextManifest = `-- name: GetProjectMemoryContextManifest :one
-SELECT id, project_id, repo_id, workflow_run_id, task_ref, role, pack_digest, policy_version, generation, indexed_commit, item_ids_json, item_count, selected_bytes, estimated_tokens, created_at, updated_at FROM project_memory_context_manifests WHERE id = ?
+SELECT id, project_id, repo_id, workflow_run_id, task_ref, role, pack_digest, policy_version, generation, indexed_commit, item_ids_json, item_count, selected_bytes, estimated_tokens, created_at, updated_at, item_versions_json, role_head_sha FROM project_memory_context_manifests WHERE id = ?
 `
 
 func (q *Queries) GetProjectMemoryContextManifest(ctx context.Context, id string) (ProjectMemoryContextManifest, error) {
@@ -504,6 +542,8 @@ func (q *Queries) GetProjectMemoryContextManifest(ctx context.Context, id string
 		&i.EstimatedTokens,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ItemVersionsJson,
+		&i.RoleHeadSha,
 	)
 	return i, err
 }
@@ -575,7 +615,7 @@ func (q *Queries) GetProjectMemoryIndex(ctx context.Context, arg GetProjectMemor
 }
 
 const getProjectMemoryItem = `-- name: GetProjectMemoryItem :one
-SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at FROM project_memory_items WHERE id = ?
+SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit FROM project_memory_items WHERE id = ?
 `
 
 func (q *Queries) GetProjectMemoryItem(ctx context.Context, id string) (ProjectMemoryItem, error) {
@@ -604,12 +644,19 @@ func (q *Queries) GetProjectMemoryItem(ctx context.Context, id string) (ProjectM
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.InvalidatedAt,
+		&i.Authority,
+		&i.AuthorityReason,
+		&i.RepoIdentity,
+		&i.ProvenanceKind,
+		&i.PromotionAuthority,
+		&i.VerifiedCommit,
+		&i.IntegratedCommit,
 	)
 	return i, err
 }
 
 const getProjectMemoryRelation = `-- name: GetProjectMemoryRelation :one
-SELECT id, project_id, repo_id, from_kind, from_key, relation_kind, to_kind, to_key, origin, origin_ref, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, created_at, updated_at, invalidated_at FROM project_memory_relations WHERE id = ?
+SELECT id, project_id, repo_id, from_kind, from_key, relation_kind, to_kind, to_key, origin, origin_ref, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity FROM project_memory_relations WHERE id = ?
 `
 
 func (q *Queries) GetProjectMemoryRelation(ctx context.Context, id string) (ProjectMemoryRelation, error) {
@@ -637,6 +684,9 @@ func (q *Queries) GetProjectMemoryRelation(ctx context.Context, id string) (Proj
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.InvalidatedAt,
+		&i.Authority,
+		&i.AuthorityReason,
+		&i.RepoIdentity,
 	)
 	return i, err
 }
@@ -647,33 +697,42 @@ INSERT OR IGNORE INTO project_memory_items (
     origin, origin_ref, summary, content,
     source_paths_json, source_commit, source_digest,
     generation, state, state_reason, confidence, metadata_json, content_hash,
-    created_at, updated_at, invalidated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    created_at, updated_at, invalidated_at,
+    authority, authority_reason, repo_identity, provenance_kind,
+    promotion_authority, verified_commit, integrated_commit
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertProjectMemoryItemParams struct {
-	ID              string
-	ProjectID       string
-	RepoID          string
-	ItemType        string
-	Scope           string
-	ItemKey         string
-	Origin          string
-	OriginRef       string
-	Summary         string
-	Content         string
-	SourcePathsJson string
-	SourceCommit    string
-	SourceDigest    string
-	Generation      int64
-	State           string
-	StateReason     string
-	Confidence      float64
-	MetadataJson    string
-	ContentHash     string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	InvalidatedAt   sql.NullTime
+	ID                 string
+	ProjectID          string
+	RepoID             string
+	ItemType           string
+	Scope              string
+	ItemKey            string
+	Origin             string
+	OriginRef          string
+	Summary            string
+	Content            string
+	SourcePathsJson    string
+	SourceCommit       string
+	SourceDigest       string
+	Generation         int64
+	State              string
+	StateReason        string
+	Confidence         float64
+	MetadataJson       string
+	ContentHash        string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	InvalidatedAt      sql.NullTime
+	Authority          string
+	AuthorityReason    string
+	RepoIdentity       string
+	ProvenanceKind     string
+	PromotionAuthority string
+	VerifiedCommit     string
+	IntegratedCommit   string
 }
 
 // First write of a fact. OR IGNORE rather than OR REPLACE: a row that already
@@ -703,6 +762,13 @@ func (q *Queries) InsertProjectMemoryItem(ctx context.Context, arg InsertProject
 		arg.CreatedAt,
 		arg.UpdatedAt,
 		arg.InvalidatedAt,
+		arg.Authority,
+		arg.AuthorityReason,
+		arg.RepoIdentity,
+		arg.ProvenanceKind,
+		arg.PromotionAuthority,
+		arg.VerifiedCommit,
+		arg.IntegratedCommit,
 	)
 	if err != nil {
 		return 0, err
@@ -715,8 +781,9 @@ INSERT OR IGNORE INTO project_memory_relations (
     id, project_id, repo_id, from_kind, from_key, relation_kind, to_kind, to_key,
     origin, origin_ref, source_paths_json, source_commit, source_digest,
     generation, state, state_reason, confidence, metadata_json,
-    created_at, updated_at, invalidated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    created_at, updated_at, invalidated_at,
+    authority, authority_reason, repo_identity
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertProjectMemoryRelationParams struct {
@@ -741,6 +808,9 @@ type InsertProjectMemoryRelationParams struct {
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	InvalidatedAt   sql.NullTime
+	Authority       string
+	AuthorityReason string
+	RepoIdentity    string
 }
 
 func (q *Queries) InsertProjectMemoryRelation(ctx context.Context, arg InsertProjectMemoryRelationParams) (int64, error) {
@@ -766,6 +836,9 @@ func (q *Queries) InsertProjectMemoryRelation(ctx context.Context, arg InsertPro
 		arg.CreatedAt,
 		arg.UpdatedAt,
 		arg.InvalidatedAt,
+		arg.Authority,
+		arg.AuthorityReason,
+		arg.RepoIdentity,
 	)
 	if err != nil {
 		return 0, err
@@ -821,7 +894,7 @@ func (q *Queries) LatestProjectMemoryItemUpdatedAt(ctx context.Context, arg Late
 }
 
 const listProjectMemoryContextManifestsForRun = `-- name: ListProjectMemoryContextManifestsForRun :many
-SELECT id, project_id, repo_id, workflow_run_id, task_ref, role, pack_digest, policy_version, generation, indexed_commit, item_ids_json, item_count, selected_bytes, estimated_tokens, created_at, updated_at FROM project_memory_context_manifests
+SELECT id, project_id, repo_id, workflow_run_id, task_ref, role, pack_digest, policy_version, generation, indexed_commit, item_ids_json, item_count, selected_bytes, estimated_tokens, created_at, updated_at, item_versions_json, role_head_sha FROM project_memory_context_manifests
 WHERE project_id = ? AND workflow_run_id = ?
 ORDER BY created_at DESC, id
 `
@@ -857,6 +930,8 @@ func (q *Queries) ListProjectMemoryContextManifestsForRun(ctx context.Context, a
 			&i.EstimatedTokens,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ItemVersionsJson,
+			&i.RoleHeadSha,
 		); err != nil {
 			return nil, err
 		}
@@ -872,7 +947,7 @@ func (q *Queries) ListProjectMemoryContextManifestsForRun(ctx context.Context, a
 }
 
 const listProjectMemoryContextManifestsForTask = `-- name: ListProjectMemoryContextManifestsForTask :many
-SELECT id, project_id, repo_id, workflow_run_id, task_ref, role, pack_digest, policy_version, generation, indexed_commit, item_ids_json, item_count, selected_bytes, estimated_tokens, created_at, updated_at FROM project_memory_context_manifests
+SELECT id, project_id, repo_id, workflow_run_id, task_ref, role, pack_digest, policy_version, generation, indexed_commit, item_ids_json, item_count, selected_bytes, estimated_tokens, created_at, updated_at, item_versions_json, role_head_sha FROM project_memory_context_manifests
 WHERE project_id = ? AND task_ref = ?
 ORDER BY created_at DESC, id
 `
@@ -908,6 +983,8 @@ func (q *Queries) ListProjectMemoryContextManifestsForTask(ctx context.Context, 
 			&i.EstimatedTokens,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ItemVersionsJson,
+			&i.RoleHeadSha,
 		); err != nil {
 			return nil, err
 		}
@@ -1057,7 +1134,7 @@ func (q *Queries) ListProjectMemoryIndexes(ctx context.Context, projectID string
 }
 
 const listProjectMemoryItems = `-- name: ListProjectMemoryItems :many
-SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at FROM project_memory_items
+SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit FROM project_memory_items
 WHERE project_id = ? AND repo_id = ?
 ORDER BY confidence DESC, scope, updated_at DESC, id
 `
@@ -1102,6 +1179,78 @@ func (q *Queries) ListProjectMemoryItems(ctx context.Context, arg ListProjectMem
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.InvalidatedAt,
+			&i.Authority,
+			&i.AuthorityReason,
+			&i.RepoIdentity,
+			&i.ProvenanceKind,
+			&i.PromotionAuthority,
+			&i.VerifiedCommit,
+			&i.IntegratedCommit,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProjectMemoryItemsByAuthority = `-- name: ListProjectMemoryItemsByAuthority :many
+SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit FROM project_memory_items
+WHERE project_id = ? AND repo_id = ? AND authority = ?
+ORDER BY confidence DESC, scope, updated_at DESC, id
+`
+
+type ListProjectMemoryItemsByAuthorityParams struct {
+	ProjectID string
+	RepoID    string
+	Authority string
+}
+
+func (q *Queries) ListProjectMemoryItemsByAuthority(ctx context.Context, arg ListProjectMemoryItemsByAuthorityParams) ([]ProjectMemoryItem, error) {
+	rows, err := q.db.QueryContext(ctx, listProjectMemoryItemsByAuthority, arg.ProjectID, arg.RepoID, arg.Authority)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ProjectMemoryItem{}
+	for rows.Next() {
+		var i ProjectMemoryItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.RepoID,
+			&i.ItemType,
+			&i.Scope,
+			&i.ItemKey,
+			&i.Origin,
+			&i.OriginRef,
+			&i.Summary,
+			&i.Content,
+			&i.SourcePathsJson,
+			&i.SourceCommit,
+			&i.SourceDigest,
+			&i.Generation,
+			&i.State,
+			&i.StateReason,
+			&i.Confidence,
+			&i.MetadataJson,
+			&i.ContentHash,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.InvalidatedAt,
+			&i.Authority,
+			&i.AuthorityReason,
+			&i.RepoIdentity,
+			&i.ProvenanceKind,
+			&i.PromotionAuthority,
+			&i.VerifiedCommit,
+			&i.IntegratedCommit,
 		); err != nil {
 			return nil, err
 		}
@@ -1117,7 +1266,7 @@ func (q *Queries) ListProjectMemoryItems(ctx context.Context, arg ListProjectMem
 }
 
 const listProjectMemoryItemsByOriginRef = `-- name: ListProjectMemoryItemsByOriginRef :many
-SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at FROM project_memory_items
+SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit FROM project_memory_items
 WHERE project_id = ? AND origin = ? AND origin_ref = ?
 ORDER BY confidence DESC, scope, updated_at DESC, id
 `
@@ -1160,6 +1309,13 @@ func (q *Queries) ListProjectMemoryItemsByOriginRef(ctx context.Context, arg Lis
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.InvalidatedAt,
+			&i.Authority,
+			&i.AuthorityReason,
+			&i.RepoIdentity,
+			&i.ProvenanceKind,
+			&i.PromotionAuthority,
+			&i.VerifiedCommit,
+			&i.IntegratedCommit,
 		); err != nil {
 			return nil, err
 		}
@@ -1175,7 +1331,7 @@ func (q *Queries) ListProjectMemoryItemsByOriginRef(ctx context.Context, arg Lis
 }
 
 const listProjectMemoryItemsByPath = `-- name: ListProjectMemoryItemsByPath :many
-SELECT i.id, i.project_id, i.repo_id, i.item_type, i.scope, i.item_key, i.origin, i.origin_ref, i.summary, i.content, i.source_paths_json, i.source_commit, i.source_digest, i.generation, i.state, i.state_reason, i.confidence, i.metadata_json, i.content_hash, i.created_at, i.updated_at, i.invalidated_at FROM project_memory_items i
+SELECT i.id, i.project_id, i.repo_id, i.item_type, i.scope, i.item_key, i.origin, i.origin_ref, i.summary, i.content, i.source_paths_json, i.source_commit, i.source_digest, i.generation, i.state, i.state_reason, i.confidence, i.metadata_json, i.content_hash, i.created_at, i.updated_at, i.invalidated_at, i.authority, i.authority_reason, i.repo_identity, i.provenance_kind, i.promotion_authority, i.verified_commit, i.integrated_commit FROM project_memory_items i
 JOIN project_memory_sources s
   ON s.owner_kind = 'item' AND s.owner_id = i.id
 WHERE s.project_id = ? AND s.repo_id = ? AND s.path = ?
@@ -1220,6 +1376,13 @@ func (q *Queries) ListProjectMemoryItemsByPath(ctx context.Context, arg ListProj
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.InvalidatedAt,
+			&i.Authority,
+			&i.AuthorityReason,
+			&i.RepoIdentity,
+			&i.ProvenanceKind,
+			&i.PromotionAuthority,
+			&i.VerifiedCommit,
+			&i.IntegratedCommit,
 		); err != nil {
 			return nil, err
 		}
@@ -1235,7 +1398,7 @@ func (q *Queries) ListProjectMemoryItemsByPath(ctx context.Context, arg ListProj
 }
 
 const listProjectMemoryItemsByState = `-- name: ListProjectMemoryItemsByState :many
-SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at FROM project_memory_items
+SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit FROM project_memory_items
 WHERE project_id = ? AND repo_id = ? AND state = ?
 ORDER BY confidence DESC, scope, updated_at DESC, id
 `
@@ -1278,6 +1441,13 @@ func (q *Queries) ListProjectMemoryItemsByState(ctx context.Context, arg ListPro
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.InvalidatedAt,
+			&i.Authority,
+			&i.AuthorityReason,
+			&i.RepoIdentity,
+			&i.ProvenanceKind,
+			&i.PromotionAuthority,
+			&i.VerifiedCommit,
+			&i.IntegratedCommit,
 		); err != nil {
 			return nil, err
 		}
@@ -1293,7 +1463,7 @@ func (q *Queries) ListProjectMemoryItemsByState(ctx context.Context, arg ListPro
 }
 
 const listProjectMemoryItemsForProject = `-- name: ListProjectMemoryItemsForProject :many
-SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at FROM project_memory_items
+SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit FROM project_memory_items
 WHERE project_id = ?
 ORDER BY repo_id, confidence DESC, scope, updated_at DESC, id
 `
@@ -1330,6 +1500,13 @@ func (q *Queries) ListProjectMemoryItemsForProject(ctx context.Context, projectI
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.InvalidatedAt,
+			&i.Authority,
+			&i.AuthorityReason,
+			&i.RepoIdentity,
+			&i.ProvenanceKind,
+			&i.PromotionAuthority,
+			&i.VerifiedCommit,
+			&i.IntegratedCommit,
 		); err != nil {
 			return nil, err
 		}
@@ -1345,7 +1522,7 @@ func (q *Queries) ListProjectMemoryItemsForProject(ctx context.Context, projectI
 }
 
 const listProjectMemoryRelations = `-- name: ListProjectMemoryRelations :many
-SELECT id, project_id, repo_id, from_kind, from_key, relation_kind, to_kind, to_key, origin, origin_ref, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, created_at, updated_at, invalidated_at FROM project_memory_relations
+SELECT id, project_id, repo_id, from_kind, from_key, relation_kind, to_kind, to_key, origin, origin_ref, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity FROM project_memory_relations
 WHERE project_id = ? AND repo_id = ?
 ORDER BY from_kind, from_key, relation_kind, to_kind, to_key, id
 `
@@ -1386,6 +1563,9 @@ func (q *Queries) ListProjectMemoryRelations(ctx context.Context, arg ListProjec
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.InvalidatedAt,
+			&i.Authority,
+			&i.AuthorityReason,
+			&i.RepoIdentity,
 		); err != nil {
 			return nil, err
 		}
@@ -1401,7 +1581,7 @@ func (q *Queries) ListProjectMemoryRelations(ctx context.Context, arg ListProjec
 }
 
 const listProjectMemoryRelationsFrom = `-- name: ListProjectMemoryRelationsFrom :many
-SELECT id, project_id, repo_id, from_kind, from_key, relation_kind, to_kind, to_key, origin, origin_ref, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, created_at, updated_at, invalidated_at FROM project_memory_relations
+SELECT id, project_id, repo_id, from_kind, from_key, relation_kind, to_kind, to_key, origin, origin_ref, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity FROM project_memory_relations
 WHERE project_id = ? AND repo_id = ? AND from_kind = ? AND from_key = ? AND state = ?
 ORDER BY relation_kind, to_kind, to_key, id
 `
@@ -1451,6 +1631,9 @@ func (q *Queries) ListProjectMemoryRelationsFrom(ctx context.Context, arg ListPr
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.InvalidatedAt,
+			&i.Authority,
+			&i.AuthorityReason,
+			&i.RepoIdentity,
 		); err != nil {
 			return nil, err
 		}
@@ -1466,7 +1649,7 @@ func (q *Queries) ListProjectMemoryRelationsFrom(ctx context.Context, arg ListPr
 }
 
 const listProjectMemoryRelationsTo = `-- name: ListProjectMemoryRelationsTo :many
-SELECT id, project_id, repo_id, from_kind, from_key, relation_kind, to_kind, to_key, origin, origin_ref, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, created_at, updated_at, invalidated_at FROM project_memory_relations
+SELECT id, project_id, repo_id, from_kind, from_key, relation_kind, to_kind, to_key, origin, origin_ref, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity FROM project_memory_relations
 WHERE project_id = ? AND repo_id = ? AND to_kind = ? AND to_key = ? AND state = ?
 ORDER BY relation_kind, from_kind, from_key, id
 `
@@ -1516,6 +1699,9 @@ func (q *Queries) ListProjectMemoryRelationsTo(ctx context.Context, arg ListProj
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.InvalidatedAt,
+			&i.Authority,
+			&i.AuthorityReason,
+			&i.RepoIdentity,
 		); err != nil {
 			return nil, err
 		}
@@ -1561,6 +1747,44 @@ func (q *Queries) ListProjectMemorySourcePaths(ctx context.Context, arg ListProj
 		return nil, err
 	}
 	return items, nil
+}
+
+const markLegacyProjectMemoryItemsUnprovable = `-- name: MarkLegacyProjectMemoryItemsUnprovable :execrows
+UPDATE project_memory_items
+SET authority = 'legacy_unprovable', authority_reason = ?, updated_at = ?
+WHERE project_id = ? AND repo_id = ?
+  AND authority = 'authoritative' AND provenance_kind = ''
+`
+
+type MarkLegacyProjectMemoryItemsUnprovableParams struct {
+	AuthorityReason string
+	UpdatedAt       time.Time
+	ProjectID       string
+	RepoID          string
+}
+
+// Classify the rows an upgraded install already had (P2-D section 21).
+//
+// A row written before 0146 has provenance_kind = ” -- not because anything
+// went wrong, but because the column did not exist when it was written. It is
+// withheld rather than deleted, and it is classified as LEGACY rather than as
+// broken, because the two want different operator responses: one is an
+// incident, the other is a migration.
+//
+// Runs once per repository, guarded on authority still being the default, so
+// a row a later validation pass proved (or disproved) is never reclassified
+// back to legacy by a second sweep.
+func (q *Queries) MarkLegacyProjectMemoryItemsUnprovable(ctx context.Context, arg MarkLegacyProjectMemoryItemsUnprovableParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, markLegacyProjectMemoryItemsUnprovable,
+		arg.AuthorityReason,
+		arg.UpdatedAt,
+		arg.ProjectID,
+		arg.RepoID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const markProjectMemoryItemState = `-- name: MarkProjectMemoryItemState :execrows
@@ -1692,6 +1916,51 @@ func (q *Queries) MarkProjectMemoryItemsStaleByPath(ctx context.Context, arg Mar
 	return result.RowsAffected()
 }
 
+const markProjectMemoryItemsUnprovableByRepoIdentity = `-- name: MarkProjectMemoryItemsUnprovableByRepoIdentity :execrows
+UPDATE project_memory_items
+SET authority = ?1, authority_reason = ?2,
+    updated_at = ?3
+WHERE project_id = ?4 AND repo_id = ?5
+  AND authority = 'authoritative'
+  AND repo_identity <> ?6
+`
+
+type MarkProjectMemoryItemsUnprovableByRepoIdentityParams struct {
+	Authority        string
+	AuthorityReason  string
+	UpdatedAt        time.Time
+	ProjectID        string
+	RepoID           string
+	ObservedIdentity string
+}
+
+// The repository at this path is not the repository these facts came from.
+//
+// This is the single most dangerous drift case (P2-D section 9), and it is the one
+// that must NOT be scoped by path: no individual file is wrong, the whole
+// premise is. Every fact whose recorded identity disagrees with the one now
+// observed loses its licence in one statement -- including the rows that
+// recorded no identity at all, because "AO could not tell" has never been
+// permission to inherit another project's knowledge.
+//
+// Not generation-conditioned, and deliberately so: this is not one pass's
+// opinion about its own work, it is a fact about the checkout that is true for
+// every generation at once.
+func (q *Queries) MarkProjectMemoryItemsUnprovableByRepoIdentity(ctx context.Context, arg MarkProjectMemoryItemsUnprovableByRepoIdentityParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, markProjectMemoryItemsUnprovableByRepoIdentity,
+		arg.Authority,
+		arg.AuthorityReason,
+		arg.UpdatedAt,
+		arg.ProjectID,
+		arg.RepoID,
+		arg.ObservedIdentity,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const markProjectMemoryRelationsStaleBelowGeneration = `-- name: MarkProjectMemoryRelationsStaleBelowGeneration :execrows
 UPDATE project_memory_relations
 SET state = ?, state_reason = ?, invalidated_at = ?, updated_at = ?
@@ -1776,6 +2045,44 @@ func (q *Queries) MarkProjectMemoryRelationsStaleByPath(ctx context.Context, arg
 	return result.RowsAffected()
 }
 
+const markProjectMemoryRelationsUnprovableForNode = `-- name: MarkProjectMemoryRelationsUnprovableForNode :execrows
+UPDATE project_memory_relations
+SET authority = ?1, authority_reason = ?2,
+    updated_at = ?3
+WHERE project_id = ?4 AND repo_id = ?5
+  AND authority = 'authoritative'
+  AND ((from_kind = ?6 AND from_key = ?7)
+    OR (to_kind = ?6 AND to_key = ?7))
+`
+
+type MarkProjectMemoryRelationsUnprovableForNodeParams struct {
+	Authority       string
+	AuthorityReason string
+	UpdatedAt       time.Time
+	ProjectID       string
+	RepoID          string
+	NodeKind        string
+	NodeKey         string
+}
+
+// Retire every edge that touches one node, in either direction. This is what
+// an item losing its authority does to the graph around it.
+func (q *Queries) MarkProjectMemoryRelationsUnprovableForNode(ctx context.Context, arg MarkProjectMemoryRelationsUnprovableForNodeParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, markProjectMemoryRelationsUnprovableForNode,
+		arg.Authority,
+		arg.AuthorityReason,
+		arg.UpdatedAt,
+		arg.ProjectID,
+		arg.RepoID,
+		arg.NodeKind,
+		arg.NodeKey,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const reclaimProjectMemoryIndexPass = `-- name: ReclaimProjectMemoryIndexPass :execrows
 UPDATE project_memory_index
 SET phase = ?, pending_commit = ?, branch = ?, last_error = '', updated_at = ?
@@ -1806,6 +2113,125 @@ func (q *Queries) ReclaimProjectMemoryIndexPass(ctx context.Context, arg Reclaim
 		arg.UpdatedAt,
 		arg.ProjectID,
 		arg.RepoID,
+		arg.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const setProjectMemoryItemAuthority = `-- name: SetProjectMemoryItemAuthority :execrows
+
+UPDATE project_memory_items
+SET authority = ?, authority_reason = ?, updated_at = ?
+WHERE id = ? AND generation <= ?
+`
+
+type SetProjectMemoryItemAuthorityParams struct {
+	Authority       string
+	AuthorityReason string
+	UpdatedAt       time.Time
+	ID              string
+	Generation      int64
+}
+
+// ---------------------------------------------------------------------------
+// P2-D (migration 0146): the authority axis.
+// ---------------------------------------------------------------------------
+// Move one fact's LICENCE, leaving its drift state and its content alone.
+//
+// Generation-conditioned exactly like every other write, and for the sharper
+// of the two reasons: a stale validation pass that wakes up after a rebuild
+// must not be able to mark the REBUILT row unprovable. `<=` matches the
+// update statement above -- a writer at the row's own generation is the same
+// pass, and only a writer BEHIND it is stale (P2-D section 6).
+//
+// updated_at moves because an authority change is a real change to what AO
+// will serve; the freshness ranking should see it.
+func (q *Queries) SetProjectMemoryItemAuthority(ctx context.Context, arg SetProjectMemoryItemAuthorityParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setProjectMemoryItemAuthority,
+		arg.Authority,
+		arg.AuthorityReason,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const setProjectMemoryItemPromotionProof = `-- name: SetProjectMemoryItemPromotionProof :execrows
+UPDATE project_memory_items
+SET promotion_authority = ?, verified_commit = ?, integrated_commit = ?,
+    repo_identity = ?, provenance_kind = ?,
+    authority = ?, authority_reason = ?, updated_at = ?
+WHERE id = ? AND generation <= ?
+`
+
+type SetProjectMemoryItemPromotionProofParams struct {
+	PromotionAuthority string
+	VerifiedCommit     string
+	IntegratedCommit   string
+	RepoIdentity       string
+	ProvenanceKind     string
+	Authority          string
+	AuthorityReason    string
+	UpdatedAt          time.Time
+	ID                 string
+	Generation         int64
+}
+
+// Record what licensed one fact's promotion to canonical, and pin it to the
+// commits that authorize it.
+//
+// Written by PromoteTaskMemory in the same transaction that creates the
+// canonical row, so a fact cannot exist as canonical for even one read without
+// the row that proves how it got there.
+func (q *Queries) SetProjectMemoryItemPromotionProof(ctx context.Context, arg SetProjectMemoryItemPromotionProofParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setProjectMemoryItemPromotionProof,
+		arg.PromotionAuthority,
+		arg.VerifiedCommit,
+		arg.IntegratedCommit,
+		arg.RepoIdentity,
+		arg.ProvenanceKind,
+		arg.Authority,
+		arg.AuthorityReason,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const setProjectMemoryRelationAuthority = `-- name: SetProjectMemoryRelationAuthority :execrows
+UPDATE project_memory_relations
+SET authority = ?, authority_reason = ?, updated_at = ?
+WHERE id = ? AND generation <= ?
+`
+
+type SetProjectMemoryRelationAuthorityParams struct {
+	Authority       string
+	AuthorityReason string
+	UpdatedAt       time.Time
+	ID              string
+	Generation      int64
+}
+
+// Retire one edge's licence. Edges follow their endpoints (P2-D section 23): an edge
+// derived from a fact that is no longer provable must not be traversed as
+// current, and must not be deleted either.
+func (q *Queries) SetProjectMemoryRelationAuthority(ctx context.Context, arg SetProjectMemoryRelationAuthorityParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setProjectMemoryRelationAuthority,
+		arg.Authority,
+		arg.AuthorityReason,
+		arg.UpdatedAt,
+		arg.ID,
 		arg.Generation,
 	)
 	if err != nil {
@@ -1885,29 +2311,38 @@ SET item_type = ?, scope = ?, item_key = ?,
     summary = ?, content = ?,
     source_paths_json = ?, source_commit = ?, source_digest = ?,
     generation = ?, state = ?, state_reason = ?, confidence = ?,
-    metadata_json = ?, content_hash = ?, updated_at = ?, invalidated_at = ?
+    metadata_json = ?, content_hash = ?, updated_at = ?, invalidated_at = ?,
+    authority = ?, authority_reason = ?, repo_identity = ?, provenance_kind = ?,
+    promotion_authority = ?, verified_commit = ?, integrated_commit = ?
 WHERE id = ? AND generation <= ?
 `
 
 type UpdateProjectMemoryItemParams struct {
-	ItemType        string
-	Scope           string
-	ItemKey         string
-	Summary         string
-	Content         string
-	SourcePathsJson string
-	SourceCommit    string
-	SourceDigest    string
-	Generation      int64
-	State           string
-	StateReason     string
-	Confidence      float64
-	MetadataJson    string
-	ContentHash     string
-	UpdatedAt       time.Time
-	InvalidatedAt   sql.NullTime
-	ID              string
-	Generation_2    int64
+	ItemType           string
+	Scope              string
+	ItemKey            string
+	Summary            string
+	Content            string
+	SourcePathsJson    string
+	SourceCommit       string
+	SourceDigest       string
+	Generation         int64
+	State              string
+	StateReason        string
+	Confidence         float64
+	MetadataJson       string
+	ContentHash        string
+	UpdatedAt          time.Time
+	InvalidatedAt      sql.NullTime
+	Authority          string
+	AuthorityReason    string
+	RepoIdentity       string
+	ProvenanceKind     string
+	PromotionAuthority string
+	VerifiedCommit     string
+	IntegratedCommit   string
+	ID                 string
+	Generation_2       int64
 }
 
 // Generation-conditioned update: apply only if the stored row is not already
@@ -1936,6 +2371,13 @@ func (q *Queries) UpdateProjectMemoryItem(ctx context.Context, arg UpdateProject
 		arg.ContentHash,
 		arg.UpdatedAt,
 		arg.InvalidatedAt,
+		arg.Authority,
+		arg.AuthorityReason,
+		arg.RepoIdentity,
+		arg.ProvenanceKind,
+		arg.PromotionAuthority,
+		arg.VerifiedCommit,
+		arg.IntegratedCommit,
 		arg.ID,
 		arg.Generation_2,
 	)
@@ -1949,7 +2391,8 @@ const updateProjectMemoryRelation = `-- name: UpdateProjectMemoryRelation :execr
 UPDATE project_memory_relations
 SET source_paths_json = ?, source_commit = ?, source_digest = ?,
     generation = ?, state = ?, state_reason = ?, confidence = ?,
-    metadata_json = ?, updated_at = ?, invalidated_at = ?
+    metadata_json = ?, updated_at = ?, invalidated_at = ?,
+    authority = ?, authority_reason = ?, repo_identity = ?
 WHERE id = ? AND generation <= ?
 `
 
@@ -1964,6 +2407,9 @@ type UpdateProjectMemoryRelationParams struct {
 	MetadataJson    string
 	UpdatedAt       time.Time
 	InvalidatedAt   sql.NullTime
+	Authority       string
+	AuthorityReason string
+	RepoIdentity    string
 	ID              string
 	Generation_2    int64
 }
@@ -1982,6 +2428,9 @@ func (q *Queries) UpdateProjectMemoryRelation(ctx context.Context, arg UpdatePro
 		arg.MetadataJson,
 		arg.UpdatedAt,
 		arg.InvalidatedAt,
+		arg.Authority,
+		arg.AuthorityReason,
+		arg.RepoIdentity,
 		arg.ID,
 		arg.Generation_2,
 	)
@@ -1997,8 +2446,8 @@ INSERT INTO project_memory_context_manifests (
     id, project_id, repo_id, workflow_run_id, task_ref, role,
     pack_digest, policy_version, generation, indexed_commit,
     item_ids_json, item_count, selected_bytes, estimated_tokens,
-    created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    created_at, updated_at, item_versions_json, role_head_sha
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     repo_id = excluded.repo_id,
     pack_digest = excluded.pack_digest,
@@ -2009,26 +2458,30 @@ ON CONFLICT(id) DO UPDATE SET
     item_count = excluded.item_count,
     selected_bytes = excluded.selected_bytes,
     estimated_tokens = excluded.estimated_tokens,
+    item_versions_json = excluded.item_versions_json,
+    role_head_sha = excluded.role_head_sha,
     updated_at = excluded.updated_at
 `
 
 type UpsertProjectMemoryContextManifestParams struct {
-	ID              string
-	ProjectID       string
-	RepoID          string
-	WorkflowRunID   string
-	TaskRef         string
-	Role            string
-	PackDigest      string
-	PolicyVersion   int64
-	Generation      int64
-	IndexedCommit   string
-	ItemIdsJson     string
-	ItemCount       int64
-	SelectedBytes   int64
-	EstimatedTokens int64
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID               string
+	ProjectID        string
+	RepoID           string
+	WorkflowRunID    string
+	TaskRef          string
+	Role             string
+	PackDigest       string
+	PolicyVersion    int64
+	Generation       int64
+	IndexedCommit    string
+	ItemIdsJson      string
+	ItemCount        int64
+	SelectedBytes    int64
+	EstimatedTokens  int64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	ItemVersionsJson string
+	RoleHeadSha      string
 }
 
 // Context manifests (migration 0145). A manifest records the IDENTITIES of the
@@ -2056,6 +2509,8 @@ func (q *Queries) UpsertProjectMemoryContextManifest(ctx context.Context, arg Up
 		arg.EstimatedTokens,
 		arg.CreatedAt,
 		arg.UpdatedAt,
+		arg.ItemVersionsJson,
+		arg.RoleHeadSha,
 	)
 	return err
 }

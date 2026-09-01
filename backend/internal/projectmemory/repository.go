@@ -127,6 +127,43 @@ type Repository interface {
 	// ListProjectMemoryContextManifestsForRun reads everything one run's
 	// executions were told, newest first.
 	ListProjectMemoryContextManifestsForRun(ctx context.Context, projectID domain.ProjectID, runID string) ([]domain.MemoryContextManifest, error)
+
+	// --- P2-D: the authority axis (migration 0146) -----------------------
+	//
+	// A third guarantee joins the two above for these, and an alternative
+	// implementation must honour it: authority NEVER widens implicitly. Every
+	// method here can move a fact from provable to unprovable, or record the
+	// proof that makes one provable; none of them may make a fact provable as
+	// a side effect of doing something else.
+
+	// SetProjectMemoryItemAuthority moves one fact's licence under the same
+	// generation fence as a content write, leaving state and content alone.
+	SetProjectMemoryItemAuthority(ctx context.Context, id string, generation int64, authority domain.MemoryAuthority, reason string, now time.Time) (bool, error)
+	// SetProjectMemoryItemPromotionProof records what licensed one fact's
+	// promotion to canonical.
+	SetProjectMemoryItemPromotionProof(ctx context.Context, id string, generation int64, proof store.ProjectMemoryPromotionProof, now time.Time) (bool, error)
+	// ListProjectMemoryItemsByAuthority reads the facts currently held under
+	// one licence -- the withheld-items read.
+	ListProjectMemoryItemsByAuthority(ctx context.Context, projectID domain.ProjectID, repoID string, authority domain.MemoryAuthority) ([]domain.ProjectMemoryItem, error)
+	// CountProjectMemoryItemsByAuthority is the operator summary.
+	CountProjectMemoryItemsByAuthority(ctx context.Context, projectID domain.ProjectID, repoID string) (map[domain.MemoryAuthority]int64, error)
+	// MarkProjectMemoryItemsUnprovableByRepoIdentity withholds every fact not
+	// derived under the identity now observed. An unknown observed identity
+	// changes nothing.
+	MarkProjectMemoryItemsUnprovableByRepoIdentity(ctx context.Context, projectID domain.ProjectID, repoID string, observed domain.RepoIdentity, reason string, now time.Time) (int64, error)
+	// MarkLegacyProjectMemoryItemsUnprovable classifies pre-P2-D rows.
+	MarkLegacyProjectMemoryItemsUnprovable(ctx context.Context, projectID domain.ProjectID, repoID, reason string, now time.Time) (int64, error)
+	// SetProjectMemoryRelationAuthority moves one edge's licence.
+	SetProjectMemoryRelationAuthority(ctx context.Context, id string, generation int64, authority domain.MemoryAuthority, reason string, now time.Time) (bool, error)
+	// RetireProjectMemoryRelationsForNode withholds every edge touching one
+	// node, in both directions.
+	RetireProjectMemoryRelationsForNode(ctx context.Context, projectID domain.ProjectID, repoID string, node domain.ProjectMemoryNode, reason string, now time.Time) (int64, error)
+
+	// ProjectMemoryChangeMark is the instant this repository's memory last
+	// changed in any way that can alter what a reader is served. It is the
+	// pack cache's epoch -- see the method's own doc for why the generation is
+	// not enough.
+	ProjectMemoryChangeMark(ctx context.Context, projectID domain.ProjectID, repoID string) (time.Time, error)
 }
 
 // Compile-time proof that the SQLite store satisfies the port. If a method
