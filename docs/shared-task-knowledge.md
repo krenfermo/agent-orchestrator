@@ -370,12 +370,13 @@ question sibling safety exists to guarantee an answer to.
 
 ## 15. Known limitations
 
-- **Decisions and risks must be supplied.** AO records what a caller hands it
-  and infers nothing. Today the workflow boundary supplies outcome, scope,
-  verification, commit and declared dependencies; it supplies no decisions or
-  risks, because no durable row currently holds them. Nothing is guessed to
-  fill the gap. Wiring reviewer findings and plan rationale into `Decisions` and
-  `Risks` is the natural next increment, and needs a durable source first.
+- **Decisions and risks are only as wide as their durable sources.** They are
+  no longer supplied by hand — see §16 — but every source has an edge, and the
+  facts outside it are not recorded rather than approximated. In particular the
+  planner's own reasoning for a task has no column: a task carries a title, a
+  description, acceptance criteria and a scope, and none of them is "why this
+  approach rather than that one". Where the plan rationale becomes durable, it
+  becomes a decision the same day; until then AO says nothing about it.
 - **Contradiction detection is structural.** AO can prove two decisions are the
   same subject; it cannot prove two different texts mean the same thing. A
   disagreement between an unintegrated branch and the project's own decision is
@@ -398,3 +399,99 @@ question sibling safety exists to guarantee an answer to.
 - **No cross-repository knowledge sharing beyond selection.** Multi-repo
   projects select per repository, and a Planner pack spans them; there is no
   inference that a decision in one repository governs another.
+
+---
+
+## 16. Where decisions and risks come from
+
+P2-C shipped the lifecycle and left the inputs empty, because the *contents* of
+a reviewer's opinion and of a planner's reasoning had no durable row. That was
+true of the prose and not of everything around it. `taskOutcomeFacts` now
+derives both from rows AO already keeps
+(`workflow/task_knowledge_sources.go`), and the lifecycle above is unchanged:
+these are ordinary decisions and risks, with ordinary subjects, supersession,
+resolution, share and promotion.
+
+Three rules decide what counts, and each one costs coverage deliberately.
+
+**Only durable rows.** A transcript, a pane capture and a prompt are not
+sources. Neither is a review body: `CountReviewFindings` says outright that AO
+has never had a structured finding type, so a review's markdown is prose and
+parsing findings out of it would be the invented provenance this model refuses
+everywhere else. What AO holds *around* the prose is structured, and that is
+what is read.
+
+**Only authoritative rows.** Authority is read off a column, never assumed.
+
+**Nothing is invented.** A field no row proves is left empty. A risk that names
+no file is anchored by the task's own changed paths — the fallback
+`knowledgeEvidence` already applies — rather than by a guessed one.
+
+### Risks
+
+| Source | Becomes a risk when | Excluded when | Resolved when |
+|---|---|---|---|
+| Post-Run QA findings (`post_run_qa_runs.findings_json`, migration 0126) | `Finding.Blocking()` | the gate's own predicate says baseline, out-of-scope, report-only, or below major | the gate pass ended `clean` |
+| PR review threads (`pr_review_threads`, migration 0004) | the thread is unresolved | — | the provider reports the thread resolved |
+| Review runs (`review_run`) | `EffectiveVerdict` is `changes_requested` | the run was superseded, or never concluded | a later, non-superseded pass on the same PR approved |
+
+The QA gate is the one **structured** finding type AO has: each finding carries
+its own attribution, scope, verification and severity, so "is this this task's
+problem, and does anyone need to act on it" is answered by the row. The filter
+is `Finding.Blocking()` itself rather than a second opinion written at the
+workflow boundary — a baseline finding was already true before the task ran, an
+out-of-scope one belongs to something the execution never owned, and a
+report-only one is the agent's prose with nothing behind it. Re-deciding that
+here would be two answers to one question.
+
+The review thread is the only reviewer finding AO holds that names a **file**,
+which is what lets a derived risk anchor to a path a reviewer actually pointed
+at. The row carries no comment text and none is invented; what it can say is
+that a reviewer opened a thread on a path and line and nobody has resolved it.
+
+The review run is the review-level fact: a pass that requested changes against a
+commit. The risk names the review, never its body.
+
+One caveat, stated rather than left to be discovered: the QA gate's state model
+is durable and wired, but **nothing runs its checks yet** — `internal/postrunqa`
+says so itself ("no check runners, no repair dispatch, no scheduling"). Until a
+runner lands, that row is always empty and the two review-derived sources carry
+the risks. The wiring is in place now because it is the part that has to be
+right the day the runner arrives.
+
+### Decisions
+
+| Source | Statement | Rationale | Authority |
+|---|---|---|---|
+| Criterion amendments (`workflow_task_criterion_amendments`, migration 0132) | the criterion as amended, or that it no longer applies | the amendment's own `reason` | the schema refuses an amendment without a human approver, a reason and evidence |
+| Answered questions (`workflow_questions` + `workflow_question_resolutions`) | the question and its answer | the resolver's `reason_summary`, or the answer's source | human and policy answers outright; a **resolver** answer only when its own resolution row completed and did not ask for a human |
+
+The amendment ledger is the most authoritative decision AO records anywhere: it
+is append-only, human-approved and evidence-bearing by schema. Its topic is
+derived from the criterion's **text**, not its index — migration 0132 says an
+index stops identifying anything as soon as an earlier criterion is removed —
+so a second amendment of the same criterion supersedes the first instead of
+sitting beside it.
+
+An answered question is a decision by construction: the work was blocked, an
+answer was recorded with its source, and it was delivered and changed what the
+agent did. The **question row** is the source, never the pane it was captured
+from; the row is classified, fingerprinted and durable, and its fingerprint is
+the decision's topic.
+
+### Resolution by topic
+
+`ResolvesRisks` accepts an item id, a subject **or a topic**. The third is what
+lets a derivation close what it opened: the boundary that raised a risk from a
+review thread knows the thread's id, not memory's subject scheme. Without it a
+fixed finding could only fall silent, and an earlier task's risk would stay open
+forever — "AO stopped mentioning it" is not "AO knows it was dealt with".
+
+### What this does not change
+
+Nothing about promotion, sharing or freezing. A derived fact from an
+unintegrated worktree is exactly as task-local as a hand-supplied one; a derived
+decision that contradicts a canonical one conflicts rather than replaces; a
+derived risk is compacted under the same bound. Derivation is deterministic over
+the same rows, so a duplicate completion callback and a restart produce the same
+facts, address the same identities, and write once.

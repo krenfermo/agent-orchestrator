@@ -382,6 +382,14 @@ func (w *knowledgeWriter) markConflict(ctx context.Context, item domain.ProjectM
 }
 
 // resolveRisks closes the risks this outcome says it fixed.
+//
+// A risk is named by item id, by subject, or by TOPIC. The third is what lets
+// the boundary that DERIVED a risk from a durable source close it again from
+// the same source without re-deriving memory's subject scheme: a reviewer
+// thread that is now resolved, a QA finding a clean gate cleared, a
+// changes_requested review a later pass approved. The topic is the identity
+// that source already used to raise the risk, so naming it is naming the same
+// fact — and nothing outside this package has to know how a subject is built.
 func (w *knowledgeWriter) resolveRisks(ctx context.Context) ([]domain.ProjectMemoryRelation, error) {
 	if len(w.out.ResolvesRisks) == 0 {
 		return nil, nil
@@ -399,7 +407,8 @@ func (w *knowledgeWriter) resolveRisks(ctx context.Context) ([]domain.ProjectMem
 		}
 		_, byID := wanted[item.ID]
 		_, bySubject := wanted[domain.KnowledgeSubjectOf(item)]
-		if !byID && !bySubject {
+		_, byTopic := wanted[strings.TrimSpace(item.Metadata["topic"])]
+		if !byID && !bySubject && !byTopic {
 			continue
 		}
 		if err := w.retire(ctx, item, domain.KnowledgeResolved,

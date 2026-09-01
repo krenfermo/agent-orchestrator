@@ -231,7 +231,13 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		// P2-B: a verified, committed task records its bounded outcome here,
 		// and a cancelled one has its unintegrated memory discarded. Nil when
 		// memory is off, which the coordinator treats as ordinary.
-		TaskMemory:               taskMemoryFor(memory, log),
+		TaskMemory: taskMemoryFor(memory, log),
+		// P2-C: the durable sources a finished task's risks are derived from —
+		// the Post-Run QA gate's classified findings and the pull request's
+		// normalized review threads. Both are read-only reads of rows the
+		// store already keeps; neither can raise a risk the row does not say.
+		QAGate:                   store,
+		ReviewThreads:            store,
 		Switcher:                 workflowAgentSwitcher{mgr: sessionMgr},
 		QuestionsStore:           store,
 		PaneReader:               paneReader,

@@ -75,6 +75,9 @@ func (a *TaskMemoryAdapter) RecordOutcome(ctx stdctx.Context, facts workflowcore
 		WorkflowRunID:  facts.WorkflowRunID,
 		Share:          facts.Share,
 		DependsOnTasks: facts.DependsOnTasks,
+		Decisions:      taskDecisions(facts.Decisions),
+		Risks:          taskRisks(facts.Risks),
+		ResolvesRisks:  facts.ResolvesRisks,
 	})
 }
 
@@ -97,4 +100,45 @@ func (a *TaskMemoryAdapter) DiscardTask(
 		return 0, nil
 	}
 	return a.svc.DiscardTaskMemory(ctx, projectID, taskRef)
+}
+
+// taskDecisions and taskRisks translate workflow's vocabulary for a derived
+// fact into memory's.
+//
+// The translation is a copy and nothing else. Scope is left unset on purpose,
+// so normalizeKnowledgeScope resolves it to the repository — a decision derived
+// from a plan amendment or a risk derived from a reviewer thread is a claim
+// about this repository's work, and narrowing it to a module here would be a
+// judgement the source row does not support. Evidence stays empty unless the
+// source PROVED a path, in which case memory anchors on it; otherwise memory
+// falls back to the task's own changed paths.
+func taskDecisions(in []workflowcore.TaskDecisionFact) []projectmemory.TaskDecision {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]projectmemory.TaskDecision, 0, len(in))
+	for _, d := range in {
+		out = append(out, projectmemory.TaskDecision{
+			Statement: d.Statement,
+			Rationale: d.Rationale,
+			Topic:     d.Topic,
+		})
+	}
+	return out
+}
+
+func taskRisks(in []workflowcore.TaskRiskFact) []projectmemory.TaskRisk {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]projectmemory.TaskRisk, 0, len(in))
+	for _, r := range in {
+		out = append(out, projectmemory.TaskRisk{
+			Statement: r.Statement,
+			Kind:      r.Kind,
+			Topic:     r.Topic,
+			Evidence:  r.Evidence,
+		})
+	}
+	return out
 }

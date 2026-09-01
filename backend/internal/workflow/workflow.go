@@ -505,6 +505,14 @@ type Deps struct {
 	// Optional; a per-process value is derived when it is empty.
 	InstanceToken string
 
+	// QAGate and ReviewThreads are the durable finding sources a finished
+	// task's risks are derived from (P2-C §15 / task_knowledge_sources.go).
+	// Both optional, on this file's usual convention: a nil dependency
+	// contributes no risks from that source and is never an error — a task
+	// whose sources cannot be read records fewer facts, never invented ones.
+	QAGate        QAGate
+	ReviewThreads ReviewThreads
+
 	// CommitHistory lists a worktree's reachable commits, and is what lets AO
 	// reconstruct the commit an approved review target was read at for runs
 	// whose ledger predates that pin (approved_head_recovery.go). Optional: nil
@@ -611,6 +619,10 @@ type Coordinator struct {
 	// memory. Nil is the ordinary state for a daemon with memory switched off,
 	// and every call site treats it as normal rather than degraded.
 	taskMemory TaskMemory
+	// qaGate and reviewThreads are the durable sources a finished task's risks
+	// are derived from. Both optional; see task_knowledge_sources.go.
+	qaGate        QAGate
+	reviewThreads ReviewThreads
 
 	// switcher backs Checkpoint 8H's live-session failover. Optional.
 	switcher AgentSwitcher
@@ -746,6 +758,8 @@ func New(d Deps) *Coordinator {
 		planner:                  d.Planner,
 		plannerContextBuilder:    d.PlannerContextBuilder,
 		taskMemory:               d.TaskMemory,
+		qaGate:                   d.QAGate,
+		reviewThreads:            d.ReviewThreads,
 		switcher:                 d.Switcher,
 		questionsStore:           d.QuestionsStore,
 		paneReader:               d.PaneReader,

@@ -100,6 +100,19 @@ type TaskOutcomeFacts struct {
 	// copied from workflow_task_dependencies, never inferred — two tasks that
 	// touched the same files are not related (P2-C §5).
 	DependsOnTasks []string
+
+	// Decisions and Risks are derived from the durable rows AO already holds —
+	// the plan's amendment ledger, the question ledger, the Post-Run QA gate,
+	// the review runs and their threads. See task_knowledge_sources.go for
+	// which rows count and why the rest do not. A task whose sources hold
+	// nothing contributes nothing, never a guess.
+	Decisions []TaskDecisionFact
+	Risks     []TaskRiskFact
+	// ResolvesRisks names, by topic, the risks a durable source now reports as
+	// closed. Emitting nothing would leave an earlier task's risk active
+	// forever; this is what makes "it was dealt with" a fact rather than a
+	// silence.
+	ResolvesRisks []string
 }
 
 // recordTaskMemory is called from completeVerifiedRun, after the work has been
@@ -196,6 +209,13 @@ func (c *Coordinator) taskOutcomeFacts(
 	facts.WorkflowRunID = auth.WorkflowRunID
 	facts.DependsOnTasks = auth.UpstreamTaskRefs
 	facts.Share = knowledgeShareFor(step, facts.Integrated)
+
+	// The decisions and risks the durable sources prove. Assembling them here,
+	// with everything else this task knows, is what keeps one recording one
+	// snapshot: a second pass over the same rows produces the same facts, which
+	// is what makes a duplicate completion callback and a restart idempotent.
+	facts.Decisions = c.durableTaskDecisions(ctx, run)
+	facts.Risks, facts.ResolvesRisks = c.durableTaskRisks(ctx, run)
 	return facts
 }
 

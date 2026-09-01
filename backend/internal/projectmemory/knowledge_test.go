@@ -1044,3 +1044,130 @@ func TestMeasureSharedKnowledgeTokenImpact(t *testing.T) {
 			unrelated.Stats.SharedIrrelevantExcluded)
 	}
 }
+
+// --- derived knowledge (P2-C §15, closed) ------------------------------------
+//
+// The three tests below are about facts the workflow boundary DERIVED from
+// durable rows — a reviewer's unresolved thread, a QA finding, a plan
+// amendment — rather than from a caller who typed them in. Memory does not know
+// or care where a fact came from, which is the point: the lifecycle that
+// governs a hand-supplied decision governs a derived one identically.
+
+// TestDerivedReviewerRiskReachesTheRelatedTaskOnly is the headline claim,
+// re-stated for facts nobody supplied by hand: a risk derived from a reviewer
+// thread on one file reaches the next task in that file and nothing else.
+func TestDerivedReviewerRiskReachesTheRelatedTaskOnly(t *testing.T) {
+	f, svc, root, _ := packService(t)
+
+	recordTask(t, f, svc, root, projectmemory.TaskOutcome{
+		TaskRef: "task-a", Title: "harden the store", WhatChanged: "made the store write through a queue",
+		FilesChanged: []string{"internal/store/store.go"}, Modules: []string{"internal/store"},
+		Integrated: true, Commit: "c1",
+		Decisions: []projectmemory.TaskDecision{{
+			Statement: "the acceptance criterion \"the tree stays dirty\" no longer applies to this work",
+			Rationale: "the state it describes was committed in 70296042b (approved by a human)",
+			Topic:     "acceptance-criterion:task-a:9f1c0c2b1a44",
+			Evidence:  []string{"internal/store/store.go"},
+		}},
+		Risks: []projectmemory.TaskRisk{{
+			Statement: "a reviewer thread on internal/store/store.go:42 is still unresolved",
+			Topic:     "review-thread:th-1",
+			Evidence:  []string{"internal/store/store.go"},
+		}},
+	})
+
+	related := svc.Context(f.ctx, projectmemory.PackRequest{
+		ProjectID: testProject, RepoPath: root, Role: projectmemory.RoleWorker,
+		TaskRef: "task-b", ChangedPaths: []string{"internal/store/store.go"},
+		Modules: []string{"internal/store"},
+	}).Render()
+	if !strings.Contains(related, "still unresolved") {
+		t.Errorf("the next task in the same file did not receive the derived reviewer risk:\n%s", related)
+	}
+	if !strings.Contains(related, "no longer applies") {
+		t.Errorf("the next task in the same file did not receive the derived decision:\n%s", related)
+	}
+
+	unrelated := svc.Context(f.ctx, projectmemory.PackRequest{
+		ProjectID: testProject, RepoPath: root, Role: projectmemory.RoleWorker,
+		TaskRef: "task-c", ChangedPaths: []string{"cmd/app/main.go"}, Modules: []string{"cmd/app"},
+	}).Render()
+	for _, leaked := range []string{"still unresolved", "no longer applies"} {
+		if strings.Contains(unrelated, leaked) {
+			t.Errorf("a task in another module received %q:\n%s", leaked, unrelated)
+		}
+	}
+}
+
+// TestRiskResolvesByTheTopicItsSourceRaisedItUnder is the mechanism that lets a
+// derivation close what it opened.
+//
+// The boundary that derives a risk from a reviewer thread knows the thread's
+// id, not memory's subject scheme. Naming the topic has to be enough — without
+// it, a fixed finding could only ever fall silent, leaving the risk it raised
+// open forever.
+func TestRiskResolvesByTheTopicItsSourceRaisedItUnder(t *testing.T) {
+	f, svc, root, _ := packService(t)
+
+	recordTask(t, f, svc, root, projectmemory.TaskOutcome{
+		TaskRef: "task-a", Title: "add the queue", WhatChanged: "added the queue",
+		FilesChanged: []string{"internal/store/store.go"}, Integrated: true, Commit: "c1",
+		Risks: []projectmemory.TaskRisk{{
+			Statement: "a reviewer thread on internal/store/store.go:42 is still unresolved",
+			Topic:     "review-thread:th-1",
+		}},
+	})
+
+	// The later task names the SAME topic its source used, and nothing else.
+	recordTask(t, f, svc, root, projectmemory.TaskOutcome{
+		TaskRef: "task-b", Title: "answer the reviewer", WhatChanged: "addressed the thread",
+		FilesChanged: []string{"internal/store/store.go"}, Integrated: true, Commit: "c2",
+		ResolvesRisks: []string{"review-thread:th-1"},
+	})
+
+	open, err := svc.Risks(f.ctx, projectmemory.KnowledgeFilter{ProjectID: testProject, RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 0 {
+		t.Fatalf("%d risks still open, want 0 — a topic must resolve the risk it raised: %+v", len(open), open)
+	}
+	resolved, err := svc.Risks(f.ctx, projectmemory.KnowledgeFilter{
+		ProjectID: testProject, RepoPath: root,
+		Statuses: []domain.KnowledgeStatus{domain.KnowledgeResolved},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved) != 1 || resolved[0].ResolvedBy != "task-b" {
+		t.Fatalf("resolution did not keep who closed it: %+v", resolved)
+	}
+}
+
+// TestDerivedKnowledgeFromAnUnintegratedWorktreeStaysOutOfCanonical: deriving a
+// fact from a durable row says nothing about whether the project HAS the work.
+// An unintegrated task's derived risk is still its own, and a task in the same
+// module that never declared a dependency on it must not see it.
+func TestDerivedKnowledgeFromAnUnintegratedWorktreeStaysOutOfCanonical(t *testing.T) {
+	f, svc, root, _ := packService(t)
+
+	recordTask(t, f, svc, root, projectmemory.TaskOutcome{
+		TaskRef: "task-a", WorkflowRunID: "wf-1", Title: "work in a worktree",
+		WhatChanged:  "changed the store on an ao/* branch",
+		FilesChanged: []string{"internal/store/store.go"}, Modules: []string{"internal/store"},
+		Integrated: false, Share: domain.ShareWorkflow, Commit: "c1",
+		Risks: []projectmemory.TaskRisk{{
+			Statement: "a reviewer thread on internal/store/store.go:42 is still unresolved",
+			Topic:     "review-thread:th-1", Evidence: []string{"internal/store/store.go"},
+		}},
+	})
+
+	sibling := svc.Context(f.ctx, projectmemory.PackRequest{
+		ProjectID: testProject, RepoPath: root, Role: projectmemory.RoleWorker,
+		TaskRef: "task-sibling", ChangedPaths: []string{"internal/store/store.go"},
+		Modules: []string{"internal/store"},
+	}).Render()
+	if strings.Contains(sibling, "still unresolved") {
+		t.Errorf("a sibling read an unintegrated task's derived risk:\n%s", sibling)
+	}
+}
