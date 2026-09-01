@@ -120,9 +120,17 @@ function setupHost(agentBrowserRuntime?: import("./agent-browser-runtime").Agent
 	const shellFocus = vi.fn();
 	const shellSend = vi.fn((channel: string, payload?: unknown) => sent.push({ channel, payload }));
 	const mainContentView = { addChildView: vi.fn(), removeChildView: vi.fn() };
+	// Electron destroys the BaseWindow before "closed" fires, and every access
+	// to `.contentView` -- the property read included -- throws from then on.
+	// The fake models that so teardown-after-destroy is testable at all.
+	let mainWindowDestroyed = false;
 	const host = createBrowserViewHost({
 		mainWindow: {
-			contentView: mainContentView,
+			get contentView() {
+				if (mainWindowDestroyed) throw new TypeError("Object has been destroyed");
+				return mainContentView;
+			},
+			isDestroyed: () => mainWindowDestroyed,
 			getContentBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
 			webContents: {
 				id: 1,
@@ -181,6 +189,10 @@ function setupHost(agentBrowserRuntime?: import("./agent-browser-runtime").Agent
 		return event;
 	};
 	return {
+		destroyMainWindow: () => {
+			mainWindowDestroyed = true;
+		},
+		runtimeDisposeCalls: () => (runtime.dispose as ReturnType<typeof vi.fn>).mock.calls.length,
 		emit,
 		emitBeforeInput,
 		host,
@@ -1504,5 +1516,62 @@ describe("scaleBoundsForZoom", () => {
 		expect(scaleBoundsForZoom(rect, 1)).toBe(rect);
 		expect(scaleBoundsForZoom(rect, 0)).toBe(rect);
 		expect(scaleBoundsForZoom(rect, Number.NaN)).toBe(rect);
+	});
+});
+
+// --- teardown after the window is gone (P2-E follow-up incident) -----------
+//
+// The "Object has been destroyed" incident was in window-composition, but the
+// host is the other half of the same teardown and is what makes it ASYNCHRONOUS:
+// `mainWindow.on("closed")` awaits the host's dispose before releasing the
+// shell, which is why the shell release ran a tick late and hit a window that
+// was already gone. These pin the host's own contribution to that sequence.
+describe("browser view host teardown", () => {
+	it("disposes without throwing when the window is already destroyed", async () => {
+		const harness = setupHost();
+		harness.destroyMainWindow();
+
+		await expect(harness.host.dispose()).resolves.toBeUndefined();
+	});
+
+	it("is idempotent: concurrent and repeated disposes share one teardown", async () => {
+		const harness = setupHost();
+
+		const first = harness.host.dispose();
+		const second = harness.host.dispose();
+		expect(second).toBe(first);
+
+		await first;
+		await expect(harness.host.dispose()).resolves.toBeUndefined();
+		expect(harness.runtimeDisposeCalls()).toBe(1);
+	});
+
+	it("still tears the browser runtime down when the window is gone", async () => {
+		const harness = setupHost();
+		harness.destroyMainWindow();
+
+		await harness.host.dispose();
+
+		// The window going away must not skip child cleanup: the Agent Browser
+		// runtime is a real child process and orphaning it is the failure this
+		// whole path exists to prevent.
+		expect(harness.runtimeDisposeCalls()).toBe(1);
+	});
+
+	it("produces no unhandled rejection when disposed from a voided promise chain", async () => {
+		const harness = setupHost();
+		const rejections: unknown[] = [];
+		const onRejection = (reason: unknown) => rejections.push(reason);
+		process.on("unhandledRejection", onRejection);
+		try {
+			harness.destroyMainWindow();
+			// The exact production shape: nobody awaits this.
+			void harness.host.dispose();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(rejections).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onRejection);
+		}
 	});
 });

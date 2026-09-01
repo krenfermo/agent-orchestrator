@@ -501,9 +501,21 @@ async function createWindowInternal(): Promise<void> {
 		disposeBrowserRuntimeLink();
 		keybindingRecordingActive = false;
 		if (windowComposition === composition) windowComposition = null;
-		void disposeBrowserViewHost().finally(() => {
-			composition.dispose();
-		});
+		// The shell surface is released only after the browser runtime has been
+		// torn down, which is asynchronous -- so this callback runs at least a
+		// tick after Electron destroyed the window, and the composition has to
+		// cope with that (it does; see WindowComposition.dispose).
+		//
+		// The trailing catch is not decoration. Without it a throw in either
+		// half becomes an UNHANDLED REJECTION, which today is a warning and
+		// under `--unhandled-rejections=strict` terminates the whole app --
+		// closing AO because a window was closed. Closing a window is never a
+		// reason to quit, so the failure is logged and contained here.
+		void disposeBrowserViewHost()
+			.finally(() => composition.dispose())
+			.catch((error) => {
+				console.error("window composition cleanup failed:", error);
+			});
 		mainWindow = null;
 		trayLifecycle.clearPendingTarget();
 	});
@@ -1873,7 +1885,16 @@ function initAutoUpdates(): void {
 	const runFile = runFilePath();
 	if (!runFile) return;
 	const stateDir = path.dirname(runFile);
-	void ensureUpdatePrefs(stateDir).then(() => startAutoUpdates(stateDir));
+	// Both halves are async and neither is awaited, so without a rejection
+	// handler a failing update check is an unhandled rejection at boot -- the
+	// same hazard the window-close path had, and fatal for the whole app under
+	// `--unhandled-rejections=strict`. Auto-update is best-effort by design:
+	// AO runs perfectly well without it, so a failure is logged and dropped.
+	void ensureUpdatePrefs(stateDir)
+		.then(() => startAutoUpdates(stateDir))
+		.catch((error) => {
+			console.error("auto-update initialisation failed:", error);
+		});
 }
 
 // Resolve the bundle path `ao start` will later `open` and stat as a usable app.
