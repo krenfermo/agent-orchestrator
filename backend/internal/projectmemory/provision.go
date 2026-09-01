@@ -32,9 +32,41 @@ import (
 // ProvisionRequest is one boundary's ask.
 type ProvisionRequest struct {
 	ProjectID domain.ProjectID
-	// RepoPath is the checkout this dispatch is about. A Planner may leave it
-	// empty to span every repository of the project.
+	// RepoPath is the CANONICAL REPOSITORY ROOT this dispatch is about -- the
+	// path the project record names, never the workspace the agent happens to
+	// be running in. A Planner may leave it empty to span every repository of
+	// the project.
+	//
+	// The distinction is load-bearing and was the P2-D production gate's
+	// blocker (P2-E). Canonical memory is derived from a repository; an
+	// isolated worktree is one task's unintegrated checkout of that same
+	// repository, and indexing it mints a second repo_id whose facts are
+	// canonical-looking but describe a branch nothing has merged. Callers pass
+	// the root here and the workspace in ExecutionWorkspace below; the syncer
+	// refuses a linked worktree outright as a last line of defence.
 	RepoPath string
+	// ExecutionWorkspace is where the agent is actually working, when that is
+	// not the repository root -- a task's isolated worktree. It is RECORDED
+	// and never indexed: it exists so a diagnostic can say which checkout a
+	// pack was assembled for, and so a future change has an honest place to
+	// put workspace-scoped evidence instead of reaching for RepoPath.
+	//
+	// Empty means the agent is working in the repository root, which is the
+	// direct-branch case.
+	ExecutionWorkspace string
+	// TaskChangedPaths are repo-relative paths this execution's own task has
+	// already modified in its workspace but has not integrated (P2-E A4).
+	//
+	// They are an EXCLUSION, not a relevance hint. A canonical file summary
+	// describes the file as the repository has it; once a task has rewritten
+	// that file in its own worktree, serving the canonical summary to the
+	// reviewer of that change would describe a version nobody is looking at.
+	// Facts whose evidence lies entirely inside this set are therefore
+	// withheld, and the role reads the working tree instead -- which is the
+	// authority anyway (see ContextPack.Render's own preamble).
+	//
+	// Empty is the common case and changes nothing.
+	TaskChangedPaths []string
 	// Role decides the section order, the budget and the dedupe allowance.
 	Role PackRole
 	// ChangedPaths, Modules and Keywords are the relevance evidence, strongest
@@ -208,9 +240,14 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 		// differ only in which upstream tasks they may read are entitled to
 		// different packs, and a cache that ignored that would serve one
 		// task's authorized knowledge to a sibling that has none.
+		// TaskChangedPaths joins the scope digest because it CHANGES WHAT IS
+		// SELECTED: two dispatches identical but for the set of files the task
+		// has rewritten are entitled to different packs, and a cache that
+		// ignored it would hand the second one the first one's answer.
 		Scope: ScopeDigest(req.ChangedPaths, req.Modules,
 			append(append([]string(nil), req.Keywords...), coverablePaths...),
-			req.TaskRef+"|"+req.WorkflowRunID+"|"+strings.Join(req.UpstreamTaskRefs, ",")),
+			req.TaskRef+"|"+req.WorkflowRunID+"|"+strings.Join(req.UpstreamTaskRefs, ",")+
+				"|excl:"+strings.Join(domain.NormalizeMemorySourcePaths(req.TaskChangedPaths), ",")),
 	}
 	out.Metrics.CacheKey = key.String()
 
@@ -223,8 +260,9 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 			ChangedPaths: req.ChangedPaths, Modules: req.Modules,
 			Keywords: req.Keywords, TaskRef: req.TaskRef,
 			WorkflowRunID: req.WorkflowRunID, UpstreamTaskRefs: req.UpstreamTaskRefs,
-			CoverablePaths: coverablePaths,
-			Budget:         budget.packBudget(),
+			CoverablePaths:   coverablePaths,
+			TaskChangedPaths: req.TaskChangedPaths,
+			Budget:           budget.packBudget(),
 		})
 		p.cache.Put(key, pack)
 	}

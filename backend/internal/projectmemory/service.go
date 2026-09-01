@@ -34,10 +34,12 @@ type Service struct {
 	detector *Detector
 	validate *Validator
 	packs    *PackBuilder
-	graph    MemoryGraph
-	limits   IndexLimits
-	now      func() time.Time
-	log      *slog.Logger
+	// linkedWorktree is the P2-E worktree guard, injectable for tests.
+	linkedWorktree func(ctx context.Context, path string) (string, bool)
+	graph          MemoryGraph
+	limits         IndexLimits
+	now            func() time.Time
+	log            *slog.Logger
 }
 
 // ServiceOption configures a Service.

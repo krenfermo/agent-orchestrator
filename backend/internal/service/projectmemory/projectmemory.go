@@ -15,6 +15,7 @@ package projectmemory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -31,6 +32,17 @@ type ProjectReader interface {
 	ListWorkspaceRepos(ctx context.Context, projectID string) ([]domain.WorkspaceRepoRecord, error)
 }
 
+// WorkspaceReader names the workspaces a live execution is using, so a prune
+// can prove nothing depends on what it is about to remove (P2-E A8, proof 5).
+//
+// It is a separate, optional port: with it absent the prune still runs, but it
+// refuses every candidate it cannot clear -- an unknown is never treated as
+// idle.
+type WorkspaceReader interface {
+	ListNonTerminalWorkflowRuns(ctx context.Context) ([]domain.WorkflowRun, error)
+	ListWorkflowCheckpoints(ctx context.Context, runID string) ([]domain.WorkflowCheckpoint, error)
+}
+
 // Service backs the project-memory HTTP surface.
 type Service struct {
 	memory   *pm.Service
@@ -39,11 +51,113 @@ type Service struct {
 	// switched off it is nil, and the report says so rather than pretending to
 	// measure a subsystem nobody enabled.
 	provisioner *pm.Provisioner
+	// workspaces backs the prune's live-execution proof. Optional; nil makes
+	// the prune fail closed rather than assume nothing is running.
+	workspaces WorkspaceReader
 }
 
 // New builds the service over the memory subsystem and the project registry.
 func New(memory *pm.Service, projects ProjectReader) *Service {
 	return &Service{memory: memory, projects: projects}
+}
+
+// WithWorkspaces attaches the live-execution reader the prune needs.
+func (s *Service) WithWorkspaces(w WorkspaceReader) *Service {
+	s.workspaces = w
+	return s
+}
+
+// Prune retires the canonical memories a worktree should never have had
+// (P2-E A8).
+//
+// Every proof the memory package requires is assembled HERE, because this is
+// the layer that holds the project registry and the workflow state: which
+// checkouts the project legitimately has, and which workspaces a live run is
+// using. The memory package applies them and decides; it never guesses either.
+func (s *Service) Prune(
+	ctx context.Context, projectID domain.ProjectID, apply bool,
+) (controllers.ProjectMemoryPruneResult, error) {
+	project, found, err := s.projects.GetProject(ctx, string(projectID))
+	if err != nil {
+		return controllers.ProjectMemoryPruneResult{}, err
+	}
+	if !found {
+		return controllers.ProjectMemoryPruneResult{}, fmt.Errorf("project %s is not registered", projectID)
+	}
+
+	registered := []string{project.Path}
+	if repos, rerr := s.projects.ListWorkspaceRepos(ctx, string(projectID)); rerr == nil {
+		for _, r := range repos {
+			registered = append(registered, filepath.Join(project.Path, r.RelativePath))
+		}
+	}
+
+	busy, err := s.busyWorkspaces(ctx)
+	if err != nil {
+		return controllers.ProjectMemoryPruneResult{}, err
+	}
+
+	report, err := s.memory.Prune(ctx, pm.PruneRequest{
+		ProjectID: projectID, ProjectRoot: project.Path,
+		RegisteredRepos: registered, BusyWorkspaces: busy, Apply: apply,
+	})
+	if err != nil {
+		return controllers.ProjectMemoryPruneResult{}, err
+	}
+
+	out := controllers.ProjectMemoryPruneResult{
+		Applied:          apply,
+		CanonicalRepoIDs: report.CanonicalRepoIDs,
+		PurgedItems:      report.PurgedItems,
+		PurgedRelations:  report.PurgedRelations,
+	}
+	for _, c := range report.Candidates {
+		out.Candidates = append(out.Candidates, controllers.ProjectMemoryPruneCandidate{
+			RepoID: c.RepoID, RepoPath: c.RepoPath, Items: c.Items, Relations: c.Relations,
+			ParentRepo: c.ParentRepo, Prunable: c.Prunable, Reason: c.Reason, Purged: c.Purged,
+		})
+	}
+	return out, nil
+}
+
+// busyWorkspaces lists the worktrees a non-terminal run is using.
+//
+// It reads the runs' own durable checkpoints rather than the worktree
+// registry, because a checkpoint records the workspace a step was DISPATCHED
+// into -- which is the thing a prune must not pull out from under -- and it
+// stays readable even for a run whose worktree row was already cleaned up.
+//
+// With no workspace reader wired it returns an error rather than an empty
+// list. "AO cannot tell what is running" must never read as "nothing is
+// running".
+func (s *Service) busyWorkspaces(ctx context.Context) ([]string, error) {
+	if s.workspaces == nil {
+		return nil, errors.New("cannot prune: AO cannot read which workspaces live executions are using")
+	}
+	runs, err := s.workspaces.ListNonTerminalWorkflowRuns(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read live workflow runs: %w", err)
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	for _, run := range runs {
+		cps, cerr := s.workspaces.ListWorkflowCheckpoints(ctx, run.ID)
+		if cerr != nil {
+			return nil, fmt.Errorf("read checkpoints of live run %s: %w", run.ID, cerr)
+		}
+		for _, cp := range cps {
+			path := strings.TrimSpace(cp.WorktreePath)
+			if path == "" {
+				continue
+			}
+			if _, dup := seen[path]; dup {
+				continue
+			}
+			seen[path] = struct{}{}
+			out = append(out, path)
+		}
+	}
+	return out, nil
 }
 
 // WithProvisioner attaches the dispatch-path provisioner, so `memory report`

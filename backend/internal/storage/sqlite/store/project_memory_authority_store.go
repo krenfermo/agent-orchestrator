@@ -302,3 +302,37 @@ func (s *Store) ProjectMemoryChangeMark(
 	}
 	return last, nil
 }
+
+// DeregisterProjectMemoryRepo removes a repository memory entirely: its facts,
+// its edges, its file ledger, its provenance index AND its registration.
+//
+// It is separate from PurgeProjectMemoryRepo, which empties a repository so the
+// next pass can rebuild it and therefore KEEPS the index row that gives that
+// pass its identity. Deregistration is for a "repository" that never was one --
+// P2-E's worktree-minted memories -- where leaving the registration behind
+// would keep it showing up in `ao memory status` as a repository of the project
+// forever.
+//
+// The caller proves it is safe to call. This method deletes what it is told to.
+func (s *Store) DeregisterProjectMemoryRepo(
+	ctx context.Context, projectID domain.ProjectID, repoID string,
+) error {
+	if err := s.PurgeProjectMemoryRepo(ctx, projectID, repoID); err != nil {
+		return err
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.inTx(ctx, "deregister project memory repo", func(q *gen.Queries) error {
+		if _, err := q.DeleteProjectMemorySourcesForRepo(ctx, gen.DeleteProjectMemorySourcesForRepoParams{
+			ProjectID: string(projectID), RepoID: repoID,
+		}); err != nil {
+			return fmt.Errorf("delete sources: %w", err)
+		}
+		if _, err := q.DeleteProjectMemoryIndex(ctx, gen.DeleteProjectMemoryIndexParams{
+			ProjectID: string(projectID), RepoID: repoID,
+		}); err != nil {
+			return fmt.Errorf("delete index row: %w", err)
+		}
+		return nil
+	})
+}

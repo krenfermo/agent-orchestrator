@@ -690,7 +690,7 @@ func RunWithConfig(cfg config.Config) error {
 		UsageHooks:         usageCollector,
 		UsageSummary:       usagesvc.NewSummaryReader(store),
 		Capacity:           capacitysvc.NewReader(store),
-		ProjectMemory:      projectmemorysvc.New(projectMemory, store).WithProvisioner(memoryProvisioning),
+		ProjectMemory:      projectmemorysvc.New(projectMemory, store).WithProvisioner(memoryProvisioning).WithWorkspaces(store),
 		Questions:          &questionssvc.AnswerService{Store: store, Runs: store, Sender: rawSessionMgr},
 		Decisions:          &questionssvc.ResolverAnswerService{Store: store},
 		Telemetry:          telemetrySink,

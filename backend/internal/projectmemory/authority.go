@@ -129,3 +129,32 @@ func RoleHeadFrom(ctx stdctx.Context) string {
 	sha, _ := ctx.Value(roleHeadContextKey{}).(string)
 	return sha
 }
+
+// --- task changed paths (P2-E A4) -------------------------------------------
+//
+// The files a task has already rewritten in its own workspace, travelling the
+// same way the sharing entitlement and the role head do: the workflow boundary
+// knows them, the memory boundary needs them, and neither should have to learn
+// the other's model.
+//
+// They are an EXCLUSION and never a relevance hint. See PackRequest's
+// TaskChangedPaths for the rule and for why it is "every source path" rather
+// than "any".
+
+type taskChangedPathsContextKey struct{}
+
+// WithTaskChangedPaths returns a context carrying the paths this execution's
+// task has rewritten but not integrated.
+func WithTaskChangedPaths(ctx stdctx.Context, paths []string) stdctx.Context {
+	if len(paths) == 0 {
+		return ctx
+	}
+	return stdctx.WithValue(ctx, taskChangedPathsContextKey{}, append([]string(nil), paths...))
+}
+
+// TaskChangedPathsFrom reads those paths, if a boundary stamped any. Nil is a
+// complete answer and excludes nothing, which is the pre-P2-E behaviour.
+func TaskChangedPathsFrom(ctx stdctx.Context) []string {
+	paths, _ := ctx.Value(taskChangedPathsContextKey{}).([]string)
+	return paths
+}

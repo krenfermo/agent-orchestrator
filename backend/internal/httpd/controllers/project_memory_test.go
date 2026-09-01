@@ -43,6 +43,9 @@ type fakeProjectMemory struct {
 	validation  controllers.ProjectMemoryValidation
 	gotValidate controllers.ProjectMemoryValidateQuery
 
+	pruned        controllers.ProjectMemoryPruneResult
+	gotPruneApply bool
+
 	provenance      controllers.ProjectMemoryProvenance
 	provenanceFound bool
 	gotProvenanceID string
@@ -83,6 +86,11 @@ func (f *fakeProjectMemory) Report(context.Context, domain.ProjectID, string) (c
 func (f *fakeProjectMemory) Validate(_ context.Context, q controllers.ProjectMemoryValidateQuery) (controllers.ProjectMemoryValidation, error) {
 	f.gotValidate = q
 	return f.validation, nil
+}
+
+func (f *fakeProjectMemory) Prune(_ context.Context, _ domain.ProjectID, apply bool) (controllers.ProjectMemoryPruneResult, error) {
+	f.gotPruneApply = apply
+	return f.pruned, nil
 }
 
 func (f *fakeProjectMemory) Provenance(_ context.Context, _ domain.ProjectID, itemID string) (controllers.ProjectMemoryProvenance, bool, error) {

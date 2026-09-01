@@ -1280,6 +1280,18 @@ func projectMemoryOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/memory/prune", id: "pruneProjectMemory", tag: "projects",
+			summary:    "P2-E: retire canonical project memory that was built from a task's isolated worktree instead of from the repository. A worktree is a checkout of a repository AO already knows, not a second repository; indexing one produced canonical facts derived from an unintegrated branch. Dry run unless apply is set, and it refuses anything it cannot prove is safe: registered repositories, workspaces a live execution is using, and any prune that would leave the project with no memory at all.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			reqBody:    controllers.PruneProjectMemoryRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.PruneProjectMemoryResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodGet, path: "/api/v1/projects/{id}/memory/provenance/{itemId}", id: "getProjectMemoryProvenance", tag: "projects",
 			summary:    "P2-D: the full evidence chain behind one fact — why it is valid, which task produced it, which commit supports it, how it became canonical, what withdrew it, and what replaced it. Retired edges are included: a superseded decision's supersedes edge is not in the current graph and is usually what is being looked for.",
 			pathParams: []any{controllers.ProjectMemoryItemIDParam{}},

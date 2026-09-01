@@ -119,6 +119,7 @@ func newMemoryCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newMemoryInvalidateCommand(ctx))
 	cmd.AddCommand(newMemoryValidateCommand(ctx))
 	cmd.AddCommand(newMemoryProvenanceCommand(ctx))
+	cmd.AddCommand(newMemoryPruneCommand(ctx))
 	cmd.AddCommand(newMemoryReportCommand(ctx))
 	cmd.AddCommand(newMemoryKnowledgeCommand(ctx))
 	cmd.AddCommand(newMemoryDecisionsCommand(ctx))

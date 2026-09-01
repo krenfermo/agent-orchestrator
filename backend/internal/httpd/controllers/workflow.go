@@ -51,8 +51,23 @@ type ListWorkflowsQuery struct {
 }
 
 // CreateWorkflowRunRequest is the body of POST /api/v1/projects/{projectId}/workflows.
+// maxCreateWorkflowBodyBytes bounds a create-workflow request body.
+//
+// It is the objective ceiling plus 64 KiB of headroom for everything else the
+// body legitimately carries — acceptance criteria, a verification plan, the
+// strategy signals — so a request that fits the documented objective limit can
+// never be refused for being one field too large.
+const maxCreateWorkflowBodyBytes = domain.MaxWorkflowObjectiveBytes + 64*1024
+
+// CreateWorkflowRunRequest is the body of
+// POST /api/v1/projects/{projectId}/workflows.
 type CreateWorkflowRunRequest struct {
-	Objective        string                          `json:"objective" description:"The workflow run's objective."`
+	// Objective is the run's objective, and for the "task" strategy it is the
+	// task's full specification: multi-line, markdown-friendly, and preserved
+	// exactly as written. It is bounded at domain.MaxWorkflowObjectiveBytes
+	// (128 KiB of UTF-8) and is NEVER truncated — an over-long objective is
+	// refused with OBJECTIVE_TOO_LONG naming both sizes.
+	Objective        string                          `json:"objective" maxLength:"131072" description:"The workflow run's objective. For the task strategy this is the task's full specification: multi-line and markdown-friendly, preserved verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long objective is refused."`
 	Verification     WorkflowVerificationPlan        `json:"verification,omitempty"`
 	MasterPlan       bool                            `json:"masterPlan,omitempty" description:"Generate a provider-neutral master plan before execution."`
 	PlanApprovalMode domain.WorkflowPlanApprovalMode `json:"planApprovalMode,omitempty" enum:"manual,auto"`
@@ -1140,10 +1155,42 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	projectID := strings.TrimSpace(chi.URLParam(r, "projectId"))
+	// P2-E B3: a Task specification may be long, and the body is bounded so
+	// "long" cannot become "unbounded". The cap is the objective limit plus
+	// room for the rest of the request (criteria, verification plan), and
+	// MaxBytesReader stops the read rather than buffering a hostile body to
+	// find out how big it is.
+	r.Body = http.MaxBytesReader(w, r.Body, maxCreateWorkflowBodyBytes)
 	var in CreateWorkflowRunRequest
 	if err := decodeJSON(r, &in); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			envelope.WriteAPIError(w, r, http.StatusRequestEntityTooLarge, "bad_request", "OBJECTIVE_TOO_LONG",
+				fmt.Sprintf("La instrucción de la tarea supera el máximo permitido: el cuerpo de la petición excede %d bytes.",
+					maxCreateWorkflowBodyBytes), nil)
+			return
+		}
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
 		return
+	}
+	// Validated BEFORE anything is created, alongside the strategy and the
+	// approval policy, so an over-long specification is refused rather than
+	// producing a run whose objective nobody can read back in full. It is
+	// never truncated -- see domain.ValidateWorkflowObjective.
+	objective, objErr := domain.ValidateWorkflowObjective(in.Objective)
+	switch {
+	case errors.Is(objErr, domain.ErrObjectiveTooLong):
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "OBJECTIVE_TOO_LONG",
+			domain.ObjectiveTooLongMessage(in.Objective), nil)
+		return
+	case objErr != nil && !errors.Is(objErr, domain.ErrObjectiveEmpty):
+		// An empty objective keeps its existing downstream handling; anything
+		// else (invalid UTF-8) is refused here.
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_OBJECTIVE", objErr.Error(), nil)
+		return
+	}
+	if objective != "" {
+		in.Objective = objective
 	}
 	verification := workflowcore.VerificationPlan{}
 	for _, check := range in.Verification.Commands {

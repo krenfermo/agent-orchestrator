@@ -1495,9 +1495,16 @@ func (c *Coordinator) dispatchReviewFromPending(
 	// P2-D section 17: and the commit it is about to judge travels with it, so
 	// the manifest recording what this reviewer was told can be compared
 	// against what it actually reviewed.
-	launch, adopted, err := c.ensureReviewerLaunched(
+	//
+	// P2-E A4: and the files this task has already rewritten, so a canonical
+	// summary of a file the reviewer is about to read a NEW version of is
+	// withheld rather than served as a current description of it. The write
+	// set is the durable one the plan recorded; a task AO holds none for
+	// excludes nothing, which is the pre-P2-E behaviour.
+	reviewCtx := projectmemory.WithTaskChangedPaths(
 		projectmemory.WithRoleHead(c.withTaskAuthority(ctx, run), targetSHA),
-		launchReq, authorization.HandleID)
+		c.expectedWriteSetFor(ctx, run))
+	launch, adopted, err := c.ensureReviewerLaunched(reviewCtx, launchReq, authorization.HandleID)
 	if err != nil {
 		return c.recordReviewLaunchFailure(ctx, run, reviewStep, entry, harness, reviewRunID, targetSHA, cycleNumber, reviewLaunchStageLaunch, fmt.Errorf("launch reviewer: %w", err))
 	}

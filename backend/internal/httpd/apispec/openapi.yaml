@@ -1951,6 +1951,57 @@ paths:
         is being looked for.'
       tags:
       - projects
+  /api/v1/projects/{id}/memory/prune:
+    post:
+      operationId: pruneProjectMemory
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersPruneProjectMemoryRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersPruneProjectMemoryResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P2-E: retire canonical project memory that was built from a task''s
+        isolated worktree instead of from the repository. A worktree is a checkout
+        of a repository AO already knows, not a second repository; indexing one produced
+        canonical facts derived from an unintegrated branch. Dry run unless apply
+        is set, and it refuses anything it cannot prove is safe: registered repositories,
+        workspaces a live execution is using, and any prune that would leave the project
+        with no memory at all.'
+      tags:
+      - projects
   /api/v1/projects/{id}/memory/rebuild:
     post:
       operationId: rebuildProjectMemory
@@ -9522,6 +9573,33 @@ components:
       - servable
       - relations
       type: object
+    ControllersProjectMemoryPruneCandidateResponse:
+      properties:
+        items:
+          type: integer
+        parentRepo:
+          type: string
+        prunable:
+          type: boolean
+        purged:
+          type: boolean
+        reason:
+          type: string
+        relations:
+          type: integer
+        repoId:
+          type: string
+        repoPath:
+          type: string
+      required:
+      - repoId
+      - repoPath
+      - items
+      - relations
+      - prunable
+      - reason
+      - purged
+      type: object
     ControllersProjectMemoryRelationResponse:
       properties:
         authority:
@@ -9943,6 +10021,36 @@ components:
           type: array
       required:
       - providers
+      type: object
+    ControllersPruneProjectMemoryRequest:
+      properties:
+        apply:
+          description: Purge the worktree-minted memories. Defaults to false, so the
+            repair can be inspected before it changes anything.
+          type: boolean
+      type: object
+    ControllersPruneProjectMemoryResponse:
+      properties:
+        applied:
+          type: boolean
+        candidates:
+          items:
+            $ref: '#/components/schemas/ControllersProjectMemoryPruneCandidateResponse'
+          type: array
+        canonicalRepoIds:
+          items:
+            type: string
+          type: array
+        purgedItems:
+          type: integer
+        purgedRelations:
+          type: integer
+      required:
+      - applied
+      - canonicalRepoIds
+      - purgedItems
+      - purgedRelations
+      - candidates
       type: object
     ControllersPutExecutionPolicyRequest:
       properties:
@@ -11556,7 +11664,11 @@ components:
           description: Generate a provider-neutral master plan before execution.
           type: boolean
         objective:
-          description: The workflow run's objective.
+          description: 'The workflow run''s objective. For the task strategy this
+            is the task''s full specification: multi-line and markdown-friendly, preserved
+            verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long objective
+            is refused.'
+          maxLength: 131072
           type: string
         planApprovalMode:
           enum:

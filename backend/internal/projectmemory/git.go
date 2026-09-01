@@ -127,3 +127,41 @@ func RepoIdentityOf(ctx context.Context, repoPath string) domain.RepoIdentity {
 	}
 	return domain.NewRepoIdentity(remote, root)
 }
+
+// LinkedWorktreeOf reports whether a path is a LINKED git worktree rather than
+// a repository's own main working tree, and if so names the repository it
+// belongs to (P2-E).
+//
+// This is the guard that closes the class of bug the P2-D production gate
+// found. A linked worktree is a checkout of a repository AO already knows; it
+// is not a second repository, and canonically indexing one mints a second
+// repo_id whose facts are derived from a branch nothing has integrated. The
+// contract has always said so -- see ProjectMemoryRepoID's doc comment, "a
+// worktree is deliberately NOT its own repository" -- but until now nothing
+// enforced it, so a single caller passing a workspace path was enough to
+// violate it silently.
+//
+// The signal is git's own and needs no AO convention: in a main working tree
+// `--git-dir` and `--git-common-dir` resolve to the same directory, and in a
+// linked worktree they do not (the former is
+// `<common>/worktrees/<name>`). That is true of every linked worktree however
+// it was created and wherever it lives, which matters because AO's own
+// worktrees live under ~/.ao but a user's do not have to.
+//
+// A path git cannot answer for is reported as NOT a linked worktree, with no
+// parent. That is the safe direction here: the caller's other proofs (the
+// project record) still govern, and refusing to index a plain directory that
+// happens to confuse git would withhold memory from projects that are not git
+// checkouts at all.
+func LinkedWorktreeOf(ctx context.Context, path string) (parentRepo string, linked bool) {
+	gitDir := gitOutput(ctx, path, "rev-parse", "--path-format=absolute", "--git-dir")
+	commonDir := gitOutput(ctx, path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if gitDir == "" || commonDir == "" || gitDir == commonDir {
+		return "", false
+	}
+	// The repository the worktree belongs to is the parent of the common git
+	// dir -- `/repo/.git` -> `/repo`. A bare repository has no working tree to
+	// return, and is reported as linked with no parent so the caller still
+	// refuses rather than indexing it.
+	return filepath.Dir(commonDir), true
+}

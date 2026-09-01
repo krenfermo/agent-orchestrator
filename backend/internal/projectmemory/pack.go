@@ -132,6 +132,18 @@ type PackRequest struct {
 	// other in no list, so neither can see the other's unintegrated work no
 	// matter how much their file sets overlap.
 	UpstreamTaskRefs []string
+	// TaskChangedPaths are paths this execution's own task has rewritten in
+	// its workspace without integrating them (P2-E A4). A canonical fact whose
+	// evidence lies ENTIRELY inside this set describes a version of the file
+	// that the reader is not looking at, so it is withheld and the reader
+	// falls back to the working tree.
+	//
+	// "Entirely" is the whole rule. A module summary derived from twenty files
+	// of which the task touched one is still substantially true and still the
+	// cheapest thing the reader has; a file summary of the one file the task
+	// rewrote is simply wrong for this reader. Withholding on ANY overlap
+	// would gut the pack on every task that touches a busy module.
+	TaskChangedPaths []string
 	// CoverablePaths are legacy documents this dispatch is carrying that
 	// memory would be ALLOWED to replace.
 	//
@@ -283,6 +295,12 @@ type PackStats struct {
 	// seeing a large number here should reach for a bounded rebuild, not an
 	// investigation.
 	LegacyExcluded int
+	// WorkspaceRewrittenExcluded counts canonical facts withheld because the
+	// reader's own task has rewritten every file they were derived from
+	// (P2-E A4). It is counted apart from staleness because nothing is stale:
+	// the fact is a correct description of the repository, and merely the
+	// wrong description for THIS reader.
+	WorkspaceRewrittenExcluded int
 	// ConflictingExcluded counts facts withheld because AO could not order
 	// them against an incompatible peer.
 	ConflictingExcluded int
@@ -451,7 +469,6 @@ func (b *PackBuilder) Build(ctx context.Context, req PackRequest) (ContextPack, 
 			upstream[ref] = struct{}{}
 		}
 	}
-
 	scored := make([]SelectedItem, 0, len(candidates))
 	for _, item := range candidates {
 		if _, ok := allowed[item.Key.Type]; !ok {
@@ -592,6 +609,11 @@ func (b *PackBuilder) filterServable(
 		}
 	}
 
+	rewritten := make(map[string]struct{}, len(req.TaskChangedPaths))
+	for _, p := range domain.NormalizeMemorySourcePaths(req.TaskChangedPaths) {
+		rewritten[p] = struct{}{}
+	}
+
 	kept := make([]domain.ProjectMemoryItem, 0, len(all))
 	for _, item := range all {
 		// P2-D: evidence AND licence, in that order, so the counter says which
@@ -611,6 +633,10 @@ func (b *PackBuilder) filterServable(
 			} else {
 				stats.UnprovableExcluded++
 			}
+			continue
+		}
+		if supersededByWorkspace(item, rewritten) {
+			stats.WorkspaceRewrittenExcluded++
 			continue
 		}
 		if !b.entitled(item, req, upstream) {
@@ -1054,4 +1080,27 @@ func (p ContextPack) Render() string {
 func digestOf(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
+}
+
+// supersededByWorkspace reports whether the reader's own uncommitted work has
+// made a canonical fact the wrong description for it (P2-E A4).
+//
+// Three conditions, all required:
+//
+//   - the fact is CANONICAL. A task-local fact already belongs to this work and
+//     describes exactly what the reader is looking at.
+//   - the fact is anchored on paths at all. An aggregate whose provenance is
+//     the whole tree is not made wrong by one file changing.
+//   - EVERY path it was derived from has been rewritten. See PackRequest's
+//     TaskChangedPaths for why any-overlap would be the wrong rule.
+func supersededByWorkspace(item domain.ProjectMemoryItem, rewritten map[string]struct{}) bool {
+	if len(rewritten) == 0 || item.Origin != domain.OriginCanonical || len(item.SourcePaths) == 0 {
+		return false
+	}
+	for _, p := range item.SourcePaths {
+		if _, ok := rewritten[p]; !ok {
+			return false
+		}
+	}
+	return true
 }

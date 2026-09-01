@@ -264,3 +264,83 @@ func originRefSuffix(ref string) string {
 	}
 	return " of task " + ref
 }
+
+type memoryPruneEnvelope struct {
+	Applied          bool     `json:"applied"`
+	CanonicalRepoIDs []string `json:"canonicalRepoIds"`
+	PurgedItems      int      `json:"purgedItems"`
+	PurgedRelations  int      `json:"purgedRelations"`
+	Candidates       []struct {
+		RepoID     string `json:"repoId"`
+		RepoPath   string `json:"repoPath"`
+		Items      int    `json:"items"`
+		Relations  int    `json:"relations"`
+		ParentRepo string `json:"parentRepo"`
+		Prunable   bool   `json:"prunable"`
+		Reason     string `json:"reason"`
+		Purged     bool   `json:"purged"`
+	} `json:"candidates"`
+}
+
+// newMemoryPruneCommand is P2-E's repair for memories a worktree should never
+// have had.
+//
+// It is deliberately narrow. It does not clean up "old" or "large" memory, and
+// it has no way to name a repository by hand: it finds the repository memories
+// of one project whose recorded path is a linked git worktree (or is gone and
+// was never a registered repository), proves a real canonical memory survives,
+// proves no live execution is using the workspace, and purges only those.
+// Anything it cannot prove, it reports and leaves.
+func newMemoryPruneCommand(ctx *commandContext) *cobra.Command {
+	var apply bool
+	cmd := &cobra.Command{
+		Use:   "prune <project-id>",
+		Short: "Retire canonical memories that were built from a worktree instead of a repository",
+		Long: "A task's isolated worktree is a checkout of a repository AO already knows — it is not a second\n" +
+			"repository. A build before this repair could index one as though it were, producing canonical facts\n" +
+			"derived from a branch nothing had integrated. This removes those, and nothing else.\n\n" +
+			"Five things must hold before a single row is touched: the memory belongs to this project, its path is\n" +
+			"a linked worktree (or is gone and was never a registered repository), it is not a registered\n" +
+			"repository, a real canonical memory survives the prune, and no live execution is using that\n" +
+			"workspace. Anything unproven is reported and left alone.\n\n" +
+			"It is a dry run by default. Nothing here can remove a repository's own memory.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var res memoryPruneEnvelope
+			if err := ctx.postJSON(cmd.Context(),
+				"projects/"+url.PathEscape(args[0])+"/memory/prune",
+				map[string]any{"apply": apply}, &res); err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			_, _ = fmt.Fprintf(out, "%d repository memories kept: %s\n",
+				len(res.CanonicalRepoIDs), strings.Join(res.CanonicalRepoIDs, ", "))
+			prunable := 0
+			for _, c := range res.Candidates {
+				if !c.Prunable {
+					_, _ = fmt.Fprintf(out, "  keep  %s  %s\n        %s\n", c.RepoID, c.RepoPath, c.Reason)
+					continue
+				}
+				prunable++
+				verb := "would remove"
+				if c.Purged {
+					verb = "removed"
+				}
+				_, _ = fmt.Fprintf(out, "  %s  %s  %s\n        %d facts, %d relations — %s\n",
+					verb, c.RepoID, c.RepoPath, c.Items, c.Relations, c.Reason)
+			}
+			switch {
+			case prunable == 0:
+				_, _ = fmt.Fprintln(out, "nothing to prune")
+			case res.Applied:
+				_, _ = fmt.Fprintf(out, "\nremoved %d facts and %d relations\n", res.PurgedItems, res.PurgedRelations)
+			default:
+				_, _ = fmt.Fprintln(out, "\nnothing was changed; re-run with --apply to remove these")
+			}
+			return nil
+		},
+	}
+	normalizeDashedFlags(cmd)
+	cmd.Flags().BoolVar(&apply, "apply", false, "Remove the worktree-minted memories instead of only reporting them")
+	return cmd
+}

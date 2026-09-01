@@ -113,8 +113,12 @@ type Repository interface {
 
 	// GetProjectMemoryStatus assembles the operator-facing view.
 	GetProjectMemoryStatus(ctx context.Context, projectID domain.ProjectID, repoID string) (domain.ProjectMemoryStatus, bool, error)
-	// PurgeProjectMemoryRepo deletes everything for one repository.
+	// PurgeProjectMemoryRepo deletes everything for one repository, keeping
+	// its registration so a later pass can rebuild it.
 	PurgeProjectMemoryRepo(ctx context.Context, projectID domain.ProjectID, repoID string) error
+	// DeregisterProjectMemoryRepo additionally forgets the registration. It is
+	// for a "repository" that never was one -- see P2-E's worktree prune.
+	DeregisterProjectMemoryRepo(ctx context.Context, projectID domain.ProjectID, repoID string) error
 	// DiscardProjectMemoryForTask retires one task's unintegrated facts.
 	DiscardProjectMemoryForTask(ctx context.Context, projectID domain.ProjectID, taskRef string) (int64, int64, error)
 

@@ -742,6 +742,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/memory/prune": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P2-E: retire canonical project memory that was built from a task's isolated worktree instead of from the repository. A worktree is a checkout of a repository AO already knows, not a second repository; indexing one produced canonical facts derived from an unintegrated branch. Dry run unless apply is set, and it refuses anything it cannot prove is safe: registered repositories, workspaces a live execution is using, and any prune that would leave the project with no memory at all. */
+        post: operations["pruneProjectMemory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/memory/rebuild": {
         parameters: {
             query?: never;
@@ -3404,6 +3421,16 @@ export interface components {
             relations: components["schemas"]["ControllersProjectMemoryRelationResponse"][];
             servable: boolean;
         };
+        ControllersProjectMemoryPruneCandidateResponse: {
+            items: number;
+            parentRepo?: string;
+            prunable: boolean;
+            purged: boolean;
+            reason: string;
+            relations: number;
+            repoId: string;
+            repoPath: string;
+        };
         ControllersProjectMemoryRelationResponse: {
             /** @enum {string} */
             authority: "authoritative" | "unprovable" | "legacy_unprovable";
@@ -3550,6 +3577,17 @@ export interface components {
         };
         ControllersProviderRegistryResponse: {
             providers: components["schemas"]["ControllersProviderDescriptorView"][];
+        };
+        ControllersPruneProjectMemoryRequest: {
+            /** @description Purge the worktree-minted memories. Defaults to false, so the repair can be inspected before it changes anything. */
+            apply?: boolean;
+        };
+        ControllersPruneProjectMemoryResponse: {
+            applied: boolean;
+            candidates: components["schemas"]["ControllersProjectMemoryPruneCandidateResponse"][];
+            canonicalRepoIds: string[];
+            purgedItems: number;
+            purgedRelations: number;
         };
         ControllersPutExecutionPolicyRequest: {
             autonomousMode: boolean;
@@ -4156,7 +4194,7 @@ export interface components {
             autonomous?: null | boolean;
             /** @description Generate a provider-neutral master plan before execution. */
             masterPlan?: boolean;
-            /** @description The workflow run's objective. */
+            /** @description The workflow run's objective. For the task strategy this is the task's full specification: multi-line and markdown-friendly, preserved verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long objective is refused. */
             objective: string;
             /** @enum {string} */
             planApprovalMode?: "manual" | "auto";
@@ -8288,6 +8326,60 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    pruneProjectMemory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersPruneProjectMemoryRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersPruneProjectMemoryResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };

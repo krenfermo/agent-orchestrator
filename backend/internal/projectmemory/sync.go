@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -125,12 +126,16 @@ type syncFlight struct {
 // Syncer keeps a project's memory in step with its repositories at the
 // lifecycle boundaries, coalescing concurrent demand.
 type Syncer struct {
-	svc    *Service
-	cfg    Config
-	now    func() time.Time
-	head   func(ctx context.Context, repoPath string) (commit, branch string)
-	mu     sync.Mutex
-	flight map[syncKey]*syncFlight
+	svc  *Service
+	cfg  Config
+	now  func() time.Time
+	head func(ctx context.Context, repoPath string) (commit, branch string)
+	// linkedWorktree is the P2-E guard, injectable so a test can exercise the
+	// refusal without building a real linked worktree.
+	linkedWorktree func(ctx context.Context, path string) (string, bool)
+	log            *slog.Logger
+	mu             sync.Mutex
+	flight         map[syncKey]*syncFlight
 	// stats are process-lifetime counters an operator surface can read to see
 	// whether coalescing is doing anything.
 	stats SyncStats
@@ -145,16 +150,23 @@ type SyncStats struct {
 	Full        int64
 	Skipped     int64
 	TimedOut    int64
+	// WorktreeRefused counts freshness checks that named a linked worktree
+	// instead of a repository root. It is a counter rather than only a log
+	// line because a non-zero value is a caller bug, not a repository state --
+	// see EnsureFresh.
+	WorktreeRefused int64
 }
 
 // NewSyncer builds the lifecycle syncer over a memory service.
 func NewSyncer(svc *Service, cfg Config) *Syncer {
 	return &Syncer{
-		svc:    svc,
-		cfg:    cfg,
-		now:    func() time.Time { return time.Now().UTC() },
-		head:   HeadOf,
-		flight: map[syncKey]*syncFlight{},
+		svc:            svc,
+		cfg:            cfg,
+		now:            func() time.Time { return time.Now().UTC() },
+		head:           HeadOf,
+		linkedWorktree: LinkedWorktreeOf,
+		log:            svc.log,
+		flight:         map[syncKey]*syncFlight{},
 	}
 }
 
@@ -191,6 +203,36 @@ func (s *Syncer) EnsureFresh(ctx context.Context, projectID domain.ProjectID, re
 			Reason: "the repository path could not be resolved: " + err.Error(),
 		}
 	}
+
+	// P2-E: a linked worktree is not a repository, and canonical memory is
+	// never derived from one.
+	//
+	// This is the LAST line of defence rather than the fix -- the fix is that
+	// callers pass the canonical repository root (see wfmemory's reviewer
+	// path). It lives here because EnsureFresh is the single funnel every
+	// canonical index passes through, so one check here closes the whole
+	// class: no future caller can mint a second repo_id for a workspace by
+	// passing the wrong path, which is exactly how the P2-D production gate
+	// found 288 canonical facts derived from unintegrated ao/* branches.
+	//
+	// It refuses rather than silently re-pointing at the parent repository.
+	// Re-pointing would be a guess about which project the caller meant, and
+	// this subsystem's whole argument is that it does not guess: the caller
+	// holds the project record and is the authority on its root.
+	if parent, linked := s.linkedWorktree(ctx, canonical); linked {
+		s.bump(func(st *SyncStats) { st.WorktreeRefused++; st.Skipped++ })
+		if s.log != nil {
+			s.log.Warn("project memory: refused to index a linked worktree as a repository",
+				"worktree", canonical, "repository", parent)
+		}
+		return Freshness{
+			Kind: SyncSkipped, Duration: s.now().Sub(started),
+			Reason: fmt.Sprintf(
+				"%s is a linked worktree of %s, not a repository; canonical memory is only ever derived from the repository root",
+				canonical, orNone(parent)),
+		}
+	}
+
 	repoID := domain.ProjectMemoryRepoID(canonical)
 
 	commit, branch := s.head(ctx, canonical)

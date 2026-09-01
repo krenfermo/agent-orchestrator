@@ -14,6 +14,7 @@ import {
 } from "../hooks/useWorkflowRuns";
 import { useUiStore } from "../stores/ui-store";
 import { Button } from "../components/ui/button";
+import { Textarea } from "../components/ui/textarea";
 import {
 	Select,
 	SelectContent,
@@ -21,6 +22,29 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "../components/ui/select";
+
+/**
+ * MAX_OBJECTIVE_BYTES mirrors domain.MaxWorkflowObjectiveBytes.
+ *
+ * It is duplicated rather than fetched because the check it drives is a
+ * courtesy: the browser tells you before you submit, and the daemon is the
+ * authority that refuses. The two must agree, so the value is asserted against
+ * the generated OpenAPI schema in the route's test — a limit that drifted
+ * would let the UI accept text the daemon rejects, which is exactly the
+ * silent-failure shape this change exists to remove.
+ */
+export const MAX_OBJECTIVE_BYTES = 131072;
+
+/**
+ * Below this the counter stays hidden. A specification only becomes something
+ * you have to budget once it is genuinely long.
+ */
+const OBJECTIVE_COUNTER_FROM_BYTES = 2000;
+
+/** Bytes, not characters: the limit is in UTF-8 bytes and so is this. */
+export function objectiveByteLength(value: string): number {
+	return new TextEncoder().encode(value.trim()).length;
+}
 
 export const Route = createFileRoute("/_shell/workflows")({
 	component: WorkflowsListRoute,
@@ -47,6 +71,10 @@ export function WorkflowsList() {
 	const openGlobalSettings = useUiStore((state) => state.openGlobalSettings);
 	const [projectId, setProjectId] = useState(initialProjectIdFromSearch);
 	const [objective, setObjective] = useState("");
+	// Byte length, recomputed only when the text changes: TextEncoder on every
+	// keystroke of a 100 KB specification would be felt.
+	const objectiveBytes = useMemo(() => objectiveByteLength(objective), [objective]);
+	const objectiveTooLong = objectiveBytes > MAX_OBJECTIVE_BYTES;
 	// P1-A: two independent choices, deliberately not one.
 	//
 	// Execution strategy is how much orchestration this run gets — a bounded
@@ -169,13 +197,42 @@ export function WorkflowsList() {
 						</Select>
 					</label>
 					<label className="flex flex-col gap-1 text-sm">
-						{t("shell.workflowsObjective")}
-						<input
-							className="rounded border border-border bg-background px-2 py-1"
+						<span className="flex items-baseline justify-between gap-2">
+							{t("shell.workflowsObjective")}
+							{/* The counter appears only once a specification is long enough for
+							    the ceiling to be worth knowing about. Showing "12 / 131072" next
+							    to a one-line objective would be noise about a limit nobody is
+							    anywhere near. */}
+							{objectiveBytes > OBJECTIVE_COUNTER_FROM_BYTES ? (
+								<span
+									className={
+										objectiveTooLong
+											? "text-xs font-medium text-destructive"
+											: "text-xs text-muted-foreground"
+									}
+								>
+									{t("shell.workflowsObjectiveSize", {
+										bytes: objectiveBytes.toLocaleString(),
+										max: MAX_OBJECTIVE_BYTES.toLocaleString(),
+									})}
+								</span>
+							) : null}
+						</span>
+						<Textarea
+							aria-invalid={objectiveTooLong || undefined}
 							onChange={(event) => setObjective(event.target.value)}
 							placeholder={t("shell.workflowsObjectivePlaceholder")}
+							rows={8}
 							value={objective}
 						/>
+						{objectiveTooLong ? (
+							<span className="text-xs text-destructive">
+								{t("shell.workflowsObjectiveTooLong", {
+									bytes: objectiveBytes.toLocaleString(),
+									max: MAX_OBJECTIVE_BYTES.toLocaleString(),
+								})}
+							</span>
+						) : null}
 					</label>
 					<fieldset className="flex flex-col gap-2">
 						<legend className="text-sm">{t("shell.workflowsStrategy")}</legend>
@@ -248,7 +305,7 @@ export function WorkflowsList() {
 					</fieldset>
 					<button
 						className="mt-1 self-start rounded bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50"
-						disabled={creating || !projectId.trim() || !objective.trim()}
+						disabled={creating || !projectId.trim() || !objective.trim() || objectiveTooLong}
 						type="submit"
 					>
 						{creating ? t("shell.workflowsCreating") : t("shell.workflowsCreate")}

@@ -370,6 +370,30 @@ func (q *Queries) DeleteProjectMemoryFilesForRepo(ctx context.Context, arg Delet
 	return result.RowsAffected()
 }
 
+const deleteProjectMemoryIndex = `-- name: DeleteProjectMemoryIndex :execrows
+DELETE FROM project_memory_index WHERE project_id = ? AND repo_id = ?
+`
+
+type DeleteProjectMemoryIndexParams struct {
+	ProjectID string
+	RepoID    string
+}
+
+// Forget that a repository was ever registered for indexing.
+//
+// This is deliberately NOT part of PurgeProjectMemoryRepo. A purge empties a
+// repository's memory so the next pass can rebuild it, and keeping the index
+// row is what lets that pass resume the same identity. Deregistration is the
+// other thing: the repository should not be indexed again, because it was
+// never a repository (P2-E's worktree prune).
+func (q *Queries) DeleteProjectMemoryIndex(ctx context.Context, arg DeleteProjectMemoryIndexParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteProjectMemoryIndex, arg.ProjectID, arg.RepoID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const deleteProjectMemoryItemsForRepo = `-- name: DeleteProjectMemoryItemsForRepo :execrows
 DELETE FROM project_memory_items WHERE project_id = ? AND repo_id = ?
 `
@@ -418,6 +442,27 @@ type DeleteProjectMemorySourcesForOwnerParams struct {
 func (q *Queries) DeleteProjectMemorySourcesForOwner(ctx context.Context, arg DeleteProjectMemorySourcesForOwnerParams) error {
 	_, err := q.db.ExecContext(ctx, deleteProjectMemorySourcesForOwner, arg.OwnerKind, arg.OwnerID)
 	return err
+}
+
+const deleteProjectMemorySourcesForRepo = `-- name: DeleteProjectMemorySourcesForRepo :execrows
+DELETE FROM project_memory_sources WHERE project_id = ? AND repo_id = ?
+`
+
+type DeleteProjectMemorySourcesForRepoParams struct {
+	ProjectID string
+	RepoID    string
+}
+
+// The provenance index of one repository. It is keyed by owner rather than by
+// repository, so purging a repository's facts leaves these behind unless they
+// are removed explicitly -- which matters for a DEREGISTRATION, where the
+// repository is not coming back.
+func (q *Queries) DeleteProjectMemorySourcesForRepo(ctx context.Context, arg DeleteProjectMemorySourcesForRepoParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteProjectMemorySourcesForRepo, arg.ProjectID, arg.RepoID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const deleteProjectMemoryTaskLocalItems = `-- name: DeleteProjectMemoryTaskLocalItems :execrows

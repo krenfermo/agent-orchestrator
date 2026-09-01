@@ -513,3 +513,20 @@ WHERE project_id = sqlc.arg(project_id) AND repo_id = sqlc.arg(repo_id)
   AND authority = 'authoritative'
   AND ((from_kind = sqlc.arg(node_kind) AND from_key = sqlc.arg(node_key))
     OR (to_kind = sqlc.arg(node_kind) AND to_key = sqlc.arg(node_key)));
+
+-- name: DeleteProjectMemorySourcesForRepo :execrows
+-- The provenance index of one repository. It is keyed by owner rather than by
+-- repository, so purging a repository's facts leaves these behind unless they
+-- are removed explicitly -- which matters for a DEREGISTRATION, where the
+-- repository is not coming back.
+DELETE FROM project_memory_sources WHERE project_id = ? AND repo_id = ?;
+
+-- name: DeleteProjectMemoryIndex :execrows
+-- Forget that a repository was ever registered for indexing.
+--
+-- This is deliberately NOT part of PurgeProjectMemoryRepo. A purge empties a
+-- repository's memory so the next pass can rebuild it, and keeping the index
+-- row is what lets that pass resume the same identity. Deregistration is the
+-- other thing: the repository should not be indexed again, because it was
+-- never a repository (P2-E's worktree prune).
+DELETE FROM project_memory_index WHERE project_id = ? AND repo_id = ?;

@@ -60,6 +60,30 @@ type ProjectMemoryService interface {
 	// it, which commit supports it, how did it become canonical, and what
 	// withdrew it (P2-D §27).
 	Provenance(ctx context.Context, projectID domain.ProjectID, itemID string) (ProjectMemoryProvenance, bool, error)
+	// Prune retires canonical memories that were minted from a worktree rather
+	// than from a repository (P2-E). Dry run unless apply is set.
+	Prune(ctx context.Context, projectID domain.ProjectID, apply bool) (ProjectMemoryPruneResult, error)
+}
+
+// ProjectMemoryPruneResult is what one prune found and did.
+type ProjectMemoryPruneResult struct {
+	Applied          bool
+	CanonicalRepoIDs []string
+	Candidates       []ProjectMemoryPruneCandidate
+	PurgedItems      int
+	PurgedRelations  int
+}
+
+// ProjectMemoryPruneCandidate is one repository memory the prune considered.
+type ProjectMemoryPruneCandidate struct {
+	RepoID     string
+	RepoPath   string
+	Items      int
+	Relations  int
+	ParentRepo string
+	Prunable   bool
+	Reason     string
+	Purged     bool
 }
 
 // ProjectMemoryValidateQuery asks for one authority pass.
@@ -268,6 +292,39 @@ func (c *ProjectMemoryController) Register(r chi.Router) {
 	r.Get("/projects/{id}/memory/manifests", c.manifests)
 	r.Post("/projects/{id}/memory/validate", c.validate)
 	r.Get("/projects/{id}/memory/provenance/{itemId}", c.provenance)
+	r.Post("/projects/{id}/memory/prune", c.prune)
+}
+
+// prune retires the canonical memories a worktree should never have had.
+//
+// POST and dry-run-by-default, matching validate: a repair operation an
+// operator should be able to look at before it changes anything.
+func (c *ProjectMemoryController) prune(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/projects/{id}/memory/prune")
+		return
+	}
+	var req PruneProjectMemoryRequest
+	if err := decodeJSON(r, &req); err != nil {
+		envelope.WriteError(w, r, apierr.Invalid("invalid_body", "request body is not valid JSON", nil))
+		return
+	}
+	res, err := c.Svc.Prune(r.Context(), domain.ProjectID(chi.URLParam(r, "id")), req.Apply)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	cands := make([]ProjectMemoryPruneCandidateResponse, 0, len(res.Candidates))
+	for _, cand := range res.Candidates {
+		cands = append(cands, ProjectMemoryPruneCandidateResponse(cand))
+	}
+	envelope.WriteJSON(w, http.StatusOK, PruneProjectMemoryResponse{
+		Applied:          res.Applied,
+		CanonicalRepoIDs: res.CanonicalRepoIDs,
+		PurgedItems:      res.PurgedItems,
+		PurgedRelations:  res.PurgedRelations,
+		Candidates:       cands,
+	})
 }
 
 // validate runs the P2-D authority pass.
@@ -710,6 +767,35 @@ type ProjectMemoryValidationFindingResponse struct {
 	ReasonClass string `json:"reasonClass"`
 	Detail      string `json:"detail"`
 	Applied     bool   `json:"applied"`
+}
+
+// PruneProjectMemoryRequest is the body of
+// POST /api/v1/projects/{id}/memory/prune.
+type PruneProjectMemoryRequest struct {
+	Apply bool `json:"apply,omitempty" description:"Purge the worktree-minted memories. Defaults to false, so the repair can be inspected before it changes anything."`
+}
+
+// PruneProjectMemoryResponse is the body of the same route.
+type PruneProjectMemoryResponse struct {
+	Applied bool `json:"applied"`
+	// CanonicalRepoIDs are the repository memories the prune preserved, named
+	// so an operator sees what survives and not only what goes.
+	CanonicalRepoIDs []string                              `json:"canonicalRepoIds"`
+	PurgedItems      int                                   `json:"purgedItems"`
+	PurgedRelations  int                                   `json:"purgedRelations"`
+	Candidates       []ProjectMemoryPruneCandidateResponse `json:"candidates"`
+}
+
+// ProjectMemoryPruneCandidateResponse is one repository memory considered.
+type ProjectMemoryPruneCandidateResponse struct {
+	RepoID     string `json:"repoId"`
+	RepoPath   string `json:"repoPath"`
+	Items      int    `json:"items"`
+	Relations  int    `json:"relations"`
+	ParentRepo string `json:"parentRepo,omitempty"`
+	Prunable   bool   `json:"prunable"`
+	Reason     string `json:"reason"`
+	Purged     bool   `json:"purged"`
 }
 
 // ProjectMemoryProvenanceResponse is the body of

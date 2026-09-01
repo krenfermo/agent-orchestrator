@@ -218,12 +218,19 @@ func (s *spawner) attach(ctx stdctx.Context, cfg ports.SpawnConfig) (stdctx.Cont
 		runID = cfg.WorkflowRunID
 	}
 	provisioned := s.prov.Provision(ctx, projectmemory.ProvisionRequest{
-		ProjectID:        cfg.ProjectID,
-		RepoPath:         root,
-		Role:             projectmemory.RoleWorker,
-		Keywords:         keywordsFrom(cfg.Prompt),
-		Legacy:           legacy,
-		TaskBytes:        len(cfg.Prompt),
+		ProjectID: cfg.ProjectID,
+		RepoPath:  root,
+		Role:      projectmemory.RoleWorker,
+		Keywords:  keywordsFrom(cfg.Prompt),
+		Legacy:    legacy,
+		TaskBytes: len(cfg.Prompt),
+		// P2-E: the worker already provisioned against the project root -- it
+		// resolves `root` from the project record above, which is why the gate
+		// saw the worker take the warm path while the reviewer full-indexed a
+		// worktree. Its workspace does not exist yet at spawn time (the
+		// spawner creates it downstream), so there is nothing honest to record
+		// as ExecutionWorkspace and the field is deliberately left unset
+		// rather than filled with the root it is not.
 		TaskRef:          auth.TaskRef,
 		WorkflowRunID:    runID,
 		UpstreamTaskRefs: auth.UpstreamTaskRefs,
@@ -309,13 +316,25 @@ func (r *reviewerLauncher) attach(
 		// editing an instruction, which these wrappers may not do.
 		return ctx, req
 	}
-	root := strings.TrimSpace(req.WorkspacePath)
-	if root == "" {
-		var ok bool
-		if root, ok = r.projectRoot(ctx, req.ProjectID); !ok {
-			return ctx, req
-		}
+	// P2-E, the P2-D gate's blocker, fixed at its source.
+	//
+	// This used to prefer req.WorkspacePath -- the task's isolated worktree --
+	// and fall back to the project root. That single preference was enough to
+	// mint a second canonical repo_id per reviewed task, full-index the
+	// worktree (~658 files on the project the gate ran against), and file the
+	// result as canonical repo_derivation memory derived from a branch nothing
+	// had integrated. On the real install it produced 288 such facts across
+	// two tasks, and they dominated what DurableMemorySource returned for the
+	// whole project.
+	//
+	// Canonical memory is derived from the repository and from nothing else.
+	// The worktree still travels, as ExecutionWorkspace, because the reviewer
+	// genuinely is working in it -- it is recorded, never indexed.
+	root, ok := r.projectRoot(ctx, req.ProjectID)
+	if !ok {
+		return ctx, req
 	}
+	workspace := strings.TrimSpace(req.WorkspacePath)
 
 	// A reviewer reviews a change, so the changed area is the relevance
 	// evidence that matters. When the launch does not carry one the pack falls
@@ -323,14 +342,20 @@ func (r *reviewerLauncher) attach(
 	// the empty system prompt this field held before P2-A.
 	auth := projectmemory.TaskAuthorityFrom(ctx)
 	provisioned := r.prov.Provision(ctx, projectmemory.ProvisionRequest{
-		ProjectID:        req.ProjectID,
-		RepoPath:         root,
-		Role:             projectmemory.RoleReviewer,
-		Keywords:         keywordsFrom(req.Prompt),
-		TaskBytes:        len(req.Prompt),
-		TaskRef:          auth.TaskRef,
-		WorkflowRunID:    auth.WorkflowRunID,
-		UpstreamTaskRefs: auth.UpstreamTaskRefs,
+		ProjectID:          req.ProjectID,
+		RepoPath:           root,
+		Role:               projectmemory.RoleReviewer,
+		Keywords:           keywordsFrom(req.Prompt),
+		TaskBytes:          len(req.Prompt),
+		TaskRef:            auth.TaskRef,
+		WorkflowRunID:      auth.WorkflowRunID,
+		UpstreamTaskRefs:   auth.UpstreamTaskRefs,
+		ExecutionWorkspace: workspace,
+		// P2-E A4: the files this task has rewritten in that workspace. A
+		// canonical summary of a file the task replaced describes a version
+		// the reviewer is not looking at, so it is withheld and the reviewer
+		// reads the working tree -- which is the authority regardless.
+		TaskChangedPaths: projectmemory.TaskChangedPathsFrom(ctx),
 		// The commit this reviewer is judging, when the dispatch stamped one.
 		// Recorded on the manifest and used for nothing else -- see
 		// projectmemory.WithRoleHead.
