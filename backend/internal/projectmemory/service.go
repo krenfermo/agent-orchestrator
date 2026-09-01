@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -35,6 +36,7 @@ type Service struct {
 	graph    MemoryGraph
 	limits   IndexLimits
 	now      func() time.Time
+	log      *slog.Logger
 }
 
 // ServiceOption configures a Service.
@@ -57,6 +59,13 @@ func WithGraph(g MemoryGraph) ServiceOption {
 			s.graph = g
 		}
 	}
+}
+
+// WithServiceLogger attaches a logger. Memory is best-effort by design, so
+// the failures it swallows have to be visible somewhere; a nil logger simply
+// swallows them silently, which is what a test wants.
+func WithServiceLogger(log *slog.Logger) ServiceOption {
+	return func(s *Service) { s.log = log }
 }
 
 // WithIndexerLimits sets the bounds passes run with unless a request overrides
@@ -356,6 +365,10 @@ type TaskOutcome struct {
 	// TaskRef identifies the task. It is the origin ref of every fact this
 	// outcome produces.
 	TaskRef string
+	// WorkflowRunID is the run the task belonged to, when there was one. It is
+	// what scopes workflow-local sharing, and it is empty for a task that ran
+	// outside a workflow.
+	WorkflowRunID string
 	// Title is a short name for the work.
 	Title string
 	// WhatChanged and Why are the two sentences a later task actually needs.
@@ -366,11 +379,22 @@ type TaskOutcome struct {
 	FilesChanged []string
 	Modules      []string
 	// Decisions are choices later work must respect. Each becomes its own
-	// fact, because a decision outlives the task that made it.
-	Decisions []string
-	// Risks are follow-ups a later task should know about before touching the
-	// same area.
-	Risks []string
+	// fact, keyed by what it is ABOUT rather than by the task that made it, so
+	// re-deciding a topic supersedes the previous answer instead of piling a
+	// second one beside it.
+	Decisions []TaskDecision
+	// Risks are risks and follow-ups a later task should know about before
+	// touching the same area.
+	Risks []TaskRisk
+	// ResolvesRisks names risks this task closed, by item id or by subject.
+	// The named risks become resolved and stop being carried as current, while
+	// the edge saying who closed them survives.
+	ResolvesRisks []string
+	// DependsOnTasks and FollowsUpTasks are the durable task relationships the
+	// plan already recorded. They are copied, never inferred: two tasks that
+	// merely touched the same repository are not related.
+	DependsOnTasks []string
+	FollowsUpTasks []string
 	// Verification is how the work was checked ("go test ./... green,
 	// reviewer approved"), in one line.
 	Verification string
@@ -380,6 +404,13 @@ type TaskOutcome struct {
 	// state. Only integrated work produces canonical memory; everything else
 	// is task-local and reaches nobody but the task itself.
 	Integrated bool
+	// Share is how far this outcome's facts may travel when the work is NOT
+	// integrated. It is decided by the workflow boundary that knows the
+	// placement and the verification state, never here: ShareWorkflow means a
+	// verified task whose downstream dependents may read it, and ShareTask —
+	// the default — means nobody but the task itself. Integrated work is
+	// always canonical regardless of this field.
+	Share domain.KnowledgeShare
 }
 
 // MaxRetainedTaskResults bounds how many task outcomes one repository keeps.
@@ -388,15 +419,25 @@ type TaskOutcome struct {
 // than with the repository, so it is the one part that needs an explicit
 // retention rule. The oldest outcomes beyond the bound are retired, not
 // deleted: an operator can still see that they existed and when they aged out.
+// P2-C adds a second, per-scope bound on top of it (see compactKnowledge),
+// because a global cap alone lets one busy module evict every other module's
+// history.
 const MaxRetainedTaskResults = 200
 
-// RecordTaskOutcome persists what one task did.
+// RecordTaskOutcome persists what one task did, and applies the knowledge
+// lifecycle that makes it reusable.
 //
-// Facts from unintegrated work are stored as task-local and are visible only
-// to that task (see PackBuilder.filterServable). Promotion to canonical is a
-// separate, explicit act — PromoteTaskMemory — performed by whatever authority
-// integrated the work. Nothing here promotes on its own, because a task's own
-// account of itself is not evidence that it landed.
+// Facts from unintegrated work are stored as task-local and reach only the
+// readers their sharing scope admits (see PackBuilder.filterServable).
+// Promotion to canonical is a separate, explicit act — PromoteTaskMemory —
+// performed by whatever authority integrated the work. Nothing here promotes
+// on its own, because a task's own account of itself is not evidence that it
+// landed.
+//
+// It is idempotent. Every write addresses a derived identity, so recording the
+// same outcome twice — which is exactly what a duplicate completion callback
+// or a restart between the outcome and the promotion produces — updates the
+// same rows rather than creating a second set.
 func (s *Service) RecordTaskOutcome(ctx context.Context, out TaskOutcome) error {
 	if strings.TrimSpace(out.TaskRef) == "" {
 		return errors.New("projectmemory: a task outcome must name its task")
@@ -432,23 +473,68 @@ func (s *Service) RecordTaskOutcome(ctx context.Context, out TaskOutcome) error 
 		paths = paths[:domain.MaxProjectMemorySourcePaths]
 	}
 
-	decisions := decisionItems(base, out, paths)
-	risks := riskItems(base, out, paths)
+	// The snapshot every lifecycle decision below is made against. Reading it
+	// once, before anything is written, is what stops two facts in one outcome
+	// from both believing they retired the same predecessor.
+	existing, err := s.repo.ListProjectMemoryItems(ctx, out.ProjectID, repoID)
+	if err != nil {
+		return err
+	}
+	w := &knowledgeWriter{svc: s, base: base, out: out, now: now, paths: paths, existing: existing}
+
+	decisions := w.decisionItems()
+	risks := w.riskItems()
 	items := make([]domain.ProjectMemoryItem, 0, 1+len(decisions)+len(risks))
-	items = append(items, taskResultItem(base, out, paths))
+	items = append(items, w.taskResultItem())
 	items = append(items, decisions...)
 	items = append(items, risks...)
+	// Normalise BEFORE anything reads an id off these. Supersession compares
+	// identities and the lineage edges name them, and a derived id that has
+	// not been filled in yet is the empty string — which makes every fact
+	// look like every other fact and makes an outcome supersede itself.
+	for i := range items {
+		items[i] = items[i].Normalized()
+	}
 	if _, err := putItems(ctx, s.repo, now, items...); err != nil {
 		return err
 	}
 
-	if err := s.writeTaskRelations(ctx, base, out, paths, now); err != nil {
+	rels := w.lineage(items)
+	superseded, err := w.supersede(ctx, items)
+	if err != nil {
 		return err
 	}
-	return s.compactTaskMemory(ctx, out.ProjectID, repoID, now)
+	rels = append(rels, superseded...)
+	resolved, err := w.resolveRisks(ctx)
+	if err != nil {
+		return err
+	}
+	rels = append(rels, resolved...)
+
+	if len(rels) > 0 {
+		// A graph the daemon cannot reach must not fail a recording: the items
+		// above are the durable knowledge, and the edges are an index over
+		// them that a later pass can rebuild.
+		if err := s.graph.Upsert(ctx, now, rels...); err != nil && s.log != nil {
+			s.log.Warn("project memory: could not mirror a task's knowledge into the graph",
+				"task", out.TaskRef, "err", err)
+		}
+	}
+
+	if err := s.compactTaskMemory(ctx, out.ProjectID, repoID, now); err != nil {
+		return err
+	}
+	return s.compactKnowledge(ctx, out.ProjectID, repoID, now)
 }
 
-func taskResultItem(base itemBase, out TaskOutcome, paths []string) domain.ProjectMemoryItem {
+// taskResultItem renders one outcome as the bounded fact a later task reads.
+//
+// Every line is a field the caller supplied from a durable row. The "Verified
+// by" line is the verification fact P2-C names as its own knowledge type; it
+// lives on the task result rather than in a row of its own because it has no
+// life independent of the outcome it verified.
+func (w *knowledgeWriter) taskResultItem() domain.ProjectMemoryItem {
+	out := w.out
 	var body strings.Builder
 	if out.WhatChanged != "" {
 		fmt.Fprintf(&body, "What changed: %s\n", out.WhatChanged)
@@ -459,8 +545,8 @@ func taskResultItem(base itemBase, out TaskOutcome, paths []string) domain.Proje
 	if len(out.Modules) > 0 {
 		fmt.Fprintf(&body, "Modules affected: %s\n", strings.Join(dedupeUnsorted(out.Modules), ", "))
 	}
-	if len(paths) > 0 {
-		fmt.Fprintf(&body, "Files changed: %s\n", strings.Join(paths, ", "))
+	if len(w.paths) > 0 {
+		fmt.Fprintf(&body, "Files changed: %s\n", strings.Join(w.paths, ", "))
 	}
 	if out.Verification != "" {
 		fmt.Fprintf(&body, "Verified by: %s\n", out.Verification)
@@ -469,81 +555,20 @@ func taskResultItem(base itemBase, out TaskOutcome, paths []string) domain.Proje
 	if title == "" {
 		title = "task " + out.TaskRef
 	}
-	return base.item(
+	return w.base.item(
 		domain.MemoryTypeTaskResult, domain.MemoryScopeTask, out.TaskRef,
 		fmt.Sprintf("%s — %s", title, firstLine(out.WhatChanged, "completed")),
-		body.String(), paths, "", confidenceVerbatim,
-		map[string]string{"task": out.TaskRef, "integrated": fmt.Sprint(out.Integrated)},
+		body.String(), w.paths, "", confidenceVerbatim,
+		w.meta(out.TaskRef, map[string]string{
+			domain.MetaKnowledgeIntegrated: fmt.Sprint(out.Integrated),
+			// The retention bucket, recorded rather than re-derived from the
+			// rendered body (see compactionScopeOf).
+			metaPrimaryModule: primaryModuleOf(out),
+		}),
 	)
 }
 
-func decisionItems(base itemBase, out TaskOutcome, paths []string) []domain.ProjectMemoryItem {
-	const maxDecisions = 10
-	var items []domain.ProjectMemoryItem
-	for i, d := range dedupeUnsorted(out.Decisions) {
-		if i >= maxDecisions {
-			break
-		}
-		d = strings.TrimSpace(d)
-		if d == "" {
-			continue
-		}
-		items = append(items, base.item(
-			domain.MemoryTypeDecision, domain.MemoryScopeRepository,
-			out.TaskRef+"#"+slug(firstLine(d, fmt.Sprint(i))),
-			firstLine(d, "decision"), d, paths, "", confidenceVerbatim,
-			map[string]string{"task": out.TaskRef},
-		))
-	}
-	return items
-}
-
-func riskItems(base itemBase, out TaskOutcome, paths []string) []domain.ProjectMemoryItem {
-	const maxRisks = 10
-	var items []domain.ProjectMemoryItem
-	for i, r := range dedupeUnsorted(out.Risks) {
-		if i >= maxRisks {
-			break
-		}
-		r = strings.TrimSpace(r)
-		if r == "" {
-			continue
-		}
-		items = append(items, base.item(
-			domain.MemoryTypeKnownRisk, domain.MemoryScopeRepository,
-			out.TaskRef+"#"+slug(firstLine(r, fmt.Sprint(i))),
-			firstLine(r, "risk"), r, paths, "", confidenceVerbatim,
-			map[string]string{"task": out.TaskRef},
-		))
-	}
-	return items
-}
-
-// writeTaskRelations records what the task touched, as graph edges: task
-// changed file, and decision affects module. They are what lets a later
-// Reviewer ask "what else has been done to this area" without reading history.
-func (s *Service) writeTaskRelations(ctx context.Context, base itemBase, out TaskOutcome, paths []string, now time.Time) error {
-	var rels []domain.ProjectMemoryRelation
-	task := domain.ProjectMemoryNode{Kind: domain.NodeTask, Key: out.TaskRef}
-	for _, p := range paths {
-		rels = append(rels, base.relation(task, domain.RelationChanged,
-			domain.ProjectMemoryNode{Kind: domain.NodeFile, Key: p}, []string{p}, confidenceVerbatim))
-	}
-	for _, m := range dedupeUnsorted(out.Modules) {
-		m = strings.TrimSpace(m)
-		if m == "" {
-			continue
-		}
-		rels = append(rels, base.relation(task, domain.RelationAffects,
-			domain.ProjectMemoryNode{Kind: domain.NodeModule, Key: m}, nil, confidenceVerbatim))
-	}
-	if len(rels) == 0 {
-		return nil
-	}
-	return s.graph.Upsert(ctx, now, rels...)
-}
-
-// compactTaskMemory enforces the retention bound.
+// compactTaskMemory enforces the global retention bound.
 //
 // It retires the oldest task-result facts beyond MaxRetainedTaskResults rather
 // than deleting them, so "this repository's memory of task X aged out" stays
@@ -589,13 +614,35 @@ func (s *Service) compactTaskMemory(ctx context.Context, projectID domain.Projec
 // part of the project. Promotion re-keys each fact as canonical, which gives
 // it a new identity — the same content under a different origin is a different
 // row, and the task-local original is discarded.
+//
+// Promotion is also where a branch's DISAGREEMENT with the project is
+// resolved. A decision recorded on an unintegrated branch that contradicted a
+// canonical one was marked conflicting rather than allowed to supersede it
+// (see knowledgeWriter.supersede); once the branch is integrated the
+// contradiction has an answer, and this is the moment the promoted decision
+// finally retires the one it replaced.
+//
+// It is idempotent and restart-safe. A crash between the promotion write and
+// the discard leaves the canonical row present and the task-local original
+// still there, and a second call promotes the same content to the same derived
+// identity before discarding again — so a duplicate completion callback
+// produces exactly one canonical fact, never two.
 func (s *Service) PromoteTaskMemory(ctx context.Context, projectID domain.ProjectID, taskRef, commit string) (int, error) {
 	items, err := s.repo.ListProjectMemoryItemsForTask(ctx, projectID, taskRef)
 	if err != nil {
 		return 0, err
 	}
+	if len(items) == 0 {
+		return 0, nil
+	}
 	now := s.now()
-	promoted := 0
+	repoID := items[0].Key.RepoID
+	existing, err := s.repo.ListProjectMemoryItems(ctx, projectID, repoID)
+	if err != nil {
+		return 0, err
+	}
+
+	promoted := make([]domain.ProjectMemoryItem, 0, len(items))
 	for _, item := range items {
 		canonical := item
 		canonical.Origin = domain.OriginCanonical
@@ -604,23 +651,53 @@ func (s *Service) PromoteTaskMemory(ctx context.Context, projectID domain.Projec
 		if commit != "" {
 			canonical.SourceCommit = commit
 		}
-		if canonical.Metadata == nil {
-			canonical.Metadata = map[string]string{}
+		canonical = domain.WithKnowledgeMetadata(canonical, domain.MetaKnowledgeIntegrated, "true")
+		canonical = domain.WithKnowledgeMetadata(canonical, "promotedFromTask", taskRef)
+		canonical = domain.WithKnowledgeMetadata(canonical, domain.MetaKnowledgeShare, string(domain.ShareCanonical))
+		// A branch decision that was held as conflicting becomes the project's
+		// answer the moment the branch lands. The conflict annotation is
+		// cleared here and settled by the supersession pass below.
+		if domain.KnowledgeStatusOf(canonical) == domain.KnowledgeConflicting {
+			canonical = domain.WithKnowledgeMetadata(canonical, domain.MetaKnowledgeStatus, string(domain.KnowledgeActive))
+			canonical = domain.WithKnowledgeMetadata(canonical, domain.MetaKnowledgeConflictsWith, "")
 		}
-		canonical.Metadata["integrated"] = "true"
-		canonical.Metadata["promotedFromTask"] = taskRef
 		canonical = canonical.Normalized()
 		if _, err := s.repo.PutProjectMemoryItem(ctx, canonical, now); err != nil {
-			return promoted, err
+			return len(promoted), err
 		}
-		promoted++
+		promoted = append(promoted, canonical)
 	}
-	if promoted > 0 {
-		if _, _, err := s.repo.DiscardProjectMemoryForTask(ctx, projectID, taskRef); err != nil {
-			return promoted, err
+
+	// The promoted facts now carry the project's own authority, so the
+	// supersession they were refused on the branch is applied here.
+	w := &knowledgeWriter{
+		svc: s, now: now, existing: existing,
+		base: itemBase{
+			ProjectID: projectID, RepoID: repoID, Commit: commit,
+			Origin: domain.OriginCanonical,
+		},
+		out: TaskOutcome{ProjectID: projectID, TaskRef: taskRef, Integrated: true},
+	}
+	rels, err := w.supersede(ctx, promoted)
+	if err != nil {
+		return len(promoted), err
+	}
+	for _, item := range promoted {
+		rels = append(rels, w.base.relation(
+			domain.ProjectMemoryNode{Kind: domain.NodeTask, Key: taskRef},
+			domain.RelationProduced, knowledgeNode(item.ID), item.SourcePaths, confidenceVerbatim))
+	}
+	if len(rels) > 0 {
+		if err := s.graph.Upsert(ctx, now, rels...); err != nil && s.log != nil {
+			s.log.Warn("project memory: could not mirror a promotion into the graph",
+				"task", taskRef, "err", err)
 		}
 	}
-	return promoted, nil
+
+	if _, _, err := s.repo.DiscardProjectMemoryForTask(ctx, projectID, taskRef); err != nil {
+		return len(promoted), err
+	}
+	return len(promoted), s.compactKnowledge(ctx, projectID, repoID, now)
 }
 
 // DiscardTaskMemory drops one task's unintegrated facts.

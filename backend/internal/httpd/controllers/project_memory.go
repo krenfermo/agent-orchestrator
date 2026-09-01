@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -44,6 +45,72 @@ type ProjectMemoryService interface {
 	// project's memory warm, what is it costing per role, and what did the
 	// last freshness check have to do.
 	Report(ctx context.Context, projectID domain.ProjectID, repoPath string) (ProjectMemoryReport, error)
+	// Knowledge reads shared task knowledge — what tasks learned, which
+	// decisions still govern, which risks are still open (P2-C §17).
+	Knowledge(ctx context.Context, req ProjectMemoryKnowledgeQuery) (ProjectMemoryKnowledgeResult, error)
+	// Manifests reads what one execution was actually told (P2-C §16).
+	Manifests(ctx context.Context, req ProjectMemoryManifestQuery) (ProjectMemoryManifestResult, error)
+}
+
+// ProjectMemoryKnowledgeQuery narrows a shared-knowledge read.
+type ProjectMemoryKnowledgeQuery struct {
+	ProjectID domain.ProjectID
+	RepoPath  string
+	// Type narrows to decisions, risks or task results. Empty means all three.
+	Type domain.ProjectMemoryType
+	// Status narrows by lifecycle. Empty means active only, which is what
+	// retrieval would serve.
+	Status domain.KnowledgeStatus
+	// TaskRef narrows to what one task produced. When set, EVERY status is
+	// returned: "what did we learn from this task" includes the decision a
+	// later task has since replaced.
+	TaskRef string
+	Limit   int
+}
+
+// ProjectMemoryKnowledgeEntry is one shared fact with its lifecycle rendered.
+type ProjectMemoryKnowledgeEntry struct {
+	Item          domain.ProjectMemoryItem
+	Status        string
+	Kind          string
+	Share         string
+	Subject       string
+	SourceTask    string
+	SupersededBy  string
+	Supersedes    string
+	ResolvedBy    string
+	ConflictsWith string
+}
+
+// ProjectMemoryKnowledgeResult is what a knowledge read found.
+type ProjectMemoryKnowledgeResult struct {
+	RepoID  string
+	Entries []ProjectMemoryKnowledgeEntry
+}
+
+// ProjectMemoryManifestQuery asks what one execution was told.
+type ProjectMemoryManifestQuery struct {
+	ProjectID     domain.ProjectID
+	TaskRef       string
+	WorkflowRunID string
+	// Expand resolves each manifest's item ids back into the facts they name,
+	// and reports the ones that no longer exist.
+	Expand bool
+}
+
+// ProjectMemoryManifestEntry is one execution's frozen context.
+type ProjectMemoryManifestEntry struct {
+	Manifest domain.MemoryContextManifest
+	Items    []ProjectMemoryKnowledgeEntry
+	// Missing names manifest items that no longer exist. A quietly shorter
+	// list would hide the single most interesting thing a manifest can
+	// reveal: that an execution was told something AO has since discarded.
+	Missing []string
+}
+
+// ProjectMemoryManifestResult is what a manifest read found.
+type ProjectMemoryManifestResult struct {
+	Entries []ProjectMemoryManifestEntry
 }
 
 // ProjectMemoryReport is the P2-B operational view: the policy in force, how
@@ -140,6 +207,102 @@ func (c *ProjectMemoryController) Register(r chi.Router) {
 	r.Post("/projects/{id}/memory/rebuild", c.rebuild)
 	r.Post("/projects/{id}/memory/invalidate", c.invalidate)
 	r.Get("/projects/{id}/memory/report", c.report)
+	r.Get("/projects/{id}/memory/knowledge", c.knowledge)
+	r.Get("/projects/{id}/memory/manifests", c.manifests)
+}
+
+// knowledge answers "what have tasks taught this project, and what of it still
+// holds".
+func (c *ProjectMemoryController) knowledge(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/projects/{id}/memory/knowledge")
+		return
+	}
+	q := r.URL.Query()
+	limit, ok := parseMemoryLimit(w, r, q.Get("limit"))
+	if !ok {
+		return
+	}
+	res, err := c.Svc.Knowledge(r.Context(), ProjectMemoryKnowledgeQuery{
+		ProjectID: domain.ProjectID(chi.URLParam(r, "id")),
+		RepoPath:  strings.TrimSpace(q.Get("repoPath")),
+		Type:      domain.ProjectMemoryType(strings.TrimSpace(q.Get("type"))),
+		Status:    domain.KnowledgeStatus(strings.TrimSpace(q.Get("status"))),
+		TaskRef:   strings.TrimSpace(q.Get("task")),
+		Limit:     limit,
+	})
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	entries := make([]ProjectMemoryKnowledgeResponse, 0, len(res.Entries))
+	for _, e := range res.Entries {
+		entries = append(entries, projectMemoryKnowledgeResponse(e))
+	}
+	envelope.WriteJSON(w, http.StatusOK, ListProjectMemoryKnowledgeResponse{
+		RepoID: res.RepoID, Entries: entries, Total: len(entries),
+	})
+}
+
+// manifests answers "what did this execution actually know".
+func (c *ProjectMemoryController) manifests(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/projects/{id}/memory/manifests")
+		return
+	}
+	q := r.URL.Query()
+	task := strings.TrimSpace(q.Get("task"))
+	run := strings.TrimSpace(q.Get("run"))
+	if task == "" && run == "" {
+		envelope.WriteError(w, r, apierr.Invalid("missing_execution",
+			"a manifest read must name a task or a workflow run", nil))
+		return
+	}
+	res, err := c.Svc.Manifests(r.Context(), ProjectMemoryManifestQuery{
+		ProjectID:     domain.ProjectID(chi.URLParam(r, "id")),
+		TaskRef:       task,
+		WorkflowRunID: run,
+		Expand:        strings.TrimSpace(q.Get("expand")) == "true",
+	})
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	entries := make([]ProjectMemoryManifestResponse, 0, len(res.Entries))
+	for _, e := range res.Entries {
+		items := make([]ProjectMemoryKnowledgeResponse, 0, len(e.Items))
+		for _, it := range e.Items {
+			items = append(items, projectMemoryKnowledgeResponse(it))
+		}
+		entries = append(entries, ProjectMemoryManifestResponse{
+			ID: e.Manifest.ID, TaskRef: e.Manifest.TaskRef,
+			WorkflowRunID: e.Manifest.WorkflowRunID, Role: e.Manifest.Role,
+			PackDigest: e.Manifest.PackDigest, PolicyVersion: e.Manifest.PolicyVersion,
+			Generation: e.Manifest.Generation, IndexedCommit: e.Manifest.IndexedCommit,
+			ItemIDs: e.Manifest.ItemIDs, ItemCount: len(e.Manifest.ItemIDs),
+			SelectedBytes: e.Manifest.SelectedBytes, EstimatedTokens: e.Manifest.EstimatedTokens,
+			CreatedAt: e.Manifest.CreatedAt, Items: items, Missing: e.Missing,
+		})
+	}
+	envelope.WriteJSON(w, http.StatusOK, ListProjectMemoryManifestsResponse{
+		Entries: entries, Total: len(entries),
+	})
+}
+
+// parseMemoryLimit reads a non-negative limit, writing the error envelope and
+// reporting false when it cannot.
+func parseMemoryLimit(w http.ResponseWriter, r *http.Request, raw string) (int, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, true
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		envelope.WriteError(w, r, apierr.Invalid("invalid_limit",
+			"limit must be a non-negative integer", nil))
+		return 0, false
+	}
+	return n, true
 }
 
 func (c *ProjectMemoryController) report(w http.ResponseWriter, r *http.Request) {
@@ -344,6 +507,24 @@ type ListProjectMemoryItemsQuery struct {
 	Limit    *int64 `query:"limit,omitempty" minimum:"1" maximum:"1000" description:"Maximum items to return. Defaults to 200."`
 }
 
+// ListProjectMemoryKnowledgeQuery is the query-string contract of
+// GET /api/v1/projects/{id}/memory/knowledge.
+type ListProjectMemoryKnowledgeQuery struct {
+	RepoPath string `query:"repoPath,omitempty" description:"Repository root to read. Defaults to every repository of the project."`
+	Type     string `query:"type,omitempty" enum:"task_result,decision,known_risk" description:"Narrow to one kind of shared knowledge. Omit for all three."`
+	Status   string `query:"status,omitempty" enum:"active,superseded,resolved,obsolete,conflicting" description:"Narrow to one lifecycle status. Defaults to active, which is what retrieval would actually serve."`
+	Task     string `query:"task,omitempty" description:"Narrow to what one task produced. When set, every status is returned: a decision this task made that a later one replaced is still something this task produced."`
+	Limit    *int64 `query:"limit,omitempty" minimum:"1" maximum:"1000" description:"Maximum entries to return. Defaults to 200."`
+}
+
+// ListProjectMemoryManifestsQuery is the query-string contract of
+// GET /api/v1/projects/{id}/memory/manifests.
+type ListProjectMemoryManifestsQuery struct {
+	Task   string `query:"task,omitempty" description:"The task whose frozen context to read. One of task or run is required."`
+	Run    string `query:"run,omitempty" description:"The workflow run whose executions to read. One of task or run is required."`
+	Expand string `query:"expand,omitempty" enum:"true,false" description:"Resolve each manifest's item ids back into the facts they name, and report the ones that no longer exist."`
+}
+
 // GetProjectMemoryReportQuery is the query-string contract of
 // GET /api/v1/projects/{id}/memory/report.
 type GetProjectMemoryReportQuery struct {
@@ -500,4 +681,103 @@ type ProjectMemoryRoleReportResponse struct {
 	ReducedToSummary    int    `json:"reducedToSummary"`
 	StaleExcluded       int    `json:"staleExcluded"`
 	FallbackReason      string `json:"fallbackReason,omitempty"`
+}
+
+// ListProjectMemoryKnowledgeResponse is the body of
+// GET /api/v1/projects/{id}/memory/knowledge.
+//
+// It is the P2-C inspection surface: what tasks have taught this project, and
+// what of it still holds. Every entry carries its lifecycle links, so the four
+// questions the brief names — what did we learn, which decisions are active,
+// which risks are open, what was superseded — are all answerable from one
+// response rather than from four correlated ones.
+type ListProjectMemoryKnowledgeResponse struct {
+	RepoID  string                           `json:"repoId,omitempty"`
+	Entries []ProjectMemoryKnowledgeResponse `json:"entries"`
+	Total   int                              `json:"total"`
+}
+
+// ProjectMemoryKnowledgeResponse is one shared fact and its lifecycle.
+type ProjectMemoryKnowledgeResponse struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+	// Scope and Key say what the fact is about.
+	Scope   string `json:"scope"`
+	Key     string `json:"key,omitempty"`
+	Summary string `json:"summary"`
+	Content string `json:"content,omitempty"`
+	// Status is the lifecycle status retrieval would apply: active,
+	// superseded, resolved, obsolete or conflicting.
+	Status string `json:"status" enum:"active,superseded,resolved,obsolete,conflicting"`
+	// Kind distinguishes a risk from a follow-up; empty for other types.
+	Kind string `json:"kind,omitempty" enum:"risk,follow_up"`
+	// Share is how far the fact may travel.
+	Share string `json:"share" enum:"task,workflow,canonical"`
+	// Subject is the stable identity of what the fact is about — the field
+	// supersession turns on.
+	Subject string `json:"subject,omitempty"`
+	// SourceTask is the task that produced it.
+	SourceTask string `json:"sourceTask,omitempty"`
+	// The lifecycle links. Empty when they do not apply.
+	SupersededBy  string `json:"supersededBy,omitempty"`
+	Supersedes    string `json:"supersedes,omitempty"`
+	ResolvedBy    string `json:"resolvedBy,omitempty"`
+	ConflictsWith string `json:"conflictsWith,omitempty"`
+
+	State        string   `json:"state" enum:"valid,stale,invalidated,rebuilding"`
+	StateReason  string   `json:"stateReason,omitempty"`
+	Confidence   float64  `json:"confidence"`
+	SourceCommit string   `json:"sourceCommit,omitempty"`
+	SourcePaths  []string `json:"sourcePaths,omitempty"`
+	UpdatedAt    string   `json:"updatedAt"`
+}
+
+// ListProjectMemoryManifestsResponse is the body of
+// GET /api/v1/projects/{id}/memory/manifests.
+type ListProjectMemoryManifestsResponse struct {
+	Entries []ProjectMemoryManifestResponse `json:"entries"`
+	Total   int                             `json:"total"`
+}
+
+// ProjectMemoryManifestResponse is one execution's frozen context.
+//
+// It names the facts by id rather than carrying their text, which is what
+// keeps a manifest small and what keeps it CORRECT: the items may have been
+// superseded since, and a manifest that had copied them would report a premise
+// nobody ever held.
+type ProjectMemoryManifestResponse struct {
+	ID              string    `json:"id"`
+	TaskRef         string    `json:"taskRef,omitempty"`
+	WorkflowRunID   string    `json:"workflowRunId,omitempty"`
+	Role            string    `json:"role" enum:"planner,worker,reviewer,repair"`
+	PackDigest      string    `json:"packDigest,omitempty"`
+	PolicyVersion   int       `json:"policyVersion"`
+	Generation      int64     `json:"generation"`
+	IndexedCommit   string    `json:"indexedCommit,omitempty"`
+	ItemIDs         []string  `json:"itemIds"`
+	ItemCount       int       `json:"itemCount"`
+	SelectedBytes   int       `json:"selectedBytes"`
+	EstimatedTokens int       `json:"estimatedTokens"`
+	CreatedAt       time.Time `json:"createdAt"`
+	// Items is the expanded form, present only when the caller asked for it.
+	Items []ProjectMemoryKnowledgeResponse `json:"items,omitempty"`
+	// Missing names manifest items that no longer exist.
+	Missing []string `json:"missing,omitempty"`
+}
+
+func projectMemoryKnowledgeResponse(e ProjectMemoryKnowledgeEntry) ProjectMemoryKnowledgeResponse {
+	item := e.Item
+	return ProjectMemoryKnowledgeResponse{
+		ID: item.ID, Type: string(item.Key.Type),
+		Scope: string(item.Key.Scope), Key: item.Key.Key,
+		Summary: item.Summary, Content: item.Content,
+		Status: e.Status, Kind: e.Kind, Share: e.Share, Subject: e.Subject,
+		SourceTask:   e.SourceTask,
+		SupersededBy: e.SupersededBy, Supersedes: e.Supersedes,
+		ResolvedBy: e.ResolvedBy, ConflictsWith: e.ConflictsWith,
+		State: string(item.State), StateReason: item.StateReason,
+		Confidence:   item.Confidence,
+		SourceCommit: item.SourceCommit, SourcePaths: item.SourcePaths,
+		UpdatedAt: item.UpdatedAt.Format(rfc3339Milli),
+	}
 }

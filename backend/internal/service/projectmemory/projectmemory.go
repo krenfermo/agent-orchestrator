@@ -253,3 +253,97 @@ func (s *Service) Report(ctx context.Context, projectID domain.ProjectID, repoPa
 	report.CacheHits, report.CacheMisses = stats.Hits, stats.Misses
 	return report, nil
 }
+
+// Knowledge reads shared task knowledge for an operator (P2-C §17).
+//
+// It applies the same lifecycle rules retrieval applies, through the same
+// service call, so an operator told a decision is active is looking at exactly
+// the judgement a Worker's pack made. An inspection that computed "active"
+// its own way would be worse than no inspection at all: it would look like
+// corroboration while being an independent guess.
+//
+// Asking for one task's knowledge widens the status filter to everything,
+// because "what did we learn from this task" includes the decision a later
+// task has since replaced — that is a fact ABOUT the task, and hiding it would
+// make the answer wrong rather than tidy.
+func (s *Service) Knowledge(
+	ctx context.Context, req controllers.ProjectMemoryKnowledgeQuery,
+) (controllers.ProjectMemoryKnowledgeResult, error) {
+	var repoPath string
+	if strings.TrimSpace(req.RepoPath) != "" {
+		resolved, err := s.resolveRepo(ctx, req.ProjectID, req.RepoPath)
+		if err != nil {
+			return controllers.ProjectMemoryKnowledgeResult{}, err
+		}
+		repoPath = resolved
+	}
+
+	filter := pm.KnowledgeFilter{
+		ProjectID: req.ProjectID, RepoPath: repoPath,
+		TaskRef: strings.TrimSpace(req.TaskRef), Limit: req.Limit,
+	}
+	if req.Type != "" {
+		filter.Types = []domain.ProjectMemoryType{req.Type}
+	}
+	switch {
+	case req.Status != "":
+		filter.Statuses = []domain.KnowledgeStatus{req.Status}
+	case filter.TaskRef != "":
+		filter.Statuses = []domain.KnowledgeStatus{
+			domain.KnowledgeActive, domain.KnowledgeSuperseded, domain.KnowledgeResolved,
+			domain.KnowledgeObsolete, domain.KnowledgeConflicting,
+		}
+	}
+
+	entries, err := s.memory.Knowledge(ctx, filter)
+	if err != nil {
+		return controllers.ProjectMemoryKnowledgeResult{}, err
+	}
+	out := controllers.ProjectMemoryKnowledgeResult{
+		Entries: make([]controllers.ProjectMemoryKnowledgeEntry, 0, len(entries)),
+	}
+	if repoPath != "" {
+		out.RepoID = domain.ProjectMemoryRepoID(repoPath)
+	}
+	for _, e := range entries {
+		out.Entries = append(out.Entries, knowledgeEntryResponse(e))
+	}
+	return out, nil
+}
+
+// Manifests reads what one execution was actually told (P2-C §16).
+func (s *Service) Manifests(
+	ctx context.Context, req controllers.ProjectMemoryManifestQuery,
+) (controllers.ProjectMemoryManifestResult, error) {
+	manifests, err := s.memory.ContextManifests(ctx, req.ProjectID, req.TaskRef, req.WorkflowRunID)
+	if err != nil {
+		return controllers.ProjectMemoryManifestResult{}, err
+	}
+	out := controllers.ProjectMemoryManifestResult{
+		Entries: make([]controllers.ProjectMemoryManifestEntry, 0, len(manifests)),
+	}
+	for _, m := range manifests {
+		entry := controllers.ProjectMemoryManifestEntry{Manifest: m}
+		if req.Expand {
+			items, missing, err := s.memory.ManifestItems(ctx, m)
+			if err != nil {
+				return controllers.ProjectMemoryManifestResult{}, err
+			}
+			entry.Missing = missing
+			for _, it := range items {
+				entry.Items = append(entry.Items, knowledgeEntryResponse(it))
+			}
+		}
+		out.Entries = append(out.Entries, entry)
+	}
+	return out, nil
+}
+
+func knowledgeEntryResponse(e pm.KnowledgeEntry) controllers.ProjectMemoryKnowledgeEntry {
+	return controllers.ProjectMemoryKnowledgeEntry{
+		Item: e.Item, Status: string(e.Status), Kind: string(e.Kind),
+		Share: string(e.Share), Subject: e.Subject, SourceTask: e.SourceTask,
+		SupersededBy: e.SupersededBy, Supersedes: e.Supersedes,
+		ResolvedBy: e.ResolvedBy, ConflictsWith: e.ConflictsWith,
+	}
+}

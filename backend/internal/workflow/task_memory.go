@@ -85,6 +85,21 @@ type TaskOutcomeFacts struct {
 	// Integrated reports whether the work is part of the repository's
 	// integrated state. Only integrated work produces canonical memory.
 	Integrated bool
+
+	// --- shared knowledge (P2-C) -----------------------------------------
+
+	// WorkflowRunID is the run this task belonged to. It scopes workflow-local
+	// sharing, so a later run that names the same upstream task reads nothing.
+	WorkflowRunID string
+	// Share is how far these facts may travel while the work is not
+	// integrated. See knowledgeShareFor: verified work may reach the tasks
+	// that declared a dependency on it, and everything else reaches only
+	// itself.
+	Share domain.KnowledgeShare
+	// DependsOnTasks are the tasks the PLAN says this one depends on. They are
+	// copied from workflow_task_dependencies, never inferred — two tasks that
+	// touched the same files are not related (P2-C §5).
+	DependsOnTasks []string
 }
 
 // recordTaskMemory is called from completeVerifiedRun, after the work has been
@@ -173,6 +188,14 @@ func (c *Coordinator) taskOutcomeFacts(
 		facts.FilesChanged = boundedPaths(scope.WritePaths)
 		facts.Modules = boundedPaths(scope.Packages)
 	}
+
+	// The sharing decision and the task's declared lineage. Both are read from
+	// the same durable plan the dispatch side reads, through the same helper,
+	// so "which tasks is this one related to" cannot get two answers.
+	auth := c.taskAuthorityFor(ctx, run)
+	facts.WorkflowRunID = auth.WorkflowRunID
+	facts.DependsOnTasks = auth.UpstreamTaskRefs
+	facts.Share = knowledgeShareFor(step, facts.Integrated)
 	return facts
 }
 

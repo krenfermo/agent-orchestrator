@@ -874,7 +874,12 @@ func clampSummary(s string) string {
 	if len(s) <= domain.MaxProjectMemorySummary {
 		return s
 	}
-	return strings.ToValidUTF8(s[:domain.MaxProjectMemorySummary-1], "") + "…"
+	// The cap the store validates is a BYTE cap, and the ellipsis is three
+	// bytes. Reserving them here rather than one byte is the difference
+	// between a clamp and a value the store then refuses — which is how a
+	// long summary used to fail a whole task recording.
+	const ellipsis = "…"
+	return strings.ToValidUTF8(s[:domain.MaxProjectMemorySummary-len(ellipsis)], "") + ellipsis
 }
 
 func clampContent(s string) string { return excerpt(s, domain.MaxProjectMemoryContent) }

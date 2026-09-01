@@ -148,6 +148,7 @@ var shippedMigrations = map[int64]string{
 	142: "0142_execution_placements_and_provider_attempts.sql",
 	143: "0143_execution_placement_overrides.sql",
 	144: "0144_project_memory.sql",
+	145: "0145_project_memory_context_manifest.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

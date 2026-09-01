@@ -61,17 +61,20 @@ func (a *TaskMemoryAdapter) RecordOutcome(ctx stdctx.Context, facts workflowcore
 		return nil
 	}
 	return a.svc.RecordTaskOutcome(ctx, projectmemory.TaskOutcome{
-		ProjectID:    facts.ProjectID,
-		RepoPath:     facts.RepoPath,
-		TaskRef:      facts.TaskRef,
-		Title:        facts.Title,
-		WhatChanged:  facts.WhatChanged,
-		Why:          facts.Why,
-		FilesChanged: facts.FilesChanged,
-		Modules:      facts.Modules,
-		Verification: facts.Verification,
-		Commit:       facts.Commit,
-		Integrated:   facts.Integrated,
+		ProjectID:      facts.ProjectID,
+		RepoPath:       facts.RepoPath,
+		TaskRef:        facts.TaskRef,
+		Title:          facts.Title,
+		WhatChanged:    facts.WhatChanged,
+		Why:            facts.Why,
+		FilesChanged:   facts.FilesChanged,
+		Modules:        facts.Modules,
+		Verification:   facts.Verification,
+		Commit:         facts.Commit,
+		Integrated:     facts.Integrated,
+		WorkflowRunID:  facts.WorkflowRunID,
+		Share:          facts.Share,
+		DependsOnTasks: facts.DependsOnTasks,
 	})
 }
 

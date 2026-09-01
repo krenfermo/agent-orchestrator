@@ -696,7 +696,8 @@ const (
 // Valid reports whether the node kind is one this build writes.
 func (k ProjectMemoryNodeKind) Valid() bool {
 	switch k {
-	case NodeRepository, NodeModule, NodeFile, NodeSymbol, NodeTask, NodeDecision:
+	case NodeRepository, NodeModule, NodeFile, NodeSymbol, NodeTask, NodeDecision,
+		NodeKnowledge:
 		return true
 	default:
 		return false

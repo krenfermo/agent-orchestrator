@@ -1486,7 +1486,12 @@ func (c *Coordinator) dispatchReviewFromPending(
 		Prompt:          prompt,
 		RuntimeEnv:      runtimeEnv,
 	}
-	launch, adopted, err := c.ensureReviewerLaunched(ctx, launchReq, authorization.HandleID)
+	// P2-C §7: a Reviewer is entitled to exactly what the Worker it reviews was
+	// entitled to. Reviewing a change against knowledge the author did not have
+	// is how a review reports a "regression" that is actually a decision the
+	// project made and the reviewer was never told about.
+	launch, adopted, err := c.ensureReviewerLaunched(
+		c.withTaskAuthority(ctx, run), launchReq, authorization.HandleID)
 	if err != nil {
 		return c.recordReviewLaunchFailure(ctx, run, reviewStep, entry, harness, reviewRunID, targetSHA, cycleNumber, reviewLaunchStageLaunch, fmt.Errorf("launch reviewer: %w", err))
 	}

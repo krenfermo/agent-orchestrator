@@ -90,7 +90,18 @@ type taskWorktreeCleanupPayload struct {
 // plan over housekeeping. What it does instead is leave the record saying
 // exactly what is outstanding, so boot reconciliation picks it up.
 func (c *Coordinator) finishTaskWorktree(ctx stdctx.Context, parent domain.WorkflowRun, task domain.WorkflowTask, integratedSHA string) {
-	if c.taskWorkspaces == nil || integratedSHA == "" {
+	if integratedSHA == "" {
+		return
+	}
+	// P2-C §4: the isolated-worktree promotion path. This is the first instant
+	// at which "this task's work is part of the repository" is provable rather
+	// than hoped, and it is therefore the only place an isolated task's memory
+	// may become canonical. It runs before the cleanup below because the
+	// cleanup may fail and leave, and losing the promotion to a failed
+	// housekeeping step would silently keep integrated knowledge task-local.
+	c.promoteIntegratedTaskMemory(ctx, parent, task.ID, integratedSHA)
+
+	if c.taskWorkspaces == nil {
 		return
 	}
 	rec, err := c.taskWorkspaces.MarkIntegrated(ctx, task.ID, integratedSHA)

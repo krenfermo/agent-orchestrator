@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -963,6 +964,137 @@ func (s *Store) DiscardProjectMemoryForTask(ctx context.Context, projectID domai
 		return nil
 	})
 	return items, relations, err
+}
+
+// --- context manifests (P2-C §16) ------------------------------------------
+
+// PutProjectMemoryContextManifest records what one execution was told.
+//
+// It is an upsert on a derived id, which makes re-provisioning after a restart
+// idempotent: a manifest is an observation of an answer, not an event, and a
+// restart that reproduces the same answer must not leave two rows claiming the
+// execution was told twice. A restart that produces a DIFFERENT answer gets a
+// different digest and therefore a different row, which is exactly the case an
+// operator needs to be able to see.
+//
+// It never fails a dispatch. The caller treats an error here as a lost
+// observation, not as a reason to withhold context that was already assembled.
+func (s *Store) PutProjectMemoryContextManifest(
+	ctx context.Context, manifest domain.MemoryContextManifest, now time.Time,
+) error {
+	m := manifest.Normalized()
+	if err := m.Validate(); err != nil {
+		return err
+	}
+	ids, err := json.Marshal(m.ItemIDs)
+	if err != nil {
+		return fmt.Errorf("encode manifest item ids: %w", err)
+	}
+	created := m.CreatedAt
+	if created.IsZero() {
+		created = now
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.qw.UpsertProjectMemoryContextManifest(ctx, gen.UpsertProjectMemoryContextManifestParams{
+		ID:              m.ID,
+		ProjectID:       string(m.ProjectID),
+		RepoID:          m.RepoID,
+		WorkflowRunID:   m.WorkflowRunID,
+		TaskRef:         m.TaskRef,
+		Role:            m.Role,
+		PackDigest:      m.PackDigest,
+		PolicyVersion:   int64(m.PolicyVersion),
+		Generation:      m.Generation,
+		IndexedCommit:   m.IndexedCommit,
+		ItemIdsJson:     string(ids),
+		ItemCount:       int64(len(m.ItemIDs)),
+		SelectedBytes:   int64(m.SelectedBytes),
+		EstimatedTokens: int64(m.EstimatedTokens),
+		CreatedAt:       created,
+		UpdatedAt:       now,
+	})
+}
+
+// GetProjectMemoryContextManifest reads one manifest by its derived id.
+func (s *Store) GetProjectMemoryContextManifest(
+	ctx context.Context, id string,
+) (domain.MemoryContextManifest, bool, error) {
+	row, err := s.qr.GetProjectMemoryContextManifest(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.MemoryContextManifest{}, false, nil
+	}
+	if err != nil {
+		return domain.MemoryContextManifest{}, false, fmt.Errorf("read context manifest: %w", err)
+	}
+	m, err := projectMemoryManifestFromRow(row)
+	return m, err == nil, err
+}
+
+// ListProjectMemoryContextManifestsForTask reads everything one task execution
+// was told, newest first.
+func (s *Store) ListProjectMemoryContextManifestsForTask(
+	ctx context.Context, projectID domain.ProjectID, taskRef string,
+) ([]domain.MemoryContextManifest, error) {
+	rows, err := s.qr.ListProjectMemoryContextManifestsForTask(ctx,
+		gen.ListProjectMemoryContextManifestsForTaskParams{ProjectID: string(projectID), TaskRef: taskRef})
+	if err != nil {
+		return nil, fmt.Errorf("list context manifests for task: %w", err)
+	}
+	return projectMemoryManifestsFromRows(rows)
+}
+
+// ListProjectMemoryContextManifestsForRun reads everything one run's
+// executions were told, newest first.
+func (s *Store) ListProjectMemoryContextManifestsForRun(
+	ctx context.Context, projectID domain.ProjectID, runID string,
+) ([]domain.MemoryContextManifest, error) {
+	rows, err := s.qr.ListProjectMemoryContextManifestsForRun(ctx,
+		gen.ListProjectMemoryContextManifestsForRunParams{ProjectID: string(projectID), WorkflowRunID: runID})
+	if err != nil {
+		return nil, fmt.Errorf("list context manifests for run: %w", err)
+	}
+	return projectMemoryManifestsFromRows(rows)
+}
+
+func projectMemoryManifestsFromRows(
+	rows []gen.ProjectMemoryContextManifest,
+) ([]domain.MemoryContextManifest, error) {
+	out := make([]domain.MemoryContextManifest, 0, len(rows))
+	for _, r := range rows {
+		m, err := projectMemoryManifestFromRow(r)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+func projectMemoryManifestFromRow(r gen.ProjectMemoryContextManifest) (domain.MemoryContextManifest, error) {
+	var ids []string
+	if strings.TrimSpace(r.ItemIdsJson) != "" {
+		if err := json.Unmarshal([]byte(r.ItemIdsJson), &ids); err != nil {
+			return domain.MemoryContextManifest{}, fmt.Errorf("decode manifest item ids: %w", err)
+		}
+	}
+	return domain.MemoryContextManifest{
+		ID:              r.ID,
+		ProjectID:       domain.ProjectID(r.ProjectID),
+		RepoID:          r.RepoID,
+		WorkflowRunID:   r.WorkflowRunID,
+		TaskRef:         r.TaskRef,
+		Role:            r.Role,
+		PackDigest:      r.PackDigest,
+		PolicyVersion:   int(r.PolicyVersion),
+		Generation:      r.Generation,
+		IndexedCommit:   r.IndexedCommit,
+		ItemIDs:         ids,
+		SelectedBytes:   int(r.SelectedBytes),
+		EstimatedTokens: int(r.EstimatedTokens),
+		CreatedAt:       r.CreatedAt,
+		UpdatedAt:       r.UpdatedAt,
+	}, nil
 }
 
 // --- row mapping ------------------------------------------------------------

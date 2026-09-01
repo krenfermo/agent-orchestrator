@@ -155,6 +155,11 @@ var legacyActorlessUserCLICommands = map[string]struct{}{
 	"ao memory rebuild":    {},
 	"ao memory invalidate": {},
 	"ao memory report":     {},
+	"ao memory knowledge":  {},
+	"ao memory decisions":  {},
+	"ao memory risks":      {},
+	"ao memory task":       {},
+	"ao memory context":    {},
 	"ao runtime":           {},
 	"ao runtime gc":        {},
 	// P1-D: the placement surface. Same sweep, same proofs, named for the

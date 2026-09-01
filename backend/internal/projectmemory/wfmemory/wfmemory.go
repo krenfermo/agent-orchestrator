@@ -122,13 +122,17 @@ func (p *planner) attach(
 		})
 	}
 
+	auth := projectmemory.TaskAuthorityFrom(ctx)
 	provisioned := p.prov.Provision(ctx, projectmemory.ProvisionRequest{
-		ProjectID: domain.ProjectID(request.Project.ID),
-		RepoPath:  request.Project.Path,
-		Role:      projectmemory.RolePlanner,
-		Keywords:  keywordsFrom(request.Objective),
-		Legacy:    legacy,
-		TaskBytes: len(request.Objective),
+		ProjectID:        domain.ProjectID(request.Project.ID),
+		RepoPath:         request.Project.Path,
+		Role:             projectmemory.RolePlanner,
+		Keywords:         keywordsFrom(request.Objective),
+		Legacy:           legacy,
+		TaskBytes:        len(request.Objective),
+		TaskRef:          auth.TaskRef,
+		WorkflowRunID:    auth.WorkflowRunID,
+		UpstreamTaskRefs: auth.UpstreamTaskRefs,
 	})
 	if !provisioned.Attached() {
 		p.note("planner", provisioned)
@@ -204,13 +208,25 @@ func (s *spawner) attach(ctx stdctx.Context, cfg ports.SpawnConfig) (stdctx.Cont
 		})
 	}
 
+	// The spawn config names the run; the entitlement on the context names the
+	// task and what it may read. The run is taken from the config when the
+	// context did not carry one, so a spawn dispatched outside the coordinator
+	// still scopes workflow-local knowledge correctly rather than widening it.
+	auth := projectmemory.TaskAuthorityFrom(ctx)
+	runID := auth.WorkflowRunID
+	if runID == "" {
+		runID = cfg.WorkflowRunID
+	}
 	provisioned := s.prov.Provision(ctx, projectmemory.ProvisionRequest{
-		ProjectID: cfg.ProjectID,
-		RepoPath:  root,
-		Role:      projectmemory.RoleWorker,
-		Keywords:  keywordsFrom(cfg.Prompt),
-		Legacy:    legacy,
-		TaskBytes: len(cfg.Prompt),
+		ProjectID:        cfg.ProjectID,
+		RepoPath:         root,
+		Role:             projectmemory.RoleWorker,
+		Keywords:         keywordsFrom(cfg.Prompt),
+		Legacy:           legacy,
+		TaskBytes:        len(cfg.Prompt),
+		TaskRef:          auth.TaskRef,
+		WorkflowRunID:    runID,
+		UpstreamTaskRefs: auth.UpstreamTaskRefs,
 	})
 	if !provisioned.Attached() {
 		logProvision(s.log, "worker", provisioned)
@@ -305,12 +321,16 @@ func (r *reviewerLauncher) attach(
 	// evidence that matters. When the launch does not carry one the pack falls
 	// back to the repository's standing knowledge, which is still better than
 	// the empty system prompt this field held before P2-A.
+	auth := projectmemory.TaskAuthorityFrom(ctx)
 	provisioned := r.prov.Provision(ctx, projectmemory.ProvisionRequest{
-		ProjectID: req.ProjectID,
-		RepoPath:  root,
-		Role:      projectmemory.RoleReviewer,
-		Keywords:  keywordsFrom(req.Prompt),
-		TaskBytes: len(req.Prompt),
+		ProjectID:        req.ProjectID,
+		RepoPath:         root,
+		Role:             projectmemory.RoleReviewer,
+		Keywords:         keywordsFrom(req.Prompt),
+		TaskBytes:        len(req.Prompt),
+		TaskRef:          auth.TaskRef,
+		WorkflowRunID:    auth.WorkflowRunID,
+		UpstreamTaskRefs: auth.UpstreamTaskRefs,
 	})
 	if !provisioned.Attached() {
 		logProvision(r.log, "reviewer", provisioned)

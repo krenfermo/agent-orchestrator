@@ -262,6 +262,18 @@ func (q *Queries) CountProjectMemoryTaskLocalItems(ctx context.Context, arg Coun
 	return count, err
 }
 
+const deleteProjectMemoryContextManifestsForProject = `-- name: DeleteProjectMemoryContextManifestsForProject :execrows
+DELETE FROM project_memory_context_manifests WHERE project_id = ?
+`
+
+func (q *Queries) DeleteProjectMemoryContextManifestsForProject(ctx context.Context, projectID string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteProjectMemoryContextManifestsForProject, projectID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const deleteProjectMemoryFile = `-- name: DeleteProjectMemoryFile :execrows
 DELETE FROM project_memory_files
 WHERE project_id = ? AND repo_id = ? AND path = ?
@@ -466,6 +478,34 @@ func (q *Queries) FailProjectMemoryIndexPass(ctx context.Context, arg FailProjec
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const getProjectMemoryContextManifest = `-- name: GetProjectMemoryContextManifest :one
+SELECT id, project_id, repo_id, workflow_run_id, task_ref, role, pack_digest, policy_version, generation, indexed_commit, item_ids_json, item_count, selected_bytes, estimated_tokens, created_at, updated_at FROM project_memory_context_manifests WHERE id = ?
+`
+
+func (q *Queries) GetProjectMemoryContextManifest(ctx context.Context, id string) (ProjectMemoryContextManifest, error) {
+	row := q.db.QueryRowContext(ctx, getProjectMemoryContextManifest, id)
+	var i ProjectMemoryContextManifest
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.RepoID,
+		&i.WorkflowRunID,
+		&i.TaskRef,
+		&i.Role,
+		&i.PackDigest,
+		&i.PolicyVersion,
+		&i.Generation,
+		&i.IndexedCommit,
+		&i.ItemIdsJson,
+		&i.ItemCount,
+		&i.SelectedBytes,
+		&i.EstimatedTokens,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const getProjectMemoryFile = `-- name: GetProjectMemoryFile :one
@@ -778,6 +818,108 @@ func (q *Queries) LatestProjectMemoryItemUpdatedAt(ctx context.Context, arg Late
 	var updated_at time.Time
 	err := row.Scan(&updated_at)
 	return updated_at, err
+}
+
+const listProjectMemoryContextManifestsForRun = `-- name: ListProjectMemoryContextManifestsForRun :many
+SELECT id, project_id, repo_id, workflow_run_id, task_ref, role, pack_digest, policy_version, generation, indexed_commit, item_ids_json, item_count, selected_bytes, estimated_tokens, created_at, updated_at FROM project_memory_context_manifests
+WHERE project_id = ? AND workflow_run_id = ?
+ORDER BY created_at DESC, id
+`
+
+type ListProjectMemoryContextManifestsForRunParams struct {
+	ProjectID     string
+	WorkflowRunID string
+}
+
+func (q *Queries) ListProjectMemoryContextManifestsForRun(ctx context.Context, arg ListProjectMemoryContextManifestsForRunParams) ([]ProjectMemoryContextManifest, error) {
+	rows, err := q.db.QueryContext(ctx, listProjectMemoryContextManifestsForRun, arg.ProjectID, arg.WorkflowRunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ProjectMemoryContextManifest{}
+	for rows.Next() {
+		var i ProjectMemoryContextManifest
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.RepoID,
+			&i.WorkflowRunID,
+			&i.TaskRef,
+			&i.Role,
+			&i.PackDigest,
+			&i.PolicyVersion,
+			&i.Generation,
+			&i.IndexedCommit,
+			&i.ItemIdsJson,
+			&i.ItemCount,
+			&i.SelectedBytes,
+			&i.EstimatedTokens,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProjectMemoryContextManifestsForTask = `-- name: ListProjectMemoryContextManifestsForTask :many
+SELECT id, project_id, repo_id, workflow_run_id, task_ref, role, pack_digest, policy_version, generation, indexed_commit, item_ids_json, item_count, selected_bytes, estimated_tokens, created_at, updated_at FROM project_memory_context_manifests
+WHERE project_id = ? AND task_ref = ?
+ORDER BY created_at DESC, id
+`
+
+type ListProjectMemoryContextManifestsForTaskParams struct {
+	ProjectID string
+	TaskRef   string
+}
+
+func (q *Queries) ListProjectMemoryContextManifestsForTask(ctx context.Context, arg ListProjectMemoryContextManifestsForTaskParams) ([]ProjectMemoryContextManifest, error) {
+	rows, err := q.db.QueryContext(ctx, listProjectMemoryContextManifestsForTask, arg.ProjectID, arg.TaskRef)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ProjectMemoryContextManifest{}
+	for rows.Next() {
+		var i ProjectMemoryContextManifest
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.RepoID,
+			&i.WorkflowRunID,
+			&i.TaskRef,
+			&i.Role,
+			&i.PackDigest,
+			&i.PolicyVersion,
+			&i.Generation,
+			&i.IndexedCommit,
+			&i.ItemIdsJson,
+			&i.ItemCount,
+			&i.SelectedBytes,
+			&i.EstimatedTokens,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listProjectMemoryFiles = `-- name: ListProjectMemoryFiles :many
@@ -1457,6 +1599,9 @@ const markProjectMemoryItemsStaleBelowGeneration = `-- name: MarkProjectMemoryIt
 UPDATE project_memory_items
 SET state = ?, state_reason = ?, invalidated_at = ?, updated_at = ?
 WHERE project_id = ? AND repo_id = ? AND origin = 'canonical'
+  AND item_type <> 'task_result'
+  AND item_type <> 'decision'
+  AND item_type <> 'known_risk'
   AND state <> ? AND generation < ?
 `
 
@@ -1475,8 +1620,19 @@ type MarkProjectMemoryItemsStaleBelowGenerationParams struct {
 // behind at an older generation was not re-derived by a pass that walked the
 // whole repository, which means its subject is gone.
 //
-// Task-local items are excluded: they are not produced by the repository walk,
-// so a walk's silence says nothing about them.
+// Two populations are excluded, for the same reason: the walk is not
+// RESPONSIBLE for them, so its silence about them is not evidence.
+//
+//   - Task-local items. They are one task's view, not a derivation of the
+//     tree, and no walk ever produces them.
+//   - Task-produced knowledge (task_result, decision, known_risk), including
+//     the canonical rows promotion creates. These are recorded from a finished
+//     task at generation 0 and are never re-derived by any pass, so without
+//     this exclusion the FIRST full re-index after a promotion would retire
+//     every decision and every open risk the project had, silently, and
+//     exactly when memory looked healthiest. Their own lifecycle retires them
+//     (supersession, resolution, compaction) and drift detection invalidates
+//     them when their evidence is gone; a generation sweep has no standing to.
 func (q *Queries) MarkProjectMemoryItemsStaleBelowGeneration(ctx context.Context, arg MarkProjectMemoryItemsStaleBelowGenerationParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, markProjectMemoryItemsStaleBelowGeneration,
 		arg.State,
@@ -1540,6 +1696,14 @@ const markProjectMemoryRelationsStaleBelowGeneration = `-- name: MarkProjectMemo
 UPDATE project_memory_relations
 SET state = ?, state_reason = ?, invalidated_at = ?, updated_at = ?
 WHERE project_id = ? AND repo_id = ? AND origin = 'canonical'
+  AND relation_kind <> 'produced'
+  AND relation_kind <> 'supersedes'
+  AND relation_kind <> 'resolved_by'
+  AND relation_kind <> 'follows_up'
+  AND relation_kind <> 'concerns'
+  AND relation_kind <> 'conflicts_with'
+  AND relation_kind <> 'changed'
+  AND relation_kind <> 'affects'
   AND state <> ? AND generation < ?
 `
 
@@ -1554,6 +1718,11 @@ type MarkProjectMemoryRelationsStaleBelowGenerationParams struct {
 	Generation    int64
 }
 
+// The edge half of the same rule. Task lineage edges (what a task produced,
+// changed, decided, depends on) are asserted from a finished task and are
+// never re-derived by a repository walk, so a walk silence must not retire
+// them either. Without this, the question "what did we learn from this task"
+// would go unanswerable at the next full re-index.
 func (q *Queries) MarkProjectMemoryRelationsStaleBelowGeneration(ctx context.Context, arg MarkProjectMemoryRelationsStaleBelowGenerationParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, markProjectMemoryRelationsStaleBelowGeneration,
 		arg.State,
@@ -1820,6 +1989,75 @@ func (q *Queries) UpdateProjectMemoryRelation(ctx context.Context, arg UpdatePro
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const upsertProjectMemoryContextManifest = `-- name: UpsertProjectMemoryContextManifest :exec
+
+INSERT INTO project_memory_context_manifests (
+    id, project_id, repo_id, workflow_run_id, task_ref, role,
+    pack_digest, policy_version, generation, indexed_commit,
+    item_ids_json, item_count, selected_bytes, estimated_tokens,
+    created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+    repo_id = excluded.repo_id,
+    pack_digest = excluded.pack_digest,
+    policy_version = excluded.policy_version,
+    generation = excluded.generation,
+    indexed_commit = excluded.indexed_commit,
+    item_ids_json = excluded.item_ids_json,
+    item_count = excluded.item_count,
+    selected_bytes = excluded.selected_bytes,
+    estimated_tokens = excluded.estimated_tokens,
+    updated_at = excluded.updated_at
+`
+
+type UpsertProjectMemoryContextManifestParams struct {
+	ID              string
+	ProjectID       string
+	RepoID          string
+	WorkflowRunID   string
+	TaskRef         string
+	Role            string
+	PackDigest      string
+	PolicyVersion   int64
+	Generation      int64
+	IndexedCommit   string
+	ItemIdsJson     string
+	ItemCount       int64
+	SelectedBytes   int64
+	EstimatedTokens int64
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+// Context manifests (migration 0145). A manifest records the IDENTITIES of the
+// facts one execution received, never their content and never the prompt they
+// were rendered into.
+// Idempotent by derived id: re-provisioning the same context after a restart
+// addresses the same row rather than appending a second observation of the
+// same answer. created_at is preserved so "when was this execution first told
+// this" survives a re-record.
+func (q *Queries) UpsertProjectMemoryContextManifest(ctx context.Context, arg UpsertProjectMemoryContextManifestParams) error {
+	_, err := q.db.ExecContext(ctx, upsertProjectMemoryContextManifest,
+		arg.ID,
+		arg.ProjectID,
+		arg.RepoID,
+		arg.WorkflowRunID,
+		arg.TaskRef,
+		arg.Role,
+		arg.PackDigest,
+		arg.PolicyVersion,
+		arg.Generation,
+		arg.IndexedCommit,
+		arg.ItemIdsJson,
+		arg.ItemCount,
+		arg.SelectedBytes,
+		arg.EstimatedTokens,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+	)
+	return err
 }
 
 const upsertProjectMemoryFile = `-- name: UpsertProjectMemoryFile :exec

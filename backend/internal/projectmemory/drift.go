@@ -55,6 +55,13 @@ type DriftRequest struct {
 // DefaultDriftChecks bounds one drift pass.
 const DefaultDriftChecks = 2000
 
+// errUnverifiedButPresent means an item's sources were all found on disk but
+// the item carries no digest to compare them against — a task outcome, a
+// decision, a risk. It is a sentinel rather than a bool because it must never
+// be confused with "confirmed": the item is not disproved, and it is not
+// vouched for either.
+var errUnverifiedButPresent = errors.New("projectmemory: item has no source digest to verify")
+
 // DriftFinding is one fact whose provenance no longer holds.
 type DriftFinding struct {
 	ItemID string
@@ -139,7 +146,7 @@ func (d *Detector) Check(ctx context.Context, req DriftRequest) (DriftReport, er
 		if err := ctx.Err(); err != nil {
 			return report, err
 		}
-		if len(item.SourcePaths) == 0 || item.SourceDigest == "" {
+		if len(item.SourcePaths) == 0 {
 			report.Unverifiable++
 			continue
 		}
@@ -150,10 +157,17 @@ func (d *Detector) Check(ctx context.Context, req DriftRequest) (DriftReport, er
 		report.Checked++
 
 		finding, ok, err := d.evaluate(repoPath, item, digests, missing, req.Commit)
-		if err != nil {
+		switch {
+		case errors.Is(err, errUnverifiedButPresent):
+			// Its sources are still there, and there is no digest to compare.
+			// Counted as unverifiable, never as confirmed, so the report never
+			// implies AO vouched for something it could not check.
+			report.Checked--
+			report.Unverifiable++
+			continue
+		case err != nil:
 			return report, err
-		}
-		if !ok {
+		case !ok:
 			report.Confirmed++
 			continue
 		}
@@ -217,6 +231,19 @@ func (d *Detector) evaluate(
 			Reason: fmt.Sprintf("source %s no longer present at %s",
 				strings.Join(gone, ", "), orNone(commit)),
 		}, true, nil
+	}
+	if item.SourceDigest == "" {
+		// A fact with paths but no digest — a task outcome, a decision, a risk.
+		// Its evidence EXISTS, which is all a digest-free item can be checked
+		// for, and that check is exactly the one P2-C §10 needs: a decision
+		// about a module that has since been deleted must stop being served
+		// as current, while one whose files merely changed is handled by the
+		// path-anchored invalidation the commit itself triggers.
+		//
+		// It is not "confirmed" either. Reporting it as unverifiable is the
+		// honest answer: AO checked what it could, and what it could check
+		// held.
+		return DriftFinding{}, false, errUnverifiedButPresent
 	}
 	if domain.MemorySourceDigest(pairs) == item.SourceDigest {
 		return DriftFinding{}, false, nil

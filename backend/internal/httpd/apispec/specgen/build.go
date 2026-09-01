@@ -1222,6 +1222,28 @@ func projectMemoryOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/memory/knowledge", id: "listProjectMemoryKnowledge", tag: "projects",
+			summary:    "P2-C: what tasks have taught this project, and what of it still holds. Task results, decisions and known risks, each with the lifecycle that decides whether retrieval would serve it: active, superseded (and by what), resolved (and by whom), obsolete, or conflicting. Active only by default, because that is what a task would actually receive; nothing is ever deleted, so asking for another status reconstructs what the project used to believe.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.ListProjectMemoryKnowledgeQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListProjectMemoryKnowledgeResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/memory/manifests", id: "listProjectMemoryContextManifests", tag: "projects",
+			summary:    "P2-C: what one execution was actually told. A context manifest records the identities of the memory facts a dispatch received — never the prompt, and never the facts' text, which may have been superseded since. It is what makes \"the Worker was working from a stale decision\" checkable rather than suspected. Names a task or a workflow run; expand=true resolves the ids back into the facts and reports any that no longer exist.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.ListProjectMemoryManifestsQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListProjectMemoryManifestsResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodPost, path: "/api/v1/projects/{id}/memory/rebuild", id: "rebuildProjectMemory", tag: "projects",
 			summary:    "P2-A: re-derive one repository's project memory. Bounded by the indexer's limits and restart-safe; purge deletes the existing facts first, which is the escape hatch for memory that is wrong in a way a re-derivation cannot fix.",
 			pathParams: []any{controllers.ProjectIDParam{}},

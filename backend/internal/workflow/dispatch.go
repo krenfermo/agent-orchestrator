@@ -145,6 +145,13 @@ func (c *Coordinator) dispatchWorkStep(ctx stdctx.Context, run domain.WorkflowRu
 		return step, nil
 	}
 
+	// P2-C §14/§15: stamp what this task is entitled to read before anything
+	// downstream assembles its context. It is done once, here, so every path
+	// out of dispatch — pending, adoption, recovery — carries the same
+	// entitlement, and so no boundary further down has to know how to compute
+	// it. A dispatch that skips this stamp gets canonical knowledge only.
+	ctx = c.withTaskAuthority(ctx, run)
+
 	now := c.clock()
 	entry, _, err := c.store.EnqueueWorkflowOutboxEntry(ctx, domain.WorkflowOutboxEntry{
 		ID:             "wfo-" + c.newID(),

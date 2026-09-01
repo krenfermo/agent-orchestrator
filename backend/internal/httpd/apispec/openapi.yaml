@@ -1732,6 +1732,173 @@ paths:
         can still vouch for it.'
       tags:
       - projects
+  /api/v1/projects/{id}/memory/knowledge:
+    get:
+      operationId: listProjectMemoryKnowledge
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Repository root to read. Defaults to every repository of the
+          project.
+        in: query
+        name: repoPath
+        schema:
+          description: Repository root to read. Defaults to every repository of the
+            project.
+          type: string
+      - description: Narrow to one kind of shared knowledge. Omit for all three.
+        in: query
+        name: type
+        schema:
+          description: Narrow to one kind of shared knowledge. Omit for all three.
+          enum:
+          - task_result
+          - decision
+          - known_risk
+          type: string
+      - description: Narrow to one lifecycle status. Defaults to active, which is
+          what retrieval would actually serve.
+        in: query
+        name: status
+        schema:
+          description: Narrow to one lifecycle status. Defaults to active, which is
+            what retrieval would actually serve.
+          enum:
+          - active
+          - superseded
+          - resolved
+          - obsolete
+          - conflicting
+          type: string
+      - description: 'Narrow to what one task produced. When set, every status is
+          returned: a decision this task made that a later one replaced is still something
+          this task produced.'
+        in: query
+        name: task
+        schema:
+          description: 'Narrow to what one task produced. When set, every status is
+            returned: a decision this task made that a later one replaced is still
+            something this task produced.'
+          type: string
+      - description: Maximum entries to return. Defaults to 200.
+        in: query
+        name: limit
+        schema:
+          description: Maximum entries to return. Defaults to 200.
+          maximum: 1000
+          minimum: 1
+          type:
+          - "null"
+          - integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersListProjectMemoryKnowledgeResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P2-C: what tasks have taught this project, and what of it still holds.
+        Task results, decisions and known risks, each with the lifecycle that decides
+        whether retrieval would serve it: active, superseded (and by what), resolved
+        (and by whom), obsolete, or conflicting. Active only by default, because that
+        is what a task would actually receive; nothing is ever deleted, so asking
+        for another status reconstructs what the project used to believe.'
+      tags:
+      - projects
+  /api/v1/projects/{id}/memory/manifests:
+    get:
+      operationId: listProjectMemoryContextManifests
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: The task whose frozen context to read. One of task or run is
+          required.
+        in: query
+        name: task
+        schema:
+          description: The task whose frozen context to read. One of task or run is
+            required.
+          type: string
+      - description: The workflow run whose executions to read. One of task or run
+          is required.
+        in: query
+        name: run
+        schema:
+          description: The workflow run whose executions to read. One of task or run
+            is required.
+          type: string
+      - description: Resolve each manifest's item ids back into the facts they name,
+          and report the ones that no longer exist.
+        in: query
+        name: expand
+        schema:
+          description: Resolve each manifest's item ids back into the facts they name,
+            and report the ones that no longer exist.
+          enum:
+          - "true"
+          - "false"
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersListProjectMemoryManifestsResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P2-C: what one execution was actually told. A context manifest records
+        the identities of the memory facts a dispatch received — never the prompt,
+        and never the facts'' text, which may have been superseded since. It is what
+        makes "the Worker was working from a stale decision" checkable rather than
+        suspected. Names a task or a workflow run; expand=true resolves the ids back
+        into the facts and reports any that no longer exist.'
+      tags:
+      - projects
   /api/v1/projects/{id}/memory/rebuild:
     post:
       operationId: rebuildProjectMemory
@@ -8926,6 +9093,32 @@ components:
       - total
       - truncated
       type: object
+    ControllersListProjectMemoryKnowledgeResponse:
+      properties:
+        entries:
+          items:
+            $ref: '#/components/schemas/ControllersProjectMemoryKnowledgeResponse'
+          type: array
+        repoId:
+          type: string
+        total:
+          type: integer
+      required:
+      - entries
+      - total
+      type: object
+    ControllersListProjectMemoryManifestsResponse:
+      properties:
+        entries:
+          items:
+            $ref: '#/components/schemas/ControllersProjectMemoryManifestResponse'
+          type: array
+        total:
+          type: integer
+      required:
+      - entries
+      - total
+      type: object
     ControllersListProjectMemoryResponse:
       properties:
         repositories:
@@ -9051,6 +9244,138 @@ components:
       - contentBytes
       - updatedAt
       - invalidatedAt
+      type: object
+    ControllersProjectMemoryKnowledgeResponse:
+      properties:
+        confidence:
+          format: double
+          type: number
+        conflictsWith:
+          type: string
+        content:
+          type: string
+        id:
+          type: string
+        key:
+          type: string
+        kind:
+          enum:
+          - risk
+          - follow_up
+          type: string
+        resolvedBy:
+          type: string
+        scope:
+          type: string
+        share:
+          enum:
+          - task
+          - workflow
+          - canonical
+          type: string
+        sourceCommit:
+          type: string
+        sourcePaths:
+          items:
+            type: string
+          type: array
+        sourceTask:
+          type: string
+        state:
+          enum:
+          - valid
+          - stale
+          - invalidated
+          - rebuilding
+          type: string
+        stateReason:
+          type: string
+        status:
+          enum:
+          - active
+          - superseded
+          - resolved
+          - obsolete
+          - conflicting
+          type: string
+        subject:
+          type: string
+        summary:
+          type: string
+        supersededBy:
+          type: string
+        supersedes:
+          type: string
+        type:
+          type: string
+        updatedAt:
+          type: string
+      required:
+      - id
+      - type
+      - scope
+      - summary
+      - status
+      - share
+      - state
+      - confidence
+      - updatedAt
+      type: object
+    ControllersProjectMemoryManifestResponse:
+      properties:
+        createdAt:
+          format: date-time
+          type: string
+        estimatedTokens:
+          type: integer
+        generation:
+          format: int64
+          type: integer
+        id:
+          type: string
+        indexedCommit:
+          type: string
+        itemCount:
+          type: integer
+        itemIds:
+          items:
+            type: string
+          type: array
+        items:
+          items:
+            $ref: '#/components/schemas/ControllersProjectMemoryKnowledgeResponse'
+          type: array
+        missing:
+          items:
+            type: string
+          type: array
+        packDigest:
+          type: string
+        policyVersion:
+          type: integer
+        role:
+          enum:
+          - planner
+          - worker
+          - reviewer
+          - repair
+          type: string
+        selectedBytes:
+          type: integer
+        taskRef:
+          type: string
+        workflowRunId:
+          type: string
+      required:
+      - id
+      - role
+      - policyVersion
+      - generation
+      - itemIds
+      - itemCount
+      - selectedBytes
+      - estimatedTokens
+      - createdAt
       type: object
     ControllersProjectMemoryReportResponse:
       properties:

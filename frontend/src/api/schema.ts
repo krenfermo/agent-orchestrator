@@ -691,6 +691,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/memory/knowledge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P2-C: what tasks have taught this project, and what of it still holds. Task results, decisions and known risks, each with the lifecycle that decides whether retrieval would serve it: active, superseded (and by what), resolved (and by whom), obsolete, or conflicting. Active only by default, because that is what a task would actually receive; nothing is ever deleted, so asking for another status reconstructs what the project used to believe. */
+        get: operations["listProjectMemoryKnowledge"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/manifests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P2-C: what one execution was actually told. A context manifest records the identities of the memory facts a dispatch received — never the prompt, and never the facts' text, which may have been superseded since. It is what makes "the Worker was working from a stale decision" checkable rather than suspected. Names a task or a workflow run; expand=true resolves the ids back into the facts and reports any that no longer exist. */
+        get: operations["listProjectMemoryContextManifests"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/memory/rebuild": {
         parameters: {
             query?: never;
@@ -3218,6 +3252,15 @@ export interface components {
             total: number;
             truncated: boolean;
         };
+        ControllersListProjectMemoryKnowledgeResponse: {
+            entries: components["schemas"]["ControllersProjectMemoryKnowledgeResponse"][];
+            repoId?: string;
+            total: number;
+        };
+        ControllersListProjectMemoryManifestsResponse: {
+            entries: components["schemas"]["ControllersProjectMemoryManifestResponse"][];
+            total: number;
+        };
         ControllersListProjectMemoryResponse: {
             repositories: components["schemas"]["ControllersProjectMemoryStatusResponse"][];
         };
@@ -3262,6 +3305,54 @@ export interface components {
             summary: string;
             type: string;
             updatedAt: string;
+        };
+        ControllersProjectMemoryKnowledgeResponse: {
+            /** Format: double */
+            confidence: number;
+            conflictsWith?: string;
+            content?: string;
+            id: string;
+            key?: string;
+            /** @enum {string} */
+            kind?: "risk" | "follow_up";
+            resolvedBy?: string;
+            scope: string;
+            /** @enum {string} */
+            share: "task" | "workflow" | "canonical";
+            sourceCommit?: string;
+            sourcePaths?: string[];
+            sourceTask?: string;
+            /** @enum {string} */
+            state: "valid" | "stale" | "invalidated" | "rebuilding";
+            stateReason?: string;
+            /** @enum {string} */
+            status: "active" | "superseded" | "resolved" | "obsolete" | "conflicting";
+            subject?: string;
+            summary: string;
+            supersededBy?: string;
+            supersedes?: string;
+            type: string;
+            updatedAt: string;
+        };
+        ControllersProjectMemoryManifestResponse: {
+            /** Format: date-time */
+            createdAt: string;
+            estimatedTokens: number;
+            /** Format: int64 */
+            generation: number;
+            id: string;
+            indexedCommit?: string;
+            itemCount: number;
+            itemIds: string[];
+            items?: components["schemas"]["ControllersProjectMemoryKnowledgeResponse"][];
+            missing?: string[];
+            packDigest?: string;
+            policyVersion: number;
+            /** @enum {string} */
+            role: "planner" | "worker" | "reviewer" | "repair";
+            selectedBytes: number;
+            taskRef?: string;
+            workflowRunId?: string;
         };
         ControllersProjectMemoryReportResponse: {
             cacheEnabled: boolean;
@@ -7923,6 +8014,124 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ControllersListProjectMemoryItemsResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listProjectMemoryKnowledge: {
+        parameters: {
+            query?: {
+                /** @description Repository root to read. Defaults to every repository of the project. */
+                repoPath?: string;
+                /** @description Narrow to one kind of shared knowledge. Omit for all three. */
+                type?: "task_result" | "decision" | "known_risk";
+                /** @description Narrow to one lifecycle status. Defaults to active, which is what retrieval would actually serve. */
+                status?: "active" | "superseded" | "resolved" | "obsolete" | "conflicting";
+                /** @description Narrow to what one task produced. When set, every status is returned: a decision this task made that a later one replaced is still something this task produced. */
+                task?: string;
+                /** @description Maximum entries to return. Defaults to 200. */
+                limit?: null | number;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersListProjectMemoryKnowledgeResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listProjectMemoryContextManifests: {
+        parameters: {
+            query?: {
+                /** @description The task whose frozen context to read. One of task or run is required. */
+                task?: string;
+                /** @description The workflow run whose executions to read. One of task or run is required. */
+                run?: string;
+                /** @description Resolve each manifest's item ids back into the facts they name, and report the ones that no longer exist. */
+                expand?: "true" | "false";
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersListProjectMemoryManifestsResponse"];
                 };
             };
             /** @description Bad Request */

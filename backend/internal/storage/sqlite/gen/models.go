@@ -486,6 +486,25 @@ type Project struct {
 	OwnerUserID   *domain.UserID
 }
 
+type ProjectMemoryContextManifest struct {
+	ID              string
+	ProjectID       string
+	RepoID          string
+	WorkflowRunID   string
+	TaskRef         string
+	Role            string
+	PackDigest      string
+	PolicyVersion   int64
+	Generation      int64
+	IndexedCommit   string
+	ItemIdsJson     string
+	ItemCount       int64
+	SelectedBytes   int64
+	EstimatedTokens int64
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
 type ProjectMemoryFile struct {
 	ProjectID     string
 	RepoID        string

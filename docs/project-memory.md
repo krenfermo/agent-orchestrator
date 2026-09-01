@@ -8,7 +8,9 @@ This document is the design and the operating manual. The pre-existing context
 inventory it was built from is [`p2-project-memory-audit.md`](p2-project-memory-audit.md);
 the Phase-0 measurement recorder it sits beside is
 [`project-memory-baseline.md`](project-memory-baseline.md); the older JSON fact
-store it does **not** replace is [`project-memory-store.md`](project-memory-store.md).
+store it does **not** replace is [`project-memory-store.md`](project-memory-store.md);
+the lifecycle P2-C layers on top of the task and decision memory described in
+§8 is [`shared-task-knowledge.md`](shared-task-knowledge.md).
 
 ---
 
@@ -302,6 +304,13 @@ Task memory is the one part of the system that grows with *time* rather than
 with the repository, so it is the one part with an explicit retention rule:
 `MaxRetainedTaskResults = 200` per repository, oldest beyond the bound retired
 (not deleted — "AO's memory of task X aged out" stays readable).
+
+**P2-C extends this section rather than replacing it.** The row shape here is
+unchanged; what was added is the lifecycle that decides who may read a task's
+facts and for how long they stay current — sharing scopes, decision
+supersession, risk resolution, conflict marking, per-scope compaction, and the
+evidence-based relevance gate that keeps one task's history away from unrelated
+work. See [`shared-task-knowledge.md`](shared-task-knowledge.md).
 
 ---
 

@@ -118,6 +118,20 @@ type PackRequest struct {
 	// pack — and only that task's. It is how a Repair Agent sees what the
 	// task before it did without any other task's uncommitted view leaking in.
 	TaskRef string
+	// WorkflowRunID is the run this dispatch belongs to. It scopes
+	// workflow-local knowledge: a fact shared at ShareWorkflow reaches only
+	// readers inside the run that produced it, and never a later, unrelated
+	// run that happens to name the same upstream task.
+	WorkflowRunID string
+	// UpstreamTaskRefs are the tasks this one explicitly depends on, and whose
+	// workflow-local knowledge it is therefore authorized to read.
+	//
+	// It is supplied by the workflow boundary from workflow_task_dependencies,
+	// never derived here, and it is what makes sibling isolation real: two
+	// parallel tasks that do not declare a dependency on each other name each
+	// other in no list, so neither can see the other's unintegrated work no
+	// matter how much their file sets overlap.
+	UpstreamTaskRefs []string
 	// CoverablePaths are legacy documents this dispatch is carrying that
 	// memory would be ALLOWED to replace.
 	//
@@ -231,6 +245,46 @@ type PackStats struct {
 	// was built from.
 	IndexedCommit string
 	Generation    int64
+
+	// --- shared task knowledge (P2-C §18) --------------------------------
+	//
+	// These count the facts that came from a TASK rather than from the
+	// repository, which is the population whose selection P2-C has to be able
+	// to defend. The pair that matters is SharedCandidates against
+	// SharedSelected: an unrelated task's pack should show candidates it
+	// considered and did not take, not an empty population it never had.
+
+	// SharedCandidates counts task-produced facts selection was allowed to
+	// choose from, after the sharing gate and before the relevance gate.
+	SharedCandidates int
+	// SharedSelected counts task-produced facts the pack actually carries.
+	SharedSelected int
+	// SharedIrrelevantExcluded counts task-produced facts withheld because
+	// they had no bearing on this work. It is the number that proves an
+	// unrelated task received nothing rather than everything.
+	SharedIrrelevantExcluded int
+	// SharedUnauthorizedExcluded counts task-produced facts withheld because
+	// this reader was not entitled to them — another task's unintegrated view,
+	// or a sibling's workflow-local knowledge.
+	SharedUnauthorizedExcluded int
+	// SupersededExcluded counts facts withheld because they are no longer
+	// current: a superseded decision, a resolved risk, an obsolete fact.
+	SupersededExcluded int
+	// ConflictingExcluded counts facts withheld because AO could not order
+	// them against an incompatible peer.
+	ConflictingExcluded int
+	// DecisionsSelected and RisksSelected break the selected shared knowledge
+	// down by what it is.
+	DecisionsSelected int
+	RisksSelected     int
+	// TaskLocalSelected, WorkflowLocalSelected and CanonicalSelected report
+	// which scope the pack's facts came from. They are what makes "did this
+	// task read a sibling's unintegrated work" answerable after the fact.
+	TaskLocalSelected     int
+	WorkflowLocalSelected int
+	CanonicalSelected     int
+	// KnowledgeBytes is what the task-produced facts weigh inside the pack.
+	KnowledgeBytes int
 }
 
 // ContextPack is the bounded, role-scoped memory handed to one dispatch.
@@ -267,6 +321,8 @@ var roleSections = map[PackRole][]domain.ProjectMemoryType{
 		domain.MemoryTypeModule,
 		domain.MemoryTypeConvention,
 		domain.MemoryTypeDecision,
+		domain.MemoryTypeKnownRisk,
+		domain.MemoryTypeTaskResult,
 		domain.MemoryTypeBuildTest,
 	},
 	RoleWorker: {
@@ -278,12 +334,14 @@ var roleSections = map[PackRole][]domain.ProjectMemoryType{
 		domain.MemoryTypeBuildTest,
 		domain.MemoryTypeDecision,
 		domain.MemoryTypeKnownRisk,
+		domain.MemoryTypeTaskResult,
 	},
 	RoleReviewer: {
 		domain.MemoryTypeConvention,
 		domain.MemoryTypeArchitecture,
 		domain.MemoryTypeKnownRisk,
 		domain.MemoryTypeDecision,
+		domain.MemoryTypeTaskResult,
 		domain.MemoryTypeModule,
 		domain.MemoryTypeFileSummary,
 		domain.MemoryTypeBuildTest,
@@ -374,9 +432,29 @@ func (b *PackBuilder) Build(ctx context.Context, req PackRequest) (ContextPack, 
 		}
 	}
 
+	upstream := make(map[string]struct{}, len(req.UpstreamTaskRefs))
+	for _, ref := range req.UpstreamTaskRefs {
+		if ref = strings.TrimSpace(ref); ref != "" {
+			upstream[ref] = struct{}{}
+		}
+	}
+
 	scored := make([]SelectedItem, 0, len(candidates))
 	for _, item := range candidates {
 		if _, ok := allowed[item.Key.Type]; !ok {
+			continue
+		}
+		shared := domain.IsSharedKnowledgeType(item.Key.Type)
+		if shared {
+			pack.Stats.SharedCandidates++
+		}
+		// The relevance gate runs BEFORE scoring, not as a low score. A fact
+		// with no bearing on this work must be absent from the candidate set
+		// entirely: leaving it in with a poor score would still let it win a
+		// pack that had nothing better, which is exactly how an unrelated task
+		// ends up carrying another task's history.
+		if !relevantSharedKnowledge(item, req, upstream) {
+			pack.Stats.SharedIrrelevantExcluded++
 			continue
 		}
 		score, why := scoreItem(item, req, coverable)
@@ -394,6 +472,7 @@ func (b *PackBuilder) Build(ctx context.Context, req PackRequest) (ContextPack, 
 	pack.Sections = groupSections(selected, eligible)
 	pack.Stats.SelectedItems = len(selected)
 	pack.Stats.SourcesReused = sourcesOf(selected)
+	countSharedKnowledge(selected, req, &pack.Stats)
 	if len(selected) == 0 && pack.Stats.FallbackReason == "" {
 		pack.Stats.FallbackReason = fmt.Sprintf(
 			"no memory of a type the %s role consumes is currently valid for this repository", role)
@@ -467,29 +546,165 @@ func (b *PackBuilder) candidates(
 	return b.filterServable(all, req, stats), repoID, "", nil
 }
 
-// filterServable applies the two rules that decide whether a stored fact may
-// be handed to an agent: it must be valid, and — if it is one task's
-// unintegrated view — it must belong to the task asking.
+// filterServable applies the three rules that decide whether a stored fact may
+// be handed to an agent: it must be valid, this reader must be entitled to it,
+// and it must still be current.
+//
+// The three are separate on purpose, because they answer different questions
+// and their answers have different consequences.
+//
+//  1. **Validity** is the P2-A drift rule: can AO still demonstrate this
+//     fact's provenance? A fact whose sources moved is withheld regardless of
+//     who is asking.
+//  2. **Entitlement** is the P2-C sharing rule: may THIS reader see it? A
+//     task-local fact reaches its own task; a workflow-local fact reaches the
+//     tasks downstream of it inside its own run; a canonical fact reaches
+//     everyone. This is the whole of sibling safety at the read side — two
+//     parallel tasks name each other in no dependency list, so neither is
+//     entitled to the other's unintegrated view no matter how much their file
+//     sets overlap.
+//  3. **Currency** is the P2-C lifecycle rule: is this still what the project
+//     believes? A superseded decision, a resolved risk and an obsolete fact
+//     are all kept forever and none of them is served as current.
+//
+// Each exclusion is counted under its own name, so "why did this task not
+// receive that decision" has one answer rather than three candidates.
 func (b *PackBuilder) filterServable(
 	all []domain.ProjectMemoryItem, req PackRequest, stats *PackStats,
 ) []domain.ProjectMemoryItem {
+	upstream := make(map[string]struct{}, len(req.UpstreamTaskRefs))
+	for _, ref := range req.UpstreamTaskRefs {
+		if ref = strings.TrimSpace(ref); ref != "" {
+			upstream[ref] = struct{}{}
+		}
+	}
+
 	kept := make([]domain.ProjectMemoryItem, 0, len(all))
 	for _, item := range all {
 		if !item.State.Authoritative() {
 			stats.StaleExcluded++
 			continue
 		}
-		if item.Origin == domain.OriginTaskLocal {
-			// Task-local memory is visible only to its own task. This is the
-			// whole of the worktree-isolation rule at the read side: one
-			// task's uncommitted opinion can never become another's premise.
-			if req.TaskRef == "" || item.OriginRef != req.TaskRef {
-				continue
+		if !b.entitled(item, req, upstream) {
+			if domain.IsSharedKnowledgeType(item.Key.Type) {
+				stats.SharedUnauthorizedExcluded++
 			}
+			continue
+		}
+		switch status := domain.KnowledgeStatusOf(item); {
+		case status.Current():
+		case status == domain.KnowledgeConflicting && req.Role == RolePlanner:
+			// A contradiction AO could not order is information about the
+			// memory rather than about the project, so it reaches the one role
+			// whose job is to decide what to do about it — and reaches it
+			// labelled as a conflict, never as a fact.
+			item.Summary = "CONFLICTING — " + item.Summary
+			kept = append(kept, item)
+			continue
+		case status == domain.KnowledgeConflicting:
+			stats.ConflictingExcluded++
+			continue
+		default:
+			stats.SupersededExcluded++
+			continue
 		}
 		kept = append(kept, item)
 	}
 	return kept
+}
+
+// entitled reports whether this reader may see one fact.
+func (b *PackBuilder) entitled(
+	item domain.ProjectMemoryItem, req PackRequest, upstream map[string]struct{},
+) bool {
+	switch domain.KnowledgeShareOf(item) {
+	case domain.ShareCanonical:
+		// Canonical knowledge is the project's. A task-local ROW that somehow
+		// claims canonical sharing is still refused below, because origin and
+		// sharing must agree before anything is served project-wide.
+		return item.Origin == domain.OriginCanonical
+	case domain.ShareWorkflow:
+		// Downstream of the producer, inside the producer's own run. Both
+		// halves are required: the run scopes it, and the declared dependency
+		// authorizes it.
+		if req.WorkflowRunID == "" || domain.KnowledgeRunOf(item) != req.WorkflowRunID {
+			return item.OriginRef != "" && item.OriginRef == req.TaskRef
+		}
+		if item.OriginRef == req.TaskRef {
+			return true
+		}
+		_, ok := upstream[item.OriginRef]
+		return ok
+	default:
+		// ShareTask, and anything unrecognised. Its own task and nobody else.
+		return item.OriginRef != "" && item.OriginRef == req.TaskRef
+	}
+}
+
+// relevantSharedKnowledge is the gate that keeps one task's learning away from
+// work it has nothing to do with (P2-C §6, §19).
+//
+// It applies only to task-produced facts. A fact about the repository — a
+// convention, a module summary — is relevant to anyone working in that
+// repository, and gating it would be a regression. A fact about what some
+// earlier task did is different: it is worth carrying when the two pieces of
+// work overlap, and it is pure cost when they do not. Without this gate, every
+// task would receive every prior task's outcome and the pack budget would be
+// spent on history instead of on knowledge.
+//
+// Four things count as overlap, and nothing else does:
+//
+//   - The reader's OWN task produced it.
+//   - The reader explicitly depends on the task that produced it.
+//   - The fact's evidence names a path or a module this work touches.
+//   - The fact is stated at PROJECT scope, or is a decision or risk that names
+//     no evidence at all. Both are facts AO has nothing narrower to match on,
+//     and withholding them would withhold the project's standing rules.
+//
+// "Both tasks are in the same project" is deliberately NOT overlap. That is
+// the invented relationship P2-C §5 forbids, and admitting it would make the
+// gate no gate at all.
+//
+// Repository scope is NOT a free pass either, and measuring it is what showed
+// why. A decision recorded by a task inherits that task's changed paths as its
+// evidence, and its scope defaults to the repository — so treating
+// "repository-scoped" as universally relevant admitted every decision and
+// every risk every task had ever recorded. On a store holding twelve prior
+// tasks in one module, an unrelated task was handed 24 of their facts and 3.3
+// KB of another module's history. The rule is therefore about EVIDENCE, not
+// scope: a fact whose subject AO can locate must overlap the work; only a fact
+// AO cannot locate is admitted on the repository's authority.
+func relevantSharedKnowledge(
+	item domain.ProjectMemoryItem, req PackRequest, upstream map[string]struct{},
+) bool {
+	if !domain.IsSharedKnowledgeType(item.Key.Type) {
+		return true
+	}
+	task := domain.KnowledgeTaskOf(item)
+	if task != "" && req.TaskRef != "" && task == req.TaskRef {
+		return true
+	}
+	if _, ok := upstream[task]; ok && task != "" {
+		return true
+	}
+	if len(req.ChangedPaths) > 0 && matchesPaths(item, req.ChangedPaths) {
+		return true
+	}
+	if len(req.Modules) > 0 && matchesModules(item, req.Modules) {
+		return true
+	}
+	// A task RESULT never qualifies on anything but overlap: it is a report
+	// about one piece of work, and a reader with no overlap has no use for it.
+	if item.Key.Type != domain.MemoryTypeDecision && item.Key.Type != domain.MemoryTypeKnownRisk {
+		return false
+	}
+	// A decision or risk stated at project scope is a standing rule.
+	if item.Key.Scope == domain.MemoryScopeProject {
+		return true
+	}
+	// Otherwise it is admitted only when AO has nothing narrower to judge it
+	// by. A fact with evidence has already failed the overlap test above.
+	return len(item.SourcePaths) == 0
 }
 
 // scoreItem ranks one fact for one request.
@@ -718,6 +933,42 @@ func groupSections(selected []SelectedItem, order []domain.ProjectMemoryType) []
 		sections = append(sections, PackSection{Title: title, Type: t, Items: items})
 	}
 	return sections
+}
+
+// countSharedKnowledge attributes the selected facts to the scope they came
+// from and to what they are.
+//
+// It runs on the FINAL selection rather than on the candidates, because the
+// question it answers is "what did this dispatch actually receive" — a fact
+// the budget evicted was not shared with anyone, and counting it as shared
+// would make the number describe an intention instead of an outcome.
+func countSharedKnowledge(selected []SelectedItem, req PackRequest, stats *PackStats) {
+	for _, sel := range selected {
+		item := sel.Item
+		switch domain.KnowledgeShareOf(item) {
+		case domain.ShareCanonical:
+			stats.CanonicalSelected++
+		case domain.ShareWorkflow:
+			if item.OriginRef == req.TaskRef {
+				stats.TaskLocalSelected++
+			} else {
+				stats.WorkflowLocalSelected++
+			}
+		default:
+			stats.TaskLocalSelected++
+		}
+		if !domain.IsSharedKnowledgeType(item.Key.Type) {
+			continue
+		}
+		stats.SharedSelected++
+		stats.KnowledgeBytes += item.Bytes()
+		switch item.Key.Type {
+		case domain.MemoryTypeDecision:
+			stats.DecisionsSelected++
+		case domain.MemoryTypeKnownRisk:
+			stats.RisksSelected++
+		}
+	}
 }
 
 func sourcesOf(selected []SelectedItem) []string {

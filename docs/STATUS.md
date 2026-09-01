@@ -123,6 +123,24 @@ surface (`npm run sqlc`, `npm run api`).
   cover AO-assembled context only; harness reads remain unobservable. Inspect
   with `ao memory report`. See
   [`project-memory-optimization.md`](project-memory-optimization.md).
+- **Shared task knowledge (P2-C)**: what one task learns is reusable by the
+  next one, and only by the ones it is relevant and safe for. Task outcomes,
+  decisions and risks carry a bounded lifecycle on the existing memory item —
+  active, superseded, resolved, obsolete, conflicting — so a re-decided topic
+  retires its predecessor and names it rather than overwriting it, and a
+  resolved risk stops being served while keeping the task that closed it. Three
+  sharing scopes (task / workflow / canonical) encode sibling safety directly:
+  an unintegrated worktree's knowledge reaches only the tasks that declared a
+  dependency on it inside its own run, and becomes canonical only when the
+  integration authority can prove the work landed. A relevance gate keyed on
+  EVIDENCE keeps prior task history away from unrelated work. Measured on a
+  store of twelve prior tasks in one module: a task in the same module receives
+  32 shared facts (6,203 pack bytes, ~1,551 tokens); a task in a different
+  module receives **zero** from the same 32 candidates (1,450 bytes). Every
+  execution's context is frozen into a durable manifest of fact identities, so
+  what a Worker knew is checkable rather than suspected. Inspect with `ao memory
+  knowledge|decisions|risks|task|context`. See
+  [`shared-task-knowledge.md`](shared-task-knowledge.md).
 - OpenAPI spec generated from Go DTOs; frontend TS types generated from it and
   drift-checked in CI.
 

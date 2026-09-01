@@ -117,6 +117,16 @@ type Repository interface {
 	PurgeProjectMemoryRepo(ctx context.Context, projectID domain.ProjectID, repoID string) error
 	// DiscardProjectMemoryForTask retires one task's unintegrated facts.
 	DiscardProjectMemoryForTask(ctx context.Context, projectID domain.ProjectID, taskRef string) (int64, int64, error)
+
+	// PutProjectMemoryContextManifest records what one execution was told
+	// (P2-C §16). It is idempotent on the manifest's derived id.
+	PutProjectMemoryContextManifest(ctx context.Context, manifest domain.MemoryContextManifest, now time.Time) error
+	// ListProjectMemoryContextManifestsForTask reads everything one task
+	// execution was told, newest first.
+	ListProjectMemoryContextManifestsForTask(ctx context.Context, projectID domain.ProjectID, taskRef string) ([]domain.MemoryContextManifest, error)
+	// ListProjectMemoryContextManifestsForRun reads everything one run's
+	// executions were told, newest first.
+	ListProjectMemoryContextManifestsForRun(ctx context.Context, projectID domain.ProjectID, runID string) ([]domain.MemoryContextManifest, error)
 }
 
 // Compile-time proof that the SQLite store satisfies the port. If a method

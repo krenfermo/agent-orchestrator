@@ -205,7 +205,7 @@ func TestContextPackKeepsTaskMemoryToItsOwnTask(t *testing.T) {
 		ProjectID: testProject, RepoPath: root, TaskRef: "t1",
 		Title: "add the queue", WhatChanged: "added a durable queue",
 		Why: "the scheduler needed one", FilesChanged: []string{"internal/store/store.go"},
-		Risks: []string{"the queue is unbounded under load"},
+		Risks: []projectmemory.TaskRisk{{Statement: "the queue is unbounded under load"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestPromoteTaskMemoryMakesItCanonical(t *testing.T) {
 	if err := svc.RecordTaskOutcome(f.ctx, projectmemory.TaskOutcome{
 		ProjectID: testProject, RepoPath: root, TaskRef: "t1",
 		Title: "add the queue", WhatChanged: "added a durable queue",
-		Decisions: []string{"the queue is a table, not a JSON blob"},
+		Decisions: []projectmemory.TaskDecision{{Statement: "the queue is a table, not a JSON blob"}},
 	}); err != nil {
 		t.Fatal(err)
 	}

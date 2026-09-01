@@ -26,7 +26,12 @@ type fakeProjectMemory struct {
 	rebuilt     controllers.ProjectMemoryRebuildOutcome
 	invalidated controllers.ProjectMemoryInvalidateOutcome
 	report      controllers.ProjectMemoryReport
-	gotRebuild  struct {
+	knowledge   controllers.ProjectMemoryKnowledgeResult
+	manifests   controllers.ProjectMemoryManifestResult
+
+	gotKnowledge controllers.ProjectMemoryKnowledgeQuery
+	gotManifests controllers.ProjectMemoryManifestQuery
+	gotRebuild   struct {
 		repoPath string
 		purge    bool
 	}
@@ -42,6 +47,16 @@ func (f *fakeProjectMemory) Status(context.Context, domain.ProjectID) ([]domain.
 
 func (f *fakeProjectMemory) Inspect(context.Context, controllers.ProjectMemoryInspectQuery) (controllers.ProjectMemoryInspection, error) {
 	return f.inspection, nil
+}
+
+func (f *fakeProjectMemory) Knowledge(_ context.Context, q controllers.ProjectMemoryKnowledgeQuery) (controllers.ProjectMemoryKnowledgeResult, error) {
+	f.gotKnowledge = q
+	return f.knowledge, nil
+}
+
+func (f *fakeProjectMemory) Manifests(_ context.Context, q controllers.ProjectMemoryManifestQuery) (controllers.ProjectMemoryManifestResult, error) {
+	f.gotManifests = q
+	return f.manifests, nil
 }
 
 func (f *fakeProjectMemory) Rebuild(_ context.Context, _ domain.ProjectID, repoPath string, purge bool) (controllers.ProjectMemoryRebuildOutcome, error) {

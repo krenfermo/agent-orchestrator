@@ -157,11 +157,25 @@ WHERE state = 'valid'
 -- behind at an older generation was not re-derived by a pass that walked the
 -- whole repository, which means its subject is gone.
 --
--- Task-local items are excluded: they are not produced by the repository walk,
--- so a walk's silence says nothing about them.
+-- Two populations are excluded, for the same reason: the walk is not
+-- RESPONSIBLE for them, so its silence about them is not evidence.
+--
+--   * Task-local items. They are one task's view, not a derivation of the
+--     tree, and no walk ever produces them.
+--   * Task-produced knowledge (task_result, decision, known_risk), including
+--     the canonical rows promotion creates. These are recorded from a finished
+--     task at generation 0 and are never re-derived by any pass, so without
+--     this exclusion the FIRST full re-index after a promotion would retire
+--     every decision and every open risk the project had, silently, and
+--     exactly when memory looked healthiest. Their own lifecycle retires them
+--     (supersession, resolution, compaction) and drift detection invalidates
+--     them when their evidence is gone; a generation sweep has no standing to.
 UPDATE project_memory_items
 SET state = ?, state_reason = ?, invalidated_at = ?, updated_at = ?
 WHERE project_id = ? AND repo_id = ? AND origin = 'canonical'
+  AND item_type <> 'task_result'
+  AND item_type <> 'decision'
+  AND item_type <> 'known_risk'
   AND state <> ? AND generation < ?;
 
 -- name: ListProjectMemoryItems :many
@@ -268,9 +282,22 @@ WHERE state = 'valid'
   );
 
 -- name: MarkProjectMemoryRelationsStaleBelowGeneration :execrows
+-- The edge half of the same rule. Task lineage edges (what a task produced,
+-- changed, decided, depends on) are asserted from a finished task and are
+-- never re-derived by a repository walk, so a walk silence must not retire
+-- them either. Without this, the question "what did we learn from this task"
+-- would go unanswerable at the next full re-index.
 UPDATE project_memory_relations
 SET state = ?, state_reason = ?, invalidated_at = ?, updated_at = ?
 WHERE project_id = ? AND repo_id = ? AND origin = 'canonical'
+  AND relation_kind <> 'produced'
+  AND relation_kind <> 'supersedes'
+  AND relation_kind <> 'resolved_by'
+  AND relation_kind <> 'follows_up'
+  AND relation_kind <> 'concerns'
+  AND relation_kind <> 'conflicts_with'
+  AND relation_kind <> 'changed'
+  AND relation_kind <> 'affects'
   AND state <> ? AND generation < ?;
 
 -- name: ListProjectMemoryRelations :many
@@ -337,3 +364,46 @@ DELETE FROM project_memory_files WHERE project_id = ? AND repo_id = ?;
 -- behind would make the next full pass "discover" the deletion a second time.
 DELETE FROM project_memory_files
 WHERE project_id = ? AND repo_id = ? AND path = ?;
+
+-- Context manifests (migration 0145). A manifest records the IDENTITIES of the
+-- facts one execution received, never their content and never the prompt they
+-- were rendered into.
+
+-- name: UpsertProjectMemoryContextManifest :exec
+-- Idempotent by derived id: re-provisioning the same context after a restart
+-- addresses the same row rather than appending a second observation of the
+-- same answer. created_at is preserved so "when was this execution first told
+-- this" survives a re-record.
+INSERT INTO project_memory_context_manifests (
+    id, project_id, repo_id, workflow_run_id, task_ref, role,
+    pack_digest, policy_version, generation, indexed_commit,
+    item_ids_json, item_count, selected_bytes, estimated_tokens,
+    created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+    repo_id = excluded.repo_id,
+    pack_digest = excluded.pack_digest,
+    policy_version = excluded.policy_version,
+    generation = excluded.generation,
+    indexed_commit = excluded.indexed_commit,
+    item_ids_json = excluded.item_ids_json,
+    item_count = excluded.item_count,
+    selected_bytes = excluded.selected_bytes,
+    estimated_tokens = excluded.estimated_tokens,
+    updated_at = excluded.updated_at;
+
+-- name: GetProjectMemoryContextManifest :one
+SELECT * FROM project_memory_context_manifests WHERE id = ?;
+
+-- name: ListProjectMemoryContextManifestsForTask :many
+SELECT * FROM project_memory_context_manifests
+WHERE project_id = ? AND task_ref = ?
+ORDER BY created_at DESC, id;
+
+-- name: ListProjectMemoryContextManifestsForRun :many
+SELECT * FROM project_memory_context_manifests
+WHERE project_id = ? AND workflow_run_id = ?
+ORDER BY created_at DESC, id;
+
+-- name: DeleteProjectMemoryContextManifestsForProject :execrows
+DELETE FROM project_memory_context_manifests WHERE project_id = ?;

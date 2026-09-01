@@ -85,6 +85,52 @@ type MemoryMetrics struct {
 	// suspected stale reuse. It is a digest, not the content.
 	CacheKey string `json:"cacheKey,omitempty"`
 
+	// --- shared task knowledge (P2-C §18) --------------------------------
+	//
+	// Additive, and omitempty for the same reason the whole struct is: a
+	// dispatch with no shared knowledge produces byte-for-byte the record it
+	// produced before P2-C, and a consumer that predates P2-C keeps reading
+	// every record.
+	//
+	// The pair that carries the argument is SharedCandidates against
+	// SharedSelected. A task working in the same area as an earlier one should
+	// show candidates it considered and took; an unrelated task should show
+	// candidates it considered and excluded. Neither claim can be made from a
+	// single number, which is why both are here.
+
+	// SharedCandidates counts task-produced facts selection was allowed to
+	// choose from, and SharedSelected counts what the dispatch received.
+	SharedCandidates int `json:"sharedCandidates,omitempty"`
+	SharedSelected   int `json:"sharedSelected,omitempty"`
+	// SharedIrrelevantExcluded counts task-produced facts withheld for having
+	// no bearing on this work. It is the number that proves an unrelated task
+	// received nothing rather than everything.
+	SharedIrrelevantExcluded int `json:"sharedIrrelevantExcluded,omitempty"`
+	// SharedUnauthorizedExcluded counts task-produced facts this reader was
+	// not entitled to — another task's unintegrated view, or a sibling's
+	// workflow-local knowledge.
+	SharedUnauthorizedExcluded int `json:"sharedUnauthorizedExcluded,omitempty"`
+	// SupersededExcluded and ConflictingExcluded count facts withheld because
+	// they are no longer current, or because AO could not order them against
+	// an incompatible peer.
+	SupersededExcluded  int `json:"supersededExcluded,omitempty"`
+	ConflictingExcluded int `json:"conflictingExcluded,omitempty"`
+	// DecisionsSelected and RisksSelected break the shared knowledge down by
+	// what it is.
+	DecisionsSelected int `json:"decisionsSelected,omitempty"`
+	RisksSelected     int `json:"risksSelected,omitempty"`
+	// TaskLocalItems, WorkflowLocalItems and CanonicalItems report which scope
+	// the pack's facts came from. Together they are what makes "did this task
+	// read a sibling's unintegrated work" answerable after the fact — the
+	// question sibling safety exists to guarantee an answer to.
+	TaskLocalItems     int `json:"taskLocalItems,omitempty"`
+	WorkflowLocalItems int `json:"workflowLocalItems,omitempty"`
+	CanonicalItems     int `json:"canonicalItems,omitempty"`
+	// KnowledgeBytes is what the task-produced facts weigh inside the pack. It
+	// is a subset of PackBytes, never an addition to it: shared knowledge
+	// competes inside the same budget rather than beside it (P2-C §19).
+	KnowledgeBytes int `json:"knowledgeBytes,omitempty"`
+
 	// FallbackReason is set whenever memory contributed less than it might
 	// have, and says why in words an operator can act on.
 	FallbackReason string `json:"fallbackReason,omitempty"`
@@ -132,6 +178,16 @@ func (m MemoryMetrics) Validate() error {
 	if m.PackItems > 0 && m.PackCandidates > 0 && m.PackItems > m.PackCandidates {
 		return fmt.Errorf("memory metrics: %d items selected from %d candidates", m.PackItems, m.PackCandidates)
 	}
+	if m.SharedSelected > m.PackItems {
+		return fmt.Errorf("memory metrics: %d shared items inside a %d-item pack", m.SharedSelected, m.PackItems)
+	}
+	if m.KnowledgeBytes > m.PackBytes {
+		// Shared knowledge competes INSIDE the pack budget. A knowledge figure
+		// larger than the pack would mean it had been counted as an addition
+		// to the context rather than a part of it, which is the exact
+		// misreading P2-C §19 forbids.
+		return fmt.Errorf("memory metrics: %d knowledge bytes inside a %d-byte pack", m.KnowledgeBytes, m.PackBytes)
+	}
 	if strings.TrimSpace(m.Mode) == "" {
 		return fmt.Errorf("memory metrics: mode is required")
 	}
@@ -151,6 +207,12 @@ func (m MemoryMetrics) Summary() string {
 	}
 	if m.DedupeSavedBytes > 0 {
 		fmt.Fprintf(&b, " deduped=%dB", m.DedupeSavedBytes)
+	}
+	if m.SharedCandidates > 0 {
+		fmt.Fprintf(&b, " shared=%d/%d", m.SharedSelected, m.SharedCandidates)
+		if m.SharedIrrelevantExcluded > 0 {
+			fmt.Fprintf(&b, "(irrelevant=%d)", m.SharedIrrelevantExcluded)
+		}
 	}
 	if m.CacheHit {
 		b.WriteString(" cache=hit")

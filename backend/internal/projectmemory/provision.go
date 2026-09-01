@@ -2,6 +2,7 @@ package projectmemory
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -45,6 +46,17 @@ type ProvisionRequest struct {
 	// TaskRef admits that task's own unintegrated memory, and only that
 	// task's.
 	TaskRef string
+	// WorkflowRunID and UpstreamTaskRefs are the shared-knowledge authority
+	// (P2-C §14, §15). The run scopes workflow-local facts, and the upstream
+	// refs are the tasks this one explicitly depends on and may therefore read
+	// the verified, not-yet-integrated knowledge of.
+	//
+	// A boundary that does not know them supplies neither, and the pack falls
+	// back to canonical knowledge alone — which is the safe direction: the
+	// failure mode of an unsupplied dependency list is a task that learns less
+	// than it could, never one that reads a sibling's unmerged work.
+	WorkflowRunID    string
+	UpstreamTaskRefs []string
 	// Legacy is the context the dispatch was going to send anyway. It is used
 	// for dedupe and for the honest before/after byte counts; it is never
 	// modified in place.
@@ -175,8 +187,13 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 		ProjectID: req.ProjectID, RepoID: out.Freshness.RepoID,
 		IndexedCommit: out.Freshness.IndexedCommit, Generation: out.Freshness.Generation,
 		Role: role, PolicyVersion: PackPolicyVersion, Budget: budget,
+		// The sharing authority is part of the cache key. Two dispatches that
+		// differ only in which upstream tasks they may read are entitled to
+		// different packs, and a cache that ignored that would serve one
+		// task's authorized knowledge to a sibling that has none.
 		Scope: ScopeDigest(req.ChangedPaths, req.Modules,
-			append(append([]string(nil), req.Keywords...), coverablePaths...), req.TaskRef),
+			append(append([]string(nil), req.Keywords...), coverablePaths...),
+			req.TaskRef+"|"+req.WorkflowRunID+"|"+strings.Join(req.UpstreamTaskRefs, ",")),
 	}
 	out.Metrics.CacheKey = key.String()
 
@@ -188,6 +205,7 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 			ProjectID: req.ProjectID, RepoPath: req.RepoPath, Role: role,
 			ChangedPaths: req.ChangedPaths, Modules: req.Modules,
 			Keywords: req.Keywords, TaskRef: req.TaskRef,
+			WorkflowRunID: req.WorkflowRunID, UpstreamTaskRefs: req.UpstreamTaskRefs,
 			CoverablePaths: coverablePaths,
 			Budget:         budget.packBudget(),
 		})
@@ -203,6 +221,18 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 	out.Metrics.PackStaleExcluded = pack.Stats.StaleExcluded
 	out.Metrics.EstimatedPackTokens = pack.Stats.SelectedTokens
 	out.Metrics.PackDigest = pack.Digest
+	out.Metrics.SharedCandidates = pack.Stats.SharedCandidates
+	out.Metrics.SharedSelected = pack.Stats.SharedSelected
+	out.Metrics.SharedIrrelevantExcluded = pack.Stats.SharedIrrelevantExcluded
+	out.Metrics.SharedUnauthorizedExcluded = pack.Stats.SharedUnauthorizedExcluded
+	out.Metrics.SupersededExcluded = pack.Stats.SupersededExcluded
+	out.Metrics.ConflictingExcluded = pack.Stats.ConflictingExcluded
+	out.Metrics.DecisionsSelected = pack.Stats.DecisionsSelected
+	out.Metrics.RisksSelected = pack.Stats.RisksSelected
+	out.Metrics.TaskLocalItems = pack.Stats.TaskLocalSelected
+	out.Metrics.WorkflowLocalItems = pack.Stats.WorkflowLocalSelected
+	out.Metrics.CanonicalItems = pack.Stats.CanonicalSelected
+	out.Metrics.KnowledgeBytes = pack.Stats.KnowledgeBytes
 	if pack.Stats.IndexedCommit != "" {
 		out.Metrics.IndexedCommit = pack.Stats.IndexedCommit
 		out.Metrics.Generation = pack.Stats.Generation
@@ -231,7 +261,51 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 	case out.Freshness.Kind == SyncSkipped && out.Freshness.Reason != "":
 		out.Metrics.FallbackReason = out.Freshness.Reason
 	}
+
+	// 6. The manifest. What this execution was told, by identity, so a
+	//    Reviewer can be shown what the Worker knew and a restart can be
+	//    checked against what the previous attempt knew.
+	p.freeze(ctx, req, role, pack)
 	return out
+}
+
+// freeze records what one execution received (P2-C §16).
+//
+// It writes only for a dispatch that names an execution — a task ref or a run
+// — because a manifest with neither identifies nothing and would be a row
+// nobody can ever look up. It is best-effort in the strongest sense: a
+// manifest that cannot be written is a lost observation, and Provision's
+// contract is that nothing about memory may affect the dispatch.
+func (p *Provisioner) freeze(ctx context.Context, req ProvisionRequest, role PackRole, pack ContextPack) {
+	if p.svc == nil || pack.Empty() {
+		return
+	}
+	if strings.TrimSpace(req.TaskRef) == "" && strings.TrimSpace(req.WorkflowRunID) == "" {
+		return
+	}
+	ids := make([]string, 0, pack.Stats.SelectedItems)
+	for _, section := range pack.Sections {
+		for _, sel := range section.Items {
+			ids = append(ids, sel.Item.ID)
+		}
+	}
+	if len(ids) > domain.MaxManifestItems {
+		ids = ids[:domain.MaxManifestItems]
+	}
+	p.svc.RecordContextManifest(ctx, domain.MemoryContextManifest{
+		ProjectID:       req.ProjectID,
+		RepoID:          pack.RepoID,
+		WorkflowRunID:   req.WorkflowRunID,
+		TaskRef:         req.TaskRef,
+		Role:            string(role),
+		PackDigest:      pack.Digest,
+		PolicyVersion:   PackPolicyVersion,
+		Generation:      pack.Stats.Generation,
+		IndexedCommit:   pack.Stats.IndexedCommit,
+		ItemIDs:         ids,
+		SelectedBytes:   pack.Stats.SelectedBytes,
+		EstimatedTokens: pack.Stats.SelectedTokens,
+	})
 }
 
 // WithMetrics attaches this dispatch's memory record to a context, so the
