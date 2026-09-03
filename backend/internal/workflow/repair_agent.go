@@ -391,7 +391,13 @@ func (c *Coordinator) LaunchRepair(ctx stdctx.Context, runID, authorizedBy strin
 	// possible at all; the transfer itself happens after the repair run exists,
 	// because a cession to a run that does not exist yet would leave the branch
 	// owned by nothing.
-	directBranch := c.projectExecutionMode(ctx, plan.Intent.ProjectID).DirectBranch()
+	// P3-C §28: whether a cession is needed is a fact about the TARGET RUN's
+	// execution placement, not about the project's default mode. An explicit
+	// direct-branch run inside an isolated-default project holds a real branch
+	// lock, and reading the project here answered "isolated" for it -- so the
+	// repair was allowed to proceed with no cession path and would have queued
+	// behind the very lock it exists to release. See placement_semantics.go.
+	directBranch := c.runIDPlacementIsDirectBranch(ctx, plan.Intent.TargetRunID)
 	if directBranch {
 		if _, ok := c.branchLocks.(branchLockCeder); !ok || c.branchLocks == nil {
 			// No way to transfer authority, so the deadlock P1-B named is
@@ -758,17 +764,12 @@ func (c *Coordinator) ApplyRepairPolicy(ctx stdctx.Context, runID string, mode d
 	if run.State != domain.WorkflowRunPending {
 		return fmt.Errorf("%w: workflow run %q is already %s; its repair policy is frozen", ErrInvalid, runID, run.State)
 	}
-	policy := policyForRun(run)
-	frozen := policy.EffectiveRepairPolicy()
-	frozen.Mode = mode
-	frozen.At = c.clock()
-	policy.Repair = frozen
-	snapshot, err := json.Marshal(policy)
-	if err != nil {
-		return err
-	}
-	_, err = c.store.UpdateWorkflowRunPolicySnapshot(ctx, runID, string(snapshot), c.clock())
-	return err
+	return c.rewriteFrozenPolicy(ctx, run, func(p *domain.WorkflowPolicy) {
+		frozen := p.EffectiveRepairPolicy()
+		frozen.Mode = mode
+		frozen.At = c.clock()
+		p.Repair = frozen
+	})
 }
 
 // RunRepairPolicy reads back a run's frozen repair policy.

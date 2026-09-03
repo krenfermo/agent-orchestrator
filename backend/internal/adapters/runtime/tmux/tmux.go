@@ -2210,3 +2210,73 @@ func (r *Runtime) ListSessions(ctx context.Context) ([]ports.RuntimeSessionSumma
 	}
 	return summaries, nil
 }
+
+// SendKeys presses a bounded sequence of named keys in the pane (P3-C).
+//
+// It is deliberately NOT SendMessage, and the difference is the entire reason
+// this capability exists. SendMessage means "deliver a message to the agent":
+// it types text and follows it with Enter, which is the correct interaction for
+// a composer and a catastrophic one for a select dialog, where the Enter
+// confirms whichever row the cursor happens to be on. This method types
+// nothing, appends nothing, and presses exactly the keys it was given.
+//
+// Two guards, both fail-closed:
+//
+//   - Every key must be in ports' closed vocabulary. An unrecognised key is
+//     refused rather than forwarded, so no caller can reach tmux's key parser
+//     with a string of its own.
+//   - ensurePaneAcceptsKeys runs first, exactly as it does for a message. A
+//     pane in copy-mode dispatches keys against the mode's own table, so an
+//     arrow would scroll the history and the Enter would be swallowed -- and
+//     tmux would report success for both. Refusing here is what makes a
+//     non-delivery provably a non-delivery.
+func (r *Runtime) SendKeys(ctx context.Context, handle ports.RuntimeHandle, keys []ports.DialogKey) error {
+	id, err := handleID(handle)
+	if err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(keys))
+	for _, k := range keys {
+		name, ok := tmuxKeyNames[k]
+		if !ok {
+			return fmt.Errorf("tmux runtime: send keys %s: %w: %q", id, ports.ErrDialogResponseUnsupported, k)
+		}
+		names = append(names, name)
+	}
+	if err := r.ensurePaneAcceptsKeys(ctx, id); err != nil {
+		return err
+	}
+	for i, name := range names {
+		// A digit is typed literally; everything else is a tmux key name.
+		literal := len(name) == 1 && name[0] >= '1' && name[0] <= '9'
+		if _, err := r.run(ctx, sendNamedKeyArgs(id, name, literal)...); err != nil {
+			if i == 0 {
+				// Nothing reached the pane, so the caller may retry the whole
+				// sequence without having half-navigated a live cursor.
+				return fmt.Errorf("tmux runtime: send keys %s: %w: %w", id, ports.ErrPromptUndelivered, err)
+			}
+			return fmt.Errorf("tmux runtime: send keys %s (key %d of %d): %w", id, i+1, len(names), err)
+		}
+	}
+	return nil
+}
+
+// GetVisibleOutput returns the pane's visible screen with no scrollback
+// (P3-C). See ports.VisiblePaneReader for why the distinction matters.
+func (r *Runtime) GetVisibleOutput(ctx context.Context, handle ports.RuntimeHandle, maxLines int) (string, error) {
+	id, err := handleID(handle)
+	if err != nil {
+		return "", err
+	}
+	if maxLines <= 0 {
+		return "", errors.New("tmux runtime: maxLines must be positive")
+	}
+	out, err := r.run(ctx, captureVisiblePaneArgs(id)...)
+	if err != nil {
+		return "", fmt.Errorf("tmux runtime: capture visible output %s: %w", id, err)
+	}
+	return tailLines(trimTrailingBlankLines(string(out)), maxLines), nil
+}

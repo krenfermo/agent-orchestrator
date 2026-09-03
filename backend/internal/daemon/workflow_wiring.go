@@ -76,6 +76,11 @@ func (w workflowBranchLocks) Acquire(ctx context.Context, req workflowcore.Branc
 		RunID:     req.RunID,
 		StepID:    req.StepID,
 		SessionID: req.SessionID,
+		// P3-C §28: the run's frozen direct-branch target, when it has one the
+		// project's own mode would not produce. Empty leaves the manager
+		// deriving its targets from the project exactly as before.
+		RepoPath: req.RepoPath,
+		Branch:   req.Branch,
 	})
 }
 
@@ -102,6 +107,12 @@ func (w workflowBranchLocks) Cede(ctx context.Context, lockID, fromRunID, toRunI
 	return w.mgr.Cede(ctx, lockID, fromRunID, toRunID, toStepID)
 }
 
+// Holder answers "who owns this branch right now", for the commit-and-continue
+// flow's authority proof. See workflow.branchLockHolderReader.
+func (w workflowBranchLocks) Holder(ctx context.Context, repoPath, branch string) (domain.BranchLock, bool, error) {
+	return w.mgr.Holder(ctx, repoPath, branch)
+}
+
 func (w workflowBranchLocks) RecoverStale(ctx context.Context, runID string) (int64, error) {
 	return w.mgr.RecoverStale(ctx, runID)
 }
@@ -114,6 +125,40 @@ func (w workflowBranchLocks) RecoverStale(ctx context.Context, runID string) (in
 // Note that it is the SAME *branchlock.Manager the workflow coordinator uses,
 // over the same lock_key. That is what makes a task and a workflow contend for
 // one repository+branch rather than each honoring a lock the other cannot see.
+// sessionInputState answers "is this agent sitting on a prompt of its own" for
+// the questions delivery sweep, off the same session rows every other component
+// reads.
+//
+// It exists because an answer delivered as TEXT into a session showing a modal
+// dialog is swallowed and the write still succeeds — so "the send returned nil"
+// cannot be the receipt that consumes the answer (P3-D §4). An unreadable
+// session answers known=false, which is never read as a refusal.
+type sessionInputState struct{ store sessionRecordReader }
+
+// sessionRecordReader is the one read this needs, named locally so the adapter
+// depends on the question rather than on the store.
+type sessionRecordReader interface {
+	GetSession(ctx context.Context, id domain.SessionID) (domain.SessionRecord, bool, error)
+}
+
+func (s sessionInputState) AwaitingInput(ctx context.Context, id domain.SessionID) (bool, bool) {
+	if s.store == nil || id == "" {
+		return false, false
+	}
+	rec, found, err := s.store.GetSession(ctx, id)
+	if err != nil || !found {
+		return false, false
+	}
+	if !rec.Activity.State.NeedsInput() {
+		return false, true
+	}
+	// Only withhold when the structured path can actually carry the answer
+	// instead. A provider AO cannot answer structurally has no relay, and
+	// refusing there would withhold the answer from the only mechanism there
+	// is rather than hand it to a better one.
+	return workflowcore.SupportsStructuredDialogResponse(rec.Harness), true
+}
+
 type sessionBranchLocks struct {
 	mgr *branchlock.Manager
 }
@@ -248,11 +293,16 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		// the Post-Run QA gate's classified findings and the pull request's
 		// normalized review threads. Both are read-only reads of rows the
 		// store already keeps; neither can raise a risk the row does not say.
-		QAGate:                   store,
-		ReviewThreads:            store,
-		Switcher:                 workflowAgentSwitcher{mgr: sessionMgr},
-		QuestionsStore:           store,
-		PaneReader:               paneReader,
+		QAGate:         store,
+		ReviewThreads:  store,
+		Switcher:       workflowAgentSwitcher{mgr: sessionMgr},
+		QuestionsStore: store,
+		PaneReader:     paneReader,
+		// P3-C: the runtime's key primitive, discovered rather than assumed.
+		// A runtime without it (conpty on Windows today) simply cannot answer
+		// an interactive prompt, and AO reports that honestly instead of
+		// falling back to typing into one.
+		DialogKeys:               dialogKeySenderFor(paneReader),
 		DecisionResolverLauncher: decisionResolverLauncher,
 		IncidentAgents:           incidentAgents,
 		// Checkpoint 8P-E.20: the project holding AO's OWN source, the only
@@ -282,6 +332,7 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		// adapter and is refused for every other mode.
 		BranchLocks:        workflowBranchLocks{mgr: branchLocks},
 		WorkspaceCommitter: workspace,
+		WorkspacePreflight: workspace,
 		// The target-integration lane, over the SAME branch-lock manager as
 		// BranchLocks above. Sharing the manager is what makes an integration
 		// and a direct writer of one branch exclude each other: they contend
@@ -378,7 +429,7 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 	//
 	// Off by default -- a disabled mode yields a nil provisioner, and
 	// wfmemory.Instrument then hands the dependencies back untouched.
-	deps = wfmemory.Instrument(deps, memoryProvisioning, log)
+	deps = wfmemory.Instrument(deps, memoryProvisionerFor(memoryProvisioning), log)
 	coordinator := workflowcore.New(deps)
 	return coordinator, workflowsvc.New(coordinator), wakeScheduler
 }
@@ -412,6 +463,26 @@ func taskMemoryFor(memory *durablememory.Service, log *slog.Logger) workflowcore
 		return nil
 	}
 	return adapter
+}
+
+// memoryProvisionerFor converts the concrete provisioner into the interface
+// wfmemory.Instrument takes, preserving "there is no provisioner" as an UNTYPED
+// nil.
+//
+// This is not ceremony. memoryProvisioner returns a nil *Provisioner whenever
+// memory is switched off -- which is the default -- and assigning a nil pointer
+// to an interface produces a non-nil interface holding a nil pointer. Instrument's
+// `prov == nil` guard is then false, every dispatch surface gets wrapped, and the
+// first worker spawn dereferences the nil pointer inside Provision. The symptom is
+// a panic on the spawn path of a daemon whose memory is simply off.
+//
+// taskMemoryFor below already carries this guard and says why; this is the same
+// hazard at the sibling call site.
+func memoryProvisionerFor(prov *durablememory.Provisioner) wfmemory.Provisioner {
+	if prov == nil {
+		return nil
+	}
+	return prov
 }
 
 // memoryProvisioner builds the boundary-facing provisioner, or nil when memory
@@ -571,4 +642,17 @@ type workflowWorkerLiveness struct{ mgr *sessionmanager.Manager }
 
 func (l workflowWorkerLiveness) SessionAlive(ctx context.Context, id domain.SessionID) (bool, bool, error) {
 	return l.mgr.SessionRuntimeAlive(ctx, id)
+}
+
+// dialogKeySenderFor resolves the runtime's structured key capability from the
+// same object that already reads its panes.
+//
+// The type assertion is the capability check (P3-C §15). It is done here, in
+// composition-root wiring, so workflow depends on its own narrow interface and
+// the daemon is the only place that knows which concrete runtime is in play.
+func dialogKeySenderFor(paneReader workflowcore.PaneReader) workflowcore.DialogKeySender {
+	if sender, ok := paneReader.(workflowcore.DialogKeySender); ok {
+		return sender
+	}
+	return nil
 }

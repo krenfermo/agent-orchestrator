@@ -189,6 +189,13 @@ func withStrategy(policy domain.WorkflowPolicy, sel domain.ExecutionStrategySele
 	if !policy.Repair.Recorded() {
 		policy.Repair = domain.DefaultRepairPolicy(sel.At)
 	}
+	// P3-C: and the question-autonomy policy, in the same write and for exactly
+	// the same reason. A run must never durably exist without one, and the
+	// default it gets (ask_always) must be a recorded decision rather than a
+	// fallback every reader re-derives.
+	if !policy.Autonomy.Recorded() {
+		policy.Autonomy = domain.DefaultQuestionAutonomyPolicy(sel.At)
+	}
 	return policy
 }
 

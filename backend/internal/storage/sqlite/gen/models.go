@@ -1030,6 +1030,7 @@ type WorkflowQuestion struct {
 	Delivered            int64
 	DeliveredAt          sql.NullTime
 	ResolvingRunID       sql.NullString
+	AutonomyMode         string
 }
 
 type WorkflowQuestionResolution struct {

@@ -575,6 +575,13 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 		RuntimeEnv:    runtimeEnv,
 		Owner:         owner,
 		ProfileID:     profileID,
+		// The worker launch goes through the session manager's prepareWorkspace,
+		// which runs the adapter's PreLaunch for the workspace it is actually
+		// launching in — and claude-code's PreLaunch is what records that
+		// workspace's trust. So this dispatch cannot stop at the trust dialog,
+		// whatever the provider's config says right now. See the field's own
+		// doc comment for the refusal this removes.
+		TrustRecordedAtLaunch: true,
 	}); perr != nil {
 		now := c.clock()
 		class := classifyWorkerLaunchFailure(perr).Class
@@ -584,6 +591,12 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 		c.recordLaunchFailureBoundary(ctx, run, step, entry, intent, domain.LaunchStagePreflight, class, perr)
 		return c.recordWorkerLaunchFailure(ctx, run, step, entry, harness, workerLaunchStagePreflight, perr)
 	}
+
+	// P3-A §7: the frozen placement decides BOTH where the work happens and
+	// which branch is checked out there. Reading one from the record and the
+	// other from project configuration is what produced a direct-branch run
+	// pointed at a generated ao/* branch that does not exist.
+	placementType, placementBranch := c.frozenPlacementTarget(ctx, run, step)
 
 	// PHASE 2 -- LAUNCH. Through the injectable launcher, with the process/
 	// session ownership proof read back through the injectable prober.
@@ -603,6 +616,12 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 		// ensureBranchLock above), so the worker session must not try to
 		// acquire it as a task in its own right and queue behind its own run.
 		WorkflowRunID: run.ID,
+		// P3-A §7: the frozen placement travels with the launch. Without it the
+		// workspace router asks the PROJECT where to put the work, and a run
+		// whose placement was explicitly chosen for this obligation alone gets
+		// the project's answer instead of its own.
+		Placement:       placementType,
+		PlacementBranch: placementBranch,
 	})
 	if errors.Is(err, errLaunchWithoutEvidence) {
 		// The launcher answered "fine" and named no session. Nothing is retried

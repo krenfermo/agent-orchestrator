@@ -130,6 +130,7 @@ func taskDecisions(in []workflowcore.TaskDecisionFact) []projectmemory.TaskDecis
 			Statement: d.Statement,
 			Rationale: d.Rationale,
 			Topic:     d.Topic,
+			Evidence:  d.Evidence,
 		})
 	}
 	return out

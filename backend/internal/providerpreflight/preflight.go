@@ -125,7 +125,17 @@ func (c *Checker) Preflight(ctx context.Context, req workflowcore.WorkerPrefligh
 			// trust for the launch workspace itself in PreLaunch, so the only
 			// path worth checking here is one that already exists and will not
 			// get that write — an incident or repair workspace.
-			if req.WorkspacePath != "" && dirExists(req.WorkspacePath) {
+			//
+			// TrustRecordedAtLaunch is the caller saying which it is, and it is
+			// checked here rather than left implicit because "will not get that
+			// write" was previously an assumption about the caller that the one
+			// real caller did not satisfy: a worker dispatch's launch DOES
+			// record trust, so refusing it was refusing a condition that was
+			// about to stop being true.
+			if req.TrustRecordedAtLaunch {
+				notes = append(notes,
+					"trust: not checked — this launch records the workspace's trust itself before the agent starts")
+			} else if req.WorkspacePath != "" && dirExists(req.WorkspacePath) {
 				trusted, known := cfg.projectBool(req.WorkspacePath, "hasTrustDialogAccepted")
 				if known {
 					res.TrustUnknown = false

@@ -3,6 +3,7 @@ package questions
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -58,7 +59,15 @@ type AnswerService struct {
 	Store  APIStore
 	Runs   RunLookup
 	Sender MessageSender
+	// Inputs reports whether a target session is sitting on a prompt of its
+	// own, so the immediate text delivery below cannot consume an answer a
+	// modal dialog would swallow. Optional; nil means AO cannot tell, which
+	// preserves the previous behaviour. See questions.SessionInputState.
+	Inputs SessionInputState
 	Clock  func() time.Time
+	// Logger receives the one thing this service now swallows: a text delivery
+	// that was refused after the answer was already recorded. Optional.
+	Logger *slog.Logger
 }
 
 func (s *AnswerService) now() time.Time {
@@ -167,8 +176,21 @@ func (s *AnswerService) Answer(ctx context.Context, runID, questionID string, ch
 	}
 
 	if s.Sender != nil {
-		if _, err := DeliverAnswered(ctx, s.Store, s.Sender, runID, now); err != nil {
-			return domain.WorkflowQuestion{}, err
+		// Best-effort, and deliberately so (P3-C).
+		//
+		// The answer is already durable at this point. Delivering it is a
+		// separate obligation that the reconcile sweep retries, and for a
+		// worker blocked on a select dialog this text path is REFUSED on
+		// purpose -- sessionguard will not let a paste answer a prompt whose
+		// Enter confirms a highlighted row. The structured path is what carries
+		// such an answer over.
+		//
+		// Returning that refusal to the caller reported a 500 for an answer
+		// that had been recorded perfectly well, which tells a person their
+		// decision failed when it did not, and invites them to submit it again.
+		if _, err := DeliverAnsweredWithState(ctx, s.Store, s.Sender, s.Inputs, runID, now); err != nil && s.Logger != nil {
+			s.Logger.Warn("questions: the answer was recorded but could not be delivered as text; it stays pending for the structured delivery sweep",
+				"run", runID, "question", questionID, "err", err)
 		}
 	}
 

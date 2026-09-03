@@ -33,8 +33,16 @@ vi.mock("../hooks/useWorkflowRuns", () => ({
 	EXECUTION_STRATEGIES: ["task", "autonomous", "master"] as const,
 	APPROVAL_POLICIES: ["automatic", "manual"] as const,
 	REPAIR_POLICIES: ["disabled", "suggest", "automatic"] as const,
+	PLACEMENTS: ["direct_branch", "isolated_worktree", "auto"] as const,
 }));
 vi.mock("../hooks/useExecutionPolicy", () => ({ useExecutionPolicy: useExecutionPolicyMock }));
+
+// P3-A: the creation summary states the daemon's project-memory mode. It is a
+// daemon fact, not a form input, so this stubs the read rather than standing up
+// a query client for one string.
+vi.mock("../hooks/useSettings", () => ({
+	useSettings: () => ({ settings: { defaultSessionMode: "tui", chatHarnesses: [], memoryMode: "off" } }),
+}));
 vi.mock("../stores/ui-store", () => ({
 	useUiStore: (selector: (state: { openGlobalSettings: typeof openGlobalSettingsMock }) => unknown) =>
 		selector({ openGlobalSettings: openGlobalSettingsMock }),

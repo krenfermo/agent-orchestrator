@@ -47,8 +47,13 @@ type DetectInput struct {
 	Branch                        string
 	WorktreePath                  string
 	MaxAutoAnswered               int
-	Now                           time.Time
-	NewID                         func() string
+	// AutonomyMode is P3-C's frozen question-autonomy policy for the run. The
+	// zero value is not a mode, and EvaluateAutonomy normalizes it to
+	// ask_always -- so a caller that does not pass one gets exactly the
+	// pre-P3-C behaviour rather than an accidental widening.
+	AutonomyMode domain.QuestionAutonomyMode
+	Now          time.Time
+	NewID        func() string
 }
 
 // DetectResult is what Detect produced.
@@ -116,7 +121,24 @@ func Detect(ctx context.Context, store Store, parser ports.QuestionPaneParser, i
 	}
 	fingerprint := Fingerprint(in.RunID, stepIDStr, questionText, choices, in.PolicyVersionAtCapture, in.WorkspaceFingerprintAtCapture)
 
-	classification, reason := Classify(questionText, certainty)
+	// P3-C §20: the run's frozen autonomy policy is consulted for AMBIGUOUS
+	// questions only, and strictly after every refusal Classify already makes.
+	// Under ask_always this is Classify unchanged.
+	// The autonomy decision's own sentence travels inside `reason`, which is
+	// persisted as workflow_questions.classification_reason -- so an
+	// auto-decided question carries the policy and the justification it was
+	// taken under, and an escalated one carries why AO refused to take it.
+	//
+	// The MODE travels separately, in its own column, because the answer this
+	// question eventually gets has to be durably distinguishable from a human's
+	// and from an ordinary discovery-shape resolver answer. Deciding that from
+	// prose would make the distinction depend on wording; deciding it from the
+	// column makes it a fact. See domain.AnswerSourceAutonomous.
+	classification, reason, autonomy := ClassifyUnderAutonomy(questionText, certainty, in.AutonomyMode)
+	autonomyMode := domain.QuestionAutonomyMode("")
+	if autonomy.AutoDecidable {
+		autonomyMode = autonomy.Mode
+	}
 
 	budgetCtx := ClassifyContext{
 		Branch:          in.Branch,
@@ -173,6 +195,7 @@ func Detect(ctx context.Context, store Store, parser ports.QuestionPaneParser, i
 		ClassificationReason: reason,
 		State:                state,
 		CreatedAt:            in.Now,
+		AutonomyMode:         autonomyMode,
 	}
 
 	saved, inserted, err := store.InsertWorkflowQuestion(ctx, row)

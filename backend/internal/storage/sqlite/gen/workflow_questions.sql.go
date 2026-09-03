@@ -76,7 +76,7 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
        answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
-       resolving_run_id
+       resolving_run_id, autonomy_mode
 FROM workflow_questions
 WHERE id = ?
 `
@@ -110,6 +110,7 @@ func (q *Queries) GetWorkflowQuestion(ctx context.Context, id string) (WorkflowQ
 		&i.Delivered,
 		&i.DeliveredAt,
 		&i.ResolvingRunID,
+		&i.AutonomyMode,
 	)
 	return i, err
 }
@@ -120,7 +121,7 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
        answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
-       resolving_run_id
+       resolving_run_id, autonomy_mode
 FROM workflow_questions
 WHERE fingerprint = ?
 `
@@ -154,6 +155,7 @@ func (q *Queries) GetWorkflowQuestionByFingerprint(ctx context.Context, fingerpr
 		&i.Delivered,
 		&i.DeliveredAt,
 		&i.ResolvingRunID,
+		&i.AutonomyMode,
 	)
 	return i, err
 }
@@ -163,14 +165,14 @@ INSERT OR IGNORE INTO workflow_questions (
     id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
     asking_harness, asking_role, fingerprint, question_text, structured_choices,
     capture_provider, capture_parser_version, capture_range_lines,
-    certainty, classification, classification_reason, state, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    certainty, classification, classification_reason, state, created_at, autonomy_mode
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
           asking_harness, asking_role, fingerprint, question_text, structured_choices,
           capture_provider, capture_parser_version, capture_range_lines,
           certainty, classification, classification_reason, state, created_at,
           answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
-          resolving_run_id
+          resolving_run_id, autonomy_mode
 `
 
 type InsertWorkflowQuestionParams struct {
@@ -192,6 +194,7 @@ type InsertWorkflowQuestionParams struct {
 	ClassificationReason sql.NullString
 	State                sql.NullString
 	CreatedAt            time.Time
+	AutonomyMode         string
 }
 
 // Checkpoint 8K-A: durable question row, inserted with classification
@@ -217,6 +220,7 @@ func (q *Queries) InsertWorkflowQuestion(ctx context.Context, arg InsertWorkflow
 		arg.ClassificationReason,
 		arg.State,
 		arg.CreatedAt,
+		arg.AutonomyMode,
 	)
 	var i WorkflowQuestion
 	err := row.Scan(
@@ -245,6 +249,7 @@ func (q *Queries) InsertWorkflowQuestion(ctx context.Context, arg InsertWorkflow
 		&i.Delivered,
 		&i.DeliveredAt,
 		&i.ResolvingRunID,
+		&i.AutonomyMode,
 	)
 	return i, err
 }
@@ -255,7 +260,7 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
        answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
-       resolving_run_id
+       resolving_run_id, autonomy_mode
 FROM workflow_questions
 WHERE workflow_run_id = ? AND state IN ('pending', 'human_required')
 ORDER BY created_at
@@ -299,6 +304,7 @@ func (q *Queries) ListOpenWorkflowQuestionsByRun(ctx context.Context, workflowRu
 			&i.Delivered,
 			&i.DeliveredAt,
 			&i.ResolvingRunID,
+			&i.AutonomyMode,
 		); err != nil {
 			return nil, err
 		}
@@ -319,7 +325,7 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
        answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
-       resolving_run_id
+       resolving_run_id, autonomy_mode
 FROM workflow_questions
 WHERE workflow_run_id = ? AND state = 'answered' AND delivered = 0
 `
@@ -360,6 +366,7 @@ func (q *Queries) ListUndeliveredAnsweredWorkflowQuestions(ctx context.Context, 
 			&i.Delivered,
 			&i.DeliveredAt,
 			&i.ResolvingRunID,
+			&i.AutonomyMode,
 		); err != nil {
 			return nil, err
 		}
@@ -380,7 +387,7 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
        answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
-       resolving_run_id
+       resolving_run_id, autonomy_mode
 FROM workflow_questions
 WHERE workflow_run_id = ?
 ORDER BY created_at
@@ -421,6 +428,7 @@ func (q *Queries) ListWorkflowQuestionsByRun(ctx context.Context, workflowRunID 
 			&i.Delivered,
 			&i.DeliveredAt,
 			&i.ResolvingRunID,
+			&i.AutonomyMode,
 		); err != nil {
 			return nil, err
 		}

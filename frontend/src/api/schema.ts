@@ -2321,6 +2321,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflowId}/advice": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P3-C: the deterministic answer to "what do I do now" — the category (no action required / auto-recoverable / wait-only / human action / terminal), whether a person is actually needed, what AO is doing about it by itself, the offered and refused actions with the reason behind every refusal, and the authority proof a later click is revalidated against. A strict read: it writes nothing. */
+        get: operations["getWorkflowAdvice"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workflows/{workflowId}/cancel": {
         parameters: {
             query?: never;
@@ -2364,7 +2381,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Continue a workflow run: dispatch its review step's real Claude reviewer once the work step has completed (Checkpoint 8C). Idempotent no-op when nothing is currently dispatchable. */
+        /** Continue a workflow run: dispatch its review step's real Claude reviewer once the work step has completed (Checkpoint 8C). Idempotent no-op when nothing is currently dispatchable. P3-C: the optional body carries the authority proof from a GET /advice reading; a Continue that arrives while AO is already repairing this run is refused 409 ACTION_SUPERSEDED rather than re-entering a resume path the repair owns. */
         post: operations["continueWorkflowRun"];
         delete?: never;
         options?: never;
@@ -2434,6 +2451,40 @@ export interface paths {
         put?: never;
         /** Carry out an incident's diagnosed action, after AO's authorization policy and — for anything beyond the ordinary continue path — an explicit human approval */
         post: operations["executeWorkflowIncidentAction"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/pending-changes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P3-A: what is uncommitted in the repository this run works in, and a proposed commit message. Read-only: it runs git status and nothing else. `available: false` means AO could not read the repository, which is UNKNOWN and never "clean". */
+        get: operations["getWorkflowPendingChanges"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workflows/{workflowId}/pending-changes/commit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P3-A: commit the repository's pending work under a message the caller supplied, re-probe, and resume the run only once the tree is provably clean. There is no stash and no silent commit: a message is required, and a commit that leaves the tree dirty does not resume the run. */
+        post: operations["commitWorkflowPendingChanges"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2551,7 +2602,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** P1-B: mint a new durable plan revision for an objective whose plan cannot be reused. The superseded revision stays auditable and its tasks stop being authoritative. Bounded, and a compare-and-set on the revision the caller observed. */
+        /** P1-B: mint a new durable plan revision for an objective whose plan cannot be reused. The superseded revision stays auditable and its tasks stop being authoritative. Bounded, and a compare-and-set on the revision the caller observed. P3-C: the optional body carries the authority proof from a GET /advice reading; a click computed against a state the run has moved past is refused 409 ACTION_SUPERSEDED. */
         post: operations["regenerateWorkflowPlan"];
         delete?: never;
         options?: never;
@@ -2704,7 +2755,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** P1-B: launch a bounded Repair Agent for a repairable technical stop. Refused with the full repair plan (and why) for any condition AO must not aim a code-writing agent at, for a spent repair budget, or under a disabled repair policy. */
+        /** P1-B: launch a bounded Repair Agent for a repairable technical stop. Refused with the full repair plan (and why) for any condition AO must not aim a code-writing agent at, for a spent repair budget, or under a disabled repair policy. P3-C: the optional body carries the authority proof from a GET /advice reading; a click computed against a state the run has moved past — or one that arrives while AO is already repairing — is refused 409 ACTION_SUPERSEDED instead of duplicated. */
         post: operations["repairWorkflowRun"];
         delete?: never;
         options?: never;
@@ -2985,6 +3036,17 @@ export interface components {
         CleanupSkippedSession: {
             reason: string;
             sessionId: string;
+        };
+        CommitPendingChangesRequest: {
+            authority?: components["schemas"]["ControllersWorkflowActionAuthorityRequest"];
+            message: string;
+        };
+        CommitPendingChangesResponse: {
+            clean: boolean;
+            commitSha?: string;
+            committed: boolean;
+            detail?: string;
+            resumed: boolean;
         };
         CompactConversationResponse: {
             /** Format: int64 */
@@ -3878,6 +3940,63 @@ export interface components {
             repoIdentity?: string;
             truncated: boolean;
         };
+        ControllersWorkflowActionAuthorityRequest: {
+            /** Format: int64 */
+            lifecycleGeneration?: number;
+            /** Format: int64 */
+            placementGeneration?: number;
+            repairGeneration?: number;
+            runState?: string;
+            stopPhase?: string;
+        };
+        ControllersWorkflowAdviceAuthorityView: {
+            /** Format: int64 */
+            lifecycleGeneration?: number;
+            /** Format: int64 */
+            placementGeneration?: number;
+            repairGeneration?: number;
+            runState?: string;
+            /** Format: date-time */
+            stopAt?: null | string;
+            stopPhase?: string;
+        };
+        ControllersWorkflowAdviceBlockedView: {
+            action: string;
+            reason: string;
+        };
+        ControllersWorkflowAdviceResponse: {
+            advice: components["schemas"]["ControllersWorkflowAdviceView"];
+        };
+        ControllersWorkflowAdviceView: {
+            authority: components["schemas"]["ControllersWorkflowAdviceAuthorityView"];
+            /** @enum {string} */
+            automaticAction?: "launch_repair" | "repair_in_flight" | "scheduled_retry" | "provider_failover" | "await_capacity" | "await_branch" | "resolve_question" | "fresh_review";
+            automaticActionActive: boolean;
+            automaticActionBlockedReason?: string;
+            availableActions?: string[];
+            blockedActions?: components["schemas"]["ControllersWorkflowAdviceBlockedView"][];
+            /** @enum {string} */
+            category: "no_action_required" | "auto_recoverable" | "wait_only" | "human_action" | "terminal";
+            expectedNextStage?: string;
+            explanation?: string;
+            reasonCode?: string;
+            recommendedAction?: string;
+            repairBudget: number;
+            /** @enum {string} */
+            repairEligibility?: "eligible" | "ineligible" | "budget_exhausted" | "policy_disabled" | "unknown_condition";
+            repairSpent: number;
+            repairable: boolean;
+            requiresHuman: boolean;
+            retryable: boolean;
+            stage?: string;
+            summary?: string;
+            summaryCode?: string;
+            targetRunId?: string;
+            version?: string;
+            waitReason?: string;
+            /** Format: date-time */
+            waitUntil?: null | string;
+        };
         ControllersWorkflowBranchCessionChainView: {
             /** @enum {string} */
             blockedReason?: "holder_can_still_write" | "legacy_unprovable_branch_cession" | "previous_owner_not_authoritative" | "branch_moved_on";
@@ -3922,6 +4041,98 @@ export interface components {
             updatedAt: string;
             workflowQuestionId: string;
             workflowRunId: string;
+        };
+        ControllersWorkflowRecoveryAttemptView: {
+            attemptId: string;
+            /** Format: int64 */
+            attemptNumber?: number;
+            errorClass?: string;
+            /** Format: date-time */
+            finishedAt?: null | string;
+            outcome?: string;
+            provider?: string;
+            /** Format: date-time */
+            startedAt?: null | string;
+        };
+        ControllersWorkflowRecoveryBranchView: {
+            branch?: string;
+            heldByRunId?: string;
+            heldBySessionId?: string;
+            waiting: boolean;
+        };
+        ControllersWorkflowRecoveryCapacityView: {
+            claimId?: string;
+            dispatchKey?: string;
+            fossilSuspected?: boolean;
+            held: number;
+            kinds?: string[];
+            read: boolean;
+            waiting: number;
+        };
+        ControllersWorkflowRecoveryDialogView: {
+            source?: string;
+            /** @enum {string} */
+            state?: "captured" | "resolving" | "delivery_pending" | "delivered" | "unreadable" | "human_required";
+            unreadable?: boolean;
+        };
+        ControllersWorkflowRecoveryEventView: {
+            /** Format: date-time */
+            at: string;
+            detail?: string;
+            kind: string;
+            phase?: string;
+            stepId?: string;
+        };
+        ControllersWorkflowRecoveryExecutionView: {
+            attemptId?: string;
+            /** Format: int64 */
+            attemptNumber?: number;
+            /** @enum {string} */
+            authority?: "active" | "concluded" | "superseded" | "legacy_unproven";
+            errorClass?: string;
+            finishedAt?: string;
+            lastEventAt?: string;
+            lastEventPhase?: string;
+            lifecycleState?: string;
+            outcome?: string;
+            provider?: string;
+            sessionId?: string;
+            startedAt?: string;
+            stepId: string;
+            stepKind?: string;
+        };
+        ControllersWorkflowRecoveryRepairView: {
+            active: boolean;
+            attempt: number;
+            budget: number;
+            detail?: string;
+            exhausted: boolean;
+            nextRetryPossible: boolean;
+            quiescent: boolean;
+            runId?: string;
+            whyStarted?: string;
+        };
+        ControllersWorkflowRecoveryStatusView: {
+            aoIsActing: boolean;
+            branch: components["schemas"]["ControllersWorkflowRecoveryBranchView"];
+            capacity: components["schemas"]["ControllersWorkflowRecoveryCapacityView"];
+            dialog: components["schemas"]["ControllersWorkflowRecoveryDialogView"];
+            execution?: components["schemas"]["ControllersWorkflowRecoveryExecutionView"];
+            failover?: components["schemas"]["ControllersWorkflowRecoveryAttemptView"][];
+            /** Format: date-time */
+            nextWakeAt?: null | string;
+            repair: components["schemas"]["ControllersWorkflowRecoveryRepairView"];
+            /** Format: int64 */
+            retryCount?: number;
+            runId: string;
+            /** @enum {string} */
+            state: "healthy_running" | "waiting_capacity" | "waiting_branch" | "waiting_provider" | "waiting_dialog_delivery" | "verifying_result" | "automatic_recovery_pending" | "repair_running" | "failover_running" | "restart_recovery" | "needs_human" | "terminal";
+            stopReason?: string;
+            summary: string;
+            taskId?: string;
+            timeline?: components["schemas"]["ControllersWorkflowRecoveryEventView"][];
+            version?: string;
+            waiting: boolean;
         };
         ControllersWorkflowRunOriginView: {
             approvedBy?: string;
@@ -4192,10 +4403,18 @@ export interface components {
             approvalPolicy?: "automatic" | "manual";
             /** @description Explicit per-run autonomous/manual override; omit to inherit the caller's execution policy. */
             autonomous?: null | boolean;
+            /** @enum {string} */
+            autonomyPolicy?: "ask_always" | "auto_decide_low_risk" | "full_autonomy";
             /** @description Generate a provider-neutral master plan before execution. */
             masterPlan?: boolean;
             /** @description The workflow run's objective. For the task strategy this is the task's full specification: multi-line and markdown-friendly, preserved verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long objective is refused. */
             objective: string;
+            /**
+             * @description Where this run's work happens. direct_branch is binding: AO never falls back to a worktree.
+             * @enum {string}
+             */
+            placement?: "auto" | "direct_branch" | "isolated_worktree";
+            placementReason?: string;
             /** @enum {string} */
             planApprovalMode?: "manual" | "auto";
             /** @enum {string} */
@@ -4398,6 +4617,9 @@ export interface components {
             questions: components["schemas"]["WorkflowQuestionResponse"][];
         };
         ListWorkflowsResponse: {
+            limit: number;
+            offset: number;
+            total: number;
             workflows: components["schemas"]["WorkflowRunView"][];
         };
         ListWorkspaceFilesResponse: {
@@ -5138,6 +5360,8 @@ export interface components {
             chatHarnesses: string[];
             /** @enum {string} */
             defaultSessionMode: "chat" | "tui";
+            /** @enum {string} */
+            memoryMode?: "off" | "assisted" | "preferred";
         };
         ShellTerminalEnvelope: {
             shellTerminal: components["schemas"]["ShellTerminalResponse"];
@@ -5326,6 +5550,14 @@ export interface components {
             /** Format: date-time */
             startedAt: string;
         };
+        WorkflowBoardCountsView: {
+            active: number;
+            archived: number;
+            completed: number;
+            needsAttention: number;
+            waiting: number;
+            working: number;
+        };
         WorkflowBoardEntryView: {
             /** Format: date-time */
             archivedAt?: null | string;
@@ -5333,6 +5565,7 @@ export interface components {
             attention?: "ao_internal" | "human_decision";
             attentionAction?: string;
             attentionReason?: string;
+            automaticActionActive: boolean;
             branchWait?: components["schemas"]["WorkflowBranchWaitView"];
             /** Format: int64 */
             currentTaskOrdinal?: number;
@@ -5343,18 +5576,30 @@ export interface components {
             harness?: string;
             /** Format: date-time */
             lastActivityAt: string;
+            /** Format: date-time */
+            lastMeaningfulActivityAt: string;
             model?: string;
             /** Format: date-time */
             nextWakeAt?: null | string;
             objective: string;
+            objectiveTruncated?: boolean;
             /** @enum {string} */
             phase: "queued" | "planning" | "running" | "reviewing" | "fixing" | "verifying" | "waiting" | "waiting_for_capacity" | "retrying" | "blocked" | "needs_attention" | "completed" | "failed" | "cancelled";
+            presentation?: components["schemas"]["WorkflowPresentationView"];
             projectId: string;
+            repairGeneration?: number;
+            repairOfWorkflowId?: string;
+            repairs?: components["schemas"]["WorkflowBoardRepairView"][];
+            requiresHuman: boolean;
             reviewCycles: number;
             sessionId?: string;
             /** @enum {string} */
+            stage: "preparing" | "planning" | "working" | "reviewing" | "correcting" | "verifying" | "integrating" | "waiting" | "needs_attention" | "completed" | "cancelled" | "failed";
+            /** @enum {string} */
             state: "pending" | "running" | "waiting" | "needs_attention" | "completed" | "failed" | "cancelled";
             steps?: components["schemas"]["WorkflowStepProgressView"][];
+            /** @enum {string} */
+            strategy?: "task" | "autonomous" | "master";
             tasks?: components["schemas"]["WorkflowBoardTaskView"][];
             tasksBlocked: number;
             tasksCompleted: number;
@@ -5366,7 +5611,27 @@ export interface components {
             waitReason?: string;
             workflowId: string;
         };
+        WorkflowBoardRepairView: {
+            active: boolean;
+            attempt: number;
+            budget: number;
+            failed?: boolean;
+            /** Format: date-time */
+            lastMeaningfulActivityAt: string;
+            requiresHuman: boolean;
+            /** @enum {string} */
+            stage: "preparing" | "planning" | "working" | "reviewing" | "correcting" | "verifying" | "integrating" | "waiting" | "needs_attention" | "completed" | "cancelled" | "failed";
+            /** @enum {string} */
+            state: "pending" | "running" | "waiting" | "needs_attention" | "completed" | "failed" | "cancelled";
+            succeeded?: boolean;
+            summaryCode?: string;
+            workflowId: string;
+        };
         WorkflowBoardResponse: {
+            counts: components["schemas"]["WorkflowBoardCountsView"];
+            limit: number;
+            matched: number;
+            offset: number;
             workflows: components["schemas"]["WorkflowBoardEntryView"][];
         };
         WorkflowBoardTaskView: {
@@ -5459,6 +5724,24 @@ export interface components {
             summary: string;
             version: string;
         };
+        WorkflowPendingChangeView: {
+            path: string;
+            status?: string;
+        };
+        WorkflowPendingChangesResponse: {
+            available: boolean;
+            branch?: string;
+            changes?: components["schemas"]["WorkflowPendingChangeView"][];
+            dirty: boolean;
+            headSha?: string;
+            historical?: boolean;
+            /** @enum {string} */
+            placement?: "direct_branch" | "isolated_worktree";
+            proposedMessage?: string;
+            repoPath?: string;
+            unavailable?: string;
+            worktreePath?: string;
+        };
         WorkflowPlanReuseView: {
             contextDrift?: string;
             planHash?: string;
@@ -5504,17 +5787,101 @@ export interface components {
             verify: components["schemas"]["WorkflowVerificationPlanType2"];
             writeIntent?: string;
         };
+        WorkflowPresentationAction: {
+            disabledReason?: string;
+            enabled: boolean;
+            /** @enum {string} */
+            id: "continue" | "cancel" | "repair" | "commit_and_continue" | "view_changes" | "view_blocking_workflow" | "wait" | "authenticate" | "revalidate_plan" | "regenerate_plan" | "open_session" | "integrate" | "use_isolated_worktree";
+            primary?: boolean;
+        };
+        WorkflowPresentationEvent: {
+            /** Format: date-time */
+            at: string;
+            detail?: string;
+            /** @enum {string} */
+            kind: "started" | "planned" | "worker_launched" | "work_completed" | "review_started" | "review_verdict" | "fix_started" | "repair_started" | "verified" | "integrated" | "provider_failed" | "stopped" | "completed" | "cancelled" | "failed";
+        };
+        WorkflowPresentationPlacement: {
+            baseBranch?: string;
+            choiceReason?: string;
+            /** @enum {string} */
+            chosenBy: "user" | "automatic" | "unknown";
+            executionBranch?: string;
+            /** Format: int64 */
+            generation?: number;
+            integratedSha?: string;
+            /** @enum {string} */
+            integration: "not_required" | "pending" | "in_progress" | "integrated" | "failed";
+            integrationRequired: boolean;
+            mergeTarget?: string;
+            repoPath?: string;
+            /** @enum {string} */
+            state?: "selected" | "waiting" | "preparing" | "ready" | "active" | "reviewing" | "integrating" | "integrated" | "conflict" | "preserved" | "terminal";
+            /** @enum {string} */
+            type: "direct_branch" | "isolated_worktree";
+            worktreePath?: string;
+        };
+        WorkflowPresentationStage: {
+            optional?: boolean;
+            /** @enum {string} */
+            stage: "preparing" | "planning" | "working" | "reviewing" | "correcting" | "verifying" | "integrating" | "waiting" | "needs_attention" | "completed" | "cancelled" | "failed";
+            /** @enum {string} */
+            state: "completed" | "current" | "future" | "blocked" | "skipped";
+        };
+        WorkflowPresentationTechnical: {
+            attemptId?: string;
+            /** Format: int64 */
+            attemptNumber?: number;
+            attention?: string;
+            attentionDetail?: string;
+            attentionReason?: string;
+            /** @enum {string} */
+            authority?: "active" | "concluded" | "superseded" | "legacy_unproven";
+            /** Format: date-time */
+            dispatchedAt?: null | string;
+            errorClass?: string;
+            /** Format: date-time */
+            lastEventAt?: null | string;
+            lastEventPhase?: string;
+            /** Format: int64 */
+            lifecycleGeneration?: number;
+            /** Format: date-time */
+            nextWakeAt?: null | string;
+            phase?: string;
+            /** Format: int64 */
+            placementGeneration?: number;
+            provider?: string;
+            repairRunId?: string;
+            runState?: string;
+            sessionId?: string;
+            waitReason?: string;
+        };
+        WorkflowPresentationView: {
+            actions?: components["schemas"]["WorkflowPresentationAction"][];
+            automaticActionActive: boolean;
+            placement?: components["schemas"]["WorkflowPresentationPlacement"];
+            progress?: components["schemas"]["WorkflowPresentationStage"][];
+            recommendedAction?: string;
+            requiresHuman: boolean;
+            /** @enum {string} */
+            stage: "preparing" | "planning" | "working" | "reviewing" | "correcting" | "verifying" | "integrating" | "waiting" | "needs_attention" | "completed" | "cancelled" | "failed";
+            summaryCode: string;
+            technical: components["schemas"]["WorkflowPresentationTechnical"];
+            timeline?: components["schemas"]["WorkflowPresentationEvent"][];
+        };
         WorkflowQuestionChoiceResponse: {
             id: string;
             label: string;
         };
         WorkflowQuestionResponse: {
             /** @enum {string} */
-            answerSource?: "" | "policy" | "human" | "resolver";
+            answerSource?: "" | "policy" | "human" | "resolver" | "autonomous";
             answerText?: string;
             answeredAt?: null | string;
             askingHarness?: string;
             askingRole?: string;
+            /** @enum {string} */
+            autonomyMode?: "" | "ask_always" | "auto_decide_low_risk" | "full_autonomy";
             /** @enum {string} */
             certainty: "actual" | "inferred" | "unknown";
             /** @enum {string} */
@@ -5544,10 +5911,12 @@ export interface components {
             plan: components["schemas"]["WorkflowPlanReuseView"];
             recovery: components["schemas"]["WorkflowRecoveryView"];
             repair: components["schemas"]["WorkflowRepairPlanView"];
+            status?: components["schemas"]["ControllersWorkflowRecoveryStatusView"];
         };
         WorkflowRecoveryView: {
             automaticAllowed: boolean;
             blockingCondition?: string;
+            execution?: components["schemas"]["ControllersWorkflowRecoveryExecutionView"];
             explanation?: string;
             /** @enum {string} */
             obligation?: "none" | "plan_generation" | "plan_approval" | "plan_dispatch" | "work_dispatch" | "work_observation" | "review_dispatch" | "review_observation" | "fix_delivery" | "fix_observation" | "verify" | "convergence" | "terminal";
@@ -5636,9 +6005,11 @@ export interface components {
             verifyFileCheckCount: number;
         };
         WorkflowRunDetailView: {
+            advice?: components["schemas"]["ControllersWorkflowAdviceView"];
             integrationState?: components["schemas"]["ControllersWorkflowIntegrationStateView"];
             plan?: components["schemas"]["WorkflowPlanView"];
             planReuse?: components["schemas"]["WorkflowPlanReuseView"];
+            presentation?: components["schemas"]["WorkflowPresentationView"];
             questions?: components["schemas"]["WorkflowQuestionResponse"][];
             resume?: components["schemas"]["WorkflowResumeView"];
             run: components["schemas"]["WorkflowRunView"];
@@ -5657,6 +6028,7 @@ export interface components {
             attentionAction?: string;
             attentionReason?: string;
             attentionWorkflowId?: string;
+            automaticActionActive?: boolean;
             branchWait?: components["schemas"]["WorkflowBranchWaitView"];
             canContinue: boolean;
             /** Format: date-time */
@@ -5672,6 +6044,8 @@ export interface components {
             id: string;
             /** Format: date-time */
             lastActivityAt: string;
+            /** Format: date-time */
+            lastMeaningfulActivityAt?: null | string;
             nextAction?: string;
             /** Format: date-time */
             nextWakeAt?: null | string;
@@ -5680,10 +6054,17 @@ export interface components {
             /** @enum {string} */
             phase: "queued" | "planning" | "running" | "reviewing" | "fixing" | "verifying" | "waiting" | "waiting_for_capacity" | "retrying" | "blocked" | "needs_attention" | "completed" | "failed" | "cancelled";
             projectId: string;
+            /** @enum {string} */
+            recommendedAction?: "continue" | "cancel" | "repair" | "commit_and_continue" | "view_changes" | "view_blocking_workflow" | "wait" | "authenticate" | "revalidate_plan" | "regenerate_plan" | "open_session" | "integrate" | "use_isolated_worktree";
             recovery?: components["schemas"]["WorkflowRecoveryView"];
             repair?: components["schemas"]["WorkflowRepairStateView"];
+            repairOfWorkflowId?: string;
+            requiresHuman?: boolean;
+            /** @enum {string} */
+            stage?: "preparing" | "planning" | "working" | "reviewing" | "correcting" | "verifying" | "integrating" | "waiting" | "needs_attention" | "completed" | "cancelled" | "failed";
             /** @enum {string} */
             state: "pending" | "running" | "waiting" | "needs_attention" | "completed" | "failed" | "cancelled";
+            summaryCode?: string;
             /** Format: date-time */
             updatedAt: string;
             waitReason?: string;
@@ -8665,7 +9046,20 @@ export interface operations {
     };
     getProjectBoard: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Comma-separated derived stages to keep (preparing, working, reviewing, correcting, verifying, integrating, waiting, needs_attention, completed, cancelled, failed). */
+                stage?: string;
+                /** @description Keep only runs that do (true) or do not (false) need a person. */
+                requiresHuman?: "true" | "false";
+                /** @description Recorded execution strategy filter. */
+                strategy?: "task" | "autonomous" | "master";
+                /** @description Case-insensitive substring of the objective or the run id. */
+                search?: string;
+                /** @description Zero-based offset into the ordered result. */
+                offset?: string;
+                /** @description Page size; defaults to 50 and is capped at 200. */
+                limit?: string;
+            };
             header?: never;
             path: {
                 /** @description Project identifier (registry key). */
@@ -8697,7 +9091,20 @@ export interface operations {
     };
     getProjectBoardHistory: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Comma-separated derived stages to keep (preparing, working, reviewing, correcting, verifying, integrating, waiting, needs_attention, completed, cancelled, failed). */
+                stage?: string;
+                /** @description Keep only runs that do (true) or do not (false) need a person. */
+                requiresHuman?: "true" | "false";
+                /** @description Recorded execution strategy filter. */
+                strategy?: "task" | "autonomous" | "master";
+                /** @description Case-insensitive substring of the objective or the run id. */
+                search?: string;
+                /** @description Zero-based offset into the ordered result. */
+                offset?: string;
+                /** @description Page size; defaults to 50 and is capped at 200. */
+                limit?: string;
+            };
             header?: never;
             path: {
                 /** @description Project identifier (registry key). */
@@ -14229,6 +14636,10 @@ export interface operations {
             query?: {
                 /** @description Project id filter. */
                 projectId?: string;
+                /** @description Zero-based offset into the result. */
+                offset?: string;
+                /** @description Page size; defaults to 200 and is capped there. */
+                limit?: string;
             };
             header?: never;
             path?: never;
@@ -14275,6 +14686,47 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowAdvice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersWorkflowAdviceResponse"];
                 };
             };
             /** @description Not Found */
@@ -14407,7 +14859,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ControllersWorkflowActionAuthorityRequest"];
+            };
+        };
         responses: {
             /** @description OK */
             200: {
@@ -14664,6 +15120,110 @@ export interface operations {
             };
             /** @description Unprocessable Entity */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowPendingChanges: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowPendingChangesResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    commitWorkflowPendingChanges: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CommitPendingChangesRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommitPendingChangesResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -14964,7 +15524,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ControllersWorkflowActionAuthorityRequest"];
+            };
+        };
         responses: {
             /** @description OK */
             200: {
@@ -15426,7 +15990,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ControllersWorkflowActionAuthorityRequest"];
+            };
+        };
         responses: {
             /** @description Accepted */
             202: {

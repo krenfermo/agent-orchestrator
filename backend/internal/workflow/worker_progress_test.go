@@ -35,6 +35,7 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 		now                time.Time
 		dispatchedAt       time.Time
 		humanInputProven   bool
+		turnCompleted      bool
 		evidence           workerEvidence
 		readOnly           readOnlyExpectation
 		wantNoChange       bool
@@ -345,7 +346,7 @@ func TestEvaluateWorkStepProgress(t *testing.T) {
 			if now.IsZero() {
 				now = fixedNow
 			}
-			got := evaluateWorkStepProgress(tc.sessionFound, tc.session, tc.workspaceAvailable, tc.obs, tc.baseSHA, now, tc.dispatchedAt, tc.humanInputProven, tc.evidence, tc.readOnly)
+			got := evaluateWorkStepProgress(tc.sessionFound, tc.session, tc.workspaceAvailable, tc.obs, tc.baseSHA, now, tc.dispatchedAt, tc.humanInputProven, tc.turnCompleted, tc.evidence, tc.readOnly)
 			if got.NoChange != tc.wantNoChange {
 				t.Fatalf("NoChange = %v, want %v", got.NoChange, tc.wantNoChange)
 			}

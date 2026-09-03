@@ -2243,6 +2243,53 @@ paths:
         schema:
           description: Project identifier (registry key).
           type: string
+      - description: Comma-separated derived stages to keep (preparing, working, reviewing,
+          correcting, verifying, integrating, waiting, needs_attention, completed,
+          cancelled, failed).
+        in: query
+        name: stage
+        schema:
+          description: Comma-separated derived stages to keep (preparing, working,
+            reviewing, correcting, verifying, integrating, waiting, needs_attention,
+            completed, cancelled, failed).
+          type: string
+      - description: Keep only runs that do (true) or do not (false) need a person.
+        in: query
+        name: requiresHuman
+        schema:
+          description: Keep only runs that do (true) or do not (false) need a person.
+          enum:
+          - "true"
+          - "false"
+          type: string
+      - description: Recorded execution strategy filter.
+        in: query
+        name: strategy
+        schema:
+          description: Recorded execution strategy filter.
+          enum:
+          - task
+          - autonomous
+          - master
+          type: string
+      - description: Case-insensitive substring of the objective or the run id.
+        in: query
+        name: search
+        schema:
+          description: Case-insensitive substring of the objective or the run id.
+          type: string
+      - description: Zero-based offset into the ordered result.
+        in: query
+        name: offset
+        schema:
+          description: Zero-based offset into the ordered result.
+          type: string
+      - description: Page size; defaults to 50 and is capped at 200.
+        in: query
+        name: limit
+        schema:
+          description: Page size; defaults to 50 and is capped at 200.
+          type: string
       responses:
         "200":
           content:
@@ -2270,6 +2317,53 @@ paths:
         required: true
         schema:
           description: Project identifier (registry key).
+          type: string
+      - description: Comma-separated derived stages to keep (preparing, working, reviewing,
+          correcting, verifying, integrating, waiting, needs_attention, completed,
+          cancelled, failed).
+        in: query
+        name: stage
+        schema:
+          description: Comma-separated derived stages to keep (preparing, working,
+            reviewing, correcting, verifying, integrating, waiting, needs_attention,
+            completed, cancelled, failed).
+          type: string
+      - description: Keep only runs that do (true) or do not (false) need a person.
+        in: query
+        name: requiresHuman
+        schema:
+          description: Keep only runs that do (true) or do not (false) need a person.
+          enum:
+          - "true"
+          - "false"
+          type: string
+      - description: Recorded execution strategy filter.
+        in: query
+        name: strategy
+        schema:
+          description: Recorded execution strategy filter.
+          enum:
+          - task
+          - autonomous
+          - master
+          type: string
+      - description: Case-insensitive substring of the objective or the run id.
+        in: query
+        name: search
+        schema:
+          description: Case-insensitive substring of the objective or the run id.
+          type: string
+      - description: Zero-based offset into the ordered result.
+        in: query
+        name: offset
+        schema:
+          description: Zero-based offset into the ordered result.
+          type: string
+      - description: Page size; defaults to 50 and is capped at 200.
+        in: query
+        name: limit
+        schema:
+          description: Page size; defaults to 50 and is capped at 200.
           type: string
       responses:
         "200":
@@ -6659,6 +6753,18 @@ paths:
         schema:
           description: Project id filter.
           type: string
+      - description: Zero-based offset into the result.
+        in: query
+        name: offset
+        schema:
+          description: Zero-based offset into the result.
+          type: string
+      - description: Page size; defaults to 200 and is capped there.
+        in: query
+        name: limit
+        schema:
+          description: Page size; defaults to 200 and is capped there.
+          type: string
       responses:
         "200":
           content:
@@ -6706,6 +6812,44 @@ paths:
                 $ref: '#/components/schemas/APIError'
           description: Not Implemented
       summary: Get a workflow run with its steps and attempts
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/advice:
+    get:
+      operationId: getWorkflowAdvice
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersWorkflowAdviceResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P3-C: the deterministic answer to "what do I do now" — the category
+        (no action required / auto-recoverable / wait-only / human action / terminal),
+        whether a person is actually needed, what AO is doing about it by itself,
+        the offered and refused actions with the reason behind every refusal, and
+        the authority proof a later click is revalidated against. A strict read: it
+        writes nothing.'
       tags:
       - workflows
   /api/v1/workflows/{workflowId}/cancel:
@@ -6798,6 +6942,11 @@ paths:
         schema:
           description: Workflow run identifier.
           type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersWorkflowActionAuthorityRequest'
       responses:
         "200":
           content:
@@ -6825,7 +6974,10 @@ paths:
           description: Not Implemented
       summary: 'Continue a workflow run: dispatch its review step''s real Claude reviewer
         once the work step has completed (Checkpoint 8C). Idempotent no-op when nothing
-        is currently dispatchable.'
+        is currently dispatchable. P3-C: the optional body carries the authority proof
+        from a GET /advice reading; a Continue that arrives while AO is already repairing
+        this run is refused 409 ACTION_SUPERSEDED rather than re-entering a resume
+        path the repair owns.'
       tags:
       - workflows
   /api/v1/workflows/{workflowId}/incident:
@@ -7017,6 +7169,96 @@ paths:
       summary: Carry out an incident's diagnosed action, after AO's authorization
         policy and — for anything beyond the ordinary continue path — an explicit
         human approval
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/pending-changes:
+    get:
+      operationId: getWorkflowPendingChanges
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowPendingChangesResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P3-A: what is uncommitted in the repository this run works in, and
+        a proposed commit message. Read-only: it runs git status and nothing else.
+        `available: false` means AO could not read the repository, which is UNKNOWN
+        and never "clean".'
+      tags:
+      - workflows
+  /api/v1/workflows/{workflowId}/pending-changes/commit:
+    post:
+      operationId: commitWorkflowPendingChanges
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitPendingChangesRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitPendingChangesResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P3-A: commit the repository''s pending work under a message the caller
+        supplied, re-probe, and resume the run only once the tree is provably clean.
+        There is no stash and no silent commit: a message is required, and a commit
+        that leaves the tree dirty does not resume the run.'
       tags:
       - workflows
   /api/v1/workflows/{workflowId}/placement:
@@ -7268,6 +7510,11 @@ paths:
         schema:
           description: Workflow run identifier.
           type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersWorkflowActionAuthorityRequest'
       responses:
         "200":
           content:
@@ -7302,7 +7549,9 @@ paths:
       summary: 'P1-B: mint a new durable plan revision for an objective whose plan
         cannot be reused. The superseded revision stays auditable and its tasks stop
         being authoritative. Bounded, and a compare-and-set on the revision the caller
-        observed.'
+        observed. P3-C: the optional body carries the authority proof from a GET /advice
+        reading; a click computed against a state the run has moved past is refused
+        409 ACTION_SUPERSEDED.'
       tags:
       - workflows
   /api/v1/workflows/{workflowId}/plan/reject:
@@ -7663,6 +7912,11 @@ paths:
         schema:
           description: Workflow run identifier.
           type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersWorkflowActionAuthorityRequest'
       responses:
         "202":
           content:
@@ -7691,7 +7945,10 @@ paths:
       summary: 'P1-B: launch a bounded Repair Agent for a repairable technical stop.
         Refused with the full repair plan (and why) for any condition AO must not
         aim a code-writing agent at, for a spent repair budget, or under a disabled
-        repair policy.'
+        repair policy. P3-C: the optional body carries the authority proof from a
+        GET /advice reading; a click computed against a state the run has moved past
+        — or one that arrives while AO is already repairing — is refused 409 ACTION_SUPERSEDED
+        instead of duplicated.'
       tags:
       - workflows
   /api/v1/workflows/{workflowId}/resume:
@@ -8425,6 +8682,32 @@ components:
       required:
       - sessionId
       - reason
+      type: object
+    CommitPendingChangesRequest:
+      properties:
+        authority:
+          $ref: '#/components/schemas/ControllersWorkflowActionAuthorityRequest'
+        message:
+          type: string
+      required:
+      - message
+      type: object
+    CommitPendingChangesResponse:
+      properties:
+        clean:
+          type: boolean
+        commitSha:
+          type: string
+        committed:
+          type: boolean
+        detail:
+          type: string
+        resumed:
+          type: boolean
+      required:
+      - committed
+      - clean
+      - resumed
       type: object
     CompactConversationResponse:
       properties:
@@ -10830,6 +11113,146 @@ components:
       - truncated
       - findings
       type: object
+    ControllersWorkflowActionAuthorityRequest:
+      properties:
+        lifecycleGeneration:
+          format: int64
+          type: integer
+        placementGeneration:
+          format: int64
+          type: integer
+        repairGeneration:
+          type: integer
+        runState:
+          type: string
+        stopPhase:
+          type: string
+      type: object
+    ControllersWorkflowAdviceAuthorityView:
+      properties:
+        lifecycleGeneration:
+          format: int64
+          type: integer
+        placementGeneration:
+          format: int64
+          type: integer
+        repairGeneration:
+          type: integer
+        runState:
+          type: string
+        stopAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        stopPhase:
+          type: string
+      type: object
+    ControllersWorkflowAdviceBlockedView:
+      properties:
+        action:
+          type: string
+        reason:
+          type: string
+      required:
+      - action
+      - reason
+      type: object
+    ControllersWorkflowAdviceResponse:
+      properties:
+        advice:
+          $ref: '#/components/schemas/ControllersWorkflowAdviceView'
+      required:
+      - advice
+      type: object
+    ControllersWorkflowAdviceView:
+      properties:
+        authority:
+          $ref: '#/components/schemas/ControllersWorkflowAdviceAuthorityView'
+        automaticAction:
+          enum:
+          - launch_repair
+          - repair_in_flight
+          - scheduled_retry
+          - provider_failover
+          - await_capacity
+          - await_branch
+          - resolve_question
+          - fresh_review
+          type: string
+        automaticActionActive:
+          type: boolean
+        automaticActionBlockedReason:
+          type: string
+        availableActions:
+          items:
+            type: string
+          type: array
+        blockedActions:
+          items:
+            $ref: '#/components/schemas/ControllersWorkflowAdviceBlockedView'
+          type: array
+        category:
+          enum:
+          - no_action_required
+          - auto_recoverable
+          - wait_only
+          - human_action
+          - terminal
+          type: string
+        expectedNextStage:
+          type: string
+        explanation:
+          type: string
+        reasonCode:
+          type: string
+        recommendedAction:
+          type: string
+        repairBudget:
+          type: integer
+        repairEligibility:
+          enum:
+          - eligible
+          - ineligible
+          - budget_exhausted
+          - policy_disabled
+          - unknown_condition
+          type: string
+        repairSpent:
+          type: integer
+        repairable:
+          type: boolean
+        requiresHuman:
+          type: boolean
+        retryable:
+          type: boolean
+        stage:
+          type: string
+        summary:
+          type: string
+        summaryCode:
+          type: string
+        targetRunId:
+          type: string
+        version:
+          type: string
+        waitReason:
+          type: string
+        waitUntil:
+          format: date-time
+          type:
+          - "null"
+          - string
+      required:
+      - category
+      - requiresHuman
+      - automaticActionActive
+      - retryable
+      - repairable
+      - repairSpent
+      - repairBudget
+      - authority
+      type: object
     ControllersWorkflowBranchCessionChainView:
       properties:
         blockedReason:
@@ -10955,6 +11378,236 @@ components:
       - requiresHuman
       - createdAt
       - updatedAt
+      type: object
+    ControllersWorkflowRecoveryAttemptView:
+      properties:
+        attemptId:
+          type: string
+        attemptNumber:
+          format: int64
+          type: integer
+        errorClass:
+          type: string
+        finishedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        outcome:
+          type: string
+        provider:
+          type: string
+        startedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+      required:
+      - attemptId
+      type: object
+    ControllersWorkflowRecoveryBranchView:
+      properties:
+        branch:
+          type: string
+        heldByRunId:
+          type: string
+        heldBySessionId:
+          type: string
+        waiting:
+          type: boolean
+      required:
+      - waiting
+      type: object
+    ControllersWorkflowRecoveryCapacityView:
+      properties:
+        claimId:
+          type: string
+        dispatchKey:
+          type: string
+        fossilSuspected:
+          type: boolean
+        held:
+          type: integer
+        kinds:
+          items:
+            type: string
+          type: array
+        read:
+          type: boolean
+        waiting:
+          type: integer
+      required:
+      - read
+      - waiting
+      - held
+      type: object
+    ControllersWorkflowRecoveryDialogView:
+      properties:
+        source:
+          type: string
+        state:
+          enum:
+          - captured
+          - resolving
+          - delivery_pending
+          - delivered
+          - unreadable
+          - human_required
+          type: string
+        unreadable:
+          type: boolean
+      type: object
+    ControllersWorkflowRecoveryEventView:
+      properties:
+        at:
+          format: date-time
+          type: string
+        detail:
+          type: string
+        kind:
+          type: string
+        phase:
+          type: string
+        stepId:
+          type: string
+      required:
+      - kind
+      - at
+      type: object
+    ControllersWorkflowRecoveryExecutionView:
+      properties:
+        attemptId:
+          type: string
+        attemptNumber:
+          format: int64
+          type: integer
+        authority:
+          enum:
+          - active
+          - concluded
+          - superseded
+          - legacy_unproven
+          type: string
+        errorClass:
+          type: string
+        finishedAt:
+          type: string
+        lastEventAt:
+          type: string
+        lastEventPhase:
+          type: string
+        lifecycleState:
+          type: string
+        outcome:
+          type: string
+        provider:
+          type: string
+        sessionId:
+          type: string
+        startedAt:
+          type: string
+        stepId:
+          type: string
+        stepKind:
+          type: string
+      required:
+      - stepId
+      type: object
+    ControllersWorkflowRecoveryRepairView:
+      properties:
+        active:
+          type: boolean
+        attempt:
+          type: integer
+        budget:
+          type: integer
+        detail:
+          type: string
+        exhausted:
+          type: boolean
+        nextRetryPossible:
+          type: boolean
+        quiescent:
+          type: boolean
+        runId:
+          type: string
+        whyStarted:
+          type: string
+      required:
+      - active
+      - attempt
+      - budget
+      - exhausted
+      - nextRetryPossible
+      - quiescent
+      type: object
+    ControllersWorkflowRecoveryStatusView:
+      properties:
+        aoIsActing:
+          type: boolean
+        branch:
+          $ref: '#/components/schemas/ControllersWorkflowRecoveryBranchView'
+        capacity:
+          $ref: '#/components/schemas/ControllersWorkflowRecoveryCapacityView'
+        dialog:
+          $ref: '#/components/schemas/ControllersWorkflowRecoveryDialogView'
+        execution:
+          $ref: '#/components/schemas/ControllersWorkflowRecoveryExecutionView'
+        failover:
+          items:
+            $ref: '#/components/schemas/ControllersWorkflowRecoveryAttemptView'
+          type: array
+        nextWakeAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        repair:
+          $ref: '#/components/schemas/ControllersWorkflowRecoveryRepairView'
+        retryCount:
+          format: int64
+          type: integer
+        runId:
+          type: string
+        state:
+          enum:
+          - healthy_running
+          - waiting_capacity
+          - waiting_branch
+          - waiting_provider
+          - waiting_dialog_delivery
+          - verifying_result
+          - automatic_recovery_pending
+          - repair_running
+          - failover_running
+          - restart_recovery
+          - needs_human
+          - terminal
+          type: string
+        stopReason:
+          type: string
+        summary:
+          type: string
+        taskId:
+          type: string
+        timeline:
+          items:
+            $ref: '#/components/schemas/ControllersWorkflowRecoveryEventView'
+          type: array
+        version:
+          type: string
+        waiting:
+          type: boolean
+      required:
+      - runId
+      - state
+      - summary
+      - aoIsActing
+      - waiting
+      - repair
+      - capacity
+      - branch
+      - dialog
       type: object
     ControllersWorkflowRunOriginView:
       properties:
@@ -11660,6 +12313,12 @@ components:
           type:
           - "null"
           - boolean
+        autonomyPolicy:
+          enum:
+          - ask_always
+          - auto_decide_low_risk
+          - full_autonomy
+          type: string
         masterPlan:
           description: Generate a provider-neutral master plan before execution.
           type: boolean
@@ -11669,6 +12328,16 @@ components:
             verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long objective
             is refused.'
           maxLength: 131072
+          type: string
+        placement:
+          description: 'Where this run''s work happens. direct_branch is binding:
+            AO never falls back to a worktree.'
+          enum:
+          - auto
+          - direct_branch
+          - isolated_worktree
+          type: string
+        placementReason:
           type: string
         planApprovalMode:
           enum:
@@ -12240,12 +12909,21 @@ components:
       type: object
     ListWorkflowsResponse:
       properties:
+        limit:
+          type: integer
+        offset:
+          type: integer
+        total:
+          type: integer
         workflows:
           items:
             $ref: '#/components/schemas/WorkflowRunView'
           type: array
       required:
       - workflows
+      - total
+      - offset
+      - limit
       type: object
     ListWorkspaceFilesResponse:
       properties:
@@ -14145,6 +14823,12 @@ components:
           - chat
           - tui
           type: string
+        memoryMode:
+          enum:
+          - "off"
+          - assisted
+          - preferred
+          type: string
       required:
       - defaultSessionMode
       - chatHarnesses
@@ -14668,6 +15352,28 @@ components:
       - attemptNumber
       - startedAt
       type: object
+    WorkflowBoardCountsView:
+      properties:
+        active:
+          type: integer
+        archived:
+          type: integer
+        completed:
+          type: integer
+        needsAttention:
+          type: integer
+        waiting:
+          type: integer
+        working:
+          type: integer
+      required:
+      - active
+      - working
+      - waiting
+      - needsAttention
+      - completed
+      - archived
+      type: object
     WorkflowBoardEntryView:
       properties:
         archivedAt:
@@ -14684,6 +15390,8 @@ components:
           type: string
         attentionReason:
           type: string
+        automaticActionActive:
+          type: boolean
         branchWait:
           $ref: '#/components/schemas/WorkflowBranchWaitView'
         currentTaskOrdinal:
@@ -14703,6 +15411,9 @@ components:
         lastActivityAt:
           format: date-time
           type: string
+        lastMeaningfulActivityAt:
+          format: date-time
+          type: string
         model:
           type: string
         nextWakeAt:
@@ -14712,6 +15423,8 @@ components:
           - string
         objective:
           type: string
+        objectiveTruncated:
+          type: boolean
         phase:
           enum:
           - queued
@@ -14729,11 +15442,38 @@ components:
           - failed
           - cancelled
           type: string
+        presentation:
+          $ref: '#/components/schemas/WorkflowPresentationView'
         projectId:
           type: string
+        repairGeneration:
+          type: integer
+        repairOfWorkflowId:
+          type: string
+        repairs:
+          items:
+            $ref: '#/components/schemas/WorkflowBoardRepairView'
+          type: array
+        requiresHuman:
+          type: boolean
         reviewCycles:
           type: integer
         sessionId:
+          type: string
+        stage:
+          enum:
+          - preparing
+          - planning
+          - working
+          - reviewing
+          - correcting
+          - verifying
+          - integrating
+          - waiting
+          - needs_attention
+          - completed
+          - cancelled
+          - failed
           type: string
         state:
           enum:
@@ -14749,6 +15489,12 @@ components:
           items:
             $ref: '#/components/schemas/WorkflowStepProgressView'
           type: array
+        strategy:
+          enum:
+          - task
+          - autonomous
+          - master
+          type: string
         tasks:
           items:
             $ref: '#/components/schemas/WorkflowBoardTaskView'
@@ -14787,15 +15533,87 @@ components:
       - tasksFailed
       - tasksNeedsAttention
       - reviewCycles
+      - stage
+      - requiresHuman
+      - automaticActionActive
+      - lastMeaningfulActivityAt
+      type: object
+    WorkflowBoardRepairView:
+      properties:
+        active:
+          type: boolean
+        attempt:
+          type: integer
+        budget:
+          type: integer
+        failed:
+          type: boolean
+        lastMeaningfulActivityAt:
+          format: date-time
+          type: string
+        requiresHuman:
+          type: boolean
+        stage:
+          enum:
+          - preparing
+          - planning
+          - working
+          - reviewing
+          - correcting
+          - verifying
+          - integrating
+          - waiting
+          - needs_attention
+          - completed
+          - cancelled
+          - failed
+          type: string
+        state:
+          enum:
+          - pending
+          - running
+          - waiting
+          - needs_attention
+          - completed
+          - failed
+          - cancelled
+          type: string
+        succeeded:
+          type: boolean
+        summaryCode:
+          type: string
+        workflowId:
+          type: string
+      required:
+      - workflowId
+      - attempt
+      - budget
+      - stage
+      - requiresHuman
+      - state
+      - active
+      - lastMeaningfulActivityAt
       type: object
     WorkflowBoardResponse:
       properties:
+        counts:
+          $ref: '#/components/schemas/WorkflowBoardCountsView'
+        limit:
+          type: integer
+        matched:
+          type: integer
+        offset:
+          type: integer
         workflows:
           items:
             $ref: '#/components/schemas/WorkflowBoardEntryView'
           type: array
       required:
       - workflows
+      - counts
+      - matched
+      - offset
+      - limit
       type: object
     WorkflowBoardTaskView:
       properties:
@@ -15036,6 +15854,48 @@ components:
       - summary
       - steps
       type: object
+    WorkflowPendingChangeView:
+      properties:
+        path:
+          type: string
+        status:
+          type: string
+      required:
+      - path
+      type: object
+    WorkflowPendingChangesResponse:
+      properties:
+        available:
+          type: boolean
+        branch:
+          type: string
+        changes:
+          items:
+            $ref: '#/components/schemas/WorkflowPendingChangeView'
+          type: array
+        dirty:
+          type: boolean
+        headSha:
+          type: string
+        historical:
+          type: boolean
+        placement:
+          enum:
+          - direct_branch
+          - isolated_worktree
+          type: string
+        proposedMessage:
+          type: string
+        repoPath:
+          type: string
+        unavailable:
+          type: string
+        worktreePath:
+          type: string
+      required:
+      - available
+      - dirty
+      type: object
     WorkflowPlanReuseView:
       properties:
         contextDrift:
@@ -15158,6 +16018,260 @@ components:
       - acceptanceCriteria
       - verify
       type: object
+    WorkflowPresentationAction:
+      properties:
+        disabledReason:
+          type: string
+        enabled:
+          type: boolean
+        id:
+          enum:
+          - continue
+          - cancel
+          - repair
+          - commit_and_continue
+          - view_changes
+          - view_blocking_workflow
+          - wait
+          - authenticate
+          - revalidate_plan
+          - regenerate_plan
+          - open_session
+          - integrate
+          - use_isolated_worktree
+          type: string
+        primary:
+          type: boolean
+      required:
+      - id
+      - enabled
+      type: object
+    WorkflowPresentationEvent:
+      properties:
+        at:
+          format: date-time
+          type: string
+        detail:
+          type: string
+        kind:
+          enum:
+          - started
+          - planned
+          - worker_launched
+          - work_completed
+          - review_started
+          - review_verdict
+          - fix_started
+          - repair_started
+          - verified
+          - integrated
+          - provider_failed
+          - stopped
+          - completed
+          - cancelled
+          - failed
+          type: string
+      required:
+      - at
+      - kind
+      type: object
+    WorkflowPresentationPlacement:
+      properties:
+        baseBranch:
+          type: string
+        choiceReason:
+          type: string
+        chosenBy:
+          enum:
+          - user
+          - automatic
+          - unknown
+          type: string
+        executionBranch:
+          type: string
+        generation:
+          format: int64
+          type: integer
+        integratedSha:
+          type: string
+        integration:
+          enum:
+          - not_required
+          - pending
+          - in_progress
+          - integrated
+          - failed
+          type: string
+        integrationRequired:
+          type: boolean
+        mergeTarget:
+          type: string
+        repoPath:
+          type: string
+        state:
+          enum:
+          - selected
+          - waiting
+          - preparing
+          - ready
+          - active
+          - reviewing
+          - integrating
+          - integrated
+          - conflict
+          - preserved
+          - terminal
+          type: string
+        type:
+          enum:
+          - direct_branch
+          - isolated_worktree
+          type: string
+        worktreePath:
+          type: string
+      required:
+      - type
+      - chosenBy
+      - integrationRequired
+      - integration
+      type: object
+    WorkflowPresentationStage:
+      properties:
+        optional:
+          type: boolean
+        stage:
+          enum:
+          - preparing
+          - planning
+          - working
+          - reviewing
+          - correcting
+          - verifying
+          - integrating
+          - waiting
+          - needs_attention
+          - completed
+          - cancelled
+          - failed
+          type: string
+        state:
+          enum:
+          - completed
+          - current
+          - future
+          - blocked
+          - skipped
+          type: string
+      required:
+      - stage
+      - state
+      type: object
+    WorkflowPresentationTechnical:
+      properties:
+        attemptId:
+          type: string
+        attemptNumber:
+          format: int64
+          type: integer
+        attention:
+          type: string
+        attentionDetail:
+          type: string
+        attentionReason:
+          type: string
+        authority:
+          enum:
+          - active
+          - concluded
+          - superseded
+          - legacy_unproven
+          type: string
+        dispatchedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        errorClass:
+          type: string
+        lastEventAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        lastEventPhase:
+          type: string
+        lifecycleGeneration:
+          format: int64
+          type: integer
+        nextWakeAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        phase:
+          type: string
+        placementGeneration:
+          format: int64
+          type: integer
+        provider:
+          type: string
+        repairRunId:
+          type: string
+        runState:
+          type: string
+        sessionId:
+          type: string
+        waitReason:
+          type: string
+      type: object
+    WorkflowPresentationView:
+      properties:
+        actions:
+          items:
+            $ref: '#/components/schemas/WorkflowPresentationAction'
+          type: array
+        automaticActionActive:
+          type: boolean
+        placement:
+          $ref: '#/components/schemas/WorkflowPresentationPlacement'
+        progress:
+          items:
+            $ref: '#/components/schemas/WorkflowPresentationStage'
+          type: array
+        recommendedAction:
+          type: string
+        requiresHuman:
+          type: boolean
+        stage:
+          enum:
+          - preparing
+          - planning
+          - working
+          - reviewing
+          - correcting
+          - verifying
+          - integrating
+          - waiting
+          - needs_attention
+          - completed
+          - cancelled
+          - failed
+          type: string
+        summaryCode:
+          type: string
+        technical:
+          $ref: '#/components/schemas/WorkflowPresentationTechnical'
+        timeline:
+          items:
+            $ref: '#/components/schemas/WorkflowPresentationEvent'
+          type: array
+      required:
+      - stage
+      - requiresHuman
+      - automaticActionActive
+      - summaryCode
+      - technical
+      type: object
     WorkflowQuestionChoiceResponse:
       properties:
         id:
@@ -15176,6 +16290,7 @@ components:
           - policy
           - human
           - resolver
+          - autonomous
           type: string
         answerText:
           type: string
@@ -15186,6 +16301,13 @@ components:
         askingHarness:
           type: string
         askingRole:
+          type: string
+        autonomyMode:
+          enum:
+          - ""
+          - ask_always
+          - auto_decide_low_risk
+          - full_autonomy
           type: string
         certainty:
           enum:
@@ -15269,6 +16391,8 @@ components:
           $ref: '#/components/schemas/WorkflowRecoveryView'
         repair:
           $ref: '#/components/schemas/WorkflowRepairPlanView'
+        status:
+          $ref: '#/components/schemas/ControllersWorkflowRecoveryStatusView'
       required:
       - recovery
       - repair
@@ -15280,6 +16404,8 @@ components:
           type: boolean
         blockingCondition:
           type: string
+        execution:
+          $ref: '#/components/schemas/ControllersWorkflowRecoveryExecutionView'
         explanation:
           type: string
         obligation:
@@ -15554,12 +16680,16 @@ components:
       type: object
     WorkflowRunDetailView:
       properties:
+        advice:
+          $ref: '#/components/schemas/ControllersWorkflowAdviceView'
         integrationState:
           $ref: '#/components/schemas/ControllersWorkflowIntegrationStateView'
         plan:
           $ref: '#/components/schemas/WorkflowPlanView'
         planReuse:
           $ref: '#/components/schemas/WorkflowPlanReuseView'
+        presentation:
+          $ref: '#/components/schemas/WorkflowPresentationView'
         questions:
           items:
             $ref: '#/components/schemas/WorkflowQuestionResponse'
@@ -15607,6 +16737,8 @@ components:
           type: string
         attentionWorkflowId:
           type: string
+        automaticActionActive:
+          type: boolean
         branchWait:
           $ref: '#/components/schemas/WorkflowBranchWaitView'
         canContinue:
@@ -15638,6 +16770,11 @@ components:
         lastActivityAt:
           format: date-time
           type: string
+        lastMeaningfulActivityAt:
+          format: date-time
+          type:
+          - "null"
+          - string
         nextAction:
           type: string
         nextWakeAt:
@@ -15668,10 +16805,45 @@ components:
           type: string
         projectId:
           type: string
+        recommendedAction:
+          enum:
+          - continue
+          - cancel
+          - repair
+          - commit_and_continue
+          - view_changes
+          - view_blocking_workflow
+          - wait
+          - authenticate
+          - revalidate_plan
+          - regenerate_plan
+          - open_session
+          - integrate
+          - use_isolated_worktree
+          type: string
         recovery:
           $ref: '#/components/schemas/WorkflowRecoveryView'
         repair:
           $ref: '#/components/schemas/WorkflowRepairStateView'
+        repairOfWorkflowId:
+          type: string
+        requiresHuman:
+          type: boolean
+        stage:
+          enum:
+          - preparing
+          - planning
+          - working
+          - reviewing
+          - correcting
+          - verifying
+          - integrating
+          - waiting
+          - needs_attention
+          - completed
+          - cancelled
+          - failed
+          type: string
         state:
           enum:
           - pending
@@ -15681,6 +16853,8 @@ components:
           - completed
           - failed
           - cancelled
+          type: string
+        summaryCode:
           type: string
         updatedAt:
           format: date-time

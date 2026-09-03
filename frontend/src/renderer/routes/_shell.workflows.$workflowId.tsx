@@ -3,7 +3,7 @@ import { Link, createFileRoute } from "@tanstack/react-router";
 import { Archive } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { useWorkflowRun, workflowRunIsTerminal } from "../hooks/useWorkflowRun";
+import { useWorkflowRun } from "../hooks/useWorkflowRun";
 import { useWorkflowStatusLabel } from "../hooks/useWorkflowExecutionStatus";
 import { useChildTaskRouting } from "../hooks/useChildTaskRouting";
 import { WorkflowVerifyDetails } from "../components/workflow-verify-details";
@@ -18,9 +18,19 @@ import { WorkflowRecoveryPanel } from "../components/workflow-recovery-panel";
 import {
 	translateDynamic,
 	WorkflowActivityPanel,
-	WorkflowPhaseBadge,
 	WorkflowStepIcon,
 } from "../components/workflow-activity";
+import {
+	WorkflowActions,
+	WorkflowCompletionSummary,
+	WorkflowExecutionLocation,
+	WorkflowRepairInline,
+	WorkflowStatusPanel,
+	WorkflowTechnicalDetails,
+	WorkflowTimeline,
+	type WorkflowActionHandlers,
+} from "../components/workflow-status";
+import { WorkflowCommitDialog } from "../components/workflow-commit-dialog";
 import { processedTokens } from "../components/workflow-usage-section";
 import { formatElapsedCompact } from "../lib/format-time";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -129,6 +139,10 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 	// The "¿Qué hago?" modal's own open state. It is local because opening the
 	// modal is a read with no durable consequence — see the control below.
 	const [incidentOpen, setIncidentOpen] = useState(false);
+	// The commit-and-continue dialog's own open state. Local because opening it
+	// is a read: the daemon runs `git status` and nothing else until the user
+	// presses the button inside it.
+	const [commitOpen, setCommitOpen] = useState(false);
 	const {
 		workflow,
 		isLoading,
@@ -176,13 +190,8 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 		return <p className="p-6 text-sm text-muted-foreground">{t("shell.workflowsNotFound")}</p>;
 	}
 
-	const nonTerminal = !workflowRunIsTerminal(workflow.run.state);
 	const isPending = workflow.run.state === "pending";
 	const workStep = workflow.steps.find((step) => step.kind === "work");
-	const reviewStep = workflow.steps.find((step) => step.kind === "review");
-	const canContinueReview = Boolean(
-		workStep?.state === "completed" && (reviewStep?.state === "pending" || reviewStep?.state === "ready"),
-	);
 
 	// Facts for the "working right now" panel. Every one of them is a value the
 	// API already returns for this run -- the harness is read the same way the
@@ -203,6 +212,21 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 			value: observedTokens === null ? t("board.factUnknown") : observedTokens.toLocaleString(),
 		},
 	];
+
+	const presentation = workflow.presentation;
+	// The action handlers the renderer can actually perform. An action the
+	// daemon offers and this map has no entry for renders disabled rather than
+	// disappearing: the daemon authorised it, and hiding it would misreport
+	// what AO is willing to do. Every entry here is a call the page already
+	// made before P3-A -- nothing new is being authorised by the projection.
+	const actionHandlers: WorkflowActionHandlers = {
+		continue: () => void continueRun(),
+		cancel: () => void cancel(),
+		commit_and_continue: () => setCommitOpen(true),
+		view_changes: () => setCommitOpen(true),
+		revalidate_plan: () => void generatePlan(),
+		regenerate_plan: () => void generatePlan(),
+	};
 
 	return (
 		// Checkpoint 8P-E.12: the shell gives every route a `min-h-0 flex-1`
@@ -232,14 +256,17 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 			    planner-context probe. */}
 			<WorkflowRecoveryPanel run={workflow.run} />
 			<WorkflowBranchWaitBanner run={workflow.run} />
-			<div className="flex flex-col gap-1">
-				<div className="flex items-start gap-2">
-					<h1 className="min-w-0 flex-1 text-lg font-semibold">{workflow.run.objective}</h1>
-					{/* The header's own "what is this run doing" answer: the same
-					    badge (and the same single spinner) the board card uses, so
-					    the two surfaces can never disagree. */}
-					<WorkflowPhaseBadge className="mt-1" phase={workflow.run.phase} />
-				</div>
+			<div className="flex flex-col gap-3">
+				<h1 className="min-w-0 flex-1 text-lg font-semibold">{workflow.run.objective}</h1>
+				{/* P3-A: the human status is the headline. Stage, the sentence that
+				    says what is happening, the one-line "¿qué hago?", and the stage
+				    progression — all of it derived by the daemon, so this page and
+				    the board card cannot tell two different stories. The technical
+				    vocabulary keeps its place further down, in a disclosure. */}
+				{presentation ? <WorkflowStatusPanel presentation={presentation} /> : null}
+				{presentation ? (
+					<WorkflowActions busy={continuing || cancelling} handlers={actionHandlers} presentation={presentation} />
+				) : null}
 				<p className="text-sm text-muted-foreground">
 					{t("shell.workflowsRunHeader", { projectId: workflow.run.projectId, state: workflow.run.state })}
 				</p>
@@ -314,19 +341,14 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 						{rejectPlanError && <p className="mt-1 text-sm text-destructive">{rejectPlanError}</p>}
 					</div>
 				)}
-				{canContinueReview && (
-					<div>
-						<button
-							className="rounded border border-border px-3 py-1.5 text-sm disabled:opacity-50"
-							disabled={continuing}
-							onClick={() => void continueRun()}
-							type="button"
-						>
-							{continuing ? t("shell.workflowsContinuing") : t("shell.workflowsStartReview")}
-						</button>
-						{continueError && <p className="mt-1 text-sm text-destructive">{continueError}</p>}
-					</div>
-				)}
+				{/* P3-A: Continue, Resume and Cancel are no longer rendered here.
+				    They are offered by WorkflowActions above, from the daemon's own
+				    authorisation, so a person is never shown two buttons that make
+				    the same POST -- and never shown one AO would refuse. The
+				    controls that remain below are the ones the projection does not
+				    cover: starting a pending run, the plan approval pair, the
+				    incident advisor, and cancel-and-archive. */}
+				{continueError && <p className="text-sm text-destructive">{continueError}</p>}
 				{/* Resume, for a run stopped on something a person has now dealt
 				    with. Gated on the backend's authoritative canContinue flag —
 				    never on a state string read here — so a terminal or
@@ -352,27 +374,18 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				{workflow.run.state === "needs_attention" && (
 					<WorkflowIncidentDialog onOpenChange={setIncidentOpen} open={incidentOpen} workflowId={workflowId} />
 				)}
-				{workflow.run.canContinue && !canContinueReview && (
+				{/* The attention hand-off keeps its own control: it does not
+				    continue THIS run, it sends the user to the child run that
+				    actually stopped, which no generic action can express. */}
+				{workflow.run.canContinue && workflow.run.attentionWorkflowId ? (
 					<WorkflowResumeButton
 						attentionWorkflowId={workflow.run.attentionWorkflowId}
 						continueError={continueError}
 						continueRun={continueRun}
 						continuing={continuing}
 					/>
-				)}
-				{nonTerminal && (
-					<div>
-						<button
-							className="rounded border border-border px-3 py-1.5 text-sm disabled:opacity-50"
-							disabled={cancelling}
-							onClick={() => void cancel()}
-							type="button"
-						>
-							{cancelling ? t("shell.workflowsCancelling") : t("shell.workflowsCancel")}
-						</button>
-						{cancelError && <p className="mt-1 text-sm text-destructive">{cancelError}</p>}
-					</div>
-				)}
+				) : null}
+				{cancelError && <p className="text-sm text-destructive">{cancelError}</p>}
 				<WorkflowCancelAndArchiveButton run={workflow.run} />
 			</div>
 
@@ -612,7 +625,43 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				<WorkflowQuestionsSection questions={workflow.questions} onAnswer={answerQuestion} answering={answeringQuestion} />
 			)}
 
+			{/* §26: what a finished run actually produced, so nobody has to
+			    reconstruct it from the step list -- and, for a direct-branch run,
+			    a plain statement that there is nothing left to integrate. */}
+			{presentation ? (
+				<WorkflowCompletionSummary
+					commitSha={workflow.steps.find((step) => step.kind === "work")?.headSha}
+					presentation={presentation}
+					verdict={workflow.steps.find((step) => step.kind === "review")?.verdict}
+					verificationPassed={workflow.steps.find((step) => step.kind === "verify")?.verification?.passed}
+				/>
+			) : null}
+			{/* §5/§6: AO's own repair, inside the run it is repairing, with the
+			    audit trail one link away rather than hidden. */}
+			<WorkflowRepairInline
+				renderLink={(runId, label) => (
+					<Link
+						className="text-xs text-primary underline underline-offset-2"
+						params={{ workflowId: runId }}
+						to="/workflows/$workflowId"
+					>
+						{label}
+					</Link>
+				)}
+				repair={workflow.run.repair}
+			/>
+			{/* §13: where AO is working, always visible, never only in a log. */}
+			{presentation ? (
+				<WorkflowExecutionLocation presentation={presentation} projectId={workflow.run.projectId} />
+			) : null}
+			{/* §15: the bounded human timeline. */}
+			{presentation ? <WorkflowTimeline events={presentation.timeline} /> : null}
+			{/* §3: the technical account, present in full and ranked below the
+			    human one. */}
+			{presentation ? <WorkflowTechnicalDetails presentation={presentation} /> : null}
+
 			{workflow.usage && <WorkflowUsageSection usage={workflow.usage} />}
+			<WorkflowCommitDialog onOpenChange={setCommitOpen} open={commitOpen} workflowId={workflowId} />
 		</div>
 	);
 }

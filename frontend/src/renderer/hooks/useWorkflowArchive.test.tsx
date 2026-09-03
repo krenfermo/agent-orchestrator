@@ -26,8 +26,12 @@ function boardWorkflow(id: string, state: BoardWorkflow["state"] = "needs_attent
 		objective: "an objective",
 		state,
 		phase: "needs_attention",
+		stage: "needs_attention",
+		requiresHuman: true,
+		automaticActionActive: false,
 		executionMode: "autonomous",
 		lastActivityAt: new Date().toISOString(),
+		lastMeaningfulActivityAt: new Date().toISOString(),
 		reviewCycles: 0,
 		tasksTotal: 0,
 		tasksCompleted: 0,
@@ -59,18 +63,25 @@ describe("canCancelAndArchive", () => {
 describe("useCancelAndArchiveWorkflow", () => {
 	// Requirement: the card leaves the active Board immediately, without an
 	// application restart and without waiting for the next poll.
-	it("removes the workflow from the cached board as soon as the call succeeds", async () => {
+	// P3-B §10: the renderer holds no optimistic board state. Archiving asks the
+	// daemon and then re-reads it; the card goes away because the daemon's next
+	// board does not contain it. Removing it locally would make a workflow the
+	// daemon refused to retire vanish anyway, and would not survive a restart.
+	it("re-reads the board from the daemon instead of editing it locally", async () => {
 		postMock.mockResolvedValue({ data: { workflow: { run: { id: "wf-stale" } } } });
 		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-		client.setQueryData(projectBoardQueryKey("proj"), [boardWorkflow("wf-stale"), boardWorkflow("wf-live", "running")]);
+		const invalidated: unknown[] = [];
+		const realInvalidate = client.invalidateQueries.bind(client);
+		vi.spyOn(client, "invalidateQueries").mockImplementation((filters) => {
+			invalidated.push((filters as { queryKey?: unknown })?.queryKey);
+			return realInvalidate(filters);
+		});
 
 		const { result } = renderHook(() => useCancelAndArchiveWorkflow("proj"), { wrapper: wrapperFor(client) });
 		await result.current.mutateAsync("wf-stale");
 
-		await waitFor(() => {
-			const board = client.getQueryData<BoardWorkflow[]>(projectBoardQueryKey("proj"));
-			expect(board?.map((w) => w.workflowId)).toEqual(["wf-live"]);
-		});
+		await waitFor(() => expect(invalidated).toContainEqual(["project-board", "proj"]));
+		expect(invalidated).toContainEqual(projectBoardHistoryQueryKey("proj"));
 		expect(postMock).toHaveBeenCalledWith("/api/v1/workflows/{workflowId}/cancel-archive", {
 			params: { path: { workflowId: "wf-stale" } },
 		});
@@ -104,7 +115,7 @@ describe("useProjectBoardHistory", () => {
 		const open = renderHook(() => useProjectBoardHistory("proj", true), { wrapper: wrapperFor(client) });
 		await waitFor(() => expect(open.result.current.workflows).toHaveLength(1));
 		expect(getMock).toHaveBeenCalledWith("/api/v1/projects/{projectId}/board/history", {
-			params: { path: { projectId: "proj" } },
+			params: { path: { projectId: "proj" }, query: {} },
 		});
 		expect(client.getQueryData(projectBoardHistoryQueryKey("proj"))).toBeDefined();
 	});

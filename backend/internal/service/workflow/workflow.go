@@ -133,6 +133,10 @@ type RecoveryManager interface {
 	// AssessRecovery is the deterministic "what should I do about this run".
 	// It writes nothing.
 	AssessRecovery(ctx context.Context, runID string) (workflowcore.RecoveryAssessment, error)
+	// RecoveryStatusFor is the companion question: "how is AO trying to recover
+	// this run" -- which of its own mechanisms is in play, and what it is
+	// waiting for. Also a strict read.
+	RecoveryStatusFor(ctx context.Context, runID string) (workflowcore.RecoveryStatus, error)
 	// ResumeRun states the durable obligation and discharges only that one.
 	ResumeRun(ctx context.Context, runID string) (workflowcore.RunDetail, workflowcore.ResumeReport, error)
 	// ReusePlan executes an existing plan revision, refusing anything but an
@@ -148,12 +152,77 @@ type RecoveryManager interface {
 	ApplyRepairPolicy(ctx context.Context, runID string, mode domain.RepairMode) error
 }
 
+// AdvisorManager is P3-C's Incident Advisor surface: the single deterministic
+// answer to "what do I do now", the automatic-recovery dispatcher that is
+// allowed to act on it, and the authority revalidation a late click needs.
+//
+// The read half and the write half are deliberately separate methods on one
+// interface rather than one method that does both. AdviceFor writes nothing, so
+// a board poll and a page load may call it freely; DispatchAutomaticRecovery is
+// the only thing that carries an automatic action out, and it re-derives its own
+// authority when it does (P3-C §16).
+//
+// Optional and type-asserted, exactly like RecoveryManager, so an
+// implementation or test double that predates P3-C keeps compiling and its
+// deployment answers 501 rather than doing something weaker.
+type AdvisorManager interface {
+	// AdviceFor is the deterministic "what do I do now" for one run. It writes
+	// nothing.
+	AdviceFor(ctx context.Context, runID string) (workflowcore.Advice, error)
+	// AdviceForDetail is AdviceFor for a caller that already loaded the run
+	// detail, so the most-polled route in the product does not read it twice.
+	AdviceForDetail(ctx context.Context, detail workflowcore.RunDetail) (workflowcore.Advice, error)
+	// DispatchAutomaticRecovery performs whatever AO is authorized to do about
+	// a run by itself, and nothing else.
+	DispatchAutomaticRecovery(ctx context.Context, runID string) (workflowcore.AutomaticRecoveryOutcome, error)
+	// RevalidateActionAuthority answers "is this action still the action AO
+	// offered", for a click computed against an earlier reading.
+	RevalidateActionAuthority(ctx context.Context, runID string, action workflowcore.ActionID, expected workflowcore.AdviceAuthority) (workflowcore.ActionAuthorityMismatch, error)
+	// ApplyAutonomyPolicy freezes a just-created run's question-autonomy mode.
+	ApplyAutonomyPolicy(ctx context.Context, runID string, mode domain.QuestionAutonomyMode) error
+}
+
 // BoardReader is Checkpoint 8P-E.12's project Board projection. Optional
 // (type-asserted by the controller, mirroring PlannerManager) so a Manager
 // implementation or test double that predates it keeps compiling unchanged.
 type BoardReader interface {
 	ProjectBoard(ctx context.Context, projectID string, retention time.Duration) ([]workflowcore.BoardEntry, error)
 }
+
+// BoardViewReader is P3-B's Board: the same projection with hierarchy, counts,
+// server-side filtering, stable ordering and paging. Separate from BoardReader
+// rather than a widening of it for this package's usual reason — a double that
+// predates it keeps compiling — and the controller falls back to BoardReader
+// when it is absent.
+type BoardViewReader interface {
+	ProjectBoardView(ctx context.Context, projectID string, q workflowcore.BoardQuery) (workflowcore.BoardView, error)
+}
+
+// RepairOriginReader reports whether a run is an automatic repair of another
+// run, and of which. Optional, like every other read surface here.
+type RepairOriginReader interface {
+	RepairRunOrigin(ctx context.Context, runID string) (string, int, bool)
+}
+
+// RunSummaryLister is P3-B §3: the workflow list projected onto the same human
+// status model the Board and the run detail page use, so the three cannot
+// contradict each other about what a run is doing.
+type RunSummaryLister interface {
+	ListRunSummaries(ctx context.Context, f workflowcore.ListRunSummariesFilter) ([]workflowcore.RunSummary, int, error)
+}
+
+// BoardPageLimit is the default page size of one Board request, and the ceiling
+// a caller may ask for. It exists because a project with several hundred runs
+// should not have to project all of them to draw the cards that fit on a
+// screen.
+const BoardPageLimit = 50
+
+// BoardPageLimitMax bounds an explicit `limit` query parameter.
+const BoardPageLimitMax = 200
+
+// ListPageLimit is the default page size of GET /api/v1/workflows, which had no
+// bound at all before its rows started carrying a derived stage.
+const ListPageLimit = 200
 
 // RunArchiver is the cancel-and-archive surface. Optional (type-asserted by
 // the controller, mirroring PlannerManager/BoardReader) so a Manager
@@ -268,6 +337,37 @@ func (s *Service) EffectiveStrategy(ctx context.Context, runID string) (domain.E
 	return s.coordinator.EffectiveStrategy(ctx, runID)
 }
 
+// AdviceFor implements AdvisorManager.
+func (s *Service) AdviceFor(ctx context.Context, runID string) (workflowcore.Advice, error) {
+	return s.coordinator.AdviceFor(ctx, runID)
+}
+
+// AdviceForDetail implements AdvisorManager.
+func (s *Service) AdviceForDetail(ctx context.Context, detail workflowcore.RunDetail) (workflowcore.Advice, error) {
+	return s.coordinator.AdviceForDetail(ctx, detail)
+}
+
+// DispatchAutomaticRecovery implements AdvisorManager.
+func (s *Service) DispatchAutomaticRecovery(ctx context.Context, runID string) (workflowcore.AutomaticRecoveryOutcome, error) {
+	return s.coordinator.DispatchAutomaticRecovery(ctx, runID)
+}
+
+// RevalidateActionAuthority implements AdvisorManager.
+func (s *Service) RevalidateActionAuthority(ctx context.Context, runID string, action workflowcore.ActionID, expected workflowcore.AdviceAuthority) (workflowcore.ActionAuthorityMismatch, error) {
+	return s.coordinator.RevalidateActionAuthority(ctx, runID, action, expected)
+}
+
+// ApplyAutonomyPolicy implements AdvisorManager.
+func (s *Service) ApplyAutonomyPolicy(ctx context.Context, runID string, mode domain.QuestionAutonomyMode) error {
+	return s.coordinator.ApplyAutonomyPolicy(ctx, runID, mode)
+}
+
+// RecoveryStatusFor implements RecoveryManager: "how is AO trying to recover
+// this run". A strict read, like its neighbour.
+func (s *Service) RecoveryStatusFor(ctx context.Context, runID string) (workflowcore.RecoveryStatus, error) {
+	return s.coordinator.RecoveryStatusFor(ctx, runID)
+}
+
 // AssessRecovery implements RecoveryManager.
 func (s *Service) AssessRecovery(ctx context.Context, runID string) (workflowcore.RecoveryAssessment, error) {
 	return s.coordinator.AssessRecovery(ctx, runID)
@@ -342,6 +442,21 @@ func (s *Service) StartRun(ctx context.Context, runID string) (workflowcore.RunD
 // ProjectBoard implements BoardReader.
 func (s *Service) ProjectBoard(ctx context.Context, projectID string, retention time.Duration) ([]workflowcore.BoardEntry, error) {
 	return s.coordinator.ProjectBoard(ctx, projectID, retention)
+}
+
+// ProjectBoardView implements BoardViewReader.
+func (s *Service) ProjectBoardView(ctx context.Context, projectID string, q workflowcore.BoardQuery) (workflowcore.BoardView, error) {
+	return s.coordinator.ProjectBoardView(ctx, projectID, q)
+}
+
+// RepairRunOrigin implements RepairOriginReader.
+func (s *Service) RepairRunOrigin(ctx context.Context, runID string) (string, int, bool) {
+	return s.coordinator.RepairRunOrigin(ctx, runID)
+}
+
+// ListRunSummaries implements RunSummaryLister.
+func (s *Service) ListRunSummaries(ctx context.Context, f workflowcore.ListRunSummariesFilter) ([]workflowcore.RunSummary, int, error) {
+	return s.coordinator.ListRunSummaries(ctx, f)
 }
 
 // CancelAndArchiveRun implements RunArchiver: it cancels the run and its
@@ -469,4 +584,30 @@ func (s *Service) ListPlacementOverrides(ctx context.Context, runID string) ([]w
 // ListPlacementTransitions implements PlacementOverrideManager.
 func (s *Service) ListPlacementTransitions(ctx context.Context, runID string) ([]workflowcore.PlacementTransitionView, error) {
 	return s.coordinator.ListPlacementTransitions(ctx, runID)
+}
+
+// PendingChangesManager is P3-A §17's commit-and-continue surface.
+//
+// It is a separate, type-asserted interface for the same reason
+// PlacementOverrideManager is: it can WRITE to a person's repository, and a
+// deployment that exposes the read-only workflow API must not acquire that
+// ability by implementing an unrelated method.
+type PendingChangesManager interface {
+	// PendingChanges is read-only: it reports what is uncommitted in the
+	// repository this run works in, and proposes a message the caller edits.
+	PendingChanges(ctx context.Context, runID string) (workflowcore.PendingChanges, error)
+	// CommitPendingChanges commits what the caller was shown, under the message
+	// they approved, re-probes, and resumes the run only if the tree is
+	// provably clean.
+	CommitPendingChanges(ctx context.Context, runID, message string) (workflowcore.CommitOutcome, error)
+}
+
+// PendingChanges implements PendingChangesManager.
+func (s *Service) PendingChanges(ctx context.Context, runID string) (workflowcore.PendingChanges, error) {
+	return s.coordinator.PendingChanges(ctx, runID)
+}
+
+// CommitPendingChanges implements PendingChangesManager.
+func (s *Service) CommitPendingChanges(ctx context.Context, runID, message string) (workflowcore.CommitOutcome, error) {
+	return s.coordinator.CommitPendingChanges(ctx, runID, message)
 }

@@ -26,6 +26,9 @@ type recoveryWorkflowService struct {
 	assessment workflowcore.RecoveryAssessment
 	assessErr  error
 	assessRuns []string
+	statusRuns []string
+	status     workflowcore.RecoveryStatus
+	statusErr  error
 
 	resumeReport workflowcore.ResumeReport
 	resumeRuns   []string
@@ -51,6 +54,11 @@ var _ workflowsvc.RecoveryManager = (*recoveryWorkflowService)(nil)
 func (f *recoveryWorkflowService) AssessRecovery(_ context.Context, runID string) (workflowcore.RecoveryAssessment, error) {
 	f.assessRuns = append(f.assessRuns, runID)
 	return f.assessment, f.assessErr
+}
+
+func (f *recoveryWorkflowService) RecoveryStatusFor(_ context.Context, runID string) (workflowcore.RecoveryStatus, error) {
+	f.statusRuns = append(f.statusRuns, runID)
+	return f.status, f.statusErr
 }
 
 func (f *recoveryWorkflowService) ResumeRun(_ context.Context, runID string) (workflowcore.RunDetail, workflowcore.ResumeReport, error) {

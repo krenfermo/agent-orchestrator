@@ -2,6 +2,7 @@ package workflow
 
 import (
 	stdctx "context"
+	"strings"
 	"testing"
 	"time"
 
@@ -269,4 +270,78 @@ func boundaryKinds(rows []domain.WorkflowMutationProvenance) []domain.WorkflowMu
 		out = append(out, r.Boundary)
 	}
 	return out
+}
+
+// P3-A: a provenance reason states what was PROVED, not the path that was
+// expected.
+//
+// The smoke that found this ran a direct-branch placement inside a project
+// configured for isolated worktrees. autonomousLocalCommit consults the
+// PROJECT, so it committed nothing and returned success — one of four normal
+// outcomes in which it writes no commit — and the run finished with the work
+// uncommitted on the branch. Both provenance rows nevertheless asserted a
+// commit. Somebody reading those rows later to decide whether the change is
+// safe would have been told, in AO's own ledger, that the work was committed
+// when it is sitting in the working tree.
+func TestProvenanceReasonDoesNotClaimACommitThatDidNotHappen(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		committed   bool
+		wantFragOK  string
+		wantFragBad string
+	}{
+		{"no autonomous commit was recorded", false, "left uncommitted", "committed the result locally"},
+		{"an autonomous commit was recorded", true, "committed the result locally", "left uncommitted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := sqlitetest.MustOpen(t)
+			ctx := stdctx.Background()
+			base := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+			if err := store.UpsertProject(ctx, domain.ProjectRecord{ID: "p", Path: t.TempDir(), RegisteredAt: base}); err != nil {
+				t.Fatal(err)
+			}
+			run := domain.WorkflowRun{
+				ID: "wf-reason", ProjectID: "p", Objective: "do the thing",
+				State: domain.WorkflowRunRunning, PolicyVersion: policyVersionV1, PolicySnapshot: "{}",
+				CreatedAt: base, UpdatedAt: base,
+			}
+			steps := []domain.WorkflowStep{
+				{ID: "wfs-work", WorkflowRunID: run.ID, Kind: domain.WorkflowStepWork, Ordinal: 1,
+					State: domain.WorkflowStepCompleted, ArtifactJSON: "{}", CreatedAt: base, UpdatedAt: base},
+				{ID: "wfs-verify", WorkflowRunID: run.ID, Kind: domain.WorkflowStepVerify, Ordinal: 2,
+					State: domain.WorkflowStepRunning, ArtifactJSON: "{}", CreatedAt: base, UpdatedAt: base},
+			}
+			if _, _, err := store.CreateWorkflowRun(ctx, run, steps); err != nil {
+				t.Fatal(err)
+			}
+			if tc.committed {
+				stepID := steps[0].ID
+				if _, err := store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+					ID: "wfc-commit", WorkflowRunID: run.ID, WorkflowStepID: &stepID, ProjectID: run.ProjectID,
+					HeadSHA: "committed-sha", NextAction: "local_commit_created",
+					DurablePhase: autonomousLocalCommitPhase, PayloadVersion: "v1", RetryState: "{}",
+					CreatedAt: base,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			prov := &fakeMutationProvenance{}
+			c := New(Deps{Store: store, Projects: store, MutationProvenance: prov,
+				Clock: func() time.Time { return base }})
+			c.recordVerifiedBoundary(ctx, run, steps[1], "sha-verified")
+
+			if len(prov.rows) == 0 {
+				t.Fatal("no provenance was recorded")
+			}
+			for _, row := range prov.rows {
+				if !strings.Contains(row.Reason, tc.wantFragOK) {
+					t.Fatalf("%s reason = %q, want it to say %q", row.Boundary, row.Reason, tc.wantFragOK)
+				}
+				if strings.Contains(row.Reason, tc.wantFragBad) {
+					t.Fatalf("%s reason = %q, must not say %q", row.Boundary, row.Reason, tc.wantFragBad)
+				}
+			}
+		})
+	}
 }

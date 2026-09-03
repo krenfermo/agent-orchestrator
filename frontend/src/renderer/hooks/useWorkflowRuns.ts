@@ -24,6 +24,21 @@ export type ApprovalPolicy = (typeof APPROVAL_POLICIES)[number];
 export const REPAIR_POLICIES = ["disabled", "suggest", "automatic"] as const;
 export type RepairPolicy = (typeof REPAIR_POLICIES)[number];
 
+/**
+ * P3-A §7: where the work happens, chosen at creation.
+ *
+ * The order is the order the options are offered in, and it puts the two
+ * explicit answers before the deferral on purpose: `auto` is what AO does when
+ * nobody has an opinion, not the recommended answer.
+ *
+ * `direct_branch` is BINDING. A run created with it never silently becomes an
+ * isolated worktree — if the branch cannot be used, AO waits or stops with the
+ * cause named. That guarantee lives in the daemon; the renderer only has to
+ * stop describing the choice as a preference.
+ */
+export const PLACEMENTS = ["direct_branch", "isolated_worktree", "auto"] as const;
+export type Placement = (typeof PLACEMENTS)[number];
+
 export function workflowRunsQueryKey(projectId?: string) {
 	return ["workflow-runs", projectId ?? ""] as const;
 }
@@ -54,6 +69,7 @@ export function useWorkflowRuns(projectId?: string) {
 			strategy: ExecutionStrategy;
 			approvalPolicy: ApprovalPolicy;
 			repairPolicy: RepairPolicy;
+			placement: Placement;
 		}) => {
 			const { data, error } = await apiClient.POST("/api/v1/projects/{projectId}/workflows", {
 				params: { path: { projectId: input.projectId } },
@@ -66,6 +82,12 @@ export function useWorkflowRuns(projectId?: string) {
 					strategy: input.strategy,
 					approvalPolicy: input.approvalPolicy,
 					repairPolicy: input.repairPolicy,
+					// P3-A §7: the placement travels with the create request, so it
+					// is recorded durably BEFORE anything this run can execute and
+					// the freeze consumes it. Sending it afterwards would race the
+					// autonomous kickoff, and losing that race is exactly how an
+					// explicit "current branch" became a worktree nobody asked for.
+					placement: input.placement,
 				},
 			});
 			if (error) throw error;

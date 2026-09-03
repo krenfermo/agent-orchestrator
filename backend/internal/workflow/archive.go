@@ -83,6 +83,18 @@ func (c *Coordinator) CancelAndArchiveRun(ctx stdctx.Context, runID string) (Run
 			ErrInvalid, runID, *run.ParentWorkflowID)
 	}
 
+	// A repair run is not a card either, for the same reason and with a
+	// different link: it has no parent_workflow_id, but it exists only because
+	// another run stopped, and archiving it alone would leave that run showing
+	// an inline repair whose own history had been retired out from under it.
+	// P3-B §14: the origin is the thing to archive, and archiving it takes its
+	// repairs with it.
+	if link, ok := c.repairOriginLink(ctx, runID); ok && link.OriginRunID != runID {
+		return RunDetail{}, fmt.Errorf(
+			"%w: workflow run %q is an automatic repair of %q; cancel and archive the run it repairs instead",
+			ErrInvalid, runID, link.OriginRunID)
+	}
+
 	// 1. Cascade first, parent last. A child cancelled after its parent would
 	// briefly be a running child of an archived master — the exact orphan this
 	// action exists to prevent — and the parent's own cancellation is what
@@ -91,6 +103,10 @@ func (c *Coordinator) CancelAndArchiveRun(ctx stdctx.Context, runID string) (Run
 	if err != nil {
 		return RunDetail{}, err
 	}
+	// Repairs of this run cascade with it. They are top-level rows the Board
+	// only ever showed nested, so leaving one behind would resurrect it as a
+	// card of its own the moment its origin left the active lane.
+	children = append(children, c.repairRunsOf(ctx, run)...)
 	for _, child := range children {
 		if err := c.cancelForArchive(ctx, child); err != nil {
 			return RunDetail{}, err
@@ -186,4 +202,29 @@ func (c *Coordinator) ProjectBoardHistory(ctx stdctx.Context, projectID string, 
 		entries = append(entries, entry)
 	}
 	return entries, nil
+}
+
+// repairRunsOf lists the automatic repair runs created for this run.
+//
+// Read from the run's OWN ledger — the repair dispatch intents it recorded
+// before each repair started — rather than by scanning the project for runs
+// that claim it. The intent is written first and is the durable link; a run
+// that claims an origin the origin does not claim back is exactly the
+// provenance the cession chain refuses to trust, and archiving is not the place
+// to start trusting it.
+func (c *Coordinator) repairRunsOf(ctx stdctx.Context, run domain.WorkflowRun) []domain.WorkflowRun {
+	var out []domain.WorkflowRun
+	seen := map[string]bool{}
+	for _, intent := range c.repairIntents(ctx, run.ID) {
+		if intent.RepairRunID == "" || seen[intent.RepairRunID] {
+			continue
+		}
+		seen[intent.RepairRunID] = true
+		repair, found, err := c.store.GetWorkflowRun(ctx, intent.RepairRunID)
+		if err != nil || !found {
+			continue
+		}
+		out = append(out, repair)
+	}
+	return out
 }

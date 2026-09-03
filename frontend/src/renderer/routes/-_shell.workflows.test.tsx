@@ -29,10 +29,18 @@ vi.mock("../hooks/useWorkflowRuns", () => ({
 	EXECUTION_STRATEGIES: ["task", "autonomous", "master"] as const,
 	APPROVAL_POLICIES: ["automatic", "manual"] as const,
 	REPAIR_POLICIES: ["disabled", "suggest", "automatic"] as const,
+	PLACEMENTS: ["direct_branch", "isolated_worktree", "auto"] as const,
 }));
 
 vi.mock("../hooks/useExecutionPolicy", () => ({
 	useExecutionPolicy: useExecutionPolicyMock,
+}));
+
+// P3-A: the creation summary states the daemon's project-memory mode. It is a
+// daemon fact, not a form input, so the form's tests stub the read rather than
+// standing up a query client for one string.
+vi.mock("../hooks/useSettings", () => ({
+	useSettings: () => ({ settings: { defaultSessionMode: "tui", chatHarnesses: [], memoryMode: "off" } }),
 }));
 
 vi.mock("../stores/ui-store", () => ({
@@ -189,6 +197,68 @@ describe("WorkflowsList", () => {
 		await userEvent.click(screen.getByRole("button", { name: /create/i }));
 
 		expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ repairPolicy: "automatic" }));
+	});
+
+	// P3-A §7/§12: where the work happens is a first-class choice made before
+	// the run exists, not something discovered afterwards from a worktree that
+	// appeared. "Auto" is the default because it is what AO did before this
+	// choice existed -- defaulting to an explicit placement would silently move
+	// every existing user's work.
+	it("offers the placement as an explicit choice, defaults it to auto, and sends the one picked", async () => {
+		const createRun = vi.fn().mockResolvedValue({});
+		useWorkflowRunsMock.mockReturnValue({
+			runs: [],
+			isLoading: false,
+			error: undefined,
+			createRun,
+			creating: false,
+			createError: undefined,
+		});
+		useProjectsListMock.mockReturnValue({ projects: PROJECTS, isLoading: false, error: undefined });
+		render(<WorkflowsList />);
+
+		const placement = screen.getByRole("group", { name: "Where the work happens" });
+		expect(within(placement).getByRole("radio", { name: /^Automatic/ })).toBeChecked();
+		// The branch option says what it means, including the consequence that
+		// makes it different: there is nothing to integrate afterwards.
+		expect(within(placement).getByRole("radio", { name: /^Current branch/ })).toBeInTheDocument();
+
+		await userEvent.click(screen.getByRole("combobox", { name: "Project" }));
+		await userEvent.click(await screen.findByText("Project B"));
+		await userEvent.type(screen.getByLabelText(/objective/i), "Ship the thing");
+		await userEvent.click(within(placement).getByRole("radio", { name: /^Current branch/ }));
+		await userEvent.click(screen.getByRole("button", { name: /create/i }));
+
+		expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ placement: "direct_branch" }));
+	});
+
+	// §12: the choices that change execution semantics are restated where the
+	// user is about to act on them, not hidden behind an "advanced" disclosure.
+	it("summarises every semantic choice above the button that starts the run", async () => {
+		useWorkflowRunsMock.mockReturnValue({
+			runs: [],
+			isLoading: false,
+			error: undefined,
+			createRun: vi.fn(),
+			creating: false,
+			createError: undefined,
+		});
+		useProjectsListMock.mockReturnValue({ projects: PROJECTS, isLoading: false, error: undefined });
+		render(<WorkflowsList />);
+
+		const summary = screen.getByTestId("task-creation-summary");
+		expect(summary).toHaveTextContent("Strategy");
+		expect(summary).toHaveTextContent("Approval");
+		expect(summary).toHaveTextContent("Automatic repair");
+		expect(summary).toHaveTextContent("Where the work happens");
+		expect(summary).toHaveTextContent("Project memory");
+		// No project chosen yet: it says so rather than showing an empty row
+		// that reads as "none".
+		expect(summary).toHaveTextContent("Select a project to see where the work will happen.");
+
+		await userEvent.click(screen.getByRole("combobox", { name: "Project" }));
+		await userEvent.click(await screen.findByText("Project B"));
+		expect(screen.getByTestId("task-creation-summary")).toHaveTextContent("Project B");
 	});
 
 	it("defaults approval to the caller's stored execution policy", async () => {

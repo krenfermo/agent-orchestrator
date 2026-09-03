@@ -148,6 +148,38 @@ func Classify(questionText string, certainty domain.QuestionCertainty) (domain.Q
 	return domain.QuestionClassificationAmbiguous, "no confident classifier match; escalated to human_required (no auto-resolver dispatch wired in this pass)"
 }
 
+// ClassifyUnderAutonomy is Classify plus P3-C's autonomy policy.
+//
+// It calls Classify first and unchanged, so every refusal that file already
+// makes -- no text, sensitive keyword, fact-backed pattern -- is made BEFORE
+// any autonomy rule is consulted. Only classification=ambiguous is
+// reconsidered, and only under a mode that permits it: the run's frozen policy
+// decides whether AO settles a technical, reversible choice itself instead of
+// parking the run on it (see autonomy.go).
+//
+// Under ask_always it is exactly Classify, byte for byte, which is what makes
+// the default behaviour of every existing run unchanged.
+func ClassifyUnderAutonomy(questionText string, certainty domain.QuestionCertainty, mode domain.QuestionAutonomyMode) (domain.QuestionClassification, string, AutonomyDecision) {
+	classification, reason := Classify(questionText, certainty)
+	if classification != domain.QuestionClassificationAmbiguous {
+		return classification, reason, AutonomyDecision{Mode: mode}
+	}
+	decision := EvaluateAutonomy(questionText, mode)
+	if !decision.AutoDecidable {
+		// The classification is unchanged and the run still asks. What is added
+		// is WHY, which is what §21 requires a question to carry: AO says what
+		// it could not determine rather than forwarding the worker's raw prompt.
+		return classification, reason + "; not auto-decided because " + decision.Reason, decision
+	}
+	// Auto-decidable ambiguity becomes the SAME auto_resolvable classification
+	// a discovery-shaped question already gets, so it flows through the existing
+	// Decision Resolver -- read-only, cross-provider, evidence-bound, budgeted --
+	// rather than through a second answering mechanism nobody reviewed.
+	return domain.QuestionClassificationAutoResolvable,
+		"auto-decided under autonomy policy " + string(decision.Mode) + ": " + decision.Reason,
+		decision
+}
+
 // ResolveState maps a classification (plus the budget check) to the
 // question's initial persisted state. classification=ambiguous always
 // forces state=human_required even though the classification value itself

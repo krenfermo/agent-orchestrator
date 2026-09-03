@@ -276,15 +276,8 @@ func (c *Coordinator) workerEvidenceFor(
 		}
 	}
 
-	if !workspaceAvailable && c.workspaceFacts != nil && sessionFound && sess.Metadata.WorkspacePath != "" {
-		if o, err := c.workspaceFacts.ObserveWorkspace(ctx, ports.WorkspaceInfo{
-			Path:      sess.Metadata.WorkspacePath,
-			Branch:    sess.Metadata.Branch,
-			SessionID: sess.ID,
-			ProjectID: sess.ProjectID,
-		}); err == nil {
-			obs, workspaceAvailable = o, true
-		}
+	if sessionFound {
+		obs, workspaceAvailable = c.forceWorkspaceObservation(ctx, sess, obs, workspaceAvailable)
 	}
 	ev.WorkspaceObserved = workspaceAvailable
 	if workspaceAvailable {

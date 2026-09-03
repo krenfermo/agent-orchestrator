@@ -128,6 +128,10 @@ describe("WorkflowQuestionsSection", () => {
 			answerText: "Use the existing formatHelper in internal/foo.",
 			resolverHarness: "codex",
 			resolverProvider: "openai",
+			// P3-C: the answer block's heading now distinguishes "AO decided" from
+			// "the agent has it". This case is the delivered one — the state badge
+			// and the block heading both read "Answered".
+			delivered: true,
 		});
 		render(<WorkflowQuestionsSection questions={[question]} onAnswer={vi.fn()} answering={false} />);
 

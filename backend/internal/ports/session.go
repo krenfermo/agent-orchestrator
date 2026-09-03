@@ -88,6 +88,16 @@ type SpawnConfig struct {
 	// state and is deliberately absent from the HTTP spawn DTO, so no client
 	// can present itself as a workflow to bypass task branch locking.
 	WorkflowRunID string
+
+	// Placement is the workflow run's frozen execution placement, when the
+	// spawn belongs to one (P3-A §7). It is threaded down to the workspace
+	// router so an explicitly chosen direct branch can never be materialised as
+	// an isolated worktree, whatever the project's current execution mode says.
+	//
+	// Daemon-internal like WorkflowRunID, and for the same reason: it is set by
+	// the workflow coordinator from the durable placement record and is
+	// deliberately absent from the HTTP spawn DTO.
+	Placement domain.ExecutionPlacementType
 }
 
 // SpawnAttachment is a single file attached to a spawn request. Data holds the

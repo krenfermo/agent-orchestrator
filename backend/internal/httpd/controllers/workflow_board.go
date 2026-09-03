@@ -3,6 +3,7 @@ package controllers
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -122,11 +123,114 @@ type WorkflowBoardEntryView struct {
 	ReviewCycles int                        `json:"reviewCycles"`
 	Steps        []WorkflowStepProgressView `json:"steps,omitempty"`
 	Tasks        []WorkflowBoardTaskView    `json:"tasks,omitempty"`
+
+	// Stage, RequiresHuman and AutomaticActionActive are the compact human
+	// projection, mirrored at the top level of the card for the surfaces that
+	// only need those three. They are COPIES of `presentation`, taken from the
+	// same value, so they cannot drift from it.
+	Stage                 string `json:"stage" enum:"preparing,planning,working,reviewing,correcting,verifying,integrating,waiting,needs_attention,completed,cancelled,failed"`
+	RequiresHuman         bool   `json:"requiresHuman"`
+	AutomaticActionActive bool   `json:"automaticActionActive"`
+
+	// Presentation is P3-B's contract: the Board sends the SAME projection the
+	// run detail endpoint sends, built by the same mapping function from the
+	// same derivation. The only difference is the bounded timeline, which a
+	// card has no room for and which the detail page still carries in full — so
+	// every field present here is field-for-field equal to the detail page's,
+	// which is what board_detail_contract_test.go asserts.
+	Presentation *WorkflowPresentationView `json:"presentation,omitempty"`
+	// Strategy is the run's recorded execution strategy. Empty for a legacy run
+	// whose mapping has not been reconciled yet — a fact, not an unknown.
+	Strategy string `json:"strategy,omitempty" enum:"task,autonomous,master"`
+	// LastMeaningfulActivityAt is when this run last did something a person
+	// would recognise as having happened (§11). It is deliberately NOT
+	// lastActivityAt above: that one moves for bookkeeping, and a board sorted
+	// by it showed a run stalled for hours as active seconds ago.
+	LastMeaningfulActivityAt time.Time `json:"lastMeaningfulActivityAt"`
+	// Repairs are the automatic repairs of THIS run, inline (§6). A repair run
+	// is an ordinary top-level run in the project; nesting it here is what
+	// stops one incident from reading as three workflows and from being counted
+	// three times in the headline.
+	Repairs []WorkflowBoardRepairView `json:"repairs,omitempty"`
+	// RepairOfWorkflowID/RepairGeneration are set only on a card that IS a
+	// repair and could not be nested because the run it repairs is not on this
+	// board. Rather than disappear, it stays visible and stays labelled.
+	RepairOfWorkflowID string `json:"repairOfWorkflowId,omitempty"`
+	RepairGeneration   int    `json:"repairGeneration,omitempty"`
+	// ObjectiveTruncated says plainly that `objective` above is a bounded
+	// summary of a longer specification (§17). Nothing is truncated in storage:
+	// the run detail endpoint returns the objective in full.
+	ObjectiveTruncated bool `json:"objectiveTruncated,omitempty"`
+}
+
+// WorkflowBoardRepairView is one automatic repair, shown under the run it
+// repairs.
+//
+// It deliberately carries no actions. §6: the origin owns Resume and Repair,
+// and a repair offering its own copies is the duplicate remedy §5 forbids. The
+// run id is here so the full repair run stays one click away.
+type WorkflowBoardRepairView struct {
+	WorkflowID string `json:"workflowId"`
+	// Attempt/Budget are "attempt N of M", from the ORIGIN's durable repair
+	// ledger — the intent's generation, never a count of attempt rows.
+	Attempt int    `json:"attempt"`
+	Budget  int    `json:"budget"`
+	Stage   string `json:"stage" enum:"preparing,planning,working,reviewing,correcting,verifying,integrating,waiting,needs_attention,completed,cancelled,failed"`
+	// SummaryCode is the same stable key the origin's card renders its sentence
+	// from, so a repair says what it is doing in the same vocabulary.
+	SummaryCode   string `json:"summaryCode,omitempty"`
+	RequiresHuman bool   `json:"requiresHuman"`
+	State         string `json:"state" enum:"pending,running,waiting,needs_attention,completed,failed,cancelled"`
+	// Active is the LIFECYCLE authority: a repair run that exists and has not
+	// reached a terminal state. It is never derived from an attempt row, so an
+	// orphaned attempt can neither invent a repair nor keep a finished one
+	// alive.
+	Active                   bool      `json:"active"`
+	Succeeded                bool      `json:"succeeded,omitempty"`
+	Failed                   bool      `json:"failed,omitempty"`
+	LastMeaningfulActivityAt time.Time `json:"lastMeaningfulActivityAt"`
+}
+
+// WorkflowBoardCountsView is the headline (§22).
+//
+// The numbers come from the same derived stages the cards do, and a repair
+// nested under its origin is never counted: "3 workflows need attention" when
+// the truth is one origin and two of its repairs is the misreport these counts
+// exist to prevent.
+type WorkflowBoardCountsView struct {
+	Active         int `json:"active"`
+	Working        int `json:"working"`
+	Waiting        int `json:"waiting"`
+	NeedsAttention int `json:"needsAttention"`
+	Completed      int `json:"completed"`
+	Archived       int `json:"archived"`
 }
 
 // WorkflowBoardResponse is the body of GET /api/v1/projects/{projectId}/board.
 type WorkflowBoardResponse struct {
 	Workflows []WorkflowBoardEntryView `json:"workflows"`
+	// Counts are computed over the whole board, not over the returned page, so
+	// the view tabs keep saying how much there is while a filter is applied.
+	Counts WorkflowBoardCountsView `json:"counts"`
+	// Matched is how many runs the filter selected before paging — what a pager
+	// needs and what len(workflows) cannot say.
+	Matched int `json:"matched"`
+	Offset  int `json:"offset"`
+	Limit   int `json:"limit"`
+}
+
+// ProjectBoardQuery is the query string accepted by the board route (§20).
+//
+// Every filter runs server-side against the same derived projection the cards
+// render, so a filtered board can never disagree with an unfiltered one about
+// what a run is doing.
+type ProjectBoardQuery struct {
+	Stage         string `query:"stage,omitempty" description:"Comma-separated derived stages to keep (preparing, working, reviewing, correcting, verifying, integrating, waiting, needs_attention, completed, cancelled, failed)."`
+	RequiresHuman string `query:"requiresHuman,omitempty" enum:"true,false" description:"Keep only runs that do (true) or do not (false) need a person."`
+	Strategy      string `query:"strategy,omitempty" enum:"task,autonomous,master" description:"Recorded execution strategy filter."`
+	Search        string `query:"search,omitempty" description:"Case-insensitive substring of the objective or the run id."`
+	Offset        string `query:"offset,omitempty" description:"Zero-based offset into the ordered result."`
+	Limit         string `query:"limit,omitempty" description:"Page size; defaults to 50 and is capped at 200."`
 }
 
 func workflowBoardEntryView(e workflowcore.BoardEntry) WorkflowBoardEntryView {
@@ -160,6 +264,37 @@ func workflowBoardEntryView(e workflowcore.BoardEntry) WorkflowBoardEntryView {
 		ReviewCycles:        e.ReviewCycles,
 		Steps:               stepProgressViews(e.Steps),
 		BranchWait:          workflowBranchWaitView(e.BranchWait),
+	}
+	// P3-B: one projection, sent once. The three flat fields below are copies
+	// taken from the same value, never a second derivation -- the whole reason
+	// a card and its page could disagree before was that each mapped the facts
+	// itself.
+	presentation := workflowPresentationView(e.Presentation)
+	// The timeline is the one field a card drops: it is unbounded in length,
+	// nothing on a card renders it, and the run detail page carries it in full.
+	presentation.Timeline = nil
+	view.Presentation = &presentation
+	view.Stage = presentation.Stage
+	view.RequiresHuman = presentation.RequiresHuman
+	view.AutomaticActionActive = presentation.AutomaticActionActive
+	view.Strategy = e.Strategy
+	view.LastMeaningfulActivityAt = e.Presentation.LastMeaningfulActivityAt
+	view.RepairOfWorkflowID = e.RepairOfRunID
+	view.RepairGeneration = e.RepairGeneration
+	view.ObjectiveTruncated = e.ObjectiveTruncated
+	if e.ObjectiveTruncated {
+		// §17: the card carries a bounded summary. The full specification stays
+		// on disk and on the run detail endpoint, untouched.
+		view.Objective = e.ObjectiveSummary
+	}
+	for _, r := range e.Repairs {
+		view.Repairs = append(view.Repairs, WorkflowBoardRepairView{
+			WorkflowID: r.RunID, Attempt: r.Attempt, Budget: r.Budget,
+			Stage: string(r.Stage), SummaryCode: r.SummaryCode,
+			RequiresHuman: r.RequiresHuman, State: string(r.State),
+			Active: r.Active, Succeeded: r.Succeeded, Failed: r.Failed,
+			LastMeaningfulActivityAt: r.LastMeaningfulActivityAt,
+		})
 	}
 	// The planner projection speaks in task ids; every other id on this endpoint
 	// is a plan-step id, and mixing the two in one response is how a client ends
@@ -195,16 +330,76 @@ func stepProgressViews(steps []workflowcore.StepProgress) []WorkflowStepProgress
 	return out
 }
 
+// boardQuery parses §20's server-side filter and page off the request.
+//
+// Every value it cannot understand is IGNORED rather than refused: a board is a
+// read, and a stage name a client sent that this daemon does not know should
+// narrow nothing rather than 400 the whole screen. The one thing it enforces is
+// the page ceiling, because that is a promise about response size rather than a
+// preference.
+func boardQuery(r *http.Request, archived bool) workflowcore.BoardQuery {
+	q := workflowcore.BoardQuery{
+		Retention: workflowsvc.BoardTerminalRetention,
+		Archived:  archived,
+		Limit:     workflowsvc.BoardPageLimit,
+	}
+	values := r.URL.Query()
+	for _, raw := range strings.Split(values.Get("stage"), ",") {
+		if stage := strings.TrimSpace(raw); stage != "" {
+			q.Stages = append(q.Stages, workflowcore.Stage(stage))
+		}
+	}
+	switch strings.TrimSpace(values.Get("requiresHuman")) {
+	case "true":
+		yes := true
+		q.RequiresHuman = &yes
+	case "false":
+		no := false
+		q.RequiresHuman = &no
+	}
+	q.Strategy = strings.TrimSpace(values.Get("strategy"))
+	q.Search = strings.TrimSpace(values.Get("search"))
+	if n, err := strconv.Atoi(strings.TrimSpace(values.Get("offset"))); err == nil && n > 0 {
+		q.Offset = n
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(values.Get("limit"))); err == nil && n > 0 {
+		if n > workflowsvc.BoardPageLimitMax {
+			n = workflowsvc.BoardPageLimitMax
+		}
+		q.Limit = n
+	}
+	return q
+}
+
 // boardHistory serves the archived ("Mostrar archivados") projection: the runs
-// a human has cancelled and archived, newest first. Same entry shape as the
-// active board, so history renders with the same card.
+// a human has cancelled and archived, newest first. Same entry shape and the
+// same derivation as the active board, so history renders with the same card
+// and cannot describe a run differently from the way the active board did the
+// moment before it was archived.
 func (c *WorkflowsController) boardHistory(w http.ResponseWriter, r *http.Request) {
+	projectID := strings.TrimSpace(chi.URLParam(r, "projectId"))
+	if viewer, ok := c.Svc.(workflowsvc.BoardViewReader); ok && c.Svc != nil {
+		q := boardQuery(r, true)
+		if q.Limit > workflowsvc.BoardHistoryLimit {
+			q.Limit = workflowsvc.BoardHistoryLimit
+		}
+		view, err := viewer.ProjectBoardView(r.Context(), projectID, q)
+		if errors.Is(err, workflowsvc.ErrArchiveUnsupported) {
+			apispec.NotImplemented(w, r, "GET", "/api/v1/projects/{projectId}/board/history")
+			return
+		}
+		if err != nil {
+			envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "BOARD_HISTORY_FAILED", err.Error(), nil)
+			return
+		}
+		c.writeBoardView(w, r, view)
+		return
+	}
 	archiver, ok := c.Svc.(workflowsvc.RunArchiver)
 	if c.Svc == nil || !ok {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/projects/{projectId}/board/history")
 		return
 	}
-	projectID := strings.TrimSpace(chi.URLParam(r, "projectId"))
 	entries, err := archiver.ProjectBoardHistory(r.Context(), projectID, workflowsvc.BoardHistoryLimit)
 	if errors.Is(err, workflowsvc.ErrArchiveUnsupported) {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/projects/{projectId}/board/history")
@@ -214,31 +409,48 @@ func (c *WorkflowsController) boardHistory(w http.ResponseWriter, r *http.Reques
 		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "BOARD_HISTORY_FAILED", err.Error(), nil)
 		return
 	}
-	c.writeBoard(w, r, entries)
+	c.writeBoardView(w, r, workflowcore.BoardView{Entries: entries, Matched: len(entries)})
 }
 
 // board serves the project Board projection.
 func (c *WorkflowsController) board(w http.ResponseWriter, r *http.Request) {
+	projectID := strings.TrimSpace(chi.URLParam(r, "projectId"))
+	if viewer, ok := c.Svc.(workflowsvc.BoardViewReader); ok && c.Svc != nil {
+		view, err := viewer.ProjectBoardView(r.Context(), projectID, boardQuery(r, false))
+		if err != nil {
+			envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "BOARD_FAILED", err.Error(), nil)
+			return
+		}
+		c.writeBoardView(w, r, view)
+		return
+	}
 	reader, ok := c.Svc.(workflowsvc.BoardReader)
 	if c.Svc == nil || !ok {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/projects/{projectId}/board")
 		return
 	}
-	projectID := strings.TrimSpace(chi.URLParam(r, "projectId"))
 	entries, err := reader.ProjectBoard(r.Context(), projectID, workflowsvc.BoardTerminalRetention)
 	if err != nil {
 		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "BOARD_FAILED", err.Error(), nil)
 		return
 	}
-	c.writeBoard(w, r, entries)
+	c.writeBoardView(w, r, workflowcore.BoardView{Entries: entries, Matched: len(entries)})
 }
 
-// writeBoard applies ownership scoping and serializes a board projection. The
-// active board and the archived history share it so an archived run can never
-// become visible to a user the active board would have hidden it from.
-func (c *WorkflowsController) writeBoard(w http.ResponseWriter, r *http.Request, entries []workflowcore.BoardEntry) {
-	out := WorkflowBoardResponse{Workflows: make([]WorkflowBoardEntryView, 0, len(entries))}
-	for _, e := range entries {
+// writeBoardView applies ownership scoping and serializes a board projection.
+// The active board and the archived history share it so an archived run can
+// never become visible to a user the active board would have hidden it from.
+func (c *WorkflowsController) writeBoardView(w http.ResponseWriter, r *http.Request, view workflowcore.BoardView) {
+	out := WorkflowBoardResponse{
+		Workflows: make([]WorkflowBoardEntryView, 0, len(view.Entries)),
+		Counts: WorkflowBoardCountsView{
+			Active: view.Counts.Active, Working: view.Counts.Working,
+			Waiting: view.Counts.Waiting, NeedsAttention: view.Counts.NeedsAttention,
+			Completed: view.Counts.Completed, Archived: view.Counts.Archived,
+		},
+		Matched: view.Matched, Offset: view.Offset, Limit: view.Limit,
+	}
+	for _, e := range view.Entries {
 		// Ownership scoping mirrors the run-detail route exactly: a run whose
 		// owner is somebody else is simply absent from the board, never a
 		// redacted placeholder.

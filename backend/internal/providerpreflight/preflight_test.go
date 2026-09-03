@@ -105,6 +105,56 @@ func TestWorkspaceTrustIsPathScoped(t *testing.T) {
 	}
 }
 
+// P3-D smoke A: the refusal that grounded every claude-code worker.
+//
+// A worker dispatch's launch records the workspace's trust itself, in the
+// adapter's PreLaunch, before the agent starts — so the trust dialog cannot
+// stop it however the config reads beforehand. The check nevertheless fired on
+// the project path, and refused an unattended launch on a repository the person
+// had simply never opened in Claude Code. On a real run that was the whole of
+// "the worker never started".
+//
+// The exemption is scoped to the caller that earns it. The SAME untrusted,
+// existing workspace is still refused for a caller whose launch does not record
+// trust, which is the case the check was written for.
+func TestALaunchThatRecordsTrustItselfIsNotRefusedForNotHavingItYet(t *testing.T) {
+	dir := t.TempDir()
+	untrusted := t.TempDir()
+	writeClaudeConfig(t, dir, map[string]any{
+		"bypassPermissionsModeAccepted": true,
+		"projects":                      map[string]any{},
+	})
+	c := &Checker{}
+	env := map[string]string{"CLAUDE_CONFIG_DIR": dir}
+
+	res, err := c.Preflight(context.Background(), workflowcore.WorkerPreflightRequest{
+		Harness: "claude-code", WorkspacePath: untrusted, RuntimeEnv: env,
+		TrustRecordedAtLaunch: true,
+	})
+	if err != nil {
+		t.Fatalf("Preflight(records trust at launch): %v", err)
+	}
+	if !res.TrustOK || !res.TrustUnknown {
+		t.Fatalf("a launch that records its own trust was refused for not having it yet: %+v", res)
+	}
+	// And nothing else was waived: the posture answer is still read, because
+	// no launch writes that one and accepting it for somebody is exactly what
+	// this package refuses to do.
+	if res.PermissionModeUnknown {
+		t.Fatalf("the bypass-permissions answer was waived along with trust: %+v", res)
+	}
+
+	res, err = c.Preflight(context.Background(), workflowcore.WorkerPreflightRequest{
+		Harness: "claude-code", WorkspacePath: untrusted, RuntimeEnv: env,
+	})
+	if err != nil {
+		t.Fatalf("Preflight(does not record trust): %v", err)
+	}
+	if res.TrustUnknown || res.TrustOK {
+		t.Fatalf("the exemption leaked to a caller that never claimed it: %+v", res)
+	}
+}
+
 // A harness AO has no interactive-startup knowledge of produces unknowns, which
 // is ready. The preflight must never invent a verdict about a provider whose
 // configuration it does not understand.

@@ -11,8 +11,12 @@ function boardWorkflow(overrides: Partial<BoardWorkflow> = {}): BoardWorkflow {
 		objective: "WF2 Backup/Restore",
 		state: "running",
 		phase: "running",
+		stage: "working",
+		requiresHuman: false,
+		automaticActionActive: false,
 		executionMode: "autonomous",
 		lastActivityAt: new Date().toISOString(),
+		lastMeaningfulActivityAt: new Date().toISOString(),
 		reviewCycles: 0,
 		tasksTotal: 0,
 		tasksCompleted: 0,
@@ -451,5 +455,171 @@ describe("WorkflowBoardCard cancel-and-archive", () => {
 			/>,
 		);
 		expect(screen.queryByTestId("workflow-archive-wf-old")).toBeNull();
+	});
+});
+
+/**
+ * P3-B: everything the card says about status comes from the daemon's
+ * `presentation`. These tests pin that down — the card must not compute a
+ * status, must not offer an action the daemon did not offer, and must show a
+ * repair under the run it repairs rather than beside it.
+ */
+describe("WorkflowBoardCard — the shared projection", () => {
+	function presentation(overrides: Partial<NonNullable<BoardWorkflow["presentation"]>> = {}) {
+		return {
+			stage: "needs_attention",
+			requiresHuman: true,
+			automaticActionActive: false,
+			summaryCode: "dirty_worktree",
+			recommendedAction: "commit_and_continue",
+			actions: [
+				{ id: "commit_and_continue", primary: true, enabled: true },
+				{ id: "cancel", enabled: true },
+			],
+			progress: [
+				{ stage: "preparing", state: "completed" },
+				{ stage: "working", state: "blocked" },
+				{ stage: "completed", state: "future" },
+			],
+			technical: {},
+			...overrides,
+		} as NonNullable<BoardWorkflow["presentation"]>;
+	}
+
+	it("renders the daemon's sentence and stage rather than a state name", () => {
+		render(
+			<WorkflowBoardCard
+				workflow={boardWorkflow({
+					state: "needs_attention",
+					phase: "needs_attention",
+					stage: "needs_attention",
+					requiresHuman: true,
+					presentation: presentation(),
+				})}
+			/>,
+		);
+		expect(screen.getByTestId("workflow-stage-badge")).toHaveTextContent("Needs you");
+		expect(screen.getByTestId("workflow-status-summary")).toHaveTextContent(
+			"There are pending changes in Git",
+		);
+		expect(screen.getByTestId("workflow-progress")).toBeInTheDocument();
+	});
+
+	it("names the recommended action the daemon offers, and no other", () => {
+		render(<WorkflowBoardCard workflow={boardWorkflow({ presentation: presentation() })} />);
+		expect(screen.getByTestId("workflow-recommended-action")).toHaveTextContent("Commit and continue");
+	});
+
+	// §8: a recommendation the daemon offers DISABLED must not appear on the
+	// card — the Board may never present an action the run page would refuse.
+	it("hides a recommended action the daemon offers disabled", () => {
+		render(
+			<WorkflowBoardCard
+				workflow={boardWorkflow({
+					presentation: presentation({
+						recommendedAction: "repair",
+						actions: [{ id: "repair", enabled: false, disabledReason: "repair_active" }],
+					}),
+				})}
+			/>,
+		);
+		expect(screen.queryByTestId("workflow-recommended-action")).toBeNull();
+	});
+
+	// §6: a repair belongs under the run it repairs, with attempt N of M and a
+	// way into its own run — and with none of the origin's buttons.
+	it("shows repairs inline under their origin, with a link to each repair run", async () => {
+		const onOpenRun = vi.fn();
+		render(
+			<WorkflowBoardCard
+				onOpenRun={onOpenRun}
+				workflow={boardWorkflow({
+					presentation: presentation({ stage: "correcting", requiresHuman: false, automaticActionActive: true, summaryCode: "repair_active", recommendedAction: undefined, actions: [] }),
+					repairs: [
+						{
+							workflowId: "wf-repair-1",
+							attempt: 1,
+							budget: 3,
+							stage: "working",
+							requiresHuman: false,
+							state: "running",
+							active: true,
+							lastMeaningfulActivityAt: new Date().toISOString(),
+						},
+					],
+				})}
+			/>,
+		);
+		const repair = screen.getByTestId("workflow-repair-wf-repair-1");
+		expect(repair).toHaveTextContent("Attempt 1 of 3");
+		await userEvent.click(screen.getByTestId("workflow-repair-open-wf-repair-1"));
+		expect(onOpenRun).toHaveBeenCalledWith("wf-repair-1");
+	});
+
+	// §15/§16: the card names the frozen placement and the specific integration
+	// answer. A direct-branch run is never told anything is pending.
+	it("shows the frozen placement and says nothing about integrating a direct-branch run", () => {
+		render(
+			<WorkflowBoardCard
+				workflow={boardWorkflow({
+					presentation: presentation({
+						placement: {
+							type: "direct_branch",
+							chosenBy: "user",
+							executionBranch: "feat/x",
+							integrationRequired: false,
+							integration: "not_required",
+						},
+					}),
+				})}
+			/>,
+		);
+		expect(screen.getByTestId("workflow-placement")).toHaveTextContent("feat/x");
+		expect(screen.queryByTestId("workflow-integration")).toBeNull();
+	});
+
+	it("says an isolated worktree is not yet integrated", () => {
+		render(
+			<WorkflowBoardCard
+				workflow={boardWorkflow({
+					presentation: presentation({
+						placement: {
+							type: "isolated_worktree",
+							chosenBy: "automatic",
+							executionBranch: "ao/wf-1",
+							integrationRequired: true,
+							integration: "pending",
+						},
+					}),
+				})}
+			/>,
+		);
+		expect(screen.getByTestId("workflow-integration")).toHaveTextContent("Not yet integrated");
+	});
+
+	// §11: the card reports the run's last MEANINGFUL act. A bookkeeping write a
+	// second ago must not make a run stalled for hours read as active.
+	it("reports the last meaningful activity, not the last write", () => {
+		const hoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString();
+		render(
+			<WorkflowBoardCard
+				workflow={boardWorkflow({
+					lastActivityAt: new Date().toISOString(),
+					lastMeaningfulActivityAt: hoursAgo,
+					presentation: presentation(),
+				})}
+			/>,
+		);
+		expect(screen.queryByText(/Last activity just now/)).toBeNull();
+	});
+
+	// §17: a card never carries a whole specification.
+	it("says a long specification is only summarised here", () => {
+		render(
+			<WorkflowBoardCard
+				workflow={boardWorkflow({ objectiveTruncated: true, presentation: presentation() })}
+			/>,
+		);
+		expect(screen.getByTestId("workflow-spec-hint")).toBeInTheDocument();
 	});
 });

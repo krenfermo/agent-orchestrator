@@ -290,7 +290,16 @@ func isBookkeepingPhase(phase string) bool {
 		// parked on its own reason, and displacing that reason would make the
 		// run unreadable to head convergence — the very rule getting the branch
 		// back exists to unblock. See branch_cession_chain.go.
-		phase == branchCustodyReturnedPhase
+		phase == branchCustodyReturnedPhase ||
+		// P3-C: the automatic-recovery dispatch note, with the same shape and
+		// the same hazard in its sharpest form. It is written on a run that is
+		// stopped for its own reason, at the exact moment AO starts repairing
+		// that reason -- so counting it would replace `verify_budget_exhausted`
+		// with a bookkeeping line, and the repair's own eligibility, quiescence
+		// and convergence rules all read that reason back. A recovery that
+		// worked would erase the record of what it was recovering from. See
+		// recovery_dispatch.go.
+		phase == autoRecoveryDispatchedPhase
 }
 
 func isIncidentLedgerPhase(phase string) bool {

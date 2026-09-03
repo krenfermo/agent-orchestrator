@@ -37,6 +37,13 @@ type BranchLockRequest struct {
 	RunID     string
 	StepID    string
 	SessionID string
+	// RepoPath and Branch name the direct-branch target this run's frozen
+	// placement selected, for the case the PROJECT's mode does not select one.
+	// Both empty means "derive the targets from the project", which is what
+	// every caller did before P3-C and what a project actually configured for
+	// direct-branch execution still does.
+	RepoPath string
+	Branch   string
 }
 
 // WorkspaceCommitter performs the autonomous local commit for a direct-branch
@@ -96,11 +103,26 @@ func (c *Coordinator) ensureBranchLock(ctx stdctx.Context, run domain.WorkflowRu
 	if c.branchLocks == nil {
 		return true, nil
 	}
+	// P3-C §28: name the repository and branch this run's FROZEN placement
+	// says it will write to.
+	//
+	// Without it the lock manager derives its targets from the project's
+	// execution MODE, and a run whose direct-branch placement was chosen
+	// explicitly inside an isolated-default project produced no targets at all
+	// -- which the manager reads as "nothing to lock" and reports as success.
+	// The dirty-worktree gate never ran and the worker launched onto the user's
+	// real branch owning nothing. See branchlock.Manager.Acquire.
+	//
+	// Empty for a run with no readable placement, which leaves the manager's own
+	// project-derived behaviour exactly as it was.
+	repoPath, branch := c.directBranchTarget(ctx, run, step)
 	acquire := func() error {
 		_, err := c.branchLocks.Acquire(ctx, BranchLockRequest{
 			ProjectID: domain.ProjectID(run.ProjectID),
 			RunID:     run.ID,
 			StepID:    step.ID,
+			RepoPath:  repoPath,
+			Branch:    branch,
 		})
 		return err
 	}
@@ -263,7 +285,13 @@ func (c *Coordinator) autonomousLocalCommit(ctx stdctx.Context, run domain.Workf
 	if err != nil || !ok {
 		return err
 	}
-	if domain.ResolveExecutionMode(project.Kind, project.Config) != domain.ExecutionDirectBranch {
+	// P3-C §28: the RUN's placement decides whether this is direct-branch work,
+	// not the project's default mode. An explicit direct-branch placement inside
+	// an isolated-default project holds a real branch lock and writes on a real
+	// branch, and reading the project here left exactly that run's work
+	// uncommitted with nothing on the ledger saying so. See
+	// placement_semantics.go.
+	if !c.runPlacementIsDirectBranch(ctx, run) {
 		return nil
 	}
 	policy := project.Config.EffectiveGitPolicy()

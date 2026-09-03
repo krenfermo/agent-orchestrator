@@ -81,6 +81,21 @@ type WorkerLaunchRequest struct {
 	// WorkflowRunID tells the session it belongs to a run that already holds
 	// this repository+branch pair, so it does not queue behind its own run.
 	WorkflowRunID string
+	// Placement is the run's frozen execution placement (P3-A §7). It is what
+	// the workspace router materialises, so an explicitly chosen direct branch
+	// stays a direct branch even when the project is configured for isolated
+	// worktrees. Empty when no placement authority is wired, which keeps the
+	// pre-P3-A project-config routing.
+	Placement domain.ExecutionPlacementType
+	// PlacementBranch is the frozen placement's own execution branch.
+	//
+	// It travels with the placement because routing the ADAPTER is not enough:
+	// the spawn also names the branch that adapter checks out, and deriving
+	// that from project configuration while the adapter came from the placement
+	// is how a direct-branch run was handed a generated `ao/*` name that does
+	// not exist in the user's repository. The frozen record answers both
+	// questions or neither.
+	PlacementBranch string
 }
 
 // WorkerLaunchResult is what a launcher can prove about a launch it performed.
@@ -227,6 +242,8 @@ func (l spawnerWorkerLauncher) LaunchWorker(ctx stdctx.Context, req WorkerLaunch
 		RuntimeEnv:    req.RuntimeEnv,
 		Owner:         req.Owner,
 		WorkflowRunID: req.WorkflowRunID,
+		Placement:     req.Placement,
+		Branch:        req.PlacementBranch,
 	})
 	if err != nil {
 		return WorkerLaunchResult{}, err

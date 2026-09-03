@@ -180,6 +180,20 @@ type ownedExecution struct {
 	RowFound      bool
 	RowTerminated bool
 
+	// RowTurnCompletedAt is the provider's own durable receipt for the LAST
+	// turn this session ran to the end, straight off the session row.
+	//
+	// It is the fact that separates the two endings an absent execution can
+	// have, and reconciliation was deciding between them without it (P3-D §1):
+	// a process that vanished under a worker still mid-turn is a phantom, and a
+	// process that exited BECAUSE its turn finished is a completion. Both leave
+	// the same runtime probe answer and — for as long as the lifecycle reaper's
+	// recent-activity window has not elapsed — the same un-terminated row.
+	//
+	// Zero means the row carries no receipt, never that the turn did not
+	// finish. Silence is not an ending here any more than anywhere else.
+	RowTurnCompletedAt time.Time
+
 	// LivenessKnown records that the runtime probe ANSWERED. False covers both
 	// "no probe is wired" and "the probe could not tell", exactly as in
 	// ObservedWorkerFacts, and neither is ever read as death.
@@ -255,6 +269,45 @@ func (o ownedExecution) PhantomRunning() bool {
 	return o.ExecutionProvenGone() && o.RowFound && !o.RowTerminated
 }
 
+// TurnFinishedSince reports a durable turn receipt belonging to THIS dispatch:
+// the provider stated it ran a turn to the end, at or after the moment this
+// dispatch started.
+//
+// The `since` fence is the whole of its safety, and it is the same generation
+// rule every other receipt in this package obeys. A receipt from an earlier
+// generation's turn describes an execution this attempt did not start, and
+// reading it here would let one dispatch's ending conclude another's. A zero
+// `since` (no dispatch time AO can name) therefore answers false: an unfenced
+// receipt is not this dispatch's receipt.
+func (o ownedExecution) TurnFinishedSince(since time.Time) bool {
+	if o.RowTurnCompletedAt.IsZero() || since.IsZero() {
+		return false
+	}
+	return !o.RowTurnCompletedAt.Before(since)
+}
+
+// FinishedNormallySince is the ending reconciliation must NOT touch: the
+// execution is gone, and there is a receipt for this dispatch saying it is gone
+// because the provider finished.
+//
+// It outranks PhantomRunning, and has to. The two are observationally identical
+// in every fact ownership can read — an absent process behind a row the
+// lifecycle reaper has not caught up with yet — and the reaper cannot catch up
+// promptly by design: it requires the row to have had NO activity for its
+// recent-activity window, and a worker that just finished has activity seconds
+// old. So there is a window, on every single successful headless run, in which
+// a completed worker reads exactly like a phantom. A wake landing in it used to
+// close the attempt and park the run on worker_dispatch_ambiguous with the
+// worker's change sitting on disk (P3-D §1).
+//
+// What it is NOT is a completion verdict. Whether the finished turn produced
+// anything is decided on workspace evidence this file never reads; all this
+// says is that the ending belongs to work observation, which runs on the very
+// next line of both callers and fails closed on its own terms.
+func (o ownedExecution) FinishedNormallySince(since time.Time) bool {
+	return o.ExecutionProvenGone() && o.TurnFinishedSince(since)
+}
+
 // Unprovable is the gap: neither live nor provably gone. The only correct
 // answer to it is to stop with the evidence.
 func (o ownedExecution) Unprovable() bool { return !o.Live() && !o.ProvenGone() }
@@ -270,6 +323,10 @@ func (o ownedExecution) describe() string {
 		return "no session exists under this dispatch key"
 	case o.SessionID == "":
 		return "no session identity is recorded and none could be looked up"
+	case o.RowFound && !o.RowTerminated && !o.RowTurnCompletedAt.IsZero() && o.ExecutionProvenGone():
+		return fmt.Sprintf(
+			"session %s completed a turn at %s and its execution has since exited",
+			o.SessionID, o.RowTurnCompletedAt.UTC().Format(time.RFC3339))
 	case o.Evidence.Missing && o.RowFound && !o.RowTerminated:
 		return fmt.Sprintf(
 			"the session row for %s still reads as a live worker and its owned execution no longer exists",
@@ -300,6 +357,7 @@ func (c *Coordinator) observeOneOwnedExecution(ctx stdctx.Context, id domain.Ses
 		if rec, found, err := c.sessionFacts.GetSession(ctx, id); err == nil && found {
 			o.RowFound = true
 			o.RowTerminated = rec.IsTerminated || rec.Activity.State == domain.ActivityExited
+			o.RowTurnCompletedAt = rec.TurnCompletedAt
 		}
 	}
 	if c.workerLiveness != nil {
@@ -562,6 +620,19 @@ func (c *Coordinator) reconcileWorkStepDispatch(
 			// row, runtime probe answering "not running" — so taking it here
 			// would turn every completed worker into an incident. It belongs to
 			// observation, which is on the very next line of both callers.
+			//
+			// And the third thing it can be, which is neither and which used
+			// to be read as the first: a worker that finished NORMALLY and
+			// whose row the lifecycle reaper has not marked yet. Its receipt
+			// says the provider ran this dispatch's turn to the end, so its
+			// absent process is an ending rather than a disappearance — see
+			// FinishedNormallySince, and P3-D §1 for the incident.
+			if owned.FinishedNormallySince(dispatchStartedAt(attempt, hasAttempt, status)) {
+				result.Detail = fmt.Sprintf(
+					"this worker completed its turn for this dispatch and then exited; what it produced is work observation's question (%s)",
+					owned.describe())
+				return result, run, nil
+			}
 			if !owned.PhantomRunning() {
 				result.Detail = fmt.Sprintf(
 					"a confirmed, running launch whose execution is not proven gone behind a live-reading row belongs to work observation (%s)",
@@ -645,6 +716,22 @@ func (c *Coordinator) reconcileWorkStepDispatch(
 		return c.stopReconciledDispatch(ctx, run, step, attempt, hasAttempt, owned, result)
 	}
 	return c.retryReconciledDispatch(ctx, run, step, attempt, hasAttempt, owned, result)
+}
+
+// dispatchStartedAt is the moment THIS dispatch began, and the fence every
+// receipt in this file is read against.
+//
+// The open attempt's start is the truest answer: the attempt row is opened at
+// dispatch intent, before the launcher is invoked, so it dates the dispatch
+// rather than anything that happened to it afterwards. The durable boundary's
+// own timestamp is the fallback for a step whose attempt has already been
+// concluded. A step with neither is one AO cannot date, and it answers zero —
+// which every caller reads as "no receipt belongs to this dispatch".
+func dispatchStartedAt(attempt domain.WorkflowAttempt, hasAttempt bool, status WorkerDispatchStatus) time.Time {
+	if hasAttempt && !attempt.StartedAt.IsZero() {
+		return attempt.StartedAt
+	}
+	return status.Record.CreatedAt
 }
 
 // openAttemptForStep returns the step's currently open (unconcluded) attempt.

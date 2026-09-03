@@ -88,6 +88,16 @@ type TaskDecisionFact struct {
 	// re-deciding the same topic retires the previous answer instead of piling
 	// a second one beside it.
 	Topic string
+	// Evidence are the references the durable row recorded for this decision,
+	// when it recorded any. Today only an autonomous/resolver answer has them:
+	// the Decision Resolver is required to name the repository evidence it read
+	// (see BuildDecisionResolverPrompt's guardrails), and a decision AO took by
+	// itself is exactly the one whose evidence a later reader most needs.
+	//
+	// Empty is normal and never fabricated -- memory then anchors the decision
+	// to the task's own changed paths, which is what it already did for every
+	// decision before this field existed.
+	Evidence []string
 }
 
 // TaskRiskFact is one durable risk a finished task carries into project memory.
@@ -230,7 +240,7 @@ func (c *Coordinator) answeredQuestionDecisions(ctx stdctx.Context, run domain.W
 		if question == "" || answer == "" {
 			continue
 		}
-		rationale, ok := c.questionAnswerAuthority(ctx, q)
+		rationale, evidence, ok := c.questionAnswerAuthority(ctx, q)
 		if !ok {
 			continue
 		}
@@ -241,7 +251,12 @@ func (c *Coordinator) answeredQuestionDecisions(ctx stdctx.Context, run domain.W
 		out = append(out, TaskDecisionFact{
 			Statement: boundedStatement(question + " — answered: " + answer),
 			Rationale: rationale,
-			Topic:     "question:" + topic,
+			// The QUESTION's fingerprint, so a human who later answers the same
+			// question produces the same topic and SUPERSEDES the autonomous
+			// decision through P2-C's own subject machinery, rather than sitting
+			// beside it as a second, competing answer (P3-C §5).
+			Topic:    "question:" + topic,
+			Evidence: evidence,
 		})
 		if len(out) >= projectmemory.MaxTaskDecisions {
 			break
@@ -251,14 +266,23 @@ func (c *Coordinator) answeredQuestionDecisions(ctx stdctx.Context, run domain.W
 }
 
 // questionAnswerAuthority reports whether an answered question may become a
-// decision, and returns the durable rationale that goes with it.
+// decision, and returns the durable rationale and evidence that go with it.
 //
 // The rationale is the resolver's own recorded reason summary when there is
 // one, and otherwise names the answer's source — never a sentence composed
 // about why the answer is right.
+//
+// P3-C adds one source and no new authority rules. An `autonomous` answer is
+// proven exactly as a `resolver` answer is — its own resolution row must have
+// completed and must not have asked for a human — because the same read-only
+// cross-provider machinery produced both and the proof is a property of that
+// machinery, not of why the question reached it. What differs is what the
+// decision SAYS about itself: an autonomous decision names the policy that
+// authorized AO to take it instead of asking, which is the one fact a person
+// re-reading it later needs in order to decide whether to change that policy.
 func (c *Coordinator) questionAnswerAuthority(
 	ctx stdctx.Context, q domain.WorkflowQuestion,
-) (string, bool) {
+) (string, []string, bool) {
 	source := *q.AnswerSource
 	rationale := "answered by " + string(source)
 	if ref := strings.TrimSpace(q.AnswerReference); ref != "" {
@@ -266,25 +290,51 @@ func (c *Coordinator) questionAnswerAuthority(
 	}
 	switch source {
 	case domain.AnswerSourceHuman, domain.AnswerSourcePolicy:
-		return rationale, true
-	case domain.AnswerSourceResolver:
+		return rationale, nil, true
+	case domain.AnswerSourceResolver, domain.AnswerSourceAutonomous:
 		res, ok, err := c.questionsStore.GetCurrentResolutionForQuestion(ctx, string(q.ID))
 		if err != nil || !ok {
-			// The answer says a resolver produced it and AO cannot read the
+			// The answer says an agent produced it and AO cannot read the
 			// attempt that did. That is exactly the case for recording
 			// nothing: an unverifiable authority is not an authority.
-			return "", false
+			return "", nil, false
 		}
 		if res.Status != domain.ResolutionStatusComplete || res.RequiresHuman {
-			return "", false
+			return "", nil, false
 		}
 		if summary := strings.TrimSpace(res.ReasonSummary); summary != "" {
-			return summary, true
+			rationale = summary
 		}
-		return rationale, true
+		if source == domain.AnswerSourceAutonomous {
+			rationale = autonomousRationale(q, rationale)
+		}
+		return rationale, res.EvidenceReferences, true
 	default:
-		return "", false
+		return "", nil, false
 	}
+}
+
+// autonomousRationale prefixes a resolver's own reason with the durable facts
+// that make an AUTOMATIC decision auditable: that AO took it rather than a
+// person, under which frozen policy, and on what classification grounds.
+//
+// Every part of it is copied from a durable row. Nothing here is composed
+// about why the answer is right — that stays the resolver's own sentence,
+// verbatim, at the end.
+func autonomousRationale(q domain.WorkflowQuestion, resolverReason string) string {
+	var b strings.Builder
+	b.WriteString("decided automatically by AO under autonomy policy ")
+	b.WriteString(string(q.AutonomyMode))
+	if reason := strings.TrimSpace(q.ClassificationReason); reason != "" {
+		b.WriteString(" (")
+		b.WriteString(reason)
+		b.WriteString(")")
+	}
+	if resolverReason != "" {
+		b.WriteString("; ")
+		b.WriteString(resolverReason)
+	}
+	return b.String()
 }
 
 // durableTaskRisks collects the risks AO can prove this task leaves behind, and

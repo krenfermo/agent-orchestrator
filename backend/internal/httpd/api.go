@@ -33,6 +33,12 @@ const minimumSwitchAgentRequestTimeout = 6 * time.Minute
 
 // APIDeps bundles every service the API layer's controllers depend on.
 type APIDeps struct {
+	// MemoryMode is the daemon's resolved project-memory rollout stage
+	// ("off"/"assisted"/"preferred"). It is reported on GET /settings so a
+	// task's creation summary can state whether AO will bring remembered
+	// project knowledge to the work. Empty is a valid value and means the
+	// deployment does not report one.
+	MemoryMode   string
 	Agents       controllers.AgentCatalog
 	Projects     projectsvc.Manager
 	Environment  controllers.EnvironmentStatusProvider
@@ -240,7 +246,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			Ownership:    deps.SessionOwnership,
 			TrustedLocal: cfg.TrustedLocalMode,
 		},
-		settings: &controllers.SettingsController{Svc: deps.Settings},
+		settings: &controllers.SettingsController{Svc: deps.Settings, MemoryMode: deps.MemoryMode},
 		dev:      &controllers.DevController{Import: deps.DevImport},
 		browser:  &controllers.BrowserController{Svc: deps.Browser},
 		workflows: &controllers.WorkflowsController{

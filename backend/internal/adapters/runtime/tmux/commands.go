@@ -3,6 +3,8 @@ package tmux
 import (
 	"fmt"
 	"strings"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
 // newSessionArgs builds args for `tmux new-session -d -s <id> -x 220 -y 50
@@ -214,6 +216,41 @@ func sendEnterArgs(id string) []string {
 	return []string{"send-keys", "-t", id, "Enter"}
 }
 
+// tmuxKeyNames maps AO's closed dialog-key vocabulary onto tmux's own key
+// names (P3-C).
+//
+// It is a TABLE rather than a pass-through, and that is the security property:
+// a provider adapter asks for "down", not for a string tmux will interpret. A
+// key absent from this table cannot reach a pane, so no adapter can smuggle a
+// raw control sequence, a command separator or a semicolon-chained second
+// command into send-keys through the key argument.
+var tmuxKeyNames = map[ports.DialogKey]string{
+	ports.KeyUp:     "Up",
+	ports.KeyDown:   "Down",
+	ports.KeyEnter:  "Enter",
+	ports.KeyEscape: "Escape",
+	ports.KeyDigit1: "1",
+	ports.KeyDigit2: "2",
+	ports.KeyDigit3: "3",
+	ports.KeyDigit4: "4",
+	ports.KeyDigit5: "5",
+	ports.KeyDigit6: "6",
+	ports.KeyDigit7: "7",
+	ports.KeyDigit8: "8",
+	ports.KeyDigit9: "9",
+}
+
+// sendNamedKeyArgs builds args for `tmux send-keys -t <id> <keyname>`.
+//
+// The digits are sent with -l (literal) so tmux types the character rather than
+// looking it up as a key name; every other member is a named key.
+func sendNamedKeyArgs(id, name string, literal bool) []string {
+	if literal {
+		return []string{"send-keys", "-t", id, "-l", name}
+	}
+	return []string{"send-keys", "-t", id, name}
+}
+
 // paneInModeArgs builds args for
 // `tmux display-message -p -t =<id> #{pane_in_mode}`, which answers "is this
 // pane currently in one of tmux's own modes (copy-mode, view-mode, a chooser)".
@@ -252,6 +289,17 @@ func sendInterruptArgs(id string) []string {
 // -p prints to stdout; -S -<n> starts n lines back in history.
 func capturePaneArgs(id string, lines int) []string {
 	return []string{"capture-pane", "-t", id, "-p", "-S", fmt.Sprintf("-%d", lines)}
+}
+
+// captureVisiblePaneArgs builds args for `tmux capture-pane -t <id> -p`, with
+// NO -S: it returns the pane's visible screen and none of its history.
+//
+// That distinction is load-bearing for P3-C's delivery receipt. An answered
+// prompt stays in scrollback for as long as the pane lives, so a capture that
+// includes history can never report the prompt gone -- and "the prompt is gone"
+// is the only proof AO accepts that an answer actually reached the agent.
+func captureVisiblePaneArgs(id string) []string {
+	return []string{"capture-pane", "-t", id, "-p"}
 }
 
 // capturePaneStyledArgs preserves SGR sequences so callers can distinguish a

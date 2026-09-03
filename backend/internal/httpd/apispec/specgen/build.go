@@ -354,6 +354,16 @@ var schemaNames = map[string]string{
 	"ControllersRuntimeGCFindingView":             "RuntimeGCFindingView",
 	"ControllersRuntimeGCReportResponse":          "RuntimeGCReportResponse",
 	"ControllersWorkflowBranchWaitView":           "WorkflowBranchWaitView",
+	"ControllersWorkflowPendingChangesResponse":   "WorkflowPendingChangesResponse",
+	"ControllersWorkflowPendingChangeView":        "WorkflowPendingChangeView",
+	"ControllersCommitPendingChangesRequest":      "CommitPendingChangesRequest",
+	"ControllersCommitPendingChangesResponse":     "CommitPendingChangesResponse",
+	"ControllersWorkflowPresentationView":         "WorkflowPresentationView",
+	"ControllersWorkflowPresentationAction":       "WorkflowPresentationAction",
+	"ControllersWorkflowPresentationStage":        "WorkflowPresentationStage",
+	"ControllersWorkflowPresentationPlacement":    "WorkflowPresentationPlacement",
+	"ControllersWorkflowPresentationEvent":        "WorkflowPresentationEvent",
+	"ControllersWorkflowPresentationTechnical":    "WorkflowPresentationTechnical",
 	"ControllersWorkflowCapacityWaitView":         "WorkflowCapacityWaitView",
 	"ControllersWorkflowRepairStateView":          "WorkflowRepairStateView",
 	"ControllersWorkflowCapacityWaitProviderView": "WorkflowCapacityWaitProviderView",
@@ -368,6 +378,9 @@ var schemaNames = map[string]string{
 	"ControllersWorkflowBoardResponse":            "WorkflowBoardResponse",
 	"ControllersWorkflowBoardEntryView":           "WorkflowBoardEntryView",
 	"ControllersWorkflowBoardTaskView":            "WorkflowBoardTaskView",
+	"ControllersWorkflowBoardRepairView":          "WorkflowBoardRepairView",
+	"ControllersWorkflowBoardCountsView":          "WorkflowBoardCountsView",
+	"ControllersProjectBoardQuery":                "ProjectBoardQuery",
 	"ControllersWorkflowStepProgressView":         "WorkflowStepProgressView",
 	"WorkflowMasterPlan":                          "WorkflowMasterPlan",
 	"WorkflowPlannedStep":                         "WorkflowPlannedStep",
@@ -762,7 +775,7 @@ func workflowOperations() []operation {
 		{
 			method: http.MethodGet, path: "/api/v1/projects/{projectId}/board", id: "getProjectBoard", tag: "workflows",
 			summary:    "Project Board: every top-level workflow run projected onto the lifecycle vocabulary",
-			pathParams: []any{controllers.ProjectBoardParam{}},
+			pathParams: []any{controllers.ProjectBoardParam{}, controllers.ProjectBoardQuery{}},
 			resps: []respUnit{
 				{http.StatusOK, controllers.WorkflowBoardResponse{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
@@ -812,7 +825,7 @@ func workflowOperations() []operation {
 		{
 			method: http.MethodGet, path: "/api/v1/projects/{projectId}/board/history", id: "getProjectBoardHistory", tag: "workflows",
 			summary:    "Archived workflows for a project, newest archive first",
-			pathParams: []any{controllers.ProjectBoardParam{}},
+			pathParams: []any{controllers.ProjectBoardParam{}, controllers.ProjectBoardQuery{}},
 			resps: []respUnit{
 				{http.StatusOK, controllers.WorkflowBoardResponse{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
@@ -831,8 +844,13 @@ func workflowOperations() []operation {
 		},
 		{
 			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/continue", id: "continueWorkflowRun", tag: "workflows",
-			summary:    "Continue a workflow run: dispatch its review step's real Claude reviewer once the work step has completed (Checkpoint 8C). Idempotent no-op when nothing is currently dispatchable.",
+			summary:    "Continue a workflow run: dispatch its review step's real Claude reviewer once the work step has completed (Checkpoint 8C). Idempotent no-op when nothing is currently dispatchable. P3-C: the optional body carries the authority proof from a GET /advice reading; a Continue that arrives while AO is already repairing this run is refused 409 ACTION_SUPERSEDED rather than re-entering a resume path the repair owns.",
 			pathParams: []any{controllers.WorkflowIDParam{}},
+			// Optional: a caller that sends no authority proof gets exactly the
+			// pre-P3-C behaviour, so requiring the body would break every
+			// existing client for a check that is a courtesy, not a gate.
+			reqBody:         controllers.WorkflowActionAuthorityRequest{},
+			optionalReqBody: true,
 			resps: []respUnit{
 				{http.StatusOK, controllers.WorkflowRunResponse{}},
 				{http.StatusConflict, envelope.APIError{}},
@@ -863,6 +881,39 @@ func workflowOperations() []operation {
 			pathParams: []any{controllers.WorkflowIDParam{}},
 			resps: []respUnit{
 				{http.StatusOK, controllers.WorkflowRecoveryResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/advice", id: "getWorkflowAdvice", tag: "workflows",
+			summary:    "P3-C: the deterministic answer to \"what do I do now\" — the category (no action required / auto-recoverable / wait-only / human action / terminal), whether a person is actually needed, what AO is doing about it by itself, the offered and refused actions with the reason behind every refusal, and the authority proof a later click is revalidated against. A strict read: it writes nothing.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowAdviceResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/pending-changes", id: "getWorkflowPendingChanges", tag: "workflows",
+			summary:    "P3-A: what is uncommitted in the repository this run works in, and a proposed commit message. Read-only: it runs git status and nothing else. `available: false` means AO could not read the repository, which is UNKNOWN and never \"clean\".",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowPendingChangesResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/pending-changes/commit", id: "commitWorkflowPendingChanges", tag: "workflows",
+			summary:    "P3-A: commit the repository's pending work under a message the caller supplied, re-probe, and resume the run only once the tree is provably clean. There is no stash and no silent commit: a message is required, and a commit that leaves the tree dirty does not resume the run.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			reqBody:    controllers.CommitPendingChangesRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.CommitPendingChangesResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
@@ -927,8 +978,12 @@ func workflowOperations() []operation {
 		},
 		{
 			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/plan/regenerate", id: "regenerateWorkflowPlan", tag: "workflows",
-			summary:    "P1-B: mint a new durable plan revision for an objective whose plan cannot be reused. The superseded revision stays auditable and its tasks stop being authoritative. Bounded, and a compare-and-set on the revision the caller observed.",
+			summary:    "P1-B: mint a new durable plan revision for an objective whose plan cannot be reused. The superseded revision stays auditable and its tasks stop being authoritative. Bounded, and a compare-and-set on the revision the caller observed. P3-C: the optional body carries the authority proof from a GET /advice reading; a click computed against a state the run has moved past is refused 409 ACTION_SUPERSEDED.",
 			pathParams: []any{controllers.WorkflowIDParam{}},
+			// Optional for the same reason /repair's is: a caller that sends no
+			// proof keeps the pre-P3-C behaviour.
+			reqBody:         controllers.WorkflowActionAuthorityRequest{},
+			optionalReqBody: true,
 			resps: []respUnit{
 				{http.StatusOK, controllers.WorkflowRunResponse{}},
 				{http.StatusBadRequest, envelope.APIError{}},
@@ -939,8 +994,13 @@ func workflowOperations() []operation {
 		},
 		{
 			method: http.MethodPost, path: "/api/v1/workflows/{workflowId}/repair", id: "repairWorkflowRun", tag: "workflows",
-			summary:    "P1-B: launch a bounded Repair Agent for a repairable technical stop. Refused with the full repair plan (and why) for any condition AO must not aim a code-writing agent at, for a spent repair budget, or under a disabled repair policy.",
+			summary:    "P1-B: launch a bounded Repair Agent for a repairable technical stop. Refused with the full repair plan (and why) for any condition AO must not aim a code-writing agent at, for a spent repair budget, or under a disabled repair policy. P3-C: the optional body carries the authority proof from a GET /advice reading; a click computed against a state the run has moved past — or one that arrives while AO is already repairing — is refused 409 ACTION_SUPERSEDED instead of duplicated.",
 			pathParams: []any{controllers.WorkflowIDParam{}},
+			// Optional: a caller that sends no authority proof gets exactly the
+			// pre-P3-C behaviour, so requiring the body would break every
+			// existing client for a check that is a courtesy, not a gate.
+			reqBody:         controllers.WorkflowActionAuthorityRequest{},
+			optionalReqBody: true,
 			resps: []respUnit{
 				{http.StatusAccepted, controllers.WorkflowRepairResponse{}},
 				{http.StatusConflict, envelope.APIError{}},

@@ -65,6 +65,21 @@ const (
 	// is always nil for it: a lock has no announced release time, and
 	// inventing one would be exactly the fabricated timestamp 0106 forbids.
 	ReasonBranchLock Reason = "branch_lock"
+	// ReasonAutoRecovery is P3-C's automatic-recovery wake: a run has parked on
+	// a condition its own frozen repair policy authorizes AO to repair without
+	// asking, and this wake is what makes that actually happen while the daemon
+	// stays up.
+	//
+	// It is deliberately a wake rather than an inline launch at the stop site.
+	// A stop is sometimes recorded from a read path, and starting a repair
+	// agent from there would give a GET a side effect; and a durable wake
+	// survives a daemon that dies between the stop and the repair. The poller
+	// routes it to Coordinator.DispatchAutomaticRecovery rather than to
+	// ContinueRun, because the remedy is not a resume (see wakepoller).
+	//
+	// known_reset_at is always nil for it: nothing external announces when a
+	// repairable condition becomes repairable, and it already is.
+	ReasonAutoRecovery Reason = "auto_recovery"
 )
 
 // Status is the fixed vocabulary of a wake schedule's lifecycle state,

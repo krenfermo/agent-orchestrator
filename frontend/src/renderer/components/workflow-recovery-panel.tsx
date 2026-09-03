@@ -36,7 +36,7 @@ export function WorkflowRecoveryPanel({ run }: { run: WorkflowRunView }) {
 	// assessment probes the project's planner context, and asking for it on
 	// every poll of every run would be a real cost for an answer nobody needs.
 	const relevant = run.state === "needs_attention" || run.state === "waiting" || run.phase === "blocked";
-	const { recovery, repairPlan, isLoading, error, run: runOperation, pending, pendingOperation, actionError } =
+	const { recovery, repairPlan, recoveryStatus, isLoading, error, run: runOperation, pending, pendingOperation, actionError } =
 		useWorkflowRecovery(run.id, relevant);
 
 	if (!relevant) return null;
@@ -56,7 +56,18 @@ export function WorkflowRecoveryPanel({ run }: { run: WorkflowRunView }) {
 	}
 	if (!recovery) return null;
 
-	const offered = offeredOperations(recovery);
+	// P3-C §14: while AO is acting on this run by itself — an automatic repair
+	// in flight, a low-risk decision being resolved, a scheduled retry — the
+	// panel offers no mutating operation at all.
+	//
+	// The flag is the backend's (`workflow.Presentation.AutomaticActionActive`),
+	// not a rule re-derived here. That is the whole point: P1-B's assessment
+	// still says a repair is "available", because it answers "is this condition
+	// repairable" — and one click away from authorizing the identical repair AO
+	// has already started is not a choice worth offering. Which of the two
+	// questions governs the buttons is exactly what the Advisor decides.
+	const automatic = run.automaticActionActive === true;
+	const offered = automatic ? [] : offeredOperations(recovery);
 
 	return (
 		<section className="flex flex-col gap-3 rounded-lg border border-border p-4">
@@ -86,6 +97,12 @@ export function WorkflowRecoveryPanel({ run }: { run: WorkflowRunView }) {
 				)}
 			</dl>
 
+			{/* P3-D §15: how AO is trying to recover this, behind a disclosure.
+			    The human sentence above stays the headline; this is the operator
+			    detail underneath it, and every value in it is served already
+			    composed by the daemon. */}
+			<WorkflowRecoveryDetails status={recoveryStatus} />
+
 			{/* When this run's stop is a mirror of a child's, the operator is
 			    sent to the run that actually owns the problem. */}
 			{recovery.targetRunId && recovery.targetRunId !== run.id && (
@@ -113,7 +130,9 @@ export function WorkflowRecoveryPanel({ run }: { run: WorkflowRunView }) {
 					))}
 				</div>
 			) : (
-				<p className="text-xs text-muted-foreground">{t("recovery.noAutomaticActions")}</p>
+				<p className="text-xs text-muted-foreground">
+					{automatic ? t("recovery.automaticInFlight") : t("recovery.noAutomaticActions")}
+				</p>
 			)}
 
 			{/* A backend refusal is shown as a refusal. It is never swallowed and
@@ -252,4 +271,81 @@ function repairLabel(t: TFunction, recovery: WorkflowRecoveryView, plan: Workflo
 	const budgetIsTheAnswer = recovery.repairEligibility === "eligible" || recovery.repairEligibility === "budget_exhausted";
 	if (!plan || !budgetIsTheAnswer) return eligibility;
 	return t("recovery.repairWithBudget", { eligibility, spent: plan.spent, budget: plan.budget });
+}
+
+/**
+ * The recovery projection, rendered as an advanced disclosure (P3-D §15).
+ *
+ * It answers "how is AO trying to recover this run" — the state, what it is
+ * waiting for, the repair attempt, the provider chain, and the bounded history.
+ * Nothing here is inferred in the renderer: the daemon composes the sentence and
+ * every classification, so the CLI, the Board and this panel cannot disagree.
+ *
+ * A block whose facts the daemon does not hold is not rendered. An empty
+ * "capacity" row on a run that never queued reads as a finding.
+ */
+function WorkflowRecoveryDetails({
+	status,
+}: {
+	status: NonNullable<ReturnType<typeof useWorkflowRecovery>["recoveryStatus"]> | undefined;
+}) {
+	const { t } = useTranslation();
+	if (!status) return null;
+	const failover = status.failover ?? [];
+	const timeline = status.timeline ?? [];
+	return (
+		<details className="rounded-lg border border-border p-3" data-testid="workflow-recovery-details">
+			<summary className="cursor-pointer text-xs font-semibold">{t("recovery.details")}</summary>
+			<p className="mt-2 text-xs text-foreground">{status.summary}</p>
+			<dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+				<RecoveryFact label={t("recovery.state")} value={status.state} />
+				{status.execution?.attemptId ? (
+					<RecoveryFact
+						label={t("recovery.attempt")}
+						value={`${status.execution.attemptId}${status.execution.attemptNumber ? ` (#${status.execution.attemptNumber})` : ""}`}
+					/>
+				) : null}
+				{status.execution?.provider ? (
+					<RecoveryFact label={t("recovery.provider")} value={status.execution.provider} />
+				) : null}
+				{status.execution?.authority ? (
+					<RecoveryFact label={t("recovery.authority")} value={status.execution.authority} />
+				) : null}
+				{status.repair.attempt > 0 ? (
+					<RecoveryFact
+						label={t("recovery.repairAttempt")}
+						value={`${status.repair.attempt}/${status.repair.budget}${status.repair.active ? ` · ${status.state}` : ""}`}
+					/>
+				) : null}
+				{status.capacity.read && (status.capacity.waiting > 0 || status.capacity.held > 0) ? (
+					<RecoveryFact
+						label={t("recovery.capacity")}
+						value={`${status.capacity.waiting} / ${status.capacity.held}`}
+					/>
+				) : null}
+				{status.branch.branch ? (
+					<RecoveryFact
+						label={t("recovery.branchOwner")}
+						value={status.branch.waiting && status.branch.heldByRunId ? status.branch.heldByRunId : status.branch.branch}
+					/>
+				) : null}
+				{status.dialog.state ? <RecoveryFact label={t("recovery.dialogState")} value={status.dialog.state} /> : null}
+				{status.retryCount ? <RecoveryFact label={t("recovery.retries")} value={String(status.retryCount)} /> : null}
+			</dl>
+			{failover.length > 1 ? (
+				<ul className="mt-2 space-y-0.5 text-xs text-muted-foreground" data-testid="workflow-recovery-failover">
+					{failover.map((a) => (
+						<li key={a.attemptId}>
+							{`#${a.attemptNumber} ${a.provider ?? ""} → ${a.outcome || t("recovery.running")}${a.errorClass ? ` (${a.errorClass})` : ""}`}
+						</li>
+					))}
+				</ul>
+			) : null}
+			{timeline.length > 0 ? (
+				<p className="mt-2 truncate text-xs text-muted-foreground" data-testid="workflow-recovery-timeline">
+					{timeline.map((e) => e.kind).join(" → ")}
+				</p>
+			) : null}
+		</details>
+	);
 }

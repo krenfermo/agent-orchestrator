@@ -374,6 +374,12 @@ type Deps struct {
 	// (restart recovery) but never attempts new detection.
 	QuestionsStore QuestionsStore
 	PaneReader     PaneReader
+	// DialogKeys is P3-C's structured dialog-response capability: the runtime's
+	// ability to press named keys in a pane, which is the ONLY way an answer
+	// reaches a worker blocked on a select prompt. Optional, and its absence is
+	// reported honestly rather than worked around -- a deployment without it
+	// hands such questions to a person instead of typing into them.
+	DialogKeys DialogKeySender
 
 	// DecisionResolverLauncher backs Checkpoint 8K-B pass 2's cross-provider
 	// Decision Resolver dispatch (decision_resolver_wiring.go). Optional: a
@@ -427,6 +433,11 @@ type Deps struct {
 	// writer of one branch exclude each other.
 	IntegrationLocks   integration.Locker
 	WorkspaceCommitter WorkspaceCommitter
+	// WorkspacePreflight is the read-only repository probe behind P3-A §17's
+	// commit-and-continue flow. Optional: nil means AO reports pending changes
+	// as UNKNOWN rather than as absent -- an unreadable repository is never
+	// evidence that there is nothing in it.
+	WorkspacePreflight WorkspacePreflighter
 
 	// TrustedLocal mirrors config.Config.TrustedLocalMode (Checkpoint 8P-C):
 	// when true, a workflow owner with zero configured ProviderProfile rows
@@ -641,6 +652,7 @@ type Coordinator struct {
 	// handling. Both optional.
 	questionsStore QuestionsStore
 	paneReader     PaneReader
+	dialogKeys     DialogKeySender
 
 	// decisionResolverLauncher backs Checkpoint 8K-B pass 2's resolver
 	// dispatch. Optional.
@@ -683,6 +695,7 @@ type Coordinator struct {
 	// direct-branch execution mode. Both optional.
 	branchLocks        BranchLocks
 	workspaceCommitter WorkspaceCommitter
+	workspacePreflight WorkspacePreflighter
 
 	// capacityProber backs Checkpoint 8P-E.13A.4's ACTIVE capacity probe.
 	// Optional: nil keeps the pre-8P-E.13A.4 purely reactive behavior, where a
@@ -754,6 +767,7 @@ func New(d Deps) *Coordinator {
 		branchLocks:              d.BranchLocks,
 		integrationLocks:         d.IntegrationLocks,
 		workspaceCommitter:       d.WorkspaceCommitter,
+		workspacePreflight:       d.WorkspacePreflight,
 		spawner:                  d.Spawner,
 		sessionFacts:             d.SessionFacts,
 		workspaceFacts:           d.WorkspaceFacts,
@@ -774,6 +788,7 @@ func New(d Deps) *Coordinator {
 		switcher:                 d.Switcher,
 		questionsStore:           d.QuestionsStore,
 		paneReader:               d.PaneReader,
+		dialogKeys:               d.DialogKeys,
 		decisionResolverLauncher: d.DecisionResolverLauncher,
 		notifications:            d.Notifications,
 		wakeScheduler:            d.WakeScheduler,

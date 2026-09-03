@@ -195,6 +195,16 @@ func (c *Coordinator) reconcileRun(ctx stdctx.Context, run domain.WorkflowRun, n
 	// whose capacity state cannot be reasoned about must not stop every other
 	// run from being scheduled.
 	c.reconcileCapacityForRun(ctx, run)
+	// P3-D §10/§28: and the fix attempts whose cycle is provably over. Same
+	// argument as the capacity claim above, one table across: an open attempt
+	// row is a claim that a writer is live in this tree, and a cancelled or
+	// answered review cycle can leave one that nothing else will ever retract.
+	// Best-effort for the same reason -- a run whose review authority cannot be
+	// read must not stop the sweep.
+	if _, terr := c.TerminalizeSupersededFixAttempts(ctx, run); terr != nil && c.log != nil {
+		c.log.Warn("workflow: could not terminalize superseded fix attempts",
+			"run", run.ID, "err", terr)
+	}
 	// P1-D: the same pass, for the same reason. A placement whose generation
 	// was superseded by a crashed replacement, or one belonging to a run that
 	// is over, must stop being an authority — and boot is where a stale one is

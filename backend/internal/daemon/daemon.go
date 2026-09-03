@@ -684,17 +684,28 @@ func RunWithConfig(cfg config.Config) error {
 		ShellTerminals:     shellTermSvc,
 		Conversations:      chatSvc,
 		Settings:           settingsSvc,
-		CDC:                store,
-		Events:             cdcPipe.Broadcaster,
-		Activity:           lcStack.LCM,
-		UsageHooks:         usageCollector,
-		UsageSummary:       usagesvc.NewSummaryReader(store),
-		Capacity:           capacitysvc.NewReader(store),
-		ProjectMemory:      projectmemorysvc.New(projectMemory, store).WithProvisioner(memoryProvisioning).WithWorkspaces(store),
-		Questions:          &questionssvc.AnswerService{Store: store, Runs: store, Sender: rawSessionMgr},
-		Decisions:          &questionssvc.ResolverAnswerService{Store: store},
-		Telemetry:          telemetrySink,
-		Mobile:             mc,
+		// The same resolver the workflow wiring uses, so /settings reports the
+		// policy that is actually in force rather than a second reading of the
+		// environment that could disagree with it.
+		MemoryMode:    string(memoryConfig(log).Mode),
+		CDC:           store,
+		Events:        cdcPipe.Broadcaster,
+		Activity:      lcStack.LCM,
+		UsageHooks:    usageCollector,
+		UsageSummary:  usagesvc.NewSummaryReader(store),
+		Capacity:      capacitysvc.NewReader(store),
+		ProjectMemory: projectmemorysvc.New(projectMemory, store).WithProvisioner(memoryProvisioning).WithWorkspaces(store),
+		Questions: &questionssvc.AnswerService{
+			Store: store, Runs: store, Sender: rawSessionMgr, Logger: log,
+			// P3-D: the answer is recorded first and delivered second, and the
+			// delivery must not claim a write landed in a composer that a modal
+			// prompt was covering. This is the same session row the structured
+			// dialog path reads.
+			Inputs: sessionInputState{store: store},
+		},
+		Decisions: &questionssvc.ResolverAnswerService{Store: store},
+		Telemetry: telemetrySink,
+		Mobile:    mc,
 		DevImport: devimportsvc.New(devimportsvc.Deps{
 			Store:         store,
 			TargetDataDir: cfg.DataDir,

@@ -62,9 +62,17 @@ const (
 	// session that has also stopped producing any activity at all. Truthful,
 	// bounded, and never phrased as "the worker is waiting for you".
 	WorkerObservationAmbiguous WorkerProgress = "worker_observation_ambiguous"
-	WorkerTerminated           WorkerProgress = "worker_terminated"
-	WorkerFailed               WorkerProgress = "worker_failed"
-	WorkerResultAvailable      WorkerProgress = "worker_result_available"
+	// WorkerTurnCompleted is the TUI half of "the worker is done". A worker
+	// whose runtime is a terminal pane does not exit when it finishes: it goes
+	// idle with the pane still alive, and the only thing that distinguishes
+	// "finished" from "quiet" is the turn-completion receipt the harness's own
+	// Stop hook writes. That receipt is what this label stands on, and AO had
+	// no name for it before -- which is why a real TUI worker could finish, be
+	// observed, and be recorded as merely idle, forever.
+	WorkerTurnCompleted   WorkerProgress = "worker_turn_completed"
+	WorkerTerminated      WorkerProgress = "worker_terminated"
+	WorkerFailed          WorkerProgress = "worker_failed"
+	WorkerResultAvailable WorkerProgress = "worker_result_available"
 	// WorkerReadOnlyVerified is a worker whose task the plan declared
 	// read-only, which finished, and whose worktree AO has git-verified to be
 	// exactly as it was at dispatch. It is a SUCCESS, and it is deliberately a
@@ -142,6 +150,22 @@ type WorkStepDecision struct {
 // "the worker needs you" because the worker is merely still alive, or because
 // no completion signal has arrived. It must hold POSITIVE evidence that a
 // person is being asked something. See provenHumanInputRequest for what counts.
+//
+// turnCompleted is P3-A's missing terminal authority for a worker that never
+// exits. Every other "the work is over" fact this evaluator reads is about the
+// PROCESS -- terminated, exited, gone -- and a TUI worker satisfies none of
+// them when it finishes: the pane stays alive and the session goes idle,
+// exactly as it does between two turns of a conversation that is not over. So a
+// real worker could finish, with its change on disk, and be evaluated forever
+// as "idle, look again later". The receipt closes that: it is written only from
+// a REPORTED turn boundary (the harness's Stop hook), it is CLEARED the moment
+// work goes back in flight, and it is durable across a daemon restart -- see
+// SessionRecord.TurnCompletedAt. It is generation-bound by its caller, which
+// only sets it for a receipt at or after THIS attempt's dispatch.
+//
+// What it is not is a verdict. It never completes a step on its own and it
+// never outranks the evidence: it makes the step CONCLUSIVE, so an outcome AO
+// cannot prove becomes a bounded, honest stop instead of an unbounded silence.
 func evaluateWorkStepProgress(
 	sessionFound bool,
 	session domain.SessionRecord,
@@ -151,6 +175,7 @@ func evaluateWorkStepProgress(
 	now time.Time,
 	dispatchedAt time.Time,
 	humanInputProven bool,
+	turnCompleted bool,
 	evidence workerEvidence,
 	readOnly readOnlyExpectation,
 ) WorkStepDecision {
@@ -330,14 +355,58 @@ func evaluateWorkStepProgress(
 		if !workspaceAvailable {
 			// Insufficient fresh evidence this call; wait for a future call
 			// once the throttle window has elapsed. Not an error.
-			return WorkStepDecision{Progress: WorkerIdle, NoChange: true}
+			//
+			// Unless the worker has already SAID it is finished. Then there is
+			// no future call worth waiting for -- nothing else is coming, the
+			// receipt does not expire, and "look again later" is a promise AO
+			// cannot keep. This is the exact state both P3-A smokes ended in:
+			// a finished worker, its change on disk, and a work step polling
+			// itself forever because the one observation that would have
+			// concluded it could not be obtained. Its caller has already paid
+			// for a forced, unthrottled observation before reaching here, so an
+			// observation still missing at this point is a repository AO cannot
+			// read rather than a throttle -- which is a thing to say out loud,
+			// not to keep quiet about.
+			if !turnCompleted {
+				return WorkStepDecision{Progress: WorkerIdle, NoChange: true}
+			}
+			return WorkStepDecision{
+				Progress:   WorkerTurnCompleted,
+				NextStep:   domain.WorkflowStepWaiting,
+				NextRun:    domain.WorkflowRunNeedsAttention,
+				NextAction: "worker reported its turn finished, but AO could not observe its workspace and cannot prove what it produced",
+				Ambiguous:  true,
+				// Not the generic dispatch ambiguity: the turn receipt is
+				// proof this worker ran its turn to the end, so the only thing
+				// missing is one observation of one directory. See the reason's
+				// own doc comment for why the two must not share a sentence.
+				AttentionReason: ReasonWorkerWorkspaceUnreadable,
+			}
+		}
+		// Observed, and nothing to show for it. Fail closed: a worker that says
+		// it is done and left no trace is not a completed task, and a process
+		// that merely stopped is not a result either. Naming the receipt in the
+		// progress label keeps the two apart on the ledger.
+		progress := WorkerIdle
+		action := "worker idle with no verifiable change — needs human review"
+		// The default reason stands for the idle half: no receipt, nothing in
+		// the tree, and no way to tell a worker that did nothing from one that
+		// never really started. A turn receipt removes exactly that doubt, and
+		// with it the reason -- what is left is a disagreement between two
+		// facts AO holds, not a gap in them.
+		reason := ""
+		if turnCompleted {
+			progress = WorkerTurnCompleted
+			action = "worker reported its turn finished, but AO can see no change in its workspace — nothing verifiable was produced"
+			reason = ReasonWorkerTurnProducedNothing
 		}
 		return WorkStepDecision{
-			Progress:   WorkerIdle,
-			NextStep:   domain.WorkflowStepWaiting,
-			NextRun:    domain.WorkflowRunNeedsAttention,
-			NextAction: "worker idle with no verifiable change — needs human review",
-			Ambiguous:  true,
+			Progress:        progress,
+			NextStep:        domain.WorkflowStepWaiting,
+			NextRun:         domain.WorkflowRunNeedsAttention,
+			NextAction:      action,
+			Ambiguous:       true,
+			AttentionReason: reason,
 		}
 	default:
 		// Unknown/unspecified activity: make no change rather than guess.
@@ -469,10 +538,21 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 	terminalish := !found || sess.IsTerminated || sess.Activity.State == domain.ActivityExited
 	missingFirstSignal := found && sess.FirstSignalAt.IsZero() &&
 		!dispatchedAt.IsZero() && now.Sub(dispatchedAt) > workStepFirstSignalTimeout
+	// P3-A: the third decision that must never be taken against a throttled
+	// observation, and the one that had no forcing at all. A TUI worker that
+	// reported its turn finished is a work step with a conclusion due NOW: the
+	// receipt does not expire, no further signal is coming, and the throttle --
+	// which is keyed off the newest checkpoint and which a quietly polling step
+	// never refreshes -- can otherwise keep the observation that would conclude
+	// it permanently out of reach. Same argument as the two above, same
+	// remedy: when a conclusion is in play, AO pays for the git observation.
+	turnCompleted := workerTurnCompleted(found, sess, dispatchedAt)
 	var evidence workerEvidence
 	if terminalish || missingFirstSignal {
 		evidence, obs, workspaceAvailable = c.workerEvidenceFor(
 			ctx, run, found, sess, obs, workspaceAvailable, baseSHA, dispatchedAt)
+	} else if turnCompleted {
+		obs, workspaceAvailable = c.forceWorkspaceObservation(ctx, sess, obs, workspaceAvailable)
 	}
 
 	// The read-only expectation is resolved only for an observation it could
@@ -488,7 +568,7 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 		readOnly = c.resolveReadOnlyExpectation(ctx, run, step, workspaceAvailable, obs)
 	}
 
-	decision := evaluateWorkStepProgress(found, sess, workspaceAvailable, obs, baseSHA, now, dispatchedAt, humanInputProven, evidence, readOnly)
+	decision := evaluateWorkStepProgress(found, sess, workspaceAvailable, obs, baseSHA, now, dispatchedAt, humanInputProven, turnCompleted, evidence, readOnly)
 	if missingFirstSignal {
 		// The reconciliation's verdict is durable whether or not it changes any
 		// state: "AO looked again and decided to keep waiting" is exactly the
@@ -555,8 +635,29 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 		}
 		return step, nil
 	}
-	if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, step.State, decision.NextStep, now); err != nil {
+	// The CAS is the exactly-once boundary, and its answer is load-bearing.
+	//
+	// Three mechanisms observe the same worker -- the autonomous heartbeat,
+	// Continue, and boot recovery -- and all three can reach this line for one
+	// completion. Exactly one of them moves the row; the losers must then do
+	// NOTHING, because every write below this point is a side effect of having
+	// moved it: clearing the stop, transitioning the run, and above all writing
+	// the completion checkpoint that review dispatch resolves its worktree and
+	// its target fingerprint from. A second checkpoint for one completion ties
+	// with the first on created_at, which makes "the latest checkpoint for this
+	// step" ambiguous -- so the loser observing the winner's own result is not
+	// merely tidier, it is the difference between one review dispatch and a
+	// coin flip between two. Ignoring the CAS result is what made this a race
+	// rather than a decision.
+	moved, err := c.store.UpdateWorkflowStepState(ctx, step.ID, step.State, decision.NextStep, now)
+	if err != nil {
 		return step, err
+	}
+	if !moved {
+		if current, ok, gerr := c.getWorkflowStep(ctx, run.ID, step.ID); gerr == nil && ok {
+			return current, nil
+		}
+		return step, nil
 	}
 	step.State = decision.NextStep
 
@@ -706,6 +807,56 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 	}
 
 	return step, nil
+}
+
+// workerTurnCompleted reports whether this attempt's worker has REPORTED that
+// its turn ended, and is the whole of the ownership/generation guard on that
+// fact.
+//
+// Two conditions, and the second is the one that makes an old completion unable
+// to close a new work step. The receipt must exist, and it must not predate
+// THIS attempt's dispatch. A worker relaunched for attempt N+1 carries the
+// session row of attempt N, and that row can still hold a receipt from the
+// earlier turn if nothing has cleared it yet; concluding on it would close the
+// new attempt on the old attempt's word. (The receipt is in fact cleared the
+// moment work goes back in flight -- see SessionRecord.TurnCompletedAt -- so
+// this is a second lock on a door that is already shut. Both are cheap, and
+// only one of them lives in this package.)
+//
+// A dispatch time AO does not know is not treated as permission: with no
+// attempt row there is nothing to bind the receipt to, and an unbound receipt
+// concludes nothing.
+func workerTurnCompleted(sessionFound bool, sess domain.SessionRecord, dispatchedAt time.Time) bool {
+	if !sessionFound || sess.TurnCompletedAt.IsZero() || dispatchedAt.IsZero() {
+		return false
+	}
+	return !sess.TurnCompletedAt.Before(dispatchedAt)
+}
+
+// forceWorkspaceObservation pays for the git observation the throttle skipped.
+//
+// Extracted from workerEvidenceFor, which has always done exactly this and for
+// exactly the same reason, so the two forcing paths cannot drift: one of them
+// also wants the independent liveness facts, and one of them only wants to be
+// able to see the repository. Already-available observations are returned
+// untouched, so calling it is idempotent and free.
+func (c *Coordinator) forceWorkspaceObservation(
+	ctx stdctx.Context, sess domain.SessionRecord,
+	obs ports.WorkspaceObservation, workspaceAvailable bool,
+) (ports.WorkspaceObservation, bool) {
+	if workspaceAvailable || c.workspaceFacts == nil || sess.Metadata.WorkspacePath == "" {
+		return obs, workspaceAvailable
+	}
+	o, err := c.workspaceFacts.ObserveWorkspace(ctx, ports.WorkspaceInfo{
+		Path:      sess.Metadata.WorkspacePath,
+		Branch:    sess.Metadata.Branch,
+		SessionID: sess.ID,
+		ProjectID: sess.ProjectID,
+	})
+	if err != nil {
+		return obs, workspaceAvailable
+	}
+	return o, true
 }
 
 // sessionIDIfFound is the session to probe and to stamp on a recorded

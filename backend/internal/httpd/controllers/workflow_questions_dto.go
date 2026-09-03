@@ -30,10 +30,19 @@ type WorkflowQuestionResponse struct {
 	State                string                           `json:"state" enum:"pending,resolving,answered,human_required,cancelled"`
 	CreatedAt            string                           `json:"createdAt"`
 	AnsweredAt           *string                          `json:"answeredAt,omitempty"`
-	AnswerSource         string                           `json:"answerSource,omitempty" enum:",policy,human,resolver"`
+	AnswerSource         string                           `json:"answerSource,omitempty" enum:",policy,human,resolver,autonomous"`
 	AnswerText           string                           `json:"answerText,omitempty"`
 	Delivered            bool                             `json:"delivered"`
 	DeliveredAt          *string                          `json:"deliveredAt,omitempty"`
+	// AutonomyMode names the frozen question-autonomy policy that routed this
+	// question to the Decision Resolver, when one did (P3-C). Empty for every
+	// question the classifier resolved on its own fact-backed or
+	// discovery-shape grounds.
+	//
+	// It is what lets a surface explain an automatic decision rather than just
+	// label it: "AO decided this" is not actionable, and "AO decided this
+	// because you set this run to auto_decide_low_risk" is.
+	AutonomyMode string `json:"autonomyMode,omitempty" enum:",ask_always,auto_decide_low_risk,full_autonomy"`
 
 	// The fields below surface Checkpoint 8K-B's cross-provider Decision
 	// Resolver (pass 3), when a resolution attempt exists for this
@@ -94,6 +103,7 @@ func workflowQuestionResponse(q domain.WorkflowQuestion) WorkflowQuestionRespons
 	if q.SessionID != nil {
 		out.SessionID = string(*q.SessionID)
 	}
+	out.AutonomyMode = string(q.AutonomyMode)
 	if q.AnswerSource != nil {
 		out.AnswerSource = string(*q.AnswerSource)
 	}

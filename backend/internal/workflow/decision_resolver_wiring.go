@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
-	"github.com/aoagents/agent-orchestrator/backend/internal/service/questions"
 )
 
 // resolutionStalenessThreshold bounds how long a resolution attempt may sit
@@ -95,6 +94,20 @@ func (c *Coordinator) dispatchDecisionResolver(ctx stdctx.Context, run domain.Wo
 			fingerprint = cp.FingerprintAfter
 			if fingerprint == "" {
 				fingerprint = cp.FingerprintBefore
+			}
+		}
+	}
+	if worktreePath == "" {
+		// P3-C: the checkpoint has no worktree path. For a DIRECT-BRANCH
+		// placement it never will -- such a run has no worktree, it works in the
+		// repository itself -- so the run's own frozen placement is the durable
+		// fact that answers "where is this work happening". Without this the
+		// resolver could never be dispatched for a direct-branch run at all, and
+		// every autonomous decision on one parked forever on a capacity wait.
+		if path, placementBranch := c.placementWorkspacePath(ctx, run); path != "" {
+			worktreePath = path
+			if branch == "" {
+				branch = placementBranch
 			}
 		}
 	}
@@ -260,8 +273,22 @@ func (c *Coordinator) observeResolutionStep(ctx stdctx.Context, run domain.Workf
 			// validation, but never invent an answer.
 			return c.forceQuestionHumanRequired(ctx, q, "ambiguous_resolution_state: resolution completed with no answer and requires_human=false", now)
 		}
+		// P3-C: WHICH automatic source produced this answer is a durable fact
+		// about the question, not about the resolver that ran. The same
+		// read-only cross-provider machinery serves both cases; what separates
+		// them is why the question reached it. A discovery-shaped question the
+		// classifier recognised on its own is `resolver`. A question AO judged
+		// a low-risk choice it was AUTHORIZED to make instead of asking is
+		// `autonomous`, and only that one has an autonomy policy behind it that
+		// a person may want to change.
+		//
+		// Neither is ever recorded as `human`. See domain.AnswerSourceAutonomous.
+		source := domain.AnswerSourceResolver
+		if q.AutonomyMode.Valid() {
+			source = domain.AnswerSourceAutonomous
+		}
 		ok, err := c.questionsStore.AnswerWorkflowQuestion(ctx, string(q.ID), domain.QuestionStateResolving, domain.QuestionStateAnswered,
-			domain.AnswerSourceResolver, answerText, "", now)
+			source, answerText, "", now)
 		if err != nil {
 			return err
 		}
@@ -275,9 +302,10 @@ func (c *Coordinator) observeResolutionStep(ctx stdctx.Context, run domain.Workf
 			// pattern (questions_wiring.go) — the top-of-reconcileQuestions
 			// sweep also covers this on the very next call (restart
 			// recovery), the delivered flag makes both calls safe.
-			if _, err := questions.DeliverAnswered(ctx, c.questionsStore, questionMessageSender{c.messageSender}, run.ID, now); err != nil {
-				return err
-			}
+			// Best-effort: observeResolutionStep also runs on the read path, and
+			// a worker session that refuses the write must not make the run
+			// unreadable. The answer is durable; the delivery is retried.
+			c.deliverAnsweredQuestions(ctx, run, now)
 		}
 		return nil
 

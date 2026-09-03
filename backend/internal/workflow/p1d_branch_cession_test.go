@@ -61,6 +61,14 @@ func (c cessionBranchLocks) Renew(ctx context.Context, runID, stepID, sessionID 
 func (c cessionBranchLocks) RecoverStale(ctx context.Context, runID string) (int64, error) {
 	return c.mgr.RecoverStale(ctx, runID)
 }
+
+// Holder answers "who owns this branch right now" (P3-C). The double
+// implements it because the production adapter does: without it the
+// commit-and-continue authority proof degrades to a refusal, and the fixture
+// would then be testing the degraded path rather than the real one.
+func (c cessionBranchLocks) Holder(ctx context.Context, repoPath, branch string) (domain.BranchLock, bool, error) {
+	return c.mgr.Holder(ctx, repoPath, branch)
+}
 func (c cessionBranchLocks) Cede(ctx context.Context, lockID, fromRunID, toRunID, toStepID string) (bool, error) {
 	return c.mgr.Cede(ctx, lockID, fromRunID, toRunID, toStepID)
 }

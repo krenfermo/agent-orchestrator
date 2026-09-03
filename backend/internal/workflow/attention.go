@@ -249,7 +249,46 @@ const (
 	// one. Parking is scoped to this run: every other run reconciles normally.
 	ReasonRecoveryUnreconcilable  = "recovery_unreconcilable"
 	ReasonWorkerDispatchAmbiguous = "worker_dispatch_ambiguous"
-	ReasonWorkerBlocked           = "worker_blocked"
+	// ReasonWorkerWorkspaceUnreadable is a worker whose turn AO can PROVE
+	// finished — the provider's own turn receipt for this dispatch — and whose
+	// repository AO could not read, so what the turn produced is unknown.
+	//
+	// It is deliberately NOT ReasonWorkerDispatchAmbiguous (P3-D §1). That
+	// reason means AO cannot say what the worker did or whether it ran at all;
+	// here AO knows exactly what the worker did with its turn and is missing
+	// one specific observation, of one specific directory. The remedies are
+	// nothing alike: this one is fixed by making the workspace readable again
+	// and re-entering, and the run resumes on the evidence it was always going
+	// to be decided on. Sending a person to "confirm whether the worker
+	// produced work" instead sends them to answer a question AO could answer
+	// itself the moment the path comes back.
+	ReasonWorkerWorkspaceUnreadable = "worker_workspace_unreadable"
+	// ReasonWorkerTurnProducedNothing is the other half of that split: the turn
+	// receipt is there, the workspace WAS read, and there is nothing in it.
+	//
+	// Also not ReasonWorkerDispatchAmbiguous, and for the opposite reason —
+	// nothing here is ambiguous. Both facts are in hand and they disagree with
+	// each other: the provider says it finished, and the tree says it did
+	// nothing. That is a judgement about the work, which is a person's, and the
+	// sentence they get should say so rather than ask them to establish a fact
+	// AO already established.
+	ReasonWorkerTurnProducedNothing = "worker_turn_produced_nothing"
+	ReasonWorkerBlocked             = "worker_blocked"
+	// ReasonProviderDialogUnreadable is a worker sitting on an interactive
+	// prompt that AO holds a durable answer for and CANNOT READ well enough to
+	// deliver it: an unrecognised layout, or a screen that never settled.
+	//
+	// It is deliberately not ReasonWorkerBlocked, and it is emphatically not
+	// treated as the prompt being gone. Worker-blocked says "somebody has to
+	// answer this"; here the answer already exists and AO is the one that
+	// cannot act. Telling a person to go and decide something AO decided
+	// minutes ago wastes their time and hides the real fault, which is that
+	// AO's reading of this provider's screen has stopped matching the provider.
+	//
+	// Bounded: it is raised only after the retry window has passed with every
+	// observation inconclusive. Before that the run stays as it was and AO
+	// keeps looking, because a half-drawn repaint resolves itself.
+	ReasonProviderDialogUnreadable = "provider_dialog_unreadable"
 	// ReasonReadOnlyWorkspaceMutated is a task the plan declared read-only
 	// (domain.WorkflowWriteIntentReadOnly) whose worktree changed anyway,
 	// measured against the workspace fingerprint recorded at dispatch.
@@ -319,6 +358,15 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonWorkerDispatchAmbiguous: {
 		HumanAction: "Confirm whether the worker session actually produced work, then continue or cancel this run.",
+	},
+	ReasonProviderDialogUnreadable: {
+		HumanAction: "AO decided this question automatically but cannot read the prompt the agent is showing, so it has not sent the answer. Open that session and choose the option AO recorded, then continue this run.",
+	},
+	ReasonWorkerWorkspaceUnreadable: {
+		HumanAction: "The worker finished its turn and AO could not read its workspace to see what it produced. Check that the run's repository path still exists and is readable, then continue this run — AO re-reads it and resumes on its own evidence.",
+	},
+	ReasonWorkerTurnProducedNothing: {
+		HumanAction: "The worker reported its turn finished and left no change in its workspace. Decide whether that is correct for this task, then continue this run or cancel it.",
 	},
 	"review_dispatch_ambiguous": {
 		HumanAction: "Confirm the state of the review, then continue or cancel this run.",
@@ -717,6 +765,15 @@ func (c *Coordinator) recordAttentionStopWithState(ctx stdctx.Context, run domai
 	// says the run stopped, the checkpoint only says why, and a person is no
 	// less needed when AO failed to write down the explanation.
 	c.notifyAttentionStop(ctx, run, reason, detail)
+	// P3-C §3: if this run's own frozen policy authorizes AO to repair this
+	// condition without asking, make that happen on a timer rather than on the
+	// next daemon restart. scheduleAutoRecoveryWake re-checks the policy and
+	// the condition itself and is a no-op for every stop that is not both
+	// repairable and automatic, so registering the call here costs nothing for
+	// the stops it does not apply to. Unconditional on the checkpoint write
+	// above for the same reason the notification is: the run stopped either
+	// way, and a failure to write down why must not also cost it its recovery.
+	c.scheduleAutoRecoveryWake(ctx, run, reason)
 }
 
 // recordAttentionStopOnce is recordAttentionStop for a stop a caller may

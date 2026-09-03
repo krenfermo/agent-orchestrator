@@ -706,3 +706,30 @@ func (c *Coordinator) reconcilePlacementsForRun(ctx stdctx.Context, run domain.W
 		}
 	}
 }
+
+// frozenPlacementTarget is the placement type a launch must materialise, and
+// the branch it must check out there.
+//
+// It reads the LIVE record and never re-derives selection policy: after the
+// freeze the stored record is the authority, and asking project configuration
+// again at launch time is exactly the drift P1-D closed for recovery and P3-A
+// closes for the workspace router.
+//
+// An empty answer means "no placement authority is wired, or none is frozen
+// yet", and the workspace router then falls back to project configuration —
+// which is the pre-P3-A behaviour. It is deliberately not defaulted to
+// isolated: guessing a placement is how a direct branch gets written without a
+// lock, and how an explicit branch choice becomes a worktree nobody asked for.
+func (c *Coordinator) frozenPlacementTarget(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep) (domain.ExecutionPlacementType, string) {
+	if !c.placementEnabled() {
+		return "", ""
+	}
+	placement, ok, err := c.EnsureExecutionPlacement(ctx, run, step)
+	if err != nil || !ok {
+		return "", ""
+	}
+	if !placement.Type.IsKnown() {
+		return "", ""
+	}
+	return placement.Type, placement.ExecutionBranch
+}

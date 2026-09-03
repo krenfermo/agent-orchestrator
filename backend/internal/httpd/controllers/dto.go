@@ -1816,6 +1816,13 @@ type SettingsResponse struct {
 	// ChatHarnesses are the agents that can run in chat mode today. Empty means
 	// chat cannot be used yet, which a client should say plainly.
 	ChatHarnesses []string `json:"chatHarnesses"`
+	// MemoryMode is the daemon's project-memory rollout stage. It is a daemon
+	// policy rather than a per-project or per-run one, and it is surfaced here
+	// because P3-A §12 requires a task's creation summary to state it: a person
+	// deciding whether to launch work should be able to see whether AO will
+	// bring remembered project knowledge to it. Empty when the daemon does not
+	// report one, which a client renders as unknown rather than as "off".
+	MemoryMode string `json:"memoryMode,omitempty" enum:"off,assisted,preferred"`
 }
 
 // UpdateSessionInterfaceRequest changes the default interface for new sessions.

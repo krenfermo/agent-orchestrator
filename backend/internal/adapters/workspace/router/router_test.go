@@ -34,6 +34,19 @@ type recordingWorkspace struct {
 	lastPatterns       []string
 	lastProjectCreate  ports.WorkspaceProjectConfig
 	path               string
+	// commits counts CommitAll calls, so a test can assert WHICH adapter the
+	// router asked to write (P3-C §28).
+	commits int
+}
+
+// CommitAll makes the double a ports.WorkspaceCommitter. Both adapters
+// implement it here on purpose: the router must be shown choosing the
+// direct-branch one because that is the rule, not because the other one
+// happens to be incapable.
+func (w *recordingWorkspace) CommitAll(_ context.Context, info ports.WorkspaceInfo, _ string) (string, bool, error) {
+	w.commits++
+	w.lastInfo = info
+	return "sha-" + info.RepoPath, true, nil
 }
 
 func (w *recordingWorkspace) Create(_ context.Context, cfg ports.WorkspaceConfig) (ports.WorkspaceInfo, error) {

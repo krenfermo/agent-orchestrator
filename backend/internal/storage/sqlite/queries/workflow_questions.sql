@@ -6,14 +6,14 @@ INSERT OR IGNORE INTO workflow_questions (
     id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
     asking_harness, asking_role, fingerprint, question_text, structured_choices,
     capture_provider, capture_parser_version, capture_range_lines,
-    certainty, classification, classification_reason, state, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    certainty, classification, classification_reason, state, created_at, autonomy_mode
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
           asking_harness, asking_role, fingerprint, question_text, structured_choices,
           capture_provider, capture_parser_version, capture_range_lines,
           certainty, classification, classification_reason, state, created_at,
           answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
-          resolving_run_id;
+          resolving_run_id, autonomy_mode;
 
 -- name: GetWorkflowQuestionByFingerprint :one
 SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
@@ -21,7 +21,7 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
        answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
-       resolving_run_id
+       resolving_run_id, autonomy_mode
 FROM workflow_questions
 WHERE fingerprint = ?;
 
@@ -31,7 +31,7 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
        answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
-       resolving_run_id
+       resolving_run_id, autonomy_mode
 FROM workflow_questions
 WHERE id = ?;
 
@@ -44,7 +44,7 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
        answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
-       resolving_run_id
+       resolving_run_id, autonomy_mode
 FROM workflow_questions
 WHERE workflow_run_id = ? AND state IN ('pending', 'human_required')
 ORDER BY created_at;
@@ -55,7 +55,7 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
        answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
-       resolving_run_id
+       resolving_run_id, autonomy_mode
 FROM workflow_questions
 WHERE workflow_run_id = ?
 ORDER BY created_at;
@@ -82,7 +82,7 @@ SELECT id, workflow_run_id, workflow_step_id, workflow_attempt_id, session_id,
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
        answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
-       resolving_run_id
+       resolving_run_id, autonomy_mode
 FROM workflow_questions
 WHERE workflow_run_id = ? AND state = 'answered' AND delivered = 0;
 

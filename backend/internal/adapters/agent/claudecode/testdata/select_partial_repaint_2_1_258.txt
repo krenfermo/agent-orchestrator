@@ -1,0 +1,9 @@
+⏺ The task explicitly requires me to ask before choosing the string-building style.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ String style
+
+How should `farewell(name)` build its return value?
+
+❯ 1. String concatenation         ┌──────────────────────────────────────────┐
+                                  │ function farewell(name) {                │

@@ -176,8 +176,23 @@ func (c *Coordinator) reapOrphanedAttempts(ctx stdctx.Context, run domain.Workfl
 			// abandoned before it produced an outcome. No error class — AO
 			// never observed one, and inventing one would put a failure AO did
 			// not see into the run's error history.
-			if err := c.store.UpdateWorkflowAttemptOutcome(ctx, a.ID, now, domain.WorkflowAttemptCancelled, ""); err != nil {
-				return closed, err
+			//
+			// The CLAIM form, not the unconditional update (P3-D §11/§26). This
+			// is no longer the only writer that can conclude an attempt: the
+			// supersession sweep closes rows whose cycle ended, and the dispatch
+			// paths close their own on failure. An unconditional update here
+			// would overwrite whichever outcome got there first — turning a
+			// superseded fix cycle into an abandoned one, and a recorded
+			// failure into a cancellation — so a row somebody else already
+			// concluded is left exactly as they concluded it, and this pass
+			// counts nothing for it.
+			concluded, cerr := c.store.ClaimWorkflowAttemptOutcome(
+				ctx, a.ID, now, domain.WorkflowAttemptCancelled, "")
+			if cerr != nil {
+				return closed, cerr
+			}
+			if !concluded {
+				continue
 			}
 			closed++
 			if c.log != nil {

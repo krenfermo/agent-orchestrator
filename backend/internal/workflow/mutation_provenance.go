@@ -250,9 +250,19 @@ func (c *Coordinator) recordMutationBoundary(ctx stdctx.Context, b mutationBound
 // itself uses, so "was this direct branch" cannot get two answers in one
 // process (see task_memory.go's workIsIntegrated for the other reader).
 func (c *Coordinator) mutationPlacementFor(ctx stdctx.Context, run domain.WorkflowRun) domain.WorkflowMutationPlacement {
-	scope := placementScope{}
-	if run.PlannedTaskID != nil {
-		scope.taskID = *run.PlannedTaskID
+	scope := placementScopeFor(run)
+	// P3-A §7: the FROZEN record wins when there is one. Project configuration
+	// answers "how does this project usually work", which is the wrong question
+	// for a run whose placement was decided once and explicitly -- and reading
+	// the mutable answer here is how a direct-branch run gets its mutations
+	// filed as if they had happened in a worktree.
+	if c.placementEnabled() {
+		if live, found, err := c.placements.GetLiveExecutionPlacement(ctx, scope.runID, scope.taskID, scope.stepID); err == nil && found && live.Type.IsKnown() {
+			if live.Type == domain.PlacementDirectBranch {
+				return domain.MutationPlacementDirectBranch
+			}
+			return domain.MutationPlacementIsolatedWorktree
+		}
 	}
 	if c.projectExecutionModeFor(ctx, run, scope).DirectBranch() {
 		return domain.MutationPlacementDirectBranch

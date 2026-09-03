@@ -135,12 +135,32 @@ export function QuestionCard({ question, onAnswer, answering }: QuestionCardProp
 
 			{question.state === "answered" && (
 				<div className="rounded border border-border bg-muted/50 p-2 text-xs">
-					<div className="font-medium text-foreground">{t("shell.workflowQuestions.answered")}</div>
+					<div className="font-medium text-foreground">
+						{/* P3-C §18: "AO decided" and "the agent has it" are different
+						    moments, and the second is the one that unblocks the task.
+						    Before delivery the decision is durable and the worker is
+						    still waiting, which is worth showing rather than hiding
+						    behind a single "Answered". */}
+						{question.delivered
+							? t("shell.workflowQuestions.answered")
+							: t("shell.workflowQuestions.answerDelivering")}
+					</div>
 					<p className="mt-1 text-muted-foreground">{question.answerText}</p>
-					{question.answerSource && (
+					{/* P3-C: an answer AO decided FOR the user is labelled as that,
+					    never as a bare source string beside a human's. The two
+					    carry different authority, and a reader who cannot tell
+					    them apart has been told the wrong thing about their own
+					    project. */}
+					{question.answerSource === "autonomous" ? (
 						<p className="mt-1 text-muted-foreground">
-							{t("shell.workflowQuestions.answerSource", { source: question.answerSource })}
+							{t("shell.workflowQuestions.answerSourceAutonomous")}
 						</p>
+					) : (
+						question.answerSource && (
+							<p className="mt-1 text-muted-foreground">
+								{t("shell.workflowQuestions.answerSource", { source: question.answerSource })}
+							</p>
+						)
 					)}
 				</div>
 			)}

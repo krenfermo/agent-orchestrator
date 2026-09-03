@@ -290,6 +290,33 @@ func (m *Manager) Acquire(ctx context.Context, req AcquireRequest) ([]domain.Bra
 	var err error
 	if kind == domain.BranchLockOwnershipDirectBranch {
 		targets, err = m.Targets(ctx, req.ProjectID)
+		if err == nil && len(targets) == 0 {
+			// P3-C §28: the project is not in direct-branch MODE, but this
+			// caller is executing a direct-branch PLACEMENT and named the
+			// repository and branch it will write to.
+			//
+			// THE DEFECT THIS CLOSES. Targets asks the project, so for a run
+			// whose placement was chosen explicitly inside an isolated-default
+			// project it returned nothing -- and an acquisition with no targets
+			// returns (nil, nil), which reads as success. The dirty-worktree
+			// preflight never ran, no lock row was written, and the run launched
+			// a worker straight onto the user's real branch, on top of their
+			// uncommitted work, owning nothing. It was found by the P3-C closing
+			// smoke doing exactly that with a live Claude worker.
+			//
+			// The override is deliberately narrow: it applies ONLY when the
+			// project produced no targets of its own. A project that IS in
+			// direct-branch mode keeps deriving its full set from configuration,
+			// which is what makes a workspace project still lock its root AND
+			// every child repository rather than the one repo a caller named.
+			if repoPath, branch := strings.TrimSpace(req.RepoPath), strings.TrimSpace(req.Branch); repoPath != "" && branch != "" {
+				name := req.RepoName
+				if name == "" {
+					name = domain.RootWorkspaceRepoName
+				}
+				targets = []Target{newTarget(name, repoPath, branch)}
+			}
+		}
 	} else {
 		if strings.TrimSpace(req.RepoPath) == "" || strings.TrimSpace(req.Branch) == "" {
 			return nil, fmt.Errorf("branch lock: %s acquisition requires repo path and branch", kind)

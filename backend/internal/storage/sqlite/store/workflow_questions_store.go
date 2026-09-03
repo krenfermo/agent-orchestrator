@@ -47,6 +47,12 @@ func (s *Store) InsertWorkflowQuestion(ctx context.Context, q domain.WorkflowQue
 		ClassificationReason: sql.NullString{String: q.ClassificationReason, Valid: q.ClassificationReason != ""},
 		State:                sql.NullString{String: string(q.State), Valid: q.State != ""},
 		CreatedAt:            q.CreatedAt,
+		// P3-C: empty unless an autonomy policy is what routed this question to
+		// the resolver. It is written at INSERT and never updated, so the policy
+		// recorded against a decision is the one that was in force when AO took
+		// it -- not whichever one happens to be current when somebody reads it
+		// back.
+		AutonomyMode: string(q.AutonomyMode),
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		// INSERT OR IGNORE skipped the row: a duplicate fingerprint already
@@ -134,7 +140,7 @@ func (s *Store) ListPendingWorkflowQuestions(ctx context.Context, states []strin
        capture_provider, capture_parser_version, capture_range_lines,
        certainty, classification, classification_reason, state, created_at,
        answered_at, answer_source, answer_text, answer_reference, delivered, delivered_at,
-       resolving_run_id
+       resolving_run_id, autonomy_mode
 FROM workflow_questions
 WHERE state IN (` + strings.Join(placeholders, ",") + `)
 ORDER BY created_at`
@@ -153,7 +159,7 @@ ORDER BY created_at`
 			&r.CaptureProvider, &r.CaptureParserVersion, &r.CaptureRangeLines,
 			&r.Certainty, &r.Classification, &r.ClassificationReason, &r.State, &r.CreatedAt,
 			&r.AnsweredAt, &r.AnswerSource, &r.AnswerText, &r.AnswerReference, &r.Delivered, &r.DeliveredAt,
-			&r.ResolvingRunID,
+			&r.ResolvingRunID, &r.AutonomyMode,
 		); err != nil {
 			return nil, fmt.Errorf("scan pending workflow question: %w", err)
 		}
@@ -405,5 +411,6 @@ func workflowQuestionFromRow(r gen.WorkflowQuestion) (domain.WorkflowQuestion, e
 		Delivered:            r.Delivered != 0,
 		DeliveredAt:          nullTimeToTimePtr(r.DeliveredAt),
 		ResolvingRunID:       resolvingRunID,
+		AutonomyMode:         domain.QuestionAutonomyMode(r.AutonomyMode),
 	}, nil
 }

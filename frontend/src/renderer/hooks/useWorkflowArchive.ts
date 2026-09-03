@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient, apiErrorMessage, hasTrustedApiBaseUrl } from "../lib/api-client";
-import { type BoardWorkflow, projectBoardQueryKey } from "./useProjectBoard";
+import type { BoardWorkflow } from "./useProjectBoard";
 
 export const cancelAndArchiveWorkflowMutationKey = ["cancel-archive-workflow"] as const;
 
@@ -61,13 +61,16 @@ export function useCancelAndArchiveWorkflow(projectId: string | undefined) {
 			}
 			return data;
 		},
-		onSuccess: async (_data, workflowId) => {
+		onSuccess: async () => {
 			if (!projectId) return;
-			queryClient.setQueryData<BoardWorkflow[]>(projectBoardQueryKey(projectId), (current) =>
-				current ? current.filter((workflow) => workflow.workflowId !== workflowId) : current,
-			);
+			// P3-B §10: no optimistic removal. The card goes away because the
+			// daemon's next board no longer contains it, which is the only
+			// answer that survives a restart and the only one that cannot show
+			// a workflow as retired while it is in fact still running. Every
+			// view's query is invalidated, because archiving moves a run
+			// between two of them.
 			await Promise.all([
-				queryClient.invalidateQueries({ queryKey: projectBoardQueryKey(projectId) }),
+				queryClient.invalidateQueries({ queryKey: ["project-board", projectId] }),
 				queryClient.invalidateQueries({ queryKey: projectBoardHistoryQueryKey(projectId) }),
 			]);
 		},
@@ -86,7 +89,7 @@ export function useProjectBoardHistory(projectId: string | undefined, enabled: b
 		enabled: Boolean(projectId) && enabled && hasTrustedApiBaseUrl(),
 		queryFn: async () => {
 			const { data, error } = await apiClient.GET("/api/v1/projects/{projectId}/board/history", {
-				params: { path: { projectId: projectId as string } },
+				params: { path: { projectId: projectId as string }, query: {} },
 			});
 			if (error) throw error;
 			return data.workflows;

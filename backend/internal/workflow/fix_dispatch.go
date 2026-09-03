@@ -2,6 +2,8 @@ package workflow
 
 import (
 	stdctx "context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -107,6 +109,34 @@ func fixStepOutboxIdempotencyKey(stepID string, cycleNumber, transportAttempt in
 		key += ":transport" + strconv.Itoa(transportAttempt)
 	}
 	return key
+}
+
+// fixAttemptID is the durable identity of ONE fix cycle's attempt row (P3-D §7,
+// deferral A). It is a pure function of the fix step, the review run that
+// authorized the cycle, and the cycle number, so every pass that re-derives the
+// same cycle derives the same row id — across a restart, a duplicate wake, a
+// manual Continue and an automatic repair alike.
+//
+// What it replaces is the reason this was a deferral: the fix lane identified a
+// cycle by COUNTING attempt rows (`len(attempts) >= cycleNumber`). A count is
+// not an identity. It answers "are there at least N rows on this step" — a
+// question whose answer changes when a row is added for any other reason, and
+// which can never say WHICH row belongs to cycle N. So a review cycle that was
+// cancelled or superseded after minting its attempt left a row with no backing
+// lifecycle, NULL outcome and NULL error class, and nothing downstream — least
+// of all the reaper — could associate it with the cycle it came from or prove
+// it was finished. Two different cycles could also collide on one count.
+//
+// The review run is in the seed and carries the review cycle/generation: a
+// superseded review is a different run, so its successor's cycle 1 is a
+// different attempt rather than the same count. The step is in the seed because
+// attempt ids are unique per step but derived independently of it. And the row
+// id is the identity rather than a new column because the attempts table's
+// primary key is already exactly this constraint — a second creation for one
+// cycle does not silently double-mint, it is refused by the database.
+func fixAttemptID(fixStepID, reviewRunID string, cycleNumber int) string {
+	sum := sha256.Sum256([]byte(fixStepID + "\n" + reviewRunID + "\ncycle=" + strconv.Itoa(cycleNumber)))
+	return "wfa-fix-" + hex.EncodeToString(sum[:12])
 }
 
 // fixDispatchedPhase is the durable phase of a completed fix-cycle dispatch:
@@ -242,7 +272,8 @@ func (c *Coordinator) dispatchFixStep(ctx stdctx.Context, run domain.WorkflowRun
 	if err != nil {
 		return fixStep, err
 	}
-	if int64(len(attempts)) >= int64(cycleNumber) && !c.fixCycleDispatchIncomplete(ctx, run.ID, fixStep.ID, cycleNumber) {
+	if fixCycleHasAttempt(attempts, fixStep.ID, reviewRun.ID, cycleNumber) &&
+		!c.fixCycleDispatchIncomplete(ctx, run.ID, fixStep.ID, cycleNumber) {
 		// This cycle already has its attempt row: either fully dispatched
 		// and progressing, or ambiguous and awaiting attention. Either way,
 		// never re-enter dispatch for it.
@@ -580,7 +611,20 @@ func (c *Coordinator) recordFixDispatchSuccess(
 	if err != nil {
 		return fixStep, err
 	}
-	if int64(len(attempts)) < int64(cycleNumber) {
+	attemptID := fixAttemptID(fixStep.ID, reviewRun.ID, cycleNumber)
+	if existing, ok := findAttemptByID(attempts, attemptID); ok {
+		// This cycle's row already exists and this pass is re-entering it after
+		// a crash. Bind the delivery record to THAT row — by identity, not by
+		// position — so the delivery and the attempt stay one traceable pair.
+		delivery.FixAttemptID = existing.ID
+	} else if legacy, ok := legacyFixCycleAttempt(attempts, fixStep.ID, reviewRun.ID, cycleNumber); ok {
+		// P3-D §8: a cycle minted by a pre-identity binary. Its row cannot be
+		// PROVEN to belong to this cycle, so no new row is minted over it (that
+		// would be the duplicate this whole change exists to prevent) and none
+		// is invented for it either. It is bound as the best available answer
+		// and stays classifiable as legacy, because its id does not derive.
+		delivery.FixAttemptID = legacy.ID
+	} else {
 		// Checkpoint 8L: the fix message is delivered into the SAME live
 		// worker session (Send targets reviewRun.SessionID, the worker's
 		// session — never a new one), so the fix attempt's harness must
@@ -596,16 +640,17 @@ func (c *Coordinator) recordFixDispatchSuccess(
 				fixHarness = h
 			}
 		}
-		attempt, err := c.store.CreateWorkflowAttempt(ctx, "wfa-"+c.newID(), fixStep.ID, fixHarness, "", now)
+		// The cycle key goes in `model`, which is where an attempt with no
+		// provider model to record already carries its identity (verify.go).
+		// It is what lets a row found later — by the reaper, by the recovery
+		// projection — say which cycle it belongs to without joining to a
+		// checkpoint that a crash may have prevented. See fix_attempt_identity.go.
+		attempt, err := c.store.CreateWorkflowAttempt(
+			ctx, attemptID, fixStep.ID, fixHarness, fixCycleKey(reviewRun.ID, cycleNumber), now)
 		if err != nil {
 			return fixStep, err
 		}
 		delivery.FixAttemptID = attempt.ID
-	} else if len(attempts) > 0 {
-		// Recovery re-entered a cycle whose attempt row already exists. Bind
-		// the record to THAT row rather than leaving the field blank, so the
-		// delivery and the attempt stay one traceable pair either way.
-		delivery.FixAttemptID = attempts[len(attempts)-1].ID
 	}
 	// The attempt is bound to the generation on BOTH records, so recovery can
 	// answer "which attempt did this generation open?" from either side.

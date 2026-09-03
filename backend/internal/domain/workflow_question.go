@@ -141,12 +141,41 @@ const (
 	// the enum (and, if it ever gains a CHECK constraint) doesn't need a
 	// second migration once it is.
 	AnswerSourceResolver AnswerSource = "resolver"
+	// AnswerSourceAutonomous means AO decided this itself, under the run's
+	// frozen question-autonomy policy (P3-C).
+	//
+	// It is deliberately NOT AnswerSourceResolver even though the same
+	// read-only cross-provider Decision Resolver machinery produced the text.
+	// The two answer different questions about the same row: `resolver` says
+	// "an agent read the repository and found the answer to a discovery
+	// question", and this says "AO judged the question a low-risk choice it was
+	// authorized to make instead of asking you, and made it". Only the second
+	// one is a decision somebody delegated, and only the second one has an
+	// autonomy policy behind it that a person may want to change.
+	//
+	// It is also deliberately NOT AnswerSourceHuman. Recording an automatic
+	// decision as a human one is the single most damaging thing this vocabulary
+	// could do: every downstream reader -- Shared Task Knowledge, the run page,
+	// a later planner reading project memory -- treats a human answer as
+	// authoritative outright, and a machine decision wearing that label would
+	// inherit an authority nobody granted it.
+	AnswerSourceAutonomous AnswerSource = "autonomous"
 )
+
+// Automatic reports whether AO produced this answer without a person.
+//
+// It is the one predicate a surface needs to decide whether to say "you
+// answered this" or "AO answered this", and it is a method rather than a
+// comparison at each call site so a fourth automatic source cannot be added
+// without every reader learning about it.
+func (s AnswerSource) Automatic() bool {
+	return s == AnswerSourcePolicy || s == AnswerSourceResolver || s == AnswerSourceAutonomous
+}
 
 // Valid reports whether an answer source value is persistable.
 func (s AnswerSource) Valid() bool {
 	switch s {
-	case AnswerSourcePolicy, AnswerSourceHuman, AnswerSourceResolver:
+	case AnswerSourcePolicy, AnswerSourceHuman, AnswerSourceResolver, AnswerSourceAutonomous:
 		return true
 	default:
 		return false
@@ -189,8 +218,17 @@ type WorkflowQuestion struct {
 	AnswerSource         *AnswerSource
 	AnswerText           string
 	AnswerReference      string
-	Delivered            bool
-	DeliveredAt          *time.Time
+	// AutonomyMode is the frozen question-autonomy policy that routed this
+	// question to the Decision Resolver, when one did (P3-C). Empty for every
+	// question the classifier resolved on its own fact-backed or
+	// discovery-shape grounds, and for every row written before P3-C.
+	//
+	// It is what makes an autonomous answer explainable after the policy
+	// changes: the durable decision names the policy that authorized it rather
+	// than the policy in force whenever somebody happens to read it back.
+	AutonomyMode QuestionAutonomyMode
+	Delivered    bool
+	DeliveredAt  *time.Time
 	// ResolvingRunID points at the currently in-flight (or most recently
 	// current) Decision Resolver attempt for this question (Checkpoint
 	// 8K-B, pass 1: column added, nothing writes it yet). Nil when no

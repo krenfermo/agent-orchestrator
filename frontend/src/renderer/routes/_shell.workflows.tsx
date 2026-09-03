@@ -6,12 +6,15 @@ import { useProjectsList } from "../hooks/useProjectsList";
 import {
 	APPROVAL_POLICIES,
 	EXECUTION_STRATEGIES,
+	PLACEMENTS,
 	REPAIR_POLICIES,
 	useWorkflowRuns,
 	type ApprovalPolicy,
 	type ExecutionStrategy,
+	type Placement,
 	type RepairPolicy,
 } from "../hooks/useWorkflowRuns";
+import { useSettings } from "../hooks/useSettings";
 import { useUiStore } from "../stores/ui-store";
 import { Button } from "../components/ui/button";
 import { Textarea } from "../components/ui/textarea";
@@ -22,6 +25,19 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "../components/ui/select";
+import type { TFunction } from "i18next";
+import { WorkflowStageBadge } from "../components/workflow-status";
+import { translateDynamic } from "../components/workflow-activity";
+import { summaryKey } from "../lib/workflow-presentation";
+
+/**
+ * A workflow's name is the thing it was asked to do — its objective's first
+ * line. The rest of a long specification belongs on the run's own page (§17).
+ */
+function objectiveTitle(objective: string): string {
+	const first = objective.split("\n", 1)[0]?.trim();
+	return first && first.length > 0 ? first : objective.trim();
+}
 
 /**
  * MAX_OBJECTIVE_BYTES mirrors domain.MaxWorkflowObjectiveBytes.
@@ -69,6 +85,11 @@ export function WorkflowsList() {
 	const { projects, isLoading: projectsLoading } = useProjectsList();
 	const { policy: executionPolicy, isLoading: policyLoading } = useExecutionPolicy();
 	const openGlobalSettings = useUiStore((state) => state.openGlobalSettings);
+	// The daemon's project-memory rollout stage. It is a daemon policy, not a
+	// per-run one, and it is shown because §12 requires the summary to state
+	// whether AO will bring remembered project knowledge to this work.
+	const { settings } = useSettings();
+	const memoryMode = settings?.memoryMode;
 	const [projectId, setProjectId] = useState(initialProjectIdFromSearch);
 	const [objective, setObjective] = useState("");
 	// Byte length, recomputed only when the text changes: TextEncoder on every
@@ -109,6 +130,25 @@ export function WorkflowsList() {
 	// "suggest" is the default because a repair writes code, and opting into
 	// that unattended should be a decision somebody made.
 	const [repairPolicy, setRepairPolicy] = useState<RepairPolicy>("suggest");
+	// P3-A §7: where the work happens, chosen here rather than discovered
+	// afterwards. "auto" is the default because it is what AO did before this
+	// choice existed -- defaulting to an explicit placement would silently change
+	// where every existing user's work happens.
+	const [placement, setPlacement] = useState<Placement>("auto");
+	const placementLabels: Record<Placement, { label: string; explainer: string }> = {
+		direct_branch: {
+			label: t("wf.placement.direct_branch"),
+			explainer: t("wf.placement.direct_branchExplainer"),
+		},
+		isolated_worktree: {
+			label: t("wf.placement.isolated_worktree"),
+			explainer: t("wf.placement.isolated_worktreeExplainer"),
+		},
+		auto: {
+			label: t("wf.placement.auto"),
+			explainer: t("wf.placement.autoExplainer"),
+		},
+	};
 	const repairLabels: Record<RepairPolicy, { label: string; explainer: string }> = {
 		disabled: {
 			label: t("shell.workflowsRepairPolicyDisabledLabel"),
@@ -147,6 +187,7 @@ export function WorkflowsList() {
 			strategy,
 			approvalPolicy,
 			repairPolicy,
+			placement,
 		}).then(() => {
 			setObjective("");
 		});
@@ -303,6 +344,41 @@ export function WorkflowsList() {
 							</label>
 						))}
 					</fieldset>
+					<fieldset className="flex flex-col gap-2">
+						<legend className="text-sm">{t("wf.create.placement")}</legend>
+						{PLACEMENTS.map((value) => (
+							<label
+								className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
+									placement === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
+								}`}
+								key={value}
+							>
+								<span className="flex items-center gap-2 font-medium text-foreground">
+									<input
+										checked={placement === value}
+										name="workflow-placement"
+										onChange={() => setPlacement(value)}
+										type="radio"
+										value={value}
+									/>
+									{placementLabels[value].label}
+								</span>
+								<span className="pl-5 text-muted-foreground">{placementLabels[value].explainer}</span>
+							</label>
+						))}
+					</fieldset>
+					{/* §12: every choice that changes what AO actually does, in one
+					    place, before the button that starts it. None of it is hidden
+					    behind an "advanced" disclosure, because all five change real
+					    execution semantics. */}
+					<TaskCreationSummary
+						approvalPolicy={approvalPolicy}
+						memoryMode={memoryMode}
+						placement={placement}
+						project={selectedProject}
+						repairPolicy={repairPolicy}
+						strategy={strategy}
+					/>
 					<button
 						className="mt-1 self-start rounded bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50"
 						disabled={creating || !projectId.trim() || !objective.trim() || objectiveTooLong}
@@ -325,7 +401,20 @@ export function WorkflowsList() {
 							params={{ workflowId: run.id }}
 							to="/workflows/$workflowId"
 						>
-							<span className="font-medium">{run.objective}</span>
+							{/* P3-B §3: the list used to print the raw run state, which
+							    cannot tell `running` from `reviewing`, so the same
+							    workflow read differently here, on the board and on its
+							    own page. The stage below is the daemon's own projection —
+							    the same value the other two render. */}
+							<span className="flex min-w-0 items-baseline gap-2">
+								<span className="min-w-0 flex-1 truncate font-medium">{objectiveTitle(run.objective)}</span>
+								<WorkflowStageBadge stage={run.stage} />
+							</span>
+							{run.summaryCode ? (
+								<span className="text-xs text-muted-foreground" data-testid={`workflow-list-summary-${run.id}`}>
+									{translateDynamic(t as TFunction, summaryKey(run.summaryCode), run.summaryCode)}
+								</span>
+							) : null}
 							<span className="text-xs text-muted-foreground">
 								{t("shell.workflowsRunMeta", {
 									projectId: run.projectId,
@@ -341,5 +430,80 @@ export function WorkflowsList() {
 				)}
 			</ul>
 		</div>
+	);
+}
+
+/**
+ * TaskCreationSummary — P3-A §12.
+ *
+ * The five choices that change what AO actually does, plus where it will do it,
+ * restated in one block immediately above the button that starts the run. None
+ * of it sits behind an "advanced" disclosure: every value here changes real
+ * execution semantics, and hiding a semantic choice is how somebody launches
+ * work into a placement or an approval mode they did not intend.
+ *
+ * It states facts and nothing else. The repository and branch come from the
+ * selected project's own record; when no project is selected yet it says so
+ * rather than showing an empty row that reads as "none".
+ */
+function TaskCreationSummary({
+	strategy,
+	approvalPolicy,
+	repairPolicy,
+	placement,
+	project,
+	memoryMode,
+}: {
+	strategy: ExecutionStrategy;
+	approvalPolicy: ApprovalPolicy;
+	repairPolicy: RepairPolicy;
+	placement: Placement;
+	project: { name: string; path?: string; repo?: string; config?: { defaultBranch?: string } } | undefined;
+	memoryMode: string | undefined;
+}) {
+	const { t } = useTranslation();
+	return (
+		<section className="flex flex-col gap-1 rounded-lg border border-border bg-muted/30 p-3" data-testid="task-creation-summary">
+			<h2 className="text-sm font-semibold">{t("wf.create.summaryTitle")}</h2>
+			<dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+				<dt>{t("wf.create.strategy")}</dt>
+				<dd>{t(`shell.workflowsStrategy${strategy === "task" ? "Task" : strategy === "master" ? "Master" : "Autonomous"}Label`)}</dd>
+				<dt>{t("wf.create.approval")}</dt>
+				<dd>{t(approvalPolicy === "automatic" ? "shell.workflowsApprovalAutomaticLabel" : "shell.workflowsApprovalManualLabel")}</dd>
+				<dt>{t("wf.create.repair")}</dt>
+				<dd>
+					{t(
+						repairPolicy === "automatic"
+							? "shell.workflowsRepairPolicyAutomaticLabel"
+							: repairPolicy === "disabled"
+								? "shell.workflowsRepairPolicyDisabledLabel"
+								: "shell.workflowsRepairPolicySuggestLabel",
+					)}
+				</dd>
+				<dt>{t("wf.create.placement")}</dt>
+				<dd>{t(`wf.placement.${placement}` as "wf.placement.auto")}</dd>
+				<dt>{t("wf.create.memory")}</dt>
+				<dd>{memoryMode ? t(`wf.memory.${memoryMode}` as "wf.memory.off") : t("wf.memory.unknown")}</dd>
+				{project ? (
+					<>
+						<dt>{t("wf.create.project")}</dt>
+						<dd className="truncate">{project.name}</dd>
+						<dt>{t("wf.create.repository")}</dt>
+						<dd className="truncate font-mono" title={project.path ?? project.repo}>
+							{project.repo || project.path || t("wf.location.unknownValue")}
+						</dd>
+						<dt>{t("wf.create.branch")}</dt>
+						<dd className="truncate font-mono">
+							{project.config?.defaultBranch || t("wf.location.unknownValue")}
+						</dd>
+					</>
+				) : (
+					<>
+						<dt>{t("wf.create.project")}</dt>
+						<dd>{t("wf.create.selectProjectFirst")}</dd>
+					</>
+				)}
+			</dl>
+		</section>
 	);
 }

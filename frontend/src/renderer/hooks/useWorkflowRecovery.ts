@@ -102,6 +102,9 @@ export function useWorkflowRecovery(workflowId: string | undefined, enabled: boo
 	return {
 		recovery: query.data?.recovery,
 		repairPlan: query.data?.repair,
+		// P3-D: the recovery projection rides on the same response, so the
+		// panel never has to ask a second time and see a different moment.
+		recoveryStatus: query.data?.status,
 		isLoading: query.isLoading,
 		error: query.error ? apiErrorMessage(query.error) : undefined,
 		run: (op: RecoveryOperation) => {

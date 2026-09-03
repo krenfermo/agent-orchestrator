@@ -157,6 +157,28 @@ describe("WorkflowRunView", () => {
 						lastActivityAt: new Date().toISOString(),
 						executionMode: "autonomous",
 					},
+					// P3-A: the header renders the daemon's human projection, so the
+					// fixture supplies it exactly as the daemon would.
+					presentation: {
+						stage: "working",
+						requiresHuman: false,
+						automaticActionActive: false,
+						summaryCode: "working",
+						progress: [
+							{ stage: "preparing", state: "completed" },
+							{ stage: "working", state: "current" },
+							{ stage: "completed", state: "future" },
+						],
+						placement: {
+							type: "direct_branch",
+							chosenBy: "user",
+							repoPath: "/repo",
+							executionBranch: "feat/board-activity",
+							mergeTarget: "feat/board-activity",
+							integrationRequired: false,
+						},
+						technical: { phase: "running", runState: "running" },
+					},
 					steps: [
 						{
 							id: "wfs-1",
@@ -186,7 +208,18 @@ describe("WorkflowRunView", () => {
 		render(<WorkflowRunView workflowId="wf-active" />, { wrapper });
 
 		await waitFor(() => expect(screen.getByText("Ship the board activity indicator")).toBeInTheDocument());
-		expect(screen.getByTestId("workflow-phase-badge")).toHaveTextContent("Running");
+		expect(screen.getByTestId("workflow-stage-badge")).toHaveTextContent("Working");
+		// §16: the page answers "what do I do" without anyone reading a log.
+		expect(screen.getByTestId("workflow-status-guidance")).toHaveTextContent(
+			"AO is working. You do not need to do anything.",
+		);
+		// §13: where the work is happening, on the page, in the terms it was
+		// chosen in -- and §9: no merge target for a direct-branch run.
+		const location = screen.getByTestId("workflow-location");
+		expect(location).toHaveTextContent("Current branch");
+		expect(location).toHaveTextContent("you chose it");
+		expect(location).toHaveTextContent("feat/board-activity");
+		expect(location).not.toHaveTextContent("Integrates into");
 		expect(screen.getByRole("status", { name: "In progress" })).toBeInTheDocument();
 		const panel = screen.getByTestId("workflow-activity-panel");
 		expect(panel).toHaveTextContent("Working right now");
@@ -211,6 +244,14 @@ describe("WorkflowRunView", () => {
 						updatedAt: "2026-01-01T00:10:00Z",
 						executionMode: "autonomous",
 					},
+					presentation: {
+						stage: "completed",
+						requiresHuman: false,
+						automaticActionActive: false,
+						summaryCode: "completed",
+						progress: [{ stage: "completed", state: "completed" }],
+						technical: { phase: "completed", runState: "completed" },
+					},
 					steps: [
 						{
 							id: "wfs-1",
@@ -230,7 +271,7 @@ describe("WorkflowRunView", () => {
 		render(<WorkflowRunView workflowId="wf-done" />, { wrapper });
 
 		await waitFor(() => expect(screen.getByText("Already finished")).toBeInTheDocument());
-		expect(screen.getByTestId("workflow-phase-badge")).toHaveTextContent("Completed");
+		expect(screen.getByTestId("workflow-stage-badge")).toHaveTextContent("Completed");
 		expect(screen.queryByTestId("workflow-spinner")).toBeNull();
 		expect(screen.queryByTestId("workflow-activity-panel")).toBeNull();
 	});

@@ -29,6 +29,12 @@ type SettingsService interface {
 // disagree with the others.
 type SettingsController struct {
 	Svc SettingsService
+	// MemoryMode is the daemon's resolved project-memory rollout stage,
+	// supplied at composition. Empty when the deployment does not report one,
+	// and reported as empty rather than as "off": "AO does not say" and "AO
+	// says memory is disabled" are different answers, and only one of them is a
+	// fact this controller has.
+	MemoryMode string
 }
 
 // Register mounts the settings routes.
@@ -185,5 +191,6 @@ func (c *SettingsController) response(snapshot settingssvc.Snapshot) SettingsRes
 	return SettingsResponse{
 		DefaultSessionMode: string(snapshot.DefaultSessionMode),
 		ChatHarnesses:      names,
+		MemoryMode:         c.MemoryMode,
 	}
 }

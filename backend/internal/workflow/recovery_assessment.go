@@ -68,6 +68,14 @@ type RecoveryAssessment struct {
 	StepID    string
 	TaskID    string
 	AttemptID string
+	// Execution is the technical projection of the execution this answer is
+	// about: which attempt, whose provider, on what session, holding what
+	// authority, and the last thing AO can prove happened to it (P3-D §12).
+	//
+	// Empty() when AO cannot identify one. It is a projection of rows already
+	// loaded, never a second source of truth, and it carries identities and
+	// bounded classifications only — never prompt text or credentials.
+	Execution RecoveryExecution
 	// Version is RecoveryAssessmentVersion.
 	Version string
 }
@@ -82,7 +90,57 @@ func (c *Coordinator) AssessRecovery(ctx stdctx.Context, runID string) (Recovery
 	}
 	strategy := c.strategyForRun(ctx, detail.Run)
 	reuse := c.assessPlanReuse(ctx, detail, strategy)
-	return c.assessRecoveryFromDetail(detail, strategy.Effective, reuse.Reusability, c.repairsSpentFor(ctx, runID)), nil
+	a := c.assessRecoveryFromDetail(detail, strategy.Effective, reuse.Reusability, c.repairsSpentFor(ctx, runID))
+	// The execution projection is attached here rather than inside the pure
+	// core because resolving which fix cycle currently holds authority is a
+	// read, and the core is a pure function of facts already in hand. Every
+	// other field it fills comes from the detail the core already used, so the
+	// two can never describe different executions.
+	a.Execution = deriveRecoveryExecution(detail, a.StepID, c.fixAuthorityForStep(ctx, detail, a.StepID))
+	if a.AttemptID == "" {
+		a.AttemptID = a.Execution.AttemptID
+	}
+	return a, nil
+}
+
+// fixAuthorityForStep resolves which fix cycle currently holds authority on one
+// step, for the classification the execution projection reports.
+//
+// It answers Known=false for anything it cannot resolve, and that answer is
+// load-bearing: an unresolved authority classifies an open row as active, which
+// is the reading that never claims a live fix worker's attempt is stale.
+func (c *Coordinator) fixAuthorityForStep(ctx stdctx.Context, d RunDetail, stepID string) FixAuthority {
+	if stepID == "" {
+		return FixAuthority{}
+	}
+	var attempts []domain.WorkflowAttempt
+	for _, s := range d.Steps {
+		if s.Step.ID == stepID {
+			if s.Step.Kind != domain.WorkflowStepFix {
+				return FixAuthority{}
+			}
+			attempts = s.Attempts
+			break
+		}
+	}
+	for i := len(attempts) - 1; i >= 0; i-- {
+		reviewRunID, cycleNumber, ok := FixAttemptCycle(attempts[i])
+		if !ok {
+			continue
+		}
+		verdict := c.assessFixCycleSupersession(ctx, reviewRunID, cycleNumber)
+		if !verdict.Known {
+			return FixAuthority{}
+		}
+		if verdict.Superseded {
+			// This cycle is over and nothing has replaced it here yet: no cycle
+			// holds authority on this step, which is a positive answer rather
+			// than an absent one.
+			return FixAuthority{Known: true}
+		}
+		return FixAuthority{ReviewRunID: reviewRunID, CycleNumber: cycleNumber, Known: true}
+	}
+	return FixAuthority{}
 }
 
 // assessRecoveryFromDetail is AssessRecovery's pure core, taking the durable

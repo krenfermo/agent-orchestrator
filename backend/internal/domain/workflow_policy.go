@@ -95,6 +95,32 @@ type WorkflowPolicy struct {
 	// A snapshot decoded from before P1-B has this at its zero value; callers
 	// must use EffectiveRepairPolicy, never read Repair directly.
 	Repair RepairPolicySnapshot `json:"repair,omitempty"`
+	// Autonomy is P3-C's frozen question-autonomy policy: how much of a Task's
+	// own ambiguity AO may settle by itself instead of parking the run on a
+	// question. Frozen at creation for the same reason Repair is -- a later
+	// Settings change must not widen what an in-flight run is allowed to decide
+	// on its own, and a restart must not change the answer.
+	//
+	// A snapshot decoded from before P3-C has this at its zero value; callers
+	// must use EffectiveAutonomyPolicy, never read Autonomy directly.
+	Autonomy QuestionAutonomySnapshot `json:"autonomy,omitempty"`
+}
+
+// EffectiveAutonomyPolicy returns p.Autonomy, falling back to the safe default
+// (ask_always) when the snapshot predates P3-C or recorded no mode. Mirrors
+// EffectiveRepairPolicy's own forward-compatible zero-value fallback exactly.
+//
+// The fallback is deliberately ask_always: a run created before anybody could
+// choose an autonomy mode never opted into having its ambiguity settled for it.
+func (p WorkflowPolicy) EffectiveAutonomyPolicy() QuestionAutonomySnapshot {
+	autonomy := p.Autonomy
+	if !autonomy.Mode.Valid() {
+		autonomy.Mode = QuestionAutonomyAskAlways
+	}
+	if autonomy.Version == "" {
+		autonomy.Version = QuestionAutonomyPolicyVersion
+	}
+	return autonomy
 }
 
 // EffectiveRepairPolicy returns p.Repair, falling back to the safe default

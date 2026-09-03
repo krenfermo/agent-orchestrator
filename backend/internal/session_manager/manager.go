@@ -773,7 +773,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 
 	branch := cfg.Branch
 	if branch == "" {
-		branch = ProjectSpawnBranch(project, id, cfg.Kind, m.dataDir)
+		branch = SpawnBranchForPlacement(project, id, cfg.Kind, m.dataDir, cfg.Placement)
 	}
 	// Checkpoint 8P-E.14: take the direct-branch execution lock before the
 	// workspace adapter checks the branch out in the user's own repository. A
@@ -1017,6 +1017,11 @@ func (m *Manager) createSessionWorkspace(ctx context.Context, project domain.Pro
 			SessionPrefix: sessionPrefix(project),
 			Branch:        branch,
 			BaseBranch:    baseBranch,
+			// P3-A §7: a workflow spawn carries its run's frozen placement, and
+			// the router honours it over the project's current execution mode.
+			// Empty for an ordinary session, which keeps the project-config
+			// routing it has always had.
+			Placement: cfg.Placement,
 		})
 		return ws, nil, err
 	}
@@ -3053,6 +3058,30 @@ func defaultSessionBranch(id domain.SessionID, kind domain.SessionKind, prefix, 
 	// branch under a session namespace so sibling PR branches such as
 	// ao/<session>/<topic> remain valid Git refs.
 	return aoBranch(branchNamespace, string(id), "root")
+}
+
+// SpawnBranchForPlacement is ProjectSpawnBranch with the run's FROZEN execution
+// placement taking precedence over the project's current execution mode.
+//
+// Routing the workspace ADAPTER by placement is necessary and not sufficient: a
+// spawn also has to name the branch that adapter will check out. Deriving the
+// branch from project configuration while the adapter came from the placement
+// produced exactly one shape, and it is the shape the P3-A smoke caught -- a
+// direct-branch placement handed the generated `ao/<project>/<session>` name,
+// which does not exist in the user's repository, so every launch failed with
+// "branch is not fetched" and retried forever.
+//
+// An unknown placement falls through to the project, which is the pre-P3-A
+// behaviour. It is never coerced to a default: guessing the branch is guessing
+// where somebody's code gets written.
+func SpawnBranchForPlacement(project domain.ProjectRecord, id domain.SessionID, kind domain.SessionKind, dataDir string, placement domain.ExecutionPlacementType) string {
+	switch placement {
+	case domain.PlacementDirectBranch:
+		return project.Config.WithDefaults().DefaultBranch
+	case domain.PlacementIsolatedWorktree:
+		return DefaultSpawnBranch(id, kind, sessionPrefix(project), project.Kind.WithDefault(), dataDir)
+	}
+	return ProjectSpawnBranch(project, id, kind, dataDir)
 }
 
 // ProjectSpawnBranch resolves the branch a spawn works on for a project,

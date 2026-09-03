@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 
@@ -41,6 +42,24 @@ type workflowRecoveryEnvelope struct {
 		ObligationDetail  string `json:"obligationDetail"`
 		Strategy          string `json:"strategy"`
 		TargetRunID       string `json:"targetRunId"`
+		// Execution is P3-D's technical detail. Absent from an older daemon's
+		// response, in which case the technical block simply is not printed.
+		Execution *struct {
+			StepID         string `json:"stepId"`
+			StepKind       string `json:"stepKind"`
+			AttemptID      string `json:"attemptId"`
+			AttemptNumber  int64  `json:"attemptNumber"`
+			Provider       string `json:"provider"`
+			SessionID      string `json:"sessionId"`
+			LifecycleState string `json:"lifecycleState"`
+			Authority      string `json:"authority"`
+			StartedAt      string `json:"startedAt"`
+			FinishedAt     string `json:"finishedAt"`
+			Outcome        string `json:"outcome"`
+			ErrorClass     string `json:"errorClass"`
+			LastEventPhase string `json:"lastEventPhase"`
+			LastEventAt    string `json:"lastEventAt"`
+		} `json:"execution"`
 	} `json:"recovery"`
 	Repair struct {
 		Eligibility string `json:"eligibility"`
@@ -49,6 +68,69 @@ type workflowRecoveryEnvelope struct {
 		Budget      int    `json:"budget"`
 		Reason      string `json:"reason"`
 	} `json:"repair"`
+	// Status is P3-D's recovery projection. Absent from an older daemon, in
+	// which case the recovery block below prints exactly as it always did.
+	Status *struct {
+		State      string `json:"state"`
+		Summary    string `json:"summary"`
+		AOIsActing bool   `json:"aoIsActing"`
+		Waiting    bool   `json:"waiting"`
+		StopReason string `json:"stopReason"`
+		Repair     struct {
+			Active            bool   `json:"active"`
+			Attempt           int    `json:"attempt"`
+			Budget            int    `json:"budget"`
+			Exhausted         bool   `json:"exhausted"`
+			NextRetryPossible bool   `json:"nextRetryPossible"`
+			Quiescent         bool   `json:"quiescent"`
+			WhyStarted        string `json:"whyStarted"`
+		} `json:"repair"`
+		Failover []struct {
+			AttemptNumber int64  `json:"attemptNumber"`
+			Provider      string `json:"provider"`
+			Outcome       string `json:"outcome"`
+			ErrorClass    string `json:"errorClass"`
+		} `json:"failover"`
+		Capacity struct {
+			Read            bool     `json:"read"`
+			Waiting         int      `json:"waiting"`
+			Held            int      `json:"held"`
+			Kinds           []string `json:"kinds"`
+			FossilSuspected bool     `json:"fossilSuspected"`
+		} `json:"capacity"`
+		Branch struct {
+			Branch      string `json:"branch"`
+			HeldByRunID string `json:"heldByRunId"`
+			Waiting     bool   `json:"waiting"`
+		} `json:"branch"`
+		Dialog struct {
+			State      string `json:"state"`
+			Source     string `json:"source"`
+			Unreadable bool   `json:"unreadable"`
+		} `json:"dialog"`
+		RetryCount int64 `json:"retryCount"`
+		Timeline   []struct {
+			Kind string `json:"kind"`
+			At   string `json:"at"`
+		} `json:"timeline"`
+	} `json:"status"`
+}
+
+// workflowAdviceEnvelope mirrors P3-C's advice response. Hand-mirrored for the
+// same reason every other envelope in this file is: the CLI is a thin client
+// over the daemon's HTTP routes and does not import controller packages.
+type workflowAdviceEnvelope struct {
+	Advice struct {
+		Category                     string `json:"category"`
+		Summary                      string `json:"summary"`
+		Explanation                  string `json:"explanation"`
+		RequiresHuman                bool   `json:"requiresHuman"`
+		AutomaticAction              string `json:"automaticAction"`
+		AutomaticActionActive        bool   `json:"automaticActionActive"`
+		AutomaticActionBlockedReason string `json:"automaticActionBlockedReason"`
+		RecommendedAction            string `json:"recommendedAction"`
+		ExpectedNextStage            string `json:"expectedNextStage"`
+	} `json:"advice"`
 }
 
 // workflowResumeEnvelope mirrors the resume response.
@@ -120,6 +202,27 @@ func newRecoverStatusCommand(ctx *commandContext) *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
+			// P3-C §25: lead with the Advisor's answer to "what do I do now",
+			// because that is the question somebody typing this actually has.
+			// The P1-B assessment below it is unchanged and still printed in
+			// full — it is the operator detail behind the headline, not a
+			// competing answer. A daemon that does not serve /advice (an older
+			// build) simply prints the assessment as it always did.
+			// P3-D §16: the recovery state leads, because "what is AO doing"
+			// is the question somebody typing this at a run that will not
+			// finish actually has. The Advisor's "what do I do" follows it, and
+			// the P1-B assessment follows that — three answers to three
+			// different questions, in the order they get asked.
+			// Terminal is the one state this line is silent on: the Advisor
+			// below already says the run ended, and two sentences saying the
+			// same thing is how a status page stops being read.
+			if res.Status != nil && res.Status.Summary != "" && res.Status.State != "terminal" {
+				_, _ = fmt.Fprintf(out, "%s\n", res.Status.Summary)
+			}
+			var advice workflowAdviceEnvelope
+			if aerr := ctx.getJSON(cmd.Context(), "workflows/"+url.PathEscape(runID)+"/advice", &advice); aerr == nil {
+				printWorkflowAdvice(out, advice)
+			}
 			_, _ = fmt.Fprintf(out, "recommended: %s", res.Recovery.RecommendedAction)
 			if res.Recovery.AutomaticAllowed {
 				_, _ = fmt.Fprint(out, " (AO can do this itself)")
@@ -150,10 +253,190 @@ func newRecoverStatusCommand(ctx *commandContext) *cobra.Command {
 			if res.Repair.Reason != "" {
 				_, _ = fmt.Fprintf(out, " — %s", res.Repair.Reason)
 			}
-			_, err = fmt.Fprintln(out)
-			return err
+			_, _ = fmt.Fprintln(out)
+			// P3-D §14/§22: the technical block, under the human answer rather
+			// than instead of it. It names the execution the recommendation is
+			// about — which attempt, whose provider, on what session, holding
+			// what authority — so a stuck run is diagnosable without opening
+			// ao.db (§24). Identities and classifications only (§35).
+			printWorkflowExecution(out, res)
+			printWorkflowRecoveryStatus(out, res)
+			return nil
 		},
 	}
+}
+
+// printWorkflowExecution renders the recovery answer's technical detail.
+//
+// Every line is omitted when the fact behind it is absent, because a printed
+// "unknown" for something AO simply did not look at reads as a finding. What it
+// never omits is the authority line: "which attempt is allowed to speak for
+// this step" is the question the whole projection exists for, and a blank there
+// would be the one silence a reader could misread as "fine".
+func printWorkflowExecution(out io.Writer, res workflowRecoveryEnvelope) {
+	e := res.Recovery.Execution
+	if e == nil || e.StepID == "" {
+		return
+	}
+	_, _ = fmt.Fprintln(out, "\nexecution:")
+	_, _ = fmt.Fprintf(out, "  step:      %s", e.StepID)
+	if e.StepKind != "" {
+		_, _ = fmt.Fprintf(out, " (%s)", e.StepKind)
+	}
+	if e.LifecycleState != "" {
+		_, _ = fmt.Fprintf(out, " — %s", e.LifecycleState)
+	}
+	_, _ = fmt.Fprintln(out)
+	if e.AttemptID != "" {
+		_, _ = fmt.Fprintf(out, "  attempt:   %s", e.AttemptID)
+		if e.AttemptNumber > 0 {
+			_, _ = fmt.Fprintf(out, " (#%d)", e.AttemptNumber)
+		}
+		if e.Provider != "" {
+			_, _ = fmt.Fprintf(out, " via %s", e.Provider)
+		}
+		_, _ = fmt.Fprintln(out)
+	}
+	_, _ = fmt.Fprintf(out, "  authority: %s\n", orUnknown(e.Authority))
+	if e.SessionID != "" {
+		_, _ = fmt.Fprintf(out, "  session:   %s\n", e.SessionID)
+	}
+	if e.StartedAt != "" {
+		_, _ = fmt.Fprintf(out, "  dispatched:%s\n", " "+e.StartedAt)
+	}
+	if e.Outcome != "" {
+		_, _ = fmt.Fprintf(out, "  outcome:   %s", e.Outcome)
+		if e.ErrorClass != "" {
+			_, _ = fmt.Fprintf(out, " (%s)", e.ErrorClass)
+		}
+		if e.FinishedAt != "" {
+			_, _ = fmt.Fprintf(out, " at %s", e.FinishedAt)
+		}
+		_, _ = fmt.Fprintln(out)
+	}
+	if e.LastEventPhase != "" {
+		_, _ = fmt.Fprintf(out, "  last event:%s", " "+e.LastEventPhase)
+		if e.LastEventAt != "" {
+			_, _ = fmt.Fprintf(out, " at %s", e.LastEventAt)
+		}
+		_, _ = fmt.Fprintln(out)
+	}
+	if res.Repair.Budget > 0 {
+		_, _ = fmt.Fprintf(out, "  repair:    attempt %d of %d\n", res.Repair.Spent, res.Repair.Budget)
+	}
+}
+
+// printWorkflowRecoveryStatus renders the recovery projection: the state, what
+// it is waiting for, and the bounded history that got it there.
+//
+// Every block is omitted when the daemon holds nothing for it. A "capacity: 0
+// waiting" line on a run that never queued reads as a finding; its absence
+// reads as what it is.
+func printWorkflowRecoveryStatus(out io.Writer, res workflowRecoveryEnvelope) {
+	s := res.Status
+	if s == nil || s.State == "" {
+		return
+	}
+	_, _ = fmt.Fprintln(out, "\nrecovery:")
+	_, _ = fmt.Fprintf(out, "  state:     %s", s.State)
+	switch {
+	case s.State == "terminal":
+		// Nobody is the next actor on a run that ended, and saying "you are"
+		// would invite somebody to go and do something about it.
+		_, _ = fmt.Fprint(out, " (nothing further to do)")
+	case s.Waiting:
+		_, _ = fmt.Fprint(out, " (a legitimate wait, not a fault)")
+	case s.AOIsActing:
+		_, _ = fmt.Fprint(out, " (AO is the next actor)")
+	default:
+		_, _ = fmt.Fprint(out, " (you are the next actor)")
+	}
+	_, _ = fmt.Fprintln(out)
+	if s.StopReason != "" {
+		_, _ = fmt.Fprintf(out, "  stopped:   %s\n", s.StopReason)
+	}
+	if s.Repair.Attempt > 0 || s.Repair.Active {
+		_, _ = fmt.Fprintf(out, "  repair:    attempt %d of %d", s.Repair.Attempt, s.Repair.Budget)
+		switch {
+		case s.Repair.Active:
+			_, _ = fmt.Fprint(out, " · running")
+		case s.Repair.Quiescent:
+			_, _ = fmt.Fprint(out, " · parked (proven unable to write)")
+		case s.Repair.Exhausted:
+			_, _ = fmt.Fprint(out, " · exhausted")
+		}
+		if s.Repair.NextRetryPossible {
+			_, _ = fmt.Fprint(out, " · another attempt remains")
+		}
+		if s.Repair.WhyStarted != "" {
+			_, _ = fmt.Fprintf(out, " · started for %s", s.Repair.WhyStarted)
+		}
+		_, _ = fmt.Fprintln(out)
+	}
+	if len(s.Failover) > 1 {
+		for _, a := range s.Failover {
+			_, _ = fmt.Fprintf(out, "  provider:  attempt %d %s → %s", a.AttemptNumber, a.Provider,
+				orValueCLI(a.Outcome, "running"))
+			if a.ErrorClass != "" {
+				_, _ = fmt.Fprintf(out, " (%s)", a.ErrorClass)
+			}
+			_, _ = fmt.Fprintln(out)
+		}
+	}
+	if s.Capacity.Read && (s.Capacity.Waiting > 0 || s.Capacity.Held > 0) {
+		_, _ = fmt.Fprintf(out, "  capacity:  %d waiting, %d held", s.Capacity.Waiting, s.Capacity.Held)
+		if len(s.Capacity.Kinds) > 0 {
+			_, _ = fmt.Fprintf(out, " (%s)", strings.Join(s.Capacity.Kinds, ", "))
+		}
+		if s.Capacity.FossilSuspected {
+			_, _ = fmt.Fprint(out, " · a held claim looks like a fossil")
+		}
+		_, _ = fmt.Fprintln(out)
+	}
+	if s.Branch.Branch != "" {
+		_, _ = fmt.Fprintf(out, "  branch:    %s", s.Branch.Branch)
+		if s.Branch.Waiting && s.Branch.HeldByRunID != "" {
+			_, _ = fmt.Fprintf(out, " · waiting, held by %s", s.Branch.HeldByRunID)
+		}
+		_, _ = fmt.Fprintln(out)
+	}
+	if s.Dialog.State != "" {
+		_, _ = fmt.Fprintf(out, "  question:  %s", s.Dialog.State)
+		if s.Dialog.Source != "" {
+			_, _ = fmt.Fprintf(out, " (answered by %s)", s.Dialog.Source)
+		}
+		_, _ = fmt.Fprintln(out)
+	}
+	if s.RetryCount > 0 {
+		_, _ = fmt.Fprintf(out, "  retries:   %d\n", s.RetryCount)
+	}
+	if len(s.Timeline) > 0 {
+		_, _ = fmt.Fprint(out, "  history:  ")
+		for i, e := range s.Timeline {
+			if i > 0 {
+				_, _ = fmt.Fprint(out, " →")
+			}
+			_, _ = fmt.Fprintf(out, " %s", e.Kind)
+		}
+		_, _ = fmt.Fprintln(out)
+	}
+}
+
+// orValueCLI is orUnknown for a caller that has its own fallback word.
+func orValueCLI(s, fallback string) string {
+	if strings.TrimSpace(s) == "" {
+		return fallback
+	}
+	return s
+}
+
+// orUnknown is the one place this file says "unknown", so a missing fact reads
+// as a missing fact rather than as a value.
+func orUnknown(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "unknown"
+	}
+	return s
 }
 
 func newWorkflowResumeCommand(ctx *commandContext) *cobra.Command {
@@ -293,4 +576,42 @@ func newWorkflowPlanCommand(ctx *commandContext) *cobra.Command {
 		},
 	})
 	return cmd
+}
+
+// printWorkflowAdvice writes the Advisor's headline: whether anybody is needed,
+// what AO is already doing, and — only when a person really is needed — what
+// they have to do.
+//
+// The three shapes it deliberately keeps apart are the whole point of P3-C: a
+// run AO is repairing prints "no action required" and NOT a Repair suggestion,
+// a run waiting on capacity prints what it is waiting for and offers nothing,
+// and a run that genuinely needs a person prints the imperative.
+func printWorkflowAdvice(out io.Writer, env workflowAdviceEnvelope) {
+	a := env.Advice
+	if a.Summary == "" && a.Category == "" {
+		return
+	}
+	if a.Summary != "" {
+		_, _ = fmt.Fprintf(out, "%s\n", a.Summary)
+	}
+	switch {
+	case a.RequiresHuman:
+		_, _ = fmt.Fprintln(out, "Human action required.")
+		if a.Explanation != "" {
+			_, _ = fmt.Fprintf(out, "  %s\n", a.Explanation)
+		}
+	case a.AutomaticActionActive:
+		_, _ = fmt.Fprintf(out, "AO is handling it (%s). No action required.\n", a.AutomaticAction)
+	case a.AutomaticAction != "":
+		_, _ = fmt.Fprintf(out, "AO will handle it by itself (%s). No action required.\n", a.AutomaticAction)
+	default:
+		_, _ = fmt.Fprintln(out, "No action required.")
+	}
+	if a.AutomaticActionBlockedReason != "" {
+		_, _ = fmt.Fprintf(out, "  AO is not doing it automatically: %s\n", a.AutomaticActionBlockedReason)
+	}
+	if a.ExpectedNextStage != "" {
+		_, _ = fmt.Fprintf(out, "  next expected stage: %s\n", a.ExpectedNextStage)
+	}
+	_, _ = fmt.Fprintln(out)
 }

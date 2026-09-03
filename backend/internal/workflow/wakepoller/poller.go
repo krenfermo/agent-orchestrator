@@ -57,6 +57,24 @@ type Resumer interface {
 	MarkCapacityRetryExhausted(ctx context.Context, runID string, reason string) error
 }
 
+// RecoveryDispatcher is the P3-C surface a wake scheduled for
+// wake.ReasonAutoRecovery is routed to instead of ContinueRun.
+//
+// The distinction matters and is the reason this is a separate interface
+// rather than another Resumer method: an automatic recovery is NOT a resume.
+// The run is parked on a condition a resume cannot clear -- that is why it is
+// parked -- so calling ContinueRun for it would do nothing, report nothing, and
+// leave the wake looking like it fired successfully. Routing by reason lets the
+// poller drive the remedy the Advisor actually selected, while every other wake
+// keeps the reason-agnostic resume path unchanged.
+//
+// Optional: a Resumer that does not implement it simply never gets an
+// auto-recovery wake routed differently, which degrades to the pre-P3-C
+// behaviour rather than to an error.
+type RecoveryDispatcher interface {
+	DispatchAutomaticRecovery(ctx context.Context, runID string) (workflow.AutomaticRecoveryOutcome, error)
+}
+
 // Config holds the externally-tunable knobs for a Poller. Every field is
 // optional; zero values fall back to safe defaults, mirroring
 // observe/reaper.Config's own convention.
@@ -180,7 +198,7 @@ func (p *Poller) RunDueOnce(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	for _, sch := range claimed {
-		_, resumeErr := p.resumer.ContinueRun(ctx, string(sch.WorkflowRunID))
+		resumeErr := p.fire(ctx, sch)
 		switch {
 		case resumeErr == nil, errors.Is(resumeErr, workflow.ErrNotFound), errors.Is(resumeErr, workflow.ErrAlreadyTerminal),
 			errors.Is(resumeErr, workflow.ErrUnrecoverable):
@@ -203,8 +221,17 @@ func (p *Poller) RunDueOnce(ctx context.Context) (int, error) {
 			}
 			if res.BudgetExhausted {
 				p.logger.Warn("wakepoller: wake budget exhausted, giving up", "wake", sch.ID, "run", sch.WorkflowRunID, "reason", sch.Reason, "attempts", res.AttemptCount)
-				if merr := p.resumer.MarkCapacityRetryExhausted(ctx, string(sch.WorkflowRunID), string(sch.Reason)); merr != nil {
-					p.logger.Warn("wakepoller: mark capacity retry exhausted failed", "wake", sch.ID, "run", sch.WorkflowRunID, "err", merr)
+				// P3-C: an auto-recovery wake that ran out of retries is NOT a
+				// capacity exhaustion, and parking the run under that name
+				// would tell a person their provider is at capacity when what
+				// actually happened is that AO's own recovery dispatcher kept
+				// erroring. The run is already parked on its real stop, which
+				// still explains it and still names a remedy; the wake simply
+				// stops, and the log line above is what says so.
+				if sch.Reason != wake.ReasonAutoRecovery {
+					if merr := p.resumer.MarkCapacityRetryExhausted(ctx, string(sch.WorkflowRunID), string(sch.Reason)); merr != nil {
+						p.logger.Warn("wakepoller: mark capacity retry exhausted failed", "wake", sch.ID, "run", sch.WorkflowRunID, "err", merr)
+					}
 				}
 			} else {
 				p.logger.Info("wakepoller: wake rescheduled after transient error", "wake", sch.ID, "run", sch.WorkflowRunID, "reason", sch.Reason, "nextScheduledAt", res.NextScheduledAt, "err", resumeErr)
@@ -212,4 +239,40 @@ func (p *Poller) RunDueOnce(ctx context.Context) (int, error) {
 		}
 	}
 	return len(claimed), nil
+}
+
+// fire performs the one action a claimed wake calls for.
+//
+// Every wake but one is reason-agnostic and goes to ContinueRun, exactly as it
+// did before P3-C: the run's own evidence gates decide what, if anything, a
+// resume discharges. wake.ReasonAutoRecovery is the exception, because the run
+// it fires for is parked on a condition a resume provably cannot clear -- see
+// RecoveryDispatcher.
+//
+// The dispatcher's own refusals are NOT errors here. "The budget is spent",
+// "another actor took this repair", "the condition is no longer repairable" are
+// all outcomes it reports in its result rather than raising, so a wake that
+// finds nothing left to do completes cleanly instead of being rescheduled into
+// the same answer forever.
+func (p *Poller) fire(ctx context.Context, sch wake.Schedule) error {
+	if sch.Reason == wake.ReasonAutoRecovery {
+		dispatcher, ok := p.resumer.(RecoveryDispatcher)
+		if !ok {
+			// No dispatcher wired. Fall through to the ordinary resume rather
+			// than failing the wake: the pre-P3-C behaviour is a no-op, not a
+			// broken one.
+			_, err := p.resumer.ContinueRun(ctx, string(sch.WorkflowRunID))
+			return err
+		}
+		out, err := dispatcher.DispatchAutomaticRecovery(ctx, string(sch.WorkflowRunID))
+		if err != nil {
+			return err
+		}
+		p.logger.Info("wakepoller: automatic recovery evaluated",
+			"wake", sch.ID, "run", sch.WorkflowRunID, "action", out.Action,
+			"dispatched", out.Dispatched, "detail", out.Detail)
+		return nil
+	}
+	_, err := p.resumer.ContinueRun(ctx, string(sch.WorkflowRunID))
+	return err
 }

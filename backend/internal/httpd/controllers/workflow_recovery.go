@@ -3,6 +3,7 @@ package controllers
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -55,9 +56,46 @@ type WorkflowRecoveryView struct {
 	TargetRunID string `json:"targetRunId,omitempty"`
 	StepID      string `json:"stepId,omitempty"`
 	TaskID      string `json:"taskId,omitempty"`
+	// Execution is the technical detail behind the recommendation: which
+	// attempt, whose provider, on what session, holding what authority. Absent
+	// when AO cannot identify one (P3-D §12/§14).
+	Execution *WorkflowRecoveryExecutionView `json:"execution,omitempty"`
 	// Version is the assessment-rules version, so a recommendation stays
 	// explainable after the rules change.
 	Version string `json:"version,omitempty"`
+}
+
+// WorkflowRecoveryExecutionView is the execution a recovery answer is about.
+//
+// Identities and bounded classifications only (P3-D §35): no prompt text, no
+// provider credentials, no terminal contents. Every field is projected from
+// rows the run detail already carries, so nothing here can disagree with the
+// ledger it came from.
+type WorkflowRecoveryExecutionView struct {
+	StepID   string `json:"stepId"`
+	StepKind string `json:"stepKind,omitempty"`
+	// AttemptID/AttemptNumber name the durable attempt row.
+	AttemptID     string `json:"attemptId,omitempty"`
+	AttemptNumber int64  `json:"attemptNumber,omitempty"`
+	// Provider is the attempt's harness.
+	Provider string `json:"provider,omitempty"`
+	// SessionID is the agent session the step durably owns, when it owns one.
+	SessionID string `json:"sessionId,omitempty"`
+	// LifecycleState is the step's own state.
+	LifecycleState string `json:"lifecycleState,omitempty"`
+	// Authority is what AO may conclude about this attempt row: whether it is
+	// the one that currently holds authority, history, superseded by a later
+	// cycle, or a legacy row whose cycle cannot be proven.
+	Authority string `json:"authority,omitempty" enum:"active,concluded,superseded,legacy_unproven"`
+	// StartedAt/FinishedAt bound the attempt.
+	StartedAt  string `json:"startedAt,omitempty"`
+	FinishedAt string `json:"finishedAt,omitempty"`
+	// Outcome/ErrorClass are the attempt's own conclusion, absent while open.
+	Outcome    string `json:"outcome,omitempty"`
+	ErrorClass string `json:"errorClass,omitempty"`
+	// LastEventPhase/LastEventAt are the last thing AO can prove happened here.
+	LastEventPhase string `json:"lastEventPhase,omitempty"`
+	LastEventAt    string `json:"lastEventAt,omitempty"`
 }
 
 // WorkflowResumeView is what a resume actually did.
@@ -132,6 +170,159 @@ type WorkflowRecoveryResponse struct {
 	Recovery WorkflowRecoveryView   `json:"recovery"`
 	Repair   WorkflowRepairPlanView `json:"repair"`
 	Plan     WorkflowPlanReuseView  `json:"plan"`
+	// Status is P3-D's "how is AO trying to recover this run": the state it is
+	// in, what it is waiting for, and the bounded history that got it there.
+	// Absent only when the daemon could not compose it.
+	Status *WorkflowRecoveryStatusView `json:"status,omitempty"`
+}
+
+// WorkflowRecoveryStatusView is the recovery projection (P3-D §6/§7).
+//
+// It is deliberately NOT a second copy of the presentation: the presentation
+// answers what a person reading the page sees, and this answers which of AO's
+// own recovery mechanisms is in play. Identities and bounded classifications
+// only — no prompt text, no pane contents, no credentials.
+type WorkflowRecoveryStatusView struct {
+	RunID  string `json:"runId"`
+	TaskID string `json:"taskId,omitempty"`
+	// State is the closed recovery vocabulary. `running` is deliberately not a
+	// member: a run waiting for capacity, queued behind a branch lock, retrying
+	// a provider or rebuilding after a restart are different situations with
+	// different next steps.
+	State string `json:"state" enum:"healthy_running,waiting_capacity,waiting_branch,waiting_provider,waiting_dialog_delivery,verifying_result,automatic_recovery_pending,repair_running,failover_running,restart_recovery,needs_human,terminal"`
+	// Summary is the one sentence every surface leads with, composed on the
+	// server so the Board, the run detail and the CLI cannot disagree.
+	Summary string `json:"summary"`
+	// AOIsActing reports that AO, not the person, is the next actor.
+	AOIsActing bool   `json:"aoIsActing"`
+	Waiting    bool   `json:"waiting"`
+	StopReason string `json:"stopReason,omitempty"`
+	// Execution is which attempt this is about.
+	Execution  *WorkflowRecoveryExecutionView `json:"execution,omitempty"`
+	Repair     WorkflowRecoveryRepairView     `json:"repair"`
+	Failover   []WorkflowRecoveryAttemptView  `json:"failover,omitempty"`
+	Capacity   WorkflowRecoveryCapacityView   `json:"capacity"`
+	Branch     WorkflowRecoveryBranchView     `json:"branch"`
+	Dialog     WorkflowRecoveryDialogView     `json:"dialog"`
+	NextWakeAt *time.Time                     `json:"nextWakeAt,omitempty"`
+	RetryCount int64                          `json:"retryCount,omitempty"`
+	Timeline   []WorkflowRecoveryEventView    `json:"timeline,omitempty"`
+	Version    string                         `json:"version,omitempty"`
+}
+
+// WorkflowRecoveryRepairView is the automatic repair in the terms a person asks
+// about: attempt N of M, on what provider, why, and whether another remains.
+type WorkflowRecoveryRepairView struct {
+	Active            bool   `json:"active"`
+	Attempt           int    `json:"attempt"`
+	Budget            int    `json:"budget"`
+	RunID             string `json:"runId,omitempty"`
+	Exhausted         bool   `json:"exhausted"`
+	NextRetryPossible bool   `json:"nextRetryPossible"`
+	Quiescent         bool   `json:"quiescent"`
+	WhyStarted        string `json:"whyStarted,omitempty"`
+	Detail            string `json:"detail,omitempty"`
+}
+
+// WorkflowRecoveryAttemptView is one provider attempt in the failover chain.
+type WorkflowRecoveryAttemptView struct {
+	AttemptID     string     `json:"attemptId"`
+	AttemptNumber int64      `json:"attemptNumber,omitempty"`
+	Provider      string     `json:"provider,omitempty"`
+	Outcome       string     `json:"outcome,omitempty"`
+	ErrorClass    string     `json:"errorClass,omitempty"`
+	StartedAt     *time.Time `json:"startedAt,omitempty"`
+	FinishedAt    *time.Time `json:"finishedAt,omitempty"`
+}
+
+// WorkflowRecoveryCapacityView is the admission answer. `read` false means
+// nobody looked, which is never the same as "no claims".
+type WorkflowRecoveryCapacityView struct {
+	Read            bool     `json:"read"`
+	Waiting         int      `json:"waiting"`
+	Held            int      `json:"held"`
+	Kinds           []string `json:"kinds,omitempty"`
+	ClaimID         string   `json:"claimId,omitempty"`
+	DispatchKey     string   `json:"dispatchKey,omitempty"`
+	FossilSuspected bool     `json:"fossilSuspected,omitempty"`
+}
+
+// WorkflowRecoveryBranchView is who owns the branch. Read-only projection: no
+// GET in this file acquires or releases a lock.
+type WorkflowRecoveryBranchView struct {
+	Branch          string `json:"branch,omitempty"`
+	HeldByRunID     string `json:"heldByRunId,omitempty"`
+	HeldBySessionID string `json:"heldBySessionId,omitempty"`
+	Waiting         bool   `json:"waiting"`
+}
+
+// WorkflowRecoveryDialogView is the question pipeline's position and nothing
+// else about it: no prompt, no options, no keystrokes.
+type WorkflowRecoveryDialogView struct {
+	State      string `json:"state,omitempty" enum:"captured,resolving,delivery_pending,delivered,unreadable,human_required"`
+	Source     string `json:"source,omitempty"`
+	Unreadable bool   `json:"unreadable,omitempty"`
+}
+
+// WorkflowRecoveryEventView is one bounded, significant thing that happened.
+type WorkflowRecoveryEventView struct {
+	Kind   string    `json:"kind"`
+	Phase  string    `json:"phase,omitempty"`
+	At     time.Time `json:"at"`
+	StepID string    `json:"stepId,omitempty"`
+	Detail string    `json:"detail,omitempty"`
+}
+
+// workflowRecoveryStatusView projects the daemon's status onto the wire.
+func workflowRecoveryStatusView(s workflowcore.RecoveryStatus) *WorkflowRecoveryStatusView {
+	if s.RunID == "" {
+		return nil
+	}
+	v := &WorkflowRecoveryStatusView{
+		RunID:      s.RunID,
+		TaskID:     s.TaskID,
+		State:      string(s.State),
+		Summary:    s.Describe(),
+		AOIsActing: s.State.AOIsActing(),
+		Waiting:    s.State.Waiting(),
+		StopReason: s.StopReason,
+		Execution:  workflowRecoveryExecutionView(s.Execution),
+		Repair: WorkflowRecoveryRepairView{
+			Active: s.Repair.Active, Attempt: s.Repair.Attempt, Budget: s.Repair.Budget,
+			RunID: s.Repair.RunID, Exhausted: s.Repair.Exhausted,
+			NextRetryPossible: s.Repair.NextRetryPossible, Quiescent: s.Repair.Quiescent,
+			WhyStarted: s.Repair.WhyStarted, Detail: s.Repair.Detail,
+		},
+		Capacity: WorkflowRecoveryCapacityView{
+			Read: s.Capacity.Read, Waiting: s.Capacity.Waiting, Held: s.Capacity.Held,
+			Kinds: s.Capacity.Kinds, ClaimID: s.Capacity.ClaimID,
+			DispatchKey: s.Capacity.DispatchKey, FossilSuspected: s.Capacity.FossilSuspected,
+		},
+		Branch: WorkflowRecoveryBranchView{
+			Branch: s.Branch.Branch, HeldByRunID: s.Branch.HeldByRunID,
+			HeldBySessionID: s.Branch.HeldBySessionID, Waiting: s.Branch.Waiting,
+		},
+		Dialog: WorkflowRecoveryDialogView{
+			State: s.Dialog.State, Source: s.Dialog.Source, Unreadable: s.Dialog.Unreadable,
+		},
+		NextWakeAt: s.NextWakeAt,
+		RetryCount: s.RetryCount,
+		Version:    s.Version,
+	}
+	for _, a := range s.Failover {
+		started := a.StartedAt
+		v.Failover = append(v.Failover, WorkflowRecoveryAttemptView{
+			AttemptID: a.AttemptID, AttemptNumber: a.AttemptNumber, Provider: a.Provider,
+			Outcome: a.Outcome, ErrorClass: a.ErrorClass,
+			StartedAt: timePtrOrNil(started), FinishedAt: a.FinishedAt,
+		})
+	}
+	for _, e := range s.Timeline {
+		v.Timeline = append(v.Timeline, WorkflowRecoveryEventView{
+			Kind: e.Kind, Phase: e.Phase, At: e.At, StepID: e.StepID, Detail: e.Detail,
+		})
+	}
+	return v
 }
 
 func workflowRecoveryView(a workflowcore.RecoveryAssessment) *WorkflowRecoveryView {
@@ -153,8 +344,41 @@ func workflowRecoveryView(a workflowcore.RecoveryAssessment) *WorkflowRecoveryVi
 		TargetRunID:       a.TargetRunID,
 		StepID:            a.StepID,
 		TaskID:            a.TaskID,
+		Execution:         workflowRecoveryExecutionView(a.Execution),
 		Version:           a.Version,
 	}
+}
+
+// workflowRecoveryExecutionView projects the execution, or nothing at all when
+// AO could not identify one. A zero-valued object would read as "AO looked and
+// there is no attempt", which is a different and unearned claim.
+func workflowRecoveryExecutionView(e workflowcore.RecoveryExecution) *WorkflowRecoveryExecutionView {
+	if e.Empty() {
+		return nil
+	}
+	v := &WorkflowRecoveryExecutionView{
+		StepID:         e.StepID,
+		StepKind:       e.StepKind,
+		AttemptID:      e.AttemptID,
+		AttemptNumber:  e.AttemptNumber,
+		Provider:       e.Provider,
+		SessionID:      e.SessionID,
+		LifecycleState: e.LifecycleState,
+		Authority:      string(e.Authority),
+		Outcome:        e.Outcome,
+		ErrorClass:     e.ErrorClass,
+		LastEventPhase: e.LastEventPhase,
+	}
+	if !e.StartedAt.IsZero() {
+		v.StartedAt = e.StartedAt.UTC().Format(time.RFC3339)
+	}
+	if e.FinishedAt != nil && !e.FinishedAt.IsZero() {
+		v.FinishedAt = e.FinishedAt.UTC().Format(time.RFC3339)
+	}
+	if !e.LastEventAt.IsZero() {
+		v.LastEventAt = e.LastEventAt.UTC().Format(time.RFC3339)
+	}
+	return v
 }
 
 func workflowPlanReuseView(a workflowcore.PlanReuseAssessment) WorkflowPlanReuseView {
@@ -223,6 +447,14 @@ func (c *WorkflowsController) getRecovery(w http.ResponseWriter, r *http.Request
 		out.Recovery = *view
 	}
 	out.Plan = WorkflowPlanReuseView{Reusability: string(assessment.PlanReusable)}
+	// The recovery status rides on the SAME route rather than a new one: "what
+	// should I do" and "what is AO doing" are two halves of one question, and a
+	// caller that had to ask twice could see two different moments. A daemon
+	// that cannot compose it omits the field rather than failing the read — the
+	// assessment above is still the answer an operator came for.
+	if status, serr := svc.RecoveryStatusFor(r.Context(), runID); serr == nil {
+		out.Status = workflowRecoveryStatusView(status)
+	}
 	envelope.WriteJSON(w, http.StatusOK, out)
 }
 
@@ -271,7 +503,18 @@ func (c *WorkflowsController) regeneratePlan(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	detail, assessment, err := svc.RegeneratePlan(r.Context(), chi.URLParam(r, "workflowId"))
+	runID := chi.URLParam(r, "workflowId")
+	// P3-C §15: regeneration DISCARDS the plan the run is executing and mints a
+	// new revision. A click computed against an earlier reading is the one case
+	// here that can destroy something, so it is revalidated. Its sibling
+	// /plan/reuse is deliberately NOT: it refuses anything but an exact plan
+	// match, so a stale click there is a correct refusal or a correct no-op.
+	var authority WorkflowActionAuthorityRequest
+	_ = decodeJSON(r, &authority)
+	if c.refuseStaleAction(w, r, runID, workflowcore.ActionRegeneratePlan, authority.authority()) {
+		return
+	}
+	detail, assessment, err := svc.RegeneratePlan(r.Context(), runID)
 	if err != nil {
 		writeWorkflowError(w, r, err)
 		return
@@ -293,6 +536,16 @@ func (c *WorkflowsController) repair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runID := chi.URLParam(r, "workflowId")
+	// P3-C §15: a Repair click computed against an earlier reading is refused
+	// rather than duplicated. The body is optional — a client that sends no
+	// authority proof still gets the pre-P3-C behaviour — but a repair that is
+	// ALREADY running is refused either way, because that is a fact about now
+	// rather than a comparison against what the caller captured.
+	var authority WorkflowActionAuthorityRequest
+	_ = decodeJSON(r, &authority)
+	if c.refuseStaleAction(w, r, runID, workflowcore.ActionRepair, authority.authority()) {
+		return
+	}
 	authorizedBy := "operator"
 	if user, found := identity.FromContext(r.Context()); found {
 		authorizedBy = string(user.ID)

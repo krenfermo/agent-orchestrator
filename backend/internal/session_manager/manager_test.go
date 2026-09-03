@@ -6909,3 +6909,33 @@ func (m *flipOnNudgeMessenger) Send(_ context.Context, _ domain.SessionID, msg s
 	}
 	return nil
 }
+
+// TestSend_StaysBlockedForDialogsAfterStructuredResponsesExist — P3-C §25.
+//
+// The structured dialog-response path is a SECOND door, never a widening of
+// this one. Runtime.Send still means "type a message and submit it", and that
+// is still exactly the wrong interaction for a prompt whose Enter confirms a
+// highlighted row.
+//
+// The regression this pins is the tempting one: having built a safe way to
+// answer a dialog, relaxing this guard so the old caller "just works" would put
+// every existing text send back on the mechanism that answered the user's
+// permission dialog for them.
+func TestSend_StaysBlockedForDialogsAfterStructuredResponsesExist(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["s1"] = domain.SessionRecord{ID: "s1", Harness: "claude-code",
+		Activity: domain.Activity{State: domain.ActivityBlocked}}
+	msg := &fakeMessenger{}
+	m := newSendTestManager(t, signalingAgent{}, msg, st)
+
+	// The exact shape of the incident: a decision AO wants the worker to act on,
+	// while the worker sits on a select prompt.
+	err := m.Send(context.Background(), "s1",
+		"Decision:\npathutil.go\n\nContinue the current task using this decision.", nil)
+	if !errors.Is(err, ErrAwaitingDecision) {
+		t.Fatalf("Send error = %v, want ErrAwaitingDecision — the text path must stay shut", err)
+	}
+	if len(msg.msgs) != 0 {
+		t.Fatalf("%d messages reached the pane, want 0", len(msg.msgs))
+	}
+}

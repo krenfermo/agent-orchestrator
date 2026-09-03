@@ -57,6 +57,30 @@ type WorkerPreflightRequest struct {
 	RuntimeEnv map[string]string
 	Owner      domain.UserID
 	ProfileID  domain.ProviderProfileID
+	// TrustRecordedAtLaunch says the launch this preflight is for will record
+	// the provider's workspace trust ITSELF, for the workspace it actually
+	// launches in, before the agent starts.
+	//
+	// It exists because the trust check would otherwise refuse a launch on a
+	// condition AO resolves moments later, and did (P3-D, smoke A): every
+	// session spawn runs the adapter's PreLaunch, and claude-code's PreLaunch
+	// writes projects[workspace].hasTrustDialogAccepted into the very config
+	// this preflight reads. A worker dispatch therefore cannot stop at the
+	// trust dialog however the config reads beforehand — but the check fired
+	// anyway and grounded every claude-code worker on any repository the person
+	// had never opened in Claude Code themselves.
+	//
+	// It is a field rather than an assumption because the exemption is NOT
+	// universal: the case the trust check was written for is a workspace that
+	// will not get that write (the package comment names an incident or repair
+	// workspace), and a future caller in that shape must still be refused. The
+	// caller states which it is; the checker never guesses.
+	//
+	// Only the trust answer is affected. Binary, credentials and the
+	// bypass-permissions acceptance are untouched — nothing about a launch
+	// writes those, and accepting a permissions posture on somebody's behalf is
+	// exactly what this package refuses to do.
+	TrustRecordedAtLaunch bool
 }
 
 // WorkerPreflightResult is the answer. Every field is a fact the checker

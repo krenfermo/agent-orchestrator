@@ -142,6 +142,19 @@ func (c *Coordinator) recordVerifiedBoundary(
 		base.integrationMethod = domain.IntegrationDirectCommit
 	}
 
+	// P3-A: whether an autonomous local commit actually happened, read from the
+	// durable record rather than assumed from the code path.
+	//
+	// autonomousLocalCommit returns success in four cases where it commits
+	// nothing -- no committer wired, a project not in direct-branch mode, no
+	// branch lock held, and a git policy of require_approval or never -- and
+	// the reasons below used to state a commit in every one of them. A
+	// provenance reason is read long after the fact by somebody deciding
+	// whether the work is safe, so it has to describe what was proved, not the
+	// path that was expected. commitHeldRepositories writes its checkpoint only
+	// when git reported a commit, so the checkpoint's presence IS the proof.
+	committed := c.recordedAutonomousCommit(ctx, run.ID)
+
 	if repaired {
 		repair := base
 		repair.step = &domain.WorkflowStep{ID: repairStepID}
@@ -154,7 +167,7 @@ func (c *Coordinator) recordVerifiedBoundary(
 		work := base
 		work.boundary = domain.BoundaryWorkResult
 		work.generation = c.boundaryGeneration(ctx, workStepID)
-		work.reason = "the work step's result, observed after the autonomous local commit"
+		work.reason = "the work step's result, observed at the end of verification" + commitSuffix(committed)
 		c.recordMutationBoundary(ctx, work)
 	}
 
@@ -166,12 +179,40 @@ func (c *Coordinator) recordVerifiedBoundary(
 	verified.step = &verifyStep
 	verified.boundary = domain.BoundaryVerified
 	verified.generation = c.boundaryGeneration(ctx, verifyStep.ID)
-	verified.reason = "verification passed and the work was committed while the branch lock was still held"
+	verified.reason = "verification passed while the branch lock was still held" + commitSuffix(committed)
 	verified.evidence = map[string]any{
 		"repaired":  repaired,
 		"placement": string(placement),
 	}
 	c.recordMutationBoundary(ctx, verified)
+}
+
+// commitSuffix says what happened to the work, in the two words that are
+// actually different for whoever reads this row later.
+func commitSuffix(committed bool) string {
+	if committed {
+		return "; AO committed the result locally"
+	}
+	return "; the result was left uncommitted in the workspace"
+}
+
+// recordedAutonomousCommit reports whether this run durably recorded an
+// autonomous local commit. The checkpoint is written only after git confirmed
+// one, so its absence is the absence of a commit rather than of a record.
+func (c *Coordinator) recordedAutonomousCommit(ctx stdctx.Context, runID string) bool {
+	if c.store == nil || runID == "" {
+		return false
+	}
+	checkpoints, err := c.store.ListWorkflowCheckpoints(ctx, runID)
+	if err != nil {
+		return false
+	}
+	for _, cp := range checkpoints {
+		if cp.DurablePhase == autonomousLocalCommitPhase {
+			return true
+		}
+	}
+	return false
 }
 
 // recordIntegratedBoundary records that a task's work reached a target ref.

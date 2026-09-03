@@ -293,6 +293,16 @@ const (
 	// completed when this fires: its worktree stays intact for diagnosis and
 	// the master run surfaces needs_attention with this as next_action.
 	WorkflowErrorIntegrationFailed WorkflowErrorClass = "integration_failed"
+	// WorkflowErrorSuperseded is an attempt that stopped being AUTHORIZED
+	// rather than one that went wrong: the cycle it belonged to was cancelled,
+	// answered by a later cycle, or ended with its step or run.
+	//
+	// It exists so such a closure cannot be recorded as a failure. "Failed"
+	// asserts an outcome AO observed; nothing was observed here, and a run's
+	// history that says a fix failed when its review was merely cancelled is a
+	// history that misleads every later reader of it — human and advisor alike.
+	// Paired with WorkflowAttemptCancelled; see fix_attempt_terminalization.go.
+	WorkflowErrorSuperseded WorkflowErrorClass = "superseded"
 )
 
 // Valid reports whether an error class is persistable. The empty value is
@@ -309,7 +319,7 @@ func (c WorkflowErrorClass) Valid() bool {
 		WorkflowErrorVerifyEnvironment, WorkflowErrorVerifyArtifactMissing,
 		WorkflowErrorVerifyArtifactMismatch, WorkflowErrorVerifyWorkspaceChanged,
 		WorkflowErrorVerifyAmbiguous, WorkflowErrorCapacityExhausted, WorkflowErrorBinaryMissing,
-		WorkflowErrorIntegrationFailed:
+		WorkflowErrorIntegrationFailed, WorkflowErrorSuperseded:
 		return true
 	default:
 		return false

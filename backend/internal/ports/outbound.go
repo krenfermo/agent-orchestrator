@@ -386,6 +386,19 @@ var (
 	// this state after path-safety checks, while real preserve failures remain
 	// fatal.
 	ErrWorkspaceStale = errors.New("workspace: stale managed worktree")
+	// ErrWorkspaceNotManaged reports that a workspace adapter refused a path
+	// because the path is not one of the worktrees THAT adapter manages — not
+	// because anything is wrong with the path itself.
+	//
+	// It is the difference between "this path is dangerous" and "this is not my
+	// department", and the two used to be the same error. The managed-root guard
+	// exists to stop the worktree adapter from deleting, stashing or checking
+	// out somewhere it does not own; a direct-branch run's repository is exactly
+	// such a path, and it is also a perfectly ordinary repository to READ. A
+	// router that cannot tell the two apart turns "ask the other adapter" into
+	// "there is no observation", which is how a direct-branch worker's own
+	// change became invisible to the work step watching for it.
+	ErrWorkspaceNotManaged = errors.New("workspace: path is not managed by this workspace adapter")
 	// ErrWorkspaceLocked reports a registered git worktree whose directory is
 	// missing but whose registration is locked (`git worktree lock`). `git
 	// worktree prune` deliberately leaves a locked registration in place even
@@ -519,6 +532,20 @@ type WorkspaceConfig struct {
 	RepoPath string
 	// Path optionally supplies an existing managed worktree path for restore.
 	Path string
+	// Placement is the run's FROZEN execution placement, when this workspace
+	// belongs to one (P3-A §7). It OVERRIDES the project's current execution
+	// mode in the workspace router.
+	//
+	// It exists because those two answers can differ, and the difference is the
+	// bug it closes: a caller who explicitly chose `direct_branch` for one run
+	// of a project configured for isolated worktrees used to get a worktree
+	// anyway, because the router asked the project instead of the run. The
+	// frozen placement is the record of what AO decided for THIS obligation,
+	// and after the freeze it is the authority.
+	//
+	// Empty means "no frozen placement" -- an ordinary non-workflow session --
+	// and the router falls back to project configuration exactly as before.
+	Placement domain.ExecutionPlacementType
 }
 
 // WorkspaceInfo describes a created workspace — where it lives and its branch.

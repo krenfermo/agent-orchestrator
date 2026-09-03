@@ -1561,7 +1561,13 @@ func (w *Workspace) validateManagedPath(path string) (string, error) {
 		return "", err
 	}
 	if !inside || clean == w.managedRoot {
-		return "", fmt.Errorf("%w: %q is outside managed root %q", ErrUnsafePath, clean, w.managedRoot)
+		// Wrapped with ports.ErrWorkspaceNotManaged as well as ErrUnsafePath so a
+		// caller can tell "this path is dangerous" from "this is not my
+		// department". Every mutating caller treats both the same and refuses;
+		// only the router's read-only observation distinguishes them, because a
+		// repository outside this adapter's managed root is not unsafe to READ --
+		// it is simply the other adapter's.
+		return "", fmt.Errorf("%w: %q is outside managed root %q (%w)", ErrUnsafePath, clean, w.managedRoot, ports.ErrWorkspaceNotManaged)
 	}
 	return clean, nil
 }
