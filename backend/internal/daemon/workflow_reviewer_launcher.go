@@ -417,6 +417,15 @@ func (l *workflowReviewerLauncher) runtimeEnv(ctx context.Context, req workflowc
 	// is what the workload-liveness probe recognises and reports as exited.
 	env[sessionmanager.EnvSupervisedProcess] = "1"
 	env["AO_REVIEW_SESSION_ID"] = req.ReviewID
+	// P3-E: the usage subject this pane's tokens belong to. It is the REVIEW RUN
+	// -- the durable authority for one review attempt -- not the pane's handle
+	// and not "whatever process started most recently", so a second reviewer for
+	// the same step binds to its own subject and never absorbs its predecessor's
+	// spend. The pane's own harness hook supplies the provider conversation id;
+	// AO infers nothing.
+	if subject := usageSubjectEnvValue(domain.RuntimePaneSubject(req.RunID)); subject != "" {
+		env[usageSubjectEnvName] = subject
+	}
 	env["AO_REVIEW_WORKER_SESSION_ID"] = string(req.WorkerSessionID)
 	env["AO_REVIEW_HARNESS"] = string(req.Harness)
 	env[sessionmanager.EnvProjectID] = string(req.ProjectID)

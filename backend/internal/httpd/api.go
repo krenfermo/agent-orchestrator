@@ -38,14 +38,24 @@ type APIDeps struct {
 	// task's creation summary can state whether AO will bring remembered
 	// project knowledge to the work. Empty is a valid value and means the
 	// deployment does not report one.
-	MemoryMode   string
-	Agents       controllers.AgentCatalog
-	Projects     projectsvc.Manager
-	Environment  controllers.EnvironmentStatusProvider
-	Sessions     controllers.SessionService
-	Activity     controllers.ActivityRecorder
-	UsageHooks   controllers.UsageHookRecorder
-	UsageSummary controllers.UsageSummaryService
+	MemoryMode  string
+	Agents      controllers.AgentCatalog
+	Projects    projectsvc.Manager
+	Environment controllers.EnvironmentStatusProvider
+	Sessions    controllers.SessionService
+	Activity    controllers.ActivityRecorder
+	UsageHooks  controllers.UsageHookRecorder
+	// UsageSubjectHooks receives a runtime pane's own usage callback (P3-E).
+	// Separate from UsageHooks because the two accept different things: a
+	// session hook carries activity and a launch id, a pane hook carries only
+	// what it spent.
+	UsageSubjectHooks controllers.UsageSubjectHookRecorder
+	UsageSummary      controllers.UsageSummaryService
+	// UsageLedger backs P3-E's canonical per-run/per-project token and cost
+	// accounting. Optional: nil leaves the ledger sections unset.
+	UsageLedger controllers.UsageLedgerService
+	// UsageContext backs the AO-assembled context section. Optional.
+	UsageContext controllers.UsageContextService
 	// Capacity backs Checkpoint 8J's read-only capacity/quota view. Optional
 	// like the other 8H/8J surfaces; nil answers 501.
 	Capacity controllers.CapacityService
@@ -175,6 +185,7 @@ type API struct {
 	environment      *controllers.EnvironmentController
 	sessions         *controllers.SessionsController
 	usage            *controllers.UsageController
+	usageSubject     *controllers.UsageSubjectController
 	capacity         *controllers.CapacityController
 	prs              *controllers.PRsController
 	reviews          *controllers.ReviewsController
@@ -223,6 +234,10 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			Ownership:     deps.SessionOwnership,
 			TrustedLocal:  cfg.TrustedLocalMode,
 		},
+		// P3-E: the loopback callback a reviewer or decision-resolver pane uses
+		// to report its OWN token spend. Wired to the same collector the session
+		// hook uses, through a strictly narrower entry point.
+		usageSubject: &controllers.UsageSubjectController{Usage: deps.UsageSubjectHooks},
 		usage: &controllers.UsageController{
 			Svc:          deps.UsageSummary,
 			Ownership:    deps.SessionOwnership,
@@ -252,6 +267,8 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		workflows: &controllers.WorkflowsController{
 			Svc:              deps.Workflows,
 			UsageReader:      deps.UsageSummary,
+			UsageLedger:      deps.UsageLedger,
+			UsageContext:     deps.UsageContext,
 			QuestionsReader:  deps.Questions,
 			Ownership:        deps.WorkflowOwnership,
 			TrustedLocal:     cfg.TrustedLocalMode,
@@ -289,6 +306,7 @@ func (a *API) Register(root chi.Router) {
 			a.environment.Register(r)
 			a.sessions.Register(r)
 			a.usage.Register(r)
+			a.usageSubject.Register(r)
 			a.capacity.Register(r)
 			a.projectMemory.Register(r)
 			a.prs.Register(r)

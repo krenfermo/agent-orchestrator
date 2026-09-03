@@ -1,9 +1,12 @@
 -- name: UpsertUsageBinding :one
+-- Keyed on the SUBJECT, so a reviewer pane, a resolver pane and a planner
+-- invocation each bind independently -- and a re-discovered one binds to the row
+-- it already had rather than minting a second.
 INSERT INTO usage_bindings (
-    session_id, harness, native_root_id, initial_model_id, state,
-    last_error_code, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (session_id, harness, native_root_id) DO UPDATE SET
+    subject_kind, subject_id, session_id, harness, native_root_id,
+    initial_model_id, state, last_error_code, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (subject_kind, subject_id, harness, native_root_id) DO UPDATE SET
     initial_model_id = CASE
         WHEN excluded.initial_model_id <> '' THEN excluded.initial_model_id
         ELSE usage_bindings.initial_model_id
@@ -25,10 +28,36 @@ ON CONFLICT (session_id, harness, native_root_id) DO UPDATE SET
     updated_at = excluded.updated_at
 RETURNING *;
 
--- name: GetUsageBindingBySessionHarnessRoot :one
+-- name: GetUsageBindingBySubjectHarnessRoot :one
 SELECT *
 FROM usage_bindings
-WHERE session_id = ? AND harness = ? AND native_root_id = ?;
+WHERE subject_kind = ? AND subject_id = ? AND harness = ? AND native_root_id = ?;
+
+-- name: ListUsageBindingsForSubject :many
+SELECT *
+FROM usage_bindings
+WHERE subject_kind = ? AND subject_id = ?
+ORDER BY updated_at, id;
+
+-- name: FinalizeUsageBindingsForSubject :execrows
+-- Finalizes ONLY this subject's bindings.
+--
+-- The session-scoped finalizer below must never be reachable from a pane's own
+-- lifecycle: a reviewer's `session-end` used to be able to finalize the WORKER's
+-- bindings, because the only finalizer keyed on the session the pane happened to
+-- be associated with. Panes finalize themselves through this statement and
+-- touch nothing else.
+UPDATE usage_bindings
+SET state = 'finalizing',
+    last_error_code = CASE
+        WHEN usage_bindings.last_error_code = 'codex_source_budget_exceeded'
+        THEN usage_bindings.last_error_code
+        ELSE ''
+    END,
+    updated_at = sqlc.arg(finalized_at)
+WHERE subject_kind = sqlc.arg(subject_kind)
+  AND subject_id = sqlc.arg(subject_id)
+  AND state NOT IN ('complete', 'partial');
 
 -- name: ListUsageBindingsForSession :many
 SELECT *
@@ -85,8 +114,8 @@ ORDER BY generation, id;
 SELECT us.*
 FROM usage_sources us
 JOIN usage_bindings ub ON ub.id = us.binding_id
-JOIN sessions s ON s.id = ub.session_id
-WHERE (s.is_terminated = 0 OR ub.state = 'finalizing')
+LEFT JOIN sessions s ON s.id = ub.session_id
+WHERE (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
   AND NOT (
       us.state = 'complete'
       AND us.last_error_code = 'artifact_replaced'
@@ -105,8 +134,8 @@ ORDER BY us.artifact_path, us.generation, us.id;
 SELECT CAST(EXISTS (
     SELECT 1
     FROM usage_bindings ub
-    JOIN sessions s ON s.id = ub.session_id
-    WHERE (s.is_terminated = 0 OR ub.state = 'finalizing')
+    LEFT JOIN sessions s ON s.id = ub.session_id
+    WHERE (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
       AND ub.harness IN ('claude-code', 'codex')
       AND (
           ub.state = 'discovering'
@@ -137,7 +166,7 @@ SELECT CAST(EXISTS (
 -- name: ListLatestRetiredCodexReplacementClaimsByPath :many
 SELECT us.*
 FROM usage_bindings ub
-JOIN sessions s ON s.id = ub.session_id
+LEFT JOIN sessions s ON s.id = ub.session_id
 JOIN usage_sources us ON us.id = (
     SELECT latest.id
     FROM usage_sources latest
@@ -149,14 +178,14 @@ JOIN usage_sources us ON us.id = (
 WHERE us.kind = 'codex_rollout'
   AND us.state = 'complete'
   AND us.last_error_code = 'artifact_replaced'
-  AND (s.is_terminated = 0 OR ub.state = 'finalizing')
+  AND (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
 ORDER BY us.binding_id, us.generation, us.id;
 
 -- name: ListUsageDiscoveryBindings :many
 SELECT ub.*
 FROM usage_bindings ub
-JOIN sessions s ON s.id = ub.session_id
-WHERE (s.is_terminated = 0 OR ub.state = 'finalizing')
+LEFT JOIN sessions s ON s.id = ub.session_id
+WHERE (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
   AND ub.harness IN ('claude-code', 'codex')
   AND (
       ub.state IN ('discovering', 'active', 'finalizing')
@@ -194,9 +223,9 @@ LIMIT ?;
 -- name: ListUsageBindingsForCodexParent :many
 SELECT DISTINCT ub.*
 FROM usage_bindings ub
-JOIN sessions s ON s.id = ub.session_id
+LEFT JOIN sessions s ON s.id = ub.session_id
 JOIN usage_sources parent ON parent.binding_id = ub.id
-WHERE (s.is_terminated = 0 OR ub.state = 'finalizing')
+WHERE (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
   AND ub.harness = 'codex'
   AND (
       ub.state IN ('discovering', 'active', 'finalizing')
@@ -233,6 +262,8 @@ SELECT
     us.next_retry_at,
     us.last_error_code AS source_last_error_code,
     us.updated_at AS source_updated_at,
+    ub.subject_kind,
+    ub.subject_id,
     ub.session_id,
     ub.harness,
     ub.native_root_id,
@@ -344,8 +375,8 @@ WHERE binding_id = ? AND source_event_key = ?;
 INSERT INTO model_usage_events (
     binding_id, usage_source_id, model_id, input_tokens, uncached_input_tokens,
     cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
-    source_event_key
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    source_event_key, observed_at, recorded_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: TouchUsageBinding :exec
 UPDATE usage_bindings SET updated_at = ? WHERE id = ?;

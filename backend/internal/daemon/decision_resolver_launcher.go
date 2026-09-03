@@ -212,6 +212,13 @@ func (l *decisionResolverLauncher) runtimeEnv(ctx context.Context, req workflowc
 	env := map[string]string{}
 	delete(env, sessionmanager.EnvSessionID)
 	env["AO_DECISION_RESOLUTION_ID"] = req.ResolutionID
+	// P3-E: the usage subject this pane's tokens belong to. It is the RESOLUTION
+	// -- the durable authority for one resolver attempt -- so a cross-provider
+	// resolution's spend lands under role=decision_resolver rather than being
+	// invisible, and never under the worker that asked the question.
+	if subject := usageSubjectEnvValue(domain.RuntimePaneSubject(req.ResolutionID)); subject != "" {
+		env[usageSubjectEnvName] = subject
+	}
 	env["AO_DECISION_RESOLVER_SESSION_ID"] = string(req.ResolverSessionID)
 	env["AO_DECISION_ASKING_SESSION_ID"] = string(req.AskingSessionID)
 	env[sessionmanager.EnvProjectID] = string(req.ProjectID)

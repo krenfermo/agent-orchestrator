@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import type { components } from "../../api/schema";
+import { WorkflowTokenLedger } from "./workflow-token-ledger";
 
 // Looks up a translation key computed at runtime from a small, finite,
 // hardcoded map (ROLE_KEYS/RECOMMENDATION_KEYS below) — every value that
@@ -214,6 +215,13 @@ export function WorkflowUsageSection({ usage }: { usage: WorkflowUsageResponse }
 	return (
 		<section className="flex flex-col gap-3">
 			<h2 className="text-sm font-semibold text-muted-foreground">{t("shell.workflowUsage.title")}</h2>
+
+			{/* P3-E: the canonical token/cost answer, first, because it is the
+			    question people actually open this section to ask. It comes
+			    straight from the backend ledger; the per-role cards below are a
+			    per-SESSION view and several roles can share one session, so they
+			    are deliberately NOT summed into a total anywhere in this file. */}
+			{usage.tokens ? <WorkflowTokenLedger ledger={usage.tokens} /> : null}
 
 			<div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
 				{usage.roles.map((role) => (

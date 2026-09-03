@@ -64,6 +64,8 @@ func newWorkflowCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newWorkflowPlanCommand(ctx))
 	// P1-D: where the work happens, and why it has not launched.
 	cmd.AddCommand(newWorkflowPlacementCommand(ctx))
+	// P3-E: what this run has spent, and how well AO knows it.
+	cmd.AddCommand(newWorkflowUsageCommand(ctx))
 	return cmd
 }
 

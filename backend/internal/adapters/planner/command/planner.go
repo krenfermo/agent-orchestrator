@@ -205,10 +205,17 @@ Conservative repository context:
 		plan, provider, respModel, evidence, err := p.attempt(ctx, args, req.Project.Path, env, timeout, model, shape)
 		p.logAttempt(evidence, err)
 		if err == nil {
-			return workflowcore.PlannerResponse{Plan: plan, Provider: provider, Model: respModel}, nil
+			return workflowcore.PlannerResponse{
+				Plan: plan, Provider: provider, Model: respModel, Evidence: evidence,
+			}, nil
 		}
 		err = &workflowcore.PlannerAttemptError{Evidence: evidence, Err: err}
-		if !errors.Is(err, ports.ErrPlannerOutputMalformed) {
+		// F2: a result that parsed but cannot be reconciled with the
+		// invocation is retry-eligible for the same reason a malformed one is
+		// -- it is a fact about this attempt, not a verdict about the
+		// objective, and re-running the planner is the thing most likely to
+		// recover the plan the provider actually produced.
+		if !errors.Is(err, ports.ErrPlannerOutputMalformed) && !errors.Is(err, ports.ErrPlannerResultInconsistent) {
 			// Timeout, missing binary, non-zero exit, etc. -- never worth
 			// retrying blind: a slow provider stays slow, a missing binary
 			// stays missing, and a real permission/capacity error should
@@ -266,15 +273,40 @@ func (p Planner) attempt(ctx context.Context, args []string, dir string, env []s
 		return fail(workflowcore.PlannerAttemptMalformed, fmt.Errorf("planner parse envelope: %w: %w: output=%q", ports.ErrPlannerOutputMalformed, envErr, snippet(b)))
 	}
 	raw := envelope.StructuredOutput
+	evidence.ResultSource = "structured_output"
 	if len(raw) == 0 && envelope.Result != "" {
 		raw = []byte(envelope.Result)
+		evidence.ResultSource = "result"
 	}
+	evidence.StructuredOutputBytes = len(envelope.StructuredOutput)
+	evidence.ResultBytes = len(envelope.Result)
+	evidence.PlanBytes = len(raw)
 	if len(raw) == 0 {
 		return fail(workflowcore.PlannerAttemptMalformed, fmt.Errorf("planner output missing structured plan: %w: output=%q", ports.ErrPlannerOutputMalformed, snippet(b)))
 	}
 	var plan workflowcore.MasterPlan
 	if err := json.Unmarshal(raw, &plan); err != nil {
 		return fail(workflowcore.PlannerAttemptMalformed, fmt.Errorf("planner parse plan: %w: %w: output=%q", ports.ErrPlannerOutputMalformed, err, snippet(raw)))
+	}
+	// Usage is read BEFORE the consistency verdict, because the verdict needs
+	// it and because a rejected attempt still spent every one of these tokens:
+	// the caller meters both outcomes off this same evidence.
+	if usage, usedModel, ok := plannerUsageFromEnvelope(envelope, model); ok {
+		evidence.Usage = &usage
+		evidence.UsageModel = usedModel
+	}
+	// F2: the plan parsed, which before this said nothing about whether it is
+	// the plan the provider actually produced. A schema-shaped placeholder
+	// parses perfectly. See consistency.go for what each signal is and why the
+	// token-ratio one is last and weakest.
+	var reportedOutputTokens int64
+	if evidence.Usage != nil {
+		reportedOutputTokens = evidence.Usage.OutputTokens
+	}
+	if reason := resultConsistency(envelope, len(raw), reportedOutputTokens); reason != "" {
+		evidence.ConsistencySignal = reason
+		return fail(workflowcore.PlannerAttemptResultInconsistent,
+			fmt.Errorf("planner result inconsistent: %w: %s", ports.ErrPlannerResultInconsistent, reason))
 	}
 	evidence.Classification = workflowcore.PlannerAttemptOK
 	return plan, "anthropic", model, evidence, nil
@@ -283,6 +315,73 @@ func (p Planner) attempt(ctx context.Context, args []string, dir string, env []s
 type plannerEnvelope struct {
 	StructuredOutput json.RawMessage `json:"structured_output"`
 	Result           string          `json:"result"`
+	// IsError and Subtype are the CLI's own verdict on the invocation. A
+	// print-mode envelope that says it failed must never be mined for a plan:
+	// before F2 these were not read at all, so an error envelope carrying a
+	// stub structured_output would have been accepted as a plan and executed.
+	IsError bool   `json:"is_error"`
+	Subtype string `json:"subtype"`
+	// Usage is the print-mode CLI's own token report for this call. It is the
+	// ONLY way the planner's spend can be observed: the invocation runs under
+	// --no-session-persistence, so it writes no transcript for the usage
+	// pipeline to discover. Absent on a CLI that does not report it, which the
+	// caller renders as unknown rather than as zero.
+	Usage *plannerUsage `json:"usage"`
+	// ModelUsage is the per-model breakdown some CLI versions emit alongside
+	// Usage. Preferred when present because it names the model the tokens were
+	// actually spent on rather than the one AO asked for.
+	ModelUsage map[string]plannerUsage `json:"modelUsage"`
+}
+
+// plannerUsage mirrors the print-mode usage block. Field names follow the
+// provider's wire shape, not AO's.
+type plannerUsage struct {
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+}
+
+// normalize folds one usage block into workflow's token vector, applying the
+// same convention the transcript parser uses: InputTokens is the TOTAL input,
+// with the cached halves counted inside it rather than beside it, so a planner
+// call and a worker turn are summable without double counting.
+func (u plannerUsage) normalize() (workflowcore.PlannerTokenUsage, bool) {
+	uncached := u.InputTokens
+	if uncached < 0 || u.OutputTokens < 0 || u.CacheCreationInputTokens < 0 || u.CacheReadInputTokens < 0 {
+		return workflowcore.PlannerTokenUsage{}, false
+	}
+	total := uncached + u.CacheCreationInputTokens + u.CacheReadInputTokens
+	if total == 0 && u.OutputTokens == 0 {
+		return workflowcore.PlannerTokenUsage{}, false
+	}
+	return workflowcore.PlannerTokenUsage{
+		InputTokens:         total,
+		UncachedInputTokens: uncached,
+		CacheWriteTokens:    u.CacheCreationInputTokens,
+		CacheReadTokens:     u.CacheReadInputTokens,
+		OutputTokens:        u.OutputTokens,
+	}, true
+}
+
+// plannerUsageFromEnvelope picks the usage this call actually reported, and the
+// model it names. It returns ok=false rather than a zeroed vector when the CLI
+// reported nothing: a planner whose spend AO cannot see is unknown, not free.
+func plannerUsageFromEnvelope(env plannerEnvelope, requestedModel string) (workflowcore.PlannerTokenUsage, string, bool) {
+	// A per-model block is authoritative about WHICH model was billed; the
+	// aggregate block is not. Prefer it, and take the one that actually
+	// reported tokens.
+	for model, usage := range env.ModelUsage {
+		if normalized, ok := usage.normalize(); ok {
+			return normalized, model, true
+		}
+	}
+	if env.Usage != nil {
+		if normalized, ok := env.Usage.normalize(); ok {
+			return normalized, requestedModel, true
+		}
+	}
+	return workflowcore.PlannerTokenUsage{}, "", false
 }
 
 // extractEnvelope parses the planner subprocess's combined output into its

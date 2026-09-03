@@ -372,6 +372,13 @@ type Deps struct {
 	// as every other optional dependency here); a nil PaneReader with a
 	// non-nil QuestionsStore still delivers already-answered questions
 	// (restart recovery) but never attempts new detection.
+	// UsagePricer prices metered tokens for the P3-E budget gate. Optional:
+	// without it a token ceiling still applies (it needs no rate card) and a
+	// cost ceiling reports itself unenforceable rather than being guessed at.
+	UsagePricer UsagePricer
+	// PlannerUsage meters the planner's own provider calls. Optional.
+	PlannerUsage PlannerUsageRecorder
+
 	QuestionsStore QuestionsStore
 	PaneReader     PaneReader
 	// DialogKeys is P3-C's structured dialog-response capability: the runtime's
@@ -627,6 +634,23 @@ type Coordinator struct {
 	messageSender MessageSender
 	verifier      VerifyRunner
 	planStore     masterPlanStore
+	// usageWindows records which role a dispatch handed a session to (P3-E).
+	// Optional and obtained by type assertion, like planStore: a store that
+	// predates the attribution table records no windows, and a run whose
+	// windows are missing simply reports a coarser role breakdown rather than
+	// failing to execute. See usage_attribution.go.
+	usageWindows usageAttributionStore
+	// usageBudgets and usagePricer back P3-E's budget gate. Both optional and
+	// both fail open: a coordinator that cannot measure spend does not refuse
+	// to dispatch, it reports the budget as unmeasurable. See usage_budget.go.
+	usageBudgets usageBudgetStore
+	usagePricer  UsagePricer
+	// plannerUsage records what a planner invocation reported spending. The
+	// planner is a real `claude --print` subprocess with no transcript, so this
+	// response-reported path is the ONLY way its tokens can be seen. Optional:
+	// nil records nothing, and the read model reports the planner's spend as
+	// unknown rather than as zero. See planner_usage.go.
+	plannerUsage PlannerUsageRecorder
 	// verifyClaimsState holds the per-process claims that stop one daemon from
 	// executing the same verify attempt twice concurrently. See
 	// verify_authority.go.
@@ -779,6 +803,10 @@ func New(d Deps) *Coordinator {
 		messageSender:            d.MessageSender,
 		verifier:                 d.Verifier,
 		planStore:                func() masterPlanStore { s, _ := d.Store.(masterPlanStore); return s }(),
+		usageWindows:             func() usageAttributionStore { s, _ := d.Store.(usageAttributionStore); return s }(),
+		usageBudgets:             func() usageBudgetStore { s, _ := d.Store.(usageBudgetStore); return s }(),
+		usagePricer:              d.UsagePricer,
+		plannerUsage:             d.PlannerUsage,
 		planner:                  d.Planner,
 		plannerContextBuilder:    d.PlannerContextBuilder,
 		taskMemory:               d.TaskMemory,

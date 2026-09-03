@@ -38,8 +38,8 @@ func (staticContextHTTP) Build(_ context.Context, proj domain.ProjectRecord) (wo
 func twoStepMasterPlanHTTP() workflowcore.MasterPlan {
 	verify := workflowcore.VerificationPlan{Commands: []workflowcore.VerificationCommandCheck{{Command: "go", Args: []string{"test", "./..."}, TimeoutSeconds: 60, RequiredExitCode: 0, RetrySafe: true}}, Files: []workflowcore.VerificationFileCheck{}}
 	return workflowcore.MasterPlan{Version: "v1", Objective: "Build users", Summary: "two steps", Steps: []workflowcore.PlannedStep{
-		{ID: "model", Title: "Model", Description: "Add the model.", Dependencies: []string{}, AcceptanceCriteria: []string{"ok"}, Verify: verify},
-		{ID: "tests", Title: "Tests", Description: "Add tests.", Dependencies: []string{"model"}, AcceptanceCriteria: []string{"ok"}, Verify: verify},
+		{ID: "model", Title: "Model", Description: "Add the user model.", Dependencies: []string{}, AcceptanceCriteria: []string{"The user model validates names."}, Verify: verify},
+		{ID: "tests", Title: "Tests", Description: "Add behaviour tests.", Dependencies: []string{"model"}, AcceptanceCriteria: []string{"Tests cover invalid users."}, Verify: verify},
 	}}
 }
 

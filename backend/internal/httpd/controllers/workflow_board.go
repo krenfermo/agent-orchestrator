@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
@@ -119,6 +120,15 @@ type WorkflowBoardEntryView struct {
 	// ArchivedAt is set on a run a human cancelled and archived. Present only
 	// in the archived view; the active board never returns an archived run.
 	ArchivedAt *time.Time `json:"archivedAt,omitempty"`
+
+	// Usage is P3-E's compact per-card figure: a token total, and a cost when
+	// one is knowable. Deliberately nothing more -- a card is not a financial
+	// dashboard, and it is filled from ONE grouped query for the whole board
+	// rather than a query per card. Absent when the run has no usage rows, so
+	// a card renders nothing rather than "0 tokens"; present with
+	// `recorded: false` never happens, and `cost.known: false` means show the
+	// tokens and no money at all, never "$0.00".
+	Usage *CompactRunUsageResponse `json:"usage,omitempty"`
 
 	ReviewCycles int                        `json:"reviewCycles"`
 	Steps        []WorkflowStepProgressView `json:"steps,omitempty"`
@@ -441,6 +451,15 @@ func (c *WorkflowsController) board(w http.ResponseWriter, r *http.Request) {
 // The active board and the archived history share it so an archived run can
 // never become visible to a user the active board would have hidden it from.
 func (c *WorkflowsController) writeBoardView(w http.ResponseWriter, r *http.Request, view workflowcore.BoardView) {
+	// P3-E: ONE grouped query for the whole board, not one per card. A board
+	// of fifty runs must stay one round trip, which is why CompactForProject
+	// folds every run in the project at once. A failure here costs the cards
+	// their token figure and nothing else -- a board that cannot price itself
+	// must still render.
+	usageByRun := map[string]domain.CompactRunUsage{}
+	if c.UsageLedger != nil && len(view.Entries) > 0 {
+		usageByRun = c.boardUsage.get(r.Context(), view.Entries[0].Run.ProjectID, c.UsageLedger.CompactForProject)
+	}
 	out := WorkflowBoardResponse{
 		Workflows: make([]WorkflowBoardEntryView, 0, len(view.Entries)),
 		Counts: WorkflowBoardCountsView{
@@ -460,7 +479,12 @@ func (c *WorkflowsController) writeBoardView(w http.ResponseWriter, r *http.Requ
 				continue
 			}
 		}
-		out.Workflows = append(out.Workflows, workflowBoardEntryView(e))
+		card := workflowBoardEntryView(e)
+		if u, ok := usageByRun[card.WorkflowID]; ok && u.Recorded {
+			compact := compactRunUsageResponse(u)
+			card.Usage = &compact
+		}
+		out.Workflows = append(out.Workflows, card)
 	}
 	envelope.WriteJSON(w, http.StatusOK, out)
 }

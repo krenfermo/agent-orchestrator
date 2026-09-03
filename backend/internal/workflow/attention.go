@@ -223,6 +223,17 @@ const (
 	ReasonPlannerStartFailed      = "planner_start_failed"
 	ReasonPlannerPolicyViolation  = "planner_policy_violation"
 	ReasonPlannerAmbiguous        = "planner_ambiguous"
+	// ReasonPlannerResultInconsistent is F2's class, and it is deliberately
+	// NOT ReasonPlannerAmbiguous. Ambiguous means the objective genuinely did
+	// not say enough and a person must decide. This means the provider
+	// answered, was billed for answering, and AO received something that
+	// provably is not that answer -- a schema-shaped placeholder accepted while
+	// 17.5k output tokens of real plan were lost. Nothing about the objective
+	// is unclear and there is nothing for a person to decide; the right
+	// response is to ask the planner again, which is why this class routes
+	// through the bounded planner retry and only names a human once that is
+	// exhausted.
+	ReasonPlannerResultInconsistent = "planner_result_inconsistent"
 	// ReasonObjectivePlanRecovered is CP1's healer speaking: an objective run
 	// that had no plan row got one, and the approval mode that row should have
 	// carried was never recorded anywhere. It is NOT a failure — the run works

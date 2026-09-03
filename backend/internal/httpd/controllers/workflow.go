@@ -932,6 +932,25 @@ type WorkflowsController struct {
 	// leaves every StepDetail.Routing.*Profile field unset; the raw
 	// harness/reason-code fields still surface.
 	ProviderProfiles providerprofilesvc.Manager
+	// UsageLedger backs P3-E's canonical token/cost ledger: the run's totals,
+	// its role and repair breakdown, and the budget it is measured against.
+	// Optional in exactly the way UsageReader is -- nil leaves the ledger
+	// sections unset rather than failing the request.
+	//
+	// It is what makes the run total CORRECT, not merely richer. The 8J view
+	// asked the per-session reader once per step and added the answers, and
+	// because a repair is delivered into the worker's own session, a run with
+	// one worker and two fix steps counted that session's tokens three times.
+	UsageLedger UsageLedgerService
+	// UsageContext backs the AO-ASSEMBLED context section: how much context AO
+	// built, what it was made of, and what project memory contributed. Separate
+	// from UsageLedger because the two measure different quantities -- what AO
+	// sent versus what a provider reported receiving -- and must never be added.
+	UsageContext UsageContextService
+	// boardUsage memoizes the per-project usage fold for a few seconds. The
+	// Board polls every two seconds while anything moves, and the fold covers
+	// the project's whole append-only ledger -- see workflow_board_usage.go.
+	boardUsage boardUsageCache
 }
 
 func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail workflowcore.RunDetail) WorkflowRunDetailView {
@@ -1175,8 +1194,12 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 			view.Questions = enrichedQuestionResponses(ctx, c.QuestionsReader, qs)
 		}
 	}
-	if c.UsageReader != nil {
-		usageView := BuildWorkflowUsageView(ctx, detail, c.UsageReader)
+	if c.UsageReader != nil || c.UsageLedger != nil {
+		var ledger *domain.WorkflowUsageLedger
+		if l, ok := c.runUsageLedger(ctx, detail.Run); ok {
+			ledger = &l
+		}
+		usageView := BuildWorkflowUsageView(ctx, detail, c.UsageReader, ledger)
 		if c.QuestionsReader != nil {
 			// Checkpoint 8K-B pass 3: Decisions telemetry is derived
 			// read-time from the same questions list plus every resolution
@@ -1187,6 +1210,9 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 			}
 		}
 		usage := workflowUsageResponse(usageView)
+		if usage.Tokens != nil {
+			usage.Tokens.Context = c.runUsageContext(ctx, detail.Run.ID)
+		}
 		view.Usage = &usage
 	}
 	return view
@@ -1253,6 +1279,11 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	// P1-B: the recovery surface, as named operations rather than one
 	// ambiguous continue. /continue keeps working unchanged and now reports
 	// which recovery action it took.
+	// P3-E: the canonical usage ledger for one run, and the project rollup.
+	// Separate routes rather than only an embedded section: a client polling a
+	// cost figure must not have to fetch the whole run detail to get it.
+	r.Get("/workflows/{workflowId}/usage", c.getWorkflowUsage)
+	r.Get("/projects/{projectId}/usage", c.getProjectUsage)
 	r.Get("/workflows/{workflowId}/recovery", c.getRecovery)
 	// P3-C §24: the "what do I do now" surface, composed on the server so no
 	// client has to compose it itself. A strict read.

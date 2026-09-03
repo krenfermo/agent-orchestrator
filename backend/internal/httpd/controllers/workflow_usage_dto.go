@@ -133,6 +133,12 @@ type WorkflowUsageResponse struct {
 	Decisions        DecisionsUsageResponse         `json:"decisions"`
 	Routing          []RoutingUsageResponse         `json:"routing,omitempty"`
 	SessionLifecycle SessionLifecycleUsageResponse  `json:"sessionLifecycle"`
+	// Tokens is P3-E's canonical ledger: the run's real totals, its role and
+	// repair breakdown, cost with its provenance, and the budget. It is the
+	// ONLY block a client may total from. The per-role `usage` above is a
+	// per-SESSION figure, and several roles can share one session, so adding
+	// those up double counts -- which is precisely what this field replaced.
+	Tokens *WorkflowUsageLedgerResponse `json:"tokens,omitempty"`
 }
 
 func workflowUsageResponse(v WorkflowUsageView) WorkflowUsageResponse {
@@ -195,6 +201,13 @@ func workflowUsageResponse(v WorkflowUsageView) WorkflowUsageResponse {
 		},
 		Routing:          routingUsageResponses(v.Routing),
 		SessionLifecycle: sessionLifecycleUsageResponse(v.SessionLifecycle),
+		Tokens: func() *WorkflowUsageLedgerResponse {
+			if v.Ledger == nil {
+				return nil
+			}
+			out := workflowUsageLedgerResponse(*v.Ledger)
+			return &out
+		}(),
 	}
 }
 

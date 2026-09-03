@@ -238,8 +238,13 @@ func validSHA256Digest(value string) bool {
 }
 
 type claudeTranscriptRecord struct {
-	Type        string `json:"type"`
-	UUID        string `json:"uuid"`
+	Type string `json:"type"`
+	UUID string `json:"uuid"`
+	// Timestamp is Claude Code's own event time for the record. Read only to
+	// place the event on a timeline (P3-E role attribution); it is never part
+	// of SourceEventKey, because an identity that moved with a clock would
+	// stop being exactly-once the moment a transcript was re-read.
+	Timestamp   string `json:"timestamp"`
 	IsSidechain bool   `json:"isSidechain"`
 	Message     struct {
 		ID         string  `json:"id"`
@@ -302,6 +307,7 @@ func parseClaude(source domain.UsageSourceContext, records []jsonlRecord, state 
 				source.Source.NativeSessionID,
 				keyID,
 			),
+			ObservedAt: parseObservedAt(native.Timestamp),
 		}
 		result.Events = append(result.Events, event)
 	}
@@ -590,8 +596,29 @@ func parseCodexEvent(source domain.UsageSourceContext, envelope codexEnvelope, s
 			strconv.FormatInt(total.OutputTokens, 10),
 			strconv.FormatInt(total.ReasoningOutputTokens, 10),
 		),
+		ObservedAt: parseObservedAt(envelope.Timestamp),
 	}
 	result.Events = append(result.Events, event)
+}
+
+// parseObservedAt reads a provider-stated event time. An absent or
+// unparseable value yields nil rather than a substituted "now": a fabricated
+// timestamp would silently move a token into the wrong role window, and the
+// read model is built to report an unknown time as approximate attribution
+// instead. Both harnesses write RFC3339; the two fallbacks cover the
+// space-separated and zoneless shapes seen in older artifacts.
+func parseObservedAt(raw string) *time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05.999999999", "2006-01-02 15:04:05.999999999Z07:00"} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			utc := parsed.UTC()
+			return &utc
+		}
+	}
+	return nil
 }
 
 func recordMalformed(result *parseResult) {

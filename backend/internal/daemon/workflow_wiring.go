@@ -222,7 +222,7 @@ func (c coordinatorLockClassifier) ClassifyLockOwner(ctx context.Context, run do
 // it, at runtime, on every run. Pinning it here makes that a compile error.
 var _ workflowcore.DispatchRecorder = (*sqlite.Store)(nil)
 
-func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememory.Service, memoryProvisioning *durablememory.Provisioner, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, agents ports.AgentResolver, terminalRuntimes workflowcore.TerminalRuntimeReclaimer, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
+func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememory.Service, memoryProvisioning *durablememory.Provisioner, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, agents ports.AgentResolver, terminalRuntimes workflowcore.TerminalRuntimeReclaimer, plannerUsage workflowcore.PlannerUsageRecorder, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {
 		plannerBinary = "claude"
@@ -248,8 +248,16 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		TrustedLocal: cfg.TrustedLocalMode,
 	}
 	deps := workflowcore.Deps{
-		Store:            store,
-		Projects:         store,
+		Store:    store,
+		Projects: store,
+		// P3-E: the budget gate prices metered tokens with the same rate card
+		// the read model uses, so what a run is stopped for and what the UI
+		// shows it spent can never disagree.
+		UsagePricer: usagePricing(cfg.DataDir, log),
+		// P3-E: the planner's own provider calls. It runs under
+		// --no-session-persistence and writes no transcript, so this
+		// response-reported path is the only way its tokens are ever seen.
+		PlannerUsage:     plannerUsage,
 		Sessions:         store,
 		ReviewRuns:       store,
 		Spawner:          sessionMgr,

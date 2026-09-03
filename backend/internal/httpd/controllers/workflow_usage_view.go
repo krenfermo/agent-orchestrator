@@ -60,6 +60,10 @@ type WorkflowUsageView struct {
 	// SessionLifecycle is Checkpoint 8M's read-time-derived audit trail,
 	// built directly from RunDetail.SessionLifecycle — no new store call.
 	SessionLifecycle SessionLifecycleUsageView
+	// Ledger is P3-E's canonical token/cost answer for the run. Nil when no
+	// ledger reader is wired; never reconstructed from the role views above,
+	// which is exactly the double count this field exists to end.
+	Ledger *domain.WorkflowUsageLedger
 }
 
 // SessionLifecycleUsageView is Checkpoint 8M's telemetry section: plain
@@ -210,7 +214,7 @@ func BuildDecisionsUsageView(qs []domain.WorkflowQuestion, resolutions []domain.
 // lookup) it derives every Checkpoint 8J read-model field. It never blocks
 // on or triggers ingestion — a session with no usage rows yet simply reports
 // UsageKnown=false, not zero.
-func BuildWorkflowUsageView(ctx context.Context, detail workflowcore.RunDetail, lookup SessionUsageLookup) WorkflowUsageView {
+func BuildWorkflowUsageView(ctx context.Context, detail workflowcore.RunDetail, lookup SessionUsageLookup, ledger *domain.WorkflowUsageLedger) WorkflowUsageView {
 	roles := make([]RoleUsageView, 0, len(detail.Steps))
 	var routing []RoutingUsageView
 	var attempts, reviewRuns, fixCycles int64
@@ -302,7 +306,20 @@ func BuildWorkflowUsageView(ctx context.Context, detail workflowcore.RunDetail, 
 	if haveDuration {
 		metrics.Duration = &totalDuration
 	}
-	if in, out, cached, ok := sumKnownTokens(roles); ok {
+	// Token totals come from the P3-E ledger and from nowhere else.
+	//
+	// They used to be summed from the per-role views above, and that was a
+	// real arithmetic bug rather than a missing feature: AO delivers a repair
+	// into the WORKER's own session, so a work step and every fix step point at
+	// the same session, and asking the per-session reader once per step counted
+	// the same tokens once per step. A run with two repair cycles reported
+	// triple its spend. The ledger attributes each event to exactly one role
+	// window, so a total cannot double count whatever the step graph looks
+	// like. Absent a ledger the fields stay nil and certainty stays unknown --
+	// never a resurrected sum.
+	if ledger != nil && ledger.Recorded {
+		in, out := ledger.Totals.InputTokens, ledger.Totals.OutputTokens
+		cached := ledger.Totals.CacheReadTokens
 		metrics.InputTokens = &in
 		metrics.OutputTokens = &out
 		metrics.CachedTokens = &cached
@@ -311,6 +328,7 @@ func BuildWorkflowUsageView(ctx context.Context, detail workflowcore.RunDetail, 
 
 	return WorkflowUsageView{
 		Roles:            roles,
+		Ledger:           ledger,
 		Metrics:          metrics,
 		Advisory:         BuildSessionRefreshAdvisory(detail, fixCycles),
 		Checkpoint:       BuildTaskCheckpointSummary(detail),
@@ -343,25 +361,4 @@ func verifyCheckCount(sd workflowcore.StepDetail) *int64 {
 	}
 	n := int64(len(result.Checks))
 	return &n
-}
-
-func sumKnownTokens(roles []RoleUsageView) (input, output, cached int64, ok bool) {
-	found := false
-	for _, r := range roles {
-		if r.Usage == nil {
-			continue
-		}
-		if r.Usage.Totals.InputTokens != nil {
-			input += *r.Usage.Totals.InputTokens
-			found = true
-		}
-		if r.Usage.Totals.OutputTokens != nil {
-			output += *r.Usage.Totals.OutputTokens
-			found = true
-		}
-		if r.Usage.Totals.CacheReadTokens != nil {
-			cached += *r.Usage.Totals.CacheReadTokens
-		}
-	}
-	return input, output, cached, found
 }

@@ -15,10 +15,16 @@ import (
 // UpsertUsageBinding records or refreshes the association between an AO
 // session and a native root session/thread.
 func (s *Store) UpsertUsageBinding(ctx context.Context, rec domain.UsageBindingRecord) (domain.UsageBindingRecord, error) {
+	subject := usageSubjectOf(rec)
+	if !subject.Valid() {
+		return domain.UsageBindingRecord{}, fmt.Errorf("usage binding needs a valid subject, got %q", subject.String())
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	row, err := s.qw.UpsertUsageBinding(ctx, gen.UpsertUsageBindingParams{
-		SessionID:      rec.SessionID,
+		SubjectKind:    string(subject.Kind),
+		SubjectID:      subject.ID,
+		SessionID:      usageSessionColumn(subject),
 		Harness:        rec.Harness,
 		NativeRootID:   rec.NativeRootID,
 		InitialModelID: rec.InitialModelID,
@@ -27,15 +33,47 @@ func (s *Store) UpsertUsageBinding(ctx context.Context, rec domain.UsageBindingR
 		UpdatedAt:      timeOrNow(rec.UpdatedAt),
 	})
 	if err != nil {
-		return domain.UsageBindingRecord{}, fmt.Errorf("upsert usage binding for session %s root %q: %w", rec.SessionID, rec.NativeRootID, err)
+		return domain.UsageBindingRecord{}, fmt.Errorf("upsert usage binding for subject %s root %q: %w", subject, rec.NativeRootID, err)
 	}
 	return usageBindingFromGen(row), nil
 }
 
-// GetUsageBinding returns one binding, or ok=false when absent.
+// usageSubjectOf resolves a record's subject, defaulting a record that names
+// only a session to the session subject. Callers written before the subject
+// existed therefore keep binding exactly what they always bound.
+func usageSubjectOf(rec domain.UsageBindingRecord) domain.UsageSubject {
+	if rec.Subject.Valid() {
+		return rec.Subject
+	}
+	if rec.SessionID != "" {
+		return domain.SessionSubject(rec.SessionID)
+	}
+	return domain.UsageSubject{}
+}
+
+// usageSessionColumn is the session_id column for a subject: the session for a
+// session subject, NULL for every other kind. Storage CHECKs the correspondence,
+// so this is the one place that decides it.
+func usageSessionColumn(subject domain.UsageSubject) *domain.SessionID {
+	if subject.Kind != domain.UsageSubjectSession {
+		return nil
+	}
+	id := domain.SessionID(subject.ID)
+	return &id
+}
+
+// GetUsageBinding returns one SESSION binding, or ok=false when absent. Kept as
+// the session-shaped call every pre-existing caller already uses; pane and
+// planner subjects go through GetUsageBindingBySubject.
 func (s *Store) GetUsageBinding(ctx context.Context, sessionID domain.SessionID, harness domain.AgentHarness, nativeRootID string) (domain.UsageBindingRecord, bool, error) {
-	row, err := s.qr.GetUsageBindingBySessionHarnessRoot(ctx, gen.GetUsageBindingBySessionHarnessRootParams{
-		SessionID:    sessionID,
+	return s.GetUsageBindingBySubject(ctx, domain.SessionSubject(sessionID), harness, nativeRootID)
+}
+
+// GetUsageBindingBySubject returns one binding for any subject kind.
+func (s *Store) GetUsageBindingBySubject(ctx context.Context, subject domain.UsageSubject, harness domain.AgentHarness, nativeRootID string) (domain.UsageBindingRecord, bool, error) {
+	row, err := s.qr.GetUsageBindingBySubjectHarnessRoot(ctx, gen.GetUsageBindingBySubjectHarnessRootParams{
+		SubjectKind:  string(subject.Kind),
+		SubjectID:    subject.ID,
 		Harness:      harness,
 		NativeRootID: nativeRootID,
 	})
@@ -43,14 +81,48 @@ func (s *Store) GetUsageBinding(ctx context.Context, sessionID domain.SessionID,
 		return domain.UsageBindingRecord{}, false, nil
 	}
 	if err != nil {
-		return domain.UsageBindingRecord{}, false, fmt.Errorf("get usage binding for session %s root %q: %w", sessionID, nativeRootID, err)
+		return domain.UsageBindingRecord{}, false, fmt.Errorf("get usage binding for subject %s root %q: %w", subject, nativeRootID, err)
 	}
 	return usageBindingFromGen(row), true, nil
 }
 
+// ListUsageBindingsForSubject returns every binding of one subject.
+func (s *Store) ListUsageBindingsForSubject(ctx context.Context, subject domain.UsageSubject) ([]domain.UsageBindingRecord, error) {
+	rows, err := s.qr.ListUsageBindingsForSubject(ctx, gen.ListUsageBindingsForSubjectParams{
+		SubjectKind: string(subject.Kind), SubjectID: subject.ID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list usage bindings for subject %s: %w", subject, err)
+	}
+	out := make([]domain.UsageBindingRecord, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, usageBindingFromGen(row))
+	}
+	return out, nil
+}
+
+// FinalizeUsageBindingsForSubject moves one subject's live bindings to
+// `finalizing`, and touches nothing else.
+//
+// It exists so a runtime pane can end its OWN usage collection. The
+// session-scoped finalizer must never be reachable from a pane's lifecycle: a
+// reviewer's `session-end` firing the session finalizer would finalize the
+// WORKER's bindings, cutting the worker's own ingestion short.
+func (s *Store) FinalizeUsageBindingsForSubject(ctx context.Context, subject domain.UsageSubject, at time.Time) (int64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	n, err := s.qw.FinalizeUsageBindingsForSubject(ctx, gen.FinalizeUsageBindingsForSubjectParams{
+		SubjectKind: string(subject.Kind), SubjectID: subject.ID, FinalizedAt: timeOrNow(at),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("finalize usage bindings for subject %s: %w", subject, err)
+	}
+	return n, nil
+}
+
 // ListUsageBindingsForSession returns every native usage binding for a session.
 func (s *Store) ListUsageBindingsForSession(ctx context.Context, sessionID domain.SessionID) ([]domain.UsageBindingRecord, error) {
-	rows, err := s.qr.ListUsageBindingsForSession(ctx, sessionID)
+	rows, err := s.qr.ListUsageBindingsForSession(ctx, &sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("list usage bindings for session %s: %w", sessionID, err)
 	}
@@ -74,7 +146,7 @@ func (s *Store) FinalizeUsageBindingsForSessionLaunch(
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	rows, err := s.qw.FinalizeUsageBindingsForSessionLaunch(ctx, gen.FinalizeUsageBindingsForSessionLaunchParams{
-		SessionID:                sessionID,
+		SessionID:                &sessionID,
 		ExpectedRuntimeLaunchID:  expectedRuntimeLaunchID,
 		ExpectedSessionUpdatedAt: expectedSessionUpdatedAt,
 		FinalizedAt:              timeOrNow(at),
@@ -397,7 +469,7 @@ func (s *Store) ApplyUsageChunk(
 				}
 				continue
 			}
-			if err := q.InsertModelUsageEvent(ctx, usageEventInsertParams(source, ev)); err != nil {
+			if err := q.InsertModelUsageEvent(ctx, usageEventInsertParams(source, ev, timeOrNow(nextState.UpdatedAt))); err != nil {
 				return err
 			}
 			insertedEvent = true
@@ -431,7 +503,7 @@ func (s *Store) ApplyUsageChunk(
 
 // ListUsageModelAggregates returns model-level aggregate rows for a session.
 func (s *Store) ListUsageModelAggregates(ctx context.Context, sessionID domain.SessionID) ([]domain.UsageModelAggregate, error) {
-	rows, err := s.qr.AggregateUsageBySessionHarnessModel(ctx, sessionID)
+	rows, err := s.qr.AggregateUsageBySessionHarnessModel(ctx, &sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("aggregate usage for session %s: %w", sessionID, err)
 	}
@@ -444,7 +516,7 @@ func (s *Store) ListUsageModelAggregates(ctx context.Context, sessionID domain.S
 
 // GetUsageSessionIncomplete reports whether durable collection facts indicate missing usage.
 func (s *Store) GetUsageSessionIncomplete(ctx context.Context, sessionID domain.SessionID) (bool, error) {
-	incomplete, err := s.qr.GetUsageSessionIncomplete(ctx, string(sessionID))
+	incomplete, err := s.qr.GetUsageSessionIncomplete(ctx, sql.NullString{String: string(sessionID), Valid: true})
 	if err != nil {
 		return false, fmt.Errorf("get usage integrity for session %s: %w", sessionID, err)
 	}
@@ -468,7 +540,7 @@ func (s *Store) ListCompactSessionUsage(ctx context.Context, projectID domain.Pr
 	out := make([]domain.CompactSessionUsage, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, domain.CompactSessionUsage{
-			SessionID: row.SessionID, TotalTokens: row.TotalTokens, Incomplete: row.Incomplete != 0,
+			SessionID: derefSessionID(row.SessionID), TotalTokens: row.TotalTokens, Incomplete: row.Incomplete != 0,
 		})
 	}
 	return out, nil
@@ -477,7 +549,8 @@ func (s *Store) ListCompactSessionUsage(ctx context.Context, projectID domain.Pr
 func usageBindingFromGen(row gen.UsageBinding) domain.UsageBindingRecord {
 	return domain.UsageBindingRecord{
 		ID:             row.ID,
-		SessionID:      row.SessionID,
+		Subject:        domain.UsageSubject{Kind: domain.UsageSubjectKind(row.SubjectKind), ID: row.SubjectID},
+		SessionID:      derefSessionID(row.SessionID),
 		Harness:        row.Harness,
 		NativeRootID:   row.NativeRootID,
 		InitialModelID: row.InitialModelID,
@@ -485,6 +558,16 @@ func usageBindingFromGen(row gen.UsageBinding) domain.UsageBindingRecord {
 		LastErrorCode:  row.LastErrorCode,
 		UpdatedAt:      row.UpdatedAt,
 	}
+}
+
+// derefSessionID flattens the nullable session column. An empty SessionID means
+// "this binding has no session", which for a pane or planner subject is the
+// normal state rather than a missing value.
+func derefSessionID(id *domain.SessionID) domain.SessionID {
+	if id == nil {
+		return ""
+	}
+	return *id
 }
 
 func usageSourceFromGen(row gen.UsageSource) domain.UsageSourceRecord {
@@ -528,7 +611,8 @@ func usageSourceContextFromGen(row gen.GetUsageSourceWithBindingAndSessionRow) d
 			LastErrorCode:   row.SourceLastErrorCode,
 			UpdatedAt:       row.SourceUpdatedAt,
 		},
-		SessionID:      row.SessionID,
+		Subject:        domain.UsageSubject{Kind: domain.UsageSubjectKind(row.SubjectKind), ID: row.SubjectID},
+		SessionID:      derefSessionID(row.SessionID),
 		NativeRootID:   row.NativeRootID,
 		InitialModelID: row.InitialModelID,
 		BindingState:   row.BindingState,
@@ -555,10 +639,14 @@ func usageSourceInsertParams(rec domain.UsageSourceRecord) gen.InsertUsageSource
 	}
 }
 
-func usageEventInsertParams(source gen.GetUsageSourceWithBindingAndSessionRow, ev domain.ModelUsageEvent) gen.InsertModelUsageEventParams {
+// usageEventInsertParams builds one event row. recordedAt is the ingest
+// instant; observed_at is the provider's own event time and stays NULL when the
+// artifact carried none, because a period or a role window built on a
+// fabricated timestamp is worse than one that admits the gap.
+func usageEventInsertParams(source gen.GetUsageSourceWithBindingAndSessionRow, ev domain.ModelUsageEvent, recordedAt time.Time) gen.InsertModelUsageEventParams {
 	return gen.InsertModelUsageEventParams{
 		BindingID:           source.BindingID,
-		UsageSourceID:       source.SourceID,
+		UsageSourceID:       sql.NullInt64{Int64: source.SourceID, Valid: true},
 		ModelID:             ev.ModelID,
 		InputTokens:         ev.Tokens.InputTokens,
 		UncachedInputTokens: ev.Tokens.UncachedInputTokens,
@@ -567,6 +655,8 @@ func usageEventInsertParams(source gen.GetUsageSourceWithBindingAndSessionRow, e
 		OutputTokens:        ev.Tokens.OutputTokens,
 		ReasoningTokens:     ptrInt64ToNull(ev.Tokens.ReasoningTokens),
 		SourceEventKey:      ev.SourceEventKey,
+		ObservedAt:          ptrTimeToNullTime(ev.ObservedAt),
+		RecordedAt:          sql.NullTime{Time: recordedAt, Valid: !recordedAt.IsZero()},
 	}
 }
 

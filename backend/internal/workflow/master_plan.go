@@ -145,6 +145,11 @@ type PlannerResponse struct {
 	Plan     MasterPlan
 	Provider string
 	Model    string
+	// Evidence is the winning attempt's shape, including what the provider
+	// reported it spent. It travels on the response so a SUCCESSFUL planner
+	// call can be metered; a FAILED one carries the same evidence inside
+	// PlannerAttemptError, because a failed call spends tokens too.
+	Evidence PlannerAttemptEvidence
 }
 
 // Planner turns an objective into a MasterPlan. It returns an error rather

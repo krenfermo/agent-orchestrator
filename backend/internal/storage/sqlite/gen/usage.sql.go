@@ -43,7 +43,7 @@ type AggregateUsageBySessionHarnessModelRow struct {
 	ReasoningEventCount int64
 }
 
-func (q *Queries) AggregateUsageBySessionHarnessModel(ctx context.Context, sessionID domain.SessionID) ([]AggregateUsageBySessionHarnessModelRow, error) {
+func (q *Queries) AggregateUsageBySessionHarnessModel(ctx context.Context, sessionID *domain.SessionID) ([]AggregateUsageBySessionHarnessModelRow, error) {
 	rows, err := q.db.QueryContext(ctx, aggregateUsageBySessionHarnessModel, sessionID)
 	if err != nil {
 		return nil, err
@@ -164,12 +164,12 @@ WHERE usage_bindings.session_id = ?2
         AND sessions.updated_at = ?4
         AND sessions.is_terminated = 0
   )
-RETURNING id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
+RETURNING id, subject_kind, subject_id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
 `
 
 type FinalizeUsageBindingsForSessionLaunchParams struct {
 	FinalizedAt              time.Time
-	SessionID                domain.SessionID
+	SessionID                *domain.SessionID
 	ExpectedRuntimeLaunchID  string
 	ExpectedSessionUpdatedAt time.Time
 }
@@ -190,6 +190,8 @@ func (q *Queries) FinalizeUsageBindingsForSessionLaunch(ctx context.Context, arg
 		var i UsageBinding
 		if err := rows.Scan(
 			&i.ID,
+			&i.SubjectKind,
+			&i.SubjectID,
 			&i.SessionID,
 			&i.Harness,
 			&i.NativeRootID,
@@ -209,6 +211,41 @@ func (q *Queries) FinalizeUsageBindingsForSessionLaunch(ctx context.Context, arg
 		return nil, err
 	}
 	return items, nil
+}
+
+const finalizeUsageBindingsForSubject = `-- name: FinalizeUsageBindingsForSubject :execrows
+UPDATE usage_bindings
+SET state = 'finalizing',
+    last_error_code = CASE
+        WHEN usage_bindings.last_error_code = 'codex_source_budget_exceeded'
+        THEN usage_bindings.last_error_code
+        ELSE ''
+    END,
+    updated_at = ?1
+WHERE subject_kind = ?2
+  AND subject_id = ?3
+  AND state NOT IN ('complete', 'partial')
+`
+
+type FinalizeUsageBindingsForSubjectParams struct {
+	FinalizedAt time.Time
+	SubjectKind string
+	SubjectID   string
+}
+
+// Finalizes ONLY this subject's bindings.
+//
+// The session-scoped finalizer below must never be reachable from a pane's own
+// lifecycle: a reviewer's `session-end` used to be able to finalize the WORKER's
+// bindings, because the only finalizer keyed on the session the pane happened to
+// be associated with. Panes finalize themselves through this statement and
+// touch nothing else.
+func (q *Queries) FinalizeUsageBindingsForSubject(ctx context.Context, arg FinalizeUsageBindingsForSubjectParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, finalizeUsageBindingsForSubject, arg.FinalizedAt, arg.SubjectKind, arg.SubjectID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const getModelUsageEventByKey = `-- name: GetModelUsageEventByKey :one
@@ -249,23 +286,31 @@ func (q *Queries) GetModelUsageEventByKey(ctx context.Context, arg GetModelUsage
 	return i, err
 }
 
-const getUsageBindingBySessionHarnessRoot = `-- name: GetUsageBindingBySessionHarnessRoot :one
-SELECT id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
+const getUsageBindingBySubjectHarnessRoot = `-- name: GetUsageBindingBySubjectHarnessRoot :one
+SELECT id, subject_kind, subject_id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
 FROM usage_bindings
-WHERE session_id = ? AND harness = ? AND native_root_id = ?
+WHERE subject_kind = ? AND subject_id = ? AND harness = ? AND native_root_id = ?
 `
 
-type GetUsageBindingBySessionHarnessRootParams struct {
-	SessionID    domain.SessionID
+type GetUsageBindingBySubjectHarnessRootParams struct {
+	SubjectKind  string
+	SubjectID    string
 	Harness      domain.AgentHarness
 	NativeRootID string
 }
 
-func (q *Queries) GetUsageBindingBySessionHarnessRoot(ctx context.Context, arg GetUsageBindingBySessionHarnessRootParams) (UsageBinding, error) {
-	row := q.db.QueryRowContext(ctx, getUsageBindingBySessionHarnessRoot, arg.SessionID, arg.Harness, arg.NativeRootID)
+func (q *Queries) GetUsageBindingBySubjectHarnessRoot(ctx context.Context, arg GetUsageBindingBySubjectHarnessRootParams) (UsageBinding, error) {
+	row := q.db.QueryRowContext(ctx, getUsageBindingBySubjectHarnessRoot,
+		arg.SubjectKind,
+		arg.SubjectID,
+		arg.Harness,
+		arg.NativeRootID,
+	)
 	var i UsageBinding
 	err := row.Scan(
 		&i.ID,
+		&i.SubjectKind,
+		&i.SubjectID,
 		&i.SessionID,
 		&i.Harness,
 		&i.NativeRootID,
@@ -283,7 +328,7 @@ SELECT CAST(COALESCE((
 ), 0) AS INTEGER)
 `
 
-func (q *Queries) GetUsageSessionIncomplete(ctx context.Context, sessionID string) (int64, error) {
+func (q *Queries) GetUsageSessionIncomplete(ctx context.Context, sessionID sql.NullString) (int64, error) {
 	row := q.db.QueryRowContext(ctx, getUsageSessionIncomplete, sessionID)
 	var column_1 int64
 	err := row.Scan(&column_1)
@@ -308,6 +353,8 @@ SELECT
     us.next_retry_at,
     us.last_error_code AS source_last_error_code,
     us.updated_at AS source_updated_at,
+    ub.subject_kind,
+    ub.subject_id,
     ub.session_id,
     ub.harness,
     ub.native_root_id,
@@ -335,7 +382,9 @@ type GetUsageSourceWithBindingAndSessionRow struct {
 	NextRetryAt         sql.NullTime
 	SourceLastErrorCode string
 	SourceUpdatedAt     time.Time
-	SessionID           domain.SessionID
+	SubjectKind         string
+	SubjectID           string
+	SessionID           *domain.SessionID
 	Harness             domain.AgentHarness
 	NativeRootID        string
 	InitialModelID      string
@@ -362,6 +411,8 @@ func (q *Queries) GetUsageSourceWithBindingAndSession(ctx context.Context, id in
 		&i.NextRetryAt,
 		&i.SourceLastErrorCode,
 		&i.SourceUpdatedAt,
+		&i.SubjectKind,
+		&i.SubjectID,
 		&i.SessionID,
 		&i.Harness,
 		&i.NativeRootID,
@@ -375,8 +426,8 @@ const hasPendingUsageDiscovery = `-- name: HasPendingUsageDiscovery :one
 SELECT CAST(EXISTS (
     SELECT 1
     FROM usage_bindings ub
-    JOIN sessions s ON s.id = ub.session_id
-    WHERE (s.is_terminated = 0 OR ub.state = 'finalizing')
+    LEFT JOIN sessions s ON s.id = ub.session_id
+    WHERE (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
       AND ub.harness IN ('claude-code', 'codex')
       AND (
           ub.state = 'discovering'
@@ -416,13 +467,13 @@ const insertModelUsageEvent = `-- name: InsertModelUsageEvent :exec
 INSERT INTO model_usage_events (
     binding_id, usage_source_id, model_id, input_tokens, uncached_input_tokens,
     cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
-    source_event_key
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    source_event_key, observed_at, recorded_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertModelUsageEventParams struct {
 	BindingID           int64
-	UsageSourceID       int64
+	UsageSourceID       sql.NullInt64
 	ModelID             string
 	InputTokens         int64
 	UncachedInputTokens int64
@@ -431,6 +482,8 @@ type InsertModelUsageEventParams struct {
 	OutputTokens        int64
 	ReasoningTokens     sql.NullInt64
 	SourceEventKey      string
+	ObservedAt          sql.NullTime
+	RecordedAt          sql.NullTime
 }
 
 func (q *Queries) InsertModelUsageEvent(ctx context.Context, arg InsertModelUsageEventParams) error {
@@ -445,6 +498,8 @@ func (q *Queries) InsertModelUsageEvent(ctx context.Context, arg InsertModelUsag
 		arg.OutputTokens,
 		arg.ReasoningTokens,
 		arg.SourceEventKey,
+		arg.ObservedAt,
+		arg.RecordedAt,
 	)
 	return err
 }
@@ -548,7 +603,7 @@ type ListCompactSessionUsageParams struct {
 }
 
 type ListCompactSessionUsageRow struct {
-	SessionID   domain.SessionID
+	SessionID   *domain.SessionID
 	TotalTokens int64
 	Incomplete  int64
 }
@@ -584,7 +639,7 @@ func (q *Queries) ListCompactSessionUsage(ctx context.Context, arg ListCompactSe
 const listLatestRetiredCodexReplacementClaimsByPath = `-- name: ListLatestRetiredCodexReplacementClaimsByPath :many
 SELECT us.id, us.binding_id, us.kind, us.native_session_id, us.subagent_id, us.artifact_path, us.file_identity, us.generation, us.byte_offset, us.parser_state_json, us.state, us.failure_count, us.anomaly_count, us.next_retry_at, us.last_error_code, us.updated_at
 FROM usage_bindings ub
-JOIN sessions s ON s.id = ub.session_id
+LEFT JOIN sessions s ON s.id = ub.session_id
 JOIN usage_sources us ON us.id = (
     SELECT latest.id
     FROM usage_sources latest
@@ -596,7 +651,7 @@ JOIN usage_sources us ON us.id = (
 WHERE us.kind = 'codex_rollout'
   AND us.state = 'complete'
   AND us.last_error_code = 'artifact_replaced'
-  AND (s.is_terminated = 0 OR ub.state = 'finalizing')
+  AND (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
 ORDER BY us.binding_id, us.generation, us.id
 `
 
@@ -641,11 +696,11 @@ func (q *Queries) ListLatestRetiredCodexReplacementClaimsByPath(ctx context.Cont
 }
 
 const listUsageBindingsForCodexParent = `-- name: ListUsageBindingsForCodexParent :many
-SELECT DISTINCT ub.id, ub.session_id, ub.harness, ub.native_root_id, ub.initial_model_id, ub.state, ub.last_error_code, ub.updated_at
+SELECT DISTINCT ub.id, ub.subject_kind, ub.subject_id, ub.session_id, ub.harness, ub.native_root_id, ub.initial_model_id, ub.state, ub.last_error_code, ub.updated_at
 FROM usage_bindings ub
-JOIN sessions s ON s.id = ub.session_id
+LEFT JOIN sessions s ON s.id = ub.session_id
 JOIN usage_sources parent ON parent.binding_id = ub.id
-WHERE (s.is_terminated = 0 OR ub.state = 'finalizing')
+WHERE (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
   AND ub.harness = 'codex'
   AND (
       ub.state IN ('discovering', 'active', 'finalizing')
@@ -676,6 +731,8 @@ func (q *Queries) ListUsageBindingsForCodexParent(ctx context.Context, parentNat
 		var i UsageBinding
 		if err := rows.Scan(
 			&i.ID,
+			&i.SubjectKind,
+			&i.SubjectID,
 			&i.SessionID,
 			&i.Harness,
 			&i.NativeRootID,
@@ -698,13 +755,13 @@ func (q *Queries) ListUsageBindingsForCodexParent(ctx context.Context, parentNat
 }
 
 const listUsageBindingsForSession = `-- name: ListUsageBindingsForSession :many
-SELECT id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
+SELECT id, subject_kind, subject_id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
 FROM usage_bindings
 WHERE session_id = ?
 ORDER BY updated_at, id
 `
 
-func (q *Queries) ListUsageBindingsForSession(ctx context.Context, sessionID domain.SessionID) ([]UsageBinding, error) {
+func (q *Queries) ListUsageBindingsForSession(ctx context.Context, sessionID *domain.SessionID) ([]UsageBinding, error) {
 	rows, err := q.db.QueryContext(ctx, listUsageBindingsForSession, sessionID)
 	if err != nil {
 		return nil, err
@@ -715,6 +772,54 @@ func (q *Queries) ListUsageBindingsForSession(ctx context.Context, sessionID dom
 		var i UsageBinding
 		if err := rows.Scan(
 			&i.ID,
+			&i.SubjectKind,
+			&i.SubjectID,
+			&i.SessionID,
+			&i.Harness,
+			&i.NativeRootID,
+			&i.InitialModelID,
+			&i.State,
+			&i.LastErrorCode,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsageBindingsForSubject = `-- name: ListUsageBindingsForSubject :many
+SELECT id, subject_kind, subject_id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
+FROM usage_bindings
+WHERE subject_kind = ? AND subject_id = ?
+ORDER BY updated_at, id
+`
+
+type ListUsageBindingsForSubjectParams struct {
+	SubjectKind string
+	SubjectID   string
+}
+
+func (q *Queries) ListUsageBindingsForSubject(ctx context.Context, arg ListUsageBindingsForSubjectParams) ([]UsageBinding, error) {
+	rows, err := q.db.QueryContext(ctx, listUsageBindingsForSubject, arg.SubjectKind, arg.SubjectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []UsageBinding{}
+	for rows.Next() {
+		var i UsageBinding
+		if err := rows.Scan(
+			&i.ID,
+			&i.SubjectKind,
+			&i.SubjectID,
 			&i.SessionID,
 			&i.Harness,
 			&i.NativeRootID,
@@ -737,10 +842,10 @@ func (q *Queries) ListUsageBindingsForSession(ctx context.Context, sessionID dom
 }
 
 const listUsageDiscoveryBindings = `-- name: ListUsageDiscoveryBindings :many
-SELECT ub.id, ub.session_id, ub.harness, ub.native_root_id, ub.initial_model_id, ub.state, ub.last_error_code, ub.updated_at
+SELECT ub.id, ub.subject_kind, ub.subject_id, ub.session_id, ub.harness, ub.native_root_id, ub.initial_model_id, ub.state, ub.last_error_code, ub.updated_at
 FROM usage_bindings ub
-JOIN sessions s ON s.id = ub.session_id
-WHERE (s.is_terminated = 0 OR ub.state = 'finalizing')
+LEFT JOIN sessions s ON s.id = ub.session_id
+WHERE (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
   AND ub.harness IN ('claude-code', 'codex')
   AND (
       ub.state IN ('discovering', 'active', 'finalizing')
@@ -787,6 +892,8 @@ func (q *Queries) ListUsageDiscoveryBindings(ctx context.Context, limit int64) (
 		var i UsageBinding
 		if err := rows.Scan(
 			&i.ID,
+			&i.SubjectKind,
+			&i.SubjectID,
 			&i.SessionID,
 			&i.Harness,
 			&i.NativeRootID,
@@ -859,8 +966,8 @@ const listWatchableUsageSources = `-- name: ListWatchableUsageSources :many
 SELECT us.id, us.binding_id, us.kind, us.native_session_id, us.subagent_id, us.artifact_path, us.file_identity, us.generation, us.byte_offset, us.parser_state_json, us.state, us.failure_count, us.anomaly_count, us.next_retry_at, us.last_error_code, us.updated_at
 FROM usage_sources us
 JOIN usage_bindings ub ON ub.id = us.binding_id
-JOIN sessions s ON s.id = ub.session_id
-WHERE (s.is_terminated = 0 OR ub.state = 'finalizing')
+LEFT JOIN sessions s ON s.id = ub.session_id
+WHERE (ub.session_id IS NULL OR s.is_terminated = 0 OR ub.state = 'finalizing')
   AND NOT (
       us.state = 'complete'
       AND us.last_error_code = 'artifact_replaced'
@@ -1041,10 +1148,10 @@ func (q *Queries) UpdateUsageSourceLifecycle(ctx context.Context, arg UpdateUsag
 
 const upsertUsageBinding = `-- name: UpsertUsageBinding :one
 INSERT INTO usage_bindings (
-    session_id, harness, native_root_id, initial_model_id, state,
-    last_error_code, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (session_id, harness, native_root_id) DO UPDATE SET
+    subject_kind, subject_id, session_id, harness, native_root_id,
+    initial_model_id, state, last_error_code, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (subject_kind, subject_id, harness, native_root_id) DO UPDATE SET
     initial_model_id = CASE
         WHEN excluded.initial_model_id <> '' THEN excluded.initial_model_id
         ELSE usage_bindings.initial_model_id
@@ -1064,11 +1171,13 @@ ON CONFLICT (session_id, harness, native_root_id) DO UPDATE SET
         ELSE excluded.last_error_code
     END,
     updated_at = excluded.updated_at
-RETURNING id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
+RETURNING id, subject_kind, subject_id, session_id, harness, native_root_id, initial_model_id, state, last_error_code, updated_at
 `
 
 type UpsertUsageBindingParams struct {
-	SessionID      domain.SessionID
+	SubjectKind    string
+	SubjectID      string
+	SessionID      *domain.SessionID
 	Harness        domain.AgentHarness
 	NativeRootID   string
 	InitialModelID string
@@ -1077,8 +1186,13 @@ type UpsertUsageBindingParams struct {
 	UpdatedAt      time.Time
 }
 
+// Keyed on the SUBJECT, so a reviewer pane, a resolver pane and a planner
+// invocation each bind independently -- and a re-discovered one binds to the row
+// it already had rather than minting a second.
 func (q *Queries) UpsertUsageBinding(ctx context.Context, arg UpsertUsageBindingParams) (UsageBinding, error) {
 	row := q.db.QueryRowContext(ctx, upsertUsageBinding,
+		arg.SubjectKind,
+		arg.SubjectID,
 		arg.SessionID,
 		arg.Harness,
 		arg.NativeRootID,
@@ -1090,6 +1204,8 @@ func (q *Queries) UpsertUsageBinding(ctx context.Context, arg UpsertUsageBinding
 	var i UsageBinding
 	err := row.Scan(
 		&i.ID,
+		&i.SubjectKind,
+		&i.SubjectID,
 		&i.SessionID,
 		&i.Harness,
 		&i.NativeRootID,

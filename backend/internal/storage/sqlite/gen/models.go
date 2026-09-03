@@ -340,7 +340,7 @@ type ExecutionPlacementTransition struct {
 type ModelUsageEvent struct {
 	ID                  int64
 	BindingID           int64
-	UsageSourceID       int64
+	UsageSourceID       sql.NullInt64
 	ModelID             string
 	InputTokens         int64
 	UncachedInputTokens int64
@@ -349,6 +349,8 @@ type ModelUsageEvent struct {
 	OutputTokens        int64
 	ReasoningTokens     sql.NullInt64
 	SourceEventKey      string
+	ObservedAt          sql.NullTime
+	RecordedAt          sql.NullTime
 }
 
 type Notification struct {
@@ -794,9 +796,32 @@ type TelemetryEvent struct {
 	PayloadJson string
 }
 
+type UsageAttributionWindow struct {
+	ID                  int64
+	DedupeKey           string
+	SessionID           string
+	ProjectID           string
+	WorkflowRunID       string
+	ParentWorkflowRunID string
+	TaskID              string
+	WorkflowStepID      string
+	AttemptID           string
+	AttemptOrdinal      int64
+	Cycle               int64
+	Role                string
+	Harness             string
+	Provider            string
+	Model               string
+	OpenedAt            time.Time
+	CreatedAt           time.Time
+	SubjectKind         string
+}
+
 type UsageBinding struct {
 	ID             int64
-	SessionID      domain.SessionID
+	SubjectKind    string
+	SubjectID      string
+	SessionID      *domain.SessionID
 	Harness        domain.AgentHarness
 	NativeRootID   string
 	InitialModelID string
@@ -818,8 +843,28 @@ type UsageCodexSourceDiscovery struct {
 	HasMixedChildTypes     int64
 }
 
+type UsageEventAttribution struct {
+	EventID             int64
+	BindingID           int64
+	SubjectKind         string
+	SubjectID           string
+	SessionID           sql.NullString
+	Harness             string
+	ModelID             string
+	InputTokens         int64
+	UncachedInputTokens int64
+	CacheReadTokens     int64
+	CacheWriteTokens    int64
+	OutputTokens        int64
+	ReasoningTokens     sql.NullInt64
+	ObservedAt          sql.NullTime
+	RecordedAt          sql.NullTime
+	WindowID            interface{}
+	AttributionBasis    string
+}
+
 type UsageSessionIntegrity struct {
-	SessionID  string
+	SessionID  sql.NullString
 	Incomplete int64
 }
 

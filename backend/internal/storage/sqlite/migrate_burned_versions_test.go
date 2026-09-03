@@ -152,6 +152,8 @@ var shippedMigrations = map[int64]string{
 	146: "0146_memory_provenance_authority.sql",
 	147: "0147_workflow_wake_auto_recovery.sql",
 	148: "0148_workflow_questions_autonomy_mode.sql",
+	149: "0149_usage_attribution.sql",
+	150: "0150_usage_subject.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

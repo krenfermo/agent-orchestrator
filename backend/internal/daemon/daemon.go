@@ -32,7 +32,9 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/mailer"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/notify"
+	baselineevidence "github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory"
 	usagepipeline "github.com/aoagents/agent-orchestrator/backend/internal/observe/usage"
+	"github.com/aoagents/agent-orchestrator/backend/internal/observe/usage/pricing"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/presence"
 	"github.com/aoagents/agent-orchestrator/backend/internal/preview"
@@ -564,7 +566,7 @@ func RunWithConfig(cfg config.Config) error {
 	// precisely what the single-flight exists to prevent.
 	memoryProvisioning := memoryProvisioner(projectMemory, log)
 
-	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, projectMemory, memoryProvisioning, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, incidentAgentLauncher, notificationWriter, agents, newTerminalRuntimeReclaimer(runtimeGC, lcStack.LCM, log), log)
+	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, projectMemory, memoryProvisioning, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, incidentAgentLauncher, notificationWriter, agents, newTerminalRuntimeReclaimer(runtimeGC, lcStack.LCM, log), plannerUsageRecorderFor(usageCollector), log)
 	// Checkpoint 8P-E.13A: reconciliation can only decide a stopped owner's
 	// lock once it can ask what that stop means, and only the coordinator knows
 	// (branchlock/retention.go). The coordinator needs the lock manager to
@@ -687,12 +689,27 @@ func RunWithConfig(cfg config.Config) error {
 		// The same resolver the workflow wiring uses, so /settings reports the
 		// policy that is actually in force rather than a second reading of the
 		// environment that could disagree with it.
-		MemoryMode:    string(memoryConfig(log).Mode),
-		CDC:           store,
-		Events:        cdcPipe.Broadcaster,
-		Activity:      lcStack.LCM,
-		UsageHooks:    usageCollector,
-		UsageSummary:  usagesvc.NewSummaryReader(store),
+		MemoryMode: string(memoryConfig(log).Mode),
+		CDC:        store,
+		Events:     cdcPipe.Broadcaster,
+		Activity:   lcStack.LCM,
+		UsageHooks: usageCollector,
+		// P3-E: the same collector, reached through the pane-shaped entry point
+		// that cannot touch a session's lifecycle.
+		UsageSubjectHooks: usageCollector,
+		UsageSummary:      usagesvc.NewSummaryReader(store),
+		// P3-E: the ledger reader owns the run/project token and cost answers.
+		// Its rate card is resolved once, from AO's own data dir, so a cost
+		// figure always names the rates that produced it -- and a rate card
+		// that is absent or unreadable simply leaves cost unknown while tokens
+		// keep being reported in full.
+		UsageLedger: usagesvc.NewLedgerReader(store, usagePricing(cfg.DataDir, log)),
+		// The AO-ASSEMBLED context view, read from the same baseline evidence
+		// tree P2 already writes. Deliberately a second reader rather than a
+		// widened ledger: what AO sent and what a provider reported receiving
+		// are different quantities, and one reader that could return both is
+		// one refactor away from adding them.
+		UsageContext:  usagesvc.NewContextReader(usageEvidenceSource(log)),
 		Capacity:      capacitysvc.NewReader(store),
 		ProjectMemory: projectmemorysvc.New(projectMemory, store).WithProvisioner(memoryProvisioning).WithWorkspaces(store),
 		Questions: &questionssvc.AnswerService{
@@ -855,4 +872,40 @@ func stabilizeWorkingDirectory(dataDir string) error {
 		return fmt.Errorf("daemon working directory: chdir %s: %w", dataDir, err)
 	}
 	return nil
+}
+
+// usagePricing resolves the P3-E rate card once for this daemon.
+//
+// A rate card that fails to parse is a configuration error worth surfacing, but
+// it is never worth refusing to start over: the embedded catalog stays in
+// force, the operator sees the warning, and every model it does not cover
+// reports cost=unknown rather than a guess.
+func usagePricing(dataDir string, log *slog.Logger) *pricing.Table {
+	table, err := pricing.Load(dataDir)
+	if err != nil {
+		if log != nil {
+			log.Warn("usage rate card ignored; falling back to the embedded catalog",
+				"file", pricing.RateCardFileName, "err", err)
+		}
+		return pricing.Embedded()
+	}
+	return table
+}
+
+// usageEvidenceSource opens the P2 baseline evidence tree for reading.
+//
+// It returns nil rather than failing when the tree cannot be opened: a daemon
+// whose evidence directory does not exist yet, or whose data dir is configured
+// somewhere the reader refuses, must still serve token usage. The context
+// section is then simply absent, which the API renders as "no context data
+// recorded" — an absence, not a set of zeroes.
+func usageEvidenceSource(log *slog.Logger) *baselineevidence.DirSource {
+	source, err := baselineevidence.NewDefaultDirSource()
+	if err != nil {
+		if log != nil {
+			log.Warn("assembled-context evidence is unreadable; usage will report tokens only", "err", err)
+		}
+		return nil
+	}
+	return source
 }

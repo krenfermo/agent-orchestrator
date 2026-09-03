@@ -15,7 +15,14 @@ import (
 
 var expectedUsageTableColumns = map[string][]string{
 	"usage_bindings": {
-		"id", "session_id", "harness", "native_root_id", "initial_model_id",
+		"id",
+		// P3-E (migration 0150). A binding names a SUBJECT, not necessarily a
+		// session: a reviewer pane, a decision-resolver pane and a planner
+		// invocation all spend real provider tokens and none of them is a row
+		// in `sessions`. session_id survives as a real, nullable, foreign-keyed
+		// column so every session-scoped read keeps meaning what it meant.
+		"subject_kind", "subject_id",
+		"session_id", "harness", "native_root_id", "initial_model_id",
 		"state", "last_error_code", "updated_at",
 	},
 	"usage_sources": {
@@ -27,6 +34,12 @@ var expectedUsageTableColumns = map[string][]string{
 		"id", "binding_id", "usage_source_id", "model_id", "input_tokens", "uncached_input_tokens",
 		"cache_read_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens",
 		"source_event_key",
+		// P3-E (migration 0149). observed_at is the provider's own event time
+		// and recorded_at the ingest instant. Both are durable collection
+		// state, not display state: observed_at is what places a token inside
+		// the role window that was open when it was spent, and it stays NULL
+		// rather than being invented when an artifact carried no timestamp.
+		"observed_at", "recorded_at",
 	},
 }
 

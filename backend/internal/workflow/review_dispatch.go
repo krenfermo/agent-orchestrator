@@ -1521,6 +1521,19 @@ func (c *Coordinator) dispatchReviewFromPending(
 			"run", run.ID, "step", reviewStep.ID, "reviewRun", reviewRun.ID, "handle", launch.HandleID)
 	}
 	launchedRef := ReviewerRef{HandleID: launch.HandleID, InstanceID: launch.InstanceID}
+
+	// P3-E: the reviewer's own attribution window, keyed on the REVIEW RUN --
+	// the same durable authority the pane's environment carries as its usage
+	// subject. The two must be identical or the reviewer's events resolve to no
+	// window: this is the pairing that makes reviewer spend visible, separately
+	// from the worker's, without either absorbing the other.
+	c.openUsageWindow(ctx, usageWindowSpec{
+		Subject: domain.RuntimePaneSubject(reviewRun.ID),
+		Role:    domain.WorkflowRoleReviewer, Run: run,
+		StepID: reviewStep.ID, AttemptID: reviewRun.ID, AttemptOrdinal: int64(cycleNumber),
+		Harness: string(harness), OpenedAt: c.clock(),
+	})
+
 	if rerr := c.recordReviewLaunchConfirmed(ctx, run, reviewStep, reviewRun, launchedRef, targetSHA); rerr != nil {
 		if errors.Is(rerr, errReviewerInstanceUnproven) {
 			// A reviewer was started and the launcher could not say WHICH

@@ -16,6 +16,13 @@ const (
 	PlannerAttemptParentCancelled = "parent_cancelled"
 	PlannerAttemptCommandFailed   = "command_failed"
 	PlannerAttemptMalformed       = "malformed_output"
+	// PlannerAttemptResultInconsistent is F2's class: the subprocess
+	// succeeded and its output parsed into a plan, but that plan could not be
+	// reconciled with the invocation that produced it. Distinct from
+	// malformed_output, which means nothing readable came back at all --
+	// here something perfectly readable came back and is provably not the
+	// answer the provider was billed for.
+	PlannerAttemptResultInconsistent = "result_inconsistent"
 )
 
 // PlannerAttemptEvidence is what one planner invocation records about itself.
@@ -50,6 +57,47 @@ type PlannerAttemptEvidence struct {
 
 	DurationMS     int64  `json:"durationMs"`
 	Classification string `json:"classification"`
+
+	// Usage is what the provider reported this planner call actually spent, and
+	// UsageModel the model it names. Both are nil/empty when the CLI reported
+	// nothing -- which is UNKNOWN, not zero: the planner is a real `claude
+	// --print` subprocess and it always spends something.
+	//
+	// It rides on the attempt evidence rather than on PlannerResponse because a
+	// FAILED attempt also spends tokens, and evidence is the one thing the
+	// adapter returns on both paths.
+	Usage      *PlannerTokenUsage `json:"usage,omitempty"`
+	UsageModel string             `json:"usageModel,omitempty"`
+
+	// F2 provenance: enough to explain, from durable state alone, WHICH half
+	// of the provider envelope AO turned into a plan and how big each half
+	// was -- the questions the placeholder-plan incident could not answer
+	// afterwards. Sizes and a reason string only: never the plan body, never
+	// the provider's prose, never a raw terminal dump.
+	//
+	// ResultSource is "structured_output" or "result".
+	ResultSource string `json:"resultSource,omitempty"`
+	// StructuredOutputBytes / ResultBytes are the two halves as received, and
+	// PlanBytes is the one AO actually parsed.
+	StructuredOutputBytes int `json:"structuredOutputBytes,omitempty"`
+	ResultBytes           int `json:"resultBytes,omitempty"`
+	PlanBytes             int `json:"planBytes,omitempty"`
+	// ConsistencySignal names why the result was refused, empty when it was
+	// accepted. It is the operator-facing half of ErrPlannerResultInconsistent.
+	ConsistencySignal string `json:"consistencySignal,omitempty"`
+}
+
+// PlannerTokenUsage is one planner invocation's provider-reported token vector.
+//
+// InputTokens is the TOTAL input with the cached halves counted inside it, which
+// is the same convention the transcript parser uses -- so a planner call and a
+// worker turn can be summed without double counting the cache.
+type PlannerTokenUsage struct {
+	InputTokens         int64 `json:"inputTokens"`
+	UncachedInputTokens int64 `json:"uncachedInputTokens"`
+	CacheReadTokens     int64 `json:"cacheReadTokens"`
+	CacheWriteTokens    int64 `json:"cacheWriteTokens"`
+	OutputTokens        int64 `json:"outputTokens"`
 }
 
 // LogArgs renders the evidence as slog key/value pairs.
@@ -68,6 +116,17 @@ func (e PlannerAttemptEvidence) LogArgs() []any {
 	}
 	if e.HasParentDeadline {
 		args = append(args, "parentDeadlineMs", e.ParentDeadlineMS)
+	}
+	if e.ResultSource != "" {
+		args = append(args, "resultSource", e.ResultSource,
+			"structuredOutputBytes", e.StructuredOutputBytes,
+			"resultBytes", e.ResultBytes, "planBytes", e.PlanBytes)
+	}
+	if e.Usage != nil {
+		args = append(args, "reportedOutputTokens", e.Usage.OutputTokens)
+	}
+	if e.ConsistencySignal != "" {
+		args = append(args, "consistencySignal", e.ConsistencySignal)
 	}
 	return args
 }

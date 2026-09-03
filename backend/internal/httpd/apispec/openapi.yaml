@@ -2381,6 +2381,58 @@ paths:
       summary: Archived workflows for a project, newest archive first
       tags:
       - workflows
+  /api/v1/projects/{projectId}/usage:
+    get:
+      operationId: getProjectUsage
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: projectId
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Rollup period. Defaults to 7d. Buckets by dispatch time, not
+          by any provider billing period.
+        in: query
+        name: range
+        schema:
+          description: Rollup period. Defaults to 7d. Buckets by dispatch time, not
+            by any provider billing period.
+          enum:
+          - today
+          - 7d
+          - 30d
+          - all
+          type:
+          - "null"
+          - string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersProjectUsageResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P3-E: a project''s token/cost rollup for one period (today, 7d, 30d,
+        all). Buckets by the instant AO DISPATCHED the work — a fact AO recorded itself
+        — which `periodBasis` states explicitly so nobody reads these windows as a
+        provider''s billing period. `averageTokensPerWorkflow` is null, not 0, when
+        no workflow spent anything in the range.'
+      tags:
+      - workflows
   /api/v1/projects/{projectId}/workflows:
     post:
       operationId: createWorkflowRun
@@ -6743,6 +6795,37 @@ paths:
       summary: Get detailed token usage for one session
       tags:
       - usage
+  /api/v1/usage/subject-hook:
+    post:
+      operationId: recordSubjectUsageHook
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersSubjectUsageHookRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersSubjectUsageHookResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+      summary: 'P3-E: a runtime pane reports its OWN provider token spend. Used by
+        reviewer and decision-resolver panes, which are not AO sessions and therefore
+        cannot report through the session activity route. Deliberately usage-only:
+        it carries no activity state and no session id, so a pane can say what it
+        spent without being able to touch any session''s lifecycle. A session subject
+        is refused -- sessions report through /sessions/{id}/activity, which validates
+        a launch id this route has no business touching.'
+      tags:
+      - usage
   /api/v1/workflows:
     get:
       operationId: listWorkflowRuns
@@ -8240,6 +8323,48 @@ paths:
         is returned unchanged.'
       tags:
       - workflows
+  /api/v1/workflows/{workflowId}/usage:
+    get:
+      operationId: getWorkflowUsage
+      parameters:
+      - description: Workflow run identifier.
+        in: path
+        name: workflowId
+        required: true
+        schema:
+          description: Workflow run identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersWorkflowUsageLedgerResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P3-E: the canonical token/cost ledger for one run — totals, the per-role
+        and per-model breakdown, base execution vs repair, an autonomous parent''s
+        children, the roles whose spend AO cannot observe, and the frozen budget the
+        run is measured against. Every figure carries its own provenance: `source`
+        says whether tokens were reported by a provider or estimated by AO, and `cost.basis`
+        says whether money was calculated (from the named rate card) or is simply
+        unknown. `recorded: false` means no usage rows exist for the run and must
+        be rendered as "no usage data recorded", never as zero. This is the ONLY total
+        a client may present; the per-role `usage` block on the run detail is per-SESSION
+        and several roles can share one session.'
+      tags:
+      - workflows
 components:
   schemas:
     APIError:
@@ -8873,6 +8998,163 @@ components:
       - detectedAt
       - resetAt
       - certainty
+      type: object
+    ControllersCompactRunUsageResponse:
+      properties:
+        cost:
+          $ref: '#/components/schemas/ControllersUsageCostResponse'
+        recorded:
+          type: boolean
+        source:
+          type: string
+        totalTokens:
+          format: int64
+          type: integer
+      required:
+      - totalTokens
+      - cost
+      - source
+      - recorded
+      type: object
+    ControllersContextMemoryResponse:
+      properties:
+        cacheHits:
+          format: int64
+          type: integer
+        cacheMisses:
+          format: int64
+          type: integer
+        candidates:
+          format: int64
+          type: integer
+        canonicalItems:
+          format: int64
+          type: integer
+        estimatedPackTokens:
+          format: int64
+          type: integer
+        fallbackReasons:
+          items:
+            type: string
+          type: array
+        fullSyncs:
+          format: int64
+          type: integer
+        generation:
+          format: int64
+          type: integer
+        incrementalSyncs:
+          format: int64
+          type: integer
+        indexedCommit:
+          type: string
+        mode:
+          enum:
+          - "off"
+          - assisted
+          - preferred
+          type: string
+        noOpSyncs:
+          format: int64
+          type: integer
+        packBytes:
+          format: int64
+          type: integer
+        packItems:
+          format: int64
+          type: integer
+        provider:
+          type: string
+        rejectedByBudget:
+          format: int64
+          type: integer
+        sharedCandidates:
+          format: int64
+          type: integer
+        sharedExcluded:
+          format: int64
+          type: integer
+        sharedSelected:
+          format: int64
+          type: integer
+        staleExcluded:
+          format: int64
+          type: integer
+        syncFilesRead:
+          format: int64
+          type: integer
+        syncs:
+          format: int64
+          type: integer
+        taskLocalItems:
+          format: int64
+          type: integer
+        workflowLocalItems:
+          format: int64
+          type: integer
+      required:
+      - generation
+      - provider
+      - packItems
+      - packBytes
+      - estimatedPackTokens
+      - candidates
+      - rejectedByBudget
+      - staleExcluded
+      - cacheHits
+      - cacheMisses
+      - syncs
+      - fullSyncs
+      - incrementalSyncs
+      - noOpSyncs
+      - syncFilesRead
+      - sharedCandidates
+      - sharedSelected
+      - sharedExcluded
+      - taskLocalItems
+      - workflowLocalItems
+      - canonicalItems
+      type: object
+    ControllersContextRoleResponse:
+      properties:
+        assembledBytes:
+          format: int64
+          type: integer
+        dispatches:
+          format: int64
+          type: integer
+        estimatedAssembledTokens:
+          format: int64
+          type: integer
+        role:
+          type: string
+      required:
+      - role
+      - dispatches
+      - assembledBytes
+      - estimatedAssembledTokens
+      type: object
+    ControllersContextSourceResponse:
+      properties:
+        bytes:
+          format: int64
+          type: integer
+        estimatedTokens:
+          format: int64
+          type: integer
+        source:
+          enum:
+          - task_spec
+          - project_memory
+          - shared_knowledge
+          - repo_content
+          - index_reuse
+          - other
+          type: string
+      required:
+      - source
+      - bytes
+      - estimatedTokens
       type: object
     ControllersCreateProviderProfileRequest:
       properties:
@@ -9609,6 +9891,30 @@ components:
       required:
       - status
       type: object
+    ControllersModelUsageLineResponse:
+      properties:
+        approximateEvents:
+          format: int64
+          type: integer
+        cost:
+          $ref: '#/components/schemas/ControllersUsageCostResponse'
+        harness:
+          type: string
+        model:
+          type: string
+        provider:
+          type: string
+        source:
+          type: string
+        tokens:
+          $ref: '#/components/schemas/ControllersUsageTokenTotalsResponse'
+      required:
+      - model
+      - tokens
+      - cost
+      - source
+      - approximateEvents
+      type: object
     ControllersProjectMemoryItemResponse:
       properties:
         authority:
@@ -10143,6 +10449,67 @@ components:
       - detail
       - applied
       type: object
+    ControllersProjectUsageResponse:
+      properties:
+        averageTokensPerWorkflow:
+          type:
+          - "null"
+          - integer
+        budget:
+          $ref: '#/components/schemas/ControllersUsageBudgetResponse'
+        cost:
+          $ref: '#/components/schemas/ControllersUsageCostResponse'
+        from:
+          type: string
+        models:
+          items:
+            $ref: '#/components/schemas/ControllersModelUsageLineResponse'
+          type: array
+        period:
+          type: string
+        periodBasis:
+          type: string
+        projectId:
+          type: string
+        providers:
+          items:
+            $ref: '#/components/schemas/ControllersProviderUsageLineResponse'
+          type: array
+        recorded:
+          type: boolean
+        roles:
+          items:
+            $ref: '#/components/schemas/ControllersRoleUsageLineResponse'
+          type: array
+        runs:
+          items:
+            $ref: '#/components/schemas/ControllersRunUsageLineResponse'
+          type: array
+        source:
+          type: string
+        to:
+          type: string
+        totals:
+          $ref: '#/components/schemas/ControllersUsageTokenTotalsResponse'
+        workflows:
+          format: int64
+          type: integer
+      required:
+      - projectId
+      - period
+      - to
+      - recorded
+      - source
+      - periodBasis
+      - totals
+      - cost
+      - workflows
+      - roles
+      - providers
+      - models
+      - averageTokensPerWorkflow
+      - budget
+      type: object
     ControllersProviderAttemptView:
       properties:
         authoritative:
@@ -10304,6 +10671,22 @@ components:
           type: array
       required:
       - providers
+      type: object
+    ControllersProviderUsageLineResponse:
+      properties:
+        cost:
+          $ref: '#/components/schemas/ControllersUsageCostResponse'
+        provider:
+          type: string
+        source:
+          type: string
+        tokens:
+          $ref: '#/components/schemas/ControllersUsageTokenTotalsResponse'
+      required:
+      - provider
+      - tokens
+      - cost
+      - source
       type: object
     ControllersPruneProjectMemoryRequest:
       properties:
@@ -10478,6 +10861,50 @@ components:
       required:
       - resolution
       type: object
+    ControllersRoleUsageLineResponse:
+      properties:
+        attemptId:
+          type: string
+        attemptOrdinal:
+          format: int64
+          type: integer
+        cost:
+          $ref: '#/components/schemas/ControllersUsageCostResponse'
+        cycle:
+          format: int64
+          type: integer
+        harness:
+          type: string
+        model:
+          type: string
+        observable:
+          type: boolean
+        openedAt:
+          type: string
+        provider:
+          type: string
+        repair:
+          type: boolean
+        role:
+          type: string
+        source:
+          type: string
+        taskId:
+          type: string
+        tokens:
+          $ref: '#/components/schemas/ControllersUsageTokenTotalsResponse'
+        unobservableReason:
+          type: string
+      required:
+      - role
+      - cycle
+      - repair
+      - attemptOrdinal
+      - tokens
+      - cost
+      - source
+      - observable
+      type: object
     ControllersRoleUsageResponse:
       properties:
         completedAt:
@@ -10605,6 +11032,22 @@ components:
       - reasonCodes
       - policyVersion
       - waiting
+      type: object
+    ControllersRunUsageLineResponse:
+      properties:
+        cost:
+          $ref: '#/components/schemas/ControllersUsageCostResponse'
+        source:
+          type: string
+        tokens:
+          $ref: '#/components/schemas/ControllersUsageTokenTotalsResponse'
+        workflowRunId:
+          type: string
+      required:
+      - workflowRunId
+      - tokens
+      - cost
+      - source
       type: object
     ControllersSecurePairingStatus:
       properties:
@@ -10867,6 +11310,40 @@ components:
       - handleId
       - instructions
       type: object
+    ControllersSubjectUsageHookRequest:
+      properties:
+        agent:
+          description: The harness that invoked the hook.
+          type: string
+        event:
+          description: The native hook event name.
+          type: string
+        harness:
+          description: The provider harness whose transcript this is.
+          type: string
+        modelId:
+          description: The model the pane reported.
+          type: string
+        nativeSessionId:
+          description: The harness's own conversation id, as the pane's hook reported
+            it.
+          type: string
+        subject:
+          description: The usage subject this pane's tokens belong to, as "<kind>:<id>".
+          type: string
+        transcriptPath:
+          description: The provider transcript path, when the hook carries one.
+          type: string
+      required:
+      - subject
+      type: object
+    ControllersSubjectUsageHookResponse:
+      properties:
+        ok:
+          type: boolean
+      required:
+      - ok
+      type: object
     ControllersTaskCheckpointSummaryResponse:
       properties:
         acceptanceCriteria:
@@ -11028,6 +11505,113 @@ components:
       required:
       - displayName
       - enabled
+      type: object
+    ControllersUsageBudgetResponse:
+      properties:
+        costBudget:
+          format: double
+          type: number
+        costPercent:
+          type:
+          - "null"
+          - number
+        parentScoped:
+          type: boolean
+        projectDailyCostBudget:
+          format: double
+          type: number
+        projectDailyTokenBudget:
+          format: int64
+          type: integer
+        reason:
+          type: string
+        scope:
+          type: string
+        state:
+          type: string
+        tokenBudget:
+          format: int64
+          type: integer
+        tokenPercent:
+          type:
+          - "null"
+          - number
+        tokensUsed:
+          format: int64
+          type: integer
+        warnPercent:
+          type: integer
+      required:
+      - state
+      - scope
+      - warnPercent
+      - tokensUsed
+      - tokenPercent
+      - costPercent
+      - parentScoped
+      type: object
+    ControllersUsageCostResponse:
+      properties:
+        amount:
+          format: double
+          type: number
+        basis:
+          type: string
+        currency:
+          type: string
+        effectiveDate:
+          type: string
+        known:
+          type: boolean
+        pricingSource:
+          type: string
+        pricingVersion:
+          type: string
+        unpricedModels:
+          items:
+            type: string
+          type: array
+      required:
+      - known
+      - basis
+      - amount
+      type: object
+    ControllersUsageTokenTotalsResponse:
+      properties:
+        cacheRead:
+          format: int64
+          type: integer
+        cacheWrite:
+          format: int64
+          type: integer
+        events:
+          format: int64
+          type: integer
+        input:
+          format: int64
+          type: integer
+        output:
+          format: int64
+          type: integer
+        reasoning:
+          type:
+          - "null"
+          - integer
+        total:
+          format: int64
+          type: integer
+        uncachedInput:
+          format: int64
+          type: integer
+      required:
+      - input
+      - uncachedInput
+      - cacheRead
+      - cacheWrite
+      - output
+      - reasoning
+      - total
+      - events
       type: object
     ControllersUserView:
       properties:
@@ -11288,6 +11872,66 @@ components:
       - currentHolderRunId
       - depth
       - returnable
+      type: object
+    ControllersWorkflowContextResponse:
+      properties:
+        assembledBytes:
+          format: int64
+          type: integer
+        avoidedAssembledBytes:
+          format: int64
+          type: integer
+        avoidedComparable:
+          type: boolean
+        basis:
+          enum:
+          - ao_assembled
+          type: string
+        byRole:
+          items:
+            $ref: '#/components/schemas/ControllersContextRoleResponse'
+          type: array
+        bySource:
+          items:
+            $ref: '#/components/schemas/ControllersContextSourceResponse'
+          type: array
+        complete:
+          type: boolean
+        dispatches:
+          format: int64
+          type: integer
+        estimateMethod:
+          type: string
+        estimatedAssembledTokens:
+          format: int64
+          type: integer
+        estimatedAvoidedTokens:
+          format: int64
+          type: integer
+        memory:
+          $ref: '#/components/schemas/ControllersContextMemoryResponse'
+        recorded:
+          type: boolean
+        skippedRecords:
+          format: int64
+          type: integer
+        unmeasured:
+          format: int64
+          type: integer
+      required:
+      - recorded
+      - dispatches
+      - unmeasured
+      - skippedRecords
+      - complete
+      - assembledBytes
+      - estimatedAssembledTokens
+      - avoidedAssembledBytes
+      - estimatedAvoidedTokens
+      - avoidedComparable
+      - memory
+      - estimateMethod
+      - basis
       type: object
     ControllersWorkflowIntegrationStateView:
       properties:
@@ -11664,6 +12308,84 @@ components:
       - approvedBy
       - createdAt
       type: object
+    ControllersWorkflowUsageLedgerResponse:
+      properties:
+        approximateEvents:
+          format: int64
+          type: integer
+        baseCost:
+          $ref: '#/components/schemas/ControllersUsageCostResponse'
+        baseTokens:
+          $ref: '#/components/schemas/ControllersUsageTokenTotalsResponse'
+        budget:
+          $ref: '#/components/schemas/ControllersUsageBudgetResponse'
+        children:
+          items:
+            $ref: '#/components/schemas/ControllersRunUsageLineResponse'
+          type: array
+        complete:
+          type: boolean
+        context:
+          $ref: '#/components/schemas/ControllersWorkflowContextResponse'
+        cost:
+          $ref: '#/components/schemas/ControllersUsageCostResponse'
+        familyCost:
+          $ref: '#/components/schemas/ControllersUsageCostResponse'
+        familyTotals:
+          $ref: '#/components/schemas/ControllersUsageTokenTotalsResponse'
+        incompleteReason:
+          type: string
+        models:
+          items:
+            $ref: '#/components/schemas/ControllersModelUsageLineResponse'
+          type: array
+        providers:
+          items:
+            $ref: '#/components/schemas/ControllersProviderUsageLineResponse'
+          type: array
+        recorded:
+          type: boolean
+        repairCost:
+          $ref: '#/components/schemas/ControllersUsageCostResponse'
+        repairTokens:
+          $ref: '#/components/schemas/ControllersUsageTokenTotalsResponse'
+        roles:
+          items:
+            $ref: '#/components/schemas/ControllersRoleUsageLineResponse'
+          type: array
+        source:
+          type: string
+        totalEvents:
+          format: int64
+          type: integer
+        totals:
+          $ref: '#/components/schemas/ControllersUsageTokenTotalsResponse'
+        unobservable:
+          items:
+            $ref: '#/components/schemas/ControllersRoleUsageLineResponse'
+          type: array
+        workflowRunId:
+          type: string
+      required:
+      - workflowRunId
+      - recorded
+      - source
+      - totals
+      - cost
+      - baseTokens
+      - repairTokens
+      - baseCost
+      - repairCost
+      - roles
+      - models
+      - providers
+      - complete
+      - familyTotals
+      - familyCost
+      - approximateEvents
+      - totalEvents
+      - budget
+      type: object
     ControllersWorkflowUsageResponse:
       properties:
         advisory:
@@ -11684,6 +12406,8 @@ components:
           type: array
         sessionLifecycle:
           $ref: '#/components/schemas/ControllersSessionLifecycleUsageResponse'
+        tokens:
+          $ref: '#/components/schemas/ControllersWorkflowUsageLedgerResponse'
       required:
       - roles
       - metrics
@@ -15513,6 +16237,8 @@ components:
           type: integer
         tasksTotal:
           type: integer
+        usage:
+          $ref: '#/components/schemas/ControllersCompactRunUsageResponse'
         waitReason:
           type: string
         workflowId:

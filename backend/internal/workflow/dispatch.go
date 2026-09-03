@@ -144,6 +144,13 @@ func (c *Coordinator) dispatchWorkStep(ctx stdctx.Context, run domain.WorkflowRu
 		// foundation). Nothing to dispatch.
 		return step, nil
 	}
+	// P3-E: a SAFE BOUNDARY. Nothing has been launched yet, so refusing here
+	// costs a dispatch that never started rather than orphaning one that had.
+	// A run over its frozen token/cost ceiling stops starting new work and
+	// parks for a human; whatever is already running is left to finish.
+	if c.usageBudgetBlocks(ctx, run, "a worker dispatch") {
+		return step, nil
+	}
 
 	// P2-C §14/§15: stamp what this task is entitled to read before anything
 	// downstream assembles its context. It is done once, here, so every path
@@ -964,6 +971,20 @@ func (c *Coordinator) confirmWorkerDispatch(
 		return step, err
 	}
 	step.SessionID = &sessID
+
+	// P3-E: from the launch instant, tokens spent in this session are the
+	// WORKER's. Opened here rather than at intent time because this is the
+	// first point at which the session actually exists; opened before the step
+	// goes RUNNING so no token can be spent outside a window.
+	openedAt := now
+	if launchedAt != nil {
+		openedAt = *launchedAt
+	}
+	c.openUsageWindow(ctx, usageWindowSpec{
+		SessionID: sessID, Role: domain.WorkflowRoleWorker, Run: run, StepID: step.ID,
+		AttemptID: intent.attempt.ID, AttemptOrdinal: intent.attempt.AttemptNumber,
+		Harness: string(rec.Harness), Model: intent.attempt.Model, OpenedAt: openedAt,
+	})
 
 	// Checkpoint 8P-E.11: point any branch lock this run holds at the session
 	// that now occupies it, so "currently used by" can name the live session

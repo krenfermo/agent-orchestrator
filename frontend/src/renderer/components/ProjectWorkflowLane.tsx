@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { ProjectUsageSummary } from "./project-usage-summary";
 import { useNavigate } from "@tanstack/react-router";
 import { AlertTriangle, Archive, Hourglass, Wrench } from "lucide-react";
 import {
@@ -81,6 +82,10 @@ export function ProjectWorkflowLane({ projectId }: { projectId: string }) {
 				</h2>
 				<BoardViewTabs archivedCount={archived.length} counts={counts} onSelect={setView} view={view} />
 			</div>
+			{/* P3-E §13: the project's own spend, over a period the user picks.
+			    One line: the run page carries the detail, and a board header is
+			    not the place for a billing console. */}
+			<ProjectUsageSummary projectId={projectId} />
 			{view === "archived" && archivedLoading ? (
 				<p className="text-xs text-muted-foreground">{t("board.archivedLoading")}</p>
 			) : shown.length === 0 ? (
@@ -243,6 +248,13 @@ export function WorkflowBoardCard({
 			{presentation ? <WorkflowStatusSummary presentation={presentation} /> : null}
 
 			{workflow.tasksTotal > 0 ? <TaskHeadline workflow={workflow} /> : null}
+
+			{/* P3-E §12: a card is not a financial dashboard. One compact line,
+			    only when the daemon actually recorded usage — absent means "no
+			    usage data recorded", which renders as nothing rather than as a
+			    zero. Cost is omitted entirely when no rate covers the models in
+			    play, because "$0.00" would claim the run was free. */}
+			<WorkflowUsageLine workflow={workflow} />
 
 			{/* Stages, never a percentage. The progression REPLACES the raw step
 			    checklist when the daemon sends one: they answer the same question,
@@ -488,6 +500,35 @@ function CancelAndArchiveAction({
 function objectiveTitle(objective: string): string {
 	const first = objective.split("\n", 1)[0]?.trim();
 	return first && first.length > 0 ? first : objective.trim();
+}
+
+/**
+ * WorkflowUsageLine is the Board's whole cost surface: a token total, and a
+ * cost only when one is genuinely known.
+ *
+ * It reads the figures the daemon already folded for the entire board in one
+ * query — the card computes nothing and issues no request of its own, so a
+ * board of fifty runs stays one round trip.
+ */
+function WorkflowUsageLine({ workflow }: { workflow: BoardWorkflow }) {
+	const { t } = useTranslation();
+	const usage = workflow.usage;
+	if (!usage || !usage.recorded) return null;
+	const tokens = usage.source === "provider_reported"
+		? compactTokens(usage.totalTokens)
+		: `~${compactTokens(usage.totalTokens)}`;
+	return (
+		<p className="text-xs text-muted-foreground" data-testid="workflow-usage-line">
+			{t("board.usageTokens", { tokens })}
+			{usage.cost.known ? ` · ${usage.cost.currency || "USD"} ${usage.cost.amount.toFixed(2)}` : ""}
+		</p>
+	);
+}
+
+function compactTokens(n: number): string {
+	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+	if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+	return String(n);
 }
 
 function TaskHeadline({ workflow }: { workflow: BoardWorkflow }) {

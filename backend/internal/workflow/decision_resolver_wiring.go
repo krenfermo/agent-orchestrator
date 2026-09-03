@@ -87,16 +87,7 @@ func (c *Coordinator) dispatchDecisionResolver(ctx stdctx.Context, run domain.Wo
 		return "waiting_for_capacity: resolver unavailable", nil
 	}
 
-	var branch, worktreePath, fingerprint string
-	if q.WorkflowStepID != nil {
-		if cp, hasCP, cerr := c.store.GetLatestWorkflowCheckpointByStep(ctx, string(*q.WorkflowStepID)); cerr == nil && hasCP {
-			branch, worktreePath = cp.Branch, cp.WorktreePath
-			fingerprint = cp.FingerprintAfter
-			if fingerprint == "" {
-				fingerprint = cp.FingerprintBefore
-			}
-		}
-	}
+	branch, worktreePath, fingerprint := c.resolverWorkspaceForQuestion(ctx, q)
 	if worktreePath == "" {
 		// P3-C: the checkpoint has no worktree path. For a DIRECT-BRANCH
 		// placement it never will -- such a run has no worktree, it works in the
@@ -190,6 +181,18 @@ func (c *Coordinator) dispatchDecisionResolver(ctx stdctx.Context, run domain.Wo
 	if _, err := c.questionsStore.SetResolutionResolverSessionID(ctx, resolutionID, string(resolverSessionID)); err != nil {
 		return "", err
 	}
+
+	// P3-E: the resolver's attribution window, keyed on the RESOLUTION -- the
+	// same durable authority the pane's environment carries as its usage
+	// subject, so the resolver's own tokens land under decision_resolver and
+	// never under the worker that asked. Opened before Preflight/Launch so it
+	// precedes any token the resolver could spend.
+	c.openUsageWindow(ctx, usageWindowSpec{
+		Subject: domain.RuntimePaneSubject(resolutionID),
+		Role:    domain.WorkflowRoleDecisionResolver,
+		Run:     run, AttemptID: resolutionID, Harness: string(selection.Harness),
+		OpenedAt: now,
+	})
 
 	if err := c.decisionResolverLauncher.Preflight(ctx, selection.Harness, worktreePath); err != nil {
 		return c.recordResolutionFailure(ctx, resolutionID, fmt.Errorf("resolver preflight: %w", err), now)
@@ -339,4 +342,70 @@ func derefSessionID(id *domain.SessionID) domain.SessionID {
 		return ""
 	}
 	return *id
+}
+
+// resolverWorkspaceForQuestion finds the checkout the resolver should read.
+//
+// IT LOOKS FOR THE LATEST CHECKPOINT THAT ACTUALLY CARRIES A WORKSPACE, not
+// simply the latest checkpoint. That distinction is the whole of this function,
+// and it was a real defect: a step's append-only ledger ends with whatever phase
+// was written last, and several of those phases legitimately record no workspace
+// — `worker_blocked` is one, and it is exactly the phase a step is in when a
+// worker pauses on a question. So the resolver asked for "the latest
+// checkpoint", got a row with an empty worktree path, and parked on
+// "waiting_for_capacity: no worktree recorded yet" for a workspace AO had
+// already written down twice on the same step.
+//
+// The consequence was that an auto_resolvable question on a WORKTREE-placed run
+// could never be resolved: the wake fired, dispatch re-read the same blank row,
+// and the question sat in `resolving` forever. Direct-branch runs were unharmed,
+// because placementWorkspacePath answers for them — which is why this went
+// unnoticed.
+//
+// It changes no question semantics and invents nothing: it reads the same
+// durable checkpoints, and returns empty when none of them recorded a workspace,
+// leaving the existing placement fallback and capacity-wait behaviour exactly as
+// they were.
+func (c *Coordinator) resolverWorkspaceForQuestion(ctx stdctx.Context, q domain.WorkflowQuestion) (branch, worktreePath, fingerprint string) {
+	if q.WorkflowStepID == nil {
+		return "", "", ""
+	}
+	stepID := string(*q.WorkflowStepID)
+
+	// The fingerprint still comes from the LATEST checkpoint when it has one:
+	// it describes the tree as it stands now, which is what the resolver should
+	// reason about, and it is independent of which row recorded the path.
+	if cp, hasCP, cerr := c.store.GetLatestWorkflowCheckpointByStep(ctx, stepID); cerr == nil && hasCP {
+		fingerprint = cp.FingerprintAfter
+		if fingerprint == "" {
+			fingerprint = cp.FingerprintBefore
+		}
+		if cp.WorktreePath != "" {
+			return cp.Branch, cp.WorktreePath, fingerprint
+		}
+	}
+
+	checkpoints, err := c.store.ListWorkflowCheckpoints(ctx, string(q.WorkflowRunID))
+	if err != nil {
+		return "", "", fingerprint
+	}
+	// Newest first: the most recent recorded workspace for THIS step wins, so a
+	// step that moved workspace mid-flight resolves against where it is now.
+	for i := len(checkpoints) - 1; i >= 0; i-- {
+		cp := checkpoints[i]
+		if cp.WorkflowStepID == nil || *cp.WorkflowStepID != stepID {
+			continue
+		}
+		if cp.WorktreePath == "" {
+			continue
+		}
+		if fingerprint == "" {
+			fingerprint = cp.FingerprintAfter
+			if fingerprint == "" {
+				fingerprint = cp.FingerprintBefore
+			}
+		}
+		return cp.Branch, cp.WorktreePath, fingerprint
+	}
+	return "", "", fingerprint
 }

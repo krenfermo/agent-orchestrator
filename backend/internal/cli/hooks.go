@@ -71,6 +71,22 @@ type setReviewActivityAPIRequest struct {
 	LaunchID       string `json:"launchId,omitempty"`
 }
 
+// subjectUsageHookAPIRequest mirrors POST /api/v1/usage/subject-hook: a
+// usage-ONLY report from a runtime pane, addressed by its usage subject.
+//
+// It carries no activity state and no session id on purpose. A reviewer or a
+// decision-resolver pane must be able to say what it spent without being able to
+// touch the lifecycle of any session.
+type subjectUsageHookAPIRequest struct {
+	Subject         string `json:"subject"`
+	Agent           string `json:"agent,omitempty"`
+	Harness         string `json:"harness,omitempty"`
+	Event           string `json:"event,omitempty"`
+	NativeSessionID string `json:"nativeSessionId,omitempty"`
+	TranscriptPath  string `json:"transcriptPath,omitempty"`
+	ModelID         string `json:"modelId,omitempty"`
+}
+
 // maxActivityMetaLen caps the correlation fields lifted from a native hook
 // payload before they go on the wire — they are ids/names, anything longer is
 // garbage and gets dropped rather than truncated (a truncated id would never
@@ -254,6 +270,52 @@ func newHooksCommand(ctx *commandContext) *cobra.Command {
 	}
 }
 
+// usageSubjectEnv carries the usage subject a runtime pane's tokens belong to.
+//
+// It is set by the reviewer and decision-resolver launchers, and it is how a
+// pane that is NOT an AO session reports its own provider conversation. Without
+// it those roles spend real tokens AO can never see; with it, the pane's own
+// harness hook supplies the native conversation id, so nothing has to be
+// inferred from "whichever transcript looks recent".
+const usageSubjectEnv = "AO_USAGE_SUBJECT"
+
+// reportSubjectUsage forwards a pane's usage metadata against its own subject.
+//
+// Deliberately usage-ONLY: it reports no activity state and no agent session id,
+// so it cannot disturb the activity or identity of any session. Best-effort like
+// every other hook path — a usage report must never break the agent.
+func (c *commandContext) reportSubjectUsage(ctx context.Context, agent, event string, payload []byte) {
+	subject := strings.TrimSpace(os.Getenv(usageSubjectEnv))
+	if subject == "" {
+		return
+	}
+	usage := hookUsageMetadata(agent, payload)
+	nativeSessionID := ""
+	if activitydispatch.SupportsHarness(domain.AgentHarness(agent)) {
+		nativeSessionID = hookAgentSessionID(payload)
+	}
+	if usage == nil && nativeSessionID == "" {
+		return
+	}
+	req := subjectUsageHookAPIRequest{
+		Subject:         subject,
+		Agent:           agent,
+		Event:           event,
+		NativeSessionID: nativeSessionID,
+	}
+	if usage != nil {
+		req.Harness = usage.Harness
+		req.TranscriptPath = usage.TranscriptPath
+		req.ModelID = usage.ModelID
+	}
+	if req.Harness == "" {
+		req.Harness = agent
+	}
+	if err := c.postJSON(ctx, "usage/subject-hook", req, nil); err != nil {
+		c.reportHookFailure(agent, event, subject, err)
+	}
+}
+
 func (c *commandContext) runHook(ctx context.Context, agent, event string) error {
 	reviewSessionID := strings.TrimSpace(os.Getenv("AO_REVIEW_SESSION_ID"))
 	if reviewSessionID != "" {
@@ -265,8 +327,19 @@ func (c *commandContext) runHook(ctx context.Context, agent, event string) error
 	sessionID := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
 	if !sessionIDPattern.MatchString(sessionID) {
 		// Not an AO-managed session (unset/empty), or an id we won't put in a
-		// request path. Return before reading stdin so a manual invocation
-		// without a piped payload can't block on EOF.
+		// request path. A decision-resolver pane lands here: it deliberately
+		// carries no session id, because it is not one — but it does carry a
+		// usage subject, and its tokens are as real as a worker's, so its usage
+		// is reported before returning.
+		if strings.TrimSpace(os.Getenv(usageSubjectEnv)) != "" {
+			payload, rerr := io.ReadAll(c.deps.In)
+			if rerr != nil {
+				c.reportHookFailure(agent, event, "", fmt.Errorf("read stdin: %w", rerr))
+			}
+			c.reportSubjectUsage(ctx, agent, event, payload)
+		}
+		// Return before reading stdin so a manual invocation without a piped
+		// payload can't block on EOF.
 		return nil
 	}
 	payload, err := io.ReadAll(c.deps.In)
@@ -326,6 +399,10 @@ func (c *commandContext) runReviewHook(ctx context.Context, agent, event, review
 	if err != nil {
 		c.reportHookFailure(agent, event, reviewSessionID, fmt.Errorf("read stdin: %w", err))
 	}
+	// P3-E: a reviewer pane's own token spend, reported against its own subject
+	// BEFORE the activity report below and independently of it. A reviewer that
+	// carries no activity signal still spent tokens.
+	c.reportSubjectUsage(ctx, agent, event, payload)
 	state, hasActivity := activitydispatch.Derive(agent, event, payload)
 	agentSessionID := ""
 	if activitydispatch.SupportsHarness(domain.AgentHarness(agent)) {

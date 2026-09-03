@@ -81,7 +81,7 @@ func timePtr(t time.Time) *time.Time { return &t }
 func TestBuildWorkflowUsageView_RoleAttribution(t *testing.T) {
 	now := time.Now().UTC()
 	detail := detailWithRoles(now)
-	view := controllers.BuildWorkflowUsageView(context.Background(), detail, &fakeSessionUsageLookup{})
+	view := controllers.BuildWorkflowUsageView(context.Background(), detail, &fakeSessionUsageLookup{}, nil)
 
 	byRole := map[domain.WorkflowRole]controllers.RoleUsageView{}
 	for _, r := range view.Roles {
@@ -110,7 +110,7 @@ func TestBuildWorkflowUsageView_RoleAttribution(t *testing.T) {
 func TestBuildWorkflowUsageView_UnknownStaysUnknown(t *testing.T) {
 	now := time.Now().UTC()
 	detail := detailWithRoles(now)
-	view := controllers.BuildWorkflowUsageView(context.Background(), detail, &fakeSessionUsageLookup{})
+	view := controllers.BuildWorkflowUsageView(context.Background(), detail, &fakeSessionUsageLookup{}, nil)
 
 	for _, r := range view.Roles {
 		if r.UsageKnown {
@@ -128,21 +128,65 @@ func TestBuildWorkflowUsageView_UnknownStaysUnknown(t *testing.T) {
 	}
 }
 
-// TestBuildWorkflowUsageView_KnownUsageAggregates covers test item #9: when
-// session usage telemetry IS available, the task-level totals sum the real
-// per-role values (still Certainty=actual).
+// TestBuildWorkflowUsageView_KnownUsageAggregates covers test item #9, as
+// P3-E redefined it: the task-level token totals come from the LEDGER, not
+// from summing the per-role session views.
+//
+// The lookup below seeds one session that several roles share, which is the
+// ordinary shape of a run with repair (a fix prompt is delivered into the
+// worker's own session). Summing per-role would report that session's tokens
+// once per role; the ledger reports them once, full stop.
 func TestBuildWorkflowUsageView_KnownUsageAggregates(t *testing.T) {
 	now := time.Now().UTC()
 	detail := detailWithRoles(now)
 	lookup := &fakeSessionUsageLookup{byID: map[domain.SessionID]domain.SessionUsageSummary{
 		"sess-worker": {SessionID: "sess-worker", Totals: domain.UsageMetricTotals{InputTokens: tokenPtr(1000), OutputTokens: tokenPtr(200), CacheReadTokens: tokenPtr(50)}},
 	}}
-	view := controllers.BuildWorkflowUsageView(context.Background(), detail, lookup)
+	ledger := &domain.WorkflowUsageLedger{
+		Recorded: true,
+		Totals: domain.UsageTokenTotals{
+			InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 50, EventCount: 3,
+		},
+	}
+	view := controllers.BuildWorkflowUsageView(context.Background(), detail, lookup, ledger)
 	if view.Metrics.TokensCertainty != domain.MetricActual {
 		t.Fatalf("TokensCertainty = %q, want actual", view.Metrics.TokensCertainty)
 	}
 	if view.Metrics.InputTokens == nil || *view.Metrics.InputTokens != 1000 {
 		t.Fatalf("InputTokens = %v, want 1000", view.Metrics.InputTokens)
+	}
+	if view.Metrics.OutputTokens == nil || *view.Metrics.OutputTokens != 200 {
+		t.Fatalf("OutputTokens = %v, want 200", view.Metrics.OutputTokens)
+	}
+	if view.Metrics.CachedTokens == nil || *view.Metrics.CachedTokens != 50 {
+		t.Fatalf("CachedTokens = %v, want 50", view.Metrics.CachedTokens)
+	}
+}
+
+// TestBuildWorkflowUsageView_SharedSessionIsNotCountedTwice is the regression
+// this checkpoint exists to prevent from coming back.
+//
+// Three roles point at ONE session holding 1000 input tokens. The pre-P3-E
+// code asked the per-session reader once per role and added the answers, so
+// this run reported 3000. The ledger is the only source of a total now, so the
+// answer is 1000 regardless of how many roles shared the session.
+func TestBuildWorkflowUsageView_SharedSessionIsNotCountedTwice(t *testing.T) {
+	now := time.Now().UTC()
+	detail := detailWithRoles(now)
+	shared := domain.SessionUsageSummary{
+		SessionID: "sess-worker",
+		Totals:    domain.UsageMetricTotals{InputTokens: tokenPtr(1000), OutputTokens: tokenPtr(200)},
+	}
+	lookup := &fakeSessionUsageLookup{byID: map[domain.SessionID]domain.SessionUsageSummary{
+		"sess-plan": shared, "sess-worker": shared, "sess-review": shared,
+	}}
+	ledger := &domain.WorkflowUsageLedger{
+		Recorded: true,
+		Totals:   domain.UsageTokenTotals{InputTokens: 1000, OutputTokens: 200, EventCount: 4},
+	}
+	view := controllers.BuildWorkflowUsageView(context.Background(), detail, lookup, ledger)
+	if view.Metrics.InputTokens == nil || *view.Metrics.InputTokens != 1000 {
+		t.Fatalf("InputTokens = %v, want 1000 — a session shared by three roles must be counted once", view.Metrics.InputTokens)
 	}
 	if view.Metrics.OutputTokens == nil || *view.Metrics.OutputTokens != 200 {
 		t.Fatalf("OutputTokens = %v, want 200", view.Metrics.OutputTokens)
@@ -171,7 +215,7 @@ func TestBuildWorkflowUsageView_FixCyclesAndReviewsSkipped(t *testing.T) {
 			},
 		},
 	}
-	view := controllers.BuildWorkflowUsageView(context.Background(), detail, &fakeSessionUsageLookup{})
+	view := controllers.BuildWorkflowUsageView(context.Background(), detail, &fakeSessionUsageLookup{}, nil)
 	if view.Metrics.FixCycles != 2 {
 		t.Fatalf("FixCycles = %d, want 2", view.Metrics.FixCycles)
 	}
@@ -201,7 +245,7 @@ func TestBuildWorkflowUsageView_ReviewRunsCountsDispatchedReviewsWithoutAttempts
 			},
 		},
 	}
-	view := controllers.BuildWorkflowUsageView(context.Background(), detail, &fakeSessionUsageLookup{})
+	view := controllers.BuildWorkflowUsageView(context.Background(), detail, &fakeSessionUsageLookup{}, nil)
 	if view.Metrics.ReviewRuns != 1 {
 		t.Fatalf("ReviewRuns = %d, want 1 for a dispatched-and-completed review with no attempts recorded", view.Metrics.ReviewRuns)
 	}
@@ -291,7 +335,7 @@ func TestBuildTaskCheckpointSummary_FactsNotTranscript(t *testing.T) {
 func TestBuildWorkflowUsageView_LookupErrorStaysUnknown(t *testing.T) {
 	now := time.Now().UTC()
 	detail := detailWithRoles(now)
-	view := controllers.BuildWorkflowUsageView(context.Background(), detail, &fakeSessionUsageLookup{err: errors.New("db unavailable")})
+	view := controllers.BuildWorkflowUsageView(context.Background(), detail, &fakeSessionUsageLookup{err: errors.New("db unavailable")}, nil)
 	for _, r := range view.Roles {
 		if r.UsageKnown {
 			t.Fatalf("role %s reported known usage despite a lookup error", r.Role)

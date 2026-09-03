@@ -297,8 +297,32 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 	// shutdown, cancellation of this run, and the adapter's own bounded
 	// timeout -- it does; see plannerExecutionContext.
 	plannerCtx, releasePlannerCtx := c.plannerExecutionContext(ctx, run.ID)
+	plannerInvocation := plannerUsageSubject(run.ID, c.plannerRetryCount(ctx, runID)+1)
+	// P3-E: the planner's attribution window and its usage subject.
+	//
+	// The planner is NOT in-process: it shells out to `claude --print`, which
+	// spends real Anthropic tokens. It runs under --no-session-persistence, so
+	// there is no transcript to discover -- its usage comes back inside the
+	// print-mode envelope the adapter already parses, and is recorded against
+	// this same subject below. The window is opened first so it precedes any
+	// token the call could spend.
+	c.openUsageWindow(ctx, usageWindowSpec{
+		Subject: plannerInvocation, Role: domain.WorkflowRolePlanner, Run: run,
+		Provider: provider, Model: model, OpenedAt: c.clock(),
+	})
 	response, err := c.planner.Generate(plannerCtx, PlannerRequest{Objective: run.Objective, Project: project, Context: contextValue, MaxSteps: MaxPlanSteps, RuntimeEnv: runtimeEnv})
 	releasePlannerCtx()
+	// P3-E: what this invocation actually spent, recorded on BOTH outcomes. A
+	// planner call that timed out after the provider generated most of a plan
+	// is billed exactly like one that succeeded, so metering only the success
+	// path would under-report every objective that needed a second attempt.
+	if err != nil {
+		if failed, ok := PlannerEvidenceFrom(err); ok {
+			c.recordPlannerUsage(ctx, plannerInvocation, provider, model, failed)
+		}
+	} else {
+		c.recordPlannerUsage(ctx, plannerInvocation, response.Provider, response.Model, response.Evidence)
+	}
 	// P1-C: the planner slot goes back the instant the planner returns,
 	// whatever it returned. A planner that failed still finished, and its
 	// retry is a new launch intent with its own claim.
@@ -334,6 +358,13 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 			return c.retryPlanOrFail(ctx, run, "planner_timeout", err)
 		case errors.Is(err, ports.ErrPlannerOutputMalformed):
 			return c.retryPlanOrFail(ctx, run, "planner_parse_failed", err)
+		case errors.Is(err, ports.ErrPlannerResultInconsistent):
+			// F2: the adapter got something readable back and proved it is not
+			// the answer the provider produced. Retryable for the same reason a
+			// timeout is, and under its OWN class so the stop a person
+			// eventually reads says the result was lost rather than that the
+			// objective was ambiguous.
+			return c.retryPlanOrFail(ctx, run, ReasonPlannerResultInconsistent, err)
 		}
 		return c.failPlan(ctx, run, ReasonPlannerStartFailed, err)
 	}
@@ -398,6 +429,23 @@ func (c *Coordinator) finalizeGeneratedPlan(ctx stdctx.Context, run domain.Workf
 		}
 		c.stopPlanningStep(ctx, run.ID)
 		return c.GetRun(ctx, run.ID)
+	}
+	// F2: structurally valid is not the same as "this is the plan the provider
+	// produced". The placeholder that caused F2 passed every check above --
+	// known dependencies, no cycle, a safe `npm test` -- and was then
+	// auto-approved and dispatched against a task titled "t". The semantic
+	// floor runs HERE, after validity and before approval, so it gates the
+	// automatic and the manual approval paths identically: neither can bless a
+	// plan whose content is a placeholder, and Approval=Automatic never
+	// weakens what "valid" has to mean.
+	//
+	// This is reached on the restart path too (a run re-entering
+	// finalizeGeneratedPlan with command_status=responded), so the same
+	// provider result converges to the same verdict rather than being accepted
+	// because a daemon happened to restart at the right moment.
+	if reason := PlanResultPlausibility(generated, run.Objective); reason != "" {
+		return c.retryPlanOrFail(ctx, run, ReasonPlannerResultInconsistent,
+			fmt.Errorf("%w: %s", ports.ErrPlannerResultInconsistent, reason))
 	}
 	// CP9(b): the task identity a replay computes must be the identity the
 	// first pass persisted, or the FK-bound relationship insert below names
@@ -1387,6 +1435,16 @@ func blockedByUnsuccessfulTask(tasks []domain.WorkflowTask) bool {
 }
 
 func (c *Coordinator) dispatchMasterTask(ctx stdctx.Context, parent domain.WorkflowRun, task domain.WorkflowTask) error {
+	// P3-E §16: the parent owns the family's budget. Checked HERE, before a
+	// child run is created or resumed, because this is the boundary at which a
+	// parent decides to spend more -- and because a per-child check could never
+	// see the sum that matters (ten children at 100k each under a 200k parent).
+	// The measured scope is the parent plus every child it has already
+	// launched, in one query, so a child that finished a moment ago cannot be
+	// missing from the total.
+	if c.usageBudgetBlocks(ctx, parent, "a new task") {
+		return nil
+	}
 	if id, ok, err := c.planStore.FindWorkflowRunByPlannedTask(ctx, task.ID); err != nil {
 		return err
 	} else if ok {

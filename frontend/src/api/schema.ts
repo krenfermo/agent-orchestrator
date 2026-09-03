@@ -878,6 +878,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{projectId}/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P3-E: a project's token/cost rollup for one period (today, 7d, 30d, all). Buckets by the instant AO DISPATCHED the work — a fact AO recorded itself — which `periodBasis` states explicitly so nobody reads these windows as a provider's billing period. `averageTokensPerWorkflow` is null, not 0, when no workflow spent anything in the range. */
+        get: operations["getProjectUsage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{projectId}/workflows": {
         parameters: {
             query?: never;
@@ -2287,6 +2304,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/usage/subject-hook": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P3-E: a runtime pane reports its OWN provider token spend. Used by reviewer and decision-resolver panes, which are not AO sessions and therefore cannot report through the session activity route. Deliberately usage-only: it carries no activity state and no session id, so a pane can say what it spent without being able to touch any session's lifecycle. A session subject is refused -- sessions report through /sessions/{id}/activity, which validates a launch id this route has no business touching. */
+        post: operations["recordSubjectUsageHook"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workflows": {
         parameters: {
             query?: never;
@@ -2865,6 +2899,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workflows/{workflowId}/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P3-E: the canonical token/cost ledger for one run — totals, the per-role and per-model breakdown, base execution vs repair, an autonomous parent's children, the roles whose spend AO cannot observe, and the frozen budget the run is measured against. Every figure carries its own provenance: `source` says whether tokens were reported by a provider or estimated by AO, and `cost.basis` says whether money was calculated (from the named rate card) or is simply unknown. `recorded: false` means no usage rows exist for the run and must be rendered as "no usage data recorded", never as zero. This is the ONLY total a client may present; the per-role `usage` block on the run detail is per-SESSION and several roles can share one session. */
+        get: operations["getWorkflowUsage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -3111,6 +3162,77 @@ export interface components {
             resetAt: null | string;
             /** @enum {string} */
             state: "available" | "limited" | "cooldown" | "unavailable" | "unknown";
+        };
+        ControllersCompactRunUsageResponse: {
+            cost: components["schemas"]["ControllersUsageCostResponse"];
+            recorded: boolean;
+            source: string;
+            /** Format: int64 */
+            totalTokens: number;
+        };
+        ControllersContextMemoryResponse: {
+            /** Format: int64 */
+            cacheHits: number;
+            /** Format: int64 */
+            cacheMisses: number;
+            /** Format: int64 */
+            candidates: number;
+            /** Format: int64 */
+            canonicalItems: number;
+            /** Format: int64 */
+            estimatedPackTokens: number;
+            fallbackReasons?: string[];
+            /** Format: int64 */
+            fullSyncs: number;
+            /** Format: int64 */
+            generation: number;
+            /** Format: int64 */
+            incrementalSyncs: number;
+            indexedCommit?: string;
+            /** @enum {string} */
+            mode?: "off" | "assisted" | "preferred";
+            /** Format: int64 */
+            noOpSyncs: number;
+            /** Format: int64 */
+            packBytes: number;
+            /** Format: int64 */
+            packItems: number;
+            provider: string;
+            /** Format: int64 */
+            rejectedByBudget: number;
+            /** Format: int64 */
+            sharedCandidates: number;
+            /** Format: int64 */
+            sharedExcluded: number;
+            /** Format: int64 */
+            sharedSelected: number;
+            /** Format: int64 */
+            staleExcluded: number;
+            /** Format: int64 */
+            syncFilesRead: number;
+            /** Format: int64 */
+            syncs: number;
+            /** Format: int64 */
+            taskLocalItems: number;
+            /** Format: int64 */
+            workflowLocalItems: number;
+        };
+        ControllersContextRoleResponse: {
+            /** Format: int64 */
+            assembledBytes: number;
+            /** Format: int64 */
+            dispatches: number;
+            /** Format: int64 */
+            estimatedAssembledTokens: number;
+            role: string;
+        };
+        ControllersContextSourceResponse: {
+            /** Format: int64 */
+            bytes: number;
+            /** Format: int64 */
+            estimatedTokens: number;
+            /** @enum {string} */
+            source: "task_spec" | "project_memory" | "shared_knowledge" | "repo_content" | "index_reuse" | "other";
         };
         ControllersCreateProviderProfileRequest: {
             defaultModel?: string;
@@ -3395,6 +3517,16 @@ export interface components {
             status: "authenticated" | "trusted-local" | "no_user";
             user?: components["schemas"]["ControllersUserView"];
         };
+        ControllersModelUsageLineResponse: {
+            /** Format: int64 */
+            approximateEvents: number;
+            cost: components["schemas"]["ControllersUsageCostResponse"];
+            harness?: string;
+            model: string;
+            provider?: string;
+            source: string;
+            tokens: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+        };
         ControllersProjectMemoryItemResponse: {
             /** @enum {string} */
             authority: "authoritative" | "unprovable" | "legacy_unprovable";
@@ -3585,6 +3717,25 @@ export interface components {
             to: string;
             type: string;
         };
+        ControllersProjectUsageResponse: {
+            averageTokensPerWorkflow: null | number;
+            budget: components["schemas"]["ControllersUsageBudgetResponse"];
+            cost: components["schemas"]["ControllersUsageCostResponse"];
+            from?: string;
+            models: components["schemas"]["ControllersModelUsageLineResponse"][];
+            period: string;
+            periodBasis: string;
+            projectId: string;
+            providers: components["schemas"]["ControllersProviderUsageLineResponse"][];
+            recorded: boolean;
+            roles: components["schemas"]["ControllersRoleUsageLineResponse"][];
+            runs?: components["schemas"]["ControllersRunUsageLineResponse"][];
+            source: string;
+            to: string;
+            totals: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+            /** Format: int64 */
+            workflows: number;
+        };
         ControllersProviderAttemptView: {
             authoritative: boolean;
             capacityClaimId?: string;
@@ -3639,6 +3790,12 @@ export interface components {
         };
         ControllersProviderRegistryResponse: {
             providers: components["schemas"]["ControllersProviderDescriptorView"][];
+        };
+        ControllersProviderUsageLineResponse: {
+            cost: components["schemas"]["ControllersUsageCostResponse"];
+            provider: string;
+            source: string;
+            tokens: components["schemas"]["ControllersUsageTokenTotalsResponse"];
         };
         ControllersPruneProjectMemoryRequest: {
             /** @description Purge the worktree-minted memories. Defaults to false, so the repair can be inspected before it changes anything. */
@@ -3712,6 +3869,25 @@ export interface components {
         ControllersResolveDecisionResponse: {
             resolution: components["schemas"]["ControllersWorkflowQuestionResolutionResponse"];
         };
+        ControllersRoleUsageLineResponse: {
+            attemptId?: string;
+            /** Format: int64 */
+            attemptOrdinal: number;
+            cost: components["schemas"]["ControllersUsageCostResponse"];
+            /** Format: int64 */
+            cycle: number;
+            harness?: string;
+            model?: string;
+            observable: boolean;
+            openedAt?: string;
+            provider?: string;
+            repair: boolean;
+            role: string;
+            source: string;
+            taskId?: string;
+            tokens: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+            unobservableReason?: string;
+        };
         ControllersRoleUsageResponse: {
             completedAt?: null | string;
             durationMs?: null | number;
@@ -3761,6 +3937,12 @@ export interface components {
             selectedHarness?: string;
             stepKind: string;
             waiting: boolean;
+        };
+        ControllersRunUsageLineResponse: {
+            cost: components["schemas"]["ControllersUsageCostResponse"];
+            source: string;
+            tokens: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+            workflowRunId: string;
         };
         ControllersSecurePairingStatus: {
             active: boolean;
@@ -3850,6 +4032,25 @@ export interface components {
             handleId: string;
             instructions: string;
         };
+        ControllersSubjectUsageHookRequest: {
+            /** @description The harness that invoked the hook. */
+            agent?: string;
+            /** @description The native hook event name. */
+            event?: string;
+            /** @description The provider harness whose transcript this is. */
+            harness?: string;
+            /** @description The model the pane reported. */
+            modelId?: string;
+            /** @description The harness's own conversation id, as the pane's hook reported it. */
+            nativeSessionId?: string;
+            /** @description The usage subject this pane's tokens belong to, as "<kind>:<id>". */
+            subject: string;
+            /** @description The provider transcript path, when the hook carries one. */
+            transcriptPath?: string;
+        };
+        ControllersSubjectUsageHookResponse: {
+            ok: boolean;
+        };
         ControllersTaskCheckpointSummaryResponse: {
             acceptanceCriteria?: string[];
             activeErrors?: string[];
@@ -3906,6 +4107,53 @@ export interface components {
             defaultModel?: string;
             displayName: string;
             enabled: boolean;
+        };
+        ControllersUsageBudgetResponse: {
+            /** Format: double */
+            costBudget?: number;
+            costPercent: null | number;
+            parentScoped: boolean;
+            /** Format: double */
+            projectDailyCostBudget?: number;
+            /** Format: int64 */
+            projectDailyTokenBudget?: number;
+            reason?: string;
+            scope: string;
+            state: string;
+            /** Format: int64 */
+            tokenBudget?: number;
+            tokenPercent: null | number;
+            /** Format: int64 */
+            tokensUsed: number;
+            warnPercent: number;
+        };
+        ControllersUsageCostResponse: {
+            /** Format: double */
+            amount: number;
+            basis: string;
+            currency?: string;
+            effectiveDate?: string;
+            known: boolean;
+            pricingSource?: string;
+            pricingVersion?: string;
+            unpricedModels?: string[];
+        };
+        ControllersUsageTokenTotalsResponse: {
+            /** Format: int64 */
+            cacheRead: number;
+            /** Format: int64 */
+            cacheWrite: number;
+            /** Format: int64 */
+            events: number;
+            /** Format: int64 */
+            input: number;
+            /** Format: int64 */
+            output: number;
+            reasoning: null | number;
+            /** Format: int64 */
+            total: number;
+            /** Format: int64 */
+            uncachedInput: number;
         };
         ControllersUserView: {
             displayName: string;
@@ -4010,6 +4258,31 @@ export interface components {
             originRunId: string;
             repoPath?: string;
             returnable: boolean;
+        };
+        ControllersWorkflowContextResponse: {
+            /** Format: int64 */
+            assembledBytes: number;
+            /** Format: int64 */
+            avoidedAssembledBytes: number;
+            avoidedComparable: boolean;
+            /** @enum {string} */
+            basis: "ao_assembled";
+            byRole?: components["schemas"]["ControllersContextRoleResponse"][];
+            bySource?: components["schemas"]["ControllersContextSourceResponse"][];
+            complete: boolean;
+            /** Format: int64 */
+            dispatches: number;
+            estimateMethod: string;
+            /** Format: int64 */
+            estimatedAssembledTokens: number;
+            /** Format: int64 */
+            estimatedAvoidedTokens: number;
+            memory: components["schemas"]["ControllersContextMemoryResponse"];
+            recorded: boolean;
+            /** Format: int64 */
+            skippedRecords: number;
+            /** Format: int64 */
+            unmeasured: number;
         };
         ControllersWorkflowIntegrationStateView: {
             currentSha?: string;
@@ -4156,6 +4429,32 @@ export interface components {
             supersededReviewRunId?: string;
             taskId: string;
         };
+        ControllersWorkflowUsageLedgerResponse: {
+            /** Format: int64 */
+            approximateEvents: number;
+            baseCost: components["schemas"]["ControllersUsageCostResponse"];
+            baseTokens: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+            budget: components["schemas"]["ControllersUsageBudgetResponse"];
+            children?: components["schemas"]["ControllersRunUsageLineResponse"][];
+            complete: boolean;
+            context?: components["schemas"]["ControllersWorkflowContextResponse"];
+            cost: components["schemas"]["ControllersUsageCostResponse"];
+            familyCost: components["schemas"]["ControllersUsageCostResponse"];
+            familyTotals: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+            incompleteReason?: string;
+            models: components["schemas"]["ControllersModelUsageLineResponse"][];
+            providers: components["schemas"]["ControllersProviderUsageLineResponse"][];
+            recorded: boolean;
+            repairCost: components["schemas"]["ControllersUsageCostResponse"];
+            repairTokens: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+            roles: components["schemas"]["ControllersRoleUsageLineResponse"][];
+            source: string;
+            /** Format: int64 */
+            totalEvents: number;
+            totals: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+            unobservable?: components["schemas"]["ControllersRoleUsageLineResponse"][];
+            workflowRunId: string;
+        };
         ControllersWorkflowUsageResponse: {
             advisory: components["schemas"]["ControllersSessionRefreshAdvisoryResponse"];
             checkpoint: components["schemas"]["ControllersTaskCheckpointSummaryResponse"];
@@ -4164,6 +4463,7 @@ export interface components {
             roles: components["schemas"]["ControllersRoleUsageResponse"][];
             routing?: components["schemas"]["ControllersRoutingUsageResponse"][];
             sessionLifecycle: components["schemas"]["ControllersSessionLifecycleUsageResponse"];
+            tokens?: components["schemas"]["ControllersWorkflowUsageLedgerResponse"];
         };
         ConversationAccountPayload: {
             authMode?: string;
@@ -5608,6 +5908,7 @@ export interface components {
             tasksNeedsAttention: number;
             tasksRunning: number;
             tasksTotal: number;
+            usage?: components["schemas"]["ControllersCompactRunUsageResponse"];
             waitReason?: string;
             workflowId: string;
         };
@@ -9121,6 +9422,50 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WorkflowBoardResponse"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectUsage: {
+        parameters: {
+            query?: {
+                /** @description Rollup period. Defaults to 7d. Buckets by dispatch time, not by any provider billing period. */
+                range?: "today" | "7d" | "30d" | "all" | null;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                projectId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProjectUsageResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
                 };
             };
             /** @description Not Implemented */
@@ -14631,6 +14976,39 @@ export interface operations {
             };
         };
     };
+    recordSubjectUsageHook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersSubjectUsageHookRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersSubjectUsageHookResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     listWorkflowRuns: {
         parameters: {
             query?: {
@@ -16328,6 +16706,47 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WorkflowRunResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getWorkflowUsage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workflow run identifier. */
+                workflowId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersWorkflowUsageLedgerResponse"];
                 };
             };
             /** @description Not Found */

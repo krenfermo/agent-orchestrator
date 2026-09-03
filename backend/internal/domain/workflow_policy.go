@@ -104,6 +104,44 @@ type WorkflowPolicy struct {
 	// A snapshot decoded from before P3-C has this at its zero value; callers
 	// must use EffectiveAutonomyPolicy, never read Autonomy directly.
 	Autonomy QuestionAutonomySnapshot `json:"autonomy,omitempty"`
+	// Usage is P3-E's frozen token/cost budget: how much this run, and (for an
+	// autonomous parent) its whole family, is allowed to spend. Frozen at
+	// creation for the same reason Repair and Autonomy are -- a later Settings
+	// change must not widen what an in-flight run may spend, and a restart must
+	// not change the answer.
+	//
+	// A snapshot decoded from before P3-E has this at its zero value, which
+	// EffectiveUsageBudgetPolicy reads as "no ceiling" rather than as a ceiling
+	// of zero. A run created before anybody could set a budget never opted into
+	// being stopped by one.
+	Usage UsageBudgetPolicy `json:"usage,omitempty"`
+}
+
+// UsageBudgetPolicyVersion identifies the shape of a frozen usage budget.
+const UsageBudgetPolicyVersion = "usage-budget/v1"
+
+// EffectiveUsageBudgetPolicy returns p.Usage with the forward-compatible
+// defaults filled in. Every ceiling stays at its recorded value -- including 0,
+// which means "no limit" -- so a snapshot written by a binary that had never
+// heard of budgets can never be read as a run that is already over one.
+//
+// The one default that is not "off" is ParentScope. An autonomous parent whose
+// children each held the parent's whole budget is exactly the failure P3-E §16
+// names (ten tasks at 100k each against a 200k parent), so children share the
+// parent's ceiling unless a policy explicitly says otherwise.
+func (p WorkflowPolicy) EffectiveUsageBudgetPolicy() UsageBudgetPolicy {
+	usage := p.Usage
+	if usage.Version == "" {
+		usage.Version = UsageBudgetPolicyVersion
+	}
+	if usage.WarnPercent <= 0 || usage.WarnPercent >= 100 {
+		usage.WarnPercent = DefaultUsageWarnPercent
+	}
+	if usage.ParentScope == nil {
+		shared := true
+		usage.ParentScope = &shared
+	}
+	return usage
 }
 
 // EffectiveAutonomyPolicy returns p.Autonomy, falling back to the safe default

@@ -205,37 +205,42 @@ func (c *Coordinator) maybeKickoffAutonomousPlanning(ctx stdctx.Context, run dom
 	c.scheduleWake(ctx, run, nil, wake.ReasonAutonomousProgress, "")
 }
 
-// inheritExecutionPolicySnapshot copies parent's already-frozen execution
-// policy verbatim onto a just-created child (master-task) run's own policy
-// snapshot -- never re-derived from live policy/profiles, so every task in
-// one master objective routes under the exact same rules the objective was
-// created with (checkpoint brief §9's "no recalcules historia", applied the
-// same way Routing/Wake already are for a single run). See
-// routingInputsForRole's snapshotReferencesAny guard for what happens if the
-// child has no ownership of its own to resolve these profile IDs against.
+// inheritExecutionPolicySnapshot copies the parent's already-frozen workflow
+// policy onto a just-created child (master-task) run's own policy snapshot --
+// never re-derived from live policy/profiles, so every task in one master
+// objective executes under the exact same rules the objective was created with
+// (checkpoint brief §9's "no recalcules historia", applied the same way
+// Routing/Wake already are for a single run). See routingInputsForRole's
+// snapshotReferencesAny guard for what happens if the child has no ownership of
+// its own to resolve these profile IDs against.
+//
+// F1: this used to copy childPolicy.Execution and nothing else. Autonomy,
+// Repair and Usage are SIBLINGS of Execution in domain.WorkflowPolicy, so an
+// objective created with autonomy=auto_decide_low_risk and repair=automatic
+// produced children durably frozen at the creation defaults ask_always /
+// suggest -- and since every worker, review, fix and verify step runs on the
+// child, the parent's autonomy contract had no effect on anything that
+// actually executed. domain.InheritWorkflowPolicy now decides the whole
+// snapshot field by field, and documents why each field inherits, recomputes
+// or stays child-local.
 func (c *Coordinator) inheritExecutionPolicySnapshot(ctx stdctx.Context, childRunID string, parent domain.WorkflowRun) error {
 	parentPolicy := policyForRun(parent)
-	// CP19: the old guard returned early whenever the parent's snapshot had
-	// no routing priorities, which meant AutonomousMode was NOT inherited for
-	// exactly the parents most likely to be autonomous-but-profile-less. The
-	// whole frozen execution policy is copied now; routingInputsForRole
-	// already handles a priority-less snapshot by resolving fresh, so copying
-	// one changes no routing decision, and it stops the child from silently
-	// disagreeing with its parent about autonomy.
-	//
-	// Nothing is copied from a parent that predates provenance AND carries no
-	// priorities: that is a pure legacy default, and rewriting the child's
-	// snapshot from it would change no value while inventing a provenance
-	// record for history that has none.
-	if parentPolicy.Execution.Provenance.Source == "" && !snapshotHasPriorities(parentPolicy.Execution) {
+	// Nothing is copied from a parent that predates provenance AND carries
+	// nothing worth inheriting: that is a pure legacy default, and rewriting
+	// the child's snapshot from it would change no value while inventing a
+	// provenance record for history that has none.
+	if parentPolicy.Execution.Provenance.Source == "" &&
+		!snapshotHasPriorities(parentPolicy.Execution) &&
+		!parentPolicy.Repair.Mode.Valid() &&
+		!parentPolicy.Autonomy.Mode.Valid() &&
+		!parentPolicy.Usage.Configured() {
 		return nil
 	}
 	child, ok, err := c.store.GetWorkflowRun(ctx, childRunID)
 	if err != nil || !ok {
 		return err
 	}
-	childPolicy := policyForRun(child)
-	childPolicy.Execution = parentPolicy.Execution
+	childPolicy := domain.InheritWorkflowPolicy(parentPolicy, policyForRun(child))
 	childPolicy.Execution.Provenance = domain.ExecutionPolicyProvenance{
 		Source:              domain.ExecutionPolicyInherited,
 		OwnerID:             parentPolicy.Execution.Provenance.OwnerID,
@@ -260,14 +265,21 @@ func (c *Coordinator) inheritExecutionPolicySnapshot(ctx stdctx.Context, childRu
 // to check, so this is a no-op for every pre-existing run -- the compatibility
 // stance stampChildOwnership/requireChildOwnershipForDispatch already take.
 // When the parent IS proven, the child must carry an "inherited" record
-// naming that parent, and must agree with it on autonomy. Anything else means
-// the inheritance write did not land, and the child would otherwise run under
-// a substituted default while every durable row looked healthy.
+// naming that parent. Anything else means the inheritance write did not land,
+// and the child would otherwise run under a substituted default while every
+// durable row looked healthy.
+//
+// F1: the semantic half of the check used to compare Execution.AutonomousMode
+// and nothing else, so a child frozen at ask_always / suggest under a parent
+// that said auto_decide_low_risk / automatic passed this gate cleanly. It now
+// proves every field domain.InheritWorkflowPolicy is responsible for, via
+// domain.RequireInheritedWorkflowPolicy -- and that comparison runs even for a
+// parent whose Execution provenance is unproven, because Autonomy/Repair/Usage
+// are inheritable independently of whether the owner's routing freeze landed.
+// The comparison is on EFFECTIVE values, so a legacy parent and a legacy child
+// still agree trivially and no pre-existing run is refused.
 func (c *Coordinator) requireInheritedExecutionPolicy(ctx stdctx.Context, childRunID string, parent domain.WorkflowRun) error {
 	parentPolicy := policyForRun(parent)
-	if !parentPolicy.Execution.Provenance.Proven() {
-		return nil
-	}
 	child, ok, err := c.store.GetWorkflowRun(ctx, childRunID)
 	if err != nil {
 		return err
@@ -276,14 +288,16 @@ func (c *Coordinator) requireInheritedExecutionPolicy(ctx stdctx.Context, childR
 		return fmt.Errorf("%w: child run %s", ErrNotFound, childRunID)
 	}
 	childPolicy := policyForRun(child)
-	prov := childPolicy.Execution.Provenance
-	if prov.Source != domain.ExecutionPolicyInherited || prov.ParentRunID != parent.ID {
-		return fmt.Errorf("%w: child run %s cannot prove it inherited parent %s's frozen execution policy (source=%q parent=%q)",
-			ErrInvalid, childRunID, parent.ID, prov.Source, prov.ParentRunID)
+	if parentPolicy.Execution.Provenance.Proven() {
+		prov := childPolicy.Execution.Provenance
+		if prov.Source != domain.ExecutionPolicyInherited || prov.ParentRunID != parent.ID {
+			return fmt.Errorf("%w: child run %s cannot prove it inherited parent %s's frozen execution policy (source=%q parent=%q)",
+				ErrInvalid, childRunID, parent.ID, prov.Source, prov.ParentRunID)
+		}
 	}
-	if childPolicy.Execution.AutonomousMode != parentPolicy.Execution.AutonomousMode {
-		return fmt.Errorf("%w: child run %s autonomy (%t) disagrees with parent %s (%t)",
-			ErrInvalid, childRunID, childPolicy.Execution.AutonomousMode, parent.ID, parentPolicy.Execution.AutonomousMode)
+	if mismatch := domain.RequireInheritedWorkflowPolicy(parentPolicy, childPolicy); mismatch != nil {
+		return fmt.Errorf("%w: child run %s does not execute under parent %s's frozen policy (%w)",
+			ErrInvalid, childRunID, parent.ID, mismatch)
 	}
 	return nil
 }

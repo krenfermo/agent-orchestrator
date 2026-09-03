@@ -521,6 +521,7 @@ func operations() []operation {
 	ops = append(ops, notificationOperations()...)
 	ops = append(ops, usageOperations()...)
 	ops = append(ops, capacityOperations()...)
+	ops = append(ops, usageSubjectOperations()...)
 	ops = append(ops, projectMemoryOperations()...)
 	ops = append(ops, pushOperations()...)
 	ops = append(ops, importOperations()...)
@@ -876,6 +877,26 @@ func workflowOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/usage", id: "getWorkflowUsage", tag: "workflows",
+			summary:    "P3-E: the canonical token/cost ledger for one run — totals, the per-role and per-model breakdown, base execution vs repair, an autonomous parent's children, the roles whose spend AO cannot observe, and the frozen budget the run is measured against. Every figure carries its own provenance: `source` says whether tokens were reported by a provider or estimated by AO, and `cost.basis` says whether money was calculated (from the named rate card) or is simply unknown. `recorded: false` means no usage rows exist for the run and must be rendered as \"no usage data recorded\", never as zero. This is the ONLY total a client may present; the per-role `usage` block on the run detail is per-SESSION and several roles can share one session.",
+			pathParams: []any{controllers.WorkflowIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.WorkflowUsageLedgerResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{projectId}/usage", id: "getProjectUsage", tag: "workflows",
+			summary:    "P3-E: a project's token/cost rollup for one period (today, 7d, 30d, all). Buckets by the instant AO DISPATCHED the work — a fact AO recorded itself — which `periodBasis` states explicitly so nobody reads these windows as a provider's billing period. `averageTokensPerWorkflow` is null, not 0, when no workflow spent anything in the range.",
+			pathParams: []any{controllers.WorkflowProjectIDParam{}, projectUsageQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectUsageResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodGet, path: "/api/v1/workflows/{workflowId}/recovery", id: "getWorkflowRecovery", tag: "workflows",
 			summary:    "P1-B: the deterministic recovery assessment for a run — the one recommended action, why, whether AO may take it automatically, whether the durable plan is reusable, and whether a bounded Repair Agent is available. Derived entirely from durable facts; no model is consulted.",
 			pathParams: []any{controllers.WorkflowIDParam{}},
@@ -1226,9 +1247,28 @@ func browserOperations() []operation {
 	}
 }
 
+// projectUsageQuery is the period selector for the P3-E project rollup.
+type projectUsageQuery struct {
+	Range *string `query:"range,omitempty" enum:"today,7d,30d,all" description:"Rollup period. Defaults to 7d. Buckets by dispatch time, not by any provider billing period."`
+}
+
 type conversationSnapshotQuery struct {
 	BeforeSequence *int64 `query:"beforeSequence,omitempty" minimum:"1" description:"Read items older than this conversation sequence. Omit for the newest page."`
 	Limit          *int64 `query:"limit,omitempty" minimum:"1" maximum:"500" description:"Maximum combined messages and activities to return. Defaults to 200."`
+}
+
+func usageSubjectOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/usage/subject-hook", id: "recordSubjectUsageHook", tag: "usage",
+			summary: "P3-E: a runtime pane reports its OWN provider token spend. Used by reviewer and decision-resolver panes, which are not AO sessions and therefore cannot report through the session activity route. Deliberately usage-only: it carries no activity state and no session id, so a pane can say what it spent without being able to touch any session's lifecycle. A session subject is refused -- sessions report through /sessions/{id}/activity, which validates a launch id this route has no business touching.",
+			reqBody: controllers.SubjectUsageHookRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SubjectUsageHookResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+			},
+		},
+	}
 }
 
 func capacityOperations() []operation {

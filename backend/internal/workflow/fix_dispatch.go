@@ -268,6 +268,13 @@ func (c *Coordinator) dispatchFixStep(ctx stdctx.Context, run domain.WorkflowRun
 	if c.messageSender == nil {
 		return fixStep, nil
 	}
+	// P3-E: a SAFE BOUNDARY. Repair is the spend that runs away — a review/fix
+	// loop can cost more than the work it is repairing — so a run over its
+	// ceiling stops opening new repair cycles here, before any prompt is
+	// written down or delivered. Nothing already in flight is touched.
+	if c.usageBudgetBlocks(ctx, run, "a repair cycle") {
+		return fixStep, nil
+	}
 	attempts, err := c.store.ListWorkflowAttempts(ctx, fixStep.ID)
 	if err != nil {
 		return fixStep, err
@@ -507,6 +514,19 @@ func (c *Coordinator) deliverFixPrompt(
 	if err := c.recordFixDispatchIntent(ctx, run, fixStep, reviewRun, reviewRun.TargetSHA, delivery); err != nil {
 		return fixStep, err
 	}
+
+	// P3-E: repair goes into the WORKER's own session, so from this instant the
+	// same session's tokens stop being the worker's base execution and become
+	// this repair cycle's. The window is opened before Send, not after, so no
+	// token the repair prompt causes can land in the base bucket. Cycle carries
+	// the number, which is what lets a run say "base 40k, repair +18k" without
+	// a second ledger.
+	c.openUsageWindow(ctx, usageWindowSpec{
+		SessionID: string(reviewRun.SessionID), Role: domain.WorkflowRoleFixWorker, Run: run,
+		StepID: fixStep.ID, AttemptID: fixAttemptID(fixStep.ID, reviewRun.ID, cycleNumber),
+		AttemptOrdinal: int64(transportAttempt), Cycle: int64(cycleNumber),
+		Harness: fixStep.AssignedHarness, OpenedAt: c.clock(),
+	})
 
 	submission, err := c.deliverAndConfirm(ctx, reviewRun.SessionID, prompt)
 	if err != nil {
