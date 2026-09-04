@@ -219,6 +219,15 @@ func (w *Workspace) DestroyWorkspaceProject(ctx context.Context, info ports.Work
 // answered 500 for the one stop it exists to clear. Found by the P3-C closing
 // smoke.
 //
+// F5 adds a third caller with the same shape: commitIsolatedWorktree names an
+// AO-owned WORKTREE rather than a direct-branch checkout. That is still keyed by
+// the path the caller named and still lands through the direct-branch adapter's
+// `git -C <path>` commit, which is correct for any git working directory -- the
+// adapter is the commit implementation here, not a statement about the project's
+// execution mode. What the callers keep proving is that the path is theirs to
+// write: a branch lock for direct-branch, the run's own frozen isolated
+// placement for a worktree.
+//
 // A deployment with no direct-branch adapter still reports a clear unsupported
 // error rather than silently doing nothing.
 func (w *Workspace) CommitAll(ctx context.Context, info ports.WorkspaceInfo, message string) (string, bool, error) {

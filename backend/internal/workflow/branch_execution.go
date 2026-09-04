@@ -278,21 +278,31 @@ func (c *Coordinator) releaseBranchLocks(ctx stdctx.Context, runID, reason strin
 // It returns an error only for a genuine failure to perform an allowed commit;
 // "policy forbade it" and "nothing to commit" are both normal outcomes.
 func (c *Coordinator) autonomousLocalCommit(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep) error {
-	if c.branchLocks == nil || c.workspaceCommitter == nil || c.projects == nil {
+	if c.projects == nil {
+		return nil
+	}
+	// The isolated half needs no branch lock: an AO worktree is this task's
+	// alone by construction, which is why the placement -- not a lock -- is
+	// what proves ownership there. Deciding placement BEFORE the branch-lock
+	// guard is what keeps a deployment without a lock manager from silently
+	// skipping the isolated commit, which would be F5 again by another route.
+	if !c.runPlacementIsDirectBranch(ctx, run) {
+		// F5: this used to return nil for every isolated task, so an AO
+		// worktree whose worker had not run `git commit` reached integration
+		// with its entire deliverable as dirty, untracked state -- and
+		// integration, finding the branch head unchanged, recorded a successful
+		// no-op. The isolated half of this boundary is in isolated_commit.go;
+		// it commits inside the task's OWN worktree, under the same "verified
+		// but not yet completed" authority window this function uses for a
+		// branch lock.
+		return c.commitIsolatedWorktree(ctx, run, step)
+	}
+	if c.branchLocks == nil || c.workspaceCommitter == nil {
 		return nil
 	}
 	project, ok, err := c.projects.GetProject(ctx, run.ProjectID)
 	if err != nil || !ok {
 		return err
-	}
-	// P3-C §28: the RUN's placement decides whether this is direct-branch work,
-	// not the project's default mode. An explicit direct-branch placement inside
-	// an isolated-default project holds a real branch lock and writes on a real
-	// branch, and reading the project here left exactly that run's work
-	// uncommitted with nothing on the ledger saying so. See
-	// placement_semantics.go.
-	if !c.runPlacementIsDirectBranch(ctx, run) {
-		return nil
 	}
 	policy := project.Config.EffectiveGitPolicy()
 	locks, err := c.branchLocks.HeldByRun(ctx, run.ID)

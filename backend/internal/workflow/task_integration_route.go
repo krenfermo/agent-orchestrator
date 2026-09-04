@@ -90,6 +90,22 @@ func (c *Coordinator) integrateIsolatedTask(
 			"integration_no_source_branch: this task's base was overtaken but its worktree has no branch to replay")
 	}
 
+	// F5, §7/§8: an isolated task may only integrate a COMMITTED result. The
+	// incident integrated a task whose deliverable was still dirty, untracked
+	// worktree state: the branch head equalled the target, the fast-forward
+	// path took it, and base == head was recorded as a successful integration
+	// while the work stayed behind in a worktree the lifecycle then retired.
+	//
+	// The commit itself happens earlier, at the verified boundary
+	// (isolated_commit.go). This is the fail-closed proof that it did: a
+	// worktree that still has pending changes here means the result was never
+	// captured, and there is nothing this integration could legitimately move.
+	// Direct-branch has had exactly this refusal since 8P-E.13B; the isolated
+	// path never did.
+	if reason, lost := c.isolatedResultNotCaptured(ctx, parent, child, workCP); lost {
+		return c.recordIntegrationFailure(ctx, parent, task, reason)
+	}
+
 	artifact, err := c.planArtifactForRun(ctx, child.Run)
 	if err != nil {
 		return err
@@ -857,4 +873,75 @@ func (c *Coordinator) hasPendingIntegrationAudit(ctx stdctx.Context, runID, task
 		}
 	}
 	return pending
+}
+
+// isolatedResultNotCaptured reports that this task's verified result never
+// became a durable commit, and names what would be lost by integrating anyway.
+//
+// The question is deliberately "was the result captured", not "is the worktree
+// clean". A worktree can be dirty for reasons that are not a lost deliverable —
+// a test run leaving output after the commit is the ordinary case — and a
+// worktree AO can no longer probe is not evidence of loss either. So this
+// refuses exactly one situation: real pending changes AND no durable record
+// that the verified result was ever committed. That pair is F5.
+func (c *Coordinator) isolatedResultNotCaptured(ctx stdctx.Context, parent domain.WorkflowRun, child RunDetail, workCP domain.WorkflowCheckpoint) (string, bool) {
+	if c.workspaceFacts == nil || workCP.WorktreePath == "" {
+		return "", false
+	}
+	// Only a deployment that CAN capture a result is held to having captured
+	// one. Without a committer AO never had the opportunity, and refusing the
+	// integration would blame the task for a missing capability rather than for
+	// lost work -- while changing nothing about the outcome, since there is no
+	// path left that could rescue it. The daemon wires WorkspaceCommitter
+	// (workflow_wiring.go), so this gate is fully active in production.
+	if c.workspaceCommitter == nil {
+		return "", false
+	}
+	if c.hasCommittedCandidate(ctx, child.Run.ID) {
+		// AO holds a commit that captures this task's verified result. Whatever
+		// is in the worktree now is not the deliverable.
+		return "", false
+	}
+	obs, err := c.workspaceFacts.ObserveWorkspace(ctx, ports.WorkspaceInfo{
+		Path: workCP.WorktreePath, Branch: workCP.Branch,
+		ProjectID: domain.ProjectID(parent.ProjectID),
+	})
+	if err != nil || !obs.Dirty {
+		return "", false
+	}
+	paths := make([]string, 0, len(obs.Changes))
+	for _, ch := range obs.Changes {
+		if IsEphemeralArtifactPath(ch.Path) {
+			continue
+		}
+		paths = append(paths, ch.Path)
+		if len(paths) == 5 {
+			break
+		}
+	}
+	if len(paths) == 0 {
+		// Only ephemeral build/cache artifacts are pending. That is not a lost
+		// deliverable, and refusing over it would park real work for a
+		// __pycache__ directory.
+		return "", false
+	}
+	return "integration_uncommitted_result: this task's worktree still holds uncommitted work (" +
+		strings.Join(paths, ", ") + "), so its verified result was never captured as a commit and there is nothing to integrate", true
+}
+
+// hasCommittedCandidate reports whether AO durably recorded that this execution
+// run's verified result became a commit. It reads the same checkpoint phase
+// both placements write (autonomousLocalCommitPhase), so a worker that
+// committed for itself and an AO-captured result are proved the same way.
+func (c *Coordinator) hasCommittedCandidate(ctx stdctx.Context, childRunID string) bool {
+	checkpoints, err := c.store.ListWorkflowCheckpoints(ctx, childRunID)
+	if err != nil {
+		return false
+	}
+	for _, cp := range checkpoints {
+		if cp.DurablePhase == autonomousLocalCommitPhase && strings.TrimSpace(cp.HeadSHA) != "" {
+			return true
+		}
+	}
+	return false
 }
