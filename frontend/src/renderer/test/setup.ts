@@ -226,6 +226,9 @@ if (typeof window !== "undefined") {
 			list: async () => [],
 			getActive: async () => null,
 		},
+		auth: {
+			ssoSignIn: async () => ({ status: "cancelled" }) as const,
+		},
 		cloud: {
 			getSession: async () => null,
 			signIn: async () => undefined,

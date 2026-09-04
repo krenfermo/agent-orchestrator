@@ -14,7 +14,7 @@ import (
 )
 
 const getAuthSessionByTokenHash = `-- name: GetAuthSessionByTokenHash :one
-SELECT id, user_id, token_hash, created_at, expires_at, last_seen_at, revoked_at
+SELECT id, user_id, token_hash, created_at, expires_at, last_seen_at, revoked_at, auth_method, issuer, subject
 FROM auth_sessions WHERE token_hash = ?
 `
 
@@ -29,15 +29,18 @@ func (q *Queries) GetAuthSessionByTokenHash(ctx context.Context, tokenHash strin
 		&i.ExpiresAt,
 		&i.LastSeenAt,
 		&i.RevokedAt,
+		&i.AuthMethod,
+		&i.Issuer,
+		&i.Subject,
 	)
 	return i, err
 }
 
 const insertAuthSession = `-- name: InsertAuthSession :one
 
-INSERT INTO auth_sessions (id, user_id, token_hash, created_at, expires_at, last_seen_at, revoked_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-RETURNING id, user_id, token_hash, created_at, expires_at, last_seen_at, revoked_at
+INSERT INTO auth_sessions (id, user_id, token_hash, created_at, expires_at, last_seen_at, revoked_at, auth_method, issuer, subject)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, user_id, token_hash, created_at, expires_at, last_seen_at, revoked_at, auth_method, issuer, subject
 `
 
 type InsertAuthSessionParams struct {
@@ -48,6 +51,9 @@ type InsertAuthSessionParams struct {
 	ExpiresAt  time.Time
 	LastSeenAt time.Time
 	RevokedAt  sql.NullTime
+	AuthMethod domain.AuthMethod
+	Issuer     string
+	Subject    string
 }
 
 // Checkpoint 8P-A: auth_sessions. No trailing ORDER BY/LIMIT -- see
@@ -61,6 +67,9 @@ func (q *Queries) InsertAuthSession(ctx context.Context, arg InsertAuthSessionPa
 		arg.ExpiresAt,
 		arg.LastSeenAt,
 		arg.RevokedAt,
+		arg.AuthMethod,
+		arg.Issuer,
+		arg.Subject,
 	)
 	var i AuthSession
 	err := row.Scan(
@@ -71,6 +80,9 @@ func (q *Queries) InsertAuthSession(ctx context.Context, arg InsertAuthSessionPa
 		&i.ExpiresAt,
 		&i.LastSeenAt,
 		&i.RevokedAt,
+		&i.AuthMethod,
+		&i.Issuer,
+		&i.Subject,
 	)
 	return i, err
 }

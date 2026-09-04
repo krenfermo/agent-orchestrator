@@ -113,6 +113,26 @@ func (s *Store) UpdateUserPasswordHash(ctx context.Context, id domain.UserID, ha
 	return n > 0, nil
 }
 
+// UpdateUserStatus flips a user between active and disabled. A disabled row
+// keeps its identity and everything it owns; it simply stops authenticating —
+// both the password path (authsvc.Authenticate) and the federated one
+// (ssosvc's SSO_ACCOUNT_DISABLED refusal) check the status before issuing a
+// session. Returns false if the user id doesn't exist.
+func (s *Store) UpdateUserStatus(ctx context.Context, id domain.UserID, status domain.UserStatus, updatedAt time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	n, err := s.qw.UpdateUserStatus(ctx, gen.UpdateUserStatusParams{
+		Status:    status,
+		UpdatedAt: updatedAt,
+		ID:        id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("update user %s status: %w", id, err)
+	}
+	return n > 0, nil
+}
+
 // UpdateUserRole sets a user's role. Returns false if the user id doesn't
 // exist. Callers are responsible for the single-owner invariant -- the
 // ux_users_single_owner partial unique index enforces it at the SQL layer.

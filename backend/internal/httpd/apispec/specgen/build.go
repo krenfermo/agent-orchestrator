@@ -742,6 +742,48 @@ func authOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodGet, path: "/api/v1/auth/providers", id: "getAuthProviders", tag: "auth",
+			summary: "P4-A: report which sign-in methods this installation offers. Public by necessity — the sign-in screen renders from it — and it carries no issuer, client id, client secret, scope or constraint.",
+			resps: []respUnit{
+				{http.StatusOK, controllers.AuthProvidersResponse{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/auth/oidc/start", id: "startOIDCLogin", tag: "auth",
+			summary:         "P4-A: begin an OIDC Authorization Code + PKCE login and return the provider authorization URL",
+			reqBody:         controllers.OIDCStartRequest{},
+			optionalReqBody: true,
+			resps: []respUnit{
+				{http.StatusOK, controllers.OIDCStartResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/auth/oidc/callback", id: "completeOIDCLogin", tag: "auth",
+			summary: "P4-A: the identity provider's redirect target. A browser flow receives the session cookie and a 302 to a bounded in-app path; a desktop flow receives a terminal HTML page and mints its session at /auth/oidc/claim instead. Never renders a token, an authorization code, or the provider's own message.",
+			resps: []respUnit{
+				{http.StatusFound, ""},
+				{http.StatusBadRequest, ""},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+			contentTypes: map[int]string{http.StatusFound: "text/html", http.StatusBadRequest: "text/html"},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/auth/oidc/claim", id: "claimOIDCLogin", tag: "auth",
+			summary: "P4-A: redeem a finished desktop login with the handoff secret the supervisor kept on loopback. Answers pending until the person finishes at the provider; on completion the AO session arrives as a Set-Cookie header and never in the body.",
+			reqBody: controllers.OIDCClaimRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.OIDCClaimResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodPost, path: "/api/v1/auth/admin/reset-password", id: "adminResetPassword", tag: "auth",
 			summary: "Loopback-only local recovery: reset a known account's password without a session",
 			reqBody: controllers.AdminResetPasswordRequest{},

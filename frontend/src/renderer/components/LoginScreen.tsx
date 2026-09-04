@@ -1,4 +1,4 @@
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -15,9 +15,22 @@ export function LoginScreen() {
 	const { t } = useTranslation();
 	const login = useAuthStore((state) => state.login);
 	const error = useAuthStore((state) => state.error);
+	// P4-A: the SSO button renders only when the backend says a provider is
+	// configured. The renderer never learns the issuer, the client id, or any
+	// constraint — only a label and that a provider exists.
+	const providers = useAuthStore((state) => state.providers);
+	const loadProviders = useAuthStore((state) => state.loadProviders);
+	const startSso = useAuthStore((state) => state.startSso);
+	const ssoPending = useAuthStore((state) => state.ssoPending);
 	const [usernameOrEmail, setUsernameOrEmail] = useState("");
 	const [password, setPassword] = useState("");
 	const [submitting, setSubmitting] = useState(false);
+
+	useEffect(() => {
+		void loadProviders();
+	}, [loadProviders]);
+
+	const oidc = providers?.oidc;
 
 	const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
 		event.preventDefault();
@@ -38,6 +51,29 @@ export function LoginScreen() {
 					<CardDescription>{t("auth.login.description")}</CardDescription>
 				</CardHeader>
 				<CardContent>
+					{oidc ? (
+						<div className="mb-4 flex flex-col gap-4">
+							<Button
+								type="button"
+								variant="primary"
+								className="w-full"
+								disabled={ssoPending}
+								onClick={() => void startSso()}
+							>
+								{ssoPending
+									? t("auth.login.ssoSubmitting", { provider: oidc.displayName })
+									: t("auth.login.ssoSubmit", { provider: oidc.displayName })}
+							</Button>
+							{ssoPending ? (
+								<p className="text-center text-sm text-muted-foreground">{t("auth.login.ssoWaiting")}</p>
+							) : null}
+							<div className="flex items-center gap-3">
+								<span className="h-px flex-1 bg-border" />
+								<span className="text-xs uppercase text-muted-foreground">{t("auth.login.ssoDivider")}</span>
+								<span className="h-px flex-1 bg-border" />
+							</div>
+						</div>
+					) : null}
 					<form className="flex flex-col gap-4" onSubmit={handleSubmit}>
 						<div className="flex flex-col gap-1.5">
 							<Label htmlFor="auth-username">{t("auth.login.usernameOrEmailLabel")}</Label>

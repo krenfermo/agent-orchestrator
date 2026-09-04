@@ -1,10 +1,17 @@
 # AO-identity SSO design (GitHub / Google / Apple)
 
-Status: **design only** — Checkpoint 8P-E.8. No provider code ships in this
-checkpoint. This documents the architecture the local-password foundation
-(users/auth_sessions/role, `authsvc`, `/api/v1/auth/*`) is meant to grow into,
-and the deployment question that has to be answered before any provider is
-wired up for real.
+Status: **superseded in part by P4-A, which shipped.** This page remains the
+record of the 8P-E.8 design thinking, and most of it held. Where the shipped
+implementation deliberately differs, see
+[**sso-oidc.md**](sso-oidc.md) — the as-built reference — and the
+"What P4-A changed about this design" section at the end of this file, which
+names each divergence and why.
+
+The original status line read: design only — Checkpoint 8P-E.8. No provider
+code ships in this checkpoint. This documents the architecture the
+local-password foundation (users/auth_sessions/role, `authsvc`,
+`/api/v1/auth/*`) is meant to grow into, and the deployment question that has
+to be answered before any provider is wired up for real.
 
 ## Why design-only, this checkpoint
 
@@ -174,3 +181,56 @@ Local password auth (`RegisterFirstUser`, `ResetPassword`, `role`,
 `ux_users_single_owner`) needs none of this. It is the default, always-
 available path regardless of which OAuth providers (if any) an installation
 later turns on.
+
+## What P4-A changed about this design
+
+P4-A shipped SSO as **standards-based OIDC against one operator-configured
+provider**, not as three named vendor integrations. Three concrete
+divergences, each deliberate:
+
+**1. The identity key is `(issuer, subject)`, not `(provider, subject)`.**
+The table is `external_identities` (migration 0151), not
+`user_external_identities`, and it has no `provider` column with a CHECK
+listing github/google/apple. The reason is the P4-A brief's own constraint —
+"do not hardcode one identity vendor" — and the fact that a `provider` enum
+cannot name a self-hosted Keycloak, Dex, Authentik, or any corporate IdP. The
+`iss` claim already is the vendor-neutral name for exactly this, and OIDC
+guarantees `sub` is unique within it. Everything the original design said
+about **never keying on email** carries over unchanged and is enforced by
+`ux_external_identities_issuer_subject`.
+
+**2. A first federated login DOES link to a matching local account, when the
+provider verified the email — and it is a toggle.** The original design said
+linking must be an explicit action from Settings while already signed in. That
+reasoning is sound for a MULTI-provider deployment (control `bob@example.com`
+at Google but not at GitHub, and automatic linking is a takeover). P4-A
+configures exactly one issuer, chosen by the operator, and ships no
+account-linking UI — so refusing to link would strand every account an
+installation already has, with no remedy, the moment SSO is switched on. The
+shipped rule is: link only on `email_verified`, and only when
+`AO_OIDC_LINK_VERIFIED_EMAIL` is on (the default). An operator running an
+issuer they do not fully trust to verify addresses turns it off and gets the
+original design's behavior — a refusal, with a distinct
+`SSO_LINKING_DISABLED` code. An UNVERIFIED email never links, in either
+setting.
+
+**3. The desktop callback is the daemon's own loopback route, not
+`ao-app://callback`.** The original design chose the custom protocol to avoid
+"a localhost callback server", and warned that packaged-app sandboxes break
+such patterns. That warning is about an app spawning its *own* callback
+listener. AO does not have to: the daemon is already bound on loopback and is
+already the app's entire API surface — if it were unreachable the app would
+not run at all. Using it means Electron and web converge on **one** backend
+code path for the whole exchange, which is what this document itself called
+"the point"; and it keeps the authorization code out of a deep link entirely.
+The desktop session still never crosses into a renderer URL: the callback
+records who signed in but issues nothing, and the supervisor redeems it over
+loopback with a handoff secret that never left the machine. See
+[sso-oidc.md](sso-oidc.md) for the full sequence.
+
+**Unchanged and still true:** AO identity stays completely independent of
+source-control credentials; no provider access or refresh token is persisted;
+local password auth remains the always-available default; and the
+self-hosting answer is option 2 — the operator supplies the client
+credentials via environment variables, and AO depends on no hosted identity
+broker.

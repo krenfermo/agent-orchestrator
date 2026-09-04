@@ -19,19 +19,40 @@ import (
 // authCookieName) — the two never share a name or a code path.
 const SessionCookieName = "ao_session"
 
-type userContextKey struct{}
+type principalContextKey struct{}
 
-// WithUser returns a copy of ctx carrying the resolved current user.
+// WithPrincipal returns a copy of ctx carrying the resolved principal.
+//
+// P4-A: the principal — not the bare user — is what the middleware attaches,
+// so "who is this" and "how did they authenticate" travel together and are
+// resolved exactly once, at the edge. WithUser is the pre-P4-A shorthand,
+// preserved for the callers (and tests) that only ever had a user.
+func WithPrincipal(ctx context.Context, p domain.Principal) context.Context {
+	return context.WithValue(ctx, principalContextKey{}, p)
+}
+
+// WithUser returns a copy of ctx carrying the resolved current user, with no
+// recorded authentication method. Equivalent to WithPrincipal for a principal
+// carrying only a user.
 func WithUser(ctx context.Context, u domain.User) context.Context {
-	return context.WithValue(ctx, userContextKey{}, u)
+	return WithPrincipal(ctx, domain.Principal{User: u})
+}
+
+// PrincipalFromContext returns the request's resolved principal, if any.
+func PrincipalFromContext(ctx context.Context) (domain.Principal, bool) {
+	p, ok := ctx.Value(principalContextKey{}).(domain.Principal)
+	return p, ok
 }
 
 // FromContext returns the request's resolved current user, if any. ok is
 // false when no session cookie resolved (multi-user mode with no/invalid
 // cookie, and trusted-local mode did not synthesize one either).
 func FromContext(ctx context.Context) (domain.User, bool) {
-	u, ok := ctx.Value(userContextKey{}).(domain.User)
-	return u, ok
+	p, ok := PrincipalFromContext(ctx)
+	if !ok {
+		return domain.User{}, false
+	}
+	return p.User, true
 }
 
 // Require returns the request's resolved current user, or a structured 401
@@ -47,11 +68,27 @@ func Require(r *http.Request) (domain.User, error) {
 	return u, nil
 }
 
+// RequirePrincipal is Require's full-fidelity form: the resolved user plus how
+// they authenticated. P4-B's authorization checks read this; P4-A only ever
+// answers who authenticated, never what they may do.
+func RequirePrincipal(r *http.Request) (domain.Principal, error) {
+	p, ok := PrincipalFromContext(r.Context())
+	if !ok {
+		return domain.Principal{}, apierr.Unauthorized("NOT_AUTHENTICATED", "authentication required")
+	}
+	return p, nil
+}
+
 // Resolver is the subset of authsvc.Manager the identity middleware needs.
 // Kept narrow so router.go doesn't have to import the service package
 // directly.
+//
+// P4-A widened it from ResolveSession to ResolvePrincipal: the middleware now
+// attaches the authentication method and (for a federated session) the
+// issuer/subject alongside the user, so no layer above it re-derives any of
+// that — the point of having one canonical principal at all.
 type Resolver interface {
-	ResolveSession(ctx context.Context, rawToken string) (domain.User, error)
+	ResolvePrincipal(ctx context.Context, rawToken string) (domain.Principal, error)
 }
 
 // Middleware resolves the request's application-identity user from the
@@ -73,15 +110,18 @@ func Middleware(resolver Resolver, trustedLocal bool, bootstrapAdmin func(ctx co
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if resolver != nil {
 				if c, err := r.Cookie(SessionCookieName); err == nil && c.Value != "" {
-					if u, err := resolver.ResolveSession(r.Context(), c.Value); err == nil {
-						next.ServeHTTP(w, r.WithContext(WithUser(r.Context(), u)))
+					if p, err := resolver.ResolvePrincipal(r.Context(), c.Value); err == nil {
+						next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), p)))
 						return
 					}
 				}
 			}
 			if trustedLocal && bootstrapAdmin != nil {
 				if u, ok := bootstrapAdmin(r.Context()); ok {
-					next.ServeHTTP(w, r.WithContext(WithUser(r.Context(), u)))
+					// Recorded as trusted_local, not as a login: no credential
+					// was presented, and the audit trail says so.
+					next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(),
+						domain.Principal{User: u, AuthMethod: domain.AuthMethodTrustedLocal})))
 					return
 				}
 			}
