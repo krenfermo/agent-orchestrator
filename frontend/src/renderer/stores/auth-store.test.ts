@@ -21,6 +21,7 @@ vi.mock("../lib/api-client", async () => {
 	};
 });
 
+import { setApiBaseUrl } from "../lib/api-client";
 import { useAuthStore } from "./auth-store";
 
 describe("auth-store", () => {
@@ -38,9 +39,14 @@ describe("auth-store", () => {
 			authMethod: null,
 			issuer: null,
 			providers: null,
+			providersStatus: "idle",
+			ssoError: null,
 			permissions: [],
 			ssoPending: false,
 		});
+		// The store's calls are gated on a trusted daemon URL, so the default for
+		// these cases is "daemon is ready". The not-ready gate has its own block.
+		setApiBaseUrl("http://127.0.0.1:3001");
 	});
 
 	// P4-A -------------------------------------------------------------------
@@ -58,6 +64,102 @@ describe("auth-store", () => {
 			apiGET.mockRejectedValue(new Error("network down"));
 			await useAuthStore.getState().loadProviders();
 			expect(useAuthStore.getState().providers).toBeNull();
+		});
+
+		it("reports a reachable daemon's provider failure as an SSO error, not a daemon one", async () => {
+			apiGET.mockResolvedValue({ error: { message: "provider discovery failed", code: "oidc_discovery" } });
+
+			await useAuthStore.getState().loadProviders();
+
+			expect(useAuthStore.getState().providersStatus).toBe("error");
+			expect(useAuthStore.getState().ssoError).toContain("provider discovery failed");
+			// Password sign-in is unaffected and shows nothing of this.
+			expect(useAuthStore.getState().error).toBeNull();
+		});
+
+		it("marks providers loaded so the screen can tell 'no SSO' from 'not asked yet'", async () => {
+			apiGET.mockResolvedValue({ data: { mode: "password", passwordEnabled: true } });
+
+			await useAuthStore.getState().loadProviders();
+
+			expect(useAuthStore.getState().providersStatus).toBe("loaded");
+			expect(useAuthStore.getState().providers?.oidc).toBeUndefined();
+		});
+
+		it("de-duplicates concurrent loads into one request", async () => {
+			apiGET.mockResolvedValue({ data: { mode: "oidc", passwordEnabled: true, oidc: { displayName: "Google", startPath: "/api/v1/auth/oidc/start" } } });
+
+			await Promise.all([useAuthStore.getState().loadProviders(), useAuthStore.getState().loadProviders()]);
+
+			expect(apiGET).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	// The cold-start race this fix exists for: Electron's renderer boots before
+	// the daemon binds its port, api-client short-circuits every request into a
+	// synthetic 503 carrying the daemon-startup text, and nothing used to run
+	// again once the daemon came up.
+	describe("daemon readiness", () => {
+		beforeEach(() => {
+			setApiBaseUrl(null);
+		});
+
+		it("does not ask anything while no daemon URL is trusted", async () => {
+			await useAuthStore.getState().load();
+			await useAuthStore.getState().checkSetup();
+			await useAuthStore.getState().loadProviders();
+
+			expect(apiGET).not.toHaveBeenCalled();
+		});
+
+		it("stays in loading rather than claiming the person is signed out", async () => {
+			await useAuthStore.getState().load();
+
+			// "unauthenticated" here is what rendered LoginScreen before the daemon
+			// had answered anything at all.
+			expect(useAuthStore.getState().status).toBe("loading");
+			expect(useAuthStore.getState().error).toBeNull();
+		});
+
+		it("never puts the daemon-startup message where the login form shows errors", async () => {
+			await useAuthStore.getState().load();
+
+			expect(useAuthStore.getState().error).toBeNull();
+		});
+
+		it("leaves setupRequired undecided instead of guessing", async () => {
+			await useAuthStore.getState().checkSetup();
+
+			expect(useAuthStore.getState().setupRequired).toBeNull();
+		});
+
+		it("keeps providers idle, not errored, so the retry is expected", async () => {
+			await useAuthStore.getState().loadProviders();
+
+			expect(useAuthStore.getState().providersStatus).toBe("idle");
+			expect(useAuthStore.getState().ssoError).toBeNull();
+		});
+
+		it("loads the identity, setup state and providers once the daemon is ready", async () => {
+			apiGET.mockImplementation((path: string) => {
+				if (path === "/api/v1/auth/providers") {
+					return Promise.resolve({
+						data: { mode: "oidc", passwordEnabled: true, oidc: { displayName: "Google", startPath: "/api/v1/auth/oidc/start" } },
+					});
+				}
+				if (path === "/api/v1/auth/setup-status") return Promise.resolve({ data: { setupRequired: false } });
+				return Promise.resolve({ error: { message: "unauthorized" }, response: { status: 401 } });
+			});
+
+			setApiBaseUrl("http://127.0.0.1:3002");
+			await useAuthStore.getState().refreshForDaemonReady();
+
+			// providers 200 + /me 401 is a login-ready daemon, not a starting one.
+			expect(useAuthStore.getState().status).toBe("unauthenticated");
+			expect(useAuthStore.getState().error).toBeNull();
+			expect(useAuthStore.getState().setupRequired).toBe(false);
+			expect(useAuthStore.getState().providers?.oidc?.displayName).toBe("Google");
+			expect(useAuthStore.getState().providersStatus).toBe("loaded");
 		});
 	});
 
@@ -88,7 +190,9 @@ describe("auth-store", () => {
 
 			await useAuthStore.getState().startSso();
 
-			expect(useAuthStore.getState().error).toBe("Single sign-on could not be completed.");
+			expect(useAuthStore.getState().ssoError).toBe("Single sign-on could not be completed.");
+			// Never in `error`: that slot is the password form's.
+			expect(useAuthStore.getState().error).toBeNull();
 			expect(useAuthStore.getState().ssoPending).toBe(false);
 			expect(apiPOST).not.toHaveBeenCalled();
 		});

@@ -110,6 +110,16 @@ function ShellLayout() {
 	const workspaceQuery = useWorkspaceQuery();
 	const workspaces = workspaceQuery.data ?? [];
 	const daemonStatus = useDaemonStatus(queryClient);
+	// The renderer boots well before the daemon binds its port, so the loader's
+	// auth calls above are expected to be no-ops on a cold start. This is the
+	// retry: exactly one refresh per not-ready -> ready transition, keyed on the
+	// port so a daemon restart (possibly on a new port) re-runs it too. No
+	// polling — the status hook already owns that.
+	const readyDaemonPort = daemonStatus.state === "ready" ? daemonStatus.port : undefined;
+	useEffect(() => {
+		if (!readyDaemonPort) return;
+		void useAuthStore.getState().refreshForDaemonReady();
+	}, [readyDaemonPort]);
 	const [workspaceStartupState, setWorkspaceStartupState] = useState<"loading" | "ready" | "error">("loading");
 	const workspaceStartupBaselineRef = useRef(0);
 	const agentCatalogPortRef = useRef<number | undefined>(undefined);
