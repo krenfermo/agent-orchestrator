@@ -203,6 +203,21 @@ func (c *Coordinator) selectExecutionPlacement(ctx stdctx.Context, run domain.Wo
 		placementType = pending.Requested.PlacementType()
 	}
 	target := project.Config.WithDefaults().DefaultBranch
+	// A REPAIR run's base is not the project's default branch: it is the exact
+	// commit of the artifact under repair, frozen before the repair run existed
+	// (repair_artifact.go). The merge target stays the project's, because a
+	// repair changes where work HAPPENS, never what it is for -- the same
+	// separation replacePlacementGeneration makes for a placement transition.
+	//
+	// Recording it here matters as much as passing it to the launcher does: a
+	// placement whose BaseBranch says `main` for a checkout cut from a task
+	// branch is a record that would answer "what did this task change" with the
+	// wrong diff for the rest of the run's life.
+	base := target
+	repairBase, repairAuthority, repairPinned := c.repairBaseRef(ctx, run)
+	if repairPinned {
+		base = repairBase
+	}
 
 	placement := domain.ExecutionPlacement{
 		ID:                  "plc-" + c.newID(),
@@ -214,7 +229,7 @@ func (c *Coordinator) selectExecutionPlacement(ctx stdctx.Context, run domain.Wo
 		LifecycleGeneration: c.stepDispatchGeneration(ctx, step.ID),
 		Type:                placementType,
 		RepoPath:            project.Path,
-		BaseBranch:          target,
+		BaseBranch:          base,
 		MergeTarget:         target,
 		OwnerToken:          c.placementOwnerToken(),
 		State:               domain.PlacementSelected,
@@ -230,6 +245,13 @@ func (c *Coordinator) selectExecutionPlacement(ctx stdctx.Context, run domain.Wo
 		placement.ExecutionBranch = placementExecutionBranch(scope, generation)
 	} else {
 		placement.ExecutionBranch = target
+	}
+	if repairPinned {
+		// RepoPath is deliberately NOT taken from the authority. The checkout is
+		// materialised from the PROJECT's own path, so recording anything else
+		// here would be a record that disagrees with the directory it describes.
+		placement.Detail = fmt.Sprintf("repair of %s, cut from %s on %s",
+			repairAuthority.OriginRunID, shortSHA(repairAuthority.BaseSHA), repairAuthority.OriginBranch)
 	}
 	return placement, nil
 }

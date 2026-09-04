@@ -199,3 +199,39 @@ func (c *Coordinator) ProveNoMutationForTest(
 ) MutationProof {
 	return c.ProveNoMutation(ctx, attempt, placement, launchFingerprint)
 }
+
+// ReclassifyRepairWorkspaceStopForTest exercises the §12 guard directly.
+//
+// Reaching it through a real observation would mean staging a provider turn
+// receipt, an empty worktree and a disproven repair checkout in one fixture --
+// three independent subsystems, none of which is the property under test. What
+// this guard guarantees lives entirely inside it: an empty turn is the WORKER's
+// answer only when AO can show the worker held the artifact.
+func (c *Coordinator) ReclassifyRepairWorkspaceStopForTest(
+	ctx stdctx.Context, run domain.WorkflowRun, decision WorkStepDecision,
+) WorkStepDecision {
+	return c.reclassifyRepairWorkspaceStop(ctx, run, decision)
+}
+
+// RepairBaseRefForTest exposes the launch-time base decision: what a repair
+// run's checkout must be cut from, and the refusal when AO cannot say.
+//
+// It is the one answer the incident turned on, and it is taken deep inside a
+// dispatch that also needs a provider, a runtime and a capacity slot. Asking it
+// directly is what lets a test assert the refusal a LEGACY repair run gets --
+// one whose marker predates artifact authority, which is precisely the shape
+// every repair created before this change carries.
+func (c *Coordinator) RepairBaseRefForTest(
+	ctx stdctx.Context, run domain.WorkflowRun,
+) (string, domain.RepairArtifactAuthority, bool) {
+	return c.repairBaseRef(ctx, run)
+}
+
+// AttentionDispositionForTest exposes the stop registry so a test can assert
+// that a reason it produces is one AO can actually explain. Membership IS the
+// definition of "AO knows what this stop is" (attention.go), so a reason absent
+// from it is a run parked with nothing to tell a person.
+func AttentionDispositionForTest(reason string) (AttentionDisposition, bool) {
+	d, ok := attentionDispositions[reason]
+	return d, ok
+}

@@ -12016,6 +12016,7 @@ components:
           - budget_exhausted
           - policy_disabled
           - unknown_condition
+          - artifact_unprovable
           type: string
         repairSpent:
           type: integer
@@ -17399,6 +17400,7 @@ components:
           - budget_exhausted
           - policy_disabled
           - unknown_condition
+          - artifact_unprovable
           type: string
         stepId:
           type: string
@@ -17420,6 +17422,52 @@ components:
       - planReusable
       - repairAvailable
       - repairEligibility
+      type: object
+    WorkflowRepairArtifactView:
+      properties:
+        baseSha:
+          type: string
+        branch:
+          type: string
+        changedFiles:
+          items:
+            type: string
+          type: array
+        detail:
+          type: string
+        findingsCount:
+          type: integer
+        hasArtifact:
+          type: boolean
+        originRunId:
+          type: string
+        originTaskId:
+          type: string
+        placement:
+          enum:
+          - direct_branch
+          - isolated_worktree
+          type: string
+        refusal:
+          enum:
+          - repair_artifact_unavailable
+          - repair_artifact_uncommitted
+          - repair_workspace_mismatch
+          type: string
+        resolved:
+          type: boolean
+        reviewRunId:
+          type: string
+        source:
+          enum:
+          - observed_worktree
+          - reconstructed_from_ledger
+          - shared_checkout
+          - no_artifact
+          type: string
+      required:
+      - resolved
+      - hasArtifact
       type: object
     WorkflowRepairIntentView:
       properties:
@@ -17470,6 +17518,8 @@ components:
       type: object
     WorkflowRepairPlanView:
       properties:
+        artifact:
+          $ref: '#/components/schemas/WorkflowRepairArtifactView'
         automaticAllowed:
           type: boolean
         budget:
@@ -17481,6 +17531,7 @@ components:
           - budget_exhausted
           - policy_disabled
           - unknown_condition
+          - artifact_unprovable
           type: string
         intent:
           $ref: '#/components/schemas/WorkflowRepairIntentView'

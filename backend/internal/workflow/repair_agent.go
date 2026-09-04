@@ -177,6 +177,11 @@ type RepairPlan struct {
 	Reason string
 	// AutomaticAllowed reports whether AO may launch it without being asked.
 	AutomaticAllowed bool
+	// Artifact is the frozen identity of the thing a repair would work on --
+	// which branch, which commit, which review's findings. It is populated for
+	// an eligible repair AND for a RepairArtifactUnprovable refusal, because
+	// the refusal's whole content is which fact could not be established.
+	Artifact domain.RepairArtifactAuthority
 }
 
 // PlanRepair computes the repair decision for a run. It writes nothing.
@@ -279,6 +284,22 @@ func (c *Coordinator) planRepairFor(ctx stdctx.Context, detail RunDetail) (Repai
 	}
 
 	digest, stepID, generation := evidenceDigestFor(target, reason)
+
+	// §2/§4 of the repair-artifact brief: the thing being repaired is resolved
+	// BEFORE anything is created from it, and an origin whose artifact cannot
+	// be established is a refusal rather than a repair cut from the project's
+	// default branch. That fallback is the wf-3af3c533 incident: a repair run
+	// whose checkout was byte-identical to origin/main and could not contain
+	// the code under review. See repair_artifact.go.
+	artifact := c.resolveRepairArtifact(ctx, target, spent+1)
+	if !artifact.Resolved {
+		out.Eligibility = domain.RepairArtifactUnprovable
+		out.Artifact = artifact
+		out.Reason = artifact.Detail
+		return out, nil
+	}
+
+	out.Artifact = artifact
 	out.Intent = domain.RepairIntent{
 		ID:                  repairIntentID(detail.Run.ID, spent+1),
 		WorkflowRunID:       detail.Run.ID,
@@ -294,6 +315,7 @@ func (c *Coordinator) planRepairFor(ctx stdctx.Context, detail RunDetail) (Repai
 			SiblingsUntouched: target.Run.ID != detail.Run.ID,
 		},
 		AcceptanceCriteria: repairAcceptanceCriteria(reason),
+		Origin:             artifact,
 		Strategy:           domain.ExecutionStrategyTask,
 		PolicyVersion:      policy.Version,
 		Mode:               policy.Mode,
@@ -372,6 +394,16 @@ func (c *Coordinator) LaunchRepair(ctx stdctx.Context, runID, authorizedBy strin
 		if plan.Eligibility == domain.RepairBudgetExhausted {
 			c.recordRepairEscalation(ctx, detail.Run, plan)
 		}
+		if plan.Eligibility == domain.RepairArtifactUnprovable {
+			// A DIFFERENT refusal from an ineligible condition, and it must
+			// read as one. The stop is repairable and AO simply cannot prove
+			// what a repair would work on -- so the run parks on a reason whose
+			// remedy is about the workspace, and the sentence a person gets
+			// does not blame the worker or the condition.
+			c.recordRepairArtifactRefusal(ctx, detail.Run, plan.Artifact)
+			return domain.RepairIntent{}, fmt.Errorf("%w (%s): %s",
+				ErrRepairArtifactUnavailable, plan.Artifact.Refusal, plan.Reason)
+		}
 		return domain.RepairIntent{}, fmt.Errorf("%w (%s): %s", ErrRepairIneligible, plan.Eligibility, plan.Reason)
 	}
 	if authorizedBy == "" && plan.Mode != domain.RepairModeAutomatic {
@@ -448,9 +480,14 @@ func (c *Coordinator) LaunchRepair(ctx stdctx.Context, runID, authorizedBy strin
 		return domain.RepairIntent{}, fmt.Errorf("%w: a repair for this failure is already being created", ErrPlanLocked)
 	}
 
+	// The evidence pack is assembled from the TARGET's durable state -- the run
+	// that owns the artifact -- rather than from the run LaunchRepair was
+	// called on, which for a master objective is the parent and holds none of
+	// the findings.
+	pack := c.buildRepairContext(ctx, targetDetail(ctx, c, detail, intent), intent.Origin)
 	created, err := c.CreateTaskRun(ctx, TaskRunRequest{
 		ProjectID:          intent.ProjectID,
-		Objective:          buildRepairObjective(intent, plan),
+		Objective:          buildRepairObjective(intent, plan, pack),
 		Strategy:           c.repairChildStrategy(intent),
 		AcceptanceCriteria: intent.AcceptanceCriteria,
 		WriteIntent:        domain.WorkflowWriteIntentMutating,
@@ -462,21 +499,62 @@ func (c *Coordinator) LaunchRepair(ctx stdctx.Context, runID, authorizedBy strin
 	}
 	intent.RepairRunID = created.Run.ID
 
+	// The repair runs as the SAME person the origin does. Ownership decides
+	// which provider profile and which isolated credential set the worker
+	// launches with (8P-B.1/8P-C.1), so an unowned repair either cannot resolve
+	// a provider at all or would resolve somebody else's -- and a repair
+	// carrying different credentials from the run it is repairing is not the
+	// same authority operating on the same artifact. Stamped before StartRun,
+	// idempotent on replay, and a no-op when the origin itself is unowned.
+	if oerr := c.stampChildOwnership(ctx, created.Run.ID, detail.Run); oerr != nil && c.log != nil {
+		c.log.Warn("workflow: repair run could not inherit its origin's owner",
+			"run", runID, "repairRun", created.Run.ID, "err", oerr)
+	}
+
 	// P1-C: mark the repair run as a repair BEFORE it is started, so the
 	// scheduler meters its worker dispatch against the repair budget rather
 	// than the ordinary worker one. Written first for the same reason the
 	// intent is: a run that starts before anything says what it is would be
 	// charged to the wrong meter, and the repair limit is the narrower budget.
-	_, _ = c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
-		ID:             "wfc-" + c.newID(),
-		WorkflowRunID:  created.Run.ID,
-		ProjectID:      created.Run.ProjectID,
-		DurablePhase:   repairRunOriginPhase,
-		NextAction:     fmt.Sprintf("repair run for %s (%s), generation %d", intent.TargetRunID, intent.ConditionReason, intent.Generation),
-		PayloadVersion: "v1",
-		RetryState:     fmt.Sprintf(`{"originRunId":%q,"generation":%d}`, intent.WorkflowRunID, intent.Generation),
-		CreatedAt:      c.clock(),
+	//
+	// P4 repair-artifact authority: the marker also carries the FROZEN identity
+	// of the artifact under repair, and it is written here -- before the run is
+	// started, in the same window the metering marker is -- for the same
+	// reason. The launch path reads it to decide what this repair's checkout is
+	// cut from (repair_artifact.go's repairBaseRef), and a run that started
+	// before anything said what it was repairing would be cut from the
+	// project's default branch. That is the wf-3af3c533 incident exactly.
+	originPayload, perr := json.Marshal(repairRunOriginPayload{
+		OriginRunID: intent.WorkflowRunID, Generation: intent.Generation, Origin: intent.Origin,
 	})
+	if perr != nil {
+		c.releaseIncidentRepairClaim(ctx, entry, perr)
+		return domain.RepairIntent{}, perr
+	}
+	if _, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
+		ID:            "wfc-" + c.newID(),
+		WorkflowRunID: created.Run.ID,
+		ProjectID:     created.Run.ProjectID,
+		// BaseSHA only, deliberately: it is the commit THIS run is cut from,
+		// which is a true statement about the repair run. The origin's branch
+		// is in the payload rather than in the Branch column, which every
+		// reader takes to mean "the branch this run writes to".
+		BaseSHA:        intent.Origin.BaseSHA,
+		DurablePhase:   repairRunOriginPhase,
+		NextAction:     repairRunOriginDetail(intent),
+		PayloadVersion: "v1",
+		RetryState:     string(originPayload),
+		CreatedAt:      c.clock(),
+	}); err != nil {
+		// Unlike the pre-existing best-effort write this replaces, a missing
+		// marker is now fatal to the launch: without it the repair run has no
+		// artifact authority, and dispatch would either refuse it later or --
+		// worse, before this change -- cut it from main. Failing here leaves a
+		// created-but-unstarted run and a spent claim, which recovery already
+		// knows how to read.
+		c.releaseIncidentRepairClaim(ctx, entry, err)
+		return domain.RepairIntent{}, err
+	}
 
 	// The intent is durable BEFORE the repair run is started, so a crash
 	// between the two leaves a discoverable repair and a spent generation --
@@ -536,6 +614,51 @@ func (c *Coordinator) LaunchRepair(ctx stdctx.Context, runID, authorizedBy strin
 	return intent, nil
 }
 
+// targetDetail resolves the run whose artifact is under repair, which for a
+// master objective is the affected CHILD and not the objective LaunchRepair was
+// called on. Fail-soft to the run in hand: an unreadable child yields a thinner
+// evidence pack, never a repair aimed somewhere else.
+func targetDetail(ctx stdctx.Context, c *Coordinator, detail RunDetail, intent domain.RepairIntent) RunDetail {
+	if intent.TargetRunID == "" || intent.TargetRunID == detail.Run.ID {
+		return detail
+	}
+	target, err := c.GetRun(ctx, intent.TargetRunID)
+	if err != nil {
+		return detail
+	}
+	return target
+}
+
+// repairRunOriginDetail is the human sentence on a repair run's origin marker.
+// It names the artifact, because "repair run for wf-x" was exactly as true of
+// the repair that could not see wf-x's code as of one that can.
+func repairRunOriginDetail(intent domain.RepairIntent) string {
+	base := fmt.Sprintf("repair run for %s (%s), generation %d",
+		intent.TargetRunID, intent.ConditionReason, intent.Generation)
+	switch {
+	case intent.Origin.PinsCheckout():
+		return fmt.Sprintf("%s; cut from %s on %s", base, shortSHA(intent.Origin.BaseSHA), intent.Origin.OriginBranch)
+	case intent.Origin.Placement == domain.PlacementDirectBranch:
+		return base + "; works in the project's own checkout on " + intent.Origin.OriginBranch
+	default:
+		return base + "; the origin has produced no artifact, so it starts from the project's default branch"
+	}
+}
+
+// recordRepairArtifactRefusal parks the origin on the one stop whose remedy is
+// about AO's own workspace rather than about the run's work.
+func (c *Coordinator) recordRepairArtifactRefusal(ctx stdctx.Context, run domain.WorkflowRun, artifact domain.RepairArtifactAuthority) {
+	payload, err := json.Marshal(artifact)
+	if err != nil {
+		payload = []byte("{}")
+	}
+	reason := ReasonRepairArtifactUnavailable
+	if artifact.Refusal == domain.RepairArtifactUncommitted {
+		reason = ReasonRepairArtifactUncommitted
+	}
+	c.recordAttentionStopWithState(ctx, run, nil, reason, artifact.Detail, string(payload))
+}
+
 // repairChildStrategy is §I, in one place: a repair is always a bounded TASK.
 //
 // It is never autonomous and never master, whatever the run being repaired is.
@@ -575,10 +698,20 @@ func repairVerificationFor(ctx stdctx.Context, c *Coordinator, intent domain.Rep
 
 // buildRepairObjective renders the intent as the repair run's objective.
 //
-// It carries AO's own durable vocabulary and nothing else: the condition, the
-// run and step it belongs to, and the guardrails. No provider output, no
-// findings body, no credentials, no paths outside the project.
-func buildRepairObjective(intent domain.RepairIntent, plan RepairPlan) string {
+// It used to carry AO's own durable vocabulary and NOTHING else -- no findings
+// body, no verification output -- on the reasoning that the repairer could read
+// the failing checks and the existing changes in the worktree it was given.
+// wf-3af3c533 was given a worktree cut from origin/main, followed that
+// instruction exactly, found nothing, and produced nothing. The vocabulary was
+// all true and it described no defect.
+//
+// So the objective now carries the EVIDENCE as well: which branch and commit it
+// is looking at, the reviewer's findings verbatim, the verification output that
+// failed, and the acceptance criteria the original task still owes. What stays
+// excluded is unchanged -- no provider output, no session transcript, no
+// reasoning from the worker that failed, no credentials, no paths outside the
+// project. See repair_context.go.
+func buildRepairObjective(intent domain.RepairIntent, plan RepairPlan, pack repairContext) string {
 	var b strings.Builder
 	b.WriteString("Repair a stopped AO workflow task.\n\n")
 	fmt.Fprintf(&b, "Stopped run: %s\nCondition: %s\n", intent.TargetRunID, intent.ConditionReason)
@@ -589,7 +722,11 @@ func buildRepairObjective(intent domain.RepairIntent, plan RepairPlan) string {
 	if plan.Reason != "" {
 		fmt.Fprintf(&b, "What AO knows about the stop:\n%s\n\n", plan.Reason)
 	}
-	b.WriteString("Read the failing checks and the existing changes in this worktree, then implement the smallest correct fix for the condition above.\n\n")
+	renderRepairArtifact(&b, intent.Origin)
+	renderRepairReview(&b, intent.Origin, pack)
+	renderRepairVerification(&b, pack)
+	renderRepairAcceptance(&b, pack)
+	b.WriteString("Read the evidence above and the code in this worktree, then implement the smallest correct fix for the condition.\n\n")
 	b.WriteString(`Do not weaken, skip or delete a check in order to make it pass. Do not run any destructive git operation: no reset, no stash, no checkout that discards work, no force, no branch deletion, no history rewrite. Do not touch work belonging to any other task. Do not approve your own change — an independent reviewer reads it next and deterministic checks run after that. If you conclude the condition is not repairable by a code change, stop and say so rather than changing something else.`)
 	return b.String()
 }
@@ -693,6 +830,22 @@ func (c *Coordinator) reconcileRepairOutcome(ctx stdctx.Context, run domain.Work
 		// does not hold its own branch would be resuming it into a refusal.
 		if rerr := c.returnBranchLockFromRepair(ctx, run, intent); rerr != nil && c.log != nil {
 			c.log.Warn("workflow: repair could not return the branch lock", "run", run.ID, "err", rerr)
+		}
+		// §11: the repaired candidate becomes the task's artifact BEFORE the
+		// origin is resumed. An origin resumed onto its own unchanged tree
+		// gets the same verdict it already had, and the repair's commit is
+		// stranded on a branch nothing will ever look at. A promotion that is
+		// refused parks the origin with the repaired commit named on it, and
+		// deliberately does NOT resume: resuming would hand the reviewer the
+		// old artifact and spend a cycle proving what is already known.
+		//
+		// A refused promotion is NOT resolved here. The obstruction it names --
+		// an origin checkout that moved, or that holds uncommitted work -- is
+		// something a person clears in seconds, and recording the generation as
+		// resolved would strand the repaired commit for good once they had. So
+		// the generation stays open and the next fold tries again.
+		if !c.promoteRepairedCandidate(ctx, run, intent) {
+			continue
 		}
 		c.recordRepairResolution(ctx, run, intent, "completed",
 			fmt.Sprintf("repair run %s completed; resuming the obligation it was blocking", intent.RepairRunID))

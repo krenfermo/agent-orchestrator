@@ -68,7 +68,7 @@ type WorkflowAdviceView struct {
 	// never re-derive.
 	Retryable         bool   `json:"retryable"`
 	Repairable        bool   `json:"repairable"`
-	RepairEligibility string `json:"repairEligibility,omitempty" enum:"eligible,ineligible,budget_exhausted,policy_disabled,unknown_condition"`
+	RepairEligibility string `json:"repairEligibility,omitempty" enum:"eligible,ineligible,budget_exhausted,policy_disabled,unknown_condition,artifact_unprovable"`
 	RepairSpent       int    `json:"repairSpent"`
 	RepairBudget      int    `json:"repairBudget"`
 	// WaitUntil / WaitReason are the run's soonest open wake, when there is one.

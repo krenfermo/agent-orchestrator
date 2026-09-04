@@ -810,6 +810,7 @@
 	"recovery.repairIneligible": "修復できる条件ではありません",
 	"recovery.repairPolicyDisabled": "この実行では無効です",
 	"recovery.repairUnknownCondition": "不明な条件",
+	"recovery.repairArtifactUnprovable": "対象の成果物を特定できません",
 	"recovery.repairWithBudget": "{{eligibility}}（{{budget}} 回中 {{spent}} 回使用）",
 	"recovery.retries": "再試行",
 	"recovery.running": "実行中",

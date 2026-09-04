@@ -810,6 +810,7 @@
 	"recovery.repairIneligible": "복구 가능한 조건이 아님",
 	"recovery.repairPolicyDisabled": "이 실행에서 비활성화됨",
 	"recovery.repairUnknownCondition": "알 수 없는 조건",
+	"recovery.repairArtifactUnprovable": "대상 산출물을 확인할 수 없음",
 	"recovery.repairWithBudget": "{{eligibility}} ({{budget}}회 중 {{spent}}회 사용)",
 	"recovery.retries": "재시도",
 	"recovery.running": "실행 중",

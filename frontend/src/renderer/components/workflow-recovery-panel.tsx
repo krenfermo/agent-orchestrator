@@ -229,6 +229,7 @@ const repairEligibilityKeys: Record<NonNullable<WorkflowRecoveryView["repairElig
 	budget_exhausted: "recovery.repairBudgetExhausted",
 	policy_disabled: "recovery.repairPolicyDisabled",
 	unknown_condition: "recovery.repairUnknownCondition",
+	artifact_unprovable: "recovery.repairArtifactUnprovable",
 };
 
 const obligationKeys: Record<NonNullable<WorkflowRecoveryView["obligation"]>, MessageKey> = {

@@ -4334,7 +4334,7 @@ export interface components {
             recommendedAction?: string;
             repairBudget: number;
             /** @enum {string} */
-            repairEligibility?: "eligible" | "ineligible" | "budget_exhausted" | "policy_disabled" | "unknown_condition";
+            repairEligibility?: "eligible" | "ineligible" | "budget_exhausted" | "policy_disabled" | "unknown_condition" | "artifact_unprovable";
             repairSpent: number;
             repairable: boolean;
             requiresHuman: boolean;
@@ -6332,13 +6332,31 @@ export interface components {
             recommendedAction: "resume" | "reuse_plan" | "regenerate_plan" | "repair" | "authenticate" | "inspect_repository" | "operator_action" | "restart_required" | "abandon" | "terminal" | "unrecoverable";
             repairAvailable: boolean;
             /** @enum {string} */
-            repairEligibility: "eligible" | "ineligible" | "budget_exhausted" | "policy_disabled" | "unknown_condition";
+            repairEligibility: "eligible" | "ineligible" | "budget_exhausted" | "policy_disabled" | "unknown_condition" | "artifact_unprovable";
             stepId?: string;
             /** @enum {string} */
             strategy?: "task" | "autonomous" | "master";
             targetRunId?: string;
             taskId?: string;
             version?: string;
+        };
+        WorkflowRepairArtifactView: {
+            baseSha?: string;
+            branch?: string;
+            changedFiles?: string[];
+            detail?: string;
+            findingsCount?: number;
+            hasArtifact: boolean;
+            originRunId?: string;
+            originTaskId?: string;
+            /** @enum {string} */
+            placement?: "direct_branch" | "isolated_worktree";
+            /** @enum {string} */
+            refusal?: "repair_artifact_unavailable" | "repair_artifact_uncommitted" | "repair_workspace_mismatch";
+            resolved: boolean;
+            reviewRunId?: string;
+            /** @enum {string} */
+            source?: "observed_worktree" | "reconstructed_from_ledger" | "shared_checkout" | "no_artifact";
         };
         WorkflowRepairIntentView: {
             acceptanceCriteria?: string[];
@@ -6358,10 +6376,11 @@ export interface components {
             targetStepId?: string;
         };
         WorkflowRepairPlanView: {
+            artifact?: components["schemas"]["WorkflowRepairArtifactView"];
             automaticAllowed: boolean;
             budget: number;
             /** @enum {string} */
-            eligibility: "eligible" | "ineligible" | "budget_exhausted" | "policy_disabled" | "unknown_condition";
+            eligibility: "eligible" | "ineligible" | "budget_exhausted" | "policy_disabled" | "unknown_condition" | "artifact_unprovable";
             intent?: components["schemas"]["WorkflowRepairIntentView"];
             /** @enum {string} */
             mode: "disabled" | "suggest" | "automatic";
