@@ -111,6 +111,43 @@ sql:
             go_type:
               import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
               type: "UserRole"
+          # P4-B: teams, membership and project-scoped grants.
+          - column: "teams.id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "TeamID"
+          - column: "teams.status"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "TeamStatus"
+          - column: "team_memberships.team_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "TeamID"
+          - column: "team_memberships.user_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "UserID"
+          - column: "team_memberships.role"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "TeamRole"
+          - column: "project_grants.project_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "ProjectID"
+          - column: "project_grants.subject_kind"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "GrantSubjectKind"
+          - column: "project_grants.role"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "ProjectRole"
+          - column: "project_grants.created_by"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "UserID"
           - column: "auth_sessions.id"
             go_type: "string"
           - column: "auth_sessions.user_id"

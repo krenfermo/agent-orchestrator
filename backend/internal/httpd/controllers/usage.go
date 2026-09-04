@@ -27,6 +27,10 @@ type UsageController struct {
 	// sessions (never another user's usage/session summaries).
 	Ownership    SessionOwnershipStore
 	TrustedLocal bool
+	// Guard is P4-B's authorization gate. When wired it replaces the 8P-A/8P-B
+	// owner-equality checks with the canonical permission evaluator; a zero
+	// Guard preserves the pre-P4-B behavior exactly.
+	Guard Guard
 }
 
 // Register mounts usage routes on the supplied router.
@@ -65,7 +69,7 @@ func (c *UsageController) getSession(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/usage/sessions/{sessionId}")
 		return
 	}
-	if !AuthorizeSessionAccess(w, r, SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal}, sessionID(r)) {
+	if !AuthorizeSessionAccess(w, r, SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal, Guard: c.Guard}, sessionID(r)) {
 		return
 	}
 	summary, err := c.Svc.Get(r.Context(), domain.SessionID(chi.URLParam(r, "sessionId")))

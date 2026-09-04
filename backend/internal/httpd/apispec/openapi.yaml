@@ -1648,6 +1648,150 @@ paths:
       summary: Atomically replace a project's display name and config
       tags:
       - projects
+  /api/v1/projects/{id}/access:
+    get:
+      operationId: getProjectAccess
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectAccessResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-B: who can reach this project, and what the caller may do in it.
+        Requires project.access.read on the project.'
+      tags:
+      - projects
+    put:
+      operationId: grantProjectAccess
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GrantProjectAccessRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectAccessResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-B: grant a user or a team a role on this project, or change an
+        existing grant. Requires project.access.manage.'
+      tags:
+      - projects
+  /api/v1/projects/{id}/access/{subjectKind}/{subjectId}:
+    delete:
+      operationId: revokeProjectAccess
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: 'Grant subject kind: user or team.'
+        in: path
+        name: subjectKind
+        required: true
+        schema:
+          description: 'Grant subject kind: user or team.'
+          type: string
+      - description: Grant subject identifier.
+        in: path
+        name: subjectId
+        required: true
+        schema:
+          description: Grant subject identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OKResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-B: revoke one subject''s grant on this project. Requires project.access.manage.'
+      tags:
+      - projects
   /api/v1/projects/{id}/config:
     put:
       operationId: setProjectConfig
@@ -6856,6 +7000,393 @@ paths:
       summary: Rename a standalone shell terminal tab
       tags:
       - shellTerminals
+  /api/v1/teams:
+    get:
+      operationId: listTeams
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListTeamsResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-B: list teams. Requires teams.read.'
+      tags:
+      - teams
+    post:
+      operationId: createTeam
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTeamRequest'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamResponse'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-B: create a team. Requires teams.manage.'
+      tags:
+      - teams
+  /api/v1/teams/{id}:
+    delete:
+      operationId: deleteTeam
+      parameters:
+      - description: Team identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Team identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OKResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-B: delete a team, its memberships, and every project grant made
+        to it. Requires teams.manage.'
+      tags:
+      - teams
+    get:
+      operationId: getTeam
+      parameters:
+      - description: Team identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Team identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-B: read one team. Requires teams.read.'
+      tags:
+      - teams
+    patch:
+      operationId: updateTeam
+      parameters:
+      - description: Team identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Team identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTeamRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-B: rename, re-describe, archive or reactivate a team. Requires
+        teams.manage.'
+      tags:
+      - teams
+  /api/v1/teams/{id}/members:
+    get:
+      operationId: listTeamMembers
+      parameters:
+      - description: Team identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Team identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListTeamMembersResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-B: list a team''s members. Requires teams.read.'
+      tags:
+      - teams
+    post:
+      operationId: addTeamMember
+      parameters:
+      - description: Team identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Team identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddTeamMemberRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListTeamMembersResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-B: add an account to a team, or change its role in it. Requires
+        teams.manage.'
+      tags:
+      - teams
+  /api/v1/teams/{id}/members/{userId}:
+    delete:
+      operationId: removeTeamMember
+      parameters:
+      - description: Team identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Team identifier.
+          type: string
+      - description: User identifier.
+        in: path
+        name: userId
+        required: true
+        schema:
+          description: User identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OKResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-B: remove an account from a team. Access inherited through the
+        team stops on the member''s next request.'
+      tags:
+      - teams
   /api/v1/usage/sessions:
     get:
       operationId: listCompactSessionUsage
@@ -6958,6 +7489,299 @@ paths:
         a launch id this route has no business touching.'
       tags:
       - usage
+  /api/v1/users:
+    get:
+      operationId: listUsers
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListUsersResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-B: list the installation''s accounts. Requires users.read.'
+      tags:
+      - users
+    post:
+      operationId: createUser
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-B: create a local (password) account with a non-owner role. Requires
+        users.manage.'
+      tags:
+      - users
+  /api/v1/users/{id}:
+    get:
+      operationId: getUser
+      parameters:
+      - description: User identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: User identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-B: read one account. Requires users.read.'
+      tags:
+      - users
+  /api/v1/users/{id}/role:
+    patch:
+      operationId: setUserRole
+      parameters:
+      - description: User identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: User identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetUserRoleRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-B: change an account''s installation role. The owner cannot be
+        demoted; promoting another account to owner transfers ownership and is reserved
+        to the owner.'
+      tags:
+      - users
+  /api/v1/users/{id}/status:
+    patch:
+      operationId: setUserStatus
+      parameters:
+      - description: User identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: User identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetUserStatusRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-B: enable or disable an account. The owner can never be disabled,
+        and no account can disable itself.'
+      tags:
+      - users
+  /api/v1/users/{id}/teams:
+    get:
+      operationId: listUserTeams
+      parameters:
+      - description: User identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: User identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListTeamMembersResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-B: list the teams one account belongs to. Requires users.read.'
+      tags:
+      - users
   /api/v1/workflows:
     get:
       operationId: listWorkflowRuns
@@ -8543,6 +9367,60 @@ components:
       required:
       - path
       type: object
+    AddTeamMemberRequest:
+      properties:
+        role:
+          enum:
+          - maintainer
+          - member
+          type: string
+        userId:
+          type: string
+      required:
+      - userId
+      - role
+      type: object
+    AdminUserView:
+      properties:
+        createdAt:
+          format: date-time
+          type: string
+        displayName:
+          type: string
+        email:
+          type: string
+        federated:
+          type: boolean
+        id:
+          type: string
+        role:
+          enum:
+          - owner
+          - admin
+          - member
+          - viewer
+          type: string
+        status:
+          enum:
+          - active
+          - disabled
+          type: string
+        updatedAt:
+          format: date-time
+          type: string
+        username:
+          type: string
+      required:
+      - id
+      - displayName
+      - email
+      - username
+      - status
+      - role
+      - federated
+      - createdAt
+      - updatedAt
+      type: object
     AgentConfig:
       properties:
         mode:
@@ -10037,6 +10915,10 @@ components:
           type: string
         issuer:
           type: string
+        permissions:
+          items:
+            type: string
+          type: array
         status:
           enum:
           - authenticated
@@ -10047,6 +10929,7 @@ components:
           $ref: '#/components/schemas/ControllersUserView'
       required:
       - status
+      - permissions
       type: object
     ControllersModelUsageLineResponse:
       properties:
@@ -11839,7 +12722,9 @@ components:
         role:
           enum:
           - owner
+          - admin
           - member
+          - viewer
           type: string
         status:
           enum:
@@ -13235,6 +14120,39 @@ components:
       - cachedTokens
       - totalTokens
       type: object
+    CreateTeamRequest:
+      properties:
+        description:
+          type: string
+        name:
+          type: string
+      required:
+      - name
+      - description
+      type: object
+    CreateUserRequest:
+      properties:
+        displayName:
+          type: string
+        email:
+          type: string
+        password:
+          type: string
+        role:
+          enum:
+          - admin
+          - member
+          - viewer
+          type: string
+        username:
+          type: string
+      required:
+      - displayName
+      - email
+      - username
+      - password
+      - role
+      type: object
     CreateWorkflowRunRequest:
       properties:
         acceptanceCriteria:
@@ -13641,6 +14559,26 @@ components:
           - never
           type: string
       type: object
+    GrantProjectAccessRequest:
+      properties:
+        role:
+          enum:
+          - admin
+          - member
+          - viewer
+          type: string
+        subjectId:
+          type: string
+        subjectKind:
+          enum:
+          - user
+          - team
+          type: string
+      required:
+      - subjectKind
+      - subjectId
+      - role
+      type: object
     ImportReport:
       properties:
         dryRun:
@@ -13837,6 +14775,33 @@ components:
           type: array
       required:
       - shellTerminals
+      type: object
+    ListTeamMembersResponse:
+      properties:
+        members:
+          items:
+            $ref: '#/components/schemas/TeamMemberView'
+          type: array
+      required:
+      - members
+      type: object
+    ListTeamsResponse:
+      properties:
+        teams:
+          items:
+            $ref: '#/components/schemas/TeamView'
+          type: array
+      required:
+      - teams
+      type: object
+    ListUsersResponse:
+      properties:
+        users:
+          items:
+            $ref: '#/components/schemas/AdminUserView'
+          type: array
+      required:
+      - users
       type: object
     ListWorkflowQuestionsResponse:
       properties:
@@ -14105,6 +15070,13 @@ components:
       required:
       - kind
       - sessionId
+      type: object
+    OKResponse:
+      properties:
+        ok:
+          type: boolean
+      required:
+      - ok
       type: object
     OpenShellTerminalRequest:
       properties:
@@ -14460,6 +15432,25 @@ components:
       - defaultBranch
       - executionMode
       type: object
+    ProjectAccessResponse:
+      properties:
+        grants:
+          items:
+            $ref: '#/components/schemas/ProjectGrantView'
+          type: array
+        ownerUserId:
+          type: string
+        permissions:
+          items:
+            type: string
+          type: array
+        projectId:
+          type: string
+      required:
+      - projectId
+      - grants
+      - permissions
+      type: object
     ProjectBrowseEntry:
       properties:
         isGitRepo:
@@ -14570,6 +15561,34 @@ components:
       required:
       - status
       - project
+      type: object
+    ProjectGrantView:
+      properties:
+        createdAt:
+          format: date-time
+          type: string
+        role:
+          enum:
+          - admin
+          - member
+          - viewer
+          type: string
+        subjectId:
+          type: string
+        subjectKind:
+          enum:
+          - user
+          - team
+          type: string
+        updatedAt:
+          format: date-time
+          type: string
+      required:
+      - subjectKind
+      - subjectId
+      - role
+      - createdAt
+      - updatedAt
       type: object
     ProjectOrDegraded:
       oneOf:
@@ -15752,6 +16771,28 @@ components:
           - autohand
           type: string
       type: object
+    SetUserRoleRequest:
+      properties:
+        role:
+          enum:
+          - owner
+          - admin
+          - member
+          - viewer
+          type: string
+      required:
+      - role
+      type: object
+    SetUserStatusRequest:
+      properties:
+        status:
+          enum:
+          - active
+          - disabled
+          type: string
+      required:
+      - status
+      type: object
     SettingsResponse:
       properties:
         chatHarnesses:
@@ -16044,6 +17085,63 @@ components:
       required:
       - targetHarness
       type: object
+    TeamMemberView:
+      properties:
+        createdAt:
+          format: date-time
+          type: string
+        role:
+          enum:
+          - maintainer
+          - member
+          type: string
+        teamId:
+          type: string
+        userId:
+          type: string
+      required:
+      - teamId
+      - userId
+      - role
+      - createdAt
+      type: object
+    TeamResponse:
+      properties:
+        team:
+          $ref: '#/components/schemas/TeamView'
+      required:
+      - team
+      type: object
+    TeamView:
+      properties:
+        createdAt:
+          format: date-time
+          type: string
+        description:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+        slug:
+          type: string
+        status:
+          enum:
+          - active
+          - archived
+          type: string
+        updatedAt:
+          format: date-time
+          type: string
+      required:
+      - id
+      - name
+      - slug
+      - description
+      - status
+      - createdAt
+      - updatedAt
+      type: object
     TrackerIntakeConfig:
       properties:
         assignee:
@@ -16151,6 +17249,20 @@ components:
       required:
       - title
       type: object
+    UpdateTeamRequest:
+      properties:
+        archived:
+          type:
+          - "null"
+          - boolean
+        description:
+          type: string
+        name:
+          type: string
+      required:
+      - name
+      - description
+      type: object
     UsageHarnessResponse:
       properties:
         harness:
@@ -16227,6 +17339,13 @@ components:
       - cacheWriteTokens
       - outputTokens
       - reasoningTokens
+      type: object
+    UserResponse:
+      properties:
+        user:
+          $ref: '#/components/schemas/AdminUserView'
+      required:
+      - user
       type: object
     WorkflowAttemptView:
       properties:

@@ -174,3 +174,51 @@ func userFromRow(row gen.User) domain.User {
 		UpdatedAt:    row.UpdatedAt,
 	}
 }
+
+// TransferOwnership moves the installation owner role from one account to
+// another in a SINGLE transaction: the demotion and the promotion either both
+// land or neither does.
+//
+// This is what makes the last-owner invariant safe under concurrency. Two
+// simultaneous transfers both read the same current owner; the first commits,
+// and the second's promotion collides with ux_users_single_owner and rolls the
+// whole thing back -- so the loser's demotion never lands either, and the
+// installation is never left with zero owners. No application lock is
+// involved, because an application lock cannot make two statements atomic.
+//
+// from must be the current owner. Returns false when either id is missing.
+func (s *Store) TransferOwnership(ctx context.Context, from, to domain.UserID, updatedAt time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	var ok bool
+	err := s.inTx(ctx, "transfer ownership", func(q *gen.Queries) error {
+		if from != "" {
+			n, err := q.UpdateUserRole(ctx, gen.UpdateUserRoleParams{
+				Role:      domain.UserRoleAdmin,
+				UpdatedAt: updatedAt,
+				ID:        from,
+			})
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				return nil
+			}
+		}
+		n, err := q.UpdateUserRole(ctx, gen.UpdateUserRoleParams{
+			Role:      domain.UserRoleOwner,
+			UpdatedAt: updatedAt,
+			ID:        to,
+		})
+		if err != nil {
+			return err
+		}
+		ok = n > 0
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
+}

@@ -279,20 +279,36 @@ type ProjectMemoryInvalidateOutcome struct {
 // ProjectMemoryController owns the /projects/{id}/memory routes.
 type ProjectMemoryController struct {
 	Svc ProjectMemoryService
+	// Guard is P4-B's authorization gate. Every route here is addressed by a
+	// project id, so reading memory needs memory.read on that project and
+	// rebuilding/pruning it needs project.manage -- a repair that discards
+	// derived knowledge is a change to the project, not a read of it.
+	Guard Guard
 }
 
 // Register mounts the project-memory routes.
 func (c *ProjectMemoryController) Register(r chi.Router) {
-	r.Get("/projects/{id}/memory", c.status)
-	r.Get("/projects/{id}/memory/items", c.inspect)
-	r.Post("/projects/{id}/memory/rebuild", c.rebuild)
-	r.Post("/projects/{id}/memory/invalidate", c.invalidate)
-	r.Get("/projects/{id}/memory/report", c.report)
-	r.Get("/projects/{id}/memory/knowledge", c.knowledge)
-	r.Get("/projects/{id}/memory/manifests", c.manifests)
-	r.Post("/projects/{id}/memory/validate", c.validate)
-	r.Get("/projects/{id}/memory/provenance/{itemId}", c.provenance)
-	r.Post("/projects/{id}/memory/prune", c.prune)
+	r.Get("/projects/{id}/memory", c.scoped(domain.PermMemoryRead, c.status))
+	r.Get("/projects/{id}/memory/items", c.scoped(domain.PermMemoryRead, c.inspect))
+	r.Post("/projects/{id}/memory/rebuild", c.scoped(domain.PermProjectManage, c.rebuild))
+	r.Post("/projects/{id}/memory/invalidate", c.scoped(domain.PermProjectManage, c.invalidate))
+	r.Get("/projects/{id}/memory/report", c.scoped(domain.PermMemoryRead, c.report))
+	r.Get("/projects/{id}/memory/knowledge", c.scoped(domain.PermMemoryRead, c.knowledge))
+	r.Get("/projects/{id}/memory/manifests", c.scoped(domain.PermMemoryRead, c.manifests))
+	r.Post("/projects/{id}/memory/validate", c.scoped(domain.PermMemoryRead, c.validate))
+	r.Get("/projects/{id}/memory/provenance/{itemId}", c.scoped(domain.PermMemoryRead, c.provenance))
+	r.Post("/projects/{id}/memory/prune", c.scoped(domain.PermProjectManage, c.prune))
+}
+
+// scoped wraps a handler addressed by {id} with the project permission it
+// needs.
+func (c *ProjectMemoryController) scoped(perm domain.Permission, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !c.Guard.AllowProject(w, r, perm, projectID(r), "PROJECT_NOT_FOUND", "project not found") {
+			return
+		}
+		h(w, r)
+	}
 }
 
 // prune retires the canonical memories a worktree should never have had.

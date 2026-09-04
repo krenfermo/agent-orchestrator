@@ -24,6 +24,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	previewutil "github.com/aoagents/agent-orchestrator/backend/internal/preview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/previewserver"
@@ -156,12 +157,16 @@ type SessionsController struct {
 	// controllers.AuthorizeSessionAccess boundary -- see session_authz.go.
 	Ownership    SessionOwnershipStore
 	TrustedLocal bool
+	// Guard is P4-B's authorization gate. When wired it replaces the 8P-A/8P-B
+	// owner-equality checks with the canonical permission evaluator; a zero
+	// Guard preserves the pre-P4-B behavior exactly.
+	Guard Guard
 }
 
 // scoping adapts this controller's two ownership fields into the shared
 // SessionScoping value AuthorizeSessionAccess expects.
 func (c *SessionsController) scoping() SessionScoping {
-	return SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal}
+	return SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal, Guard: c.Guard}
 }
 
 // sessionAccessAllowed is this controller's call site for the canonical
@@ -248,6 +253,25 @@ func (c *SessionsController) list(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteError(w, r, err)
 		return
 	}
+	// P4-B: a session list spans every project in the installation, so it
+	// filters per row rather than rejecting the request -- a person must never
+	// see the existence of work in a project they cannot reach. The subject is
+	// resolved once and every row is decided from the ProjectID already on it,
+	// so this costs no extra query per session.
+	if c.Guard.Enabled() {
+		sub, ok := c.Guard.Subject(r)
+		if !ok {
+			envelope.WriteError(w, r, identity.Unauthorized())
+			return
+		}
+		visible := make([]domain.Session, 0, len(sessions))
+		for _, sess := range sessions {
+			if sub.Allows(domain.PermSessionRead, domain.ProjectResource(sess.ProjectID)) {
+				visible = append(visible, sess)
+			}
+		}
+		sessions = visible
+	}
 	envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{Sessions: sessionViews(sessions)})
 }
 
@@ -268,6 +292,11 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.ProjectID == "" {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "PROJECT_ID_REQUIRED", "projectId is required", nil)
+		return
+	}
+	// Spawning names its own project, so it is gated here rather than through
+	// AuthorizeSessionAccess -- there is no session yet to resolve one from.
+	if !c.Guard.AllowProject(w, r, domain.PermSessionWrite, in.ProjectID, "PROJECT_NOT_FOUND", "project not found") {
 		return
 	}
 	mode, err := domain.ParseSessionMode(string(in.Mode))

@@ -37,3 +37,14 @@ SELECT owner_user_id FROM sessions WHERE id = ?;
 
 -- name: SetSessionOwner :execrows
 UPDATE sessions SET owner_user_id = ? WHERE id = ?;
+
+-- P4-B: the project a session or a workflow run belongs to. Authorization for
+-- a session/run is a question about its PROJECT, so the resolver needs the
+-- project id and nothing else; selecting one indexed column keeps the gate off
+-- the full row every request would otherwise load.
+
+-- name: GetSessionProjectID :one
+SELECT project_id FROM sessions WHERE id = ?;
+
+-- name: GetWorkflowRunProjectID :one
+SELECT project_id FROM workflow_runs WHERE id = ?;

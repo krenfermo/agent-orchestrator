@@ -22,6 +22,26 @@ go build -o ./bin/ao ./cmd/ao
 Every product command resolves to a daemon HTTP route. Run `ao <command>
 --help` for the authoritative flag shape.
 
+### Authorization (P4-B)
+
+`ao` is a thin loopback client and carries **no session cookie**, so its
+authorization model is the loopback one:
+
+- On a normal (trusted-local) install, a cookie-less request resolves to the
+  bootstrap admin — the installation owner — and every command keeps the
+  authority it has always had. P4-B changes no CLI behavior here.
+- With `AO_AUTH_MODE=oidc`, trusted-local synthesis is off *by construction*,
+  so a cookie-less CLI request resolves no principal and any permission-gated
+  route answers `401 NOT_AUTHENTICATED`. That is deliberate: an installation
+  that requires single sign-on has asked for exactly that. CLI tokens are a
+  later slice and are not smuggled in through this one.
+- `ao admin reset-password` remains the loopback-only recovery path and is
+  unaffected — it is how an operator recovers an installation whose only
+  account they cannot sign into.
+
+The full model, including which permission each route family requires, is in
+[`docs/rbac.md`](../rbac.md).
+
 ### Daemon control
 
 | Command                       | Purpose                                                                                                                           |

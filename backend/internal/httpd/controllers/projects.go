@@ -41,6 +41,12 @@ type ProjectsController struct {
 	// single-user desktop flow (TrustedLocal default true) is completely
 	// unaffected by Ownership being wired.
 	TrustedLocal bool
+	// Guard is P4-B's authorization gate. When wired it REPLACES the 8P-A
+	// owner-equality checks below: a project is reachable because the caller
+	// holds a permission on it (as its owner, by a direct grant, or through a
+	// team), not because their user id matches a column. A zero Guard leaves
+	// the pre-P4-B behavior exactly as it was.
+	Guard Guard
 }
 
 // ownerForbidden reports whether a resource's stored owner (nil means
@@ -74,16 +80,8 @@ func (c *ProjectsController) testRepoConnection(w http.ResponseWriter, r *http.R
 		return
 	}
 	id := projectID(r)
-	if c.scopingEnforced() {
-		user, err := identity.Require(r)
-		if err != nil {
-			envelope.WriteError(w, r, err)
-			return
-		}
-		if !c.projectVisible(r.Context(), id, user.ID) {
-			envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "PROJECT_NOT_FOUND", "project not found", nil)
-			return
-		}
+	if !c.authorize(w, r, domain.PermProjectRead, id) {
+		return
 	}
 	var in TestRepoConnectionRequest
 	if err := decodeJSONStrict(r, &in); err != nil {
@@ -104,16 +102,8 @@ func (c *ProjectsController) refreshWorkspaceRepos(w http.ResponseWriter, r *htt
 		return
 	}
 	id := projectID(r)
-	if c.scopingEnforced() {
-		user, err := identity.Require(r)
-		if err != nil {
-			envelope.WriteError(w, r, err)
-			return
-		}
-		if !c.projectVisible(r.Context(), id, user.ID) {
-			envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "PROJECT_NOT_FOUND", "project not found", nil)
-			return
-		}
+	if !c.authorize(w, r, domain.PermProjectRead, id) {
+		return
 	}
 	p, err := c.Mgr.RefreshWorkspaceRepos(r.Context(), id)
 	if err != nil {
@@ -136,7 +126,23 @@ func (c *ProjectsController) list(w http.ResponseWriter, r *http.Request) {
 	if projects == nil {
 		projects = []projectsvc.Summary{}
 	}
-	if c.scopingEnforced() {
+	if c.Guard.Enabled() {
+		// One resolution for the whole list: the subject is computed once and
+		// every row is then decided in memory, so a project list costs the
+		// same three queries whether it returns two projects or two hundred.
+		sub, ok := c.Guard.Subject(r)
+		if !ok {
+			envelope.WriteError(w, r, identity.Unauthorized())
+			return
+		}
+		visible := make([]projectsvc.Summary, 0, len(projects))
+		for _, p := range projects {
+			if sub.CanSeeProject(p.ID) {
+				visible = append(visible, p)
+			}
+		}
+		projects = visible
+	} else if c.scopingEnforced() {
 		user, err := identity.Require(r)
 		if err != nil {
 			envelope.WriteError(w, r, err)
@@ -225,16 +231,8 @@ func (c *ProjectsController) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := projectID(r)
-	if c.scopingEnforced() {
-		user, err := identity.Require(r)
-		if err != nil {
-			envelope.WriteError(w, r, err)
-			return
-		}
-		if !c.projectVisible(r.Context(), id, user.ID) {
-			envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "PROJECT_NOT_FOUND", "project not found", nil)
-			return
-		}
+	if !c.authorize(w, r, domain.PermProjectRead, id) {
+		return
 	}
 	got, err := c.Mgr.Get(r.Context(), id)
 	if err != nil {
@@ -252,6 +250,9 @@ func (c *ProjectsController) get(w http.ResponseWriter, r *http.Request) {
 func (c *ProjectsController) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if c.Mgr == nil {
 		apispec.NotImplemented(w, r, "PUT", "/api/v1/projects/{id}")
+		return
+	}
+	if !c.authorize(w, r, domain.PermProjectManage, projectID(r)) {
 		return
 	}
 	var in projectsvc.UpdateSettingsInput
@@ -272,6 +273,9 @@ func (c *ProjectsController) setConfig(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "PUT", "/api/v1/projects/{id}/config")
 		return
 	}
+	if !c.authorize(w, r, domain.PermProjectManage, projectID(r)) {
+		return
+	}
 	var in projectsvc.SetConfigInput
 	if err := decodeJSONStrict(r, &in); err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
@@ -290,6 +294,9 @@ func (c *ProjectsController) remove(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "DELETE", "/api/v1/projects/{id}")
 		return
 	}
+	if !c.authorize(w, r, domain.PermProjectManage, projectID(r)) {
+		return
+	}
 	result, err := c.Mgr.Remove(r.Context(), projectID(r))
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -305,6 +312,32 @@ func (c *ProjectsController) remove(w http.ResponseWriter, r *http.Request) {
 // isn't wired (headless/test configurations without ownership storage).
 func (c *ProjectsController) scopingEnforced() bool {
 	return !c.TrustedLocal && c.Ownership != nil
+}
+
+// authorize is this controller's single authorization gate. With P4-B's Guard
+// wired it asks the canonical evaluator; without it, it falls back to 8P-A's
+// owner-equality visibility check, so every configuration that predates
+// authorization keeps its exact behavior.
+//
+// Both paths answer a denial with 404, never 403: a project id the caller
+// cannot reach must be indistinguishable from one that does not exist.
+func (c *ProjectsController) authorize(w http.ResponseWriter, r *http.Request, perm domain.Permission, id domain.ProjectID) bool {
+	if c.Guard.Enabled() {
+		return c.Guard.AllowProject(w, r, perm, id, "PROJECT_NOT_FOUND", "project not found")
+	}
+	if !c.scopingEnforced() {
+		return true
+	}
+	user, err := identity.Require(r)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return false
+	}
+	if !c.projectVisible(r.Context(), id, user.ID) {
+		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "PROJECT_NOT_FOUND", "project not found", nil)
+		return false
+	}
+	return true
 }
 
 // stampOwner records the creating user as a new project's owner. Runs

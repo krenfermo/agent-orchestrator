@@ -26,6 +26,12 @@ type SessionOwnershipStore interface {
 type SessionScoping struct {
 	Ownership    SessionOwnershipStore
 	TrustedLocal bool
+	// Guard is P4-B's authorization gate. When wired it REPLACES the
+	// owner-equality check below: a session is reachable because the caller
+	// may work in the session's PROJECT, which is what makes a teammate's
+	// session visible to the team that was granted the project and invisible
+	// to everyone else. A zero Guard leaves 8P-B.2's behavior untouched.
+	Guard Guard
 }
 
 func (s SessionScoping) enforced() bool {
@@ -61,6 +67,9 @@ func (s SessionScoping) enforced() bool {
 //     of owner), so no legacy desktop session becomes unreachable.
 //   - a session owned by a DIFFERENT user: denied.
 func AuthorizeSessionAccess(w http.ResponseWriter, r *http.Request, scoping SessionScoping, id domain.SessionID) bool {
+	if scoping.Guard.Enabled() {
+		return scoping.Guard.AllowSession(w, r, sessionPermissionFor(r.Method), id)
+	}
 	if !scoping.enforced() {
 		return true
 	}
@@ -75,4 +84,18 @@ func AuthorizeSessionAccess(w http.ResponseWriter, r *http.Request, scoping Sess
 		return false
 	}
 	return true
+}
+
+// sessionPermissionFor maps a request's verb to the permission it needs.
+// Reading a session's transcript and steering the agent inside it are
+// genuinely different authorities -- a viewer may watch work happen without
+// being able to type into it -- and the HTTP method is the honest signal for
+// which one a request is exercising.
+func sessionPermissionFor(method string) domain.Permission {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return domain.PermSessionRead
+	default:
+		return domain.PermSessionWrite
+	}
 }

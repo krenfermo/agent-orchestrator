@@ -103,10 +103,14 @@ type ReviewsController struct {
 	// 8P-B.2 §16).
 	Ownership    SessionOwnershipStore
 	TrustedLocal bool
+	// Guard is P4-B's authorization gate. When wired it replaces the 8P-A/8P-B
+	// owner-equality checks with the canonical permission evaluator; a zero
+	// Guard preserves the pre-P4-B behavior exactly.
+	Guard Guard
 }
 
 func (c *ReviewsController) scoping() SessionScoping {
-	return SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal}
+	return SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal, Guard: c.Guard}
 }
 
 func (c *ReviewsController) requireSessionAccess(next http.Handler) http.Handler {

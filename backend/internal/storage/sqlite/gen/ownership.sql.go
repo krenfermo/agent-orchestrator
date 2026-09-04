@@ -67,6 +67,22 @@ func (q *Queries) GetSessionOwner(ctx context.Context, id domain.SessionID) (*do
 	return owner_user_id, err
 }
 
+const getSessionProjectID = `-- name: GetSessionProjectID :one
+
+SELECT project_id FROM sessions WHERE id = ?
+`
+
+// P4-B: the project a session or a workflow run belongs to. Authorization for
+// a session/run is a question about its PROJECT, so the resolver needs the
+// project id and nothing else; selecting one indexed column keeps the gate off
+// the full row every request would otherwise load.
+func (q *Queries) GetSessionProjectID(ctx context.Context, id domain.SessionID) (domain.ProjectID, error) {
+	row := q.db.QueryRowContext(ctx, getSessionProjectID, id)
+	var project_id domain.ProjectID
+	err := row.Scan(&project_id)
+	return project_id, err
+}
+
 const getWorkflowRunOwner = `-- name: GetWorkflowRunOwner :one
 SELECT user_id FROM workflow_runs WHERE id = ?
 `
@@ -76,6 +92,17 @@ func (q *Queries) GetWorkflowRunOwner(ctx context.Context, id string) (*domain.U
 	var user_id *domain.UserID
 	err := row.Scan(&user_id)
 	return user_id, err
+}
+
+const getWorkflowRunProjectID = `-- name: GetWorkflowRunProjectID :one
+SELECT project_id FROM workflow_runs WHERE id = ?
+`
+
+func (q *Queries) GetWorkflowRunProjectID(ctx context.Context, id string) (domain.ProjectID, error) {
+	row := q.db.QueryRowContext(ctx, getWorkflowRunProjectID, id)
+	var project_id domain.ProjectID
+	err := row.Scan(&project_id)
+	return project_id, err
 }
 
 const listProjectIDsByOwner = `-- name: ListProjectIDsByOwner :many

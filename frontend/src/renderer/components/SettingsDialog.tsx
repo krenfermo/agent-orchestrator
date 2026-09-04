@@ -9,6 +9,7 @@ import {
 	MonitorCog,
 	RefreshCw,
 	Settings2,
+	ShieldCheck,
 	TriangleAlert,
 	UserCircle,
 	X,
@@ -35,6 +36,7 @@ import {
 	settingsDialogHeaderClass,
 } from "./ui/dialog";
 import { type SettingsModal, useUiStore } from "../stores/ui-store";
+import { useCanAny } from "../stores/auth-store";
 import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 
@@ -44,6 +46,7 @@ export function SettingsDialog() {
 	const closeSettings = useUiStore((state) => state.closeSettings);
 	const openGlobalSettings = useUiStore((state) => state.openGlobalSettings);
 	const openProjectSettings = useUiStore((state) => state.openProjectSettings);
+	const canAdminister = useCanAny("users.read", "teams.read");
 	const [keyboardShortcutsOpen, setKeyboardShortcutsOpen] = useState(false);
 	const [connectMobileOpen, setConnectMobileOpen] = useState(false);
 	const keyboardShortcutsRestoreRef = useRef<SettingsModal | null>(null);
@@ -67,6 +70,13 @@ export function SettingsDialog() {
 		{ id: "projects", label: "Projects", icon: FolderGit2 },
 		{ id: "updates", label: t("settings.updates"), icon: RefreshCw },
 		{ id: "account", label: t("settings.account"), icon: UserCircle },
+		// P4-B: the administration entry appears only when the BACKEND reports a
+		// capability for it. Hiding it is convenience, not authorization -- the
+		// routes behind it refuse a caller without the permission whether or not
+		// this row was ever rendered.
+		...(canAdminister
+			? [{ id: "access" as const, label: t("settings.access"), icon: ShieldCheck }]
+			: []),
 		{ id: "help", label: t("settings.help"), icon: CircleHelp },
 	];
 
@@ -75,6 +85,11 @@ export function SettingsDialog() {
 		{ id: "agents", label: t("settings.project.agents"), icon: Bot },
 		{ id: "workflow", label: t("settings.project.workflow"), icon: GitBranch },
 		{ id: "intake", label: t("settings.project.intake"), icon: Inbox },
+		// Project access is always offered: unlike the installation-wide
+		// administration entry, whether the caller may CHANGE it is a per-project
+		// answer only the daemon has, and the panel renders read-only when it
+		// reports no manage permission.
+		{ id: "access", label: t("settings.project.access"), icon: ShieldCheck },
 	];
 
 	const isProjectSettings = displaySettings?.scope === "project";

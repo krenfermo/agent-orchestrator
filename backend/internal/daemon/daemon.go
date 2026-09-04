@@ -47,6 +47,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/secretbox"
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
 	authsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/authsvc"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/authz"
 	browsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/browser"
 	capacitysvc "github.com/aoagents/agent-orchestrator/backend/internal/service/capacity"
 	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
@@ -61,6 +62,7 @@ import (
 	providerprofilesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providerprofile"
 	providersetupsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providersetup"
 	questionssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/questions"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/rbac"
 	settingssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/settings"
 	ssosvc "github.com/aoagents/agent-orchestrator/backend/internal/service/ssosvc"
 	usagesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/usage"
@@ -210,6 +212,16 @@ func RunWithConfig(cfg config.Config) error {
 
 	telemetrySink := newTelemetrySink(cfg, store, log)
 	defer func() { _ = telemetrySink.Close(context.Background()) }()
+
+	// P4-B: authorization. authzSvc is the ONE evaluator every transport asks
+	// "may this principal do X?"; rbacSvc is the write side that manages
+	// accounts, teams and project access under the owner-safety invariants.
+	// Both are wired on every boot for the same reason authMgr is: the answer
+	// to an authorization question must not depend on which optional surface
+	// happened to be configured.
+	authzSvc := authz.New(store)
+	rbacSvc := rbac.New(store, authsvcCreator{authMgr}, rbac.LogAudit{Log: log, Sink: telemetrySink}, nil)
+
 	telemetrySink.Emit(context.Background(), ports.TelemetryEvent{
 		Name:       "ao.daemon.started",
 		Source:     "daemon",
@@ -765,6 +777,9 @@ func RunWithConfig(cfg config.Config) error {
 		ProjectOwnership:    store,
 		WorkflowOwnership:   store,
 		SessionOwnership:    store,
+		Authz:               authzSvc,
+		ProjectScope:        store,
+		RBAC:                rbacSvc,
 		ProviderProfiles:    providerProfilesSvc,
 		ProviderSetup:       providerSetupSvc,
 		ExecutionPolicy:     executionPolicySvc,
@@ -936,6 +951,24 @@ func usageEvidenceSource(log *slog.Logger) *baselineevidence.DirSource {
 		return nil
 	}
 	return source
+}
+
+// authsvcCreator adapts authsvc.Manager to rbac.UserCreator. P4-B does not
+// reimplement account creation -- password hashing, uniqueness and the
+// single-owner index all belong to the identity layer P4-A finished -- so this
+// is the one place the two input structs are translated between, exactly like
+// federatedSessionIssuer below.
+type authsvcCreator struct{ mgr authsvc.Manager }
+
+// CreateUser implements rbac.UserCreator.
+func (c authsvcCreator) CreateUser(ctx context.Context, in rbac.CreateUserInput) (domain.User, error) {
+	return c.mgr.CreateUser(ctx, authsvc.CreateUserInput{
+		DisplayName: in.DisplayName,
+		Email:       in.Email,
+		Username:    in.Username,
+		Password:    in.Password,
+		Role:        in.Role,
+	})
 }
 
 // federatedSessionIssuer adapts authsvc.Manager to ssosvc.SessionIssuer. The
