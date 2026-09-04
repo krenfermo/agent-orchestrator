@@ -37,9 +37,14 @@ type Service struct {
 	// linkedWorktree is the P2-E worktree guard, injectable for tests.
 	linkedWorktree func(ctx context.Context, path string) (string, bool)
 	graph          MemoryGraph
-	limits         IndexLimits
-	now            func() time.Time
-	log            *slog.Logger
+	// codeGraph is the OPTIONAL structural half (migration 0153). A nil one is
+	// the pre-phase behaviour and is fully supported: every path that reads it
+	// degrades to the memory AO already had, with a stated reason.
+	codeGraph    CodeGraph
+	graphBudgets GraphBudgetSet
+	limits       IndexLimits
+	now          func() time.Time
+	log          *slog.Logger
 }
 
 // ServiceOption configures a Service.
@@ -60,6 +65,26 @@ func WithGraph(g MemoryGraph) ServiceOption {
 	return func(s *Service) {
 		if g != nil {
 			s.graph = g
+		}
+	}
+}
+
+// WithCodeGraph attaches the structural code graph.
+//
+// It is deliberately a separate option from WithGraph. MemoryGraph is the
+// relationship port over project memory's own edges and is never absent -- the
+// local backend is always there. CodeGraph is the symbol-level structural index
+// and IS allowed to be absent: an installation that has not built one, or whose
+// build failed, must keep dispatching on the memory it already had.
+func WithCodeGraph(g CodeGraph) ServiceOption {
+	return func(s *Service) { s.codeGraph = g }
+}
+
+// WithGraphBudgets replaces the per-role bounds on graph evidence.
+func WithGraphBudgets(b GraphBudgetSet) ServiceOption {
+	return func(s *Service) {
+		if len(b) > 0 {
+			s.graphBudgets = b
 		}
 	}
 }
@@ -86,10 +111,11 @@ func WithIndexerLimits(l IndexLimits) ServiceOption {
 // happens to pass its options the other way round.
 func NewService(repo Repository, opts ...ServiceOption) *Service {
 	s := &Service{
-		repo:   repo,
-		now:    func() time.Time { return time.Now().UTC() },
-		graph:  NewLocalGraph(repo),
-		limits: DefaultIndexLimits(),
+		repo:         repo,
+		now:          func() time.Time { return time.Now().UTC() },
+		graph:        NewLocalGraph(repo),
+		graphBudgets: DefaultGraphBudgets(),
+		limits:       DefaultIndexLimits(),
 	}
 	for _, o := range opts {
 		o(s)
@@ -106,6 +132,14 @@ func NewService(repo Repository, opts ...ServiceOption) *Service {
 // Graph exposes the wired graph backend, so an operator surface can report
 // which one is actually in use.
 func (s *Service) Graph() MemoryGraph { return s.graph }
+
+// CodeGraph exposes the structural index, or nil when none is wired. Operator
+// surfaces read it to report the backend and its state; nothing on the
+// dispatch path may assume it is non-nil.
+func (s *Service) CodeGraph() CodeGraph { return s.codeGraph }
+
+// GraphBudgets returns the per-role bounds on graph evidence.
+func (s *Service) GraphBudgets() GraphBudgetSet { return s.graphBudgets }
 
 // --- indexing -------------------------------------------------------------
 
@@ -421,8 +455,23 @@ func (s *Service) Context(ctx context.Context, req PackRequest) ContextPack {
 				FallbackReason: fmt.Sprintf("project memory could not be read (%v)", err),
 			},
 		}
+		// Even here the graph may still have something: durable memory being
+		// unreadable does not make the structural index unreadable, and a
+		// dispatch that can still be told where the code lives is better off
+		// than one told nothing.
+		if canonical, pathErr := canonicalRepoPath(req.RepoPath); pathErr == nil {
+			degraded.Graph = s.graphEvidence(ctx, req, domain.ProjectMemoryRepoID(canonical), s.graphBudgets.For(role))
+		}
 		degraded.Digest = digestOf(degraded.Render())
 		return degraded
+	}
+	pack.Graph = s.graphEvidence(ctx, req, pack.RepoID, s.graphBudgets.For(pack.Role))
+	if !pack.Graph.Empty() {
+		// The digest is what proves two dispatches were given the same memory,
+		// so it has to cover everything the pack renders -- graph evidence
+		// included, or a changed structural answer would look like an
+		// unchanged premise.
+		pack.Digest = digestOf(pack.Render())
 	}
 	return pack
 }

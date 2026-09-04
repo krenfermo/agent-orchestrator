@@ -63,10 +63,16 @@ type CacheKey struct {
 	// ChangeMark is the instant this repository's memory last changed in any
 	// way that can alter what is servable. Nanoseconds, so two demotions in one
 	// millisecond are still two keys.
-	ChangeMark    int64
-	Role          PackRole
-	PolicyVersion int
-	Budget        RoleBudget
+	ChangeMark int64
+	// GraphGeneration is the code graph's served generation. It is part of the
+	// key because graph evidence is part of the pack: a graph rebuilt between
+	// two otherwise identical dispatches is entitled to a different answer, and
+	// a cache that ignored it would serve the first dispatch's structure to the
+	// second.
+	GraphGeneration int64
+	Role            PackRole
+	PolicyVersion   int
+	Budget          RoleBudget
 	// Scope is the digest of everything about the REQUEST that changes
 	// selection: the changed paths, the modules, the keywords and the task
 	// ref. It is a digest rather than the values so the key stays fixed-width
@@ -80,8 +86,9 @@ func (k CacheKey) String() string {
 	h := sha256.New()
 	// hash.Hash.Write never errors; the discard matches the idiom used
 	// throughout this package rather than a swallowed failure.
-	_, _ = fmt.Fprintf(h, "v%d\x00%s\x00%s\x00%s\x00%d\x00%d\x00%s\x00%d/%d/%d\x00%s",
-		k.PolicyVersion, k.ProjectID, k.RepoID, k.IndexedCommit, k.Generation, k.ChangeMark, k.Role,
+	_, _ = fmt.Fprintf(h, "v%d\x00%s\x00%s\x00%s\x00%d\x00%d\x00%d\x00%s\x00%d/%d/%d\x00%s",
+		k.PolicyVersion, k.ProjectID, k.RepoID, k.IndexedCommit, k.Generation, k.ChangeMark,
+		k.GraphGeneration, k.Role,
 		k.Budget.MaxBytes, k.Budget.MaxItems, k.Budget.MaxDocuments, k.Scope)
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }

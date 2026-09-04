@@ -90,6 +90,10 @@ type Freshness struct {
 	// FilesRead counts paths this check actually opened. It is the honest
 	// measure of what the warm path costs, and on a no-op sync it is zero.
 	FilesRead int
+	// Graph is what the code-graph sync did, when one is wired. A zero value
+	// with Attempted false means no structural graph is configured, which is
+	// the pre-phase behaviour and not a degradation.
+	Graph GraphFreshness
 }
 
 // Healthy reports whether memory may be served for this dispatch.
@@ -242,6 +246,11 @@ func (s *Syncer) EnsureFresh(ctx context.Context, projectID domain.ProjectID, re
 	// read that answers "already there" without touching the filesystem.
 	if fresh, ok := s.alreadyCurrent(ctx, projectID, repoID, commit); ok {
 		s.bump(func(st *SyncStats) { st.NoOp++ })
+		// Project memory is current; the code graph may still not be, because
+		// it can be enabled, rebuilt or purged independently. Its own warm
+		// path is one row read, so asking is nearly free and never asking
+		// would leave a project permanently unindexed after memory warmed.
+		fresh.Graph = s.syncGraph(ctx, projectID, canonical, repoID, commit, branch)
 		fresh.Duration = s.now().Sub(started)
 		return fresh
 	}
@@ -350,6 +359,21 @@ func (s *Syncer) runSync(
 ) Freshness {
 	syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.SyncTimeout)
 	defer cancel()
+
+	fresh := s.runMemorySync(syncCtx, ctx, projectID, repoPath, repoID, commit, branch)
+	// The graph is brought to the same commit AFTER memory and never instead
+	// of it. It runs on the same derived context, so it inherits the timeout
+	// and the detachment from the caller; and its result is attached rather
+	// than merged, because a graph that failed must not make memory look
+	// unhealthy.
+	fresh.Graph = s.syncGraph(syncCtx, projectID, repoPath, repoID, commit, branch)
+	return fresh
+}
+
+// runMemorySync is the project-memory half of a sync.
+func (s *Syncer) runMemorySync(
+	syncCtx, ctx context.Context, projectID domain.ProjectID, repoPath, repoID, commit, branch string,
+) Freshness {
 
 	out, err := s.svc.Sync(syncCtx, projectID, repoPath, commit, branch)
 	switch {

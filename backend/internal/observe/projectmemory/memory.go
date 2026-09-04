@@ -79,6 +79,57 @@ type MemoryMetrics struct {
 	// used. It is the honest counterpart to DedupeSavedBytes.
 	FallbackBytes int `json:"fallbackBytes"`
 
+	// --- code graph (the structural source category) --------------------
+	//
+	// Additive and omitempty, for the same reason the shared-knowledge block
+	// below is: a dispatch with no code graph produces byte-for-byte the record
+	// it produced before this phase, and a consumer that predates it keeps
+	// reading every record.
+	//
+	// The pair that carries the argument is GraphSymbolsConsidered against
+	// GraphSymbolsSelected. "The graph contributed 1,800 bytes" says nothing on
+	// its own; "it considered 340 symbols and sent 24" is a bounded retrieval
+	// doing its job, and "it considered 340 and sent 340" is a budget that
+	// never binds.
+
+	// GraphBackend names the implementation that produced the graph. It is
+	// reported by its real name and never as a vendor's -- see
+	// docs/usage-accounting.md on why LocalGraph is not called Graphify.
+	GraphBackend string `json:"graphBackend,omitempty"`
+	// GraphGeneration and GraphIndexedCommit are the graph's provenance, which
+	// may legitimately differ from the memory generation above: the two halves
+	// are synced together but versioned separately.
+	GraphGeneration    int64  `json:"graphGeneration,omitempty"`
+	GraphIndexedCommit string `json:"graphIndexedCommit,omitempty"`
+	// GraphSyncKind is what the graph sync had to do ("full", "incremental",
+	// "noop"), and GraphFilesParsed against GraphFilesReused is the evidence
+	// that an incremental sync costs a file's work rather than a repository's.
+	GraphSyncKind    string `json:"graphSyncKind,omitempty"`
+	GraphFilesParsed int    `json:"graphFilesParsed,omitempty"`
+	GraphFilesReused int    `json:"graphFilesReused,omitempty"`
+	GraphSyncMillis  int64  `json:"graphSyncMillis,omitempty"`
+	// GraphSymbols and GraphEdges size the served graph.
+	GraphSymbols int `json:"graphSymbols,omitempty"`
+	GraphEdges   int `json:"graphEdges,omitempty"`
+	// What the graph contributed to THIS dispatch's context.
+	GraphSymbolsConsidered int `json:"graphSymbolsConsidered,omitempty"`
+	GraphSymbolsSelected   int `json:"graphSymbolsSelected,omitempty"`
+	GraphEdgesConsidered   int `json:"graphEdgesConsidered,omitempty"`
+	GraphEdgesSelected     int `json:"graphEdgesSelected,omitempty"`
+	// GraphBytes is what the rendered graph section weighs, and
+	// EstimatedGraphTokens is that at the shared four-bytes-per-token
+	// estimate.
+	//
+	// It is IN ADDITION to PackBytes, not a subset of it: PackBytes counts the
+	// durable facts selection chose, and the graph is a separate source
+	// category with its own budget. ContextBytes below includes both, so the
+	// total stays the honest one.
+	GraphBytes           int `json:"graphBytes,omitempty"`
+	EstimatedGraphTokens int `json:"estimatedGraphTokens,omitempty"`
+	// GraphFallbackReason says why the graph contributed nothing, when it
+	// contributed nothing.
+	GraphFallbackReason string `json:"graphFallbackReason,omitempty"`
+
 	// CacheHit reports whether the pack came from the pack cache.
 	CacheHit bool `json:"cacheHit"`
 	// CacheKey is the authority the pack was cached under, for diagnosing a
