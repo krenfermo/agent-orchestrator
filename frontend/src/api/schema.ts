@@ -760,6 +760,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/memory/graph": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The code graph's state per repository: which backend is serving it (by its real name -- the in-tree one is reported as "local" and never under a vendor's name), which generation and commit, how many files, symbols and relations it holds, what the last sync had to do, and the bounded architecture summary derived from it. drift is non-empty when the graph can no longer be vouched for -- the checkout moved on, or it is no longer the same repository -- and such a graph is reported unhealthy even though its rows are intact. */
+        get: operations["getProjectMemoryGraphStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/graph/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Ask the code graph what a dispatch would be told. Given a symbol, a file, or free text from an objective, it returns the bounded neighbourhood: the matching declarations with their signatures and summaries, what reaches them, what they reach, the tests proven to cover them, the routes that arrive at them and the tables they touch. consideredSymbols against the returned count is what makes the bound visible. */
+        get: operations["queryProjectMemoryGraph"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/memory/graph/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Bring one repository's code graph up to its current commit. It chooses incremental or full exactly as a dispatch would, so an operator running it by hand exercises the production path: incremental whenever a change set can be proved, a full build otherwise. filesParsed against filesReused is the measurement -- an incremental sync of a one-file commit parses one file, and a full pass over an unchanged tree parses none. */
+        post: operations["syncProjectMemoryGraph"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/memory/invalidate": {
         parameters: {
             query?: never;
@@ -3768,6 +3819,9 @@ export interface components {
         ControllersListCapacityResponse: {
             capacity: components["schemas"]["ControllersCapacitySnapshotResponse"][];
         };
+        ControllersListProjectMemoryGraphResponse: {
+            repositories: components["schemas"]["ControllersProjectMemoryGraphStatusResponse"][];
+        };
         ControllersListProjectMemoryItemsResponse: {
             items: components["schemas"]["ControllersProjectMemoryItemResponse"][];
             repoId: string;
@@ -3843,6 +3897,95 @@ export interface components {
             /** Format: date-time */
             expiresAt: string;
             flowId: string;
+        };
+        ControllersProjectMemoryGraphAnswerResponse: {
+            callees: components["schemas"]["ControllersProjectMemoryGraphEdgeResponse"][];
+            callers: components["schemas"]["ControllersProjectMemoryGraphEdgeResponse"][];
+            consideredEdges: number;
+            consideredSymbols: number;
+            endpoints: components["schemas"]["ControllersProjectMemoryGraphSymbolResponse"][];
+            files: string[];
+            /** Format: int64 */
+            generation: number;
+            indexedCommit?: string;
+            reason?: string;
+            repoId: string;
+            symbols: components["schemas"]["ControllersProjectMemoryGraphSymbolResponse"][];
+            tables: string[];
+            tests: components["schemas"]["ControllersProjectMemoryGraphSymbolResponse"][];
+            truncated?: boolean;
+        };
+        ControllersProjectMemoryGraphEdgeResponse: {
+            from: string;
+            kind: string;
+            line?: number;
+            to: string;
+        };
+        ControllersProjectMemoryGraphStatusResponse: {
+            architecture?: string;
+            backend: string;
+            drift?: string;
+            /** Format: int64 */
+            edges: number;
+            /** Format: int64 */
+            files: number;
+            /** Format: int64 */
+            filesParsed: number;
+            /** Format: int64 */
+            filesRemoved: number;
+            /** Format: int64 */
+            filesReused: number;
+            /** Format: int64 */
+            generation: number;
+            healthy: boolean;
+            indexedCommit?: string;
+            lastError?: string;
+            /** Format: int64 */
+            lastMillis: number;
+            lastSyncKind?: string;
+            phase: string;
+            repoId: string;
+            repoIdentity?: string;
+            repoPath: string;
+            /** Format: int64 */
+            symbols: number;
+            updatedAt?: string;
+        };
+        ControllersProjectMemoryGraphSymbolResponse: {
+            exported?: boolean;
+            id: string;
+            kind: string;
+            line: number;
+            name: string;
+            path: string;
+            reason?: string;
+            /** Format: double */
+            score?: number;
+            signature?: string;
+            summary?: string;
+        };
+        ControllersProjectMemoryGraphSyncResponse: {
+            edges: number;
+            edgesAdded: number;
+            edgesRemoved: number;
+            files: number;
+            filesParsed: number;
+            filesRemoved: number;
+            filesReused: number;
+            filesScanned: number;
+            /** Format: int64 */
+            generation: number;
+            indexedCommit?: string;
+            kind: string;
+            /** Format: int64 */
+            millis: number;
+            reason?: string;
+            repoId: string;
+            repoPath: string;
+            symbols: number;
+            symbolsAdded: number;
+            symbolsRemoved: number;
+            truncated?: boolean;
         };
         ControllersProjectMemoryItemResponse: {
             /** @enum {string} */
@@ -9507,6 +9650,163 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ControllersListProjectMemoryResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectMemoryGraphStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersListProjectMemoryGraphResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    queryProjectMemoryGraph: {
+        parameters: {
+            query?: {
+                /** @description Repository root to query. Defaults to the project's own root, which is the single-repo case. */
+                repoPath?: string;
+                /** @description A declaration to start from, by name ("Records.MayExport") or by full symbol id. Ranks above every other signal. */
+                symbol?: string;
+                /** @description A repo-relative file to anchor on. Every symbol declared in it becomes a candidate. */
+                path?: string;
+                /** @description Free text from an objective, space- or comma-separated. The weakest signal, and the one that finds a starting point when nothing else is known. */
+                terms?: string;
+                /** @description Maximum symbols to return. Zero uses the retrieval default. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProjectMemoryGraphAnswerResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    syncProjectMemoryGraph: {
+        parameters: {
+            query?: {
+                /** @description Repository root to sync. Defaults to the project's own root. */
+                repoPath?: string;
+                /** @description Force a full rebuild instead of applying the diff since the indexed commit. It is the repair for a graph an operator has reason to distrust; an ordinary sync picks incremental whenever it can prove a change set. */
+                full?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProjectMemoryGraphSyncResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
                 };
             };
             /** @description Internal Server Error */

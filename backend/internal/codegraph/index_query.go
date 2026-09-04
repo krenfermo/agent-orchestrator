@@ -144,72 +144,93 @@ func roleOf(record store.CodeGraphSymbolRecord) string {
 // expandDurable pulls the bounded relation neighbourhood around the selected
 // symbols: what they reach, what reaches them, which tests cover them, which
 // routes arrive at them, which tables they touch.
+//
+// It does so in three round trips, whatever the neighbourhood's size: the
+// edges leaving the selection, the edges arriving at it, and one read of the
+// files those edges live in. The first version did one query per symbol per
+// direction, and measurement on a synthetic thousand-file repository found
+// exactly what that costs -- retrieval scaling with the size of the graph,
+// which is the one thing a dispatch-path read may not do.
 func (ix *Index) expandDurable(
 	ctx context.Context, projectID domain.ProjectID, repoID string, generation int64,
 	out *Neighborhood, req RetrieveRequest,
 ) error {
-	tables := map[string]bool{}
+	fromKeys := make([]string, 0, len(out.Symbols))
+	toKeys := make([]string, 0, len(out.Symbols)*3)
 	files := map[string]bool{}
-	testIDs := map[string]bool{}
-	endpointIDs := map[string]bool{}
-	seenCallee := map[string]bool{}
-	seenCaller := map[string]bool{}
-
+	seenKey := map[string]bool{}
 	for _, selected := range out.Symbols {
 		sym := selected.Symbol
 		files[sym.File] = true
-
-		outgoing, err := ix.repo.ListCodeGraphEdgesFrom(ctx, projectID, repoID, generation, sym.ID, edgeFanOut)
-		if err != nil {
-			return err
-		}
-		out.ConsideredEdges += len(outgoing)
-		for _, edge := range outgoing {
-			key := edge.Kind + "\x00" + edge.FromKey + "\x00" + edge.ToKey
-			if seenCallee[key] {
+		fromKeys = append(fromKeys, sym.ID)
+		for _, key := range incomingKeys(sym) {
+			if key == "" || seenKey[key] {
 				continue
 			}
-			seenCallee[key] = true
-			out.Callees = append(out.Callees, Edge{
-				Kind: EdgeKind(edge.Kind), From: edge.FromKey, To: edge.ToKey, Line: int(edge.Line),
-			})
-			if edge.Kind == string(EdgeReadsFrom) || edge.Kind == string(EdgeWritesTo) {
-				tables[edge.ToKey] = true
-			}
-		}
-
-		// Incoming edges are matched by NAME as well as by id: a caller writes
-		// `s.Delete`, not the callee's identity, so resolving by name at read
-		// time is the only honest way to find it.
-		for _, key := range incomingKeys(sym) {
-			incoming, err := ix.repo.ListCodeGraphEdgesTo(ctx, projectID, repoID, generation, key, edgeFanOut)
-			if err != nil {
-				return err
-			}
-			out.ConsideredEdges += len(incoming)
-			for _, edge := range incoming {
-				dedupeKey := edge.Kind + "\x00" + edge.FromKey + "\x00" + edge.ToKey
-				if seenCaller[dedupeKey] {
-					continue
-				}
-				seenCaller[dedupeKey] = true
-				out.Callers = append(out.Callers, Edge{
-					Kind: EdgeKind(edge.Kind), From: edge.FromKey, To: edge.ToKey, Line: int(edge.Line),
-				})
-				files[edge.Path] = true
-				switch edge.Kind {
-				case string(EdgeTests):
-					if err := ix.appendSymbol(ctx, projectID, repoID, generation, edge, testIDs, &out.Tests); err != nil {
-						return err
-					}
-				case string(EdgeRoutesTo):
-					if err := ix.appendSymbol(ctx, projectID, repoID, generation, edge, endpointIDs, &out.Endpoints); err != nil {
-						return err
-					}
-				}
-			}
+			seenKey[key] = true
+			toKeys = append(toKeys, key)
 		}
 	}
+
+	outgoing, err := ix.repo.ListCodeGraphEdgesFromKeys(ctx, projectID, repoID, generation, fromKeys)
+	if err != nil {
+		return err
+	}
+	incoming, err := ix.repo.ListCodeGraphEdgesToKeys(ctx, projectID, repoID, generation, toKeys)
+	if err != nil {
+		return err
+	}
+	out.ConsideredEdges += len(outgoing) + len(incoming)
+
+	tables := map[string]bool{}
+	perSymbol := map[string]int{}
+	for _, edge := range outgoing {
+		if perSymbol[edge.FromKey] >= edgeFanOut {
+			// A symbol that reaches four hundred things does not need four
+			// hundred of them named. The cap is on the ANSWER; the edges are
+			// all still in the graph and all still counted above.
+			out.Truncated = true
+			continue
+		}
+		perSymbol[edge.FromKey]++
+		out.Callees = append(out.Callees, Edge{
+			Kind: EdgeKind(edge.Kind), From: edge.FromKey, To: edge.ToKey, Line: int(edge.Line),
+		})
+		if edge.Kind == string(EdgeReadsFrom) || edge.Kind == string(EdgeWritesTo) {
+			tables[edge.ToKey] = true
+		}
+	}
+
+	// Incoming edges are matched by NAME as well as by id: a caller writes
+	// `s.Delete`, not the callee's identity, so resolving by name at read time
+	// is the only honest way to find it.
+	perTarget := map[string]int{}
+	var testEdges, routeEdges []store.CodeGraphEdgeRecord
+	for _, edge := range incoming {
+		if perTarget[edge.ToKey] >= edgeFanOut {
+			out.Truncated = true
+			continue
+		}
+		perTarget[edge.ToKey]++
+		out.Callers = append(out.Callers, Edge{
+			Kind: EdgeKind(edge.Kind), From: edge.FromKey, To: edge.ToKey, Line: int(edge.Line),
+		})
+		files[edge.Path] = true
+		switch edge.Kind {
+		case string(EdgeTests):
+			testEdges = append(testEdges, edge)
+		case string(EdgeRoutesTo):
+			routeEdges = append(routeEdges, edge)
+		}
+	}
+
+	// One read for every file those edges live in, then resolve from memory.
+	resolved, err := ix.resolveSources(ctx, projectID, repoID, generation, testEdges, routeEdges)
+	if err != nil {
+		return err
+	}
+	out.Tests = pickSources(testEdges, resolved)
+	out.Endpoints = pickSources(routeEdges, resolved)
 
 	sortEdges(out.Callers)
 	sortEdges(out.Callees)
@@ -228,6 +249,62 @@ func (ix *Index) expandDurable(
 	return nil
 }
 
+// resolveSources reads the files a set of edges originate in, once each, and
+// returns their declarations by symbol id.
+func (ix *Index) resolveSources(
+	ctx context.Context, projectID domain.ProjectID, repoID string, generation int64,
+	groups ...[]store.CodeGraphEdgeRecord,
+) (map[string]Symbol, error) {
+	seen := map[string]bool{}
+	var paths []string
+	for _, group := range groups {
+		for _, edge := range group {
+			if edge.Path == "" || seen[edge.Path] {
+				continue
+			}
+			seen[edge.Path] = true
+			paths = append(paths, edge.Path)
+			if len(paths) >= maxResolvedPaths {
+				break
+			}
+		}
+	}
+	records, err := ix.repo.ListCodeGraphSymbolsForPaths(ctx, projectID, repoID, generation, paths)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]Symbol, len(records))
+	for _, record := range records {
+		out[record.SymbolID] = symbolFromRecord(record)
+	}
+	return out, nil
+}
+
+// pickSources turns edges into the declarations they start at, bounded and
+// deduplicated.
+func pickSources(edges []store.CodeGraphEdgeRecord, resolved map[string]Symbol) []Symbol {
+	seen := map[string]bool{}
+	var out []Symbol
+	for _, edge := range edges {
+		if seen[edge.FromKey] || len(out) >= maxResolvedSymbols {
+			continue
+		}
+		seen[edge.FromKey] = true
+		if sym, ok := resolved[edge.FromKey]; ok {
+			out = append(out, sym)
+		}
+	}
+	return out
+}
+
+// Answer bounds. A symbol exercised by three hundred tests does not need three
+// hundred of them named, and reading three hundred files to find that out is
+// the cost this cap exists to refuse.
+const (
+	maxResolvedSymbols = 24
+	maxResolvedPaths   = 64
+)
+
 // incomingKeys are the names an edge could use to reach a symbol: its id, its
 // qualified name, and -- for a method -- its bare name.
 func incomingKeys(sym Symbol) []string {
@@ -236,28 +313,6 @@ func incomingKeys(sym Symbol) []string {
 		keys = append(keys, member)
 	}
 	return keys
-}
-
-// appendSymbol resolves an edge's source to the declaration it belongs to.
-func (ix *Index) appendSymbol(
-	ctx context.Context, projectID domain.ProjectID, repoID string, generation int64,
-	edge store.CodeGraphEdgeRecord, seen map[string]bool, into *[]Symbol,
-) error {
-	if seen[edge.FromKey] {
-		return nil
-	}
-	seen[edge.FromKey] = true
-	records, err := ix.repo.ListCodeGraphSymbolsForPath(ctx, projectID, repoID, generation, edge.Path)
-	if err != nil {
-		return err
-	}
-	for _, record := range records {
-		if record.SymbolID == edge.FromKey {
-			*into = append(*into, symbolFromRecord(record))
-			return nil
-		}
-	}
-	return nil
 }
 
 // Architecture returns the stored structural summary for a repository.

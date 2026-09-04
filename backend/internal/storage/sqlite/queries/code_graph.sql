@@ -304,3 +304,32 @@ ORDER BY path, symbol_id;
 SELECT * FROM code_graph_edges
 WHERE project_id = ? AND repo_id = ? AND generation = ?
 ORDER BY path, edge_id;
+
+-- name: ListCodeGraphEdgesFromKeys :many
+-- The batched form of ListCodeGraphEdgesFrom, and the one retrieval uses.
+--
+-- One round trip for a whole neighbourhood rather than one per symbol. That is
+-- not micro-optimisation: measurement on a synthetic thousand-file repository
+-- found retrieval scaling with the graph, and the cause was ninety-six
+-- separate statements per query, each paying its own preparation cost.
+SELECT * FROM code_graph_edges
+WHERE project_id = ? AND repo_id = ? AND generation = ?
+  AND from_key IN (sqlc.slice('keys'))
+ORDER BY from_key, edge_id;
+
+-- name: ListCodeGraphEdgesToKeys :many
+SELECT * FROM code_graph_edges
+WHERE project_id = ? AND repo_id = ? AND generation = ?
+  AND to_key IN (sqlc.slice('keys'))
+ORDER BY to_key, edge_id;
+
+-- name: ListCodeGraphSymbolsForPaths :many
+SELECT * FROM code_graph_symbols
+WHERE project_id = ? AND repo_id = ? AND generation = ?
+  AND path IN (sqlc.slice('paths'))
+ORDER BY path, symbol_id;
+
+-- name: ListCodeGraphEdgesForPath :many
+SELECT * FROM code_graph_edges
+WHERE project_id = ? AND repo_id = ? AND generation = ? AND path = ?
+ORDER BY edge_id;

@@ -8,6 +8,7 @@ package gen
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -618,6 +619,58 @@ func (q *Queries) ListCodeGraphEdges(ctx context.Context, arg ListCodeGraphEdges
 	return items, nil
 }
 
+const listCodeGraphEdgesForPath = `-- name: ListCodeGraphEdgesForPath :many
+SELECT project_id, repo_id, generation, edge_id, path, kind, from_key, to_key, line, updated_at FROM code_graph_edges
+WHERE project_id = ? AND repo_id = ? AND generation = ? AND path = ?
+ORDER BY edge_id
+`
+
+type ListCodeGraphEdgesForPathParams struct {
+	ProjectID  string
+	RepoID     string
+	Generation int64
+	Path       string
+}
+
+func (q *Queries) ListCodeGraphEdgesForPath(ctx context.Context, arg ListCodeGraphEdgesForPathParams) ([]CodeGraphEdge, error) {
+	rows, err := q.db.QueryContext(ctx, listCodeGraphEdgesForPath,
+		arg.ProjectID,
+		arg.RepoID,
+		arg.Generation,
+		arg.Path,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CodeGraphEdge{}
+	for rows.Next() {
+		var i CodeGraphEdge
+		if err := rows.Scan(
+			&i.ProjectID,
+			&i.RepoID,
+			&i.Generation,
+			&i.EdgeID,
+			&i.Path,
+			&i.Kind,
+			&i.FromKey,
+			&i.ToKey,
+			&i.Line,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCodeGraphEdgesFrom = `-- name: ListCodeGraphEdgesFrom :many
 SELECT project_id, repo_id, generation, edge_id, path, kind, from_key, to_key, line, updated_at FROM code_graph_edges
 WHERE project_id = ? AND repo_id = ? AND generation = ? AND from_key = ?
@@ -673,6 +726,73 @@ func (q *Queries) ListCodeGraphEdgesFrom(ctx context.Context, arg ListCodeGraphE
 	return items, nil
 }
 
+const listCodeGraphEdgesFromKeys = `-- name: ListCodeGraphEdgesFromKeys :many
+SELECT project_id, repo_id, generation, edge_id, path, kind, from_key, to_key, line, updated_at FROM code_graph_edges
+WHERE project_id = ? AND repo_id = ? AND generation = ?
+  AND from_key IN (/*SLICE:keys*/?)
+ORDER BY from_key, edge_id
+`
+
+type ListCodeGraphEdgesFromKeysParams struct {
+	ProjectID  string
+	RepoID     string
+	Generation int64
+	Keys       []string
+}
+
+// The batched form of ListCodeGraphEdgesFrom, and the one retrieval uses.
+//
+// One round trip for a whole neighbourhood rather than one per symbol. That is
+// not micro-optimisation: measurement on a synthetic thousand-file repository
+// found retrieval scaling with the graph, and the cause was ninety-six
+// separate statements per query, each paying its own preparation cost.
+func (q *Queries) ListCodeGraphEdgesFromKeys(ctx context.Context, arg ListCodeGraphEdgesFromKeysParams) ([]CodeGraphEdge, error) {
+	query := listCodeGraphEdgesFromKeys
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.ProjectID)
+	queryParams = append(queryParams, arg.RepoID)
+	queryParams = append(queryParams, arg.Generation)
+	if len(arg.Keys) > 0 {
+		for _, v := range arg.Keys {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:keys*/?", strings.Repeat(",?", len(arg.Keys))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:keys*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CodeGraphEdge{}
+	for rows.Next() {
+		var i CodeGraphEdge
+		if err := rows.Scan(
+			&i.ProjectID,
+			&i.RepoID,
+			&i.Generation,
+			&i.EdgeID,
+			&i.Path,
+			&i.Kind,
+			&i.FromKey,
+			&i.ToKey,
+			&i.Line,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCodeGraphEdgesTo = `-- name: ListCodeGraphEdgesTo :many
 SELECT project_id, repo_id, generation, edge_id, path, kind, from_key, to_key, line, updated_at FROM code_graph_edges
 WHERE project_id = ? AND repo_id = ? AND generation = ? AND to_key = ?
@@ -696,6 +816,67 @@ func (q *Queries) ListCodeGraphEdgesTo(ctx context.Context, arg ListCodeGraphEdg
 		arg.ToKey,
 		arg.Limit,
 	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CodeGraphEdge{}
+	for rows.Next() {
+		var i CodeGraphEdge
+		if err := rows.Scan(
+			&i.ProjectID,
+			&i.RepoID,
+			&i.Generation,
+			&i.EdgeID,
+			&i.Path,
+			&i.Kind,
+			&i.FromKey,
+			&i.ToKey,
+			&i.Line,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCodeGraphEdgesToKeys = `-- name: ListCodeGraphEdgesToKeys :many
+SELECT project_id, repo_id, generation, edge_id, path, kind, from_key, to_key, line, updated_at FROM code_graph_edges
+WHERE project_id = ? AND repo_id = ? AND generation = ?
+  AND to_key IN (/*SLICE:keys*/?)
+ORDER BY to_key, edge_id
+`
+
+type ListCodeGraphEdgesToKeysParams struct {
+	ProjectID  string
+	RepoID     string
+	Generation int64
+	Keys       []string
+}
+
+func (q *Queries) ListCodeGraphEdgesToKeys(ctx context.Context, arg ListCodeGraphEdgesToKeysParams) ([]CodeGraphEdge, error) {
+	query := listCodeGraphEdgesToKeys
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.ProjectID)
+	queryParams = append(queryParams, arg.RepoID)
+	queryParams = append(queryParams, arg.Generation)
+	if len(arg.Keys) > 0 {
+		for _, v := range arg.Keys {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:keys*/?", strings.Repeat(",?", len(arg.Keys))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:keys*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
 	if err != nil {
 		return nil, err
 	}
@@ -968,6 +1149,74 @@ func (q *Queries) ListCodeGraphSymbolsForPath(ctx context.Context, arg ListCodeG
 		arg.Generation,
 		arg.Path,
 	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CodeGraphSymbol{}
+	for rows.Next() {
+		var i CodeGraphSymbol
+		if err := rows.Scan(
+			&i.ProjectID,
+			&i.RepoID,
+			&i.Generation,
+			&i.SymbolID,
+			&i.Path,
+			&i.Name,
+			&i.Kind,
+			&i.Language,
+			&i.Line,
+			&i.EndLine,
+			&i.Signature,
+			&i.Doc,
+			&i.Summary,
+			&i.SummarySource,
+			&i.Exported,
+			&i.BodyHash,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCodeGraphSymbolsForPaths = `-- name: ListCodeGraphSymbolsForPaths :many
+SELECT project_id, repo_id, generation, symbol_id, path, name, kind, language, line, end_line, signature, doc, summary, summary_source, exported, body_hash, updated_at FROM code_graph_symbols
+WHERE project_id = ? AND repo_id = ? AND generation = ?
+  AND path IN (/*SLICE:paths*/?)
+ORDER BY path, symbol_id
+`
+
+type ListCodeGraphSymbolsForPathsParams struct {
+	ProjectID  string
+	RepoID     string
+	Generation int64
+	Paths      []string
+}
+
+func (q *Queries) ListCodeGraphSymbolsForPaths(ctx context.Context, arg ListCodeGraphSymbolsForPathsParams) ([]CodeGraphSymbol, error) {
+	query := listCodeGraphSymbolsForPaths
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.ProjectID)
+	queryParams = append(queryParams, arg.RepoID)
+	queryParams = append(queryParams, arg.Generation)
+	if len(arg.Paths) > 0 {
+		for _, v := range arg.Paths {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:paths*/?", strings.Repeat(",?", len(arg.Paths))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:paths*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
 	if err != nil {
 		return nil, err
 	}

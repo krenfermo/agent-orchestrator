@@ -701,6 +701,15 @@ func RunWithConfig(cfg config.Config) error {
 	// provider connected after the policy was first saved does not stay
 	// invisible to Settings. Shared with APIDeps.ExecutionPolicy below so both
 	// surfaces read and repair the same policy through one implementation.
+	// ONE project-memory service instance backs both API surfaces: the memory
+	// routes and the code-graph routes are two views of the same subsystem,
+	// and giving them separate resolvers would give them separate opinions
+	// about which repository a project id means.
+	memoryAPI := projectmemorysvc.New(projectMemory, store).
+		WithProvisioner(memoryProvisioning).
+		WithWorkspaces(store).
+		WithGraph(codeGraph)
+
 	executionPolicySvc := &executionpolicysvc.Service{Store: store}
 	providerProfilesSvc := &providerprofilesvc.Service{
 		Store:      store,
@@ -760,9 +769,14 @@ func RunWithConfig(cfg config.Config) error {
 		// widened ledger: what AO sent and what a provider reported receiving
 		// are different quantities, and one reader that could return both is
 		// one refactor away from adding them.
-		UsageContext:  usagesvc.NewContextReader(usageEvidenceSource(log)),
-		Capacity:      capacitysvc.NewReader(store),
-		ProjectMemory: projectmemorysvc.New(projectMemory, store).WithProvisioner(memoryProvisioning).WithWorkspaces(store),
+		UsageContext: usagesvc.NewContextReader(usageEvidenceSource(log)),
+		Capacity:     capacitysvc.NewReader(store),
+		// ONE service instance backs both surfaces: the memory routes and the
+		// code-graph routes are two views of the same subsystem, and giving
+		// them separate resolvers would give them separate opinions about
+		// which repository a project id means.
+		ProjectMemory:      memoryAPI,
+		ProjectMemoryGraph: memoryAPI,
 		Questions: &questionssvc.AnswerService{
 			Store: store, Runs: store, Sender: rawSessionMgr, Logger: log,
 			// P3-D: the answer is recorded first and delivered second, and the

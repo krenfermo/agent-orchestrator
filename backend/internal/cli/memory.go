@@ -15,6 +15,7 @@ import (
 //	ao memory inspect <project>             the individual facts, stale ones included
 //	ao memory rebuild <project>             re-derive it
 //	ao memory invalidate <project>          retire what can no longer be proven
+//	ao memory graph <project>               the structural half (see memory_graph.go)
 //
 // The deliberate shape here mirrors `ao capacity status`: the CLI prints what
 // the daemon decided and classifies nothing itself, so an operator's preview
@@ -126,6 +127,7 @@ func newMemoryCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newMemoryRisksCommand(ctx))
 	cmd.AddCommand(newMemoryTaskCommand(ctx))
 	cmd.AddCommand(newMemoryContextCommand(ctx))
+	cmd.AddCommand(newMemoryGraphCommand(ctx))
 	return cmd
 }
 

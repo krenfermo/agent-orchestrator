@@ -423,6 +423,12 @@ func (ix *Index) Apply(ctx context.Context, req SyncRequest, diff Diff) (SyncOut
 	generation := state.ServedGeneration
 	out := SyncOutcome{Kind: store.CodeGraphSyncIncremental, Generation: generation}
 	changed := map[string]bool{}
+	// structural records whether anything the ARCHITECTURE summary is derived
+	// from could have moved. Most edits cannot move it -- a rewritten function
+	// body changes no module, no endpoint, no table and no dependency -- and
+	// recomputing a whole-repository census for each of those is the single
+	// most expensive thing an ordinary task could pay for. See architectural().
+	structural := false
 
 	changes := append([]FileChange(nil), diff.Changes...)
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
@@ -438,6 +444,9 @@ func (ix *Index) Apply(ctx context.Context, req SyncRequest, diff Diff) (SyncOut
 		out.FilesScanned++
 		switch change.Status {
 		case ChangeDeleted:
+			// A file appearing or disappearing changes the census outright:
+			// the module list, the language mix, the entry points.
+			structural = true
 			if err := ix.dropPath(ctx, req, generation, rel, &out, changed); err != nil {
 				return SyncOutcome{}, err
 			}
@@ -446,6 +455,7 @@ func (ix *Index) Apply(ctx context.Context, req SyncRequest, diff Diff) (SyncOut
 			// part of a symbol's identity. So a rename is a delete and a
 			// create, recorded as both -- which is also the honest description
 			// of what happened to anything that referred to the old path.
+			structural = true
 			if old := normalizeRel(change.OldPath); old != "" && old != rel {
 				if err := ix.dropPath(ctx, req, generation, old, &out, changed); err != nil {
 					return SyncOutcome{}, err
@@ -455,9 +465,14 @@ func (ix *Index) Apply(ctx context.Context, req SyncRequest, diff Diff) (SyncOut
 				return SyncOutcome{}, err
 			}
 		case ChangeAdded, ChangeModified:
-			if err := ix.syncPath(ctx, req, root, generation, rel, &out, changed); err != nil {
+			if change.Status == ChangeAdded {
+				structural = true
+			}
+			moved, err := ix.syncPathTracked(ctx, req, root, generation, rel, &out, changed)
+			if err != nil {
 				return SyncOutcome{}, err
 			}
+			structural = structural || moved
 		default:
 			return SyncOutcome{}, fmt.Errorf("codegraph: unsupported change status %q for %q", change.Status, rel)
 		}
@@ -467,14 +482,71 @@ func (ix *Index) Apply(ctx context.Context, req SyncRequest, diff Diff) (SyncOut
 		out.Kind = store.CodeGraphSyncNoop
 		out.Reason = "no indexed file changed between the two commits"
 	}
-	return ix.finishApply(ctx, req, state, out, changed, started)
+	return ix.finishApply(ctx, req, state, out, changed, structural, started)
+}
+
+// syncPathTracked is syncPath plus the answer to "could this have moved the
+// architecture", which is decided by comparing the file's ARCHITECTURAL
+// fingerprint before and after: its role, the surfaces it declares (endpoints,
+// tables, queries, configuration keys), and what it imports.
+//
+// Two small reads of one file, against a census over every file. That is the
+// whole trade, and it is why an ordinary task's sync costs a file's work.
+func (ix *Index) syncPathTracked(
+	ctx context.Context, req SyncRequest, root string, generation int64, rel string,
+	out *SyncOutcome, changed map[string]bool,
+) (bool, error) {
+	before, err := ix.architectural(ctx, req, generation, rel)
+	if err != nil {
+		return false, err
+	}
+	if err := ix.syncPath(ctx, req, root, generation, rel, out, changed); err != nil {
+		return false, err
+	}
+	after, err := ix.architectural(ctx, req, generation, rel)
+	if err != nil {
+		return false, err
+	}
+	return before != after, nil
+}
+
+// architectural fingerprints the part of one file that the architecture
+// summary is derived from.
+//
+// Deliberately NOT the whole file: a changed function body, a renamed local, a
+// new unexported helper all leave this identical, because none of them appear
+// anywhere in the summary. What does appear is the file's surfaces and its
+// dependencies, and those are what is hashed.
+func (ix *Index) architectural(ctx context.Context, req SyncRequest, generation int64, rel string) (string, error) {
+	symbols, err := ix.repo.ListCodeGraphSymbolsForPath(ctx, req.ProjectID, req.RepoID, generation, rel)
+	if err != nil {
+		return "", err
+	}
+	edges, err := ix.repo.ListCodeGraphEdgesForPath(ctx, req.ProjectID, req.RepoID, generation, rel)
+	if err != nil {
+		return "", err
+	}
+	var parts []string
+	for _, sym := range symbols {
+		switch SymbolKind(sym.Kind) {
+		case SymbolEndpoint, SymbolTable, SymbolQuery, SymbolConfig:
+			parts = append(parts, sym.Kind+":"+sym.Name)
+		}
+	}
+	for _, edge := range edges {
+		if edge.Kind == string(EdgeImport) || edge.Kind == string(EdgeTests) {
+			parts = append(parts, edge.Kind+":"+edge.ToKey)
+		}
+	}
+	sort.Strings(parts)
+	return hashBytes([]byte(strings.Join(parts, "\x00"))), nil
 }
 
 // finishApply records an in-place update, refreshing the architecture summary
 // only when something actually moved.
 func (ix *Index) finishApply(
 	ctx context.Context, req SyncRequest, state store.CodeGraphState,
-	out SyncOutcome, changed map[string]bool, started time.Time,
+	out SyncOutcome, changed map[string]bool, structural bool, started time.Time,
 ) (SyncOutcome, error) {
 	generation := state.ServedGeneration
 	files, symbols, edges, err := ix.repo.CountCodeGraph(ctx, req.ProjectID, req.RepoID, generation)
@@ -484,13 +556,28 @@ func (ix *Index) finishApply(
 	out.Files, out.Symbols, out.Edges = int(files), int(symbols), int(edges)
 
 	rendered, encoded := state.Architecture, state.ArchitectureJSON
-	if out.Changed() {
-		// Recomputed only when the graph moved. A no-op sync must not pay for
-		// a census, and a census over an unchanged graph would produce the
-		// same bytes anyway.
+	switch {
+	case !out.Changed():
+		// A no-op sync must not pay for a census, and a census over an
+		// unchanged graph would produce the same bytes anyway.
+	case structural:
+		// Something the summary is actually derived from moved: a file
+		// appeared or vanished, a route or a table was declared, a dependency
+		// changed. Recompute it properly.
 		if rendered, encoded, err = ix.renderArchitecture(ctx, req, generation); err != nil {
 			return SyncOutcome{}, err
 		}
+	default:
+		// The commonest case by far: bodies changed and structure did not. The
+		// summary's SHAPE is unchanged; only its totals and its provenance
+		// moved, and those are already in hand from the row counts. Refreshing
+		// them is one decode and one render, against a census over every file
+		// in the repository.
+		if rendered, encoded, err = ix.refreshArchitectureCounts(state, req.Commit, files, symbols, edges); err != nil {
+			return SyncOutcome{}, err
+		}
+	}
+	if out.Changed() {
 		if out.AffectedSymbols, err = ix.affectedBy(ctx, req, generation, changed); err != nil {
 			return SyncOutcome{}, err
 		}
@@ -748,6 +835,38 @@ func (ix *Index) renderArchitecture(ctx context.Context, req SyncRequest, genera
 	arch := graph.Architecture()
 	arch.ProjectRoot = req.RepoPath
 	arch.IndexedCommit = req.Commit
+	payload, err := json.Marshal(arch)
+	if err != nil {
+		return "", "", fmt.Errorf("encode architecture summary: %w", err)
+	}
+	return arch.Render(), string(payload), nil
+}
+
+// refreshArchitectureCounts updates a stored summary's totals and provenance
+// without recomputing it.
+//
+// It is only ever reached when the pass proved nothing structural moved, so
+// what it produces is the same summary with correct numbers -- not a stale one
+// dressed up. A stored summary that will not decode falls back to the full
+// recompute rather than being patched blind.
+func (ix *Index) refreshArchitectureCounts(
+	state store.CodeGraphState, commit string, files, symbols, edges int64,
+) (rendered, encoded string, err error) {
+	if state.ArchitectureJSON == "" {
+		return state.Architecture, state.ArchitectureJSON, nil
+	}
+	var arch Architecture
+	if decodeErr := json.Unmarshal([]byte(state.ArchitectureJSON), &arch); decodeErr != nil {
+		if ix.log != nil {
+			ix.log.Warn("code graph: stored architecture summary would not decode; keeping the previous one",
+				"repo", state.RepoID, "err", decodeErr)
+		}
+		return state.Architecture, state.ArchitectureJSON, nil
+	}
+	arch.Files, arch.Symbols, arch.Edges = int(files), int(symbols), int(edges)
+	if commit != "" {
+		arch.IndexedCommit = commit
+	}
 	payload, err := json.Marshal(arch)
 	if err != nil {
 		return "", "", fmt.Errorf("encode architecture summary: %w", err)

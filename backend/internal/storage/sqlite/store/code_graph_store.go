@@ -866,3 +866,69 @@ func (s *Store) LoadCodeGraph(
 	}
 	return files, codeGraphSymbolsFromRows(symbolRows), codeGraphEdgesFromRows(edgeRows), nil
 }
+
+// ListCodeGraphEdgesFromKeys is the batched traversal outward. Retrieval uses
+// it in place of one query per symbol: a bounded neighbourhood is one round
+// trip, whatever its size.
+func (s *Store) ListCodeGraphEdgesFromKeys(
+	ctx context.Context, projectID domain.ProjectID, repoID string, generation int64, keys []string,
+) ([]CodeGraphEdgeRecord, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	rows, err := s.qr.ListCodeGraphEdgesFromKeys(ctx, gen.ListCodeGraphEdgesFromKeysParams{
+		ProjectID: string(projectID), RepoID: repoID, Generation: generation, Keys: keys,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list code graph edges from keys: %w", err)
+	}
+	return codeGraphEdgesFromRows(rows), nil
+}
+
+// ListCodeGraphEdgesToKeys is the batched traversal inward.
+func (s *Store) ListCodeGraphEdgesToKeys(
+	ctx context.Context, projectID domain.ProjectID, repoID string, generation int64, keys []string,
+) ([]CodeGraphEdgeRecord, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	rows, err := s.qr.ListCodeGraphEdgesToKeys(ctx, gen.ListCodeGraphEdgesToKeysParams{
+		ProjectID: string(projectID), RepoID: repoID, Generation: generation, Keys: keys,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list code graph edges to keys: %w", err)
+	}
+	return codeGraphEdgesFromRows(rows), nil
+}
+
+// ListCodeGraphSymbolsForPaths reads several files' declarations at once, so
+// resolving a set of edges back to their declarations costs one statement.
+func (s *Store) ListCodeGraphSymbolsForPaths(
+	ctx context.Context, projectID domain.ProjectID, repoID string, generation int64, paths []string,
+) ([]CodeGraphSymbolRecord, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	rows, err := s.qr.ListCodeGraphSymbolsForPaths(ctx, gen.ListCodeGraphSymbolsForPathsParams{
+		ProjectID: string(projectID), RepoID: repoID, Generation: generation, Paths: paths,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list code graph symbols for paths: %w", err)
+	}
+	return codeGraphSymbolsFromRows(rows), nil
+}
+
+// ListCodeGraphEdgesForPath reads one file's relations. An incremental update
+// uses it to decide whether a change could have moved the ARCHITECTURE, which
+// is a different and much cheaper question than recomputing the architecture.
+func (s *Store) ListCodeGraphEdgesForPath(
+	ctx context.Context, projectID domain.ProjectID, repoID string, generation int64, path string,
+) ([]CodeGraphEdgeRecord, error) {
+	rows, err := s.qr.ListCodeGraphEdgesForPath(ctx, gen.ListCodeGraphEdgesForPathParams{
+		ProjectID: string(projectID), RepoID: repoID, Generation: generation, Path: path,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list code graph edges for path: %w", err)
+	}
+	return codeGraphEdgesFromRows(rows), nil
+}

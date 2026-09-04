@@ -73,6 +73,18 @@ type Repository interface {
 	ListCodeGraphEdgesFrom(ctx context.Context, projectID domain.ProjectID, repoID string, generation int64, from string, limit int64) ([]store.CodeGraphEdgeRecord, error)
 	// ListCodeGraphEdgesTo traverses inward to a node key.
 	ListCodeGraphEdgesTo(ctx context.Context, projectID domain.ProjectID, repoID string, generation int64, to string, limit int64) ([]store.CodeGraphEdgeRecord, error)
+	// ListCodeGraphEdgesFromKeys and ListCodeGraphEdgesToKeys are the batched
+	// forms, and the ones the dispatch path uses. A bounded neighbourhood
+	// costs one round trip in each direction rather than one per symbol --
+	// which is what keeps retrieval from scaling with the size of the graph.
+	ListCodeGraphEdgesFromKeys(ctx context.Context, projectID domain.ProjectID, repoID string, generation int64, keys []string) ([]store.CodeGraphEdgeRecord, error)
+	ListCodeGraphEdgesToKeys(ctx context.Context, projectID domain.ProjectID, repoID string, generation int64, keys []string) ([]store.CodeGraphEdgeRecord, error)
+	// ListCodeGraphSymbolsForPaths reads several files' declarations at once.
+	ListCodeGraphSymbolsForPaths(ctx context.Context, projectID domain.ProjectID, repoID string, generation int64, paths []string) ([]store.CodeGraphSymbolRecord, error)
+	// ListCodeGraphEdgesForPath reads one file's relations, which is how an
+	// incremental update decides whether a change could have moved the
+	// architecture summary.
+	ListCodeGraphEdgesForPath(ctx context.Context, projectID domain.ProjectID, repoID string, generation int64, path string) ([]store.CodeGraphEdgeRecord, error)
 	// LoadCodeGraph reads a whole generation back, for the architecture
 	// summary only.
 	LoadCodeGraph(ctx context.Context, projectID domain.ProjectID, repoID string, generation int64) ([]store.CodeGraphFileRecord, []store.CodeGraphSymbolRecord, []store.CodeGraphEdgeRecord, error)

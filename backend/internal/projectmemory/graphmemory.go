@@ -286,7 +286,7 @@ func (s *Syncer) graphPass(
 		}
 		return s.svc.codeGraph.Build(ctx, req)
 	}
-	return s.svc.codeGraph.Apply(ctx, req, graphDiff(changes))
+	return s.svc.codeGraph.Apply(ctx, req, GraphDiff(changes))
 }
 
 // graphDegraded records a graph failure as a degradation and never as an error.
@@ -298,12 +298,14 @@ func (s *Syncer) graphDegraded(fresh GraphFreshness, reason string) GraphFreshne
 	return fresh
 }
 
-// graphDiff converts project memory's change set into the graph's.
+// GraphDiff converts project memory's change set into the graph's.
 //
 // The two vocabularies are both git's, which is why this is a mapping rather
 // than a translation: one change set is computed, once, and both halves of
-// memory are updated from it.
-func graphDiff(changes []PathChange) codegraph.Diff {
+// memory are updated from it. It is exported because the operator-facing
+// service performs the same sync by hand, and two mappings of one vocabulary
+// is how the hand path and the dispatch path drift apart.
+func GraphDiff(changes []PathChange) codegraph.Diff {
 	diff := codegraph.Diff{Changes: make([]codegraph.FileChange, 0, len(changes))}
 	for _, change := range changes {
 		var status codegraph.ChangeStatus
