@@ -584,3 +584,49 @@ func TestContextComparisonWithAndWithoutTheGraph(t *testing.T) {
 		t.Fatal("no token estimate for the graph's contribution")
 	}
 }
+
+// TestPreferredModeAttachesGraphEvidenceAndStillPointsAtTheWorkingTree is
+// section 16's third mode.
+//
+// The rule the brief states directly is the one worth a test: **Preferred must
+// not be incapable of checking source code.** Preferred ranks memory first and
+// may replace legacy documents it demonstrably covers; it does not, and must
+// not, tell an agent that the graph is the truth. The pack says the opposite in
+// its own preamble, and graph evidence does not change that.
+func TestPreferredModeAttachesGraphEvidenceAndStillPointsAtTheWorkingTree(t *testing.T) {
+	f, svc, _, root := graphFixture(t)
+	if _, err := svc.Index(f.ctx, projectmemory.IndexRequest{
+		ProjectID: testProject, RepoPath: root, Commit: "c1", Branch: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := projectmemory.Config{
+		Mode: projectmemory.ModePreferred, SyncTimeout: projectmemory.DefaultConfig().SyncTimeout,
+		Budgets: projectmemory.DefaultBudgets(),
+	}
+	got := projectmemory.NewProvisioner(svc, cfg).Provision(f.ctx, projectmemory.ProvisionRequest{
+		ProjectID: testProject, RepoPath: root, Role: projectmemory.RoleWorker,
+		ChangedPaths: []string{"internal/service/records.go"},
+		Keywords:     []string{"export", "supervisor"},
+	})
+
+	if got.Pack.Graph.Empty() {
+		t.Fatalf("preferred mode attached no graph evidence: %+v", got.Pack.Graph)
+	}
+	rendered := got.Render()
+	if !strings.Contains(rendered, "(code graph)") {
+		t.Fatalf("graph evidence is not in the rendered pack:\n%s", rendered)
+	}
+	// The working tree stays the authority, in the same words every other mode
+	// uses. A mode that quietly dropped that sentence would be telling an
+	// agent not to look.
+	if !strings.Contains(rendered, "the working tree is correct and this is out of date") {
+		t.Fatalf("preferred mode stopped saying the working tree is authoritative:\n%s", rendered)
+	}
+	// Graph evidence is never used to justify dropping a document. A symbol
+	// summary does not cover a README, and claiming it did would remove a
+	// source AO cannot replace.
+	if got.Metrics.DedupeSavedBytes > 0 && got.Metrics.PackItems == 0 {
+		t.Fatalf("documents were replaced with nothing but graph evidence: %+v", got.Metrics)
+	}
+}
