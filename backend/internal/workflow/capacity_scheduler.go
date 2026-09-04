@@ -694,3 +694,25 @@ type stepKindKey struct {
 	stepID string
 	kind   domain.ExecutionKind
 }
+
+// heldClaimFor reads back the held claim a just-granted request produced, so a
+// caller that has only the request can bind the runtime it went on to launch.
+//
+// F6: the reviewer dispatch is the caller. It is the one launch path whose
+// runtime never gets a `sessions` row, so bindRuntimesToClaims -- which
+// resolves a runtime through the step's session -- can never bind its claim.
+// Without a bound claim the runtime is invisible to Runtime GC's protection
+// and gets collected as unreferenced on the next sweep.
+func (c *Coordinator) heldClaimFor(ctx stdctx.Context, req capacityRequest) (domain.CapacityClaim, bool, error) {
+	if !c.capacityEnabled() {
+		return domain.CapacityClaim{}, false, nil
+	}
+	claim, found, err := c.capacity.GetCapacityClaim(ctx, req.dispatchKey())
+	if err != nil || !found {
+		return domain.CapacityClaim{}, false, err
+	}
+	if claim.State != domain.CapacityClaimHeld {
+		return domain.CapacityClaim{}, false, nil
+	}
+	return claim, true, nil
+}

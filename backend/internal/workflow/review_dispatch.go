@@ -1522,6 +1522,28 @@ func (c *Coordinator) dispatchReviewFromPending(
 	}
 	launchedRef := ReviewerRef{HandleID: launch.HandleID, InstanceID: launch.InstanceID}
 
+	// F6: the capacity claim that paid for this reviewer learns WHICH runtime
+	// it paid for, here, in the same window that first records the launch.
+	//
+	// Runtime GC protects a live runtime only when a held claim names its
+	// instance (runtimegc.protectedInstances). A reviewer's claim could never
+	// acquire that name: bindRuntimesToClaims resolves a runtime through
+	// step.SessionID -> sessions row -> Metadata.RuntimeHandleID, and a reviewer
+	// runs in an AO runtime that has NO sessions row of its own. So every
+	// reviewer claim stayed held-but-unbound, protected nothing, and the first
+	// GC sweep after a restart classified the live reviewer as
+	// `unreferenced_owned_session` and destroyed it -- taking a review AO was
+	// actively waiting on. Binding from the launch result closes that: the
+	// incarnation is known here and nowhere earlier.
+	//
+	// Best-effort, exactly as bindRuntimesToClaims is: the claim is the
+	// authority and this is evidence. A crash before it lands leaves the
+	// pre-existing behaviour, which the ReviewLaunchIntended probe path already
+	// resolves by adopting or cleanly relaunching.
+	if held, ok, cerr := c.heldClaimFor(ctx, capReq); cerr == nil && ok {
+		c.bindCapacityRuntime(ctx, held, launch.HandleID, launch.InstanceID)
+	}
+
 	// P3-E: the reviewer's own attribution window, keyed on the REVIEW RUN --
 	// the same durable authority the pane's environment carries as its usage
 	// subject. The two must be identical or the reviewer's events resolve to no

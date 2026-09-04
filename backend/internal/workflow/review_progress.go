@@ -97,6 +97,25 @@ func (c *Coordinator) observeReviewStep(ctx stdctx.Context, run domain.WorkflowR
 			if stalled := c.reviewerSessionStalled(ctx, reviewRun, latestCP.CreatedAt); stalled {
 				return c.handleReviewerCapacityStall(ctx, run, step, reviewRun, now)
 			}
+			// F6: the session-activity signal above cannot see a reviewer that
+			// died before it ever produced one. reviewerSessionStalled requires
+			// LastActivityAt to be AFTER the dispatch -- an anti-race guard so a
+			// worker's leftover idle state is not misread as an instant stall --
+			// and a reviewer killed between its launch and its first hook never
+			// advances that timestamp. The run then waited out the full
+			// 30-minute reviewStalenessThreshold and ended at
+			// ambiguous_review_state: a person summoned for a condition AO
+			// created and could have recovered from.
+			//
+			// So the runtime itself is asked. A confirmed reviewer whose
+			// incarnation is provably gone is a stall by the plainest evidence
+			// there is, and it routes to exactly the same recovery an idle-turn
+			// stall does -- the step rests at waiting and the ordinary dispatch
+			// cascade re-enters, which is what keeps this one reviewer per
+			// cycle rather than a second one.
+			if c.reviewerRuntimeGone(ctx, run, step, reviewRun) {
+				return c.handleReviewerCapacityStall(ctx, run, step, reviewRun, now)
+			}
 		}
 		if hasCP && elapsed > reviewStalenessThreshold {
 			return c.stopReviewAmbiguous(ctx, run, step,
@@ -665,4 +684,35 @@ func (c *Coordinator) reviewObservationIsRedundant(
 	default:
 		return *reviewRunID == *latest.ReviewRunID
 	}
+}
+
+// reviewerRuntimeGone reports that a review AO durably CONFIRMED it launched no
+// longer has a runtime.
+//
+// It answers only for a confirmed launch carrying an exact incarnation. An
+// intent that was never confirmed is a different question with its own probe
+// path (adoptExistingReviewRun), and a ref with no instance identifies nothing
+// this could honestly ask about.
+//
+// Every uncertain answer is false. `unknown` means the probe could not tell,
+// and `foreign` means something else owns that name -- neither is proof this
+// reviewer is gone, and acting on either would risk launching a second reviewer
+// over a live one. Only proven absence counts, which is the same asymmetry
+// ReviewerPresence.LicensesLaunch already encodes.
+func (c *Coordinator) reviewerRuntimeGone(
+	ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, reviewRun domain.ReviewRun,
+) bool {
+	ensurer, ok := c.reviewerEnsurer()
+	if !ok {
+		return false
+	}
+	phase, ref := c.reviewLaunchPhaseFor(ctx, run.ID, step.ID, reviewRun.ID)
+	if phase != ReviewLaunchConfirmed || !ref.Known() {
+		return false
+	}
+	obs, err := ensurer.ProbeReviewer(ctx, ref)
+	if err != nil {
+		return false
+	}
+	return obs.Presence == ReviewerPresenceAbsent
 }
