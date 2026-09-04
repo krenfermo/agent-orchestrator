@@ -13,6 +13,16 @@ vi.mock("../lib/bridge", () => ({
 	},
 }));
 
+// The shared renderer setup defines window.ao, so platform-adapter's
+// module-load snapshot reports "desktop" for every test in this file. Each case
+// that cares states the platform it means instead of inheriting that.
+let desktopMode = true;
+
+vi.mock("../lib/platform-adapter", async () => {
+	const actual = await vi.importActual<typeof import("../lib/platform-adapter")>("../lib/platform-adapter");
+	return { ...actual, isDesktopMode: () => desktopMode };
+});
+
 vi.mock("../lib/api-client", async () => {
 	const actual = await vi.importActual<typeof import("../lib/api-client")>("../lib/api-client");
 	return {
@@ -31,6 +41,7 @@ describe("auth-store", () => {
 		ssoSignIn.mockReset();
 		openExternal.mockReset();
 		openExternal.mockResolvedValue(undefined);
+		desktopMode = true;
 		useAuthStore.setState({
 			user: null,
 			status: "loading",
@@ -197,7 +208,25 @@ describe("auth-store", () => {
 			expect(apiPOST).not.toHaveBeenCalled();
 		});
 
+		// B5: in Electron the bridge is the whole flow. A cancelled or timed-out
+		// desktop sign-in must not turn into a page navigation at the provider —
+		// main.ts's will-navigate guard blocks it, so the only visible effect was
+		// a button stuck on "Opening…".
+		it("ends the attempt in the desktop app instead of navigating the window", async () => {
+			ssoSignIn.mockResolvedValue({ status: "cancelled" });
+			const assign = vi.fn();
+			vi.stubGlobal("window", { ao: {}, location: { pathname: "/board", search: "", assign } });
+
+			await useAuthStore.getState().startSso();
+
+			expect(assign).not.toHaveBeenCalled();
+			expect(apiPOST).not.toHaveBeenCalled();
+			expect(useAuthStore.getState().ssoPending).toBe(false);
+			vi.unstubAllGlobals();
+		});
+
 		it("falls back to a browser navigation when there is no supervisor", async () => {
+			desktopMode = false;
 			ssoSignIn.mockResolvedValue({ status: "cancelled" });
 			apiPOST.mockResolvedValue({ data: { authorizationUrl: "https://idp.example/authorize?x=1", flowId: "f1" } });
 			const assign = vi.fn();

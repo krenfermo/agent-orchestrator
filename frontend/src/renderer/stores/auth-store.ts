@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { apiClient, apiErrorMessage, hasTrustedApiBaseUrl } from "../lib/api-client";
 import { aoBridge } from "../lib/bridge";
+import { isDesktopMode } from "../lib/platform-adapter";
 import type { components } from "../../api/schema";
 
 type UserView = components["schemas"]["ControllersUserView"];
@@ -254,6 +255,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 			const outcome = await aoBridge.auth.ssoSignIn();
 			if (outcome.status === "complete") {
 				await get().load();
+				return;
+			}
+			// In the desktop app the bridge IS the sign-in path, so "cancelled"
+			// (the person closed the browser tab, or the claim poll timed out) is
+			// the end of the attempt. Falling through would navigate the app window
+			// itself at the provider — main.ts's will-navigate guard blocks that, so
+			// nothing moved and ssoPending never cleared, leaving the button stuck
+			// on "Opening…" forever.
+			if (isDesktopMode()) {
+				set({ ssoPending: false });
 				return;
 			}
 		} catch (bridgeError) {
