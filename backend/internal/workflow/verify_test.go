@@ -23,6 +23,13 @@ type fakeVerifyRunner struct {
 	calls  int
 	last   workflowcore.VerifyCommandRequest
 	after  func()
+	// decide, when set, computes this execution's outcome from the REQUEST
+	// rather than replaying a canned one. It is what lets a verification's
+	// verdict depend on the repository the command was pointed at, which is
+	// the whole basis of the repair certification harness
+	// (repair_lifecycle_test.go): a second pass must pass because the tree was
+	// repaired, never because it is the second pass.
+	decide func(workflowcore.VerifyCommandRequest) (workflowcore.VerifyCommandExecution, error)
 }
 
 func (f *fakeVerifyRunner) Run(_ context.Context, req workflowcore.VerifyCommandRequest) (workflowcore.VerifyCommandExecution, error) {
@@ -30,6 +37,9 @@ func (f *fakeVerifyRunner) Run(_ context.Context, req workflowcore.VerifyCommand
 	f.last = req
 	if f.after != nil {
 		f.after()
+	}
+	if f.decide != nil {
+		return f.decide(req)
 	}
 	return f.result, f.err
 }
