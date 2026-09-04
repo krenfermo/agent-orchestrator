@@ -116,9 +116,7 @@ func (sqlExtractor) Extract(relPath string, src []byte) (Extraction, error) {
 		}
 		sym.Summary = summarize(sym, nil)
 		out.Symbols = append(out.Symbols, sym)
-		for _, edge := range sqlTableEdges(sym.ID, block.body, block.line-1) {
-			out.Edges = append(out.Edges, edge)
-		}
+		out.Edges = append(out.Edges, sqlTableEdges(sym.ID, block.body, block.line-1)...)
 	}
 	return dedupeExtraction(out), nil
 }

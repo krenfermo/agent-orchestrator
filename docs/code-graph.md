@@ -204,6 +204,39 @@ The measurements are recorded, not asserted: `filesParsed` against
 `filesReused`, in `SyncOutcome`, in `code_graph_index`, in `ao memory graph
 status` and in the P3-E metrics.
 
+### Measured
+
+On AO's own checkout — 3,079 indexed files, 41,808 symbols, 169,350 relations
+(`AO_CODEGRAPH_SMOKE_REPO=. go test ./internal/codegraph -run RealProject -v`):
+
+| operation | cost |
+|---|---|
+| initial full index | ~19 s |
+| no-op sync (commit moved, nothing indexed changed) | 0.4 ms |
+| incremental sync, one file's body edited | 1.3 ms |
+| incremental sync, one file added | 590 ms — adding a file can move the module census, so the architecture summary is recomputed |
+| retrieval for a six-term English objective | 250 ms |
+
+Two of those numbers were much worse before measurement, and both causes are
+worth recording because neither was visible from the code:
+
+- **A "lookup" that was a full scan.** `WHERE (project, repo, generation, path)
+  ORDER BY edge_id` let SQLite pick the primary key — which delivers the same
+  equality *and* the requested order — and walk an entire generation to filter
+  one path out of it. 340 ms per lookup, and several per sync. Putting the
+  ordering column at the end of each index, and ordering by the index's own
+  prefix, took a one-file sync from 1.5 s to 1.3 ms.
+- **A census on every edit.** The architecture summary is derived from every
+  file; recomputing it per sync cost a repository-wide read for a change that
+  could not have moved it. Fingerprinting each changed file's *architectural*
+  content — its surfaces and its dependencies — before and after decides whether
+  the census is needed at all.
+
+The retrieval figure is the honest remaining cost: a term match is a substring
+scan, and no index can serve one. It is bounded (a fixed number of scans, capped
+rows) and it is behind the pack cache, but it grows with the symbol count. A
+full-text index is the obvious next step and is not in this phase.
+
 ## Retrieval
 
 Retrieval is hybrid and says so. Term matching over symbol names, paths and
@@ -222,6 +255,20 @@ surface them. Generated files are excluded unless asked for — a generated clie
 has one symbol per API operation and would spend the whole budget restating the
 schema — but they remain reachable, because generated code is frequently the API
 authority.
+
+Ranking is by **coordination**: how many distinct terms of the objective a
+symbol's name or path carries. That is the part measurement forced. An objective
+like *"the authorization path for cancelling a workflow"* has six usable terms,
+and in a 41,000-symbol repository each of them individually matches hundreds of
+things — `TestContextCancellation` matches "cancel", `auth_test.go` matches
+"authoriz", every third file matches "path". What almost nothing matches is two
+of them at once, and the handful that do are the answer. So the score is
+superlinear in the number of terms a name carries, and a candidate matching one
+common word does not compete with one matching two.
+
+Terms are stemmed before any of that, which is the difference between finding
+the code and not: an objective says "cancelling" and the code says `Cancel`, and
+a substring match on the inflected word finds nothing at all.
 
 Everything is bounded before it is returned, and every result carries what was
 **considered** alongside what was **selected**. A retrieval that cannot say how
@@ -332,6 +379,10 @@ extend — the operator surface for memory is the CLI and the API.
 
 ```bash
 cd backend && go test ./internal/codegraph/... ./internal/projectmemory/...
+
+# The real-project smoke, opt-in because it indexes thousands of files.
+AO_CODEGRAPH_SMOKE_REPO=/path/to/checkout \
+  go test ./internal/codegraph -run RealProject -v
 ```
 
 Covering: per-language extraction fixtures; the architecture summary and

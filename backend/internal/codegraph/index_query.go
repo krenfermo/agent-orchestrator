@@ -26,8 +26,12 @@ import (
 const (
 	// candidatesPerTerm caps how many symbols one task term contributes. The
 	// cap is in SQL, not in Go, so a term like "service" in a large repository
-	// never crosses the boundary in bulk.
-	candidatesPerTerm = 120
+	// never crosses the boundary in bulk. It doubles as the specificity test:
+	// a term that fills it matched at least this much of the graph.
+	candidatesPerTerm = 400
+	// proseSearchThreshold is how many times the answer size the name pass
+	// must already have produced before the summary pass is skipped.
+	proseSearchThreshold = 4
 	// candidatesPerAnchor caps the symbols one named symbol resolves to.
 	candidatesPerAnchor = 32
 	// edgeFanOut caps the relations pulled in around one selected symbol.
@@ -87,34 +91,96 @@ func (ix *Index) Retrieve(
 			candidates[record.SymbolID] = record
 		}
 	}
+	// Candidate selection, in two passes, and the order is the whole of the
+	// ranking's quality on a real repository.
+	//
+	// First by NAME and path. Every match a term produces is kept, up to a
+	// generous cap, because the ranking that follows is about CO-OCCURRENCE --
+	// which symbols carry several of the objective's words at once -- and a
+	// sample cannot answer that. Sampling was tried first, and on AO's own
+	// checkout it produced twenty-four alphabetically-early tests: the file
+	// that actually carried two terms was never in the sample to be found.
+	//
+	// A term whose search comes back FULL matched at least as much of the graph
+	// as the cap allows, which is the cheapest honest signal that it does not
+	// discriminate. Terms that do are Specific; the rest are Common and count
+	// for less.
+	//
+	// Then, for the specific terms only, by summary as well, so a symbol whose
+	// documentation is the thing that names the concept is still reachable.
+	// Doing that pass for common terms too is what made the first measurement
+	// on AO's own checkout return two dozen unrelated tests.
+	var terms TermSet
 	for _, term := range normalizeTerms(req.Terms) {
-		records, err := ix.repo.SearchCodeGraphSymbols(ctx, projectID, repoID, generation, term, candidatesPerTerm)
+		records, err := ix.repo.SearchCodeGraphSymbolNames(ctx, projectID, repoID, generation, term, candidatesPerTerm)
 		if err != nil {
 			return Neighborhood{}, err
 		}
 		out.ConsideredSymbols += len(records)
+		if len(records) >= candidatesPerTerm {
+			terms.Common = append(terms.Common, term)
+		} else {
+			terms.Specific = append(terms.Specific, term)
+		}
 		for _, record := range records {
 			candidates[record.SymbolID] = record
+		}
+	}
+	// The summary pass is a substring scan of every symbol's prose, and it
+	// only earns its cost when the names did not already produce plenty to
+	// rank. When they did, adding prose matches cannot change the answer --
+	// the coordination gate would drop them anyway -- so the scan is skipped.
+	if len(candidates) < req.MaxSymbols*proseSearchThreshold {
+		for _, term := range terms.Specific {
+			records, err := ix.repo.SearchCodeGraphSymbols(ctx, projectID, repoID, generation, term, candidatesPerTerm)
+			if err != nil {
+				return Neighborhood{}, err
+			}
+			out.ConsideredSymbols += len(records)
+			for _, record := range records {
+				candidates[record.SymbolID] = record
+			}
+		}
+	}
+	// Nothing discriminated and nothing was anchored: rather than return
+	// nothing, fall back to the broad read and let the score decide. A vague
+	// answer to a vague question is still better than silence.
+	if len(terms.Specific) == 0 && len(candidates) == 0 {
+		for _, term := range terms.Common {
+			records, err := ix.repo.SearchCodeGraphSymbols(ctx, projectID, repoID, generation, term, candidatesPerTerm)
+			if err != nil {
+				return Neighborhood{}, err
+			}
+			out.ConsideredSymbols += len(records)
+			for _, record := range records {
+				candidates[record.SymbolID] = record
+			}
 		}
 	}
 	if len(candidates) == 0 {
 		return out, nil
 	}
-
-	terms := normalizeTerms(req.Terms)
 	scored := make([]ScoredSymbol, 0, len(candidates))
+	best := 0
 	for _, record := range candidates {
 		if FileRole(roleOf(record)) == RoleGenerated && !req.IncludeGenerated {
 			continue
 		}
 		sym := symbolFromRecord(record)
-		score, reason := scoreSymbol(sym, fromAnchoredFile[record.SymbolID], anchorSymbols, terms,
-			termScore(record.Path, terms)*pathTermWeight)
+		score, reason, m := scoreSymbol(sym, fromAnchoredFile[record.SymbolID], anchorSymbols, terms,
+			termScore(record.Path, terms.Specific)*pathTermWeight)
 		if score <= 0 {
 			continue
 		}
-		scored = append(scored, ScoredSymbol{Symbol: sym, Score: score, Reason: reason})
+		if m.coverage() > best {
+			best = m.coverage()
+		}
+		scored = append(scored, ScoredSymbol{Symbol: sym, Score: score, Reason: reason, match: m})
 	}
+	// The coordination gate: when some candidate's name carries several of the
+	// objective's terms, one that carries a single common word is not
+	// competing for the same budget. See matchProfile.
+	scored = keepEligible(scored, best)
 	sort.SliceStable(scored, func(i, j int) bool {
 		if scored[i].Score != scored[j].Score {
 			return scored[i].Score > scored[j].Score

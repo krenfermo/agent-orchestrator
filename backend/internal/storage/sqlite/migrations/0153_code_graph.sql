@@ -195,32 +195,42 @@ CREATE TABLE code_graph_edges (
 -- Retrieval reads symbols by name and by path; both are indexed because both
 -- are on the dispatch path, where a scan of a 100k-symbol table would be paid
 -- for on every task.
+--
+-- Each index ends with the column its query ORDERs BY, and that trailing column
+-- is load-bearing rather than tidy. Without it the row order has to be produced
+-- by a sort, and SQLite -- offered a primary key that delivers
+-- (project, repo, generation) equality AND the required order for free --
+-- prefers to walk the whole generation and filter, which is a full scan of
+-- every symbol in the repository. Measurement caught it: an "indexed" lookup of
+-- one file's relations was taking 340ms against a 130k-edge table. With the
+-- ordering column in the index there is no sort to avoid, and the selective
+-- index wins.
 -- +goose StatementBegin
 CREATE INDEX idx_code_graph_symbols_name
-    ON code_graph_symbols (project_id, repo_id, generation, name);
+    ON code_graph_symbols (project_id, repo_id, generation, name, symbol_id);
 -- +goose StatementEnd
 
 -- +goose StatementBegin
 CREATE INDEX idx_code_graph_symbols_path
-    ON code_graph_symbols (project_id, repo_id, generation, path);
+    ON code_graph_symbols (project_id, repo_id, generation, path, symbol_id);
 -- +goose StatementEnd
 
 -- Traversal in both directions: what does this reach, and what reaches it.
 -- +goose StatementBegin
 CREATE INDEX idx_code_graph_edges_from
-    ON code_graph_edges (project_id, repo_id, generation, from_key);
+    ON code_graph_edges (project_id, repo_id, generation, from_key, edge_id);
 -- +goose StatementEnd
 
 -- +goose StatementBegin
 CREATE INDEX idx_code_graph_edges_to
-    ON code_graph_edges (project_id, repo_id, generation, to_key);
+    ON code_graph_edges (project_id, repo_id, generation, to_key, edge_id);
 -- +goose StatementEnd
 
 -- Deleting or re-writing one path's rows, which is the whole of an incremental
 -- update's write path.
 -- +goose StatementBegin
 CREATE INDEX idx_code_graph_edges_path
-    ON code_graph_edges (project_id, repo_id, generation, path);
+    ON code_graph_edges (project_id, repo_id, generation, path, edge_id);
 -- +goose StatementEnd
 
 -- +goose Down

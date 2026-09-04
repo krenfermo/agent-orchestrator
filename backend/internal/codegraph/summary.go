@@ -166,16 +166,16 @@ func collapseSpaces(s string) string {
 // clampRunes truncates on a rune boundary and marks that it did. Truncating on
 // a byte boundary would split a multi-byte character and produce invalid UTF-8
 // in a field that goes straight into a prompt.
-func clampRunes(s string, max int) string {
-	if max <= 0 {
+func clampRunes(s string, limit int) string {
+	if limit <= 0 {
 		return ""
 	}
 	runes := []rune(s)
-	if len(runes) <= max {
+	if len(runes) <= limit {
 		return s
 	}
-	if max <= 3 {
-		return string(runes[:max])
+	if limit <= 3 {
+		return string(runes[:limit])
 	}
-	return strings.TrimRight(string(runes[:max-3]), " ") + "..."
+	return strings.TrimRight(string(runes[:limit-3]), " ") + "..."
 }

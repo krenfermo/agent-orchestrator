@@ -423,7 +423,7 @@ func (w *tsWalk) declaration(line maskedLine) {
 	default:
 		if class, inClass := w.currentClass(); inClass && opens {
 			m := tsMethod.FindStringSubmatch(code)
-			if m == nil || tsReservedFns[m[1]] {
+			if len(m) < 2 || tsReservedFns[m[1]] {
 				return
 			}
 			name := class.name + "." + m[1]

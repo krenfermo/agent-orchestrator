@@ -319,13 +319,13 @@ func (a Architecture) Render() string {
 
 // clampBytes truncates to a byte budget on a line boundary, so a clipped
 // summary never ends mid-fact.
-func clampBytes(s string, max int) string {
-	if len(s) <= max {
+func clampBytes(s string, limit int) string {
+	if len(s) <= limit {
 		return s
 	}
-	cut := strings.LastIndex(s[:max], "\n")
+	cut := strings.LastIndex(s[:limit], "\n")
 	if cut <= 0 {
-		return s[:max]
+		return s[:limit]
 	}
 	return s[:cut+1] + "(truncated)\n"
 }

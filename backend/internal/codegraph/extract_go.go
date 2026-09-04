@@ -477,8 +477,8 @@ func goRouteCall(callee string, call *ast.CallExpr) (method, pattern, handler st
 	if !hasSelector {
 		fn = callee
 	}
-	switch {
-	case fn == "HandleFunc" || fn == "Handle":
+	switch fn {
+	case "HandleFunc", "Handle":
 		if len(call.Args) < 2 {
 			return "", "", "", false
 		}
@@ -487,7 +487,7 @@ func goRouteCall(callee string, call *ast.CallExpr) (method, pattern, handler st
 			return "", "", "", false
 		}
 		return "ANY", pattern, goCalleeName(call.Args[1]), true
-	case fn == "Method" || fn == "MethodFunc":
+	case "Method", "MethodFunc":
 		if len(call.Args) < 3 {
 			return "", "", "", false
 		}

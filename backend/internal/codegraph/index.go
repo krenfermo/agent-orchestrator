@@ -192,6 +192,10 @@ type SyncOutcome struct {
 	FilesParsed  int
 	FilesReused  int
 	FilesRemoved int
+	// FilesAdded counts paths that had no row before this pass. It is carried
+	// so an incremental update can maintain the graph's totals by delta
+	// instead of counting every row.
+	FilesAdded int
 	// Symbol and edge deltas across the whole pass.
 	SymbolsAdded   int
 	SymbolsRemoved int
@@ -549,11 +553,28 @@ func (ix *Index) finishApply(
 	out SyncOutcome, changed map[string]bool, structural bool, started time.Time,
 ) (SyncOutcome, error) {
 	generation := state.ServedGeneration
-	files, symbols, edges, err := ix.repo.CountCodeGraph(ctx, req.ProjectID, req.RepoID, generation)
-	if err != nil {
-		return SyncOutcome{}, err
+	// Counted by DELTA, not by COUNT(*). Every mutation on this path reports
+	// exactly what it added and removed, so the totals follow from the totals
+	// that were already published plus this pass's own arithmetic -- and an
+	// ordinary one-file task stops paying for a scan of every symbol in the
+	// repository. Measurement on AO's own checkout is what made this
+	// necessary rather than tidy: 32,000 symbols turned a one-file sync into
+	// a second and a half, nearly all of it counting rows nothing had touched.
+	//
+	// It falls back to the authoritative count if the arithmetic ever produces
+	// something impossible, because a wrong total that looks plausible is
+	// worse than a slow one.
+	files := state.FileCount + int64(out.FilesAdded) - int64(out.FilesRemoved)
+	symbols := state.SymbolCount + int64(out.SymbolsAdded) - int64(out.SymbolsRemoved)
+	edges := state.EdgeCount + int64(out.EdgesAdded) - int64(out.EdgesRemoved)
+	if files < 0 || symbols < 0 || edges < 0 {
+		var err error
+		if files, symbols, edges, err = ix.repo.CountCodeGraph(ctx, req.ProjectID, req.RepoID, generation); err != nil {
+			return SyncOutcome{}, err
+		}
 	}
 	out.Files, out.Symbols, out.Edges = int(files), int(symbols), int(edges)
+	var err error
 
 	rendered, encoded := state.Architecture, state.ArchitectureJSON
 	switch {
@@ -694,6 +715,9 @@ func (ix *Index) writeEntry(
 		return err
 	}
 	out.FilesParsed++
+	if !delta.FileExisted {
+		out.FilesAdded++
+	}
 	out.SymbolsAdded += int(delta.SymbolsAfter)
 	out.SymbolsRemoved += int(delta.SymbolsBefore)
 	out.EdgesAdded += int(delta.EdgesAfter)

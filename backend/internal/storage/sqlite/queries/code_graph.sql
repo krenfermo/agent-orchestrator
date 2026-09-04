@@ -1,5 +1,13 @@
 -- Code graph (migration 0153).
 --
+-- A note on every ORDER BY here: it leads with the columns the WHERE clause
+-- pins, not with the tiebreak alone. That is not style. SQLite will happily
+-- choose the primary key over a selective index when the primary key also
+-- delivers the requested order, and then scan an entire generation to filter
+-- one path out of it -- which is exactly what a 340ms "indexed" lookup turned
+-- out to be. Ordering by the index's own column prefix leaves nothing to sort,
+-- and the selective index wins.
+--
 -- Two write disciplines live here and they must not be confused.
 --
 --   * A FULL build writes at a staging generation and is made visible by one
@@ -240,12 +248,12 @@ WHERE project_id = ? AND repo_id = ? AND generation > ?;
 -- name: ListCodeGraphSymbolsForPath :many
 SELECT * FROM code_graph_symbols
 WHERE project_id = ? AND repo_id = ? AND generation = ? AND path = ?
-ORDER BY symbol_id;
+ORDER BY path, symbol_id;
 
 -- name: ListCodeGraphSymbolsByName :many
 SELECT * FROM code_graph_symbols
 WHERE project_id = ? AND repo_id = ? AND generation = ? AND name = ?
-ORDER BY symbol_id
+ORDER BY name, symbol_id
 LIMIT ?;
 
 -- name: SearchCodeGraphSymbols :many
@@ -271,13 +279,13 @@ LIMIT ?;
 -- name: ListCodeGraphEdgesFrom :many
 SELECT * FROM code_graph_edges
 WHERE project_id = ? AND repo_id = ? AND generation = ? AND from_key = ?
-ORDER BY edge_id
+ORDER BY from_key, edge_id
 LIMIT ?;
 
 -- name: ListCodeGraphEdgesTo :many
 SELECT * FROM code_graph_edges
 WHERE project_id = ? AND repo_id = ? AND generation = ? AND to_key = ?
-ORDER BY edge_id
+ORDER BY to_key, edge_id
 LIMIT ?;
 
 -- name: PurgeCodeGraphFiles :execrows
@@ -332,4 +340,19 @@ ORDER BY path, symbol_id;
 -- name: ListCodeGraphEdgesForPath :many
 SELECT * FROM code_graph_edges
 WHERE project_id = ? AND repo_id = ? AND generation = ? AND path = ?
-ORDER BY edge_id;
+ORDER BY path, edge_id;
+
+-- name: SearchCodeGraphSymbolNames :many
+-- The NAME-and-path candidate read, and the one retrieval leads with.
+--
+-- It exists apart from SearchCodeGraphSymbols because the two answer different
+-- questions. A summary is prose: on a real repository, "path" appears in
+-- hundreds of perfectly true sentences about symbols that have nothing to do
+-- with the task. A name is a commitment somebody made about what a thing IS.
+-- So a name match is what makes a symbol eligible, and a summary match is what
+-- breaks ties between the eligible ones.
+SELECT * FROM code_graph_symbols
+WHERE project_id = ? AND repo_id = ? AND generation = ?
+  AND instr(lower(name) || ' ' || lower(path), @term) > 0
+ORDER BY exported DESC, symbol_id
+LIMIT ?;

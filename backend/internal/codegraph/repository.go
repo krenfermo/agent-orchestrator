@@ -8,6 +8,8 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
 )
 
+// Package codegraph's durable port.
+//
 // repository.go — the durable port the project-scoped code graph is written
 // through.
 //
@@ -63,8 +65,12 @@ type Repository interface {
 	// CountCodeGraph reports the row counts at a generation.
 	CountCodeGraph(ctx context.Context, projectID domain.ProjectID, repoID string, generation int64) (files, symbols, edges int64, err error)
 
-	// SearchCodeGraphSymbols is the bounded candidate read behind retrieval.
+	// SearchCodeGraphSymbols is the bounded candidate read over name, path and
+	// summary. SearchCodeGraphSymbolNames narrows it to name and path, which
+	// is what retrieval leads with: a name is a commitment about what a thing
+	// is, and a summary is prose that happens to contain a word.
 	SearchCodeGraphSymbols(ctx context.Context, projectID domain.ProjectID, repoID string, generation int64, term string, limit int64) ([]store.CodeGraphSymbolRecord, error)
+	SearchCodeGraphSymbolNames(ctx context.Context, projectID domain.ProjectID, repoID string, generation int64, term string, limit int64) ([]store.CodeGraphSymbolRecord, error)
 	// ListCodeGraphSymbolsForPath reads one file's declarations.
 	ListCodeGraphSymbolsForPath(ctx context.Context, projectID domain.ProjectID, repoID string, generation int64, path string) ([]store.CodeGraphSymbolRecord, error)
 	// ListCodeGraphSymbolsByName resolves a name to its declarations.

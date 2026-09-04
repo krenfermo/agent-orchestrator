@@ -159,6 +159,12 @@ type CodeGraphDelta struct {
 	EdgesBefore   int64
 	EdgesAfter    int64
 	FileRemoved   bool
+	// FileExisted reports whether the path already had a row at this
+	// generation. It is what lets an incremental update maintain the graph's
+	// file count by delta instead of counting every row: on a real repository
+	// a COUNT(*) over a hundred thousand symbols is the most expensive thing
+	// an ordinary one-file task would otherwise pay for.
+	FileExisted bool
 }
 
 // CodeGraphCompletion carries everything a finished sync records.
@@ -403,6 +409,15 @@ func (s *Store) PutCodeGraphEntry(
 		var err error
 		if delta.SymbolsBefore, delta.EdgesBefore, err = countCodeGraphPath(ctx, q, projectID, repoID, generation, entry.File.Path); err != nil {
 			return err
+		}
+		switch _, getErr := q.GetCodeGraphFile(ctx, gen.GetCodeGraphFileParams{
+			ProjectID: string(projectID), RepoID: repoID, Generation: generation, Path: entry.File.Path,
+		}); {
+		case getErr == nil:
+			delta.FileExisted = true
+		case errors.Is(getErr, sql.ErrNoRows):
+		default:
+			return getErr
 		}
 		if _, err := q.DeleteCodeGraphSymbolsForPath(ctx, gen.DeleteCodeGraphSymbolsForPathParams{
 			ProjectID: string(projectID), RepoID: repoID, Generation: generation, Path: entry.File.Path,
@@ -931,4 +946,19 @@ func (s *Store) ListCodeGraphEdgesForPath(
 		return nil, fmt.Errorf("list code graph edges for path: %w", err)
 	}
 	return codeGraphEdgesFromRows(rows), nil
+}
+
+// SearchCodeGraphSymbolNames is the name-and-path candidate read. See the
+// query's own comment for why it is separate from SearchCodeGraphSymbols.
+func (s *Store) SearchCodeGraphSymbolNames(
+	ctx context.Context, projectID domain.ProjectID, repoID string, generation int64, term string, limit int64,
+) ([]CodeGraphSymbolRecord, error) {
+	rows, err := s.qr.SearchCodeGraphSymbolNames(ctx, gen.SearchCodeGraphSymbolNamesParams{
+		ProjectID: string(projectID), RepoID: repoID, Generation: generation,
+		Term: strings.ToLower(term), Limit: limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("search code graph symbol names: %w", err)
+	}
+	return codeGraphSymbolsFromRows(rows), nil
 }
