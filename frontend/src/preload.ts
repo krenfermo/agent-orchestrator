@@ -360,6 +360,15 @@ const api = {
 		list: () => ipcRenderer.invoke("featureBuilds:list") as Promise<FeatureBuild[]>,
 		getActive: () => ipcRenderer.invoke("featureBuilds:getActive") as Promise<{ pr: number } | null>,
 	},
+	// P4-A: desktop single sign-on. The renderer only ever learns the OUTCOME —
+	// the session itself arrives as an HttpOnly cookie the main process
+	// installed, never as a value crossing this bridge.
+	auth: {
+		ssoSignIn: () =>
+			ipcRenderer.invoke("auth:ssoSignIn") as Promise<
+				{ status: "complete"; user: { id: string; displayName: string; email: string } } | { status: "cancelled" }
+			>,
+	},
 	cloud: {
 		getSession: () => ipcRenderer.invoke("cloud:getSession") as Promise<CloudAccount | null>,
 		signIn: () => ipcRenderer.invoke("cloud:signIn") as Promise<void>,

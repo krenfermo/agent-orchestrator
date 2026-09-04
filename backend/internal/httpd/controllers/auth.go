@@ -13,6 +13,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 	authsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/authsvc"
+	ssosvc "github.com/aoagents/agent-orchestrator/backend/internal/service/ssosvc"
 )
 
 // UserView is the wire shape of a resolved user — deliberately excludes
@@ -76,7 +77,16 @@ type LoginResponse struct {
 
 // LogoutResponse is the body of a successful POST /api/v1/auth/logout.
 type LogoutResponse struct {
+	// OK reports that the AO session was invalidated. That is the ONLY thing
+	// this endpoint ever promises.
 	OK bool `json:"ok"`
+	// ProviderEndSessionURL is the identity provider's RP-initiated logout
+	// URL, present only when the session was federated AND the provider
+	// advertises an end_session_endpoint. Its presence is an OFFER, not a
+	// claim: AO ended its own session and nothing more. A client that wants
+	// the provider session ended too must navigate here; a client that does
+	// not is still fully signed out of AO.
+	ProviderEndSessionURL string `json:"providerEndSessionUrl,omitempty"`
 }
 
 // MeResponse is the body of GET /api/v1/auth/me. Status distinguishes a
@@ -88,6 +98,16 @@ type LogoutResponse struct {
 type MeResponse struct {
 	Status string    `json:"status" enum:"authenticated,trusted-local,no_user"`
 	User   *UserView `json:"user,omitempty"`
+	// AuthMethod is HOW this identity was established: "trusted_local" for a
+	// synthesized desktop identity, "password" for a local login, "oidc" for
+	// a federated one. P4-A: the frontend renders sign-out differently for a
+	// federated session, and a client should never have to guess this from
+	// the presence of a cookie.
+	AuthMethod string `json:"authMethod,omitempty" enum:"trusted_local,password,oidc"`
+	// Issuer is the identity provider behind a federated session, empty
+	// otherwise. It names the provider; it is not a secret and carries no
+	// token material.
+	Issuer string `json:"issuer,omitempty"`
 }
 
 // AuthController owns the /auth routes (Checkpoint 8P-A). A nil Mgr keeps
@@ -99,6 +119,14 @@ type AuthController struct {
 	// /me synthesizes the bootstrap admin identity in the absence of a
 	// session cookie, matching the identity middleware's own behavior.
 	TrustedLocal bool
+	// SSO is P4-A's OIDC surface, consulted on logout so the response can
+	// offer the provider's own end-session URL when it advertises one.
+	// Optional: nil simply means no provider logout is offered.
+	SSO ssosvc.Manager
+	// Audit records login/logout outcomes.
+	Audit AuthAudit
+	// CookiePolicy decides the session cookie's SameSite/Secure attributes.
+	CookiePolicy SessionCookiePolicy
 }
 
 // Register mounts the auth routes on the supplied router.
@@ -123,6 +151,11 @@ func (c *AuthController) login(w http.ResponseWriter, r *http.Request) {
 	}
 	u, err := c.Mgr.Authenticate(r.Context(), in.UsernameOrEmail, in.Password, loginSourceKey(r))
 	if err != nil {
+		c.Audit.LoginFailed(r, AuthAuditFields{
+			Method:  domain.AuthMethodPassword,
+			Outcome: apierrCode(err),
+			Source:  loginSourceKey(r),
+		})
 		envelope.WriteError(w, r, err)
 		return
 	}
@@ -131,7 +164,13 @@ func (c *AuthController) login(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteError(w, r, err)
 		return
 	}
-	setSessionCookie(w, r, raw, sess.ExpiresAt)
+	setSessionCookie(w, r, c.CookiePolicy, raw, sess.ExpiresAt)
+	c.Audit.LoginSucceeded(r, AuthAuditFields{
+		Method:      domain.AuthMethodPassword,
+		UserID:      u.ID,
+		EmailDomain: emailDomainOf(u.Email),
+		Source:      loginSourceKey(r),
+	})
 	envelope.WriteJSON(w, http.StatusOK, LoginResponse{User: userView(u)})
 }
 
@@ -140,11 +179,35 @@ func (c *AuthController) logout(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/auth/logout")
 		return
 	}
+	out := LogoutResponse{OK: true}
+	var actor AuthAuditFields
+	actor.Method = domain.AuthMethodTrustedLocal
 	if cookie, err := r.Cookie(identity.SessionCookieName); err == nil && cookie.Value != "" {
+		// Resolve BEFORE revoking: after revocation there is nothing left to
+		// attribute the audit line to, and the provider-logout offer depends
+		// on whether this session was federated at all.
+		if p, err := c.Mgr.ResolvePrincipal(r.Context(), cookie.Value); err == nil {
+			actor = AuthAuditFields{
+				Method:      p.AuthMethod,
+				UserID:      p.User.ID,
+				Issuer:      p.Issuer,
+				EmailDomain: emailDomainOf(p.User.Email),
+			}
+			if p.IsFederated() && c.SSO != nil {
+				// A provider that advertises no end-session endpoint yields
+				// "", and the field is then absent: AO never implies it ended
+				// a session it cannot end.
+				if endURL, err := c.SSO.EndSessionURL(r.Context(), ""); err == nil {
+					out.ProviderEndSessionURL = endURL
+				}
+			}
+		}
 		_ = c.Mgr.RevokeSession(r.Context(), cookie.Value)
 	}
-	clearSessionCookie(w, r)
-	envelope.WriteJSON(w, http.StatusOK, LogoutResponse{OK: true})
+	clearSessionCookie(w, r, c.CookiePolicy)
+	actor.Source = loginSourceKey(r)
+	c.Audit.Logout(r, actor)
+	envelope.WriteJSON(w, http.StatusOK, out)
 }
 
 func (c *AuthController) me(w http.ResponseWriter, r *http.Request) {
@@ -153,16 +216,32 @@ func (c *AuthController) me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cookie, err := r.Cookie(identity.SessionCookieName); err == nil && cookie.Value != "" {
-		if u, err := c.Mgr.ResolveSession(r.Context(), cookie.Value); err == nil {
-			view := userView(u)
-			envelope.WriteJSON(w, http.StatusOK, MeResponse{Status: "authenticated", User: &view})
+		p, err := c.Mgr.ResolvePrincipal(r.Context(), cookie.Value)
+		if err == nil {
+			view := userView(p.User)
+			envelope.WriteJSON(w, http.StatusOK, MeResponse{
+				Status:     "authenticated",
+				User:       &view,
+				AuthMethod: string(p.AuthMethod),
+				Issuer:     p.Issuer,
+			})
 			return
+		}
+		if apierrCode(err) == "SESSION_EXPIRED" {
+			// An expired session is a distinct, auditable event: it is the
+			// difference between "this person's access lapsed" and "someone
+			// presented a token that never existed".
+			c.Audit.SessionExpired(r, AuthAuditFields{Source: loginSourceKey(r)})
 		}
 	}
 	if c.TrustedLocal {
 		if u, ok, err := c.Mgr.BootstrapAdmin(r.Context()); err == nil && ok {
 			view := userView(u)
-			envelope.WriteJSON(w, http.StatusOK, MeResponse{Status: "trusted-local", User: &view})
+			envelope.WriteJSON(w, http.StatusOK, MeResponse{
+				Status:     "trusted-local",
+				User:       &view,
+				AuthMethod: string(domain.AuthMethodTrustedLocal),
+			})
 			return
 		}
 		envelope.WriteJSON(w, http.StatusOK, MeResponse{Status: "no_user"})
@@ -213,7 +292,14 @@ func (c *AuthController) register(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteError(w, r, err)
 		return
 	}
-	setSessionCookie(w, r, raw, sess.ExpiresAt)
+	setSessionCookie(w, r, c.CookiePolicy, raw, sess.ExpiresAt)
+	c.Audit.LoginSucceeded(r, AuthAuditFields{
+		Method:      domain.AuthMethodPassword,
+		UserID:      u.ID,
+		EmailDomain: emailDomainOf(u.Email),
+		Source:      loginSourceKey(r),
+		Provisioned: true,
+	})
 	envelope.WriteJSON(w, http.StatusOK, LoginResponse{User: userView(u)})
 }
 
@@ -251,45 +337,73 @@ func loginSourceKey(r *http.Request) string {
 	return r.RemoteAddr
 }
 
-// setSessionCookie writes the session cookie. Secure is set whenever the
-// request itself arrived over TLS or a trusted reverse proxy declares it did
-// (X-Forwarded-Proto: https) — the loopback desktop daemon serves plain
-// http, so Secure stays unset there, matching how the existing LAN
-// preview-file cookie (auth.go's maybeSetPreviewAuthCookie) handles the same
-// loopback-vs-network distinction.
-func setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expiresAt time.Time) {
-	// Secure is conditional by design, and HttpOnly/SameSite are always set:
-	// the loopback desktop daemon serves plain http, and an unconditionally
-	// Secure cookie would simply never be stored there, breaking sign-in on
-	// the primary deployment. requestIsSecure sets it for every request that
-	// did arrive over TLS or through a proxy that declares it did.
-	//nolint:gosec // G124: HttpOnly+SameSite always set; Secure tracks the actual scheme.
+// SessionCookiePolicy decides the session cookie's SameSite/Secure attributes.
+// It exists because AO has two genuinely different deployments and one
+// hard-coded answer cannot serve both:
+//
+//   - A browser deployment renders the app from the daemon's OWN origin, so
+//     the cookie is same-site and SameSiteLax is exactly right: it is sent on
+//     every in-app request and withheld from cross-site ones.
+//
+//   - The DESKTOP renders from a custom `app://` scheme and calls the daemon
+//     at http://127.0.0.1:<port>. That is a cross-site request, so a Lax
+//     cookie is never sent and a session cookie is effectively inert there.
+//     SameSiteNone (which browsers accept only alongside Secure, and which
+//     Chromium honors on a loopback origin because loopback is a trustworthy
+//     origin) is what makes a real session usable in the desktop app.
+//
+// The zero value is the Lax behavior 8P-A shipped, so nothing changes for any
+// deployment that does not explicitly ask for the other one.
+type SessionCookiePolicy struct {
+	// CrossSite selects SameSite=None; Secure. Set only by a deployment whose
+	// renderer is a different origin than the daemon (the Electron desktop),
+	// via AO_SESSION_COOKIE_SAMESITE=none.
+	CrossSite bool
+}
+
+func (p SessionCookiePolicy) sameSite() http.SameSite {
+	if p.CrossSite {
+		return http.SameSiteNoneMode
+	}
+	return http.SameSiteLaxMode
+}
+
+// secure reports the Secure attribute. SameSite=None is only honored on a
+// Secure cookie, so the two move together; otherwise Secure tracks whether the
+// request actually arrived over TLS (directly or through a proxy that says so).
+func (p SessionCookiePolicy) secure(r *http.Request) bool {
+	return p.CrossSite || requestIsSecure(r)
+}
+
+// setSessionCookie writes the session cookie under the given policy. HttpOnly
+// is unconditional: the token is never readable from JavaScript, in any
+// deployment, which is what keeps it out of localStorage and out of any XSS
+// payload's reach.
+func setSessionCookie(w http.ResponseWriter, r *http.Request, policy SessionCookiePolicy, token string, expiresAt time.Time) {
+	//nolint:gosec // G124: HttpOnly+SameSite always set; Secure tracks the policy and the actual scheme.
 	http.SetCookie(w, &http.Cookie{
 		Name:     identity.SessionCookieName,
 		Value:    token,
 		Path:     "/",
 		Expires:  expiresAt,
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   requestIsSecure(r),
+		SameSite: policy.sameSite(),
+		Secure:   policy.secure(r),
 	})
 }
 
-func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
-	// Secure is conditional by design, and HttpOnly/SameSite are always set:
-	// the loopback desktop daemon serves plain http, and an unconditionally
-	// Secure cookie would simply never be stored there, breaking sign-in on
-	// the primary deployment. requestIsSecure sets it for every request that
-	// did arrive over TLS or through a proxy that declares it did.
-	//nolint:gosec // G124: HttpOnly+SameSite always set; Secure tracks the actual scheme.
+func clearSessionCookie(w http.ResponseWriter, r *http.Request, policy SessionCookiePolicy) {
+	// The clearing cookie must match the attributes the browser stored it
+	// under, or the old cookie survives the "logout" that appeared to work.
+	//nolint:gosec // G124: HttpOnly+SameSite always set; Secure tracks the policy and the actual scheme.
 	http.SetCookie(w, &http.Cookie{
 		Name:     identity.SessionCookieName,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   requestIsSecure(r),
+		SameSite: policy.sameSite(),
+		Secure:   policy.secure(r),
 	})
 }
 

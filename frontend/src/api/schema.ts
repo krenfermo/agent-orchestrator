@@ -157,6 +157,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/oidc/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-A: the identity provider's redirect target. A browser flow receives the session cookie and a 302 to a bounded in-app path; a desktop flow receives a terminal HTML page and mints its session at /auth/oidc/claim instead. Never renders a token, an authorization code, or the provider's own message. */
+        get: operations["completeOIDCLogin"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/oidc/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P4-A: redeem a finished desktop login with the handoff secret the supervisor kept on loopback. Answers pending until the person finishes at the provider; on completion the AO session arrives as a Set-Cookie header and never in the body. */
+        post: operations["claimOIDCLogin"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/oidc/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P4-A: begin an OIDC Authorization Code + PKCE login and return the provider authorization URL */
+        post: operations["startOIDCLogin"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/providers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-A: report which sign-in methods this installation offers. Public by necessity — the sign-in screen renders from it — and it carries no issuer, client id, client secret, scope or constraint. */
+        get: operations["getAuthProviders"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/register": {
         parameters: {
             query?: never;
@@ -3146,6 +3214,12 @@ export interface components {
             amendment: components["schemas"]["ControllersWorkflowTaskCriterionAmendmentView"];
             workflow: components["schemas"]["WorkflowRunDetailView"];
         };
+        ControllersAuthProvidersResponse: {
+            /** @enum {string} */
+            mode: "trusted_local" | "oidc";
+            oidc?: components["schemas"]["ControllersOIDCProviderView"];
+            passwordEnabled: boolean;
+        };
         ControllersAuthorizeFreshReviewExceptionRequest: {
             approvedBy: string;
             reason: string;
@@ -3511,8 +3585,12 @@ export interface components {
         };
         ControllersLogoutResponse: {
             ok: boolean;
+            providerEndSessionUrl?: string;
         };
         ControllersMeResponse: {
+            /** @enum {string} */
+            authMethod?: "trusted_local" | "password" | "oidc";
+            issuer?: string;
             /** @enum {string} */
             status: "authenticated" | "trusted-local" | "no_user";
             user?: components["schemas"]["ControllersUserView"];
@@ -3526,6 +3604,31 @@ export interface components {
             provider?: string;
             source: string;
             tokens: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+        };
+        ControllersOIDCClaimRequest: {
+            flowId: string;
+            handoffSecret: string;
+        };
+        ControllersOIDCClaimResponse: {
+            /** @enum {string} */
+            status: "pending" | "complete";
+            user?: components["schemas"]["ControllersUserView"];
+        };
+        ControllersOIDCProviderView: {
+            displayName: string;
+            startPath: string;
+        };
+        ControllersOIDCStartRequest: {
+            /** @enum {string} */
+            clientKind?: "browser" | "desktop";
+            handoffSecret?: string;
+            returnTo?: string;
+        };
+        ControllersOIDCStartResponse: {
+            authorizationUrl: string;
+            /** Format: date-time */
+            expiresAt: string;
+            flowId: string;
         };
         ControllersProjectMemoryItemResponse: {
             /** @enum {string} */
@@ -7072,6 +7175,184 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    completeOIDCLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Found */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/html": string;
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    claimOIDCLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersOIDCClaimRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersOIDCClaimResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    startOIDCLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ControllersOIDCStartRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersOIDCStartResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getAuthProviders: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersAuthProvidersResponse"];
                 };
             };
         };

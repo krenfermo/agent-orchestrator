@@ -117,6 +117,23 @@ sql:
             go_type:
               import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
               type: "UserID"
+          # P4-A: a session records how it was authenticated.
+          - column: "auth_sessions.auth_method"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "AuthMethod"
+          - column: "external_identities.user_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "UserID"
+          - column: "external_identities.email_verified"
+            go_type: "bool"
+          # Nullable: stamped only once the callback has passed every check.
+          - column: "oidc_login_flows.authenticated_user_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "UserID"
+              pointer: true
           - column: "workspace_repos.project_id"
             go_type:
               import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"

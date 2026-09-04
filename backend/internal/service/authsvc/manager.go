@@ -136,6 +136,17 @@ type Manager interface {
 	// zero/multiple users exist (the latter needs a human decision, not an
 	// automatic promotion).
 	EnsureOwnerExists(ctx context.Context) (bool, error)
+	// CreateFederatedUser provisions a password-less account for an external
+	// (OIDC) identity. P4-A.
+	CreateFederatedUser(ctx context.Context, in FederatedUserInput) (domain.User, error)
+	// CreateSessionAs issues a session that records the authentication
+	// method, and — for a federated session — the issuer/subject behind it.
+	// CreateSession is the password-flow shorthand for this. P4-A.
+	CreateSessionAs(ctx context.Context, userID domain.UserID, method domain.AuthMethod, issuer, subject string) (string, domain.AuthSession, error)
+	// ResolvePrincipal is the canonical request-identity resolution: the
+	// user plus how they authenticated. ResolveSession is the user-only
+	// shorthand kept for callers that need nothing else. P4-A.
+	ResolvePrincipal(ctx context.Context, rawToken string) (domain.Principal, error)
 	// BootstrapAdmin returns the identity trusted-local mode synthesizes when
 	// no session cookie is present: the earliest-created active user. There is
 	// no separate "is bootstrap admin" flag — the first account is, by
@@ -240,6 +251,15 @@ func (s *Service) Authenticate(ctx context.Context, usernameOrEmail, password, s
 		s.lock.fail(sourceKey)
 		return domain.User{}, invalid
 	}
+	// P4-A: a federated account carries an empty password_hash on purpose.
+	// bcrypt would reject it anyway, but saying so explicitly keeps the
+	// invariant ("a password can never authenticate an SSO-only account")
+	// visible at the point it matters rather than resting on a library's
+	// error for a malformed hash.
+	if strings.TrimSpace(u.PasswordHash) == "" {
+		s.lock.fail(sourceKey)
+		return domain.User{}, invalid
+	}
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
 		s.lock.fail(sourceKey)
 		return domain.User{}, invalid
@@ -250,26 +270,10 @@ func (s *Service) Authenticate(ctx context.Context, usernameOrEmail, password, s
 
 // CreateSession issues a new session for a user and returns the raw token
 // alongside the stored record. The raw token is returned here and never again:
-// only its hash is persisted.
+// only its hash is persisted. This is the password flow's shorthand for
+// CreateSessionAs; P4-A's federated flow calls that directly.
 func (s *Service) CreateSession(ctx context.Context, userID domain.UserID) (string, domain.AuthSession, error) {
-	raw, err := randomToken()
-	if err != nil {
-		return "", domain.AuthSession{}, fmt.Errorf("generate session token: %w", err)
-	}
-	now := s.now().UTC()
-	sess := domain.AuthSession{
-		ID:         uuid.NewString(),
-		UserID:     userID,
-		TokenHash:  hashToken(raw),
-		CreatedAt:  now,
-		ExpiresAt:  now.Add(SessionTTL),
-		LastSeenAt: now,
-	}
-	created, err := s.store.InsertAuthSession(ctx, sess)
-	if err != nil {
-		return "", domain.AuthSession{}, fmt.Errorf("create session: %w", err)
-	}
-	return raw, created, nil
+	return s.CreateSessionAs(ctx, userID, domain.AuthMethodPassword, "", "")
 }
 
 // ResolveSession returns the user behind a raw session token, rejecting a

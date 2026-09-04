@@ -336,6 +336,138 @@ paths:
         synthesized admin, or no_user'
       tags:
       - auth
+  /api/v1/auth/oidc/callback:
+    get:
+      operationId: completeOIDCLogin
+      responses:
+        "302":
+          content:
+            text/html:
+              schema:
+                type: string
+          description: Found
+        "400":
+          content:
+            text/html:
+              schema:
+                type: string
+          description: Bad Request
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-A: the identity provider''s redirect target. A browser flow receives
+        the session cookie and a 302 to a bounded in-app path; a desktop flow receives
+        a terminal HTML page and mints its session at /auth/oidc/claim instead. Never
+        renders a token, an authorization code, or the provider''s own message.'
+      tags:
+      - auth
+  /api/v1/auth/oidc/claim:
+    post:
+      operationId: claimOIDCLogin
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersOIDCClaimRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersOIDCClaimResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-A: redeem a finished desktop login with the handoff secret the
+        supervisor kept on loopback. Answers pending until the person finishes at
+        the provider; on completion the AO session arrives as a Set-Cookie header
+        and never in the body.'
+      tags:
+      - auth
+  /api/v1/auth/oidc/start:
+    post:
+      operationId: startOIDCLogin
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersOIDCStartRequest'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersOIDCStartResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-A: begin an OIDC Authorization Code + PKCE login and return the
+        provider authorization URL'
+      tags:
+      - auth
+  /api/v1/auth/providers:
+    get:
+      operationId: getAuthProviders
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersAuthProvidersResponse'
+          description: OK
+      summary: 'P4-A: report which sign-in methods this installation offers. Public
+        by necessity — the sign-in screen renders from it — and it carries no issuer,
+        client id, client secret, scope or constraint.'
+      tags:
+      - auth
   /api/v1/auth/register:
     post:
       operationId: registerFirstUser
@@ -8946,6 +9078,21 @@ components:
       - amendment
       - workflow
       type: object
+    ControllersAuthProvidersResponse:
+      properties:
+        mode:
+          enum:
+          - trusted_local
+          - oidc
+          type: string
+        oidc:
+          $ref: '#/components/schemas/ControllersOIDCProviderView'
+        passwordEnabled:
+          type: boolean
+      required:
+      - mode
+      - passwordEnabled
+      type: object
     ControllersAuthorizeFreshReviewExceptionRequest:
       properties:
         approvedBy:
@@ -9875,11 +10022,21 @@ components:
       properties:
         ok:
           type: boolean
+        providerEndSessionUrl:
+          type: string
       required:
       - ok
       type: object
     ControllersMeResponse:
       properties:
+        authMethod:
+          enum:
+          - trusted_local
+          - password
+          - oidc
+          type: string
+        issuer:
+          type: string
         status:
           enum:
           - authenticated
@@ -9914,6 +10071,64 @@ components:
       - cost
       - source
       - approximateEvents
+      type: object
+    ControllersOIDCClaimRequest:
+      properties:
+        flowId:
+          type: string
+        handoffSecret:
+          type: string
+      required:
+      - flowId
+      - handoffSecret
+      type: object
+    ControllersOIDCClaimResponse:
+      properties:
+        status:
+          enum:
+          - pending
+          - complete
+          type: string
+        user:
+          $ref: '#/components/schemas/ControllersUserView'
+      required:
+      - status
+      type: object
+    ControllersOIDCProviderView:
+      properties:
+        displayName:
+          type: string
+        startPath:
+          type: string
+      required:
+      - displayName
+      - startPath
+      type: object
+    ControllersOIDCStartRequest:
+      properties:
+        clientKind:
+          enum:
+          - browser
+          - desktop
+          type: string
+        handoffSecret:
+          type: string
+        returnTo:
+          type: string
+      type: object
+    ControllersOIDCStartResponse:
+      properties:
+        authorizationUrl:
+          type: string
+        expiresAt:
+          format: date-time
+          type: string
+        flowId:
+          type: string
+      required:
+      - authorizationUrl
+      - flowId
+      - expiresAt
       type: object
     ControllersProjectMemoryItemResponse:
       properties:

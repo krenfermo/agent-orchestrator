@@ -22,6 +22,7 @@ import (
 	providerprofilesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providerprofile"
 	providersetupsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providersetup"
 	reviewsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/review"
+	ssosvc "github.com/aoagents/agent-orchestrator/backend/internal/service/ssosvc"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
 )
 
@@ -117,6 +118,18 @@ type APIDeps struct {
 	// if AO_TRUSTED_LOCAL_MODE were off, since there is nothing to resolve
 	// to), matching the other optional-surface conventions here.
 	Auth authsvc.Manager
+	// SSO backs P4-A's OIDC surface (/auth/providers, /auth/oidc/*).
+	// Optional in exactly the same sense as every other surface here: nil
+	// leaves those routes answering 501 and leaves the installation
+	// password-only, which is what every install that configures no provider
+	// is.
+	SSO ssosvc.Manager
+
+	// Log is the daemon logger the API layer records audit lines to. It is
+	// filled in by normalizeAPIDeps from the router's own logger, so callers
+	// never set it; a nil logger simply means no audit line is written (the
+	// telemetry sink, when wired, still receives the event).
+	Log *slog.Logger
 	// ProjectOwnership/WorkflowOwnership back Checkpoint 8P-A's minimal
 	// ownership scoping on the projects/workflows controllers. Optional:
 	// nil disables scoping entirely (pre-8P-A behavior). Both are satisfied
@@ -166,6 +179,9 @@ type APIDeps struct {
 // warning, because a silent-forever-offline roster is precisely what a
 // startup log is for.
 func normalizeAPIDeps(deps APIDeps, log *slog.Logger) APIDeps {
+	if deps.Log == nil {
+		deps.Log = log
+	}
 	if deps.DeviceLive == nil && deps.Presence != nil {
 		deps.DeviceLive = deps.Presence
 	}
@@ -203,6 +219,7 @@ type API struct {
 	projectMemory    *controllers.ProjectMemoryController
 	events           *EventsController
 	auth             *controllers.AuthController
+	sso              *controllers.SSOController
 	providerProfiles *controllers.ProviderProfilesController
 	executionPolicy  *controllers.ExecutionPolicyController
 }
@@ -274,9 +291,21 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			TrustedLocal:     cfg.TrustedLocalMode,
 			ProviderProfiles: deps.ProviderProfiles,
 		},
-		scheduler:        &controllers.SchedulerController{Scheduler: deps.Scheduler, GC: deps.RuntimeGC},
-		events:           &EventsController{Source: deps.CDC, Live: deps.Events},
-		auth:             &controllers.AuthController{Mgr: deps.Auth, TrustedLocal: cfg.TrustedLocalMode},
+		scheduler: &controllers.SchedulerController{Scheduler: deps.Scheduler, GC: deps.RuntimeGC},
+		events:    &EventsController{Source: deps.CDC, Live: deps.Events},
+		auth: &controllers.AuthController{
+			Mgr:          deps.Auth,
+			TrustedLocal: cfg.TrustedLocalMode,
+			SSO:          deps.SSO,
+			Audit:        controllers.AuthAudit{Log: deps.Log, Sink: deps.Telemetry},
+			CookiePolicy: controllers.SessionCookiePolicy{CrossSite: cfg.SessionCookieCrossSite},
+		},
+		sso: &controllers.SSOController{
+			Mgr:          deps.SSO,
+			Mode:         cfg.AuthMode,
+			Audit:        controllers.AuthAudit{Log: deps.Log, Sink: deps.Telemetry},
+			CookiePolicy: controllers.SessionCookiePolicy{CrossSite: cfg.SessionCookieCrossSite},
+		},
 		providerProfiles: &controllers.ProviderProfilesController{Mgr: deps.ProviderProfiles, Setup: deps.ProviderSetup},
 		executionPolicy:  &controllers.ExecutionPolicyController{Mgr: deps.ExecutionPolicy},
 	}
@@ -323,6 +352,7 @@ func (a *API) Register(root chi.Router) {
 			a.workflows.Register(r)
 			a.scheduler.Register(r)
 			a.auth.Register(r)
+			a.sso.Register(r)
 			a.providerProfiles.Register(r)
 			a.executionPolicy.Register(r)
 			// Sibling REST controllers plug in here.

@@ -55,10 +55,19 @@ type User struct {
 // handed to the client once, in the Set-Cookie response at login; TokenHash
 // (its SHA-256) is the only form stored server-side, and — like
 // PasswordHash — must never be exposed in any JSON-serializable DTO.
+//
+// P4-A: a session also records how it was authenticated. AuthMethod is
+// AuthMethodPassword for every session predating that work (migration 0151
+// backfills it), and Issuer/Subject are populated only for AuthMethodOIDC.
+// The provider's own access/refresh tokens are deliberately absent: AO issues
+// its own session and never re-presents a provider token as one.
 type AuthSession struct {
 	ID         string
 	UserID     UserID
 	TokenHash  string
+	AuthMethod AuthMethod
+	Issuer     string
+	Subject    string
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
 	LastSeenAt time.Time

@@ -35,6 +35,7 @@ import (
 	baselineevidence "github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory"
 	usagepipeline "github.com/aoagents/agent-orchestrator/backend/internal/observe/usage"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/usage/pricing"
+	"github.com/aoagents/agent-orchestrator/backend/internal/oidc"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/presence"
 	"github.com/aoagents/agent-orchestrator/backend/internal/preview"
@@ -61,6 +62,7 @@ import (
 	providersetupsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providersetup"
 	questionssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/questions"
 	settingssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/settings"
+	ssosvc "github.com/aoagents/agent-orchestrator/backend/internal/service/ssosvc"
 	usagesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/usage"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillassets"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
@@ -179,6 +181,31 @@ func RunWithConfig(cfg config.Config) error {
 		log.Warn("ensure-owner-exists check failed", "err", err)
 	} else if promoted {
 		log.Info("promoted sole pre-existing user to installation owner")
+	}
+
+	// P4-A: SSO. Wired on every boot, exactly like authMgr — the service
+	// itself reports Enabled() false when no provider is configured, so the
+	// routes exist and answer SSO_NOT_CONFIGURED rather than being
+	// conditionally absent. An install that sets no AO_OIDC_* variable is
+	// indistinguishable from one built before this checkpoint.
+	var ssoMgr ssosvc.Manager
+	if cfg.OIDC.Enabled {
+		ssoMgr = ssosvc.New(cfg.OIDC, oidc.NewClient(oidc.Config{
+			Issuer:       cfg.OIDC.Issuer,
+			ClientID:     cfg.OIDC.ClientID,
+			ClientSecret: cfg.OIDC.ClientSecret,
+			RedirectURL:  cfg.OIDC.RedirectURL,
+			Scopes:       cfg.OIDC.Scopes,
+		}, nil, nil), store, federatedSessionIssuer{authMgr}, nil)
+		log.Info("single sign-on enabled",
+			"issuer", cfg.OIDC.Issuer,
+			"redirectUrl", cfg.OIDC.RedirectURL,
+			"authMode", string(cfg.AuthMode),
+			"allowedEmailDomains", len(cfg.OIDC.AllowedEmailDomains),
+		)
+		if _, err := ssoMgr.PurgeExpiredFlows(context.Background()); err != nil {
+			log.Warn("could not prune expired sign-in flows", "err", err)
+		}
 	}
 
 	telemetrySink := newTelemetrySink(cfg, store, log)
@@ -734,6 +761,7 @@ func RunWithConfig(cfg config.Config) error {
 		PreviewServer:       managedPreview,
 		SessionCapabilities: browserAuthority,
 		Auth:                authMgr,
+		SSO:                 ssoMgr,
 		ProjectOwnership:    store,
 		WorkflowOwnership:   store,
 		SessionOwnership:    store,
@@ -908,4 +936,23 @@ func usageEvidenceSource(log *slog.Logger) *baselineevidence.DirSource {
 		return nil
 	}
 	return source
+}
+
+// federatedSessionIssuer adapts authsvc.Manager to ssosvc.SessionIssuer. The
+// two declare the same operations with their own input structs, so that
+// neither service package has to import the other; this is the one place the
+// translation lives.
+type federatedSessionIssuer struct{ mgr authsvc.Manager }
+
+func (f federatedSessionIssuer) CreateFederatedUser(ctx context.Context, in ssosvc.FederatedUserInput) (domain.User, error) {
+	return f.mgr.CreateFederatedUser(ctx, authsvc.FederatedUserInput{
+		DisplayName: in.DisplayName,
+		Email:       in.Email,
+		Username:    in.Username,
+		PreferOwner: in.PreferOwner,
+	})
+}
+
+func (f federatedSessionIssuer) CreateSessionAs(ctx context.Context, userID domain.UserID, method domain.AuthMethod, issuer, subject string) (string, domain.AuthSession, error) {
+	return f.mgr.CreateSessionAs(ctx, userID, method, issuer, subject)
 }

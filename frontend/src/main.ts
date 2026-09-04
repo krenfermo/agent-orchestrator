@@ -74,6 +74,7 @@ import {
 	registerCloudProtocol,
 	showCloudSignInFailure,
 } from "./main/cloud-auth";
+import { beginSsoSignIn } from "./main/sso-signin";
 import { DEFAULT_POSTHOG_HOST, DEFAULT_POSTHOG_PROJECT_KEY } from "./shared/posthog-config";
 import { buildTelemetryBootstrap, defaultDataDir } from "./shared/telemetry";
 import { createBrowserViewHost, type BrowserViewHost } from "./main/browser-view-host";
@@ -688,6 +689,13 @@ function daemonEnv(forceKeep = keepDaemonAlive(process.env)): NodeJS.ProcessEnv 
 		// Claude Code Chat uses AO's packaged ACP adapter + Node runtime. The
 		// provider executable itself is resolved by the daemon from the user's PATH
 		// and passed through CLAUDE_CODE_EXECUTABLE; it is not part of this resource.
+		// P4-A: the renderer is served from the app:// scheme while the daemon
+		// answers on http://127.0.0.1, so the two are different origins and a
+		// SameSite=Lax session cookie would never be sent between them. `none`
+		// (which implies Secure, honored on a loopback origin) is what makes a
+		// real signed-in session usable in the desktop app at all. A user-set
+		// value still wins, as everywhere else here.
+		AO_SESSION_COOKIE_SAMESITE: process.env.AO_SESSION_COOKIE_SAMESITE ?? "none",
 		AO_ACP_RUNTIME_DIR:
 			process.env.AO_ACP_RUNTIME_DIR ??
 			(app.isPackaged
@@ -1836,6 +1844,18 @@ function notifyRenderersOfCloudSession(account: import("./shared/cloud-account")
 }
 
 installCloudIPC(cloudDataDir, notifyRenderersOfCloudSession);
+
+// P4-A: desktop single sign-on. The whole flow lives in the main process
+// because the AO session must land in the renderer's own cookie jar, and the
+// only way to put it there without a token ever becoming a JavaScript value
+// is to let Electron's net module write the Set-Cookie itself. See
+// src/main/sso-signin.ts for the shape and why each step exists.
+ipcMain.handle("auth:ssoSignIn", async () => {
+	if (daemonStatus.state !== "ready" || !daemonStatus.port) {
+		throw new Error("Agent Orchestrator is not connected to its daemon yet.");
+	}
+	return beginSsoSignIn({ apiBaseUrl: `http://127.0.0.1:${daemonStatus.port}` });
+});
 
 function focusCloudWindow(): void {
 	const window = BaseWindow.getAllWindows()[0];

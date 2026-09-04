@@ -96,6 +96,9 @@ type AuthSession struct {
 	ExpiresAt  time.Time
 	LastSeenAt time.Time
 	RevokedAt  sql.NullTime
+	AuthMethod domain.AuthMethod
+	Issuer     string
+	Subject    string
 }
 
 type BranchLock struct {
@@ -337,6 +340,19 @@ type ExecutionPlacementTransition struct {
 	UpdatedAt           time.Time
 }
 
+type ExternalIdentity struct {
+	ID            string
+	UserID        domain.UserID
+	Issuer        string
+	Subject       string
+	Email         string
+	EmailVerified bool
+	DisplayName   string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	LastLoginAt   sql.NullTime
+}
+
 type ModelUsageEvent struct {
 	ID                  int64
 	BindingID           int64
@@ -366,6 +382,21 @@ type Notification struct {
 	Status        domain.NotificationStatus
 	CreatedAt     time.Time
 	ResolvedAt    sql.NullTime
+}
+
+type OidcLoginFlow struct {
+	ID                  string
+	Nonce               string
+	CodeVerifier        string
+	RedirectUri         string
+	ReturnTo            string
+	ClientKind          string
+	HandoffSecretHash   string
+	AuthenticatedUserID *domain.UserID
+	AuthenticatedAt     sql.NullTime
+	CreatedAt           time.Time
+	ExpiresAt           time.Time
+	ConsumedAt          sql.NullTime
 }
 
 type PR struct {

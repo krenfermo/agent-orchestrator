@@ -165,6 +165,22 @@ type Config struct {
 	// controls how the non-rejecting identity middleware resolves an
 	// application-level "current user".
 	TrustedLocalMode bool
+	// AuthMode is P4-A's explicit identity posture, domain.AuthModeTrustedLocal
+	// (the default, today's behavior) or domain.AuthModeOIDC. It is derived
+	// alongside OIDC below, never set independently: see loadOIDC for why the
+	// two cannot be separate switches.
+	AuthMode domain.AuthMode
+	// SessionCookieCrossSite selects SameSite=None; Secure for the session
+	// cookie (AO_SESSION_COOKIE_SAMESITE=none). Default false keeps 8P-A's
+	// SameSite=Lax. The Electron supervisor sets it, because its renderer
+	// (app://) and the daemon (http://127.0.0.1) are different origins and a
+	// Lax cookie is never sent between them. See
+	// httpd/controllers.SessionCookiePolicy.
+	SessionCookieCrossSite bool
+	// OIDC is P4-A's backend-owned provider configuration. Zero-valued (and
+	// OIDC.Enabled false) on every install that configures no provider, which
+	// is every install that exists today.
+	OIDC OIDCConfig
 	// CapacityLimits is P1-C's runtime scheduler bound: how many agent
 	// runtimes AO may have running at once, globally, per execution kind, and
 	// per workflow. Zero-valued fields normalize to the shipped defaults
@@ -219,6 +235,20 @@ func (c Config) Addr() string {
 //	AO_TMUX_SOCKET       isolated tmux server name (Darwin/Linux only)
 //	                     (default: derived from DataDir, e.g. "ao-<hash>")
 //	AO_TRUSTED_LOCAL_MODE  application-identity trust mode off|on (default on)
+//	AO_SESSION_COOKIE_SAMESITE  session cookie SameSite lax|none (default lax;
+//	                       `none` implies Secure and is what the desktop uses)
+//	AO_AUTH_MODE           trusted_local|oidc (default: oidc when a provider is
+//	                       configured, trusted_local otherwise)
+//	AO_OIDC_ISSUER         OIDC provider issuer identifier
+//	AO_OIDC_CLIENT_ID      OIDC client id
+//	AO_OIDC_CLIENT_SECRET  OIDC client secret (omit for a PKCE-only public client)
+//	AO_OIDC_REDIRECT_URL   OIDC callback (default http://127.0.0.1:<port>/api/v1/auth/oidc/callback)
+//	AO_OIDC_SCOPES         requested scopes (default "openid profile email")
+//	AO_OIDC_DISPLAY_NAME   sign-in button label
+//	AO_OIDC_ALLOWED_DOMAINS  comma-separated email domains permitted to sign in
+//	AO_OIDC_REQUIRED_CLAIM   claim=value a signing-in identity must carry
+//	AO_OIDC_LINK_VERIFIED_EMAIL  link a first federated login to an existing local
+//	                       account on a verified email match off|on (default on)
 //
 // The bind host is not configurable: the daemon is loopback-only by design.
 // envPositiveInt reads a positive integer from the environment, returning 0
@@ -396,6 +426,24 @@ func Load() (Config, error) {
 			return Config{}, err
 		}
 		cfg.TrustedLocalMode = v
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("AO_SESSION_COOKIE_SAMESITE")); raw != "" {
+		switch strings.ToLower(raw) {
+		case "lax":
+			cfg.SessionCookieCrossSite = false
+		case "none":
+			cfg.SessionCookieCrossSite = true
+		default:
+			return Config{}, fmt.Errorf("invalid AO_SESSION_COOKIE_SAMESITE %q: must be lax or none", raw)
+		}
+	}
+
+	// P4-A. Runs after AO_TRUSTED_LOCAL_MODE and after AO_PORT: it may
+	// override the former (an OIDC installation never synthesizes an
+	// identity) and it derives the default redirect URL from the latter.
+	if err := loadOIDC(&cfg); err != nil {
+		return Config{}, err
 	}
 
 	runFile, err := resolveRunFilePath()
