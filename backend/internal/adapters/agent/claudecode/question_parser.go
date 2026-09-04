@@ -42,16 +42,7 @@ func (QuestionParser) ParseQuestion(paneText string) (ports.QuestionCandidate, b
 		choices = append(choices, domain.QuestionChoice{ID: opt.number, Label: opt.label})
 	}
 
-	// The question text is the nearest non-empty line above the option
-	// block that doesn't itself look like an option row.
-	questionText := ""
-	for i := start - 1; i >= 0; i-- {
-		if claudeOptionLine.MatchString(lines[i]) {
-			continue
-		}
-		questionText = strings.TrimSpace(lines[i])
-		break
-	}
+	questionText := claudeQuestionText(lines, start)
 	if questionText == "" {
 		return ports.QuestionCandidate{}, false
 	}
@@ -300,4 +291,54 @@ func claudeRowsHaveTextLeftOf(raw []string, from, to, col int) bool {
 		}
 	}
 	return false
+}
+
+// maxQuestionLookbackLines bounds how far above the option block the question
+// is looked for. Claude Code renders a question above its choices, wrapped to
+// the pane width and sometimes followed by supporting lines; a couple of dozen
+// lines covers that generously while keeping the scan from wandering into
+// whatever tool output happens to precede the prompt.
+const maxQuestionLookbackLines = 24
+
+// claudeQuestionText picks the question out of the lines above the option block.
+//
+// F7: this used to take the NEAREST non-option line, which is right only when
+// the question is one line. Claude Code passes the whole `question` field
+// through, and a model that supplies its evidence inside that field renders as
+//
+//	Which helper convention should the new helper under src/helpers/ follow?
+//
+//	Evidence found in the repo:
+//	• src/helpers/stringutil.js — flat module, individually named exports...
+//	• CONTRIBUTING.md states the two conventions are a live migration, that
+//	  file counts are not evidence, and that I must ask rather than infer.
+//	❯ 1. Flat named exports
+//	  2. Default-exported object
+//
+// so the stored question became that last bullet. The consequences are not
+// cosmetic: the captured text is what the autonomy classifier reads, what the
+// resolver is asked to answer, and what a person is shown. In the gate it made
+// the classifier read "live migration" as a change to persisted data and
+// escalate a reversible technical choice to a human.
+//
+// So the nearest line ending in '?' within a bounded look-back wins, and the
+// old nearest-line rule remains the fallback for a question that genuinely has
+// no question mark. Only the SELECTION is changed here -- nothing is
+// reformatted, joined or truncated, so a one-line question yields exactly the
+// text it always did.
+func claudeQuestionText(lines []string, start int) string {
+	fallback := ""
+	for i := start - 1; i >= 0 && i >= start-maxQuestionLookbackLines; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || claudeOptionLine.MatchString(lines[i]) {
+			continue
+		}
+		if fallback == "" {
+			fallback = line
+		}
+		if strings.HasSuffix(line, "?") {
+			return line
+		}
+	}
+	return fallback
 }
