@@ -54,6 +54,10 @@ type WorkflowQuestionsController struct {
 	Svc          WorkflowQuestionsService
 	Ownership    WorkflowOwnershipStore
 	TrustedLocal bool
+	// Guard is P4-B's authorization gate. When wired it replaces the 8P-A/8P-B
+	// owner-equality checks with the canonical permission evaluator; a zero
+	// Guard preserves the pre-P4-B behavior exactly.
+	Guard Guard
 }
 
 func (c *WorkflowQuestionsController) scopingEnforced() bool {
@@ -133,6 +137,16 @@ var pendingDecisionsAllowedStates = map[string]string{
 // precedent) when scoping is enforced and the caller doesn't own runID's
 // workflow run.
 func (c *WorkflowQuestionsController) authorizeRunAccess(w http.ResponseWriter, r *http.Request, runID string) bool {
+	if c.Guard.Enabled() {
+		// Answering a question steers the run, so it needs workflow.run;
+		// reading the queue needs only workflow.read. A viewer can watch a
+		// run wait on a decision without being able to make it.
+		perm := domain.PermWorkflowRead
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			perm = domain.PermWorkflowRun
+		}
+		return c.Guard.AllowWorkflowRun(w, r, perm, runID)
+	}
 	if !c.scopingEnforced() {
 		return true
 	}
@@ -180,7 +194,20 @@ func (c *WorkflowQuestionsController) pending(w http.ResponseWriter, r *http.Req
 	// in the daemon, so (unlike list/get/answer's single workflowId) it
 	// must filter per-question rather than reject the whole request --
 	// never surface another user's question in the caller's inbox.
-	if c.scopingEnforced() {
+	if c.Guard.Enabled() {
+		sub, ok := c.Guard.Subject(r)
+		if !ok {
+			envelope.WriteError(w, r, identity.Unauthorized())
+			return
+		}
+		visible := qs[:0]
+		for _, q := range qs {
+			if c.Guard.CanRun(r.Context(), sub, domain.PermWorkflowRead, string(q.WorkflowRunID)) {
+				visible = append(visible, q)
+			}
+		}
+		qs = visible
+	} else if c.scopingEnforced() {
 		user, err := identity.Require(r)
 		if err != nil {
 			envelope.WriteError(w, r, err)

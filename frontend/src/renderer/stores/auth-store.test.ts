@@ -38,6 +38,7 @@ describe("auth-store", () => {
 			authMethod: null,
 			issuer: null,
 			providers: null,
+			permissions: [],
 			ssoPending: false,
 		});
 	});
@@ -171,6 +172,52 @@ describe("auth-store", () => {
 			expect(ok).toBe(false);
 			expect(useAuthStore.getState().status).not.toBe("authenticated");
 			expect(useAuthStore.getState().error).toBeTruthy();
+		});
+	});
+
+	// P4-B -------------------------------------------------------------------
+
+	describe("capabilities", () => {
+		// The renderer takes the daemon's word for what this identity may do.
+		// Deriving it from `user.role` in React would be a second authorization
+		// implementation, and the one that decides lives in the daemon.
+		it("stores the permissions /auth/me reports", async () => {
+			apiGET.mockResolvedValue({
+				data: {
+					status: "authenticated",
+					user: { id: "u1", displayName: "Ada", email: "ada@example.com", username: "ada", status: "active", role: "admin" },
+					authMethod: "password",
+					permissions: ["users.read", "users.manage", "settings.read"],
+				},
+			});
+
+			await useAuthStore.getState().load();
+
+			expect(useAuthStore.getState().permissions).toEqual(["users.read", "users.manage", "settings.read"]);
+		});
+
+		// A capability list that cannot be fetched must render an app with no
+		// administration surfaces, never one with all of them.
+		it("reports no capabilities when the identity cannot be resolved", async () => {
+			useAuthStore.setState({ permissions: ["users.manage"] });
+			apiGET.mockResolvedValue({
+				error: { error: { code: "NOT_AUTHENTICATED", message: "authentication required" } },
+				response: { status: 401 },
+			});
+
+			await useAuthStore.getState().load();
+
+			expect(useAuthStore.getState().permissions).toEqual([]);
+		});
+
+		it("clears capabilities on sign-out", async () => {
+			useAuthStore.setState({ permissions: ["users.manage"] });
+			apiPOST.mockResolvedValue({ data: { ok: true } });
+			apiGET.mockResolvedValue({ data: { status: "no_user", permissions: [] } });
+
+			await useAuthStore.getState().logout();
+
+			expect(useAuthStore.getState().permissions).toEqual([]);
 		});
 	});
 });

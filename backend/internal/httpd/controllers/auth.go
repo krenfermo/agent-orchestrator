@@ -25,7 +25,7 @@ type UserView struct {
 	Email       string `json:"email"`
 	Username    string `json:"username"`
 	Status      string `json:"status" enum:"active,disabled"`
-	Role        string `json:"role" enum:"owner,member"`
+	Role        string `json:"role" enum:"owner,admin,member,viewer"`
 }
 
 func userView(u domain.User) UserView {
@@ -108,6 +108,16 @@ type MeResponse struct {
 	// otherwise. It names the provider; it is not a secret and carries no
 	// token material.
 	Issuer string `json:"issuer,omitempty"`
+	// Permissions is P4-B's capability list: the INSTALLATION-WIDE permissions
+	// this identity holds, evaluated by the backend. The frontend renders
+	// administration navigation and controls from this and never from the role
+	// name -- a role is an input to authorization, not a substitute for it, and
+	// a renderer that maps roles to buttons has quietly become a second
+	// authorization implementation that can disagree with the real one.
+	//
+	// Hiding a control is convenience only. Every route these permissions
+	// describe is enforced again on the way in.
+	Permissions []string `json:"permissions"`
 }
 
 // AuthController owns the /auth routes (Checkpoint 8P-A). A nil Mgr keeps
@@ -127,6 +137,10 @@ type AuthController struct {
 	Audit AuthAudit
 	// CookiePolicy decides the session cookie's SameSite/Secure attributes.
 	CookiePolicy SessionCookiePolicy
+	// Authz is P4-B's evaluator, consulted by GET /me to report the caller's
+	// effective capabilities. Nil simply reports none, which renders an app
+	// with no administration surfaces -- the safe direction.
+	Authz Authorizer
 }
 
 // Register mounts the auth routes on the supplied router.
@@ -220,10 +234,11 @@ func (c *AuthController) me(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			view := userView(p.User)
 			envelope.WriteJSON(w, http.StatusOK, MeResponse{
-				Status:     "authenticated",
-				User:       &view,
-				AuthMethod: string(p.AuthMethod),
-				Issuer:     p.Issuer,
+				Status:      "authenticated",
+				User:        &view,
+				AuthMethod:  string(p.AuthMethod),
+				Issuer:      p.Issuer,
+				Permissions: c.permissionsFor(r, p),
 			})
 			return
 		}
@@ -238,13 +253,14 @@ func (c *AuthController) me(w http.ResponseWriter, r *http.Request) {
 		if u, ok, err := c.Mgr.BootstrapAdmin(r.Context()); err == nil && ok {
 			view := userView(u)
 			envelope.WriteJSON(w, http.StatusOK, MeResponse{
-				Status:     "trusted-local",
-				User:       &view,
-				AuthMethod: string(domain.AuthMethodTrustedLocal),
+				Status:      "trusted-local",
+				User:        &view,
+				AuthMethod:  string(domain.AuthMethodTrustedLocal),
+				Permissions: c.permissionsFor(r, authsvc.TrustedLocalPrincipal(u)),
 			})
 			return
 		}
-		envelope.WriteJSON(w, http.StatusOK, MeResponse{Status: "no_user"})
+		envelope.WriteJSON(w, http.StatusOK, MeResponse{Status: "no_user", Permissions: []string{}})
 		return
 	}
 	envelope.WriteAPIError(w, r, http.StatusUnauthorized, "unauthorized", "NOT_AUTHENTICATED", "authentication required", nil)
@@ -412,4 +428,25 @@ func requestIsSecure(r *http.Request) bool {
 		return true
 	}
 	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+// permissionsFor resolves the caller's installation-wide capabilities. A nil
+// evaluator, or a resolution failure, reports an EMPTY list rather than a
+// permissive one: a UI that renders nothing it cannot prove is allowed is a
+// degraded experience, while a UI that renders everything on a failed lookup
+// is a lie about authority.
+func (c *AuthController) permissionsFor(r *http.Request, p domain.Principal) []string {
+	if c.Authz == nil {
+		return []string{}
+	}
+	sub, err := c.Authz.Resolve(r.Context(), p)
+	if err != nil {
+		return []string{}
+	}
+	perms := sub.GlobalPermissions()
+	out := make([]string, 0, len(perms))
+	for _, perm := range perms {
+		out = append(out, string(perm))
+	}
+	return out
 }

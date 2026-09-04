@@ -155,6 +155,7 @@ var shippedMigrations = map[int64]string{
 	149: "0149_usage_attribution.sql",
 	150: "0150_usage_subject.sql",
 	151: "0151_oidc_identities.sql",
+	152: "0152_users_teams_rbac.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

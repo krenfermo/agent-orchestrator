@@ -35,6 +35,7 @@ export type GlobalSettingsSectionId =
 	| "sourceControl"
 	| "projects"
 	| "updates"
+	| "access"
 	| "help";
 
 /** Worker detail view toggles — Changes (Git rail) is the default. */

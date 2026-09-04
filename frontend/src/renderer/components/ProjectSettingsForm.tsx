@@ -33,6 +33,7 @@ import { buildIntake, deriveGitHubRepo, IntakeFields, type IntakeForm } from "./
 import { ProductExternalLink } from "./ProductExternalLink";
 import { ReviewerSelect, reviewerTrustWarning } from "./ReviewerSelect";
 import { AgentModelCombobox } from "./settings/AgentModelCombobox";
+import { ProjectAccessSettingsSection } from "./settings/ProjectAccessSettingsSection";
 import { SettingsOptionMenu } from "./settings/SettingsOptionMenu";
 import { SettingsRow } from "./settings/SettingsRow";
 
@@ -46,7 +47,7 @@ const PERMISSION_MODE_VALUES = ["default", "accept-edits", "auto", "bypass-permi
 
 const projectQueryKey = (id: string) => ["project", id] as const;
 
-export type ProjectSettingsSection = "general" | "agents" | "workflow" | "intake";
+export type ProjectSettingsSection = "general" | "agents" | "workflow" | "intake" | "access";
 export interface ProjectSettingsSaveState {
 	isPending: boolean;
 	showSaving: boolean;
@@ -658,6 +659,8 @@ function SettingsBody({
 					)}
 				</>
 			)}
+
+			{section === "access" && <ProjectAccessSettingsSection projectId={projectId} />}
 
 			{section === "intake" && (
 				<>

@@ -927,6 +927,10 @@ type WorkflowsController struct {
 	// enforced when this is false — see ProjectsController's own field for
 	// the identical reasoning.
 	TrustedLocal bool
+	// Guard is P4-B's authorization gate. When wired it replaces the 8P-A/8P-B
+	// owner-equality checks with the canonical permission evaluator; a zero
+	// Guard preserves the pre-P4-B behavior exactly.
+	Guard Guard
 	// ProviderProfiles backs Checkpoint 8P-C.1's routing-decision profile
 	// display metadata (safe fields only -- see RoutingProfileView). Nil
 	// leaves every StepDetail.Routing.*Profile field unset; the raw
@@ -1264,17 +1268,98 @@ func (c *WorkflowsController) runVisible(ctx context.Context, id string, current
 	return owner == nil || *owner == current
 }
 
+// runFilter returns the predicate a list handler applies to each row. It
+// resolves the caller's authority ONCE and then decides every row in memory,
+// which is what keeps a hundred-run page at a fixed query cost instead of a
+// per-row ownership lookup. A run's project id comes from the row that is
+// already loaded, so filtering costs no extra read at all.
+//
+// With no Guard wired it degrades to 8P-A's per-run owner check, unchanged.
+func (c *WorkflowsController) runFilter(r *http.Request) (func(ctx context.Context, runID string, project domain.ProjectID) bool, error) {
+	if c.Guard.Enabled() {
+		sub, ok := c.Guard.Subject(r)
+		if !ok {
+			return nil, identity.Unauthorized()
+		}
+		return func(_ context.Context, _ string, project domain.ProjectID) bool {
+			return sub.Allows(domain.PermWorkflowRead, domain.ProjectResource(project))
+		}, nil
+	}
+	if !c.scopingEnforced() {
+		return func(context.Context, string, domain.ProjectID) bool { return true }, nil
+	}
+	user, err := identity.Require(r)
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, runID string, _ domain.ProjectID) bool {
+		return c.runVisible(ctx, runID, user.ID)
+	}, nil
+}
+
+// authorizeRun is this controller's single run-scoped authorization gate. With
+// P4-B's Guard wired it resolves the run's PROJECT and asks the canonical
+// evaluator; without it, it falls back to 8P-A's owner-equality check. Both
+// answer a denial with 404, so a run id nobody may reach is indistinguishable
+// from one that does not exist.
+func (c *WorkflowsController) authorizeRun(w http.ResponseWriter, r *http.Request, perm domain.Permission, id string) bool {
+	if c.Guard.Enabled() {
+		return c.Guard.AllowWorkflowRun(w, r, perm, id)
+	}
+	if !c.scopingEnforced() {
+		return true
+	}
+	user, err := identity.Require(r)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return false
+	}
+	if !c.runVisible(r.Context(), id, user.ID) {
+		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "WORKFLOW_NOT_FOUND", "workflow run not found", nil)
+		return false
+	}
+	return true
+}
+
+// run wraps a handler addressed by {workflowId} with the permission it needs.
+// Applying the gate in Register rather than inside forty handlers is what
+// makes the authorization model READABLE: the route table below is also the
+// permission table, and a new route that forgets a permission does not
+// compile into an unguarded endpoint -- it does not compile at all.
+func (c *WorkflowsController) run(perm domain.Permission, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !c.authorizeRun(w, r, perm, chi.URLParam(r, "workflowId")) {
+			return
+		}
+		h(w, r)
+	}
+}
+
+// project wraps a handler addressed by {projectId} with the permission it
+// needs.
+func (c *WorkflowsController) project(perm domain.Permission, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if c.Guard.Enabled() {
+			id := domain.ProjectID(chi.URLParam(r, "projectId"))
+			if !c.Guard.AllowProject(w, r, perm, id, "PROJECT_NOT_FOUND", "project not found") {
+				return
+			}
+		}
+		h(w, r)
+	}
+}
+
 // Register mounts the workflow routes on the supplied router.
 func (c *WorkflowsController) Register(r chi.Router) {
-	r.Post("/projects/{projectId}/workflows", c.create)
-	r.Get("/projects/{projectId}/board", c.board)
-	r.Get("/workflows/{workflowId}", c.get)
+	r.Post("/projects/{projectId}/workflows", c.project(domain.PermWorkflowRun, c.create))
+	r.Get("/projects/{projectId}/board", c.project(domain.PermWorkflowRead, c.board))
+	r.Get("/workflows/{workflowId}", c.run(domain.PermWorkflowRead, c.get))
 	r.Get("/workflows", c.list)
-	r.Post("/workflows/{workflowId}/cancel", c.cancel)
-	r.Post("/workflows/{workflowId}/cancel-archive", c.cancelAndArchive)
-	r.Get("/projects/{projectId}/board/history", c.boardHistory)
-	r.Post("/workflows/{workflowId}/start", c.start)
-	r.Post("/workflows/{workflowId}/continue", c.continueRun)
+	r.Post("/workflows/{workflowId}/cancel", c.run(domain.PermWorkflowCancel, c.cancel))
+	r.Post("/workflows/{workflowId}/cancel-archive", c.run(domain.PermWorkflowCancel, c.cancelAndArchive))
+	r.Get("/projects/{projectId}/board/history", c.project(domain.PermWorkflowRead, c.boardHistory))
+	r.Post("/workflows/{workflowId}/start", c.run(domain.PermWorkflowRun, c.start))
+	r.Post("/workflows/{workflowId}/continue", c.run(domain.PermWorkflowRun, c.continueRun))
 
 	// P1-B: the recovery surface, as named operations rather than one
 	// ambiguous continue. /continue keeps working unchanged and now reports
@@ -1282,47 +1367,47 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	// P3-E: the canonical usage ledger for one run, and the project rollup.
 	// Separate routes rather than only an embedded section: a client polling a
 	// cost figure must not have to fetch the whole run detail to get it.
-	r.Get("/workflows/{workflowId}/usage", c.getWorkflowUsage)
-	r.Get("/projects/{projectId}/usage", c.getProjectUsage)
-	r.Get("/workflows/{workflowId}/recovery", c.getRecovery)
+	r.Get("/workflows/{workflowId}/usage", c.run(domain.PermUsageRead, c.getWorkflowUsage))
+	r.Get("/projects/{projectId}/usage", c.project(domain.PermUsageRead, c.getProjectUsage))
+	r.Get("/workflows/{workflowId}/recovery", c.run(domain.PermWorkflowRead, c.getRecovery))
 	// P3-C §24: the "what do I do now" surface, composed on the server so no
 	// client has to compose it itself. A strict read.
-	r.Get("/workflows/{workflowId}/advice", c.getAdvice)
+	r.Get("/workflows/{workflowId}/advice", c.run(domain.PermWorkflowRead, c.getAdvice))
 	// P1-D: the frozen placement, the provider-attempt chain, and the one
 	// admission answer to "why has this not launched" -- one route, because
 	// they are three legs of one question.
-	r.Get("/workflows/{workflowId}/placement", c.getPlacement)
+	r.Get("/workflows/{workflowId}/placement", c.run(domain.PermWorkflowRead, c.getPlacement))
 	// P1-E: the two WRITE routes over that same placement. An override is a
 	// request consumed at the freeze; a transition is an explicit, quiesced,
 	// audited replacement of one generation by another. Neither can re-point a
 	// running obligation -- see workflow_placement_override.go.
-	r.Post("/workflows/{workflowId}/placement/override", c.requestPlacementOverride)
-	r.Post("/workflows/{workflowId}/placement/transition", c.transitionPlacement)
-	r.Post("/workflows/{workflowId}/resume", c.resume)
-	r.Post("/workflows/{workflowId}/plan/reuse", c.reusePlan)
-	r.Post("/workflows/{workflowId}/plan/regenerate", c.regeneratePlan)
-	r.Post("/workflows/{workflowId}/repair", c.repair)
-	r.Post("/workflows/{workflowId}/tasks/{taskId}/resume", c.resumeTask)
-	r.Post("/workflows/{workflowId}/tasks/{taskId}/fresh-review-exception", c.authorizeFreshReviewException)
-	r.Post("/workflows/{workflowId}/tasks/{taskId}/criteria/amend", c.amendTaskCriterion)
-	r.Post("/workflows/{workflowId}/tasks/{taskId}/criteria/resume-review", c.resumeAmendedTaskReview)
+	r.Post("/workflows/{workflowId}/placement/override", c.run(domain.PermWorkflowRepair, c.requestPlacementOverride))
+	r.Post("/workflows/{workflowId}/placement/transition", c.run(domain.PermWorkflowRepair, c.transitionPlacement))
+	r.Post("/workflows/{workflowId}/resume", c.run(domain.PermWorkflowRun, c.resume))
+	r.Post("/workflows/{workflowId}/plan/reuse", c.run(domain.PermWorkflowRun, c.reusePlan))
+	r.Post("/workflows/{workflowId}/plan/regenerate", c.run(domain.PermWorkflowRun, c.regeneratePlan))
+	r.Post("/workflows/{workflowId}/repair", c.run(domain.PermWorkflowRepair, c.repair))
+	r.Post("/workflows/{workflowId}/tasks/{taskId}/resume", c.run(domain.PermWorkflowRun, c.resumeTask))
+	r.Post("/workflows/{workflowId}/tasks/{taskId}/fresh-review-exception", c.run(domain.PermWorkflowRepair, c.authorizeFreshReviewException))
+	r.Post("/workflows/{workflowId}/tasks/{taskId}/criteria/amend", c.run(domain.PermWorkflowRun, c.amendTaskCriterion))
+	r.Post("/workflows/{workflowId}/tasks/{taskId}/criteria/resume-review", c.run(domain.PermWorkflowRun, c.resumeAmendedTaskReview))
 
 	// Checkpoint 8P-E.18 — the Incident Advisor behind the "¿Qué hago?" control.
 	// Four routes rather than one, because the split IS the authorization
 	// model: proposing and executing must not be reachable through the same
 	// capability. See workflow_incident.go.
-	r.Get("/workflows/{workflowId}/incident", c.getIncident)
-	r.Post("/workflows/{workflowId}/incident/diagnose", c.diagnoseIncident)
-	r.Post("/workflows/{workflowId}/incident/diagnosis", c.submitIncidentDiagnosis)
-	r.Post("/workflows/{workflowId}/incident/execute", c.executeIncidentAction)
+	r.Get("/workflows/{workflowId}/incident", c.run(domain.PermWorkflowRead, c.getIncident))
+	r.Post("/workflows/{workflowId}/incident/diagnose", c.run(domain.PermWorkflowRepair, c.diagnoseIncident))
+	r.Post("/workflows/{workflowId}/incident/diagnosis", c.run(domain.PermWorkflowRepair, c.submitIncidentDiagnosis))
+	r.Post("/workflows/{workflowId}/incident/execute", c.run(domain.PermWorkflowRepair, c.executeIncidentAction))
 	// P3-A §17. Two routes, because seeing what is pending must not require the
 	// ability to commit it.
-	r.Get("/workflows/{workflowId}/pending-changes", c.getPendingChanges)
-	r.Post("/workflows/{workflowId}/pending-changes/commit", c.commitPendingChanges)
-	r.Post("/workflows/{workflowId}/plan/generate", c.generatePlan)
-	r.Get("/workflows/{workflowId}/plan", c.get)
-	r.Post("/workflows/{workflowId}/plan/approve", c.approvePlan)
-	r.Post("/workflows/{workflowId}/plan/reject", c.rejectPlan)
+	r.Get("/workflows/{workflowId}/pending-changes", c.run(domain.PermWorkflowRead, c.getPendingChanges))
+	r.Post("/workflows/{workflowId}/pending-changes/commit", c.run(domain.PermWorkflowRun, c.commitPendingChanges))
+	r.Post("/workflows/{workflowId}/plan/generate", c.run(domain.PermWorkflowRun, c.generatePlan))
+	r.Get("/workflows/{workflowId}/plan", c.run(domain.PermWorkflowRead, c.get))
+	r.Post("/workflows/{workflowId}/plan/approve", c.run(domain.PermWorkflowRun, c.approvePlan))
+	r.Post("/workflows/{workflowId}/plan/reject", c.run(domain.PermWorkflowRun, c.rejectPlan))
 
 	// The operator-only recovery routes. They are separate from /continue on
 	// purpose: /continue is also the wake poller's entry point, and both of
@@ -1331,9 +1416,9 @@ func (c *WorkflowsController) Register(r chi.Router) {
 	// judged). An automatic caller reaching either one turns a fail-closed stop
 	// into an unattended loop, so they are reachable only by an explicit human
 	// action and each is bounded on its own durable counter.
-	r.Post("/workflows/{workflowId}/recover/review-provenance", c.recoverReviewProvenance)
-	r.Post("/workflows/{workflowId}/plan/reopen", c.reopenAmbiguousPlan)
-	(&WorkflowQuestionsController{Svc: c.QuestionsReader, Ownership: c.Ownership, TrustedLocal: c.TrustedLocal}).Register(r)
+	r.Post("/workflows/{workflowId}/recover/review-provenance", c.run(domain.PermWorkflowRepair, c.recoverReviewProvenance))
+	r.Post("/workflows/{workflowId}/plan/reopen", c.run(domain.PermWorkflowRepair, c.reopenAmbiguousPlan))
+	(&WorkflowQuestionsController{Svc: c.QuestionsReader, Ownership: c.Ownership, TrustedLocal: c.TrustedLocal, Guard: c.Guard}).Register(r)
 }
 
 func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
@@ -1661,18 +1746,8 @@ func (c *WorkflowsController) get(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/workflows/{workflowId}")
 		return
 	}
+	// Authorization already happened in the route wrapper (see Register).
 	workflowID := chi.URLParam(r, "workflowId")
-	if c.scopingEnforced() {
-		user, err := identity.Require(r)
-		if err != nil {
-			envelope.WriteError(w, r, err)
-			return
-		}
-		if !c.runVisible(r.Context(), workflowID, user.ID) {
-			envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "WORKFLOW_NOT_FOUND", "workflow run not found", nil)
-			return
-		}
-	}
 	detail, err := c.Svc.GetRun(r.Context(), workflowID)
 	if err != nil {
 		writeWorkflowError(w, r, err)
@@ -1701,17 +1776,13 @@ func (c *WorkflowsController) list(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		views := make([]WorkflowRunView, 0, len(summaries))
-		var user domain.User
-		if c.scopingEnforced() {
-			got, err := identity.Require(r)
-			if err != nil {
-				envelope.WriteError(w, r, err)
-				return
-			}
-			user = got
+		visible, err := c.runFilter(r)
+		if err != nil {
+			envelope.WriteError(w, r, err)
+			return
 		}
 		for _, summary := range summaries {
-			if c.scopingEnforced() && !c.runVisible(r.Context(), summary.Run.ID, user.ID) {
+			if !visible(r.Context(), summary.Run.ID, domain.ProjectID(summary.Run.ProjectID)) {
 				continue
 			}
 			views = append(views, workflowRunSummaryView(summary))
@@ -1727,20 +1798,18 @@ func (c *WorkflowsController) list(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowError(w, r, err)
 		return
 	}
-	if c.scopingEnforced() {
-		user, err := identity.Require(r)
-		if err != nil {
-			envelope.WriteError(w, r, err)
-			return
-		}
-		visible := make([]domain.WorkflowRun, 0, len(runs))
-		for _, run := range runs {
-			if c.runVisible(r.Context(), run.ID, user.ID) {
-				visible = append(visible, run)
-			}
-		}
-		runs = visible
+	allowed, err := c.runFilter(r)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
 	}
+	visible := make([]domain.WorkflowRun, 0, len(runs))
+	for _, run := range runs {
+		if allowed(r.Context(), run.ID, domain.ProjectID(run.ProjectID)) {
+			visible = append(visible, run)
+		}
+	}
+	runs = visible
 	views := make([]WorkflowRunView, 0, len(runs))
 	for _, run := range runs {
 		views = append(views, workflowRunView(run, ""))

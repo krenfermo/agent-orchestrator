@@ -21,6 +21,7 @@ import (
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 	providerprofilesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providerprofile"
 	providersetupsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/providersetup"
+	rbacsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/rbac"
 	reviewsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/review"
 	ssosvc "github.com/aoagents/agent-orchestrator/backend/internal/service/ssosvc"
 	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/workflow"
@@ -159,6 +160,20 @@ type APIDeps struct {
 	// controllers.AuthorizeSessionAccess. Optional: nil disables scoping
 	// entirely, matching ProjectOwnership/WorkflowOwnership's convention.
 	SessionOwnership controllers.SessionOwnershipStore
+
+	// Authz is P4-B's canonical authorization evaluator, and ProjectScope
+	// resolves the project a session or workflow run belongs to so a
+	// permission can be asked about it. Both optional and both satisfied by
+	// the same *sqlite/store.Store: nil leaves every gate falling back to
+	// 8P-A/8P-B's owner-equality checks, which is exactly what a headless or
+	// test daemon with no identity layer should do.
+	Authz        controllers.Authorizer
+	ProjectScope controllers.ProjectScope
+
+	// RBAC backs P4-B's /users, /teams and /projects/{id}/access management
+	// surfaces. Optional: nil leaves those routes answering 501, matching
+	// every other optional-surface convention here.
+	RBAC rbacsvc.Manager
 }
 
 // normalizeAPIDeps closes the Presence/DeviceLive duplication trap structurally.
@@ -222,15 +237,24 @@ type API struct {
 	sso              *controllers.SSOController
 	providerProfiles *controllers.ProviderProfilesController
 	executionPolicy  *controllers.ExecutionPolicyController
+	users            *controllers.UsersController
+	teams            *controllers.TeamsController
+	projectAccess    *controllers.ProjectAccessController
+	// guard is P4-B's authorization gate, built once and shared by every
+	// controller that scopes a resource. One value, so a route can never be
+	// gated by a differently-configured evaluator than its neighbour.
+	guard controllers.Guard
 }
 
 // NewAPI constructs the API surface from its dependencies. cfg carries the
 // per-request timeout so the REST group can apply it without re-reading the
 // environment.
 func NewAPI(cfg config.Config, deps APIDeps) *API {
+	guard := controllers.Guard{Authz: deps.Authz, Scope: deps.ProjectScope}
 	return &API{
-		cfg:  cfg,
-		deps: deps,
+		guard: guard,
+		cfg:   cfg,
+		deps:  deps,
 		agents: &controllers.AgentsController{
 			Catalog: deps.Agents,
 		},
@@ -238,6 +262,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			Mgr:          deps.Projects,
 			Ownership:    deps.ProjectOwnership,
 			TrustedLocal: cfg.TrustedLocalMode,
+			Guard:        guard,
 		},
 		environment: &controllers.EnvironmentController{
 			Svc: deps.Environment,
@@ -250,6 +275,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			Capabilities:  deps.SessionCapabilities,
 			Ownership:     deps.SessionOwnership,
 			TrustedLocal:  cfg.TrustedLocalMode,
+			Guard:         guard,
 		},
 		// P3-E: the loopback callback a reviewer or decision-resolver pane uses
 		// to report its OWN token spend. Wired to the same collector the session
@@ -259,14 +285,16 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			Svc:          deps.UsageSummary,
 			Ownership:    deps.SessionOwnership,
 			TrustedLocal: cfg.TrustedLocalMode,
+			Guard:        guard,
 		},
 		capacity:      &controllers.CapacityController{Svc: deps.Capacity},
-		projectMemory: &controllers.ProjectMemoryController{Svc: deps.ProjectMemory},
+		projectMemory: &controllers.ProjectMemoryController{Svc: deps.ProjectMemory, Guard: guard},
 		prs:           &controllers.PRsController{Svc: deps.PRs},
 		reviews: &controllers.ReviewsController{
 			Svc:          deps.Reviews,
 			Ownership:    deps.SessionOwnership,
 			TrustedLocal: cfg.TrustedLocalMode,
+			Guard:        guard,
 		},
 		decisions:     &controllers.DecisionsController{Svc: deps.Decisions},
 		notifications: &controllers.NotificationsController{Svc: deps.Notifications, Stream: deps.NotificationStream},
@@ -277,6 +305,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			Svc:          deps.Conversations,
 			Ownership:    deps.SessionOwnership,
 			TrustedLocal: cfg.TrustedLocalMode,
+			Guard:        guard,
 		},
 		settings: &controllers.SettingsController{Svc: deps.Settings, MemoryMode: deps.MemoryMode},
 		dev:      &controllers.DevController{Import: deps.DevImport},
@@ -289,6 +318,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			QuestionsReader:  deps.Questions,
 			Ownership:        deps.WorkflowOwnership,
 			TrustedLocal:     cfg.TrustedLocalMode,
+			Guard:            guard,
 			ProviderProfiles: deps.ProviderProfiles,
 		},
 		scheduler: &controllers.SchedulerController{Scheduler: deps.Scheduler, GC: deps.RuntimeGC},
@@ -299,6 +329,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			SSO:          deps.SSO,
 			Audit:        controllers.AuthAudit{Log: deps.Log, Sink: deps.Telemetry},
 			CookiePolicy: controllers.SessionCookiePolicy{CrossSite: cfg.SessionCookieCrossSite},
+			Authz:        deps.Authz,
 		},
 		sso: &controllers.SSOController{
 			Mgr:          deps.SSO,
@@ -308,6 +339,9 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		},
 		providerProfiles: &controllers.ProviderProfilesController{Mgr: deps.ProviderProfiles, Setup: deps.ProviderSetup},
 		executionPolicy:  &controllers.ExecutionPolicyController{Mgr: deps.ExecutionPolicy},
+		users:            &controllers.UsersController{Mgr: deps.RBAC},
+		teams:            &controllers.TeamsController{Mgr: deps.RBAC},
+		projectAccess:    &controllers.ProjectAccessController{Mgr: deps.RBAC, Guard: guard},
 	}
 }
 
@@ -330,6 +364,11 @@ func (a *API) Register(root chi.Router) {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Timeout(timeout))
 			r.Use(presenceMiddleware(a.deps.Presence))
+			// P4-B: the installation-wide permission gate. It sits ahead of
+			// every REST controller so a settings, provider, user or team
+			// route is decided in one place for every transport -- browser,
+			// desktop, CLI and LAN bridge alike.
+			r.Use(controllers.GlobalAuthzMiddleware(a.guard))
 			a.agents.Register(r)
 			a.projects.Register(r)
 			a.environment.Register(r)
@@ -355,6 +394,9 @@ func (a *API) Register(root chi.Router) {
 			a.sso.Register(r)
 			a.providerProfiles.Register(r)
 			a.executionPolicy.Register(r)
+			a.users.Register(r)
+			a.teams.Register(r)
+			a.projectAccess.Register(r)
 			// Sibling REST controllers plug in here.
 		})
 		// Agent switching synchronously collects a handoff, starts the target,

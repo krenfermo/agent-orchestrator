@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -122,4 +124,30 @@ func (s *Store) SetSessionOwner(ctx context.Context, id domain.SessionID, owner 
 		return false, fmt.Errorf("set session owner %s: %w", id, err)
 	}
 	return n > 0, nil
+}
+
+// GetSessionProjectID returns the project a session belongs to. ok is false
+// when the session id is unknown.
+func (s *Store) GetSessionProjectID(ctx context.Context, id domain.SessionID) (domain.ProjectID, bool, error) {
+	project, err := s.qr.GetSessionProjectID(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("get session project %s: %w", id, err)
+	}
+	return project, true, nil
+}
+
+// GetWorkflowRunProjectID returns the project a workflow run belongs to. ok is
+// false when the run id is unknown.
+func (s *Store) GetWorkflowRunProjectID(ctx context.Context, id string) (domain.ProjectID, bool, error) {
+	project, err := s.qr.GetWorkflowRunProjectID(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("get workflow run project %s: %w", id, err)
+	}
+	return project, true, nil
 }

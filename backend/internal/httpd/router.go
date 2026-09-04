@@ -23,6 +23,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/authz"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
 )
@@ -66,6 +67,12 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	// identity to the request context; it never rejects or redirects, so
 	// this reorder has no effect on any other route.
 	r.Use(identity.Middleware(deps.Auth, cfg.TrustedLocalMode, bootstrapAdminResolver(deps.Auth)))
+	// P4-B: one authorization resolution per request. Without this every
+	// permission check re-reads the caller's role, teams and grants; with it a
+	// handler that asks five questions pays for one lookup. It attaches an
+	// empty cache and nothing else -- it never resolves, never rejects, and
+	// never touches a request that asks no authorization question at all.
+	r.Use(authzCacheMiddleware)
 	r.Use(previewOriginMiddleware(api.sessions))
 
 	// JSON envelopes for unmatched routes / methods — chi's defaults are
@@ -421,4 +428,12 @@ func webFrontendAvailable(root string) bool {
 	}
 	info, err := os.Stat(filepath.Join(root, "index.html"))
 	return err == nil && !info.IsDir()
+}
+
+// authzCacheMiddleware installs the per-request authorization memo (see
+// service/authz.WithCache).
+func authzCacheMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(authz.WithCache(r.Context())))
+	})
 }

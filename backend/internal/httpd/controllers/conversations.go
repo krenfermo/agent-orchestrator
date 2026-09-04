@@ -65,10 +65,14 @@ type ConversationsController struct {
 	// one router-group middleware rather than duplicated per handler.
 	Ownership    SessionOwnershipStore
 	TrustedLocal bool
+	// Guard is P4-B's authorization gate. When wired it replaces the 8P-A/8P-B
+	// owner-equality checks with the canonical permission evaluator; a zero
+	// Guard preserves the pre-P4-B behavior exactly.
+	Guard Guard
 }
 
 func (c *ConversationsController) scoping() SessionScoping {
-	return SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal}
+	return SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal, Guard: c.Guard}
 }
 
 // requireSessionAccess is this controller's session-authorization

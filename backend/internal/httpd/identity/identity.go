@@ -68,6 +68,14 @@ func Require(r *http.Request) (domain.User, error) {
 	return u, nil
 }
 
+// Unauthorized is the canonical 401 for a request that resolved no identity.
+// Callers that discover this outside Require/RequirePrincipal (a list handler
+// that resolves a subject rather than a user, say) use this so every
+// unauthenticated response carries the same code and message.
+func Unauthorized() error {
+	return apierr.Unauthorized("NOT_AUTHENTICATED", "authentication required")
+}
+
 // RequirePrincipal is Require's full-fidelity form: the resolved user plus how
 // they authenticated. P4-B's authorization checks read this; P4-A only ever
 // answers who authenticated, never what they may do.

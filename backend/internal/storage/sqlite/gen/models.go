@@ -519,6 +519,17 @@ type Project struct {
 	OwnerUserID   *domain.UserID
 }
 
+type ProjectGrant struct {
+	ID          string
+	ProjectID   domain.ProjectID
+	SubjectKind domain.GrantSubjectKind
+	SubjectID   string
+	Role        domain.ProjectRole
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	CreatedBy   domain.UserID
+}
+
 type ProjectMemoryContextManifest struct {
 	ID               string
 	ProjectID        string
@@ -813,6 +824,25 @@ type ShellTerminal struct {
 	AppRunID   string
 	CreatedAt  time.Time
 	SessionID  sql.NullString
+}
+
+type Team struct {
+	ID          domain.TeamID
+	Name        string
+	Slug        string
+	Description string
+	Status      domain.TeamStatus
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type TeamMembership struct {
+	ID        string
+	TeamID    domain.TeamID
+	UserID    domain.UserID
+	Role      domain.TeamRole
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 type TelemetryEvent struct {

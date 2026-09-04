@@ -29,6 +29,23 @@ export type AuthStatus = "loading" | "trusted-local" | "no_user" | "authenticate
 // may additionally be offered the provider's own logout.
 export type AuthMethod = "trusted_local" | "password" | "oidc" | null;
 
+// P4-B: the installation-wide permissions the BACKEND says this identity
+// holds. The renderer never derives authority from `user.role` — a second
+// authorization implementation in React is one that can disagree with the real
+// one, and the one in the daemon is the one that decides. Hiding a control from
+// this list is a convenience; the route behind it is enforced regardless.
+export type Permission =
+	| "project.create"
+	| "provider.read"
+	| "provider.manage"
+	| "settings.read"
+	| "settings.manage"
+	| "users.read"
+	| "users.manage"
+	| "teams.read"
+	| "teams.manage"
+	| "audit.read";
+
 type AuthState = {
 	user: UserView | null;
 	status: AuthStatus;
@@ -41,6 +58,11 @@ type AuthState = {
 	// the renderer knows about the installation's SSO configuration: a label
 	// and a start path. Issuer, client id and every secret stay server-side.
 	providers: AuthProviders | null;
+	// permissions is what this identity may do installation-wide. Empty until
+	// load() resolves, and empty on any failure — an app that renders nothing
+	// it cannot prove is allowed is degraded; one that renders everything on a
+	// failed lookup is lying about authority.
+	permissions: Permission[];
 	// ssoPending is true while a sign-in is waiting on the system browser.
 	ssoPending: boolean;
 	// Checkpoint 8P-E.8: null until checkSetup() resolves. Orthogonal to
@@ -62,6 +84,17 @@ type AuthState = {
 
 let pendingLoad: Promise<void> | undefined;
 
+// signedOutState is the one definition of "nobody is signed in". Spelling it
+// out at each call site is how a new field (permissions, say) ends up cleared
+// in three places and left stale in a fourth.
+const signedOutState = {
+	user: null,
+	status: "unauthenticated" as AuthStatus,
+	authMethod: null,
+	issuer: null,
+	permissions: [] as Permission[],
+};
+
 export const useAuthStore = create<AuthState>((set, get) => ({
 	user: null,
 	status: "loading",
@@ -69,6 +102,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 	authMethod: null,
 	issuer: null,
 	providers: null,
+	permissions: [],
 	ssoPending: false,
 	setupRequired: null,
 	load: async () => {
@@ -78,20 +112,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 				const { data, error, response } = await apiClient.GET("/api/v1/auth/me", { credentials: "include" });
 				if (error) {
 					if (response?.status === 401) {
-						set({ user: null, status: "unauthenticated", error: null, authMethod: null, issuer: null });
+						set({ ...signedOutState, error: null });
 						return;
 					}
 					set({
-						user: null,
-						status: "unauthenticated",
+						...signedOutState,
 						error: apiErrorMessage(error, "Could not resolve current user"),
-						authMethod: null,
-						issuer: null,
 					});
 					return;
 				}
 				if (!data) {
-					set({ user: null, status: "unauthenticated", error: null, authMethod: null, issuer: null });
+					set({ ...signedOutState, error: null });
 					return;
 				}
 				set({
@@ -100,11 +131,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 					error: null,
 					authMethod: (data.authMethod as AuthMethod) ?? null,
 					issuer: data.issuer ?? null,
+					permissions: (data.permissions ?? []) as Permission[],
 				});
 			} catch {
 				// A missing/unreachable daemon must not crash the shell; the daemon
 				// status banner already surfaces that separately.
-				set({ user: null, status: "unauthenticated", error: null, authMethod: null, issuer: null });
+				set({ ...signedOutState, error: null });
 			}
 		})();
 		try {
@@ -137,6 +169,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 				return false;
 			}
 			set({ user: data.user, status: "authenticated", error: null, authMethod: "password", issuer: null });
+			// The login response carries the identity, not the capabilities;
+			// /auth/me is the one place that answers what this identity may do.
+			void get().load();
 			return true;
 		} catch {
 			set({ error: "Could not reach the daemon" });
@@ -218,7 +253,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 		} catch {
 			// Best-effort: clear local state regardless of network outcome.
 		}
-		set({ user: null, status: "unauthenticated", error: null, authMethod: null, issuer: null });
+		set({ ...signedOutState, error: null });
 		void get().load();
 		// The AO session is already gone. This only OFFERS the provider's own
 		// sign-out; a provider that advertises none returns nothing here, and
@@ -228,3 +263,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 		}
 	},
 }));
+
+/**
+ * useCan reports whether the signed-in identity holds a permission, according
+ * to the backend. Use it to hide navigation and controls a person cannot use —
+ * never to decide whether an action is safe. The daemon enforces every one of
+ * these again, and a direct API call from a hidden button is refused exactly as
+ * a visible one would be.
+ */
+export function useCan(permission: Permission): boolean {
+	return useAuthStore((state) => state.permissions.includes(permission));
+}
+
+/** useCanAny is useCan for a group of related surfaces (an admin nav entry). */
+export function useCanAny(...permissions: Permission[]): boolean {
+	return useAuthStore((state) => permissions.some((p) => state.permissions.includes(p)));
+}
