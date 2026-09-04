@@ -78,8 +78,8 @@ func TestGoExtractorKeepsWhatItCanFromABrokenFile(t *testing.T) {
 	}
 }
 
-func TestScanExtractorReadsTypeScript(t *testing.T) {
-	extractor := newScanExtractor("typescript", []string{".ts"}, tsPatterns)
+func TestTypeScriptExtractorReadsDeclarationsAndImports(t *testing.T) {
+	extractor := tsExtractor{language: "typescript", extensions: []string{".ts"}}
 	extraction, err := extractor.Extract("web/app.ts", []byte(appTS))
 	if err != nil {
 		t.Fatalf("Extract: %v", err)
@@ -90,8 +90,8 @@ func TestScanExtractorReadsTypeScript(t *testing.T) {
 		t.Fatalf("arrow-function const not recorded as a function: %+v", extraction.Symbols)
 	}
 	props, ok := findSymbol(extraction.Symbols, "Props")
-	if !ok || props.Kind != SymbolType {
-		t.Fatalf("interface not recorded as a type: %+v", extraction.Symbols)
+	if !ok || props.Kind != SymbolInterface {
+		t.Fatalf("interface not recorded as an interface: %+v", extraction.Symbols)
 	}
 	for _, want := range []Edge{
 		{Kind: EdgeImport, From: "web/app.ts", To: "react"},
@@ -103,8 +103,8 @@ func TestScanExtractorReadsTypeScript(t *testing.T) {
 	}
 }
 
-func TestScanExtractorReadsJavaScriptRequires(t *testing.T) {
-	extractor := newScanExtractor("javascript", []string{".js"}, tsPatterns)
+func TestJavaScriptExtractorReadsRequires(t *testing.T) {
+	extractor := tsExtractor{language: "javascript", extensions: []string{".js"}}
 	extraction, err := extractor.Extract("lib.js", []byte("const path = require(\"node:path\");\n\nexport function join(a, b) { return path.join(a, b); }\n"))
 	if err != nil {
 		t.Fatalf("Extract: %v", err)
@@ -117,16 +117,18 @@ func TestScanExtractorReadsJavaScriptRequires(t *testing.T) {
 	}
 }
 
-func TestScanExtractorReadsPython(t *testing.T) {
-	extractor := newScanExtractor("python", []string{".py"}, pyPatterns)
+func TestPythonExtractorReadsDeclarationsAndImports(t *testing.T) {
+	extractor := pyExtractor{}
 	src := "from os import path\nimport json\n\nMAX_SIZE = 10\n\nclass Store:\n    def save(self, item):\n        return json.dumps(item)\n\ndef load(raw):\n    return path.abspath(raw)\n"
 	extraction, err := extractor.Extract("store.py", []byte(src))
 	if err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
 
-	if sym, ok := findSymbol(extraction.Symbols, "save"); !ok || sym.Kind != SymbolMethod {
-		t.Fatalf("indented def not recorded as a method: %+v", extraction.Symbols)
+	// The method is qualified by its class, which is what keeps two `save`
+	// methods on different classes from colliding on one identity.
+	if sym, ok := findSymbol(extraction.Symbols, "Store.save"); !ok || sym.Kind != SymbolMethod {
+		t.Fatalf("indented def not recorded as a qualified method: %+v", extraction.Symbols)
 	}
 	if sym, ok := findSymbol(extraction.Symbols, "load"); !ok || sym.Kind != SymbolFunction {
 		t.Fatalf("module-level def not recorded as a function: %+v", extraction.Symbols)
@@ -157,6 +159,7 @@ func TestExtractorSetDispatchesByExtension(t *testing.T) {
 		"a/b.py":   "python",
 		"a/b.rb":   "",
 		"README":   "",
+		"a/b.sql":  "sql",
 		"a/b.json": "",
 	}
 	for path, want := range cases {

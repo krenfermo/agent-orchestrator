@@ -139,7 +139,7 @@ func (n *NativeIndexer) Index(ctx context.Context, req IndexRequest) (IndexResul
 			result.RemovedFiles = append(result.RemovedFiles, rel)
 		}
 	}
-	return n.commit(graph, result)
+	return n.commit(graph, result, req.Commit)
 }
 
 // IncrementalUpdate implements CodeGraphProvider. Only the paths the diff
@@ -158,7 +158,7 @@ func (n *NativeIndexer) IncrementalUpdate(ctx context.Context, req UpdateRequest
 	if !found {
 		// Nothing to update against. A full index is what the caller wants,
 		// and FullIndex in the result says that is what they got.
-		return n.Index(ctx, IndexRequest{ProjectRoot: root})
+		return n.Index(ctx, IndexRequest{ProjectRoot: root, Commit: req.Commit})
 	}
 
 	changes := append([]FileChange(nil), req.Diff.Changes...)
@@ -191,7 +191,7 @@ func (n *NativeIndexer) IncrementalUpdate(ctx context.Context, req UpdateRequest
 			return IndexResult{}, fmt.Errorf("codegraph: unsupported change status %q for %q", change.Status, rel)
 		}
 	}
-	return n.commit(graph, result)
+	return n.commit(graph, result, req.Commit)
 }
 
 // Query implements CodeGraphProvider. It is read-only: a project with no
@@ -255,6 +255,13 @@ func (n *NativeIndexer) applyRename(graph *Graph, root, oldRel, newRel string, r
 // its persisted symbols and edges are left exactly as they are.
 func (n *NativeIndexer) syncFile(graph *Graph, root, rel string, result *IndexResult) error {
 	extractor, supported := n.extractors.find(rel)
+	// DeniedPath is checked here as well as in the walk, and that is the
+	// point: an incremental update names its own paths, so a diff mentioning
+	// `secrets.py` would otherwise reach a file the walk would never have
+	// visited. Refusing in both places closes the whole class.
+	if supported && DeniedPath(rel) {
+		supported = false
+	}
 	if !supported {
 		if graph.Remove(rel) {
 			result.FilesRemoved++
@@ -288,6 +295,7 @@ func (n *NativeIndexer) syncFile(graph *Graph, root, rel string, result *IndexRe
 		Path:     rel,
 		Hash:     hash,
 		Language: extractor.Language(),
+		Role:     ClassifyFile(rel, data),
 		Size:     int64(len(data)),
 		Symbols:  dedupeSymbols(extraction.Symbols),
 		Edges:    dedupeEdges(extraction.Edges),
@@ -408,6 +416,12 @@ func (n *NativeIndexer) walk(ctx context.Context, root string) ([]string, error)
 		if _, supported := n.extractors.find(rel); !supported {
 			return nil
 		}
+		if DeniedPath(rel) {
+			// Section 28: a file whose content is a secret by convention is
+			// never opened. A configuration KEY can still enter the graph --
+			// from the code that reads it -- but its value cannot.
+			return nil
+		}
 		found = append(found, rel)
 		return nil
 	})
@@ -419,9 +433,13 @@ func (n *NativeIndexer) walk(ctx context.Context, root string) ([]string, error)
 }
 
 // commit stamps, persists, and finishes a result.
-func (n *NativeIndexer) commit(graph *Graph, result IndexResult) (IndexResult, error) {
+func (n *NativeIndexer) commit(graph *Graph, result IndexResult, atCommit string) (IndexResult, error) {
 	now := n.now().UTC()
 	graph.IndexedAt = now
+	if atCommit != "" {
+		graph.IndexedCommit = atCommit
+	}
+	result.IndexedCommit = graph.IndexedCommit
 	path, err := n.store.Save(graph)
 	if err != nil {
 		return IndexResult{}, err
