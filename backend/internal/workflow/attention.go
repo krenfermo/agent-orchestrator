@@ -331,6 +331,37 @@ const (
 	// BEFORE spending a dispatch: a provider that would have stopped at an
 	// interactive prompt nobody was there to answer.
 
+	// ReasonRepairArtifactUnavailable is a repairable stop AO refused to repair
+	// because it could not establish WHAT the repair would be working on: no
+	// branch, no committed head, or a repository it could not read.
+	//
+	// It is deliberately its own reason rather than an ineligible condition.
+	// The condition is repairable and the findings are in hand; what is missing
+	// is AO's own workspace authority, and a person sent to "read the findings"
+	// would be sent to fix something that is not broken. See repair_artifact.go
+	// and the wf-3af3c533 incident.
+	ReasonRepairArtifactUnavailable = "repair_artifact_unavailable"
+	// ReasonRepairArtifactUncommitted is the same refusal for the one cause a
+	// person can clear in seconds: the work under review is still uncommitted
+	// in the origin's own worktree, so no second checkout can be cut carrying
+	// it.
+	ReasonRepairArtifactUncommitted = "repair_artifact_uncommitted"
+	// ReasonRepairWorkspaceMismatch is a repair whose checkout was materialised
+	// and does NOT contain the artifact it was pinned to.
+	//
+	// It exists so that AO can never again report that shape as
+	// `worker_turn_produced_nothing`. A worker that changed nothing in the
+	// wrong tree is not a worker that produced nothing; it is AO that produced
+	// the wrong tree, and the sentence must say so.
+	ReasonRepairWorkspaceMismatch = "repair_workspace_mismatch"
+	// ReasonRepairPromotionBlocked is a repair that SUCCEEDED and whose result
+	// could not be moved onto the origin's own branch -- the origin's checkout
+	// had moved, or carried uncommitted work AO must not overwrite.
+	//
+	// The repaired commit is never lost: it is on its own branch and this stop
+	// names it. What is refused is AO writing over somebody's tree to place it.
+	ReasonRepairPromotionBlocked = "repair_promotion_blocked"
+
 	// unclassifiedStop is the honest label for a run durably parked in
 	// needs_attention with no canonical reason recorded anywhere — an
 	// older row, or a stop site not yet migrated to recordAttentionStop. It is
@@ -543,6 +574,26 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonProviderPreflightFailed: {
 		HumanAction: "The provider would have asked the operator something before it could work — usually a permission mode that cannot run unattended. Correct the provider configuration, then continue this run.",
+	},
+	// The repair-artifact refusals. None of them is repairable: aiming a second
+	// repair at a stop whose cause is that AO cannot establish the artifact
+	// would produce the same refusal, and aiming one at a repair that already
+	// ran in the wrong workspace would repeat the incident.
+	ReasonRepairArtifactUnavailable: {
+		Recovery:    domain.RecoveryInspectRepository,
+		HumanAction: "AO will not repair this run because it cannot prove which commit and checkout hold the work under review, and a repair started from the project's default branch would not contain it. The checkpoint names exactly what could not be established. Restore or re-create that task's worktree, then continue this run.",
+	},
+	ReasonRepairArtifactUncommitted: {
+		Recovery:    domain.RecoveryInspectRepository,
+		HumanAction: "AO will not repair this run because the work under review is still uncommitted in its own worktree, and a separate repair checkout cannot be cut from state that is not a commit. Commit that work on its branch (or let the run reach its own commit step), then continue this run.",
+	},
+	ReasonRepairWorkspaceMismatch: {
+		Recovery:    domain.RecoveryOperatorAction,
+		HumanAction: "This repair agent's checkout does not hold the commit it was created to repair, so nothing it produced (or did not produce) means anything about the defect. That is AO's own workspace error, not the agent's — the checkpoint names the commit that was expected and the one that is there. Cancel this repair run; the original task keeps its own repair budget and asks for a fresh one.",
+	},
+	ReasonRepairPromotionBlocked: {
+		Recovery:    domain.RecoveryInspectRepository,
+		HumanAction: "A repair produced a verified change and AO could not move it onto the original task's branch, because that checkout has moved or holds uncommitted work AO must not overwrite. The repaired commit and its branch are named on the checkpoint — nothing is lost. Commit or discard the changes in that worktree and AO places the repaired commit itself on its next pass; or merge it yourself.",
 	},
 }
 

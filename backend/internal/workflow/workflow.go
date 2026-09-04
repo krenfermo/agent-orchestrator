@@ -544,6 +544,14 @@ type Deps struct {
 	// uses a plain `git rev-list` reader, and a repository that cannot be read
 	// produces no candidates, which fails closed.
 	CommitHistory CommitHistory
+
+	// RepairGit is the narrow git surface repair artifact authority and repair
+	// candidate promotion need: proving a base commit is present, listing what
+	// an artifact changed, and fast-forwarding an origin's checkout onto a
+	// repaired candidate. Optional: nil uses a plain `git` reader, and a
+	// repository that cannot be read fails the repair closed rather than
+	// substituting a base. See repair_artifact.go.
+	RepairGit RepairGit
 }
 
 // TaskWorktreeRecords lists the AO worktree records belonging to one master
@@ -744,6 +752,9 @@ type Coordinator struct {
 	// commitHistory backs the approved-head reconstruction. Optional; see
 	// commitHistoryOrDefault.
 	commitHistory CommitHistory
+	// repairGitPort backs repair artifact resolution and candidate promotion.
+	// Optional; see repairGit().
+	repairGitPort RepairGit
 
 	// placements is P1-D's frozen execution placement authority, and
 	// providerAttempts is its durable provider-attempt ledger. Both optional;
@@ -832,6 +843,7 @@ func New(d Deps) *Coordinator {
 		workerLiveness:           d.WorkerLiveness,
 		workerPreflight:          d.WorkerPreflight,
 		commitHistory:            d.CommitHistory,
+		repairGitPort:            d.RepairGit,
 		placements:               d.Placements,
 		providerAttempts:         d.ProviderAttempts,
 		terminalRuntimes:         d.TerminalRuntimes,

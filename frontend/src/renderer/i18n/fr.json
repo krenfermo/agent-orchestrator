@@ -822,6 +822,7 @@
 	"recovery.repairIneligible": "Condition non réparable",
 	"recovery.repairPolicyDisabled": "Désactivée pour cette exécution",
 	"recovery.repairUnknownCondition": "Condition inconnue",
+	"recovery.repairArtifactUnprovable": "Artefact impossible à établir",
 	"recovery.repairWithBudget": "{{eligibility}} ({{spent}} sur {{budget}} utilisées)",
 	"recovery.retries": "Réessais",
 	"recovery.running": "en cours",

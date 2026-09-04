@@ -792,6 +792,7 @@
 	"recovery.repairIneligible": "不是可修复的情况",
 	"recovery.repairPolicyDisabled": "此运行已禁用",
 	"recovery.repairUnknownCondition": "未知情况",
+	"recovery.repairArtifactUnprovable": "无法确定待修复产物",
 	"recovery.repairWithBudget": "{{eligibility}}（已用 {{spent}}/{{budget}}）",
 	"recovery.retries": "重试次数",
 	"recovery.running": "运行中",

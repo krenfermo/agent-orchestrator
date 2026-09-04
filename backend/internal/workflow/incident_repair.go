@@ -303,23 +303,15 @@ func (c *Coordinator) reconcileIncidentRepair(ctx stdctx.Context, run domain.Wor
 
 // repairFinalSHA reads the commit the repair actually landed at, from the
 // repair run's own durable record.
+//
+// It reads only the phases that record a COMMIT. It used to take the newest
+// checkpoint carrying any HeadSHA, and that column is shared with the review
+// dispatch trail, which stores a 64-character workspace FINGERPRINT in it --
+// so an incident's audit row could report a fingerprint as the commit its
+// repair landed at. See ledgerCommittedHead, which is the same strict read
+// task_integration_route.go and task_integration_baseline.go already do.
 func (c *Coordinator) repairFinalSHA(ctx stdctx.Context, repairRunID string) string {
-	cps, err := c.store.ListWorkflowCheckpoints(ctx, repairRunID)
-	if err != nil {
-		return ""
-	}
-	sha := ""
-	for _, cp := range cps {
-		if cp.HeadSHA != "" {
-			sha = cp.HeadSHA
-		}
-		if cp.DurablePhase == autonomousLocalCommitPhase {
-			if _, after, found := strings.Cut(cp.NextAction, "local_commit_created: "); found {
-				sha = strings.Fields(after)[0]
-			}
-		}
-	}
-	return sha
+	return c.ledgerCommittedHead(ctx, repairRunID)
 }
 
 // repairReviewerHarness reads which independent reviewer approved the repair.

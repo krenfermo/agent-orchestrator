@@ -1268,7 +1268,47 @@ func (w *Workspace) resolveBaseRef(ctx context.Context, repo, branch, baseBranch
 	return w.resolveBaseRefFromDefault(ctx, repo, branch, defaultBranch)
 }
 
+// isObjectID reports whether s is a FULL git object id: 40 hex characters
+// (sha-1) or 64 (sha-256).
+//
+// Abbreviations are deliberately not accepted. An abbreviated id can become
+// ambiguous as a repository grows, and a base that resolves today and refuses
+// tomorrow is the worst kind of pin.
+func isObjectID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
 func (w *Workspace) resolveBaseRefFromDefault(ctx context.Context, repo, branch, defaultBranch string) (string, error) {
+	// A base given as an object id is the ONLY candidate, and it must be a
+	// commit that is really there.
+	//
+	// Two reasons this cannot go through the candidate list below. It names one
+	// commit, so every fallback in that list would resolve to a different tree
+	// that looked exactly as plausible — which is precisely what a caller
+	// pinning a commit is asking not to happen (workflow/repair_artifact.go
+	// cuts a repair checkout from the exact commit under review). And
+	// `rev-parse --verify` answers a full hex string with the string itself
+	// whether or not the object exists, so existence has to be asked with an
+	// explicit `^{commit}` peel or the pin proves nothing at all.
+	if isObjectID(defaultBranch) {
+		exists, err := w.refExists(ctx, repo, defaultBranch+"^{commit}")
+		if err != nil {
+			return "", err
+		}
+		if exists {
+			return defaultBranch, nil
+		}
+		return "", fmt.Errorf("%w: commit %s is not present in this repository", errNoBaseRef, defaultBranch)
+	}
 	candidates := baseRefCandidates(branch, defaultBranch)
 	for _, ref := range candidates {
 		exists, err := w.refExists(ctx, repo, ref)

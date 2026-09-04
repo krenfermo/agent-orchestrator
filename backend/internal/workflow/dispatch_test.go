@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -94,18 +95,31 @@ type fakeWorkspaceFacts struct {
 	obs   ports.WorkspaceObservation
 	err   error
 	calls int
+	// realHead fills an unset HeadSHA from the actual git worktree being
+	// observed. It is opt-in per fixture, and it exists because a fixture that
+	// hands out REAL worktrees (autoSpawner) while reporting an empty head is
+	// describing a repository that cannot exist — and code which reasons about
+	// the commit a task is sitting on then cannot be exercised at all. A test
+	// that sets obs.HeadSHA itself keeps its own value.
+	realHead bool
 }
 
 func (f *fakeWorkspaceFacts) MaterializeIntegrationCommit(_ context.Context, _ ports.WorkspaceInfo, _, _, _ string, _ []string) (string, string, bool, error) {
 	return "", "", false, nil
 }
 
-func (f *fakeWorkspaceFacts) ObserveWorkspace(_ context.Context, _ ports.WorkspaceInfo) (ports.WorkspaceObservation, error) {
+func (f *fakeWorkspaceFacts) ObserveWorkspace(_ context.Context, info ports.WorkspaceInfo) (ports.WorkspaceObservation, error) {
 	f.calls++
 	if f.err != nil {
 		return ports.WorkspaceObservation{}, f.err
 	}
-	return f.obs, nil
+	obs := f.obs
+	if f.realHead && obs.HeadSHA == "" && info.Path != "" {
+		if out, err := exec.Command("git", "-C", info.Path, "rev-parse", "--verify", "HEAD").Output(); err == nil {
+			obs.HeadSHA = strings.TrimSpace(string(out))
+		}
+	}
+	return obs, nil
 }
 
 func newCoordinatorFull(spawner workflowcore.Spawner, sessionFacts workflowcore.SessionFacts, workspaceFacts workflowcore.WorkspaceFacts) (*workflowcore.Coordinator, *fakeStore, *fakeClock) {

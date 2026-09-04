@@ -151,6 +151,15 @@ func (c *Coordinator) dispatchWorkStep(ctx stdctx.Context, run domain.WorkflowRu
 	if c.usageBudgetBlocks(ctx, run, "a worker dispatch") {
 		return step, nil
 	}
+	// The same SAFE BOUNDARY, for the workspace this dispatch would be launched
+	// into. A repair run whose artifact authority cannot be read must not be
+	// launched at all: the session manager's fallback for an absent base ref is
+	// the project's default branch, so "AO could not tell the launcher what to
+	// cut from" and "AO told it to cut from main" are the same call. That is
+	// the wf-3af3c533 incident, and this is where it is refused instead.
+	if c.repairArtifactBlocks(ctx, run, step) {
+		return step, nil
+	}
 
 	// P2-C §14/§15: stamp what this task is entitled to read before anything
 	// downstream assembles its context. It is done once, here, so every path
@@ -616,7 +625,7 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 		IssueID:     workStepIssueID(step.ID),
 		Prompt:      prompt,
 		DisplayName: workDisplayName(run.Objective),
-		BaseRef:     c.masterTaskBaseRef(ctx, run),
+		BaseRef:     c.workerBaseRef(ctx, run),
 		RuntimeEnv:  runtimeEnv,
 		Owner:       owner,
 		// This run already holds the direct-branch execution lock (see
@@ -939,6 +948,14 @@ func (c *Coordinator) confirmWorkerDispatch(
 	}); err != nil {
 		return step, err
 	}
+
+	// A REPAIR run's checkout is proven here, from the observation this
+	// confirmation already paid for, and before the worker has done anything.
+	// It is what lets a later empty turn be classified honestly: a worker that
+	// changed nothing in the RIGHT tree is a judgement about the work, and one
+	// that changed nothing in the wrong tree is AO's own workspace error. See
+	// repair_artifact.go §12 and worker_progress.go.
+	c.recordRepairWorkspaceEvidence(ctx, run, step, string(rec.ID), branch, worktree, baseSHA)
 
 	// PHASE 4 -- RUNNING. Only now, and only through the claim.
 	//

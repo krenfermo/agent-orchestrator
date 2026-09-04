@@ -810,6 +810,7 @@
 	"recovery.repairIneligible": "Keine reparierbare Bedingung",
 	"recovery.repairPolicyDisabled": "Für diesen Lauf deaktiviert",
 	"recovery.repairUnknownCondition": "Unbekannte Bedingung",
+	"recovery.repairArtifactUnprovable": "Artefakt nicht feststellbar",
 	"recovery.repairWithBudget": "{{eligibility}} ({{spent}} von {{budget}} genutzt)",
 	"recovery.retries": "Wiederholungen",
 	"recovery.running": "läuft",

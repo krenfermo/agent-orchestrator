@@ -202,6 +202,17 @@ const (
 	// RepairUnknownCondition is the fail-closed default: AO cannot name what
 	// stopped this run, so it will not aim a code-writing agent at it.
 	RepairUnknownCondition RepairEligibility = "unknown_condition"
+	// RepairArtifactUnprovable means the condition IS repairable and AO cannot
+	// establish what the repair would be working on: which branch, which
+	// commit, which checkout. It is a separate answer from unknown_condition
+	// because the two send a person to different places -- one says AO cannot
+	// name the failure, this one says AO knows the failure exactly and cannot
+	// prove the artifact.
+	//
+	// It exists because the alternative is the wf-3af3c533 incident: a repair
+	// created anyway, cut from the project's default branch, and unable to see
+	// a line of the code it was asked to fix. See RepairArtifactAuthority.
+	RepairArtifactUnprovable RepairEligibility = "artifact_unprovable"
 )
 
 // Allowed reports whether a Repair Agent may be created for this eligibility.
@@ -246,6 +257,16 @@ type RepairIntent struct {
 	// ProjectID and Scope bound where the repair may write.
 	ProjectID string      `json:"projectId"`
 	Scope     RepairScope `json:"scope"`
+	// Origin is the frozen identity of the artifact being repaired: which
+	// branch, which commit, which review's findings, which worktree it has to
+	// go back to. It is resolved BEFORE the repair run is created and is the
+	// only thing consulted afterwards -- project configuration is not.
+	//
+	// A zero value marks an intent recorded before repair artifact authority
+	// existed. Such an intent describes a repair that was cut from the project
+	// default branch, and readers must treat it as unproven rather than as a
+	// repair of the origin's artifact. See repair_artifact.go.
+	Origin RepairArtifactAuthority `json:"origin,omitzero"`
 	// AcceptanceCriteria is what "repaired" means, written by AO from the
 	// failure -- never proposed by the agent that will be judged against it.
 	AcceptanceCriteria []string `json:"acceptanceCriteria,omitempty"`

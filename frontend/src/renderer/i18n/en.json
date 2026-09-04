@@ -792,6 +792,7 @@
 	"recovery.repairIneligible": "Not a repairable condition",
 	"recovery.repairPolicyDisabled": "Disabled for this run",
 	"recovery.repairUnknownCondition": "Unknown condition",
+	"recovery.repairArtifactUnprovable": "Artifact cannot be established",
 	"recovery.repairWithBudget": "{{eligibility}} ({{spent}} of {{budget}} used)",
 	"recovery.retries": "Retries",
 	"recovery.running": "running",

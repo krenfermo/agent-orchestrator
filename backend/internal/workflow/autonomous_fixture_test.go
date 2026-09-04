@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -71,7 +72,17 @@ func (s *autoSpawner) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.
 	if s.repoPath != "" {
 		// A real worktree on its own branch, with one commit of its own — the
 		// shape the Coordinator has to be able to fast-forward or replay.
-		if out, err := autoGit(s.repoPath, "worktree", "add", "-b", branch, wsPath); err != nil {
+		//
+		// cfg.BaseRef is honoured exactly as session_manager.createSessionWorkspace
+		// honours it: an explicit base wins over the project's default branch.
+		// Ignoring it here would make every base-ref decision the coordinator
+		// takes untestable, and it is precisely a base ref that never reached a
+		// worktree that produced the wf-3af3c533 incident.
+		addArgs := []string{"worktree", "add", "-b", branch, wsPath}
+		if base := strings.TrimSpace(cfg.BaseRef); base != "" {
+			addArgs = append(addArgs, base)
+		}
+		if out, err := autoGit(s.repoPath, addArgs...); err != nil {
 			return domain.SessionRecord{}, 0, 0, fmt.Errorf("worktree add: %w: %s", err, out)
 		}
 		file := filepath.Join(wsPath, fmt.Sprintf("task-%d.txt", n))
@@ -261,7 +272,11 @@ func newAutonomousFixture(t *testing.T, plan workflowcore.MasterPlan) *autonomou
 	spawner := &autoSpawner{store: store, baseDir: t.TempDir(), repoPath: repoPath}
 	planner := &staticPlanner{plan: plan}
 	wakeSched := wake.New(store, clk.Now, autoIDSeq("wk"), wake.Config{})
-	ws := &fakeWorkspaceFacts{obs: ports.WorkspaceObservation{Dirty: true}}
+	// realHead: this fixture's spawner cuts REAL git worktrees with real
+	// commits, so the observation has to be able to say which commit a task is
+	// on. Without it every artifact-authority path reads "no committed head"
+	// for a worktree that plainly has one.
+	ws := &fakeWorkspaceFacts{obs: ports.WorkspaceObservation{Dirty: true}, realHead: true}
 	launcher := &fakeReviewerLauncher{}
 	verifier := &fakeVerifyRunner{result: workflowcore.VerifyCommandExecution{ExitCode: 0}}
 	sender := &fakeMessageSender{}

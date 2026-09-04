@@ -41,7 +41,7 @@ type WorkflowRecoveryView struct {
 	// RepairAvailable and RepairEligibility are the repair decision and the
 	// reason behind it.
 	RepairAvailable   bool   `json:"repairAvailable"`
-	RepairEligibility string `json:"repairEligibility" enum:"eligible,ineligible,budget_exhausted,policy_disabled,unknown_condition"`
+	RepairEligibility string `json:"repairEligibility" enum:"eligible,ineligible,budget_exhausted,policy_disabled,unknown_condition,artifact_unprovable"`
 	// BlockingCondition names, in AO's words, what stands between this run and
 	// progress.
 	BlockingCondition string `json:"blockingCondition,omitempty"`
@@ -126,7 +126,7 @@ type WorkflowPlanReuseView struct {
 
 // WorkflowRepairPlanView is what a Repair Agent would do, without doing it.
 type WorkflowRepairPlanView struct {
-	Eligibility string `json:"eligibility" enum:"eligible,ineligible,budget_exhausted,policy_disabled,unknown_condition"`
+	Eligibility string `json:"eligibility" enum:"eligible,ineligible,budget_exhausted,policy_disabled,unknown_condition,artifact_unprovable"`
 	// Mode, Spent and Budget are the frozen policy in force for this run.
 	Mode   string `json:"mode" enum:"disabled,suggest,automatic"`
 	Spent  int    `json:"spent"`
@@ -136,6 +136,57 @@ type WorkflowRepairPlanView struct {
 	AutomaticAllowed bool `json:"automaticAllowed"`
 	// Intent is present only for an eligible repair.
 	Intent *WorkflowRepairIntentView `json:"intent,omitempty"`
+	// Artifact is what a repair would actually work on -- which branch, which
+	// commit, which review's findings. It is present for an eligible repair AND
+	// for an `artifact_unprovable` refusal, because that refusal's whole content
+	// is which fact could not be established.
+	Artifact *WorkflowRepairArtifactView `json:"artifact,omitempty"`
+}
+
+// WorkflowRepairArtifactView is the frozen identity of the thing under repair.
+//
+// It exists so an operator authorizing a repair is authorizing something
+// specific, and so a refused one says what was missing rather than only that
+// something was. See domain.RepairArtifactAuthority.
+type WorkflowRepairArtifactView struct {
+	// Resolved is whether AO established the artifact at all. Refusal names
+	// which refusal when it did not.
+	Resolved bool   `json:"resolved"`
+	Refusal  string `json:"refusal,omitempty" enum:"repair_artifact_unavailable,repair_artifact_uncommitted,repair_workspace_mismatch"`
+	Detail   string `json:"detail,omitempty"`
+	// HasArtifact is false for an origin that has never executed. Such a repair
+	// legitimately starts from the project's default branch.
+	HasArtifact bool `json:"hasArtifact"`
+	// OriginRunID/OriginTaskID place the artifact.
+	OriginRunID  string `json:"originRunId,omitempty"`
+	OriginTaskID string `json:"originTaskId,omitempty"`
+	// Branch and BaseSHA are what a repair checkout is cut from.
+	Branch  string `json:"branch,omitempty"`
+	BaseSHA string `json:"baseSha,omitempty"`
+	// Source says how BaseSHA was established.
+	Source string `json:"source,omitempty" enum:"observed_worktree,reconstructed_from_ledger,shared_checkout,no_artifact"`
+	// Placement is the origin's frozen execution placement.
+	Placement string `json:"placement,omitempty" enum:"direct_branch,isolated_worktree"`
+	// ReviewRunID and FindingsCount identify the review that asked for the
+	// repair and how much it said. The findings themselves are not surfaced
+	// here; they are on the review.
+	ReviewRunID   string `json:"reviewRunId,omitempty"`
+	FindingsCount int    `json:"findingsCount,omitempty"`
+	// ChangedFiles is what the artifact changes relative to its merge target.
+	ChangedFiles []string `json:"changedFiles,omitempty"`
+}
+
+func workflowRepairArtifactView(a domain.RepairArtifactAuthority) *WorkflowRepairArtifactView {
+	if a.OriginRunID == "" {
+		return nil
+	}
+	return &WorkflowRepairArtifactView{
+		Resolved: a.Resolved, Refusal: string(a.Refusal), Detail: a.Detail,
+		HasArtifact: a.HasArtifact, OriginRunID: a.OriginRunID, OriginTaskID: a.OriginTaskID,
+		Branch: a.OriginBranch, BaseSHA: a.BaseSHA, Source: string(a.Source),
+		Placement: string(a.Placement), ReviewRunID: a.ReviewRunID,
+		FindingsCount: a.FindingsCount, ChangedFiles: a.ChangedFiles,
+	}
 }
 
 // WorkflowRepairIntentView is the durable record of one repair.
@@ -406,7 +457,8 @@ func workflowRepairPlanView(p workflowcore.RepairPlan) WorkflowRepairPlanView {
 	return WorkflowRepairPlanView{
 		Eligibility: string(p.Eligibility), Mode: string(p.Mode), Spent: p.Spent,
 		Budget: p.Budget, Reason: p.Reason, AutomaticAllowed: p.AutomaticAllowed,
-		Intent: workflowRepairIntentView(p.Intent),
+		Intent:   workflowRepairIntentView(p.Intent),
+		Artifact: workflowRepairArtifactView(p.Artifact),
 	}
 }
 

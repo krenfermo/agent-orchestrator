@@ -580,6 +580,12 @@ func (c *Coordinator) observeWorkStep(ctx stdctx.Context, run domain.WorkflowRun
 		return step, nil
 	}
 
+	// §12: before an empty turn is recorded as the worker's fault, ask whether
+	// the worker was even looking at the right code. Done BEFORE the ambiguity
+	// gate so the reason it writes down, the evidence snapshot it collects and
+	// the attention stop below all carry the same corrected answer.
+	decision = c.reclassifyRepairWorkspaceStop(ctx, run, decision)
+
 	// The ambiguity gate. A decision that concluded "AO cannot prove what this
 	// worker is doing" may not become durable on that conclusion alone: the
 	// raise collects the bounded evidence snapshot, records it, and is the only
