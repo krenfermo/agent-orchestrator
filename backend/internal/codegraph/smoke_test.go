@@ -236,7 +236,9 @@ func copyTree(t *testing.T, src, dst string) int {
 	copied := 0
 	err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil
+			// An unreadable directory costs the fixture a subtree, not the
+			// test: what is being copied is a convenience, not the subject.
+			return nil //nolint:nilerr // an unreadable subtree is skipped, not fatal, for a fixture copy
 		}
 		if info.IsDir() {
 			if skip[info.Name()] {

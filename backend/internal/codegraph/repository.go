@@ -8,16 +8,16 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
 )
 
-// Package codegraph's durable port.
-//
 // repository.go — the durable port the project-scoped code graph is written
 // through.
 //
 // It is declared here, at the consumer, rather than in internal/ports, the same
 // local-narrow-interface pattern projectmemory/repository.go follows. The only
 // implementation AO ships is the SQLite store behind migration 0153.
+
+// Repository is the durable state the project-scoped code graph is kept in.
 //
-// Two guarantees belong to the CONTRACT rather than to that implementation,
+// Two guarantees belong to the CONTRACT rather than to any one implementation,
 // and a second implementation must honour both:
 //
 //   - A full build stages. Rows written at a generation above

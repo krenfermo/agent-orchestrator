@@ -518,3 +518,69 @@ func TestGraphEvidenceIsAbsentBeforeTheFirstBuild(t *testing.T) {
 		t.Fatal("an unbuilt graph emptied a pack that had durable facts")
 	}
 }
+
+// TestContextComparisonWithAndWithoutTheGraph is section 38: what does adding
+// the graph actually cost and add.
+//
+// It is a COMPARISON, not a savings claim. The brief's rule applies exactly:
+// AO does not observe what a coding harness reads inside a worktree, so nothing
+// here is a count of agent-side reads avoided. What can honestly be said is
+// what AO ASSEMBLED, with and without graph evidence, from the same repository
+// at the same commit for the same role -- which is what this asserts.
+func TestContextComparisonWithAndWithoutTheGraph(t *testing.T) {
+	requireGit(t)
+	root := graphRepo(t)
+
+	measure := func(t *testing.T, withGraph bool) projectmemory.Provisioned {
+		t.Helper()
+		f := newFixture(t)
+		opts := []projectmemory.ServiceOption{}
+		if withGraph {
+			opts = append(opts, projectmemory.WithCodeGraph(codegraph.NewIndex(f.store)))
+		}
+		svc := projectmemory.NewService(f.store, opts...)
+		cfg := projectmemory.Config{
+			Mode: projectmemory.ModeAssisted, SyncTimeout: projectmemory.DefaultConfig().SyncTimeout,
+			Budgets: projectmemory.DefaultBudgets(),
+		}
+		provisioner := projectmemory.NewProvisioner(svc, cfg)
+		return provisioner.Provision(f.ctx, projectmemory.ProvisionRequest{
+			ProjectID: testProject, RepoPath: root, Role: projectmemory.RoleReviewer,
+			ChangedPaths: []string{"internal/service/records.go"},
+			Keywords:     []string{"export", "permission", "supervisor"},
+		})
+	}
+
+	without := measure(t, false)
+	with := measure(t, true)
+
+	t.Logf("without the graph: %d context bytes (%d pack, %d legacy, %d graph), ~%d tokens",
+		without.Metrics.ContextBytes, without.Metrics.PackBytes, without.Metrics.LegacyBytes,
+		without.Metrics.GraphBytes, without.Metrics.EstimatedInputTokens)
+	t.Logf("with the graph:    %d context bytes (%d pack, %d legacy, %d graph), ~%d tokens; "+
+		"%d symbols selected from %d considered",
+		with.Metrics.ContextBytes, with.Metrics.PackBytes, with.Metrics.LegacyBytes,
+		with.Metrics.GraphBytes, with.Metrics.EstimatedInputTokens,
+		with.Metrics.GraphSymbolsSelected, with.Metrics.GraphSymbolsConsidered)
+
+	if without.Metrics.GraphBytes != 0 {
+		t.Fatalf("a service with no graph reported %d graph bytes", without.Metrics.GraphBytes)
+	}
+	if with.Metrics.GraphBytes == 0 {
+		t.Fatal("the graph contributed nothing to compare")
+	}
+	// The durable-fact half must be IDENTICAL. If adding the graph changed
+	// which memory items were selected, the comparison would be measuring two
+	// different things and the graph's contribution could not be isolated.
+	if with.Metrics.PackItems != without.Metrics.PackItems {
+		t.Fatalf("the graph changed durable-fact selection: %d items with, %d without",
+			with.Metrics.PackItems, without.Metrics.PackItems)
+	}
+	// And the whole cost of adding it is exactly what it rendered.
+	if got, want := with.Metrics.ContextBytes-without.Metrics.ContextBytes, with.Metrics.GraphBytes; got != want {
+		t.Fatalf("context grew by %d bytes but the graph reported %d", got, want)
+	}
+	if with.Metrics.EstimatedGraphTokens == 0 {
+		t.Fatal("no token estimate for the graph's contribution")
+	}
+}
