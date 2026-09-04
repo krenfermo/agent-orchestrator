@@ -83,6 +83,13 @@ type CodeGraphProvider interface { //nolint:revive // the name is this boundary'
 type IndexRequest struct {
 	// ProjectRoot is the absolute path of the checkout to index.
 	ProjectRoot string
+	// Commit is the revision the checkout is at, when the caller knows it. It
+	// is recorded on the graph as its provenance -- "every fact in here was
+	// observed in this checkout at this revision" -- and it is what drift
+	// detection later compares against the repository's actual HEAD. An empty
+	// value means the caller could not prove a revision, and the graph then
+	// claims none.
+	Commit string
 }
 
 // UpdateRequest asks a provider to apply one git diff to a project's graph.
@@ -92,6 +99,8 @@ type UpdateRequest struct {
 	// Diff lists the file-level changes to apply. An empty diff is valid and
 	// is a no-op.
 	Diff Diff
+	// Commit is the revision the diff brings the graph up to.
+	Commit string
 }
 
 // QueryRequest is a read-only question about an indexed project. At least one
@@ -140,6 +149,9 @@ type IndexResult struct {
 	RemovedFiles []string
 	// IndexedAt is when the graph was written.
 	IndexedAt time.Time
+	// IndexedCommit is the revision the graph now claims, empty when the
+	// caller supplied none.
+	IndexedCommit string
 	// StorePath is the file the graph was persisted to, empty for providers
 	// that keep no local state.
 	StorePath string

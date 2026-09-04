@@ -210,6 +210,16 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 	out.Metrics.SyncMillis = out.Freshness.Duration.Milliseconds()
 	out.Metrics.Generation = out.Freshness.Generation
 	out.Metrics.IndexedCommit = out.Freshness.IndexedCommit
+	if graph := out.Freshness.Graph; graph.Attempted {
+		out.Metrics.GraphSyncKind = string(graph.Kind)
+		out.Metrics.GraphFilesParsed = graph.FilesParsed
+		out.Metrics.GraphFilesReused = graph.FilesReused
+		out.Metrics.GraphSyncMillis = graph.Duration.Milliseconds()
+		out.Metrics.GraphSymbols = graph.Symbols
+		out.Metrics.GraphEdges = graph.Edges
+		out.Metrics.GraphGeneration = graph.Generation
+		out.Metrics.GraphIndexedCommit = graph.IndexedCommit
+	}
 
 	// 2. The pack. In a mode that may replace, the documents this dispatch is
 	//    carrying are handed to selection so the facts that can pay for
@@ -235,7 +245,10 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 		// reachable and keeps serving a fact AO has just withheld -- see
 		// CacheKey's doc comment.
 		ChangeMark: p.changeMark(ctx, req.ProjectID, out.Freshness.RepoID),
-		Role:       role, PolicyVersion: PackPolicyVersion, Budget: budget,
+		// The code graph is versioned separately from project memory, so its
+		// generation joins the key in its own right.
+		GraphGeneration: out.Freshness.Graph.Generation,
+		Role:            role, PolicyVersion: PackPolicyVersion, Budget: budget,
 		// The sharing authority is part of the cache key. Two dispatches that
 		// differ only in which upstream tasks they may read are entitled to
 		// different packs, and a cache that ignored that would serve one
@@ -288,6 +301,22 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 	out.Metrics.WorkflowLocalItems = pack.Stats.WorkflowLocalSelected
 	out.Metrics.CanonicalItems = pack.Stats.CanonicalSelected
 	out.Metrics.KnowledgeBytes = pack.Stats.KnowledgeBytes
+	// The graph's contribution, reported apart from the durable facts' so the
+	// two source categories stay separable (section 15). GraphBytes is a
+	// subset of PackBytes: the pack's own byte count already includes the
+	// rendered graph section.
+	out.Metrics.GraphSymbolsConsidered = pack.Graph.ConsideredSymbols
+	out.Metrics.GraphSymbolsSelected = pack.Graph.SelectedSymbols
+	out.Metrics.GraphEdgesConsidered = pack.Graph.ConsideredEdges
+	out.Metrics.GraphEdgesSelected = pack.Graph.SelectedEdges
+	out.Metrics.GraphBytes = pack.Graph.Bytes
+	out.Metrics.EstimatedGraphTokens = pack.Graph.EstimatedTokens
+	out.Metrics.GraphFallbackReason = pack.Graph.Reason
+	if pack.Graph.Backend != "" {
+		out.Metrics.GraphBackend = pack.Graph.Backend
+		out.Metrics.GraphGeneration = pack.Graph.Generation
+		out.Metrics.GraphIndexedCommit = pack.Graph.IndexedCommit
+	}
 	if pack.Stats.IndexedCommit != "" {
 		out.Metrics.IndexedCommit = pack.Stats.IndexedCommit
 		out.Metrics.Generation = pack.Stats.Generation
@@ -302,7 +331,7 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 	// 4. The honest totals. ContextBytes is what AO will actually send:
 	//    surviving legacy plus the pack plus the task text.
 	survivingLegacy := legacyBytes(out.Legacy)
-	out.Metrics.ContextBytes = survivingLegacy + out.Metrics.PackBytes + out.Metrics.TaskBytes
+	out.Metrics.ContextBytes = survivingLegacy + out.Metrics.PackBytes + out.Metrics.GraphBytes + out.Metrics.TaskBytes
 	out.Metrics.EstimatedInputTokens = EstimateTokens(out.Metrics.ContextBytes)
 	if pack.Empty() {
 		out.Metrics.FallbackBytes = survivingLegacy

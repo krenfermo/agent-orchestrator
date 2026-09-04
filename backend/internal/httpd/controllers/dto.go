@@ -1953,3 +1953,106 @@ type MuteDeviceRequest struct {
 type InstallIDParam struct {
 	InstallID string `path:"installId" description:"The device's stable install id."`
 }
+
+// --- code graph (migration 0153) -----------------------------------------
+//
+// These mirror the controller-facing shapes one for one, which is why the
+// handlers can convert with a direct conversion rather than a field-by-field
+// copy: a drift between the two then fails the build instead of silently
+// dropping a field from the wire.
+
+// ListProjectMemoryGraphResponse is every repository's code-graph state.
+type ListProjectMemoryGraphResponse struct {
+	Repositories []ProjectMemoryGraphStatusResponse `json:"repositories"`
+}
+
+// ProjectMemoryGraphStatusResponse is one repository's code-graph state.
+type ProjectMemoryGraphStatusResponse struct {
+	RepoID   string `json:"repoId"`
+	RepoPath string `json:"repoPath"`
+	// Backend names the implementation serving this graph, by its real name.
+	Backend       string `json:"backend"`
+	Generation    int64  `json:"generation"`
+	Phase         string `json:"phase"`
+	IndexedCommit string `json:"indexedCommit,omitempty"`
+	RepoIdentity  string `json:"repoIdentity,omitempty"`
+	Files         int64  `json:"files"`
+	Symbols       int64  `json:"symbols"`
+	Edges         int64  `json:"edges"`
+	LastSyncKind  string `json:"lastSyncKind,omitempty"`
+	FilesParsed   int64  `json:"filesParsed"`
+	FilesReused   int64  `json:"filesReused"`
+	FilesRemoved  int64  `json:"filesRemoved"`
+	LastMillis    int64  `json:"lastMillis"`
+	LastError     string `json:"lastError,omitempty"`
+	Architecture  string `json:"architecture,omitempty"`
+	UpdatedAt     string `json:"updatedAt,omitempty"`
+	Healthy       bool   `json:"healthy"`
+	Drift         string `json:"drift,omitempty"`
+}
+
+// ProjectMemoryGraphSyncResponse is what one code-graph sync did.
+type ProjectMemoryGraphSyncResponse struct {
+	RepoID         string `json:"repoId"`
+	RepoPath       string `json:"repoPath"`
+	Kind           string `json:"kind"`
+	Generation     int64  `json:"generation"`
+	IndexedCommit  string `json:"indexedCommit,omitempty"`
+	FilesScanned   int    `json:"filesScanned"`
+	FilesParsed    int    `json:"filesParsed"`
+	FilesReused    int    `json:"filesReused"`
+	FilesRemoved   int    `json:"filesRemoved"`
+	SymbolsAdded   int    `json:"symbolsAdded"`
+	SymbolsRemoved int    `json:"symbolsRemoved"`
+	EdgesAdded     int    `json:"edgesAdded"`
+	EdgesRemoved   int    `json:"edgesRemoved"`
+	Files          int    `json:"files"`
+	Symbols        int    `json:"symbols"`
+	Edges          int    `json:"edges"`
+	Millis         int64  `json:"millis"`
+	Truncated      bool   `json:"truncated,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+}
+
+// ProjectMemoryGraphAnswerResponse is what a bounded graph query found.
+type ProjectMemoryGraphAnswerResponse struct {
+	RepoID        string                             `json:"repoId"`
+	Generation    int64                              `json:"generation"`
+	IndexedCommit string                             `json:"indexedCommit,omitempty"`
+	Symbols       []ProjectMemoryGraphSymbolResponse `json:"symbols"`
+	Callers       []ProjectMemoryGraphEdgeResponse   `json:"callers"`
+	Callees       []ProjectMemoryGraphEdgeResponse   `json:"callees"`
+	Tests         []ProjectMemoryGraphSymbolResponse `json:"tests"`
+	Endpoints     []ProjectMemoryGraphSymbolResponse `json:"endpoints"`
+	Tables        []string                           `json:"tables"`
+	Files         []string                           `json:"files"`
+	// ConsideredSymbols and ConsideredEdges are everything the retrieval was
+	// allowed to choose from. With the returned counts they are what makes the
+	// bound visible rather than asserted.
+	ConsideredSymbols int    `json:"consideredSymbols"`
+	ConsideredEdges   int    `json:"consideredEdges"`
+	Truncated         bool   `json:"truncated,omitempty"`
+	Reason            string `json:"reason,omitempty"`
+}
+
+// ProjectMemoryGraphSymbolResponse is one declaration in an answer.
+type ProjectMemoryGraphSymbolResponse struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Kind      string  `json:"kind"`
+	Path      string  `json:"path"`
+	Line      int     `json:"line"`
+	Signature string  `json:"signature,omitempty"`
+	Summary   string  `json:"summary,omitempty"`
+	Exported  bool    `json:"exported,omitempty"`
+	Score     float64 `json:"score,omitempty"`
+	Reason    string  `json:"reason,omitempty"`
+}
+
+// ProjectMemoryGraphEdgeResponse is one relation in an answer.
+type ProjectMemoryGraphEdgeResponse struct {
+	Kind string `json:"kind"`
+	From string `json:"from"`
+	To   string `json:"to"`
+	Line int    `json:"line,omitempty"`
+}

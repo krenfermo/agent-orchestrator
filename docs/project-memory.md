@@ -337,8 +337,12 @@ arbitrary branch. Order is deterministic, because a pack's digest depends on it.
 
 ### Grae / Graphify
 
-**No Grae or Graphify integration exists in this repository, and P2-A does not
-add one.** The audit's reproducible search
+**No Grae or Graphify integration exists in this repository. P2-A did not add
+one, and neither did the code-graph phase that followed it** — see
+[code-graph.md](code-graph.md), which re-ran the determination and reports the
+same answer: the port is shipped, the in-tree backend is production, and no
+external provider contract exists to implement against. The audit's reproducible
+search
 ([§4.1](p2-project-memory-audit.md#41-graphify--grae-the-explicit-determination))
 found Graphify named only in prose and Grae not at all. Adding a fragile
 external dependency in order to claim an integration would be worse than a clean
@@ -360,6 +364,13 @@ state rather than a nil check: writes are dropped, traversals return
 `ErrGraphUnavailable`, and `TeeGraph` absorbs both into a fallback. Indexing and
 traversal both keep working — that is the structural form of "AO works even
 when Grae is not available".
+
+`MemoryGraph` is the relationship port over project memory's own edges.
+`CodeGraph` (see [code-graph.md](code-graph.md)) is a second, separate port for
+the symbol-level structural index, and the difference between them is that
+`MemoryGraph` is never absent — the local backend is always there — while
+`CodeGraph` is allowed to be. An installation with no code graph built, or one
+whose build failed, keeps dispatching on exactly the memory it had before.
 
 ---
 

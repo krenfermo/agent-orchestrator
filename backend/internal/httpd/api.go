@@ -72,6 +72,11 @@ type APIDeps struct {
 	// 501, and a daemon built without it behaves exactly as it did before
 	// P2-A.
 	ProjectMemory controllers.ProjectMemoryService
+	// ProjectMemoryGraph backs the code graph's status/sync/query routes. It is
+	// separate from ProjectMemory and independently optional: a build with no
+	// graph wired leaves it nil and the routes answer not-implemented, which is
+	// the same shape every other optional surface here uses.
+	ProjectMemoryGraph controllers.ProjectMemoryGraphService
 	// Scheduler and RuntimeGC back P1-C's capacity and runtime-GC surfaces.
 	// Optional like every other surface here: nil answers 501.
 	Scheduler controllers.SchedulerService
@@ -209,37 +214,38 @@ func normalizeAPIDeps(deps APIDeps, log *slog.Logger) APIDeps {
 // API owns one controller per resource and is the single Register call the
 // router invokes to mount the /api/v1 surface.
 type API struct {
-	cfg              config.Config
-	deps             APIDeps
-	agents           *controllers.AgentsController
-	projects         *controllers.ProjectsController
-	environment      *controllers.EnvironmentController
-	sessions         *controllers.SessionsController
-	usage            *controllers.UsageController
-	usageSubject     *controllers.UsageSubjectController
-	capacity         *controllers.CapacityController
-	prs              *controllers.PRsController
-	reviews          *controllers.ReviewsController
-	decisions        *controllers.DecisionsController
-	notifications    *controllers.NotificationsController
-	push             *controllers.PushController
-	imports          *controllers.ImportController
-	shellTerms       *controllers.ShellTerminalsController
-	conversations    *controllers.ConversationsController
-	settings         *controllers.SettingsController
-	dev              *controllers.DevController
-	browser          *controllers.BrowserController
-	workflows        *controllers.WorkflowsController
-	scheduler        *controllers.SchedulerController
-	projectMemory    *controllers.ProjectMemoryController
-	events           *EventsController
-	auth             *controllers.AuthController
-	sso              *controllers.SSOController
-	providerProfiles *controllers.ProviderProfilesController
-	executionPolicy  *controllers.ExecutionPolicyController
-	users            *controllers.UsersController
-	teams            *controllers.TeamsController
-	projectAccess    *controllers.ProjectAccessController
+	cfg                config.Config
+	deps               APIDeps
+	agents             *controllers.AgentsController
+	projects           *controllers.ProjectsController
+	environment        *controllers.EnvironmentController
+	sessions           *controllers.SessionsController
+	usage              *controllers.UsageController
+	usageSubject       *controllers.UsageSubjectController
+	capacity           *controllers.CapacityController
+	prs                *controllers.PRsController
+	reviews            *controllers.ReviewsController
+	decisions          *controllers.DecisionsController
+	notifications      *controllers.NotificationsController
+	push               *controllers.PushController
+	imports            *controllers.ImportController
+	shellTerms         *controllers.ShellTerminalsController
+	conversations      *controllers.ConversationsController
+	settings           *controllers.SettingsController
+	dev                *controllers.DevController
+	browser            *controllers.BrowserController
+	workflows          *controllers.WorkflowsController
+	scheduler          *controllers.SchedulerController
+	projectMemory      *controllers.ProjectMemoryController
+	projectMemoryGraph *controllers.ProjectMemoryGraphController
+	events             *EventsController
+	auth               *controllers.AuthController
+	sso                *controllers.SSOController
+	providerProfiles   *controllers.ProviderProfilesController
+	executionPolicy    *controllers.ExecutionPolicyController
+	users              *controllers.UsersController
+	teams              *controllers.TeamsController
+	projectAccess      *controllers.ProjectAccessController
 	// guard is P4-B's authorization gate, built once and shared by every
 	// controller that scopes a resource. One value, so a route can never be
 	// gated by a differently-configured evaluator than its neighbour.
@@ -287,9 +293,10 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			TrustedLocal: cfg.TrustedLocalMode,
 			Guard:        guard,
 		},
-		capacity:      &controllers.CapacityController{Svc: deps.Capacity},
-		projectMemory: &controllers.ProjectMemoryController{Svc: deps.ProjectMemory, Guard: guard},
-		prs:           &controllers.PRsController{Svc: deps.PRs},
+		capacity:           &controllers.CapacityController{Svc: deps.Capacity},
+		projectMemory:      &controllers.ProjectMemoryController{Svc: deps.ProjectMemory, Guard: guard},
+		projectMemoryGraph: &controllers.ProjectMemoryGraphController{Svc: deps.ProjectMemoryGraph, Guard: guard},
+		prs:                &controllers.PRsController{Svc: deps.PRs},
 		reviews: &controllers.ReviewsController{
 			Svc:          deps.Reviews,
 			Ownership:    deps.SessionOwnership,
@@ -377,6 +384,7 @@ func (a *API) Register(root chi.Router) {
 			a.usageSubject.Register(r)
 			a.capacity.Register(r)
 			a.projectMemory.Register(r)
+			a.projectMemoryGraph.Register(r)
 			a.prs.Register(r)
 			a.reviews.Register(r)
 			a.decisions.Register(r)

@@ -23,6 +23,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/autoreview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/branchlock"
 	"github.com/aoagents/agent-orchestrator/backend/internal/browserruntime"
+	"github.com/aoagents/agent-orchestrator/backend/internal/codegraph"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemon/supervisor"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -597,7 +598,18 @@ func RunWithConfig(cfg config.Config) error {
 	// It is built before the workflow stack because P2-B's dispatch wrappers
 	// take it: whether they do anything is decided by AO_MEMORY_MODE inside
 	// startWorkflows, not by whether this value exists.
-	projectMemory := projectmemory.NewService(store)
+	// The structural half (migration 0153). It is constructed unconditionally
+	// and is inert until a repository is indexed: with no completed build every
+	// pack's graph evidence comes back empty with a stated reason, and every
+	// role falls back to exactly the behaviour it had before this phase.
+	//
+	// It shares the daemon's store rather than owning a second one, so the
+	// graph and project memory are versioned in the same database and a purge
+	// of one cannot leave the other pointing at facts that are gone.
+	codeGraph := codegraph.NewIndex(store, codegraph.WithIndexLogger(log))
+	projectMemory := projectmemory.NewService(store,
+		projectmemory.WithCodeGraph(codeGraph),
+		projectmemory.WithServiceLogger(log))
 	// ONE provisioner for the whole daemon. It owns the sync single-flight and
 	// the pack cache, so constructing a second one for the API surface would
 	// give `ao memory report` its own syncer -- and a report could then trigger
@@ -689,6 +701,15 @@ func RunWithConfig(cfg config.Config) error {
 	// provider connected after the policy was first saved does not stay
 	// invisible to Settings. Shared with APIDeps.ExecutionPolicy below so both
 	// surfaces read and repair the same policy through one implementation.
+	// ONE project-memory service instance backs both API surfaces: the memory
+	// routes and the code-graph routes are two views of the same subsystem,
+	// and giving them separate resolvers would give them separate opinions
+	// about which repository a project id means.
+	memoryAPI := projectmemorysvc.New(projectMemory, store).
+		WithProvisioner(memoryProvisioning).
+		WithWorkspaces(store).
+		WithGraph(codeGraph)
+
 	executionPolicySvc := &executionpolicysvc.Service{Store: store}
 	providerProfilesSvc := &providerprofilesvc.Service{
 		Store:      store,
@@ -748,9 +769,14 @@ func RunWithConfig(cfg config.Config) error {
 		// widened ledger: what AO sent and what a provider reported receiving
 		// are different quantities, and one reader that could return both is
 		// one refactor away from adding them.
-		UsageContext:  usagesvc.NewContextReader(usageEvidenceSource(log)),
-		Capacity:      capacitysvc.NewReader(store),
-		ProjectMemory: projectmemorysvc.New(projectMemory, store).WithProvisioner(memoryProvisioning).WithWorkspaces(store),
+		UsageContext: usagesvc.NewContextReader(usageEvidenceSource(log)),
+		Capacity:     capacitysvc.NewReader(store),
+		// ONE service instance backs both surfaces: the memory routes and the
+		// code-graph routes are two views of the same subsystem, and giving
+		// them separate resolvers would give them separate opinions about
+		// which repository a project id means.
+		ProjectMemory:      memoryAPI,
+		ProjectMemoryGraph: memoryAPI,
 		Questions: &questionssvc.AnswerService{
 			Store: store, Runs: store, Sender: rawSessionMgr, Logger: log,
 			// P3-D: the answer is recorded first and delivered second, and the

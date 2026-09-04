@@ -149,7 +149,7 @@ func TestIndexBuildsGraphAndSkipsUnindexableTrees(t *testing.T) {
 		"main.go#function:Run",
 		"main.go#constant:DefaultPrefix",
 		"helper.go#function:Helper",
-		"web/app.ts#type:Props",
+		"web/app.ts#interface:Props",
 		"web/app.ts#function:Widget",
 		"web/app.ts#function:render",
 	} {
@@ -537,9 +537,13 @@ func contains(values []string, want string) bool {
 	return false
 }
 
+// hasEdge matches on the relation itself -- kind, source, target -- and
+// ignores Line, which is an observation of where the relation was written and
+// not part of what the relation says. Asserting on it would make every test in
+// this package fail when a fixture gains a line.
 func hasEdge(edges []Edge, want Edge) bool {
 	for _, edge := range edges {
-		if edge == want {
+		if edge.Kind == want.Kind && edge.From == want.From && edge.To == want.To {
 			return true
 		}
 	}

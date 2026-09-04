@@ -1666,6 +1666,38 @@ func projectMemoryOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/memory/graph", id: "getProjectMemoryGraphStatus", tag: "projects",
+			summary:    "The code graph's state per repository: which backend is serving it (by its real name -- the in-tree one is reported as \"local\" and never under a vendor's name), which generation and commit, how many files, symbols and relations it holds, what the last sync had to do, and the bounded architecture summary derived from it. drift is non-empty when the graph can no longer be vouched for -- the checkout moved on, or it is no longer the same repository -- and such a graph is reported unhealthy even though its rows are intact.",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListProjectMemoryGraphResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/memory/graph/sync", id: "syncProjectMemoryGraph", tag: "projects",
+			summary:    "Bring one repository's code graph up to its current commit. It chooses incremental or full exactly as a dispatch would, so an operator running it by hand exercises the production path: incremental whenever a change set can be proved, a full build otherwise. filesParsed against filesReused is the measurement -- an incremental sync of a one-file commit parses one file, and a full pass over an unchanged tree parses none.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.SyncProjectMemoryGraphQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectMemoryGraphSyncResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/memory/graph/query", id: "queryProjectMemoryGraph", tag: "projects",
+			summary:    "Ask the code graph what a dispatch would be told. Given a symbol, a file, or free text from an objective, it returns the bounded neighbourhood: the matching declarations with their signatures and summaries, what reaches them, what they reach, the tests proven to cover them, the routes that arrive at them and the tables they touch. consideredSymbols against the returned count is what makes the bound visible.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.GetProjectMemoryGraphQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectMemoryGraphAnswerResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodGet, path: "/api/v1/projects/{id}/memory/provenance/{itemId}", id: "getProjectMemoryProvenance", tag: "projects",
 			summary:    "P2-D: the full evidence chain behind one fact — why it is valid, which task produced it, which commit supports it, how it became canonical, what withdrew it, and what replaced it. Retired edges are included: a superseded decision's supersedes edge is not in the current graph and is usually what is being looked for.",
 			pathParams: []any{controllers.ProjectMemoryItemIDParam{}},

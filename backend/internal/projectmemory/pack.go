@@ -325,7 +325,11 @@ type ContextPack struct {
 	RepoID    string
 	BuiltAt   time.Time
 	Sections  []PackSection
-	Stats     PackStats
+	// Graph is the code_graph source category: structural evidence from the
+	// symbol-level graph, kept apart from Sections so "how much of this
+	// context came from the graph" stays answerable (section 15 of the brief).
+	Graph GraphEvidence
+	Stats PackStats
 	// Digest is a hash over the rendered pack. Two dispatches with the same
 	// digest were given the same memory; a changed digest is a changed
 	// premise, and that is what makes a regression traceable.
@@ -334,7 +338,11 @@ type ContextPack struct {
 
 // Empty reports whether the pack carries nothing. A caller that gets true must
 // fall back to its pre-memory behaviour rather than sending a thinner context.
-func (p ContextPack) Empty() bool { return p.Stats.SelectedItems == 0 }
+//
+// Graph evidence counts. A repository whose durable facts are all withheld but
+// whose code graph can still say where the authorization path lives has
+// something worth sending, and treating that pack as empty would throw it away.
+func (p ContextPack) Empty() bool { return p.Stats.SelectedItems == 0 && p.Graph.Empty() }
 
 // roleSections is the ordered set of types each role receives.
 //
@@ -1053,9 +1061,15 @@ func (p ContextPack) Render() string {
 		fmt.Fprintf(&b, "Derived at commit %s (memory generation %d).\n\n",
 			p.Stats.IndexedCommit, p.Stats.Generation)
 	}
-	if p.Stats.FallbackReason != "" {
+	if p.Stats.FallbackReason != "" && p.Stats.SelectedItems == 0 && p.Graph.Empty() {
 		fmt.Fprintf(&b, "No project memory is attached: %s.\n", p.Stats.FallbackReason)
 		return b.String()
+	}
+
+	// The graph goes first. It is structure -- where things are -- and a reader
+	// that has the map reads the durable facts that follow in the right frame.
+	if rendered := p.Graph.Render(); rendered != "" {
+		b.WriteString(rendered)
 	}
 
 	for _, section := range p.Sections {

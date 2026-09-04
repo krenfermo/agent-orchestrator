@@ -54,6 +54,9 @@ type Service struct {
 	// workspaces backs the prune's live-execution proof. Optional; nil makes
 	// the prune fail closed rather than assume nothing is running.
 	workspaces WorkspaceReader
+	// graph is the code graph (migration 0153). Optional: a daemon with none
+	// answers the graph routes with not-implemented rather than an error.
+	graph GraphIndex
 }
 
 // New builds the service over the memory subsystem and the project registry.
