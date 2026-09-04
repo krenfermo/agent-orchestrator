@@ -86,8 +86,20 @@ func (c *Coordinator) commitIsolatedWorktree(ctx stdctx.Context, run domain.Work
 		return nil
 	}
 
+	// §3: observe the tree the VERIFICATION named, not a root re-derived here.
+	// The placement and the verify checkpoint agreed in the incident, but they
+	// are two independent derivations of "this run's worktree", and a
+	// fingerprint comparison is only meaningful when both sides were computed
+	// over the same root. verifiedRoot returns the verification's own root when
+	// it recorded one, and falls back to the placement for results written
+	// before it did.
+	verified, hasVerified := c.canonicalVerifiedState(ctx, run)
+	observePath := target.worktreePath
+	if hasVerified && verified.WorktreePath != "" {
+		observePath = verified.WorktreePath
+	}
 	before, err := c.workspaceFacts.ObserveWorkspace(ctx, ports.WorkspaceInfo{
-		Path: target.worktreePath, Branch: target.branch, ProjectID: domain.ProjectID(run.ProjectID),
+		Path: observePath, Branch: target.branch, ProjectID: domain.ProjectID(run.ProjectID),
 	})
 	if err != nil {
 		return fmt.Errorf("observing this run's worktree before committing its verified result: %w", err)
@@ -116,12 +128,16 @@ func (c *Coordinator) commitIsolatedWorktree(ctx stdctx.Context, run domain.Work
 	// A worktree that changed after verification is not covered by that
 	// verdict, and committing it would launder an unverified state into an
 	// integration candidate.
-	if err := c.requireVerifiedTree(ctx, run, before); err != nil {
-		return err
+	if hasVerified {
+		if observedState := newVerifiedWorkspaceState(before); observedState.Fingerprint != verified.Fingerprint {
+			// §4/§5: NOT a failure. The verdict no longer describes the
+			// workspace, which completeVerifiedRun answers by verifying again.
+			return &verifiedStateDriftError{verified: verified, observed: observedState}
+		}
 	}
 
 	sha, committed, err := c.workspaceCommitter.CommitAll(ctx, ports.WorkspaceInfo{
-		Path: target.worktreePath, Branch: target.branch,
+		Path: observePath, Branch: target.branch,
 		ProjectID: domain.ProjectID(run.ProjectID), RepoPath: target.repoPath,
 	}, autonomousCommitMessage(run))
 	if err != nil {
@@ -133,7 +149,7 @@ func (c *Coordinator) commitIsolatedWorktree(ctx stdctx.Context, run domain.Work
 	// restart between the commit and this checkpoint re-observes the same HEAD
 	// and records it once rather than creating a second, identical commit.
 	after, err := c.workspaceFacts.ObserveWorkspace(ctx, ports.WorkspaceInfo{
-		Path: target.worktreePath, Branch: target.branch, ProjectID: domain.ProjectID(run.ProjectID),
+		Path: observePath, Branch: target.branch, ProjectID: domain.ProjectID(run.ProjectID),
 	})
 	if err != nil {
 		return fmt.Errorf("re-reading this run's worktree after committing its verified result: %w", err)
@@ -178,30 +194,33 @@ func (c *Coordinator) isolatedCommitTarget(ctx stdctx.Context, run domain.Workfl
 	}, true
 }
 
-// requireVerifiedTree proves the pending tree is the one the run's passing
-// verification actually judged.
+// canonicalVerifiedState is the state this run's passing verification approved,
+// read from the verification's own record rather than reconstructed.
 //
-// A run whose plan asked for no verification has no fingerprint to compare
-// against, and refusing it would make this boundary stricter than the
-// verification contract itself — so an absent verdict is not treated as a
-// mismatch. What is refused is a verdict that exists and describes a DIFFERENT
-// tree, which is the case where committing would misrepresent what passed.
-func (c *Coordinator) requireVerifiedTree(ctx stdctx.Context, run domain.WorkflowRun, observed ports.WorkspaceObservation) error {
+// A run whose plan asked for no verification has nothing to compare against,
+// and refusing it would make this boundary stricter than the verification
+// contract itself — so an absent verdict reports false and the commit proceeds.
+// What is refused is a verdict that exists and describes a DIFFERENT tree.
+//
+// Results written before VerifiedState existed carry only a digest; they are
+// promoted to a canonical state with no root, which makes the consumer fall
+// back to the placement's worktree exactly as it did before.
+func (c *Coordinator) canonicalVerifiedState(ctx stdctx.Context, run domain.WorkflowRun) (VerifiedWorkspaceState, bool) {
 	_, result, ok := latestPassingVerifyResult(ctx, c, run.ID)
 	if !ok {
-		return nil
+		return VerifiedWorkspaceState{}, false
 	}
-	verified := strings.TrimSpace(result.PostFingerprint)
-	if verified == "" {
-		verified = strings.TrimSpace(result.PreFingerprint)
+	if result.VerifiedState != nil && strings.TrimSpace(result.VerifiedState.Fingerprint) != "" {
+		return *result.VerifiedState, true
 	}
-	if verified == "" {
-		return nil
+	fingerprint := strings.TrimSpace(result.PostFingerprint)
+	if fingerprint == "" {
+		fingerprint = strings.TrimSpace(result.PreFingerprint)
 	}
-	if WorkspaceFingerprint(observed) == verified {
-		return nil
+	if fingerprint == "" {
+		return VerifiedWorkspaceState{}, false
 	}
-	return fmt.Errorf("this run's worktree changed after its verification passed, so the pending work is not the state that was verified and AO will not commit it as the verified result")
+	return VerifiedWorkspaceState{Fingerprint: fingerprint}, true
 }
 
 // recordIsolatedCommit persists the committed candidate. Unlike the rest of the

@@ -6532,6 +6532,16 @@ export interface components {
             commands?: components["schemas"]["WorkflowVerificationCommandCheck"][];
             files?: components["schemas"]["WorkflowVerificationFileCheck"][];
         };
+        WorkflowVerifiedWorkspaceState: {
+            branch?: string;
+            changes?: string[];
+            dirty: boolean;
+            fingerprint: string;
+            headSHA?: string;
+            staged: boolean;
+            untracked: boolean;
+            worktreePath?: string;
+        };
         WorkflowVerifyCheckResult: {
             /** Format: int64 */
             durationMs?: number;
@@ -6576,6 +6586,7 @@ export interface components {
             stopReason?: string;
             supersededByFreshReview?: boolean;
             targetKey: string;
+            verifiedState?: components["schemas"]["WorkflowVerifiedWorkspaceState"];
             version: string;
         };
         WorkflowVerifyScopeDecision: {

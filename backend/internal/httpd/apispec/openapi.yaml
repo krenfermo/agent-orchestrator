@@ -18036,6 +18036,32 @@ components:
             $ref: '#/components/schemas/WorkflowVerificationFileCheck'
           type: array
       type: object
+    WorkflowVerifiedWorkspaceState:
+      properties:
+        branch:
+          type: string
+        changes:
+          items:
+            type: string
+          type: array
+        dirty:
+          type: boolean
+        fingerprint:
+          type: string
+        headSHA:
+          type: string
+        staged:
+          type: boolean
+        untracked:
+          type: boolean
+        worktreePath:
+          type: string
+      required:
+      - fingerprint
+      - dirty
+      - staged
+      - untracked
+      type: object
     WorkflowVerifyCheckResult:
       properties:
         durationMs:
@@ -18143,6 +18169,8 @@ components:
           type: boolean
         targetKey:
           type: string
+        verifiedState:
+          $ref: '#/components/schemas/WorkflowVerifiedWorkspaceState'
         version:
           type: string
       required:

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,14 +75,22 @@ type VerifyCheckResult struct {
 // reader can tell whether the result still describes the workspace rather than
 // having to re-derive that from a tree that may since have moved.
 type VerifyResult struct {
-	Version             string                    `json:"version"`
-	TargetKey           string                    `json:"targetKey"`
-	ReviewedFingerprint string                    `json:"reviewedFingerprint"`
-	PreFingerprint      string                    `json:"preFingerprint"`
-	PostFingerprint     string                    `json:"postFingerprint"`
-	Checks              []VerifyCheckResult       `json:"checks"`
-	Passed              bool                      `json:"passed"`
-	ErrorClass          domain.WorkflowErrorClass `json:"errorClass,omitempty"`
+	Version             string `json:"version"`
+	TargetKey           string `json:"targetKey"`
+	ReviewedFingerprint string `json:"reviewedFingerprint"`
+	PreFingerprint      string `json:"preFingerprint"`
+	PostFingerprint     string `json:"postFingerprint"`
+	// VerifiedState is the canonical state this verification approved: the
+	// same digest PostFingerprint carries, plus the worktree it was computed
+	// over and the components behind it (verified_state.go). The commit
+	// boundary reads THIS rather than re-deriving a root of its own, so
+	// producer and consumer cannot describe two different trees under one
+	// name. Absent on results written before it existed, which the consumer
+	// falls back from to PostFingerprint.
+	VerifiedState *VerifiedWorkspaceState   `json:"verifiedState,omitempty"`
+	Checks        []VerifyCheckResult       `json:"checks"`
+	Passed        bool                      `json:"passed"`
+	ErrorClass    domain.WorkflowErrorClass `json:"errorClass,omitempty"`
 	// Scope is Checkpoint 8I's VerifyScopePolicy decision for this attempt —
 	// always recorded, even when the scope resolved to repository (i.e. no
 	// narrowing applied), so a run can later explain exactly which commands
@@ -380,6 +389,15 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 		return c.failVerifyWithoutExecution(ctx, run, verifyStep, domain.WorkflowErrorVerifyAmbiguous, err.Error())
 	}
 	targetKey := verificationTargetKey(reviewed, artifact.Verification)
+	// A verification AO invalidated because the tree no longer matched it must
+	// be RE-RUN, not resumed. Folding the drift count into the target key is
+	// what makes that happen: verifyAttemptID is derived from this key, so the
+	// stale succeeded attempt can no longer satisfy hasAttempt and drive
+	// completeVerifiedRun. At zero drifts the key is bit-for-bit the
+	// pre-generation one, so no historical attempt changes meaning.
+	if drifts := c.verifiedStateDrifts(ctx, run.ID); drifts > 0 {
+		targetKey = verificationTargetKey(reviewed+"\ndrift:"+strconv.Itoa(drifts), artifact.Verification)
+	}
 
 	// Checkpoint 8P-E.14C: an open stale-verify recovery (verify_recovery.go) is
 	// a person's explicit licence to re-ask a target whose historical answer came
@@ -448,7 +466,8 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 		// finished history for a superseded target, and this cycle gets its own
 		// attempt row (verifyAttemptID is derived from the target key, so the
 		// two can never collide).
-		if !c.verifyTargetAdvancedByFix(ctx, run.ID, latest) && !c.verifyTargetAdvancedByReview(ctx, run.ID, latest) {
+		if !c.verifyTargetAdvancedByFix(ctx, run.ID, latest) && !c.verifyTargetAdvancedByReview(ctx, run.ID, latest) &&
+			!c.verifyTargetAdvancedByVerifiedStateDrift(ctx, run.ID, latest) {
 			return c.failVerifyWithoutExecution(ctx, run, verifyStep, domain.WorkflowErrorVerifyAmbiguous, "verify target changed after an attempt was created")
 		}
 		hasAttempt = false
@@ -755,7 +774,9 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 		result.ErrorClass = domain.WorkflowErrorVerifyEnvironment
 		return c.finishVerifyFailure(ctx, run, verifyStep, latest, result, err.Error())
 	}
-	result.PostFingerprint = WorkspaceFingerprint(postObs)
+	verifiedState := newVerifiedWorkspaceState(postObs)
+	result.PostFingerprint = verifiedState.Fingerprint
+	result.VerifiedState = &verifiedState
 	if result.PostFingerprint != pre {
 		result.ErrorClass = domain.WorkflowErrorVerifyWorkspaceChanged
 		return c.finishVerifyFailure(ctx, run, verifyStep, latest, result, "workspace changed while verification was running")
@@ -1372,6 +1393,14 @@ func (c *Coordinator) completeVerifiedRun(ctx stdctx.Context, run domain.Workflo
 	// sits uncommitted would be exactly the kind of untruthful state this
 	// codebase refuses everywhere else.
 	if err := c.autonomousLocalCommit(ctx, run, step); err != nil {
+		// A tree that no longer matches its verdict is a stale VERIFICATION,
+		// not a failed commit, and the honest answer is to verify again rather
+		// than to park a person in front of work AO can still finish itself.
+		// See verified_state.go for the incident this distinction comes from.
+		var drift *verifiedStateDriftError
+		if errors.As(err, &drift) {
+			return c.reverifyAfterVerifiedStateDrift(ctx, run, step, drift)
+		}
 		if c.log != nil {
 			c.log.Warn("workflow: autonomous local commit failed", "run", run.ID, "err", err)
 		}
