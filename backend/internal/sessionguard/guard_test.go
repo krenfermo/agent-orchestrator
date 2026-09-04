@@ -365,3 +365,58 @@ func TestGuard_NudgeCoordinationEnforcesSteeringAtWriteBoundary(t *testing.T) {
 		})
 	}
 }
+
+// TestGuard_F4_EmptyNudgeNeverAnswersAnOpenQuestion is the F4 regression.
+//
+// Claude Code reports an open AskUserQuestion as Notification(agent_needs_input)
+// -> ActivityWaitingInput. An empty message is AO's Enter-only nudge, and an
+// Enter into that pane does not flush a draft: it SELECTS THE HIGHLIGHTED
+// OPTION, always the first one. In the gate that silently answered a worker's
+// "which helper convention should this follow?" with option 1 while AO's own
+// durable question row stayed unresolved and undelivered.
+//
+// A non-empty message must still be delivered to the same state: that is a
+// person, or AO's structured answer, responding to the very question the
+// session is waiting on.
+func TestGuard_F4_EmptyNudgeNeverAnswersAnOpenQuestion(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		msg  string
+		want Outcome
+	}{
+		{"enter-only nudge is withheld", "", SuppressedAwaitingUser},
+		{"a real answer is delivered", "1", Sent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			msgr := &fakeMessenger{}
+			g := New(&fakeStore{rec: record(domain.ActivityWaitingInput, false), ok: true}, msgr, nil)
+			got, err := g.Deliver(context.Background(), "s1", tc.msg)
+			if err != nil {
+				t.Fatalf("Deliver: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("outcome = %v, want %v", got, tc.want)
+			}
+			if wantSent := tc.want == Sent; (len(msgr.sent) == 1) != wantSent {
+				t.Errorf("messenger sends = %d, want sent=%v", len(msgr.sent), wantSent)
+			}
+		})
+	}
+}
+
+// The mutation-bypass form must hold the same line: it skips input admission,
+// not the decision-safety check.
+func TestGuard_F4_EmptyNudgeWithheldUnderMutationToo(t *testing.T) {
+	msgr := &fakeMessenger{}
+	g := New(&fakeStore{rec: record(domain.ActivityWaitingInput, false), ok: true}, msgr, nil)
+	got, err := g.DeliverUnderMutation(context.Background(), "s1", "")
+	if err != nil {
+		t.Fatalf("DeliverUnderMutation: %v", err)
+	}
+	if got != SuppressedAwaitingUser {
+		t.Errorf("outcome = %v, want %v", got, SuppressedAwaitingUser)
+	}
+	if len(msgr.sent) != 0 {
+		t.Errorf("an Enter reached a session waiting on a person: %v", msgr.sent)
+	}
+}

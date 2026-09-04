@@ -6732,10 +6732,44 @@ func TestSend_NoNudgeWhenBlockedAppearsMidWait(t *testing.T) {
 	}
 }
 
-func TestSend_StillNudgesWhenWaitingInput(t *testing.T) {
-	// waiting_input (an idle prompt awaiting the next instruction) is the
-	// PRIMARY nudge scenario: a long-idle worker with an unsubmitted pasted
-	// draft. The decision-safety guard must not disable it.
+func TestSend_StillNudgesWhenIdle(t *testing.T) {
+	// ActivityIdle is the nudge scenario: a composer sitting at an idle prompt
+	// with an unsubmitted pasted draft. Claude Code reports that as
+	// Notification(idle_prompt) -> ActivityIdle (adapters/agent/claudecode/
+	// activity.go). The decision-safety guard must not disable it.
+	st := newFakeStore()
+	st.sessions["s1"] = domain.SessionRecord{ID: "s1", Harness: "claude-code",
+		Activity: domain.Activity{State: domain.ActivityIdle}}
+	msg := &flipOnNudgeMessenger{sessionID: "s1", store: st}
+	m := newSendTestManager(t, signalingAgent{}, msg, st)
+
+	if err := m.Send(context.Background(), "s1", "do the thing", nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(msg.msgs) != 2 {
+		t.Fatalf("Send calls = %d, want 2 (initial + one nudge for idle)", len(msg.msgs))
+	}
+	if msg.msgs[1] != "" {
+		t.Fatalf("nudge msg = %q, want empty (Enter-only)", msg.msgs[1])
+	}
+}
+
+// TestSend_NeverNudgesWhenWaitingInput is the F4 regression at the manager
+// level.
+//
+// This test previously asserted the opposite, on the premise that
+// waiting_input means "an idle prompt awaiting the next instruction". It does
+// not: the Claude Code adapter maps Notification(idle_prompt) to ActivityIdle
+// and Notification(agent_needs_input) -- which is what an OPEN AskUserQuestion
+// fires -- to ActivityWaitingInput. So waiting_input means the agent is asking
+// a question, and an Enter into that pane selects the highlighted option rather
+// than flushing a draft.
+//
+// In the gate that silently answered a worker's "which helper convention should
+// the new helper follow?" by choosing option 1, while AO's own durable
+// workflow_questions row stayed unresolved with delivered=0 -- AO answering its
+// own question with no record of having done so.
+func TestSend_NeverNudgesWhenWaitingInput(t *testing.T) {
 	st := newFakeStore()
 	st.sessions["s1"] = domain.SessionRecord{ID: "s1", Harness: "claude-code",
 		Activity: domain.Activity{State: domain.ActivityWaitingInput}}
@@ -6745,11 +6779,13 @@ func TestSend_StillNudgesWhenWaitingInput(t *testing.T) {
 	if err := m.Send(context.Background(), "s1", "do the thing", nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	if len(msg.msgs) != 2 {
-		t.Fatalf("Send calls = %d, want 2 (initial + one nudge for waiting_input)", len(msg.msgs))
+	if len(msg.msgs) != 1 {
+		t.Fatalf("Send calls = %d, want 1 (the message itself, and no Enter into an open question)", len(msg.msgs))
 	}
-	if msg.msgs[1] != "" {
-		t.Fatalf("nudge msg = %q, want empty (Enter-only)", msg.msgs[1])
+	for i, sent := range msg.msgs[1:] {
+		if sent == "" {
+			t.Fatalf("nudge %d delivered an Enter into a session waiting on a person", i+1)
+		}
 	}
 }
 

@@ -146,8 +146,33 @@ func (g *Guard) Send(ctx context.Context, id domain.SessionID, msg string) error
 // submits its unsent draft) belongs.
 func (g *Guard) Deliver(ctx context.Context, id domain.SessionID, msg string) (Outcome, error) {
 	return g.send(ctx, id, msg, func(rec domain.SessionRecord) (Outcome, bool) {
-		return SuppressedAwaitingUser, rec.Activity.State == domain.ActivityBlocked
+		return SuppressedAwaitingUser, suppressForAwaitingUser(rec, msg)
 	})
+}
+
+// suppressForAwaitingUser decides whether a delivery must be withheld because
+// the session is waiting on a person.
+//
+// Blocked always suppresses: an Enter into a permission dialog answers it.
+//
+// waiting_input suppresses only an EMPTY message, and that distinction is F4.
+// An empty message is AO's Enter-only nudge (see ports.AgentMessenger), whose
+// purpose is to flush a draft an idle composer never submitted. Claude Code
+// reports an open AskUserQuestion as Notification(agent_needs_input) ->
+// ActivityWaitingInput, and an Enter there does not flush anything -- it SELECTS
+// THE HIGHLIGHTED OPTION, always the first one. In the gate that silently
+// answered a worker's "which helper convention should this follow?" while AO's
+// own durable question row sat unresolved, so AO was answering its own
+// questions with no record of having done so.
+//
+// A non-empty message is left alone: that is a real person (or an AO structured
+// answer) responding to the very question the session is waiting on, which is
+// exactly when it should be delivered.
+func suppressForAwaitingUser(rec domain.SessionRecord, msg string) bool {
+	if rec.Activity.State == domain.ActivityBlocked {
+		return true
+	}
+	return msg == "" && rec.Activity.State == domain.ActivityWaitingInput
 }
 
 // DeliverWithPostWrite is Deliver plus a callback that runs only after a
@@ -166,7 +191,7 @@ func (g *Guard) DeliverWithPostWrite(ctx context.Context, id domain.SessionID, m
 // write its own handoff or startup prompt while ordinary input stays gated.
 func (g *Guard) DeliverUnderMutation(ctx context.Context, id domain.SessionID, msg string) (Outcome, error) {
 	return g.sendAdmitted(ctx, id, msg, func(rec domain.SessionRecord) (Outcome, bool) {
-		return SuppressedAwaitingUser, rec.Activity.State == domain.ActivityBlocked
+		return SuppressedAwaitingUser, suppressForAwaitingUser(rec, msg)
 	})
 }
 

@@ -2804,9 +2804,11 @@ const (
 //
 // Decision safety: a session observed in ActivityBlocked stops confirmation
 // immediately with no nudge — an Enter into a pending permission dialog would
-// answer it for the user. Sticky ActivityWaitingInput does NOT stop the loop:
-// an idle-prompt session with an unsubmitted pasted draft is exactly the case
-// the nudge exists for.
+// answer it for the user. ActivityWaitingInput stops it for the same reason
+// (F4): Claude Code reports an open AskUserQuestion that way, and an Enter
+// there selects the highlighted option rather than resubmitting a draft. The
+// case the nudge actually exists for -- an idle composer holding an
+// unsubmitted pasted draft -- is ActivityIdle, which still nudges.
 func (m *Manager) confirmActive(ctx context.Context, guard *sessionguard.Guard, id domain.SessionID) {
 	m.confirmActiveWithNudge(ctx, id, nil, func(nudgeCtx context.Context) (sessionguard.Outcome, error) {
 		return guard.Deliver(nudgeCtx, id, "")
@@ -2904,7 +2906,28 @@ func (m *Manager) waitForActive(ctx context.Context, id domain.SessionID) (waitO
 		switch rec.Activity.State {
 		case domain.ActivityActive:
 			return waitActive, nil
-		case domain.ActivityBlocked:
+		case domain.ActivityBlocked, domain.ActivityWaitingInput:
+			// F4: waiting_input stops the loop for the same reason blocked
+			// does. Claude Code reports an open AskUserQuestion as
+			// Notification(agent_needs_input) -> ActivityWaitingInput (see
+			// adapters/agent/claudecode/activity.go), and an Enter into that
+			// pane does not resubmit a draft -- it SELECTS THE HIGHLIGHTED
+			// OPTION, which is always the first one.
+			//
+			// That is exactly what happened in the gate: a worker asked "which
+			// helper convention should the new helper follow?", AO's own
+			// confirmation nudge pressed Enter, option 1 was chosen, and the
+			// worker continued -- while AO's durable workflow_questions row
+			// stayed unresolved with delivered=0 and no resolution. AO was
+			// answering its own questions, invisibly, always picking the first
+			// option, and its structured-delivery path never decided anything.
+			//
+			// The asymmetry decides this: a nudge withheld from a session that
+			// is genuinely waiting on a person costs one delayed resend, and
+			// the next real send delivers it. A nudge sent into an open
+			// question answers it irreversibly and silently. The nudge's own
+			// purpose -- flushing an unsubmitted draft at an idle composer --
+			// is an ActivityIdle condition, which is untouched here.
 			return waitBlocked, nil
 		}
 		if !m.clock().Before(deadlineAt) {
