@@ -153,6 +153,83 @@ type ChangeLog struct {
 	CreatedAt time.Time
 }
 
+type CodeGraphEdge struct {
+	ProjectID  string
+	RepoID     string
+	Generation int64
+	EdgeID     string
+	Path       string
+	Kind       string
+	FromKey    string
+	ToKey      string
+	Line       int64
+	UpdatedAt  time.Time
+}
+
+type CodeGraphFile struct {
+	ProjectID   string
+	RepoID      string
+	Generation  int64
+	Path        string
+	Language    string
+	Role        string
+	ContentHash string
+	SizeBytes   int64
+	UpdatedAt   time.Time
+}
+
+type CodeGraphIndex struct {
+	ProjectID          string
+	RepoID             string
+	RepoPath           string
+	Backend            string
+	Generation         int64
+	ServedGeneration   int64
+	Phase              string
+	IndexedCommit      string
+	PendingCommit      string
+	Branch             string
+	RepoIdentity       string
+	FileCount          int64
+	SymbolCount        int64
+	EdgeCount          int64
+	LastSyncKind       string
+	LastFilesParsed    int64
+	LastFilesReused    int64
+	LastFilesRemoved   int64
+	LastSymbolsAdded   int64
+	LastSymbolsRemoved int64
+	LastEdgesAdded     int64
+	LastEdgesRemoved   int64
+	LastDurationMs     int64
+	LastError          string
+	Architecture       string
+	ArchitectureJson   string
+	StartedAt          sql.NullTime
+	CompletedAt        sql.NullTime
+	UpdatedAt          time.Time
+}
+
+type CodeGraphSymbol struct {
+	ProjectID     string
+	RepoID        string
+	Generation    int64
+	SymbolID      string
+	Path          string
+	Name          string
+	Kind          string
+	Language      string
+	Line          int64
+	EndLine       int64
+	Signature     string
+	Doc           string
+	Summary       string
+	SummarySource string
+	Exported      int64
+	BodyHash      string
+	UpdatedAt     time.Time
+}
+
 type Conversation struct {
 	ID                         string
 	Scope                      domain.ConversationScope

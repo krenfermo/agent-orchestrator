@@ -3,11 +3,8 @@ package codegraph
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"os"
-	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -33,11 +30,13 @@ var defaultSkipDirs = []string{
 // the Go standard library, with no external tool, subprocess, or network
 // dependency. It persists one graph per project root through a Store.
 type NativeIndexer struct {
-	store       *Store
-	extractors  extractorSet
-	skipDirs    map[string]bool
-	maxFileSize int64
-	now         func() time.Time
+	store *Store
+	// scanner is the shared filesystem half: which paths are admitted, how
+	// they are read, and the containment proof that keeps a diff from reaching
+	// outside the project. The durable, project-scoped Index uses the same
+	// one, so "what AO will look at" has a single definition.
+	scanner scanner
+	now     func() time.Time
 }
 
 // Option customizes a NativeIndexer.
@@ -45,7 +44,7 @@ type Option func(*NativeIndexer)
 
 // WithExtractors replaces the default language extractors.
 func WithExtractors(extractors ...Extractor) Option {
-	return func(n *NativeIndexer) { n.extractors = newExtractorSet(extractors) }
+	return func(n *NativeIndexer) { n.scanner.extractors = newExtractorSet(extractors) }
 }
 
 // WithMaxFileSize caps the size of a file the indexer will read. A
@@ -55,14 +54,14 @@ func WithMaxFileSize(limit int64) Option {
 		if limit <= 0 {
 			limit = defaultMaxFileSize
 		}
-		n.maxFileSize = limit
+		n.scanner.maxFileSize = limit
 	}
 }
 
 // WithSkipDirs replaces the default list of directory names that are never
 // descended into.
 func WithSkipDirs(names ...string) Option {
-	return func(n *NativeIndexer) { n.skipDirs = nameSet(names) }
+	return func(n *NativeIndexer) { n.scanner.skipDirs = nameSet(names) }
 }
 
 // WithClock replaces the source of index timestamps, so callers that need
@@ -81,11 +80,9 @@ func NewNativeIndexer(store *Store, opts ...Option) (*NativeIndexer, error) {
 		return nil, fmt.Errorf("%w: a store is required", ErrStorePath)
 	}
 	indexer := &NativeIndexer{
-		store:       store,
-		extractors:  newExtractorSet(DefaultExtractors()),
-		skipDirs:    nameSet(defaultSkipDirs),
-		maxFileSize: defaultMaxFileSize,
-		now:         time.Now,
+		store:   store,
+		scanner: newScanner(),
+		now:     time.Now,
 	}
 	for _, opt := range opts {
 		opt(indexer)
@@ -114,7 +111,7 @@ func (n *NativeIndexer) Index(ctx context.Context, req IndexRequest) (IndexResul
 		return IndexResult{}, err
 	}
 
-	candidates, err := n.walk(ctx, root)
+	candidates, err := n.scanner.walk(ctx, root)
 	if err != nil {
 		return IndexResult{}, err
 	}
@@ -226,7 +223,7 @@ func (n *NativeIndexer) applyRename(graph *Graph, root, oldRel, newRel string, r
 		return n.syncFile(graph, root, newRel, result)
 	}
 
-	data, ok, err := n.readCandidate(root, newRel)
+	data, ok, err := n.scanner.readCandidate(root, newRel)
 	if err != nil {
 		return err
 	}
@@ -254,7 +251,7 @@ func (n *NativeIndexer) applyRename(graph *Graph, root, oldRel, newRel string, r
 // The content hash is the gate: an unchanged file is counted as skipped and
 // its persisted symbols and edges are left exactly as they are.
 func (n *NativeIndexer) syncFile(graph *Graph, root, rel string, result *IndexResult) error {
-	extractor, supported := n.extractors.find(rel)
+	extractor, supported := n.scanner.extractors.find(rel)
 	// DeniedPath is checked here as well as in the walk, and that is the
 	// point: an incremental update names its own paths, so a diff mentioning
 	// `secrets.py` would otherwise reach a file the walk would never have
@@ -269,7 +266,7 @@ func (n *NativeIndexer) syncFile(graph *Graph, root, rel string, result *IndexRe
 		}
 		return nil
 	}
-	data, ok, err := n.readCandidate(root, rel)
+	data, ok, err := n.scanner.readCandidate(root, rel)
 	if err != nil {
 		return err
 	}
@@ -303,133 +300,6 @@ func (n *NativeIndexer) syncFile(graph *Graph, root, rel string, result *IndexRe
 	result.FilesParsed++
 	result.ParsedFiles = append(result.ParsedFiles, rel)
 	return nil
-}
-
-// readCandidate reads a project-relative file if it is one the indexer will
-// consider: an existing regular file within the size cap. ok=false means "not
-// indexable", which is a normal outcome, not an error.
-func (n *NativeIndexer) readCandidate(root, rel string) (data []byte, ok bool, err error) {
-	abs, exists, err := n.resolve(root, rel)
-	if err != nil {
-		return nil, false, err
-	}
-	if !exists {
-		return nil, false, nil
-	}
-	info, err := os.Lstat(abs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("codegraph: stat %s: %w", rel, err)
-	}
-	if !info.Mode().IsRegular() || info.Size() > n.maxFileSize {
-		return nil, false, nil
-	}
-	data, err = os.ReadFile(abs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("codegraph: read %s: %w", rel, err)
-	}
-	return data, true, nil
-}
-
-// resolve turns a project-relative path into an absolute one, refusing any
-// path that does not genuinely live beneath the project root. A diff is data
-// from outside the process; neither a "../../etc/passwd" entry nor a
-// "linked/secret.go" entry that reaches another checkout through a symlinked
-// directory inside this one may make the indexer read — or file under this
-// project's graph — a file the caller did not ask about.
-//
-// Lexical cleaning alone cannot decide this: it sees no ".." in
-// "linked/secret.go", and os.Lstat only ever inspects the final component. So
-// the parent directory is symlink-resolved and proven to be inside the
-// canonical root before anything is opened. The final component is left
-// unresolved on purpose — readCandidate's Lstat then sees a symlink for what
-// it is and declines it as a non-regular file.
-//
-// exists=false means the path (or a directory on the way to it) is simply not
-// there, which is a normal outcome for a stale or partially-applied diff, not
-// an error.
-func (n *NativeIndexer) resolve(root, rel string) (abs string, exists bool, err error) {
-	clean := filepath.Clean(filepath.FromSlash(rel))
-	if clean == "." || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return "", false, fmt.Errorf("%w: path %q escapes the project root", ErrProjectRoot, rel)
-	}
-
-	candidate := filepath.Join(root, clean)
-	parent, err := filepath.EvalSymlinks(filepath.Dir(candidate))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", false, nil
-		}
-		return "", false, fmt.Errorf("codegraph: resolve %s: %w", rel, err)
-	}
-	if !containedIn(root, parent) {
-		return "", false, fmt.Errorf("%w: path %q leaves the project root through a symlink", ErrProjectRoot, rel)
-	}
-	return filepath.Join(parent, filepath.Base(candidate)), true, nil
-}
-
-// containedIn reports whether path is root itself or sits beneath it. Both
-// must already be absolute and symlink-resolved for the answer to mean
-// anything.
-func containedIn(root, path string) bool {
-	rel, err := filepath.Rel(root, path)
-	if err != nil {
-		return false
-	}
-	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
-}
-
-// walk collects every indexable project-relative path under root.
-func (n *NativeIndexer) walk(ctx context.Context, root string) ([]string, error) {
-	var found []string
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			// An unreadable directory is skipped rather than fatal: one
-			// permission-denied subtree should not cost the whole index.
-			if entry != nil && entry.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			if path != root && n.skipDirs[entry.Name()] {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if !entry.Type().IsRegular() {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return fmt.Errorf("relativize %s: %w", path, err)
-		}
-		rel = filepath.ToSlash(rel)
-		if _, supported := n.extractors.find(rel); !supported {
-			return nil
-		}
-		if DeniedPath(rel) {
-			// Section 28: a file whose content is a secret by convention is
-			// never opened. A configuration KEY can still enter the graph --
-			// from the code that reads it -- but its value cannot.
-			return nil
-		}
-		found = append(found, rel)
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("codegraph: walk %s: %w", root, err)
-	}
-	sort.Strings(found)
-	return found, nil
 }
 
 // commit stamps, persists, and finishes a result.
