@@ -158,6 +158,31 @@ func (s *Store) ListWorkflowTasks(ctx context.Context, runID string) ([]domain.W
 	return out, nil
 }
 
+// GetWorkflowTask reads one task by id.
+//
+// It exists because a caller holding a task id — an external-work-item sync
+// announcing a transition, for one — needs the row itself rather than its
+// run's whole authoritative list, and asking for the list to find one member
+// would read every task of the run on every task transition.
+func (s *Store) GetWorkflowTask(ctx context.Context, id string) (domain.WorkflowTask, bool, error) {
+	r, err := s.qr.GetWorkflowTask(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.WorkflowTask{}, false, nil
+	}
+	if err != nil {
+		return domain.WorkflowTask{}, false, err
+	}
+	return workflowTaskFromRow(workflowTaskRow{
+		ID: r.ID, WorkflowRunID: r.WorkflowRunID, PlanStepID: r.PlanStepID, Ordinal: r.Ordinal,
+		Title: r.Title, Description: r.Description, AcceptanceCriteriaJson: r.AcceptanceCriteriaJson,
+		VerifyJson: r.VerifyJson, ScopeJson: r.ScopeJson, State: r.State,
+		ExecutionRunID: r.ExecutionRunID, AttentionReason: r.AttentionReason,
+		AttentionJson: r.AttentionJson, AttentionAt: r.AttentionAt, PlanRevision: r.PlanRevision,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt, CompletedAt: r.CompletedAt,
+		DependenciesJson: r.DependenciesJson,
+	}), true, nil
+}
+
 // ListWorkflowTasksAtRevision is the audit view: the tasks of ONE plan
 // revision, including superseded ones. Nothing in the execution path reads it
 // -- that is the point.

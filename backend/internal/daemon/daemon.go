@@ -660,7 +660,28 @@ func RunWithConfig(cfg config.Config) error {
 	// precisely what the single-flight exists to prevent.
 	memoryProvisioning := memoryProvisioner(projectMemory, log)
 
-	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, projectMemory, memoryProvisioning, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, incidentAgentLauncher, notificationWriter, agents, newTerminalRuntimeReclaimer(runtimeGC, lcStack.LCM, log), plannerUsageRecorderFor(usageCollector), log)
+	// P4-E: external work management (Plane).
+	//
+	// Constructed unconditionally and inert until a project is configured and
+	// switched on: with no configuration every read answers "not configured",
+	// the outbox is never written to, and the worker's every tick claims zero
+	// rows. That is the §3 requirement that AO starts normally when Plane is
+	// not configured, and it is a property of the code rather than of a flag
+	// somebody has to remember to check.
+	//
+	// It shares the daemon's store and secret box rather than owning either,
+	// so the API token is sealed with the same key as every other credential
+	// AO must be able to present.
+	workItemsSvc := workitems.New(workitems.Deps{
+		Store:   store,
+		Secrets: secretbox.New(cfg.DataDir),
+		Logger:  log,
+		NewID:   uuid.NewString,
+	}).WithNotifier(notificationWriter)
+	workItemsDone := workitems.NewWorker(workItemsSvc, workitems.WorkerConfig{Logger: log}).Start(ctx)
+	_ = workItemsDone
+
+	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, projectMemory, memoryProvisioning, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, incidentAgentLauncher, notificationWriter, workItemsSvc, agents, newTerminalRuntimeReclaimer(runtimeGC, lcStack.LCM, log), plannerUsageRecorderFor(usageCollector), log)
 	// Checkpoint 8P-E.13A: reconciliation can only decide a stopped owner's
 	// lock once it can ask what that stop means, and only the coordinator knows
 	// (branchlock/retention.go). The coordinator needs the lock manager to
@@ -748,27 +769,6 @@ func RunWithConfig(cfg config.Config) error {
 	// routes and the code-graph routes are two views of the same subsystem,
 	// and giving them separate resolvers would give them separate opinions
 	// about which repository a project id means.
-	// P4-E: external work management (Plane).
-	//
-	// Constructed unconditionally and inert until a project is configured and
-	// switched on: with no configuration every read answers "not configured",
-	// the outbox is never written to, and the worker's every tick claims zero
-	// rows. That is the §3 requirement that AO starts normally when Plane is
-	// not configured, and it is a property of the code rather than of a flag
-	// somebody has to remember to check.
-	//
-	// It shares the daemon's store and secret box rather than owning either,
-	// so the API token is sealed with the same key as every other credential
-	// AO must be able to present.
-	workItemsSvc := workitems.New(workitems.Deps{
-		Store:   store,
-		Secrets: secretbox.New(cfg.DataDir),
-		Logger:  log,
-		NewID:   uuid.NewString,
-	}).WithNotifier(notificationWriter)
-	workItemsDone := workitems.NewWorker(workItemsSvc, workitems.WorkerConfig{Logger: log}).Start(ctx)
-	_ = workItemsDone
-
 	memoryAPI := projectmemorysvc.New(projectMemory, store).
 		WithProvisioner(memoryProvisioning).
 		WithWorkspaces(store).

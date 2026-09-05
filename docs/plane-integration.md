@@ -300,14 +300,55 @@ that probes is slow exactly when the thing it reports on is broken.
 - Create items for internal repair, reviewer or recovery work. Item creation is
   explicit, per §6.
 
-## 14. Status
+## 14. How a transition becomes an external update
 
-**REAL E2E: BLOCKED BY ENVIRONMENT.** No Plane credentials, workspace or
+The producer is **one place**: a decorator over the store's compare-and-swap
+(`internal/daemon/workitems_sync_store.go`). Every run and task transition in
+AO goes through `UpdateWorkflowRunState` / `UpdateWorkflowTaskState` /
+`ParkWorkflowTaskForAttention`, and the emit sits behind their `moved` result.
+
+Wiring at the call sites was rejected for the reason `attention_notify.go`
+already documents for notifications: "the state write is scattered across two
+dozen call sites". A decorator cannot be forgotten by a new call site, because
+there is nothing at a call site to forget.
+
+    AO transition CAS commits          ← durable, and already done
+      → moved == true
+      → outbox row written             ← durable, no network
+      → worker delivers later          ← may fail freely
+
+Three consequences, each of which is a requirement met by construction:
+
+- **Exactly once per real transition.** A retry, a second observer, a reconcile
+  pass re-deriving the same conclusion, and a restart re-running a convergence
+  check all see `moved == false` and emit nothing. No sync storm is possible.
+- **Plane cannot fail an AO transition.** The CAS has already committed before
+  the emit is reached; the emit's own error is logged and dropped.
+- **`internal/workflow` never learns Plane exists.** It does not import the
+  work-items service. The dependency points inward from the composition root,
+  which is what makes "AO remains canonical" structural.
+
+The decorator embeds the **concrete** `*sqlite.Store`, and that is load-bearing:
+`workflow.Coordinator` obtains its plan store by type-asserting its `Store` to
+an unexported `masterPlanStore`. Embedding a narrower interface would make that
+assertion fail and silently leave the master coordinator with no plan store —
+a failure that would not announce itself. The invariant is pinned by
+`store_decorator_contract_test.go`, in the package that owns the assertion.
+
+## 15. Status
+
+**REAL PLANE E2E: BLOCKED BY ENVIRONMENT.** No Plane credentials, workspace or
 configuration exist on this machine, and none of the `AO_PLANE_*` variables is
-set. The adapter is covered by 20 contract tests against an httptest server
-shaped like Plane's documented responses, and the lifecycle by 24 tests against
-a real SQLite database. That proves AO behaves correctly *given* the contract;
-it cannot prove Plane implements it, and this document does not claim otherwise.
+set.
+
+What IS exercised end to end, against a Plane-shaped httptest server and a real
+SQLite database: a canonical AO transition → the durable outbox → a real Plane
+HTTP request → acknowledged, including the restart case where the daemon exits
+between the transition and the delivery and a second daemon resumes it to
+exactly one semantic update.
+
+That proves AO behaves correctly *given* the contract. It cannot prove Plane
+implements it, and this document does not claim otherwise.
 
 To run the real check, set the four environment variables against a
 **dedicated test project**, connect one AO project, link a run, and drive a

@@ -15,6 +15,7 @@ import { WorkflowRoutingSummary } from "../components/workflow-routing-summary";
 import { WorkflowIncidentDialog } from "../components/workflow-incident-dialog";
 import { WorkflowResumeButton } from "../components/workflow-resume-button";
 import { WorkflowRecoveryPanel } from "../components/workflow-recovery-panel";
+import { WorkItemLinkPanel } from "../components/workitem-link-panel";
 import {
 	translateDynamic,
 	WorkflowActivityPanel,
@@ -256,6 +257,11 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 			    planner-context probe. */}
 			<WorkflowRecoveryPanel run={workflow.run} />
 			<WorkflowBranchWaitBanner run={workflow.run} />
+			{/* P4-E: the external planning item this run delivers, if any. It
+			    renders nothing at all when the project has no Plane connection,
+			    so an installation that does not use the integration sees no
+			    trace of it here. */}
+			<WorkItemLinkPanel projectId={workflow.run.projectId} scope="run" scopeId={workflow.run.id} />
 			<div className="flex flex-col gap-3">
 				<h1 className="min-w-0 flex-1 text-lg font-semibold">{workflow.run.objective}</h1>
 				{/* P3-A: the human status is the headline. Stage, the sentence that
@@ -439,6 +445,13 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 									{t("shell.workflowsBasedOnIntegrationRevision", { sha: workflow.integrationState.currentSha.slice(0, 12) })}
 								</p>
 							)}
+							{/* P4-E: the planned task's own planning item, at the finest
+							    granularity a plan can be tracked at. Renders nothing when
+							    the project has no connection, so the plan list is
+							    unchanged for an installation that does not use it. */}
+							<div className="mt-2">
+								<WorkItemLinkPanel projectId={workflow.run.projectId} scope="task" scopeId={task.id} />
+							</div>
 						</article>
 					))}
 				</section>
