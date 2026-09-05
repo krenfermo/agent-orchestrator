@@ -617,6 +617,7 @@ type Project struct {
 	Config        sql.NullString
 	Kind          string
 	OwnerUserID   *domain.UserID
+	TenantID      domain.TenantID
 }
 
 type ProjectGrant struct {
@@ -934,6 +935,7 @@ type Team struct {
 	Status      domain.TeamStatus
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	TenantID    domain.TenantID
 }
 
 type TeamMembership struct {
@@ -955,6 +957,25 @@ type TelemetryEvent struct {
 	SessionID   sql.NullString
 	RequestID   string
 	PayloadJson string
+}
+
+type Tenant struct {
+	ID          domain.TenantID
+	Name        string
+	Slug        string
+	Description string
+	Status      domain.TenantStatus
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type TenantMembership struct {
+	ID        string
+	TenantID  domain.TenantID
+	UserID    domain.UserID
+	Role      domain.TenantRole
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 type UsageAttributionWindow struct {

@@ -23,6 +23,11 @@ type Summary struct {
 	// path still exists and still looks like a Git repository. false surfaces
 	// a project whose folder moved or was deleted since registration.
 	Valid bool `json:"valid"`
+	// TenantID is the organization that owns the project (P4-C). It is
+	// reported so the frontend can group and filter a list it has already
+	// been given -- never so it can decide access, which the daemon decided
+	// before the row was in the response at all.
+	TenantID domain.TenantID `json:"tenantId,omitempty"`
 }
 
 // Project is the full read-model returned by GET /api/v1/projects/{id}.

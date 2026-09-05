@@ -53,7 +53,7 @@ func (q *Queries) DeleteTeamMembership(ctx context.Context, arg DeleteTeamMember
 }
 
 const getTeamByID = `-- name: GetTeamByID :one
-SELECT id, name, slug, description, status, created_at, updated_at
+SELECT id, name, slug, description, status, created_at, updated_at, tenant_id
 FROM teams WHERE id = ?
 `
 
@@ -68,12 +68,13 @@ func (q *Queries) GetTeamByID(ctx context.Context, id domain.TeamID) (Team, erro
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.TenantID,
 	)
 	return i, err
 }
 
 const getTeamBySlug = `-- name: GetTeamBySlug :one
-SELECT id, name, slug, description, status, created_at, updated_at
+SELECT id, name, slug, description, status, created_at, updated_at, tenant_id
 FROM teams WHERE slug = ?
 `
 
@@ -88,15 +89,16 @@ func (q *Queries) GetTeamBySlug(ctx context.Context, slug string) (Team, error) 
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.TenantID,
 	)
 	return i, err
 }
 
 const insertTeam = `-- name: InsertTeam :one
 
-INSERT INTO teams (id, name, slug, description, status, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-RETURNING id, name, slug, description, status, created_at, updated_at
+INSERT INTO teams (id, name, slug, description, status, created_at, updated_at, tenant_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, name, slug, description, status, created_at, updated_at, tenant_id
 `
 
 type InsertTeamParams struct {
@@ -107,6 +109,7 @@ type InsertTeamParams struct {
 	Status      domain.TeamStatus
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	TenantID    domain.TenantID
 }
 
 // P4-B: teams and team membership. No trailing ORDER BY/LIMIT on any :many
@@ -121,6 +124,7 @@ func (q *Queries) InsertTeam(ctx context.Context, arg InsertTeamParams) (Team, e
 		arg.Status,
 		arg.CreatedAt,
 		arg.UpdatedAt,
+		arg.TenantID,
 	)
 	var i Team
 	err := row.Scan(
@@ -131,6 +135,7 @@ func (q *Queries) InsertTeam(ctx context.Context, arg InsertTeamParams) (Team, e
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.TenantID,
 	)
 	return i, err
 }
@@ -277,7 +282,7 @@ func (q *Queries) ListTeamMembershipsForUser(ctx context.Context, userID domain.
 }
 
 const listTeams = `-- name: ListTeams :many
-SELECT id, name, slug, description, status, created_at, updated_at
+SELECT id, name, slug, description, status, created_at, updated_at, tenant_id
 FROM teams
 `
 
@@ -298,6 +303,7 @@ func (q *Queries) ListTeams(ctx context.Context) ([]Team, error) {
 			&i.Status,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.TenantID,
 		); err != nil {
 			return nil, err
 		}

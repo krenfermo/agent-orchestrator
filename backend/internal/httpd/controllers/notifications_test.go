@@ -29,6 +29,8 @@ type fakeNotificationService struct {
 	unreadCount      int
 	unreadCountCalls int
 	err              error
+	gotScope         *notificationsvc.ProjectScope
+	projectOf        map[string]domain.ProjectID
 }
 
 type fakeNotificationStream struct {
@@ -49,6 +51,25 @@ func (f *fakeNotificationService) MarkRead(_ context.Context, id string) (notifi
 func (f *fakeNotificationService) MarkAllRead(_ context.Context, ids []string) (int64, error) {
 	f.gotMarkAllIDs = ids
 	return f.markAllCount, f.err
+}
+
+// P4-C scoped forms. These fakes are wired without a Guard, so the controller
+// always passes a nil scope and these behave exactly as their unscoped
+// siblings -- which is the point: the pre-P4-C tests in this file must keep
+// asserting the pre-P4-C behavior.
+func (f *fakeNotificationService) UnreadCountInScope(ctx context.Context, scope *notificationsvc.ProjectScope) (int, error) {
+	f.gotScope = scope
+	return f.UnreadCount(ctx)
+}
+
+func (f *fakeNotificationService) MarkAllReadInScope(ctx context.Context, ids []string, scope *notificationsvc.ProjectScope) (int64, error) {
+	f.gotScope = scope
+	return f.MarkAllRead(ctx, ids)
+}
+
+func (f *fakeNotificationService) ProjectFor(_ context.Context, id string) (domain.ProjectID, bool, error) {
+	p, ok := f.projectOf[id]
+	return p, ok, f.err
 }
 
 func (f *fakeNotificationService) UnreadCount(context.Context) (int, error) {

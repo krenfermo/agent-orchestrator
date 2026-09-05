@@ -1345,6 +1345,7 @@
 	"shell.spawnProjectOrchestrator": "Spawn {{name}} orchestrator",
 	"shell.spawning": "Spawning…",
 	"shell.spawningDots": "Spawning...",
+	"shell.switchOrganization": "Switch organization",
 	"shell.terminateNamed": "Terminate {{title}}",
 	"shell.terminateSession": "Terminate session",
 	"shell.toggleProject": "Toggle {{name}} sessions",

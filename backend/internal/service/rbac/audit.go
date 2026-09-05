@@ -24,6 +24,14 @@ const (
 	EventTeamMemberRemoved    = "ao.authz.team.member_removed"
 	EventProjectAccessGranted = "ao.authz.project.access_granted"
 	EventProjectAccessRevoked = "ao.authz.project.access_revoked"
+
+	// P4-C organization events.
+	EventTenantCreated         = "ao.authz.tenant.created"
+	EventTenantUpdated         = "ao.authz.tenant.updated"
+	EventTenantMemberAdded     = "ao.authz.tenant.member_added"
+	EventTenantMemberRemoved   = "ao.authz.tenant.member_removed"
+	EventProjectTenantAssigned = "ao.authz.project.tenant_assigned"
+	EventTeamTenantAssigned    = "ao.authz.team.tenant_assigned"
 )
 
 // Event is one authorization change, recorded with the actor who made it and
@@ -36,7 +44,7 @@ const (
 type Event struct {
 	Name  string
 	Actor domain.Principal
-	// TargetKind is "user", "team" or "project".
+	// TargetKind is "user", "team", "tenant" or "project".
 	TargetKind string
 	// TargetID is the object the change was made to.
 	TargetID string

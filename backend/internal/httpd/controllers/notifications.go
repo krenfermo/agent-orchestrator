@@ -14,6 +14,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 	notificationsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/notification"
 )
 
@@ -23,6 +24,12 @@ type NotificationService interface {
 	List(ctx context.Context, filter notificationsvc.ListFilter) (notificationsvc.ListPage, error)
 	MarkRead(ctx context.Context, id string) (notificationsvc.Notification, bool, error)
 	MarkAllRead(ctx context.Context, ids []string) (int64, error)
+
+	// P4-C organization-scoped forms. Every read and acknowledgement on these
+	// routes goes through one of them once a Guard is wired.
+	UnreadCountInScope(ctx context.Context, scope *notificationsvc.ProjectScope) (int, error)
+	MarkAllReadInScope(ctx context.Context, ids []string, scope *notificationsvc.ProjectScope) (int64, error)
+	ProjectFor(ctx context.Context, id string) (domain.ProjectID, bool, error)
 }
 
 // NotificationStream is the live notification stream used by SSE clients.
@@ -31,9 +38,48 @@ type NotificationStream interface {
 }
 
 // NotificationsController owns the /notifications routes.
+//
+// P4-B left this family deliberately ungated: it was one of the loopback
+// desktop surfaces, and narrowing it needed a scope that did not exist yet.
+// P4-C is that scope. A notification is ABOUT a project -- every row carries a
+// NOT NULL project_id -- so "which notifications may this caller see" is the
+// question "which projects may this caller see", already answered, and the
+// answer is now applied here rather than left open.
 type NotificationsController struct {
 	Svc    NotificationService
 	Stream NotificationStream
+	// Guard is P4-C's authorization gate. A zero Guard leaves the pre-P4-C
+	// behavior exactly as it was, which is what every headless and test
+	// wiring with no identity layer depends on.
+	Guard Guard
+}
+
+// scope resolves the caller's visible-project scope for these routes.
+//
+// ok is false when a response has already been written. A nil scope means "do
+// not scope": either authorization is not wired at all, or the caller's
+// authority genuinely spans every organization. Everyone else gets the exact
+// set of projects they can read, which for a foreign organization is the empty
+// set -- and an empty scope shows nothing rather than everything.
+func (c *NotificationsController) scope(w http.ResponseWriter, r *http.Request) (*notificationsvc.ProjectScope, bool) {
+	if !c.Guard.Enabled() {
+		return nil, true
+	}
+	sub, ok := c.Guard.Subject(r)
+	if !ok {
+		envelope.WriteError(w, r, identity.Unauthorized())
+		return nil, false
+	}
+	if sub.CrossTenant {
+		return nil, true
+	}
+	visible := make([]domain.ProjectID, 0, len(sub.ProjectRoles))
+	for _, id := range sub.AccessibleProjectIDs() {
+		if sub.CanSeeProject(id) {
+			visible = append(visible, id)
+		}
+	}
+	return &notificationsvc.ProjectScope{ProjectIDs: visible}, true
 }
 
 // Register mounts bounded notification REST routes on the supplied router.
@@ -58,7 +104,11 @@ func (c *NotificationsController) unreadCount(w http.ResponseWriter, r *http.Req
 		apispec.NotImplemented(w, r, "GET", "/api/v1/notifications/unread-count")
 		return
 	}
-	count, err := c.Svc.UnreadCount(r.Context())
+	scope, ok := c.scope(w, r)
+	if !ok {
+		return
+	}
+	count, err := c.Svc.UnreadCountInScope(r.Context(), scope)
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
@@ -76,6 +126,11 @@ func (c *NotificationsController) list(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_QUERY", err.Error(), nil)
 		return
 	}
+	scope, ok := c.scope(w, r)
+	if !ok {
+		return
+	}
+	filter.Scope = scope
 	page, err := c.Svc.List(r.Context(), filter)
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -103,7 +158,11 @@ func (c *NotificationsController) markRead(w http.ResponseWriter, r *http.Reques
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_NOTIFICATION_STATUS", "Notification status must be read", nil)
 		return
 	}
-	notification, _, err := c.Svc.MarkRead(r.Context(), chi.URLParam(r, "id"))
+	id := chi.URLParam(r, "id")
+	if !c.mayAcknowledge(w, r, id) {
+		return
+	}
+	notification, _, err := c.Svc.MarkRead(r.Context(), id)
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
@@ -124,7 +183,11 @@ func (c *NotificationsController) markAllRead(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
-	updatedCount, err := c.Svc.MarkAllRead(r.Context(), req.IDs)
+	scope, ok := c.scope(w, r)
+	if !ok {
+		return
+	}
+	updatedCount, err := c.Svc.MarkAllReadInScope(r.Context(), req.IDs, scope)
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
@@ -133,6 +196,36 @@ func (c *NotificationsController) markAllRead(w http.ResponseWriter, r *http.Req
 		Notifications: []NotificationResponse{},
 		UpdatedCount:  updatedCount,
 	})
+}
+
+// mayAcknowledge reports whether the caller may mark one notification read,
+// answering BEFORE the write. A notification about a project the caller cannot
+// see reports 404 -- the same answer an id that does not exist gets, for the
+// same reason project ids answer 404: the route must not become an oracle for
+// "did something happen over there".
+func (c *NotificationsController) mayAcknowledge(w http.ResponseWriter, r *http.Request, id string) bool {
+	if !c.Guard.Enabled() {
+		return true
+	}
+	sub, ok := c.Guard.Subject(r)
+	if !ok {
+		envelope.WriteError(w, r, identity.Unauthorized())
+		return false
+	}
+	if sub.CrossTenant {
+		return true
+	}
+	project, found, err := c.Svc.ProjectFor(r.Context(), id)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return false
+	}
+	if !found || !sub.CanSeeProject(project) {
+		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found",
+			"NOTIFICATION_NOT_FOUND", "Unknown unread notification", nil)
+		return false
+	}
+	return true
 }
 
 func (c *NotificationsController) stream(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +238,28 @@ func (c *NotificationsController) stream(w http.ResponseWriter, r *http.Request)
 		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "SSE_UNSUPPORTED", "Streaming is not supported by this server", nil)
 		return
 	}
+	// Authenticated is not authorized. The subscription is per-project when a
+	// projectId is given and installation-wide when it is not, so the filter
+	// below is what keeps the wide form from becoming a live feed of every
+	// organization's activity.
+	var visible func(domain.ProjectID) bool
+	if c.Guard.Enabled() {
+		sub, ok := c.Guard.Subject(r)
+		if !ok {
+			envelope.WriteError(w, r, identity.Unauthorized())
+			return
+		}
+		requested := domain.ProjectID(r.URL.Query().Get("projectId"))
+		if requested != "" && !sub.CrossTenant && !sub.CanSeeProject(requested) {
+			envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found",
+				"PROJECT_NOT_FOUND", "project not found", nil)
+			return
+		}
+		if !sub.CrossTenant {
+			visible = sub.CanSeeProject
+		}
+	}
+
 	ch, unsubscribe := c.Stream.Subscribe(domain.ProjectID(r.URL.Query().Get("projectId")))
 	defer unsubscribe()
 
@@ -163,6 +278,9 @@ func (c *NotificationsController) stream(w http.ResponseWriter, r *http.Request)
 		case event, ok := <-ch:
 			if !ok {
 				return
+			}
+			if visible != nil && !visible(event.Record.ProjectID) {
+				continue
 			}
 			if err := writeNotificationSSE(w, flusher, event); err != nil {
 				return

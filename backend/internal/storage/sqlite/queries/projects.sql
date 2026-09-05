@@ -1,6 +1,11 @@
+-- tenant_id appears in the INSERT column list and in NEITHER "DO UPDATE SET"
+-- below. Registering a project places it in an organization; re-registering
+-- one that already exists must never move it to a different organization,
+-- which would silently hand it to a different set of people.
+
 -- name: UpsertProject :exec
-INSERT INTO projects (id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO projects (id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, tenant_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO UPDATE SET
     path = excluded.path,
     repo_origin_url = excluded.repo_origin_url,
@@ -10,8 +15,8 @@ ON CONFLICT (id) DO UPDATE SET
     kind = excluded.kind;
 
 -- name: UpsertImportedProject :exec
-INSERT INTO projects (id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO projects (id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, tenant_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO UPDATE SET
     path = excluded.path,
     repo_origin_url = excluded.repo_origin_url,
@@ -22,18 +27,18 @@ ON CONFLICT (id) DO UPDATE SET
     kind = excluded.kind;
 
 -- name: GetProject :one
-SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id
+SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id, tenant_id
 FROM projects WHERE id = ?;
 
 -- name: ListProjects :many
-SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id
+SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id, tenant_id
 FROM projects WHERE archived_at IS NULL ORDER BY id;
 
 -- name: CountProjectsIncludingArchived :one
 SELECT COUNT(*) FROM projects;
 
 -- name: FindProjectByPath :one
-SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id
+SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id, tenant_id
 FROM projects WHERE path = ? AND archived_at IS NULL;
 
 -- name: UpdateProjectSettings :execrows

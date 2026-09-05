@@ -36,6 +36,7 @@ import {
 import { getAgentActivityView } from "../lib/session-presentation";
 import { aoBridge } from "../lib/bridge";
 import { useCommandPaletteEnabled } from "../hooks/useCommandPaletteEnabled";
+import { TenantSwitcher } from "./TenantSwitcher";
 import { useDevSandboxInfo } from "../hooks/useDevSandboxInfo";
 import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import { usePinSession, useUnpinSession } from "../hooks/usePinSession";
@@ -439,6 +440,10 @@ export function Sidebar({
 					className="sidebar-expanded-chrome relative flex w-full min-w-46.5 flex-col gap-0.5 transition-[opacity,transform] duration-150 ease-out group-data-[collapsible=icon]:pointer-events-none group-data-[collapsible=icon]:-translate-x-2 group-data-[collapsible=icon]:opacity-0"
 				>
 					<RestartToUpdateRow status={updateStatus} tabIndex={isCollapsed ? -1 : 0} />
+					{/* P4-C. Renders nothing at all on a single-organization
+					    installation, which is every installation that has not
+					    asked for a second one. */}
+					<TenantSwitcher tabIndex={isCollapsed ? -1 : 0} />
 					<CloudAccountRow tabIndex={isCollapsed ? -1 : 0} />
 					<button
 						aria-label={t("shell.workflows")}

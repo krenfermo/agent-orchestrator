@@ -1363,6 +1363,7 @@
 	"shell.spawnProjectOrchestrator": "{{name}} 오케스트레이터 시작",
 	"shell.spawning": "시작 중…",
 	"shell.spawningDots": "시작 중...",
+	"shell.switchOrganization": "조직 전환",
 	"shell.terminateNamed": "{{title}} 종료",
 	"shell.terminateSession": "세션 종료",
 	"shell.toggleProject": "{{name}} 세션 전환",

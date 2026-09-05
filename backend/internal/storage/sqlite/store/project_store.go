@@ -95,6 +95,19 @@ func (s *Store) ListWorkspaceRepos(ctx context.Context, projectID string) ([]dom
 	return out, nil
 }
 
+// tenantOrDefault is the organization a tenant-owned row (a project or a team)
+// is written into. A zero value becomes the default organization rather than
+// an empty string, which buys two things at once: every caller that predates
+// P4-C keeps writing rows exactly where it always did, and no code path can
+// create a project or team that belongs to nobody. Deciding it here is why
+// none of the many write paths has to remember to.
+func tenantOrDefault(id domain.TenantID) domain.TenantID {
+	if id == "" {
+		return domain.DefaultTenantID
+	}
+	return id
+}
+
 func upsertProject(ctx context.Context, q *gen.Queries, r domain.ProjectRecord, config sql.NullString) error {
 	kind := r.Kind.WithDefault()
 	return q.UpsertProject(ctx, gen.UpsertProjectParams{
@@ -106,6 +119,7 @@ func upsertProject(ctx context.Context, q *gen.Queries, r domain.ProjectRecord, 
 		ArchivedAt:    nullTime(r.ArchivedAt),
 		Config:        config,
 		Kind:          string(kind),
+		TenantID:      tenantOrDefault(r.TenantID),
 	})
 }
 
@@ -158,6 +172,7 @@ func importProject(ctx context.Context, q *gen.Queries, r domain.ProjectRecord, 
 		RegisteredAt:  r.RegisteredAt,
 		ArchivedAt:    nullTime(r.ArchivedAt),
 		Config:        config,
+		TenantID:      tenantOrDefault(r.TenantID),
 		Kind:          string(kind),
 	})
 }
@@ -254,6 +269,7 @@ func projectRowFromGen(p gen.Project) domain.ProjectRecord {
 		RegisteredAt:  p.RegisteredAt,
 		Kind:          domain.ProjectKind(p.Kind).WithDefault(),
 		Config:        unmarshalProjectConfig(p.Config),
+		TenantID:      p.TenantID,
 	}
 	if p.ArchivedAt.Valid {
 		r.ArchivedAt = p.ArchivedAt.Time

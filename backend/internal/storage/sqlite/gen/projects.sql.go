@@ -42,7 +42,7 @@ func (q *Queries) CountProjectsIncludingArchived(ctx context.Context) (int64, er
 }
 
 const findProjectByPath = `-- name: FindProjectByPath :one
-SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id
+SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id, tenant_id
 FROM projects WHERE path = ? AND archived_at IS NULL
 `
 
@@ -59,12 +59,13 @@ func (q *Queries) FindProjectByPath(ctx context.Context, path string) (Project, 
 		&i.Config,
 		&i.Kind,
 		&i.OwnerUserID,
+		&i.TenantID,
 	)
 	return i, err
 }
 
 const getProject = `-- name: GetProject :one
-SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id
+SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id, tenant_id
 FROM projects WHERE id = ?
 `
 
@@ -81,12 +82,13 @@ func (q *Queries) GetProject(ctx context.Context, id domain.ProjectID) (Project,
 		&i.Config,
 		&i.Kind,
 		&i.OwnerUserID,
+		&i.TenantID,
 	)
 	return i, err
 }
 
 const listProjects = `-- name: ListProjects :many
-SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id
+SELECT id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, owner_user_id, tenant_id
 FROM projects WHERE archived_at IS NULL ORDER BY id
 `
 
@@ -109,6 +111,7 @@ func (q *Queries) ListProjects(ctx context.Context) ([]Project, error) {
 			&i.Config,
 			&i.Kind,
 			&i.OwnerUserID,
+			&i.TenantID,
 		); err != nil {
 			return nil, err
 		}
@@ -144,8 +147,8 @@ func (q *Queries) UpdateProjectSettings(ctx context.Context, arg UpdateProjectSe
 }
 
 const upsertImportedProject = `-- name: UpsertImportedProject :exec
-INSERT INTO projects (id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO projects (id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, tenant_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO UPDATE SET
     path = excluded.path,
     repo_origin_url = excluded.repo_origin_url,
@@ -165,6 +168,7 @@ type UpsertImportedProjectParams struct {
 	ArchivedAt    sql.NullTime
 	Config        sql.NullString
 	Kind          string
+	TenantID      domain.TenantID
 }
 
 func (q *Queries) UpsertImportedProject(ctx context.Context, arg UpsertImportedProjectParams) error {
@@ -177,13 +181,15 @@ func (q *Queries) UpsertImportedProject(ctx context.Context, arg UpsertImportedP
 		arg.ArchivedAt,
 		arg.Config,
 		arg.Kind,
+		arg.TenantID,
 	)
 	return err
 }
 
 const upsertProject = `-- name: UpsertProject :exec
-INSERT INTO projects (id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+
+INSERT INTO projects (id, path, repo_origin_url, display_name, registered_at, archived_at, config, kind, tenant_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO UPDATE SET
     path = excluded.path,
     repo_origin_url = excluded.repo_origin_url,
@@ -202,8 +208,13 @@ type UpsertProjectParams struct {
 	ArchivedAt    sql.NullTime
 	Config        sql.NullString
 	Kind          string
+	TenantID      domain.TenantID
 }
 
+// tenant_id appears in the INSERT column list and in NEITHER "DO UPDATE SET"
+// below. Registering a project places it in an organization; re-registering
+// one that already exists must never move it to a different organization,
+// which would silently hand it to a different set of people.
 func (q *Queries) UpsertProject(ctx context.Context, arg UpsertProjectParams) error {
 	_, err := q.db.ExecContext(ctx, upsertProject,
 		arg.ID,
@@ -214,6 +225,7 @@ func (q *Queries) UpsertProject(ctx context.Context, arg UpsertProjectParams) er
 		arg.ArchivedAt,
 		arg.Config,
 		arg.Kind,
+		arg.TenantID,
 	)
 	return err
 }

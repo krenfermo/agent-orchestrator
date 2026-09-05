@@ -1377,6 +1377,7 @@
 	"shell.spawnProjectOrchestrator": "Iniciar orchestrator de {{name}}",
 	"shell.spawning": "Iniciando…",
 	"shell.spawningDots": "Iniciando...",
+	"shell.switchOrganization": "Trocar de organização",
 	"shell.terminateNamed": "Encerrar {{title}}",
 	"shell.terminateSession": "Encerrar sessão",
 	"shell.toggleProject": "Alternar sessões de {{name}}",

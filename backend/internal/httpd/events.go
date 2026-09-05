@@ -11,8 +11,11 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/cdc"
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 )
 
 const (
@@ -27,9 +30,20 @@ type cdcSubscriber interface {
 
 // EventsController owns the client-facing CDC stream. Durable replay comes from
 // change_log through Source; Broadcaster remains a live-only pub/sub seam.
+//
+// P4-B left this route ungated as one of the loopback desktop surfaces. P4-C
+// closes it, because an unfiltered CDC stream is the most complete leak an
+// installation has: every session created, every PR updated, every check
+// recorded, in every organization, live. Every change_log row carries a
+// project_id, so the filter is the same question the rest of the API already
+// asks -- "may this caller read this project" -- applied per event.
 type EventsController struct {
 	Source cdc.Source
 	Live   cdcSubscriber
+	// Guard is P4-C's authorization gate. A zero Guard streams everything,
+	// which is what every pre-P4-C wiring did and what the headless and test
+	// configurations still expect.
+	Guard controllers.Guard
 }
 
 // Register mounts the CDC SSE stream route.
@@ -66,6 +80,16 @@ func (c *EventsController) stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the caller's reach ONCE, before the stream opens. A stream is
+	// long-lived, so re-resolving per event would turn one authorization
+	// question into thousands; resolving it here means a permission change
+	// takes effect on the client's next reconnect, which is the same contract
+	// every other long-lived surface in AO has.
+	visible, ok := c.visibility(w, r)
+	if !ok {
+		return
+	}
+
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
@@ -91,7 +115,7 @@ func (c *EventsController) stream(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	sentSeq := after
-	if err := c.replay(ctx, w, flusher, &sentSeq); err != nil {
+	if err := c.replay(ctx, w, flusher, &sentSeq, visible); err != nil {
 		return
 	}
 
@@ -100,14 +124,39 @@ func (c *EventsController) stream(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case e := <-live:
-			if err := writeSSEEvent(w, flusher, e, &sentSeq); err != nil {
+			if err := writeSSEEvent(w, flusher, e, &sentSeq, visible); err != nil {
 				return
 			}
 		}
 	}
 }
 
-func (c *EventsController) replay(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, sentSeq *int64) error {
+// visibility resolves the per-event filter for one stream. A nil filter means
+// "send everything": authorization is not wired, or the caller's authority
+// spans every organization. ok is false when a response has already been
+// written.
+func (c *EventsController) visibility(w http.ResponseWriter, r *http.Request) (func(domain.ProjectID) bool, bool) {
+	if !c.Guard.Enabled() {
+		return nil, true
+	}
+	sub, ok := c.Guard.Subject(r)
+	if !ok {
+		envelope.WriteError(w, r, identity.Unauthorized())
+		return nil, false
+	}
+	if sub.CrossTenant {
+		return nil, true
+	}
+	return sub.CanSeeProject, true
+}
+
+func (c *EventsController) replay(
+	ctx context.Context,
+	w http.ResponseWriter,
+	flusher http.Flusher,
+	sentSeq *int64,
+	visible func(domain.ProjectID) bool,
+) error {
 	for {
 		events, err := c.Source.EventsAfter(ctx, *sentSeq, eventsReplayBatch)
 		if err != nil {
@@ -117,7 +166,7 @@ func (c *EventsController) replay(ctx context.Context, w http.ResponseWriter, fl
 			return nil
 		}
 		for _, e := range events {
-			if err := writeSSEEvent(w, flusher, e, sentSeq); err != nil {
+			if err := writeSSEEvent(w, flusher, e, sentSeq, visible); err != nil {
 				return err
 			}
 		}
@@ -142,8 +191,22 @@ func parseEventsAfter(r *http.Request) (int64, error) {
 	return seq, nil
 }
 
-func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, e cdc.Event, sentSeq *int64) error {
+func writeSSEEvent(
+	w http.ResponseWriter,
+	flusher http.Flusher,
+	e cdc.Event,
+	sentSeq *int64,
+	visible func(domain.ProjectID) bool,
+) error {
 	if e.Seq <= *sentSeq {
+		return nil
+	}
+	if visible != nil && !visible(domain.ProjectID(e.ProjectID)) {
+		// Advance the cursor without writing. Skipping the event but NOT the
+		// sequence number would make replay ask for the same batch forever,
+		// and would also tell the client, by the gap in ids it never receives,
+		// exactly how much is happening where it cannot look.
+		*sentSeq = e.Seq
 		return nil
 	}
 	data, err := json.Marshal(e)

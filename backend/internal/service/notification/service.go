@@ -45,14 +45,39 @@ func New(d Deps) *Manager {
 // polling the badge does not have to fetch a page of history to learn one
 // number (P4-D section 16).
 func (m *Manager) UnreadCount(ctx context.Context) (int, error) {
+	return m.UnreadCountInScope(ctx, nil)
+}
+
+// UnreadCountInScope is UnreadCount limited to the caller's visible projects.
+// A nil scope is the unscoped count, which is what UnreadCount asks for.
+func (m *Manager) UnreadCountInScope(ctx context.Context, scope *ProjectScope) (int, error) {
 	if m == nil || m.store == nil {
 		return 0, errors.New("notification: store is required")
 	}
-	count, err := m.store.CountUnreadNotifications(ctx)
+	var (
+		count int64
+		err   error
+	)
+	if scope == nil {
+		count, err = m.store.CountUnreadNotifications(ctx)
+	} else {
+		count, err = m.store.CountUnreadNotificationsInProjects(ctx, scope.ProjectIDs)
+	}
 	if err != nil {
 		return 0, err
 	}
 	return int(count), nil
+}
+
+// ProjectFor reports which project a notification is about, so an
+// acknowledgement route can refuse one in a project the caller cannot see
+// BEFORE marking it read. Doing it after would leave a foreign row modified by
+// a request that was about to be told the row does not exist.
+func (m *Manager) ProjectFor(ctx context.Context, id string) (domain.ProjectID, bool, error) {
+	if m == nil || m.store == nil {
+		return "", false, errors.New("notification: store is required")
+	}
+	return m.store.GetNotificationProject(ctx, id)
 }
 
 // List returns one stable newest-first page of notification history.
@@ -75,17 +100,38 @@ func (m *Manager) List(ctx context.Context, filter ListFilter) (ListPage, error)
 	if err != nil {
 		return ListPage{}, err
 	}
-	rows, err := m.store.ListNotifications(ctx, filter.Status, beforeCreatedAt, beforeID, limit+1)
-	if err != nil {
-		return ListPage{}, err
-	}
-	unreadCount, err := m.store.CountUnreadNotifications(ctx)
-	if err != nil {
-		return ListPage{}, err
-	}
-	unresolvedCount, err := m.store.CountUnresolvedNotifications(ctx)
-	if err != nil {
-		return ListPage{}, err
+	var (
+		rows            []domain.NotificationRecord
+		unreadCount     int64
+		unresolvedCount int64
+	)
+	if filter.Scope == nil {
+		rows, err = m.store.ListNotifications(ctx, filter.Status, beforeCreatedAt, beforeID, limit+1)
+		if err != nil {
+			return ListPage{}, err
+		}
+		if unreadCount, err = m.store.CountUnreadNotifications(ctx); err != nil {
+			return ListPage{}, err
+		}
+		if unresolvedCount, err = m.store.CountUnresolvedNotifications(ctx); err != nil {
+			return ListPage{}, err
+		}
+	} else {
+		// The counts are read through the same scope as the rows on purpose. A
+		// badge that counts what the list refuses to show is a bug report
+		// waiting to be filed, and an unscoped count would also disclose HOW
+		// MUCH is happening in organizations the caller cannot see.
+		projects := filter.Scope.ProjectIDs
+		rows, err = m.store.ListNotificationsInProjects(ctx, filter.Status, beforeCreatedAt, beforeID, limit+1, projects)
+		if err != nil {
+			return ListPage{}, err
+		}
+		if unreadCount, err = m.store.CountUnreadNotificationsInProjects(ctx, projects); err != nil {
+			return ListPage{}, err
+		}
+		if unresolvedCount, err = m.store.CountUnresolvedNotificationsInProjects(ctx, projects); err != nil {
+			return ListPage{}, err
+		}
 	}
 	hasMore := len(rows) > limit
 	if hasMore {
@@ -126,14 +172,46 @@ func (m *Manager) MarkRead(ctx context.Context, id string) (Notification, bool, 
 // reachable. With no ids it falls back to acknowledging every unread row, for
 // clients that do not paginate.
 func (m *Manager) MarkAllRead(ctx context.Context, ids []string) (int64, error) {
+	return m.MarkAllReadInScope(ctx, ids, nil)
+}
+
+// MarkAllReadInScope is MarkAllRead confined to the caller's visible projects.
+// The explicit-ids form is filtered before the write rather than after: a
+// client that sends an id it should not have must not acknowledge somebody
+// else's notification, even though it would never see the result.
+func (m *Manager) MarkAllReadInScope(ctx context.Context, ids []string, scope *ProjectScope) (int64, error) {
 	if m == nil || m.store == nil {
 		return 0, errors.New("notification: store is required")
 	}
 	at := m.now()
-	if len(ids) == 0 {
-		return m.store.MarkAllNotificationsRead(ctx, at)
+	if scope == nil {
+		if len(ids) == 0 {
+			return m.store.MarkAllNotificationsRead(ctx, at)
+		}
+		return m.store.MarkNotificationsRead(ctx, ids, at)
 	}
-	return m.store.MarkNotificationsRead(ctx, ids, at)
+	if len(ids) == 0 {
+		return m.store.MarkAllNotificationsReadInProjects(ctx, at, scope.ProjectIDs)
+	}
+	visible := make(map[domain.ProjectID]bool, len(scope.ProjectIDs))
+	for _, id := range scope.ProjectIDs {
+		visible[id] = true
+	}
+	allowed := make([]string, 0, len(ids))
+	for _, id := range ids {
+		project, ok, err := m.store.GetNotificationProject(ctx, id)
+		if err != nil {
+			return 0, err
+		}
+		if !ok || !visible[project] {
+			continue
+		}
+		allowed = append(allowed, id)
+	}
+	if len(allowed) == 0 {
+		return 0, nil
+	}
+	return m.store.MarkNotificationsRead(ctx, allowed, at)
 }
 
 // now is the acknowledgement clock, normalized to UTC so read_at is stored the

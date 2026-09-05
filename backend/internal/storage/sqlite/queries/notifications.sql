@@ -147,3 +147,88 @@ FROM notifications
 WHERE type = sqlc.arg(type)
   AND dedupe_key = CAST(sqlc.arg(dedupe_key) AS TEXT)
 LIMIT 1;
+
+-- P4-C: the organization-scoped halves of the reads above.
+--
+-- They are separate queries rather than an optional clause on the originals
+-- because sqlc.slice() renders IN () for an empty set, which SQLite rejects --
+-- so an "unscoped" caller would have to pass a dummy id and a flag to ignore
+-- it, and a mistake in that flag would silently unscope a scoped read. Two
+-- queries where the scoped one CANNOT be called without a project set is the
+-- version that fails closed.
+--
+-- A notification is scoped by its project because that is what it is about:
+-- every row carries a NOT NULL project_id, and P4-C decided that a person who
+-- may not see a project may not see anything AO says about it either.
+
+-- name: ListUnreadNotificationsPageInProjects :many
+SELECT *
+FROM notifications
+WHERE status = 'unread'
+  AND recipient = CAST(sqlc.arg(recipient) AS TEXT)
+  AND project_id IN (sqlc.slice('project_ids'))
+  AND (
+    CAST(sqlc.arg(before_id) AS TEXT) = ''
+    OR created_at < sqlc.arg(before_created_at)
+    OR (created_at = sqlc.arg(before_created_at) AND id < CAST(sqlc.arg(before_id) AS TEXT))
+  )
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg(page_limit);
+
+-- name: ListUnresolvedNotificationsPageInProjects :many
+SELECT *
+FROM notifications
+WHERE resolved_at IS NULL
+  AND type IN ('needs_input', 'ready_to_merge')
+  AND recipient = CAST(sqlc.arg(recipient) AS TEXT)
+  AND project_id IN (sqlc.slice('project_ids'))
+  AND (
+    CAST(sqlc.arg(before_id) AS TEXT) = ''
+    OR created_at < sqlc.arg(before_created_at)
+    OR (created_at = sqlc.arg(before_created_at) AND id < CAST(sqlc.arg(before_id) AS TEXT))
+  )
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg(page_limit);
+
+-- name: ListNotificationsPageInProjects :many
+SELECT *
+FROM notifications
+WHERE recipient = CAST(sqlc.arg(recipient) AS TEXT)
+  AND project_id IN (sqlc.slice('project_ids'))
+  AND (
+    CAST(sqlc.arg(before_id) AS TEXT) = ''
+    OR created_at < sqlc.arg(before_created_at)
+    OR (created_at = sqlc.arg(before_created_at) AND id < CAST(sqlc.arg(before_id) AS TEXT))
+  )
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg(page_limit);
+
+-- name: CountUnreadNotificationsInProjects :one
+SELECT COUNT(*)
+FROM notifications
+WHERE status = 'unread'
+  AND recipient = CAST(sqlc.arg(recipient) AS TEXT)
+  AND project_id IN (sqlc.slice('project_ids'));
+
+-- name: CountUnresolvedNotificationsInProjects :one
+SELECT COUNT(*)
+FROM notifications
+WHERE resolved_at IS NULL
+  AND type IN ('needs_input', 'ready_to_merge')
+  AND recipient = CAST(sqlc.arg(recipient) AS TEXT)
+  AND project_id IN (sqlc.slice('project_ids'));
+
+-- name: MarkAllNotificationsReadInProjects :execrows
+UPDATE notifications
+SET status = 'read', read_at = sqlc.arg(read_at)
+WHERE status = 'unread'
+  AND recipient = CAST(sqlc.arg(recipient) AS TEXT)
+  AND project_id IN (sqlc.slice('project_ids'));
+
+-- GetNotificationProject answers "which project is this notification about",
+-- which is the only question the acknowledgement routes need in order to
+-- refuse one belonging to a project the caller cannot see. Deliberately
+-- narrower than fetching the row: the caller must not learn the title of a
+-- notification it is about to be told does not exist.
+-- name: GetNotificationProject :one
+SELECT project_id FROM notifications WHERE id = ?;

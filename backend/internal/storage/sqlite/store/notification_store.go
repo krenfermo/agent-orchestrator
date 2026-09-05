@@ -387,3 +387,124 @@ func notificationsFromGen(rows []gen.Notification) []domain.NotificationRecord {
 	}
 	return out
 }
+
+// P4-C organization-scoped notification reads. Each is the same query as its
+// unscoped sibling above with one extra predicate, and each REQUIRES a project
+// set: passing none returns nothing rather than everything, which is the
+// difference between a scoped read that fails closed and one that fails open.
+
+// ListNotificationsInProjects lists one page of notifications about the given
+// projects only.
+func (s *Store) ListNotificationsInProjects(
+	ctx context.Context,
+	status domain.NotificationListStatus,
+	beforeCreatedAt time.Time,
+	beforeID string,
+	limit int,
+	projects []domain.ProjectID,
+) ([]domain.NotificationRecord, error) {
+	if len(projects) == 0 {
+		return nil, nil
+	}
+	var (
+		rows []gen.Notification
+		err  error
+	)
+	switch status {
+	case domain.NotificationListUnread:
+		rows, err = s.qr.ListUnreadNotificationsPageInProjects(ctx, gen.ListUnreadNotificationsPageInProjectsParams{
+			Recipient:       string(domain.NotificationRecipientLocal),
+			ProjectIds:      projects,
+			BeforeID:        beforeID,
+			BeforeCreatedAt: beforeCreatedAt,
+			PageLimit:       int64(limit),
+		})
+	case domain.NotificationListUnresolved:
+		rows, err = s.qr.ListUnresolvedNotificationsPageInProjects(ctx, gen.ListUnresolvedNotificationsPageInProjectsParams{
+			Recipient:       string(domain.NotificationRecipientLocal),
+			ProjectIds:      projects,
+			BeforeID:        beforeID,
+			BeforeCreatedAt: beforeCreatedAt,
+			PageLimit:       int64(limit),
+		})
+	default:
+		rows, err = s.qr.ListNotificationsPageInProjects(ctx, gen.ListNotificationsPageInProjectsParams{
+			Recipient:       string(domain.NotificationRecipientLocal),
+			ProjectIds:      projects,
+			BeforeID:        beforeID,
+			BeforeCreatedAt: beforeCreatedAt,
+			PageLimit:       int64(limit),
+		})
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list notifications in projects: %w", err)
+	}
+	return notificationsFromGen(rows), nil
+}
+
+// CountUnreadNotificationsInProjects is the badge count for one caller's
+// visible projects.
+func (s *Store) CountUnreadNotificationsInProjects(ctx context.Context, projects []domain.ProjectID) (int64, error) {
+	if len(projects) == 0 {
+		return 0, nil
+	}
+	n, err := s.qr.CountUnreadNotificationsInProjects(ctx, gen.CountUnreadNotificationsInProjectsParams{
+		Recipient:  string(domain.NotificationRecipientLocal),
+		ProjectIds: projects,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("count unread notifications in projects: %w", err)
+	}
+	return n, nil
+}
+
+// CountUnresolvedNotificationsInProjects is the still-actionable count for one
+// caller's visible projects.
+func (s *Store) CountUnresolvedNotificationsInProjects(ctx context.Context, projects []domain.ProjectID) (int64, error) {
+	if len(projects) == 0 {
+		return 0, nil
+	}
+	n, err := s.qr.CountUnresolvedNotificationsInProjects(ctx, gen.CountUnresolvedNotificationsInProjectsParams{
+		Recipient:  string(domain.NotificationRecipientLocal),
+		ProjectIds: projects,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("count unresolved notifications in projects: %w", err)
+	}
+	return n, nil
+}
+
+// MarkAllNotificationsReadInProjects acknowledges everything unread about the
+// given projects, and nothing else.
+func (s *Store) MarkAllNotificationsReadInProjects(ctx context.Context, at time.Time, projects []domain.ProjectID) (int64, error) {
+	if len(projects) == 0 {
+		return 0, nil
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	n, err := s.qw.MarkAllNotificationsReadInProjects(ctx, gen.MarkAllNotificationsReadInProjectsParams{
+		ReadAt:     nullTime(at),
+		Recipient:  string(domain.NotificationRecipientLocal),
+		ProjectIds: projects,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("mark all notifications read in projects: %w", err)
+	}
+	return n, nil
+}
+
+// GetNotificationProject returns the project a notification is about, or
+// (zero, false, nil) when no such notification exists. The acknowledgement
+// routes use it to refuse one belonging to a project the caller cannot see,
+// without reading the notification's contents to do it.
+func (s *Store) GetNotificationProject(ctx context.Context, id string) (domain.ProjectID, bool, error) {
+	project, err := s.qr.GetNotificationProject(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("get notification project %s: %w", id, err)
+	}
+	return project, true, nil
+}
