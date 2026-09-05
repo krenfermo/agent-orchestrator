@@ -43,9 +43,8 @@ import {
 	hidesShellTopbar,
 } from "../lib/platform";
 import { useUiStore } from "../stores/ui-store";
-import { useAuthStore } from "../stores/auth-store";
-import { LoginScreen } from "../components/LoginScreen";
-import { SignupScreen } from "../components/SignupScreen";
+import { authPermitsProtectedData, useAuthStore } from "../stores/auth-store";
+import { ShellAuthGate } from "../components/ShellAuthGate";
 import { matchesRendererShortcut } from "../stores/keybindings-store";
 import { sessionIsActive, toProjectKind, type WorkspaceSummary } from "../types/workspace";
 import type { components } from "../../api/schema";
@@ -57,13 +56,29 @@ export const Route = createFileRoute("/_shell")({
 	// nav target is warm before the click.
 	loader: async ({ context }) => {
 		await refreshDaemonStatus().catch(() => undefined);
-		void useAuthStore.getState().load();
-		void useAuthStore.getState().checkSetup();
-		if (!usesPreviewWorkspaceData && !hasTrustedApiBaseUrl()) return;
+		if (usesPreviewWorkspaceData) return context.queryClient.ensureQueryData(workspaceQueryOptions);
+		if (!hasTrustedApiBaseUrl()) return;
+		// Awaited, not fired and forgotten. Prefetching the workspace list is a
+		// protected request, and issuing it before the daemon has said who is
+		// asking is how a signed-out renderer came to be polling /projects and
+		// /sessions for 401s. The gate below renders on the same answer, so this
+		// costs one round trip that the shell needs regardless.
+		await useAuthStore.getState().refreshForDaemonReady();
+		if (!authPermitsProtectedData(useAuthStore.getState().status)) return;
 		return context.queryClient.ensureQueryData(workspaceQueryOptions);
 	},
-	component: ShellLayout,
+	component: ShellRoute,
 });
+
+// The gate owns the decision; ShellLayout below is only ever mounted for an
+// identity that may load the application's data.
+function ShellRoute() {
+	return (
+		<ShellAuthGate>
+			<ShellLayout />
+		</ShellAuthGate>
+	);
+}
 
 function errorMessage(error: unknown) {
 	return error instanceof Error ? error.message : "Could not load projects";
@@ -96,25 +111,16 @@ const shellTopbarHiddenByPlatform = hidesShellTopbar();
 function ShellLayout() {
 	// Reports how many agents this install has available, once per launch.
 	useAgentInventoryTelemetry();
-	// Checkpoint 8P-A/8P-E.8: the login (or, first-run, signup) screen renders
-	// in place of the shell only when a real session is required and absent.
-	// "trusted-local" (today's default desktop UX) and "loading"/"no_user"
-	// all fall through to the normal shell unchanged — the loader kicked off
-	// auth-store's load()/checkSetup() without blocking navigation, so these
-	// start as "loading"/null and update once resolved.
-	const authStatus = useAuthStore((state) => state.status);
-	const setupRequired = useAuthStore((state) => state.setupRequired);
 	const navigate = useNavigate();
 	const matchRoute = useMatchRoute();
 	const queryClient = useQueryClient();
 	const workspaceQuery = useWorkspaceQuery();
 	const workspaces = workspaceQuery.data ?? [];
 	const daemonStatus = useDaemonStatus(queryClient);
-	// The renderer boots well before the daemon binds its port, so the loader's
-	// auth calls above are expected to be no-ops on a cold start. This is the
-	// retry: exactly one refresh per not-ready -> ready transition, keyed on the
-	// port so a daemon restart (possibly on a new port) re-runs it too. No
-	// polling — the status hook already owns that.
+	// The gate resolved an identity to get here. This re-resolves it on every
+	// not-ready -> ready transition after that, keyed on the port so a daemon
+	// restart (possibly on a new port, possibly having lost the session) re-runs
+	// it too. No polling — the status hook already owns that.
 	const readyDaemonPort = daemonStatus.state === "ready" ? daemonStatus.port : undefined;
 	useEffect(() => {
 		if (!readyDaemonPort) return;
@@ -672,10 +678,6 @@ function ShellLayout() {
 			}),
 		[],
 	);
-
-	if (authStatus === "unauthenticated") {
-		return setupRequired ? <SignupScreen /> : <LoginScreen />;
-	}
 
 	return (
 		<ShellProvider value={{ daemonStatus, workspaceStartupState, createProject, initializeProjectRepository }}>

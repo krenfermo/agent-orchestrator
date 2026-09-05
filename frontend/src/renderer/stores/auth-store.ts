@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { apiClient, apiErrorMessage, hasTrustedApiBaseUrl } from "../lib/api-client";
+import { apiClient, apiErrorMessage, hasTrustedApiBaseUrl, setUnauthorizedListener } from "../lib/api-client";
 import { aoBridge } from "../lib/bridge";
 import { isDesktopMode } from "../lib/platform-adapter";
 import type { components } from "../../api/schema";
@@ -95,6 +95,10 @@ type AuthState = {
 	// long before the daemon binds its port, so the first attempt at each of
 	// these is expected to be a no-op; this is what makes the second one happen.
 	refreshForDaemonReady: () => Promise<void>;
+	// Called by api-client when any protected route answers 401. The daemon has
+	// just said this principal is not signed in; the renderer's job is to
+	// believe it rather than to keep asking.
+	reportUnauthorized: () => void;
 	// startSso begins single sign-on. In the desktop app the main process
 	// drives the system browser and installs the resulting session cookie;
 	// in a plain browser the page navigates to the provider itself.
@@ -246,6 +250,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 	refreshForDaemonReady: async () => {
 		await Promise.all([get().load(), get().checkSetup(), get().loadProviders()]);
 	},
+	reportUnauthorized: () => {
+		// Already signed out: nothing to change, and re-setting would restart a
+		// render for every 401 in a burst of parallel queries.
+		if (get().status === "unauthenticated") return;
+		set({ ...signedOutState, error: null });
+	},
 	startSso: async () => {
 		set({ error: null, ssoError: null, ssoPending: true });
 		try {
@@ -333,6 +343,25 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 		}
 	},
 }));
+
+// One listener, installed as soon as anything imports the store — which the
+// shell route does before it can render anything. A 401 from a protected route
+// is the only evidence of a lost session that arrives without anyone asking for
+// it, and it is the evidence that matters: it is what a revoked, expired or
+// never-established session actually looks like from inside the application.
+setUnauthorizedListener(() => {
+	useAuthStore.getState().reportUnauthorized();
+});
+
+/**
+ * authPermitsProtectedData reports whether the resolved identity may be used to
+ * load the application's own data. "loading" is deliberately false: not knowing
+ * is not permission, and treating it as permission is what let a signed-out
+ * renderer mount the whole shell and poll protected routes for 401s.
+ */
+export function authPermitsProtectedData(status: AuthStatus): boolean {
+	return status === "authenticated" || status === "trusted-local" || status === "no_user";
+}
 
 /**
  * useCan reports whether the signed-in identity holds a permission, according

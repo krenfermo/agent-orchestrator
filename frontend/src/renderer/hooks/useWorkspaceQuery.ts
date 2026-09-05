@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
 import { apiClient, hasTrustedApiBaseUrl } from "../lib/api-client";
 import { mockWorkspaces } from "../lib/mock-data";
+import { isUnauthorized } from "../lib/query-client";
 import { usesPreviewWorkspaceData } from "../lib/preview-mode";
 import { toReviewerHarnessId } from "../lib/reviewer-harnesses";
 import { captureRendererEvent } from "../lib/telemetry";
@@ -122,7 +123,9 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 export const workspaceQueryOptions = {
 	queryKey: workspaceQueryKey,
 	queryFn: fetchWorkspaces,
-	retry: 1,
+	// One retry for a transient failure, none for a refusal: a 401 answered
+	// again is still a 401, and this query polls.
+	retry: (failureCount: number, error: unknown) => !isUnauthorized(error) && failureCount < 1,
 	refetchInterval: 15_000,
 };
 

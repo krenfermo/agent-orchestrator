@@ -319,7 +319,9 @@ export function createNotificationsTransport(
 				source = undefined;
 				sourceBaseUrl = baseUrl;
 				try {
-					source = new EventSource(`${baseUrl.replace(/\/+$/, "")}/api/v1/notifications/stream`);
+					source = new EventSource(`${baseUrl.replace(/\/+$/, "")}/api/v1/notifications/stream`, {
+						withCredentials: true,
+					});
 					source.onopen = invalidateNotifications;
 					source.onerror = () => {
 						if (source?.readyState === EVENTSOURCE_CLOSED) scheduleRetry();
