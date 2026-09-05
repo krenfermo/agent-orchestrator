@@ -44,6 +44,23 @@ type Store interface {
 	ListTeamMembers(ctx context.Context, team domain.TeamID) ([]domain.TeamMembership, error)
 	ListTeamMembershipsForUser(ctx context.Context, user domain.UserID) ([]domain.TeamMembership, error)
 
+	// P4-C tenants. GetTenantMembership and CountTenantOwners exist for the
+	// owner-safety guards, which are the reason this is a service and not a
+	// pass-through to the store.
+	InsertTenant(ctx context.Context, t domain.Tenant) (domain.Tenant, error)
+	GetTenantByID(ctx context.Context, id domain.TenantID) (domain.Tenant, bool, error)
+	ListTenants(ctx context.Context) ([]domain.Tenant, error)
+	UpdateTenant(ctx context.Context, id domain.TenantID, name, slug, description string, updatedAt time.Time) (bool, error)
+	UpdateTenantStatus(ctx context.Context, id domain.TenantID, status domain.TenantStatus, updatedAt time.Time) (bool, error)
+	UpsertTenantMembership(ctx context.Context, m domain.TenantMembership) (domain.TenantMembership, error)
+	DeleteTenantMembership(ctx context.Context, tenant domain.TenantID, user domain.UserID) (bool, error)
+	GetTenantMembership(ctx context.Context, tenant domain.TenantID, user domain.UserID) (domain.TenantMembership, bool, error)
+	ListTenantMembers(ctx context.Context, tenant domain.TenantID) ([]domain.TenantMembership, error)
+	ListActiveTenantMembershipsForUser(ctx context.Context, user domain.UserID) ([]domain.TenantMembership, error)
+	CountTenantOwners(ctx context.Context, tenant domain.TenantID) (int64, error)
+	SetProjectTenant(ctx context.Context, id domain.ProjectID, tenant domain.TenantID) (bool, error)
+	SetTeamTenant(ctx context.Context, id domain.TeamID, tenant domain.TenantID) (bool, error)
+
 	UpsertProjectGrant(ctx context.Context, g domain.ProjectGrant) (domain.ProjectGrant, error)
 	DeleteProjectGrant(ctx context.Context, project domain.ProjectID, kind domain.GrantSubjectKind, subject string) (bool, error)
 	ListProjectGrants(ctx context.Context, project domain.ProjectID) ([]domain.ProjectGrant, error)
@@ -108,6 +125,18 @@ type Manager interface {
 	AddTeamMember(ctx context.Context, actor domain.Principal, team domain.TeamID, user domain.UserID, role domain.TeamRole) (domain.TeamMembership, error)
 	RemoveTeamMember(ctx context.Context, actor domain.Principal, team domain.TeamID, user domain.UserID) error
 
+	ListTenants(ctx context.Context) ([]domain.Tenant, error)
+	GetTenant(ctx context.Context, id domain.TenantID) (domain.Tenant, error)
+	CreateTenant(ctx context.Context, actor domain.Principal, name, description string) (domain.Tenant, error)
+	UpdateTenant(ctx context.Context, actor domain.Principal, id domain.TenantID, name, description string) (domain.Tenant, error)
+	ArchiveTenant(ctx context.Context, actor domain.Principal, id domain.TenantID, archived bool) (domain.Tenant, error)
+	ListTenantMembers(ctx context.Context, id domain.TenantID) ([]domain.TenantMembership, error)
+	ListTenantsForUser(ctx context.Context, user domain.UserID) ([]domain.TenantMembership, error)
+	AddTenantMember(ctx context.Context, actor domain.Principal, tenant domain.TenantID, user domain.UserID, role domain.TenantRole) (domain.TenantMembership, error)
+	RemoveTenantMember(ctx context.Context, actor domain.Principal, tenant domain.TenantID, user domain.UserID) error
+	AssignProjectTenant(ctx context.Context, actor domain.Principal, project domain.ProjectID, tenant domain.TenantID) error
+	AssignTeamTenant(ctx context.Context, actor domain.Principal, team domain.TeamID, tenant domain.TenantID) error
+
 	ListProjectAccess(ctx context.Context, project domain.ProjectID) (ProjectAccess, error)
 	GrantProjectAccess(ctx context.Context, actor domain.Principal, project domain.ProjectID, kind domain.GrantSubjectKind, subject string, role domain.ProjectRole) (domain.ProjectGrant, error)
 	RevokeProjectAccess(ctx context.Context, actor domain.Principal, project domain.ProjectID, kind domain.GrantSubjectKind, subject string) error
@@ -136,6 +165,30 @@ const (
 	CodeTeamExists = "TEAM_ALREADY_EXISTS"
 	// CodeInvalidSubject is returned for a grant subject that does not exist.
 	CodeInvalidSubject = "GRANT_SUBJECT_NOT_FOUND"
+
+	// P4-C organization codes.
+	//
+	// CodeTenantNotFound is returned for an unknown organization id.
+	CodeTenantNotFound = "TENANT_NOT_FOUND"
+	// CodeTenantExists is returned when an organization name collides.
+	CodeTenantExists = "TENANT_ALREADY_EXISTS"
+	// CodeTenantInvalidName is returned for a name with nothing sluggable in it.
+	CodeTenantInvalidName = "TENANT_INVALID_NAME"
+	// CodeTenantMembershipNotFound is returned when removing an account that
+	// is not in the organization.
+	CodeTenantMembershipNotFound = "TENANT_MEMBERSHIP_NOT_FOUND"
+	// CodeTenantOwnerProtected is returned when somebody other than an
+	// organization's owner tries to alter that owner's membership.
+	CodeTenantOwnerProtected = "TENANT_OWNER_PROTECTED"
+	// CodeLastTenantOwner is returned when a change would leave an
+	// organization with no owner.
+	CodeLastTenantOwner = "TENANT_LAST_OWNER_PROTECTED"
+	// CodeTenantArchived is returned when something is moved into an archived
+	// organization.
+	CodeTenantArchived = "TENANT_ARCHIVED"
+	// CodeTenantDefaultProtected is returned when the default organization is
+	// archived.
+	CodeTenantDefaultProtected = "TENANT_DEFAULT_PROTECTED"
 )
 
 func (s *Service) at() time.Time { return s.now().UTC() }

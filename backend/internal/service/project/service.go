@@ -183,6 +183,7 @@ func (m *Service) List(ctx context.Context) ([]Summary, error) {
 			Repo:              row.RepoOriginURL,
 			DefaultBranch:     defaultBranch,
 			Valid:             pathLooksValid(row.Path, kind),
+			TenantID:          row.TenantID,
 		})
 	}
 	return out, nil

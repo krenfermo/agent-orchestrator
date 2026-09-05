@@ -1345,6 +1345,7 @@
 	"shell.spawnProjectOrchestrator": "启动 {{name}} 编排器",
 	"shell.spawning": "正在启动…",
 	"shell.spawningDots": "正在启动...",
+	"shell.switchOrganization": "切换组织",
 	"shell.terminateNamed": "终止 {{title}}",
 	"shell.terminateSession": "终止会话",
 	"shell.toggleProject": "切换 {{name}} 会话",

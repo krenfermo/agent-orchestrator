@@ -6,9 +6,21 @@
 // resource) -- and two facts it derives from durable state:
 //
 //   - the principal's installation-wide role, from users.role;
+//   - the principal's role WITHIN an organization, from tenant_memberships;
 //   - the principal's role WITHIN a project, from the project's owner column,
 //     from a direct project grant, and from grants held by the teams they
-//     belong to.
+//     belong to -- each of which counts only inside an organization the
+//     principal actually belongs to.
+//
+// P4-C made the organization the outermost of those, and did it by narrowing
+// what the resolver will put in ProjectRoles rather than by adding a check
+// somewhere later. A project in an organization the caller does not belong to
+// never enters the map, so every question already asked about a project --
+// may I read it, may I run in it, may I see its sessions, its notifications,
+// its usage, its memory, its code graph -- answers "no" for a foreign
+// organization without a single one of those call sites learning that tenants
+// exist. That is the whole design: tenancy is enforced once, at resolution,
+// and it fails closed because absence from a map is the denial.
 //
 // Nothing here reads an OIDC claim. P4-A resolved the identity once, at the
 // edge, and authorization deliberately consumes only the resolved AO user --
@@ -37,6 +49,15 @@ type Store interface {
 	ListActiveTeamIDsForUser(ctx context.Context, userID domain.UserID) ([]domain.TeamID, error)
 	ListProjectGrantsForUser(ctx context.Context, userID domain.UserID) ([]domain.ProjectGrant, error)
 	ListProjectGrantsForTeams(ctx context.Context, teams []domain.TeamID) ([]domain.ProjectGrant, error)
+
+	// P4-C. ListActiveTenantMembershipsForUser is the organizations the
+	// account belongs to; the two tenancy lookups answer "which organization
+	// owns this project / this team" for a bounded set, so the resolver never
+	// loads more of the installation than the caller could reach anyway.
+	ListActiveTenantMembershipsForUser(ctx context.Context, user domain.UserID) ([]domain.TenantMembership, error)
+	ListProjectIDsInTenants(ctx context.Context, tenants []domain.TenantID) (map[domain.ProjectID]domain.TenantID, error)
+	ListProjectTenancy(ctx context.Context, ids []domain.ProjectID) (map[domain.ProjectID]domain.TenantID, error)
+	ListTeamTenancy(ctx context.Context, ids []domain.TeamID) (map[domain.TeamID]domain.TenantID, error)
 }
 
 // Service is the evaluator.
@@ -63,9 +84,26 @@ type Subject struct {
 	Role domain.UserRole
 	// TeamIDs are the active teams the user belongs to.
 	TeamIDs []domain.TeamID
+	// TenantRoles is the role held in each active organization the user
+	// belongs to. Absent from the map means not a member, which for everyone
+	// but an installation administrator means the organization and everything
+	// in it is invisible.
+	TenantRoles map[domain.TenantID]domain.TenantRole
 	// ProjectRoles is the resolved role per project the user can reach.
-	// Absent from the map means no access at all.
+	// Absent from the map means no access at all. Every id in it has passed
+	// the tenant check already -- see resolve.
 	ProjectRoles map[domain.ProjectID]domain.ProjectRole
+	// ProjectTenants is the organization owning each project in ProjectRoles.
+	// Carried on the subject so the tenant ceiling can be applied with no
+	// further I/O, and so a caller can name a project's organization without
+	// a second query.
+	ProjectTenants map[domain.ProjectID]domain.TenantID
+	// CrossTenant records that this subject's authority spans every
+	// organization, which only an installation owner or administrator has. It
+	// is what keeps a single-user desktop install -- and the person who
+	// administers a multi-tenant one -- behaving exactly as it did before
+	// P4-C.
+	CrossTenant bool
 	// UniversalProject is the role held on EVERY project, empty when none.
 	UniversalProject domain.ProjectRole
 	// RecoveredOwner records that the trusted-local recovery rule applied.
@@ -116,6 +154,18 @@ func (s Subject) Allows(perm domain.Permission, res domain.AuthzResource) bool {
 	if scope == domain.AuthzScopeGlobal {
 		return globalRolePermissions[s.Role][perm]
 	}
+	if scope == domain.AuthzScopeTenant {
+		// Same rule as below: a tenant-scope permission asked without a tenant
+		// is a programming error, and "yes" is the dangerous answer to it.
+		if res.Scope != domain.AuthzScopeTenant || res.Tenant == "" {
+			return false
+		}
+		role, ok := s.TenantRole(res.Tenant)
+		if !ok {
+			return false
+		}
+		return tenantRolePermissions[role][perm]
+	}
 	// A project-scope permission asked without a project is a programming
 	// error, and answering "yes" to it would be the dangerous direction.
 	if res.Scope != domain.AuthzScopeProject || res.Project == "" {
@@ -128,7 +178,61 @@ func (s Subject) Allows(perm domain.Permission, res domain.AuthzResource) bool {
 	return projectRolePermissions[role][perm]
 }
 
+// TenantRole reports the subject's effective role in one organization.
+//
+// An installation owner or administrator holds one in EVERY organization,
+// whether or not a membership row says so -- they administer the accounts that
+// belong to it, and hiding the organization from them would be theatre. For
+// everyone else, membership is the only source, so a tenant they do not belong
+// to reports ("", false) and every tenant-scoped permission then denies.
+func (s Subject) TenantRole(id domain.TenantID) (domain.TenantRole, bool) {
+	if id == "" {
+		return "", false
+	}
+	var best domain.TenantRole
+	if s.CrossTenant {
+		best = crossTenantRole(s.Role)
+	}
+	if held, ok := s.TenantRoles[id]; ok {
+		best = maxTenantRole(best, held)
+	}
+	if best == "" {
+		return "", false
+	}
+	return capTenantRole(best, tenantRoleCap(s.Role)), true
+}
+
+// TenantIDs lists the organizations the subject belongs to, sorted. It does
+// NOT include the organizations an installation administrator can reach
+// without belonging to them -- callers that need those enumerate the
+// installation's tenants and filter with TenantRole, because "every tenant"
+// is not a set this subject carries.
+func (s Subject) TenantIDs() []domain.TenantID {
+	out := make([]domain.TenantID, 0, len(s.TenantRoles))
+	for id := range s.TenantRoles {
+		out = append(out, id)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// ProjectTenant reports which organization owns a project the subject can
+// reach. It is false for a project the subject cannot reach, and for any
+// project at all when the subject's access is universal rather than
+// enumerated.
+func (s Subject) ProjectTenant(id domain.ProjectID) (domain.TenantID, bool) {
+	t, ok := s.ProjectTenants[id]
+	return t, ok
+}
+
 // ProjectRole reports the subject's effective role in one project.
+//
+// Three ceilings apply, in this order, and they only ever narrow: the roles a
+// subject has been GRANTED combine by MAX (the most generous grant wins, which
+// is what a person means by "I also added them to a team"), then the
+// installation role caps the result, then the organization role caps it again.
+// A tenant viewer is a viewer on every project in that organization no matter
+// what grant it holds, for the same reason an installation viewer is.
 func (s Subject) ProjectRole(id domain.ProjectID) (domain.ProjectRole, bool) {
 	best := s.UniversalProject
 	if granted, ok := s.ProjectRoles[id]; ok {
@@ -137,7 +241,17 @@ func (s Subject) ProjectRole(id domain.ProjectID) (domain.ProjectRole, bool) {
 	if best == "" {
 		return "", false
 	}
-	return capProjectRole(best, projectRoleCap(s.Role)), true
+	role := capProjectRole(best, projectRoleCap(s.Role))
+	// The tenant ceiling applies only where the project's organization is
+	// known, which is every project in ProjectRoles. A cross-tenant subject
+	// resolves through UniversalProject and has no per-project tenancy to cap
+	// against -- by definition, since its authority is not organization-bound.
+	if tenant, ok := s.ProjectTenants[id]; ok {
+		if tenantRole, held := s.TenantRoles[tenant]; held {
+			role = capProjectRole(role, tenantProjectRoleCap(tenantRole))
+		}
+	}
+	return role, true
 }
 
 // CanSeeProject is the read gate every project-scoped list and lookup shares.
@@ -188,10 +302,12 @@ func (s *Service) Resolve(ctx context.Context, p domain.Principal) (Subject, err
 
 func (s *Service) resolve(ctx context.Context, p domain.Principal) (Subject, error) {
 	sub := Subject{
-		User:         p.User,
-		Method:       p.AuthMethod,
-		Role:         p.User.Role,
-		ProjectRoles: map[domain.ProjectID]domain.ProjectRole{},
+		User:           p.User,
+		Method:         p.AuthMethod,
+		Role:           p.User.Role,
+		TenantRoles:    map[domain.TenantID]domain.TenantRole{},
+		ProjectRoles:   map[domain.ProjectID]domain.ProjectRole{},
+		ProjectTenants: map[domain.ProjectID]domain.TenantID{},
 	}
 	if !domain.ValidUserRole(sub.Role) {
 		// A role this build does not know is not a licence. Falling back to
@@ -224,11 +340,59 @@ func (s *Service) resolve(ctx context.Context, p domain.Principal) (Subject, err
 		}
 	}
 
+	// The organizations this account belongs to. Read for EVERY subject,
+	// including installation administrators, because "which organizations am
+	// I in" is a question the UI asks of everyone -- an administrator's
+	// cross-tenant reach is recorded separately, in CrossTenant.
+	memberships, err := s.store.ListActiveTenantMembershipsForUser(ctx, sub.User.ID)
+	if err != nil {
+		return Subject{}, fmt.Errorf("list tenant memberships: %w", err)
+	}
+	for _, m := range memberships {
+		if !domain.ValidTenantRole(m.Role) {
+			// A tenant role this build does not know is not a licence, for
+			// the same reason an unknown installation role is not.
+			continue
+		}
+		sub.TenantRoles[m.TenantID] = maxTenantRole(sub.TenantRoles[m.TenantID], m.Role)
+	}
+
 	if role, ok := universalProjectRole(sub.Role); ok {
 		sub.UniversalProject = role
-		// An administrator reaches every project already; loading their grants
-		// would change no answer and would scale with the installation.
+		sub.CrossTenant = true
+		// An installation administrator reaches every project in every
+		// organization already; loading their grants would change no answer
+		// and would scale with the installation rather than with them.
 		return sub, nil
+	}
+
+	// From here the subject is organization-bound, and everything below is
+	// written so that a project can only ever enter ProjectRoles THROUGH
+	// ProjectTenants -- which is populated exclusively from organizations the
+	// subject belongs to. That ordering is the enforcement point: there is no
+	// later check to forget, because a foreign-tenant project has no way in.
+
+	// Organizations this account owns or administers. Every project inside one
+	// is theirs to administer without a grant per project, which is what makes
+	// "give Ana the run of this organization" one row instead of one per
+	// repository. Bounded by the account's own membership, so this is the same
+	// cost class as the owned-projects lookup below, not an installation scan.
+	var adminTenants []domain.TenantID
+	for id, role := range sub.TenantRoles {
+		if role == domain.TenantRoleOwner || role == domain.TenantRoleAdmin {
+			adminTenants = append(adminTenants, id)
+		}
+	}
+	if len(adminTenants) > 0 {
+		sort.Slice(adminTenants, func(i, j int) bool { return adminTenants[i] < adminTenants[j] })
+		inTenants, err := s.store.ListProjectIDsInTenants(ctx, adminTenants)
+		if err != nil {
+			return Subject{}, fmt.Errorf("list projects in administered tenants: %w", err)
+		}
+		for id, tenant := range inTenants {
+			sub.ProjectTenants[id] = tenant
+			sub.ProjectRoles[id] = domain.ProjectRoleAdmin
+		}
 	}
 
 	// Owning a project row (8P-A's owner_user_id, stamped on every project the
@@ -238,9 +402,6 @@ func (s *Service) resolve(ctx context.Context, p domain.Principal) (Subject, err
 	owned, err := s.store.ListProjectIDsByOwner(ctx, sub.User.ID)
 	if err != nil {
 		return Subject{}, fmt.Errorf("list owned projects: %w", err)
-	}
-	for _, id := range owned {
-		sub.ProjectRoles[id] = domain.ProjectRoleAdmin
 	}
 
 	teams, err := s.store.ListActiveTeamIDsForUser(ctx, sub.User.ID)
@@ -253,21 +414,99 @@ func (s *Service) resolve(ctx context.Context, p domain.Principal) (Subject, err
 	if err != nil {
 		return Subject{}, fmt.Errorf("list project grants for user: %w", err)
 	}
-	applyGrants(sub.ProjectRoles, direct)
 
+	var inherited []domain.ProjectGrant
 	if len(teams) > 0 {
-		inherited, err := s.store.ListProjectGrantsForTeams(ctx, teams)
+		inherited, err = s.store.ListProjectGrantsForTeams(ctx, teams)
 		if err != nil {
 			return Subject{}, fmt.Errorf("list project grants for teams: %w", err)
 		}
-		applyGrants(sub.ProjectRoles, inherited)
 	}
+
+	// Resolve the organization of every project ownership or a grant points
+	// at, in one round trip, and admit only those the subject belongs to.
+	// Everything a foreign organization owns is dropped here, silently and
+	// permanently: it cannot be listed, fetched by a guessed id, or reached
+	// through anything that hangs off it.
+	candidates := make([]domain.ProjectID, 0, len(owned)+len(direct)+len(inherited))
+	seen := make(map[domain.ProjectID]bool, cap(candidates))
+	consider := func(id domain.ProjectID) {
+		if id == "" || seen[id] {
+			return
+		}
+		if _, known := sub.ProjectTenants[id]; known {
+			return
+		}
+		seen[id] = true
+		candidates = append(candidates, id)
+	}
+	for _, id := range owned {
+		consider(id)
+	}
+	for _, g := range direct {
+		consider(g.ProjectID)
+	}
+	for _, g := range inherited {
+		consider(g.ProjectID)
+	}
+	if len(candidates) > 0 {
+		tenancy, err := s.store.ListProjectTenancy(ctx, candidates)
+		if err != nil {
+			return Subject{}, fmt.Errorf("list project tenancy: %w", err)
+		}
+		for id, tenant := range tenancy {
+			if _, member := sub.TenantRoles[tenant]; !member {
+				continue
+			}
+			sub.ProjectTenants[id] = tenant
+		}
+	}
+
+	// A team confers access only inside its OWN organization. The write path
+	// already refuses to grant a team access to a project in another one; this
+	// is the read-side half of that promise, so a team whose organization was
+	// changed after its grants were written stops carrying them across
+	// immediately rather than at the next write.
+	if len(inherited) > 0 {
+		teamTenancy, err := s.store.ListTeamTenancy(ctx, teams)
+		if err != nil {
+			return Subject{}, fmt.Errorf("list team tenancy: %w", err)
+		}
+		kept := inherited[:0]
+		for _, g := range inherited {
+			if teamTenancy[domain.TeamID(g.SubjectID)] != sub.ProjectTenants[g.ProjectID] {
+				continue
+			}
+			kept = append(kept, g)
+		}
+		inherited = kept
+	}
+
+	for _, id := range owned {
+		if _, inReach := sub.ProjectTenants[id]; !inReach {
+			continue
+		}
+		sub.ProjectRoles[id] = maxProjectRole(sub.ProjectRoles[id], domain.ProjectRoleAdmin)
+	}
+	applyGrants(sub.ProjectRoles, sub.ProjectTenants, direct)
+	applyGrants(sub.ProjectRoles, sub.ProjectTenants, inherited)
 	return sub, nil
 }
 
-func applyGrants(into map[domain.ProjectID]domain.ProjectRole, grants []domain.ProjectGrant) {
+// applyGrants folds grants into the resolved role map, skipping any whose
+// project is not in an organization the subject belongs to. The tenancy map is
+// a required argument rather than an optional filter precisely so that adding
+// a new source of grants later cannot accidentally skip the check.
+func applyGrants(
+	into map[domain.ProjectID]domain.ProjectRole,
+	tenancy map[domain.ProjectID]domain.TenantID,
+	grants []domain.ProjectGrant,
+) {
 	for _, g := range grants {
 		if !domain.ValidProjectRole(g.Role) {
+			continue
+		}
+		if _, inReach := tenancy[g.ProjectID]; !inReach {
 			continue
 		}
 		into[g.ProjectID] = maxProjectRole(into[g.ProjectID], g.Role)

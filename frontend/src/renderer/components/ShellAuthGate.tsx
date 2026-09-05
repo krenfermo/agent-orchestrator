@@ -2,6 +2,7 @@ import { type ReactNode, useEffect } from "react";
 import { refreshDaemonStatus } from "../lib/daemon-status";
 import { usesPreviewWorkspaceData } from "../lib/preview-mode";
 import { authPermitsProtectedData, useAuthStore } from "../stores/auth-store";
+import { useTenantStore } from "../stores/tenant-store";
 import { DaemonStartupLoader } from "./DaemonStartupLoader";
 import { LoginScreen } from "./LoginScreen";
 import { SignupScreen } from "./SignupScreen";
@@ -60,6 +61,16 @@ export function ShellAuthGate({ children }: { children: ReactNode }) {
 			if (timer !== undefined) window.clearTimeout(timer);
 		};
 	}, [unresolved]);
+
+	// P4-C: which organizations this identity belongs to, loaded once the
+	// identity itself has resolved. It hangs off the resolved account rather
+	// than off the daemon being up, because asking before there is an identity
+	// answers "none" and would render an empty organization list as fact.
+	const permitted = authPermitsProtectedData(status);
+	useEffect(() => {
+		if (usesPreviewWorkspaceData || !permitted) return;
+		void useTenantStore.getState().load();
+	}, [permitted]);
 
 	if (usesPreviewWorkspaceData) return <>{children}</>;
 

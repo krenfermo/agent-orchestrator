@@ -259,10 +259,18 @@ func RunWithConfig(cfg config.Config) error {
 	// authorization boundary rather than inheriting SessionsController's.
 	// r.Context() at WS-accept time already carries identity.Middleware's
 	// resolved identity (identity.Middleware runs before mountTerminalMux
-	// in router.go), so this closure only needs to read it back and check
-	// ownership -- same semantics as controllers.AuthorizeSessionAccess,
-	// deliberately not importing httpd/controllers here to keep daemon's
-	// dependency direction one-way.
+	// in router.go), so this closure only needs to read it back and ask the
+	// one evaluator -- deliberately not importing httpd/controllers here, to
+	// keep daemon's dependency direction one-way.
+	//
+	// P4-C replaced 8P-B.2's owner-equality check here with the same
+	// authorization question every other session surface asks: may this
+	// principal write to the session's PROJECT. Owner-equality was both too
+	// strict and, once organizations exist, the wrong shape -- it denied a
+	// colleague who holds a legitimate grant, while saying nothing at all
+	// about which organization the session belongs to. Routing it through
+	// authz means a terminal attach is scoped by tenancy for free, because
+	// the resolver never puts a foreign organization's project in reach.
 	termMgr.SetAttachAuthorizer(func(ctx context.Context, id string) bool {
 		if cfg.TrustedLocalMode {
 			return true
@@ -271,11 +279,17 @@ func RunWithConfig(cfg config.Config) error {
 		if !ok {
 			return false
 		}
-		owner, err := store.GetSessionOwner(ctx, domain.SessionID(id))
-		if err != nil || owner == nil || *owner != user.ID {
+		project, found, err := store.GetSessionProjectID(ctx, domain.SessionID(id))
+		if err != nil || !found || project == "" {
+			// An un-attributable session fails closed, matching the rule
+			// 8P-B.2 established for an un-owned one.
 			return false
 		}
-		return true
+		principal := domain.Principal{User: user, AuthMethod: domain.AuthMethodPassword}
+		if p, ok := identity.PrincipalFromContext(ctx); ok {
+			principal = p
+		}
+		return authzSvc.Authorize(ctx, principal, domain.PermSessionWrite, domain.ProjectResource(project)) == nil
 	})
 
 	// The agent messenger sends validated user input to the session's live
@@ -829,6 +843,7 @@ func RunWithConfig(cfg config.Config) error {
 		Auth:                authMgr,
 		SSO:                 ssoMgr,
 		ProjectOwnership:    store,
+		ProjectTenancy:      store,
 		WorkflowOwnership:   store,
 		SessionOwnership:    store,
 		Authz:               authzSvc,

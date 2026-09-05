@@ -129,6 +129,48 @@ func (g Guard) AllowProject(w http.ResponseWriter, r *http.Request, perm domain.
 	return true
 }
 
+// AllowTenant gates an operation on one organization.
+//
+// A denial reports 404 for the same reason AllowProject does: an organization
+// id the caller cannot reach must be indistinguishable from one that does not
+// exist, or the API becomes an oracle for "does this installation have an
+// organization with this id". And for the same reason, once the caller CAN see
+// the organization its existence is no longer a secret from them, so they are
+// told what they actually lack rather than being sent on an hour's debugging
+// by a 404 that means "you may not rename this".
+func (g Guard) AllowTenant(w http.ResponseWriter, r *http.Request, perm domain.Permission, id domain.TenantID) bool {
+	if !g.Enabled() {
+		return true
+	}
+	if g.unclaimed(r.Context()) {
+		return true
+	}
+	p, err := identity.RequirePrincipal(r)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return false
+	}
+	if err := g.Authz.Authorize(r.Context(), p, perm, domain.TenantResource(id)); err != nil {
+		if isUnauthorizedErr(err) {
+			envelope.WriteError(w, r, err)
+			return false
+		}
+		if readErr := g.Authz.Authorize(r.Context(), p, domain.PermTenantRead, domain.TenantResource(id)); readErr == nil {
+			envelope.WriteError(w, r, err)
+			return false
+		}
+		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "TENANT_NOT_FOUND", "organization not found", nil)
+		return false
+	}
+	return true
+}
+
+// CanTenant answers the same question as AllowTenant without writing a
+// response, for list filtering where a denial means "omit the row".
+func (g Guard) CanTenant(sub authz.Subject, perm domain.Permission, id domain.TenantID) bool {
+	return sub.Allows(perm, domain.TenantResource(id))
+}
+
 // AllowSession gates an operation on one session, by way of the project it
 // belongs to. A session whose project cannot be resolved is denied: an
 // un-attributable session fails closed, matching the rule 8P-B.2 established

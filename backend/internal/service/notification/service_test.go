@@ -25,6 +25,70 @@ type fakeStore struct {
 	markedAll    bool
 	markedIDs    []string
 	err          error
+
+	// P4-C. scopedProjects records the project set the scoped reads were
+	// asked for, so a test can assert the scope actually reached the store
+	// rather than being dropped on the way.
+	scopedProjects []domain.ProjectID
+	projectOf      map[string]domain.ProjectID
+}
+
+func (f *fakeStore) ListNotificationsInProjects(
+	_ context.Context,
+	status ListStatus,
+	beforeAt time.Time,
+	beforeID string,
+	limit int,
+	projects []domain.ProjectID,
+) ([]domain.NotificationRecord, error) {
+	f.listStatus, f.listBeforeAt, f.listBeforeID, f.listLimit = status, beforeAt, beforeID, limit
+	f.scopedProjects = projects
+	if len(projects) == 0 {
+		return nil, f.err
+	}
+	allowed := map[domain.ProjectID]bool{}
+	for _, id := range projects {
+		allowed[id] = true
+	}
+	out := make([]domain.NotificationRecord, 0, len(f.rows))
+	for _, r := range f.rows {
+		if allowed[r.ProjectID] {
+			out = append(out, r)
+		}
+	}
+	return out, f.err
+}
+
+func (f *fakeStore) CountUnreadNotificationsInProjects(_ context.Context, projects []domain.ProjectID) (int64, error) {
+	f.scopedProjects = projects
+	if len(projects) == 0 {
+		return 0, f.err
+	}
+	return f.unreadCount, f.err
+}
+
+func (f *fakeStore) CountUnresolvedNotificationsInProjects(_ context.Context, projects []domain.ProjectID) (int64, error) {
+	if len(projects) == 0 {
+		return 0, f.err
+	}
+	return f.unresolvedCount, f.err
+}
+
+func (f *fakeStore) MarkAllNotificationsReadInProjects(_ context.Context, _ time.Time, projects []domain.ProjectID) (int64, error) {
+	f.scopedProjects = projects
+	if len(projects) == 0 {
+		return 0, f.err
+	}
+	f.markedAll = true
+	return f.markAllCount, f.err
+}
+
+func (f *fakeStore) GetNotificationProject(_ context.Context, id string) (domain.ProjectID, bool, error) {
+	if f.projectOf == nil {
+		return "", false, f.err
+	}
+	p, ok := f.projectOf[id]
+	return p, ok, f.err
 }
 
 func (f *fakeStore) CreateNotification(context.Context, domain.NotificationRecord) (domain.NotificationRecord, bool, error) {

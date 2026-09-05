@@ -76,7 +76,7 @@ func (s *Service) CreateFederatedUser(ctx context.Context, in FederatedUserInput
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	created, err := s.store.InsertUser(ctx, u)
+	created, err := s.insertUser(ctx, u)
 	if err == nil {
 		return created, nil
 	}
@@ -84,7 +84,7 @@ func (s *Service) CreateFederatedUser(ctx context.Context, in FederatedUserInput
 		// Lost the owner race to a concurrent first login. The account is
 		// still legitimate; it is simply not the owner.
 		u.Role = domain.UserRoleMember
-		created, err = s.store.InsertUser(ctx, u)
+		created, err = s.insertUser(ctx, u)
 		if err == nil {
 			return created, nil
 		}

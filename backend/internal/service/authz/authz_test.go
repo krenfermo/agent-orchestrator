@@ -18,19 +18,45 @@ type fakeStore struct {
 	teams      map[domain.UserID][]domain.TeamID
 	userGrants map[domain.UserID][]domain.ProjectGrant
 	teamGrants map[domain.TeamID][]domain.ProjectGrant
-	reads      int
-	err        error
+	// P4-C tenancy. All three default to the single default organization when
+	// a test says nothing, which is exactly the shape migration 0156 leaves an
+	// existing installation in: one tenant, everything in it, everyone a
+	// member. That default is what lets every pre-P4-C case in this file keep
+	// asserting what it always did while still running through the tenant
+	// code path.
+	tenantsOf     map[domain.UserID][]domain.TenantMembership
+	projectTenant map[domain.ProjectID]domain.TenantID
+	teamTenant    map[domain.TeamID]domain.TenantID
+	reads         int
+	err           error
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		users:      1,
-		owners:     1,
-		owned:      map[domain.UserID][]domain.ProjectID{},
-		teams:      map[domain.UserID][]domain.TeamID{},
-		userGrants: map[domain.UserID][]domain.ProjectGrant{},
-		teamGrants: map[domain.TeamID][]domain.ProjectGrant{},
+		users:         1,
+		owners:        1,
+		owned:         map[domain.UserID][]domain.ProjectID{},
+		teams:         map[domain.UserID][]domain.TeamID{},
+		userGrants:    map[domain.UserID][]domain.ProjectGrant{},
+		teamGrants:    map[domain.TeamID][]domain.ProjectGrant{},
+		tenantsOf:     map[domain.UserID][]domain.TenantMembership{},
+		projectTenant: map[domain.ProjectID]domain.TenantID{},
+		teamTenant:    map[domain.TeamID]domain.TenantID{},
 	}
+}
+
+// putProject places a project in an organization and records that the
+// organization owns it.
+func (f *fakeStore) putProject(id domain.ProjectID, tenant domain.TenantID) {
+	f.projectTenant[id] = tenant
+}
+
+// join makes a user a member of an organization at the given role, replacing
+// the default membership.
+func (f *fakeStore) join(u domain.UserID, tenant domain.TenantID, role domain.TenantRole) {
+	f.tenantsOf[u] = append(f.tenantsOf[u], domain.TenantMembership{
+		TenantID: tenant, UserID: u, Role: role,
+	})
 }
 
 func (f *fakeStore) CountUsers(context.Context) (int64, error)  { return f.users, f.err }
@@ -56,6 +82,65 @@ func (f *fakeStore) ListProjectGrantsForTeams(_ context.Context, ts []domain.Tea
 	var out []domain.ProjectGrant
 	for _, t := range ts {
 		out = append(out, f.teamGrants[t]...)
+	}
+	return out, f.err
+}
+
+func (f *fakeStore) ListActiveTenantMembershipsForUser(_ context.Context, u domain.UserID) ([]domain.TenantMembership, error) {
+	f.reads++
+	if m, ok := f.tenantsOf[u]; ok {
+		return m, f.err
+	}
+	// The migrated single-tenant installation: everyone is in the default
+	// organization. Member, not admin -- so a test that wants organization-wide
+	// authority has to ask for it.
+	return []domain.TenantMembership{{
+		TenantID: domain.DefaultTenantID, UserID: u, Role: domain.TenantRoleMember,
+	}}, f.err
+}
+
+func (f *fakeStore) tenantOfProject(id domain.ProjectID) domain.TenantID {
+	if t, ok := f.projectTenant[id]; ok {
+		return t
+	}
+	// Mirrors projects.tenant_id NOT NULL DEFAULT 'tnt_default': a project
+	// nobody placed anywhere is in the default organization, never nowhere.
+	return domain.DefaultTenantID
+}
+
+func (f *fakeStore) ListProjectIDsInTenants(_ context.Context, tenants []domain.TenantID) (map[domain.ProjectID]domain.TenantID, error) {
+	f.reads++
+	want := map[domain.TenantID]bool{}
+	for _, t := range tenants {
+		want[t] = true
+	}
+	out := map[domain.ProjectID]domain.TenantID{}
+	for id, tenant := range f.projectTenant {
+		if want[tenant] {
+			out[id] = tenant
+		}
+	}
+	return out, f.err
+}
+
+func (f *fakeStore) ListProjectTenancy(_ context.Context, ids []domain.ProjectID) (map[domain.ProjectID]domain.TenantID, error) {
+	f.reads++
+	out := make(map[domain.ProjectID]domain.TenantID, len(ids))
+	for _, id := range ids {
+		out[id] = f.tenantOfProject(id)
+	}
+	return out, f.err
+}
+
+func (f *fakeStore) ListTeamTenancy(_ context.Context, ids []domain.TeamID) (map[domain.TeamID]domain.TenantID, error) {
+	f.reads++
+	out := make(map[domain.TeamID]domain.TenantID, len(ids))
+	for _, id := range ids {
+		if t, ok := f.teamTenant[id]; ok {
+			out[id] = t
+			continue
+		}
+		out[id] = domain.DefaultTenantID
 	}
 	return out, f.err
 }
@@ -277,8 +362,13 @@ func TestTrustedLocalOwnerHasFullAuthority(t *testing.T) {
 	local := principal(user("owner", domain.UserRoleOwner), domain.AuthMethodTrustedLocal)
 	for _, perm := range domain.AllPermissions {
 		res := domain.GlobalResource()
-		if domain.ScopeOf(perm) == domain.AuthzScopeProject {
+		switch domain.ScopeOf(perm) {
+		case domain.AuthzScopeProject:
 			res = domain.ProjectResource("anything")
+		case domain.AuthzScopeTenant:
+			// Any organization at all, including one the owner holds no
+			// membership row in: the installation owner is cross-tenant.
+			res = domain.TenantResource("some-other-org")
 		}
 		if err := svc.Authorize(WithCache(context.Background()), local, perm, res); err != nil {
 			t.Fatalf("the trusted-local owner was denied %s: %v", perm, err)
@@ -313,8 +403,8 @@ func TestUnknownRoleIsLeastPrivilege(t *testing.T) {
 }
 
 // TestResolutionIsMemoizedPerRequest is section 28: a handler that asks many
-// questions must pay for one resolution. Without the cache this is four reads
-// per question.
+// questions must pay for one resolution. Without the cache this is a
+// fresh round of reads per question.
 func TestResolutionIsMemoizedPerRequest(t *testing.T) {
 	store := newFakeStore()
 	svc := New(store)
@@ -324,8 +414,11 @@ func TestResolutionIsMemoizedPerRequest(t *testing.T) {
 	for i := 0; i < 25; i++ {
 		_ = svc.Authorize(ctx, account, domain.PermProjectRead, domain.ProjectResource("p1"))
 	}
-	if store.reads > 3 {
-		t.Fatalf("resolved the subject %d times across one request; want at most 3 reads total", store.reads)
+	// One resolution reads: tenant memberships, owned projects, teams, direct
+	// grants, and the tenancy of the projects those point at. Five is the
+	// whole budget for a request, however many questions it asks.
+	if store.reads > 5 {
+		t.Fatalf("resolved the subject %d times across one request; want at most 5 reads total", store.reads)
 	}
 	if store.reads == 0 {
 		t.Fatal("expected the subject to be resolved at least once")
@@ -333,8 +426,13 @@ func TestResolutionIsMemoizedPerRequest(t *testing.T) {
 }
 
 // TestAdministratorsSkipGrantLoading proves the universal-access shortcut is
-// real: an administrator reaches every project, so loading their grants would
-// scale with the installation and change no answer.
+// real: an administrator reaches every project in every organization, so
+// loading their grants would scale with the installation and change no answer.
+//
+// The one read that remains is the administrator's own tenant memberships,
+// which is bounded by their membership rather than by the installation, and
+// which the UI needs in order to show them which organizations they are
+// actually in as opposed to which ones they can reach.
 func TestAdministratorsSkipGrantLoading(t *testing.T) {
 	store := newFakeStore()
 	svc := New(store)
@@ -343,8 +441,8 @@ func TestAdministratorsSkipGrantLoading(t *testing.T) {
 	if err := svc.Authorize(context.Background(), admin, domain.PermProjectRead, domain.ProjectResource("anything")); err != nil {
 		t.Fatalf("administrator denied a project: %v", err)
 	}
-	if store.reads != 0 {
-		t.Fatalf("administrator resolution read the grant tables %d times; want 0", store.reads)
+	if store.reads != 1 {
+		t.Fatalf("administrator resolution made %d reads; want exactly 1 (its own tenant memberships)", store.reads)
 	}
 }
 
@@ -374,6 +472,10 @@ func TestEveryPermissionHasAScope(t *testing.T) {
 		case domain.AuthzScopeProject:
 			if !projectRolePermissions[domain.ProjectRoleAdmin][perm] {
 				t.Errorf("project permission %s is granted by no project role, not even admin", perm)
+			}
+		case domain.AuthzScopeTenant:
+			if !tenantRolePermissions[domain.TenantRoleOwner][perm] {
+				t.Errorf("tenant permission %s is granted by no tenant role, not even owner", perm)
 			}
 		default:
 			t.Errorf("permission %s has an unknown scope %q", perm, scope)

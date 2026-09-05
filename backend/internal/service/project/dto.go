@@ -16,6 +16,16 @@ type AddInput struct {
 	Name        *string               `json:"name,omitempty"`
 	Config      *domain.ProjectConfig `json:"config,omitempty"`
 	AsWorkspace bool                  `json:"asWorkspace,omitempty"`
+	// TenantID is the organization to register the project in (P4-C).
+	//
+	// Consumed by the HTTP controller, not by this service -- tenancy is
+	// stamped alongside ownership, and for the same reason: both are facts
+	// about WHO registered the project, which the transport layer knows and
+	// the project service deliberately does not. Omitted is the common case:
+	// a caller who belongs to exactly one organization gets that one, which
+	// is what keeps a single-organization installation from ever seeing a
+	// picker.
+	TenantID string `json:"tenantId,omitempty"`
 }
 
 // InitializeRepositoryInput is the body shape for POST /api/v1/projects/initialize.
@@ -52,6 +62,8 @@ type RemoveResult struct {
 type CloneInput struct {
 	Repo            string  `json:"repo"`
 	DestinationName *string `json:"destinationName,omitempty"`
+	// TenantID is the organization to register the clone in. See AddInput.
+	TenantID string `json:"tenantId,omitempty"`
 }
 
 // BrowseResult is the response shape for GET /api/v1/projects/browse.

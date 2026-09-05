@@ -3,20 +3,20 @@
 -- users.sql's own note); ordering is done in Go in the store layer.
 
 -- name: InsertTeam :one
-INSERT INTO teams (id, name, slug, description, status, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-RETURNING id, name, slug, description, status, created_at, updated_at;
+INSERT INTO teams (id, name, slug, description, status, created_at, updated_at, tenant_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, name, slug, description, status, created_at, updated_at, tenant_id;
 
 -- name: GetTeamByID :one
-SELECT id, name, slug, description, status, created_at, updated_at
+SELECT id, name, slug, description, status, created_at, updated_at, tenant_id
 FROM teams WHERE id = ?;
 
 -- name: GetTeamBySlug :one
-SELECT id, name, slug, description, status, created_at, updated_at
+SELECT id, name, slug, description, status, created_at, updated_at, tenant_id
 FROM teams WHERE slug = ?;
 
 -- name: ListTeams :many
-SELECT id, name, slug, description, status, created_at, updated_at
+SELECT id, name, slug, description, status, created_at, updated_at, tenant_id
 FROM teams;
 
 -- name: UpdateTeam :execrows

@@ -140,7 +140,11 @@ type APIDeps struct {
 	// ownership scoping on the projects/workflows controllers. Optional:
 	// nil disables scoping entirely (pre-8P-A behavior). Both are satisfied
 	// by the same *sqlite/store.Store the rest of the daemon already uses.
-	ProjectOwnership  controllers.OwnershipStore
+	ProjectOwnership controllers.OwnershipStore
+	// ProjectTenancy places a newly registered project in an organization
+	// (P4-C). Nil keeps the pre-P4-C behavior, matching ProjectOwnership's
+	// convention.
+	ProjectTenancy    controllers.TenantPlacement
 	WorkflowOwnership controllers.WorkflowOwnershipStore
 
 	// ProviderProfiles backs Checkpoint 8P-B's per-user provider connection
@@ -245,6 +249,7 @@ type API struct {
 	executionPolicy    *controllers.ExecutionPolicyController
 	users              *controllers.UsersController
 	teams              *controllers.TeamsController
+	tenants            *controllers.TenantsController
 	projectAccess      *controllers.ProjectAccessController
 	// guard is P4-B's authorization gate, built once and shared by every
 	// controller that scopes a resource. One value, so a route can never be
@@ -269,6 +274,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			Ownership:    deps.ProjectOwnership,
 			TrustedLocal: cfg.TrustedLocalMode,
 			Guard:        guard,
+			Tenancy:      deps.ProjectTenancy,
 		},
 		environment: &controllers.EnvironmentController{
 			Svc: deps.Environment,
@@ -304,7 +310,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			Guard:        guard,
 		},
 		decisions:     &controllers.DecisionsController{Svc: deps.Decisions},
-		notifications: &controllers.NotificationsController{Svc: deps.Notifications, Stream: deps.NotificationStream},
+		notifications: &controllers.NotificationsController{Svc: deps.Notifications, Stream: deps.NotificationStream, Guard: guard},
 		push:          &controllers.PushController{Registry: deps.Push},
 		imports:       &controllers.ImportController{Svc: deps.Import},
 		shellTerms:    &controllers.ShellTerminalsController{Svc: deps.ShellTerminals},
@@ -329,7 +335,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			ProviderProfiles: deps.ProviderProfiles,
 		},
 		scheduler: &controllers.SchedulerController{Scheduler: deps.Scheduler, GC: deps.RuntimeGC},
-		events:    &EventsController{Source: deps.CDC, Live: deps.Events},
+		events:    &EventsController{Source: deps.CDC, Live: deps.Events, Guard: guard},
 		auth: &controllers.AuthController{
 			Mgr:          deps.Auth,
 			TrustedLocal: cfg.TrustedLocalMode,
@@ -348,6 +354,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		executionPolicy:  &controllers.ExecutionPolicyController{Mgr: deps.ExecutionPolicy},
 		users:            &controllers.UsersController{Mgr: deps.RBAC},
 		teams:            &controllers.TeamsController{Mgr: deps.RBAC},
+		tenants:          &controllers.TenantsController{Mgr: deps.RBAC, Guard: guard},
 		projectAccess:    &controllers.ProjectAccessController{Mgr: deps.RBAC, Guard: guard},
 	}
 }
@@ -404,6 +411,7 @@ func (a *API) Register(root chi.Router) {
 			a.executionPolicy.Register(r)
 			a.users.Register(r)
 			a.teams.Register(r)
+			a.tenants.Register(r)
 			a.projectAccess.Register(r)
 			// Sibling REST controllers plug in here.
 		})

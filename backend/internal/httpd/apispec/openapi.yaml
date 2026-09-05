@@ -7595,6 +7595,348 @@ paths:
         team stops on the member''s next request.'
       tags:
       - teams
+  /api/v1/tenants:
+    get:
+      operationId: listTenants
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListTenantsResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-C: list the organizations the caller can see, each with the caller''s
+        own role in it.'
+      tags:
+      - tenants
+    post:
+      operationId: createTenant
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTenantRequest'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantResponse'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-C: found an organization, with the caller as its owner. Requires
+        tenant.create.'
+      tags:
+      - tenants
+  /api/v1/tenants/{id}:
+    get:
+      operationId: getTenant
+      parameters:
+      - description: Organization identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Organization identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-C: read one organization. Requires tenant.read on it; an organization
+        the caller cannot see reports 404.'
+      tags:
+      - tenants
+    patch:
+      operationId: updateTenant
+      parameters:
+      - description: Organization identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Organization identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTenantRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-C: rename, re-describe, archive or reactivate an organization.
+        Requires tenant.manage on it.'
+      tags:
+      - tenants
+  /api/v1/tenants/{id}/members:
+    get:
+      operationId: listTenantMembers
+      parameters:
+      - description: Organization identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Organization identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListTenantMembersResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-C: list an organization''s members. Requires tenant.members.read
+        on it.'
+      tags:
+      - tenants
+    post:
+      operationId: addTenantMember
+      parameters:
+      - description: Organization identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Organization identifier.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddTenantMemberRequest'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantMemberView'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-C: add an account to an organization, or change its role there.
+        Requires tenant.members.manage on it.'
+      tags:
+      - tenants
+  /api/v1/tenants/{id}/members/{userId}:
+    delete:
+      operationId: removeTenantMember
+      parameters:
+      - description: Organization identifier.
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Organization identifier.
+          type: string
+      - description: User identifier.
+        in: path
+        name: userId
+        required: true
+        schema:
+          description: User identifier.
+          type: string
+      responses:
+        "204":
+          description: No Content
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-C: remove an account from an organization. Everything it reached
+        through the membership stops on its next request.'
+      tags:
+      - tenants
   /api/v1/usage/sessions:
     get:
       operationId: listCompactSessionUsage
@@ -9572,6 +9914,8 @@ components:
           type:
           - "null"
           - string
+        tenantId:
+          type: string
       required:
       - path
       type: object
@@ -9581,6 +9925,21 @@ components:
           enum:
           - maintainer
           - member
+          type: string
+        userId:
+          type: string
+      required:
+      - userId
+      - role
+      type: object
+    AddTenantMemberRequest:
+      properties:
+        role:
+          enum:
+          - owner
+          - admin
+          - member
+          - viewer
           type: string
         userId:
           type: string
@@ -14582,6 +14941,16 @@ components:
       - name
       - description
       type: object
+    CreateTenantRequest:
+      properties:
+        description:
+          type: string
+        name:
+          type: string
+      required:
+      - name
+      - description
+      type: object
     CreateUserRequest:
       properties:
         displayName:
@@ -15245,6 +15614,24 @@ components:
           type: array
       required:
       - teams
+      type: object
+    ListTenantMembersResponse:
+      properties:
+        members:
+          items:
+            $ref: '#/components/schemas/TenantMemberView'
+          type: array
+      required:
+      - members
+      type: object
+    ListTenantsResponse:
+      properties:
+        tenants:
+          items:
+            $ref: '#/components/schemas/TenantView'
+          type: array
+      required:
+      - tenants
       type: object
     ListUsersResponse:
       properties:
@@ -15959,6 +16346,8 @@ components:
           - string
         repo:
           type: string
+        tenantId:
+          type: string
       required:
       - repo
       type: object
@@ -16137,6 +16526,8 @@ components:
         resolveError:
           type: string
         sessionPrefix:
+          type: string
+        tenantId:
           type: string
         valid:
           type: boolean
@@ -17617,6 +18008,72 @@ components:
       - createdAt
       - updatedAt
       type: object
+    TenantMemberView:
+      properties:
+        createdAt:
+          format: date-time
+          type: string
+        role:
+          enum:
+          - owner
+          - admin
+          - member
+          - viewer
+          type: string
+        tenantId:
+          type: string
+        userId:
+          type: string
+      required:
+      - tenantId
+      - userId
+      - role
+      - createdAt
+      type: object
+    TenantResponse:
+      properties:
+        tenant:
+          $ref: '#/components/schemas/TenantView'
+      required:
+      - tenant
+      type: object
+    TenantView:
+      properties:
+        createdAt:
+          format: date-time
+          type: string
+        description:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+        role:
+          enum:
+          - owner
+          - admin
+          - member
+          - viewer
+          type: string
+        slug:
+          type: string
+        status:
+          enum:
+          - active
+          - archived
+          type: string
+        updatedAt:
+          format: date-time
+          type: string
+      required:
+      - id
+      - name
+      - slug
+      - description
+      - status
+      - createdAt
+      - updatedAt
+      type: object
     TrackerIntakeConfig:
       properties:
         assignee:
@@ -17725,6 +18182,20 @@ components:
       - title
       type: object
     UpdateTeamRequest:
+      properties:
+        archived:
+          type:
+          - "null"
+          - boolean
+        description:
+          type: string
+        name:
+          type: string
+      required:
+      - name
+      - description
+      type: object
+    UpdateTenantRequest:
       properties:
         archived:
           type:

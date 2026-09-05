@@ -25,6 +25,10 @@ var projectScopedRoutePrefixes = []string{
 	"/api/v1/reviews/",
 	"/api/v1/prs/",
 	"/api/v1/usage/",
+	// P4-C: every /tenants route is decided per organization, which the
+	// middleware cannot resolve from the path alone -- the same reason
+	// /projects is here. POST /tenants asks AllowGlobal inside the handler.
+	"/api/v1/tenants",
 }
 
 // unauthorizedByDesignRoutes are the /api/v1 families deliberately reachable

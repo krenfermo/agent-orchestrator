@@ -27,6 +27,7 @@ func (s *Store) InsertTeam(ctx context.Context, t domain.Team) (domain.Team, err
 		Status:      t.Status,
 		CreatedAt:   t.CreatedAt,
 		UpdatedAt:   t.UpdatedAt,
+		TenantID:    tenantOrDefault(t.TenantID),
 	})
 	if err != nil {
 		return domain.Team{}, fmt.Errorf("insert team: %w", err)
@@ -231,6 +232,7 @@ func teamFromRow(row gen.Team) domain.Team {
 		Status:      row.Status,
 		CreatedAt:   row.CreatedAt,
 		UpdatedAt:   row.UpdatedAt,
+		TenantID:    row.TenantID,
 	}
 }
 

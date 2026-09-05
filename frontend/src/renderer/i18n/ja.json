@@ -1363,6 +1363,7 @@
 	"shell.spawnProjectOrchestrator": "{{name}} のオーケストレーターを起動",
 	"shell.spawning": "起動中…",
 	"shell.spawningDots": "起動中...",
+	"shell.switchOrganization": "組織を切り替える",
 	"shell.terminateNamed": "{{title}} を終了",
 	"shell.terminateSession": "セッションを終了",
 	"shell.toggleProject": "{{name}} のセッションを切り替え",

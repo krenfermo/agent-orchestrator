@@ -29,6 +29,14 @@ type OwnershipStore interface {
 	SetProjectOwner(ctx context.Context, id domain.ProjectID, owner domain.UserID) (bool, error)
 }
 
+// TenantPlacement is P4-C's project-tenancy surface. Deliberately as narrow as
+// OwnershipStore and wired the same way: nil keeps every pre-P4-C
+// configuration behaving exactly as it did, with projects landing in the
+// default organization by the column default.
+type TenantPlacement interface {
+	SetProjectTenant(ctx context.Context, id domain.ProjectID, tenant domain.TenantID) (bool, error)
+}
+
 // ProjectsController owns the /projects routes. The controller depends only on
 // projectsvc.Manager; nil keeps routes registered but returns OpenAPI-backed 501s.
 type ProjectsController struct {
@@ -47,6 +55,9 @@ type ProjectsController struct {
 	// team), not because their user id matches a column. A zero Guard leaves
 	// the pre-P4-B behavior exactly as it was.
 	Guard Guard
+	// Tenancy places a newly registered project in an organization (P4-C).
+	// Nil preserves pre-P4-C behavior exactly.
+	Tenancy TenantPlacement
 }
 
 // ownerForbidden reports whether a resource's stored owner (nil means
@@ -163,12 +174,40 @@ func (c *ProjectsController) add(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
 		return
 	}
-	p, err := c.Mgr.Add(r.Context(), in)
+	c.registerProject(w, r, in.TenantID, func(ctx context.Context) (projectsvc.Project, error) {
+		return c.Mgr.Add(ctx, in)
+	})
+}
+
+// registerProject is the shared tail of every route that brings a NEW project
+// into the installation. Each caller decodes its own body and calls its own
+// manager method; everything after that is identical, and has to STAY
+// identical -- a registration path that forgets to stamp ownership leaves a
+// project nobody owns, and one that forgets to stamp tenancy leaves a project
+// sitting in whichever organization the column default put it in. One place
+// for both stamps is what keeps a third registration route from having to
+// remember either.
+//
+// Note the ordering: the organization is resolved BEFORE the project is
+// created, so an ambiguous or unreachable choice is refused while there is
+// still nothing to clean up.
+func (c *ProjectsController) registerProject(
+	w http.ResponseWriter,
+	r *http.Request,
+	requestedTenant string,
+	create func(ctx context.Context) (projectsvc.Project, error),
+) {
+	tenant, ok := c.resolveTenant(w, r, requestedTenant)
+	if !ok {
+		return
+	}
+	p, err := create(r.Context())
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
 	}
 	c.stampOwner(r, p.ID)
+	c.stampTenant(r, p.ID, tenant)
 	envelope.WriteJSON(w, http.StatusCreated, ProjectResponse{Project: p})
 }
 
@@ -216,13 +255,9 @@ func (c *ProjectsController) clone(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
 		return
 	}
-	p, err := c.Mgr.CloneFromGitHub(r.Context(), in)
-	if err != nil {
-		envelope.WriteError(w, r, err)
-		return
-	}
-	c.stampOwner(r, p.ID)
-	envelope.WriteJSON(w, http.StatusCreated, ProjectResponse{Project: p})
+	c.registerProject(w, r, in.TenantID, func(ctx context.Context) (projectsvc.Project, error) {
+		return c.Mgr.CloneFromGitHub(ctx, in)
+	})
 }
 
 func (c *ProjectsController) get(w http.ResponseWriter, r *http.Request) {
@@ -355,6 +390,85 @@ func (c *ProjectsController) stampOwner(r *http.Request, id domain.ProjectID) {
 		return
 	}
 	_, _ = c.Ownership.SetProjectOwner(r.Context(), id, user.ID)
+}
+
+// resolveTenant decides which organization a newly registered project belongs
+// to, BEFORE the project is created. Ordering matters: refusing an ambiguous
+// request after the project already exists would leave it sitting in whichever
+// organization the column default put it in, which is the outcome this whole
+// function exists to prevent.
+//
+// The rules are Step 9's, and they are shaped so the common case never sees
+// them. A caller who belongs to one organization gets that one and is never
+// asked. A caller who belongs to several must say which -- silently picking
+// for them would eventually put somebody's repository in front of the wrong
+// company. A caller who names one must be able to reach it.
+//
+// ok is false when a response has already been written.
+func (c *ProjectsController) resolveTenant(w http.ResponseWriter, r *http.Request, requested string) (domain.TenantID, bool) {
+	if c.Tenancy == nil || !c.Guard.Enabled() {
+		// Pre-P4-C wiring: the column default decides, exactly as before.
+		return "", true
+	}
+	sub, ok := c.Guard.Subject(r)
+	if !ok {
+		envelope.WriteError(w, r, identity.Unauthorized())
+		return "", false
+	}
+	if requested != "" {
+		id := domain.TenantID(requested)
+		// An organization the caller cannot even see must answer as though it
+		// does not exist, for the reason AllowTenant gives.
+		if !sub.Allows(domain.PermTenantRead, domain.TenantResource(id)) {
+			envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "TENANT_NOT_FOUND",
+				"organization not found", nil)
+			return "", false
+		}
+		if role, held := sub.TenantRole(id); !held || role == domain.TenantRoleViewer {
+			envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "TENANT_READ_ONLY",
+				"this account cannot register projects in that organization", nil)
+			return "", false
+		}
+		return id, true
+	}
+	candidates := make([]domain.TenantID, 0, len(sub.TenantRoles))
+	for _, id := range sub.TenantIDs() {
+		if sub.TenantRoles[id] == domain.TenantRoleViewer {
+			continue
+		}
+		candidates = append(candidates, id)
+	}
+	switch len(candidates) {
+	case 0:
+		// An installation administrator with no membership row of its own.
+		// The default organization is where everything else already is.
+		return domain.DefaultTenantID, true
+	case 1:
+		return candidates[0], true
+	default:
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "TENANT_REQUIRED",
+			"this account belongs to more than one organization; name the one to register the project in",
+			map[string]any{"tenantIds": tenantIDStrings(candidates)})
+		return "", false
+	}
+}
+
+func tenantIDStrings(in []domain.TenantID) []string {
+	out := make([]string, 0, len(in))
+	for _, id := range in {
+		out = append(out, string(id))
+	}
+	return out
+}
+
+// stampTenant places a freshly registered project in the organization
+// resolveTenant chose. An empty tenant means "leave the column default alone",
+// which is the pre-P4-C path.
+func (c *ProjectsController) stampTenant(r *http.Request, id domain.ProjectID, tenant domain.TenantID) {
+	if c.Tenancy == nil || tenant == "" {
+		return
+	}
+	_, _ = c.Tenancy.SetProjectTenant(r.Context(), id, tenant)
 }
 
 // projectVisible reports whether id is visible to current — true for an

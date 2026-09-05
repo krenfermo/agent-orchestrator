@@ -18,6 +18,7 @@ var globalRolePermissions = map[domain.UserRole]map[domain.Permission]bool{
 		domain.PermSettingsRead, domain.PermSettingsManage,
 		domain.PermUsersRead, domain.PermUsersManage,
 		domain.PermTeamsRead, domain.PermTeamsManage,
+		domain.PermTenantCreate,
 		domain.PermAuditRead,
 	),
 	// An administrator holds every global permission the owner does. The
@@ -31,6 +32,10 @@ var globalRolePermissions = map[domain.UserRole]map[domain.Permission]bool{
 		domain.PermSettingsRead, domain.PermSettingsManage,
 		domain.PermUsersRead, domain.PermUsersManage,
 		domain.PermTeamsRead, domain.PermTeamsManage,
+		// Founding an organization is an installation-level act: it creates a
+		// boundary the installation's administrators are responsible for. A
+		// member who could mint one could mint itself an unsupervised corner.
+		domain.PermTenantCreate,
 		domain.PermAuditRead,
 	),
 	// A member can register projects (becoming their project admin) and read
@@ -127,6 +132,101 @@ func maxProjectRole(a, b domain.ProjectRole) domain.ProjectRole {
 		return b
 	}
 	return a
+}
+
+// tenantRolePermissions maps a role held WITHIN an organization to the
+// tenant-scope permissions it grants there. Note what is NOT in this table:
+// nothing about projects. Belonging to an organization and being able to reach
+// one of its repositories are deliberately two questions, so that an
+// organization can have members who see only the projects they were given --
+// which is the ordinary case, not an edge case.
+var tenantRolePermissions = map[domain.TenantRole]map[domain.Permission]bool{
+	// The owner and the administrator hold the same tenant permissions. The
+	// difference between them is not a permission: it is the last-owner rule
+	// in service/tenants, which refuses to let an administrator demote or
+	// remove the owner. Expressing that as a missing permission would be
+	// wrong -- an administrator genuinely does manage the membership.
+	domain.TenantRoleOwner: permSet(
+		domain.PermTenantRead, domain.PermTenantManage,
+		domain.PermTenantMembersRead, domain.PermTenantMembersManage,
+	),
+	domain.TenantRoleAdmin: permSet(
+		domain.PermTenantRead, domain.PermTenantManage,
+		domain.PermTenantMembersRead, domain.PermTenantMembersManage,
+	),
+	// A member sees the organization it belongs to and who else is in it --
+	// it has to, to ask a colleague for access to a project -- and changes
+	// neither.
+	domain.TenantRoleMember: permSet(
+		domain.PermTenantRead,
+		domain.PermTenantMembersRead,
+	),
+	// A viewer sees that the organization exists. Not its membership: a
+	// read-only account has no one to ask and no reason to enumerate people.
+	domain.TenantRoleViewer: permSet(
+		domain.PermTenantRead,
+	),
+}
+
+// crossTenantRole is the tenant role an installation-wide role holds in EVERY
+// organization. Only the installation's owner and administrators have one, and
+// each holds the matching tenant role: the person who administers the accounts
+// in an organization cannot be locked out of the organization itself.
+//
+// This is also what keeps the single-user installation identical to what it
+// was before P4-C. Its one account is the installation owner, so it owns every
+// organization there will ever be, and nothing it could do yesterday is
+// refused today.
+func crossTenantRole(role domain.UserRole) domain.TenantRole {
+	switch role {
+	case domain.UserRoleOwner:
+		return domain.TenantRoleOwner
+	case domain.UserRoleAdmin:
+		return domain.TenantRoleAdmin
+	default:
+		return ""
+	}
+}
+
+// tenantRoleCap is the ceiling an installation role puts on any tenant role.
+// An installation viewer added to an organization as its administrator is
+// still a viewer there, for the reason projectRoleCap gives: the global role
+// is a statement about the person, and a scoped membership cannot promote past
+// it. Returning TenantRoleOwner means "no ceiling".
+func tenantRoleCap(role domain.UserRole) domain.TenantRole {
+	if role == domain.UserRoleViewer {
+		return domain.TenantRoleViewer
+	}
+	return domain.TenantRoleOwner
+}
+
+// capTenantRole applies the ceiling.
+func capTenantRole(role, ceiling domain.TenantRole) domain.TenantRole {
+	if role.Rank() > ceiling.Rank() {
+		return ceiling
+	}
+	return role
+}
+
+// maxTenantRole is the more generous of two tenant roles.
+func maxTenantRole(a, b domain.TenantRole) domain.TenantRole {
+	if b.Rank() > a.Rank() {
+		return b
+	}
+	return a
+}
+
+// tenantProjectRoleCap is the ceiling an organization role puts on any project
+// role held inside that organization. A tenant viewer is a viewer on every
+// project there, whatever grant it holds -- the same rule as the installation
+// viewer, applied one scope in. Owner, admin and member impose no ceiling:
+// what a member may do in a project is decided entirely by its grant, which is
+// what makes per-project access meaningful within an organization.
+func tenantProjectRoleCap(role domain.TenantRole) domain.ProjectRole {
+	if role == domain.TenantRoleViewer {
+		return domain.ProjectRoleViewer
+	}
+	return domain.ProjectRoleAdmin
 }
 
 func permSet(perms ...domain.Permission) map[domain.Permission]bool {

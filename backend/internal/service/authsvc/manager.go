@@ -55,6 +55,11 @@ type Store interface {
 
 	BackfillProjectOwners(ctx context.Context, owner domain.UserID) (int64, error)
 	BackfillWorkflowRunOwners(ctx context.Context, owner domain.UserID) (int64, error)
+
+	// P4-C. Every account needs a home organization the moment it exists --
+	// see insertUser.
+	UpsertTenantMembership(ctx context.Context, m domain.TenantMembership) (domain.TenantMembership, error)
+	ListActiveTenantMembershipsForUser(ctx context.Context, user domain.UserID) ([]domain.TenantMembership, error)
 }
 
 // CreateUserInput is the input to CreateUser. Password is plaintext in
@@ -206,7 +211,7 @@ func (s *Service) CreateUser(ctx context.Context, in CreateUserInput) (domain.Us
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	created, err := s.store.InsertUser(ctx, u)
+	created, err := s.insertUser(ctx, u)
 	if err != nil {
 		if isOwnerUniqueConstraintErr(err) {
 			return domain.User{}, apierr.Conflict("SETUP_ALREADY_COMPLETED", "this installation already has an owner account", nil)
@@ -215,6 +220,38 @@ func (s *Service) CreateUser(ctx context.Context, in CreateUserInput) (domain.Us
 			return domain.User{}, apierr.Conflict("USER_ALREADY_EXISTS", "a user with that email or username already exists", nil)
 		}
 		return domain.User{}, fmt.Errorf("create user: %w", err)
+	}
+	return created, nil
+}
+
+// insertUser persists an account AND places it in its home organization. Every
+// account-creation path in this package goes through here rather than calling
+// the store directly, because an account that belongs to no organization is a
+// broken account: P4-C resolves project access only within organizations the
+// caller is a member of, so a tenant-less account would authenticate perfectly
+// and then be shown an empty application. Making this the only way to insert a
+// user is what keeps a future fourth creation path from reintroducing that.
+//
+// The home organization is the default one, at the tenant role matching the
+// account's installation role -- exactly what migration 0156 backfilled for
+// the accounts that already existed. Placing an account somewhere else is a
+// membership change, made deliberately through the tenant API, not a side
+// effect of how the account was created.
+func (s *Service) insertUser(ctx context.Context, u domain.User) (domain.User, error) {
+	created, err := s.store.InsertUser(ctx, u)
+	if err != nil {
+		return domain.User{}, err
+	}
+	now := s.now().UTC()
+	if _, err := s.store.UpsertTenantMembership(ctx, domain.TenantMembership{
+		ID:        uuid.NewString(),
+		TenantID:  domain.DefaultTenantID,
+		UserID:    created.ID,
+		Role:      domain.TenantRoleForUserRole(created.Role),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		return domain.User{}, fmt.Errorf("place new account in its home organization: %w", err)
 	}
 	return created, nil
 }

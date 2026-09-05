@@ -3,6 +3,7 @@ import { apiClient, apiErrorMessage, hasTrustedApiBaseUrl, setUnauthorizedListen
 import { aoBridge } from "../lib/bridge";
 import { isDesktopMode } from "../lib/platform-adapter";
 import type { components } from "../../api/schema";
+import { useTenantStore } from "./tenant-store";
 
 type UserView = components["schemas"]["ControllersUserView"];
 type AuthProviders = components["schemas"]["ControllersAuthProvidersResponse"];
@@ -334,6 +335,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 			// Best-effort: clear local state regardless of network outcome.
 		}
 		set({ ...signedOutState, error: null });
+		// P4-C: drop the organization list with the identity that could see it.
+		// Keeping it would leave the next person to sign in on this machine
+		// looking at the previous one's organization names.
+		useTenantStore.getState().reset();
 		void get().load();
 		// The AO session is already gone. This only OFFERS the provider's own
 		// sign-out; a provider that advertises none returns nothing here, and

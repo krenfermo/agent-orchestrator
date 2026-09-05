@@ -65,6 +65,19 @@ const (
 	// PermTeamsManage is "create, rename, archive teams and edit membership".
 	PermTeamsManage Permission = "teams.manage"
 
+	// PermTenantCreate is global, not tenant-scoped: founding a NEW
+	// organization. There is no tenant to be scoped to yet, and the account
+	// that may create one is a statement about the installation.
+	PermTenantCreate Permission = "tenant.create"
+	// PermTenantRead is "see this organization and its settings".
+	PermTenantRead Permission = "tenant.read"
+	// PermTenantManage is "rename this organization, or archive it".
+	PermTenantManage Permission = "tenant.manage"
+	// PermTenantMembersRead is "see who belongs to this organization".
+	PermTenantMembersRead Permission = "tenant.members.read"
+	// PermTenantMembersManage is "add, remove or re-role its members".
+	PermTenantMembersManage Permission = "tenant.members.manage"
+
 	// PermAuditRead is "read the authorization/identity audit trail".
 	//
 	// The trail itself is real -- service/rbac and httpd/controllers.AuthAudit
@@ -90,22 +103,30 @@ var AllPermissions = []Permission{
 	PermSettingsRead, PermSettingsManage,
 	PermUsersRead, PermUsersManage,
 	PermTeamsRead, PermTeamsManage,
+	PermTenantCreate,
+	PermTenantRead, PermTenantManage,
+	PermTenantMembersRead, PermTenantMembersManage,
 	PermAuditRead,
 }
 
 // AuthzScope is the kind of resource a permission is evaluated against.
 //
-// P4-C adds AuthzScopeOrganization here and one more case to the resolver.
-// That is the whole reason authorization takes a scope at all rather than a
-// bare project id: a third scope must be a new case, not a rewrite.
+// P4-C added AuthzScopeTenant here and one more case to the resolver, which is
+// the whole reason authorization takes a scope at all rather than a bare
+// project id: a third scope is a new case, not a rewrite.
 type AuthzScope string
 
 const (
-	// AuthzScopeGlobal is the installation itself: users, teams, settings,
-	// providers, the audit trail.
+	// AuthzScopeGlobal is the installation itself: users, settings,
+	// providers, the audit trail, founding an organization.
 	AuthzScopeGlobal AuthzScope = "global"
+	// AuthzScopeTenant is one organization: its settings and its membership.
+	// Not the projects inside it -- those are their own scope, so that
+	// belonging to an organization and reaching one of its repositories stay
+	// two separate questions.
+	AuthzScopeTenant AuthzScope = "tenant"
 	// AuthzScopeProject is one project and everything under it -- its
-	// workflows, runs, sessions, memory and usage.
+	// workflows, runs, sessions, notifications, memory and usage.
 	AuthzScopeProject AuthzScope = "project"
 )
 
@@ -121,6 +142,9 @@ func ScopeOf(p Permission) AuthzScope {
 		PermSessionRead, PermSessionWrite,
 		PermMemoryRead, PermUsageRead:
 		return AuthzScopeProject
+	case PermTenantRead, PermTenantManage,
+		PermTenantMembersRead, PermTenantMembersManage:
+		return AuthzScopeTenant
 	default:
 		return AuthzScopeGlobal
 	}
@@ -133,10 +157,22 @@ type AuthzResource struct {
 	Scope AuthzScope
 	// Project is set when Scope is AuthzScopeProject.
 	Project ProjectID
+	// Tenant is set when Scope is AuthzScopeTenant.
+	//
+	// It is deliberately NOT set for a project resource. A project's tenancy
+	// is a durable fact the resolver reads from the database; letting a caller
+	// pass it in would make authorization believe whichever tenant the caller
+	// named, which is the one direction this must never be wrong in.
+	Tenant TenantID
 }
 
 // GlobalResource is the installation itself.
 func GlobalResource() AuthzResource { return AuthzResource{Scope: AuthzScopeGlobal} }
+
+// TenantResource is one organization.
+func TenantResource(id TenantID) AuthzResource {
+	return AuthzResource{Scope: AuthzScopeTenant, Tenant: id}
+}
 
 // ProjectResource is one project.
 func ProjectResource(id ProjectID) AuthzResource {
@@ -248,6 +284,11 @@ type Team struct {
 	Status      TeamStatus
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	// TenantID is the organization the team belongs to (P4-C). A team is
+	// tenant-owned so that a team in one organization can never hold a grant
+	// on a project in another; the store substitutes DefaultTenantID for a
+	// zero value on write.
+	TenantID TenantID
 }
 
 // TeamRole is a member's standing within a team. P4-B records it but gates
