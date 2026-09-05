@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/claudecode"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/codex"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/capacityprobe"
 	plannercommand "github.com/aoagents/agent-orchestrator/backend/internal/adapters/planner/command"
 	workspacerouter "github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/router"
@@ -231,6 +233,7 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 	if plannerModel == "" {
 		plannerModel = "sonnet"
 	}
+	plannerFallback := plannerBinaryFallback(plannerBinary)
 	// Checkpoint 8N: the durable wake-up scheduler backing automatic
 	// capacity-wait resumption (see backend/internal/workflow/wakepoller for
 	// the daemon-level poller that actually claims and fires these). Real
@@ -288,7 +291,7 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		// (scaledTimeout) may stretch it for a large MEDUSA-class objective +
 		// repository context payload. Neither value is a blind global bump --
 		// small objectives still finish (or time out) inside 3 minutes.
-		Planner: plannercommand.Planner{Binary: plannerBinary, Model: plannerModel, Timeout: 3 * time.Minute, MaxTimeout: 12 * time.Minute, Logger: log},
+		Planner: plannercommand.Planner{Binary: plannerBinary, Model: plannerModel, Timeout: 3 * time.Minute, MaxTimeout: 12 * time.Minute, Logger: log, ResolveFallback: plannerFallback},
 		// P2-B §5: the drift comparison asks this builder for DIGESTS, and the
 		// memory-backed variant answers them from the digest ledger instead of
 		// re-reading the six planner documents. Build itself is unchanged --
@@ -675,6 +678,26 @@ func (l workflowWorkerLiveness) SessionAlive(ctx context.Context, id domain.Sess
 func dialogKeySenderFor(paneReader workflowcore.PaneReader) workflowcore.DialogKeySender {
 	if sender, ok := paneReader.(workflowcore.DialogKeySender); ok {
 		return sender
+	}
+	return nil
+}
+
+// plannerBinaryFallback picks the well-known-install-location resolver that
+// matches the configured planner binary, so the planner finds its CLI in the
+// same places every agent adapter already looks.
+//
+// This is the ONE place a provider name is attached to the planner launch, and
+// it lives in wiring for that reason: the planner adapter stays
+// provider-neutral, and the agent adapters keep sole ownership of where their
+// own CLI can be installed. An unrecognised binary (a custom AO_PLANNER_BIN)
+// gets no fallback and is resolved from PATH alone, which is the honest answer
+// for a binary AO knows nothing about.
+func plannerBinaryFallback(binary string) func(context.Context) (string, error) {
+	switch name := strings.ToLower(filepath.Base(binary)); {
+	case name == "claude" || name == "claude.exe" || name == "claude.cmd":
+		return claudecode.ResolveClaudeBinary
+	case strings.HasPrefix(name, "codex"):
+		return codex.ResolveCodexBinary
 	}
 	return nil
 }

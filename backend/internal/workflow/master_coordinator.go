@@ -263,7 +263,7 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 	// marks the plan row as running, and a plan row claiming a planner nobody
 	// was allowed to start is worse than a plan that waits. A refusal reuses
 	// the planner-capacity park the provider-capacity path already has.
-	planCap := c.plannerCapacityRequest(run, int64(c.plannerRetryCount(ctx, runID)+1))
+	planCap := c.plannerCapacityRequest(run, plannerCapacityGeneration(plan, c.plannerRetryCount(ctx, runID)))
 	if admitted, cerr := c.acquireCapacity(ctx, planCap); cerr != nil {
 		return RunDetail{}, cerr
 	} else if !admitted {
@@ -287,7 +287,16 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 	// provider-selection mechanism 8P-C hasn't built yet.
 	runtimeEnv, _, _, err := c.resolveRuntimeEnv(ctx, run.ID, domain.HarnessClaudeCode)
 	if err != nil {
-		return c.failPlan(ctx, run, "planner_start_failed", err)
+		// This is the profile-resolution half of the launch contract, and it
+		// runs BEFORE any subprocess exists. Its one expected failure --
+		// "this workflow's owner has no connected profile for this provider"
+		// -- is an auth/configuration gap with a specific repair, so it stops
+		// under the reason that names it rather than under the generic
+		// "the planner could not be started".
+		if errors.Is(err, ports.ErrProviderProfileRequired) {
+			return c.failPlan(ctx, run, ReasonPlannerAuthUnavailable, err)
+		}
+		return c.failPlan(ctx, run, ReasonPlannerStartFailed, err)
 	}
 	// The planner runs on a workflow-owned execution context, never on the
 	// caller's: this same GeneratePlan is entered from an HTTP request
@@ -296,7 +305,27 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 	// must not be killed by either. What it must still obey -- daemon
 	// shutdown, cancellation of this run, and the adapter's own bounded
 	// timeout -- it does; see plannerExecutionContext.
+	//
+	// CP-PLR: that context now governs the WHOLE second half of this function,
+	// not just the subprocess call, and the reason is a defect this incident
+	// exposed. The REST group's request timeout is 60 seconds
+	// (config.DefaultRequestTimeout) while a planner's own budget runs to 12
+	// minutes, so every real objective's `POST .../plan/generate` outlives its
+	// own request. Before this, only Generate ran detached: the planner
+	// produced a real plan and then EVERY durable write that followed it --
+	// the usage record, the capacity release, and the plan row itself -- ran
+	// on the caller's already-dead context and failed with "context deadline
+	// exceeded". The observed result on the real installation was a plan row
+	// stuck at running/running holding `{}` with an 11.5 KB plan discarded, a
+	// planner capacity claim leaked in `held` forever, and a 500 to the
+	// operator. Every later attempt then hit "planner command already running"
+	// -- the objective was wedged, permanently, by AO's own bookkeeping.
+	//
+	// So the boundary moves to where the work actually ends: the caller's
+	// context decides whether to WAIT for the answer, and the run's own
+	// execution context decides whether the answer is RECORDED.
 	plannerCtx, releasePlannerCtx := c.plannerExecutionContext(ctx, run.ID)
+	defer releasePlannerCtx()
 	plannerInvocation := plannerUsageSubject(run.ID, c.plannerRetryCount(ctx, runID)+1)
 	// P3-E: the planner's attribution window and its usage subject.
 	//
@@ -306,27 +335,26 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 	// print-mode envelope the adapter already parses, and is recorded against
 	// this same subject below. The window is opened first so it precedes any
 	// token the call could spend.
-	c.openUsageWindow(ctx, usageWindowSpec{
+	c.openUsageWindow(plannerCtx, usageWindowSpec{
 		Subject: plannerInvocation, Role: domain.WorkflowRolePlanner, Run: run,
 		Provider: provider, Model: model, OpenedAt: c.clock(),
 	})
 	response, err := c.planner.Generate(plannerCtx, PlannerRequest{Objective: run.Objective, Project: project, Context: contextValue, MaxSteps: MaxPlanSteps, RuntimeEnv: runtimeEnv})
-	releasePlannerCtx()
 	// P3-E: what this invocation actually spent, recorded on BOTH outcomes. A
 	// planner call that timed out after the provider generated most of a plan
 	// is billed exactly like one that succeeded, so metering only the success
 	// path would under-report every objective that needed a second attempt.
 	if err != nil {
 		if failed, ok := PlannerEvidenceFrom(err); ok {
-			c.recordPlannerUsage(ctx, plannerInvocation, provider, model, failed)
+			c.recordPlannerUsage(plannerCtx, plannerInvocation, provider, model, failed)
 		}
 	} else {
-		c.recordPlannerUsage(ctx, plannerInvocation, response.Provider, response.Model, response.Evidence)
+		c.recordPlannerUsage(plannerCtx, plannerInvocation, response.Provider, response.Model, response.Evidence)
 	}
 	// P1-C: the planner slot goes back the instant the planner returns,
 	// whatever it returned. A planner that failed still finished, and its
 	// retry is a new launch intent with its own claim.
-	c.releaseCapacity(ctx, planCap, "planner invocation finished")
+	c.releaseCapacity(plannerCtx, planCap, "planner invocation finished")
 	if err != nil {
 		// Checkpoint 8N.1: a capacity/rate-limit-shaped planner failure must
 		// never be treated the same as a real permanent failure (parse
@@ -336,7 +364,7 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 		// specific substring rules that could drift from it.
 		cls := classifyProviderFailure(err)
 		if cls.Eligible && (cls.Class == domain.WorkflowErrorRateLimited || cls.Class == domain.WorkflowErrorCapacityExhausted || cls.Class == domain.WorkflowErrorTransient) {
-			return c.parkPlanForCapacity(ctx, run, err)
+			return c.parkPlanForCapacity(plannerCtx, run, err)
 		}
 		// Checkpoint 8P-E.10: classify by the adapter's typed sentinels
 		// (errors.Is), not by substring-matching err.Error() -- the prior
@@ -349,24 +377,60 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 		// Checkpoint 8P-E.13 Phase 3: a timeout and a malformed response are
 		// both retryable facts about one attempt, not verdicts about the
 		// objective — and neither is anything a human can repair by answering a
-		// question. They now go through retryPlanOrFail, which retries a bounded
-		// number of times and only then stops. planner_start_failed keeps
-		// failing immediately: it means the planner never ran at all (bad auth,
-		// missing binary), which retrying cannot change.
+		// question. They go through retryPlanOrFail, which retries a bounded
+		// number of times and only then stops.
+		//
+		// The launch-failure sentinels come FIRST, and their policy is
+		// derived from what the provider actually said rather than from the
+		// absence of anything to read.
+		//
+		// wf-7f8cc736 is why. Every planner failure -- a CLI that was never
+		// installed, a credential that had expired, a provider that died
+		// mid-call -- arrived here as one untyped error carrying 500 bytes of
+		// the CLI's metrics block, so the classifier above could not see a
+		// rate limit and this switch could not see anything at all. All of it
+		// fell through to failPlan(ReasonPlannerStartFailed), which is
+		// NONRECOVERABLE: a provider hiccup permanently invalidated the
+		// objective's plan, and the sentence a person read named neither the
+		// cause nor the repair.
+		//
+		// The split below is the whole retry policy, and it is explicit about
+		// which side of the line each cause sits on:
+		//
+		//   never retried -- a second identical attempt cannot change the
+		//   answer, and pretending otherwise burns provider budget to arrive
+		//   at the same stop: the binary is not there, the credential is
+		//   rejected, the profile directory is unreadable, the CLI refuses the
+		//   invocation.
+		//
+		//   bounded retry -- the process started and died without saying why.
+		//   That is a fact about one attempt, so it goes through
+		//   retryPlanOrFail exactly like a timeout, and stops for a person
+		//   only once the budget is spent.
 		switch {
+		case errors.Is(err, ports.ErrPlannerBinaryMissing):
+			return c.failPlan(plannerCtx, run, ReasonPlannerBinaryMissing, err)
+		case errors.Is(err, ports.ErrPlannerAuthRequired):
+			return c.failPlan(plannerCtx, run, ReasonPlannerAuthUnavailable, err)
+		case errors.Is(err, ports.ErrPlannerRuntimeHomeUnreadable):
+			return c.failPlan(plannerCtx, run, ReasonPlannerProfileUnreadable, err)
+		case errors.Is(err, ports.ErrPlannerUnsupportedInvocation):
+			return c.failPlan(plannerCtx, run, ReasonPlannerProviderUnsupported, err)
+		case errors.Is(err, ports.ErrPlannerLaunchFailed):
+			return c.retryPlanOrFail(plannerCtx, run, ReasonPlannerExitedEarly, err)
 		case errors.Is(err, ports.ErrPlannerTimeout):
-			return c.retryPlanOrFail(ctx, run, "planner_timeout", err)
+			return c.retryPlanOrFail(plannerCtx, run, "planner_timeout", err)
 		case errors.Is(err, ports.ErrPlannerOutputMalformed):
-			return c.retryPlanOrFail(ctx, run, "planner_parse_failed", err)
+			return c.retryPlanOrFail(plannerCtx, run, "planner_parse_failed", err)
 		case errors.Is(err, ports.ErrPlannerResultInconsistent):
 			// F2: the adapter got something readable back and proved it is not
 			// the answer the provider produced. Retryable for the same reason a
 			// timeout is, and under its OWN class so the stop a person
 			// eventually reads says the result was lost rather than that the
 			// objective was ambiguous.
-			return c.retryPlanOrFail(ctx, run, ReasonPlannerResultInconsistent, err)
+			return c.retryPlanOrFail(plannerCtx, run, ReasonPlannerResultInconsistent, err)
 		}
-		return c.failPlan(ctx, run, ReasonPlannerStartFailed, err)
+		return c.failPlan(plannerCtx, run, ReasonPlannerStartFailed, err)
 	}
 	if response.Provider != "" {
 		provider = response.Provider
@@ -376,17 +440,17 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 	}
 	raw, err := json.Marshal(response.Plan)
 	if err != nil {
-		return c.failPlan(ctx, run, "planner_parse_failed", err)
+		return c.failPlan(plannerCtx, run, "planner_parse_failed", err)
 	}
-	if moved, err := c.planStore.PersistWorkflowPlanResponse(ctx, runID, string(raw), c.clock()); err != nil {
+	if moved, err := c.planStore.PersistWorkflowPlanResponse(plannerCtx, runID, string(raw), c.clock()); err != nil {
 		return RunDetail{}, err
 	} else if !moved {
 		return RunDetail{}, ErrPlanLocked
 	}
-	plan, _, _ = c.planStore.GetWorkflowPlan(ctx, runID)
+	plan, _, _ = c.planStore.GetWorkflowPlan(plannerCtx, runID)
 	plan.Provider = provider
 	plan.Model = model
-	return c.finalizeGeneratedPlan(ctx, run, plan)
+	return c.finalizeGeneratedPlan(plannerCtx, run, plan)
 }
 
 func (c *Coordinator) finalizeGeneratedPlan(ctx stdctx.Context, run domain.WorkflowRun, record domain.WorkflowPlanRecord) (RunDetail, error) {

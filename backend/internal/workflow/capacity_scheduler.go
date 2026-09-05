@@ -716,3 +716,33 @@ func (c *Coordinator) heldClaimFor(ctx stdctx.Context, req capacityRequest) (dom
 	}
 	return claim, true, nil
 }
+
+// plannerCapacityGeneration is the planner claim's durable identity, and it is
+// the second half of the wf-7f8cc736 incident.
+//
+// A capacity claim's dispatch key folds in this generation, and acquireCapacity
+// refuses a launch whose key already names a RELEASED claim -- correctly, since
+// launching under a spent claim is the false-free-slot the model exists to
+// prevent. The generation therefore has to change whenever a planner launch is
+// genuinely a new intent.
+//
+// It used to be the retry count alone. That covers the automatic path (each
+// retry writes a planner_retry_scheduled checkpoint, so the count moves), and
+// misses the operator path entirely: a permanent planner failure writes no
+// retry checkpoint, so after an operator regenerates the plan the next attempt
+// reuses the key of the claim the FAILED attempt already released. Admission
+// then refuses it, forever, and reports "no runtime execution slot is currently
+// free" on a machine whose planner slots are entirely idle. The objective can
+// never be planned again by any means.
+//
+// The plan revision is what fixes it, and it is the right identity rather than
+// a workaround: RegeneratePlan mints a new revision precisely to say "this is a
+// new plan, not a retry of the old one". Both terms are kept -- the revision
+// separates operator-initiated replans, the retry count separates automatic
+// attempts within one revision -- so neither path can collide with the other.
+func plannerCapacityGeneration(plan domain.WorkflowPlanRecord, retries int) int64 {
+	revision := planRevisionOf(plan) // already floors at 1
+	// Revision-major so the two terms cannot alias: revision 2 attempt 1 must
+	// never land on the same generation as revision 1 attempt N.
+	return revision*int64(maxPlannerRetries+2) + int64(retries) + 1
+}

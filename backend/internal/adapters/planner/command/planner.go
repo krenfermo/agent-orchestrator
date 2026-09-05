@@ -87,6 +87,26 @@ type Planner struct {
 	// exec.CommandContext; tests inject a fake to exercise timeout scaling,
 	// envelope extraction, and retry behavior without a real CLI.
 	runCommand func(ctx context.Context, binary string, args []string, dir string, env []string) ([]byte, error)
+
+	// ResolveFallback finds this provider's CLI in its well-known install
+	// locations when the PATH the subprocess would inherit does not contain it.
+	//
+	// It exists because the planner was the ONLY provider launch in AO that did
+	// not have one. Every agent adapter resolves its binary through
+	// binaryutil.ResolveBinary, which probes ~/.local/bin, the Node version
+	// managers, Homebrew and the native installer paths after PATH; the planner
+	// handed a bare "claude" to exec and inherited whatever PATH the daemon
+	// happened to be started with. A daemon launched from the desktop app gets
+	// launchd's minimal PATH, which contains none of those locations -- so on a
+	// machine where every worker and reviewer launches correctly, the planner
+	// alone cannot find the same CLI.
+	//
+	// It is a function rather than a hardcoded lookup so this package stays
+	// provider-neutral: the wiring picks the resolver that matches the
+	// configured planner binary (see daemon.startWorkflows), and a Codex
+	// planner gets the Codex search path without this file naming either
+	// provider. Nil disables the fallback and leaves PATH as the only source.
+	ResolveFallback func(ctx context.Context) (string, error)
 }
 
 // logAttempt emits one line per attempt at the level its outcome deserves.
@@ -188,6 +208,24 @@ Conservative repository context:
 		}
 	}
 
+	// THE LAUNCH CONTRACT. One place resolves the executable, the working
+	// directory, the argv and the profile directory this invocation will use,
+	// from the environment it will actually receive -- and refuses, with a
+	// typed reason, a launch that could not possibly work. Everything below
+	// runs against that resolved plan, so an attempt either starts against a
+	// provider AO has verified it can see, or never starts at all. There is no
+	// third, half-started state.
+	plan, perr := p.resolveLaunch(ctx, args, req.Project.Path, env)
+	shape.BinaryPath = plan.BinaryPath
+	shape.ProfileVar = plan.ProfileVar
+	shape.ProfileDir = plan.ProfileDir
+	if perr != nil {
+		shape.Classification = classificationForPreflight(perr)
+		shape.DurationMS = 0
+		p.logAttempt(shape, perr)
+		return workflowcore.PlannerResponse{}, &workflowcore.PlannerAttemptError{Evidence: shape, Err: perr}
+	}
+
 	var lastErr error
 	for attempt := 0; attempt <= maxParseRetries; attempt++ {
 		if attempt > 0 {
@@ -202,11 +240,11 @@ Conservative repository context:
 			case <-time.After(parseRetryBackoff):
 			}
 		}
-		plan, provider, respModel, evidence, err := p.attempt(ctx, args, req.Project.Path, env, timeout, model, shape)
+		generated, provider, respModel, evidence, err := p.attempt(ctx, plan, timeout, model, shape)
 		p.logAttempt(evidence, err)
 		if err == nil {
 			return workflowcore.PlannerResponse{
-				Plan: plan, Provider: provider, Model: respModel, Evidence: evidence,
+				Plan: generated, Provider: provider, Model: respModel, Evidence: evidence,
 			}, nil
 		}
 		err = &workflowcore.PlannerAttemptError{Evidence: evidence, Err: err}
@@ -231,7 +269,7 @@ Conservative repository context:
 // attempt runs exactly one planner subprocess invocation and parses its
 // output. Split out of Generate so the bounded retry loop above has a single
 // place that decides whether an error is retry-eligible.
-func (p Planner) attempt(ctx context.Context, args []string, dir string, env []string, timeout time.Duration, model string, shape workflowcore.PlannerAttemptEvidence) (workflowcore.MasterPlan, string, string, workflowcore.PlannerAttemptEvidence, error) {
+func (p Planner) attempt(ctx context.Context, launch launchPlan, timeout time.Duration, model string, shape workflowcore.PlannerAttemptEvidence) (workflowcore.MasterPlan, string, string, workflowcore.PlannerAttemptEvidence, error) {
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -240,7 +278,11 @@ func (p Planner) attempt(ctx context.Context, args []string, dir string, env []s
 		run = runRealCommand
 	}
 	started := time.Now()
-	b, err := run(callCtx, p.Binary, args, dir, env)
+	// The RESOLVED path is what runs, not the name. Re-resolving the name
+	// inside exec would let the process AO verified and the process AO launched
+	// be different files -- and would silently discard the fallback lookup that
+	// found the CLI outside the subprocess PATH in the first place.
+	b, err := run(callCtx, launch.executable(), launch.Args, launch.Dir, launch.Env)
 	evidence := shape
 	evidence.DurationMS = time.Since(started).Milliseconds()
 	// The zero MasterPlan is structural: fail mirrors attempt's own return
@@ -265,7 +307,15 @@ func (p Planner) attempt(ctx context.Context, args []string, dir string, env []s
 		if callCtx.Err() != nil {
 			return fail(workflowcore.PlannerAttemptTimeout, fmt.Errorf("planner timeout: %w: %w", ports.ErrPlannerTimeout, callCtx.Err()))
 		}
-		return fail(workflowcore.PlannerAttemptCommandFailed, fmt.Errorf("planner command: %w: %s", err, strings.TrimSpace(snippet(b))))
+		// The subprocess ran and exited non-zero. Its own envelope says why --
+		// on the failure path just as on the success path -- so it is read
+		// here rather than replaced by the first 500 bytes of itself. See
+		// diagnosis.go for what that truncation cost wf-7f8cc736.
+		d := diagnoseFailure(b, err)
+		evidence.ExitCode = d.ExitCode
+		evidence.ProviderSubtype = d.Subtype
+		evidence.ProviderErrorStatus = d.APIErrorStatus
+		return fail(d.Classification, d.launchError(launch))
 	}
 
 	envelope, envErr := extractEnvelope(b)
@@ -321,6 +371,11 @@ type plannerEnvelope struct {
 	// stub structured_output would have been accepted as a plan and executed.
 	IsError bool   `json:"is_error"`
 	Subtype string `json:"subtype"`
+	// APIErrorStatus is the provider's transport-level verdict ("429",
+	// "invalid_api_key", ...) when the CLI reports one. Read only on the
+	// failure path, where it is often the ONLY machine-readable statement of
+	// why the invocation died.
+	APIErrorStatus string `json:"api_error_status"`
 	// Usage is the print-mode CLI's own token report for this call. It is the
 	// ONLY way the planner's spend can be observed: the invocation runs under
 	// --no-session-persistence, so it writes no transcript for the usage

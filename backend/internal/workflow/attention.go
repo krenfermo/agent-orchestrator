@@ -221,8 +221,29 @@ const (
 	ReasonFixGenerationUnprovable = "fix_generation_unprovable"
 	ReasonPlannerExhausted        = "planner_retries_exhausted"
 	ReasonPlannerStartFailed      = "planner_start_failed"
-	ReasonPlannerPolicyViolation  = "planner_policy_violation"
-	ReasonPlannerAmbiguous        = "planner_ambiguous"
+	// The launch-failure reasons that split ReasonPlannerStartFailed apart.
+	//
+	// ReasonPlannerStartFailed still exists and still means what it says, but
+	// it is now the residual it was always supposed to be: AO could not start
+	// the planner and cannot attribute why. Everything AO CAN attribute stops
+	// under one of the four below, each of which names a different repair --
+	// install the CLI, sign the provider in, fix the profile directory, fix
+	// the provider version -- where before all four read "check the planner
+	// provider's auth and installation".
+	ReasonPlannerBinaryMissing       = "planner_binary_missing"
+	ReasonPlannerAuthUnavailable     = "planner_auth_unavailable"
+	ReasonPlannerProfileUnreadable   = "planner_profile_unreadable"
+	ReasonPlannerProviderUnsupported = "planner_provider_unsupported"
+	// ReasonPlannerExitedEarly is the retryable one: the provider process
+	// started and exited without producing a plan, for a reason it did not
+	// attribute. It routes through the bounded planner retry exactly like
+	// "planner_timeout" does, so — like that class — it names the plan's
+	// error_class and the retry checkpoint's text, and never becomes a
+	// disposition of its own: the stop a person sees is planner_retry_scheduled
+	// while budget remains, and ReasonPlannerExhausted once it is spent.
+	ReasonPlannerExitedEarly     = "planner_exited_before_plan"
+	ReasonPlannerPolicyViolation = "planner_policy_violation"
+	ReasonPlannerAmbiguous       = "planner_ambiguous"
 	// ReasonPlannerResultInconsistent is F2's class, and it is deliberately
 	// NOT ReasonPlannerAmbiguous. Ambiguous means the objective genuinely did
 	// not say enough and a person must decide. This means the provider
@@ -514,7 +535,24 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonPlannerStartFailed: {
 		Nonrecoverable: true,
-		HumanAction:    "The planner could not be started. Check the planner provider's auth and installation, then retry planning.",
+		HumanAction:    "The planner could not be started and AO could not attribute why. The checkpoint carries the provider, the executable AO resolved and whatever the provider said before it stopped. Check that provider's installation and auth, then retry planning.",
+	},
+	ReasonPlannerBinaryMissing: {
+		Nonrecoverable: true,
+		HumanAction:    "The planner provider's CLI is not installed, or is not on the PATH the AO daemon can see (the checkpoint names the binary AO looked for and where it looked). Install it — or start the daemon from an environment whose PATH includes it — then retry planning.",
+	},
+	ReasonPlannerAuthUnavailable: {
+		Nonrecoverable: true,
+		Recovery:       domain.RecoveryAuthenticate,
+		HumanAction:    "The planner provider reported that its credentials are missing, expired or rejected, so it never produced a plan. Sign that provider in (AO never touches authentication state on your behalf), then retry planning.",
+	},
+	ReasonPlannerProfileUnreadable: {
+		Nonrecoverable: true,
+		HumanAction:    "The profile directory the planner would have run against does not exist or cannot be read, so the provider could not reach its own configuration or credentials. The checkpoint names the variable and the directory. Fix that directory (or the profile it points at), then retry planning.",
+	},
+	ReasonPlannerProviderUnsupported: {
+		Nonrecoverable: true,
+		HumanAction:    "The planner provider's CLI rejected AO's invocation — usually a version that does not support the flags AO's planner needs. The checkpoint carries what it said. Update (or pin) that provider's CLI, then retry planning.",
 	},
 	ReasonPlannerPolicyViolation: {
 		Nonrecoverable: true,

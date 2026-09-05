@@ -110,6 +110,25 @@ func classifyProviderFailureClass(err error) ProviderFailureClassification {
 		// authentication state — conservatively not failover-eligible either
 		// (a human needs to resolve the credential), always needs_attention.
 		return ProviderFailureClassification{Class: domain.WorkflowErrorAuth, Certainty: CertaintyActual, Eligible: false}
+	case errors.Is(err, ports.ErrPlannerBinaryMissing):
+		// The planner's own binary-missing sentinel. Same class as an agent
+		// adapter's, and deliberately NOT eligible: there is one planner
+		// provider, so there is nothing to fail over to, and a retry cannot
+		// install a CLI.
+		return ProviderFailureClassification{Class: domain.WorkflowErrorBinaryMissing, Certainty: CertaintyActual, Eligible: false}
+	case errors.Is(err, ports.ErrPlannerAuthRequired):
+		// The provider itself said its credentials are unusable. Typed, so it
+		// no longer depends on the prose surviving a truncated snippet -- which
+		// is exactly what it did not do in wf-7f8cc736.
+		return ProviderFailureClassification{Class: domain.WorkflowErrorAuth, Certainty: CertaintyActual, Eligible: false}
+	case errors.Is(err, ports.ErrPlannerRuntimeHomeUnreadable):
+		// A profile/home directory AO cannot read is a configuration fault, not
+		// a credential the provider rejected; it classifies as auth because
+		// that is the closest durable class, but it is never eligible and its
+		// stop names the directory rather than telling a person to log in.
+		return ProviderFailureClassification{Class: domain.WorkflowErrorAuth, Certainty: CertaintyActual, Eligible: false}
+	case errors.Is(err, ports.ErrPlannerUnsupportedInvocation):
+		return ProviderFailureClassification{Class: domain.WorkflowErrorAgentStartFailed, Certainty: CertaintyActual, Eligible: false}
 	case errors.Is(err, ports.ErrProviderProfileRequired):
 		// Checkpoint 8P-B.1: the workflow owner has no connected provider
 		// profile for this harness. Same treatment as ErrChatAuthRequired --
