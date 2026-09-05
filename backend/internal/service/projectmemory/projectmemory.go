@@ -57,6 +57,10 @@ type Service struct {
 	// graph is the code graph (migration 0153). Optional: a daemon with none
 	// answers the graph routes with not-implemented rather than an error.
 	graph GraphIndex
+	// explorer backs P4-G's bounded traversal and symbol search. Optional for
+	// the same reason graph is, and separate from it because traversal reads
+	// the persisted rows directly rather than going through the indexer.
+	explorer GraphExplorer
 }
 
 // New builds the service over the memory subsystem and the project registry.
@@ -358,7 +362,7 @@ func (s *Service) resolveRepo(ctx context.Context, projectID domain.ProjectID, r
 	}
 	requested := strings.TrimSpace(repoPath)
 	if requested == "" {
-		return project.Path, nil
+		return canonicalRepoPath(project.Path), nil
 	}
 
 	allowed := []string{project.Path}
@@ -372,10 +376,38 @@ func (s *Service) resolveRepo(ctx context.Context, projectID domain.ProjectID, r
 	}
 	for _, candidate := range allowed {
 		if pm.SameRepoPath(candidate, requested) {
-			return requested, nil
+			return canonicalRepoPath(requested), nil
 		}
 	}
 	return "", fmt.Errorf("%s is not a repository of project %s", requested, projectID)
+}
+
+// canonicalRepoPath returns the one spelling of a repository path that every
+// caller will agree on.
+//
+// This is load-bearing rather than tidiness. A repository's identity -- the
+// repo_id both project memory and the code graph are keyed by -- is a hash of
+// this string, so two spellings of the same directory are two repositories as
+// far as storage is concerned. On macOS that is not hypothetical: /var is a
+// symlink to /private/var, so a project registered under one and a sync asked
+// for under the other would mint a second graph of the same code, and each
+// would look stale to the other forever.
+//
+// Best-effort on purpose: a path that cannot be resolved (the folder moved, a
+// parent link broke) is returned as it stands rather than raising, because
+// status has to keep answering for a project whose checkout has gone missing
+// -- that is exactly when somebody needs to be told.
+func canonicalRepoPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	abs, err := filepath.Abs(trimmed)
+	if err != nil {
+		return trimmed
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return abs
+	}
+	return resolved
 }
 
 // Report answers the P2-B operational question: is this project's memory warm,

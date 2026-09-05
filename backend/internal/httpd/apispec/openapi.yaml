@@ -1862,6 +1862,463 @@ paths:
       summary: Replace a project's per-project config
       tags:
       - projects
+  /api/v1/projects/{id}/intelligence:
+    get:
+      operationId: getProjectIntelligence
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectIntelligenceOverview'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-G: what AO knows about this project, per repository — the derived
+        lifecycle state (pending, indexing, ready, stale, failed), the commit the
+        graph describes against the one the checkout is actually at, the counts, what
+        the last sync had to do, and how long it took. Stale is reported rather than
+        smoothed over: serving structure AO cannot vouch for as current is the one
+        failure this subsystem refuses to make.'
+      tags:
+      - projects
+  /api/v1/projects/{id}/intelligence/architecture:
+    get:
+      operationId: getProjectIntelligenceArchitecture
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Repository root. Defaults to the project's own root, which is
+          the single-repo case.
+        in: query
+        name: repoPath
+        schema:
+          description: Repository root. Defaults to the project's own root, which
+            is the single-repo case.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectIntelligenceArchitecture'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-G: the structural summary the build derived — modules, entry points,
+        services, storage and the dependencies between them. Read from the row the
+        build wrote, never recomputed: the summary belongs to a generation and cannot
+        have changed since it.'
+      tags:
+      - projects
+  /api/v1/projects/{id}/intelligence/context:
+    get:
+      operationId: previewProjectIntelligenceContext
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Repository root. Defaults to the project's own root; a planner
+          preview may span every repository.
+        in: query
+        name: repoPath
+        schema:
+          description: Repository root. Defaults to the project's own root; a planner
+            preview may span every repository.
+          type: string
+      - description: 'Which agent''s pack to assemble: planner, worker, reviewer or
+          repair.'
+        in: query
+        name: role
+        schema:
+          description: 'Which agent''s pack to assemble: planner, worker, reviewer
+            or repair.'
+          enum:
+          - planner
+          - worker
+          - reviewer
+          - repair
+          type: string
+      - description: Comma-separated repo-relative paths the work touches. The strongest
+          relevance signal there is.
+        in: query
+        name: changedPaths
+        schema:
+          description: Comma-separated repo-relative paths the work touches. The strongest
+            relevance signal there is.
+          type: string
+      - description: Comma-separated free-text terms from the objective. The weakest
+          signal, used to break ties.
+        in: query
+        name: keywords
+        schema:
+          description: Comma-separated free-text terms from the objective. The weakest
+            signal, used to break ties.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectIntelligenceContextPreview'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-G: the context pack one role would actually be handed, assembled
+        by the same call a dispatch makes. Input observability only — it shows AO''s
+        own construction from AO''s own durable rows, never anything a model produced.
+        The measurements are named ''selected'' and ''avoided'' rather than ''saved'':
+        AO cannot see what the coding harness reads inside the worktree, so it cannot
+        claim to have prevented a read.'
+      tags:
+      - projects
+  /api/v1/projects/{id}/intelligence/graph:
+    get:
+      operationId: getProjectIntelligenceGraph
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Repository root. Defaults to the project's own root.
+        in: query
+        name: repoPath
+        schema:
+          description: Repository root. Defaults to the project's own root.
+          type: string
+      - description: 'Declaration to start the walk from, by name or by full symbol
+          id. One of symbol or path is required: there is no whole-graph export.'
+        in: query
+        name: symbol
+        schema:
+          description: 'Declaration to start the walk from, by name or by full symbol
+            id. One of symbol or path is required: there is no whole-graph export.'
+          type: string
+      - description: Repo-relative file to start the walk from. Every symbol declared
+          in it seeds the traversal.
+        in: query
+        name: path
+        schema:
+          description: Repo-relative file to start the walk from. Every symbol declared
+            in it seeds the traversal.
+          type: string
+      - description: Hops to walk outward. Capped at 2 — three hops from a densely-connected
+          symbol is already tens of thousands of nodes.
+        in: query
+        name: depth
+        schema:
+          description: Hops to walk outward. Capped at 2 — three hops from a densely-connected
+            symbol is already tens of thousands of nodes.
+          type: integer
+      - description: Comma-separated symbol kinds to keep (func, type, method, ...).
+          Empty keeps every kind.
+        in: query
+        name: nodeKinds
+        schema:
+          description: Comma-separated symbol kinds to keep (func, type, method, ...).
+            Empty keeps every kind.
+          type: string
+      - description: Comma-separated relation kinds to keep (calls, imports, ...).
+          Empty keeps every kind.
+        in: query
+        name: edgeKinds
+        schema:
+          description: Comma-separated relation kinds to keep (calls, imports, ...).
+            Empty keeps every kind.
+          type: string
+      - description: Node ceiling for this walk. Clamped to the server's hard maximum;
+          a caller cannot raise it.
+        in: query
+        name: maxNodes
+        schema:
+          description: Node ceiling for this walk. Clamped to the server's hard maximum;
+            a caller cannot raise it.
+          type: integer
+      - description: Edge ceiling for this walk. Clamped to the server's hard maximum.
+        in: query
+        name: maxEdges
+        schema:
+          description: Edge ceiling for this walk. Clamped to the server's hard maximum.
+          type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectIntelligenceSubgraph'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-G: a bounded neighbourhood of the code graph, walked outward from
+        a named symbol or file. There is deliberately no whole-graph export — a seed
+        is required, depth is capped at two hops, and both nodes and edges have ceilings
+        a caller cannot raise. A walk that hits one reports truncated rather than
+        returning a partial answer as if it were whole.'
+      tags:
+      - projects
+  /api/v1/projects/{id}/intelligence/rebuild:
+    post:
+      operationId: rebuildProjectIntelligence
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Repository root. Defaults to the project's own root, which is
+          the single-repo case.
+        in: query
+        name: repoPath
+        schema:
+          description: Repository root. Defaults to the project's own root, which
+            is the single-repo case.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersProjectMemoryGraphSyncResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-G: discard the served graph and build it again from scratch. The
+        repair for a graph an operator has reason to distrust, and expensive on a
+        large repository — the frontend confirms before calling it.'
+      tags:
+      - projects
+  /api/v1/projects/{id}/intelligence/search:
+    get:
+      operationId: searchProjectIntelligence
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Repository root. Defaults to the project's own root.
+        in: query
+        name: repoPath
+        schema:
+          description: Repository root. Defaults to the project's own root.
+          type: string
+      - description: The question, in any language. Terms shorter than three characters
+          are ignored because they match everything.
+        in: query
+        name: q
+        schema:
+          description: The question, in any language. Terms shorter than three characters
+            are ignored because they match everything.
+          type: string
+      - description: Maximum hits. Clamped to the server's maximum.
+        in: query
+        name: limit
+        schema:
+          description: Maximum hits. Clamped to the server's maximum.
+          type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectIntelligenceSearchResult'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-G: ask a question of the two authorities AO already has — durable
+        project memory and the code graph — and get one ranked answer list with provenance
+        on every row. Every hit says which authority produced it, because a fact somebody
+        wrote and a symbol AO parsed are different kinds of claim.'
+      tags:
+      - projects
+  /api/v1/projects/{id}/intelligence/sync:
+    post:
+      operationId: syncProjectIntelligence
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Repository root. Defaults to the project's own root, which is
+          the single-repo case.
+        in: query
+        name: repoPath
+        schema:
+          description: Repository root. Defaults to the project's own root, which
+            is the single-repo case.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersProjectMemoryGraphSyncResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-G: bring the graph up to date now, choosing between an incremental
+        pass and a full build exactly as a dispatch would. Normal operation does not
+        need this: the reconciler keeps every project current on its own, and this
+        is the button for when somebody does not want to wait for it.'
+      tags:
+      - projects
   /api/v1/projects/{id}/memory:
     get:
       operationId: getProjectMemoryStatus
@@ -16453,6 +16910,396 @@ components:
       - role
       - createdAt
       - updatedAt
+      type: object
+    ProjectIntelligenceArchitecture:
+      properties:
+        architecture:
+          additionalProperties: {}
+          type:
+          - object
+          - "null"
+        rendered:
+          type: string
+      required:
+      - architecture
+      type: object
+    ProjectIntelligenceContextGraph:
+      properties:
+        architecture:
+          type: string
+        backend:
+          type: string
+        bytes:
+          type: integer
+        consideredEdges:
+          type: integer
+        consideredSymbols:
+          type: integer
+        endpoints:
+          items:
+            type: string
+          type: array
+        estimatedTokens:
+          type: integer
+        files:
+          items:
+            type: string
+          type: array
+        generation:
+          format: int64
+          type: integer
+        indexedCommit:
+          type: string
+        selectedEdges:
+          type: integer
+        selectedSymbols:
+          type: integer
+        symbols:
+          items:
+            type: string
+          type: array
+        tables:
+          items:
+            type: string
+          type: array
+        tests:
+          items:
+            type: string
+          type: array
+      required:
+      - generation
+      - consideredSymbols
+      - consideredEdges
+      - selectedSymbols
+      - selectedEdges
+      - bytes
+      - estimatedTokens
+      type: object
+    ProjectIntelligenceContextItem:
+      properties:
+        bodyIncluded:
+          type: boolean
+        content:
+          type: string
+        reason:
+          type: string
+        score:
+          format: double
+          type: number
+        sourceCommit:
+          type: string
+        sourcePaths:
+          items:
+            type: string
+          type: array
+        state:
+          type: string
+        summary:
+          type: string
+        type:
+          type: string
+      required:
+      - summary
+      - bodyIncluded
+      - score
+      type: object
+    ProjectIntelligenceContextPreview:
+      properties:
+        candidateBytes:
+          type: integer
+        candidateItems:
+          type: integer
+        digest:
+          type: string
+        droppedItems:
+          type: integer
+        droppedToSummary:
+          type: integer
+        empty:
+          type: boolean
+        estimatedTokens:
+          type: integer
+        fallbackReason:
+          type: string
+        generation:
+          format: int64
+          type: integer
+        graph:
+          $ref: '#/components/schemas/ProjectIntelligenceContextGraph'
+        indexedCommit:
+          type: string
+        projectId:
+          type: string
+        repoId:
+          type: string
+        role:
+          enum:
+          - planner
+          - worker
+          - reviewer
+          - repair
+          type: string
+        sections:
+          items:
+            $ref: '#/components/schemas/ProjectIntelligenceContextSection'
+          type: array
+        selectedBytes:
+          type: integer
+        selectedItems:
+          type: integer
+        sourcesReused:
+          items:
+            type: string
+          type: array
+        staleExcluded:
+          type: integer
+      required:
+      - role
+      - projectId
+      - sections
+      - graph
+      - candidateItems
+      - candidateBytes
+      - selectedItems
+      - selectedBytes
+      - estimatedTokens
+      - droppedItems
+      - droppedToSummary
+      - staleExcluded
+      - generation
+      - empty
+      type: object
+    ProjectIntelligenceContextSection:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/ProjectIntelligenceContextItem'
+          type: array
+        title:
+          type: string
+        type:
+          type: string
+      required:
+      - title
+      - items
+      type: object
+    ProjectIntelligenceOverview:
+      properties:
+        projectId:
+          type: string
+        repos:
+          items:
+            $ref: '#/components/schemas/ProjectIntelligenceRepoStatus'
+          type: array
+      required:
+      - projectId
+      - repos
+      type: object
+    ProjectIntelligenceRepoStatus:
+      properties:
+        backend:
+          type: string
+        branch:
+          type: string
+        drift:
+          type: string
+        edges:
+          format: int64
+          type: integer
+        files:
+          format: int64
+          type: integer
+        filesParsed:
+          format: int64
+          type: integer
+        filesRemoved:
+          format: int64
+          type: integer
+        filesReused:
+          format: int64
+          type: integer
+        generation:
+          format: int64
+          type: integer
+        headCommit:
+          type: string
+        indexedCommit:
+          type: string
+        lastError:
+          type: string
+        lastMillis:
+          format: int64
+          type: integer
+        lastSyncKind:
+          type: string
+        memoryItems:
+          format: int64
+          type: integer
+        memoryState:
+          type: string
+        repoId:
+          type: string
+        repoPath:
+          type: string
+        state:
+          enum:
+          - pending
+          - indexing
+          - ready
+          - stale
+          - failed
+          type: string
+        symbols:
+          format: int64
+          type: integer
+        updatedAt:
+          type: string
+      required:
+      - repoId
+      - repoPath
+      - state
+      - generation
+      - files
+      - symbols
+      - edges
+      - filesParsed
+      - filesReused
+      - filesRemoved
+      - lastMillis
+      - memoryItems
+      type: object
+    ProjectIntelligenceSearchHit:
+      properties:
+        detail:
+          type: string
+        kind:
+          enum:
+          - memory
+          - symbol
+          type: string
+        line:
+          format: int64
+          type: integer
+        memoryType:
+          type: string
+        path:
+          type: string
+        score:
+          type: integer
+        sourceCommit:
+          type: string
+        state:
+          type: string
+        symbolKind:
+          type: string
+        title:
+          type: string
+      required:
+      - kind
+      - title
+      - score
+      type: object
+    ProjectIntelligenceSearchResult:
+      properties:
+        generation:
+          format: int64
+          type: integer
+        hits:
+          items:
+            $ref: '#/components/schemas/ProjectIntelligenceSearchHit'
+          type: array
+        indexedCommit:
+          type: string
+        memoryHits:
+          type: integer
+        query:
+          type: string
+        symbolHits:
+          type: integer
+        truncated:
+          type: boolean
+      required:
+      - query
+      - hits
+      - memoryHits
+      - symbolHits
+      - truncated
+      - generation
+      type: object
+    ProjectIntelligenceSubgraph:
+      properties:
+        edges:
+          items:
+            $ref: '#/components/schemas/ProjectIntelligenceSubgraphEdge'
+          type: array
+        generation:
+          format: int64
+          type: integer
+        indexedCommit:
+          type: string
+        nodes:
+          items:
+            $ref: '#/components/schemas/ProjectIntelligenceSubgraphNode'
+          type: array
+        seeds:
+          items:
+            type: string
+          type: array
+        truncated:
+          type: boolean
+      required:
+      - seeds
+      - nodes
+      - edges
+      - truncated
+      - generation
+      type: object
+    ProjectIntelligenceSubgraphEdge:
+      properties:
+        from:
+          type: string
+        kind:
+          type: string
+        line:
+          format: int64
+          type: integer
+        path:
+          type: string
+        to:
+          type: string
+      required:
+      - kind
+      - from
+      - to
+      type: object
+    ProjectIntelligenceSubgraphNode:
+      properties:
+        depth:
+          type: integer
+        exported:
+          type: boolean
+        key:
+          type: string
+        kind:
+          type: string
+        language:
+          type: string
+        line:
+          format: int64
+          type: integer
+        name:
+          type: string
+        path:
+          type: string
+        signature:
+          type: string
+        summary:
+          type: string
+      required:
+      - key
+      - name
+      - exported
+      - depth
       type: object
     ProjectOrDegraded:
       oneOf:

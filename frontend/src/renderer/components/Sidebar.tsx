@@ -5,6 +5,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import {
+	Brain,
 	ChevronRight,
 	Folder,
 	FolderOpen,
@@ -150,6 +151,10 @@ function useSelection() {
 		// terminal, board, etc.) stays underneath.
 		goGlobalSettings: () => openGlobalSettings(),
 		goSettings: (projectId: string) => openProjectSettings(projectId),
+		// P4-G: project intelligence is a full route rather than a modal —
+		// it is something you read and explore, not a form you close.
+		goIntelligence: (projectId: string) =>
+			void navigate({ to: "/projects/$projectId/intelligence", params: { projectId } }),
 		goWorkflows: () => void navigate({ to: "/workflows" }),
 		goDecisions: () => void navigate({ to: "/decisions" }),
 		goProject: (projectId: string) => void navigate({ to: "/projects/$projectId", params: { projectId } }),
@@ -823,6 +828,10 @@ function ProjectItem({
 						{t("shell.newSession")}
 					</DropdownMenuItem>
 					<DropdownMenuSeparator />
+					<DropdownMenuItem onSelect={() => selection.goIntelligence(workspace.id)}>
+						<Brain aria-hidden="true" />
+						{t("shell.projectIntelligence")}
+					</DropdownMenuItem>
 					<DropdownMenuItem onSelect={() => selection.goSettings(workspace.id)}>
 						<Settings aria-hidden="true" />
 						{t("shell.projectSettings")}
@@ -906,6 +915,10 @@ function ProjectItem({
 				{t("shell.newSession")}
 			</ContextMenuItem>
 			<ContextMenuSeparator />
+			<ContextMenuItem onSelect={() => selection.goIntelligence(workspace.id)}>
+				<Brain aria-hidden="true" />
+				{t("shell.projectIntelligence")}
+			</ContextMenuItem>
 			<ContextMenuItem onSelect={() => selection.goSettings(workspace.id)}>
 				<Settings aria-hidden="true" />
 				{t("shell.projectSettings")}
