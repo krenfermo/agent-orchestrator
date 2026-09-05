@@ -169,6 +169,24 @@ export function normalizeApiOperation(method: string, pathname: string): string 
 	return `${method.toUpperCase()} ${best?.normalized ?? fallbackNormalize(pathname)}`;
 }
 
+// Notified whenever a protected route answers 401. auth-store registers the
+// one listener; keeping the reference here rather than importing the store is
+// what stops api-client (which the store imports) from importing it back.
+type UnauthorizedListener = (pathname: string) => void;
+
+let unauthorizedListener: UnauthorizedListener | null = null;
+
+export function setUnauthorizedListener(listener: UnauthorizedListener | null): void {
+	unauthorizedListener = listener;
+}
+
+// The auth namespace answers for itself: /auth/me's 401 is how auth-store
+// learns it is signed out, and reporting it twice would race the store's own
+// handling of the same response.
+function isAuthNamespace(pathname: string): boolean {
+	return pathname.startsWith("/api/v1/auth/");
+}
+
 type ApiErrorCategory = "daemon_unavailable" | "network_error" | "http_4xx" | "http_5xx";
 
 // One event per (operation, category, status) per window: a daemon outage
@@ -191,7 +209,8 @@ function reportApiError(operation: string, category: ApiErrorCategory, status?: 
 }
 
 async function runtimeFetch(input: Request): Promise<Response> {
-	const operation = normalizeApiOperation(input.method, new URL(input.url).pathname);
+	const pathname = new URL(input.url).pathname;
+	const operation = normalizeApiOperation(input.method, pathname);
 	const baseUrl = runtimeApiBaseUrl;
 	if (baseUrl === null) {
 		reportApiError(operation, "daemon_unavailable", 503);
@@ -202,29 +221,39 @@ async function runtimeFetch(input: Request): Promise<Response> {
 	}
 
 	const send = async (): Promise<Response> => {
-		if (!baseUrl) {
-			return fetch(input);
-		}
-
 		const url = new URL(input.url);
-		const target = new URL(url.pathname + url.search + url.hash, baseUrl);
-		if (target.href === input.url) {
-			return fetch(input);
-		}
+		// An empty base URL is the web build saying "same origin"; rebasing is a
+		// no-op there and the original URL is already the right target.
+		const target = baseUrl ? new URL(url.pathname + url.search + url.hash, baseUrl) : url;
 
-		// Rebase onto the runtime base URL by copying fields explicitly and
-		// buffering the body. `new Request(target, input)` reads the source
-		// request's `duplex` getter, which Electron's Chromium lacks — it throws
-		// "The duplex member must be specified" for any request with a body, so
-		// every POST would fail in the packaged app. API bodies are small JSON;
-		// buffering sidesteps streaming-duplex semantics entirely.
+		// Every request is dispatched by copying fields explicitly rather than by
+		// handing `input` to fetch, because two things have to be true of all of
+		// them.
+		//
+		// `credentials: "include"` is the first. The daemon authenticates with an
+		// HttpOnly session cookie, and the renderer is never same-origin with the
+		// daemon: dev serves the page from the Vite server, the packaged app from
+		// app://, and the daemon answers on http://127.0.0.1:<port>. fetch's
+		// default of "same-origin" therefore drops that cookie from every request
+		// that does not ask for it — which, while identity was synthesized in
+		// trusted-local mode, cost nothing and so went unnoticed. Under an auth
+		// mode that requires a real session it costs everything: the request
+		// arrives anonymous and the daemon correctly answers 401. Asking at each
+		// call site is how 135 of 158 of them came to be anonymous. Asking here is
+		// how none of them are.
+		//
+		// The second is that the body is buffered rather than streamed. Reading
+		// `duplex` off a Request throws in Electron's Chromium ("The duplex member
+		// must be specified"), so `new Request(target, input)` — and `fetch(input)`
+		// for anything carrying a body — fails in the packaged app. API bodies are
+		// small JSON; buffering sidesteps streaming-duplex semantics entirely.
 		const body = input.method === "GET" || input.method === "HEAD" ? undefined : await input.arrayBuffer();
 		return fetch(target, {
 			method: input.method,
 			headers: input.headers,
 			body,
 			signal: input.signal,
-			credentials: input.credentials,
+			credentials: "include",
 			cache: input.cache,
 			redirect: input.redirect,
 			referrerPolicy: input.referrerPolicy,
@@ -245,6 +274,15 @@ async function runtimeFetch(input: Request): Promise<Response> {
 	}
 	if (!response.ok) {
 		reportApiError(operation, response.status >= 500 ? "http_5xx" : "http_4xx", response.status);
+	}
+	// A 401 from a protected route is the daemon stating, authoritatively, that
+	// whoever sent it is not signed in. The renderer used to have no way to hear
+	// that: only /auth/me could move the auth status, so an application that
+	// believed itself signed in kept rendering — and kept re-polling — against a
+	// daemon refusing every request. The auth namespace is excluded because
+	// auth-store's own calls own those responses.
+	if (response.status === 401 && !isAuthNamespace(pathname)) {
+		unauthorizedListener?.(pathname);
 	}
 	return response;
 }

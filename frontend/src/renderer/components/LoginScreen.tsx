@@ -22,6 +22,9 @@ export function LoginScreen() {
 	const loadProviders = useAuthStore((state) => state.loadProviders);
 	const startSso = useAuthStore((state) => state.startSso);
 	const ssoPending = useAuthStore((state) => state.ssoPending);
+	// SSO failures get their own message. A provider that will not answer is not
+	// a daemon that will not start, and it is not a wrong password.
+	const ssoError = useAuthStore((state) => state.ssoError);
 	const [usernameOrEmail, setUsernameOrEmail] = useState("");
 	const [password, setPassword] = useState("");
 	const [submitting, setSubmitting] = useState(false);
@@ -30,6 +33,9 @@ export function LoginScreen() {
 		void loadProviders();
 	}, [loadProviders]);
 
+	// The button renders on the backend's word alone: mode=oidc with a
+	// displayName and a startPath. Password sign-in stays alongside it whenever
+	// the installation still allows it.
 	const oidc = providers?.oidc;
 
 	const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -51,21 +57,28 @@ export function LoginScreen() {
 					<CardDescription>{t("auth.login.description")}</CardDescription>
 				</CardHeader>
 				<CardContent>
-					{oidc ? (
+					{oidc || ssoError ? (
 						<div className="mb-4 flex flex-col gap-4">
-							<Button
-								type="button"
-								variant="primary"
-								className="w-full"
-								disabled={ssoPending}
-								onClick={() => void startSso()}
-							>
-								{ssoPending
-									? t("auth.login.ssoSubmitting", { provider: oidc.displayName })
-									: t("auth.login.ssoSubmit", { provider: oidc.displayName })}
-							</Button>
+							{oidc ? (
+								<Button
+									type="button"
+									variant="primary"
+									className="w-full"
+									disabled={ssoPending}
+									onClick={() => void startSso()}
+								>
+									{ssoPending
+										? t("auth.login.ssoSubmitting", { provider: oidc.displayName })
+										: t("auth.login.ssoSubmit", { provider: oidc.displayName })}
+								</Button>
+							) : null}
 							{ssoPending ? (
 								<p className="text-center text-sm text-muted-foreground">{t("auth.login.ssoWaiting")}</p>
+							) : null}
+							{ssoError ? (
+								<p role="alert" data-testid="login-sso-error" className="text-sm text-destructive">
+									{ssoError}
+								</p>
 							) : null}
 							<div className="flex items-center gap-3">
 								<span className="h-px flex-1 bg-border" />

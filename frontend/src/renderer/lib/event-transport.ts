@@ -124,7 +124,9 @@ export function createEventTransport(queryClient: QueryClient): EventTransport {
 				source = undefined;
 				sourceBaseUrl = baseUrl;
 				try {
-					source = new EventSource(`${baseUrl.replace(/\/+$/, "")}/api/v1/events`);
+					// withCredentials, like every api-client request, because the renderer is
+					// never same-origin with the daemon and the stream is a protected route.
+					source = new EventSource(`${baseUrl.replace(/\/+$/, "")}/api/v1/events`, { withCredentials: true });
 					source.onopen = () => {
 						setEventsConnectionState("connected");
 						// Events emitted during the gap were lost; refetch once on (re)open.

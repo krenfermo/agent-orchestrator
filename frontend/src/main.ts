@@ -87,7 +87,8 @@ import { keepDaemonAlive, shouldLinkOnAttach } from "./main/daemon-owner";
 import { readMigrationState, updateMigration, writeAppStateMarker, type MigrationState } from "./main/app-state";
 import { isAllowedAppExternalURL, openAllowedAppExternalURL } from "./main/external-open";
 import { shouldSignalAttention, shouldToast } from "./main/notification-signals";
-import { buildWindowsAppMenuTemplate } from "./main/menu";
+import { buildAppMenuTemplate } from "./main/menu";
+import { toggleDevToolsSafely } from "./main/devtools";
 import { ancestorRepositorySetupWarning, scanImportFolder } from "./main/import-folder-scan";
 
 // Globals injected at compile time by @electron-forge/plugin-vite.
@@ -192,6 +193,18 @@ const NATIVE_WINDOW_BACKGROUND_LIGHT = "#fbfbfb";
 
 function getShellWebContents(): WebContents | null {
 	return windowComposition?.shellWebContents ?? null;
+}
+
+// A WebContents reference proves nothing on its own: the window may have closed
+// since it was read, and calling into a destroyed one throws. Menu actions
+// re-resolve through this immediately before every use.
+function liveWebContents(contents: WebContents | null | undefined): WebContents | null {
+	if (!contents) return null;
+	try {
+		return contents.isDestroyed() ? null : contents;
+	} catch {
+		return null;
+	}
 }
 
 function syncNativeWindowBackground(): void {
@@ -313,17 +326,40 @@ function appendDaemonOutput(text: string): void {
 	daemonOutput = (daemonOutput + text).slice(-MAX_DAEMON_OUTPUT_CHARS);
 }
 
-// Menu installed on Windows where the native menu bar is hidden. The bar stays
-// out of sight, but the roles keep their accelerators alive (Reload, zoom, full
-// screen, edit commands). DevTools uses the AO browser toggle so the focused
-// Browser panel opens the same native Chromium surface as the toolbar.
-function buildWindowsAppMenu(): Menu {
+// Every DevTools entry point — the native menu, the accelerator, and the
+// renderer's own title-bar menu — funnels through here. The target is resolved
+// at the moment of use and proven live first; see main/devtools.ts for why
+// Electron's own toggleDevTools role cannot be used on a BaseWindow.
+function toggleDevTools(): Promise<void> {
+	return toggleDevToolsSafely({
+		togglePanelDevTools: () => browserViewHost?.toggleDevToolsForLastFocused(),
+		getShellContents: () => getShellWebContents(),
+		log: (message, detail) => (detail === undefined ? console.warn(message) : console.warn(message, detail)),
+	});
+}
+
+// Reload the surface the person is actually looking at: the focused Browser
+// panel if there is one, else the app shell.
+function reloadFocusedContents(ignoreCache: boolean): void {
+	const target = liveWebContents(browserViewHost?.getLastFocusedPanelContents()) ?? liveWebContents(getShellWebContents());
+	if (!target) return;
+	try {
+		if (ignoreCache) target.reloadIgnoringCache();
+		else target.reload();
+	} catch (error) {
+		console.warn("AO: reload failed", error);
+	}
+}
+
+// The application menu is installed on EVERY platform. Leaving macOS and Linux
+// on Electron's default menu is what exposed its toggleDevTools role, which
+// crashes the main process against AO's BaseWindow.
+function buildAppMenu(): Menu {
 	return Menu.buildFromTemplate(
-		buildWindowsAppMenuTemplate(() => {
-			const fallback = () => getShellWebContents()?.toggleDevTools();
-			void browserViewHost?.toggleDevToolsForLastFocused().then((state) => {
-				if (!state) fallback();
-			}).catch(fallback);
+		buildAppMenuTemplate(process.platform, {
+			toggleDevTools: () => void toggleDevTools(),
+			reload: () => reloadFocusedContents(false),
+			forceReload: () => reloadFocusedContents(true),
 		}),
 	);
 }
@@ -407,13 +443,15 @@ async function createWindowInternal(): Promise<void> {
 	const shellWebContents = getShellWebContents();
 	if (!shellWebContents) throw new Error("AO shell WebContents was not created");
 
-	// On Windows the app paints its own title bar (WindowTitlebar), so the native
-	// menu bar is hidden (autoHideMenuBar above). The role-based menu is still
-	// installed so its accelerators keep working and act on the focused pane;
-	// setMenuBarVisibility(false) keeps the strip itself out of view. macOS/Linux
-	// keep their native menus.
+	// Reinstall the application menu now that a window exists, so its actions
+	// bind against this window's browser host. On Windows the app paints its own
+	// title bar (WindowTitlebar), so the native menu bar is hidden
+	// (autoHideMenuBar above) and only the accelerators matter;
+	// setMenuBarVisibility(false) keeps the strip itself out of view. macOS and
+	// Linux show it, which is why their templates mirror the shape Electron's
+	// own default menu had.
+	Menu.setApplicationMenu(buildAppMenu());
 	if (process.platform === "win32") {
-		Menu.setApplicationMenu(buildWindowsAppMenu());
 		mainWindow.setMenuBarVisibility(false);
 	}
 
@@ -1550,13 +1588,14 @@ ipcMain.on(SET_TERMINAL_FOCUSED_CHANNEL, (event, focused: unknown) => {
 // Backs the custom title-bar menu (WindowTitlebar). Each item maps to the same
 // action the native default menu would have performed.
 ipcMain.handle("menu:action", (_event, action: string) => {
-	const win = mainWindow;
+	const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
 	if (!win) return;
 	// Clicking this shell-painted menu moves focus off the panel, so prefer the last-focused panel, else the focused contents, else the shell.
-	const focused = webContents.getFocusedWebContents();
-	const shell = getShellWebContents();
+	const focused = liveWebContents(webContents.getFocusedWebContents());
+	const shell = liveWebContents(getShellWebContents());
 	const wc =
-		(focused && focused !== shell ? focused : browserViewHost?.getLastFocusedPanelContents()) ?? shell;
+		(focused && focused !== shell ? focused : liveWebContents(browserViewHost?.getLastFocusedPanelContents())) ??
+		shell;
 	if (!wc) return;
 	switch (action) {
 		case "edit.undo":
@@ -1574,10 +1613,10 @@ ipcMain.handle("menu:action", (_event, action: string) => {
 		case "view.reload":
 			return wc.reload();
 		case "view.devtools":
-			return browserViewHost?.toggleDevToolsForLastFocused().then((state) => {
-				if (state) return state;
-				return wc.toggleDevTools();
-			}).catch(() => wc.toggleDevTools()) ?? wc.toggleDevTools();
+			// Deliberately does not use `wc`: that reference was resolved before the
+			// panel toggle awaits, and the window can be gone by the time a fallback
+			// would run. toggleDevTools() re-resolves and never rejects.
+			return toggleDevTools();
 		case "view.zoomIn":
 			return wc.setZoomLevel(wc.getZoomLevel() + 0.5);
 		case "view.zoomOut":
@@ -1963,6 +2002,12 @@ async function writeAppStateOnLaunch(): Promise<void> {
 }
 
 app.whenReady().then(async () => {
+	// Replace Electron's default application menu immediately. Until this runs,
+	// the default menu is live and its toggleDevTools role would crash the main
+	// process against AO's BaseWindow; createWindowInternal reinstalls the same
+	// menu later, and the actions no-op safely while no window exists.
+	Menu.setApplicationMenu(buildAppMenu());
+
 	// Capture install provenance BEFORE relocation. moveToApplicationsFolder()
 	// relaunches from /Applications WITHOUT forwarding our --installed-via arg, and
 	// code past a successful move never runs in this instance, so a post-move-only

@@ -1,6 +1,7 @@
 import { create } from "zustand";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { apiClient, apiErrorMessage, hasTrustedApiBaseUrl, setUnauthorizedListener } from "../lib/api-client";
 import { aoBridge } from "../lib/bridge";
+import { isDesktopMode } from "../lib/platform-adapter";
 import type { components } from "../../api/schema";
 
 type UserView = components["schemas"]["ControllersUserView"];
@@ -28,6 +29,18 @@ export type AuthStatus = "loading" | "trusted-local" | "no_user" | "authenticate
 // which says WHETHER one resolved. Sign-out reads this: a federated session
 // may additionally be offered the provider's own logout.
 export type AuthMethod = "trusted_local" | "password" | "oidc" | null;
+
+// How far provider discovery has got. Kept separate from `status` on purpose:
+// "we have not been able to ask yet" is not "there is no SSO", and collapsing
+// the two is what left the sign-in screen permanently password-only after a
+// cold start.
+//   "idle"    — not asked yet, or asked while no daemon URL was trusted, so the
+//               request never left the renderer. Retried on daemon-ready.
+//   "loading" — a request is in flight.
+//   "loaded"  — the daemon answered; `providers` is what it said.
+//   "error"   — the daemon answered, and could not tell us. SSO-specific, and
+//               never reported as a daemon startup failure.
+export type ProvidersStatus = "idle" | "loading" | "loaded" | "error";
 
 // P4-B: the installation-wide permissions the BACKEND says this identity
 // holds. The renderer never derives authority from `user.role` — a second
@@ -58,6 +71,11 @@ type AuthState = {
 	// the renderer knows about the installation's SSO configuration: a label
 	// and a start path. Issuer, client id and every secret stay server-side.
 	providers: AuthProviders | null;
+	providersStatus: ProvidersStatus;
+	// ssoError is the single message slot for federated sign-in going wrong —
+	// discovery or start. Kept apart from `error` (password sign-in) so a
+	// failing provider never renders as a bad password, or vice versa.
+	ssoError: string | null;
 	// permissions is what this identity may do installation-wide. Empty until
 	// load() resolves, and empty on any failure — an app that renders nothing
 	// it cannot prove is allowed is degraded; one that renders everything on a
@@ -73,6 +91,14 @@ type AuthState = {
 	load: () => Promise<void>;
 	checkSetup: () => Promise<void>;
 	loadProviders: () => Promise<void>;
+	// Called on every daemon not-ready -> ready transition. The renderer boots
+	// long before the daemon binds its port, so the first attempt at each of
+	// these is expected to be a no-op; this is what makes the second one happen.
+	refreshForDaemonReady: () => Promise<void>;
+	// Called by api-client when any protected route answers 401. The daemon has
+	// just said this principal is not signed in; the renderer's job is to
+	// believe it rather than to keep asking.
+	reportUnauthorized: () => void;
 	// startSso begins single sign-on. In the desktop app the main process
 	// drives the system browser and installs the resulting session cookie;
 	// in a plain browser the page navigates to the provider itself.
@@ -83,6 +109,7 @@ type AuthState = {
 };
 
 let pendingLoad: Promise<void> | undefined;
+let pendingProviders: Promise<void> | undefined;
 
 // signedOutState is the one definition of "nobody is signed in". Spelling it
 // out at each call site is how a new field (permissions, say) ends up cleared
@@ -102,10 +129,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 	authMethod: null,
 	issuer: null,
 	providers: null,
+	providersStatus: "idle",
+	ssoError: null,
 	permissions: [],
 	ssoPending: false,
 	setupRequired: null,
 	load: async () => {
+		// No trusted daemon URL means the request would never leave the renderer:
+		// api-client short-circuits it into a synthetic 503 whose body is the
+		// daemon startup message. Treating that as a 401 is what put the login
+		// screen on screen — with the daemon banner's text inside it — before the
+		// daemon had said anything at all. Stay in "loading" and wait for
+		// refreshForDaemonReady().
+		if (!hasTrustedApiBaseUrl()) return;
 		if (pendingLoad) return pendingLoad;
 		pendingLoad = (async () => {
 			try {
@@ -146,6 +182,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 		}
 	},
 	checkSetup: async () => {
+		// Same reasoning as load(): a synthetic 503 is not evidence that setup is
+		// complete. Leave setupRequired null until a real answer arrives.
+		if (!hasTrustedApiBaseUrl()) return;
 		try {
 			const { data, error } = await apiClient.GET("/api/v1/auth/setup-status", { credentials: "include" });
 			if (error || !data) {
@@ -179,17 +218,46 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 		}
 	},
 	loadProviders: async () => {
+		// Not reachable yet: stay "idle" so the daemon-ready transition retries.
+		// Recording an error here would be a lie about the installation's SSO
+		// configuration, which we have not managed to ask about.
+		if (!hasTrustedApiBaseUrl()) return;
+		if (pendingProviders) return pendingProviders;
+		pendingProviders = (async () => {
+			set({ providersStatus: "loading" });
+			try {
+				const { data, error } = await apiClient.GET("/api/v1/auth/providers", { credentials: "include" });
+				if (error || !data) {
+					// The daemon answered and could not tell us. That is an SSO
+					// problem, reported as one; password sign-in still works.
+					set({
+						providersStatus: "error",
+						ssoError: apiErrorMessage(error, "Single sign-on options could not be loaded."),
+					});
+					return;
+				}
+				set({ providers: data, providersStatus: "loaded", ssoError: null });
+			} catch {
+				set({ providersStatus: "error", ssoError: "Single sign-on options could not be loaded." });
+			}
+		})();
 		try {
-			const { data, error } = await apiClient.GET("/api/v1/auth/providers", { credentials: "include" });
-			if (error || !data) return;
-			set({ providers: data });
-		} catch {
-			// A provider list that cannot be fetched simply leaves the sign-in
-			// screen offering passwords only, which always works.
+			await pendingProviders;
+		} finally {
+			pendingProviders = undefined;
 		}
 	},
+	refreshForDaemonReady: async () => {
+		await Promise.all([get().load(), get().checkSetup(), get().loadProviders()]);
+	},
+	reportUnauthorized: () => {
+		// Already signed out: nothing to change, and re-setting would restart a
+		// render for every 401 in a burst of parallel queries.
+		if (get().status === "unauthenticated") return;
+		set({ ...signedOutState, error: null });
+	},
 	startSso: async () => {
-		set({ error: null, ssoPending: true });
+		set({ error: null, ssoError: null, ssoPending: true });
 		try {
 			// Desktop: the main process opens the system browser and installs
 			// the session cookie itself, so nothing sensitive crosses into the
@@ -199,9 +267,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 				await get().load();
 				return;
 			}
+			// In the desktop app the bridge IS the sign-in path, so "cancelled"
+			// (the person closed the browser tab, or the claim poll timed out) is
+			// the end of the attempt. Falling through would navigate the app window
+			// itself at the provider — main.ts's will-navigate guard blocks that, so
+			// nothing moved and ssoPending never cleared, leaving the button stuck
+			// on "Opening…" forever.
+			if (isDesktopMode()) {
+				set({ ssoPending: false });
+				return;
+			}
 		} catch (bridgeError) {
-			set({ error: bridgeError instanceof Error ? bridgeError.message : "Single sign-on could not be completed." });
-			set({ ssoPending: false });
+			set({
+				ssoError: bridgeError instanceof Error ? bridgeError.message : "Single sign-on could not be completed.",
+				ssoPending: false,
+			});
 			return;
 		}
 
@@ -215,7 +295,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 				body: { returnTo, clientKind: "browser" },
 			});
 			if (error || !data) {
-				set({ error: apiErrorMessage(error, "Single sign-on could not be started."), ssoPending: false });
+				set({ ssoError: apiErrorMessage(error, "Single sign-on could not be started."), ssoPending: false });
 				return;
 			}
 			if (typeof window !== "undefined") {
@@ -224,7 +304,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 			}
 			set({ ssoPending: false });
 		} catch {
-			set({ error: "Could not reach the daemon", ssoPending: false });
+			set({ ssoError: "Could not reach the daemon", ssoPending: false });
 		}
 	},
 	register: async (displayName, email, password) => {
@@ -263,6 +343,25 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 		}
 	},
 }));
+
+// One listener, installed as soon as anything imports the store — which the
+// shell route does before it can render anything. A 401 from a protected route
+// is the only evidence of a lost session that arrives without anyone asking for
+// it, and it is the evidence that matters: it is what a revoked, expired or
+// never-established session actually looks like from inside the application.
+setUnauthorizedListener(() => {
+	useAuthStore.getState().reportUnauthorized();
+});
+
+/**
+ * authPermitsProtectedData reports whether the resolved identity may be used to
+ * load the application's own data. "loading" is deliberately false: not knowing
+ * is not permission, and treating it as permission is what let a signed-out
+ * renderer mount the whole shell and poll protected routes for 401s.
+ */
+export function authPermitsProtectedData(status: AuthStatus): boolean {
+	return status === "authenticated" || status === "trusted-local" || status === "no_user";
+}
 
 /**
  * useCan reports whether the signed-in identity holds a permission, according
