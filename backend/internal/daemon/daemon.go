@@ -750,7 +750,8 @@ func RunWithConfig(cfg config.Config) error {
 	memoryAPI := projectmemorysvc.New(projectMemory, store).
 		WithProvisioner(memoryProvisioning).
 		WithWorkspaces(store).
-		WithGraph(codeGraph)
+		WithGraph(codeGraph).
+		WithExplorer(store)
 
 	executionPolicySvc := &executionpolicysvc.Service{Store: store}
 	providerProfilesSvc := &providerprofilesvc.Service{
@@ -817,8 +818,9 @@ func RunWithConfig(cfg config.Config) error {
 		// code-graph routes are two views of the same subsystem, and giving
 		// them separate resolvers would give them separate opinions about
 		// which repository a project id means.
-		ProjectMemory:      memoryAPI,
-		ProjectMemoryGraph: memoryAPI,
+		ProjectMemory:       memoryAPI,
+		ProjectMemoryGraph:  memoryAPI,
+		ProjectIntelligence: memoryAPI,
 		Questions: &questionssvc.AnswerService{
 			Store: store, Runs: store, Sender: rawSessionMgr, Logger: log,
 			// P3-D: the answer is recorded first and delivered second, and the
@@ -862,6 +864,13 @@ func RunWithConfig(cfg config.Config) error {
 		return err
 	}
 	previewDone := preview.NewPoller(store, sessionSvc, "http://"+srv.Addr().String(), preview.PollerConfig{Logger: log}).Start(ctx)
+
+	// P4-G: keep every project's code graph current without anybody running a
+	// sync by hand. Started here, after the server is up, because indexing is
+	// background work that must never be on the path that makes AO reachable.
+	// It starts nothing when this build has no code graph wired.
+	intelligenceDone := projectmemorysvc.NewReconciler(memoryAPI, store,
+		projectmemorysvc.ReconcilerConfig{Logger: log}).Start(ctx)
 	_ = os.Unsetenv(browserruntime.RuntimeAddressEnv)
 	if ln, addr, err := browserruntime.Listen(cfg.RunFilePath); err != nil {
 		log.Warn("browser runtime: listener unavailable; agent browser control disabled", "err", err)
@@ -930,6 +939,7 @@ func RunWithConfig(cfg config.Config) error {
 	stop()
 	managedPreview.Close()
 	<-previewDone
+	<-intelligenceDone
 	// Close chat controllers before the lifecycle stack: each owns an app-server
 	// child process, and closing them also settles any turn left in flight so a
 	// restart does not read a half-finished turn as still working.

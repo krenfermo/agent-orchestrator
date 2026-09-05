@@ -760,6 +760,125 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/intelligence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-G: what AO knows about this project, per repository — the derived lifecycle state (pending, indexing, ready, stale, failed), the commit the graph describes against the one the checkout is actually at, the counts, what the last sync had to do, and how long it took. Stale is reported rather than smoothed over: serving structure AO cannot vouch for as current is the one failure this subsystem refuses to make. */
+        get: operations["getProjectIntelligence"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/intelligence/architecture": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-G: the structural summary the build derived — modules, entry points, services, storage and the dependencies between them. Read from the row the build wrote, never recomputed: the summary belongs to a generation and cannot have changed since it. */
+        get: operations["getProjectIntelligenceArchitecture"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/intelligence/context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-G: the context pack one role would actually be handed, assembled by the same call a dispatch makes. Input observability only — it shows AO's own construction from AO's own durable rows, never anything a model produced. The measurements are named 'selected' and 'avoided' rather than 'saved': AO cannot see what the coding harness reads inside the worktree, so it cannot claim to have prevented a read. */
+        get: operations["previewProjectIntelligenceContext"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/intelligence/graph": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-G: a bounded neighbourhood of the code graph, walked outward from a named symbol or file. There is deliberately no whole-graph export — a seed is required, depth is capped at two hops, and both nodes and edges have ceilings a caller cannot raise. A walk that hits one reports truncated rather than returning a partial answer as if it were whole. */
+        get: operations["getProjectIntelligenceGraph"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/intelligence/rebuild": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P4-G: discard the served graph and build it again from scratch. The repair for a graph an operator has reason to distrust, and expensive on a large repository — the frontend confirms before calling it. */
+        post: operations["rebuildProjectIntelligence"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/intelligence/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-G: ask a question of the two authorities AO already has — durable project memory and the code graph — and get one ranked answer list with provenance on every row. Every hit says which authority produced it, because a fact somebody wrote and a symbol AO parsed are different kinds of claim. */
+        get: operations["searchProjectIntelligence"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/intelligence/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P4-G: bring the graph up to date now, choosing between an incremental pass and a full build exactly as a dispatch would. Normal operation does not need this: the reconciler keeps every project current on its own, and this is the button for when somebody does not want to wait for it. */
+        post: operations["syncProjectIntelligence"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/memory": {
         parameters: {
             query?: never;
@@ -5822,6 +5941,161 @@ export interface components {
             /** Format: date-time */
             updatedAt: string;
         };
+        ProjectIntelligenceArchitecture: {
+            architecture: {
+                [key: string]: unknown;
+            } | null;
+            rendered?: string;
+        };
+        ProjectIntelligenceContextGraph: {
+            architecture?: string;
+            backend?: string;
+            bytes: number;
+            consideredEdges: number;
+            consideredSymbols: number;
+            endpoints?: string[];
+            estimatedTokens: number;
+            files?: string[];
+            /** Format: int64 */
+            generation: number;
+            indexedCommit?: string;
+            selectedEdges: number;
+            selectedSymbols: number;
+            symbols?: string[];
+            tables?: string[];
+            tests?: string[];
+        };
+        ProjectIntelligenceContextItem: {
+            bodyIncluded: boolean;
+            content?: string;
+            reason?: string;
+            /** Format: double */
+            score: number;
+            sourceCommit?: string;
+            sourcePaths?: string[];
+            state?: string;
+            summary: string;
+            type?: string;
+        };
+        ProjectIntelligenceContextPreview: {
+            candidateBytes: number;
+            candidateItems: number;
+            digest?: string;
+            droppedItems: number;
+            droppedToSummary: number;
+            empty: boolean;
+            estimatedTokens: number;
+            fallbackReason?: string;
+            /** Format: int64 */
+            generation: number;
+            graph: components["schemas"]["ProjectIntelligenceContextGraph"];
+            indexedCommit?: string;
+            projectId: string;
+            repoId?: string;
+            /** @enum {string} */
+            role: "planner" | "worker" | "reviewer" | "repair";
+            sections: components["schemas"]["ProjectIntelligenceContextSection"][];
+            selectedBytes: number;
+            selectedItems: number;
+            sourcesReused?: string[];
+            staleExcluded: number;
+        };
+        ProjectIntelligenceContextSection: {
+            items: components["schemas"]["ProjectIntelligenceContextItem"][];
+            title: string;
+            type?: string;
+        };
+        ProjectIntelligenceOverview: {
+            projectId: string;
+            repos: components["schemas"]["ProjectIntelligenceRepoStatus"][];
+        };
+        ProjectIntelligenceRepoStatus: {
+            backend?: string;
+            branch?: string;
+            drift?: string;
+            /** Format: int64 */
+            edges: number;
+            /** Format: int64 */
+            files: number;
+            /** Format: int64 */
+            filesParsed: number;
+            /** Format: int64 */
+            filesRemoved: number;
+            /** Format: int64 */
+            filesReused: number;
+            /** Format: int64 */
+            generation: number;
+            headCommit?: string;
+            indexedCommit?: string;
+            lastError?: string;
+            /** Format: int64 */
+            lastMillis: number;
+            lastSyncKind?: string;
+            /** Format: int64 */
+            memoryItems: number;
+            memoryState?: string;
+            repoId: string;
+            repoPath: string;
+            /** @enum {string} */
+            state: "pending" | "indexing" | "ready" | "stale" | "failed";
+            /** Format: int64 */
+            symbols: number;
+            updatedAt?: string;
+        };
+        ProjectIntelligenceSearchHit: {
+            detail?: string;
+            /** @enum {string} */
+            kind: "memory" | "symbol";
+            /** Format: int64 */
+            line?: number;
+            memoryType?: string;
+            path?: string;
+            score: number;
+            sourceCommit?: string;
+            state?: string;
+            symbolKind?: string;
+            title: string;
+        };
+        ProjectIntelligenceSearchResult: {
+            /** Format: int64 */
+            generation: number;
+            hits: components["schemas"]["ProjectIntelligenceSearchHit"][];
+            indexedCommit?: string;
+            memoryHits: number;
+            query: string;
+            symbolHits: number;
+            truncated: boolean;
+        };
+        ProjectIntelligenceSubgraph: {
+            edges: components["schemas"]["ProjectIntelligenceSubgraphEdge"][];
+            /** Format: int64 */
+            generation: number;
+            indexedCommit?: string;
+            nodes: components["schemas"]["ProjectIntelligenceSubgraphNode"][];
+            seeds: string[];
+            truncated: boolean;
+        };
+        ProjectIntelligenceSubgraphEdge: {
+            from: string;
+            kind: string;
+            /** Format: int64 */
+            line?: number;
+            path?: string;
+            to: string;
+        };
+        ProjectIntelligenceSubgraphNode: {
+            depth: number;
+            exported: boolean;
+            key: string;
+            kind?: string;
+            language?: string;
+            /** Format: int64 */
+            line?: number;
+            name: string;
+            path?: string;
+            signature?: string;
+            summary?: string;
+        };
         ProjectOrDegraded: components["schemas"]["Project"] | components["schemas"]["DegradedProject"];
         ProjectRepositoryExecution: {
             branch: string;
@@ -9805,6 +10079,425 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectIntelligence: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectIntelligenceOverview"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectIntelligenceArchitecture: {
+        parameters: {
+            query?: {
+                /** @description Repository root. Defaults to the project's own root, which is the single-repo case. */
+                repoPath?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectIntelligenceArchitecture"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    previewProjectIntelligenceContext: {
+        parameters: {
+            query?: {
+                /** @description Repository root. Defaults to the project's own root; a planner preview may span every repository. */
+                repoPath?: string;
+                /** @description Which agent's pack to assemble: planner, worker, reviewer or repair. */
+                role?: "planner" | "worker" | "reviewer" | "repair";
+                /** @description Comma-separated repo-relative paths the work touches. The strongest relevance signal there is. */
+                changedPaths?: string;
+                /** @description Comma-separated free-text terms from the objective. The weakest signal, used to break ties. */
+                keywords?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectIntelligenceContextPreview"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectIntelligenceGraph: {
+        parameters: {
+            query?: {
+                /** @description Repository root. Defaults to the project's own root. */
+                repoPath?: string;
+                /** @description Declaration to start the walk from, by name or by full symbol id. One of symbol or path is required: there is no whole-graph export. */
+                symbol?: string;
+                /** @description Repo-relative file to start the walk from. Every symbol declared in it seeds the traversal. */
+                path?: string;
+                /** @description Hops to walk outward. Capped at 2 — three hops from a densely-connected symbol is already tens of thousands of nodes. */
+                depth?: number;
+                /** @description Comma-separated symbol kinds to keep (func, type, method, ...). Empty keeps every kind. */
+                nodeKinds?: string;
+                /** @description Comma-separated relation kinds to keep (calls, imports, ...). Empty keeps every kind. */
+                edgeKinds?: string;
+                /** @description Node ceiling for this walk. Clamped to the server's hard maximum; a caller cannot raise it. */
+                maxNodes?: number;
+                /** @description Edge ceiling for this walk. Clamped to the server's hard maximum. */
+                maxEdges?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectIntelligenceSubgraph"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    rebuildProjectIntelligence: {
+        parameters: {
+            query?: {
+                /** @description Repository root. Defaults to the project's own root, which is the single-repo case. */
+                repoPath?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProjectMemoryGraphSyncResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    searchProjectIntelligence: {
+        parameters: {
+            query?: {
+                /** @description Repository root. Defaults to the project's own root. */
+                repoPath?: string;
+                /** @description The question, in any language. Terms shorter than three characters are ignored because they match everything. */
+                q?: string;
+                /** @description Maximum hits. Clamped to the server's maximum. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectIntelligenceSearchResult"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    syncProjectIntelligence: {
+        parameters: {
+            query?: {
+                /** @description Repository root. Defaults to the project's own root, which is the single-repo case. */
+                repoPath?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersProjectMemoryGraphSyncResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
                 headers: {
                     [name: string]: unknown;
                 };

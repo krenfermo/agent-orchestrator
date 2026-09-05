@@ -77,6 +77,9 @@ type APIDeps struct {
 	// graph wired leaves it nil and the routes answer not-implemented, which is
 	// the same shape every other optional surface here uses.
 	ProjectMemoryGraph controllers.ProjectMemoryGraphService
+	// ProjectIntelligence backs P4-G's Project Intelligence surface. Optional:
+	// nil reports not-implemented, matching the graph's own convention.
+	ProjectIntelligence controllers.ProjectIntelligenceService
 	// Scheduler and RuntimeGC back P1-C's capacity and runtime-GC surfaces.
 	// Optional like every other surface here: nil answers 501.
 	Scheduler controllers.SchedulerService
@@ -242,6 +245,7 @@ type API struct {
 	scheduler          *controllers.SchedulerController
 	projectMemory      *controllers.ProjectMemoryController
 	projectMemoryGraph *controllers.ProjectMemoryGraphController
+	projectIntel       *controllers.ProjectIntelligenceController
 	events             *EventsController
 	auth               *controllers.AuthController
 	sso                *controllers.SSOController
@@ -302,7 +306,10 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		capacity:           &controllers.CapacityController{Svc: deps.Capacity},
 		projectMemory:      &controllers.ProjectMemoryController{Svc: deps.ProjectMemory, Guard: guard},
 		projectMemoryGraph: &controllers.ProjectMemoryGraphController{Svc: deps.ProjectMemoryGraph, Guard: guard},
-		prs:                &controllers.PRsController{Svc: deps.PRs},
+		projectIntel: &controllers.ProjectIntelligenceController{
+			Svc: deps.ProjectIntelligence, Sync: deps.ProjectMemoryGraph, Guard: guard,
+		},
+		prs: &controllers.PRsController{Svc: deps.PRs},
 		reviews: &controllers.ReviewsController{
 			Svc:          deps.Reviews,
 			Ownership:    deps.SessionOwnership,
@@ -392,6 +399,7 @@ func (a *API) Register(root chi.Router) {
 			a.capacity.Register(r)
 			a.projectMemory.Register(r)
 			a.projectMemoryGraph.Register(r)
+			a.projectIntel.Register(r)
 			a.prs.Register(r)
 			a.reviews.Register(r)
 			a.decisions.Register(r)
