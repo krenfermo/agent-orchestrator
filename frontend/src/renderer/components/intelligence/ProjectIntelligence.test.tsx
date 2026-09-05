@@ -225,6 +225,89 @@ describe("Project Intelligence", () => {
 		expect(screen.getByText(/withheld from dispatch/)).toBeInTheDocument();
 	});
 
+	// P4-H: the tab exists to show the high-level facts, and the class of claim
+	// each one is. A derived fact rendered like an observed one is how a guess
+	// becomes a premise nobody rechecks.
+	it("shows the high-level facts with how strong each claim is", async () => {
+		answer({
+			"/api/v1/projects/{id}/memory/items": {
+				items: [
+					{
+						id: "h1", summary: "Auth model: identity/permission code concentrated in internal/oidc",
+						type: "auth_model", scope: "repository", state: "valid", origin: "canonical",
+						authority: "authoritative", confidence: 0.55, contentBytes: 400, generation: 2,
+						repoId: "repo_1", servable: true, updatedAt: new Date().toISOString(),
+						invalidatedAt: null, provenanceKind: "repo_derivation",
+						evidenceClass: "derived", sourcePaths: ["internal/oidc/login.go"],
+					},
+					{
+						id: "h2", summary: "Persistence: 116 tables declared by the schema",
+						type: "persistence", scope: "repository", state: "valid", origin: "canonical",
+						authority: "authoritative", confidence: 0.85, contentBytes: 300, generation: 2,
+						repoId: "repo_1", servable: true, updatedAt: new Date().toISOString(),
+						invalidatedAt: null, provenanceKind: "repo_derivation",
+						evidenceClass: "observed", sourcePaths: ["internal/storage/queries/users.sql"],
+					},
+				],
+			},
+		});
+		render(<IntelligenceMemory projectId="p1" />, { wrapper });
+
+		const group = await screen.findByTestId("memory-group-shape");
+		expect(within(group).getByText(/Auth model/)).toBeInTheDocument();
+		expect(within(group).getByText(/116 tables/)).toBeInTheDocument();
+		// The two facts are labelled differently, which is the whole point.
+		expect(within(group).getByText("inferred")).toBeInTheDocument();
+		expect(within(group).getByText("observed")).toBeInTheDocument();
+	});
+
+	// Section 8: provenance is expandable. A label a reader cannot check is not
+	// much better than no label, and the body is where a derived fact states
+	// how it was determined.
+	it("expands a fact to the evidence behind it", async () => {
+		answer({
+			"/api/v1/projects/{id}/memory/items": {
+				items: [
+					{
+						id: "h1", summary: "Auth model: identity/permission code concentrated in internal/oidc",
+						type: "auth_model", scope: "repository", state: "valid", origin: "canonical",
+						authority: "authoritative", confidence: 0.55, contentBytes: 400, generation: 2,
+						repoId: "repo_1", servable: true, updatedAt: new Date().toISOString(),
+						invalidatedAt: null, provenanceKind: "repo_derivation", evidenceClass: "derived",
+						sourcePaths: ["internal/oidc/login.go"],
+					},
+				],
+			},
+			"/api/v1/projects/{id}/memory/provenance/{itemId}": {
+				item: {
+					id: "h1", summary: "Auth model", type: "auth_model", scope: "repository",
+					state: "valid", origin: "canonical", authority: "authoritative", confidence: 0.55,
+					contentBytes: 400, generation: 2, repoId: "repo_1", servable: true,
+					updatedAt: new Date().toISOString(), invalidatedAt: null,
+					content: "Files to read first:\n  - internal/oidc/login.go\n\nHow this was determined: " +
+						"directory and file naming during the repository scan. AO has NOT verified that these files " +
+						"implement the authorization model.",
+					sourcePaths: ["internal/oidc/login.go", "internal/rbac/roles.go"],
+					metadata: { derivedBy: "repository_scan", files: "12" },
+				},
+				servable: true,
+				relations: [],
+			},
+		});
+		const user = userEvent.setup();
+		render(<IntelligenceMemory projectId="p1" />, { wrapper });
+
+		// Collapsed: the caveat is not on screen.
+		expect(await screen.findByTestId("memory-item")).toBeInTheDocument();
+		expect(screen.queryByTestId("memory-evidence")).not.toBeInTheDocument();
+
+		await user.click(screen.getByRole("button", { expanded: false }));
+
+		const evidence = await screen.findByTestId("memory-evidence");
+		expect(within(evidence).getByText(/AO has NOT verified/)).toBeInTheDocument();
+		expect(within(evidence).getByText("internal/rbac/roles.go")).toBeInTheDocument();
+	});
+
 	it("labels every search hit with the authority that produced it", async () => {
 		answer({
 			"/api/v1/projects/{id}/intelligence/search": {
@@ -250,6 +333,38 @@ describe("Project Intelligence", () => {
 		expect(within(hits[0]).getByText("Code graph")).toBeInTheDocument();
 		expect(within(hits[1]).getByText("Memory")).toBeInTheDocument();
 		expect(screen.getByTestId("search-counts")).toHaveTextContent("1 from memory · 1 from the code graph");
+	});
+
+	// P4-H: a memory hit also says how strong a claim it is. Two memory rows
+	// of different classes must not read as equally settled.
+	it("labels a memory hit with how strong its claim is", async () => {
+		answer({
+			"/api/v1/projects/{id}/intelligence/search": {
+				query: "permisos",
+				hits: [
+					{
+						kind: "memory", title: "Auth model: code concentrated in internal/oidc",
+						memoryType: "auth_model", state: "valid", evidenceClass: "derived",
+						confidence: 0.55, provenance: "repo_derivation", score: 8,
+					},
+					{
+						kind: "memory", title: "AGENTS.md — standing instructions",
+						memoryType: "instruction", state: "valid", evidenceClass: "observed",
+						confidence: 0.95, provenance: "repo_derivation", score: 4,
+					},
+				],
+				memoryHits: 2, symbolHits: 0, truncated: false, generation: 3,
+			},
+		});
+		const user = userEvent.setup();
+		render(<IntelligenceSearch projectId="p1" />, { wrapper });
+
+		await user.type(screen.getByLabelText(/ask about this project/i), "permisos");
+		await user.click(screen.getByRole("button", { name: /search/i }));
+
+		const hits = await screen.findAllByTestId("search-hit");
+		expect(within(hits[0]).getByTestId("search-hit-evidence")).toHaveTextContent("inferred");
+		expect(within(hits[1]).getByTestId("search-hit-evidence")).toHaveTextContent("observed");
 	});
 
 	it("reports context as selected and avoided, never as saved", async () => {

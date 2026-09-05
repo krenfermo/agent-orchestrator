@@ -591,7 +591,7 @@ func (c *ProjectMemoryController) inspect(w http.ResponseWriter, r *http.Request
 	}
 	items := make([]ProjectMemoryItemResponse, 0, len(res.Items))
 	for _, item := range res.Items {
-		items = append(items, projectMemoryItemResponse(item))
+		items = append(items, projectMemoryItemResponse(item).withoutContent())
 	}
 	envelope.WriteJSON(w, http.StatusOK, ListProjectMemoryItemsResponse{
 		RepoID: res.RepoID, Items: items, Total: res.Total, Truncated: res.Truncated,
@@ -721,6 +721,33 @@ type ProjectMemoryItemResponse struct {
 	PromotionAuthority string `json:"promotionAuthority,omitempty"`
 	VerifiedCommit     string `json:"verifiedCommit,omitempty"`
 	IntegratedCommit   string `json:"integratedCommit,omitempty"`
+
+	// P4-H. EvidenceClass is how strong the claim is (domain.MemoryEvidenceClass);
+	// empty means the row does not say, which is what every fact written
+	// before P4-H reads back as.
+	EvidenceClass string `json:"evidenceClass,omitempty" enum:"derived,observed,user_provided,workflow_verified"`
+	// Content is the fact's bounded body, and it ships on the PROVENANCE read
+	// only — the list read strips it (see withoutContent).
+	//
+	// The split matters both ways. A list of two hundred facts must stay a
+	// list: shipping every body would multiply the Memory tab's payload by
+	// two orders of magnitude to render text nothing is showing yet, which is
+	// the rule that predates P4-H and still holds.
+	//
+	// But the body is also where a derived fact becomes CHECKABLE — the
+	// evidence paths, the counts, and the "how this was determined; AO has NOT
+	// verified this" note the auth-model fact carries. Withholding it
+	// everywhere left the UI unable to show a reader why to believe a claim,
+	// which §4 forbids. So it travels on the one read whose whole purpose is
+	// "show me the evidence behind this row".
+	//
+	// It is never a transcript and never model reasoning: nothing that
+	// produces a memory item has ever had either.
+	Content string `json:"content,omitempty"`
+	// Metadata is the small structured annotation the producer attached
+	// (which pass derived this, which graph generation it read, how many
+	// files matched). Keys and short values only.
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // ProjectMemoryRelationResponse is one graph edge on the wire.
@@ -960,11 +987,22 @@ func projectMemoryItemResponse(item domain.ProjectMemoryItem) ProjectMemoryItemR
 	out.PromotionAuthority = item.PromotionAuthority
 	out.VerifiedCommit = item.VerifiedCommit
 	out.IntegratedCommit = item.IntegratedCommit
+	out.EvidenceClass = string(item.EvidenceClass)
+	out.Content = item.Content
+	out.Metadata = item.Metadata
 	if !item.InvalidatedAt.IsZero() {
 		v := item.InvalidatedAt.Format(rfc3339Milli)
 		out.InvalidatedAt = &v
 	}
 	return out
+}
+
+// withoutContent returns the row as a LIST entry: everything a reader needs to
+// scan and rank facts, and not the bodies. ContentBytes survives, so an empty
+// fact is still distinguishable from a large one.
+func (r ProjectMemoryItemResponse) withoutContent() ProjectMemoryItemResponse {
+	r.Content = ""
+	return r
 }
 
 func projectMemoryRelationResponse(rel domain.ProjectMemoryRelation) ProjectMemoryRelationResponse {

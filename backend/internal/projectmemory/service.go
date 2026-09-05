@@ -120,7 +120,12 @@ func NewService(repo Repository, opts ...ServiceOption) *Service {
 	for _, o := range opts {
 		o(s)
 	}
-	s.indexer = NewIndexer(repo, s.graph, WithIndexLimits(s.limits), WithIndexClock(s.now))
+	s.indexer = NewIndexer(repo, s.graph,
+		WithIndexLimits(s.limits), WithIndexClock(s.now),
+		// P4-H: the indexer reads the structural summary to derive the
+		// high-level facts. Optional — a nil graph derives the scan-backed
+		// subset and says so in the outcome.
+		WithIndexCodeGraph(s.codeGraph))
 	s.detector = NewDetector(repo)
 	s.detector.now = s.now
 	s.validate = NewValidator(repo)
@@ -210,6 +215,10 @@ func (s *Service) Sync(ctx context.Context, projectID domain.ProjectID, repoPath
 		RelationsWritten:    full.RelationsWritten,
 		IndexedCommit:       full.IndexedCommit,
 		Duration:            full.Duration,
+		InsightsRefreshed:   full.InsightsDerived > 0,
+		InsightsDerived:     full.InsightsDerived,
+		InsightsGraphBacked: full.InsightsGraphBacked,
+		InsightsSkipReason:  full.InsightsSkipReason,
 	}
 	return out, err
 }
@@ -412,6 +421,19 @@ func (s *Service) Inspect(ctx context.Context, req InspectRequest) (InspectResul
 		}
 		filtered = append(filtered, item)
 	}
+	// P4-H: order by value BEFORE truncating.
+	//
+	// Without this the window a truncated inspect returns is whatever order
+	// the store happened to produce, which on a real repository is dominated
+	// by module rows: SIGE derives 333 of them against 12 high-level facts,
+	// so a 200-row window could — and did — contain not one fact worth
+	// reading. Every caller that truncates (the Memory tab, Search) was
+	// therefore looking at the least useful two thirds of memory.
+	//
+	// The order is deterministic, so two identical reads return identical
+	// windows and a truncation is reproducible rather than incidental.
+	sortByValue(filtered)
+
 	result := InspectResult{RepoID: repoID, Total: len(filtered)}
 	if len(filtered) > limit {
 		result.Truncated = true
@@ -419,6 +441,67 @@ func (s *Service) Inspect(ctx context.Context, req InspectRequest) (InspectResul
 	}
 	result.Items = filtered
 	return result, nil
+}
+
+// inspectTypeRank orders the fact types by how much of a project one of them
+// explains. It is a reading order, not a ranking of correctness: a module
+// census is perfectly true and answers almost nothing on its own, while an
+// architecture fact is one row that orients somebody.
+//
+// An unranked type sorts between the standing facts and the per-unit census —
+// specific enough not to lead, useful enough not to be buried under a thousand
+// modules.
+func inspectTypeRank(t domain.ProjectMemoryType) int {
+	switch t {
+	case domain.MemoryTypeProjectOverview:
+		return 0
+	case domain.MemoryTypeArchitecture:
+		return 1
+	case domain.MemoryTypeEntryPoint, domain.MemoryTypeRuntimeSurface,
+		domain.MemoryTypePersistence, domain.MemoryTypeAuthModel:
+		return 2
+	case domain.MemoryTypeDeployment, domain.MemoryTypeIntegration,
+		domain.MemoryTypeConfigSurface, domain.MemoryTypeTestingSurface:
+		return 3
+	case domain.MemoryTypeInstruction, domain.MemoryTypeConvention,
+		domain.MemoryTypeBuildTest:
+		return 4
+	case domain.MemoryTypeDecision, domain.MemoryTypeKnownRisk,
+		domain.MemoryTypeRepositoryRelationship:
+		return 5
+	case domain.MemoryTypeTaskResult, domain.MemoryTypeDependency:
+		return 6
+	case domain.MemoryTypeModule:
+		return 8
+	case domain.MemoryTypeFileSummary, domain.MemoryTypeSymbolSummary:
+		return 9
+	default:
+		return 7
+	}
+}
+
+// sortByValue orders facts most-explanatory first, breaking ties on evidence
+// class, confidence and finally the key — so the order is total and stable.
+func sortByValue(items []domain.ProjectMemoryItem) {
+	sort.SliceStable(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		if ra, rb := inspectTypeRank(a.Key.Type), inspectTypeRank(b.Key.Type); ra != rb {
+			return ra < rb
+		}
+		// A servable fact outranks a withheld one of the same type: an
+		// operator scanning a truncated list should see what AO would
+		// actually serve before what it is withholding.
+		if a.Servable() != b.Servable() {
+			return a.Servable()
+		}
+		if ra, rb := a.EvidenceClass.Rank(), b.EvidenceClass.Rank(); ra != rb {
+			return ra > rb
+		}
+		if a.Confidence != b.Confidence {
+			return a.Confidence > b.Confidence
+		}
+		return a.Key.Key < b.Key.Key
+	})
 }
 
 func matchesPrefix(item domain.ProjectMemoryItem, prefix string) bool {
@@ -616,6 +699,12 @@ func (s *Service) RecordTaskOutcome(ctx context.Context, out TaskOutcome) error 
 		// guarantees by ignoring task-local rows and by only sweeping facts a
 		// full walk was responsible for.
 		Generation: 0,
+		// P4-H §4: a task's account of its own work is a CLAIM AO recorded,
+		// not something AO read out of the repository and not something
+		// anything has verified yet. It becomes EvidenceWorkflowVerified at
+		// promotion, and only when the promotion proof holds — see
+		// PromoteTaskMemory.
+		Evidence: domain.EvidenceDerived,
 	}
 	paths := domain.NormalizeMemorySourcePaths(out.FilesChanged)
 	if len(paths) > domain.MaxProjectMemorySourcePaths {
@@ -831,6 +920,16 @@ func (s *Service) PromoteTaskMemory(
 		canonical.PromotionAuthority = proof.MutationProvenanceID
 		canonical.VerifiedCommit = proof.VerifiedCommit
 		canonical.IntegratedCommit = proof.IntegratedCommit
+		// P4-H §4/§11: promotion is the ONE event that upgrades a fact's
+		// evidence class. Everything before this point is a claim a task made
+		// about its own work; what happened here is that AO holds a durable
+		// record of that work being verified and integrated, which is exactly
+		// what EvidenceWorkflowVerified means.
+		//
+		// It is set only on the proven path. The unprovable branch above
+		// leaves the class where it was, so a fact whose promotion was refused
+		// cannot borrow the credibility of one that was not.
+		canonical.EvidenceClass = domain.EvidenceWorkflowVerified
 		if proof.RepoIdentity.Known() {
 			canonical.RepoIdentity = proof.RepoIdentity
 		}

@@ -80,6 +80,11 @@ type APIDeps struct {
 	// ProjectIntelligence backs P4-G's Project Intelligence surface. Optional:
 	// nil reports not-implemented, matching the graph's own convention.
 	ProjectIntelligence controllers.ProjectIntelligenceService
+	// ProjectIntelligenceMemory backs the durable-memory half of the
+	// Intelligence page's sync/rebuild actions (P4-H). Optional and separate
+	// from ProjectMemoryGraph: the graph and durable memory are independently
+	// optional subsystems, and a daemon can have either without the other.
+	ProjectIntelligenceMemory controllers.ProjectIntelligenceMemoryService
 	// Scheduler and RuntimeGC back P1-C's capacity and runtime-GC surfaces.
 	// Optional like every other surface here: nil answers 501.
 	Scheduler controllers.SchedulerService
@@ -307,7 +312,8 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		projectMemory:      &controllers.ProjectMemoryController{Svc: deps.ProjectMemory, Guard: guard},
 		projectMemoryGraph: &controllers.ProjectMemoryGraphController{Svc: deps.ProjectMemoryGraph, Guard: guard},
 		projectIntel: &controllers.ProjectIntelligenceController{
-			Svc: deps.ProjectIntelligence, Sync: deps.ProjectMemoryGraph, Guard: guard,
+			Svc: deps.ProjectIntelligence, Sync: deps.ProjectMemoryGraph,
+			Memory: deps.ProjectIntelligenceMemory, Guard: guard,
 		},
 		prs: &controllers.PRsController{Svc: deps.PRs},
 		reviews: &controllers.ReviewsController{

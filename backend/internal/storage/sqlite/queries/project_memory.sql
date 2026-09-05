@@ -100,8 +100,8 @@ INSERT OR IGNORE INTO project_memory_items (
     generation, state, state_reason, confidence, metadata_json, content_hash,
     created_at, updated_at, invalidated_at,
     authority, authority_reason, repo_identity, provenance_kind,
-    promotion_authority, verified_commit, integrated_commit
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    promotion_authority, verified_commit, integrated_commit, evidence_class
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: UpdateProjectMemoryItem :execrows
 -- Generation-conditioned update: apply only if the stored row is not already
@@ -119,7 +119,8 @@ SET item_type = ?, scope = ?, item_key = ?,
     generation = ?, state = ?, state_reason = ?, confidence = ?,
     metadata_json = ?, content_hash = ?, updated_at = ?, invalidated_at = ?,
     authority = ?, authority_reason = ?, repo_identity = ?, provenance_kind = ?,
-    promotion_authority = ?, verified_commit = ?, integrated_commit = ?
+    promotion_authority = ?, verified_commit = ?, integrated_commit = ?,
+    evidence_class = ?
 WHERE id = ? AND generation <= ?;
 
 -- name: TouchProjectMemoryItemProvenance :execrows

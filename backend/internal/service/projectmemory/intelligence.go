@@ -103,7 +103,27 @@ type RepoIntelligence struct {
 	// MemoryItems is how many durable project-memory facts this repository
 	// has, when memory is wired.
 	MemoryItems int64
+	// MemoryState is the derived derivation lifecycle: pending, deriving,
+	// ready, stale, failed (MemoryLifecycleState).
+	//
+	// Before P4-H this reported the raw index PHASE, which on a settled
+	// repository is the literal string "idle" -- true of the row and useless
+	// to a reader, who wants to know whether AO can answer questions about
+	// this project rather than whether a goroutine is running.
 	MemoryState string
+	// MemoryValid and MemoryStale split the census, so "memory is stale"
+	// comes with how much of it is. The field ORDER here matches
+	// controllers.ProjectIntelligenceRepoStatus, which the API layer converts
+	// to directly.
+	MemoryValid int64
+	MemoryStale int64
+	// MemoryCommit is the commit memory was last derived at, alongside the
+	// graph's IndexedCommit. The two can legitimately differ: they are
+	// separate passes with separate schedules, and showing one for both would
+	// make a normal state look like a bug.
+	MemoryCommit  string
+	MemoryError   string
+	MemoryUpdated string
 }
 
 // intelligence reports every repository's state for the Overview tab.
@@ -156,6 +176,11 @@ func (s *Service) intelligence(ctx context.Context, projectID domain.ProjectID) 
 		if m, ok := memoryByRepo[state.RepoID]; ok {
 			repo.MemoryItems = m.Items
 			repo.MemoryState = m.State
+			repo.MemoryStale = m.Stale
+			repo.MemoryValid = m.Valid
+			repo.MemoryCommit = m.Commit
+			repo.MemoryError = m.Error
+			repo.MemoryUpdated = m.Updated
 		}
 		out.Repos = append(out.Repos, repo)
 	}
@@ -163,8 +188,13 @@ func (s *Service) intelligence(ctx context.Context, projectID domain.ProjectID) 
 }
 
 type memorySummary struct {
-	Items int64
-	State string
+	Items   int64
+	Valid   int64
+	Stale   int64
+	State   string
+	Commit  string
+	Error   string
+	Updated string
 }
 
 // memoryStatusByRepo reads project memory's own status alongside the graph's.
@@ -180,7 +210,19 @@ func (s *Service) memoryStatusByRepo(ctx context.Context, projectID domain.Proje
 		return out
 	}
 	for _, st := range statuses {
-		out[st.RepoID] = memorySummary{Items: int64(st.Counts.Valid), State: string(st.Index.Phase)}
+		head, _ := pm.HeadOf(ctx, st.RepoPath)
+		summary := memorySummary{
+			Items:  int64(st.Counts.Total),
+			Valid:  int64(st.Counts.Valid),
+			Stale:  int64(st.Counts.Stale + st.Counts.Invalidated),
+			State:  string(memoryState(st, head)),
+			Commit: st.Index.IndexedCommit,
+			Error:  st.Index.LastError,
+		}
+		if !st.LastUpdatedAt.IsZero() {
+			summary.Updated = st.LastUpdatedAt.UTC().Format(time.RFC3339)
+		}
+		out[st.RepoID] = summary
 	}
 	return out
 }

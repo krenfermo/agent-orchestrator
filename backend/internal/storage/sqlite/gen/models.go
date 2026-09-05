@@ -714,6 +714,7 @@ type ProjectMemoryItem struct {
 	PromotionAuthority string
 	VerifiedCommit     string
 	IntegratedCommit   string
+	EvidenceClass      string
 }
 
 type ProjectMemoryRelation struct {

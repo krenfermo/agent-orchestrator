@@ -818,9 +818,10 @@ func RunWithConfig(cfg config.Config) error {
 		// code-graph routes are two views of the same subsystem, and giving
 		// them separate resolvers would give them separate opinions about
 		// which repository a project id means.
-		ProjectMemory:       memoryAPI,
-		ProjectMemoryGraph:  memoryAPI,
-		ProjectIntelligence: memoryAPI,
+		ProjectMemory:             memoryAPI,
+		ProjectMemoryGraph:        memoryAPI,
+		ProjectIntelligence:       memoryAPI,
+		ProjectIntelligenceMemory: memoryAPI,
 		Questions: &questionssvc.AnswerService{
 			Store: store, Runs: store, Sender: rawSessionMgr, Logger: log,
 			// P3-D: the answer is recorded first and delivered second, and the

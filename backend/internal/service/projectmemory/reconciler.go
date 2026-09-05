@@ -34,6 +34,21 @@ import (
 // both "the graph does not describe the checkout", and GraphSync already
 // decides between an incremental pass and a full build the way a dispatch
 // would. P4-G adds no second opinion about that.
+//
+// P4-H ADDS A SECOND SUBJECT, NOT A SECOND RECONCILER. Durable project memory
+// needs exactly the same four properties for exactly the same reasons, and it
+// needs them about the same repositories on the same schedule. So the loop
+// asks two questions per repository instead of one: does the graph describe
+// the checkout, and does memory. Splitting them into two pollers would give
+// one installation two independent opinions about which repositories exist and
+// two cooldowns that could interleave badly on a laptop.
+//
+// The ORDER within a repository is graph first, memory second, and it matters:
+// the high-level facts memory derives read the graph's structural summary, so
+// deriving memory before the graph is built produces the weaker scan-backed
+// subset. It is an ordering PREFERENCE, never a precondition -- memory derives
+// whether or not the graph succeeded, and picks the graph-backed half up at
+// the next tick. §10 requires exactly that: nothing waits.
 
 // DefaultReconcileInterval is how often the reconciler asks whether anything
 // needs indexing. It is deliberately slow: the work it schedules is measured
@@ -109,7 +124,12 @@ func NewReconciler(svc *Service, projects ProjectLister, cfg ReconcilerConfig) *
 // built without a code graph does not have to guard the call site.
 func (r *Reconciler) Start(ctx context.Context) <-chan struct{} {
 	done := make(chan struct{})
-	if r == nil || r.svc == nil || r.svc.graph == nil || r.projects == nil {
+	// A daemon with neither subject wired starts nothing. Either one alone is
+	// enough: P4-H made memory derivation independent of the graph, so an
+	// installation with memory and no graph still derives the scan-backed
+	// facts rather than silently reconciling nothing.
+	if r == nil || r.svc == nil || r.projects == nil ||
+		(r.svc.graph == nil && r.svc.memory == nil) {
 		close(done)
 		return done
 	}
@@ -168,6 +188,15 @@ func (r *Reconciler) reconcile(ctx context.Context) {
 // installation from being indexed, and the failure is already durable in the
 // row's last_error where the UI will show it.
 func (r *Reconciler) reconcileProject(ctx context.Context, id domain.ProjectID) bool {
+	if r.svc.graph == nil {
+		// Memory-only installation. There are no graph states to walk, so the
+		// project's own repository is the whole working set.
+		resolved, err := r.svc.resolveRepo(ctx, id, "")
+		if err != nil {
+			return false
+		}
+		return r.reconcileMemory(ctx, id, resolved)
+	}
 	states, err := r.svc.graph.StatusAll(ctx, id)
 	if err != nil {
 		r.log.Debug("project intelligence reconcile could not read graph status",
@@ -179,21 +208,77 @@ func (r *Reconciler) reconcileProject(ctx context.Context, id domain.ProjectID) 
 	// than read from a state -- this is the initial-index case, and it is the
 	// one the whole file exists for.
 	if len(states) == 0 {
-		return r.index(ctx, id, "", IntelligencePending)
+		// Nothing indexed yet. The graph build comes first so the memory pass
+		// that follows it has a structural summary to read; memory is still
+		// attempted on the same tick, because a graph build that fails must
+		// not leave the project with no knowledge at all.
+		worked := r.index(ctx, id, "", IntelligencePending)
+		if resolved, err := r.svc.resolveRepo(ctx, id, ""); err == nil {
+			if r.reconcileMemory(ctx, id, resolved) {
+				worked = true
+			}
+		}
+		return worked
 	}
+	worked := false
 	for _, state := range states {
 		if ctx.Err() != nil {
-			return false
+			return worked
 		}
 		derived := intelligenceState(state, graphDrift(ctx, state))
-		if !needsIndex(derived) {
-			continue
+		if needsIndex(derived) && r.index(ctx, id, state.RepoPath, derived) {
+			worked = true
 		}
-		if r.index(ctx, id, state.RepoPath, derived) {
+		if r.reconcileMemory(ctx, id, state.RepoPath) {
+			worked = true
+		}
+		if worked {
+			// One repository per tick, as before: the per-tick bound is about
+			// what this machine is asked to do at once, and a repository whose
+			// graph and memory both needed work has already used the budget.
 			return true
 		}
 	}
 	return false
+}
+
+// reconcileMemory derives or refreshes durable memory for one repository, and
+// reports whether it did any work.
+//
+// Errors are logged and swallowed, like the graph half: a repository whose
+// memory cannot be derived must not stop the rest of the installation, and the
+// failure is already durable in the index row where the UI shows it.
+func (r *Reconciler) reconcileMemory(ctx context.Context, id domain.ProjectID, repoPath string) bool {
+	status, state, ok := r.svc.memoryLifecycle(ctx, id, repoPath)
+	if !ok || !needsDerivation(state) {
+		return false
+	}
+	// The cooldown key is namespaced away from the graph's, so a repository
+	// whose graph was just indexed can still have its memory derived on the
+	// same tick. They are separate work with separate costs; sharing one
+	// cooldown would make the second one wait a full interval for no reason.
+	if !r.claim("memory\x00" + string(id) + "\x00" + repoPath) {
+		return false
+	}
+	started := time.Now()
+	result, err := r.svc.DeriveMemory(ctx, id, repoPath, false)
+	if err != nil {
+		r.log.Warn("project memory derivation failed",
+			"project", id, "repo", repoPath, "reason", state, "error", err)
+		return true
+	}
+	if result.Skipped {
+		r.log.Debug("project memory derivation skipped",
+			"project", id, "repo", result.RepoPath, "reason", result.SkipReason)
+		return true
+	}
+	r.log.Info("project memory derived",
+		"project", id, "repo", result.RepoPath, "was", state, "now", result.State,
+		"kind", result.Kind, "items", result.ItemsWritten,
+		"reconfirmed", result.ItemsReconfirmed, "invalidated", result.ItemsInvalidated,
+		"insights", result.InsightsDerived, "graphBacked", result.InsightsGraphBacked,
+		"previousItems", status.Counts.Total, "duration", time.Since(started))
+	return true
 }
 
 // index runs one sync, subject to the per-repository cooldown.

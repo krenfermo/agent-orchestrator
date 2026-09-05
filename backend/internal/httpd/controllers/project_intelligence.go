@@ -65,7 +65,62 @@ type ProjectIntelligenceRepoStatus struct {
 	LastError     string `json:"lastError,omitempty"`
 	UpdatedAt     string `json:"updatedAt,omitempty"`
 	MemoryItems   int64  `json:"memoryItems"`
-	MemoryState   string `json:"memoryState,omitempty"`
+	// MemoryState is the derived DERIVATION lifecycle, in the same five words
+	// the graph's State uses: pending, deriving, ready, stale, failed.
+	//
+	// It reported the raw index phase before P4-H, which on a settled
+	// repository read "idle" — a true statement about the row and no answer at
+	// all to "can AO answer questions about this project".
+	MemoryState string `json:"memoryState,omitempty" enum:"pending,deriving,ready,stale,failed"`
+	// MemoryValid and MemoryStale split MemoryItems, so a stale memory can say
+	// how much of it is stale rather than only that it is.
+	MemoryValid int64 `json:"memoryValid"`
+	MemoryStale int64 `json:"memoryStale"`
+	// MemoryCommit is what memory was last derived at. It is reported beside
+	// IndexedCommit rather than folded into it: the graph and memory are
+	// separate passes on separate schedules, and them differing is a normal
+	// state that must not read as a fault.
+	MemoryCommit  string `json:"memoryCommit,omitempty"`
+	MemoryError   string `json:"memoryError,omitempty"`
+	MemoryUpdated string `json:"memoryUpdated,omitempty"`
+}
+
+// ProjectIntelligenceMemorySync is the memory half of one intelligence sync.
+type ProjectIntelligenceMemorySync struct {
+	Kind             string `json:"kind,omitempty"`
+	State            string `json:"state,omitempty" enum:"pending,deriving,ready,stale,failed"`
+	Generation       int64  `json:"generation"`
+	IndexedCommit    string `json:"indexedCommit,omitempty"`
+	ItemsWritten     int    `json:"itemsWritten"`
+	ItemsReconfirmed int    `json:"itemsReconfirmed"`
+	ItemsInvalidated int64  `json:"itemsInvalidated"`
+	// InsightsDerived is how many of the high-level facts (architecture, auth
+	// model, persistence, runtime surface, ...) this pass produced, and
+	// InsightsGraphBacked whether the code graph contributed to them.
+	// InsightsSkipReason says why it did not, in words.
+	InsightsDerived     int    `json:"insightsDerived"`
+	InsightsGraphBacked bool   `json:"insightsGraphBacked"`
+	InsightsSkipReason  string `json:"insightsSkipReason,omitempty"`
+	Skipped             bool   `json:"skipped,omitempty"`
+	SkipReason          string `json:"skipReason,omitempty"`
+	Millis              int64  `json:"millis"`
+	// Error is a memory derivation that failed while the graph half
+	// succeeded. It is reported rather than returned as an HTTP error: the
+	// graph work really did happen, and failing the whole request would hide
+	// it.
+	Error string `json:"error,omitempty"`
+}
+
+// ProjectIntelligenceSyncResponse is what one sync of BOTH subsystems did.
+//
+// The two are reported separately rather than merged. They are separate passes
+// with separate costs and separate failure modes, and an operator who pressed
+// one button still has to be able to see which half did what — including the
+// case where the graph rebuilt and memory did not, which is normal when the
+// memory pass finds nothing to re-derive.
+type ProjectIntelligenceSyncResponse struct {
+	Graph  ProjectMemoryGraphSyncResponse `json:"graph"`
+	Memory ProjectIntelligenceMemorySync  `json:"memory"`
 }
 
 // ProjectIntelligenceArchitecture is the body of the architecture route.
@@ -144,7 +199,17 @@ type ProjectIntelligenceSearchHit struct {
 	MemoryType   string `json:"memoryType,omitempty"`
 	State        string `json:"state,omitempty"`
 	SourceCommit string `json:"sourceCommit,omitempty"`
-	Score        int    `json:"score"`
+	// P4-H: what KIND of claim a memory hit is, and how much of one.
+	//
+	// A search that mixes two authorities already labels which produced each
+	// row (Kind). These say how far to trust the memory rows among them: a
+	// fact a verified workflow established and a fact AO inferred from
+	// directory naming are both "memory", and a result list that renders them
+	// identically lets the second borrow the first's credibility.
+	EvidenceClass string  `json:"evidenceClass,omitempty" enum:"derived,observed,user_provided,workflow_verified"`
+	Confidence    float64 `json:"confidence,omitempty"`
+	Provenance    string  `json:"provenance,omitempty" enum:"repo_derivation,task_outcome,workflow_knowledge,legacy"`
+	Score         int     `json:"score"`
 }
 
 // ProjectIntelligenceSearchResult is the body of the search route.
@@ -240,8 +305,23 @@ type ProjectIntelligenceController struct {
 	// Sync reuses the existing graph service for the two write actions, so a
 	// manual sync from this UI exercises exactly the production path rather
 	// than a second one that could diverge from it.
-	Sync  ProjectMemoryGraphService
-	Guard Guard
+	Sync ProjectMemoryGraphService
+	// Memory drives the durable-memory half of a sync. Optional and nil-safe:
+	// a daemon without project memory still syncs its graph.
+	Memory ProjectIntelligenceMemoryService
+	Guard  Guard
+}
+
+// ProjectIntelligenceMemoryService is the memory half of the two write
+// actions. It is a separate port from ProjectMemoryGraphService because the
+// two subsystems are separately optional — a daemon can have either, both or
+// neither, and folding them into one interface would make a daemon with only
+// one of them unable to satisfy it.
+type ProjectIntelligenceMemoryService interface {
+	// MemorySync derives or refreshes one repository's durable memory,
+	// choosing incremental or full the way a dispatch would unless full is
+	// set.
+	MemorySync(ctx context.Context, projectID domain.ProjectID, repoPath string, full bool) (ProjectIntelligenceMemorySync, error)
 }
 
 // Register mounts the Project Intelligence routes.
@@ -371,13 +451,32 @@ func (c *ProjectIntelligenceController) runSync(w http.ResponseWriter, r *http.R
 		apispec.NotImplemented(w, r, "POST", route)
 		return
 	}
-	out, err := c.Sync.GraphSync(r.Context(), projectID(r),
-		strings.TrimSpace(r.URL.Query().Get("repoPath")), full)
+	repoPath := strings.TrimSpace(r.URL.Query().Get("repoPath"))
+	out, err := c.Sync.GraphSync(r.Context(), projectID(r), repoPath, full)
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, ProjectMemoryGraphSyncResponse(out))
+	resp := ProjectIntelligenceSyncResponse{Graph: ProjectMemoryGraphSyncResponse(out)}
+
+	// P4-H: the same button refreshes durable memory, and it runs SECOND so
+	// the high-level facts read the graph this call just built. A person who
+	// asked AO to bring a project up to date meant both halves of what AO
+	// knows about it; before this, pressing Sync rebuilt the graph and left
+	// the Memory tab exactly as stale as it was.
+	//
+	// A memory failure is reported inside the response rather than raised: the
+	// graph work above really did happen, and turning the whole call into a
+	// 500 would hide it and invite a retry that redoes it.
+	if c.Memory != nil {
+		mem, memErr := c.Memory.MemorySync(r.Context(), projectID(r), repoPath, full)
+		if memErr != nil {
+			resp.Memory.Error = memErr.Error()
+		} else {
+			resp.Memory = mem
+		}
+	}
+	envelope.WriteJSON(w, http.StatusOK, resp)
 }
 
 func intParam(raw string) int {

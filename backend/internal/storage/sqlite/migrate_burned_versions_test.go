@@ -160,6 +160,7 @@ var shippedMigrations = map[int64]string{
 	154: "0154_notification_canonical_model.sql",
 	155: "0155_notification_email_outbox.sql",
 	156: "0156_tenants.sql",
+	157: "0157_project_memory_evidence_class.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

@@ -344,6 +344,9 @@ func (s *Store) insertProjectMemoryItem(
 		PromotionAuthority: item.PromotionAuthority,
 		VerifiedCommit:     item.VerifiedCommit,
 		IntegratedCommit:   item.IntegratedCommit,
+		// P4-H: how strong the claim is, stored exactly as the producer
+		// labelled it. An unlabelled item stays unlabelled here too.
+		EvidenceClass: string(item.EvidenceClass),
 	})
 	if err != nil {
 		return fmt.Errorf("insert item: %w", err)
@@ -386,6 +389,7 @@ func (s *Store) updateProjectMemoryItem(
 		PromotionAuthority: item.PromotionAuthority,
 		VerifiedCommit:     item.VerifiedCommit,
 		IntegratedCommit:   item.IntegratedCommit,
+		EvidenceClass:      string(item.EvidenceClass),
 		ID:                 item.ID, Generation_2: item.Generation,
 	})
 	if err != nil {
@@ -1231,6 +1235,7 @@ func projectMemoryItemFromRow(r gen.ProjectMemoryItem) (domain.ProjectMemoryItem
 		PromotionAuthority: r.PromotionAuthority,
 		VerifiedCommit:     r.VerifiedCommit,
 		IntegratedCommit:   r.IntegratedCommit,
+		EvidenceClass:      domain.MemoryEvidenceClass(r.EvidenceClass),
 	}
 	return item, nil
 }

@@ -27,11 +27,28 @@ type TaskMemoryAdapter struct {
 	cfg projectmemory.Config
 }
 
-// NewTaskMemory builds the adapter. A nil service, or a disabled mode, yields
-// nil — and workflow treats a nil TaskMemory as the ordinary "memory is off"
-// state rather than as a failure.
+// NewTaskMemory builds the adapter. A nil service yields nil — and workflow
+// treats a nil TaskMemory as the ordinary "memory is off" state rather than as
+// a failure.
+//
+// P4-H: THE ROLLOUT MODE NO LONGER GATES THIS, and the distinction it draws is
+// the one the phase turns on.
+//
+// AO_MEMORY_MODE governs CONSUMPTION: whether an agent is handed a memory pack,
+// and whether that pack may stand in for a legacy document. Those change what a
+// model is told and deserve a staged rollout. Everything this adapter does is
+// RECORDING: what a finished task changed, which paths its changes invalidate,
+// and — under a proof the workflow boundary produced — which of its facts have
+// become the project's knowledge. None of it alters a single dispatch.
+//
+// Gating recording behind the consumption rollout meant that on a default
+// installation a workflow could run, verify, integrate and be forgotten: §11's
+// workflow-learned memory had the same shape of bug as the derivation itself,
+// where the machinery existed and nothing ever reached it. The provisioner
+// (memoryProvisioner) still honours the mode, so a cautious operator gets a
+// memory that learns and dispatches that are byte-for-byte what they were.
 func NewTaskMemory(svc *projectmemory.Service, cfg projectmemory.Config) *TaskMemoryAdapter {
-	if svc == nil || !cfg.Mode.Enabled() {
+	if svc == nil {
 		return nil
 	}
 	return &TaskMemoryAdapter{svc: svc, cfg: cfg}
