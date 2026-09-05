@@ -1323,6 +1323,31 @@ paths:
       summary: Stream created notifications
       tags:
       - notifications
+  /api/v1/notifications/unread-count:
+    get:
+      operationId: notificationUnreadCount
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersNotificationUnreadCountResponse'
+          description: OK
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Unread notification count
+      tags:
+      - notifications
   /api/v1/orchestrators:
     get:
       operationId: listOrchestrators
@@ -11147,6 +11172,13 @@ components:
       - source
       - approximateEvents
       type: object
+    ControllersNotificationUnreadCountResponse:
+      properties:
+        unreadCount:
+          type: integer
+      required:
+      - unreadCount
+      type: object
     ControllersOIDCClaimRequest:
       properties:
         flowId:
@@ -15432,12 +15464,25 @@ components:
           type: string
         projectId:
           type: string
+        readAt:
+          format: date-time
+          type:
+          - "null"
+          - string
         resolvedAt:
           format: date-time
           type:
           - "null"
           - string
         sessionId:
+          type: string
+        severity:
+          enum:
+          - info
+          - warning
+          - critical
+          type: string
+        source:
           type: string
         status:
           description: Seen state. unread means the user has not opened the notification
@@ -15448,6 +15493,8 @@ components:
           type: string
         target:
           $ref: '#/components/schemas/NotificationTarget'
+        taskId:
+          type: string
         title:
           type: string
         type:
@@ -15458,6 +15505,13 @@ components:
           - pr_closed_unmerged
           - task_completed
           - workflow_completed
+          - task_needs_attention
+          - workflow_needs_attention
+          - task_failed
+          - workflow_failed
+          - human_question_required
+          - repair_exhausted
+          - integration_failed
           type: string
         workflowRunId:
           type: string
@@ -15470,6 +15524,7 @@ components:
       - title
       - body
       - status
+      - severity
       - createdAt
       - target
       type: object

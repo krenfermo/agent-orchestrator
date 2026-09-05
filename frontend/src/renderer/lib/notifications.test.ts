@@ -86,6 +86,7 @@ function notification(overrides: Partial<NotificationDTO> = {}): NotificationDTO
 		title: "checkout-flow needs input",
 		body: "The agent is waiting for your response.",
 		status: "unread",
+		severity: "warning",
 		createdAt: "2026-06-16T10:00:00Z",
 		target: { kind: "session", sessionId: "mer-1" },
 		...overrides,

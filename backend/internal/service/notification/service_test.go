@@ -53,16 +53,16 @@ func (f *fakeStore) CountUnresolvedNotifications(context.Context) (int64, error)
 	return f.unresolvedCount, f.err
 }
 
-func (f *fakeStore) MarkNotificationRead(_ context.Context, _ string) (domain.NotificationRecord, bool, error) {
+func (f *fakeStore) MarkNotificationRead(_ context.Context, _ string, _ time.Time) (domain.NotificationRecord, bool, error) {
 	return f.markRow, f.markOK, f.err
 }
 
-func (f *fakeStore) MarkAllNotificationsRead(context.Context) (int64, error) {
+func (f *fakeStore) MarkAllNotificationsRead(context.Context, time.Time) (int64, error) {
 	f.markedAll = true
 	return f.markAllCount, f.err
 }
 
-func (f *fakeStore) MarkNotificationsRead(_ context.Context, ids []string) (int64, error) {
+func (f *fakeStore) MarkNotificationsRead(_ context.Context, ids []string, _ time.Time) (int64, error) {
 	f.markedIDs = ids
 	return int64(len(ids)), f.err
 }

@@ -17,6 +17,7 @@ Agent Orchestrator is a long-running Go daemon that supervises multiple parallel
 - [HTTP Layer](#http-layer)
 - [Terminal Multiplexing](#terminal-multiplexing)
 - [Browser Runtime Bridge](#browser-runtime-bridge)
+- [Notifications](#notifications)
 
 ---
 
@@ -1096,6 +1097,91 @@ expires within at most five minutes. AO never requests or stores request or
 response bodies; it allowlists safe headers and redacts URL credentials,
 fragments, and query values. Closing the tab, ending the session, or shutting
 down Electron disables and discards the capture.
+
+---
+
+## Notifications
+
+AO tells a person when something important happened, and stays quiet otherwise.
+One table, `notifications`, is the durable authority behind the in-app
+notification center, its cursor-paginated history, the live SSE stream, and the
+optional email fan-out. There is no second notification store and no second
+event bus.
+
+### Two producers, two authorities
+
+| Producer | Raises | From |
+| --- | --- | --- |
+| `workflow` coordinator (`completion_notify.go`, `attention_notify.go`) | `workflow_completed`, `task_completed`, `workflow_failed`, `task_failed`, `workflow_needs_attention`, `task_needs_attention` | a workflow RUN's terminal state and its attention checkpoint |
+| `service/notification.SessionFactNotifier` | `human_question_required`, `repair_exhausted`, `integration_failed` | durable facts about a SESSION |
+
+The split is not cosmetic. A session can sit on a permission prompt, exhaust its
+nudge budget, or have a review pass fail under it without its run ever changing
+state; a run can complete or fail without any single session saying so. Each
+session fact names the durable authority it is read from:
+
+- `human_question_required` <- `sessions.activity_state` entering blocked
+- `repair_exhausted` <- the attempt map persisted in `pr.last_nudge_signature`
+- `integration_failed` <- a `review_run` row written with status failed
+
+Facts are read off the authority that already owns them, at the moment it
+commits. Nothing publishes them, nothing queues them, and nothing writes the
+fact a second time — a notification row is the only thing a producer creates.
+
+### The autonomous policy
+
+While AO still has an autonomous move left, it makes it silently. A repair
+ATTEMPT notifies nobody; a repair EXHAUSTION does. `SessionFactRepairAttempted`
+exists precisely so that silence is a policy stated in one place
+(`policyFor`) rather than an absent branch spread across call sites.
+
+Deferred deliberately: `budget_warning` / `budget_exhausted`.
+`domain.UsageBudgetStatus` is a read model computed on demand from ledger rows;
+nothing records that a run CROSSED a threshold, so there is no durable fact to
+notify from. Adding the types before that authority exists would mean polling
+and diffing in memory, which a restart re-announces.
+
+### Idempotency and restart safety
+
+Every event-keyed notification carries a `dedupe_key` derived only from durable
+identity — never an observation time, a message body, or an in-memory counter.
+A unique index over `(type, dedupe_key)` makes that permanent rather than scoped
+to open rows, which is what a terminal fact needs: a reconcile, a retry, or a
+daemon that crashed between writing the row and publishing it all replay to the
+same single row, even after the user has already read it.
+
+Rows with an empty `dedupe_key` keep the older open-row rule
+(`idx_notifications_open_dedupe`, partial on `dedupe_key = ''`), so a condition
+that comes and goes can still be raised again once resolved.
+
+### Delivery semantics
+
+- **In-app: exactly-once.** The row IS the delivery, and the insert is idempotent.
+- **Email: at-least-once**, stated in `domain.EmailDeliverySemantics`. A send
+  that succeeds on the wire but crashes before the row is marked sent is
+  retried; SMTP offers nothing that would make it exactly-once. Duplicate mail
+  is the failure mode chosen over lost mail.
+
+`notification_email_outbox` makes the OWING durable: one row per notification
+(the primary key, so it inherits the notification's own event dedupe), moving
+`pending -> sending -> sent`, with `failed` as the bounded-retry state and
+`dead` as the terminal give-up. The attempt is spent at CLAIM time, so a crash
+mid-send still costs one and a wedging message cannot retry forever; a `sending`
+row whose lease expired is reclaimed by the next daemon.
+
+Email never gates the work it reports. An unconfigured transport enqueues
+nothing, in-app notifications are unaffected, and every delivery failure is a
+log line.
+
+### Recipient boundary
+
+`notifications.recipient` is the principal abstraction, and every list and count
+query is scoped by it. AO is single-user today and the only value written is
+`local`, so this changes no result — it exists so the authority boundary lives in
+the SQL rather than in a caller's discipline. **Extension point (P4-B/P4-C):**
+give it a real identity source and require producers to address rows explicitly
+instead of defaulting to the local principal. No users or teams table is created
+for it.
 
 ---
 

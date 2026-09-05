@@ -42,6 +42,16 @@ type NotificationIntent struct {
 	// Detail is the one-line, human-readable account of THIS occurrence — the
 	// same sentence the Board shows next to the stop.
 	Detail string
+
+	// TaskID is the optional planned-task anchor carried onto the stored row.
+	TaskID string
+	// Source and SourceEventID are provenance: which producer raised this, and
+	// the durable id of the observation it read. Both are stored so a row can
+	// be traced back to the fact that caused it. Empty Source defaults to
+	// lifecycle, which is where every intent came from before providers were
+	// distinguished.
+	Source        domain.NotificationSource
+	SourceEventID string
 }
 
 // NotificationResolution is the lifecycle-to-notification-producer contract for

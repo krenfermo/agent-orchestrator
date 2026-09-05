@@ -602,6 +602,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/notifications/unread-count": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Unread notification count */
+        get: operations["notificationUnreadCount"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orchestrators": {
         parameters: {
             query?: never;
@@ -3873,6 +3890,9 @@ export interface components {
             source: string;
             tokens: components["schemas"]["ControllersUsageTokenTotalsResponse"];
         };
+        ControllersNotificationUnreadCountResponse: {
+            unreadCount: number;
+        };
         ControllersOIDCClaimRequest: {
             flowId: string;
             handoffSecret: string;
@@ -5491,17 +5511,23 @@ export interface components {
             prUrl: string;
             projectId: string;
             /** Format: date-time */
+            readAt?: null | string;
+            /** Format: date-time */
             resolvedAt?: null | string;
             sessionId: string;
+            /** @enum {string} */
+            severity: "info" | "warning" | "critical";
+            source?: string;
             /**
              * @description Seen state. unread means the user has not opened the notification panel since it arrived.
              * @enum {string}
              */
             status: "unread" | "read";
             target: components["schemas"]["NotificationTarget"];
+            taskId?: string;
             title: string;
             /** @enum {string} */
-            type: "needs_input" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" | "task_completed" | "workflow_completed";
+            type: "needs_input" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" | "task_completed" | "workflow_completed" | "task_needs_attention" | "workflow_needs_attention" | "task_failed" | "workflow_failed" | "human_question_required" | "repair_exhausted" | "integration_failed";
             workflowRunId?: string;
         };
         NotificationTarget: {
@@ -8946,6 +8972,44 @@ export interface operations {
                 };
                 content: {
                     "text/event-stream": string;
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    notificationUnreadCount: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersNotificationUnreadCountResponse"];
                 };
             };
             /** @description Internal Server Error */

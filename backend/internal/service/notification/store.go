@@ -18,7 +18,10 @@ type Store interface {
 	) ([]domain.NotificationRecord, error)
 	CountUnreadNotifications(ctx context.Context) (int64, error)
 	CountUnresolvedNotifications(ctx context.Context) (int64, error)
-	MarkNotificationRead(ctx context.Context, id string) (domain.NotificationRecord, bool, error)
-	MarkAllNotificationsRead(ctx context.Context) (int64, error)
-	MarkNotificationsRead(ctx context.Context, ids []string) (int64, error)
+	// The acknowledgement time is passed in rather than taken from the store's
+	// own clock so read_at and status are written from one source of truth and
+	// tests can pin it.
+	MarkNotificationRead(ctx context.Context, id string, at time.Time) (domain.NotificationRecord, bool, error)
+	MarkAllNotificationsRead(ctx context.Context, at time.Time) (int64, error)
+	MarkNotificationsRead(ctx context.Context, ids []string, at time.Time) (int64, error)
 }

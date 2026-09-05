@@ -58,8 +58,9 @@ type Manager struct {
 type Deps struct {
 	Store     Store
 	Publisher Publisher
-	// Emailer receives newly inserted completion notifications. Optional: nil
-	// means the in-app notification is the only delivery.
+	// Emailer receives newly inserted event notifications and records that they
+	// owe an email. Optional: nil means the in-app notification is the only
+	// delivery, which is the normal state on an install with no SMTP settings.
 	Emailer Emailer
 	Logger  *slog.Logger
 	Clock   func() time.Time

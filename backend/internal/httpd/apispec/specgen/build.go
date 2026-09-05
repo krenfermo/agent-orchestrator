@@ -2285,6 +2285,15 @@ func notificationOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodGet, path: "/api/v1/notifications/unread-count", id: "notificationUnreadCount", tag: "notifications",
+			summary: "Unread notification count",
+			resps: []respUnit{
+				{http.StatusOK, controllers.NotificationUnreadCountResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodPatch, path: "/api/v1/notifications/{id}", id: "markNotificationRead", tag: "notifications",
 			summary:    "Mark a notification read",
 			pathParams: []any{controllers.NotificationIDParam{}},

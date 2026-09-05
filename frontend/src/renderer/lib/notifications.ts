@@ -272,17 +272,24 @@ export function keepLatestNotificationsPage(
  * reviewer tab hides the agent while the URL still names that session. The
  * caller resolves that, passing the session only while its agent pane shows.
  *
- * Only `needs_input` is suppressed. PR outcomes (`ready_to_merge`,
- * `pr_merged`, `pr_closed_unmerged`) are not visible in the terminal pane, so
- * they still deserve a toast even for the session in the foreground. Nor are
- * completions: `task_completed` is the whole point of stepping away from the
- * screen, and `workflow_completed` has no terminal pane at all.
+ * Only the two "the agent is stopped, answer it" kinds are suppressed:
+ * `needs_input` and `human_question_required`. A permission prompt IS the
+ * terminal content the user is looking at, so toasting it tells them something
+ * already on their screen.
+ *
+ * Nothing else is suppressed. PR outcomes (`ready_to_merge`, `pr_merged`,
+ * `pr_closed_unmerged`) are not visible in the terminal pane, so they still
+ * deserve a toast even for the session in the foreground. Nor are completions:
+ * `task_completed` is the whole point of stepping away from the screen, and
+ * `workflow_completed` has no terminal pane at all. Nor is `repair_exhausted`
+ * or `integration_failed`: both report something that happened outside the
+ * pane, which is exactly why the user would otherwise miss them.
  */
 function suppressToastForWatchedSession(
 	notification: NotificationDTO,
 	visibleAgentSessionId: string | undefined,
 ): boolean {
-	if (notification.type !== "needs_input") return false;
+	if (notification.type !== "needs_input" && notification.type !== "human_question_required") return false;
 	if (!notification.sessionId || notification.sessionId !== visibleAgentSessionId) return false;
 	return document.visibilityState === "visible" && document.hasFocus();
 }

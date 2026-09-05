@@ -57,6 +57,7 @@ import (
 	executionpolicysvc "github.com/aoagents/agent-orchestrator/backend/internal/service/executionpolicy"
 	importsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/importer"
 	notificationsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/notification"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/notification/emailoutbox"
 	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 	projectmemorysvc "github.com/aoagents/agent-orchestrator/backend/internal/service/projectmemory"
@@ -301,11 +302,33 @@ func RunWithConfig(cfg config.Config) error {
 		chatDrivers,
 		func() time.Time { return time.Now().UTC() },
 	).WithEmail(secretbox.New(cfg.DataDir), &mailer.Sender{})
+	// The durable email outbox. It plays two roles at once, which is why it is
+	// built here between the settings service and the notification writer:
+	// it is the writer's Emailer (recording that an email is OWED, synchronously
+	// and durably, on the notification INSERT), and it is the worker that later
+	// drains those rows over SMTP. The settings emailer supplies both halves it
+	// needs -- the enqueue-time renderer and the send-time transport.
+	//
+	// Nil-safe by construction: with no SMTP settings the renderer declines,
+	// nothing is enqueued, and in-app notifications are unaffected (P4-D 8).
+	notificationEmailer := settingssvc.NewNotificationEmailer(settingsSvc)
+	emailOutbox := emailoutbox.New(emailoutbox.Deps{
+		Store:     store,
+		Transport: notificationEmailer,
+		Renderer:  notificationEmailer,
+		Logger:    log,
+	})
 	notificationWriter := notify.New(notify.Deps{
 		Store:     store,
 		Publisher: notificationHub,
-		Emailer:   settingssvc.NewNotificationEmailer(settingsSvc),
+		Emailer:   emailOutbox,
 		Logger:    log,
+	})
+	// Session-level facts (a pending decision, a spent repair budget, a failed
+	// integration) become notifications through the same single write path, so
+	// they land in one table and reach the live stream like every other kind.
+	sessionFactNotifier := notificationsvc.NewSessionFactNotifier(notificationsvc.SessionFactDeps{
+		Notifier: notificationWriter,
 	})
 	// Resolution transitions that happened while the daemon was down never
 	// reached lifecycle, so re-check open notifications against the durable
@@ -314,6 +337,11 @@ func RunWithConfig(cfg config.Config) error {
 	if err := notificationWriter.Reconcile(ctx); err != nil {
 		log.Warn("notification resolution reconcile failed", "err", err)
 	}
+	// Emails a previous daemon owed but never finished sending. Draining once at
+	// startup reclaims anything a crash left mid-send; the ticker then keeps the
+	// queue moving. Both are best-effort by design: mail must never gate
+	// startup or the work being reported.
+	startEmailOutboxWorker(ctx, emailOutbox, log)
 
 	// Bring up the Lifecycle Manager and the reaper first: it makes the session
 	// lifecycle write path live (reducer write -> store -> DB trigger ->
@@ -333,7 +361,7 @@ func RunWithConfig(cfg config.Config) error {
 		return fmt.Errorf("wire agent resolver: %w", err)
 	}
 
-	lcStack := startLifecycle(ctx, store, runtimeAdapter, lifecycleMessenger, notificationWriter, telemetrySink, agents, log)
+	lcStack := startLifecycle(ctx, store, runtimeAdapter, lifecycleMessenger, notificationWriter, sessionFactNotifier, telemetrySink, agents, log)
 
 	// Wire the controller-facing session service over the same store + LCM, the
 	// selected runtime, routed git/scratch workspaces, the per-session agent
@@ -385,7 +413,7 @@ func RunWithConfig(cfg config.Config) error {
 		NewID:    uuid.NewString,
 	})
 
-	sessions, err := startSession(ctx, cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, agents, managedPreview, browserBroker, browserAuthority, chatLauncher{svc: chatSvc}, settingsSvc, log)
+	sessions, err := startSession(ctx, cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, agents, managedPreview, browserBroker, browserAuthority, chatLauncher{svc: chatSvc}, settingsSvc, sessionFactNotifier, log)
 	if err != nil {
 		stop()
 		lcStack.Stop()

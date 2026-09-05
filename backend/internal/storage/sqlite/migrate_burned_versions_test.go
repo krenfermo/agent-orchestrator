@@ -157,6 +157,8 @@ var shippedMigrations = map[int64]string{
 	151: "0151_oidc_identities.sql",
 	152: "0152_users_teams_rbac.sql",
 	153: "0153_code_graph.sql",
+	154: "0154_notification_canonical_model.sql",
+	155: "0155_notification_email_outbox.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they
