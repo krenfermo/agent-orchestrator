@@ -85,6 +85,10 @@ type APIDeps struct {
 	// from ProjectMemoryGraph: the graph and durable memory are independently
 	// optional subsystems, and a daemon can have either without the other.
 	ProjectIntelligenceMemory controllers.ProjectIntelligenceMemoryService
+	// WorkItems backs P4-E's external work-management surface. Optional: a
+	// daemon without it answers 501 on those routes, which is the honest
+	// answer for a build that does not carry the integration.
+	WorkItems controllers.WorkItemsService
 	// Scheduler and RuntimeGC back P1-C's capacity and runtime-GC surfaces.
 	// Optional like every other surface here: nil answers 501.
 	Scheduler controllers.SchedulerService
@@ -251,6 +255,7 @@ type API struct {
 	projectMemory      *controllers.ProjectMemoryController
 	projectMemoryGraph *controllers.ProjectMemoryGraphController
 	projectIntel       *controllers.ProjectIntelligenceController
+	workItems          *controllers.WorkItemsController
 	events             *EventsController
 	auth               *controllers.AuthController
 	sso                *controllers.SSOController
@@ -315,7 +320,8 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			Svc: deps.ProjectIntelligence, Sync: deps.ProjectMemoryGraph,
 			Memory: deps.ProjectIntelligenceMemory, Guard: guard,
 		},
-		prs: &controllers.PRsController{Svc: deps.PRs},
+		workItems: &controllers.WorkItemsController{Svc: deps.WorkItems, Guard: guard},
+		prs:       &controllers.PRsController{Svc: deps.PRs},
 		reviews: &controllers.ReviewsController{
 			Svc:          deps.Reviews,
 			Ownership:    deps.SessionOwnership,
@@ -406,6 +412,7 @@ func (a *API) Register(root chi.Router) {
 			a.projectMemory.Register(r)
 			a.projectMemoryGraph.Register(r)
 			a.projectIntel.Register(r)
+			a.workItems.Register(r)
 			a.prs.Register(r)
 			a.reviews.Register(r)
 			a.decisions.Register(r)

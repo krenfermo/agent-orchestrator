@@ -1097,6 +1097,77 @@ type UserExecutionPolicy struct {
 	UpdatedAt                time.Time
 }
 
+type WorkItemConfig struct {
+	ProjectID           string
+	Provider            string
+	BaseURL             string
+	Workspace           string
+	ExternalProjectID   string
+	ExternalProjectName string
+	ExternalProjectKey  string
+	ApiTokenEncrypted   string
+	Enabled             int64
+	SyncStates          int64
+	SyncComments        int64
+	LastCheckAt         sql.NullTime
+	LastCheckOk         int64
+	LastCheckError      string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+type WorkItemLink struct {
+	ID                string
+	ProjectID         string
+	Scope             string
+	ScopeID           string
+	Provider          string
+	Workspace         string
+	ExternalProjectID string
+	ExternalItemID    string
+	ExternalItemKey   string
+	Origin            string
+	SyncEnabled       int64
+	LastSeenTitle     string
+	LastSeenState     string
+	LastSeenAt        sql.NullTime
+	CreatedBy         string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+type WorkItemSyncAudit struct {
+	ID              string
+	ProjectID       string
+	LinkID          string
+	Provider        string
+	Operation       string
+	ExternalItemID  string
+	ExternalItemKey string
+	Outcome         string
+	ErrorKind       string
+	Detail          string
+	Attempts        int64
+	DurationMs      int64
+	CreatedAt       time.Time
+}
+
+type WorkItemSyncOutbox struct {
+	ID            string
+	ProjectID     string
+	LinkID        string
+	Event         string
+	Body          string
+	TargetState   string
+	DedupeKey     string
+	Status        string
+	Attempts      int64
+	NextAttemptAt sql.NullTime
+	LastError     string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
 type WorkflowAttempt struct {
 	ID                      string
 	WorkflowStepID          string

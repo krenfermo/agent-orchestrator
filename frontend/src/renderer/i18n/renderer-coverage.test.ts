@@ -52,6 +52,10 @@ const approvedLiterals: Record<string, readonly string[]> = {
 		"you@gmail.com",
 	],
 	"components/settings/UpdatesSection.tsx": ["PR #"],
+	// A URL and a workspace slug shown as form placeholders. Both are examples
+	// of what to type, not English copy, and translating either would make the
+	// example wrong.
+	"components/settings/WorkItemsSettingsSection.tsx": ["https://api.plane.so", "acme"],
 };
 
 // The Chat surface predates this coverage gate and is intentionally being

@@ -1117,6 +1117,162 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/workitems": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-E: this project's external work-management connection (Plane): which workspace and project it maps to, whether a credential is stored, and whether the last connection check passed. The credential itself is never returned. */
+        get: operations["getProjectWorkItemsConfig"];
+        /** P4-E: configure the connection. Every field is optional and omitting one leaves it unchanged — in particular, omitting apiToken keeps the stored credential rather than clearing it. A configuration may be saved incomplete; only switching it on requires a workspace, a project and a token. */
+        put: operations["putProjectWorkItemsConfig"];
+        post?: never;
+        /** P4-E: disconnect the project, deleting the stored credential. Links are left alone: forgetting how to reach a provider is not a reason to forget which items the work was about. */
+        delete: operations["deleteProjectWorkItemsConfig"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workitems/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-E: the recent provider operations — what AO sent, what came back, and whether it was retried. Never a credential, a request header, or an untruncated provider body. */
+        get: operations["listProjectWorkItemsAudit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workitems/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-E: whether the integration is configured, switched on, connected or degraded, and how much is queued or permanently failed. It makes no provider call: a status endpoint that probes is slow exactly when the thing it reports on is broken. */
+        get: operations["getProjectWorkItemsHealth"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workitems/links": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-E: the external items this project's work is linked to. With live=true each is refreshed from the provider; a link the provider could not answer for comes back with its cached title and state and stale=true, rather than disappearing. */
+        get: operations["listProjectWorkItemLinks"];
+        put?: never;
+        /** P4-E: link a workflow run or planned task to an external work item, either by naming one that exists ("PROJ-123" or a provider URL) or by asking AO to create it. AO never creates items on its own — internal repair and reviewer work does not mint anything on somebody's board. */
+        post: operations["createProjectWorkItemLink"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workitems/links/{linkId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** P4-E: unlink. The external item is left untouched — deleting somebody's planning item because a link was removed would be a destructive surprise. */
+        delete: operations["deleteProjectWorkItemLink"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workitems/links/{linkId}/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P4-E: turn state and comment pushing on or off for one link. A link is useful without it — recording that two things are about each other is worth doing on its own. */
+        post: operations["setProjectWorkItemLinkSync"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workitems/projects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-E: the projects in the connected workspace, so a person mapping this AO project can choose one rather than paste a UUID. */
+        get: operations["listProjectWorkItemsProviderProjects"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workitems/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P4-E: drain the outbound sync queue now. Normal operation does not need this — a background worker drains it on its own — and it is the button for when somebody does not want to wait for the next tick. */
+        post: operations["syncProjectWorkItems"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/workitems/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** P4-E: verify the configured credential against the provider and record the result. It lists the workspace's projects, which proves both that the token is valid and that it can see the workspace it is configured for. */
+        post: operations["testProjectWorkItemsConnection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/workspace-repos/refresh": {
         parameters: {
             query?: never;
@@ -6843,6 +6999,131 @@ export interface components {
         UserResponse: {
             user: components["schemas"]["AdminUserView"];
         };
+        WorkItemLinkRequest: {
+            create?: boolean;
+            description?: string;
+            reference?: string;
+            /** @enum {string} */
+            scope: "project" | "run" | "task";
+            scopeId?: string;
+            syncEnabled: boolean;
+            title?: string;
+        };
+        WorkItemLinkResponse: {
+            createdAt: string;
+            externalItemId: string;
+            externalItemKey?: string;
+            externalProjectId: string;
+            id: string;
+            lastSeenAt?: string;
+            liveError?: string;
+            /** @enum {string} */
+            origin: "manual" | "created";
+            projectId: string;
+            /** @enum {string} */
+            provider: "plane";
+            /** @enum {string} */
+            readiness?: "ready" | "deferred" | "done" | "unknown";
+            /** @enum {string} */
+            scope: "project" | "run" | "task";
+            scopeId?: string;
+            stale: boolean;
+            state?: string;
+            stateName?: string;
+            syncEnabled: boolean;
+            title?: string;
+            url?: string;
+            workspace: string;
+        };
+        WorkItemLinkSyncRequest: {
+            enabled: boolean;
+        };
+        WorkItemLinksResponse: {
+            links: components["schemas"]["WorkItemLinkResponse"][];
+        };
+        WorkItemsAuditEntry: {
+            /** Format: int64 */
+            attempts: number;
+            createdAt: string;
+            detail?: string;
+            /** Format: int64 */
+            durationMs: number;
+            errorKind?: string;
+            externalItemId?: string;
+            externalItemKey?: string;
+            id: string;
+            operation: string;
+            /** @enum {string} */
+            outcome: "ok" | "retryable" | "failed" | "skipped";
+            provider: string;
+        };
+        WorkItemsAuditResponse: {
+            entries: components["schemas"]["WorkItemsAuditEntry"][];
+        };
+        WorkItemsConfigResponse: {
+            baseUrl?: string;
+            connected: boolean;
+            degraded: boolean;
+            enabled: boolean;
+            externalProjectId?: string;
+            externalProjectKey?: string;
+            externalProjectName?: string;
+            lastCheckAt?: string;
+            lastCheckError?: string;
+            projectId: string;
+            /** @enum {string} */
+            provider: "plane";
+            syncComments: boolean;
+            syncStates: boolean;
+            tokenConfigured: boolean;
+            tokenFromEnv: boolean;
+            workspace?: string;
+        };
+        WorkItemsConfigUpdate: {
+            apiToken?: null | string;
+            baseUrl?: null | string;
+            enabled?: null | boolean;
+            externalProjectId?: null | string;
+            syncComments?: null | boolean;
+            syncStates?: null | boolean;
+            workspace?: null | string;
+        };
+        WorkItemsConnectionResponse: {
+            projects: number;
+            /** @enum {string} */
+            provider: "plane";
+            workspace: string;
+            workspaceName?: string;
+        };
+        WorkItemsHealthResponse: {
+            configured: boolean;
+            connected: boolean;
+            degraded: boolean;
+            enabled: boolean;
+            /** Format: int64 */
+            failed: number;
+            lastCheckAt?: string;
+            lastCheckError?: string;
+            links: number;
+            /** Format: int64 */
+            pending: number;
+        };
+        WorkItemsProviderProject: {
+            description?: string;
+            id: string;
+            identifier?: string;
+            name: string;
+        };
+        WorkItemsProviderProjectsResponse: {
+            projects: components["schemas"]["WorkItemsProviderProject"][];
+        };
+        WorkItemsSyncResponse: {
+            claimed: number;
+            deferred: number;
+            delivered: number;
+            failed: number;
+            skipped: number;
+        };
         WorkflowAttemptView: {
             /** Format: int64 */
             attemptNumber: number;
@@ -11285,6 +11566,586 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectWorkItemsConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemsConfigResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    putProjectWorkItemsConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkItemsConfigUpdate"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemsConfigResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    deleteProjectWorkItemsConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listProjectWorkItemsAudit: {
+        parameters: {
+            query?: {
+                /** @description How many recent operations to return. Defaults to 50. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemsAuditResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectWorkItemsHealth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemsHealthResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listProjectWorkItemLinks: {
+        parameters: {
+            query?: {
+                /** @description Refresh each link from the provider. Slower, and degrades to the cached values when the provider cannot be reached. */
+                live?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemLinksResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    createProjectWorkItemLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkItemLinkRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemLinkResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    deleteProjectWorkItemLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description The work item link's id. */
+                linkId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    setProjectWorkItemLinkSync: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description The work item link's id. */
+                linkId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkItemLinkSyncRequest"];
+            };
+        };
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listProjectWorkItemsProviderProjects: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemsProviderProjectsResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    syncProjectWorkItems: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemsSyncResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    testProjectWorkItemsConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkItemsConnectionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
                 headers: {
                     [name: string]: unknown;
                 };

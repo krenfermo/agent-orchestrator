@@ -68,6 +68,7 @@ import (
 	settingssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/settings"
 	ssosvc "github.com/aoagents/agent-orchestrator/backend/internal/service/ssosvc"
 	usagesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/usage"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/workitems"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillassets"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
@@ -747,6 +748,27 @@ func RunWithConfig(cfg config.Config) error {
 	// routes and the code-graph routes are two views of the same subsystem,
 	// and giving them separate resolvers would give them separate opinions
 	// about which repository a project id means.
+	// P4-E: external work management (Plane).
+	//
+	// Constructed unconditionally and inert until a project is configured and
+	// switched on: with no configuration every read answers "not configured",
+	// the outbox is never written to, and the worker's every tick claims zero
+	// rows. That is the §3 requirement that AO starts normally when Plane is
+	// not configured, and it is a property of the code rather than of a flag
+	// somebody has to remember to check.
+	//
+	// It shares the daemon's store and secret box rather than owning either,
+	// so the API token is sealed with the same key as every other credential
+	// AO must be able to present.
+	workItemsSvc := workitems.New(workitems.Deps{
+		Store:   store,
+		Secrets: secretbox.New(cfg.DataDir),
+		Logger:  log,
+		NewID:   uuid.NewString,
+	}).WithNotifier(notificationWriter)
+	workItemsDone := workitems.NewWorker(workItemsSvc, workitems.WorkerConfig{Logger: log}).Start(ctx)
+	_ = workItemsDone
+
 	memoryAPI := projectmemorysvc.New(projectMemory, store).
 		WithProvisioner(memoryProvisioning).
 		WithWorkspaces(store).
@@ -822,6 +844,7 @@ func RunWithConfig(cfg config.Config) error {
 		ProjectMemoryGraph:        memoryAPI,
 		ProjectIntelligence:       memoryAPI,
 		ProjectIntelligenceMemory: memoryAPI,
+		WorkItems:                 workItemsSvc,
 		Questions: &questionssvc.AnswerService{
 			Store: store, Runs: store, Sender: rawSessionMgr, Logger: log,
 			// P3-D: the answer is recorded first and delivered second, and the
@@ -872,6 +895,7 @@ func RunWithConfig(cfg config.Config) error {
 	// It starts nothing when this build has no code graph wired.
 	intelligenceDone := projectmemorysvc.NewReconciler(memoryAPI, store,
 		projectmemorysvc.ReconcilerConfig{Logger: log}).Start(ctx)
+
 	_ = os.Unsetenv(browserruntime.RuntimeAddressEnv)
 	if ln, addr, err := browserruntime.Listen(cfg.RunFilePath); err != nil {
 		log.Warn("browser runtime: listener unavailable; agent browser control disabled", "err", err)
@@ -941,6 +965,7 @@ func RunWithConfig(cfg config.Config) error {
 	managedPreview.Close()
 	<-previewDone
 	<-intelligenceDone
+	<-workItemsDone
 	// Close chat controllers before the lifecycle stack: each owns an app-server
 	// child process, and closing them also settles any turn left in flight so a
 	// restart does not read a half-finished turn as still working.
