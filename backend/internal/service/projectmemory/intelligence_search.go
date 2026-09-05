@@ -20,6 +20,14 @@ import (
 // list with provenance on every row, which is what makes a result actionable
 // rather than merely present.
 
+// searchCorpusLimit bounds how many durable facts one search scores.
+//
+// It is a safety bound rather than a page size: the indexing limits already
+// cap a repository at a few thousand facts, and this is above that, so in
+// practice search sees everything. It exists so a future writer that produces
+// far more cannot turn one search into an unbounded read.
+const searchCorpusLimit = 5000
+
 // SearchRequest is one Project Intelligence question.
 type SearchRequest struct {
 	ProjectID domain.ProjectID
@@ -50,6 +58,18 @@ type SearchHit struct {
 	State string
 	// SourceCommit is the provenance of a memory hit.
 	SourceCommit string
+	// EvidenceClass is how strong a memory hit's claim is (P4-H §4/§8):
+	// something AO read, something it concluded, something a person stated,
+	// or something a verified workflow established. Empty for a symbol hit —
+	// a parsed symbol is not a claim of this kind — and for a memory row
+	// written before the class existed.
+	EvidenceClass string
+	// Confidence is the memory hit's own confidence. Reported so a result
+	// rendered as an answer can show how much of an answer it is.
+	Confidence float64
+	// Provenance is which proof applies to a memory hit
+	// (repo_derivation, task_outcome, workflow_knowledge, legacy).
+	Provenance string
 	// Score is the rank this row was ordered by. Reported so an operator can
 	// see WHY one row came above another rather than having to trust it.
 	Score int
@@ -85,8 +105,17 @@ func (s *Service) Search(ctx context.Context, req SearchRequest) (SearchResult, 
 	if s.memory != nil {
 		resolved, err := s.resolveRepo(ctx, req.ProjectID, req.RepoPath)
 		if err == nil {
+			// The whole corpus, not one page of it. DefaultInspectLimit is
+			// sized for a person reading a list; using it here meant search
+			// scored the first 200 rows the store returned, and on a
+			// repository with 333 module facts against 12 high-level ones the
+			// window could contain nothing worth finding — SIGE answered
+			// "authentication and permissions" with zero memory hits while
+			// holding an auth fact. Inspect now orders by value before
+			// truncating, and search asks for the full set on top of that: a
+			// few thousand short strings is not a scan worth avoiding.
 			res, err := s.memory.Inspect(ctx, pm.InspectRequest{
-				ProjectID: req.ProjectID, RepoPath: resolved, Limit: pm.DefaultInspectLimit,
+				ProjectID: req.ProjectID, RepoPath: resolved, Limit: searchCorpusLimit,
 			})
 			if err == nil {
 				for _, item := range res.Items {
@@ -98,7 +127,11 @@ func (s *Service) Search(ctx context.Context, req SearchRequest) (SearchResult, 
 						Kind: "memory", Title: item.Summary, Detail: item.Content,
 						Path:  firstPath(item.SourcePaths),
 						State: string(item.State), MemoryType: string(item.Key.Type),
-						SourceCommit: item.SourceCommit, Score: score,
+						SourceCommit:  item.SourceCommit,
+						EvidenceClass: string(item.EvidenceClass),
+						Confidence:    item.Confidence,
+						Provenance:    string(item.ProvenanceKind),
+						Score:         score,
 					})
 					out.MemoryHits++
 				}

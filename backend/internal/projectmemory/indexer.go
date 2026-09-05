@@ -94,6 +94,15 @@ func DefaultIndexLimits() IndexLimits {
 			"__pycache__", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache",
 			".gradle", ".idea", ".vscode", "Pods", "DerivedData", ".terraform",
 			"bin", "obj", ".ao",
+			// P4-H: coding-agent scratch space. `.claude/worktrees` holds
+			// whole COPIES of the repository, so indexing it derives a second
+			// set of facts about paths that describe somebody's temporary
+			// checkout — the medusa operational run reported that project's
+			// entry points and architecture documents as living under
+			// .claude/worktrees/roc-capacity-fe/. `.ao` was already here for
+			// exactly this reason; these are the same thing under other
+			// tools' names.
+			".claude", ".cursor", ".aider",
 		},
 		IgnoredExts: []string{
 			".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".icns", ".svg",
@@ -216,15 +225,33 @@ type IndexOutcome struct {
 	IndexedCommit     string
 	Duration          time.Duration
 	ModulesDiscovered int
+
+	// P4-H: the high-level derivation (insight.go). InsightsDerived counts
+	// the facts it offered the store; InsightsGraphBacked says whether the
+	// code graph contributed, and InsightsSkipReason says why it did not.
+	//
+	// Reported rather than inferred from item counts, because "no high-level
+	// facts" and "high-level facts AO could not derive because the graph was
+	// not built" are different states an operator has to be able to tell
+	// apart.
+	InsightsDerived     int
+	InsightsGraphBacked bool
+	InsightsSkipReason  string
 }
 
 // Indexer runs bounded passes over a repository and keeps the durable memory
 // in step with it.
 type Indexer struct {
-	repo   Repository
-	graph  MemoryGraph
-	now    func() time.Time
-	limits IndexLimits
+	repo  Repository
+	graph MemoryGraph
+	// codeGraph is the OPTIONAL structural index the P4-H high-level facts are
+	// derived from. A nil one is fully supported and is the pre-P4-H
+	// behaviour: the pass still derives every document- and census-backed
+	// fact, plus the signal-backed high-level ones, and records why the
+	// graph-backed ones are missing.
+	codeGraph CodeGraph
+	now       func() time.Time
+	limits    IndexLimits
 }
 
 // IndexerOption configures an Indexer.
@@ -244,6 +271,12 @@ func WithIndexClock(now func() time.Time) IndexerOption {
 // own.
 func WithIndexLimits(l IndexLimits) IndexerOption {
 	return func(i *Indexer) { i.limits = l.Normalized() }
+}
+
+// WithIndexCodeGraph attaches the structural index the high-level facts read.
+// Optional at every point: see Indexer.codeGraph.
+func WithIndexCodeGraph(g CodeGraph) IndexerOption {
+	return func(i *Indexer) { i.codeGraph = g }
 }
 
 // NewIndexer builds an indexer over a durable repository and a graph backend.
@@ -374,6 +407,10 @@ type indexPass struct {
 	// so the repository-wide facts (overview, modules) carry a provenance
 	// digest of their own.
 	digest []string
+	// signals is the P4-H path census: what each admitted path is evidence
+	// of. It is accumulated during the walk because the walk is already
+	// visiting every path, and classifying one costs no I/O.
+	signals *pathSignals
 	// walkTruncated records that a bound stopped the WALK short, which is a
 	// different thing from the module cap. Only an incomplete walk makes "this
 	// fact was not re-confirmed" unsafe to act on: after a complete walk that
@@ -396,9 +433,16 @@ func (p *indexPass) run(ctx context.Context) error {
 		// times for an answer that cannot change mid-walk.
 		RepoIdentity:   RepoIdentityOf(ctx, p.req.RepoPath),
 		ProvenanceKind: domain.ProvenanceRepoDerivation,
+		// P4-H: most of what a walk derives is content it READ and is
+		// repeating — an instruction file's excerpt, a manifest's declared
+		// dependency, a README's first sentence. The aggregates that conclude
+		// rather than quote (the module census, the overview, the high-level
+		// facts) override this to EvidenceDerived at their own producer.
+		Evidence: domain.EvidenceObserved,
 	}
 	p.modules = map[string]*moduleFacts{}
 	p.imports = map[string]map[string]struct{}{}
+	p.signals = newPathSignals()
 
 	if err := p.walk(ctx); err != nil {
 		return err
@@ -522,6 +566,7 @@ func (p *indexPass) admit(ctx context.Context, rel string, content []byte) error
 	p.digest = append(p.digest, rel+":"+digest)
 
 	role := classifyPath(rel)
+	p.signals.observe(rel)
 	mod := moduleOf(rel)
 	facts, ok := p.modules[mod]
 	if !ok {
@@ -722,6 +767,27 @@ func (p *indexPass) finalize(ctx context.Context) error {
 	if err := p.writeItems(ctx, now, overviewItem(
 		p.base, p.repoPath, ordered, p.out.FilesAdmitted, treeDigest,
 	)); err != nil {
+		return err
+	}
+
+	// P4-H: the high-level facts, derived last because they read the census
+	// this pass just finished and the code graph's own summary. They are
+	// written at THIS pass's generation, so the retire sweep below carries
+	// them forward or invalidates them by exactly the same rule as every
+	// other fact — see insight_pass.go for why they are not a lifecycle of
+	// their own.
+	//
+	// A full pass derives EVERY category (insightScope{All: true}): it re-read
+	// the whole repository, so every fact is being restated from evidence this
+	// pass actually saw. The per-category scope belongs to the incremental
+	// pass, which saw only what its diff named.
+	insights, insightOut := deriveInsightItems(ctx, p.idx.codeGraph, p.base,
+		p.req.ProjectID, p.repoID, p.repoPath, treeDigest, p.signals,
+		p.out.FilesAdmitted, insightScope{All: true})
+	p.out.InsightsDerived = insightOut.Derived
+	p.out.InsightsGraphBacked = insightOut.GraphBacked
+	p.out.InsightsSkipReason = insightOut.SkipReason
+	if err := p.writeItems(ctx, now, insights...); err != nil {
 		return err
 	}
 

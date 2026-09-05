@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -104,6 +105,18 @@ type UpdateOutcome struct {
 	ModulesRefreshed int
 	IndexedCommit    string
 	Duration         time.Duration
+
+	// P4-H: whether this change set could have moved a high-level fact, and
+	// what happened if it did.
+	//
+	// InsightsRefreshed false with a reason is the NORMAL outcome and the one
+	// section 5 asks for: a change to an unrelated test must leave the
+	// deployment fact alone, and saying so explicitly is how that is
+	// demonstrated rather than assumed.
+	InsightsRefreshed   bool
+	InsightsDerived     int
+	InsightsGraphBacked bool
+	InsightsSkipReason  string
 }
 
 // UpdateChanged applies one change set to a repository's memory.
@@ -209,6 +222,10 @@ func (p *updatePass) run(ctx context.Context) error {
 		// times for an answer that cannot change mid-walk.
 		RepoIdentity:   RepoIdentityOf(ctx, p.req.RepoPath),
 		ProvenanceKind: domain.ProvenanceRepoDerivation,
+		// The same default the full pass uses. An incremental pass must not
+		// label the same fact differently from the pass that first derived it,
+		// or the class would flip every time a file was touched.
+		Evidence: domain.EvidenceObserved,
 	}
 	p.touchedModules = map[string]struct{}{}
 	p.imports = map[string]map[string]struct{}{}
@@ -500,7 +517,10 @@ func (p *updatePass) readAdmitted(rel string) ([]byte, bool, error) {
 // what makes an incremental pass cheap.
 func (p *updatePass) refreshModules(ctx context.Context) error {
 	if len(p.touchedModules) == 0 && len(p.req.Changes) > 0 {
-		return nil
+		// No module census moved. The high-level facts still might — a code
+		// graph rebuild moves their counts without moving any module — so the
+		// pass falls through to them rather than returning here.
+		return p.refreshInsightsFromLedger(ctx)
 	}
 	now := p.idx.now()
 	ledger, err := p.idx.repo.ListProjectMemoryFiles(ctx, p.req.ProjectID, p.repoID)
@@ -509,9 +529,16 @@ func (p *updatePass) refreshModules(ctx context.Context) error {
 	}
 
 	census := map[string]*moduleFacts{}
+	// The signal census is rebuilt from the ledger rather than from the change
+	// set: a high-level fact is about the repository as it stands, so deriving
+	// it from only the paths that just changed would produce, say, an auth
+	// fact naming the one auth file somebody happened to touch. The ledger is
+	// already being read for the module census, so this costs no extra I/O.
+	signals := newPathSignals()
 	digests := make([]string, 0, len(ledger))
 	for _, f := range ledger {
 		digests = append(digests, f.Path+":"+f.Digest)
+		signals.observe(f.Path)
 		mod := moduleOf(f.Path)
 		facts, ok := census[mod]
 		if !ok {
@@ -567,7 +594,137 @@ func (p *updatePass) refreshModules(ctx context.Context) error {
 		}
 		return ordered[i].Path < ordered[j].Path
 	})
-	return p.writeItems(ctx, now, overviewItem(p.base, p.repoPath, ordered, len(ledger), treeDigest))
+	if err := p.writeItems(ctx, now, overviewItem(p.base, p.repoPath, ordered, len(ledger), treeDigest)); err != nil {
+		return err
+	}
+	return p.refreshInsights(ctx, now, signals, treeDigest, len(ledger))
+}
+
+// refreshInsights re-derives the high-level facts, but only when this change
+// set can have moved one (P4-H section 5).
+//
+// The gate is the whole requirement. "Do not regenerate all memory after every
+// commit" is not satisfied by regenerating cheaply — it is satisfied by not
+// touching a fact nothing disproved, and by being able to SAY that is what
+// happened. So the pass reports which of the two it did, and a change to an
+// unrelated test leaves the deployment fact at the updated_at it already had.
+//
+// Note what does NOT need a gate: invalidation. A deleted or modified file has
+// already invalidated every fact naming it, in apply(), before this runs. This
+// decides only whether to re-derive, which is the safe direction to skip.
+func (p *updatePass) refreshInsights(
+	ctx context.Context, now time.Time, signals *pathSignals, treeDigest string, files int,
+) error {
+	scope, reason := p.insightScope(ctx)
+	if !scope.All && !scope.Graph && len(scope.Kinds) == 0 {
+		p.out.InsightsSkipReason = reason
+		return nil
+	}
+	items, outcome := deriveInsightItems(ctx, p.idx.codeGraph, p.base,
+		p.req.ProjectID, p.repoID, p.repoPath, treeDigest, signals, files, scope)
+	p.out.InsightsRefreshed = true
+	p.out.InsightsDerived = outcome.Derived
+	p.out.InsightsGraphBacked = outcome.GraphBacked
+	p.out.InsightsSkipReason = outcome.SkipReason
+	return p.writeItems(ctx, now, items...)
+}
+
+// refreshInsightsFromLedger is the no-modules-touched path. It reads the file
+// ledger for the census the high-level facts need and nothing else, so the
+// common case — a change set that moved no module — still costs one query
+// rather than the module re-derivation it does not need.
+func (p *updatePass) refreshInsightsFromLedger(ctx context.Context) error {
+	ledger, err := p.idx.repo.ListProjectMemoryFiles(ctx, p.req.ProjectID, p.repoID)
+	if err != nil {
+		return err
+	}
+	signals := newPathSignals()
+	digests := make([]string, 0, len(ledger))
+	for _, f := range ledger {
+		digests = append(digests, f.Path+":"+f.Digest)
+		signals.observe(f.Path)
+	}
+	sort.Strings(digests)
+	return p.refreshInsights(ctx, p.idx.now(), signals, hashStrings(digests), len(ledger))
+}
+
+// insightScope decides WHICH high-level facts this change set could have
+// moved, and says why when the answer is none (P4-H §5).
+//
+// Two things can move a high-level fact, and nothing else can:
+//
+//   - A changed path that is EVIDENCE of a category. A change to
+//     internal/auth/x.go can move the auth fact and nothing else; a change to
+//     docs/notes.md can move none of them.
+//   - A new code-graph build. The graph-backed facts quote its counts, so a
+//     rebuild moves them even when the change set that triggered it touched no
+//     signal path.
+//
+// Narrowing to CATEGORIES rather than answering yes/no for the whole set is
+// what makes "unrelated memory remains current" true rather than approximately
+// true. Every fact carries the commit it was derived at, so re-deriving an
+// untouched fact after a commit still rewrites its row and moves its
+// updated_at — restating a fact at a new commit is a change to the row even
+// when the sentence is identical. The only way to leave a fact alone is not to
+// derive it.
+//
+// A repository with no code graph narrows on signals alone, which is the
+// correct answer for it: with no graph there are no graph-backed counts to go
+// stale.
+func (p *updatePass) insightScope(ctx context.Context) (insightScope, string) {
+	scope := insightScope{Kinds: map[signalKind]bool{}}
+	for _, ch := range p.req.Changes {
+		for _, rel := range []string{ch.Path, ch.PreviousPath} {
+			if rel == "" || excludedFromSignals(rel) {
+				continue
+			}
+			for _, kind := range signalKindsOf(rel) {
+				scope.Kinds[kind] = true
+			}
+		}
+	}
+
+	// The graph half. Its provenance is stamped on the architecture insight,
+	// so one row read by primary key answers both "has this ever been derived"
+	// and "was it derived from the graph build we have now".
+	key := domain.ProjectMemoryKey{
+		ProjectID: p.req.ProjectID, RepoID: p.repoID,
+		Type: domain.MemoryTypeArchitecture, Scope: domain.MemoryScopeRepository,
+		Key: "graph-architecture",
+	}
+	existing, found, err := p.idx.repo.GetProjectMemoryItem(ctx, key.ID())
+	if err != nil {
+		// A read AO could not make is not evidence that nothing changed.
+		// Deriving everything is the safe direction; skipping on an unread row
+		// would let a transient failure freeze the high-level facts.
+		scope.All = true
+		return scope, ""
+	}
+	_, generation, _, reason := graphEvidence(ctx, p.idx.codeGraph, p.req.ProjectID, p.repoID)
+	switch {
+	case !found:
+		// Never derived. This is the first incremental pass over a repository
+		// indexed before P4-H, and the whole set is missing.
+		scope.All = true
+	case existing.State != domain.MemoryStateValid:
+		// Invalidated — by this very change set, or by a drift check. The
+		// derivation is the repair.
+		scope.Graph = true
+	case reason != "":
+		// No usable graph now. What is stored was derived from one that
+		// existed, and re-deriving would replace it with the weaker
+		// scan-backed version — a downgrade nothing asked for.
+	case existing.Metadata["graphGeneration"] != strconv.FormatInt(generation, 10):
+		scope.Graph = true
+	}
+
+	if !scope.All && !scope.Graph && len(scope.Kinds) == 0 {
+		if reason != "" {
+			return scope, "no change touched high-level evidence, and the code graph is unavailable"
+		}
+		return scope, "no change touched high-level evidence and the code graph has not been rebuilt"
+	}
+	return scope, ""
 }
 
 // retireModule invalidates the fact for a module whose files have all gone.

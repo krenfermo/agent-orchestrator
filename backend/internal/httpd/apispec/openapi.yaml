@@ -2176,7 +2176,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ControllersProjectMemoryGraphSyncResponse'
+                $ref: '#/components/schemas/ProjectIntelligenceSyncResponse'
           description: OK
         "404":
           content:
@@ -2196,9 +2196,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/APIError'
           description: Not Implemented
-      summary: 'P4-G: discard the served graph and build it again from scratch. The
-        repair for a graph an operator has reason to distrust, and expensive on a
-        large repository — the frontend confirms before calling it.'
+      summary: 'P4-G/P4-H: discard the served graph and build it again from scratch,
+        then re-derive every durable memory fact. The repair for knowledge an operator
+        has reason to distrust, and expensive on a large repository — the frontend
+        confirms before calling it.'
       tags:
       - projects
   /api/v1/projects/{id}/intelligence/search:
@@ -2293,7 +2294,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ControllersProjectMemoryGraphSyncResponse'
+                $ref: '#/components/schemas/ProjectIntelligenceSyncResponse'
           description: OK
         "404":
           content:
@@ -2313,10 +2314,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/APIError'
           description: Not Implemented
-      summary: 'P4-G: bring the graph up to date now, choosing between an incremental
-        pass and a full build exactly as a dispatch would. Normal operation does not
-        need this: the reconciler keeps every project current on its own, and this
-        is the button for when somebody does not want to wait for it.'
+      summary: 'P4-G/P4-H: bring the graph AND durable project memory up to date now,
+        each choosing between an incremental pass and a full build exactly as a dispatch
+        would. Normal operation does not need this: the reconciler keeps every project
+        current on its own, and this is the button for when somebody does not want
+        to wait for it. Memory runs second, so its high-level facts read the graph
+        this call just built.'
       tags:
       - projects
   /api/v1/projects/{id}/memory:
@@ -12294,8 +12297,17 @@ components:
         confidence:
           format: double
           type: number
+        content:
+          type: string
         contentBytes:
           type: integer
+        evidenceClass:
+          enum:
+          - derived
+          - observed
+          - user_provided
+          - workflow_verified
+          type: string
         generation:
           format: int64
           type: integer
@@ -12309,6 +12321,10 @@ components:
           - string
         key:
           type: string
+        metadata:
+          additionalProperties:
+            type: string
+          type: object
         origin:
           enum:
           - canonical
@@ -17083,6 +17099,54 @@ components:
       - title
       - items
       type: object
+    ProjectIntelligenceMemorySync:
+      properties:
+        error:
+          type: string
+        generation:
+          format: int64
+          type: integer
+        indexedCommit:
+          type: string
+        insightsDerived:
+          type: integer
+        insightsGraphBacked:
+          type: boolean
+        insightsSkipReason:
+          type: string
+        itemsInvalidated:
+          format: int64
+          type: integer
+        itemsReconfirmed:
+          type: integer
+        itemsWritten:
+          type: integer
+        kind:
+          type: string
+        millis:
+          format: int64
+          type: integer
+        skipReason:
+          type: string
+        skipped:
+          type: boolean
+        state:
+          enum:
+          - pending
+          - deriving
+          - ready
+          - stale
+          - failed
+          type: string
+      required:
+      - generation
+      - itemsWritten
+      - itemsReconfirmed
+      - itemsInvalidated
+      - insightsDerived
+      - insightsGraphBacked
+      - millis
+      type: object
     ProjectIntelligenceOverview:
       properties:
         projectId:
@@ -17132,11 +17196,29 @@ components:
           type: integer
         lastSyncKind:
           type: string
+        memoryCommit:
+          type: string
+        memoryError:
+          type: string
         memoryItems:
           format: int64
           type: integer
+        memoryStale:
+          format: int64
+          type: integer
         memoryState:
+          enum:
+          - pending
+          - deriving
+          - ready
+          - stale
+          - failed
           type: string
+        memoryUpdated:
+          type: string
+        memoryValid:
+          format: int64
+          type: integer
         repoId:
           type: string
         repoPath:
@@ -17167,10 +17249,22 @@ components:
       - filesRemoved
       - lastMillis
       - memoryItems
+      - memoryValid
+      - memoryStale
       type: object
     ProjectIntelligenceSearchHit:
       properties:
+        confidence:
+          format: double
+          type: number
         detail:
+          type: string
+        evidenceClass:
+          enum:
+          - derived
+          - observed
+          - user_provided
+          - workflow_verified
           type: string
         kind:
           enum:
@@ -17183,6 +17277,13 @@ components:
         memoryType:
           type: string
         path:
+          type: string
+        provenance:
+          enum:
+          - repo_derivation
+          - task_outcome
+          - workflow_knowledge
+          - legacy
           type: string
         score:
           type: integer
@@ -17300,6 +17401,16 @@ components:
       - name
       - exported
       - depth
+      type: object
+    ProjectIntelligenceSyncResponse:
+      properties:
+        graph:
+          $ref: '#/components/schemas/ControllersProjectMemoryGraphSyncResponse'
+        memory:
+          $ref: '#/components/schemas/ProjectIntelligenceMemorySync'
+      required:
+      - graph
+      - memory
       type: object
     ProjectOrDegraded:
       oneOf:

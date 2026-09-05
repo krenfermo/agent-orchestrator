@@ -161,6 +161,8 @@ var schemaNames = map[string]string{
 	"ControllersProjectIntelligenceContextSection":    "ProjectIntelligenceContextSection",
 	"ControllersProjectIntelligenceContextItem":       "ProjectIntelligenceContextItem",
 	"ControllersProjectIntelligenceContextGraph":      "ProjectIntelligenceContextGraph",
+	"ControllersProjectIntelligenceSyncResponse":      "ProjectIntelligenceSyncResponse",
+	"ControllersProjectIntelligenceMemorySync":        "ProjectIntelligenceMemorySync",
 	"ControllersTenantView":                           "TenantView",
 	"ControllersTenantMemberView":                     "TenantMemberView",
 	"ControllersListTenantsResponse":                  "ListTenantsResponse",
@@ -1872,10 +1874,10 @@ func projectMemoryOperations() []operation {
 		},
 		{
 			method: http.MethodPost, path: "/api/v1/projects/{id}/intelligence/sync", id: "syncProjectIntelligence", tag: "projects",
-			summary:    "P4-G: bring the graph up to date now, choosing between an incremental pass and a full build exactly as a dispatch would. Normal operation does not need this: the reconciler keeps every project current on its own, and this is the button for when somebody does not want to wait for it.",
+			summary:    "P4-G/P4-H: bring the graph AND durable project memory up to date now, each choosing between an incremental pass and a full build exactly as a dispatch would. Normal operation does not need this: the reconciler keeps every project current on its own, and this is the button for when somebody does not want to wait for it. Memory runs second, so its high-level facts read the graph this call just built.",
 			pathParams: []any{controllers.ProjectIDParam{}, controllers.ProjectIntelligenceRepoQuery{}},
 			resps: []respUnit{
-				{http.StatusOK, controllers.ProjectMemoryGraphSyncResponse{}},
+				{http.StatusOK, controllers.ProjectIntelligenceSyncResponse{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
@@ -1883,10 +1885,10 @@ func projectMemoryOperations() []operation {
 		},
 		{
 			method: http.MethodPost, path: "/api/v1/projects/{id}/intelligence/rebuild", id: "rebuildProjectIntelligence", tag: "projects",
-			summary:    "P4-G: discard the served graph and build it again from scratch. The repair for a graph an operator has reason to distrust, and expensive on a large repository — the frontend confirms before calling it.",
+			summary:    "P4-G/P4-H: discard the served graph and build it again from scratch, then re-derive every durable memory fact. The repair for knowledge an operator has reason to distrust, and expensive on a large repository — the frontend confirms before calling it.",
 			pathParams: []any{controllers.ProjectIDParam{}, controllers.ProjectIntelligenceRepoQuery{}},
 			resps: []respUnit{
-				{http.StatusOK, controllers.ProjectMemoryGraphSyncResponse{}},
+				{http.StatusOK, controllers.ProjectIntelligenceSyncResponse{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
 				{http.StatusNotImplemented, envelope.APIError{}},

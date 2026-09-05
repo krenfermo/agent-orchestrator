@@ -660,7 +660,7 @@ func (q *Queries) GetProjectMemoryIndex(ctx context.Context, arg GetProjectMemor
 }
 
 const getProjectMemoryItem = `-- name: GetProjectMemoryItem :one
-SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit FROM project_memory_items WHERE id = ?
+SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit, evidence_class FROM project_memory_items WHERE id = ?
 `
 
 func (q *Queries) GetProjectMemoryItem(ctx context.Context, id string) (ProjectMemoryItem, error) {
@@ -696,6 +696,7 @@ func (q *Queries) GetProjectMemoryItem(ctx context.Context, id string) (ProjectM
 		&i.PromotionAuthority,
 		&i.VerifiedCommit,
 		&i.IntegratedCommit,
+		&i.EvidenceClass,
 	)
 	return i, err
 }
@@ -744,8 +745,8 @@ INSERT OR IGNORE INTO project_memory_items (
     generation, state, state_reason, confidence, metadata_json, content_hash,
     created_at, updated_at, invalidated_at,
     authority, authority_reason, repo_identity, provenance_kind,
-    promotion_authority, verified_commit, integrated_commit
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    promotion_authority, verified_commit, integrated_commit, evidence_class
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertProjectMemoryItemParams struct {
@@ -778,6 +779,7 @@ type InsertProjectMemoryItemParams struct {
 	PromotionAuthority string
 	VerifiedCommit     string
 	IntegratedCommit   string
+	EvidenceClass      string
 }
 
 // First write of a fact. OR IGNORE rather than OR REPLACE: a row that already
@@ -814,6 +816,7 @@ func (q *Queries) InsertProjectMemoryItem(ctx context.Context, arg InsertProject
 		arg.PromotionAuthority,
 		arg.VerifiedCommit,
 		arg.IntegratedCommit,
+		arg.EvidenceClass,
 	)
 	if err != nil {
 		return 0, err
@@ -1179,7 +1182,7 @@ func (q *Queries) ListProjectMemoryIndexes(ctx context.Context, projectID string
 }
 
 const listProjectMemoryItems = `-- name: ListProjectMemoryItems :many
-SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit FROM project_memory_items
+SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit, evidence_class FROM project_memory_items
 WHERE project_id = ? AND repo_id = ?
 ORDER BY confidence DESC, scope, updated_at DESC, id
 `
@@ -1231,6 +1234,7 @@ func (q *Queries) ListProjectMemoryItems(ctx context.Context, arg ListProjectMem
 			&i.PromotionAuthority,
 			&i.VerifiedCommit,
 			&i.IntegratedCommit,
+			&i.EvidenceClass,
 		); err != nil {
 			return nil, err
 		}
@@ -1246,7 +1250,7 @@ func (q *Queries) ListProjectMemoryItems(ctx context.Context, arg ListProjectMem
 }
 
 const listProjectMemoryItemsByAuthority = `-- name: ListProjectMemoryItemsByAuthority :many
-SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit FROM project_memory_items
+SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit, evidence_class FROM project_memory_items
 WHERE project_id = ? AND repo_id = ? AND authority = ?
 ORDER BY confidence DESC, scope, updated_at DESC, id
 `
@@ -1296,6 +1300,7 @@ func (q *Queries) ListProjectMemoryItemsByAuthority(ctx context.Context, arg Lis
 			&i.PromotionAuthority,
 			&i.VerifiedCommit,
 			&i.IntegratedCommit,
+			&i.EvidenceClass,
 		); err != nil {
 			return nil, err
 		}
@@ -1311,7 +1316,7 @@ func (q *Queries) ListProjectMemoryItemsByAuthority(ctx context.Context, arg Lis
 }
 
 const listProjectMemoryItemsByOriginRef = `-- name: ListProjectMemoryItemsByOriginRef :many
-SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit FROM project_memory_items
+SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit, evidence_class FROM project_memory_items
 WHERE project_id = ? AND origin = ? AND origin_ref = ?
 ORDER BY confidence DESC, scope, updated_at DESC, id
 `
@@ -1361,6 +1366,7 @@ func (q *Queries) ListProjectMemoryItemsByOriginRef(ctx context.Context, arg Lis
 			&i.PromotionAuthority,
 			&i.VerifiedCommit,
 			&i.IntegratedCommit,
+			&i.EvidenceClass,
 		); err != nil {
 			return nil, err
 		}
@@ -1376,7 +1382,7 @@ func (q *Queries) ListProjectMemoryItemsByOriginRef(ctx context.Context, arg Lis
 }
 
 const listProjectMemoryItemsByPath = `-- name: ListProjectMemoryItemsByPath :many
-SELECT i.id, i.project_id, i.repo_id, i.item_type, i.scope, i.item_key, i.origin, i.origin_ref, i.summary, i.content, i.source_paths_json, i.source_commit, i.source_digest, i.generation, i.state, i.state_reason, i.confidence, i.metadata_json, i.content_hash, i.created_at, i.updated_at, i.invalidated_at, i.authority, i.authority_reason, i.repo_identity, i.provenance_kind, i.promotion_authority, i.verified_commit, i.integrated_commit FROM project_memory_items i
+SELECT i.id, i.project_id, i.repo_id, i.item_type, i.scope, i.item_key, i.origin, i.origin_ref, i.summary, i.content, i.source_paths_json, i.source_commit, i.source_digest, i.generation, i.state, i.state_reason, i.confidence, i.metadata_json, i.content_hash, i.created_at, i.updated_at, i.invalidated_at, i.authority, i.authority_reason, i.repo_identity, i.provenance_kind, i.promotion_authority, i.verified_commit, i.integrated_commit, i.evidence_class FROM project_memory_items i
 JOIN project_memory_sources s
   ON s.owner_kind = 'item' AND s.owner_id = i.id
 WHERE s.project_id = ? AND s.repo_id = ? AND s.path = ?
@@ -1428,6 +1434,7 @@ func (q *Queries) ListProjectMemoryItemsByPath(ctx context.Context, arg ListProj
 			&i.PromotionAuthority,
 			&i.VerifiedCommit,
 			&i.IntegratedCommit,
+			&i.EvidenceClass,
 		); err != nil {
 			return nil, err
 		}
@@ -1443,7 +1450,7 @@ func (q *Queries) ListProjectMemoryItemsByPath(ctx context.Context, arg ListProj
 }
 
 const listProjectMemoryItemsByState = `-- name: ListProjectMemoryItemsByState :many
-SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit FROM project_memory_items
+SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit, evidence_class FROM project_memory_items
 WHERE project_id = ? AND repo_id = ? AND state = ?
 ORDER BY confidence DESC, scope, updated_at DESC, id
 `
@@ -1493,6 +1500,7 @@ func (q *Queries) ListProjectMemoryItemsByState(ctx context.Context, arg ListPro
 			&i.PromotionAuthority,
 			&i.VerifiedCommit,
 			&i.IntegratedCommit,
+			&i.EvidenceClass,
 		); err != nil {
 			return nil, err
 		}
@@ -1508,7 +1516,7 @@ func (q *Queries) ListProjectMemoryItemsByState(ctx context.Context, arg ListPro
 }
 
 const listProjectMemoryItemsForProject = `-- name: ListProjectMemoryItemsForProject :many
-SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit FROM project_memory_items
+SELECT id, project_id, repo_id, item_type, scope, item_key, origin, origin_ref, summary, content, source_paths_json, source_commit, source_digest, generation, state, state_reason, confidence, metadata_json, content_hash, created_at, updated_at, invalidated_at, authority, authority_reason, repo_identity, provenance_kind, promotion_authority, verified_commit, integrated_commit, evidence_class FROM project_memory_items
 WHERE project_id = ?
 ORDER BY repo_id, confidence DESC, scope, updated_at DESC, id
 `
@@ -1552,6 +1560,7 @@ func (q *Queries) ListProjectMemoryItemsForProject(ctx context.Context, projectI
 			&i.PromotionAuthority,
 			&i.VerifiedCommit,
 			&i.IntegratedCommit,
+			&i.EvidenceClass,
 		); err != nil {
 			return nil, err
 		}
@@ -2358,7 +2367,8 @@ SET item_type = ?, scope = ?, item_key = ?,
     generation = ?, state = ?, state_reason = ?, confidence = ?,
     metadata_json = ?, content_hash = ?, updated_at = ?, invalidated_at = ?,
     authority = ?, authority_reason = ?, repo_identity = ?, provenance_kind = ?,
-    promotion_authority = ?, verified_commit = ?, integrated_commit = ?
+    promotion_authority = ?, verified_commit = ?, integrated_commit = ?,
+    evidence_class = ?
 WHERE id = ? AND generation <= ?
 `
 
@@ -2386,6 +2396,7 @@ type UpdateProjectMemoryItemParams struct {
 	PromotionAuthority string
 	VerifiedCommit     string
 	IntegratedCommit   string
+	EvidenceClass      string
 	ID                 string
 	Generation_2       int64
 }
@@ -2423,6 +2434,7 @@ func (q *Queries) UpdateProjectMemoryItem(ctx context.Context, arg UpdateProject
 		arg.PromotionAuthority,
 		arg.VerifiedCommit,
 		arg.IntegratedCommit,
+		arg.EvidenceClass,
 		arg.ID,
 		arg.Generation_2,
 	)

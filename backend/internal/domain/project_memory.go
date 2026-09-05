@@ -92,6 +92,43 @@ const (
 	// MemoryTypeRepositoryRelationship describes how one repository in a
 	// multi-repo project relates to another.
 	MemoryTypeRepositoryRelationship ProjectMemoryType = "repository_relationship"
+
+	// --- P4-H: the high-level durable categories -------------------------
+	//
+	// These are the facts a person asks a project about before touching it,
+	// and the ones a Planner needs before it can plan. They are deliberately
+	// ABOVE the symbol level: what runs, what stores, what authorises, what
+	// the project talks to. The Code Graph already answers "which function" —
+	// duplicating that here would make memory a second, worse graph, so
+	// nothing below is per-symbol.
+
+	// MemoryTypeEntryPoint is a file a process actually starts in: a main, a
+	// server bootstrap, a CLI root, an app entry.
+	MemoryTypeEntryPoint ProjectMemoryType = "entry_point"
+	// MemoryTypeRuntimeSurface is how the project is reached at runtime — the
+	// HTTP/RPC surface, where routes are registered, and what serves them.
+	MemoryTypeRuntimeSurface ProjectMemoryType = "runtime_surface"
+	// MemoryTypePersistence is the storage architecture: which engine, which
+	// tables, where the schema and the queries against it live.
+	MemoryTypePersistence ProjectMemoryType = "persistence"
+	// MemoryTypeAuthModel is the authentication/authorization architecture:
+	// where identity is established and where permission is decided. It never
+	// carries a secret, a key or a credential — only where the decisions are.
+	MemoryTypeAuthModel ProjectMemoryType = "auth_model"
+	// MemoryTypeIntegration is an external system the project talks to, as
+	// distinct from a build-time dependency (MemoryTypeDependency).
+	MemoryTypeIntegration ProjectMemoryType = "integration"
+	// MemoryTypeTestingSurface is how the project verifies itself: where the
+	// tests live, how many there are, what they cover.
+	MemoryTypeTestingSurface ProjectMemoryType = "testing_surface"
+	// MemoryTypeConfigSurface is the configuration convention: which files
+	// configure the project and which keys the code reads. Keys only, never a
+	// value — a value read out of a checked-in config is exactly the class of
+	// thing that turns out to be a credential.
+	MemoryTypeConfigSurface ProjectMemoryType = "config_surface"
+	// MemoryTypeDeployment is the runtime/deployment structure: containers,
+	// orchestration, CI/CD pipelines, release manifests.
+	MemoryTypeDeployment ProjectMemoryType = "deployment"
 )
 
 // ProjectMemoryTypes returns every type this build writes, in a stable order.
@@ -112,6 +149,14 @@ func ProjectMemoryTypes() []ProjectMemoryType {
 		MemoryTypeTaskResult,
 		MemoryTypeKnownRisk,
 		MemoryTypeRepositoryRelationship,
+		MemoryTypeEntryPoint,
+		MemoryTypeRuntimeSurface,
+		MemoryTypePersistence,
+		MemoryTypeAuthModel,
+		MemoryTypeIntegration,
+		MemoryTypeTestingSurface,
+		MemoryTypeConfigSurface,
+		MemoryTypeDeployment,
 	}
 }
 
@@ -454,6 +499,16 @@ type ProjectMemoryItem struct {
 	// integrated one until an integration is proven (P2-D §7, §13).
 	VerifiedCommit   string
 	IntegratedCommit string
+
+	// EvidenceClass is how strong the claim is: something AO copied, something
+	// it concluded, something a person stated, or something a verified
+	// workflow established (see MemoryEvidenceClass). It is a THIRD axis, not
+	// a refinement of the two above: a repo derivation whose authority is
+	// intact can still be an inference, and a reader has to be told which.
+	//
+	// Empty means the row does not say. Every row written before P4-H is in
+	// that state and nothing backfills it.
+	EvidenceClass MemoryEvidenceClass
 }
 
 // Servable reports whether this fact may be handed to a role as current.
@@ -528,6 +583,11 @@ func (i ProjectMemoryItem) Normalized() ProjectMemoryItem {
 	i.PromotionAuthority = strings.TrimSpace(i.PromotionAuthority)
 	i.VerifiedCommit = strings.TrimSpace(i.VerifiedCommit)
 	i.IntegratedCommit = strings.TrimSpace(i.IntegratedCommit)
+	// The evidence class is deliberately NOT defaulted. A producer that did
+	// not say how strong its claim is has not made a weak claim, it has made
+	// an unlabelled one, and picking a value here would put words in its
+	// mouth — which is the whole failure mode the axis exists to prevent.
+	i.EvidenceClass = MemoryEvidenceClass(strings.TrimSpace(string(i.EvidenceClass)))
 	i.SourcePaths = NormalizeMemorySourcePaths(i.SourcePaths)
 	i.Metadata = normalizeMemoryMetadata(i.Metadata)
 	i.ContentHash = i.contentHash()
@@ -703,6 +763,12 @@ func (i ProjectMemoryItem) Validate() error {
 	}
 	if !i.State.Valid() {
 		return fmt.Errorf("%w: unknown state %q", ErrProjectMemoryInvalid, i.State)
+	}
+	// Empty is legal (a pre-P4-H row, or a producer that makes no claim about
+	// its own strength). A value that is neither empty nor recognised is not:
+	// it would render as a class a reader could misjudge.
+	if i.EvidenceClass != "" && !i.EvidenceClass.Valid() {
+		return fmt.Errorf("%w: unknown evidence class %q", ErrProjectMemoryInvalid, i.EvidenceClass)
 	}
 	if i.State != MemoryStateValid && strings.TrimSpace(i.StateReason) == "" {
 		return fmt.Errorf("%w: a %s item must say why", ErrProjectMemoryInvalid, i.State)

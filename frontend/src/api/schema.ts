@@ -837,7 +837,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** P4-G: discard the served graph and build it again from scratch. The repair for a graph an operator has reason to distrust, and expensive on a large repository — the frontend confirms before calling it. */
+        /** P4-G/P4-H: discard the served graph and build it again from scratch, then re-derive every durable memory fact. The repair for knowledge an operator has reason to distrust, and expensive on a large repository — the frontend confirms before calling it. */
         post: operations["rebuildProjectIntelligence"];
         delete?: never;
         options?: never;
@@ -871,7 +871,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** P4-G: bring the graph up to date now, choosing between an incremental pass and a full build exactly as a dispatch would. Normal operation does not need this: the reconciler keeps every project current on its own, and this is the button for when somebody does not want to wait for it. */
+        /** P4-G/P4-H: bring the graph AND durable project memory up to date now, each choosing between an incremental pass and a full build exactly as a dispatch would. Normal operation does not need this: the reconciler keeps every project current on its own, and this is the button for when somebody does not want to wait for it. Memory runs second, so its high-level facts read the graph this call just built. */
         post: operations["syncProjectIntelligence"];
         delete?: never;
         options?: never;
@@ -4209,13 +4209,19 @@ export interface components {
             authorityReason?: string;
             /** Format: double */
             confidence: number;
+            content?: string;
             contentBytes: number;
+            /** @enum {string} */
+            evidenceClass?: "derived" | "observed" | "user_provided" | "workflow_verified";
             /** Format: int64 */
             generation: number;
             id: string;
             integratedCommit?: string;
             invalidatedAt: null | string;
             key?: string;
+            metadata?: {
+                [key: string]: string;
+            };
             /** @enum {string} */
             origin: "canonical" | "task_local";
             originRef?: string;
@@ -6005,6 +6011,26 @@ export interface components {
             title: string;
             type?: string;
         };
+        ProjectIntelligenceMemorySync: {
+            error?: string;
+            /** Format: int64 */
+            generation: number;
+            indexedCommit?: string;
+            insightsDerived: number;
+            insightsGraphBacked: boolean;
+            insightsSkipReason?: string;
+            /** Format: int64 */
+            itemsInvalidated: number;
+            itemsReconfirmed: number;
+            itemsWritten: number;
+            kind?: string;
+            /** Format: int64 */
+            millis: number;
+            skipReason?: string;
+            skipped?: boolean;
+            /** @enum {string} */
+            state?: "pending" | "deriving" | "ready" | "stale" | "failed";
+        };
         ProjectIntelligenceOverview: {
             projectId: string;
             repos: components["schemas"]["ProjectIntelligenceRepoStatus"][];
@@ -6031,9 +6057,17 @@ export interface components {
             /** Format: int64 */
             lastMillis: number;
             lastSyncKind?: string;
+            memoryCommit?: string;
+            memoryError?: string;
             /** Format: int64 */
             memoryItems: number;
-            memoryState?: string;
+            /** Format: int64 */
+            memoryStale: number;
+            /** @enum {string} */
+            memoryState?: "pending" | "deriving" | "ready" | "stale" | "failed";
+            memoryUpdated?: string;
+            /** Format: int64 */
+            memoryValid: number;
             repoId: string;
             repoPath: string;
             /** @enum {string} */
@@ -6043,13 +6077,19 @@ export interface components {
             updatedAt?: string;
         };
         ProjectIntelligenceSearchHit: {
+            /** Format: double */
+            confidence?: number;
             detail?: string;
+            /** @enum {string} */
+            evidenceClass?: "derived" | "observed" | "user_provided" | "workflow_verified";
             /** @enum {string} */
             kind: "memory" | "symbol";
             /** Format: int64 */
             line?: number;
             memoryType?: string;
             path?: string;
+            /** @enum {string} */
+            provenance?: "repo_derivation" | "task_outcome" | "workflow_knowledge" | "legacy";
             score: number;
             sourceCommit?: string;
             state?: string;
@@ -6095,6 +6135,10 @@ export interface components {
             path?: string;
             signature?: string;
             summary?: string;
+        };
+        ProjectIntelligenceSyncResponse: {
+            graph: components["schemas"]["ControllersProjectMemoryGraphSyncResponse"];
+            memory: components["schemas"]["ProjectIntelligenceMemorySync"];
         };
         ProjectOrDegraded: components["schemas"]["Project"] | components["schemas"]["DegradedProject"];
         ProjectRepositoryExecution: {
@@ -10356,7 +10400,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ControllersProjectMemoryGraphSyncResponse"];
+                    "application/json": components["schemas"]["ProjectIntelligenceSyncResponse"];
                 };
             };
             /** @description Not Found */
@@ -10475,7 +10519,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ControllersProjectMemoryGraphSyncResponse"];
+                    "application/json": components["schemas"]["ProjectIntelligenceSyncResponse"];
                 };
             };
             /** @description Not Found */

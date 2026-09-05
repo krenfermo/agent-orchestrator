@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Search } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import type { MessageKey } from "../../i18n/messages";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -12,6 +13,26 @@ import { useIntelligenceSearch } from "../../hooks/useProjectIntelligence";
 // wrote, or a symbol the indexer parsed. That label is not decoration: the two
 // are different kinds of claim, and a result list that blurred them would let
 // a stale note borrow a parser's certainty.
+//
+// Memory rows carry a second label for the same reason at one level down: a
+// fact a verified workflow established and a fact AO inferred from directory
+// naming are both "memory", and only one of them is settled.
+
+// EVIDENCE_LABEL maps the wire vocabulary to its message key. The mapping is a
+// table of literal keys rather than an interpolated string so the message keys
+// stay statically checkable, and so an unrecognised class from a newer daemon
+// renders as nothing rather than as a missing translation.
+const EVIDENCE_LABEL = {
+	derived: "intelligence.memory.evidence.derived",
+	observed: "intelligence.memory.evidence.observed",
+	user_provided: "intelligence.memory.evidence.userProvided",
+	workflow_verified: "intelligence.memory.evidence.workflowVerified",
+} as const satisfies Record<string, MessageKey>;
+
+function evidenceLabel(evidenceClass: string | undefined): MessageKey | undefined {
+	if (!evidenceClass) return undefined;
+	return (EVIDENCE_LABEL as Record<string, MessageKey>)[evidenceClass];
+}
 
 export function IntelligenceSearch({
 	projectId,
@@ -99,6 +120,22 @@ export function IntelligenceSearch({
 									{hit.memoryType ? <Badge variant="outline">{hit.memoryType}</Badge> : null}
 									{hit.state && hit.state !== "valid" ? (
 										<Badge variant="warning">{hit.state}</Badge>
+									) : null}
+									{/*
+									 * P4-H: a memory row also says how strong a
+									 * claim it is. Labelling only WHICH authority
+									 * produced a row leaves the two very
+									 * different kinds of memory row — one AO read
+									 * out of a file, one AO inferred from naming —
+									 * looking equally settled.
+									 */}
+									{hit.kind === "memory" && evidenceLabel(hit.evidenceClass) ? (
+										<Badge
+											variant={hit.evidenceClass === "derived" ? "warning" : "outline"}
+											data-testid="search-hit-evidence"
+										>
+											{t(evidenceLabel(hit.evidenceClass) as MessageKey)}
+										</Badge>
 									) : null}
 								</div>
 								{hit.detail ? (

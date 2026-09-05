@@ -256,6 +256,15 @@ type itemBase struct {
 	// and is what the legacy classification acts on.
 	RepoIdentity   domain.RepoIdentity
 	ProvenanceKind domain.MemoryProvenanceKind
+	// Evidence is the DEFAULT class for the facts this base produces (P4-H
+	// §4). It is a default rather than a fixed value because one pass
+	// produces both kinds: an AGENTS.md excerpt is something AO read and is
+	// repeating, while a module census is something AO concluded. Producers
+	// that conclude override it; producers that quote do not have to.
+	//
+	// Left empty it stays empty, which is what a test fixture and every
+	// pre-P4-H writer mean: this row makes no claim about its own strength.
+	Evidence domain.MemoryEvidenceClass
 }
 
 func (b itemBase) item(
@@ -285,6 +294,7 @@ func (b itemBase) item(
 		// every freshly-derived fact started life withheld.
 		RepoIdentity:   b.RepoIdentity,
 		ProvenanceKind: b.ProvenanceKind,
+		EvidenceClass:  b.Evidence,
 	}
 }
 
@@ -538,7 +548,8 @@ func moduleItem(b itemBase, f moduleFacts, digest string) domain.ProjectMemoryIt
 		summary, body.String(),
 		f.Notable, "", confidenceStructural,
 		map[string]string{"files": fmt.Sprint(f.Files), "treeDigest": digest},
-	)
+		// A census is AO counting, not AO quoting.
+	).WithEvidenceClass(domain.EvidenceDerived)
 }
 
 // overviewItem is the one-per-repository orientation fact.
@@ -563,7 +574,7 @@ func overviewItem(b itemBase, repoPath string, modules []moduleFacts, files int,
 		body.String(),
 		nil, "", confidenceStructural,
 		map[string]string{"repoPath": repoPath, "treeDigest": digest},
-	)
+	).WithEvidenceClass(domain.EvidenceDerived)
 }
 
 // --- import extraction ------------------------------------------------------

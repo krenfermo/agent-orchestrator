@@ -352,10 +352,32 @@ func (p ContextPack) Empty() bool { return p.Stats.SelectedItems == 0 && p.Graph
 // review is an application of rules. A Repair Agent is told the known risks
 // and the last task's outcome first, because it is repairing something that
 // already went wrong.
+//
+// P4-H INSERTS THE HIGH-LEVEL FACTS ABOVE THE PER-UNIT ONES, and that
+// placement is the whole of section 9. There are at most nine of them per
+// repository and each is one paragraph, so they cost a fraction of what a
+// module census costs — while answering the questions a role otherwise spends
+// its first tool calls rediscovering. Putting them below the census would let
+// a repository with four hundred modules exhaust the budget before reaching
+// them, which is exactly the "candidates are larger, selection is worse"
+// shape the phase set out to fix.
+//
+// Which high-level facts each role gets still differs, because the roles do
+// differ: a Planner needs the runtime and persistence shape to plan against, a
+// Worker needs to know where auth and persistence live before it edits them, a
+// Reviewer needs the auth model because that is what a risky diff touches, and
+// a Repair Agent needs deployment and testing because that is what it is
+// usually repairing.
 var roleSections = map[PackRole][]domain.ProjectMemoryType{
 	RolePlanner: {
 		domain.MemoryTypeProjectOverview,
 		domain.MemoryTypeArchitecture,
+		domain.MemoryTypeEntryPoint,
+		domain.MemoryTypeRuntimeSurface,
+		domain.MemoryTypePersistence,
+		domain.MemoryTypeAuthModel,
+		domain.MemoryTypeIntegration,
+		domain.MemoryTypeDeployment,
 		domain.MemoryTypeRepositoryRelationship,
 		domain.MemoryTypeModule,
 		domain.MemoryTypeConvention,
@@ -367,6 +389,11 @@ var roleSections = map[PackRole][]domain.ProjectMemoryType{
 	RoleWorker: {
 		domain.MemoryTypeConvention,
 		domain.MemoryTypeInstruction,
+		domain.MemoryTypeAuthModel,
+		domain.MemoryTypePersistence,
+		domain.MemoryTypeRuntimeSurface,
+		domain.MemoryTypeConfigSurface,
+		domain.MemoryTypeTestingSurface,
 		domain.MemoryTypeModule,
 		domain.MemoryTypeFileSummary,
 		domain.MemoryTypeDependency,
@@ -378,6 +405,9 @@ var roleSections = map[PackRole][]domain.ProjectMemoryType{
 	RoleReviewer: {
 		domain.MemoryTypeConvention,
 		domain.MemoryTypeArchitecture,
+		domain.MemoryTypeAuthModel,
+		domain.MemoryTypePersistence,
+		domain.MemoryTypeTestingSurface,
 		domain.MemoryTypeKnownRisk,
 		domain.MemoryTypeDecision,
 		domain.MemoryTypeTaskResult,
@@ -389,6 +419,9 @@ var roleSections = map[PackRole][]domain.ProjectMemoryType{
 		domain.MemoryTypeKnownRisk,
 		domain.MemoryTypeTaskResult,
 		domain.MemoryTypeDecision,
+		domain.MemoryTypeTestingSurface,
+		domain.MemoryTypeDeployment,
+		domain.MemoryTypeEntryPoint,
 		domain.MemoryTypeModule,
 		domain.MemoryTypeFileSummary,
 		domain.MemoryTypeConvention,
@@ -410,6 +443,14 @@ var sectionTitles = map[domain.ProjectMemoryType]string{
 	domain.MemoryTypeDecision:               "Decisions",
 	domain.MemoryTypeTaskResult:             "Previous task outcomes",
 	domain.MemoryTypeKnownRisk:              "Known risks",
+	domain.MemoryTypeEntryPoint:             "Entry points",
+	domain.MemoryTypeRuntimeSurface:         "Runtime surface",
+	domain.MemoryTypePersistence:            "Persistence",
+	domain.MemoryTypeAuthModel:              "Authentication and authorization",
+	domain.MemoryTypeIntegration:            "External integrations",
+	domain.MemoryTypeTestingSurface:         "Testing surface",
+	domain.MemoryTypeConfigSurface:          "Configuration",
+	domain.MemoryTypeDeployment:             "Deployment",
 }
 
 // PackBuilder assembles memory context packs.
