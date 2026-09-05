@@ -19,7 +19,10 @@ export type NotificationType =
 	| "task_needs_attention"
 	| "workflow_needs_attention"
 	| "task_failed"
-	| "workflow_failed";
+	| "workflow_failed"
+	| "human_question_required"
+	| "repair_exhausted"
+	| "integration_failed";
 
 /**
  * Types that warrant an *active* attention signal (macOS dock bounce / Windows &
@@ -41,6 +44,12 @@ const ATTENTION_TYPES: ReadonlySet<string> = new Set<NotificationType>([
 	"workflow_needs_attention",
 	"task_failed",
 	"workflow_failed",
+	// All three session-scoped facts pass the same test: AO has no autonomous
+	// move left, so nothing moves again until the user looks. A pending
+	// permission prompt is the most literal case of it.
+	"human_question_required",
+	"repair_exhausted",
+	"integration_failed",
 ]);
 
 /** Whether this notification type should bounce the dock / flash the taskbar. */

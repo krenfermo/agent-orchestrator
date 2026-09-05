@@ -20,13 +20,15 @@ import (
 )
 
 type fakeNotificationService struct {
-	gotFilter     notificationsvc.ListFilter
-	gotMarkID     string
-	gotMarkAllIDs []string
-	items         []notificationsvc.Notification
-	markItem      notificationsvc.Notification
-	markAllCount  int64
-	err           error
+	gotFilter        notificationsvc.ListFilter
+	gotMarkID        string
+	gotMarkAllIDs    []string
+	items            []notificationsvc.Notification
+	markItem         notificationsvc.Notification
+	markAllCount     int64
+	unreadCount      int
+	unreadCountCalls int
+	err              error
 }
 
 type fakeNotificationStream struct {
@@ -47,6 +49,11 @@ func (f *fakeNotificationService) MarkRead(_ context.Context, id string) (notifi
 func (f *fakeNotificationService) MarkAllRead(_ context.Context, ids []string) (int64, error) {
 	f.gotMarkAllIDs = ids
 	return f.markAllCount, f.err
+}
+
+func (f *fakeNotificationService) UnreadCount(context.Context) (int, error) {
+	f.unreadCountCalls++
+	return f.unreadCount, f.err
 }
 
 func (f *fakeNotificationStream) Subscribe(projectID domain.ProjectID) (<-chan domain.NotificationEvent, func()) {
@@ -300,4 +307,60 @@ func TestNotificationsAPI_StreamWithoutPublisherIs501(t *testing.T) {
 	srv := newNotificationStreamTestServer(t, &fakeNotificationService{}, nil)
 	body, status, _ := doRequest(t, srv, "GET", "/api/v1/notifications/stream", "")
 	assertErrorCode(t, body, status, http.StatusNotImplemented, "NOT_IMPLEMENTED")
+}
+
+// The badge count is served on its own so a client polling it does not pull a
+// page of history to learn one integer.
+func TestNotificationsAPI_UnreadCount(t *testing.T) {
+	svc := &fakeNotificationService{unreadCount: 12}
+	srv := newNotificationTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, "GET", "/api/v1/notifications/unread-count", "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", status, body)
+	}
+	if !strings.Contains(string(body), `"unreadCount":12`) {
+		t.Fatalf("body = %s, want the unread count", body)
+	}
+	if svc.unreadCountCalls != 1 {
+		t.Fatalf("UnreadCount calls = %d, want 1", svc.unreadCountCalls)
+	}
+	// The point of the endpoint: no history page was fetched to answer it.
+	if svc.gotFilter.Limit != 0 || svc.gotFilter.Status != "" {
+		t.Fatalf("the count endpoint listed notifications: %+v", svc.gotFilter)
+	}
+}
+
+// The canonical model reaches the wire: a client can style by severity and show
+// when something was acknowledged without inferring either.
+func TestNotificationsAPI_ListCarriesTheCanonicalModel(t *testing.T) {
+	now := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	svc := &fakeNotificationService{items: []notificationsvc.Notification{{
+		NotificationRecord: domain.NotificationRecord{
+			ID: "ntf_1", SessionID: "mer-1", ProjectID: "mer",
+			Type:   domain.NotificationHumanQuestionRequired,
+			Title:  "checkout-flow is waiting on your decision",
+			Status: domain.NotificationRead, Severity: domain.NotificationSeverityWarning,
+			Source: domain.NotificationSourceLifecycle, TaskID: "task-9",
+			CreatedAt: now, ReadAt: now.Add(time.Minute),
+		},
+		Target: notificationsvc.Target{Kind: notificationsvc.TargetSession, SessionID: "mer-1"},
+	}}}
+	srv := newNotificationTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, "GET", "/api/v1/notifications?status=all", "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", status, body)
+	}
+	for _, want := range []string{
+		`"type":"human_question_required"`,
+		`"severity":"warning"`,
+		`"source":"lifecycle"`,
+		`"taskId":"task-9"`,
+		`"readAt":"2026-09-04T10:01:00Z"`,
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("body is missing %s:\n%s", want, body)
+		}
+	}
 }

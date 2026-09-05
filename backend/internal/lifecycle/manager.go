@@ -73,6 +73,15 @@ type agentSwitchTargetActivationStore interface {
 }
 
 // notificationSink is the optional lifecycle-to-notification-producer boundary.
+// sessionFactSink is the optional lifecycle-to-producer boundary. Lifecycle
+// hands it durable session-level facts it has just written or just read; the
+// producer decides whether any of them is worth notifying about. Lifecycle
+// deliberately holds the ports interface, not the service type: it reduces
+// facts, it does not own notification policy.
+type sessionFactSink interface {
+	Record(ctx context.Context, fact ports.SessionFact) error
+}
+
 type notificationSink interface {
 	Notify(ctx context.Context, intent ports.NotificationIntent) error
 	// Resolve closes notifications whose underlying issue went away. It is the
@@ -120,6 +129,13 @@ type Option func(*Manager)
 // WithNotificationSink wires lifecycle notification intents to a write-side producer.
 func WithNotificationSink(sink notificationSink) Option {
 	return func(m *Manager) { m.notifications = sink }
+}
+
+// WithSessionFactNotifier wires lifecycle's durable session-level facts to the
+// notification producer. Without it the reducer still runs and still writes
+// every fact; only the session-scoped notifications are skipped.
+func WithSessionFactNotifier(sink sessionFactSink) Option {
+	return func(m *Manager) { m.sessionFacts = sink }
 }
 
 // WithTelemetry wires lifecycle activity transitions to the shared telemetry sink.
@@ -174,6 +190,9 @@ type Manager struct {
 	// nudges become no-ops but the reducer still runs.
 	guard         *sessionguard.Guard
 	notifications notificationSink
+	// sessionFacts receives session-level facts (a pending decision, a spent
+	// repair budget) after the durable state behind them is committed.
+	sessionFacts sessionFactSink
 	// completionTerminator is late-bound because Session Manager itself depends
 	// on this lifecycle reducer. It is required before the SCM observer starts.
 	completionTerminator sessionTerminator
@@ -793,6 +812,15 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	if completionChanged && !next.TurnCompletedAt.IsZero() {
 		completionIntent = taskCompletionIntent(next)
 	}
+	// The session came to rest on a pending DECISION -- a tool-permission or
+	// approval dialog. That is the one state automation must never write into,
+	// so a person genuinely has to answer it, and it is reported however the
+	// session got there: directly from active or idle (the shape a
+	// permission-request hook produces) or by escalating in-family out of
+	// waiting_input. The needs-input intent above is untouched by this: it
+	// still fires exactly once on family ENTRY and stays silent in-family, so
+	// no extra legacy ping is introduced on either path.
+	questionFact := humanQuestionFact(rec, next)
 	// Leaving the needs-input family is the user answering: the notification
 	// that pinged them has nothing left to resolve.
 	resolutions := needsInputResolutions(rec, next, now)
@@ -806,8 +834,42 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	}
 	m.emitNotification(ctx, intent)
 	m.emitNotification(ctx, completionIntent)
+	if questionFact != nil {
+		m.recordSessionFact(ctx, *questionFact)
+	}
 	m.resolveNotifications(ctx, resolutions...)
 	return nil
+}
+
+// humanQuestionFact reports a genuine ENTRY into blocked -- any prior state to
+// blocked, which covers both the direct active/idle -> blocked move a
+// permission-request hook makes and the waiting_input -> blocked escalation.
+//
+// Restricting it to the escalation, as an earlier draft did, left the COMMON
+// path with no record at all: a permission prompt moves a session straight from
+// active or idle into blocked and never passes through waiting_input, so the
+// pending-decision notification was never raised for it.
+//
+// It is scoped to the pause by the activity timestamp the session row now
+// durably holds. Only an entry qualifies: a blocked -> blocked repeat is folded
+// upstream on the same state and, on the first signal for a spawn where it is
+// not, prev is already blocked and is rejected here. So one pause maps to one
+// notification, and a restart re-reading the same stored timestamp replays to
+// the row it already produced.
+func humanQuestionFact(prev, next domain.SessionRecord) *ports.SessionFact {
+	if next.IsTerminated ||
+		next.Activity.State != domain.ActivityBlocked ||
+		prev.Activity.State == domain.ActivityBlocked {
+		return nil
+	}
+	return &ports.SessionFact{
+		Kind:               ports.SessionFactHumanQuestion,
+		SessionID:          next.ID,
+		ProjectID:          next.ProjectID,
+		ScopeID:            ports.PauseScopeID(next.Activity.LastActivityAt),
+		SessionDisplayName: next.DisplayName,
+		ObservedAt:         next.Activity.LastActivityAt,
+	}
 }
 
 // taskCompletionIntent builds the "this task finished" notification from a
@@ -1182,6 +1244,22 @@ func (m *Manager) emitNotification(ctx context.Context, intent *ports.Notificati
 	}
 	if err := m.notifications.Notify(ctx, *intent); err != nil {
 		slog.Default().Warn("lifecycle: notification failed", "session", intent.SessionID, "type", intent.Type, "err", err)
+	}
+}
+
+// recordSessionFact hands one durable session-level fact to the notification
+// producer. Best-effort like emitNotification: the fact is already persisted by
+// its own authority, so failing to notify about it must never fail the
+// lifecycle write that observed it.
+func (m *Manager) recordSessionFact(ctx context.Context, fact ports.SessionFact) {
+	if m.sessionFacts == nil || fact.Kind == "" {
+		return
+	}
+	if err := m.sessionFacts.Record(ctx, fact); err != nil {
+		slog.Default().Warn(
+			"lifecycle: session fact notification failed",
+			"session", fact.SessionID, "fact", fact.Kind, "err", err,
+		)
 	}
 }
 

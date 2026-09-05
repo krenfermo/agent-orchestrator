@@ -19,6 +19,7 @@ import (
 
 // NotificationService is the controller-facing notification service contract.
 type NotificationService interface {
+	UnreadCount(ctx context.Context) (int, error)
 	List(ctx context.Context, filter notificationsvc.ListFilter) (notificationsvc.ListPage, error)
 	MarkRead(ctx context.Context, id string) (notificationsvc.Notification, bool, error)
 	MarkAllRead(ctx context.Context, ids []string) (int64, error)
@@ -38,6 +39,7 @@ type NotificationsController struct {
 // Register mounts bounded notification REST routes on the supplied router.
 func (c *NotificationsController) Register(r chi.Router) {
 	r.Get("/notifications", c.list)
+	r.Get("/notifications/unread-count", c.unreadCount)
 	r.Post("/notifications/read-all", c.markAllRead)
 	r.Patch("/notifications/{id}", c.markRead)
 }
@@ -45,6 +47,23 @@ func (c *NotificationsController) Register(r chi.Router) {
 // RegisterStream mounts long-lived notification stream routes on the supplied router.
 func (c *NotificationsController) RegisterStream(r chi.Router) {
 	r.Get("/notifications/stream", c.stream)
+}
+
+// unreadCount serves just the badge number. It exists so a client polling the
+// badge does not have to pull a page of history to learn one integer -- the
+// count is served by a recipient-scoped index and reads no notification bodies
+// at all (P4-D section 16).
+func (c *NotificationsController) unreadCount(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/notifications/unread-count")
+		return
+	}
+	count, err := c.Svc.UnreadCount(r.Context())
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, NotificationUnreadCountResponse{UnreadCount: count})
 }
 
 func (c *NotificationsController) list(w http.ResponseWriter, r *http.Request) {
@@ -215,12 +234,16 @@ func notificationResponse(n notificationsvc.Notification) NotificationResponse {
 		ProjectID:     string(n.ProjectID),
 		PRURL:         n.PRURL,
 		WorkflowRunID: n.WorkflowRunID,
+		TaskID:        n.TaskID,
 		Type:          string(n.Type),
 		Title:         n.Title,
 		Body:          n.Body,
 		Status:        string(n.Status),
+		Severity:      string(n.Severity),
 		CreatedAt:     n.CreatedAt,
+		ReadAt:        optionalTime(n.ReadAt),
 		ResolvedAt:    optionalTime(n.ResolvedAt),
+		Source:        string(n.Source),
 		Target: NotificationTarget{
 			Kind:          string(n.Target.Kind),
 			SessionID:     string(n.Target.SessionID),
@@ -237,12 +260,16 @@ func notificationResponseFromRecord(rec domain.NotificationRecord) NotificationR
 		ProjectID:     string(rec.ProjectID),
 		PRURL:         rec.PRURL,
 		WorkflowRunID: rec.WorkflowRunID,
+		TaskID:        rec.TaskID,
 		Type:          string(rec.Type),
 		Title:         rec.Title,
 		Body:          rec.Body,
 		Status:        string(rec.Status),
+		Severity:      string(rec.Severity),
 		CreatedAt:     rec.CreatedAt,
+		ReadAt:        optionalTime(rec.ReadAt),
 		ResolvedAt:    optionalTime(rec.ResolvedAt),
+		Source:        string(rec.Source),
 		Target:        notificationTargetFromRecord(rec),
 	}
 }

@@ -459,6 +459,29 @@ type Notification struct {
 	Status        domain.NotificationStatus
 	CreatedAt     time.Time
 	ResolvedAt    sql.NullTime
+	Recipient     domain.NotificationRecipient
+	TaskID        string
+	Severity      domain.NotificationSeverity
+	ReadAt        sql.NullTime
+	DeliveryState domain.NotificationDeliveryState
+	Source        domain.NotificationSource
+	SourceEventID string
+}
+
+type NotificationEmailOutbox struct {
+	NotificationID string
+	Recipient      domain.NotificationRecipient
+	State          string
+	Subject        string
+	Body           string
+	AttemptCount   int64
+	MaxAttempts    int64
+	NextAttemptAt  time.Time
+	LeaseExpiresAt sql.NullTime
+	LastError      string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	CompletedAt    sql.NullTime
 }
 
 type OidcLoginFlow struct {

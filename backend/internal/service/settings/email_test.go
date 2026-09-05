@@ -9,6 +9,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mailer"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
 const plaintextPassword = "gmail-app-password"
@@ -279,12 +280,12 @@ func TestEmailNotificationSkipsSendWhenDisabled(t *testing.T) {
 	sender := &fakeSender{}
 	emailer := NewNotificationEmailer(newService(&fakeStore{snapshot: Snapshot{Email: cfg}}, sender))
 
-	if err := emailer.EmailNotification(context.Background(), domain.NotificationRecord{
+	if err := emailNotification(context.Background(), t, emailer, domain.NotificationRecord{
 		ID: "ntf-1", SessionID: "mer-1", ProjectID: "mer",
 		Type: domain.NotificationTaskCompleted, Title: "checkout-flow finished",
 		CreatedAt: time.Now().UTC(),
 	}); err != nil {
-		t.Fatalf("EmailNotification: %v", err)
+		t.Fatalf("emailNotification: %v", err)
 	}
 	if len(sender.sent) != 0 {
 		t.Fatalf("sent %d messages while disabled", len(sender.sent))
@@ -295,12 +296,12 @@ func TestEmailNotificationSendsWhenEnabled(t *testing.T) {
 	sender := &fakeSender{}
 	emailer := NewNotificationEmailer(newService(&fakeStore{snapshot: Snapshot{Email: configured()}}, sender))
 
-	if err := emailer.EmailNotification(context.Background(), domain.NotificationRecord{
+	if err := emailNotification(context.Background(), t, emailer, domain.NotificationRecord{
 		ID: "ntf-1", WorkflowRunID: "wf-1", ProjectID: "mer",
 		Type: domain.NotificationWorkflowCompleted, Title: "ship the thing finished",
 		Body: "Every task in this workflow run completed.", CreatedAt: time.Now().UTC(),
 	}); err != nil {
-		t.Fatalf("EmailNotification: %v", err)
+		t.Fatalf("emailNotification: %v", err)
 	}
 	if len(sender.sent) != 1 {
 		t.Fatalf("sent %d messages, want 1", len(sender.sent))
@@ -347,8 +348,8 @@ func TestEmailNotificationSendsAttentionAndFailureEvents(t *testing.T) {
 			}
 			sender := &fakeSender{}
 			emailer := NewNotificationEmailer(newService(&fakeStore{snapshot: Snapshot{Email: configured()}}, sender))
-			if err := emailer.EmailNotification(context.Background(), rec); err != nil {
-				t.Fatalf("EmailNotification: %v", err)
+			if err := emailNotification(context.Background(), t, emailer, rec); err != nil {
+				t.Fatalf("emailNotification: %v", err)
 			}
 			if len(sender.sent) != 1 {
 				t.Fatalf("sent %d messages, want 1", len(sender.sent))
@@ -374,17 +375,17 @@ func TestEmailNotificationHonorsPerEventSelection(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	if err := emailer.EmailNotification(ctx, domain.NotificationRecord{
+	if err := emailNotification(ctx, t, emailer, domain.NotificationRecord{
 		ID: "ntf-1", WorkflowRunID: "wf-1", ProjectID: "mer",
 		Type: domain.NotificationWorkflowNeedsAttention, Title: "stopped", CreatedAt: now,
 	}); err != nil {
-		t.Fatalf("EmailNotification(attention): %v", err)
+		t.Fatalf("emailNotification(attention): %v", err)
 	}
 	if len(sender.sent) != 0 {
 		t.Fatalf("sent %d messages for a deselected event", len(sender.sent))
 	}
 
-	if err := emailer.EmailNotification(ctx, domain.NotificationRecord{
+	if err := emailNotification(ctx, t, emailer, domain.NotificationRecord{
 		ID: "ntf-2", WorkflowRunID: "wf-1", ProjectID: "mer",
 		Type: domain.NotificationWorkflowCompleted, Title: "finished", CreatedAt: now,
 	}); err != nil {
@@ -400,11 +401,11 @@ func TestEmailNotificationHonorsPerEventSelection(t *testing.T) {
 func TestEmailNotificationIgnoresNonEmailableTypes(t *testing.T) {
 	sender := &fakeSender{}
 	emailer := NewNotificationEmailer(newService(&fakeStore{snapshot: Snapshot{Email: configured()}}, sender))
-	if err := emailer.EmailNotification(context.Background(), domain.NotificationRecord{
+	if err := emailNotification(context.Background(), t, emailer, domain.NotificationRecord{
 		ID: "ntf-1", SessionID: "s-1", ProjectID: "mer", PRURL: "https://example.test/pr/1",
 		Type: domain.NotificationReadyToMerge, Title: "PR #1 is ready to merge", CreatedAt: time.Now().UTC(),
 	}); err != nil {
-		t.Fatalf("EmailNotification: %v", err)
+		t.Fatalf("emailNotification: %v", err)
 	}
 	if len(sender.sent) != 0 {
 		t.Fatalf("sent %d messages for a non-emailable type", len(sender.sent))
@@ -446,4 +447,23 @@ func TestSetEmailNotificationsPersistsAnExplicitEventSelection(t *testing.T) {
 	if store.saved[0].Events != events {
 		t.Fatalf("stored Events = %+v, want %+v", store.saved[0].Events, events)
 	}
+}
+
+// emailNotification preserves the one behaviour these tests describe -- decide,
+// render, send -- now that NotificationEmailer is split into an enqueue-time
+// renderer and a send-time transport. The durable outbox performs exactly this
+// sequence; it just spreads it across a stored row so a crash in the middle
+// does not lose the email. Declining to render (email off, or an event the user
+// did not select) is a normal outcome and enqueues nothing, so it is silence
+// here too.
+func emailNotification(ctx context.Context, t *testing.T, e *NotificationEmailer, rec domain.NotificationRecord) error {
+	t.Helper()
+	msg, err := e.RenderNotificationEmail(rec)
+	if errors.Is(err, ports.ErrEmailSuppressed) || errors.Is(err, ports.ErrEmailTransportUnavailable) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return e.Send(ctx, msg)
 }

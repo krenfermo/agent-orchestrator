@@ -15,9 +15,17 @@ func enrich(intent Intent) (domain.NotificationRecord, error) {
 		WorkflowRunID: strings.TrimSpace(intent.WorkflowRunID),
 		DedupeKey:     strings.TrimSpace(intent.DedupeKey),
 		PRURL:         strings.TrimSpace(intent.PRURL),
+		TaskID:        strings.TrimSpace(intent.TaskID),
 		Type:          intent.Type,
 		Status:        domain.NotificationUnread,
 		CreatedAt:     intent.CreatedAt,
+		Source:        intent.Source,
+		SourceEventID: strings.TrimSpace(intent.SourceEventID),
+	}
+	// Every intent that does not name its producer came from lifecycle, which
+	// is where they all came from before provenance was recorded.
+	if rec.Source == "" {
+		rec.Source = domain.NotificationSourceLifecycle
 	}
 	if !intent.Type.Valid() {
 		return domain.NotificationRecord{}, domain.ErrInvalidNotificationType
@@ -72,6 +80,12 @@ func titleForIntent(intent Intent) string {
 		return fmt.Sprintf("%s failed", taskLabel(intent))
 	case domain.NotificationWorkflowFailed:
 		return fmt.Sprintf("%s failed", workflowLabel(intent))
+	case domain.NotificationHumanQuestionRequired:
+		return fmt.Sprintf("%s is waiting on your decision", sessionLabel(intent))
+	case domain.NotificationRepairExhausted:
+		return fmt.Sprintf("AO stopped retrying on %s", sessionLabel(intent))
+	case domain.NotificationIntegrationFailed:
+		return fmt.Sprintf("%s hit an integration failure", sessionLabel(intent))
 	default:
 		return "Notification"
 	}
@@ -108,6 +122,20 @@ func bodyForIntent(intent Intent) string {
 		return stopBody("It stopped and cannot continue without a decision from you.", intent)
 	case domain.NotificationTaskFailed, domain.NotificationWorkflowFailed:
 		return stopBody("It ended without completing the work it was given.", intent)
+	case domain.NotificationHumanQuestionRequired:
+		return stopBody(
+			"The agent is stopped on a permission or approval prompt. "+
+				"Only you can answer it: AO will not type into a blocked session.",
+			intent,
+		)
+	case domain.NotificationRepairExhausted:
+		return stopBody(
+			"AO retried this automatically until the attempt budget ran out, "+
+				"and the problem is still there.",
+			intent,
+		)
+	case domain.NotificationIntegrationFailed:
+		return stopBody("An integration AO runs for this session failed.", intent)
 	default:
 		return ""
 	}

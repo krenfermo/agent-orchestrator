@@ -16,6 +16,8 @@ import {
 	LoaderCircle,
 	MessageSquareDot,
 	RotateCcw,
+	ShieldAlert,
+	Wrench,
 	TriangleAlert,
 	Workflow,
 } from "lucide-react";
@@ -657,6 +659,16 @@ function notificationIcon(type: string) {
 		case "task_failed":
 		case "workflow_failed":
 			return CircleX;
+		// A pending decision is the same shape as needs_input because it is the
+		// same situation to the person reading it: the agent is stopped and
+		// only they can unstick it.
+		case "human_question_required":
+			return MessageSquareDot;
+		// AO tried to fix this by itself and ran out of attempts.
+		case "repair_exhausted":
+			return Wrench;
+		case "integration_failed":
+			return ShieldAlert;
 		default:
 			return Bell;
 	}
@@ -689,6 +701,13 @@ function notificationIconClass(type: string): string {
 			return "text-warning";
 		case "task_failed":
 		case "workflow_failed":
+			return "text-error";
+		// Same two-colour rule as above: something waiting on a person is
+		// amber, something that went wrong is red.
+		case "human_question_required":
+		case "repair_exhausted":
+			return "text-warning";
+		case "integration_failed":
 			return "text-error";
 		default:
 			return "text-muted-foreground";

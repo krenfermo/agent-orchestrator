@@ -73,7 +73,7 @@ func TestNotificationStore_ResolutionNotReadReopensDedupe(t *testing.T) {
 	if _, inserted, err := s.CreateNotification(ctx, rec); err != nil || !inserted {
 		t.Fatalf("CreateNotification inserted=%v err=%v", inserted, err)
 	}
-	read, ok, err := s.MarkNotificationRead(ctx, rec.ID)
+	read, ok, err := s.MarkNotificationRead(ctx, rec.ID, time.Now().UTC())
 	if err != nil || !ok {
 		t.Fatalf("MarkNotificationRead ok=%v err=%v", ok, err)
 	}
@@ -131,7 +131,7 @@ func TestNotificationStore_ListUnresolvedIgnoresSeenAndTerminalTypes(t *testing.
 	seed("ntf_input", domain.NotificationNeedsInput, "")
 	seed("ntf_ready", domain.NotificationReadyToMerge, "https://github.com/o/r/pull/1")
 	seed("ntf_merged", domain.NotificationPRMerged, "https://github.com/o/r/pull/2")
-	if _, err := s.MarkAllNotificationsRead(ctx); err != nil {
+	if _, err := s.MarkAllNotificationsRead(ctx, time.Now().UTC()); err != nil {
 		t.Fatalf("MarkAllNotificationsRead: %v", err)
 	}
 
@@ -163,7 +163,7 @@ func TestNotificationStore_ListUnresolvedIgnoresSeenAndTerminalTypes(t *testing.
 
 func TestNotificationStore_MarkReadMissing(t *testing.T) {
 	s := newTestStore(t)
-	_, ok, err := s.MarkNotificationRead(context.Background(), "missing")
+	_, ok, err := s.MarkNotificationRead(context.Background(), "missing", time.Now().UTC())
 	if err != nil || ok {
 		t.Fatalf("MarkNotificationRead ok=%v err=%v, want false nil", ok, err)
 	}
@@ -186,14 +186,14 @@ func TestNotificationStore_MarkAllRead(t *testing.T) {
 			t.Fatalf("insert %s inserted=%v err=%v", rec.ID, inserted, err)
 		}
 	}
-	updated, err := s.MarkAllNotificationsRead(ctx)
+	updated, err := s.MarkAllNotificationsRead(ctx, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("MarkAllNotificationsRead: %v", err)
 	}
 	if updated != 2 {
 		t.Fatalf("updated = %d, want 2", updated)
 	}
-	updated, err = s.MarkAllNotificationsRead(ctx)
+	updated, err = s.MarkAllNotificationsRead(ctx, time.Now().UTC())
 	if err != nil || updated != 0 {
 		t.Fatalf("second mark-all updated=%d err=%v, want 0 nil", updated, err)
 	}
@@ -399,7 +399,7 @@ func TestNotificationStore_MarkNotificationsReadOnlyTouchesGivenIDs(t *testing.T
 		}
 	}
 
-	updated, err := s.MarkNotificationsRead(ctx, []string{"ntf_1", "ntf_2"})
+	updated, err := s.MarkNotificationsRead(ctx, []string{"ntf_1", "ntf_2"}, time.Now().UTC())
 	if err != nil || updated != 2 {
 		t.Fatalf("MarkNotificationsRead updated=%d err=%v, want 2", updated, err)
 	}

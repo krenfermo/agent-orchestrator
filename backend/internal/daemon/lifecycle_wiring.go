@@ -37,6 +37,12 @@ type notificationSink interface {
 	Resolve(context.Context, ports.NotificationResolution) error
 }
 
+// sessionFactSink records the durable session-level facts lifecycle observes
+// (a pending decision, a spent repair budget) as notifications.
+type sessionFactSink interface {
+	Record(context.Context, ports.SessionFact) error
+}
+
 // lifecycleStack owns the runtime reaper goroutine started with the lifecycle
 // reducer. The reducer itself is only used for wiring observations into storage.
 type lifecycleStack struct {
@@ -60,9 +66,10 @@ type lifecycleStack struct {
 // reaper. The goroutine stops when ctx is cancelled; Stop waits for it to drain.
 // The messenger is the per-daemon agent messenger the LCM uses to nudge agents
 // in response to SCM observations (CI failure, review feedback, merge conflict).
-func startLifecycle(ctx context.Context, store *sqlite.Store, runtime ports.Runtime, messenger ports.AgentMessenger, notifier notificationSink, telemetry ports.EventSink, agents ports.AgentResolver, logger *slog.Logger) *lifecycleStack {
+func startLifecycle(ctx context.Context, store *sqlite.Store, runtime ports.Runtime, messenger ports.AgentMessenger, notifier notificationSink, sessionFacts sessionFactSink, telemetry ports.EventSink, agents ports.AgentResolver, logger *slog.Logger) *lifecycleStack {
 	lcm := lifecycle.New(store, messenger,
 		lifecycle.WithNotificationSink(notifier),
+		lifecycle.WithSessionFactNotifier(sessionFacts),
 		lifecycle.WithTelemetry(telemetry),
 		lifecycle.WithContainerReaper(dockerreap.New(), store),
 		lifecycle.WithActiveSteering(activeTurnSteering(agents)),
@@ -196,7 +203,7 @@ type sessionStack struct {
 	Workspace *workspacerouter.Workspace
 }
 
-func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.Runtime, store *sqlite.Store, lcm *lifecycle.Manager, messenger ports.AgentMessenger, telemetry ports.EventSink, agents ports.AgentResolver, previewLifecycle sessionmanager.PreviewLifecycle, browserLifecycle sessionmanager.BrowserLifecycle, browserCapabilities sessionmanager.BrowserCapabilityIssuer, chat sessionmanager.ChatLauncher, defaults sessionmanager.SessionModeDefaults, log *slog.Logger) (sessionStack, error) {
+func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.Runtime, store *sqlite.Store, lcm *lifecycle.Manager, messenger ports.AgentMessenger, telemetry ports.EventSink, agents ports.AgentResolver, previewLifecycle sessionmanager.PreviewLifecycle, browserLifecycle sessionmanager.BrowserLifecycle, browserCapabilities sessionmanager.BrowserCapabilityIssuer, chat sessionmanager.ChatLauncher, defaults sessionmanager.SessionModeDefaults, sessionFacts sessionFactSink, log *slog.Logger) (sessionStack, error) {
 	gitWS, err := gitworktree.New(gitworktree.Options{
 		// Per-session worktrees live under the data dir, so a single AO_DATA_DIR
 		// override moves all durable per-user state together.
@@ -294,6 +301,10 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 		Sessions: store,
 		PRs:      store,
 		Projects: store,
+		// A review pass that fails durably is something only a person can pick
+		// up: AO does not retry it. The engine raises the fact from the failed
+		// review_run row it just wrote.
+		SessionFacts: sessionFacts,
 		Launcher: reviewcore.NewLauncher(reviewers, runtime, cfg.DataDir,
 			reviewcore.WithRunFilePath(cfg.RunFilePath),
 			reviewcore.WithAgentAuth(reviewerAgentAuth{agents: agents}),

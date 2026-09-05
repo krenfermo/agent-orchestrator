@@ -1,14 +1,24 @@
+-- Notification queries.
+--
+-- Every list and count is scoped by recipient. AO is single-user today and the
+-- only value written is 'local', so this changes no result -- it exists so the
+-- authority boundary is in the SQL rather than in a caller's discipline, and so
+-- P4-B/P4-C add principals without revisiting every query. See
+-- domain.NotificationRecipient.
+
 -- name: CreateNotification :one
 INSERT INTO notifications (
-    id, session_id, project_id, workflow_run_id, pr_url, dedupe_key,
-    type, title, body, status, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    id, session_id, project_id, workflow_run_id, task_id, pr_url, dedupe_key,
+    type, title, body, status, created_at, read_at,
+    recipient, severity, delivery_state, source, source_event_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
 -- name: ListUnreadNotificationsPage :many
 SELECT *
 FROM notifications
 WHERE status = 'unread'
+  AND recipient = CAST(sqlc.arg(recipient) AS TEXT)
   AND (
     CAST(sqlc.arg(before_id) AS TEXT) = ''
     OR created_at < sqlc.arg(before_created_at)
@@ -25,6 +35,7 @@ SELECT *
 FROM notifications
 WHERE resolved_at IS NULL
   AND type IN ('needs_input', 'ready_to_merge')
+  AND recipient = CAST(sqlc.arg(recipient) AS TEXT)
   AND (
     CAST(sqlc.arg(before_id) AS TEXT) = ''
     OR created_at < sqlc.arg(before_created_at)
@@ -36,7 +47,8 @@ LIMIT sqlc.arg(page_limit);
 -- name: ListNotificationsPage :many
 SELECT *
 FROM notifications
-WHERE (
+WHERE recipient = CAST(sqlc.arg(recipient) AS TEXT)
+  AND (
     CAST(sqlc.arg(before_id) AS TEXT) = ''
     OR created_at < sqlc.arg(before_created_at)
     OR (created_at = sqlc.arg(before_created_at) AND id < CAST(sqlc.arg(before_id) AS TEXT))
@@ -44,27 +56,36 @@ WHERE (
 ORDER BY created_at DESC, id DESC
 LIMIT sqlc.arg(page_limit);
 
+-- Served by idx_notifications_recipient_status: the unread badge must never
+-- read the full notification history.
 -- name: CountUnreadNotifications :one
 SELECT COUNT(*)
 FROM notifications
-WHERE status = 'unread';
+WHERE status = 'unread'
+  AND recipient = CAST(sqlc.arg(recipient) AS TEXT);
 
 -- name: CountUnresolvedNotifications :one
 SELECT COUNT(*)
 FROM notifications
 WHERE resolved_at IS NULL
-  AND type IN ('needs_input', 'ready_to_merge');
+  AND type IN ('needs_input', 'ready_to_merge')
+  AND recipient = CAST(sqlc.arg(recipient) AS TEXT);
 
+-- status and read_at carry the same fact and are always written together:
+-- status = 'read' <=> read_at IS NOT NULL. Both updates are already idempotent
+-- through the status = 'unread' guard, so replaying a mark-read is a no-op
+-- rather than a second timestamp.
 -- name: MarkNotificationRead :one
 UPDATE notifications
-SET status = 'read'
-WHERE id = ? AND status = 'unread'
+SET status = 'read', read_at = sqlc.arg(read_at)
+WHERE id = sqlc.arg(id) AND status = 'unread'
 RETURNING *;
 
 -- name: MarkAllNotificationsRead :execrows
 UPDATE notifications
-SET status = 'read'
-WHERE status = 'unread';
+SET status = 'read', read_at = sqlc.arg(read_at)
+WHERE status = 'unread'
+  AND recipient = CAST(sqlc.arg(recipient) AS TEXT);
 
 -- name: ResolveSessionNotificationsByType :many
 UPDATE notifications

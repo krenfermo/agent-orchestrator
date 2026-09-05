@@ -57,6 +57,7 @@ if (import.meta.env.DEV) {
 			prUrl: "",
 			target: { kind: "session", sessionId: "" },
 			status: "unread",
+			severity: type === "needs_input" || type === "pr_closed_unmerged" ? "warning" : "info",
 		});
 		console.log("[testNotif] bell updated - click away from AO now, bounce fires in 3s");
 		setTimeout(() => {

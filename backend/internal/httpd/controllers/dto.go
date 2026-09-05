@@ -1038,17 +1038,38 @@ type NotificationResponse struct {
 	PRURL     string `json:"prUrl"`
 	// WorkflowRunID is set on run-level notifications (workflow_completed),
 	// which have no session behind them.
-	WorkflowRunID string    `json:"workflowRunId,omitempty"`
-	Type          string    `json:"type" enum:"needs_input,ready_to_merge,pr_merged,pr_closed_unmerged,task_completed,workflow_completed"`
-	Title         string    `json:"title"`
-	Body          string    `json:"body"`
-	Status        string    `json:"status" enum:"unread,read" description:"Seen state. unread means the user has not opened the notification panel since it arrived."`
-	CreatedAt     time.Time `json:"createdAt"`
+	WorkflowRunID string `json:"workflowRunId,omitempty"`
+	// TaskID is the optional planned-task anchor, when the notification is
+	// about one.
+	TaskID string `json:"taskId,omitempty"`
+	Type   string `json:"type" enum:"needs_input,ready_to_merge,pr_merged,pr_closed_unmerged,task_completed,workflow_completed,task_needs_attention,workflow_needs_attention,task_failed,workflow_failed,human_question_required,repair_exhausted,integration_failed"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	Status string `json:"status" enum:"unread,read" description:"Seen state. unread means the user has not opened the notification panel since it arrived."`
+	// Severity is how loudly to surface this, independent of type, so a client
+	// can style or filter without enumerating every type.
+	Severity  string    `json:"severity" enum:"info,warning,critical"`
+	CreatedAt time.Time `json:"createdAt"`
+	// ReadAt is when the user acknowledged this. It carries the same fact as
+	// status ("read" <=> present) and exists because status records only that
+	// an acknowledgement happened, never when.
+	ReadAt *time.Time `json:"readAt,omitempty"`
 	// ResolvedAt is set by AO when the underlying issue goes away (the session
 	// received its input, the PR stopped waiting on a merge). Absent means the
 	// issue is still open. There is no user-facing action that sets it.
-	ResolvedAt *time.Time         `json:"resolvedAt,omitempty"`
-	Target     NotificationTarget `json:"target"`
+	ResolvedAt *time.Time `json:"resolvedAt,omitempty"`
+	// Source names the producer that raised this row. Provenance is exposed
+	// because it is what makes an unexpected notification explainable; the
+	// paired source event id stays server-side, as does the recipient, which
+	// would imply an identity model AO does not have until P4-B.
+	Source string             `json:"source,omitempty"`
+	Target NotificationTarget `json:"target"`
+}
+
+// NotificationUnreadCountResponse is the body of
+// GET /api/v1/notifications/unread-count.
+type NotificationUnreadCountResponse struct {
+	UnreadCount int `json:"unreadCount"`
 }
 
 // ListNotificationsResponse is one history page from GET /api/v1/notifications.

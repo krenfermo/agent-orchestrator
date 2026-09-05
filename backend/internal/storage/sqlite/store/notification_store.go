@@ -30,6 +30,9 @@ func (s *Store) CreateNotification(ctx context.Context, rec domain.NotificationR
 	if err := rec.Validate(); err != nil {
 		return domain.NotificationRecord{}, false, err
 	}
+	// Defaulting here rather than in every producer keeps "an unaddressed,
+	// unrated, in-app-only notification" defined in exactly one place.
+	rec = rec.WithDefaults()
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if existing, ok, err := s.getDeduplicatedNotification(ctx, rec); err != nil {
@@ -42,6 +45,7 @@ func (s *Store) CreateNotification(ctx context.Context, rec domain.NotificationR
 		SessionID:     nullableSessionID(rec.SessionID),
 		ProjectID:     rec.ProjectID,
 		WorkflowRunID: rec.WorkflowRunID,
+		TaskID:        rec.TaskID,
 		PRURL:         rec.PRURL,
 		DedupeKey:     rec.DedupeKey,
 		Type:          rec.Type,
@@ -49,6 +53,12 @@ func (s *Store) CreateNotification(ctx context.Context, rec domain.NotificationR
 		Body:          rec.Body,
 		Status:        rec.Status,
 		CreatedAt:     rec.CreatedAt,
+		ReadAt:        nullTime(rec.ReadAt),
+		Recipient:     rec.Recipient,
+		Severity:      rec.Severity,
+		DeliveryState: rec.DeliveryState,
+		Source:        rec.Source,
+		SourceEventID: rec.SourceEventID,
 	})
 	if err != nil {
 		if isSQLiteUnique(err) {
@@ -78,18 +88,21 @@ func (s *Store) ListNotifications(
 	switch status {
 	case domain.NotificationListUnread:
 		rows, err = s.qr.ListUnreadNotificationsPage(ctx, gen.ListUnreadNotificationsPageParams{
+			Recipient:       string(domain.NotificationRecipientLocal),
 			BeforeID:        beforeID,
 			BeforeCreatedAt: beforeCreatedAt,
 			PageLimit:       int64(limit),
 		})
 	case domain.NotificationListUnresolved:
 		rows, err = s.qr.ListUnresolvedNotificationsPage(ctx, gen.ListUnresolvedNotificationsPageParams{
+			Recipient:       string(domain.NotificationRecipientLocal),
 			BeforeID:        beforeID,
 			BeforeCreatedAt: beforeCreatedAt,
 			PageLimit:       int64(limit),
 		})
 	default:
 		rows, err = s.qr.ListNotificationsPage(ctx, gen.ListNotificationsPageParams{
+			Recipient:       string(domain.NotificationRecipientLocal),
 			BeforeID:        beforeID,
 			BeforeCreatedAt: beforeCreatedAt,
 			PageLimit:       int64(limit),
@@ -104,7 +117,7 @@ func (s *Store) ListNotifications(
 // CountUnreadNotifications returns the exact unread badge count independently
 // from the bounded history page.
 func (s *Store) CountUnreadNotifications(ctx context.Context) (int64, error) {
-	count, err := s.qr.CountUnreadNotifications(ctx)
+	count, err := s.qr.CountUnreadNotifications(ctx, string(domain.NotificationRecipientLocal))
 	if err != nil {
 		return 0, fmt.Errorf("count unread notifications: %w", err)
 	}
@@ -114,7 +127,7 @@ func (s *Store) CountUnreadNotifications(ctx context.Context) (int64, error) {
 // CountUnresolvedNotifications returns how many notifications still have an
 // open underlying issue, independently from the bounded history page.
 func (s *Store) CountUnresolvedNotifications(ctx context.Context) (int64, error) {
-	count, err := s.qr.CountUnresolvedNotifications(ctx)
+	count, err := s.qr.CountUnresolvedNotifications(ctx, string(domain.NotificationRecipientLocal))
 	if err != nil {
 		return 0, fmt.Errorf("count unresolved notifications: %w", err)
 	}
@@ -234,12 +247,14 @@ func (s *Store) ReconcileResolvedNotifications(ctx context.Context, at time.Time
 // rendered. Clearing every unread row instead would strand anything past the
 // first page — the client never held a cursor for it, and terminal types are
 // not reachable through the unresolved list.
-func (s *Store) MarkNotificationsRead(ctx context.Context, ids []string) (int64, error) {
+func (s *Store) MarkNotificationsRead(ctx context.Context, ids []string, at time.Time) (int64, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	var updated int64
 	for _, id := range ids {
-		if _, err := s.qw.MarkNotificationRead(ctx, id); err != nil {
+		if _, err := s.qw.MarkNotificationRead(ctx, gen.MarkNotificationReadParams{
+			ID: id, ReadAt: nullTime(at),
+		}); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				continue
 			}
@@ -251,10 +266,12 @@ func (s *Store) MarkNotificationsRead(ctx context.Context, ids []string) (int64,
 }
 
 // MarkNotificationRead marks one unread notification read.
-func (s *Store) MarkNotificationRead(ctx context.Context, id string) (domain.NotificationRecord, bool, error) {
+func (s *Store) MarkNotificationRead(ctx context.Context, id string, at time.Time) (domain.NotificationRecord, bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	row, err := s.qw.MarkNotificationRead(ctx, id)
+	row, err := s.qw.MarkNotificationRead(ctx, gen.MarkNotificationReadParams{
+		ID: id, ReadAt: nullTime(at),
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.NotificationRecord{}, false, nil
 	}
@@ -265,10 +282,13 @@ func (s *Store) MarkNotificationRead(ctx context.Context, id string) (domain.Not
 }
 
 // MarkAllNotificationsRead marks every unread notification read.
-func (s *Store) MarkAllNotificationsRead(ctx context.Context) (int64, error) {
+func (s *Store) MarkAllNotificationsRead(ctx context.Context, at time.Time) (int64, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	count, err := s.qw.MarkAllNotificationsRead(ctx)
+	count, err := s.qw.MarkAllNotificationsRead(ctx, gen.MarkAllNotificationsReadParams{
+		ReadAt:    nullTime(at),
+		Recipient: string(domain.NotificationRecipientLocal),
+	})
 	if err != nil {
 		return 0, fmt.Errorf("mark all notifications read: %w", err)
 	}
@@ -350,6 +370,13 @@ func notificationFromGen(row gen.Notification) domain.NotificationRecord {
 		Status:        row.Status,
 		CreatedAt:     row.CreatedAt,
 		ResolvedAt:    timeFromNull(row.ResolvedAt),
+		TaskID:        row.TaskID,
+		Recipient:     row.Recipient,
+		Severity:      row.Severity,
+		DeliveryState: row.DeliveryState,
+		Source:        row.Source,
+		SourceEventID: row.SourceEventID,
+		ReadAt:        timeFromNull(row.ReadAt),
 	}
 }
 

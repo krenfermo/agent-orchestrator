@@ -21,16 +21,38 @@ const (
 // Manager reads stored notifications for REST controllers.
 type Manager struct {
 	store Store
+	clock func() time.Time
 }
 
 // Deps configures a Manager.
 type Deps struct {
 	Store Store
+	// Clock stamps read_at on acknowledgement. Injectable for deterministic
+	// tests; defaults to the wall clock in UTC.
+	Clock func() time.Time
 }
 
 // New constructs a read-only notification Manager.
 func New(d Deps) *Manager {
-	return &Manager{store: d.Store}
+	clock := d.Clock
+	if clock == nil {
+		clock = func() time.Time { return time.Now().UTC() }
+	}
+	return &Manager{store: d.Store, clock: clock}
+}
+
+// UnreadCount returns just the unread badge count. It exists so a client
+// polling the badge does not have to fetch a page of history to learn one
+// number (P4-D section 16).
+func (m *Manager) UnreadCount(ctx context.Context) (int, error) {
+	if m == nil || m.store == nil {
+		return 0, errors.New("notification: store is required")
+	}
+	count, err := m.store.CountUnreadNotifications(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return int(count), nil
 }
 
 // List returns one stable newest-first page of notification history.
@@ -88,7 +110,7 @@ func (m *Manager) MarkRead(ctx context.Context, id string) (Notification, bool, 
 	if id == "" {
 		return Notification{}, false, apierr.Invalid("INVALID_NOTIFICATION_ID", "Notification id is required", nil)
 	}
-	row, ok, err := m.store.MarkNotificationRead(ctx, id)
+	row, ok, err := m.store.MarkNotificationRead(ctx, id, m.now())
 	if err != nil {
 		return Notification{}, false, err
 	}
@@ -107,10 +129,20 @@ func (m *Manager) MarkAllRead(ctx context.Context, ids []string) (int64, error) 
 	if m == nil || m.store == nil {
 		return 0, errors.New("notification: store is required")
 	}
+	at := m.now()
 	if len(ids) == 0 {
-		return m.store.MarkAllNotificationsRead(ctx)
+		return m.store.MarkAllNotificationsRead(ctx, at)
 	}
-	return m.store.MarkNotificationsRead(ctx, ids)
+	return m.store.MarkNotificationsRead(ctx, ids, at)
+}
+
+// now is the acknowledgement clock, normalized to UTC so read_at is stored the
+// same way created_at is.
+func (m *Manager) now() time.Time {
+	if m.clock == nil {
+		return time.Now().UTC()
+	}
+	return m.clock().UTC()
 }
 
 func normalizeLimit(limit int) int {

@@ -49,7 +49,7 @@ func TestNotificationStore_TaskCompletionDedupesOnTheEvent(t *testing.T) {
 
 	// The decisive case: once read, the row leaves the OPEN set, so only the
 	// permanent event index can still stop a restart from re-announcing it.
-	if _, _, err := s.MarkNotificationRead(ctx, "ntf_1"); err != nil {
+	if _, _, err := s.MarkNotificationRead(ctx, "ntf_1", time.Now().UTC()); err != nil {
 		t.Fatalf("MarkNotificationRead: %v", err)
 	}
 	afterRead := rec
@@ -211,7 +211,7 @@ func TestNotificationStore_KeylessTypesKeepOpenRowDedupe(t *testing.T) {
 	if _, err := s.ResolveSessionNotifications(ctx, sess.ID, domain.NotificationNeedsInput, now.Add(time.Minute)); err != nil {
 		t.Fatalf("ResolveSessionNotifications: %v", err)
 	}
-	if _, _, err := s.MarkNotificationRead(ctx, "ntf_1"); err != nil {
+	if _, _, err := s.MarkNotificationRead(ctx, "ntf_1", time.Now().UTC()); err != nil {
 		t.Fatalf("MarkNotificationRead: %v", err)
 	}
 

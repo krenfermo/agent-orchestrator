@@ -40,6 +40,7 @@ const taskCompleted: NotificationDTO = {
 	title: "Checkout flow finished",
 	body: "The task reported that it finished the work it was given.",
 	status: "unread",
+	severity: "info",
 	createdAt: "2026-08-22T10:00:00Z",
 	target: { kind: "session", sessionId: "sess-1" },
 };
@@ -56,6 +57,7 @@ const workflowCompleted: NotificationDTO = {
 	title: "Ship the thing finished",
 	body: "Every task in this workflow run completed.",
 	status: "unread",
+	severity: "info",
 	createdAt: "2026-08-22T09:00:00Z",
 	target: { kind: "workflow", sessionId: "", workflowRunId: "wf-1" },
 };
