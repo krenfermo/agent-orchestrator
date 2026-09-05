@@ -14,8 +14,12 @@ const (
 	PlannerAttemptOK              = "ok"
 	PlannerAttemptTimeout         = "planner_timeout"
 	PlannerAttemptParentCancelled = "parent_cancelled"
-	PlannerAttemptCommandFailed   = "command_failed"
-	PlannerAttemptMalformed       = "malformed_output"
+	// PlannerAttemptCommandFailed is no longer emitted: a non-zero exit is now
+	// attributed to one of the launch classes below. It stays declared because
+	// it is written into existing workflow_checkpoints rows -- wf-7f8cc736's
+	// among them -- and reading those back must not lose their meaning.
+	PlannerAttemptCommandFailed = "command_failed"
+	PlannerAttemptMalformed     = "malformed_output"
 	// PlannerAttemptResultInconsistent is F2's class: the subprocess
 	// succeeded and its output parsed into a plan, but that plan could not be
 	// reconciled with the invocation that produced it. Distinct from
@@ -23,6 +27,33 @@ const (
 	// here something perfectly readable came back and is provably not the
 	// answer the provider was billed for.
 	PlannerAttemptResultInconsistent = "result_inconsistent"
+
+	// The launch-failure classes. Before them every one of these ended the
+	// attempt as command_failed, which is why wf-7f8cc736's durable evidence
+	// could say the planner had exited and nothing about why. They name a
+	// cause, and the coordinator's retry policy is derived from the matching
+	// typed sentinel rather than from this string -- the string is what a
+	// person reads afterwards.
+	//
+	// PlannerAttemptBinaryMissing: the executable could not be resolved on the
+	// PATH the subprocess would have inherited, or is present but not
+	// executable. Never retried.
+	PlannerAttemptBinaryMissing = "binary_missing"
+	// PlannerAttemptAuthUnavailable: the provider itself reported that its
+	// credentials are missing, expired or rejected. Never retried.
+	PlannerAttemptAuthUnavailable = "auth_unavailable"
+	// PlannerAttemptProfileUnreadable: the profile/home directory the launch
+	// would run against does not exist or cannot be read -- the shape of the
+	// TrustedLocal runtime-home incident. Never retried.
+	PlannerAttemptProfileUnreadable = "profile_unreadable"
+	// PlannerAttemptUnsupported: the provider CLI rejected the invocation
+	// itself (unknown flag, unsupported format, incompatible version). Never
+	// retried: the same command is rejected the same way.
+	PlannerAttemptUnsupported = "provider_unsupported"
+	// PlannerAttemptExitedEarly: the process started and exited without
+	// producing a plan, for a reason the envelope did not attribute. The
+	// honest residual, and the only launch class that is retried.
+	PlannerAttemptExitedEarly = "exited_before_plan"
 )
 
 // PlannerAttemptEvidence is what one planner invocation records about itself.
@@ -85,6 +116,30 @@ type PlannerAttemptEvidence struct {
 	// ConsistencySignal names why the result was refused, empty when it was
 	// accepted. It is the operator-facing half of ErrPlannerResultInconsistent.
 	ConsistencySignal string `json:"consistencySignal,omitempty"`
+
+	// Launch provenance: what AO actually resolved and ran, recorded on every
+	// attempt including the successful ones.
+	//
+	// wf-7f8cc736 could not answer "which claude did the daemon run, and which
+	// profile did it point at?" from durable state, and those are the first two
+	// questions any planner-launch incident asks. They are paths and variable
+	// NAMES only -- never an environment value that could be a credential.
+	//
+	// BinaryPath is the executable the launch resolved to; ProfileVar/ProfileDir
+	// are the variable that decided the provider's configuration directory and
+	// the directory it named.
+	BinaryPath string `json:"binaryPath,omitempty"`
+	ProfileVar string `json:"profileVar,omitempty"`
+	ProfileDir string `json:"profileDir,omitempty"`
+	// ExitCode is the planner subprocess's exit status on a failed attempt,
+	// -1 when it did not exit normally, and 0 (omitted) otherwise.
+	ExitCode int `json:"exitCode,omitempty"`
+	// ProviderSubtype and ProviderErrorStatus are the CLI's own verdict fields
+	// from a failed invocation's envelope. They live at ~1500 bytes into that
+	// envelope, which is exactly why the old head-only 500-byte error snippet
+	// never carried them.
+	ProviderSubtype     string `json:"providerSubtype,omitempty"`
+	ProviderErrorStatus string `json:"providerErrorStatus,omitempty"`
 }
 
 // PlannerTokenUsage is one planner invocation's provider-reported token vector.
@@ -127,6 +182,21 @@ func (e PlannerAttemptEvidence) LogArgs() []any {
 	}
 	if e.ConsistencySignal != "" {
 		args = append(args, "consistencySignal", e.ConsistencySignal)
+	}
+	if e.BinaryPath != "" {
+		args = append(args, "binaryPath", e.BinaryPath)
+	}
+	if e.ProfileVar != "" {
+		args = append(args, "profileVar", e.ProfileVar, "profileDir", e.ProfileDir)
+	}
+	if e.ExitCode != 0 {
+		args = append(args, "exitCode", e.ExitCode)
+	}
+	if e.ProviderSubtype != "" {
+		args = append(args, "providerSubtype", e.ProviderSubtype)
+	}
+	if e.ProviderErrorStatus != "" {
+		args = append(args, "providerErrorStatus", e.ProviderErrorStatus)
 	}
 	return args
 }
