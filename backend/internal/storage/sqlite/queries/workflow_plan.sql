@@ -74,6 +74,18 @@ LEFT JOIN workflow_plans p ON p.workflow_run_id = t.workflow_run_id
 WHERE t.workflow_run_id = ? AND t.plan_revision = COALESCE(p.revision, 1)
 ORDER BY t.ordinal;
 
+-- name: GetWorkflowTask :one
+-- One task by id, whatever plan revision it belongs to.
+--
+-- Deliberately NOT revision-scoped, unlike ListWorkflowTasks: this answers
+-- "what is this row", asked by a caller that already holds the id, rather than
+-- "which tasks are authoritative for this run". A caller that has an id has it
+-- because something durable named it, and refusing to resolve a superseded
+-- task would make an event about one unexplainable.
+SELECT t.*, COALESCE((SELECT json_group_array(d.depends_on_task_id)
+    FROM workflow_task_dependencies d WHERE d.workflow_task_id = t.id), '[]') AS dependencies_json
+FROM workflow_tasks t WHERE t.id = ?;
+
 -- name: ListWorkflowTasksAtRevision :many
 -- The audit view: one superseded revision's tasks, exactly as they were.
 SELECT t.*, COALESCE((SELECT json_group_array(d.depends_on_task_id)

@@ -78,6 +78,23 @@ const (
 	// PermTenantMembersManage is "add, remove or re-role its members".
 	PermTenantMembersManage Permission = "tenant.members.manage"
 
+	// PermWorkItemsRead is "see this project's external work-management
+	// connection and the items its work is linked to" (P4-E).
+	PermWorkItemsRead Permission = "workitems.read"
+	// PermWorkItemsLink is "link AO work to an external item, create one from
+	// AO, unlink, and force a sync".
+	//
+	// Separate from PermWorkItemsManage because they are different risks. This
+	// one writes into somebody's planning board through a connection an
+	// administrator already approved; the other one decides WHICH board and
+	// holds the credential. A member doing the work should be able to link
+	// what they are working on without being able to re-point the integration
+	// at a different organization.
+	PermWorkItemsLink Permission = "workitems.link"
+	// PermWorkItemsManage is "configure the connection: the workspace, the
+	// project mapping and the API token".
+	PermWorkItemsManage Permission = "workitems.manage"
+
 	// PermAuditRead is "read the authorization/identity audit trail".
 	//
 	// The trail itself is real -- service/rbac and httpd/controllers.AuthAudit
@@ -99,6 +116,7 @@ var AllPermissions = []Permission{
 	PermWorkflowRead, PermWorkflowRun, PermWorkflowCancel, PermWorkflowRepair,
 	PermSessionRead, PermSessionWrite,
 	PermMemoryRead, PermUsageRead,
+	PermWorkItemsRead, PermWorkItemsLink, PermWorkItemsManage,
 	PermProviderRead, PermProviderManage,
 	PermSettingsRead, PermSettingsManage,
 	PermUsersRead, PermUsersManage,
@@ -140,7 +158,8 @@ func ScopeOf(p Permission) AuthzScope {
 		PermProjectAccessRead, PermProjectAccessManage,
 		PermWorkflowRead, PermWorkflowRun, PermWorkflowCancel, PermWorkflowRepair,
 		PermSessionRead, PermSessionWrite,
-		PermMemoryRead, PermUsageRead:
+		PermMemoryRead, PermUsageRead,
+		PermWorkItemsRead, PermWorkItemsLink, PermWorkItemsManage:
 		return AuthzScopeProject
 	case PermTenantRead, PermTenantManage,
 		PermTenantMembersRead, PermTenantMembersManage:

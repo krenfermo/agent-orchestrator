@@ -67,6 +67,10 @@ var projectRolePermissions = map[domain.ProjectRole]map[domain.Permission]bool{
 		domain.PermSessionRead,
 		domain.PermMemoryRead,
 		domain.PermUsageRead,
+		// A viewer sees the external connection and the links, and changes
+		// neither. Seeing that a run tracks PROJ-123 is part of reading the
+		// project's work.
+		domain.PermWorkItemsRead,
 	),
 	domain.ProjectRoleMember: permSet(
 		domain.PermProjectRead,
@@ -75,6 +79,10 @@ var projectRolePermissions = map[domain.ProjectRole]map[domain.Permission]bool{
 		domain.PermSessionRead, domain.PermSessionWrite,
 		domain.PermMemoryRead,
 		domain.PermUsageRead,
+		// A member links the work they are doing to the item that tracks it,
+		// but does not decide which external organization this project is
+		// connected to or hold its credential.
+		domain.PermWorkItemsRead, domain.PermWorkItemsLink,
 	),
 	domain.ProjectRoleAdmin: permSet(
 		domain.PermProjectRead, domain.PermProjectManage,
@@ -84,6 +92,7 @@ var projectRolePermissions = map[domain.ProjectRole]map[domain.Permission]bool{
 		domain.PermSessionRead, domain.PermSessionWrite,
 		domain.PermMemoryRead,
 		domain.PermUsageRead,
+		domain.PermWorkItemsRead, domain.PermWorkItemsLink, domain.PermWorkItemsManage,
 	),
 }
 

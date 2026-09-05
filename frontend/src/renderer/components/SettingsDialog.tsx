@@ -5,6 +5,7 @@ import {
 	Gauge,
 	GitBranch,
 	Inbox,
+	SquareKanban,
 	Link2,
 	MonitorCog,
 	RefreshCw,
@@ -85,6 +86,10 @@ export function SettingsDialog() {
 		{ id: "agents", label: t("settings.project.agents"), icon: Bot },
 		{ id: "workflow", label: t("settings.project.workflow"), icon: GitBranch },
 		{ id: "intake", label: t("settings.project.intake"), icon: Inbox },
+		// Planning is always offered, like access: whether a connection exists
+		// is a per-project answer only the daemon has, and the panel renders
+		// its own "not connected" state rather than being hidden.
+		{ id: "planning", label: t("settings.project.planning"), icon: SquareKanban },
 		// Project access is always offered: unlike the installation-wide
 		// administration entry, whether the caller may CHANGE it is a per-project
 		// answer only the daemon has, and the panel renders read-only when it

@@ -222,7 +222,7 @@ func (c coordinatorLockClassifier) ClassifyLockOwner(ctx context.Context, run do
 // it, at runtime, on every run. Pinning it here makes that a compile error.
 var _ workflowcore.DispatchRecorder = (*sqlite.Store)(nil)
 
-func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememory.Service, memoryProvisioning *durablememory.Provisioner, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, agents ports.AgentResolver, terminalRuntimes workflowcore.TerminalRuntimeReclaimer, plannerUsage workflowcore.PlannerUsageRecorder, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
+func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememory.Service, memoryProvisioning *durablememory.Provisioner, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, workItemSync workItemSyncer, agents ports.AgentResolver, terminalRuntimes workflowcore.TerminalRuntimeReclaimer, plannerUsage workflowcore.PlannerUsageRecorder, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {
 		plannerBinary = "claude"
@@ -247,8 +247,22 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		DataDir:      cfg.DataDir,
 		TrustedLocal: cfg.TrustedLocalMode,
 	}
+	// P4-E: the coordinator's Store is decorated so every run and task
+	// transition announces itself to the external work-item sync — one
+	// producer, behind the same compare-and-swap the transition itself rides
+	// on. See workitems_sync_store.go for why this is here rather than at the
+	// two dozen call sites. Only the Store field is wrapped: every other
+	// dependency below wants the plain store, and giving them the decorator
+	// would emit a sync for reads that are not transitions.
+	//
+	// A nil syncer leaves the plain store in place, so a daemon without the
+	// integration is byte-for-byte what it was.
+	workflowStore := workflowcore.Store(store)
+	if decorated := maybeSyncingStore(store, workItemSync, log); decorated != nil {
+		workflowStore = decorated
+	}
 	deps := workflowcore.Deps{
-		Store:    store,
+		Store:    workflowStore,
 		Projects: store,
 		// P3-E: the budget gate prices metered tokens with the same rate card
 		// the read model uses, so what a run is stopped for and what the UI

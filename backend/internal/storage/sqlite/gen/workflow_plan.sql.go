@@ -103,6 +103,68 @@ func (q *Queries) GetWorkflowPlan(ctx context.Context, workflowRunID string) (Wo
 	return i, err
 }
 
+const getWorkflowTask = `-- name: GetWorkflowTask :one
+SELECT t.id, t.workflow_run_id, t.plan_step_id, t.ordinal, t.title, t.description, t.acceptance_criteria_json, t.verify_json, t.scope_json, t.state, t.attention_reason, t.attention_json, t.attention_at, t.execution_run_id, t.created_at, t.updated_at, t.completed_at, t.plan_revision, COALESCE((SELECT json_group_array(d.depends_on_task_id)
+    FROM workflow_task_dependencies d WHERE d.workflow_task_id = t.id), '[]') AS dependencies_json
+FROM workflow_tasks t WHERE t.id = ?
+`
+
+type GetWorkflowTaskRow struct {
+	ID                     string
+	WorkflowRunID          string
+	PlanStepID             string
+	Ordinal                int64
+	Title                  string
+	Description            string
+	AcceptanceCriteriaJson string
+	VerifyJson             string
+	ScopeJson              string
+	State                  string
+	AttentionReason        string
+	AttentionJson          string
+	AttentionAt            sql.NullTime
+	ExecutionRunID         sql.NullString
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	CompletedAt            sql.NullTime
+	PlanRevision           int64
+	DependenciesJson       interface{}
+}
+
+// One task by id, whatever plan revision it belongs to.
+//
+// Deliberately NOT revision-scoped, unlike ListWorkflowTasks: this answers
+// "what is this row", asked by a caller that already holds the id, rather than
+// "which tasks are authoritative for this run". A caller that has an id has it
+// because something durable named it, and refusing to resolve a superseded
+// task would make an event about one unexplainable.
+func (q *Queries) GetWorkflowTask(ctx context.Context, id string) (GetWorkflowTaskRow, error) {
+	row := q.db.QueryRowContext(ctx, getWorkflowTask, id)
+	var i GetWorkflowTaskRow
+	err := row.Scan(
+		&i.ID,
+		&i.WorkflowRunID,
+		&i.PlanStepID,
+		&i.Ordinal,
+		&i.Title,
+		&i.Description,
+		&i.AcceptanceCriteriaJson,
+		&i.VerifyJson,
+		&i.ScopeJson,
+		&i.State,
+		&i.AttentionReason,
+		&i.AttentionJson,
+		&i.AttentionAt,
+		&i.ExecutionRunID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.CompletedAt,
+		&i.PlanRevision,
+		&i.DependenciesJson,
+	)
+	return i, err
+}
+
 const insertWorkflowPlan = `-- name: InsertWorkflowPlan :one
 INSERT INTO workflow_plans (workflow_run_id, status, approval_mode, prompt_context_version,
     command_status, created_at, updated_at)
