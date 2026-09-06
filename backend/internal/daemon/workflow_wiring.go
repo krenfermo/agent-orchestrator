@@ -249,6 +249,11 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		Profiles:     store,
 		DataDir:      cfg.DataDir,
 		TrustedLocal: cfg.TrustedLocalMode,
+		// AO_PROVIDER_RUNTIME_ISOLATION, when set, decides this instead of
+		// the identity mode above -- see domain.ProviderRuntimeIsolation for
+		// the keychain incident that made the two separable.
+		Isolation: cfg.ProviderRuntimeIsolation,
+		Keychain:  log,
 	}
 	// P4-E: the coordinator's Store is decorated so every run and task
 	// transition announces itself to the external work-item sync — one
@@ -291,7 +296,7 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		// (scaledTimeout) may stretch it for a large MEDUSA-class objective +
 		// repository context payload. Neither value is a blind global bump --
 		// small objectives still finish (or time out) inside 3 minutes.
-		Planner: plannercommand.Planner{Binary: plannerBinary, Model: plannerModel, Timeout: 3 * time.Minute, MaxTimeout: 12 * time.Minute, Logger: log, ResolveFallback: plannerFallback},
+		Planner: plannercommand.Planner{Binary: plannerBinary, Model: plannerModel, Timeout: 3 * time.Minute, MaxTimeout: 12 * time.Minute, Logger: log, ResolveFallback: plannerFallback, AuthMode: cfg.ProviderAuthMode},
 		// P2-B §5: the drift comparison asks this builder for DIGESTS, and the
 		// memory-backed variant answers them from the digest ledger instead of
 		// re-reading the six planner documents. Build itself is unchanged --
@@ -376,7 +381,7 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		// construction and both answer "unknown" rather than "no" whenever they
 		// cannot tell, so neither can ground a dispatch on its own uncertainty.
 		WorkerLiveness:  workflowWorkerLiveness{mgr: sessionMgr},
-		WorkerPreflight: &providerpreflight.Checker{Agents: agents},
+		WorkerPreflight: &providerpreflight.Checker{Agents: agents, AuthMode: cfg.ProviderAuthMode},
 		// Checkpoint 8P-E.13A.4: without an active prober, a provider profile
 		// that has never been dispatched to reports CapacityUnknown until a
 		// human happens to run it, which is how an authenticated Codex reviewer

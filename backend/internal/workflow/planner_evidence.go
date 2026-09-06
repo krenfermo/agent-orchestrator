@@ -42,6 +42,11 @@ const (
 	// PlannerAttemptAuthUnavailable: the provider itself reported that its
 	// credentials are missing, expired or rejected. Never retried.
 	PlannerAttemptAuthUnavailable = "auth_unavailable"
+	// PlannerAttemptAuthInteractive: the credentials exist but reaching them
+	// needs a person -- an OS keychain AO cannot open unattended. Refused
+	// BEFORE the subprocess starts, so unlike auth_unavailable it costs no
+	// provider time at all. Never retried: waiting does not unlock a keychain.
+	PlannerAttemptAuthInteractive = "auth_interactive"
 	// PlannerAttemptProfileUnreadable: the profile/home directory the launch
 	// would run against does not exist or cannot be read -- the shape of the
 	// TrustedLocal runtime-home incident. Never retried.
@@ -130,6 +135,17 @@ type PlannerAttemptEvidence struct {
 	// the directory it named.
 	BinaryPath string `json:"binaryPath,omitempty"`
 	ProfileVar string `json:"profileVar,omitempty"`
+	// AuthMode and AuthStatus are the credential contract this attempt
+	// resolved from the environment it was about to launch into: which
+	// mechanism ("environment", "helper", "keychain") and whether it could be
+	// used with nobody present. They are names, never a credential.
+	//
+	// They exist because wf-4e3d187b's durable evidence could not say which
+	// credential store the planner had reached for -- only that it had spent
+	// 26 seconds and exited 1. A stop that says "keychain / requires
+	// interaction" is diagnosable; one that says "auth unavailable" is not.
+	AuthMode   string `json:"authMode,omitempty"`
+	AuthStatus string `json:"authStatus,omitempty"`
 	ProfileDir string `json:"profileDir,omitempty"`
 	// ExitCode is the planner subprocess's exit status on a failed attempt,
 	// -1 when it did not exit normally, and 0 (omitted) otherwise.

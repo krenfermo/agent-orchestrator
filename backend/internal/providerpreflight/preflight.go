@@ -26,6 +26,7 @@ package providerpreflight
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,6 +35,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/providerauth"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 )
 
@@ -47,6 +49,11 @@ type Checker struct {
 	// Probe bounds any subprocess the auth check shells out to. A probe that
 	// hangs must not hold a dispatch.
 	Probe time.Duration
+	// AuthMode pins the credential mechanism an operator requires
+	// (AO_PROVIDER_AUTH_MODE). Empty resolves in preference order; see
+	// providerauth. A pinned mode that the launch environment cannot satisfy
+	// is a refusal rather than a silent fallback onto the keychain.
+	AuthMode providerauth.Mode
 }
 
 // Preflight reports readiness for one unattended launch.
@@ -86,9 +93,35 @@ func (c *Checker) Preflight(ctx context.Context, req workflowcore.WorkerPrefligh
 		}
 	}
 
-	// 2. Credentials. Only an AFFIRMATIVE "unauthorized" is a refusal; a probe
-	//    that cannot tell leaves AuthUnknown set.
-	if haveAgent {
+	// 2. Credentials, answered against the environment THIS LAUNCH will
+	//    receive.
+	//
+	//    The canonical contract comes first (providerauth), and it is the only
+	//    thing that can report the keychain incident's state: a credential
+	//    store AO resolves but cannot open, which hangs a launch on an OS
+	//    dialog instead of failing it. The adapter's own AuthStatus probe still
+	//    runs after it, but it reads the DAEMON's home rather than the launch
+	//    env, so it may only ever DOWNGRADE an inconclusive answer -- never
+	//    overrule a contract that examined the real launch environment. That
+	//    precedence is the bug fix: the adapter probe used to be the only
+	//    voice, and it said "auth: ok" for launches that resolved a completely
+	//    different home.
+	contract := providerauth.Probe(ctx, providerauth.Request{
+		Harness:  req.Harness,
+		Env:      req.RuntimeEnv,
+		Required: c.AuthMode,
+	})
+	notes = append(notes, fmt.Sprintf("auth: mode=%s status=%s (%s)", contract.Mode, contract.Status, contract.Reason))
+	switch contract.Status {
+	case providerauth.StatusRequiresInteraction:
+		res.AuthRequiresInteraction = true
+		res.AuthOK, res.AuthUnknown = false, false
+	case providerauth.StatusUnavailable:
+		res.AuthOK, res.AuthUnknown = false, false
+	case providerauth.StatusAvailable:
+		res.AuthUnknown = false
+	}
+	if res.AuthUnknown && haveAgent {
 		if checker, ok := agent.(ports.AgentAuthChecker); ok {
 			switch status, err := checker.AuthStatus(ctx); {
 			case err != nil:

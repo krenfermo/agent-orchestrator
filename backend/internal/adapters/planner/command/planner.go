@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/providerauth"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 )
 
@@ -75,6 +76,15 @@ type Planner struct {
 	// MaxTimeout bounds scaledTimeout's expansion for large payloads. Zero
 	// (the common case, set once in wiring) defaults to defaultMaxTimeout.
 	MaxTimeout time.Duration
+
+	// AuthMode pins the credential mechanism this planner launch must use
+	// (AO_PROVIDER_AUTH_MODE). Empty resolves in preference order; see
+	// internal/providerauth. It is carried here rather than read from the
+	// process environment so the planner uses the SAME contract, from the same
+	// configuration, as every worker and reviewer dispatch -- a planner with
+	// its own idea of where credentials come from is how one role gets fixed
+	// and another keeps launching into a prompt.
+	AuthMode providerauth.Mode
 
 	// Logger receives one structured line per attempt carrying the budget it
 	// was given, the payload sizes it sent and how it ended -- the evidence
@@ -219,6 +229,8 @@ Conservative repository context:
 	shape.BinaryPath = plan.BinaryPath
 	shape.ProfileVar = plan.ProfileVar
 	shape.ProfileDir = plan.ProfileDir
+	shape.AuthMode = string(plan.Auth.Mode)
+	shape.AuthStatus = string(plan.Auth.Status)
 	if perr != nil {
 		shape.Classification = classificationForPreflight(perr)
 		shape.DurationMS = 0

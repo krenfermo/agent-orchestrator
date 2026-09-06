@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/providerauth"
 )
 
 const (
@@ -165,6 +166,27 @@ type Config struct {
 	// controls how the non-rejecting identity middleware resolves an
 	// application-level "current user".
 	TrustedLocalMode bool
+	// ProviderAuthMode pins HOW provider CLI subprocesses obtain credentials.
+	// Empty (AO_PROVIDER_AUTH_MODE unset or "auto") resolves in preference
+	// order; see internal/providerauth. Setting it is how an unattended
+	// deployment declares "credentials come from the environment" and gets a
+	// refusal, rather than a silent fall-through onto somebody's OS keychain,
+	// when that is not true.
+	ProviderAuthMode providerauth.Mode
+	// ProviderRuntimeIsolation decides whether provider subprocesses run
+	// against an AO-owned per-user runtime home (a substituted HOME,
+	// CLAUDE_CONFIG_DIR, CODEX_HOME) or keep the desktop user's own.
+	//
+	// It exists because that decision used to be a SIDE EFFECT of the identity
+	// mode: turning on OIDC set TrustedLocalMode=false, which silently moved
+	// every provider launch onto an isolated HOME -- and on macOS a
+	// substituted HOME also substitutes the keychain domain, so a single-user
+	// desktop that merely enabled Google sign-in lost access to the Claude
+	// credential it had been using and started hanging on an unanswerable
+	// keychain dialog. Signing in to AO and where AO's provider CLIs keep
+	// their credentials are two different decisions, and this makes the second
+	// one sayable on its own.
+	ProviderRuntimeIsolation domain.ProviderRuntimeIsolation
 	// AuthMode is P4-A's explicit identity posture, domain.AuthModeTrustedLocal
 	// (the default, today's behavior) or domain.AuthModeOIDC. It is derived
 	// alongside OIDC below, never set independently: see loadOIDC for why the
@@ -235,6 +257,12 @@ func (c Config) Addr() string {
 //	AO_TMUX_SOCKET       isolated tmux server name (Darwin/Linux only)
 //	                     (default: derived from DataDir, e.g. "ao-<hash>")
 //	AO_TRUSTED_LOCAL_MODE  application-identity trust mode off|on (default on)
+//	AO_PROVIDER_AUTH_MODE  how provider CLIs get credentials:
+//	                       auto|environment|helper|cloud_provider|keychain
+//	                       (default auto)
+//	AO_PROVIDER_RUNTIME_ISOLATION  whether provider subprocesses run in an
+//	                       AO-owned per-user runtime home: auto|host|strict
+//	                       (default auto = derived from the identity mode)
 //	AO_SESSION_COOKIE_SAMESITE  session cookie SameSite lax|none (default lax;
 //	                       `none` implies Secure and is what the desktop uses)
 //	AO_AUTH_MODE           trusted_local|oidc (default: oidc when a provider is
@@ -426,6 +454,22 @@ func Load() (Config, error) {
 			return Config{}, err
 		}
 		cfg.TrustedLocalMode = v
+	}
+
+	if raw := os.Getenv("AO_PROVIDER_AUTH_MODE"); strings.TrimSpace(raw) != "" {
+		mode, err := providerauth.ParseMode(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid AO_PROVIDER_AUTH_MODE: %w", err)
+		}
+		cfg.ProviderAuthMode = mode
+	}
+
+	if raw := os.Getenv("AO_PROVIDER_RUNTIME_ISOLATION"); strings.TrimSpace(raw) != "" {
+		isolation, err := domain.ParseProviderRuntimeIsolation(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid AO_PROVIDER_RUNTIME_ISOLATION: %w", err)
+		}
+		cfg.ProviderRuntimeIsolation = isolation
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("AO_SESSION_COOKIE_SAMESITE")); raw != "" {

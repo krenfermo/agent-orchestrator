@@ -8,6 +8,7 @@ package providerruntime
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -57,6 +58,30 @@ type Resolver struct {
 	// ports.ErrProviderProfileRequired -- multi-user mode never inherits
 	// the daemon's own credentials.
 	TrustedLocal bool
+	// Isolation is the operator's explicit statement of the same decision,
+	// and it OVERRIDES the derivation above when set to host or strict.
+	//
+	// It exists because deriving isolation from TrustedLocal alone conflated
+	// two separate choices, with a failure mode nobody could see coming: a
+	// single-user desktop that enabled OIDC sign-in got TrustedLocal=false,
+	// and therefore an isolated runtime home, and therefore -- on macOS,
+	// where a substituted HOME substitutes the whole keychain domain -- a
+	// provider CLI that could no longer reach the credential the person had
+	// signed in with. The planner then hung on an unanswerable keychain
+	// unlock dialog and every run stopped at planner_auth_unavailable. The
+	// zero value (auto) keeps the old derivation exactly.
+	Isolation domain.ProviderRuntimeIsolation
+	// Keychain, when non-nil, receives one line per prepared runtime home
+	// whose AO-owned credential store had to be repaired or could not be
+	// opened. That store being unopenable is the precondition for the
+	// dialog, so it is reported when it is PREPARED rather than discovered
+	// later by a launch that hangs on it.
+	Keychain *slog.Logger
+}
+
+// isolate reports whether this launch gets an AO-owned runtime home.
+func (r *Resolver) isolate() bool {
+	return r.Isolation.IsolateFor(r.TrustedLocal)
 }
 
 // Resolve returns the env overrides to apply for a workflow-run-owned
@@ -100,7 +125,7 @@ func (r *Resolver) ResolveForOwner(ctx context.Context, owner domain.UserID, har
 		return nil, "", fmt.Errorf("providerruntime: list provider profiles: %w", err)
 	}
 	if !ok {
-		if r.TrustedLocal {
+		if !r.isolate() {
 			return nil, "", nil
 		}
 		return nil, "", ports.ErrProviderProfileRequired
@@ -120,7 +145,10 @@ func (r *Resolver) ResolveForOwner(ctx context.Context, owner domain.UserID, har
 	//
 	// Multi-user mode (TrustedLocal=false) is unchanged: strict per-user
 	// isolation, never inheriting the daemon host's credentials.
-	if r.TrustedLocal {
+	//
+	// Isolation, when set, decides this instead of TrustedLocal -- see that
+	// field for why the two had to become separable.
+	if !r.isolate() {
 		return nil, profile.ID, nil
 	}
 
@@ -128,6 +156,7 @@ func (r *Resolver) ResolveForOwner(ctx context.Context, owner domain.UserID, har
 	if err != nil {
 		return nil, "", fmt.Errorf("providerruntime: prepare runtime-home: %w", err)
 	}
+	r.reportKeychain(owner, home)
 	return home.SubprocessEnv(), profile.ID, nil
 }
 
@@ -145,4 +174,27 @@ func (r *Resolver) matchingProfile(ctx context.Context, owner domain.UserID, har
 		}
 	}
 	return domain.ProviderProfile{}, false, nil
+}
+
+// reportKeychain surfaces what preparing this runtime home found about the
+// OS credential store the launch will resolve.
+//
+// It logs rather than fails on purpose: a broken credential store must not
+// stop a launch that does not need one (a launch carrying ANTHROPIC_API_KEY
+// touches no keychain at all), and a launch that DOES need one is refused by
+// the auth preflight with a far more precise reason than "prepare failed".
+// What must never happen again is this state passing unremarked, which is
+// exactly what `_ =` on every security(1) call used to guarantee.
+func (r *Resolver) reportKeychain(owner domain.UserID, home runtimehome.Environment) {
+	if r.Keychain == nil {
+		return
+	}
+	switch {
+	case home.Keychain.Repaired:
+		r.Keychain.Warn("provider runtime keychain could not be opened with AO's stored secret and was replaced; the provider must be re-connected for this user",
+			"user", owner, "keychain", home.Keychain.Path, "quarantined", home.Keychain.QuarantinedPath)
+	case !home.Keychain.State.Usable():
+		r.Keychain.Warn("provider runtime keychain cannot be opened without an interactive prompt; unattended launches that need it will be refused",
+			"user", owner, "keychain", home.Keychain.Path, "detail", home.Keychain.Detail)
+	}
 }

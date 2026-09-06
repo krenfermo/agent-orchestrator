@@ -167,6 +167,20 @@ func classifyReviewerLaunchFailure(err error) reviewLaunchClassification {
 			Reason:    ReasonReviewStateAmbiguous,
 		}
 	}
+	// A refused unattended preflight is already a proven verdict with its own
+	// class and its own attention reason, so it is read directly rather than
+	// inferred from its text. It is never retryable: waiting does not unlock a
+	// keychain, install a credential or trust a folder. This is the same
+	// classification the worker dispatch applies (classifyPreflightRefusal), so
+	// a reviewer and a worker refused for the same reason stop the same way.
+	if cls, ok := classifyPreflightRefusal(err); ok {
+		return reviewLaunchClassification{
+			Class:     cls.Class,
+			Certainty: cls.Certainty,
+			Retryable: false,
+			Reason:    cls.Reason,
+		}
+	}
 	base := classifyProviderFailure(err)
 	switch base.Class {
 	case domain.WorkflowErrorAuth:

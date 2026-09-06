@@ -232,6 +232,7 @@ const (
 	// provider's auth and installation".
 	ReasonPlannerBinaryMissing       = "planner_binary_missing"
 	ReasonPlannerAuthUnavailable     = "planner_auth_unavailable"
+	ReasonPlannerAuthInteractive     = "planner_auth_interactive"
 	ReasonPlannerProfileUnreadable   = "planner_profile_unreadable"
 	ReasonPlannerProviderUnsupported = "planner_provider_unsupported"
 	// ReasonPlannerExitedEarly is the retryable one: the provider process
@@ -541,6 +542,11 @@ var attentionDispositions = map[string]AttentionDisposition{
 		Nonrecoverable: true,
 		HumanAction:    "The planner provider's CLI is not installed, or is not on the PATH the AO daemon can see (the checkpoint names the binary AO looked for and where it looked). Install it — or start the daemon from an environment whose PATH includes it — then retry planning.",
 	},
+	ReasonPlannerAuthInteractive: {
+		Nonrecoverable: true,
+		Recovery:       domain.RecoveryOperatorAction,
+		HumanAction:    "The planner never started: reaching its provider credentials would have required answering an OS prompt, and no unattended run can. On macOS this is a keychain AO owns and can no longer open -- its password is a random AO secret, not your login password, so the dialog is unanswerable by design. The checkpoint names the keychain. Either give AO an unattended credential (ANTHROPIC_API_KEY, or an apiKeyHelper in the provider's settings), or set AO_PROVIDER_RUNTIME_ISOLATION=host so provider launches keep this desktop's own credentials, then retry planning.",
+	},
 	ReasonPlannerAuthUnavailable: {
 		Nonrecoverable: true,
 		Recovery:       domain.RecoveryAuthenticate,
@@ -598,6 +604,10 @@ var attentionDispositions = map[string]AttentionDisposition{
 	ReasonProviderAuthRequired: {
 		Recovery:    domain.RecoveryAuthenticate,
 		HumanAction: "The provider reported that its credentials are not usable, so an unattended launch would have stopped at a login prompt. Sign that provider profile in, then continue this run.",
+	},
+	ReasonProviderAuthInteractive: {
+		Recovery:    domain.RecoveryOperatorAction,
+		HumanAction: "The provider's credentials exist but AO cannot reach them without a person: on macOS the launch resolves a keychain AO owns and can no longer open, so the run would have stopped at an unlock dialog nobody can answer (its password is a random AO secret, not your login password). The checkpoint names the keychain. Either give AO an unattended credential for this provider (ANTHROPIC_API_KEY, or an apiKeyHelper in the provider's settings), or re-connect the provider for this user so AO can rebuild its credential store, then continue this run.",
 	},
 	ReasonProviderWorkspaceTrustRequired: {
 		HumanAction: "The provider has no recorded trust for this workspace, so an unattended launch would have stopped at its \"do you trust this folder?\" prompt. Trust the directory through the provider's own configuration (never by answering the prompt for an agent), then continue this run.",
@@ -666,6 +676,7 @@ var attentionErrorClasses = map[domain.WorkflowErrorClass]AttentionDisposition{
 		HumanAction: "Every automatic retry ran out while the provider was still at capacity. Wait and continue this run, switch provider, or cancel it.",
 	},
 	WorkflowErrorProviderAuthRequired:           attentionDispositions[ReasonProviderAuthRequired],
+	WorkflowErrorProviderAuthInteractive:        attentionDispositions[ReasonProviderAuthInteractive],
 	WorkflowErrorProviderWorkspaceTrustRequired: attentionDispositions[ReasonProviderWorkspaceTrustRequired],
 	WorkflowErrorProviderPreflightFailed:        attentionDispositions[ReasonProviderPreflightFailed],
 }

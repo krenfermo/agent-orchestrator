@@ -93,6 +93,14 @@ type WorkerPreflightResult struct {
 	// true and sets AuthUnknown — "AO could not check" is never a refusal.
 	AuthOK      bool
 	AuthUnknown bool
+	// AuthRequiresInteraction is the keychain incident's own state, and it is
+	// separate from AuthOK on purpose. "The provider has no usable credential"
+	// and "getting at the credential would open an OS dialog" send a person to
+	// two different places — one to a login, the other to a credential store AO
+	// itself owns — and only the second one HANGS a launch instead of failing
+	// it. Collapsing them is what let AO keep dispatching planners into an
+	// unanswerable macOS unlock prompt.
+	AuthRequiresInteraction bool
 	// TrustOK is false when the provider's own configuration does not already
 	// record this workspace as trusted, so a launch there would ask.
 	TrustOK bool
@@ -117,6 +125,12 @@ const (
 	// WorkflowErrorProviderAuthRequired: the provider says its credentials are
 	// not usable. Nothing about retrying changes that.
 	WorkflowErrorProviderAuthRequired domain.WorkflowErrorClass = "provider_auth_required"
+	// WorkflowErrorProviderAuthInteractive: the credential exists but reaching
+	// it needs a person -- on macOS, an OS keychain AO cannot open without an
+	// unlock dialog. Distinct from provider_auth_required because the remedy is
+	// different (repair or bypass the credential STORE, rather than sign in)
+	// and because this is the class that used to present as a hang.
+	WorkflowErrorProviderAuthInteractive domain.WorkflowErrorClass = "provider_auth_interactive"
 	// WorkflowErrorProviderWorkspaceTrustRequired: launching in this directory
 	// would open the provider's "do you trust this folder?" prompt, and there is
 	// nobody to answer it.
@@ -131,6 +145,7 @@ const (
 // which is the entire reason they are not one reason.
 const (
 	ReasonProviderAuthRequired           = string(WorkflowErrorProviderAuthRequired)
+	ReasonProviderAuthInteractive        = string(WorkflowErrorProviderAuthInteractive)
 	ReasonProviderWorkspaceTrustRequired = string(WorkflowErrorProviderWorkspaceTrustRequired)
 	ReasonProviderPreflightFailed        = string(WorkflowErrorProviderPreflightFailed)
 )
@@ -165,6 +180,16 @@ func evaluateWorkerPreflight(harness domain.AgentHarness, workspace string, res 
 			Class:  domain.WorkflowErrorBinaryMissing,
 			Reason: ReasonDispatchFailed,
 			Detail: fmt.Sprintf("provider preflight: %s's CLI could not be resolved%s", harness, suffix),
+		}
+	case res.AuthRequiresInteraction:
+		// Ordered ahead of the credentials verdict because it is the more
+		// specific claim: a launch that would open a keychain dialog is not
+		// "unauthenticated", it is blocked on an OS prompt, and saying "sign
+		// in" would send a person to fix something that is not broken.
+		return preflightVerdict{
+			Class:  WorkflowErrorProviderAuthInteractive,
+			Reason: ReasonProviderAuthInteractive,
+			Detail: fmt.Sprintf("provider preflight: reaching %s's credentials would require answering an interactive prompt, so an unattended launch would hang rather than fail%s", harness, suffix),
 		}
 	case !res.AuthOK && !res.AuthUnknown:
 		return preflightVerdict{
