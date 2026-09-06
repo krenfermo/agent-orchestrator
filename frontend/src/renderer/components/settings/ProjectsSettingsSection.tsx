@@ -99,10 +99,10 @@ export function ProjectsSettingsSection({ titleHidden }: { titleHidden?: boolean
 										<div className="text-settings-label">{p.name}</div>
 										<div className="text-2xs text-settings-muted">{p.id}</div>
 									</td>
-									<td className="max-w-[220px] truncate py-1.5 pr-3 text-settings-muted" title={p.path}>
+									<td className="max-w-[420px] break-all py-1.5 pr-3 text-settings-muted">
 										{p.path}
 									</td>
-									<td className="max-w-[180px] truncate py-1.5 pr-3 text-settings-muted" title={p.repo}>
+									<td className="max-w-[320px] break-all py-1.5 pr-3 text-settings-muted">
 										{p.repo || "—"}
 									</td>
 									<td className="py-1.5 pr-3 text-settings-muted">{p.defaultBranch || "—"}</td>

@@ -242,7 +242,7 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 		// fit instead of overflowing, so the scrollbar never appears and the
 		// content just gets squashed. Pinning the children's size is what
 		// makes the overflow real.
-		<div className="mx-auto flex h-full min-h-0 max-w-2xl flex-col gap-6 overflow-y-auto break-words p-6 [&>*]:shrink-0">
+		<div className="mx-auto flex h-full min-h-0 max-w-6xl flex-col gap-6 overflow-y-auto break-words p-6 [&>*]:shrink-0">
 			{workflow.run.state === "completed" && (
 				<div className="rounded-lg border border-green-500/40 bg-green-500/10 p-3 text-sm font-medium text-green-700 dark:text-green-300">
 					{t("shell.workflowsCompletedVerified")}

@@ -200,7 +200,7 @@ export function WorkflowsList() {
 		// does: the shell hands routes a `min-h-0 flex-1` box with no scroll of
 		// its own, so a long workflow list ran off the bottom of the window.
 		// See that route for why `[&>*]:shrink-0` is required here.
-		<div className="mx-auto flex h-full min-h-0 max-w-2xl flex-col gap-6 overflow-y-auto break-words p-6 [&>*]:shrink-0">
+		<div className="mx-auto flex h-full min-h-0 max-w-6xl flex-col gap-6 overflow-y-auto break-words p-6 [&>*]:shrink-0">
 			<h1 className="text-lg font-semibold">{t("shell.workflows")}</h1>
 
 			{noProjects ? (
@@ -263,7 +263,7 @@ export function WorkflowsList() {
 							aria-invalid={objectiveTooLong || undefined}
 							onChange={(event) => setObjective(event.target.value)}
 							placeholder={t("shell.workflowsObjectivePlaceholder")}
-							rows={8}
+							rows={12}
 							value={objective}
 						/>
 						{objectiveTooLong ? (
@@ -275,98 +275,103 @@ export function WorkflowsList() {
 							</span>
 						) : null}
 					</label>
-					<fieldset className="flex flex-col gap-2">
-						<legend className="text-sm">{t("shell.workflowsStrategy")}</legend>
-						{EXECUTION_STRATEGIES.map((value) => (
-							<label
-								className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
-									strategy === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
-								}`}
-								key={value}
-							>
-								<span className="flex items-center gap-2 font-medium text-foreground">
-									<input
-										checked={strategy === value}
-										name="workflow-execution-strategy"
-										onChange={() => setStrategy(value)}
-										type="radio"
-										value={value}
-									/>
-									{strategyLabels[value].label}
-								</span>
-								<span className="pl-5 text-muted-foreground">{strategyLabels[value].explainer}</span>
-							</label>
-						))}
-					</fieldset>
-					<fieldset className="flex flex-col gap-2" disabled={policyLoading}>
-						<legend className="text-sm">{t("shell.workflowsApproval")}</legend>
-						{APPROVAL_POLICIES.map((value) => (
-							<label
-								className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
-									approvalPolicy === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
-								}`}
-								key={value}
-							>
-								<span className="flex items-center gap-2 font-medium text-foreground">
-									<input
-										checked={approvalPolicy === value}
-										name="workflow-approval-policy"
-										onChange={() => setApprovalChoice(value)}
-										type="radio"
-										value={value}
-									/>
-									{approvalLabels[value].label}
-								</span>
-								<span className="pl-5 text-muted-foreground">{approvalLabels[value].explainer}</span>
-							</label>
-						))}
-					</fieldset>
-					<fieldset className="flex flex-col gap-2">
-						<legend className="text-sm">{t("shell.workflowsRepairPolicy")}</legend>
-						{REPAIR_POLICIES.map((value) => (
-							<label
-								className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
-									repairPolicy === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
-								}`}
-								key={value}
-							>
-								<span className="flex items-center gap-2 font-medium text-foreground">
-									<input
-										checked={repairPolicy === value}
-										name="workflow-repair-policy"
-										onChange={() => setRepairPolicy(value)}
-										type="radio"
-										value={value}
-									/>
-									{repairLabels[value].label}
-								</span>
-								<span className="pl-5 text-muted-foreground">{repairLabels[value].explainer}</span>
-							</label>
-						))}
-					</fieldset>
-					<fieldset className="flex flex-col gap-2">
-						<legend className="text-sm">{t("wf.create.placement")}</legend>
-						{PLACEMENTS.map((value) => (
-							<label
-								className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
-									placement === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
-								}`}
-								key={value}
-							>
-								<span className="flex items-center gap-2 font-medium text-foreground">
-									<input
-										checked={placement === value}
-										name="workflow-placement"
-										onChange={() => setPlacement(value)}
-										type="radio"
-										value={value}
-									/>
-									{placementLabels[value].label}
-								</span>
-								<span className="pl-5 text-muted-foreground">{placementLabels[value].explainer}</span>
-							</label>
-						))}
-					</fieldset>
+					{/* Four independent choices, laid out two-up on wide screens: a
+					    desktop window has room to compare Strategy against Approval
+					    side by side instead of scrolling through four stacked lists. */}
+					<div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+						<fieldset className="flex flex-col gap-2">
+							<legend className="text-sm">{t("shell.workflowsStrategy")}</legend>
+							{EXECUTION_STRATEGIES.map((value) => (
+								<label
+									className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
+										strategy === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
+									}`}
+									key={value}
+								>
+									<span className="flex items-center gap-2 font-medium text-foreground">
+										<input
+											checked={strategy === value}
+											name="workflow-execution-strategy"
+											onChange={() => setStrategy(value)}
+											type="radio"
+											value={value}
+										/>
+										{strategyLabels[value].label}
+									</span>
+									<span className="pl-5 text-muted-foreground">{strategyLabels[value].explainer}</span>
+								</label>
+							))}
+						</fieldset>
+						<fieldset className="flex flex-col gap-2" disabled={policyLoading}>
+							<legend className="text-sm">{t("shell.workflowsApproval")}</legend>
+							{APPROVAL_POLICIES.map((value) => (
+								<label
+									className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
+										approvalPolicy === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
+									}`}
+									key={value}
+								>
+									<span className="flex items-center gap-2 font-medium text-foreground">
+										<input
+											checked={approvalPolicy === value}
+											name="workflow-approval-policy"
+											onChange={() => setApprovalChoice(value)}
+											type="radio"
+											value={value}
+										/>
+										{approvalLabels[value].label}
+									</span>
+									<span className="pl-5 text-muted-foreground">{approvalLabels[value].explainer}</span>
+								</label>
+							))}
+						</fieldset>
+						<fieldset className="flex flex-col gap-2">
+							<legend className="text-sm">{t("shell.workflowsRepairPolicy")}</legend>
+							{REPAIR_POLICIES.map((value) => (
+								<label
+									className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
+										repairPolicy === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
+									}`}
+									key={value}
+								>
+									<span className="flex items-center gap-2 font-medium text-foreground">
+										<input
+											checked={repairPolicy === value}
+											name="workflow-repair-policy"
+											onChange={() => setRepairPolicy(value)}
+											type="radio"
+											value={value}
+										/>
+										{repairLabels[value].label}
+									</span>
+									<span className="pl-5 text-muted-foreground">{repairLabels[value].explainer}</span>
+								</label>
+							))}
+						</fieldset>
+						<fieldset className="flex flex-col gap-2">
+							<legend className="text-sm">{t("wf.create.placement")}</legend>
+							{PLACEMENTS.map((value) => (
+								<label
+									className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
+										placement === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
+									}`}
+									key={value}
+								>
+									<span className="flex items-center gap-2 font-medium text-foreground">
+										<input
+											checked={placement === value}
+											name="workflow-placement"
+											onChange={() => setPlacement(value)}
+											type="radio"
+											value={value}
+										/>
+										{placementLabels[value].label}
+									</span>
+									<span className="pl-5 text-muted-foreground">{placementLabels[value].explainer}</span>
+								</label>
+							))}
+						</fieldset>
+					</div>
 					{/* §12: every choice that changes what AO actually does, in one
 					    place, before the button that starts it. None of it is hidden
 					    behind an "advanced" disclosure, because all five change real
@@ -487,13 +492,13 @@ function TaskCreationSummary({
 				{project ? (
 					<>
 						<dt>{t("wf.create.project")}</dt>
-						<dd className="truncate">{project.name}</dd>
+						<dd className="break-words">{project.name}</dd>
 						<dt>{t("wf.create.repository")}</dt>
-						<dd className="truncate font-mono" title={project.path ?? project.repo}>
+						<dd className="break-all font-mono">
 							{project.repo || project.path || t("wf.location.unknownValue")}
 						</dd>
 						<dt>{t("wf.create.branch")}</dt>
-						<dd className="truncate font-mono">
+						<dd className="break-all font-mono">
 							{project.config?.defaultBranch || t("wf.location.unknownValue")}
 						</dd>
 					</>

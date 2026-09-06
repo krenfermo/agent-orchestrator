@@ -343,7 +343,7 @@ function WorkflowRecoveryDetails({
 				</ul>
 			) : null}
 			{timeline.length > 0 ? (
-				<p className="mt-2 truncate text-xs text-muted-foreground" data-testid="workflow-recovery-timeline">
+				<p className="mt-2 break-words text-xs text-muted-foreground" data-testid="workflow-recovery-timeline">
 					{timeline.map((e) => e.kind).join(" → ")}
 				</p>
 			) : null}

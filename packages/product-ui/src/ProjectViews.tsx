@@ -787,7 +787,7 @@ export function ProjectWorkflowSettingsView({
 								<span className="settings-row-value text-xs">{repo.branch || "—"}</span>
 							</div>
 							{repo.path && (
-								<span className="truncate px-1 text-xs text-settings-muted" title={repo.path}>
+								<span className="break-all px-1 text-xs text-settings-muted">
 									{repo.path}
 								</span>
 							)}
@@ -832,7 +832,7 @@ export function ProjectWorkflowSettingsView({
 								)}
 							</div>
 							{repo.remote && (
-								<span className="truncate px-1 text-xs text-settings-muted" title={repo.remote}>
+								<span className="break-all px-1 text-xs text-settings-muted">
 									{repo.remote}
 								</span>
 							)}
