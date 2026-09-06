@@ -233,11 +233,11 @@ export function WorkflowExecutionLocation({
 			<h2 className="text-sm font-semibold">{t("wf.section.location")}</h2>
 			<dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs text-muted-foreground">
 				<dt>{t("wf.location.project")}</dt>
-				<dd className="truncate">{projectId}</dd>
+				<dd className="break-words">{projectId}</dd>
 				{placement ? (
 					<>
 						<dt>{t("wf.location.repository")}</dt>
-						<dd className="truncate font-mono" title={placement.repoPath}>
+						<dd className="break-all font-mono">
 							{placement.repoPath || t("wf.location.unknownValue")}
 						</dd>
 						<dt>{t("wf.location.placement")}</dt>
@@ -247,11 +247,11 @@ export function WorkflowExecutionLocation({
 							{t(`wf.location.chosenBy.${placement.chosenBy}` as "wf.location.chosenBy.automatic")}
 						</dd>
 						<dt>{t("wf.location.branch")}</dt>
-						<dd className="truncate font-mono">{placement.executionBranch || t("wf.location.unknownValue")}</dd>
+						<dd className="break-all font-mono">{placement.executionBranch || t("wf.location.unknownValue")}</dd>
 						{placement.worktreePath ? (
 							<>
 								<dt>{t("wf.location.worktree")}</dt>
-								<dd className="truncate font-mono" title={placement.worktreePath}>
+								<dd className="break-all font-mono">
 									{placement.worktreePath}
 								</dd>
 							</>
@@ -265,13 +265,13 @@ export function WorkflowExecutionLocation({
 						{placement.integrationRequired && placement.mergeTarget ? (
 							<>
 								<dt>{t("wf.location.mergeTarget")}</dt>
-								<dd className="truncate font-mono">{placement.mergeTarget}</dd>
+								<dd className="break-all font-mono">{placement.mergeTarget}</dd>
 							</>
 						) : null}
 						{placement.integratedSha ? (
 							<>
 								<dt>{t("wf.location.integratedSha")}</dt>
-								<dd className="truncate font-mono">{placement.integratedSha.slice(0, 12)}</dd>
+								<dd className="break-all font-mono">{placement.integratedSha.slice(0, 12)}</dd>
 							</>
 						) : null}
 					</>
@@ -309,7 +309,7 @@ export function WorkflowTimeline({ events }: { events: readonly { at: string; ki
 						<span className="text-foreground">
 							{translateDynamic(t as TFunction, timelineKey(event.kind), event.kind)}
 						</span>
-						{event.detail ? <span className="truncate">{event.detail}</span> : null}
+						{event.detail ? <span className="break-words">{event.detail}</span> : null}
 					</li>
 				))}
 			</ol>
@@ -373,7 +373,7 @@ export function WorkflowTechnicalDetails({ presentation }: { presentation: Workf
 				{rows.map(([key, value]) => (
 					<div className="contents" key={key}>
 						<dt>{t(key as "wf.technical.phase")}</dt>
-						<dd className="truncate font-mono">{value}</dd>
+						<dd className="break-all font-mono">{value}</dd>
 					</div>
 				))}
 			</dl>

@@ -471,7 +471,7 @@
 	--size-settings-footer-button-padding-x: 20px;
 	--color-settings-footer-button-primary-fg: var(--primary-foreground);
 	--size-settings-dialog: 575px;
-	--size-settings-dialog-wide: 920px;
+	--size-settings-dialog-wide: 1180px;
 	--size-settings-dialog-height: 680px;
 	--size-settings-dialog-max-h: 680px;
 	--color-border-settings-dialog: oklch(1 0 0 / 3%);

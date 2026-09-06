@@ -164,7 +164,7 @@ export function SettingsDialog() {
 			<DialogContent
 				className={cn(
 					settingsDialogContentClass,
-					"h-(--size-settings-dialog-height) w-(--size-settings-dialog-wide) max-h-none origin-center overflow-hidden p-0",
+					"h-(--size-settings-dialog-height) w-[min(var(--size-settings-dialog-wide),calc(100vw-var(--space-8)))] max-h-none origin-center overflow-hidden p-0",
 				)}
 				showCloseButton={false}
 			>

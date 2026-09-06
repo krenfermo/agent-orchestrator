@@ -32,7 +32,7 @@ export function WorkflowBranchWaitBanner({ run }: { run: WorkflowRunView }) {
 				</p>
 			)}
 			{wait.repoPath && (
-				<p className="truncate text-xs text-warning/80" title={wait.repoPath}>
+				<p className="break-all text-xs text-warning/80">
 					{wait.repoPath}
 				</p>
 			)}
