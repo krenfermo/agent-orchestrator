@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { IntelligenceArchitecture } from "./IntelligenceArchitecture";
 import { IntelligenceContext } from "./IntelligenceContext";
+import { IntelligenceGitHub } from "./IntelligenceGitHub";
 import { IntelligenceGraph } from "./IntelligenceGraph";
 import { IntelligenceMemory } from "./IntelligenceMemory";
 import { IntelligenceOverview } from "./IntelligenceOverview";
@@ -29,6 +30,7 @@ const TABS: { id: string; label: MessageKey }[] = [
 	{ id: "graph", label: "intelligence.tab.graph" },
 	{ id: "memory", label: "intelligence.tab.memory" },
 	{ id: "search", label: "intelligence.tab.search" },
+	{ id: "github", label: "intelligence.tab.github" },
 	{ id: "context", label: "intelligence.tab.context" },
 ];
 
@@ -89,6 +91,9 @@ export function ProjectIntelligenceView({ projectId }: { projectId: string }) {
 					</TabsContent>
 					<TabsContent value="search">
 						<IntelligenceSearch projectId={projectId} onInspect={inspect} />
+					</TabsContent>
+					<TabsContent value="github">
+						<IntelligenceGitHub projectId={projectId} />
 					</TabsContent>
 					<TabsContent value="context">
 						<IntelligenceContext projectId={projectId} />

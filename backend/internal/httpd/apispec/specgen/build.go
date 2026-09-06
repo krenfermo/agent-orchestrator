@@ -176,6 +176,14 @@ var schemaNames = map[string]string{
 	"ControllersWorkItemsAuditEntry":                  "WorkItemsAuditEntry",
 	"ControllersWorkItemsAuditResponse":               "WorkItemsAuditResponse",
 	"ControllersProjectIntelligenceMemorySync":        "ProjectIntelligenceMemorySync",
+	"ControllersProjectGitHubIntelligence":            "ProjectGitHubIntelligence",
+	"ControllersProjectGitHubRepository":              "ProjectGitHubRepository",
+	"ControllersProjectGitHubCommit":                  "ProjectGitHubCommit",
+	"ControllersProjectGitHubPullRequest":             "ProjectGitHubPullRequest",
+	"ControllersProjectGitHubReview":                  "ProjectGitHubReview",
+	"ControllersProjectGitHubIssue":                   "ProjectGitHubIssue",
+	"ControllersProjectGitHubLinkedPR":                "ProjectGitHubLinkedPR",
+	"ControllersProjectGitHubComment":                 "ProjectGitHubComment",
 	"ControllersTenantView":                           "TenantView",
 	"ControllersTenantMemberView":                     "TenantMemberView",
 	"ControllersListTenantsResponse":                  "ListTenantsResponse",
@@ -1902,6 +1910,20 @@ func projectMemoryOperations() []operation {
 			pathParams: []any{controllers.ProjectIDParam{}, controllers.ProjectIntelligenceRepoQuery{}},
 			resps: []respUnit{
 				{http.StatusOK, controllers.ProjectIntelligenceSyncResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		// P4-F: GitHub intelligence. One project-scoped route behind the same
+		// guard as /projects/{id}, so a project in another organization
+		// answers 404 rather than leaking repository metadata across tenants.
+		{
+			method: http.MethodGet, path: "/api/v1/projects/{id}/github", id: "getProjectGitHub", tag: "projects",
+			summary:    "P4-F: what AO can currently see of this project's GitHub repository — the local checkout's branch, HEAD, dirtiness and ahead/behind beside the server's default branch and tip; the open pull requests with their review decision, checks and mergeability; the pull request for the checkout's own branch; and recent or one focused issue with its labels, milestone, GitHub-linked pull requests and a bounded comment tail. GitHub is external context and never authority over AO's execution state: an outage, a missing token or an origin AO does not recognize answers 200 with availability 'degraded' or 'unavailable' and a stable reason code, serving the last snapshot it could fetch rather than emptying the surface.",
+			pathParams: []any{controllers.ProjectIDParam{}, controllers.GetProjectGitHubQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectGitHubIntelligence{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
