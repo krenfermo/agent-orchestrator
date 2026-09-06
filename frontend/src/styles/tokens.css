@@ -546,10 +546,20 @@
 	--color-term-magenta: #c678dd;
 	--color-term-cyan: #56b6c2;
 	--color-term-white: #d7dae0;
-	--color-term-selection-dark: rgb(77 141 255 / 0.3);
-	--color-term-selection-light: rgb(37 99 235 / 0.25);
-	--color-term-selection-inactive: rgb(128 128 128 / 0.2);
-	--color-term-selection-inactive-light: rgb(128 128 128 / 0.15);
+	/* Terminal selection. Opaque on purpose: the previous low-alpha washes
+	   composited against the dark plate (#101317) down to ~#22375d, which is
+	   nearly indistinguishable from the unselected background. xterm paints the
+	   selection into the WebGL/canvas cell grid, so the pair below is the only
+	   thing that makes a drag visible — each background clears 3:1 against its
+	   terminal plate and carries its foreground at >=4.5:1. Inactive (pane
+	   unfocused) is dimmer but still legible with the same foreground, since
+	   xterm has no separate inactive foreground slot. */
+	--color-term-selection-dark: #3468cc;
+	--color-term-selection-foreground-dark: #f5f8ff;
+	--color-term-selection-inactive: #35486a;
+	--color-term-selection-light: #1f5fbe;
+	--color-term-selection-foreground-light: #ffffff;
+	--color-term-selection-inactive-light: #4e7099;
 	--color-term-bright-black: #7f8792;
 	--color-term-bright-red: #ff7b7c;
 	--color-term-bright-green: #62df91;

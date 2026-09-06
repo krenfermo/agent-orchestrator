@@ -6,6 +6,26 @@ function cssVar(name: string): string {
 	return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+/**
+ * Selection colours must never fall back to xterm's built-in default: that
+ * default is a translucent wash that disappears on the AO terminal plates, and
+ * an empty string here would silently restore it. Fall back to the literal
+ * token value instead so a stylesheet that has not been applied yet (or a test
+ * renderer without tokens.css) still gets a visible selection.
+ */
+const SELECTION_FALLBACK = {
+	darkBackground: "#3468cc",
+	darkForeground: "#f5f8ff",
+	darkInactive: "#35486a",
+	lightBackground: "#1f5fbe",
+	lightForeground: "#ffffff",
+	lightInactive: "#4e7099",
+} as const;
+
+function cssVarOr(name: string, fallback: string): string {
+	return cssVar(name) || fallback;
+}
+
 /** xterm palettes harmonized to tokens.css (--color-term-* / semantic colors). */
 export function buildTerminalThemes(): { dark: ITheme; light: ITheme } {
 	// Opaque plate — xterm cells must not be translucent or the p-2 gutter and
@@ -21,8 +41,9 @@ export function buildTerminalThemes(): { dark: ITheme; light: ITheme } {
 		foreground: terminalForeground,
 		cursor: terminalCursor,
 		cursorAccent: terminalBg,
-		selectionBackground: cssVar("--color-term-selection-dark"),
-		selectionInactiveBackground: cssVar("--color-term-selection-inactive"),
+		selectionBackground: cssVarOr("--color-term-selection-dark", SELECTION_FALLBACK.darkBackground),
+		selectionForeground: cssVarOr("--color-term-selection-foreground-dark", SELECTION_FALLBACK.darkForeground),
+		selectionInactiveBackground: cssVarOr("--color-term-selection-inactive", SELECTION_FALLBACK.darkInactive),
 		black: cssVar("--color-term-black"),
 		red: cssVar("--color-term-red"),
 		green: cssVar("--color-term-green"),
@@ -50,8 +71,9 @@ export function buildTerminalThemes(): { dark: ITheme; light: ITheme } {
 		// blinking. Use the terminal foreground so the block stays visible.
 		cursor: terminalForeground,
 		cursorAccent: terminalBg,
-		selectionBackground: cssVar("--color-term-selection-light"),
-		selectionInactiveBackground: cssVar("--color-term-selection-inactive-light"),
+		selectionBackground: cssVarOr("--color-term-selection-light", SELECTION_FALLBACK.lightBackground),
+		selectionForeground: cssVarOr("--color-term-selection-foreground-light", SELECTION_FALLBACK.lightForeground),
+		selectionInactiveBackground: cssVarOr("--color-term-selection-inactive-light", SELECTION_FALLBACK.lightInactive),
 		black: cssVar("--color-term-black"),
 		red: cssVar("--color-term-red"),
 		green: cssVar("--color-term-green"),
