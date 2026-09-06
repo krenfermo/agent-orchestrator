@@ -20,6 +20,13 @@ export type IntelligenceSubgraphEdge = components["schemas"]["ProjectIntelligenc
 export type IntelligenceSearchResult = components["schemas"]["ProjectIntelligenceSearchResult"];
 export type IntelligenceSearchHit = components["schemas"]["ProjectIntelligenceSearchHit"];
 export type IntelligenceContextPreview = components["schemas"]["ProjectIntelligenceContextPreview"];
+export type GitHubIntelligence = components["schemas"]["ProjectGitHubIntelligence"];
+export type GitHubRepository = components["schemas"]["ProjectGitHubRepository"];
+export type GitHubPullRequest = components["schemas"]["ProjectGitHubPullRequest"];
+export type GitHubIssue = components["schemas"]["ProjectGitHubIssue"];
+
+/** How much of the GitHub picture AO could actually fetch. */
+export type GitHubAvailability = "ready" | "degraded" | "unavailable";
 
 /** The derived lifecycle a repository's intelligence is in. */
 export type IntelligenceState = "pending" | "indexing" | "ready" | "stale" | "failed";
@@ -202,5 +209,64 @@ export function useIntelligenceSync(projectId: string) {
 			: rebuild.error
 				? apiErrorMessage(rebuild.error)
 				: undefined,
+	};
+}
+
+/**
+ * The GitHub tab's data (P4-F).
+ *
+ * The endpoint answers 200 for every GitHub-related failure — an outage, a
+ * missing token, an origin AO does not recognize — and says so in
+ * `availability` and `reason`. So a query error here means the REQUEST failed
+ * (the project is unreachable, the daemon is down), never that GitHub is; the
+ * component renders those two cases differently because they are different
+ * problems with different fixes.
+ *
+ * Polled on a slow interval while the answer is usable: PR checks and review
+ * decisions move on their own, and a panel that needs a manual refresh to
+ * notice is a panel people stop trusting. It does NOT poll while unavailable —
+ * retrying a missing token every thirty seconds only burns rate limit.
+ */
+export function useProjectGitHub(projectId: string, issue?: number) {
+	const queryClient = useQueryClient();
+	const key = [...intelligenceQueryKey(projectId), "github", issue ?? 0] as const;
+	const query = useQuery({
+		queryKey: key,
+		enabled: hasTrustedApiBaseUrl() && Boolean(projectId),
+		queryFn: async () =>
+			unwrap(
+				await apiClient.GET("/api/v1/projects/{id}/github", {
+					params: { path: { id: projectId }, query: issue ? { issue } : {} },
+				}),
+			),
+		refetchInterval: (query) =>
+			query.state.data?.availability === "unavailable" ? false : 60000,
+	});
+
+	const refresh = useMutation({
+		mutationFn: async () =>
+			unwrap(
+				await apiClient.GET("/api/v1/projects/{id}/github", {
+					params: {
+						path: { id: projectId },
+						query: { refresh: true, ...(issue ? { issue } : {}) },
+					},
+				}),
+			),
+		onSuccess: (data) => queryClient.setQueryData(key, data),
+	});
+
+	return {
+		github: query.data,
+		availability: (query.data?.availability ?? "unavailable") as GitHubAvailability,
+		repository: query.data?.repository,
+		pullRequests: query.data?.pullRequests ?? [],
+		currentPR: query.data?.currentPr,
+		issues: query.data?.issues ?? [],
+		isLoading: query.isLoading,
+		isRefreshing: refresh.isPending,
+		refresh: () => refresh.mutateAsync(),
+		/** A transport/authorization failure, which is NOT a GitHub outage. */
+		error: query.error ? apiErrorMessage(query.error) : undefined,
 	};
 }

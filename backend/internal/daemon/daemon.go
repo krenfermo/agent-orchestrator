@@ -660,6 +660,21 @@ func RunWithConfig(cfg config.Config) error {
 	// precisely what the single-flight exists to prevent.
 	memoryProvisioning := memoryProvisioner(projectMemory, log)
 
+	// P4-F: GitHub as EXTERNAL context, built on the same SCM providers the
+	// observer runs on and shared between the HTTP surface and agent dispatch.
+	// One instance, so the UI's poll and a dispatch's provisioning hit the
+	// same short-lived snapshot cache instead of each paying for its own round
+	// trip to GitHub.
+	githubIntel := newGitHubIntelligence(store, cfg.GitLab, log)
+	if memoryProvisioning != nil {
+		// External context rides on the dispatch-context boundary the memory
+		// provisioner already owns, rather than on a second one: that boundary
+		// is where every role's context is assembled, budgeted and measured,
+		// and a parallel path would be a second place for the "never fail a
+		// dispatch" rule to be forgotten.
+		memoryProvisioning = memoryProvisioning.WithExternal(githubIntel)
+	}
+
 	// P4-E: external work management (Plane).
 	//
 	// Constructed unconditionally and inert until a project is configured and
@@ -844,7 +859,11 @@ func RunWithConfig(cfg config.Config) error {
 		ProjectMemoryGraph:        memoryAPI,
 		ProjectIntelligence:       memoryAPI,
 		ProjectIntelligenceMemory: memoryAPI,
-		WorkItems:                 workItemsSvc,
+		// P4-F: GitHub as external context, built on the same SCM providers
+		// the observer runs on. Always wired — a daemon without credentials
+		// serves the degraded surface rather than 501.
+		ProjectGitHub: githubIntel,
+		WorkItems:     workItemsSvc,
 		Questions: &questionssvc.AnswerService{
 			Store: store, Runs: store, Sender: rawSessionMgr, Logger: log,
 			// P3-D: the answer is recorded first and delivered second, and the

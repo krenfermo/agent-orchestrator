@@ -79,6 +79,29 @@ type MemoryMetrics struct {
 	// used. It is the honest counterpart to DedupeSavedBytes.
 	FallbackBytes int `json:"fallbackBytes"`
 
+	// --- external context (P4-F's source category) -----------------------
+	//
+	// Live state from a system AO does not own — today, GitHub. It is its own
+	// category rather than part of PackBytes for the same reason the graph is:
+	// "how many of this dispatch's bytes came from outside AO, and did that
+	// source answer completely" has to stay an answerable question. Every
+	// field is additive and omitempty, so a dispatch with no external provider
+	// writes byte-for-byte the record it wrote before.
+
+	// ExternalSource names the system the external context came from.
+	ExternalSource string `json:"externalSource,omitempty"`
+	// ExternalBytes is what the external block weighs, heading included. It is
+	// NOT part of PackBytes: the two are separate source categories.
+	ExternalBytes int `json:"externalBytes,omitempty"`
+	// EstimatedExternalTokens is ExternalBytes at the router's estimate.
+	EstimatedExternalTokens int `json:"estimatedExternalTokens,omitempty"`
+	// ExternalDegraded reports that the external source answered with less
+	// than the whole picture, and ExternalReason says why in AO's own words.
+	// The pair is what keeps a GitHub outage a visible fact about the dispatch
+	// rather than a silently thinner context.
+	ExternalDegraded bool   `json:"externalDegraded,omitempty"`
+	ExternalReason   string `json:"externalReason,omitempty"`
+
 	// --- code graph (the structural source category) --------------------
 	//
 	// Additive and omitempty, for the same reason the shared-knowledge block
@@ -267,6 +290,15 @@ func (m MemoryMetrics) Summary() string {
 	}
 	if m.CacheHit {
 		b.WriteString(" cache=hit")
+	}
+	// P4-F: external context is reported apart from the pack, and a source
+	// that answered incompletely says so — otherwise a dispatch that silently
+	// lost its GitHub half looks identical to one that never had it.
+	if m.ExternalSource != "" {
+		fmt.Fprintf(&b, " external=%s:%dB(~%dt)", m.ExternalSource, m.ExternalBytes, m.EstimatedExternalTokens)
+		if m.ExternalDegraded {
+			b.WriteString("(degraded)")
+		}
 	}
 	if m.FallbackReason != "" {
 		fmt.Fprintf(&b, " fallback=%q", m.FallbackReason)

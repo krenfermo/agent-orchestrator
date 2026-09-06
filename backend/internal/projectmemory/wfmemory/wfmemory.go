@@ -224,6 +224,12 @@ func (s *spawner) attach(ctx stdctx.Context, cfg ports.SpawnConfig) (stdctx.Cont
 		Keywords:  keywordsFrom(cfg.Prompt),
 		Legacy:    legacy,
 		TaskBytes: len(cfg.Prompt),
+		// P4-F: the issue this spawn is against, forwarded to the external
+		// context provider. Memory does not read it; GitHub intelligence turns
+		// it into the issue's milestone, its GitHub-linked pull requests and
+		// the tail of its conversation — none of which the pre-fetched tracker
+		// body above carries.
+		IssueRef: string(cfg.IssueID),
 		// P2-E: the worker already provisioned against the project root -- it
 		// resolves `root` from the project record above, which is why the gate
 		// saw the worker take the warm path while the reviewer full-indexed a

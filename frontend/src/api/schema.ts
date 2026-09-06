@@ -760,6 +760,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/github": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** P4-F: what AO can currently see of this project's GitHub repository — the local checkout's branch, HEAD, dirtiness and ahead/behind beside the server's default branch and tip; the open pull requests with their review decision, checks and mergeability; the pull request for the checkout's own branch; and recent or one focused issue with its labels, milestone, GitHub-linked pull requests and a bounded comment tail. GitHub is external context and never authority over AO's execution state: an outage, a missing token or an origin AO does not recognize answers 200 with availability 'degraded' or 'unavailable' and a stable reason code, serving the last snapshot it could fetch rather than emptying the surface. */
+        get: operations["getProjectGitHub"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/intelligence": {
         parameters: {
             query?: never;
@@ -6092,6 +6109,105 @@ export interface components {
             /** @enum {string} */
             status: "ok" | "degraded";
         };
+        ProjectGitHubComment: {
+            author?: string;
+            body?: string;
+            createdAt?: string;
+            truncated?: boolean;
+        };
+        ProjectGitHubCommit: {
+            author?: string;
+            date?: string;
+            sha: string;
+            subject?: string;
+        };
+        ProjectGitHubIntelligence: {
+            authenticated: boolean;
+            /** @enum {string} */
+            availability: "ready" | "degraded" | "unavailable";
+            currentPr?: components["schemas"]["ProjectGitHubPullRequest"];
+            detail?: string;
+            issues?: components["schemas"]["ProjectGitHubIssue"][];
+            observedAt?: string;
+            projectId: string;
+            pullRequests?: components["schemas"]["ProjectGitHubPullRequest"][];
+            reason?: string;
+            repository: components["schemas"]["ProjectGitHubRepository"];
+            stale?: boolean;
+        };
+        ProjectGitHubIssue: {
+            assignees?: string[];
+            body?: string;
+            commentCount?: number;
+            comments?: components["schemas"]["ProjectGitHubComment"][];
+            labels?: string[];
+            linkedPrs?: components["schemas"]["ProjectGitHubLinkedPR"][];
+            milestone?: string;
+            number: number;
+            state?: string;
+            title: string;
+            updatedAt?: string;
+            url?: string;
+        };
+        ProjectGitHubLinkedPR: {
+            number: number;
+            state?: string;
+            title?: string;
+            url?: string;
+        };
+        ProjectGitHubPullRequest: {
+            additions: number;
+            author?: string;
+            baseBranch?: string;
+            changedFiles: number;
+            checksFailed: number;
+            checksPassed: number;
+            checksPending: number;
+            checksSummary?: string;
+            deletions: number;
+            draft?: boolean;
+            failingChecks?: string[];
+            headBranch?: string;
+            headRepo?: string;
+            headSha?: string;
+            latestReviews?: components["schemas"]["ProjectGitHubReview"][];
+            mergeBlockers?: string[];
+            mergeable?: string;
+            number: number;
+            requestedReviewers?: string[];
+            reviewDecision?: string;
+            state?: string;
+            title: string;
+            updatedAt?: string;
+            url: string;
+        };
+        ProjectGitHubRepository: {
+            ahead: number;
+            aliasResolved?: boolean;
+            archived?: boolean;
+            behind: number;
+            currentBranch?: string;
+            defaultBranch?: string;
+            detached?: boolean;
+            dirty?: boolean;
+            headSha?: string;
+            host?: string;
+            originUrl?: string;
+            private?: boolean;
+            provider?: string;
+            recentCommits?: components["schemas"]["ProjectGitHubCommit"][];
+            remoteHeadRef?: string;
+            remoteHeadSha?: string;
+            repo?: string;
+            upstreamRef?: string;
+            url?: string;
+        };
+        ProjectGitHubReview: {
+            author?: string;
+            body?: string;
+            state?: string;
+            url?: string;
+        };
         ProjectGrantView: {
             /** Format: date-time */
             createdAt: string;
@@ -10404,6 +10520,63 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getProjectGitHub: {
+        parameters: {
+            query?: {
+                /** @description Branch whose pull request to identify. Defaults to whatever branch the project checkout is on. */
+                branch?: string;
+                /** @description Focus one issue, returned with bounded comments and GitHub's own linked pull requests instead of a list of recent issues. */
+                issue?: number;
+                /** @description Bypass the short-lived snapshot cache and read GitHub again. */
+                refresh?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectGitHubIntelligence"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
                 headers: {
                     [name: string]: unknown;
                 };

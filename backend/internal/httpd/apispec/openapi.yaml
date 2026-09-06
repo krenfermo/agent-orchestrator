@@ -1862,6 +1862,76 @@ paths:
       summary: Replace a project's per-project config
       tags:
       - projects
+  /api/v1/projects/{id}/github:
+    get:
+      operationId: getProjectGitHub
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Branch whose pull request to identify. Defaults to whatever branch
+          the project checkout is on.
+        in: query
+        name: branch
+        schema:
+          description: Branch whose pull request to identify. Defaults to whatever
+            branch the project checkout is on.
+          type: string
+      - description: Focus one issue, returned with bounded comments and GitHub's
+          own linked pull requests instead of a list of recent issues.
+        in: query
+        name: issue
+        schema:
+          description: Focus one issue, returned with bounded comments and GitHub's
+            own linked pull requests instead of a list of recent issues.
+          type: integer
+      - description: Bypass the short-lived snapshot cache and read GitHub again.
+        in: query
+        name: refresh
+        schema:
+          description: Bypass the short-lived snapshot cache and read GitHub again.
+          type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectGitHubIntelligence'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'P4-F: what AO can currently see of this project''s GitHub repository
+        — the local checkout''s branch, HEAD, dirtiness and ahead/behind beside the
+        server''s default branch and tip; the open pull requests with their review
+        decision, checks and mergeability; the pull request for the checkout''s own
+        branch; and recent or one focused issue with its labels, milestone, GitHub-linked
+        pull requests and a bounded comment tail. GitHub is external context and never
+        authority over AO''s execution state: an outage, a missing token or an origin
+        AO does not recognize answers 200 with availability ''degraded'' or ''unavailable''
+        and a stable reason code, serving the last snapshot it could fetch rather
+        than emptying the surface.'
+      tags:
+      - projects
   /api/v1/projects/{id}/intelligence:
     get:
       operationId: getProjectIntelligence
@@ -17399,6 +17469,245 @@ components:
       required:
       - status
       - project
+      type: object
+    ProjectGitHubComment:
+      properties:
+        author:
+          type: string
+        body:
+          type: string
+        createdAt:
+          type: string
+        truncated:
+          type: boolean
+      type: object
+    ProjectGitHubCommit:
+      properties:
+        author:
+          type: string
+        date:
+          type: string
+        sha:
+          type: string
+        subject:
+          type: string
+      required:
+      - sha
+      type: object
+    ProjectGitHubIntelligence:
+      properties:
+        authenticated:
+          type: boolean
+        availability:
+          enum:
+          - ready
+          - degraded
+          - unavailable
+          type: string
+        currentPr:
+          $ref: '#/components/schemas/ProjectGitHubPullRequest'
+        detail:
+          type: string
+        issues:
+          items:
+            $ref: '#/components/schemas/ProjectGitHubIssue'
+          type: array
+        observedAt:
+          type: string
+        projectId:
+          type: string
+        pullRequests:
+          items:
+            $ref: '#/components/schemas/ProjectGitHubPullRequest'
+          type: array
+        reason:
+          type: string
+        repository:
+          $ref: '#/components/schemas/ProjectGitHubRepository'
+        stale:
+          type: boolean
+      required:
+      - projectId
+      - availability
+      - authenticated
+      - repository
+      type: object
+    ProjectGitHubIssue:
+      properties:
+        assignees:
+          items:
+            type: string
+          type: array
+        body:
+          type: string
+        commentCount:
+          type: integer
+        comments:
+          items:
+            $ref: '#/components/schemas/ProjectGitHubComment'
+          type: array
+        labels:
+          items:
+            type: string
+          type: array
+        linkedPrs:
+          items:
+            $ref: '#/components/schemas/ProjectGitHubLinkedPR'
+          type: array
+        milestone:
+          type: string
+        number:
+          type: integer
+        state:
+          type: string
+        title:
+          type: string
+        updatedAt:
+          type: string
+        url:
+          type: string
+      required:
+      - number
+      - title
+      type: object
+    ProjectGitHubLinkedPR:
+      properties:
+        number:
+          type: integer
+        state:
+          type: string
+        title:
+          type: string
+        url:
+          type: string
+      required:
+      - number
+      type: object
+    ProjectGitHubPullRequest:
+      properties:
+        additions:
+          type: integer
+        author:
+          type: string
+        baseBranch:
+          type: string
+        changedFiles:
+          type: integer
+        checksFailed:
+          type: integer
+        checksPassed:
+          type: integer
+        checksPending:
+          type: integer
+        checksSummary:
+          type: string
+        deletions:
+          type: integer
+        draft:
+          type: boolean
+        failingChecks:
+          items:
+            type: string
+          type: array
+        headBranch:
+          type: string
+        headRepo:
+          type: string
+        headSha:
+          type: string
+        latestReviews:
+          items:
+            $ref: '#/components/schemas/ProjectGitHubReview'
+          type: array
+        mergeBlockers:
+          items:
+            type: string
+          type: array
+        mergeable:
+          type: string
+        number:
+          type: integer
+        requestedReviewers:
+          items:
+            type: string
+          type: array
+        reviewDecision:
+          type: string
+        state:
+          type: string
+        title:
+          type: string
+        updatedAt:
+          type: string
+        url:
+          type: string
+      required:
+      - number
+      - title
+      - url
+      - checksPassed
+      - checksFailed
+      - checksPending
+      - additions
+      - deletions
+      - changedFiles
+      type: object
+    ProjectGitHubRepository:
+      properties:
+        ahead:
+          type: integer
+        aliasResolved:
+          type: boolean
+        archived:
+          type: boolean
+        behind:
+          type: integer
+        currentBranch:
+          type: string
+        defaultBranch:
+          type: string
+        detached:
+          type: boolean
+        dirty:
+          type: boolean
+        headSha:
+          type: string
+        host:
+          type: string
+        originUrl:
+          type: string
+        private:
+          type: boolean
+        provider:
+          type: string
+        recentCommits:
+          items:
+            $ref: '#/components/schemas/ProjectGitHubCommit'
+          type: array
+        remoteHeadRef:
+          type: string
+        remoteHeadSha:
+          type: string
+        repo:
+          type: string
+        upstreamRef:
+          type: string
+        url:
+          type: string
+      required:
+      - ahead
+      - behind
+      type: object
+    ProjectGitHubReview:
+      properties:
+        author:
+          type: string
+        body:
+          type: string
+        state:
+          type: string
+        url:
+          type: string
       type: object
     ProjectGrantView:
       properties:

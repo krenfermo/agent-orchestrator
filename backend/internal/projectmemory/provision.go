@@ -113,6 +113,11 @@ type ProvisionRequest struct {
 	//
 	// Empty is honest and common: a planner is not reasoning about one commit.
 	HeadSHA string
+	// IssueRef is the tracker issue this dispatch is against, when the
+	// boundary knows it. Memory itself does not use it — it is forwarded to
+	// the external context provider (P4-F), which can turn it into the issue's
+	// labels, milestone, linked pull requests and latest comments.
+	IssueRef string
 }
 
 // Provisioned is what a boundary should send.
@@ -128,29 +133,56 @@ type Provisioned struct {
 	Dedupe DedupeResult
 	// Freshness is what the sync check did.
 	Freshness Freshness
+	// External is P4-F's bounded external context — live GitHub state, read at
+	// dispatch time. It is kept apart from Pack because it is a different kind
+	// of claim with a different lifetime: see external.go.
+	External ExternalEvidence
 	// Metrics is the observability record for this dispatch.
 	Metrics baseline.MemoryMetrics
 }
 
-// Attached reports whether memory contributed anything.
-func (p Provisioned) Attached() bool { return !p.Pack.Empty() }
+// Attached reports whether this provisioning contributed anything to send.
+//
+// External evidence counts. A project whose durable memory is empty but whose
+// branch has a pull request with two failing checks has something worth
+// sending, and treating that as "nothing attached" would drop it.
+func (p Provisioned) Attached() bool { return !p.Pack.Empty() || !p.External.Empty() }
 
-// Render returns the memory text to attach, or the empty string when there is
-// nothing to attach.
+// Render returns the text to attach, or the empty string when there is
+// nothing to attach. External context follows the memory pack and is labelled
+// as external, so a reader never mistakes live state for a durable fact.
 func (p Provisioned) Render() string {
-	if p.Pack.Empty() {
-		return ""
+	memory := ""
+	if !p.Pack.Empty() {
+		memory = p.Pack.Render()
 	}
-	return p.Pack.Render()
+	external := p.External.Render()
+	switch {
+	case external == "":
+		return memory
+	case memory == "":
+		return external
+	default:
+		return strings.TrimRight(memory, "\n") + "\n\n" + external
+	}
 }
 
 // Provisioner assembles memory for dispatch boundaries.
 type Provisioner struct {
-	svc    *Service
-	syncer *Syncer
-	cache  *PackCache
-	cfg    Config
-	now    func() time.Time
+	svc      *Service
+	syncer   *Syncer
+	cache    *PackCache
+	cfg      Config
+	external ExternalContextProvider
+	now      func() time.Time
+}
+
+// WithExternal installs P4-F's external context provider. Nil leaves the
+// provisioner exactly as it was: external context is additive, and a daemon
+// without it produces byte-for-byte the dispatches it produced before.
+func (p *Provisioner) WithExternal(provider ExternalContextProvider) *Provisioner {
+	p.external = provider
+	return p
 }
 
 // NewProvisioner builds the boundary-facing provisioner.
@@ -322,6 +354,24 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 		out.Metrics.Generation = pack.Stats.Generation
 	}
 
+	// 2b. External context (P4-F). Assembled AFTER the pack cache on purpose:
+	//     it describes live state that moves independently of the indexed
+	//     commit the cache is keyed on, so a cached pack must never carry it.
+	//     Its own provider is responsible for its bounds and its timeout; the
+	//     ceiling below is AO's, enforced here rather than trusted to it.
+	if p.external != nil {
+		out.External = clampExternal(p.external.ExternalContext(ctx, ExternalContextRequest{
+			ProjectID: req.ProjectID, RepoPath: req.RepoPath,
+			Workspace: req.ExecutionWorkspace, Role: role, HeadSHA: req.HeadSHA,
+			IssueRef: req.IssueRef,
+		}))
+		out.Metrics.ExternalSource = out.External.Source
+		out.Metrics.ExternalBytes = out.External.Bytes
+		out.Metrics.EstimatedExternalTokens = out.External.EstimatedTokens
+		out.Metrics.ExternalDegraded = out.External.Degraded
+		out.Metrics.ExternalReason = out.External.Reason
+	}
+
 	// 3. Dedupe. In assisted mode this only reports what preferred mode would
 	//    save; in preferred mode it drops what it can prove is redundant.
 	out.Dedupe = NewDeduper(p.cfg.Mode, budget).Apply(req.Legacy, pack)
@@ -331,7 +381,8 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 	// 4. The honest totals. ContextBytes is what AO will actually send:
 	//    surviving legacy plus the pack plus the task text.
 	survivingLegacy := legacyBytes(out.Legacy)
-	out.Metrics.ContextBytes = survivingLegacy + out.Metrics.PackBytes + out.Metrics.GraphBytes + out.Metrics.TaskBytes
+	out.Metrics.ContextBytes = survivingLegacy + out.Metrics.PackBytes + out.Metrics.GraphBytes +
+		out.Metrics.ExternalBytes + out.Metrics.TaskBytes
 	out.Metrics.EstimatedInputTokens = EstimateTokens(out.Metrics.ContextBytes)
 	if pack.Empty() {
 		out.Metrics.FallbackBytes = survivingLegacy

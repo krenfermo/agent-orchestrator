@@ -43,9 +43,64 @@ const (
 // ParseRepository normalizes a GitHub remote/origin URL into a provider-neutral
 // repository key. It accepts https://github.com/owner/repo(.git),
 // git@github.com:owner/repo(.git), and path-only owner/repo inputs used by tests.
+//
+// An SSH remote whose host is not a GitHub host gets one further chance: the
+// host may be an alias the user defined in their own ssh configuration, and
+// git@github-nuevo:owner/repo.git is a perfectly ordinary way to push to
+// GitHub from a second account. It is resolved through that configuration and
+// counts as GitHub only when the configuration says the alias is GitHub -- see
+// host_alias.go. https:// remotes are never alias-resolved: a URL host is the
+// host, and guessing otherwise would classify a stranger's server as GitHub.
 func (p *Provider) ParseRepository(remote string) (ports.SCMRepo, bool) {
-	repo, ok := parseGitHubRepo(remote)
-	return repo, ok
+	if repo, ok := parseGitHubRepo(remote); ok {
+		return repo, true
+	}
+	return p.parseAliasedSSHRepo(remote)
+}
+
+// parseAliasedSSHRepo resolves an SSH host alias and re-classifies. The
+// returned SCMRepo carries the RESOLVED host, because that is the host every
+// API call has to be made against; the alias is a local naming convenience and
+// means nothing to GitHub.
+func (p *Provider) parseAliasedSSHRepo(remote string) (ports.SCMRepo, bool) {
+	if p.aliases == nil {
+		return ports.SCMRepo{}, false
+	}
+	host, owner, name, ok := splitSSHRemote(remote)
+	if !ok || isGitHubHost(host) {
+		// Not SSH, or already handled by the canonical parse above.
+		return ports.SCMRepo{}, false
+	}
+	resolved, ok := p.aliases.ResolveHost(host)
+	if !ok || !isGitHubHost(resolved) {
+		return ports.SCMRepo{}, false
+	}
+	return makeGitHubRepo(resolved, owner, name), true
+}
+
+// splitSSHRemote pulls host and owner/name out of the two SSH remote spellings
+// git uses, without deciding whether the host is GitHub. Anything else --
+// https, a bare owner/repo path, a malformed string -- returns ok=false.
+func splitSSHRemote(remote string) (host, owner, name string, ok bool) {
+	raw := strings.TrimSpace(remote)
+	switch {
+	case strings.HasPrefix(raw, "ssh://"):
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			return "", "", "", false
+		}
+		owner, name, ok := splitOwnerRepo(u.Path)
+		return strings.ToLower(u.Hostname()), owner, name, ok
+	case strings.HasPrefix(raw, "git@"):
+		hostPath, path, found := strings.Cut(strings.TrimPrefix(raw, "git@"), ":")
+		if !found {
+			return "", "", "", false
+		}
+		owner, name, ok := splitOwnerRepo(path)
+		return strings.ToLower(hostPath), owner, name, ok
+	default:
+		return "", "", "", false
+	}
 }
 
 // RepoPRListGuard checks GitHub's cheap open-PR-list ETag guard.
