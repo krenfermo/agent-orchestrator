@@ -265,6 +265,8 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 			Profiles:     store,
 			DataDir:      cfg.DataDir,
 			TrustedLocal: cfg.TrustedLocalMode,
+			Isolation:    cfg.ProviderRuntimeIsolation,
+			Keychain:     log,
 		},
 	})
 	scmProvider := newMultiSCMProvider(cfg.GitLab, log)
@@ -318,6 +320,8 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 				Profiles:     store,
 				DataDir:      cfg.DataDir,
 				TrustedLocal: cfg.TrustedLocalMode,
+				Isolation:    cfg.ProviderRuntimeIsolation,
+				Keychain:     log,
 			})),
 	})
 	reviewSvc := reviewsvc.New(reviewEngine, store,

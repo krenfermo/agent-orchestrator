@@ -62,6 +62,19 @@ var ErrPlannerBinaryMissing = errors.New("planner: provider binary could not be 
 // authentication state on a person's behalf.
 var ErrPlannerAuthRequired = errors.New("planner: provider credentials are unavailable")
 
+// ErrPlannerAuthInteractive means the planner's credentials could not be
+// reached without a person: on macOS, the launch resolves an OS keychain AO
+// owns and can no longer open, so the provider subprocess would stop at an
+// unlock dialog instead of failing.
+//
+// It is separate from ErrPlannerAuthRequired because the two send a person to
+// different places -- one to a login, the other to a credential STORE -- and
+// because only this one used to present as a hang: an unattended subprocess
+// behind a GUI dialog does not exit, it burns the whole planner budget and
+// then dies to a timeout, which is how wf-4e3d187b spent 26 seconds and a full
+// dispatch to learn nothing.
+var ErrPlannerAuthInteractive = errors.New("planner: provider credentials cannot be reached without an interactive prompt")
+
 // ErrPlannerRuntimeHomeUnreadable means the profile/home directory the planner
 // subprocess would have run against (HOME, CLAUDE_CONFIG_DIR or CODEX_HOME)
 // does not exist or cannot be read. This is the shape of the earlier

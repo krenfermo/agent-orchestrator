@@ -410,6 +410,8 @@ func (c *Coordinator) GeneratePlan(ctx stdctx.Context, runID string) (RunDetail,
 		switch {
 		case errors.Is(err, ports.ErrPlannerBinaryMissing):
 			return c.failPlan(plannerCtx, run, ReasonPlannerBinaryMissing, err)
+		case errors.Is(err, ports.ErrPlannerAuthInteractive):
+			return c.failPlan(plannerCtx, run, ReasonPlannerAuthInteractive, err)
 		case errors.Is(err, ports.ErrPlannerAuthRequired):
 			return c.failPlan(plannerCtx, run, ReasonPlannerAuthUnavailable, err)
 		case errors.Is(err, ports.ErrPlannerRuntimeHomeUnreadable):

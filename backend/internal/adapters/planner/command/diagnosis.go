@@ -223,6 +223,8 @@ func classificationForPreflight(err error) string {
 	switch {
 	case errors.Is(err, ports.ErrPlannerBinaryMissing):
 		return workflowcore.PlannerAttemptBinaryMissing
+	case errors.Is(err, ports.ErrPlannerAuthInteractive):
+		return workflowcore.PlannerAttemptAuthInteractive
 	case errors.Is(err, ports.ErrPlannerRuntimeHomeUnreadable):
 		return workflowcore.PlannerAttemptProfileUnreadable
 	}

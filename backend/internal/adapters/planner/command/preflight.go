@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/providerauth"
 )
 
 // preflight.go — the planner's launch contract, part one.
@@ -37,11 +39,20 @@ import (
 // installed at the path the daemon can see" instead of "check auth and
 // installation".
 //
-// It deliberately does NOT probe credentials. A preflight that shells out to
-// the provider to ask whether it is logged in would double every planner call's
-// cost and latency, and would still be a guess by the time the real call runs.
-// Auth is diagnosed from the provider's OWN verdict on the real invocation —
-// see diagnosis.go.
+// It deliberately does NOT ask the provider whether it is logged in. A
+// preflight that shells out to the provider for that would double every
+// planner call's cost and latency, and would still be a guess by the time the
+// real call runs. Whether the credentials WORK is diagnosed from the
+// provider's own verdict on the real invocation — see diagnosis.go.
+//
+// It does, since wf-4e3d187b, check one narrower thing that the provider's own
+// verdict can never deliver: whether reaching the credentials would require a
+// PERSON. That failure does not produce a verdict, because the subprocess
+// never gets far enough to have one — macOS puts up a keychain unlock dialog,
+// the unattended process blocks behind it, and the only thing AO eventually
+// learns is that its budget expired. The check is cheap and cannot itself
+// prompt (see providerauth), and refusing here costs nothing where attempting
+// costs a full planner budget.
 
 // launchPlan is the resolved, inspectable shape of exactly one planner
 // invocation: the single canonical launch contract every planner start goes
@@ -56,6 +67,10 @@ type launchPlan struct {
 	Args       []string
 	Dir        string
 	Env        []string
+	// Auth is the resolved credential contract for this invocation: which
+	// mechanism the subprocess will authenticate with, and whether it can do
+	// so with nobody present. Names and paths only, never a credential.
+	Auth providerauth.Contract
 	// ProfileVar is the environment variable that decided where the provider
 	// will look for its configuration and credentials ("CLAUDE_CONFIG_DIR",
 	// "CODEX_HOME", or "HOME"), and ProfileDir the directory it named. Empty
@@ -72,7 +87,7 @@ type launchPlan struct {
 // isolated per-user runtime home overrides HOME and CLAUDE_CONFIG_DIR, and a
 // preflight that read os.Getenv would happily bless a launch that is about to
 // run against a directory that does not exist.
-func preflight(ctx context.Context, binary string, args []string, dir string, env []string, fallback func(context.Context) (string, error)) (launchPlan, error) {
+func preflight(ctx context.Context, binary string, args []string, dir string, env []string, fallback func(context.Context) (string, error), authMode providerauth.Mode) (launchPlan, error) {
 	plan := launchPlan{Binary: binary, Args: args, Dir: dir, Env: env}
 	path, err := resolveExecutable(binary, env)
 	if err != nil && fallback != nil {
@@ -85,7 +100,8 @@ func preflight(ctx context.Context, binary string, args []string, dir string, en
 			if xerr := executableFile(found); xerr == nil {
 				plan.BinaryPath = found
 				plan.ProfileVar, plan.ProfileDir = profileDir(binary, env)
-				return plan, profileReadable(plan)
+				plan.Auth = probeAuth(ctx, binary, env, authMode)
+				return plan, launchable(plan)
 			}
 		}
 	}
@@ -94,7 +110,47 @@ func preflight(ctx context.Context, binary string, args []string, dir string, en
 	}
 	plan.BinaryPath = path
 	plan.ProfileVar, plan.ProfileDir = profileDir(binary, env)
-	return plan, profileReadable(plan)
+	plan.Auth = probeAuth(ctx, binary, env, authMode)
+	return plan, launchable(plan)
+}
+
+// launchable is the preflight's verdict on a resolved plan: the profile
+// directory must be readable AND the credentials must be reachable without a
+// person. Both are checked in one place so a fallback-resolved provider gets
+// exactly the same treatment as a PATH-resolved one.
+func launchable(plan launchPlan) error {
+	if err := profileReadable(plan); err != nil {
+		return err
+	}
+	return authUsable(plan)
+}
+
+// probeAuth resolves the credential contract for the environment this launch
+// will actually receive. Keyed off the binary NAME for the same reason
+// profileDir is: this package launches whatever AO_PLANNER_BIN names, and a
+// non-Claude planner must not be judged by Claude Code's credential model.
+func probeAuth(ctx context.Context, binary string, env []string, authMode providerauth.Mode) providerauth.Contract {
+	name := strings.ToLower(filepath.Base(binary))
+	if !strings.Contains(name, "claude") {
+		return providerauth.Contract{Mode: providerauth.ModeUnknown, Status: providerauth.StatusUnknown}
+	}
+	return providerauth.Probe(ctx, providerauth.Request{
+		Harness:  domain.HarnessClaudeCode,
+		Env:      envMap(env),
+		Required: authMode,
+	})
+}
+
+// envMap turns the "KEY=VALUE" launch slice into the map providerauth reads,
+// last writer winning -- the same precedence execve applies.
+func envMap(env []string) map[string]string {
+	out := make(map[string]string, len(env))
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // profileReadable is the second half of the preflight, shared by both binary
@@ -108,6 +164,22 @@ func profileReadable(plan launchPlan) error {
 		return fmt.Errorf("%w: %s=%s: %w", ports.ErrPlannerRuntimeHomeUnreadable, plan.ProfileVar, plan.ProfileDir, err)
 	}
 	return nil
+}
+
+// authUsable refuses a launch whose credentials cannot be reached without a
+// person.
+//
+// Only StatusRequiresInteraction refuses. An unavailable or unknown contract
+// is left to the real invocation, which produces the provider's own verdict
+// and a far better error than a preflight guess -- and grounding a planner on
+// "AO could not tell" would be the same over-refusal this package has already
+// been burned by once. What cannot be left to the invocation is a prompt,
+// because the invocation never returns from one.
+func authUsable(plan launchPlan) error {
+	if plan.Auth.Status != providerauth.StatusRequiresInteraction {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", ports.ErrPlannerAuthInteractive, plan.Auth.Reason)
 }
 
 // resolveExecutable finds binary using the PATH the subprocess will inherit.
@@ -255,7 +327,7 @@ func (p Planner) resolveLaunch(ctx context.Context, args []string, dir string, e
 	if p.runCommand != nil {
 		return launchPlan{Binary: p.Binary, Args: args, Dir: dir, Env: env}, nil
 	}
-	return preflight(ctx, p.Binary, args, dir, env, p.ResolveFallback)
+	return preflight(ctx, p.Binary, args, dir, env, p.ResolveFallback, p.AuthMode)
 }
 
 // executable is what the subprocess actually runs: the path the preflight

@@ -40,6 +40,15 @@ type Environment struct {
 	CodexHome string
 	// TempRoot is this user's isolated TMPDIR.
 	TempRoot string
+	// Keychain is what Prepare found (and, on macOS, repaired) about the
+	// OS credential store a subprocess launched with this HOME resolves to.
+	//
+	// It is carried on the Environment rather than logged and forgotten
+	// because the state it can report -- "AO manages a keychain here and
+	// cannot open it" -- is the exact precondition for an unattended launch
+	// blocking on a GUI unlock dialog. A caller that is about to spend a
+	// dispatch needs to be able to refuse instead. See keychain.go.
+	Keychain KeychainReport
 }
 
 // Prepare creates (idempotently) the directory layout described in
@@ -76,7 +85,7 @@ func Prepare(dataDir string, userID domain.UserID) (Environment, error) {
 			return Environment{}, err
 		}
 	}
-	ensureIsolatedKeychain(env)
+	env.Keychain = ensureIsolatedKeychain(env)
 	return env, nil
 }
 

@@ -1477,6 +1477,28 @@ func (c *Coordinator) dispatchReviewFromPending(
 	if err != nil {
 		return c.recordReviewLaunchFailure(ctx, run, reviewStep, entry, harness, reviewRunID, targetSHA, cycleNumber, reviewLaunchStageRuntimeEnv, err)
 	}
+	// The same unattended-readiness question the worker dispatch asks, against
+	// the runtime env this reviewer will actually receive. A reviewer is as
+	// unattended as a worker, so it is as capable of sitting forever on a
+	// macOS keychain dialog -- and fixing only the planner and the worker would
+	// have left exactly that. It rides the EXISTING preflight stage and the
+	// existing failure recorder, so no reviewer lifecycle semantics change: a
+	// refusal closes out through the same path a reviewer preflight failure
+	// always has.
+	if perr := c.preflightWorkerDispatch(ctx, WorkerPreflightRequest{
+		Harness:       domain.AgentHarness(harness),
+		WorkspacePath: worktreePath,
+		ProjectID:     run.ProjectID,
+		RunID:         run.ID,
+		StepID:        reviewStep.ID,
+		RuntimeEnv:    runtimeEnv,
+		// The reviewer launches into the WORKER's existing worktree, which
+		// the worker's own launch already recorded trust for. Re-asking the
+		// trust question here would refuse a condition that is already true.
+		TrustRecordedAtLaunch: true,
+	}); perr != nil {
+		return c.recordReviewLaunchFailure(ctx, run, reviewStep, entry, harness, reviewRunID, targetSHA, cycleNumber, reviewLaunchStagePreflight, perr)
+	}
 	launchReq := ReviewerLaunchRequest{
 		Harness:         harness,
 		WorkerSessionID: sessionID,
