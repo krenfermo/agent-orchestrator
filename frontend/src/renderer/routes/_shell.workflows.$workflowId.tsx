@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { Link, createFileRoute } from "@tanstack/react-router";
+import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Archive } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { useWorkflowRun } from "../hooks/useWorkflowRun";
+import { useWorkflowRun, workflowRunIsTerminal } from "../hooks/useWorkflowRun";
+import { useWorkflowRecovery } from "../hooks/useWorkflowRecovery";
 import { useWorkflowStatusLabel } from "../hooks/useWorkflowExecutionStatus";
 import { useChildTaskRouting } from "../hooks/useChildTaskRouting";
 import { WorkflowVerifyDetails } from "../components/workflow-verify-details";
@@ -180,6 +181,16 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 	const childTaskIds = (workflow?.tasks ?? []).map((task) => task.executionWorkflowId).filter((id): id is string => Boolean(id));
 	const childTaskRouting = useChildTaskRouting(childTaskIds);
 	const statusLabel = useWorkflowStatusLabel(workflow);
+	const navigate = useNavigate();
+	// The daemon offers Repair from the presentation; performing it is the same
+	// POST the recovery panel already makes, so it shares that hook's mutation
+	// (and its query key, so react-query issues one poll, not two) rather than
+	// growing a second implementation that could disagree with it.
+	const {
+		run: runRecoveryOperation,
+		pending: recoveryPending,
+		actionError: recoveryActionError,
+	} = useWorkflowRecovery(workflowId, Boolean(workflow) && !workflowRunIsTerminal(workflow?.run.state));
 
 	if (isLoading && !workflow) {
 		return <p className="p-6 text-sm text-muted-foreground">{t("shell.workflowsLoading")}</p>;
@@ -215,11 +226,26 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 	];
 
 	const presentation = workflow.presentation;
+	// The subject of each navigating action, as the daemon named it. Undefined
+	// when the daemon offered no target: the handler is then left out and the
+	// button reports "unsupported_action" instead of navigating nowhere.
+	const actionTarget = (id: string) => presentation?.actions?.find((a) => a.id === id)?.target || undefined;
+	const openSessionTarget = actionTarget("open_session");
+	const blockingWorkflowTarget = actionTarget("view_blocking_workflow");
 	// The action handlers the renderer can actually perform. An action the
 	// daemon offers and this map has no entry for renders disabled rather than
 	// disappearing: the daemon authorised it, and hiding it would misreport
 	// what AO is willing to do. Every entry here is a call the page already
 	// made before P3-A -- nothing new is being authorised by the projection.
+	//
+	// P4-I: open_session, repair and view_blocking_workflow were missing, and a
+	// missing entry renders the button DISABLED. On a run stopped in review
+	// that meant "Abrir la sesión" and "Reparar automáticamente" sat there
+	// greyed out with no explanation and did nothing when clicked -- the daemon
+	// had authorised both. open_session and view_blocking_workflow act on
+	// something other than this run, and they take that subject from the
+	// action's own `target`: the daemon decides which session the stop points
+	// at, and the renderer never re-derives it from the step list.
 	const actionHandlers: WorkflowActionHandlers = {
 		continue: () => void continueRun(),
 		cancel: () => void cancel(),
@@ -227,6 +253,13 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 		view_changes: () => setCommitOpen(true),
 		revalidate_plan: () => void generatePlan(),
 		regenerate_plan: () => void generatePlan(),
+		repair: () => runRecoveryOperation("repair"),
+		open_session: openSessionTarget
+			? () => void navigate({ to: "/sessions/$sessionId", params: { sessionId: openSessionTarget } })
+			: undefined,
+		view_blocking_workflow: blockingWorkflowTarget
+			? () => void navigate({ to: "/workflows/$workflowId", params: { workflowId: blockingWorkflowTarget } })
+			: undefined,
 	};
 
 	return (
@@ -271,7 +304,7 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				    vocabulary keeps its place further down, in a disclosure. */}
 				{presentation ? <WorkflowStatusPanel presentation={presentation} /> : null}
 				{presentation ? (
-					<WorkflowActions busy={continuing || cancelling} handlers={actionHandlers} presentation={presentation} />
+					<WorkflowActions busy={continuing || cancelling || recoveryPending} handlers={actionHandlers} presentation={presentation} />
 				) : null}
 				<p className="text-sm text-muted-foreground">
 					{t("shell.workflowsRunHeader", { projectId: workflow.run.projectId, state: workflow.run.state })}
@@ -355,6 +388,10 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				    cover: starting a pending run, the plan approval pair, the
 				    incident advisor, and cancel-and-archive. */}
 				{continueError && <p className="text-sm text-destructive">{continueError}</p>}
+				{/* A refused Repair is a refusal the person has to see. Without
+				    this the POST failed and the page looked exactly as it did
+				    before the click. */}
+				{recoveryActionError && <p className="text-sm text-destructive">{recoveryActionError}</p>}
 				{/* Resume, for a run stopped on something a person has now dealt
 				    with. Gated on the backend's authoritative canContinue flag —
 				    never on a state string read here — so a terminal or

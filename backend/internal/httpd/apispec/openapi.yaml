@@ -21143,6 +21143,8 @@ components:
           type: string
         primary:
           type: boolean
+        target:
+          type: string
       required:
       - id
       - enabled

@@ -31,16 +31,49 @@ authorization model is the loopback one:
   bootstrap admin — the installation owner — and every command keeps the
   authority it has always had. P4-B changes no CLI behavior here.
 - With `AO_AUTH_MODE=oidc`, trusted-local synthesis is off *by construction*,
-  so a cookie-less CLI request resolves no principal and any permission-gated
-  route answers `401 NOT_AUTHENTICATED`. That is deliberate: an installation
-  that requires single sign-on has asked for exactly that. CLI tokens are a
-  later slice and are not smuggled in through this one.
+  so a **cookie-less** CLI request resolves no principal and any
+  permission-gated route answers `401 NOT_AUTHENTICATED`. That has not changed:
+  an installation that requires single sign-on has asked for exactly that.
+  What changed is that the CLI can now *be somebody* — see **Signing the CLI
+  in** below. The 401 now also names the fix in its message.
 - `ao admin reset-password` remains the loopback-only recovery path and is
   unaffected — it is how an operator recovers an installation whose only
   account they cannot sign into.
 
 The full model, including which permission each route family requires, is in
 [`docs/rbac.md`](../rbac.md).
+
+### Signing the CLI in (`ao auth`)
+
+On an SSO installation the CLI obtains an identity of its own through the
+daemon's existing **loopback sign-in handoff** — the same flow the Electron
+supervisor uses (`clientKind: "desktop"` + a handoff secret, then
+`POST /api/v1/auth/oidc/claim`). Nothing new is trusted and nothing is
+fabricated:
+
+```bash
+ao auth login          # opens the provider in your browser, waits, stores the session
+ao auth login --no-browser   # prints the URL instead (headless / remote shell)
+ao auth status         # who the CLI is acting as, and with what permissions
+ao auth logout         # revokes the session server-side, then deletes it locally
+```
+
+| Property | Answer |
+| --- | --- |
+| Who mints the session? | The daemon, and only after the identity provider authenticated a human. |
+| What does the CLI hold? | One ordinary `auth_sessions` row — the same opaque, server-hashed token a browser holds. |
+| Where does it live? | `<AO_DATA_DIR>/cli-credentials.json`, mode `0600`, so under `~/.ao` per the hard rule. Scoped per data dir: a credential for one profile is never presented to another. |
+| How is it presented? | As the `ao_session` cookie on every daemon call, from one place in `internal/cli/client.go`, so `ao send`, `ao workflow resume`, `ao workflow recover status` and `ao hooks` all carry the same principal. |
+| Can it be revoked? | Yes — `ao auth logout`, or signing that account's sessions out from the app. It also expires. |
+| Does it grant extra authority? | No. RBAC, tenant isolation and per-project grants decide exactly what that user can reach, the same as in the app. |
+
+On a **trusted-local** installation `ao auth login` performs no login at all: it
+says so, because a cookie-less loopback request already resolves to the
+installation owner there.
+
+The authorization code and the handoff secret never meet: the secret never
+leaves this machine and never reaches the provider, and the session token
+arrives only as a `Set-Cookie` on a loopback response — never in a JSON body.
 
 ### Daemon control
 

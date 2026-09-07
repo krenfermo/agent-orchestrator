@@ -61,6 +61,12 @@ type WorkflowPresentationAction struct {
 	// DisabledReason is a stable code, not prose: repair_active,
 	// repair_exhausted, not_recoverable, placement_explicit.
 	DisabledReason string `json:"disabledReason,omitempty"`
+	// Target names what this action acts on when that is not the run itself:
+	// the agent session id for open_session, the blocking run id for
+	// view_blocking_workflow. A client that cannot resolve an action's subject
+	// cannot honor the offer, which is how "Open session" became a button that
+	// did nothing on a run stopped in review.
+	Target string `json:"target,omitempty"`
 }
 
 // WorkflowPresentationStage is one entry of the visible progression.
@@ -178,6 +184,7 @@ func workflowPresentationView(p workflowcore.Presentation) WorkflowPresentationV
 	for _, a := range p.Actions {
 		out.Actions = append(out.Actions, WorkflowPresentationAction{
 			ID: string(a.ID), Primary: a.Primary, Enabled: a.Enabled, DisabledReason: a.DisabledReason,
+			Target: a.Target,
 		})
 	}
 	for _, s := range p.Progress {

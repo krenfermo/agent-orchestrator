@@ -249,6 +249,34 @@ ones where a code change is the wrong instrument:
 A regression test asserts each of these is unrepairable *in the registry*,
 because that is where the guarantee has to live.
 
+### `review_state_ambiguous`: unrepairable, but not unrecoverable
+
+Refusing to aim a repair agent at an ambiguous review is right. Leaving the run
+with nothing a person can do about it was not, and until P4-I that is what
+happened: `stopReviewAmbiguous` rests the review step at `waiting` while its
+`review_run` row is still `running`, and from there
+
+- `observeReviewStep` skips the step (it only looks at `running` steps),
+- `ReconcileReviewAuthority` reads the pointer as intact (`reviewRunStillSpeaks`
+  is true for a `running` row), and
+- every `waiting` branch of `dispatchReviewStep` needs a fact that state does
+  not have.
+
+So Continue and `ao workflow resume` answered 200 and changed nothing, forever.
+
+The re-entry is the recovery observation already had. On an **explicit human
+resume only**, a review step resting on a `running` review run with no verdict
+whose reviewer incarnation is **provably absent** routes into
+`handleReviewerCapacityStall` — the same recovery `observeReviewStep`'s F6 rule
+uses for the same evidence. It terminates the reviewer, closes the run out with
+no verdict (CAS-guarded, so a verdict landing in the same instant still wins),
+clears the `review_state_ambiguous` stop, and authorizes exactly one bounded
+replacement over the same target.
+
+Nothing about that is automatic and nothing about it is a verdict. A poll, a
+wake and a boot reconcile all leave the run exactly where it is, and a probe
+that errors or answers "unknown" is never read as absence.
+
 ### Escalation
 
 When the budget is spent, the escalation is written to the ledger as a real

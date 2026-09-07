@@ -213,6 +213,20 @@ type Action struct {
 	// (repair_active, repair_exhausted, repair_disabled, run_terminal,
 	// not_recoverable, placement_explicit).
 	DisabledReason string
+	// Target names the thing this action acts on, for the actions that act on
+	// something other than the run itself: the agent session for
+	// open_session, the blocking run for view_blocking_workflow. Empty for
+	// every action whose subject IS the run.
+	//
+	// It exists because an offer whose subject the caller cannot resolve is an
+	// offer the caller cannot honor. Before this, open_session was derived
+	// from the newest step holding a session while the technical projection
+	// reported the CURRENTLY EXECUTING step's session — a review step owns no
+	// session, so a run stopped in review offered "Open session" alongside an
+	// empty sessionId, and the button did nothing when pressed. One field,
+	// filled by the same derivation that decided to offer the action, is what
+	// keeps the offer and its subject from being two separate answers.
+	Target string
 }
 
 // Technical is everything an operator diagnosing the run needs and everything a
@@ -796,8 +810,11 @@ func deriveActions(in PresentationInput, p Presentation) ([]Action, ActionID) {
 		// proposing it as the obvious remedy is how the expectation bug
 		// happened in the first place.
 		add(Action{ID: ActionWait, Primary: true, Enabled: true})
-		add(Action{ID: ActionViewBlockingWorkflow, Enabled: in.Detail.BranchWait != nil &&
-			in.Detail.BranchWait.HeldByWorkflowRunID != ""})
+		blocking := ""
+		if in.Detail.BranchWait != nil {
+			blocking = in.Detail.BranchWait.HeldByWorkflowRunID
+		}
+		add(Action{ID: ActionViewBlockingWorkflow, Enabled: blocking != "", Target: blocking})
 		if p.Placement.Known && p.Placement.ChosenBy != PlacementChosenByUser &&
 			p.Placement.Type == domain.PlacementDirectBranch {
 			add(Action{ID: ActionUseIsolatedWorktree, Enabled: true})
@@ -851,8 +868,8 @@ func deriveActions(in PresentationInput, p Presentation) ([]Action, ActionID) {
 	case p.RequiresHuman:
 		add(Action{ID: ActionRepair, Enabled: true})
 	}
-	if sessionOfStoppedStep(in.Detail) != "" {
-		add(Action{ID: ActionOpenSession, Enabled: true})
+	if session := sessionOfStoppedStep(in.Detail); session != "" {
+		add(Action{ID: ActionOpenSession, Enabled: true, Target: session})
 	}
 	add(Action{ID: ActionCancel, Enabled: true})
 	return actions, recommended

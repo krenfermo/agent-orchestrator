@@ -1,12 +1,17 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { getMock } = vi.hoisted(() => ({ getMock: vi.fn() }));
+const { getMock, postMock, navigateMock } = vi.hoisted(() => ({
+	getMock: vi.fn(),
+	postMock: vi.fn(),
+	navigateMock: vi.fn(),
+}));
 
 vi.mock("../lib/api-client", () => ({
-	apiClient: { GET: getMock, POST: vi.fn() },
+	apiClient: { GET: getMock, POST: postMock },
 	apiErrorMessage: () => "request failed",
 	hasTrustedApiBaseUrl: () => true,
 }));
@@ -16,6 +21,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 	return {
 		...actual,
 		Link: ({ children, to }: { children: React.ReactNode; to: string }) => <a href={to}>{children}</a>,
+		useNavigate: () => navigateMock,
 	};
 });
 
@@ -30,6 +36,9 @@ function wrapper({ children }: { children: ReactNode }) {
 
 beforeEach(() => {
 	getMock.mockReset();
+	postMock.mockReset();
+	navigateMock.mockReset();
+	postMock.mockResolvedValue({ data: {}, error: undefined });
 });
 
 describe("WorkflowRunView", () => {
@@ -274,5 +283,66 @@ describe("WorkflowRunView", () => {
 		expect(screen.getByTestId("workflow-stage-badge")).toHaveTextContent("Completed");
 		expect(screen.queryByTestId("workflow-spinner")).toBeNull();
 		expect(screen.queryByTestId("workflow-activity-panel")).toBeNull();
+	});
+	// P4-I: the two buttons that did nothing. On a run stopped in review the
+	// daemon offers "Open session" and "Repair", and this page had a handler
+	// for neither -- so both rendered greyed out with no explanation, and a
+	// click produced no request, no navigation and no error. This test presses
+	// them and asserts that something actually happens.
+	it("acts on the open-session and repair offers instead of rendering dead buttons", async () => {
+		const stoppedInReview = {
+			workflow: {
+				run: {
+					id: "wf-98ab416c",
+					projectId: "agent-orchestrator",
+					objective: "Audit terminal implementation",
+					state: "needs_attention",
+					phase: "needs_attention",
+					createdAt: "2026-09-06T03:17:53Z",
+					updatedAt: "2026-09-06T03:55:11Z",
+					executionMode: "autonomous",
+				},
+				presentation: {
+					stage: "needs_attention",
+					requiresHuman: true,
+					automaticActionActive: false,
+					summaryCode: "review_state_ambiguous",
+					actions: [
+						{ id: "repair", enabled: true },
+						{ id: "open_session", enabled: true, target: "agent-orchestrator-59" },
+						{ id: "cancel", enabled: true },
+					],
+					technical: { phase: "needs_attention", runState: "needs_attention" },
+				},
+				steps: [],
+			},
+		};
+		// Every GET this page makes (the run, the recovery assessment, the
+		// advice) resolves from the same fixture; only the run read is asserted.
+		getMock.mockImplementation(async (path: string) =>
+			path === "/api/v1/workflows/{workflowId}"
+				? { data: stoppedInReview, error: undefined }
+				: { data: {}, error: undefined },
+		);
+
+		render(<WorkflowRunView workflowId="wf-98ab416c" />, { wrapper });
+		await waitFor(() => expect(screen.getByText("Audit terminal implementation")).toBeInTheDocument());
+
+		const open = screen.getByTestId("workflow-action-open_session");
+		expect(open).toBeEnabled();
+		await userEvent.click(open);
+		expect(navigateMock).toHaveBeenCalledWith({
+			to: "/sessions/$sessionId",
+			params: { sessionId: "agent-orchestrator-59" },
+		});
+
+		const repair = screen.getByTestId("workflow-action-repair");
+		expect(repair).toBeEnabled();
+		await userEvent.click(repair);
+		await waitFor(() =>
+			expect(postMock).toHaveBeenCalledWith("/api/v1/workflows/{workflowId}/repair", {
+				params: { path: { workflowId: "wf-98ab416c" } },
+			}),
+		);
 	});
 });

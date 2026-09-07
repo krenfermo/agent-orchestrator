@@ -2055,6 +2055,7 @@
 	"wf.disabled.placement_explicit": "你已明确选择该分支，AO 不会自行把工作移到工作树。",
 	"wf.disabled.repair_active": "AO 正在修复中。",
 	"wf.disabled.repair_exhausted": "AO 已用尽本次运行的自动修复次数。",
+	"wf.disabled.unsupported_action": "此界面暂时无法执行该操作；请使用 CLI（`ao workflow …`）或恢复面板。",
 	"wf.guidance.automatic": "AO 发现问题并正在自动修复。",
 	"wf.guidance.completed": "本次运行已结束。",
 	"wf.guidance.human": "没有你的决定，AO 无法继续。",

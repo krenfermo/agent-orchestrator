@@ -478,3 +478,96 @@ func TestPresentationIsReproducibleFromDurableFactsAlone(t *testing.T) {
 		t.Fatalf("chosenBy after re-read = %q, want user", second.Placement.ChosenBy)
 	}
 }
+
+// TestOpenSessionNamesTheSessionItWouldOpen is the regression behind the
+// "Abrir la sesión" button that did nothing.
+//
+// A run stopped in review reproduces it exactly: the work step owns the agent
+// session, the review step is the one in flight, and the review step owns no
+// session of its own. deriveActions offered open_session (from the newest step
+// that HAS a session) while the technical projection reported the executing
+// step's session (empty) — two answers to one question, and a UI that read the
+// second could not honor the first. The action now carries its own subject.
+func TestOpenSessionNamesTheSessionItWouldOpen(t *testing.T) {
+	session := "agent-orchestrator-59"
+	steps := singleTaskSteps(domain.WorkflowStepCompleted, domain.WorkflowStepWaiting,
+		domain.WorkflowStepPending, domain.WorkflowStepPending)
+	steps[1].Step.SessionID = &session // the work step, which is where the agent ran
+
+	detail := workflowcore.RunDetail{
+		Run:                domain.WorkflowRun{ID: "wf-1", State: domain.WorkflowRunNeedsAttention, CreatedAt: time.Now().Add(-time.Hour)},
+		Steps:              steps,
+		StopAuthorityPhase: workflowcore.ReasonReviewStateAmbiguous,
+		CheckpointsFolded:  true,
+	}
+	p := presentationFor(detail, directBranchPlacement(), nil)
+
+	var found bool
+	for _, a := range p.Actions {
+		if a.ID != workflowcore.ActionOpenSession {
+			continue
+		}
+		found = true
+		if !a.Enabled {
+			t.Fatal("open_session was offered disabled on a run that owns a session")
+		}
+		if a.Target != session {
+			t.Fatalf("open_session target = %q, want %q — an offer whose subject the caller "+
+				"cannot resolve is an offer the caller cannot honor", a.Target, session)
+		}
+	}
+	if !found {
+		t.Fatal("a stopped run holding an agent session did not offer open_session")
+	}
+}
+
+// A run that owns no session at all must not be offered open_session, so the
+// target is never the empty string on an offered action.
+func TestOpenSessionIsNotOfferedWithoutASession(t *testing.T) {
+	detail := workflowcore.RunDetail{
+		Run:                domain.WorkflowRun{ID: "wf-1", State: domain.WorkflowRunNeedsAttention, CreatedAt: time.Now().Add(-time.Hour)},
+		Steps:              singleTaskSteps(domain.WorkflowStepReady, domain.WorkflowStepPending, domain.WorkflowStepPending, domain.WorkflowStepPending),
+		StopAuthorityPhase: workflowcore.ReasonReviewStateAmbiguous,
+		CheckpointsFolded:  true,
+	}
+	for _, a := range presentationFor(detail, directBranchPlacement(), nil).Actions {
+		if a.ID == workflowcore.ActionOpenSession {
+			t.Fatalf("open_session was offered with target %q on a run that owns no session", a.Target)
+		}
+	}
+}
+
+// TestEveryEnabledActionThatActsElsewhereCarriesItsTarget is the standing
+// guard: the two actions whose subject is not the run must never be offered
+// enabled without naming that subject.
+func TestEveryEnabledActionThatActsElsewhereCarriesItsTarget(t *testing.T) {
+	session := "sess-7"
+	steps := singleTaskSteps(domain.WorkflowStepCompleted, domain.WorkflowStepRunning,
+		domain.WorkflowStepPending, domain.WorkflowStepPending)
+	steps[1].Step.SessionID = &session
+
+	details := []workflowcore.RunDetail{
+		{
+			Run:                domain.WorkflowRun{ID: "wf-1", State: domain.WorkflowRunNeedsAttention, CreatedAt: time.Now().Add(-time.Hour)},
+			Steps:              steps,
+			StopAuthorityPhase: workflowcore.ReasonReviewStateAmbiguous,
+			CheckpointsFolded:  true,
+		},
+		{
+			Run:               domain.WorkflowRun{ID: "wf-2", State: domain.WorkflowRunWaiting, CreatedAt: time.Now().Add(-time.Hour)},
+			Steps:             singleTaskSteps(domain.WorkflowStepReady, domain.WorkflowStepPending, domain.WorkflowStepPending, domain.WorkflowStepPending),
+			BranchWait:        &workflowcore.BranchWait{Branch: "feat/x", HeldByWorkflowRunID: "wf-holder"},
+			CheckpointsFolded: true,
+		},
+	}
+	for _, detail := range details {
+		for _, a := range presentationFor(detail, directBranchPlacement(), nil).Actions {
+			switch a.ID {
+			case workflowcore.ActionOpenSession, workflowcore.ActionViewBlockingWorkflow:
+				if a.Enabled && a.Target == "" {
+					t.Errorf("run %s offered %q enabled with no target", detail.Run.ID, a.ID)
+				}
+			}
+		}
+	}
+}

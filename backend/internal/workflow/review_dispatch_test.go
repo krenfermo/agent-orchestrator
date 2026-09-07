@@ -932,3 +932,163 @@ func (f *fakeReviewerLauncher) CancelReviewer(_ context.Context, ref workflowcor
 	delete(f.instances, handleID)
 	return nil
 }
+
+// TestAmbiguousReviewIsRecoverableByAnExplicitHumanResume is the wf-98ab416c
+// regression: a run stopped on review_state_ambiguous whose reviewer is
+// provably gone used to be unreachable by EVERY re-entry path, so Continue and
+// `ao workflow resume` answered 200 and changed nothing, forever.
+//
+// It asserts three things, and the middle one is as important as the other two:
+// an unattended poll must NOT relaunch a reviewer, an explicit human resume
+// must, and neither may ever fabricate a verdict.
+func TestAmbiguousReviewIsRecoverableByAnExplicitHumanResume(t *testing.T) {
+	sessionFacts := newFakeSessionFacts()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
+	workspaceFacts := &fakeWorkspaceFacts{}
+	reviewRuns := newFakeReviewRuns()
+	launcher := &fakeReviewerLauncher{}
+	c, store, clk := newCoordinatorWithReview(spawner, sessionFacts, workspaceFacts, reviewRuns, launcher)
+	ctx := context.Background()
+
+	created, err := c.CreateRun(ctx, "proj-1", "ship the thing")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	completeWorkStep(t, c, store, clk, sessionFacts, workspaceFacts, created.Run.ID)
+	dispatched, err := c.ContinueRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("ContinueRun: %v", err)
+	}
+	firstReviewRunID := *reviewStepFrom(dispatched).Step.ReviewRunID
+
+	// Park it exactly as the 30-minute staleness rule does: the step rests at
+	// waiting, the run is needs_attention, and — the fact that made this state
+	// a dead end — the review run row is STILL "running" with no verdict.
+	clk.Advance(31 * time.Minute)
+	parked, err := c.GetRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if reviewStepFrom(parked).Step.State != domain.WorkflowStepWaiting ||
+		parked.Run.State != domain.WorkflowRunNeedsAttention {
+		t.Fatalf("run/step = %q/%q, want needs_attention/waiting",
+			parked.Run.State, reviewStepFrom(parked).Step.State)
+	}
+	if rr, ok, _ := reviewRuns.GetReviewRun(ctx, firstReviewRunID); !ok || rr.Status != domain.ReviewRunRunning {
+		t.Fatalf("review run status = %q, want the still-running row this regression is about", rr.Status)
+	}
+
+	// The reviewer's incarnation goes away (the daemon restarted; the pane is
+	// gone). Nothing about the durable rows changes.
+	delete(launcher.instances, "workflow-review-"+firstReviewRunID)
+
+	// An unattended poll must change NOTHING: relaunching a reviewer off a
+	// probe on every 2s GetRun is a loop, not a recovery.
+	polled, err := c.GetRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("GetRun after the reviewer vanished: %v", err)
+	}
+	if got := *reviewStepFrom(polled).Step.ReviewRunID; got != firstReviewRunID {
+		t.Fatalf("an unattended poll rebound the review to %q; only an explicit resume may", got)
+	}
+	if polled.Run.State != domain.WorkflowRunNeedsAttention {
+		t.Fatalf("an unattended poll unparked the run (%q)", polled.Run.State)
+	}
+
+	// The explicit human resume. It closes the abandoned review out, clears the
+	// stop by proof, and durably authorizes exactly one bounded replacement.
+	resumed, err := c.ContinueRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("ContinueRun (human resume): %v", err)
+	}
+	abandoned, ok, _ := reviewRuns.GetReviewRun(ctx, firstReviewRunID)
+	if !ok || abandoned.Status != domain.ReviewRunCancelled {
+		t.Fatalf("abandoned review run status = %q, want cancelled", abandoned.Status)
+	}
+	if abandoned.HasEffectiveVerdict() {
+		t.Fatalf("a verdict was fabricated for the abandoned review: %q", abandoned.Verdict)
+	}
+	// The stop is cleared by proof, not cosmetics: needs_attention -> waiting
+	// is not a legal run transition, so a run left parked here could not adopt
+	// the very verdict this recovery exists to obtain.
+	if resumed.Run.State == domain.WorkflowRunNeedsAttention {
+		t.Fatalf("the run is still parked on the ambiguity a replacement reviewer has resolved")
+	}
+	// Bounded, and durably so: one authorization, counted, survives a restart.
+	cps, err := store.ListWorkflowCheckpoints(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("ListWorkflowCheckpoints: %v", err)
+	}
+	rebinds := 0
+	for _, cp := range cps {
+		if cp.DurablePhase == "review_authority_rebind" {
+			rebinds++
+		}
+	}
+	if rebinds != 1 {
+		t.Fatalf("replacement authorizations = %d, want exactly 1", rebinds)
+	}
+
+	// And the loop actually closes: once the provider's cooldown has passed,
+	// an ordinary pass binds the replacement over the SAME target.
+	clk.Advance(6 * time.Hour)
+	final, err := c.GetRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("GetRun after cooldown: %v", err)
+	}
+	replacement := reviewStepFrom(final).Step.ReviewRunID
+	if replacement == nil || *replacement == firstReviewRunID {
+		t.Fatalf("no replacement review bound after the authorization (still %v)", replacement)
+	}
+	fresh, ok, _ := reviewRuns.GetReviewRun(ctx, *replacement)
+	if !ok {
+		t.Fatalf("replacement review run %q does not exist", *replacement)
+	}
+	if fresh.TargetSHA != abandoned.TargetSHA {
+		t.Fatalf("replacement reviews %q, want the same target %q", fresh.TargetSHA, abandoned.TargetSHA)
+	}
+	if fresh.HasEffectiveVerdict() {
+		t.Fatalf("the replacement was born with a verdict: %q", fresh.Verdict)
+	}
+}
+
+// A resume must NOT re-open the review when AO cannot prove the reviewer is
+// gone. An unknown probe is not death (AGENTS.md), and launching a replacement
+// beside a live reviewer is the duplication this rule exists to prevent.
+func TestAmbiguousReviewIsNotReopenedWithoutProofTheReviewerIsGone(t *testing.T) {
+	sessionFacts := newFakeSessionFacts()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
+	workspaceFacts := &fakeWorkspaceFacts{}
+	reviewRuns := newFakeReviewRuns()
+	launcher := &fakeReviewerLauncher{}
+	c, store, clk := newCoordinatorWithReview(spawner, sessionFacts, workspaceFacts, reviewRuns, launcher)
+	ctx := context.Background()
+
+	created, err := c.CreateRun(ctx, "proj-1", "ship the thing")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	completeWorkStep(t, c, store, clk, sessionFacts, workspaceFacts, created.Run.ID)
+	dispatched, err := c.ContinueRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("ContinueRun: %v", err)
+	}
+	firstReviewRunID := *reviewStepFrom(dispatched).Step.ReviewRunID
+
+	clk.Advance(31 * time.Minute)
+	if _, err := c.GetRun(ctx, created.Run.ID); err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+
+	launcher.probeUnknown = true
+	resumed, err := c.ContinueRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("ContinueRun: %v", err)
+	}
+	if got := *reviewStepFrom(resumed).Step.ReviewRunID; got != firstReviewRunID {
+		t.Fatalf("a replacement (%q) was launched over a reviewer AO could not prove absent", got)
+	}
+	if rr, ok, _ := reviewRuns.GetReviewRun(ctx, firstReviewRunID); !ok || rr.Status != domain.ReviewRunRunning {
+		t.Fatalf("the review run was closed out on an unknown probe (status %q)", rr.Status)
+	}
+}
