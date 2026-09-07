@@ -7501,6 +7501,7 @@ export interface components {
             /** @enum {string} */
             id: "continue" | "cancel" | "repair" | "commit_and_continue" | "view_changes" | "view_blocking_workflow" | "wait" | "authenticate" | "revalidate_plan" | "regenerate_plan" | "open_session" | "integrate" | "use_isolated_worktree";
             primary?: boolean;
+            target?: string;
         };
         WorkflowPresentationEvent: {
             /** Format: date-time */

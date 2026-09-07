@@ -36,7 +36,21 @@ func (e apiResponseError) Error() string {
 	if e.ErrorBody.Message == "" {
 		return fmt.Sprintf("daemon returned HTTP %d", e.StatusCode)
 	}
-	return e.ErrorBody.String()
+	msg := e.ErrorBody.String()
+	if e.unauthenticated() {
+		// The bare envelope ("authentication required (NOT_AUTHENTICATED)")
+		// is true and useless: it names no next step, and on an SSO
+		// installation the next step is not obvious. Say it here, once, so
+		// every command inherits it instead of each one re-explaining.
+		msg += "\n  This installation requires sign-in. Run `ao auth login` to sign in as yourself, then retry."
+	}
+	return msg
+}
+
+// unauthenticated reports the daemon's "no identity resolved" answer — the
+// one failure the CLI can tell the user how to fix itself.
+func (e apiResponseError) unauthenticated() bool {
+	return e.StatusCode == http.StatusUnauthorized && e.ErrorBody.Code == "NOT_AUTHENTICATED"
 }
 
 // String renders the envelope for the user: "<message> (<code>) [request <id>]",
@@ -114,6 +128,22 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 	headers map[string]string,
 	timeout time.Duration,
 ) error {
+	return c.doJSONPathFull(ctx, method, path, body, out, headers, timeout, nil)
+}
+
+// doJSONPathFull is the one request path every CLI daemon call goes through.
+// respCookies, when non-nil, receives the response's Set-Cookie cookies —
+// `ao auth login` is the only caller that needs them, because the daemon hands
+// the CLI its session the same way it hands the desktop supervisor one: as a
+// Set-Cookie on a loopback response, never as a token in a JSON body.
+func (c *commandContext) doJSONPathFull(
+	ctx context.Context,
+	method, path string,
+	body, out any,
+	headers map[string]string,
+	timeout time.Duration,
+	respCookies *[]*http.Cookie,
+) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -145,6 +175,11 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	// The CLI's identity, when it has one. Attached here rather than per
+	// command so `ao send`, `ao workflow resume`, `ao hooks` and every other
+	// route inherit exactly the same principal — there is one credential and
+	// one place that presents it. See credentials.go.
+	c.attachCredential(cfg.DataDir, req)
 	for name, value := range headers {
 		req.Header.Set(name, value)
 	}
@@ -164,6 +199,9 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 		_ = json.NewDecoder(resp.Body).Decode(&e)
 		return apiResponseError{StatusCode: resp.StatusCode, ErrorBody: e}
 	}
+	if respCookies != nil {
+		*respCookies = resp.Cookies()
+	}
 	if out != nil {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 			if errors.Is(err, io.EOF) {
@@ -173,4 +211,25 @@ func (c *commandContext) doJSONPathWithHeadersAndTimeout(
 		}
 	}
 	return nil
+}
+
+// attachCredential presents the stored session on this request, when there is
+// a usable one. It is deliberately silent about every failure mode: a missing
+// file is the normal trusted-local case, and an unreadable or expired
+// credential must degrade to "no identity" — which the daemon answers with the
+// same actionable 401 as sending nothing — rather than failing the command
+// before it is even sent.
+func (c *commandContext) attachCredential(dataDir string, req *http.Request) {
+	cred, ok, err := readCredential(dataDir)
+	if err != nil || !ok {
+		return
+	}
+	if !cred.valid(c.deps.Now()) {
+		return
+	}
+	// The same cookie the browser and the desktop supervisor present. Reusing
+	// the session cookie rather than inventing a CLI-only header is what keeps
+	// the CLI on the daemon's existing identity path: one resolver, one
+	// revocation story, one audit trail.
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: cred.Token})
 }

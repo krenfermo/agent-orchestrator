@@ -815,6 +815,75 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 			if err != nil {
 				return reviewStep, err
 			}
+			// P4-I: the dead end this branch could not see, and the state
+			// wf-98ab416c was permanently parked in.
+			//
+			// observeReviewStep's own F6 rule already handles a confirmed
+			// reviewer whose incarnation is provably gone: it routes to
+			// handleReviewerCapacityStall, which terminates the reviewer,
+			// closes its run out with no verdict, and lets the branch below
+			// dispatch exactly one replacement over the SAME target. That rule
+			// is right. It is simply UNREACHABLE once the 30-minute
+			// reviewStalenessThreshold has fired first: stopReviewAmbiguous
+			// rests the step at `waiting`, and observeReviewStep returns early
+			// for any review step that is not `running`. From that moment:
+			//
+			//   - observation never looks at the step again (not running);
+			//   - ReconcileReviewAuthority reads the row as intact, because
+			//     reviewRunStillSpeaks is true for status='running';
+			//   - every branch above needs a fact this state does not have —
+			//     no fresh-review request, no fix-cycle fingerprint, no
+			//     released authority pointer, no launch-failure record;
+			//   - and this last branch requires the run to be `cancelled`.
+			//
+			// So Continue and `ao workflow resume` answered 200 and changed
+			// nothing, forever: a button that looked inert because there was
+			// genuinely nothing behind it.
+			//
+			// The re-entry is deliberately narrow. It runs ONLY on an explicit
+			// human resume (never a poll, a wake or a boot reconcile, which is
+			// what keeps a permanently-absent reviewer from becoming an
+			// unattended relaunch loop), and ONLY on PROOF: reviewerRuntimeGone
+			// answers false for a probe that errored, for a reviewer whose
+			// launch was never confirmed, and for any presence other than
+			// absent — a failed or unknown probe is never read as death
+			// (AGENTS.md). Nothing is fabricated: no verdict is invented, the
+			// cancellation is the same CAS-guarded one every stall uses (so a
+			// verdict landing in the same instant still wins), and the
+			// replacement reviews the same target.
+			if ok && humanResume && priorRun.Status == domain.ReviewRunRunning &&
+				!priorRun.HasEffectiveVerdict() && c.reviewerRuntimeGone(ctx, run, reviewStep, priorRun) {
+				// Read the stop BEFORE the recovery writes its own bookkeeping
+				// over it (see clearReviewStateAmbiguousStop).
+				parkedOn, _ := c.latestCanonicalStopReason(ctx, run.ID)
+				stalled, serr := c.handleReviewerCapacityStall(ctx, run, reviewStep, priorRun, c.clock())
+				if serr != nil {
+					return stalled, serr
+				}
+				reviewStep = stalled
+				if reviewStep.State != domain.WorkflowStepWaiting {
+					// The reviewer had in fact concluded: its verdict won the
+					// cancellation race and is already driving the cascade.
+					// There is nothing to replace.
+					return reviewStep, nil
+				}
+				priorRun, ok, err = c.reviewRuns.GetReviewRun(ctx, priorRun.ID)
+				if err != nil {
+					return reviewStep, err
+				}
+				if ok && priorRun.Status == domain.ReviewRunCancelled && !priorRun.HasEffectiveVerdict() {
+					// Proven, not assumed: the review AO could not read the
+					// state of is now durably closed out with no verdict, so
+					// the ambiguity that parked this run no longer describes
+					// anything. Clearing it is also load-bearing rather than
+					// cosmetic — recordReviewOutcome moves the run to
+					// `waiting` when the replacement approves, and
+					// needs_attention -> waiting is not a legal transition, so
+					// a run left parked here could not adopt the very verdict
+					// this recovery exists to obtain.
+					run = c.clearReviewStateAmbiguousStop(ctx, run, parkedOn)
+				}
+			}
 			// Cancelled AND silent. A cancelled run that produced a verdict
 			// after the fact is not an unresolved capacity stall — its verdict
 			// has been adopted and is already driving the cascade (a fix, or

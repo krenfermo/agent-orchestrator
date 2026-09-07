@@ -217,6 +217,7 @@ func NewRootCommand(deps Deps) *cobra.Command {
 	root.AddCommand(newProviderCommand(ctx))
 	root.AddCommand(newRuntimeCommand(ctx))
 	root.AddCommand(newWorktreeCommand(ctx))
+	root.AddCommand(newAuthCommand(ctx))
 	root.AddCommand(newAdminCommand(ctx))
 	root.AddCommand(newCompletionCommand())
 	root.AddCommand(newVersionCommand())

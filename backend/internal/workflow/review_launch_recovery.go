@@ -1430,3 +1430,26 @@ func (h reviewLaunchHistory) attemptForClaim(idempotencyKey string, cycleNumber 
 	}
 	return h.spentIn(cycleNumber) + 1
 }
+
+// clearReviewStateAmbiguousStop releases a run parked on review_state_ambiguous
+// once the ambiguity has been resolved by evidence: the review run AO could not
+// read the state of has been durably closed out with no verdict, and exactly one
+// bounded replacement is authorized over the same target.
+//
+// It is the same shape as clearReviewLaunchStop and obeys the same rule: only a
+// caller that has just PROVEN the condition is gone may call it, it touches only
+// that one reason, and it never clears a stop somebody else recorded.
+//
+// parkedOn is the reason read BEFORE the recovery acted, not after. The
+// recovery writes its own canonical checkpoint (review_capacity_retry, a
+// self-remediable reason), so re-reading the newest one here would answer with
+// this function's own caller and never with the human stop being cleared.
+func (c *Coordinator) clearReviewStateAmbiguousStop(
+	ctx stdctx.Context, run domain.WorkflowRun, parkedOn string,
+) domain.WorkflowRun {
+	if run.State != domain.WorkflowRunNeedsAttention || parkedOn != ReasonReviewStateAmbiguous {
+		return run
+	}
+	return c.unparkRun(ctx, run, parkedOn,
+		"the review AO could not read the state of has been closed out with no verdict, and one replacement review is authorized over the same target")
+}

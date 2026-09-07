@@ -183,9 +183,14 @@ function WorkflowActionButton({
 	t: TFunction;
 }) {
 	const label = translateDynamic(t, `wf.action.${action.id}`, action.id);
-	const reason = action.disabledReason
-		? translateDynamic(t, `wf.disabled.${action.disabledReason}`, action.disabledReason)
-		: "";
+	// An action the daemon ENABLED but this screen cannot perform is the one
+	// case that used to render as a live-looking button that did nothing when
+	// pressed: `disabled` was set from the missing handler while
+	// `disabledReason` stayed empty, so the UI said nothing at all. A missing
+	// handler is a real reason and is reported as one — silence about a
+	// refusal is the worst of the three possible answers.
+	const reasonCode = action.disabledReason || (action.enabled && !handler ? "unsupported_action" : "");
+	const reason = reasonCode ? translateDynamic(t, `wf.disabled.${reasonCode}`, reasonCode) : "";
 	const disabled = Boolean(busy) || !action.enabled || !handler;
 	return (
 		<span className="flex flex-col gap-0.5">

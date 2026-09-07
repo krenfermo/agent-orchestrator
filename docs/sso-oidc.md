@@ -95,6 +95,17 @@ query parameter, or a deep link. The session is minted at pickup, so the raw
 token never rests in the database either — only its SHA-256, in
 `auth_sessions`, exactly as the password flow already did.
 
+**`ao auth login` is a second client of this same handoff.** The `ao` CLI mints
+its own handoff secret, posts `clientKind=desktop`, opens the authorization URL
+in the system browser, and polls `/auth/oidc/claim` over loopback until the
+person has finished. It stores the `Set-Cookie` session at
+`<AO_DATA_DIR>/cli-credentials.json` (mode 0600) and presents it as the
+ordinary `ao_session` cookie on every daemon call. It is the same flow with the
+same guarantees; the only difference is which loopback process holds the
+secret. Without it, a cookie-less CLI on an SSO installation resolves no
+principal and every permission-gated command answers 401 — see
+[`docs/cli/README.md`](cli/README.md).
+
 ## Identity
 
 The canonical external identity is **`issuer` + `sub`**, and nothing else.

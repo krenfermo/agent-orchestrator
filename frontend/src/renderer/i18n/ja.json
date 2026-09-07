@@ -2073,6 +2073,7 @@
 	"wf.disabled.placement_explicit": "このブランチを明示的に選んだため、AO が独断でワークツリーへ移すことはありません。",
 	"wf.disabled.repair_active": "AO が修復中です。",
 	"wf.disabled.repair_exhausted": "この実行の自動修復はすべて使い切りました。",
+	"wf.disabled.unsupported_action": "この画面ではまだこの操作を実行できません。CLI（`ao workflow …`）か復旧パネルを使用してください。",
 	"wf.guidance.automatic": "AO が問題を見つけ、自動で修復しています。",
 	"wf.guidance.completed": "この実行は終了しました。",
 	"wf.guidance.human": "あなたの判断がないと AO は続行できません。",

@@ -211,6 +211,53 @@ describe("the offered actions", () => {
 		await userEvent.click(screen.getByTestId("workflow-action-commit_and_continue"));
 		expect(onCommit).toHaveBeenCalledOnce();
 	});
+
+	// P4-I: the inert-button regression. An action the daemon ENABLED that this
+	// screen has no handler for used to render greyed out with no reason at
+	// all -- clicking it did nothing and the page said nothing, which is the
+	// worst of the three possible answers. A missing handler is a real reason
+	// and is now reported as one.
+	it("never renders an enabled action as a silent dead button", () => {
+		renderWith(
+			<WorkflowActions
+				handlers={{ cancel: vi.fn() }}
+				presentation={presentation({
+					stage: "needs_attention",
+					requiresHuman: true,
+					summaryCode: "review_state_ambiguous",
+					actions: [
+						{ id: "open_session", enabled: true, target: "agent-orchestrator-59" },
+						{ id: "cancel", enabled: true },
+					],
+				})}
+			/>,
+		);
+		expect(screen.getByTestId("workflow-action-open_session")).toBeDisabled();
+		expect(screen.getByTestId("workflow-actions")).toHaveTextContent(
+			"This screen cannot perform this action yet",
+		);
+	});
+
+	// The same action WITH a handler is live, and carries the daemon's target
+	// so the handler knows which session to open.
+	it("runs open_session against the session the daemon named", async () => {
+		const onOpen = vi.fn();
+		renderWith(
+			<WorkflowActions
+				handlers={{ open_session: onOpen }}
+				presentation={presentation({
+					stage: "needs_attention",
+					requiresHuman: true,
+					summaryCode: "review_state_ambiguous",
+					actions: [{ id: "open_session", enabled: true, target: "agent-orchestrator-59" }],
+				})}
+			/>,
+		);
+		const button = screen.getByTestId("workflow-action-open_session");
+		expect(button).toBeEnabled();
+		await userEvent.click(button);
+		expect(onOpen).toHaveBeenCalledOnce();
+	});
 });
 
 describe("the execution location", () => {

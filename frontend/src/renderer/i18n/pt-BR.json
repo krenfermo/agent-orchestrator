@@ -2088,6 +2088,7 @@
 	"wf.disabled.placement_explicit": "Você escolheu este branch explicitamente, então o AO não moverá o trabalho para um worktree por conta própria.",
 	"wf.disabled.repair_active": "O AO já está reparando isto.",
 	"wf.disabled.repair_exhausted": "O AO esgotou os reparos automáticos desta execução.",
+	"wf.disabled.unsupported_action": "Esta tela ainda não pode executar esta ação; use a CLI (`ao workflow …`) ou o painel de recuperação.",
 	"wf.guidance.automatic": "O AO encontrou um problema e está reparando automaticamente.",
 	"wf.guidance.completed": "Esta execução terminou.",
 	"wf.guidance.human": "O AO não pode continuar sem uma decisão sua.",

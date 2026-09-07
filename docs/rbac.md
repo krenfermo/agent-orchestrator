@@ -190,8 +190,20 @@ model is therefore the loopback one:
 - In `AO_AUTH_MODE=oidc`, trusted-local synthesis is off by construction, so a
   cookie-less CLI request resolves no principal and a gated route answers 401.
   That is correct and deliberate: an installation that requires SSO has asked
-  for exactly that. Issuing CLI tokens is a later slice; it is not smuggled in
-  here.
+  for exactly that, and it is still true.
+- `ao auth login` is how the CLI stops being cookie-less. It runs the daemon's
+  **loopback sign-in handoff** (the desktop supervisor's flow: an OIDC
+  Authorization Code + PKCE login in the system browser, picked up over
+  loopback with a secret that never left this machine) and stores the resulting
+  session at `<AO_DATA_DIR>/cli-credentials.json`, mode 0600. The CLI then
+  presents it as the ordinary `ao_session` cookie.
+
+  The authorization model is therefore unchanged: the CLI holds a session for a
+  real user, and `GlobalAuthzMiddleware`, `Guard` and list filtering decide what
+  that user can reach exactly as they do for a browser. Signing the CLI in
+  grants no authority the same person would not have in the app
+  (`TestCLISignInGrantsNoAuthorityTheUserLacks`). The session expires and
+  `ao auth logout` revokes it.
 - `ao admin reset-password` stays a loopback-only recovery tool, unchanged.
 
 ## Electron

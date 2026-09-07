@@ -2073,6 +2073,7 @@
 	"wf.disabled.placement_explicit": "이 브랜치를 명시적으로 선택했으므로 AO가 임의로 워크트리로 옮기지 않습니다.",
 	"wf.disabled.repair_active": "AO가 이미 복구 중입니다.",
 	"wf.disabled.repair_exhausted": "이 실행의 자동 복구를 모두 소진했습니다.",
+	"wf.disabled.unsupported_action": "이 화면에서는 아직 이 작업을 실행할 수 없습니다. CLI(`ao workflow …`) 또는 복구 패널을 사용하세요.",
 	"wf.guidance.automatic": "AO가 문제를 발견해 자동으로 복구하고 있습니다.",
 	"wf.guidance.completed": "이 실행이 끝났습니다.",
 	"wf.guidance.human": "당신의 결정 없이는 AO가 계속할 수 없습니다.",
