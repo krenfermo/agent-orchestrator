@@ -152,6 +152,33 @@ function setNavigatorPlatform(platform: string) {
 	});
 }
 
+// A wheel event carrying the two methods the handler uses to consume the
+// gesture, so tests can assert the terminal — not the surrounding page — owns it.
+type FakeWheelEvent = WheelEvent & {
+	preventDefault: ReturnType<typeof vi.fn>;
+	stopPropagation: ReturnType<typeof vi.fn>;
+};
+
+function wheelEvent(init: Partial<WheelEvent>): FakeWheelEvent {
+	return {
+		cancelable: true,
+		deltaMode: 0,
+		deltaY: 0,
+		preventDefault: vi.fn(),
+		stopPropagation: vi.fn(),
+		...init,
+	} as FakeWheelEvent;
+}
+
+// Every wheel the terminal acts on must be cancelled and kept off the ancestors:
+// the panes between the terminal and the shell content row are `overflow-x-hidden`,
+// which CSS resolves to `overflow-y: auto`, so an uncancelled gesture scrolls the
+// page under the pointer (and races xterm's own viewport into a jump-to-bottom).
+function expectConsumed(event: FakeWheelEvent) {
+	expect(event.preventDefault).toHaveBeenCalled();
+	expect(event.stopPropagation).toHaveBeenCalled();
+}
+
 describe("XtermTerminal", () => {
 	beforeEach(() => {
 		resetTerminalClipboardTargetsForTest();
@@ -192,6 +219,19 @@ describe("XtermTerminal", () => {
 
 		expect(state.lastTerminal!.options.drawBoldTextInBrightColors).toBe(true);
 		expect(state.lastTerminal!.options.minimumContrastRatio).toBe(1);
+	});
+
+	it("retains a bounded scrollback rather than growing with the session", () => {
+		render(<XtermTerminal theme="dark" />);
+
+		// Deliberately finite: xterm holds every retained line in renderer memory
+		// and AO keeps a mounted terminal per retained handle generation, so an
+		// unbounded scrollback never stops growing over a long agent session. The
+		// bound must still be deep enough to scroll back through one (see
+		// TERMINAL_SCROLLBACK_LINES).
+		const scrollback = state.lastTerminal!.options.scrollback;
+		expect(scrollback).toBe(5000);
+		expect(Number.isFinite(scrollback as number)).toBe(true);
 	});
 
 	it("focuses the terminal when human input is requested", async () => {
@@ -947,10 +987,12 @@ describe("XtermTerminal", () => {
 		const onInput = vi.fn();
 		render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
 		// rowHeight = fontSize(12) * lineHeight(1.35) = 16.2px; -50px => 3 lines up.
-		const suppressed = state.lastTerminal!.wheelHandler!({ deltaY: -50 } as WheelEvent);
+		const event = wheelEvent({ deltaY: -50 });
+		const suppressed = state.lastTerminal!.wheelHandler!(event);
 
 		expect(suppressed).toBe(false);
 		expect(onInput).toHaveBeenCalledWith("\x1b[<64;1;1M\x1b[<64;1;1M\x1b[<64;1;1M", "wheel");
+		expectConsumed(event);
 	});
 
 	it("handles line- and page-mode wheels (Linux/Windows mice), not just pixel deltas", () => {
@@ -958,25 +1000,71 @@ describe("XtermTerminal", () => {
 		render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
 
 		// DOM_DELTA_LINE: deltaY is already in lines, so one notch up => one report.
-		expect(state.lastTerminal!.wheelHandler!({ deltaY: -1, deltaMode: 1 } as WheelEvent)).toBe(false);
+		const lineWheel = wheelEvent({ deltaY: -1, deltaMode: 1 });
+		expect(state.lastTerminal!.wheelHandler!(lineWheel)).toBe(false);
 		expect(onInput).toHaveBeenLastCalledWith("\x1b[<64;1;1M", "wheel");
+		expectConsumed(lineWheel);
 
 		// DOM_DELTA_PAGE: one page down => rows (24) line reports down.
 		onInput.mockClear();
-		expect(state.lastTerminal!.wheelHandler!({ deltaY: 1, deltaMode: 2 } as WheelEvent)).toBe(false);
+		const pageWheel = wheelEvent({ deltaY: 1, deltaMode: 2 });
+		expect(state.lastTerminal!.wheelHandler!(pageWheel)).toBe(false);
 		expect(onInput).toHaveBeenLastCalledWith("\x1b[<65;1;1M".repeat(24), "wheel");
+		expectConsumed(pageWheel);
 	});
 
 	it("scrolls down on positive wheel delta and leaves zoom (ctrl/meta) wheel alone", () => {
 		const onInput = vi.fn();
 		render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
 
-		expect(state.lastTerminal!.wheelHandler!({ deltaY: 20 } as WheelEvent)).toBe(false);
+		const down = wheelEvent({ deltaY: 20 });
+		expect(state.lastTerminal!.wheelHandler!(down)).toBe(false);
 		expect(onInput).toHaveBeenCalledWith("\x1b[<65;1;1M", "wheel");
+		expectConsumed(down);
 
+		// The ctrl/meta gesture belongs to CenterPane's font-size zoom, so it is
+		// left untouched — neither cancelled nor stopped — on its way there.
 		onInput.mockClear();
-		expect(state.lastTerminal!.wheelHandler!({ deltaY: -50, ctrlKey: true } as WheelEvent)).toBe(false);
+		const zoom = wheelEvent({ ctrlKey: true, deltaY: -50 });
+		expect(state.lastTerminal!.wheelHandler!(zoom)).toBe(false);
 		expect(onInput).not.toHaveBeenCalled();
+		expect(zoom.preventDefault).not.toHaveBeenCalled();
+		expect(zoom.stopPropagation).not.toHaveBeenCalled();
+	});
+
+	it("consumes a sub-line trackpad delta instead of leaking it to the page", () => {
+		const onInput = vi.fn();
+		render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
+		state.lastTerminal!.modes.mouseTrackingMode = "none";
+		state.lastTerminal!.buffer.active.type = "normal";
+
+		// rowHeight = 16.2px, so 4px does not cross a line boundary yet. It is
+		// banked for the next notch; nothing scrolls, and nothing escapes either.
+		const nudge = wheelEvent({ deltaY: 4 });
+		expect(state.lastTerminal!.wheelHandler!(nudge)).toBe(false);
+		expect(state.lastTerminal!.scrollLines).not.toHaveBeenCalled();
+		expect(onInput).not.toHaveBeenCalled();
+		expectConsumed(nudge);
+
+		// Banked deltas still add up to a real line once the gesture continues.
+		expect(state.lastTerminal!.wheelHandler!(wheelEvent({ deltaY: 13 }))).toBe(false);
+		expect(state.lastTerminal!.scrollLines).toHaveBeenLastCalledWith(1);
+	});
+
+	it("does not force the viewport to the bottom on an ordinary scroll gesture", () => {
+		render(<XtermTerminal theme="dark" />);
+		state.lastTerminal!.modes.mouseTrackingMode = "none";
+		state.lastTerminal!.buffer.active.type = "normal";
+		state.lastTerminal!.scrollToBottom.mockClear();
+
+		state.lastTerminal!.wheelHandler!(wheelEvent({ deltaY: -50 }));
+		state.lastTerminal!.wheelHandler!(wheelEvent({ deltaY: -50 }));
+
+		// Only the explicit line delta moves; the wheel never snaps history back to
+		// the live output, and the cancelled gesture cannot race xterm's own
+		// viewport scroll into doing it either.
+		expect(state.lastTerminal!.scrollLines).toHaveBeenLastCalledWith(-3);
+		expect(state.lastTerminal!.scrollToBottom).not.toHaveBeenCalled();
 	});
 
 	it("scrolls xterm's own viewport for normal-buffer panes with mouse tracking off (codex, plain shell)", () => {
@@ -987,13 +1075,19 @@ describe("XtermTerminal", () => {
 
 		// rowHeight = 16.2px; -50px => 3 lines up. The pane never sees these bytes;
 		// we scroll the terminal's retained scrollback locally instead.
-		expect(state.lastTerminal!.wheelHandler!({ deltaY: -50 } as WheelEvent)).toBe(false);
+		const up = wheelEvent({ deltaY: -50 });
+		expect(state.lastTerminal!.wheelHandler!(up)).toBe(false);
 		expect(state.lastTerminal!.scrollLines).toHaveBeenLastCalledWith(-3);
 		expect(onInput).not.toHaveBeenCalled();
+		// The browser must not scroll `.xterm-viewport` natively on top of this,
+		// nor chain the gesture on to the page once history runs out.
+		expectConsumed(up);
 
-		expect(state.lastTerminal!.wheelHandler!({ deltaY: 20 } as WheelEvent)).toBe(false);
+		const down = wheelEvent({ deltaY: 20 });
+		expect(state.lastTerminal!.wheelHandler!(down)).toBe(false);
 		expect(state.lastTerminal!.scrollLines).toHaveBeenLastCalledWith(1);
 		expect(onInput).not.toHaveBeenCalled();
+		expectConsumed(down);
 	});
 
 	it("falls back to PageUp/PageDown for alt-buffer panes with mouse tracking off", () => {
@@ -1004,11 +1098,16 @@ describe("XtermTerminal", () => {
 		// page key per notch is the best fallback.
 		state.lastTerminal!.buffer.active.type = "alternate";
 
-		expect(state.lastTerminal!.wheelHandler!({ deltaY: -50 } as WheelEvent)).toBe(false);
+		const up = wheelEvent({ deltaY: -50 });
+		expect(state.lastTerminal!.wheelHandler!(up)).toBe(false);
 		expect(onInput).toHaveBeenLastCalledWith("\x1b[5~", "wheel");
 		expect(state.lastTerminal!.scrollLines).not.toHaveBeenCalled();
+		// An alt-buffer pane has no local scrollback, so the viewport can never
+		// absorb the gesture: without cancelling it here it would fall straight
+		// through to the page on the very first notch.
+		expectConsumed(up);
 
-		expect(state.lastTerminal!.wheelHandler!({ deltaY: 20 } as WheelEvent)).toBe(false);
+		expect(state.lastTerminal!.wheelHandler!(wheelEvent({ deltaY: 20 }))).toBe(false);
 		expect(onInput).toHaveBeenLastCalledWith("\x1b[6~", "wheel");
 	});
 
@@ -1021,8 +1120,10 @@ describe("XtermTerminal", () => {
 		// via the paneScrollsByKeyboard hint, tested separately.
 		state.lastTerminal!.modes.mouseTrackingMode = "any";
 
-		expect(state.lastTerminal!.wheelHandler!({ deltaY: -50 } as WheelEvent)).toBe(false);
+		const up = wheelEvent({ deltaY: -50 });
+		expect(state.lastTerminal!.wheelHandler!(up)).toBe(false);
 		expect(onInput).toHaveBeenLastCalledWith("\x1b[<64;1;1M".repeat(3), "wheel");
+		expectConsumed(up);
 	});
 
 	it("sends PageUp/PageDown for keyboard-scroll panes even under a mux (opencode on macOS/Linux)", () => {
@@ -1032,8 +1133,10 @@ describe("XtermTerminal", () => {
 		// hint this would send SGR reports; the hint forces page keys.
 		state.lastTerminal!.modes.mouseTrackingMode = "any";
 
-		expect(state.lastTerminal!.wheelHandler!({ deltaY: -50 } as WheelEvent)).toBe(false);
+		const up = wheelEvent({ deltaY: -50 });
+		expect(state.lastTerminal!.wheelHandler!(up)).toBe(false);
 		expect(onInput).toHaveBeenLastCalledWith("\x1b[5~", "wheel");
+		expectConsumed(up);
 	});
 
 	it("routes web links to the AO browser and does not open the system browser", () => {

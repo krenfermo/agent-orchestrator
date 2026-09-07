@@ -1347,6 +1347,13 @@ textarea,
    terminal's wheel handler. */
 .xterm .xterm-viewport {
 	scrollbar-width: none;
+	/* Never chain a wheel/trackpad gesture out of the terminal. XtermTerminal's
+	   custom wheel handler already cancels the gesture, but the viewport is a real
+	   overflow:scroll box and every ancestor up to the shell content row is
+	   `overflow-x-hidden` (which CSS resolves to `overflow-y: auto`, i.e. a scroll
+	   container). Without this, a wheel that bypasses the handler, or one that runs
+	   the viewport to its top/bottom, scrolls the page under the terminal. */
+	overscroll-behavior: contain;
 }
 
 .xterm .xterm-viewport::-webkit-scrollbar {

@@ -239,6 +239,18 @@ type TerminalContextMenuAction = "copy" | "paste" | "selectAll" | "clear";
 
 type TerminalContextMenuActions = Record<TerminalContextMenuAction, () => void>;
 
+// Bounded scrollback: 5000 lines of retained history per terminal.
+//
+// The bound exists because xterm keeps every retained line as a live JS buffer
+// in the renderer, and AO holds many terminals alive at once — TerminalPane's
+// cache retains a mounted surface per handle generation across route switches,
+// so nothing frees that history until the handle is replaced. An unbounded (or
+// very large) scrollback therefore grows for the whole life of a long-running
+// Claude/Codex session and is never reclaimed. 5000 lines is ~200 screens at a
+// typical 24-row grid — enough to scroll back through a long agent session —
+// and caps one pane's history at single-digit megabytes.
+const TERMINAL_SCROLLBACK_LINES = 5000;
+
 // For mouse-tracking panes we synthesize SGR mouse-wheel reports and write them
 // to the pane; tmux (with `mouse on`, set by the runtime adapter) acts on them
 // and scrolls its scrollback via copy-mode. Left to itself xterm would convert
@@ -417,9 +429,11 @@ export function XtermTerminal(props: XtermTerminalProps) {
 				// only matters for normal-buffer panes that print their transcript and
 				// rely on the terminal's scrollback (codex, a plain shell). Keep it > 0
 				// so that history survives to be scrolled locally (see the wheel
-				// handler's normal-buffer branch). The scrollbar itself is hidden in
-				// CSS; its matching FitAddon reservation is removed after open() below.
-				scrollback: 5000,
+				// handler's normal-buffer branch), and bounded so it cannot grow
+				// without limit (see TERMINAL_SCROLLBACK_LINES). The scrollbar itself
+				// is hidden in CSS; its matching FitAddon reservation is removed after
+				// open() below.
+				scrollback: TERMINAL_SCROLLBACK_LINES,
 				theme: props.theme === "dark" ? dark : light,
 			});
 		} catch (error) {
@@ -783,9 +797,34 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		// deltas accumulate so a full cell-height emits one line. Returning false
 		// suppresses xterm's arrow-key wheel fallback. Ctrl/Cmd wheel is the
 		// font-size zoom (CenterPane), so leave it for that handler.
+		//
+		// Every other wheel over the terminal is CONSUMED here — preventDefault
+		// plus stopPropagation — because this handler is the only thing allowed to
+		// move the terminal, and nothing outside it should move at all:
+		//  - preventDefault cancels the browser's own scroll for this gesture. The
+		//    `.xterm-viewport` element is a real overflow:scroll box, so without it
+		//    the browser scrolls it natively ON TOP of our term.scrollLines() call
+		//    (two notches per notch), and once that box hits its top/bottom the
+		//    gesture chains to the nearest scrollable ancestor. Every ancestor
+		//    between here and the shell content row is `overflow-x-hidden`, which
+		//    CSS resolves to `overflow-y: auto` — i.e. they are scroll containers,
+		//    and they are what scrolled the page out from under the terminal.
+		//  - Racing a native viewport scroll against the programmatic one is also
+		//    what snapped the viewport to the bottom mid-gesture; with the native
+		//    scroll cancelled, ordinary wheel/trackpad scrolling only moves
+		//    scrollback by the lines computed here.
+		//  - stopPropagation keeps ancestor wheel listeners out of it too. It is
+		//    safe for the font-size zoom: CenterPane's onWheelCapture runs in the
+		//    capture phase, before the event reaches this target-phase handler, and
+		//    the ctrl/meta gesture returns above without being consumed anyway.
+		// `overscroll-behavior: contain` on the viewport (styles.css) and on the
+		// host box below is the belt to this suspenders, for any wheel that
+		// reaches the viewport without passing through here.
 		let wheelAccumPx = 0;
 		term.attachCustomWheelEventHandler((event) => {
 			if (event.ctrlKey || event.metaKey) return false;
+			if (event.cancelable) event.preventDefault();
+			event.stopPropagation();
 			let lines: number;
 			if (event.deltaMode === 1 /* DOM_DELTA_LINE */) {
 				lines = Math.trunc(event.deltaY) || Math.sign(event.deltaY);
@@ -797,6 +836,10 @@ export function XtermTerminal(props: XtermTerminalProps) {
 				lines = Math.trunc(wheelAccumPx / rowHeight);
 				wheelAccumPx -= lines * rowHeight;
 			}
+			// Sub-cell trackpad delta: already banked in wheelAccumPx above, so the
+			// gesture is consumed (it stays cancelled) and simply hasn't crossed a
+			// line boundary yet. Leaking these to the page is what let a slow
+			// two-finger scroll over the terminal drift the surrounding view.
 			if (lines === 0) return false;
 			// A full-screen TUI that keeps its own transcript and scrolls it only by
 			// keyboard (opencode) ignores wheel/mouse reports on every platform; route
@@ -1034,6 +1077,11 @@ export function XtermTerminal(props: XtermTerminalProps) {
 					backgroundColor: "var(--color-bg-terminal-opaque)",
 					height: "100%",
 					overflow: "hidden",
+					// Stop scroll chaining at the terminal box: a wheel that reaches
+					// here without going through the custom wheel handler must not walk
+					// up to the `overflow-x-hidden` (and therefore vertically
+					// scrollable) ancestors in routes/_shell.tsx and move the page.
+					overscrollBehavior: "contain",
 					width: "100%",
 				}}
 			/>
