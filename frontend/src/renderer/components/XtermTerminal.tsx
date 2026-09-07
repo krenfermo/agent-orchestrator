@@ -37,6 +37,11 @@ import { aoBridge } from "../lib/bridge";
 import { TERMINAL_FONT_SIZE_DEFAULT } from "../lib/design-tokens";
 import { isWebLink, openLinkInSystemBrowser } from "../lib/external-link-policy";
 import { isMacPlatform } from "../lib/platform";
+import {
+	noteTerminalClipboardFocus,
+	registerTerminalClipboardTarget,
+	type TerminalClipboardTarget,
+} from "../lib/terminal-clipboard";
 import { applyDocumentTheme, applyDocumentThemeStyle } from "../lib/theme";
 import { buildTerminalThemes } from "../lib/terminal-themes";
 import { useUiStore, type Theme } from "../stores/ui-store";
@@ -335,13 +340,20 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		const host = hostRef.current;
 		if (!host) return undefined;
 		let reportedFocused = false;
+		// Assigned further down, once copySelection/pasteFromClipboard exist. The
+		// focus handlers below only read it, and they cannot fire before the effect
+		// body finishes.
+		let clipboardTarget: TerminalClipboardTarget | null = null;
 		const reportFocused = (focused: boolean) => {
 			const next = focused && Boolean(callbacksRef.current.onChangeFontSize);
 			if (next === reportedFocused) return;
 			reportedFocused = next;
 			aoBridge.terminal.setFocused(next);
 		};
-		const handleFocusIn = () => reportFocused(true);
+		const handleFocusIn = () => {
+			if (clipboardTarget) noteTerminalClipboardFocus(clipboardTarget);
+			reportFocused(true);
+		};
 		const handleFocusOut = (event: FocusEvent) => {
 			const next = event.relatedTarget;
 			if (next instanceof Node && host.contains(next)) return;
@@ -534,6 +546,20 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			});
 		};
 		host.addEventListener("contextmenu", openContextMenu);
+		// The title-bar Edit menu dispatches edit.copy/paste/selectAll to the main
+		// process, which runs them as DOM edits (webContents.copy()). xterm's
+		// selection is drawn by its own renderer and is not a DOM selection, so
+		// that path is a no-op over a terminal. Publish the real actions — the same
+		// ones the keyboard shortcut and the right-click menu use — so the Edit
+		// menu stays consistent with them.
+		clipboardTarget = {
+			copy: () => copySelection(),
+			paste: () => pasteFromClipboard(),
+			selectAll: () => term.selectAll(),
+			ownsFocus: () => terminalHasFocus(host),
+		};
+		const unregisterClipboardTarget = registerTerminalClipboardTarget(clipboardTarget);
+		if (terminalHasFocus(host)) noteTerminalClipboardFocus(clipboardTarget);
 		term.attachCustomKeyEventHandler((event) => {
 			// xterm invokes this same handler on keydown, keyup, AND keypress (see
 			// Terminal.ts _keyDown/_keyUp/_keyPress). Only keydown should trigger our
@@ -941,6 +967,8 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			window.removeEventListener("resize", scheduleVisibleFit);
 			host.removeEventListener("copy", copyInput);
 			window.removeEventListener("keydown", copyShortcut, true);
+			unregisterClipboardTarget();
+			clipboardTarget = null;
 			selectionChange.dispose();
 			host.removeEventListener("contextmenu", openContextMenu);
 			host.removeEventListener("paste", pasteInput, true);

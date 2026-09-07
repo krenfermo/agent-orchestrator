@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { PanelLeft } from "lucide-react";
 import { useEffect, useState } from "react";
+import { activeTerminalClipboardTarget } from "../lib/terminal-clipboard";
 import { useResolvedTheme, useUiStore } from "../stores/ui-store";
 import {
 	DropdownMenu,
@@ -25,9 +26,28 @@ const isWindows =
 type MenuKey = "file" | "edit" | "view" | "window" | "help";
 
 // Dispatch a native-menu action to the main process (see menu:action in main.ts).
+//
+// Clipboard actions get first refusal from the focused terminal: the main
+// process runs them as DOM edits (webContents.copy()/paste()/selectAll()), and
+// xterm paints its own selection rather than a DOM one, so the DOM path is a
+// no-op — or worse, for Select All, selects the whole app — while a terminal has
+// focus. Routing through the terminal keeps this menu consistent with Ctrl+C and
+// the terminal's own right-click Copy. Copy still falls through when nothing is
+// selected, so a selection elsewhere on the page copies as before.
 const act = (action: string) => () => {
+	if (runTerminalClipboardAction(action)) return;
 	void window.ao?.menu?.action(action);
 };
+
+export function runTerminalClipboardAction(action: string): boolean {
+	if (action !== "edit.copy" && action !== "edit.paste" && action !== "edit.selectAll") return false;
+	const terminal = activeTerminalClipboardTarget();
+	if (!terminal) return false;
+	if (action === "edit.copy") return terminal.copy();
+	if (action === "edit.paste") terminal.paste();
+	else terminal.selectAll();
+	return true;
+}
 
 // One top-level menu (File/Edit/…). Declared at module scope, not inside
 // WindowTitlebar, so React keeps it mounted across renders and the open dropdown

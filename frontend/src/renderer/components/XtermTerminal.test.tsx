@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AttachableTerminal } from "../hooks/useTerminalSession";
+import { activeTerminalClipboardTarget, resetTerminalClipboardTargetsForTest } from "../lib/terminal-clipboard";
 import { useUiStore } from "../stores/ui-store";
 import { XtermTerminal } from "./XtermTerminal";
 
@@ -153,6 +154,7 @@ function setNavigatorPlatform(platform: string) {
 
 describe("XtermTerminal", () => {
 	beforeEach(() => {
+		resetTerminalClipboardTargetsForTest();
 		state.lastTerminal = null;
 		state.linkHandler = null;
 		setNavigatorPlatform("Linux x86_64");
@@ -268,6 +270,39 @@ describe("XtermTerminal", () => {
 		render(<XtermTerminal theme="dark" />);
 
 		expect(state.lastTerminal!._core.viewport.scrollBarWidth).toBe(0);
+	});
+
+	// The title-bar Edit menu dispatches DOM edit commands in the main process,
+	// which cannot see an xterm selection. A mounted terminal publishes its real
+	// clipboard actions so that menu shares this component's copy path.
+	it("publishes its clipboard actions for the app Edit menu while it holds focus", async () => {
+		const { container } = render(<XtermTerminal theme="dark" />);
+		const host = container.firstElementChild as HTMLElement;
+		const focusSink = document.createElement("textarea");
+		host.append(focusSink);
+		focusSink.focus();
+		state.lastTerminal!.selection = "edit menu copy";
+
+		const target = activeTerminalClipboardTarget();
+		expect(target).not.toBeNull();
+		expect(target!.copy()).toBe(true);
+		await waitFor(() => expect(window.ao!.clipboard.writeText).toHaveBeenCalledWith("edit menu copy"));
+
+		target!.selectAll();
+		expect(state.lastTerminal!.selectAll).toHaveBeenCalled();
+	});
+
+	it("reports no clipboard target once the terminal unmounts", () => {
+		const { container, unmount } = render(<XtermTerminal theme="dark" />);
+		const host = container.firstElementChild as HTMLElement;
+		const focusSink = document.createElement("textarea");
+		host.append(focusSink);
+		focusSink.focus();
+		expect(activeTerminalClipboardTarget()).not.toBeNull();
+
+		unmount();
+
+		expect(activeTerminalClipboardTarget()).toBeNull();
 	});
 
 	it("copies selected terminal text on the terminal copy shortcut", () => {
@@ -507,6 +542,70 @@ describe("XtermTerminal", () => {
 		expect(event.preventDefault).not.toHaveBeenCalled();
 		expect(event.stopPropagation).not.toHaveBeenCalled();
 		expect(window.ao!.clipboard.writeText).not.toHaveBeenCalled();
+	});
+
+	it.each(["Linux x86_64", "Win32"])("copies the selection on Ctrl+Shift+C for %s", (platform) => {
+		setNavigatorPlatform(platform);
+		render(<XtermTerminal theme="dark" />);
+		state.lastTerminal!.selection = "shift copy";
+
+		const event = {
+			key: "C",
+			metaKey: false,
+			ctrlKey: true,
+			shiftKey: true,
+			altKey: false,
+			preventDefault: vi.fn(),
+			stopPropagation: vi.fn(),
+		} as unknown as KeyboardEvent;
+		const allowed = state.lastTerminal!.keyHandler!(event);
+
+		expect(allowed).toBe(false);
+		expect(event.preventDefault).toHaveBeenCalled();
+		expect(window.ao!.clipboard.writeText).toHaveBeenCalledWith("shift copy");
+	});
+
+	it("leaves Ctrl+C as terminal input on macOS whether or not text is selected", () => {
+		setNavigatorPlatform("MacIntel");
+		render(<XtermTerminal theme="dark" />);
+
+		for (const selection of ["macos selection", ""]) {
+			state.lastTerminal!.selection = selection;
+			const event = {
+				key: "c",
+				metaKey: false,
+				ctrlKey: true,
+				shiftKey: false,
+				altKey: false,
+				preventDefault: vi.fn(),
+				stopPropagation: vi.fn(),
+			} as unknown as KeyboardEvent;
+
+			expect(state.lastTerminal!.keyHandler!(event)).toBe(true);
+			expect(event.preventDefault).not.toHaveBeenCalled();
+		}
+		expect(window.ao!.clipboard.writeText).not.toHaveBeenCalled();
+	});
+
+	it("still pastes on Cmd+V with a live selection, so copy handling leaves paste alone", async () => {
+		setNavigatorPlatform("MacIntel");
+		const onInput = vi.fn();
+		window.ao!.clipboard.readText = vi.fn().mockResolvedValue("pasted");
+		render(<XtermTerminal theme="dark" onReady={(terminal) => terminal.onUserInput(onInput)} />);
+		state.lastTerminal!.selection = "not the clipboard";
+
+		const event = {
+			key: "v",
+			metaKey: true,
+			ctrlKey: false,
+			shiftKey: false,
+			altKey: false,
+			preventDefault: vi.fn(),
+			stopPropagation: vi.fn(),
+		} as unknown as KeyboardEvent;
+
+		expect(state.lastTerminal!.keyHandler!(event)).toBe(false);
+		await waitFor(() => expect(onInput).toHaveBeenCalledWith("pasted", "paste"));
 	});
 
 	it("copies selected text with plain Ctrl+C on Windows", () => {
