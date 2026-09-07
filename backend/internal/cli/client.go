@@ -231,5 +231,10 @@ func (c *commandContext) attachCredential(dataDir string, req *http.Request) {
 	// the session cookie rather than inventing a CLI-only header is what keeps
 	// the CLI on the daemon's existing identity path: one resolver, one
 	// revocation story, one audit trail.
+	// The attributes gosec looks for are a SERVER's Set-Cookie policy; this is
+	// a client presenting a credential over loopback on a request it built
+	// itself, so there is no browser to instruct and nothing to secure here
+	// beyond the 0600 file the token came from.
+	//nolint:gosec // G124: outbound request cookie, not a Set-Cookie policy.
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: cred.Token})
 }

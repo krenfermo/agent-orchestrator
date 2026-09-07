@@ -418,7 +418,7 @@ func (c *commandContext) openInBrowser(ctx context.Context, url string) error {
 	}
 	if out, err := c.deps.CommandOutput(ctx, name, args...); err != nil {
 		if trimmed := strings.TrimSpace(string(out)); trimmed != "" {
-			return fmt.Errorf("%s: %s", err, trimmed)
+			return fmt.Errorf("%w: %s", err, trimmed)
 		}
 		return err
 	}
