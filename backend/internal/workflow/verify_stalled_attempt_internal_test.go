@@ -541,6 +541,28 @@ func TestStalledVerifyStopStillOpensTheOperatorProvenanceRecovery(t *testing.T) 
 	}
 }
 
+// The stop's own text must describe what actually happens. It used to promise
+// an unconditional reopen on Continue; that is true only for a shape a recovery
+// door can PROVE safe, and every other shape needs a person. Telling them
+// otherwise sends them to press a button that correctly does nothing, with no
+// explanation of why.
+func TestUnretryableStopTextDoesNotPromiseAnUnconditionalReopen(t *testing.T) {
+	action := attentionDispositions[ReasonVerifyAttemptUnretryable].HumanAction
+	if strings.TrimSpace(action) == "" {
+		t.Fatal("verify_attempt_unretryable has no human action")
+	}
+	if strings.Contains(action, "AO reopens the verification once per continue") {
+		t.Fatalf("the stop still promises an unconditional reopen: %q", action)
+	}
+	// It has to say what Continue actually depends on, and what to do when the
+	// condition does not hold.
+	for _, want := range []string{"continue", "fresh review", "cancel"} {
+		if !strings.Contains(strings.ToLower(action), want) {
+			t.Fatalf("the stop text does not mention %q: %q", want, action)
+		}
+	}
+}
+
 // The stop names a recoverable stop reason, so an operator's Continue reaches
 // verify_recovery.go's bounded reopen rather than a dead end — that reopen is
 // the "valid recovery" half of the requirement, and it is what actually changes
