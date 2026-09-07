@@ -94,6 +94,15 @@ var recoverableVerifyStopReasons = map[string]bool{
 	ReasonVerifyToolUnavailable: true,
 	ReasonVerifyInfraFailed:     true,
 	ReasonVerifyUnrepairable:    true,
+	// ReasonVerifyAttemptUnretryable is in the set for the same reason
+	// ReasonVerifyUnrepairable is, and under the same guard: it is the stop
+	// verify_stalled_attempt.go records when a failed verification has no path
+	// left to be asked again, and a recovery generation is precisely the thing
+	// that gives it one. Membership alone still decides nothing — guard 2 below
+	// reads the recorded VerifyResult's error class independently, so a stop
+	// whose failure was a verdict about the CODE is refused here exactly as it
+	// is for every other member.
+	ReasonVerifyAttemptUnretryable: true,
 }
 
 // recoverableVerifyErrorClass reports whether a failed verification's class can

@@ -514,6 +514,16 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		// the durable foundation or 8B's work-step dispatch). Nothing to do.
 		return reviewStep, nil
 	}
+	// A step whose authority AO has already REFUSED is not dispatchable until a
+	// person acts. Without this the refusal converges only in the ledger: the
+	// step still rests at `waiting` with its pointer released, so every wake
+	// re-enters, launches a reviewer it must immediately close out again, and
+	// writes the cancellation rows to prove it. That is the same "wakes but
+	// never progresses" shape the refusal exists to end.
+	// See review_authority_provenance.go.
+	if !humanResume && c.reviewAuthorityRefused(ctx, run, reviewStep) {
+		return reviewStep, nil
+	}
 
 	// Checkpoint 8P-E.13A: work-completion evidence gates this entire
 	// function, before any lookup that could be mistaken for evidence.
@@ -2032,6 +2042,21 @@ func (c *Coordinator) markReviewAmbiguous(ctx stdctx.Context, run domain.Workflo
 func (c *Coordinator) recordReviewDispatchSuccess(ctx stdctx.Context, run domain.WorkflowRun, reviewStep domain.WorkflowStep, entry domain.WorkflowOutboxEntry, reviewRun domain.ReviewRun, reviewerRef ReviewerRef) (domain.WorkflowStep, error) {
 	now := c.clock()
 
+	// A run a replacement has ALREADY taken authority over is history, and it
+	// may never be bound again. The adopt-existing path (adoptExistingReviewRun)
+	// resolves a duplicate identity to whatever run already holds it, and
+	// nothing here used to ask whether that run had since been replaced — which
+	// is how wf-0aadfcde's superseded approval came back as its step's
+	// authority, and how the two runs ended up naming each other as successor.
+	// See review_authority_provenance.go.
+	if superseded, serr := c.reviewRunSuperseded(ctx, reviewRun.ID); serr != nil {
+		return reviewStep, serr
+	} else if superseded != "" {
+		return c.refuseStaleReviewAuthority(ctx, run, reviewStep, reviewRun.ID, fmt.Sprintf(
+			"review run %s was already superseded by %s, so it can no longer speak for this step",
+			reviewRun.ID, superseded))
+	}
+
 	// A reviewer is genuinely attached now, so any stop this run was parked on
 	// because a previous launch failed is stale by proof, not by assumption.
 	// Only reviewer-launch reasons are cleared (review_launch_recovery.go).
@@ -2103,10 +2128,31 @@ func (c *Coordinator) recordReviewDispatchSuccess(ctx stdctx.Context, run domain
 		// Restoring is a CAS from "unset", so it can only ever put back the
 		// authority this dispatch was authorized to take; if someone else has
 		// since claimed the step, it does nothing.
+		//
+		// It is also justified by that verdict and by nothing else, so the
+		// verdict is what is checked: readable, unsuperseded, real, and given
+		// for the target this step is currently asking about. A predecessor that
+		// cannot show all four is not a winner — it is a stale approval being
+		// handed back the authority a fresh review was authorized to take from
+		// it, which is exactly what wf-0aadfcde did. See
+		// review_authority_provenance.go.
+		staleAuthority := ""
 		if predecessor != "" && expectedPointer == "" {
-			if _, rerr := c.store.RebindWorkflowStepReviewRunFrom(
-				ctx, reviewStep.ID, "", "", predecessor, now); rerr != nil {
-				return reviewStep, rerr
+			mayRetake, why := c.predecessorMayRetakeAuthority(ctx, predecessor, reviewRun)
+			if mayRetake {
+				if _, rerr := c.store.RebindWorkflowStepReviewRunFrom(
+					ctx, reviewStep.ID, "", "", predecessor, now); rerr != nil {
+					return reviewStep, rerr
+				}
+			} else {
+				// The pointer stays released, and that is NOT a state the
+				// ordinary retry can resolve: the claim CAS refuses every
+				// replacement for as long as the predecessor holds a late
+				// verdict. So the run converges for a person instead of waking
+				// forever — but only AFTER this dispatch finishes closing out
+				// the reviewer it launched. Refusing the pointer must never be
+				// a way to leave a live reviewer unowned.
+				staleAuthority = why
 			}
 		}
 		// And this reviewer must not be left live and unowned. The EXTERNAL
@@ -2125,9 +2171,38 @@ func (c *Coordinator) recordReviewDispatchSuccess(ctx stdctx.Context, run domain
 			c.log.Warn("workflow: replacement lost the authority bind; its reviewer is closed out",
 				"run", run.ID, "step", reviewStep.ID, "replacement", reviewRun.ID, "predecessor", predecessor)
 		}
+		if staleAuthority != "" {
+			// The reviewer is closed out and the pointer is unclaimable. Say so
+			// once, durably, and stop — see review_authority_provenance.go.
+			return c.refuseStaleReviewAuthority(ctx, run, reviewStep, predecessor, staleAuthority)
+		}
 		return reviewStep, nil
 	}
 	if predecessor != "" && predecessor != reviewRun.ID {
+		// superseded_by is write-once per ROW, which says nothing about the
+		// GRAPH those rows form: the storage guard refuses only a self-link. A
+		// two-node cycle is writable, and once written the question this column
+		// exists to answer — which review replaced which — has no answer any
+		// walk can give (wf-0aadfcde wrote exactly one).
+		//
+		// The link is NOT written, and the run stops. The bind above already
+		// happened and stands — the authority pointer is the decision, and it
+		// was made correctly — but a chain AO would have to corrupt to record
+		// this replacement means it can no longer prove that run's history, and
+		// that is a person's to untangle rather than AO's to overwrite. The
+		// superseded-run guard at the top of this function is what makes this
+		// branch unreachable in practice; it is here for the race it cannot
+		// cover, and it must not fall back to writing the loop.
+		if c.supersessionWouldCycle(ctx, predecessor, reviewRun.ID) {
+			if c.log != nil {
+				c.log.Warn("workflow: refused a supersession that would loop the authority chain",
+					"run", run.ID, "step", reviewStep.ID,
+					"predecessor", predecessor, "replacement", reviewRun.ID)
+			}
+			return c.refuseStaleReviewAuthority(ctx, run, reviewStep, reviewRun.ID, fmt.Sprintf(
+				"naming review run %s the successor of %s would close a loop in the supersession chain",
+				reviewRun.ID, predecessor))
+		}
 		superseded, serr := c.reviewRuns.MarkReviewRunSupersededBy(ctx, predecessor, reviewRun.ID)
 		if serr != nil {
 			return reviewStep, serr

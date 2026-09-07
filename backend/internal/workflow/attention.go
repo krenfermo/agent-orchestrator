@@ -145,6 +145,21 @@ const (
 	// failed on AO's own infrastructure every single time. The remedy is no
 	// longer "continue it again", which is exactly why it needs its own name.
 	ReasonVerifyRecoveryExhausted = "verify_recovery_exhausted"
+	// ReasonVerifyAttemptUnretryable is a verification that has already FAILED
+	// and can no longer be asked again under its own identity: no fix cycle can
+	// answer it, and no recovery generation is open for it
+	// (verify_stalled_attempt.go).
+	//
+	// It exists so that condition CONVERGES instead of looping. Before it,
+	// maybeVerify answered a finished-and-failed attempt with a bare `nil` —
+	// which is a true statement about that pass and a lie about the run, because
+	// the attempt identity is derived and could never change on its own. The run
+	// rested on a non-terminal verify step forever (incident wf-0aadfcde).
+	//
+	// Distinct from ReasonVerifyUnrepairable, which is the verification's own
+	// verdict about the code: here the verdict was already reached and recorded,
+	// and what is missing is any path that could ask a different question.
+	ReasonVerifyAttemptUnretryable = "verify_attempt_unretryable"
 	// ReasonVerifyWorkspaceUnattributable is the refusal half of
 	// ReasonVerifyFreshReviewRequired: an authorized verification recovery found
 	// the workspace no longer matching the approval, AND could not attribute the
@@ -167,6 +182,19 @@ const (
 	// (RecoverUnprovableApprovedHead), and that one does not.
 	ReasonVerifyApprovedHeadUnprovable = "verify_approved_head_unprovable"
 	ReasonReviewStateAmbiguous         = "review_state_ambiguous"
+	// ReasonReviewAuthorityStale is a review run that was offered a review
+	// step's authority and could not be given it: it had already been
+	// superseded, or it is a released predecessor whose verdict was given for a
+	// target this step is no longer asking about
+	// (review_authority_provenance.go).
+	//
+	// It is a stop rather than a retry because the ordinary bounded dispatch
+	// cannot resolve either shape by trying again — the claim CAS refuses every
+	// replacement while a released predecessor holds a late verdict — and
+	// because the decision is genuinely a person's: an approval that was
+	// explicitly replaced must not be handed back its authority just because
+	// nothing else is available.
+	ReasonReviewAuthorityStale = "review_authority_stale"
 	// ReasonFixDispatchAmbiguous is a fix cycle whose delivery to the worker
 	// session AO could not prove either way after a restart — and only after
 	// fix_delivery_recovery.go has exhausted every durable fact that could have
@@ -481,6 +509,9 @@ var attentionDispositions = map[string]AttentionDisposition{
 		Nonrecoverable: true,
 		HumanAction:    "Verification has been reopened the maximum number of times and still fails on AO's own verification infrastructure rather than on the code. Read the latest verify output, correct the verification configuration or the host, then start a fresh run — or cancel this one.",
 	},
+	ReasonVerifyAttemptUnretryable: {
+		HumanAction: "Verification failed and AO has no way to ask it again by itself (its findings are recorded, and no fix cycle or recovery can change what would be verified). Read the verify output, correct the cause or the verification setup, then continue this run — AO reopens the verification once per continue, within its bound — or cancel it.",
+	},
 	ReasonVerifyApprovedHeadUnprovable: {
 		Recovery:    domain.RecoveryInspectRepository,
 		HumanAction: "AO cannot prove which commit the approved review was given for, and could not recover it from this branch's history, so it will not verify against that approval. Inspect the worktree; if the work in it is what you want reviewed, recover this run's review provenance — AO discards the unlocatable approval and asks for exactly one fresh review of what is there now.",
@@ -491,6 +522,9 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonReviewStateAmbiguous: {
 		HumanAction: "AO could not prove what the review concluded. Inspect the reviewer session, then continue or cancel this run.",
+	},
+	ReasonReviewAuthorityStale: {
+		HumanAction: "The only review available to speak for this step is one AO had already replaced, or one whose verdict was given for a different version of the work. AO will not hand it back its authority. Read the review history for this step and either ask for a fresh review of what is there now, or cancel this run.",
 	},
 	ReasonRecoveryUnreconcilable: {
 		HumanAction: "AO could not reconcile this run against its runtime (its session or reviewer pane cannot be classified, so AO will neither adopt nor kill it). Check whether that session is still running and close it out, then continue or cancel this run.",
