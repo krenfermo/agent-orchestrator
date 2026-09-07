@@ -12,7 +12,15 @@ import (
 type fakeStore struct {
 	creds map[string]domain.AgentCredential // by token hash
 	users map[domain.UserID]domain.User
-	seq   int
+	// runs is the durable review-run status a credential derives its life from.
+	// A run this map does not name is a run that no longer exists, which the
+	// real predicate also treats as closed.
+	runs map[string]domain.ReviewRunStatus
+	seq  int
+	// listErr and revokeErr make a pass fail the way a locked database would,
+	// so the recovery behaviour can be tested rather than argued about.
+	listErr   error
+	revokeErr error
 }
 
 func newFakeStore() *fakeStore {
@@ -21,7 +29,64 @@ func newFakeStore() *fakeStore {
 		users: map[domain.UserID]domain.User{
 			"user-owner": {ID: "user-owner", Role: domain.UserRoleOwner, Status: domain.UserStatusActive},
 		},
+		runs: map[string]domain.ReviewRunStatus{},
 	}
+}
+
+// closed mirrors the SQL predicate exactly: only a review run AO still
+// considers RUNNING keeps its reviewer able to speak.
+func (f *fakeStore) closed(reviewRunID string) bool {
+	return f.runs[reviewRunID] != domain.ReviewRunRunning
+}
+
+func (f *fakeStore) ListRevocableAgentCredentials(_ context.Context) ([]domain.RevocableAgentCredential, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	var out []domain.RevocableAgentCredential
+	for _, c := range f.creds {
+		if c.RevokedAt == nil && c.ReviewRunID != "" && f.closed(c.ReviewRunID) {
+			out = append(out, domain.RevocableAgentCredential{
+				CredentialID: c.ID, ReviewRunID: c.ReviewRunID, RuntimeHandle: c.RuntimeHandle,
+			})
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) RevokeClosedReviewRunAgentCredentials(_ context.Context, at time.Time) (int64, error) {
+	if f.revokeErr != nil {
+		return 0, f.revokeErr
+	}
+	var n int64
+	for hash, c := range f.creds {
+		if c.RevokedAt == nil && c.ReviewRunID != "" && f.closed(c.ReviewRunID) {
+			revoked := at
+			c.RevokedAt = &revoked
+			f.creds[hash] = c
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (f *fakeStore) RevokeAgentCredentialsForClosedReviewRun(_ context.Context, id string, at time.Time) (int64, error) {
+	if f.revokeErr != nil {
+		return 0, f.revokeErr
+	}
+	if !f.closed(id) {
+		return 0, nil
+	}
+	var n int64
+	for hash, c := range f.creds {
+		if c.ReviewRunID == id && c.RevokedAt == nil {
+			revoked := at
+			c.RevokedAt = &revoked
+			f.creds[hash] = c
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (f *fakeStore) InsertAgentCredential(_ context.Context, cred domain.AgentCredential) (domain.AgentCredential, error) {

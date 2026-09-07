@@ -38,3 +38,44 @@ WHERE review_run_id = ? AND review_run_id != '' AND revoked_at IS NULL;
 -- name: RevokeAgentCredentialsForSession :execrows
 UPDATE agent_credentials SET revoked_at = ?
 WHERE session_id = ? AND session_id != '' AND revoked_at IS NULL;
+
+-- The two queries below derive a credential lifetime from the review run it was
+-- minted for, which is what makes revocation recoverable: the obligation is not
+-- a queue entry that can be lost, it is re-derivable from durable rows on every
+-- pass. NOT EXISTS rather than a status comparison so a review run whose row is
+-- gone also counts as closed -- only a run AO still considers RUNNING keeps its
+-- reviewer able to speak, and nothing else ever does.
+--
+-- The predicate deliberately never anticipates closure. A reviewer whose run is
+-- still running keeps its credential however long it takes, because taking it
+-- away early recreates the exact failure this credential exists to prevent: a
+-- finished review that cannot be recorded.
+
+-- name: ListRevocableAgentCredentials :many
+SELECT id, review_run_id, runtime_handle
+FROM agent_credentials
+WHERE revoked_at IS NULL
+  AND review_run_id != ''
+  AND NOT EXISTS (
+    SELECT 1 FROM review_run r
+    WHERE r.id = agent_credentials.review_run_id AND r.status = 'running'
+  );
+
+-- name: RevokeClosedReviewRunAgentCredentials :execrows
+UPDATE agent_credentials SET revoked_at = ?
+WHERE revoked_at IS NULL
+  AND review_run_id != ''
+  AND NOT EXISTS (
+    SELECT 1 FROM review_run r
+    WHERE r.id = agent_credentials.review_run_id AND r.status = 'running'
+  );
+
+-- name: RevokeAgentCredentialsForClosedReviewRun :execrows
+UPDATE agent_credentials SET revoked_at = ?
+WHERE review_run_id = ?
+  AND review_run_id != ''
+  AND revoked_at IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM review_run r
+    WHERE r.id = agent_credentials.review_run_id AND r.status = 'running'
+  );

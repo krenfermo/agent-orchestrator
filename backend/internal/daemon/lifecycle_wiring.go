@@ -203,7 +203,7 @@ type sessionStack struct {
 	Workspace *workspacerouter.Workspace
 }
 
-func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.Runtime, store *sqlite.Store, lcm *lifecycle.Manager, messenger ports.AgentMessenger, telemetry ports.EventSink, agents ports.AgentResolver, previewLifecycle sessionmanager.PreviewLifecycle, browserLifecycle sessionmanager.BrowserLifecycle, browserCapabilities sessionmanager.BrowserCapabilityIssuer, chat sessionmanager.ChatLauncher, defaults sessionmanager.SessionModeDefaults, sessionFacts sessionFactSink, log *slog.Logger) (sessionStack, error) {
+func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.Runtime, store *sqlite.Store, lcm *lifecycle.Manager, messenger ports.AgentMessenger, telemetry ports.EventSink, agents ports.AgentResolver, previewLifecycle sessionmanager.PreviewLifecycle, browserLifecycle sessionmanager.BrowserLifecycle, browserCapabilities sessionmanager.BrowserCapabilityIssuer, chat sessionmanager.ChatLauncher, defaults sessionmanager.SessionModeDefaults, sessionFacts sessionFactSink, agentCredentials reviewsvc.AgentCredentialCloser, log *slog.Logger) (sessionStack, error) {
 	gitWS, err := gitworktree.New(gitworktree.Options{
 		// Per-session worktrees live under the data dir, so a single AO_DATA_DIR
 		// override moves all durable per-user state together.
@@ -326,7 +326,10 @@ func startSession(ctx context.Context, cfg config.Config, runtime runtimeselect.
 	})
 	reviewSvc := reviewsvc.New(reviewEngine, store,
 		reviewsvc.WithLifecycleReducer(lcm),
-		reviewsvc.WithTelemetry(telemetry))
+		reviewsvc.WithTelemetry(telemetry),
+		// A recorded verdict is the end of the reviewer that recorded it. This
+		// is where AO learns of that, on the one path a reviewer always takes.
+		reviewsvc.WithAgentCredentials(agentCredentials))
 	mgr.SetReviewerTerminator(reviewSvc)
 	return sessionStack{Service: sessionSvc, Review: reviewSvc, Lifecycle: mgr, Manager: mgr, Workspace: ws}, nil
 }

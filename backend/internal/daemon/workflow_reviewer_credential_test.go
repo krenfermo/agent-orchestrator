@@ -212,3 +212,72 @@ func TestReviewerHandleRoundTripsToItsReviewRun(t *testing.T) {
 		t.Fatalf("handle round trip = %q, want %q", got, req.RunID)
 	}
 }
+
+// A reviewer AO terminated loses its identity with its pane, and the file it
+// would have read the token from goes too.
+//
+// This path already existed; it is asserted here because it is one of the
+// lifecycle endings the revocation contract now covers as a set, and because it
+// is the one whose revocation is UNCONDITIONAL: AO killed the reviewer, so its
+// authority is over whatever the review run row still says.
+func TestCancellingAReviewerTakesItsCredentialBack(t *testing.T) {
+	issuer := &fakeCredentialIssuer{}
+	rt := newOwnedRuntime()
+	dataDir := t.TempDir()
+	l := &workflowReviewerLauncher{
+		reviewers:            &fakeReviewerResolver{adapter: &fakeReviewerAdapter{cmd: ports.ReviewCommandSpec{Argv: []string{"claude"}}}},
+		runtime:              rt,
+		dataDir:              dataDir,
+		credentials:          issuer,
+		requireAgentIdentity: true,
+	}
+	req := credentialLaunchRequest()
+	res, err := l.Launch(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	path := agentcred.Path(dataDir, l.ReviewerIdentity(req))
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the launch wrote no credential file: %v", err)
+	}
+
+	if err := l.CancelReviewer(context.Background(), workflowcore.ReviewerRef{
+		HandleID: res.HandleID, InstanceID: res.InstanceID,
+	}); err != nil {
+		t.Fatalf("CancelReviewer: %v", err)
+	}
+	if len(issuer.revoked) != 1 || issuer.revoked[0] != req.RunID {
+		t.Fatalf("revocations = %v, want the cancelled review run", issuer.revoked)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("the credential file outlived the reviewer (%v)", err)
+	}
+}
+
+// Cancelling the same reviewer twice revokes once and fails neither time. It is
+// what makes a crash-interrupted cancellation safe to replay, and it is the
+// same property the durable revocation has: a second attempt changes nothing.
+func TestCancellingAnAlreadyGoneReviewerIsASuccessfulNoOp(t *testing.T) {
+	issuer := &fakeCredentialIssuer{}
+	rt := newOwnedRuntime()
+	l := &workflowReviewerLauncher{
+		reviewers:            &fakeReviewerResolver{adapter: &fakeReviewerAdapter{cmd: ports.ReviewCommandSpec{Argv: []string{"claude"}}}},
+		runtime:              rt,
+		dataDir:              t.TempDir(),
+		credentials:          issuer,
+		requireAgentIdentity: true,
+	}
+	res, err := l.Launch(context.Background(), credentialLaunchRequest())
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	ref := workflowcore.ReviewerRef{HandleID: res.HandleID, InstanceID: res.InstanceID}
+	for i := 0; i < 2; i++ {
+		if err := l.CancelReviewer(context.Background(), ref); err != nil {
+			t.Fatalf("CancelReviewer pass %d: %v", i+1, err)
+		}
+	}
+	if len(issuer.revoked) != 1 {
+		t.Fatalf("revocations = %v; a replayed cancellation revoked more than once", issuer.revoked)
+	}
+}

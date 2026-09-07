@@ -60,7 +60,10 @@ type Store interface {
 	ListAgentCredentialsForReviewRun(ctx context.Context, reviewRunID string) ([]domain.AgentCredential, error)
 	TouchAgentCredentialLastSeen(ctx context.Context, id string, at time.Time) (bool, error)
 	RevokeAgentCredentialsForReviewRun(ctx context.Context, reviewRunID string, at time.Time) (int64, error)
+	RevokeAgentCredentialsForClosedReviewRun(ctx context.Context, reviewRunID string, at time.Time) (int64, error)
 	RevokeAgentCredentialsForSession(ctx context.Context, sessionID domain.SessionID, at time.Time) (int64, error)
+	ListRevocableAgentCredentials(ctx context.Context) ([]domain.RevocableAgentCredential, error)
+	RevokeClosedReviewRunAgentCredentials(ctx context.Context, at time.Time) (int64, error)
 	GetUserByID(ctx context.Context, id domain.UserID) (domain.User, bool, error)
 }
 
@@ -217,6 +220,97 @@ func (s *Service) RevokeForReviewRun(ctx context.Context, reviewRunID string) (i
 		return 0, nil
 	}
 	return s.store.RevokeAgentCredentialsForReviewRun(ctx, reviewRunID, s.now().UTC())
+}
+
+// RevokeForClosedReviewRun ends one reviewer's authority at the moment that
+// authority actually ends: when the review run it was minted for has durably
+// stopped running.
+//
+// It is the SUCCESS path, and its absence is the defect this exists to close.
+// RevokeForReviewRun above was only ever reached from failure paths -- a launch
+// that never produced a pane, a credential file that could not be written, a
+// reviewer AO proved it owned and terminated. A reviewer that simply finished,
+// recorded its verdict and exited passed through none of them, so its
+// credential stayed live for the rest of its 72-hour TTL over a review that had
+// already concluded (agc-dfef17e6 and agc-f1850962 on wf-98ab416c).
+//
+// The guard is the whole design. Revocation follows the run into closure and
+// never anticipates it: a reviewer whose run is still running keeps its
+// identity however long the review takes, because taking it away early is
+// exactly the failure agent credentials exist to prevent -- a real review that
+// cannot be recorded. So this is safe to call from anywhere, including beside a
+// live reviewer, and calling it early simply does nothing.
+//
+// Idempotent by construction: the statement only ever moves a NULL revoked_at
+// to a time, so a retry, a duplicate event, or a race against a cancellation
+// that already revoked converges on the same row and reports nothing revoked
+// the second time.
+//
+// The credentials it took back come back with it, so the caller can also remove
+// the files they were handed over in.
+func (s *Service) RevokeForClosedReviewRun(ctx context.Context, reviewRunID string) ([]domain.RevocableAgentCredential, error) {
+	if strings.TrimSpace(reviewRunID) == "" {
+		return nil, nil
+	}
+	// Read through the SAME predicate the write applies, so what is reported as
+	// revoked and what is actually revoked can never be two different answers.
+	// The list is the installation-wide one because there is only ever one
+	// predicate; it is a handful of rows at most, and normally zero.
+	pending, err := s.ListPendingRevocations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	matched := make([]domain.RevocableAgentCredential, 0, 1)
+	for _, cred := range pending {
+		if cred.ReviewRunID == reviewRunID {
+			matched = append(matched, cred)
+		}
+	}
+	if len(matched) == 0 {
+		return nil, nil
+	}
+	if _, err := s.store.RevokeAgentCredentialsForClosedReviewRun(ctx, reviewRunID, s.now().UTC()); err != nil {
+		return nil, err
+	}
+	return matched, nil
+}
+
+// ListPendingRevocations reports the credentials whose authority has ended and
+// whose rows are still live, WITHOUT changing anything.
+//
+// This is the recoverable obligation in its readable form. It is not a queue
+// and not a ledger: it is re-derived from durable rows every time it is asked,
+// so nothing about it can be lost by a crash, and there is nothing to replay
+// after one. The handles come back with it so the caller can also remove the
+// files the tokens were handed over in.
+func (s *Service) ListPendingRevocations(ctx context.Context) ([]domain.RevocableAgentCredential, error) {
+	rows, err := s.store.ListRevocableAgentCredentials(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// ReconcileClosedReviewRuns revokes every credential whose review run has
+// stopped running, in one statement, and reports what it took back.
+//
+// It is what makes revocation survive a failure. A revocation that could not be
+// written -- a locked database, a daemon killed between the verdict and the
+// cleanup, an installation upgraded onto this build with credentials already
+// stranded -- leaves the obligation exactly where it was: derivable from the
+// same rows, and discharged by the next pass. Nothing has to remember it.
+func (s *Service) ReconcileClosedReviewRuns(ctx context.Context) ([]domain.RevocableAgentCredential, error) {
+	pending, err := s.ListPendingRevocations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(pending) == 0 {
+		return nil, nil
+	}
+	if _, err := s.store.RevokeClosedReviewRunAgentCredentials(ctx, s.now().UTC()); err != nil {
+		return nil, err
+	}
+	return pending, nil
 }
 
 // RevokeForSession revokes every credential bound to one session.

@@ -175,6 +175,82 @@ func (q *Queries) ListAgentCredentialsForReviewRun(ctx context.Context, reviewRu
 	return items, nil
 }
 
+const listRevocableAgentCredentials = `-- name: ListRevocableAgentCredentials :many
+
+SELECT id, review_run_id, runtime_handle
+FROM agent_credentials
+WHERE revoked_at IS NULL
+  AND review_run_id != ''
+  AND NOT EXISTS (
+    SELECT 1 FROM review_run r
+    WHERE r.id = agent_credentials.review_run_id AND r.status = 'running'
+  )
+`
+
+type ListRevocableAgentCredentialsRow struct {
+	ID            string
+	ReviewRunID   string
+	RuntimeHandle string
+}
+
+// The two queries below derive a credential lifetime from the review run it was
+// minted for, which is what makes revocation recoverable: the obligation is not
+// a queue entry that can be lost, it is re-derivable from durable rows on every
+// pass. NOT EXISTS rather than a status comparison so a review run whose row is
+// gone also counts as closed -- only a run AO still considers RUNNING keeps its
+// reviewer able to speak, and nothing else ever does.
+//
+// The predicate deliberately never anticipates closure. A reviewer whose run is
+// still running keeps its credential however long it takes, because taking it
+// away early recreates the exact failure this credential exists to prevent: a
+// finished review that cannot be recorded.
+func (q *Queries) ListRevocableAgentCredentials(ctx context.Context) ([]ListRevocableAgentCredentialsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listRevocableAgentCredentials)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListRevocableAgentCredentialsRow{}
+	for rows.Next() {
+		var i ListRevocableAgentCredentialsRow
+		if err := rows.Scan(&i.ID, &i.ReviewRunID, &i.RuntimeHandle); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const revokeAgentCredentialsForClosedReviewRun = `-- name: RevokeAgentCredentialsForClosedReviewRun :execrows
+UPDATE agent_credentials SET revoked_at = ?
+WHERE review_run_id = ?
+  AND review_run_id != ''
+  AND revoked_at IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM review_run r
+    WHERE r.id = agent_credentials.review_run_id AND r.status = 'running'
+  )
+`
+
+type RevokeAgentCredentialsForClosedReviewRunParams struct {
+	RevokedAt   sql.NullTime
+	ReviewRunID string
+}
+
+func (q *Queries) RevokeAgentCredentialsForClosedReviewRun(ctx context.Context, arg RevokeAgentCredentialsForClosedReviewRunParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, revokeAgentCredentialsForClosedReviewRun, arg.RevokedAt, arg.ReviewRunID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const revokeAgentCredentialsForReviewRun = `-- name: RevokeAgentCredentialsForReviewRun :execrows
 UPDATE agent_credentials SET revoked_at = ?
 WHERE review_run_id = ? AND review_run_id != '' AND revoked_at IS NULL
@@ -205,6 +281,24 @@ type RevokeAgentCredentialsForSessionParams struct {
 
 func (q *Queries) RevokeAgentCredentialsForSession(ctx context.Context, arg RevokeAgentCredentialsForSessionParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, revokeAgentCredentialsForSession, arg.RevokedAt, arg.SessionID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const revokeClosedReviewRunAgentCredentials = `-- name: RevokeClosedReviewRunAgentCredentials :execrows
+UPDATE agent_credentials SET revoked_at = ?
+WHERE revoked_at IS NULL
+  AND review_run_id != ''
+  AND NOT EXISTS (
+    SELECT 1 FROM review_run r
+    WHERE r.id = agent_credentials.review_run_id AND r.status = 'running'
+  )
+`
+
+func (q *Queries) RevokeClosedReviewRunAgentCredentials(ctx context.Context, revokedAt sql.NullTime) (int64, error) {
+	result, err := q.db.ExecContext(ctx, revokeClosedReviewRunAgentCredentials, revokedAt)
 	if err != nil {
 		return 0, err
 	}

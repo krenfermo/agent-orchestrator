@@ -181,6 +181,19 @@ type AgentCredential struct {
 	RevokedAt   *time.Time
 }
 
+// RevocableAgentCredential names one live credential whose authority has ended
+// -- the review run it was minted for is no longer running.
+//
+// It is a projection rather than the whole row on purpose: a revocation pass
+// needs the row to revoke, the run that ended in order to explain itself, and
+// the runtime handle in order to remove the file the token was handed over in.
+// It never needs the token hash, so it never carries it.
+type RevocableAgentCredential struct {
+	CredentialID  string
+	ReviewRunID   string
+	RuntimeHandle string
+}
+
 // Authority projects the row onto the non-secret shape a request carries.
 func (c AgentCredential) Authority() AgentAuthority {
 	return AgentAuthority{
