@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
+import { ArrowDown } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { FitAddon } from "@xterm/addon-fit";
@@ -45,6 +46,7 @@ import {
 import { applyDocumentTheme, applyDocumentThemeStyle } from "../lib/theme";
 import { buildTerminalThemes } from "../lib/terminal-themes";
 import { useUiStore, type Theme } from "../stores/ui-store";
+import { Button } from "./ui/button";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -274,6 +276,58 @@ function pageKeyReport(lines: number): string {
 	return lines < 0 ? PAGE_UP : PAGE_DOWN;
 }
 
+// How far off the live tail still counts as following it. Landing exactly on
+// the last row is not something a trackpad flick or a page key reliably does,
+// and re-arming auto-follow only on an exact match leaves the terminal feeling
+// stuck one line short of the bottom.
+const FOLLOW_TAIL_SLACK_LINES = 2;
+
+// Stop counting new lines here. Past a few hundred the exact number is no
+// longer something the reader acts on, and an uncapped counter would relabel
+// (and resize) the control on every line of a `git log`.
+const NEW_LINE_COUNT_CAP = 999;
+
+// Is the viewport parked at the live tail? Alt-buffer panes have no scrollback,
+// so baseY and viewportY are both 0 there and they always read as following —
+// which is right: nothing about them can scroll away from the tail.
+function isAtTail(term: Terminal): boolean {
+	const buffer = term.buffer.active;
+	return buffer.baseY - buffer.viewportY <= FOLLOW_TAIL_SLACK_LINES;
+}
+
+type ScrollbackNavigation = "pageUp" | "pageDown" | "top" | "bottom";
+
+/**
+ * Keyboard scrollback navigation, for panes whose history lives in xterm
+ * itself (see `ownsLocalScrollback`). Panes that keep their own transcript
+ * never consult this, so their key input reaches the agent unchanged.
+ *
+ * Page keys are the terminal's on such a pane, the way they are in a native
+ * terminal: a shell ignores CSI 5~/6~ anyway, and macOS reports Fn+Up / Fn+Down
+ * as PageUp / PageDown, so both spellings land here.
+ *
+ * Home/End are NOT unconditionally the terminal's. At a live prompt they are
+ * readline's beginning-of-line / end-of-line and hijacking them would break
+ * ordinary line editing, so they only become scrollback keys once the user is
+ * demonstrably reviewing history — explicitly with Shift, or implicitly while
+ * the viewport has already left the tail.
+ */
+function scrollbackNavigation(event: KeyboardEvent, following: boolean): ScrollbackNavigation | null {
+	if (event.ctrlKey || event.altKey || event.metaKey) return null;
+	switch (event.key) {
+		case "PageUp":
+			return "pageUp";
+		case "PageDown":
+			return "pageDown";
+		case "Home":
+			return event.shiftKey || !following ? "top" : null;
+		case "End":
+			return event.shiftKey || !following ? "bottom" : null;
+		default:
+			return null;
+	}
+}
+
 function forceSelectionMode(term: Terminal): void {
 	const internal = term as XtermInternal;
 	const selectionService = internal._core?._selectionService;
@@ -303,6 +357,11 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		y: 0,
 		link: null,
 	});
+	// Whether the viewport is riding the live tail, and how much output has
+	// arrived since it stopped. Published from the mount effect (which owns the
+	// authoritative values) purely so the jump-to-latest control can render.
+	const [tailState, setTailState] = useState({ following: true, newLines: 0 });
+	const jumpToLatestRef = useRef<(() => void) | null>(null);
 	// The web link currently under the cursor, tracked via the link providers'
 	// hover/leave callbacks so the right-click menu can offer "Open in system
 	// browser" for it.
@@ -530,6 +589,116 @@ export function XtermTerminal(props: XtermTerminalProps) {
 				// Terminal is being torn down or its hidden textarea is unavailable.
 			}
 		};
+		const showLatestOutput = () => {
+			term.scrollToBottom();
+			// Hidden output can leave the offscreen DOM scrollbar stale even
+			// after xterm's logical viewport moves. Synchronize it before either
+			// the first-load cover or retained-cache container is revealed.
+			const viewport = host.querySelector<HTMLElement>(".xterm-viewport");
+			if (!viewport) return;
+			viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+		};
+
+		// ---- Following the live tail ----------------------------------------
+		//
+		// xterm already pins the viewport when the buffer scrolls under a reader
+		// who has scrolled up, so "new output must not yank them back" is not the
+		// work here. What is missing is telling them anything: once they scroll
+		// up, output keeps arriving off-screen with nothing to say so, and the
+		// only way back is hunting for the bottom with the wheel.
+		//
+		// Follow is DERIVED from the buffer, never asserted. Every path that
+		// moves the viewport — wheel, page keys, the activation scroll, the
+		// resize anchor below — ends in an onScroll, so this cannot drift out of
+		// sync with what is on screen, and scrolling back to within
+		// FOLLOW_TAIL_SLACK_LINES of the bottom re-arms auto-follow on its own
+		// without touching the control.
+		let following = true;
+		let newLines = 0;
+		let tailPublishFrame: number | null = null;
+		const publishTailState = () => {
+			tailPublishFrame = null;
+			setTailState((current) =>
+				current.following === following && current.newLines === newLines ? current : { following, newLines },
+			);
+		};
+		// Output arrives a line at a time, so a burst would otherwise re-render
+		// the control once per line. Coalesce to one publish per frame.
+		const scheduleTailPublish = () => {
+			if (tailPublishFrame !== null) return;
+			tailPublishFrame = requestAnimationFrame(publishTailState);
+		};
+		const syncFollowState = () => {
+			const next = isAtTail(term);
+			if (next === following) return;
+			following = next;
+			if (next) newLines = 0;
+			scheduleTailPublish();
+		};
+		const scrollTracker = term.onScroll(syncFollowState);
+		// Deliberately not derived from the buffer's tail distance: once the
+		// bounded scrollback is full, xterm trims from the top as it appends, so
+		// baseY - viewportY stops growing even though output keeps coming. Line
+		// feeds keep counting through that. (onScroll cannot carry this either —
+		// output landing under a scrolled-up reader moves no viewport, so it
+		// fires no scroll event.)
+		const lineTracker = term.onLineFeed(() => {
+			syncFollowState();
+			if (following || newLines >= NEW_LINE_COUNT_CAP) return;
+			newLines += 1;
+			scheduleTailPublish();
+		});
+		const jumpToLatest = () => {
+			showLatestOutput();
+			syncFollowState();
+			// Focus belongs in the terminal, not on a transient control the user
+			// pressed once — the next keystroke is meant for the agent.
+			focusTerminal();
+		};
+		jumpToLatestRef.current = jumpToLatest;
+
+		// The pane's history lives in xterm itself: a normal-buffer pane with
+		// mouse tracking off (codex, a plain shell) prints its transcript and
+		// relies on the terminal's scrollback, exactly as it would in a native
+		// terminal. Alt-buffer panes, mouse-tracking panes, and the keyboard-
+		// scroll TUIs keep their transcript inside the app instead, so scrolling
+		// them is the app's job and every gesture must be forwarded untouched.
+		const ownsLocalScrollback = () =>
+			callbacksRef.current.paneScrollsByKeyboard !== true &&
+			term.modes.mouseTrackingMode === "none" &&
+			term.buffer.active.type === "normal";
+
+		// A fit that changes the grid reflows the buffer, and xterm's post-resize
+		// viewport lands wherever that reflow leaves it — which the user reads as
+		// the terminal jumping while they drag the task-panel splitter, resize the
+		// window, or toggle the sidebar. Anchor it instead: remember where the
+		// viewport sat relative to the live tail, and put it back afterwards.
+		//
+		// A fit that does NOT change the grid is a no-op inside FitAddon, and the
+		// restore is then a no-op too — which is what keeps an active selection
+		// alive across the layout changes that leave the cell count untouched.
+		// When the grid does change, the reflow rewrites the very lines a
+		// selection is anchored to and xterm exposes no way to map the old range
+		// onto the new buffer, so that selection is lost with or without this.
+		const captureViewportAnchor = () => {
+			const buffer = term.buffer.active;
+			return { following, linesFromTail: Math.max(0, buffer.baseY - buffer.viewportY) };
+		};
+		const restoreViewportAnchor = (anchor: ReturnType<typeof captureViewportAnchor>) => {
+			if (anchor.following) {
+				term.scrollToBottom();
+				return;
+			}
+			const buffer = term.buffer.active;
+			const delta = Math.max(0, buffer.baseY - anchor.linesFromTail) - buffer.viewportY;
+			if (delta !== 0) term.scrollLines(delta);
+		};
+		const fitPreservingViewport = () => {
+			const anchor = captureViewportAnchor();
+			fit.fit();
+			restoreViewportAnchor(anchor);
+		};
+
 		contextMenuActionsRef.current = {
 			clear: () => {
 				term.clear();
@@ -624,6 +793,19 @@ export function XtermTerminal(props: XtermTerminalProps) {
 				pasteFromClipboard();
 				return false;
 			}
+			// Scrollback navigation, only for panes that keep their history here —
+			// see scrollbackNavigation() for which keys qualify and why Home/End
+			// stay with the running program at a live prompt. Consuming the event
+			// keeps the key off both the PTY and the app's outer key handlers.
+			const navigation = ownsLocalScrollback() ? scrollbackNavigation(event, following) : null;
+			if (navigation) {
+				consumeTerminalShortcut(event);
+				if (navigation === "pageUp") term.scrollPages(-1);
+				else if (navigation === "pageDown") term.scrollPages(1);
+				else if (navigation === "top") term.scrollToTop();
+				else term.scrollToBottom();
+				return false;
+			}
 			const normalized = normalizedTerminalShortcut(event);
 			if (!normalized) return true;
 			consumeTerminalShortcut(event);
@@ -654,7 +836,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			// output, but must not refit or emit PTY resizes while hidden.
 			if (callbacksRef.current.isVisible === false) return;
 			try {
-				fit.fit();
+				fitPreservingViewport();
 			} catch {
 				// Container momentarily has no size (hidden/unmounting) — a later
 				// trigger retries.
@@ -684,7 +866,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			}
 			if (fitAllowsHidden || callbacksRef.current.isVisible !== false) {
 				try {
-					fit.fit();
+					fitPreservingViewport();
 				} catch {
 					// The next observer/window event retries if the host is transiently
 					// unmeasurable (for example while entering fullscreen).
@@ -853,7 +1035,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			// prints its transcript and relies on the terminal's own scrollback — the
 			// way it scrolls in a raw terminal. Scroll xterm's viewport locally; the
 			// pane never sees these bytes. Requires scrollback > 0 (see Terminal opts).
-			if (term.modes.mouseTrackingMode === "none" && term.buffer.active.type === "normal") {
+			if (ownsLocalScrollback()) {
 				term.scrollLines(lines);
 				return false;
 			}
@@ -919,15 +1101,41 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		host.addEventListener("dragover", dragOverInput);
 		host.addEventListener("drop", dropInput);
 
-		const showLatestOutput = () => {
-			term.scrollToBottom();
-			// Hidden output can leave the offscreen DOM scrollbar stale even
-			// after xterm's logical viewport moves. Synchronize it before either
-			// the first-load cover or retained-cache container is revealed.
-			const viewport = host.querySelector<HTMLElement>(".xterm-viewport");
-			if (!viewport) return;
-			viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+		// Selecting terminal text is a drag, and a drag that starts on the last
+		// visible row is routinely released outside the terminal — over the
+		// inspector rail, the panel splitter, the session topbar. The browser
+		// then dispatches `click` on the nearest common ancestor of the press and
+		// the release, which is an outer container that may well act on it: focus
+		// leaves the terminal, a panel collapses, a task action fires. None of
+		// that was a click on that control; it was the tail of a selection. Claim
+		// the whole gesture for the terminal — swallow the escaping click and put
+		// focus back where the user is typing, so the next keystroke still
+		// reaches the agent.
+		let pointerGestureFromTerminal = false;
+		const beginPointerGesture = (event: PointerEvent) => {
+			if (event.button !== 0) return;
+			pointerGestureFromTerminal = true;
 		};
+		// A press that starts anywhere else is that control's, not ours. Window
+		// capture runs ahead of the host's own capture listener, so a press
+		// inside the terminal is cleared here and re-claimed a moment later.
+		const releasePointerGesture = (event: PointerEvent) => {
+			if (event.target instanceof Node && host.contains(event.target)) return;
+			pointerGestureFromTerminal = false;
+		};
+		const claimGestureClick = (event: MouseEvent) => {
+			if (!pointerGestureFromTerminal) return;
+			pointerGestureFromTerminal = false;
+			// A click that stayed inside the terminal is already the terminal's.
+			// Only one that escaped needs to be kept off the outer controls.
+			if (event.target instanceof Node && host.contains(event.target)) return;
+			event.preventDefault();
+			event.stopPropagation();
+			focusTerminal();
+		};
+		host.addEventListener("pointerdown", beginPointerGesture, true);
+		window.addEventListener("pointerdown", releasePointerGesture, true);
+		window.addEventListener("click", claimGestureClick, true);
 
 		let cancelActivationPreparation: (() => void) | null = null;
 		const prepareForActivation = (): Promise<void> => {
@@ -1018,6 +1226,13 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			host.removeEventListener("compositionend", compositionInput, true);
 			host.removeEventListener("dragover", dragOverInput);
 			host.removeEventListener("drop", dropInput);
+			host.removeEventListener("pointerdown", beginPointerGesture, true);
+			window.removeEventListener("pointerdown", releasePointerGesture, true);
+			window.removeEventListener("click", claimGestureClick, true);
+			scrollTracker.dispose();
+			lineTracker.dispose();
+			if (tailPublishFrame !== null) cancelAnimationFrame(tailPublishFrame);
+			jumpToLatestRef.current = null;
 			contextMenuActionsRef.current = null;
 			cancelActivationPreparation?.();
 			clearSuppressNativePaste();
@@ -1058,6 +1273,11 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		if (term) callbacksRef.current.onVisibleSize?.(term.cols, term.rows);
 	}, [props.isVisible]);
 
+	// Only for a terminal the user is actually looking at: parked entries in the
+	// retained cache keep parsing output and would otherwise each accumulate an
+	// invisible control of their own.
+	const showJumpToLatest = props.isVisible !== false && !tailState.following;
+
 	const fullscreenElement = document.fullscreenElement;
 	const contextMenuPortalContainer =
 		props.isFullscreen &&
@@ -1085,6 +1305,31 @@ export function XtermTerminal(props: XtermTerminalProps) {
 					width: "100%",
 				}}
 			/>
+			{showJumpToLatest && (
+				// pointer-events-none on the strip so the wheel and a selection drag
+				// still reach the terminal rows underneath it; only the pill itself
+				// is clickable.
+				<div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">
+					<Button
+						className="pointer-events-auto rounded-full bg-surface/95 px-3 shadow-md backdrop-blur"
+						data-testid="terminal-jump-to-latest"
+						// Keep focus in the terminal: the pill is a transient
+						// affordance, and the keystroke after it is meant for the agent.
+						onMouseDown={(event) => event.preventDefault()}
+						onClick={() => jumpToLatestRef.current?.()}
+						size="sm"
+						type="button"
+						variant="outline"
+					>
+						<ArrowDown aria-hidden="true" className="size-3.5" />
+						{tailState.newLines >= NEW_LINE_COUNT_CAP
+							? t("terminal.newLinesCapped", { count: NEW_LINE_COUNT_CAP })
+							: tailState.newLines > 0
+								? t("terminal.newLines", { count: tailState.newLines })
+								: t("terminal.jumpToLatest")}
+					</Button>
+				</div>
+			)}
 			<DropdownMenu modal={false} open={contextMenu.open} onOpenChange={setContextMenuOpen}>
 				<DropdownMenuTrigger asChild>
 					<button

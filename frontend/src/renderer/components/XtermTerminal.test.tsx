@@ -3,19 +3,24 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AttachableTerminal } from "../hooks/useTerminalSession";
 import { activeTerminalClipboardTarget, resetTerminalClipboardTargetsForTest } from "../lib/terminal-clipboard";
 import { useUiStore } from "../stores/ui-store";
-import { XtermTerminal } from "./XtermTerminal";
+import { XtermTerminal, type XtermTerminalProps } from "./XtermTerminal";
 
 const state = vi.hoisted(() => ({
 	linkHandler: null as null | ((event: MouseEvent, uri: string) => void),
+	lastFit: null as null | { onFit: (() => void) | null },
 	lastTerminal: null as null | {
 		keyHandler?: (event: KeyboardEvent) => boolean;
 		wheelHandler?: (event: WheelEvent) => boolean;
 		selection: string;
 		options: Record<string, unknown>;
 		modes: { bracketedPasteMode: boolean; mouseTrackingMode: string };
-		buffer: { active: { type: string } };
+		buffer: { active: { type: string; baseY: number; viewportY: number } };
+		rows: number;
 		scrollLines: ReturnType<typeof vi.fn>;
+		scrollPages: ReturnType<typeof vi.fn>;
+		scrollToTop: ReturnType<typeof vi.fn>;
 		scrollToBottom: ReturnType<typeof vi.fn>;
+		feedLines: (count: number) => void;
 		refresh: ReturnType<typeof vi.fn>;
 		clear: ReturnType<typeof vi.fn>;
 		focus: ReturnType<typeof vi.fn>;
@@ -43,9 +48,32 @@ vi.mock("@xterm/xterm", () => ({
 		keyHandler?: (event: KeyboardEvent) => boolean;
 		wheelHandler?: (event: WheelEvent) => boolean;
 		modes = { bracketedPasteMode: false, mouseTrackingMode: "vt200" };
-		buffer = { active: { type: "normal" } };
-		scrollLines = vi.fn();
-		scrollToBottom = vi.fn();
+		buffer = { active: { type: "normal", baseY: 0, viewportY: 0 } };
+		scrollListeners = new Set<(position: number) => void>();
+		lineFeedListeners = new Set<() => void>();
+		// Real scroll semantics, not spies that record and forget: the follow
+		// state is derived from where the viewport actually lands, so a fake that
+		// never moves it would assert nothing about following the tail.
+		moveViewportTo(next: number) {
+			const clamped = Math.max(0, Math.min(this.buffer.active.baseY, next));
+			if (clamped === this.buffer.active.viewportY) return;
+			this.buffer.active.viewportY = clamped;
+			for (const listener of this.scrollListeners) listener(clamped);
+		}
+		scrollLines = vi.fn((amount: number) => this.moveViewportTo(this.buffer.active.viewportY + amount));
+		scrollPages = vi.fn((pages: number) => this.moveViewportTo(this.buffer.active.viewportY + pages * this.rows));
+		scrollToTop = vi.fn(() => this.moveViewportTo(0));
+		scrollToBottom = vi.fn(() => this.moveViewportTo(this.buffer.active.baseY));
+		/** Append `count` lines of output the way a live PTY would. */
+		feedLines(count: number) {
+			for (let index = 0; index < count; index += 1) {
+				this.buffer.active.baseY += 1;
+				if (this.buffer.active.viewportY === this.buffer.active.baseY - 1) {
+					this.moveViewportTo(this.buffer.active.baseY);
+				}
+				for (const listener of this.lineFeedListeners) listener();
+			}
+		}
 		refresh = vi.fn();
 		clear = vi.fn();
 		focus = vi.fn();
@@ -84,6 +112,14 @@ vi.mock("@xterm/xterm", () => ({
 		onRender() {
 			return { dispose: () => undefined };
 		}
+		onScroll(listener: (position: number) => void) {
+			this.scrollListeners.add(listener);
+			return { dispose: () => this.scrollListeners.delete(listener) };
+		}
+		onLineFeed(listener: () => void) {
+			this.lineFeedListeners.add(listener);
+			return { dispose: () => this.lineFeedListeners.delete(listener) };
+		}
 		onKey(listener: (event: { key: string }) => void) {
 			this.keyListeners.add(listener);
 			return { dispose: () => this.keyListeners.delete(listener) };
@@ -110,7 +146,18 @@ vi.mock("@xterm/xterm", () => ({
 
 vi.mock("@xterm/addon-fit", () => ({
 	FitAddon: class FakeFitAddon {
-		fit() {}
+		// `onFit` lets a test stand in for the reflow a real resize performs, so
+		// the viewport anchoring around fit() can be observed.
+		onFit: (() => void) | null = null;
+		constructor() {
+			state.lastFit = this;
+		}
+		fit() {
+			this.onFit?.();
+		}
+		proposeDimensions() {
+			return undefined;
+		}
 	},
 }));
 
@@ -181,8 +228,18 @@ function expectConsumed(event: FakeWheelEvent) {
 
 describe("XtermTerminal", () => {
 	beforeEach(() => {
+		// Own the frame clock for the whole file. The retained-activation test
+		// below fakes timers and stubs requestAnimationFrame; jsdom's own
+		// animation loop never restarts once that pair is unwound, so every later
+		// test would silently never get a frame — and anything published from one
+		// (the jump-to-latest control) would never appear.
+		vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
+			window.setTimeout(() => callback(performance.now()), 0),
+		);
+		vi.stubGlobal("cancelAnimationFrame", (id: number) => window.clearTimeout(id));
 		resetTerminalClipboardTargetsForTest();
 		state.lastTerminal = null;
+		state.lastFit = null;
 		state.linkHandler = null;
 		setNavigatorPlatform("Linux x86_64");
 		window.ao!.clipboard.writeText = vi.fn().mockResolvedValue(undefined);
@@ -1201,5 +1258,167 @@ describe("XtermTerminal", () => {
 		expect(state.lastTerminal!._core._selectionService.enable).toHaveBeenCalled();
 		expect(state.lastTerminal!._core.element.classList.remove).toHaveBeenCalledWith("enable-mouse-events");
 		expect(state.lastTerminal!._core._selectionService.shouldForceSelection({} as MouseEvent)).toBe(true);
+	});
+
+	// ---- Following the live tail ------------------------------------------
+	//
+	// A pane whose transcript lives in xterm's own scrollback: normal buffer,
+	// mouse tracking off. That is the only shape where the terminal — rather
+	// than the agent inside it — owns scrolling.
+	function renderScrollbackTerminal(props: Partial<XtermTerminalProps> = {}) {
+		const rendered = render(<XtermTerminal theme="dark" {...props} />);
+		const term = state.lastTerminal!;
+		term.modes.mouseTrackingMode = "none";
+		term.buffer.active.type = "normal";
+		term.buffer.active.baseY = 100;
+		term.buffer.active.viewportY = 100;
+		return { ...rendered, term };
+	}
+
+	function navigationKey(key: string, modifiers: Partial<KeyboardEvent> = {}) {
+		return {
+			altKey: false,
+			code: key,
+			ctrlKey: false,
+			key,
+			metaKey: false,
+			preventDefault: vi.fn(),
+			shiftKey: false,
+			stopPropagation: vi.fn(),
+			type: "keydown",
+			...modifiers,
+		} as unknown as KeyboardEvent;
+	}
+
+	it("stops following the tail when the reader scrolls up and resumes near the bottom", async () => {
+		const { term } = renderScrollbackTerminal();
+
+		term.wheelHandler!(wheelEvent({ deltaMode: 1, deltaY: -8 }));
+
+		expect(term.buffer.active.viewportY).toBe(92);
+		const jump = await screen.findByTestId("terminal-jump-to-latest");
+		expect(jump).toHaveTextContent("Jump to latest");
+
+		// Back within the slack window: auto-follow re-arms on its own, with no
+		// need to press the control.
+		term.wheelHandler!(wheelEvent({ deltaMode: 1, deltaY: 7 }));
+
+		await waitFor(() => expect(screen.queryByTestId("terminal-jump-to-latest")).toBeNull());
+	});
+
+	it("counts output that lands while scrolled up and does not move the viewport for it", async () => {
+		const { term } = renderScrollbackTerminal();
+		term.wheelHandler!(wheelEvent({ deltaMode: 1, deltaY: -8 }));
+		await screen.findByTestId("terminal-jump-to-latest");
+
+		term.feedLines(3);
+
+		// The whole point: new output is announced, not scrolled to.
+		expect(term.buffer.active.viewportY).toBe(92);
+		await waitFor(() => expect(screen.getByTestId("terminal-jump-to-latest")).toHaveTextContent("3 new lines"));
+
+		fireEvent.click(screen.getByTestId("terminal-jump-to-latest"));
+
+		expect(term.buffer.active.viewportY).toBe(term.buffer.active.baseY);
+		expect(term.focus).toHaveBeenCalled();
+		await waitFor(() => expect(screen.queryByTestId("terminal-jump-to-latest")).toBeNull());
+	});
+
+	it("pages the local scrollback with Page Up/Page Down instead of sending them to the pane", () => {
+		const { term } = renderScrollbackTerminal();
+
+		const pageUp = navigationKey("PageUp");
+		expect(term.keyHandler!(pageUp)).toBe(false);
+		expect(term.scrollPages).toHaveBeenCalledWith(-1);
+		expect(pageUp.preventDefault).toHaveBeenCalled();
+		expect(pageUp.stopPropagation).toHaveBeenCalled();
+
+		const pageDown = navigationKey("PageDown");
+		expect(term.keyHandler!(pageDown)).toBe(false);
+		expect(term.scrollPages).toHaveBeenCalledWith(1);
+	});
+
+	it("forwards page keys untouched to a pane that owns its own transcript", () => {
+		const { term } = renderScrollbackTerminal();
+		term.modes.mouseTrackingMode = "vt200";
+
+		expect(term.keyHandler!(navigationKey("PageUp"))).toBe(true);
+		expect(term.scrollPages).not.toHaveBeenCalled();
+	});
+
+	it("leaves Home/End to the running program at the prompt and takes them while reviewing", () => {
+		const { term } = renderScrollbackTerminal();
+
+		// At the tail these are readline's beginning-of-line / end-of-line.
+		expect(term.keyHandler!(navigationKey("Home"))).toBe(true);
+		expect(term.keyHandler!(navigationKey("End"))).toBe(true);
+		expect(term.scrollToTop).not.toHaveBeenCalled();
+
+		// Shift is the explicit "this one is for the terminal" spelling.
+		expect(term.keyHandler!(navigationKey("End", { shiftKey: true }))).toBe(false);
+		expect(term.scrollToBottom).toHaveBeenCalled();
+
+		// Once the viewport has left the tail, the user is reviewing history and
+		// the bare keys navigate it.
+		term.wheelHandler!(wheelEvent({ deltaMode: 1, deltaY: -8 }));
+		expect(term.keyHandler!(navigationKey("Home"))).toBe(false);
+		expect(term.scrollToTop).toHaveBeenCalled();
+		expect(term.buffer.active.viewportY).toBe(0);
+	});
+
+	it("keeps the viewport anchored across a resize that reflows the buffer", async () => {
+		const { term } = renderScrollbackTerminal();
+		// Stand in for xterm's post-reflow viewport, which lands wherever the
+		// resize leaves it rather than where the reader was.
+		state.lastFit!.onFit = () => {
+			term.buffer.active.viewportY = 0;
+		};
+
+		window.dispatchEvent(new Event("resize"));
+
+		// Was following the tail, so it stays on the tail.
+		await waitFor(() => expect(term.buffer.active.viewportY).toBe(100));
+	});
+
+	it("restores the reader's place across a resize when they were reviewing older output", async () => {
+		const { term } = renderScrollbackTerminal();
+		term.wheelHandler!(wheelEvent({ deltaMode: 1, deltaY: -40 }));
+		expect(term.buffer.active.viewportY).toBe(60);
+		state.lastFit!.onFit = () => {
+			term.buffer.active.viewportY = term.buffer.active.baseY;
+		};
+
+		window.dispatchEvent(new Event("resize"));
+
+		// 40 lines above the tail before the fit, 40 lines above it after.
+		await waitFor(() => expect(term.buffer.active.viewportY).toBe(60));
+		await waitFor(() => expect(screen.getByTestId("terminal-jump-to-latest")).toBeInTheDocument());
+	});
+
+	it("keeps a selection drag that ends outside the terminal from clicking an outer control", () => {
+		const { container } = render(<XtermTerminal theme="dark" />);
+		const host = container.firstElementChild as HTMLElement;
+		const outerAction = document.createElement("button");
+		const outerClick = vi.fn();
+		outerAction.addEventListener("click", outerClick);
+		document.body.appendChild(outerAction);
+
+		try {
+			host.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
+			const escaped = new MouseEvent("click", { bubbles: true, cancelable: true });
+			outerAction.dispatchEvent(escaped);
+
+			expect(outerClick).not.toHaveBeenCalled();
+			expect(escaped.defaultPrevented).toBe(true);
+			expect(state.lastTerminal!.focus).toHaveBeenCalled();
+
+			// A press that genuinely starts on the outer control still works.
+			outerAction.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
+			outerAction.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+			expect(outerClick).toHaveBeenCalledOnce();
+		} finally {
+			outerAction.remove();
+		}
 	});
 });
