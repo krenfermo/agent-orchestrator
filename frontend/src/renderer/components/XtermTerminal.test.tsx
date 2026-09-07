@@ -15,6 +15,7 @@ const state = vi.hoisted(() => ({
 		options: Record<string, unknown>;
 		modes: { bracketedPasteMode: boolean; mouseTrackingMode: string };
 		buffer: { active: { type: string; baseY: number; viewportY: number } };
+		isUserScrolling: boolean;
 		rows: number;
 		scrollLines: ReturnType<typeof vi.fn>;
 		scrollPages: ReturnType<typeof vi.fn>;
@@ -51,26 +52,39 @@ vi.mock("@xterm/xterm", () => ({
 		buffer = { active: { type: "normal", baseY: 0, viewportY: 0 } };
 		scrollListeners = new Set<(position: number) => void>();
 		lineFeedListeners = new Set<() => void>();
-		// Real scroll semantics, not spies that record and forget: the follow
-		// state is derived from where the viewport actually lands, so a fake that
-		// never moves it would assert nothing about following the tail.
-		moveViewportTo(next: number) {
-			const clamped = Math.max(0, Math.min(this.buffer.active.baseY, next));
-			if (clamped === this.buffer.active.viewportY) return;
-			this.buffer.active.viewportY = clamped;
-			for (const listener of this.scrollListeners) listener(clamped);
+		// xterm's user-scrolling lock, modelled rather than mocked. It is the
+		// whole reason "near the bottom" is not the same as "following": the
+		// component has to clear it, and a fake that skipped it would let a
+		// regression through while looking green.
+		isUserScrolling = false;
+		// Mirrors BufferService.scrollLines: an upward scroll takes the lock, and
+		// only a downward scroll that actually reaches baseY releases it.
+		applyScroll(amount: number) {
+			const buffer = this.buffer.active;
+			if (amount < 0) {
+				if (buffer.viewportY === 0) return;
+				this.isUserScrolling = true;
+			} else if (amount + buffer.viewportY >= buffer.baseY) {
+				this.isUserScrolling = false;
+			}
+			const previous = buffer.viewportY;
+			buffer.viewportY = Math.max(0, Math.min(buffer.viewportY + amount, buffer.baseY));
+			if (previous === buffer.viewportY) return;
+			for (const listener of this.scrollListeners) listener(buffer.viewportY);
 		}
-		scrollLines = vi.fn((amount: number) => this.moveViewportTo(this.buffer.active.viewportY + amount));
-		scrollPages = vi.fn((pages: number) => this.moveViewportTo(this.buffer.active.viewportY + pages * this.rows));
-		scrollToTop = vi.fn(() => this.moveViewportTo(0));
-		scrollToBottom = vi.fn(() => this.moveViewportTo(this.buffer.active.baseY));
-		/** Append `count` lines of output the way a live PTY would. */
+		scrollLines = vi.fn((amount: number) => this.applyScroll(amount));
+		scrollPages = vi.fn((pages: number) => this.applyScroll(pages * this.rows));
+		scrollToTop = vi.fn(() => this.applyScroll(-this.buffer.active.viewportY));
+		scrollToBottom = vi.fn(() => this.applyScroll(this.buffer.active.baseY - this.buffer.active.viewportY));
+		/**
+		 * Append `count` lines of output the way a live PTY would. Mirrors
+		 * BufferService.scroll: the viewport follows the buffer only while the
+		 * user-scrolling lock is clear.
+		 */
 		feedLines(count: number) {
 			for (let index = 0; index < count; index += 1) {
 				this.buffer.active.baseY += 1;
-				if (this.buffer.active.viewportY === this.buffer.active.baseY - 1) {
-					this.moveViewportTo(this.buffer.active.baseY);
-				}
+				if (!this.isUserScrolling) this.buffer.active.viewportY = this.buffer.active.baseY;
 				for (const listener of this.lineFeedListeners) listener();
 			}
 		}
@@ -1303,6 +1317,30 @@ describe("XtermTerminal", () => {
 		// need to press the control.
 		term.wheelHandler!(wheelEvent({ deltaMode: 1, deltaY: 7 }));
 
+		await waitFor(() => expect(screen.queryByTestId("terminal-jump-to-latest")).toBeNull());
+	});
+
+	// Regression: "near the bottom" is not the same as "following". xterm's
+	// user-scrolling lock is cleared only by a scroll that actually reaches
+	// baseY, and while it is set, output advances the buffer without advancing
+	// the viewport — so stopping one line short used to hide the control while
+	// the reader silently fell further behind, with the missed lines uncounted.
+	it("re-arms xterm's own auto-scroll when the reader stops just short of the tail", async () => {
+		const { term } = renderScrollbackTerminal();
+		term.wheelHandler!(wheelEvent({ deltaMode: 1, deltaY: -8 }));
+		await screen.findByTestId("terminal-jump-to-latest");
+		expect(term.isUserScrolling).toBe(true);
+
+		// Back to one line short of the bottom: inside the slack window, so this
+		// reads as following and must therefore also BE following to xterm.
+		term.wheelHandler!(wheelEvent({ deltaMode: 1, deltaY: 7 }));
+
+		expect(term.isUserScrolling).toBe(false);
+		expect(term.buffer.active.viewportY).toBe(term.buffer.active.baseY);
+
+		term.feedLines(5);
+
+		expect(term.buffer.active.viewportY).toBe(term.buffer.active.baseY);
 		await waitFor(() => expect(screen.queryByTestId("terminal-jump-to-latest")).toBeNull());
 	});
 

@@ -635,6 +635,27 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			if (next) newLines = 0;
 			scheduleTailPublish();
 		};
+		// Landing inside the slack window is not, on its own, following — not as
+		// far as xterm is concerned. It keeps a private user-scrolling lock that
+		// any upward scroll sets and only a downward scroll actually REACHING
+		// ybase clears (BufferService.scrollLines), and while that lock is set,
+		// incoming output advances the buffer without advancing the viewport
+		// (BufferService.scroll). A reader who comes to rest one line short of
+		// the bottom would therefore be told they are on the tail while xterm
+		// quietly leaves them a line further behind with every line that
+		// arrives — and those lines would go uncounted, because we believed we
+		// were following while they landed.
+		//
+		// So close the gap: whenever the viewport settles inside the slack
+		// window, snap it to the exact bottom, which is also what clears the
+		// lock. Called from the paths that move the viewport rather than from
+		// the onScroll listener, so it never re-enters xterm's scroll dispatch
+		// from inside xterm's own scroll event.
+		const settleAtTail = () => {
+			const buffer = term.buffer.active;
+			if (buffer.viewportY === buffer.baseY || !isAtTail(term)) return;
+			term.scrollToBottom();
+		};
 		const scrollTracker = term.onScroll(syncFollowState);
 		// Deliberately not derived from the buffer's tail distance: once the
 		// bounded scrollback is full, xterm trims from the top as it appends, so
@@ -692,6 +713,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			const buffer = term.buffer.active;
 			const delta = Math.max(0, buffer.baseY - anchor.linesFromTail) - buffer.viewportY;
 			if (delta !== 0) term.scrollLines(delta);
+			settleAtTail();
 		};
 		const fitPreservingViewport = () => {
 			const anchor = captureViewportAnchor();
@@ -804,6 +826,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 				else if (navigation === "pageDown") term.scrollPages(1);
 				else if (navigation === "top") term.scrollToTop();
 				else term.scrollToBottom();
+				settleAtTail();
 				return false;
 			}
 			const normalized = normalizedTerminalShortcut(event);
@@ -1037,6 +1060,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			// pane never sees these bytes. Requires scrollback > 0 (see Terminal opts).
 			if (ownsLocalScrollback()) {
 				term.scrollLines(lines);
+				settleAtTail();
 				return false;
 			}
 			// Mouse tracking on: the pane (tmux/zellij copy-mode, or any app that
