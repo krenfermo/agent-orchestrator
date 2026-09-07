@@ -454,6 +454,10 @@ type Deps struct {
 	// resolution. Multi-user mode (false) never applies this: zero owned
 	// profiles there correctly waits (checkpoint brief §18).
 	TrustedLocal bool
+	// ReviewerIdentity is P4-I's agent-credential ledger, read only to answer
+	// whether a stranded reviewer was ever given a way to record a verdict.
+	// Optional; satisfied by service/agentauth.Service.
+	ReviewerIdentity ReviewerIdentityLedger
 
 	// CapacityProber backs Checkpoint 8P-E.13A.4's active capacity probe (see
 	// CapacityProber). Optional.
@@ -707,6 +711,11 @@ type Coordinator struct {
 	executionPolicies ExecutionPolicies
 	trustedLocal      bool
 
+	// reviewerIdentity backs P4-I's "was this reviewer ever able to answer me?"
+	// question. Optional; nil leaves reviewerCannotDeliverVerdict answering
+	// false, which is the pre-P4-I behavior.
+	reviewerIdentity ReviewerIdentityLedger
+
 	// capacity and capacityLimits are P1-C's runtime admission control: the
 	// durable claim store, and the bounds it grants under. Optional, like every
 	// other dependency here -- a nil store means no admission control, which is
@@ -835,6 +844,7 @@ func New(d Deps) *Coordinator {
 		providerProfiles:         d.ProviderProfiles,
 		executionPolicies:        d.ExecutionPolicies,
 		trustedLocal:             d.TrustedLocal,
+		reviewerIdentity:         d.ReviewerIdentity,
 		capacity:                 d.Capacity,
 		capacityLimits:           d.CapacityLimits,
 		capacityProber:           d.CapacityProber,

@@ -13,6 +13,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/presence"
 	authsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/authsvc"
@@ -141,6 +142,12 @@ type APIDeps struct {
 	// if AO_TRUSTED_LOCAL_MODE were off, since there is nothing to resolve
 	// to), matching the other optional-surface conventions here.
 	Auth authsvc.Manager
+	// AgentAuth backs P4-I's agent identity: the credential an AO-launched
+	// reviewer or worker presents so its own control-plane calls (the
+	// reviewer's `ao review submit` above all) arrive with a bounded identity
+	// instead of with none. Optional: nil leaves the X-AO-Agent-Token header
+	// resolving nothing, which is exactly the pre-P4-I behavior.
+	AgentAuth identity.AgentResolver
 	// SSO backs P4-A's OIDC surface (/auth/providers, /auth/oidc/*).
 	// Optional in exactly the same sense as every other surface here: nil
 	// leaves those routes answering 501 and leaves the installation

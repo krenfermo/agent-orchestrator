@@ -66,7 +66,7 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	// structurally pre-auth bypass. identity.Middleware only reads/attaches
 	// identity to the request context; it never rejects or redirects, so
 	// this reorder has no effect on any other route.
-	r.Use(identity.Middleware(deps.Auth, cfg.TrustedLocalMode, bootstrapAdminResolver(deps.Auth)))
+	r.Use(identity.Middleware(deps.Auth, deps.AgentAuth, cfg.TrustedLocalMode, bootstrapAdminResolver(deps.Auth)))
 	// P4-B: one authorization resolution per request. Without this every
 	// permission check re-reads the caller's role, teams and grants; with it a
 	// handler that asks five questions pays for one lookup. It attaches an

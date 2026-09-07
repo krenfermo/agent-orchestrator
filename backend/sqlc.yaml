@@ -197,6 +197,23 @@ sql:
             go_type:
               import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
               type: "TenantID"
+          # P4-I: agent credentials (the identity an AO-launched agent holds).
+          - column: "agent_credentials.role"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "AgentRole"
+          - column: "agent_credentials.user_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "UserID"
+          - column: "agent_credentials.project_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "ProjectID"
+          - column: "agent_credentials.session_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "SessionID"
           - column: "auth_sessions.id"
             go_type: "string"
           - column: "auth_sessions.user_id"

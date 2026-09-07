@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/agentcred"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 )
@@ -30,6 +33,12 @@ type apiError struct {
 type apiResponseError struct {
 	StatusCode int
 	ErrorBody  apiError
+	// InsideAgent records that this request came from inside an AO-launched
+	// agent's runtime. It changes only the hint on a 401: telling a reviewer
+	// pane to "run ao auth login" is advice it cannot take -- there is no
+	// browser and no person -- and would send whoever reads the transcript
+	// chasing the wrong problem.
+	InsideAgent bool
 }
 
 func (e apiResponseError) Error() string {
@@ -42,7 +51,13 @@ func (e apiResponseError) Error() string {
 		// is true and useless: it names no next step, and on an SSO
 		// installation the next step is not obvious. Say it here, once, so
 		// every command inherits it instead of each one re-explaining.
-		msg += "\n  This installation requires sign-in. Run `ao auth login` to sign in as yourself, then retry."
+		if e.InsideAgent {
+			msg += "\n  This agent's own credential is missing, expired or revoked, so AO could not" +
+				"\n  identify it. Do not sign in as a person from here: report this and let the" +
+				"\n  workflow relaunch the agent, which mints a fresh credential for it."
+		} else {
+			msg += "\n  This installation requires sign-in. Run `ao auth login` to sign in as yourself, then retry."
+		}
 	}
 	return msg
 }
@@ -197,7 +212,11 @@ func (c *commandContext) doJSONPathFull(
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var e apiError
 		_ = json.NewDecoder(resp.Body).Decode(&e)
-		return apiResponseError{StatusCode: resp.StatusCode, ErrorBody: e}
+		return apiResponseError{
+			StatusCode:  resp.StatusCode,
+			ErrorBody:   e,
+			InsideAgent: agentcred.InsideAgentRuntime(c.deps.LookupEnv),
+		}
 	}
 	if respCookies != nil {
 		*respCookies = resp.Cookies()
@@ -220,6 +239,20 @@ func (c *commandContext) doJSONPathFull(
 // same actionable 401 as sending nothing — rather than failing the command
 // before it is even sent.
 func (c *commandContext) attachCredential(dataDir string, req *http.Request) {
+	// P4-I: inside an AO-launched agent, the agent's OWN credential is the only
+	// identity this process may present.
+	//
+	// Both halves matter. Presenting the agent credential is what lets a
+	// reviewer record its verdict at all on an SSO installation. Refusing to
+	// fall back on the operator's credential is what keeps that from being an
+	// escalation: the file under <AO_DATA_DIR> is readable by this user, so a
+	// reviewer that fell back would act with the operator's authority over
+	// every project in every organization -- to record one verdict. An agent
+	// that cannot authenticate as itself sends nothing and is told so.
+	if agentcred.InsideAgentRuntime(c.deps.LookupEnv) {
+		c.attachAgentCredential(req)
+		return
+	}
 	cred, ok, err := readCredential(dataDir)
 	if err != nil || !ok {
 		return
@@ -237,4 +270,27 @@ func (c *commandContext) attachCredential(dataDir string, req *http.Request) {
 	// beyond the 0600 file the token came from.
 	//nolint:gosec // G124: outbound request cookie, not a Set-Cookie policy.
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: cred.Token})
+}
+
+// attachAgentCredential presents the credential the daemon minted for this
+// agent's own launch, when the launch was given one.
+//
+// Silent about every failure for the same reason attachCredential is: an agent
+// launched by a build that could not mint a credential, or one whose credential
+// has been revoked because its work was closed out, must reach the daemon's own
+// actionable 401 rather than fail before the request is sent.
+func (c *commandContext) attachAgentCredential(req *http.Request) {
+	lookup := c.deps.LookupEnv
+	if lookup == nil {
+		lookup = os.LookupEnv
+	}
+	path, ok := lookup(agentcred.EnvCredentialFile)
+	if !ok || strings.TrimSpace(path) == "" {
+		return
+	}
+	file, ok, err := agentcred.Read(path)
+	if err != nil || !ok {
+		return
+	}
+	req.Header.Set(agentTokenHeader, file.Token)
 }

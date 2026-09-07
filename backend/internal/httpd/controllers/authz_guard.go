@@ -196,6 +196,12 @@ func (g Guard) AllowSession(w http.ResponseWriter, r *http.Request, perm domain.
 // AllowWorkflowRun gates an operation on one workflow run, by way of its
 // project.
 func (g Guard) AllowWorkflowRun(w http.ResponseWriter, r *http.Request, perm domain.Permission, id string) bool {
+	// P4-I: same rule as the session gate, and checked before every other
+	// branch for the same reason -- an agent's run binding holds whether or not
+	// authorization is wired. See agent_binding.go.
+	if !agentMayReachWorkflowRun(w, r, id) {
+		return false
+	}
 	if !g.Enabled() {
 		return true
 	}

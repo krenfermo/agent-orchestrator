@@ -10,6 +10,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	agentauth "github.com/aoagents/agent-orchestrator/backend/internal/service/agentauth"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	workflowcore "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 )
@@ -71,12 +72,32 @@ var _ workflowcore.ReviewerEnsurer = (*workflowReviewerLauncher)(nil)
 // `ao review submit` unresolvable here even though review/launcher.go's
 // equivalent path already handled it).
 type workflowReviewerLauncher struct {
-	reviewers  ports.ReviewerResolver
-	runtime    workflowReviewerRuntime
-	dataDir    string
-	runFile    string
-	auth       reviewerAgentAuth
-	executable func() (string, error) // defaults to os.Executable when nil; injectable for tests
+	reviewers ports.ReviewerResolver
+	runtime   workflowReviewerRuntime
+	dataDir   string
+	runFile   string
+	auth      reviewerAgentAuth
+	// credentials mints the reviewer's OWN identity (P4-I). Nil disables the
+	// mechanism entirely: the pane launches exactly as it did before, which is
+	// what every headless wiring and every test that constructs this launcher
+	// without an identity layer gets.
+	credentials agentCredentialIssuer
+	// requireAgentIdentity is true on an installation where a cookie-less
+	// request resolves nobody (AO_AUTH_MODE=oidc). There, a reviewer with no
+	// credential is a reviewer whose verdict can never be recorded, so the
+	// launch is refused rather than started into a dead end. On a trusted-local
+	// desktop it is false and a missing credential changes nothing.
+	requireAgentIdentity bool
+	executable           func() (string, error) // defaults to os.Executable when nil; injectable for tests
+}
+
+// agentCredentialIssuer is service/agentauth as this launcher needs it: mint
+// one credential for one launch, and revoke the ones a finished review run
+// still holds. Narrow on purpose -- a launcher may hand an agent an identity
+// and take it back, and can do nothing else with authorization.
+type agentCredentialIssuer interface {
+	Issue(ctx context.Context, in agentauth.IssueInput) (agentauth.Issued, error)
+	RevokeForReviewRun(ctx context.Context, reviewRunID string) (int64, error)
 }
 
 var _ workflowcore.ReviewerLauncher = (*workflowReviewerLauncher)(nil)
@@ -311,6 +332,11 @@ func (l *workflowReviewerLauncher) CancelReviewer(ctx context.Context, ref workf
 	if stillThere && after.InstanceID == instance {
 		return fmt.Errorf("reviewer %s: session instance %s survived termination", handleID, instance)
 	}
+	// P4-I: the reviewer is gone, so its identity goes with it. Revoking here
+	// rather than only on expiry is what keeps a terminated reviewer's
+	// credential from being replayable for the rest of its TTL by anything that
+	// still holds the file.
+	l.revokeAgentCredentialForHandle(ctx, handleID)
 	return nil
 }
 
@@ -371,6 +397,25 @@ func (l *workflowReviewerLauncher) Launch(ctx context.Context, req workflowcore.
 		workingDirectory = req.WorkspacePath
 	}
 	env := l.runtimeEnv(ctx, req, cmd.Argv, cmd.Env)
+	// P4-I: THE REVIEWER'S OWN IDENTITY, minted before the pane exists.
+	//
+	// Before this, a reviewer on an SSO installation had no way to be anybody:
+	// `ao review submit` sent no cookie, resolved no principal, and was refused
+	// 401 by the one route the reviewer exists to call. It would finish its
+	// review, be told it was not authenticated, and idle -- and thirty minutes
+	// later the staleness threshold parked the workflow on
+	// review_state_ambiguous, AO reporting that it could not prove what the
+	// review concluded about a verdict it had itself refused.
+	//
+	// Minted BEFORE Create because the credential's path has to be in the env
+	// the pane is created with. The instance id is therefore not yet known and
+	// is left empty: it is audit detail, and revocation is keyed on the review
+	// run, which IS known and is the thing whose closure ends the credential's
+	// usefulness.
+	credentialPath, issueErr := l.issueAgentCredential(ctx, req, handleID, env)
+	if issueErr != nil {
+		return workflowcore.ReviewerLaunchResult{}, issueErr
+	}
 	// OWNERSHIP TRAVELS WITH CREATION.
 	//
 	// This used to be a marker written after Create returned, and that ordering
@@ -388,6 +433,10 @@ func (l *workflowReviewerLauncher) Launch(ctx context.Context, req workflowcore.
 		Owner:         reviewerOwnerToken(handleID),
 	})
 	if err != nil {
+		// The pane never existed, so the credential minted for it can never be
+		// presented by anybody. Take it back rather than leaving a live grant
+		// behind a launch that did not happen.
+		l.revokeAgentCredential(ctx, req.RunID, credentialPath)
 		return workflowcore.ReviewerLaunchResult{}, fmt.Errorf("reviewer runtime: %w", err)
 	}
 	// The INSTANCE the runtime just created travels back with the result, so the

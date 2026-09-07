@@ -12,6 +12,26 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
+type AgentCredential struct {
+	ID                string
+	TokenHash         string
+	Role              domain.AgentRole
+	UserID            domain.UserID
+	ProjectID         domain.ProjectID
+	SessionID         domain.SessionID
+	WorkflowRunID     string
+	WorkflowStepID    string
+	ReviewRunID       string
+	RuntimeHandle     string
+	RuntimeInstanceID string
+	Generation        int64
+	Permissions       string
+	CreatedAt         time.Time
+	ExpiresAt         time.Time
+	LastSeenAt        time.Time
+	RevokedAt         sql.NullTime
+}
+
 type AgentHealthEvent struct {
 	ID                  string
 	Harness             string

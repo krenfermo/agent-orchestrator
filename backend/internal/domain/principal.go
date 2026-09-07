@@ -23,6 +23,17 @@ const (
 	// flow. Issuer/Subject on the Principal are populated only for this
 	// method.
 	AuthMethodOIDC AuthMethod = "oidc"
+	// AuthMethodAgent is an AO-LAUNCHED AGENT presenting the scoped credential
+	// the daemon minted for its own launch. It is not a login and never
+	// belongs to a browser: no person authenticated, and the request may do
+	// only what that credential's AgentAuthority permits, intersected with
+	// what the account it acts for may do.
+	//
+	// It is a distinct method rather than a flavour of the others because the
+	// distinction is load-bearing in both directions: a browser session must
+	// never be resolvable from an agent token, and an agent token must never
+	// be accepted where a person's session cookie is expected.
+	AuthMethodAgent AuthMethod = "agent"
 )
 
 // AuthMode is the installation's identity posture. It is deliberately a
@@ -85,6 +96,20 @@ type Principal struct {
 	// only when AuthMethod is AuthMethodOIDC.
 	Issuer  string
 	Subject string
+	// Agent is the scoped authority of an AO-launched agent, set only when
+	// AuthMethod is AuthMethodAgent and nil for every human request.
+	//
+	// It NARROWS: authorization grants the intersection of this and what User
+	// may do, so an agent acting for an owner is still confined to one
+	// project, one session and one run. A nil Agent on a non-agent principal
+	// is what keeps every existing decision byte-for-byte unchanged.
+	Agent *AgentAuthority
+}
+
+// IsAgent reports whether this request is an AO-launched agent acting under a
+// scoped credential rather than a person.
+func (p Principal) IsAgent() bool {
+	return p.AuthMethod == AuthMethodAgent && p.Agent != nil
 }
 
 // IsFederated reports whether this principal was established by an external
