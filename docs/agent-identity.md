@@ -52,10 +52,51 @@ project, session, workflow run, step and launch generation it was created for.
 | | |
 |---|---|
 | Durable row | `agent_credentials` (migration `0159`). SHA-256 of the token only; the raw token never rests in the database, exactly as `auth_sessions` has done since `0107`. |
-| Service | `internal/service/agentauth` — `Issue`, `ResolveAgentPrincipal`, `RevokeForReviewRun`, `EverIssuedForReviewRun`. |
+| Service | `internal/service/agentauth` — `Issue`, `ResolveAgentPrincipal`, `RevokeForReviewRun`, `RevokeForClosedReviewRun`, `ReconcileClosedReviewRuns`, `EverIssuedForReviewRun`. |
 | Transport | the `X-AO-Agent-Token` header, never a cookie. An agent is not a browser, and the two credential kinds must be impossible to confuse. |
 | Handoff | `internal/agentcred` writes a 0600 JSON file under `<AO_DATA_DIR>/agent-credentials/` and the pane is given its path in `AO_AGENT_CREDENTIAL_FILE`. The token is never an environment variable: env is inherited by every tool the agent shells out to and shows up in `ps eww`. |
-| Lifetime | 72h, revoked the moment the review run it was minted for is closed out, and revoked again when the reviewer is terminated. |
+| Lifetime | 72h at the outside, but the TTL is only a backstop: the credential ends when its review run stops running. See *Revocation* below. |
+
+### Revocation follows the review run, and only the review run
+
+A credential is allowed to live for exactly as long as the review run it was
+minted for is `running`. That single predicate is the whole rule, it lives in one
+SQL statement (`queries/agent_credentials.sql`), and both revocation paths ask
+it, so they cannot disagree about what "finished" means.
+
+It is written as *only a RUNNING run keeps a credential alive* rather than *a
+terminal run ends one*, which also covers a credential whose review run no longer
+exists at all.
+
+Two timings, one decision:
+
+- **Eager.** `service/review`'s submit path calls `CloseReviewRun` once every
+  result in the submission is durable. A reviewer that reports its verdict stops
+  being able to speak inside its own request.
+- **Swept.** `agentauth.Reconciler` runs a pass on boot and on a timer for every
+  ending that has no request to hang off: a cancellation, a replacement, an
+  abandoned launch, a revocation whose write failed.
+
+The obligation is therefore **derived, never remembered**. It is not a queue and
+not a ledger — it is re-computed from durable rows on every pass, so a crash
+loses nothing, there is nothing to replay, and an installation upgraded onto this
+build with credentials already stranded discharges them on its first pass.
+
+Three rules the mechanism keeps:
+
+- **It never anticipates a closure.** A reviewer whose run is still running keeps
+  its identity however long the review takes. Taking it away early recreates the
+  exact failure the credential exists to prevent — a real review that cannot be
+  recorded. A `CloseReviewRun` call that arrives early revokes nothing.
+- **It never fails the work.** A cleanup that could not be written does not turn
+  a completed workflow into a failed one. The verdict stands; the sweep retries.
+- **It never revives a generation.** Revocation only ever moves a NULL
+  `revoked_at` to a time, and it is keyed on one review run, so a replacement's
+  credential and its predecessor's are independent in both directions.
+
+`RevokeForReviewRun` (unguarded) remains for the paths where AO **terminated** a
+reviewer or **failed to launch** one: there the authority is over whatever the
+review run row says, because there is no reviewer left to protect.
 
 ### Authorization is an INTERSECTION, never a substitute
 

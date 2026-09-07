@@ -120,6 +120,65 @@ func (s *Store) RevokeAgentCredentialsForReviewRun(ctx context.Context, reviewRu
 	return n, nil
 }
 
+// ListRevocableAgentCredentials returns the credentials a reconciliation pass
+// would revoke. It is the read half of the same predicate the write below
+// applies, so the two can never disagree about what "finished" means.
+func (s *Store) ListRevocableAgentCredentials(ctx context.Context) ([]domain.RevocableAgentCredential, error) {
+	rows, err := s.qr.ListRevocableAgentCredentials(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list revocable agent credentials: %w", err)
+	}
+	out := make([]domain.RevocableAgentCredential, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, domain.RevocableAgentCredential{
+			CredentialID:  row.ID,
+			ReviewRunID:   row.ReviewRunID,
+			RuntimeHandle: row.RuntimeHandle,
+		})
+	}
+	return out, nil
+}
+
+// RevokeClosedReviewRunAgentCredentials revokes every live credential whose
+// review run has stopped running, in one set-based statement.
+//
+// It is the recovery half of credential revocation: the obligation it
+// discharges is re-derived from durable rows rather than remembered, so a pass
+// that fails, a daemon that dies mid-pass, and a revocation that was never
+// attempted at all are the same situation on the next pass.
+func (s *Store) RevokeClosedReviewRunAgentCredentials(ctx context.Context, at time.Time) (int64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	n, err := s.qw.RevokeClosedReviewRunAgentCredentials(ctx, timePtrToNullTime(&at))
+	if err != nil {
+		return 0, fmt.Errorf("revoke agent credentials for closed review runs: %w", err)
+	}
+	return n, nil
+}
+
+// RevokeAgentCredentialsForClosedReviewRun revokes one review run's live
+// credentials, but only once that run has durably stopped running.
+//
+// The guard is the difference between this and
+// RevokeAgentCredentialsForReviewRun above: the unguarded form is for a launch
+// that failed, where there is no reviewer to protect. This one runs beside a
+// live reviewer, so it must never take away the identity a review still in
+// progress needs in order to report what it found.
+func (s *Store) RevokeAgentCredentialsForClosedReviewRun(ctx context.Context, reviewRunID string, at time.Time) (int64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	n, err := s.qw.RevokeAgentCredentialsForClosedReviewRun(ctx, gen.RevokeAgentCredentialsForClosedReviewRunParams{
+		RevokedAt:   timePtrToNullTime(&at),
+		ReviewRunID: reviewRunID,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("revoke agent credentials for closed review run %s: %w", reviewRunID, err)
+	}
+	return n, nil
+}
+
 // RevokeAgentCredentialsForSession revokes every live credential bound to one
 // session, for the session's own termination path.
 func (s *Store) RevokeAgentCredentialsForSession(ctx context.Context, sessionID domain.SessionID, at time.Time) (int64, error) {

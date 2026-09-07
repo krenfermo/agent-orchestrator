@@ -172,6 +172,18 @@ func RunWithConfig(cfg config.Config) error {
 	// cannot serve: a reviewer or worker in a pane, with no browser and no
 	// person at the keyboard. See service/agentauth.
 	agentAuthMgr := agentauth.New(store, nil, 0)
+	// ...and the end of that identity. A credential outlives its usefulness the
+	// moment the review run it was minted for stops running, and before this it
+	// was only ever taken back on the paths where AO killed the reviewer or
+	// failed to start one -- never on the path a reviewer that simply finished
+	// takes. This reconciler owns both halves of the close-out (the durable row
+	// and the file the token was handed over in) and both timings: eagerly, from
+	// the submit that ends the authority, and as a sweep on boot and on a timer
+	// for every ending that has no request to hang off. See agentauth/reconciler.go.
+	agentCredentialReaper := agentauth.NewReconciler(agentAuthMgr, agentauth.ReconcilerConfig{
+		DataDir: cfg.DataDir,
+		Logger:  log,
+	})
 	bootstrapResult, err := authMgr.Bootstrap(context.Background(), os.Getenv("AO_BOOTSTRAP_ADMIN_EMAIL"), os.Getenv("AO_BOOTSTRAP_ADMIN_PASSWORD"))
 	if err != nil {
 		log.Warn("bootstrap admin setup failed", "err", err)
@@ -435,7 +447,7 @@ func RunWithConfig(cfg config.Config) error {
 		NewID:    uuid.NewString,
 	})
 
-	sessions, err := startSession(ctx, cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, agents, managedPreview, browserBroker, browserAuthority, chatLauncher{svc: chatSvc}, settingsSvc, sessionFactNotifier, log)
+	sessions, err := startSession(ctx, cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, agents, managedPreview, browserBroker, browserAuthority, chatLauncher{svc: chatSvc}, settingsSvc, sessionFactNotifier, agentCredentialReaper, log)
 	if err != nil {
 		stop()
 		lcStack.Stop()
@@ -929,6 +941,13 @@ func RunWithConfig(cfg config.Config) error {
 	intelligenceDone := projectmemorysvc.NewReconciler(memoryAPI, store,
 		projectmemorysvc.ReconcilerConfig{Logger: log}).Start(ctx)
 
+	// The revocation sweep. Its FIRST pass is the restart recovery: whatever a
+	// previous incarnation could not revoke -- or died before revoking, or was
+	// running a build that never revoked at all -- is re-derived from the same
+	// durable rows here and taken back, with nothing to migrate and nothing to
+	// replay.
+	agentCredentialsDone := agentCredentialReaper.Start(ctx)
+
 	_ = os.Unsetenv(browserruntime.RuntimeAddressEnv)
 	if ln, addr, err := browserruntime.Listen(cfg.RunFilePath); err != nil {
 		log.Warn("browser runtime: listener unavailable; agent browser control disabled", "err", err)
@@ -998,6 +1017,7 @@ func RunWithConfig(cfg config.Config) error {
 	managedPreview.Close()
 	<-previewDone
 	<-intelligenceDone
+	<-agentCredentialsDone
 	<-workItemsDone
 	// Close chat controllers before the lifecycle stack: each owns an app-server
 	// child process, and closing them also settles any turn left in flight so a
