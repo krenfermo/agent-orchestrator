@@ -67,6 +67,16 @@ func (s SessionScoping) enforced() bool {
 //     of owner), so no legacy desktop session becomes unreachable.
 //   - a session owned by a DIFFERENT user: denied.
 func AuthorizeSessionAccess(w http.ResponseWriter, r *http.Request, scoping SessionScoping, id domain.SessionID) bool {
+	// P4-I: an AO-launched agent reaches exactly the session it was launched
+	// for, and nothing else. Checked first, and unconditionally -- before the
+	// Guard branch, before the scoping-disabled early return, and before
+	// trusted-local mode -- because this binding is a property of the
+	// CREDENTIAL, not of the installation's authorization posture. A desktop
+	// install with scoping off must still not let a reviewer steer a session it
+	// has no business in. Every non-agent request passes straight through.
+	if !agentMayReachSession(w, r, id) {
+		return false
+	}
 	if scoping.Guard.Enabled() {
 		return scoping.Guard.AllowSession(w, r, sessionPermissionFor(r.Method), id)
 	}

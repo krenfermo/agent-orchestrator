@@ -79,6 +79,9 @@ type Deps struct {
 	DoctorGitLabRESTBase string
 	Now                  func() time.Time
 	Sleep                func(time.Duration)
+	// LookupEnv reads the process environment. Injectable so the agent-identity
+	// rules below (P4-I) are testable without mutating the real environment.
+	LookupEnv func(string) (string, bool)
 }
 
 // DefaultDeps returns production dependencies.
@@ -94,6 +97,7 @@ func DefaultDeps() Deps {
 		LookPath:             exec.LookPath,
 		CommandOutput:        commandOutput,
 		CommandOutputInDir:   commandOutputInDir,
+		LookupEnv:            os.LookupEnv,
 		DoctorGitHubRESTBase: defaultDoctorGitHubRESTBase,
 		DoctorGitLabRESTBase: defaultDoctorGitLabRESTBase,
 		Now:                  time.Now,
@@ -154,6 +158,9 @@ func (d Deps) withDefaults() Deps {
 	}
 	if d.Sleep == nil {
 		d.Sleep = def.Sleep
+	}
+	if d.LookupEnv == nil {
+		d.LookupEnv = def.LookupEnv
 	}
 	return d
 }

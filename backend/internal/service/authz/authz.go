@@ -108,6 +108,14 @@ type Subject struct {
 	UniversalProject domain.ProjectRole
 	// RecoveredOwner records that the trusted-local recovery rule applied.
 	RecoveredOwner bool
+	// Agent is the bounded grant of an AO-launched agent (P4-I), nil for every
+	// human request.
+	//
+	// It only ever NARROWS. Allows grants the INTERSECTION of this and the
+	// account's own authority, so an agent acting for an owner is confined to
+	// the one project, session and run its launch was for, and an account that
+	// loses access loses it for its agents at the same instant.
+	Agent *domain.AgentAuthority
 }
 
 // ErrUnauthenticated is the 401 an unresolved principal produces.
@@ -148,6 +156,14 @@ func (s *Service) Authorize(ctx context.Context, p domain.Principal, perm domain
 // implementation of the rule.
 func (s Subject) Allows(perm domain.Permission, res domain.AuthzResource) bool {
 	if s.User.ID == "" || s.User.Status != domain.UserStatusActive {
+		return false
+	}
+	// P4-I: an agent's own grant is a CEILING applied before the account's
+	// rules, never a substitute for them. Both have to say yes, so a reviewer
+	// launched for an owner still cannot read another project, and an owner who
+	// loses a grant loses it for their agents in the same instant. Placed first
+	// because a refusal here needs no further lookup.
+	if s.Agent != nil && !s.Agent.Allows(perm, res) {
 		return false
 	}
 	scope := domain.ScopeOf(perm)
@@ -304,6 +320,7 @@ func (s *Service) resolve(ctx context.Context, p domain.Principal) (Subject, err
 	sub := Subject{
 		User:           p.User,
 		Method:         p.AuthMethod,
+		Agent:          p.Agent,
 		Role:           p.User.Role,
 		TenantRoles:    map[domain.TenantID]domain.TenantRole{},
 		ProjectRoles:   map[domain.ProjectID]domain.ProjectRole{},

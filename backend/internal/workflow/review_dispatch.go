@@ -271,6 +271,21 @@ type ReviewerLaunchRequest struct {
 	// runtime-home, resolved once by Coordinator.resolveRuntimeEnv. Nil
 	// preserves pre-8P-B.1 behavior exactly.
 	RuntimeEnv map[string]string
+
+	// P4-I: what the reviewer's own CREDENTIAL is bound to.
+	//
+	// A reviewer has to call the daemon back to record its verdict, and on an
+	// installation that requires authentication it needs an identity to do
+	// that with. These four fields are what that identity is scoped to -- the
+	// run, the step, the account it acts for, and the launch generation -- so
+	// the credential the launcher mints can be confined to exactly this launch
+	// instead of standing for the person who owns the run. All four are
+	// optional: a launcher with no credential issuer wired ignores them, which
+	// is the pre-P4-I behavior every headless test relies on.
+	WorkflowRunID  string
+	WorkflowStepID string
+	OwnerUserID    domain.UserID
+	Generation     int64
 }
 
 // ReviewerLaunchResult is the runtime handle created for a reviewer launch.
@@ -851,8 +866,21 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 			// cancellation is the same CAS-guarded one every stall uses (so a
 			// verdict landing in the same instant still wins), and the
 			// replacement reviews the same target.
-			if ok && humanResume && priorRun.Status == domain.ReviewRunRunning &&
-				!priorRun.HasEffectiveVerdict() && c.reviewerRuntimeGone(ctx, run, reviewStep, priorRun) {
+			// P4-I widens the EVIDENCE, not the mechanism. reviewerRuntimeGone
+			// asks "is the reviewer gone?"; reviewerCannotDeliverVerdict asks
+			// "could any verdict from it ever reach AO?" -- and answers yes
+			// only for AO's own, provably-owned reviewer on an installation
+			// that requires an identity the launch never gave it. That second
+			// question is the one wf-98ab416c needed: its reviewer was alive,
+			// owned, finished, and refused 401 by the only route it had.
+			//
+			// Both feed the SAME recovery below, deliberately. The termination,
+			// the CAS-guarded close-out, the single bounded replacement over the
+			// same target and the provenance it records are one implementation
+			// with two proofs in front of it, not two paths that could drift.
+			if ok && humanResume && priorRun.Status == domain.ReviewRunRunning && !priorRun.HasEffectiveVerdict() &&
+				(c.reviewerRuntimeGone(ctx, run, reviewStep, priorRun) ||
+					c.reviewerCannotDeliverVerdict(ctx, run, reviewStep, priorRun)) {
 				// Read the stop BEFORE the recovery writes its own bookkeeping
 				// over it (see clearReviewStateAmbiguousStop).
 				parkedOn, _ := c.latestCanonicalStopReason(ctx, run.ID)
@@ -1542,7 +1570,7 @@ func (c *Coordinator) dispatchReviewFromPending(
 	if err := c.reviewerLauncher.Preflight(ctx, harness, worktreePath); err != nil {
 		return c.recordReviewLaunchFailure(ctx, run, reviewStep, entry, harness, reviewRunID, targetSHA, cycleNumber, reviewLaunchStagePreflight, fmt.Errorf("reviewer preflight: %w", err))
 	}
-	runtimeEnv, _, _, err := c.resolveRuntimeEnv(ctx, run.ID, domain.AgentHarness(harness))
+	runtimeEnv, runOwner, _, err := c.resolveRuntimeEnv(ctx, run.ID, domain.AgentHarness(harness))
 	if err != nil {
 		return c.recordReviewLaunchFailure(ctx, run, reviewStep, entry, harness, reviewRunID, targetSHA, cycleNumber, reviewLaunchStageRuntimeEnv, err)
 	}
@@ -1577,6 +1605,14 @@ func (c *Coordinator) dispatchReviewFromPending(
 		WorkspacePath:   worktreePath,
 		Prompt:          prompt,
 		RuntimeEnv:      runtimeEnv,
+		// P4-I: the scope of the credential this reviewer will speak with. The
+		// cycle number is the generation, so a replacement reviewer over the
+		// same target holds its own credential and its predecessor's can be
+		// revoked without touching it.
+		WorkflowRunID:  run.ID,
+		WorkflowStepID: reviewStep.ID,
+		OwnerUserID:    runOwner,
+		Generation:     int64(cycleNumber),
 	}
 	// P2-C §7: a Reviewer is entitled to exactly what the Worker it reviews was
 	// entitled to. Reviewing a change against knowledge the author did not have

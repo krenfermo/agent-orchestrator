@@ -52,6 +52,14 @@ import (
 // silently un-authenticate the CLI.
 const sessionCookieName = "ao_session"
 
+// agentTokenHeader mirrors httpd/identity.AgentTokenHeader, duplicated for the
+// same reason sessionCookieName is: the CLI does not import the HTTP server's
+// packages. A drift here is caught by the daemon answering 401, and by
+// TestAgentTokenHeaderMatchesDaemon.
+//
+//nolint:gosec // G101: an HTTP header name, not a credential.
+const agentTokenHeader = "X-AO-Agent-Token"
+
 // loginPollInterval is how often `ao auth login` asks the daemon whether the
 // browser half has finished. The daemon's own desktop pickup polls at the same
 // cadence; it is a loopback call against an in-memory-cheap lookup.

@@ -9,6 +9,7 @@ package identity
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
@@ -18,6 +19,25 @@ import (
 // from the LAN bridge's preview-file auth cookie (httpd/auth.go's
 // authCookieName) — the two never share a name or a code path.
 const SessionCookieName = "ao_session"
+
+// AgentTokenHeader carries the credential an AO-LAUNCHED AGENT presents (P4-I).
+//
+// A header, deliberately, and never a cookie: an agent is not a browser, and the
+// two credential kinds must be impossible to confuse. A browser session
+// presented here would not resolve, and an agent credential presented in the
+// cookie would not resolve either -- each is only ever read by the resolver that
+// knows what it is.
+//
+//nolint:gosec // G101: an HTTP header name, not a credential.
+const AgentTokenHeader = "X-AO-Agent-Token"
+
+// AgentResolver turns a raw agent credential into a principal carrying the
+// launch's bounded authority. Nil disables agent identity entirely, which is
+// what every pre-P4-I wiring (and every test that wires no identity at all)
+// gets.
+type AgentResolver interface {
+	ResolveAgentPrincipal(ctx context.Context, rawToken string) (domain.Principal, error)
+}
 
 type principalContextKey struct{}
 
@@ -109,14 +129,37 @@ type Resolver interface {
 // network level (see AGENTS.md); this middleware only ever attaches
 // identity, it never gates it.
 //
+// P4-I: agents, when wired, are resolved BEFORE the cookie and from their own
+// header. See the comments in the body for why a presented agent credential is
+// never allowed to fall back onto a browser session.
+//
 // trustedLocal true (the default) makes a request with no session cookie
 // resolve to whatever bootstrapAdmin returns (when it returns ok) rather
 // than to "no user" — this is what keeps today's single-user desktop flow
 // visibly unchanged: no login screen, every route behaves as it always has.
-func Middleware(resolver Resolver, trustedLocal bool, bootstrapAdmin func(ctx context.Context) (domain.User, bool)) func(http.Handler) http.Handler {
+func Middleware(resolver Resolver, agents AgentResolver, trustedLocal bool, bootstrapAdmin func(ctx context.Context) (domain.User, bool)) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if resolver != nil {
+			// P4-I: an agent credential is decided FIRST and decided ALONE.
+			//
+			// Presenting the header is a claim about what this request is, and
+			// once made it is the only identity considered: a bad agent token
+			// resolves to NO principal rather than falling through to the
+			// cookie or to trusted-local synthesis. Falling through is the
+			// dangerous direction -- it would let a stale agent token quietly
+			// borrow whatever identity happened to be lying around, which is
+			// the escalation this whole mechanism exists to avoid.
+			agentClaimed := false
+			if raw := strings.TrimSpace(r.Header.Get(AgentTokenHeader)); raw != "" {
+				agentClaimed = true
+				if agents != nil {
+					if p, err := agents.ResolveAgentPrincipal(r.Context(), raw); err == nil && p.IsAgent() {
+						next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), p)))
+						return
+					}
+				}
+			}
+			if resolver != nil && !agentClaimed {
 				if c, err := r.Cookie(SessionCookieName); err == nil && c.Value != "" {
 					if p, err := resolver.ResolvePrincipal(r.Context(), c.Value); err == nil {
 						next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), p)))
@@ -124,6 +167,14 @@ func Middleware(resolver Resolver, trustedLocal bool, bootstrapAdmin func(ctx co
 					}
 				}
 			}
+			// A failed agent claim falls through to trusted-local synthesis but
+			// NEVER to the cookie. On a desktop install the loopback listener is
+			// itself the trust boundary, so an agent whose credential expired
+			// behaves exactly as it did before this mechanism existed. On a
+			// multi-user install trustedLocal is off by construction, so the
+			// same request resolves no identity at all and is answered 401 --
+			// which is the honest answer, and is recoverable by relaunching the
+			// agent rather than by borrowing somebody's session.
 			if trustedLocal && bootstrapAdmin != nil {
 				if u, ok := bootstrapAdmin(r.Context()); ok {
 					// Recorded as trusted_local, not as a login: no credential

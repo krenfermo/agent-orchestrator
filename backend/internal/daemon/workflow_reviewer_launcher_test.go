@@ -107,11 +107,17 @@ type fakeWorkflowReviewerRuntime struct {
 	// currently exist. It is what makes probe/cancel testable without a runtime.
 	live         map[string]bool
 	destroyCalls int
+	// createErr models the runtime refusing to create the pane, so a test can
+	// prove a failed launch leaves no live credential behind.
+	createErr error
 }
 
 func (f *fakeWorkflowReviewerRuntime) Create(_ context.Context, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
-	f.calls++
 	f.lastCfg = cfg
+	if f.createErr != nil {
+		return ports.RuntimeHandle{}, f.createErr
+	}
+	f.calls++
 	if f.live == nil {
 		f.live = map[string]bool{}
 	}

@@ -47,6 +47,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/runtimegc"
 	"github.com/aoagents/agent-orchestrator/backend/internal/secretbox"
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
+	agentauth "github.com/aoagents/agent-orchestrator/backend/internal/service/agentauth"
 	authsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/authsvc"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/authz"
 	browsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/browser"
@@ -165,6 +166,12 @@ func RunWithConfig(cfg config.Config) error {
 	// backfills any pre-existing NULL project/workflow-run owner to that
 	// admin so nothing is silently orphaned. Never hard-fails startup.
 	authMgr := authsvc.New(store, nil)
+	// P4-I: the identity an AO-LAUNCHED AGENT holds. Built beside authMgr and
+	// over the same store, because it answers the same question -- "who is this
+	// request?" -- for the one caller the browser-session layer structurally
+	// cannot serve: a reviewer or worker in a pane, with no browser and no
+	// person at the keyboard. See service/agentauth.
+	agentAuthMgr := agentauth.New(store, nil, 0)
 	bootstrapResult, err := authMgr.Bootstrap(context.Background(), os.Getenv("AO_BOOTSTRAP_ADMIN_EMAIL"), os.Getenv("AO_BOOTSTRAP_ADMIN_PASSWORD"))
 	if err != nil {
 		log.Warn("bootstrap admin setup failed", "err", err)
@@ -564,12 +571,18 @@ func RunWithConfig(cfg config.Config) error {
 		return fmt.Errorf("workflow reviewer resolver: %w", err)
 	}
 	workflowReviewerLauncher := &workflowReviewerLauncher{
-		reviewers:  workflowReviewers,
-		runtime:    runtimeAdapter,
-		dataDir:    cfg.DataDir,
-		runFile:    cfg.RunFilePath,
-		auth:       reviewerAgentAuth{agents: agents},
-		executable: os.Executable,
+		reviewers:   workflowReviewers,
+		runtime:     runtimeAdapter,
+		dataDir:     cfg.DataDir,
+		runFile:     cfg.RunFilePath,
+		auth:        reviewerAgentAuth{agents: agents},
+		credentials: agentAuthMgr,
+		// On an installation where a cookie-less request resolves nobody, a
+		// reviewer with no credential of its own cannot record a verdict, so
+		// the launch is refused rather than started into the dead end that
+		// parked wf-98ab416c.
+		requireAgentIdentity: !cfg.TrustedLocalMode,
+		executable:           os.Executable,
 	}
 	// Checkpoint 8K-B pass 2: the cross-provider Decision Resolver launcher.
 	// Unlike workflowReviewerLauncher, this resolves through the SAME
@@ -696,7 +709,7 @@ func RunWithConfig(cfg config.Config) error {
 	workItemsDone := workitems.NewWorker(workItemsSvc, workitems.WorkerConfig{Logger: log}).Start(ctx)
 	_ = workItemsDone
 
-	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, projectMemory, memoryProvisioning, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, incidentAgentLauncher, notificationWriter, workItemsSvc, agents, newTerminalRuntimeReclaimer(runtimeGC, lcStack.LCM, log), plannerUsageRecorderFor(usageCollector), log)
+	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, projectMemory, memoryProvisioning, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, incidentAgentLauncher, notificationWriter, workItemsSvc, agents, newTerminalRuntimeReclaimer(runtimeGC, lcStack.LCM, log), plannerUsageRecorderFor(usageCollector), agentAuthMgr, log)
 	// Checkpoint 8P-E.13A: reconciliation can only decide a stopped owner's
 	// lock once it can ask what that stop means, and only the coordinator knows
 	// (branchlock/retention.go). The coordinator needs the lock manager to
@@ -886,6 +899,7 @@ func RunWithConfig(cfg config.Config) error {
 		PreviewServer:       managedPreview,
 		SessionCapabilities: browserAuthority,
 		Auth:                authMgr,
+		AgentAuth:           agentAuthMgr,
 		SSO:                 ssoMgr,
 		ProjectOwnership:    store,
 		ProjectTenancy:      store,
