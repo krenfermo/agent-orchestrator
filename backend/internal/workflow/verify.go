@@ -494,7 +494,12 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 		if latest.Outcome == domain.WorkflowAttemptSucceeded {
 			return c.completeVerifiedRun(ctx, run, verifyStep)
 		}
-		return run, verifyStep, nil
+		// A FAILED attempt of the identity this pass just derived. Returning nil
+		// here used to be the end of it — no checkpoint, no transition — and
+		// because verifyAttemptID is a pure function of the four inputs derived
+		// above, every later pass re-derived the same row and returned the same
+		// nothing. See verify_stalled_attempt.go.
+		return c.resolveFailedVerifyAttempt(ctx, run, verifyStep, latest)
 	}
 	if hasAttempt && !artifact.Verification.allCommandsRetrySafe() {
 		return c.finishVerifyFailure(ctx, run, verifyStep, latest, VerifyResult{Version: verifyResultVersion, TargetKey: targetKey, ReviewedFingerprint: reviewed, ErrorClass: domain.WorkflowErrorVerifyAmbiguous}, "interrupted verify contains a command not declared retry-safe")

@@ -382,9 +382,17 @@ func (c *Coordinator) RecoverUnprovableApprovedHead(ctx stdctx.Context, runID st
 	// The stop must be one this recovery is for. Every other human-owned stop
 	// is left exactly where it is: a person pressing the wrong button must not
 	// silently discard an approval that was never the problem.
+	// ReasonVerifyAttemptUnretryable is in the accepted set for the same reason
+	// ReasonVerifyUnrepairable is: it is a NAME for a verification that has
+	// stopped, not a claim about why. verify_stalled_attempt.go records it when a
+	// failed verification has no path left to be asked again — which is exactly
+	// the state a stale approval produces — and excluding it would mean the fix
+	// that made the dead end visible also took away the recovery for it. The
+	// error-class guard below is unchanged and still does the actual gating.
 	reason, _, hasReason := c.stopReason(ctx, run)
 	if !hasReason || (reason != ReasonVerifyApprovedHeadUnprovable &&
-		reason != ReasonVerifyWorkspaceUnattributable && reason != ReasonVerifyUnrepairable) {
+		reason != ReasonVerifyWorkspaceUnattributable && reason != ReasonVerifyUnrepairable &&
+		reason != ReasonVerifyAttemptUnretryable) {
 		return RunDetail{}, fmt.Errorf(
 			"%w: workflow run %q is stopped on %q, which is not an unprovable review provenance", ErrInvalid, runID, reason)
 	}
