@@ -74,6 +74,22 @@ describe("terminal selection colours", () => {
 		expect(dark.selectionBackground).not.toBe(light.selectionBackground);
 	});
 
+	it("gives each variant three distinct selection roles, and the two variants distinct fills", () => {
+		// The fallbacks are the values under test here: an accidental copy-paste
+		// that made the focused and unfocused fills the same colour, or the dark
+		// and light fills the same colour, would make the selection unreadable in
+		// one state or one theme while every "is it set?" assertion stayed green.
+		const { dark, light } = buildTerminalThemes();
+
+		for (const theme of [dark, light]) {
+			expect(theme.selectionBackground).not.toBe(theme.selectionForeground);
+			expect(theme.selectionBackground).not.toBe(theme.selectionInactiveBackground);
+			expect(theme.selectionForeground).not.toBe(theme.selectionInactiveBackground);
+		}
+		expect(dark.selectionBackground).not.toBe(light.selectionBackground);
+		expect(dark.selectionInactiveBackground).not.toBe(light.selectionInactiveBackground);
+	});
+
 	it("never leaves a selection colour empty when the tokens are unavailable", () => {
 		// An empty string here would hand xterm its built-in translucent default,
 		// which is the wash this fix exists to replace.

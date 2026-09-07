@@ -43,6 +43,11 @@ import {
 	registerTerminalClipboardTarget,
 	type TerminalClipboardTarget,
 } from "../lib/terminal-clipboard";
+import {
+	createTailFollowTracker,
+	NEW_LINE_COUNT_CAP,
+	type ViewportAnchor,
+} from "../lib/terminal-follow";
 import { applyDocumentTheme, applyDocumentThemeStyle } from "../lib/theme";
 import { buildTerminalThemes } from "../lib/terminal-themes";
 import { useUiStore, type Theme } from "../stores/ui-store";
@@ -276,24 +281,8 @@ function pageKeyReport(lines: number): string {
 	return lines < 0 ? PAGE_UP : PAGE_DOWN;
 }
 
-// How far off the live tail still counts as following it. Landing exactly on
-// the last row is not something a trackpad flick or a page key reliably does,
-// and re-arming auto-follow only on an exact match leaves the terminal feeling
-// stuck one line short of the bottom.
-const FOLLOW_TAIL_SLACK_LINES = 2;
-
-// Stop counting new lines here. Past a few hundred the exact number is no
-// longer something the reader acts on, and an uncapped counter would relabel
-// (and resize) the control on every line of a `git log`.
-const NEW_LINE_COUNT_CAP = 999;
-
-// Is the viewport parked at the live tail? Alt-buffer panes have no scrollback,
-// so baseY and viewportY are both 0 there and they always read as following —
-// which is right: nothing about them can scroll away from the tail.
-function isAtTail(term: Terminal): boolean {
-	const buffer = term.buffer.active;
-	return buffer.baseY - buffer.viewportY <= FOLLOW_TAIL_SLACK_LINES;
-}
+// The tail-follow rules (slack window, new-line cap, anchor arithmetic) live in
+// lib/terminal-follow.ts so they can be unit-tested without a live xterm.
 
 type ScrollbackNavigation = "pageUp" | "pageDown" | "top" | "bottom";
 
@@ -607,17 +596,17 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		// up, output keeps arriving off-screen with nothing to say so, and the
 		// only way back is hunting for the bottom with the wheel.
 		//
-		// Follow is DERIVED from the buffer, never asserted. Every path that
-		// moves the viewport — wheel, page keys, the activation scroll, the
-		// resize anchor below — ends in an onScroll, so this cannot drift out of
-		// sync with what is on screen, and scrolling back to within
-		// FOLLOW_TAIL_SLACK_LINES of the bottom re-arms auto-follow on its own
-		// without touching the control.
-		let following = true;
-		let newLines = 0;
+		// Follow is DERIVED from the buffer, never asserted — see
+		// lib/terminal-follow.ts, which owns those rules (and is unit-tested
+		// without an xterm). Every path that moves the viewport — wheel, page
+		// keys, the activation scroll, the resize anchor below — ends in an
+		// onScroll, so this cannot drift out of sync with what is on screen, and
+		// scrolling back to within the slack window re-arms auto-follow on its
+		// own without touching the control.
 		let tailPublishFrame: number | null = null;
 		const publishTailState = () => {
 			tailPublishFrame = null;
+			const { following, newLines } = follow.state;
 			setTailState((current) =>
 				current.following === following && current.newLines === newLines ? current : { following, newLines },
 			);
@@ -628,50 +617,24 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			if (tailPublishFrame !== null) return;
 			tailPublishFrame = requestAnimationFrame(publishTailState);
 		};
-		const syncFollowState = () => {
-			const next = isAtTail(term);
-			if (next === following) return;
-			following = next;
-			if (next) newLines = 0;
-			scheduleTailPublish();
-		};
-		// Landing inside the slack window is not, on its own, following — not as
-		// far as xterm is concerned. It keeps a private user-scrolling lock that
-		// any upward scroll sets and only a downward scroll actually REACHING
-		// ybase clears (BufferService.scrollLines), and while that lock is set,
-		// incoming output advances the buffer without advancing the viewport
-		// (BufferService.scroll). A reader who comes to rest one line short of
-		// the bottom would therefore be told they are on the tail while xterm
-		// quietly leaves them a line further behind with every line that
-		// arrives — and those lines would go uncounted, because we believed we
-		// were following while they landed.
-		//
-		// So close the gap: whenever the viewport settles inside the slack
-		// window, snap it to the exact bottom, which is also what clears the
-		// lock. Called from the paths that move the viewport rather than from
-		// the onScroll listener, so it never re-enters xterm's scroll dispatch
-		// from inside xterm's own scroll event.
-		const settleAtTail = () => {
-			const buffer = term.buffer.active;
-			if (buffer.viewportY === buffer.baseY || !isAtTail(term)) return;
-			term.scrollToBottom();
-		};
-		const scrollTracker = term.onScroll(syncFollowState);
-		// Deliberately not derived from the buffer's tail distance: once the
-		// bounded scrollback is full, xterm trims from the top as it appends, so
-		// baseY - viewportY stops growing even though output keeps coming. Line
-		// feeds keep counting through that. (onScroll cannot carry this either —
-		// output landing under a scrolled-up reader moves no viewport, so it
-		// fires no scroll event.)
-		const lineTracker = term.onLineFeed(() => {
-			syncFollowState();
-			if (following || newLines >= NEW_LINE_COUNT_CAP) return;
-			newLines += 1;
-			scheduleTailPublish();
+		const follow = createTailFollowTracker({
+			readPosition: () => term.buffer.active,
+			onChange: scheduleTailPublish,
 		});
+		// Close the gap xterm's user-scrolling lock leaves when the reader comes
+		// to rest inside the slack window — see needsTailSettle() for why being
+		// near the bottom is not the same as following it. Called from the paths
+		// that move the viewport rather than from the onScroll listener, so it
+		// never re-enters xterm's scroll dispatch from inside xterm's own scroll
+		// event.
+		const settleAtTail = () => {
+			if (follow.needsTailSettle()) term.scrollToBottom();
+		};
+		const scrollTracker = term.onScroll(follow.syncFromViewport);
+		const lineTracker = term.onLineFeed(follow.noteLineFeed);
 		const jumpToLatest = () => {
 			showLatestOutput();
-			syncFollowState();
+			follow.syncFromViewport();
 			// Focus belongs in the terminal, not on a transient control the user
 			// pressed once — the next keystroke is meant for the agent.
 			focusTerminal();
@@ -701,22 +664,17 @@ export function XtermTerminal(props: XtermTerminalProps) {
 		// When the grid does change, the reflow rewrites the very lines a
 		// selection is anchored to and xterm exposes no way to map the old range
 		// onto the new buffer, so that selection is lost with or without this.
-		const captureViewportAnchor = () => {
-			const buffer = term.buffer.active;
-			return { following, linesFromTail: Math.max(0, buffer.baseY - buffer.viewportY) };
-		};
-		const restoreViewportAnchor = (anchor: ReturnType<typeof captureViewportAnchor>) => {
-			if (anchor.following) {
+		const restoreViewportAnchor = (anchor: ViewportAnchor) => {
+			const restore = follow.anchorRestore(anchor);
+			if (restore.toBottom) {
 				term.scrollToBottom();
 				return;
 			}
-			const buffer = term.buffer.active;
-			const delta = Math.max(0, buffer.baseY - anchor.linesFromTail) - buffer.viewportY;
-			if (delta !== 0) term.scrollLines(delta);
+			if (restore.delta !== 0) term.scrollLines(restore.delta);
 			settleAtTail();
 		};
 		const fitPreservingViewport = () => {
-			const anchor = captureViewportAnchor();
+			const anchor = follow.captureAnchor();
 			fit.fit();
 			restoreViewportAnchor(anchor);
 		};
@@ -819,7 +777,7 @@ export function XtermTerminal(props: XtermTerminalProps) {
 			// see scrollbackNavigation() for which keys qualify and why Home/End
 			// stay with the running program at a live prompt. Consuming the event
 			// keeps the key off both the PTY and the app's outer key handlers.
-			const navigation = ownsLocalScrollback() ? scrollbackNavigation(event, following) : null;
+			const navigation = ownsLocalScrollback() ? scrollbackNavigation(event, follow.state.following) : null;
 			if (navigation) {
 				consumeTerminalShortcut(event);
 				if (navigation === "pageUp") term.scrollPages(-1);

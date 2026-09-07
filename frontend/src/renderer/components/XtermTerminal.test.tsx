@@ -112,6 +112,13 @@ vi.mock("@xterm/xterm", () => ({
 		loadAddon() {}
 		open(host: HTMLElement) {
 			host.appendChild(document.createElement("textarea"));
+			// xterm listens for the wheel on its own element and consults the
+			// custom handler first (returning false is what suppresses its default
+			// handling). Mirror that, so a test can dispatch a REAL wheel over the
+			// terminal and observe what does — and does not — reach the page.
+			host.addEventListener("wheel", (event) => {
+				this.wheelHandler?.(event as WheelEvent);
+			});
 		}
 		write() {}
 		writeln() {}
@@ -375,6 +382,36 @@ describe("XtermTerminal", () => {
 			delete document.documentElement.dataset.styleTheme;
 			act(() => useUiStore.setState({ themeStyle: "orchestrate" }));
 		}
+	});
+
+	// The palette itself (contrast against the plate, token wiring) is covered in
+	// lib/terminal-themes.test.ts. What matters here is that the live terminal is
+	// actually constructed with those colours, per theme — an xterm left without
+	// them falls back to its built-in translucent wash, which is invisible on the
+	// AO plates.
+	it.each(["dark", "light"] as const)("hands xterm an explicit %s selection palette", (theme) => {
+		render(<XtermTerminal theme={theme} />);
+
+		const applied = state.lastTerminal!.options.theme as {
+			selectionBackground: string;
+			selectionForeground: string;
+			selectionInactiveBackground: string;
+		};
+		expect(applied.selectionBackground).toMatch(/^#[0-9a-f]{6}$/i);
+		expect(applied.selectionForeground).toMatch(/^#[0-9a-f]{6}$/i);
+		// Focused and unfocused fills are distinct, so a selection stays visible —
+		// and visibly unfocused — when focus moves to app chrome.
+		expect(applied.selectionInactiveBackground).toMatch(/^#[0-9a-f]{6}$/i);
+		expect(applied.selectionInactiveBackground).not.toBe(applied.selectionBackground);
+	});
+
+	it("uses a different selection fill for the light theme than for the dark one", () => {
+		render(<XtermTerminal theme="dark" />);
+		const dark = (state.lastTerminal!.options.theme as { selectionBackground: string }).selectionBackground;
+		render(<XtermTerminal theme="light" />);
+		const light = (state.lastTerminal!.options.theme as { selectionBackground: string }).selectionBackground;
+
+		expect(dark).not.toBe(light);
 	});
 
 	it("does not reserve width for the hidden terminal scrollbar", () => {
@@ -695,6 +732,28 @@ describe("XtermTerminal", () => {
 			expect(state.lastTerminal!.keyHandler!(event)).toBe(true);
 			expect(event.preventDefault).not.toHaveBeenCalled();
 		}
+		expect(window.ao!.clipboard.writeText).not.toHaveBeenCalled();
+	});
+
+	it("does not consume Cmd+C when there is nothing to copy", () => {
+		setNavigatorPlatform("MacIntel");
+		render(<XtermTerminal theme="dark" />);
+		state.lastTerminal!.selection = "";
+
+		const event = {
+			key: "c",
+			metaKey: true,
+			ctrlKey: false,
+			shiftKey: false,
+			altKey: false,
+			preventDefault: vi.fn(),
+			stopPropagation: vi.fn(),
+		} as unknown as KeyboardEvent;
+
+		// Nothing selected: the shortcut has no work to do, so the event is left
+		// to xterm and to the app rather than being swallowed.
+		expect(state.lastTerminal!.keyHandler!(event)).toBe(true);
+		expect(event.preventDefault).not.toHaveBeenCalled();
 		expect(window.ao!.clipboard.writeText).not.toHaveBeenCalled();
 	});
 
@@ -1122,6 +1181,54 @@ describe("XtermTerminal", () => {
 		expect(state.lastTerminal!.scrollLines).toHaveBeenLastCalledWith(1);
 	});
 
+	// The terminal-vs-page half of the same rule, dispatched as a REAL wheel over
+	// the terminal rather than by calling the handler directly: the panes between
+	// the terminal and the shell content row are `overflow-x-hidden`, which CSS
+	// resolves to `overflow-y: auto`, so a gesture that escapes here scrolls the
+	// page out from under the pointer.
+	it("keeps an ordinary wheel over the terminal off the surrounding page", () => {
+		const onPageWheel = vi.fn();
+		const { container } = render(<XtermTerminal theme="dark" />);
+		container.addEventListener("wheel", onPageWheel);
+		const host = container.firstElementChild as HTMLElement;
+		state.lastTerminal!.modes.mouseTrackingMode = "none";
+		state.lastTerminal!.buffer.active.type = "normal";
+
+		const wheel = new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaMode: 1, deltaY: -3 });
+		host.dispatchEvent(wheel);
+
+		expect(state.lastTerminal!.scrollLines).toHaveBeenCalledWith(-3);
+		// Cancelled so the browser does not scroll `.xterm-viewport` natively on
+		// top of the programmatic scroll, and stopped so no ancestor moves at all.
+		expect(wheel.defaultPrevented).toBe(true);
+		expect(onPageWheel).not.toHaveBeenCalled();
+		// Belt to those suspenders, for any wheel that reaches the box without
+		// passing through the handler at all.
+		expect(host.style.overscrollBehavior).toBe("contain");
+	});
+
+	it("lets the zoom wheel through to the page so font-size still works over the terminal", () => {
+		const onPageWheel = vi.fn();
+		const { container } = render(<XtermTerminal theme="dark" />);
+		container.addEventListener("wheel", onPageWheel);
+		const host = container.firstElementChild as HTMLElement;
+		state.lastTerminal!.modes.mouseTrackingMode = "none";
+		state.lastTerminal!.buffer.active.type = "normal";
+
+		const zoom = new WheelEvent("wheel", {
+			bubbles: true,
+			cancelable: true,
+			ctrlKey: true,
+			deltaMode: 1,
+			deltaY: -3,
+		});
+		host.dispatchEvent(zoom);
+
+		expect(state.lastTerminal!.scrollLines).not.toHaveBeenCalled();
+		expect(zoom.defaultPrevented).toBe(false);
+		expect(onPageWheel).toHaveBeenCalledOnce();
+	});
+
 	it("does not force the viewport to the bottom on an ordinary scroll gesture", () => {
 		render(<XtermTerminal theme="dark" />);
 		state.lastTerminal!.modes.mouseTrackingMode = "none";
@@ -1360,6 +1467,35 @@ describe("XtermTerminal", () => {
 		expect(term.buffer.active.viewportY).toBe(term.buffer.active.baseY);
 		expect(term.focus).toHaveBeenCalled();
 		await waitFor(() => expect(screen.queryByTestId("terminal-jump-to-latest")).toBeNull());
+	});
+
+	it("follows new output again after Jump to latest, without re-showing the control", async () => {
+		const { term } = renderScrollbackTerminal();
+		term.wheelHandler!(wheelEvent({ deltaMode: 1, deltaY: -8 }));
+		term.feedLines(2);
+		await screen.findByTestId("terminal-jump-to-latest");
+
+		fireEvent.click(screen.getByTestId("terminal-jump-to-latest"));
+		await waitFor(() => expect(screen.queryByTestId("terminal-jump-to-latest")).toBeNull());
+
+		// Following again means the viewport rides the next lines of output, and
+		// the control stays away because nothing is being missed.
+		term.feedLines(4);
+
+		expect(term.buffer.active.viewportY).toBe(term.buffer.active.baseY);
+		await waitFor(() => expect(screen.queryByTestId("terminal-jump-to-latest")).toBeNull());
+	});
+
+	it("stops counting missed output at a readable cap", async () => {
+		const { term } = renderScrollbackTerminal();
+		term.wheelHandler!(wheelEvent({ deltaMode: 1, deltaY: -8 }));
+		await screen.findByTestId("terminal-jump-to-latest");
+
+		// Past the cap the exact number is no longer something the reader acts on,
+		// and an uncapped counter would relabel (and resize) the pill per line.
+		term.feedLines(1200);
+
+		await waitFor(() => expect(screen.getByTestId("terminal-jump-to-latest")).toHaveTextContent("999+ new lines"));
 	});
 
 	it("pages the local scrollback with Page Up/Page Down instead of sending them to the pane", () => {
