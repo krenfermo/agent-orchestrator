@@ -510,7 +510,14 @@ var attentionDispositions = map[string]AttentionDisposition{
 		HumanAction:    "Verification has been reopened the maximum number of times and still fails on AO's own verification infrastructure rather than on the code. Read the latest verify output, correct the verification configuration or the host, then start a fresh run — or cancel this one.",
 	},
 	ReasonVerifyAttemptUnretryable: {
-		HumanAction: "Verification failed and AO has no way to ask it again by itself (its findings are recorded, and no fix cycle or recovery can change what would be verified). Read the verify output, correct the cause or the verification setup, then continue this run — AO reopens the verification once per continue, within its bound — or cancel it.",
+		// The action is deliberately conditional. Continue reopens this ONLY
+		// when the recorded failure is one of the shapes a recovery door can
+		// prove safe — most often a branch that grew commits on top of the
+		// reviewed one, which still contains it (verify_branch_advanced.go).
+		// The earlier wording promised an unconditional reopen "once per
+		// continue", which sent people to press a button that correctly does
+		// nothing for every other shape, and told them nothing about why.
+		HumanAction: "Verification failed and AO cannot ask it again on its own: its findings are recorded, and no fix cycle can change what would be verified. Read the verify output. If the difference is work that was committed on top of what review approved, continue this run — AO proves the approved commit is still in the branch's history and then asks for one fresh review of what is there now. If the history was rewritten, or the change cannot be accounted for, continue will correctly do nothing: inspect the worktree and either restore it, or cancel this run.",
 	},
 	ReasonVerifyApprovedHeadUnprovable: {
 		Recovery:    domain.RecoveryInspectRepository,
