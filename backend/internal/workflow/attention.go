@@ -373,8 +373,20 @@ const (
 	// provider's configuration is known to be wrong, the launch just would not
 	// take.
 	ReasonWorkerLaunchRetriesExhausted = "worker_launch_retries_exhausted"
-	ReasonCapacityRetryExhausted       = string(domain.WorkflowErrorCapacityExhausted)
-	ReasonQuestionHumanRequired        = "question_human_required"
+	// ReasonPlacementUnenforceable is a launch AO refused because it could not
+	// prove where the work belongs: the run's frozen placement could not be
+	// read, or records a placement type this build does not understand.
+	//
+	// A stop rather than a retry, and deliberately not self-remediable. The
+	// alternative AO used to take was to continue with no placement at all,
+	// which routes the launch by the PROJECT's current execution mode -- so a
+	// run frozen into an isolated worktree, in a project since switched to
+	// direct-branch, wrote into the operator's own checkout. That is not a
+	// degraded launch, it is a different one, and it is the one thing the
+	// frozen placement exists to make impossible.
+	ReasonPlacementUnenforceable = "placement_unenforceable"
+	ReasonCapacityRetryExhausted = string(domain.WorkflowErrorCapacityExhausted)
+	ReasonQuestionHumanRequired  = "question_human_required"
 	// The three provider-preflight reasons are declared in
 	// provider_preflight.go, next to the classes they mirror, and registered in
 	// the dispositions table below. They name the one thing AO can now detect
@@ -631,6 +643,10 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonWorkerLaunchRetriesExhausted: {
 		HumanAction: "The worker failed to start on every automatic retry, without naming a configuration problem. Check the terminal/runtime and the provider's process, then continue this run — AO reopens the dispatch and starts exactly one worker.",
+	},
+	ReasonPlacementUnenforceable: {
+		Recovery:    domain.RecoveryOperatorAction,
+		HumanAction: "AO could not establish where this task's work belongs — its frozen execution placement could not be read — so it started nothing rather than fall back to the project's current setting and risk writing to the wrong checkout. The checkpoint names the placement generation. Check the run's placement, then continue this run.",
 	},
 	ReasonWorkerBlocked: {
 		HumanAction: "The worker is waiting on input inside its own session (often an interactive trust or auth prompt). Answer it in the session, then continue this run.",

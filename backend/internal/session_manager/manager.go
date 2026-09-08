@@ -2266,6 +2266,12 @@ func (m *Manager) RestoreAll(ctx context.Context) error {
 				SessionPrefix: sessionPrefix(project),
 				Branch:        rec.Metadata.Branch,
 				Path:          rec.Metadata.WorkspacePath,
+				// A restart must not re-place a session. See
+				// restore_placement.go: without this the router asks the
+				// PROJECT, and a project switched to direct-branch since the
+				// spawn re-attaches an isolated session to the operator's own
+				// checkout, orphaning the worktree that holds the work.
+				Placement: PlacementFromSessionFacts(rec.Metadata, project.Path),
 			})
 			if restoreErr != nil {
 				m.logger.Error("restore-all: workspace restore failed", "sessionID", rec.ID, "error", restoreErr)
@@ -2372,6 +2378,9 @@ func (m *Manager) restoreSessionWorkspace(ctx context.Context, project domain.Pr
 			SessionPrefix: sessionPrefix(project),
 			Branch:        rec.Metadata.Branch,
 			Path:          rec.Metadata.WorkspacePath,
+			// Same reason as restore-all above: where this session was created
+			// is a durable fact, and it outranks what the project says now.
+			Placement: PlacementFromSessionFacts(rec.Metadata, project.Path),
 		})
 	}
 	rows, err := m.workspaceProjectRestoreRows(ctx, project, rec)

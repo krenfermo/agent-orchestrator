@@ -146,7 +146,16 @@ func (w *Workspace) Create(ctx context.Context, cfg ports.WorkspaceConfig) (port
 	if err := w.addWorktree(ctx, repo, path, cfg.Branch, cfg.BaseBranch); err != nil {
 		return ports.WorkspaceInfo{}, err
 	}
-	return ports.WorkspaceInfo{Path: path, Branch: cfg.Branch, SessionID: cfg.SessionID, ProjectID: cfg.ProjectID}, nil
+	// RepoPath is the repository this worktree was cut from, and it is reported
+	// on EVERY return from this adapter, not only when re-attaching. It used to
+	// be omitted here alone, which made the fact silently absent for exactly the
+	// sessions that have it least ambiguously: a freshly created worktree.
+	//
+	// It is a durable identity rather than a convenience. The session manager
+	// stores it, and "is this session's workspace the repository itself?" -- the
+	// question that decides whether a restore re-attaches a worktree or hands
+	// back the operator's own checkout -- cannot be answered without it.
+	return ports.WorkspaceInfo{Path: path, Branch: cfg.Branch, SessionID: cfg.SessionID, ProjectID: cfg.ProjectID, RepoPath: repo}, nil
 }
 
 // CreateWorkspaceProject materialises a root-as-repo workspace session: the

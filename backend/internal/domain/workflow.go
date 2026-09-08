@@ -262,6 +262,12 @@ const (
 	// *reviewer* pane failure, a different failure surface a human triaging
 	// attempts needs to tell apart at a glance.
 	WorkflowErrorReviewerLaunchFailed WorkflowErrorClass = "reviewer_launch_failed"
+	// WorkflowErrorInvalidPlacement is a launch AO refused because it could not
+	// establish the run's frozen execution placement. Distinct from every
+	// provider class on purpose: nothing about the agent, its credentials or
+	// its binary is implicated, and no failover addresses it -- where the work
+	// belongs does not depend on who performs it.
+	WorkflowErrorInvalidPlacement WorkflowErrorClass = "invalid_placement"
 	// WorkflowErrorFixBudgetExhausted means the review->fix->re-review loop
 	// (Checkpoint 8D) hit its policy-configured max_fix_cycles while the
 	// latest verdict was still changes_requested. Distinct from every prior

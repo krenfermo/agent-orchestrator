@@ -102,6 +102,24 @@ func (c *Coordinator) placementEnabled() bool { return c.placements != nil }
 // lock, and how a worktree with somebody's only copy of the work gets orphaned.
 var ErrPlacementUnprovable = fmt.Errorf("%w: this run's execution placement cannot be established from durable facts", ErrInvalid)
 
+// ErrPlacementNotEnforceable is the fail-closed answer for a launch that cannot
+// be given the placement its run was frozen into.
+//
+// P3-A made the frozen placement travel with the launch so the workspace router
+// would honour the RUN's decision over the PROJECT's current configuration. It
+// travels as a value, and the empty value means "no frozen placement, route by
+// project" -- which is correct for a deployment with no placement authority
+// wired, and is silent data loss for every other one.
+//
+// So a read that fails no longer degrades into that empty value. The failure
+// mode it closes is specific and it is the one this whole subsystem exists to
+// prevent: a run frozen into isolated_worktree, inside a project configured for
+// direct_branch, whose placement read hiccups once -- and whose worker is
+// therefore launched into the user's own checkout, on the user's own branch,
+// with no worktree and no lock. Convenience is not a placement policy: a launch
+// AO cannot place correctly is a launch AO does not perform.
+var ErrPlacementNotEnforceable = fmt.Errorf("%w: this run's frozen execution placement could not be read, so AO cannot prove where its work belongs", ErrInvalid)
+
 // EnsureExecutionPlacement returns the frozen placement for a run's work,
 // freezing one if this obligation does not have one yet.
 //
@@ -127,7 +145,9 @@ func (c *Coordinator) EnsureExecutionPlacement(ctx stdctx.Context, run domain.Wo
 		return live, true, nil
 	}
 
-	proposed, err := c.selectExecutionPlacement(ctx, run, step, scope)
+	// A first freeze has no predecessor to inherit from: selection policy is the
+	// whole answer, which is what a freeze is for.
+	proposed, err := c.selectExecutionPlacement(ctx, run, step, scope, carriedPlacement{})
 	if err != nil {
 		return domain.ExecutionPlacement{}, false, err
 	}
@@ -158,17 +178,64 @@ func (c *Coordinator) EnsureExecutionPlacement(ctx stdctx.Context, run domain.Wo
 	return proposed, true, nil
 }
 
+// carriedPlacement is the placement TYPE a replacement inherits from the
+// generation it replaces.
+//
+// It exists because a replacement is not a re-decision. ReplaceExecutionPlacement
+// mints a new generation when the PHYSICAL placement has to change -- a worktree
+// that has to be cut again, a checkout that has to be remade -- and it did that
+// by re-running selection, which re-reads the project's CURRENT execution mode.
+// So a project switched from isolated_worktree to direct_branch between the
+// freeze and the replacement moved the work onto the operator's own branch on
+// the next retry, without any transition, without consuming any override, and
+// with the run's own frozen record as the only evidence it had ever been
+// anywhere else. That is the exact config-drift defect the freeze was
+// introduced to end, reappearing on the one path that mints a fresh record.
+//
+// So a replacement carries the frozen type forward. Policy still supplies
+// everything a replacement legitimately re-derives -- the repository, the base,
+// the merge target, a fresh ao/* branch name for the new generation -- and an
+// operator's explicit override still wins over the carry, because a transition
+// is exactly the mechanism for changing a placement on purpose.
+type carriedPlacement struct {
+	Type domain.ExecutionPlacementType
+	// Carry is false for a first freeze, which has nothing to inherit.
+	Carry bool
+}
+
+// typeFor answers whether a carried type replaces the one policy computed. An
+// explicit operator override wins over the carry, because a transition is
+// exactly the mechanism for changing a placement on purpose; a carried type
+// otherwise wins over policy, which is the drift this closes.
+func (c carriedPlacement) typeFor(overridden bool) (domain.ExecutionPlacementType, bool) {
+	if overridden || !c.Carry || !c.Type.IsKnown() {
+		return "", false
+	}
+	return c.Type, true
+}
+
 // selectExecutionPlacement computes the placement to freeze. It is the ONLY
 // place project configuration is read for this purpose, and it runs at most
 // once per obligation.
-func (c *Coordinator) selectExecutionPlacement(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, scope placementScope) (domain.ExecutionPlacement, error) {
+func (c *Coordinator) selectExecutionPlacement(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep, scope placementScope, carry carriedPlacement) (domain.ExecutionPlacement, error) {
 	generation, err := c.placements.MaxExecutionPlacementGeneration(ctx, scope.runID, scope.taskID, scope.stepID)
 	if err != nil {
 		return domain.ExecutionPlacement{}, err
 	}
 	generation++
 
-	if c.runHasExecuted(ctx, step) {
+	// The legacy-recovery branch is for an obligation with NO placement record
+	// at all: a run that predates the freeze, whose placement therefore has to
+	// be reconstructed from physical evidence or not assigned. A replacement
+	// carrying a live record forward is not that -- it HAS a durable placement,
+	// and that record is better evidence than anything recovery could infer.
+	//
+	// Skipping it here is also what keeps a replacement possible at the moment
+	// it is most needed: the usual reason to replace an isolated placement is
+	// that its worktree is gone, which is exactly the evidence legacy recovery
+	// looks for, so routing a replacement through recovery would fail closed on
+	// the one obligation whose record already answers the question.
+	if !carry.Carry && c.runHasExecuted(ctx, step) {
 		recovered, ok := c.recoverLegacyPlacement(ctx, run, scope)
 		if !ok {
 			return domain.ExecutionPlacement{}, ErrPlacementUnprovable
@@ -199,8 +266,21 @@ func (c *Coordinator) selectExecutionPlacement(ctx stdctx.Context, run domain.Wo
 	// only to selection. It is consulted here -- once, before anything is
 	// mutated -- and never again: after the freeze the stored record wins, so a
 	// request that arrives later changes nothing until a transition consumes it.
-	if pending, ok := c.pendingPlacementOverride(ctx, scope); ok && pending.Requested.Explicit() {
+	//
+	// P5: read STRICTLY. This is the last moment the request can be honoured,
+	// and an unreadable store used to be reported as "no override", which does
+	// not degrade the answer -- it inverts it, because an override exists
+	// precisely when policy's answer is not the wanted one.
+	pending, hasPending, err := c.requiredPlacementOverride(ctx, scope)
+	if err != nil {
+		return domain.ExecutionPlacement{}, err
+	}
+	if hasPending && pending.Requested.Explicit() {
 		placementType = pending.Requested.PlacementType()
+	}
+	// A placement carried forward wins over policy. See carryForwardType.
+	if carried, ok := carry.typeFor(hasPending && pending.Requested.Explicit()); ok {
+		placementType = carried
 	}
 	target := project.Config.WithDefaults().DefaultBranch
 	// A REPAIR run's base is not the project's default branch: it is the exact
@@ -487,6 +567,16 @@ func (c *Coordinator) ReplaceExecutionPlacement(ctx stdctx.Context, run domain.W
 	if err != nil {
 		return domain.ExecutionPlacement{}, err
 	}
+	// Read what is being replaced BEFORE retiring it, so the replacement can
+	// inherit its type. A replacement changes WHERE the physical checkout is,
+	// never -- by itself -- what KIND of placement the obligation has; see
+	// carriedPlacement for the drift this closes.
+	carry := carriedPlacement{}
+	if live, found, lerr := c.placements.GetLiveExecutionPlacement(ctx, scope.runID, scope.taskID, scope.stepID); lerr != nil {
+		return domain.ExecutionPlacement{}, lerr
+	} else if found {
+		carry = carriedPlacement{Type: live.Type, Carry: true}
+	}
 	// Retire first. The live partial unique index admits at most one
 	// non-terminal placement per obligation, so the old row has to become
 	// terminal before the new one can exist -- which also means a crash between
@@ -496,7 +586,7 @@ func (c *Coordinator) ReplaceExecutionPlacement(ctx stdctx.Context, run domain.W
 		scope.runID, scope.taskID, scope.stepID, newest+1, reason, now); err != nil {
 		return domain.ExecutionPlacement{}, err
 	}
-	proposed, err := c.selectExecutionPlacement(ctx, run, step, scope)
+	proposed, err := c.selectExecutionPlacement(ctx, run, step, scope, carry)
 	if err != nil {
 		return domain.ExecutionPlacement{}, err
 	}
@@ -742,16 +832,28 @@ func (c *Coordinator) reconcilePlacementsForRun(ctx stdctx.Context, run domain.W
 // which is the pre-P3-A behaviour. It is deliberately not defaulted to
 // isolated: guessing a placement is how a direct branch gets written without a
 // lock, and how an explicit branch choice becomes a worktree nobody asked for.
-func (c *Coordinator) frozenPlacementTarget(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep) (domain.ExecutionPlacementType, string) {
+func (c *Coordinator) frozenPlacementTarget(ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep) (domain.ExecutionPlacementType, string, error) {
+	// The ONE legitimate empty answer. With no placement authority wired there
+	// is no freeze to honour and never was: the workspace router asking the
+	// project is the whole contract for that deployment, and every pre-P1-D
+	// test double lands here.
 	if !c.placementEnabled() {
-		return "", ""
+		return "", "", nil
 	}
 	placement, ok, err := c.EnsureExecutionPlacement(ctx, run, step)
-	if err != nil || !ok {
-		return "", ""
+	if err != nil {
+		return "", "", fmt.Errorf("read the frozen execution placement for run %s: %w", run.ID, err)
+	}
+	if !ok {
+		// Admission already refused a launch with no frozen placement, so
+		// getting here means the record went away between the gate and the
+		// launch. Whatever produced that, it is not a licence to place the work
+		// by project policy.
+		return "", "", fmt.Errorf("%w: run %s has no frozen placement at launch time", ErrPlacementNotEnforceable, run.ID)
 	}
 	if !placement.Type.IsKnown() {
-		return "", ""
+		return "", "", fmt.Errorf("%w: placement generation %d of run %s records placement type %q, which this build cannot read",
+			ErrPlacementNotEnforceable, placement.PlacementGeneration, run.ID, placement.Type)
 	}
-	return placement.Type, placement.ExecutionBranch
+	return placement.Type, placement.ExecutionBranch, nil
 }

@@ -170,14 +170,15 @@ func (c *Coordinator) RequestPlacementOverride(ctx stdctx.Context, req Placement
 	return outcome, nil
 }
 
-// pendingPlacementOverride reads the request the next freeze should consume.
+// pendingPlacementOverride reads the request the next freeze should consume,
+// for BOOKKEEPING only.
 //
-// Read-only and fail-soft: an unreadable override store means selection policy
-// decides, which is the behaviour every deployment without the wiring already
-// has. It is safe to be soft HERE and not in the transition path because a
-// missed override produces the placement AO would have chosen anyway, while a
-// missed authority in a transition would produce a move that was not proven
-// safe.
+// Fail-soft, and the narrowness is the point. Its one caller is the post-freeze
+// resolution that marks a request consumed: a placement is already frozen by
+// then, so an unreadable store leaves an untidy row the next pass tidies, and
+// failing the freeze over that would be worse.
+//
+// It is NOT the reader selection uses. See requiredPlacementOverride.
 func (c *Coordinator) pendingPlacementOverride(ctx stdctx.Context, scope placementScope) (domain.ExecutionPlacementOverride, bool) {
 	if !c.placementOverridesEnabled() {
 		return domain.ExecutionPlacementOverride{}, false
@@ -190,6 +191,33 @@ func (c *Coordinator) pendingPlacementOverride(ctx stdctx.Context, scope placeme
 		return domain.ExecutionPlacementOverride{}, false
 	}
 	return o, found
+}
+
+// requiredPlacementOverride reads the request SELECTION must consume, and fails
+// rather than pretending there is none.
+//
+// The soft read above used to serve this too, on the argument that a missed
+// override produces the placement AO would have chosen anyway. That argument is
+// wrong, and it is wrong in the one direction that matters: the whole reason an
+// operator writes an override is that the placement AO would otherwise choose
+// is not the one they want. A store hiccup therefore did not degrade the
+// answer, it INVERTED it -- an explicit `isolated_worktree` on a direct-branch
+// project became a direct-branch freeze, silently, permanently, and with the
+// operator's request still sitting in the table reading `requested`.
+//
+// A freeze is written once and is authoritative forever after, so this is the
+// last moment the request can be honoured. Failing here costs a retry; guessing
+// here costs the placement.
+func (c *Coordinator) requiredPlacementOverride(ctx stdctx.Context, scope placementScope) (domain.ExecutionPlacementOverride, bool, error) {
+	if !c.placementOverridesEnabled() {
+		return domain.ExecutionPlacementOverride{}, false, nil
+	}
+	o, found, err := c.placementOverrides.GetOutstandingPlacementOverride(ctx, scope.runID, scope.taskID, scope.stepID)
+	if err != nil {
+		return domain.ExecutionPlacementOverride{}, false, fmt.Errorf(
+			"read the outstanding placement override for run %s before freezing a placement: %w", scope.runID, err)
+	}
+	return o, found, nil
 }
 
 // resolveConsumedOverride marks a request as consumed by the generation that
