@@ -353,3 +353,68 @@ func (s *Store) IsWorkerCredentialAuthorized(ctx context.Context, credentialID s
 	}
 	return authorized, nil
 }
+
+// ListAdoptableWorkerAgentCredentials returns the worker credentials for one
+// step that were minted for a launch and never bound to a session.
+//
+// In the ordinary case the answer is empty: a launch that completed bound its
+// credential, and a launch that failed had it taken back. A non-empty answer
+// means a daemon died between Spawn and bind, which is exactly the case
+// adoption exists for.
+func (s *Store) ListAdoptableWorkerAgentCredentials(ctx context.Context, stepID string) ([]domain.AdoptableAgentCredential, error) {
+	rows, err := s.qr.ListAdoptableWorkerAgentCredentials(ctx, stepID)
+	if err != nil {
+		return nil, fmt.Errorf("list adoptable worker agent credentials for step %s: %w", stepID, err)
+	}
+	out := make([]domain.AdoptableAgentCredential, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, domain.AdoptableAgentCredential{
+			CredentialID:      row.ID,
+			WorkflowRunID:     row.WorkflowRunID,
+			WorkflowStepID:    row.WorkflowStepID,
+			ProjectID:         row.ProjectID,
+			RuntimeHandle:     row.RuntimeHandle,
+			RuntimeInstanceID: row.RuntimeInstanceID,
+		})
+	}
+	return out, nil
+}
+
+// CountLiveWorkerAgentCredentialsForSession reports how many live worker
+// credentials already speak for one session. Adoption refuses to add a second:
+// two live identities for one pane is a state AO cannot tell apart, and it is
+// the one adoption exists to avoid rather than to create.
+func (s *Store) CountLiveWorkerAgentCredentialsForSession(ctx context.Context, sessionID domain.SessionID) (int64, error) {
+	n, err := s.qr.CountLiveWorkerAgentCredentialsForSession(ctx, sessionID)
+	if err != nil {
+		return 0, fmt.Errorf("count live worker agent credentials for session %s: %w", sessionID, err)
+	}
+	return n, nil
+}
+
+// AdoptWorkerAgentCredential binds an orphaned worker credential to the session
+// its launch really produced and re-points its attempt fence to the attempt
+// doing the adopting.
+//
+// Both writes, or neither. A bind alone leaves the credential fenced to the
+// crashed launch's attempt, which IsWorkerCredentialAuthorized refuses; a fence
+// move alone leaves it speaking for no session, which MayReachSession refuses.
+//
+// It reports false rather than an error when the guarded update matched no row.
+// That is not a failure: it means the credential was bound, revoked or adopted
+// by somebody else between the read and the write, and every one of those is a
+// decision this call must defer to rather than overwrite.
+func (s *Store) AdoptWorkerAgentCredential(ctx context.Context, credentialID string, sessionID domain.SessionID, attemptID string) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	n, err := s.qw.AdoptWorkerAgentCredential(ctx, gen.AdoptWorkerAgentCredentialParams{
+		SessionID:         sessionID,
+		RuntimeInstanceID: attemptID,
+		ID:                credentialID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("adopt worker agent credential %s onto session %s: %w", credentialID, sessionID, err)
+	}
+	return n > 0, nil
+}

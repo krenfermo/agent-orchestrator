@@ -217,3 +217,69 @@ SELECT EXISTS (
         )
     )
 ) AS authorized;
+
+-- P5: ADOPTION, for the window between Spawn and bind.
+--
+-- A worker credential is minted unbound because the session it will speak for
+-- does not exist until the spawn returns. The daemon can die in that window,
+-- and what it leaves behind is a real worker running in a real pane, holding a
+-- credential file, with a row that names no session -- so MayReachSession
+-- refuses every session route and that worker can never report on its own work.
+-- Recovery adopted the SESSION and left the credential exactly as it was, which
+-- is why the state was terminal.
+--
+-- Adoption is allowed only on proof, never on a guess, and the two queries below
+-- are the two halves of that proof.
+--
+-- The first lists what could be adopted. A row qualifies only if it is a worker
+-- credential for THIS step that has never been bound and has not been revoked.
+-- The revocation check is what makes this generation-safe without a second
+-- fence: a replacement launch revokes its predecessors as it mints its own
+-- credential, so a superseded launch's row is already gone from this result and
+-- an old attempt can never adopt its way back into authority. A step with more
+-- than one adoptable row is one AO cannot tell apart, and the caller refuses.
+--
+-- name: ListAdoptableWorkerAgentCredentials :many
+SELECT id, workflow_run_id, workflow_step_id, project_id, runtime_handle, runtime_instance_id
+FROM agent_credentials
+WHERE role = 'worker'
+  AND revoked_at IS NULL
+  AND session_id = ''
+  AND workflow_step_id = ?
+  AND workflow_step_id != '';
+
+-- The second is the adoption itself: one guarded write that binds the session
+-- AND re-points the attempt fence, because both are needed and neither is
+-- sufficient.
+--
+-- Binding alone is not enough. IsWorkerCredentialAuthorized requires a worker
+-- credential to name the step's NEWEST attempt, and an adoption opens a new
+-- attempt for the launch it adopts -- so a credential bound but still fenced to
+-- the crashed launch's attempt is refused by the very next request. Re-pointing
+-- it is truthful rather than a loosening: the attempt being adopted onto
+-- describes the same physical worker the credential was minted for.
+--
+-- The guard is the same one BindAgentCredentialSession uses, for the same
+-- reason: session_id = '' can only ever move to bound, once. A second adopter,
+-- a racing bind, or a revocation that landed first all match zero rows, and the
+-- caller reads that as "somebody else decided this" rather than as success.
+--
+-- name: AdoptWorkerAgentCredential :execrows
+UPDATE agent_credentials SET session_id = ?, runtime_instance_id = ?
+WHERE id = ?
+  AND role = 'worker'
+  AND session_id = ''
+  AND revoked_at IS NULL;
+
+-- The other half of "prove it": a session that ALREADY has a live worker
+-- credential must not be given a second one. Two live credentials for one pane
+-- is two identities AO cannot tell apart, which is the state adoption exists to
+-- avoid rather than to create.
+--
+-- name: CountLiveWorkerAgentCredentialsForSession :one
+SELECT COUNT(*) AS live
+FROM agent_credentials
+WHERE role = 'worker'
+  AND revoked_at IS NULL
+  AND session_id = ?
+  AND session_id != '';

@@ -310,6 +310,22 @@ const (
 	// one. Parking is scoped to this run: every other run reconciles normally.
 	ReasonRecoveryUnreconcilable  = "recovery_unreconcilable"
 	ReasonWorkerDispatchAmbiguous = "worker_dispatch_ambiguous"
+	// ReasonWorkerCredentialUnadoptable is a worker AO adopted after a restart
+	// that is holding a credential AO cannot account for.
+	//
+	// It is the Spawn/bind window: a credential is minted before the spawn,
+	// because the environment is fixed at spawn, and bound after it, because
+	// the session does not exist before it. A daemon that dies in between
+	// leaves a running worker with a token bound to nothing, which every
+	// session route refuses -- so the worker keeps working and can never report
+	// on its own work. Recovery re-attaches that credential when it can prove
+	// which launch it belongs to; when it cannot, this names the stop rather
+	// than confirming a dispatch over an identity nobody decided.
+	//
+	// Distinct from ReasonWorkerDispatchAmbiguous, which is the neighbouring
+	// question: that one is "AO cannot prove whether a worker exists", this one
+	// is "AO knows the worker exists and cannot prove which token it holds".
+	ReasonWorkerCredentialUnadoptable = "worker_credential_unadoptable"
 	// ReasonWorkerWorkspaceUnreadable is a worker whose turn AO can PROVE
 	// finished — the provider's own turn receipt for this dispatch — and whose
 	// repository AO could not read, so what the turn produced is unknown.
@@ -462,6 +478,10 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonWorkerDispatchAmbiguous: {
 		HumanAction: "Confirm whether the worker session actually produced work, then continue or cancel this run.",
+	},
+	ReasonWorkerCredentialUnadoptable: {
+		Recovery:    domain.RecoveryOperatorAction,
+		HumanAction: "AO restarted between starting this worker and giving it its identity, and it cannot prove which credential that worker is holding — so the worker is running but cannot report on its own work. The checkpoint names the session. Cancel that worker and continue this run, and AO starts exactly one replacement with an identity of its own.",
 	},
 	ReasonProviderDialogUnreadable: {
 		HumanAction: "AO decided this question automatically but cannot read the prompt the agent is showing, so it has not sent the answer. Open that session and choose the option AO recorded, then continue this run.",
