@@ -89,11 +89,11 @@ describe("NewTaskDialog", () => {
 		renderDialog();
 		await waitForAgentCatalog();
 
-		const dialog = screen.getByRole("dialog", { name: "Create a new task" });
+		const dialog = screen.getByRole("dialog", { name: "Delegate a worker" });
 		expect(dialog.querySelector(".composer-prompt-surface")).not.toBeNull();
-		expect(screen.getByText("Create a new task")).toHaveClass("settings-dialog-title");
+		expect(screen.getByText("Delegate a worker")).toHaveClass("settings-dialog-title");
 		expect(screen.queryByText("Runs with")).not.toBeInTheDocument();
-		expect(screen.queryByRole("button", { name: "Close new task dialog" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Close new session dialog" })).not.toBeInTheDocument();
 		expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "Agent" })).toHaveTextContent("Claude Code");
 		expect(await screen.findByLabelText("Model")).toHaveValue("");
@@ -121,7 +121,7 @@ describe("NewTaskDialog", () => {
 
 		await user.type(screen.getByLabelText("Task"), brief);
 		await user.type(screen.getByLabelText("Model"), "placeholder-model");
-		await user.click(screen.getByRole("button", { name: "Start task" }));
+		await user.click(screen.getByRole("button", { name: "Start worker" }));
 
 		await waitFor(() => expect(requestBody).not.toThrow());
 		expect(postMock).toHaveBeenCalledWith("/api/v1/orchestrators/delegate", {
@@ -153,7 +153,7 @@ describe("NewTaskDialog", () => {
 		await waitForAgentCatalog();
 
 		await user.type(screen.getByLabelText("Task"), "Fix it");
-		await user.click(screen.getByRole("button", { name: "Start task" }));
+		await user.click(screen.getByRole("button", { name: "Start worker" }));
 
 		const fallback = await screen.findByRole("button", { name: "Create as Terminal UI" });
 		expect(requestBody()).not.toHaveProperty("mode");
@@ -175,7 +175,7 @@ describe("NewTaskDialog", () => {
 		await user.click(screen.getByRole("button", { name: "Agent" }));
 		await user.click(await screen.findByRole("menuitem", { name: "Cursor" }));
 
-		await user.click(screen.getByRole("button", { name: "Start task" }));
+		await user.click(screen.getByRole("button", { name: "Start worker" }));
 
 		await waitFor(() => expect(requestBody).not.toThrow());
 		expect(requestBody().agent).toBe("cursor");
@@ -193,7 +193,7 @@ describe("NewTaskDialog", () => {
 		await user.click(options[2]);
 
 		await user.type(screen.getByLabelText("Task"), "B");
-		await user.click(screen.getByRole("button", { name: "Start task" }));
+		await user.click(screen.getByRole("button", { name: "Start worker" }));
 
 		await waitFor(() => expect(requestBody).not.toThrow());
 		expect(requestBody().agent).toBe("kiro");
@@ -204,7 +204,7 @@ describe("NewTaskDialog", () => {
 		const user = userEvent.setup();
 		await waitForAgentCatalog();
 
-		await user.click(screen.getByRole("button", { name: "Start task" }));
+		await user.click(screen.getByRole("button", { name: "Start worker" }));
 
 		await waitFor(() => expect(requestBody).not.toThrow());
 		expect(requestBody()).toMatchObject({
@@ -245,7 +245,7 @@ describe("NewTaskDialog", () => {
 		expect(await screen.findByLabelText("Model")).toHaveValue("");
 
 		await user.type(screen.getByLabelText("Task"), "Build a quick prototype in scratch.");
-		await user.click(screen.getByRole("button", { name: "Start task" }));
+		await user.click(screen.getByRole("button", { name: "Start worker" }));
 
 		await waitFor(() => expect(requestBody).not.toThrow());
 		expect(requestBody()).not.toHaveProperty("branch");
@@ -310,7 +310,7 @@ describe("NewTaskDialog", () => {
 		await waitForAgentCatalog();
 
 		await user.type(screen.getByLabelText("Task"), "Restore fallback renderer.");
-		await user.click(screen.getByRole("button", { name: "Start task" }));
+		await user.click(screen.getByRole("button", { name: "Start worker" }));
 
 		expect(await screen.findByText(`${message} (${code})`)).toBeInTheDocument();
 	});

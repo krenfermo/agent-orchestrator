@@ -229,7 +229,7 @@ describe("project board with no sessions", () => {
 		expect(await screen.findByText("No worker sessions yet")).toBeInTheDocument();
 		// Board header + empty state each offer the pair; the orchestrator is primary in both.
 		expect(screen.getAllByRole("button", { name: "Start Interactive Orchestrator" }).length).toBeGreaterThan(0);
-		expect(screen.getAllByRole("button", { name: "New task" }).length).toBeGreaterThan(0);
+		expect(screen.getAllByRole("button", { name: "New session" }).length).toBeGreaterThan(0);
 		expect(screen.queryByText("Import to Agent Orchestrator")).not.toBeInTheDocument();
 		expect(columnCount()).toBe(0);
 	});

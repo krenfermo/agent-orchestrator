@@ -47,7 +47,7 @@ function Wrap({ children }: { children: ReactNode }) {
 }
 
 const task = () => screen.getByRole("textbox", { name: "Task" });
-const start = () => screen.getByRole("button", { name: "Start task" });
+const start = () => screen.getByRole("button", { name: "Start worker" });
 
 /** The shape of the brief that provoked this work: a full RBAC specification. */
 const RBAC_BLOCK = [

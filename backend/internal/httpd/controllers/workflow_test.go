@@ -183,7 +183,7 @@ func TestWorkflowCreateRun(t *testing.T) {
 	svc := &fakeWorkflowService{}
 	srv := newWorkflowTestServer(t, svc)
 
-	body, status, headers := doRequest(t, srv, "POST", "/api/v1/projects/proj-1/workflows", `{"objective":"ship the thing"}`)
+	body, status, headers := doRequest(t, srv, "POST", "/api/v1/projects/proj-1/workflows", `{"objective":"ship the thing",`+taskVerificationBody+`}`)
 	assertJSON(t, headers)
 	if status != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", status, body)

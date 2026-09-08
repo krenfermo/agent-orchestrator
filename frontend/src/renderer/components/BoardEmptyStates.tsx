@@ -1,4 +1,4 @@
-import { Plus } from "lucide-react";
+import { Plus, Workflow } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useShell } from "../lib/shell-context";
 import { CreateProjectFlow } from "./CreateProjectFlow";
@@ -35,6 +35,7 @@ export function ProjectBoardEmpty({
 	isProjectRestarting,
 	isSpawning,
 	onNewTask,
+	onNewWorkflowRun,
 	onOpenOrchestrator,
 	onOpenOrchestratorAsTui,
 	spawnError,
@@ -43,6 +44,10 @@ export function ProjectBoardEmpty({
 	isProjectRestarting: boolean;
 	isSpawning: boolean;
 	onNewTask: () => void;
+	// The board header's workflow entry point, mirrored here for the same
+	// reason the other two are: this screen is the whole board when a project
+	// has no sessions, and a workflow run must be reachable from it.
+	onNewWorkflowRun?: () => void;
 	onOpenOrchestrator: () => void;
 	onOpenOrchestratorAsTui?: () => void;
 	spawnError?: string | null;
@@ -74,6 +79,17 @@ export function ProjectBoardEmpty({
 						<Plus className="size-icon-md" aria-hidden="true" />
 						{t("shell.newTask")}
 					</TopbarButton>
+					{onNewWorkflowRun ? (
+						<TopbarButton
+							aria-label={t("shell.newWorkflowRun")}
+							disabled={isProjectRestarting}
+							onClick={onNewWorkflowRun}
+							variant="primary"
+						>
+							<Workflow className="size-icon-md" aria-hidden="true" />
+							{t("shell.newWorkflowRun")}
+						</TopbarButton>
+					) : null}
 				</div>
 				{spawnError && (
 					<div className="mt-3 flex flex-col items-center gap-2">

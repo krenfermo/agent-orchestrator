@@ -100,7 +100,7 @@ func TestWorkflowCreateRunStrategyRoundTrip(t *testing.T) {
 		planned   bool
 	}{
 		{
-			name: "explicit task", body: `{"objective":"rename the flag","strategy":"task"}`,
+			name: "explicit task", body: `{"objective":"rename the flag","strategy":"task",` + taskVerificationBody + `}`,
 			effective: "task", source: "explicit", reason: "explicit_request",
 		},
 		{
@@ -113,7 +113,7 @@ func TestWorkflowCreateRunStrategyRoundTrip(t *testing.T) {
 		},
 		{
 			name:      "auto selects task for a small bounded change",
-			body:      `{"objective":"typo","strategy":"auto","strategySignals":{"size":"small","expectedSteps":1}}`,
+			body:      `{"objective":"typo","strategy":"auto","strategySignals":{"size":"small","expectedSteps":1},` + taskVerificationBody + `}`,
 			effective: "task", source: "policy", reason: "bounded_work",
 		},
 		{
@@ -215,7 +215,7 @@ func TestWorkflowCreateRunLegacyClientCompatibility(t *testing.T) {
 		planned               bool
 	}{
 		{"masterPlan true", `{"objective":"x","masterPlan":true,"planApprovalMode":"auto"}`, "autonomous", true},
-		{"masterPlan omitted", `{"objective":"x"}`, "task", false},
+		{"masterPlan omitted", `{"objective":"x",` + taskVerificationBody + `}`, "task", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			svc := &strategyWorkflowService{}
@@ -244,7 +244,7 @@ func TestWorkflowCreateTaskRunForwardsCriteriaAndWriteIntent(t *testing.T) {
 	svc := &strategyWorkflowService{}
 	srv := newWorkflowTestServer(t, svc)
 	body, status, _ := doRequest(t, srv, "POST", "/api/v1/projects/proj-1/workflows",
-		`{"objective":"audit the config","strategy":"task","writeIntent":"read_only","acceptanceCriteria":["The report lists every unvalidated field."]}`)
+		`{"objective":"audit the config","strategy":"task","writeIntent":"read_only","acceptanceCriteria":["The report lists every unvalidated field."],`+taskVerificationBody+`}`)
 	if status != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", status, body)
 	}

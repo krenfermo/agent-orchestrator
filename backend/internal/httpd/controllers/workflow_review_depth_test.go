@@ -57,12 +57,12 @@ func TestWorkflowCreateRunReviewDepthRoundTrip(t *testing.T) {
 		body string
 		want []domain.ReviewDepth
 	}{
-		{"none", `{"objective":"x","strategy":"task","reviewDepth":"none"}`, []domain.ReviewDepth{domain.ReviewDepthNone}},
-		{"light", `{"objective":"x","strategy":"task","reviewDepth":"light"}`, []domain.ReviewDepth{domain.ReviewDepthLight}},
-		{"deep", `{"objective":"x","strategy":"task","reviewDepth":"deep"}`, []domain.ReviewDepth{domain.ReviewDepthDeep}},
-		{"mixed case and spacing is normalized", `{"objective":"x","strategy":"task","reviewDepth":" LIGHT "}`, []domain.ReviewDepth{domain.ReviewDepthLight}},
-		{"auto applies nothing", `{"objective":"x","strategy":"task","reviewDepth":"auto"}`, nil},
-		{"omitted applies nothing", `{"objective":"x","strategy":"task"}`, nil},
+		{"none", `{"objective":"x","strategy":"task","reviewDepth":"none",` + taskVerificationBody + `}`, []domain.ReviewDepth{domain.ReviewDepthNone}},
+		{"light", `{"objective":"x","strategy":"task","reviewDepth":"light",` + taskVerificationBody + `}`, []domain.ReviewDepth{domain.ReviewDepthLight}},
+		{"deep", `{"objective":"x","strategy":"task","reviewDepth":"deep",` + taskVerificationBody + `}`, []domain.ReviewDepth{domain.ReviewDepthDeep}},
+		{"mixed case and spacing is normalized", `{"objective":"x","strategy":"task","reviewDepth":" LIGHT ",` + taskVerificationBody + `}`, []domain.ReviewDepth{domain.ReviewDepthLight}},
+		{"auto applies nothing", `{"objective":"x","strategy":"task","reviewDepth":"auto",` + taskVerificationBody + `}`, nil},
+		{"omitted applies nothing", `{"objective":"x","strategy":"task",` + taskVerificationBody + `}`, nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			svc := &reviewDepthWorkflowService{}
@@ -117,7 +117,7 @@ func TestWorkflowRunViewCarriesTheFrozenReviewDepth(t *testing.T) {
 	svc := &reviewDepthWorkflowService{}
 	srv := newWorkflowTestServer(t, svc)
 	body, status, _ := doRequest(t, srv, "POST", "/api/v1/projects/proj-1/workflows",
-		`{"objective":"x","strategy":"task"}`)
+		`{"objective":"x","strategy":"task",`+taskVerificationBody+`}`)
 	if status != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", status, body)
 	}
@@ -145,7 +145,7 @@ func TestWorkflowCreateRunWithoutReviewDepthCapability(t *testing.T) {
 	}
 	srv := newWorkflowTestServer(t, svc)
 	body, status, _ := doRequest(t, srv, "POST", "/api/v1/projects/proj-1/workflows",
-		`{"objective":"x","strategy":"task","reviewDepth":"light"}`)
+		`{"objective":"x","strategy":"task","reviewDepth":"light",`+taskVerificationBody+`}`)
 	if status != http.StatusCreated {
 		t.Fatalf("status=%d body=%s, want the run to be created anyway", status, body)
 	}

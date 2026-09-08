@@ -20,6 +20,7 @@ import {
 import { useSettings } from "../hooks/useSettings";
 import { useUiStore } from "../stores/ui-store";
 import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import {
 	Select,
@@ -37,6 +38,15 @@ import {
 	SPECIFICATION_COUNTER_FROM_BYTES,
 	specificationByteLength,
 } from "../../shared/task-specification";
+import {
+	buildVerificationPlan,
+	commandDraftProblem,
+	newCommandDraft,
+	parseAcceptanceCriteria,
+	statedCommandDrafts,
+	verificationIsExecutable,
+	type VerificationCommandDraft,
+} from "../lib/task-verification";
 
 /**
  * A workflow's name is the thing it was asked to do — its objective's first
@@ -154,6 +164,23 @@ export function WorkflowsList() {
 			explainer: t("wf.reviewDepth.deepExplainer"),
 		},
 	};
+	// A Task run has no planner, so the two things a planner would otherwise
+	// have produced -- what "done" means, and how it is checked -- have to come
+	// from here. Without them a task runs to completion and then fails at
+	// Verify with verify_ambiguous, which is what happened to
+	// wf-aee38f69-081c-48d1-a3a4-53430ca70682: the form sent no verification at
+	// all, and the daemon accepted the empty plan.
+	//
+	// The editor always holds one more row than the user has filled, so there
+	// is somewhere to type the next command; a blank row contributes nothing.
+	const [commandDrafts, setCommandDrafts] = useState<VerificationCommandDraft[]>(() => [newCommandDraft()]);
+	const [criteriaText, setCriteriaText] = useState("");
+	const acceptanceCriteria = useMemo(() => parseAcceptanceCriteria(criteriaText), [criteriaText]);
+	// Only the Task strategy needs them: a planned run's checks are its
+	// planner's output, and the planner has not run when this form is submitted.
+	const needsVerification = strategy === "task";
+	const verificationReady = verificationIsExecutable(commandDrafts);
+
 	// P1-B: auto-repair is a third independent axis, frozen at creation.
 	// "suggest" is the default because a repair writes code, and opting into
 	// that unattended should be a decision somebody made.
@@ -209,6 +236,9 @@ export function WorkflowsList() {
 	const onSubmit = (event: React.FormEvent) => {
 		event.preventDefault();
 		if (!projectId.trim() || !objective.trim()) return;
+		// The same refusal the daemon makes, made here so the user is told
+		// before a run exists rather than after a worker has done the job.
+		if (needsVerification && !verificationReady) return;
 		void createRun({
 			projectId: projectId.trim(),
 			objective: objective.trim(),
@@ -217,8 +247,13 @@ export function WorkflowsList() {
 			repairPolicy,
 			placement,
 			reviewDepth,
+			...(needsVerification
+				? { acceptanceCriteria, verification: buildVerificationPlan(commandDrafts) }
+				: {}),
 		}).then(() => {
 			setObjective("");
+			setCriteriaText("");
+			setCommandDrafts([newCommandDraft()]);
 		});
 	};
 
@@ -428,11 +463,21 @@ export function WorkflowsList() {
 							<p className="text-xs text-muted-foreground">{t("wf.reviewDepth.clampNote")}</p>
 						</fieldset>
 					</div>
+					{needsVerification ? (
+						<TaskVerificationFields
+							commands={commandDrafts}
+							criteriaText={criteriaText}
+							onChangeCommands={setCommandDrafts}
+							onChangeCriteria={setCriteriaText}
+						/>
+					) : null}
 					{/* §12: every choice that changes what AO actually does, in one
 					    place, before the button that starts it. None of it is hidden
 					    behind an "advanced" disclosure, because all five change real
 					    execution semantics. */}
 					<TaskCreationSummary
+						acceptanceCriteria={needsVerification ? acceptanceCriteria : undefined}
+						commands={needsVerification ? statedCommandDrafts(commandDrafts) : undefined}
 						approvalPolicy={approvalPolicy}
 						memoryMode={memoryMode}
 						placement={placement}
@@ -443,7 +488,13 @@ export function WorkflowsList() {
 					/>
 					<button
 						className="mt-1 self-start rounded bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50"
-						disabled={creating || !projectId.trim() || !objective.trim() || objectiveTooLong}
+						disabled={
+							creating ||
+							!projectId.trim() ||
+							!objective.trim() ||
+							objectiveTooLong ||
+							(needsVerification && !verificationReady)
+						}
 						type="submit"
 					>
 						{creating ? t("shell.workflowsCreating") : t("shell.workflowsCreate")}
@@ -516,6 +567,8 @@ function TaskCreationSummary({
 	reviewDepth,
 	project,
 	memoryMode,
+	acceptanceCriteria,
+	commands,
 }: {
 	strategy: ExecutionStrategy;
 	approvalPolicy: ApprovalPolicy;
@@ -524,6 +577,9 @@ function TaskCreationSummary({
 	reviewDepth: ReviewDepth;
 	project: { name: string; path?: string; repo?: string; config?: { defaultBranch?: string } } | undefined;
 	memoryMode: string | undefined;
+	// Undefined for a planned strategy, which supplies neither from this form.
+	acceptanceCriteria: string[] | undefined;
+	commands: VerificationCommandDraft[] | undefined;
 }) {
 	const { t } = useTranslation();
 	return (
@@ -550,6 +606,40 @@ function TaskCreationSummary({
 				<dd>{t(`wf.reviewDepth.${reviewDepth}` as "wf.reviewDepth.light")}</dd>
 				<dt>{t("wf.create.memory")}</dt>
 				<dd>{memoryMode ? t(`wf.memory.${memoryMode}` as "wf.memory.off") : t("wf.memory.unknown")}</dd>
+				{/* What AO will actually run to decide this task succeeded, stated
+				    here for the same reason the other rows are: it changes the
+				    verdict, and a task whose checks are not what the user meant
+				    fails as surely as one with no checks at all. */}
+				<dt>{t("wf.create.verification")}</dt>
+				<dd className="break-words">
+					{commands === undefined ? (
+						t("wf.create.verificationPlanned")
+					) : commands.length === 0 ? (
+						t("wf.create.verificationNone")
+					) : (
+						<span className="flex flex-col gap-0.5 font-mono">
+							{commands.map((draft) => (
+								<span key={draft.id}>{`${draft.command.trim()} ${draft.args.trim()}`.trim()}</span>
+							))}
+						</span>
+					)}
+				</dd>
+				{acceptanceCriteria !== undefined ? (
+					<>
+						<dt>{t("wf.create.criteria")}</dt>
+						<dd className="break-words">
+							{acceptanceCriteria.length === 0 ? (
+								t("wf.create.criteriaDefault")
+							) : (
+								<span className="flex flex-col gap-0.5">
+									{acceptanceCriteria.map((criterion) => (
+										<span key={criterion}>{criterion}</span>
+									))}
+								</span>
+							)}
+						</dd>
+					</>
+				) : null}
 				{project ? (
 					<>
 						<dt>{t("wf.create.project")}</dt>
@@ -571,5 +661,143 @@ function TaskCreationSummary({
 				)}
 			</dl>
 		</section>
+	);
+}
+
+/**
+ * TaskVerificationFields — the two things a Task must carry and a planner would
+ * otherwise have produced: how AO will check the work, and what "done" means.
+ *
+ * It is a structured editor rather than a free-text box on purpose. AO does not
+ * read verification commands out of the objective's prose — a command inferred
+ * from a sentence is a command nobody chose, and it would be run against the
+ * user's repository — so every field here is something the user stated.
+ *
+ * The rule it enforces is the daemon's own: at least one command AO can run,
+ * and nothing half-typed. What it does NOT do is second-guess which executables
+ * are allowed; that policy lives in the daemon (ValidateVerifyCommand) and a
+ * copy here would drift from the one actually enforced. A command this accepts
+ * and the daemon refuses comes back as the create error shown below the button.
+ */
+function TaskVerificationFields({
+	commands,
+	criteriaText,
+	onChangeCommands,
+	onChangeCriteria,
+}: {
+	commands: VerificationCommandDraft[];
+	criteriaText: string;
+	onChangeCommands: (next: VerificationCommandDraft[]) => void;
+	onChangeCriteria: (next: string) => void;
+}) {
+	const { t } = useTranslation();
+	const update = (id: string, patch: Partial<VerificationCommandDraft>) =>
+		onChangeCommands(commands.map((draft) => (draft.id === id ? { ...draft, ...patch } : draft)));
+	// Removing the last row leaves an empty one: the editor must always offer
+	// somewhere to type, and a section with no inputs reads as "not available".
+	const remove = (id: string) => {
+		const next = commands.filter((draft) => draft.id !== id);
+		onChangeCommands(next.length > 0 ? next : [newCommandDraft()]);
+	};
+	const problems = commands.map((draft) => commandDraftProblem(draft));
+	const hasStatedCommand = statedCommandDrafts(commands).length > 0;
+
+	return (
+		<fieldset className="flex flex-col gap-3 rounded-lg border border-border p-3" data-testid="task-verification">
+			<legend className="px-1 text-sm">{t("wf.verify.legend")}</legend>
+			<p className="text-xs text-muted-foreground">{t("wf.verify.explainer")}</p>
+			{commands.map((draft, index) => (
+				<div className="flex flex-col gap-2 rounded border border-border bg-muted/40 p-2" key={draft.id}>
+					<div className="flex flex-col gap-2 sm:flex-row">
+						<label className="flex flex-col gap-1 text-xs sm:w-40">
+							{t("wf.verify.commandLabel")}
+							<Input
+								aria-invalid={problems[index] === "commandRequired" || undefined}
+								onChange={(event) => update(draft.id, { command: event.target.value })}
+								placeholder={t("wf.verify.commandPlaceholder")}
+								value={draft.command}
+							/>
+						</label>
+						<label className="flex flex-1 flex-col gap-1 text-xs">
+							{t("wf.verify.argsLabel")}
+							<Input
+								onChange={(event) => update(draft.id, { args: event.target.value })}
+								placeholder={t("wf.verify.argsPlaceholder")}
+								value={draft.args}
+							/>
+						</label>
+					</div>
+					<div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+						<label className="flex flex-1 flex-col gap-1 text-xs">
+							{t("wf.verify.workingDirectoryLabel")}
+							<Input
+								aria-invalid={problems[index] === "workingDirectoryOutside" || undefined}
+								onChange={(event) => update(draft.id, { workingDirectory: event.target.value })}
+								placeholder={t("wf.verify.workingDirectoryPlaceholder")}
+								value={draft.workingDirectory}
+							/>
+						</label>
+						<label className="flex flex-col gap-1 text-xs sm:w-28">
+							{t("wf.verify.timeoutLabel")}
+							<Input
+								aria-invalid={problems[index] === "timeoutRange" || undefined}
+								inputMode="numeric"
+								onChange={(event) => update(draft.id, { timeoutSeconds: event.target.value })}
+								value={draft.timeoutSeconds}
+							/>
+						</label>
+						<label className="flex flex-col gap-1 text-xs sm:w-28">
+							{t("wf.verify.exitCodeLabel")}
+							<Input
+								aria-invalid={problems[index] === "exitCodeInvalid" || undefined}
+								inputMode="numeric"
+								onChange={(event) => update(draft.id, { requiredExitCode: event.target.value })}
+								value={draft.requiredExitCode}
+							/>
+						</label>
+						<label className="flex items-center gap-2 text-xs sm:h-control-form">
+							<input
+								checked={draft.retrySafe}
+								onChange={(event) => update(draft.id, { retrySafe: event.target.checked })}
+								type="checkbox"
+							/>
+							{t("wf.verify.retrySafeLabel")}
+						</label>
+						<Button
+							className="sm:ml-auto"
+							onClick={() => remove(draft.id)}
+							size="sm"
+							type="button"
+							variant="ghost"
+						>
+							{t("wf.verify.removeCommand")}
+						</Button>
+					</div>
+					{problems[index] ? (
+						<p className="text-xs text-destructive">{t(`wf.verify.problem.${problems[index]}` as "wf.verify.problem.commandRequired")}</p>
+					) : null}
+				</div>
+			))}
+			<Button
+				className="self-start"
+				onClick={() => onChangeCommands([...commands, newCommandDraft()])}
+				size="sm"
+				type="button"
+				variant="outline"
+			>
+				{t("wf.verify.addCommand")}
+			</Button>
+			{hasStatedCommand ? null : <p className="text-xs text-destructive">{t("wf.verify.required")}</p>}
+			<label className="flex flex-col gap-1 text-xs">
+				{t("wf.verify.criteriaLabel")}
+				<Textarea
+					onChange={(event) => onChangeCriteria(event.target.value)}
+					placeholder={t("wf.verify.criteriaPlaceholder")}
+					rows={4}
+					value={criteriaText}
+				/>
+				<span className="text-muted-foreground">{t("wf.verify.criteriaHint")}</span>
+			</label>
+		</fieldset>
 	);
 }
