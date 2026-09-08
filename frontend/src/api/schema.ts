@@ -8019,6 +8019,7 @@ export interface components {
             postFingerprint: string;
             preFingerprint: string;
             recoveryGeneration?: number;
+            reusedCheckCount?: number;
             reviewedFingerprint: string;
             scope?: components["schemas"]["WorkflowVerifyScopeDecision"];
             scopeAppliedTransforms?: string[];

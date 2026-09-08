@@ -368,6 +368,19 @@ func (c *Coordinator) attachLightReviewEvidence(
 	in.RiskTier = depth.RiskTier
 	in.RiskReasons = depth.RiskReasons
 
+	// P5-A phase 2: the checks AO ran itself for this step, and the worker's
+	// own declaration. Both come from durable rows written before this review
+	// was dispatched, so a reviewer relaunched after a restart is judged
+	// against exactly the facts the policy was.
+	if evidence, ok := c.preReviewEvidenceForStep(ctx, run.ID, reviewStep.ID); ok {
+		in.PreReviewEvidence = evidence
+	}
+	if workStep, ok := c.workStepForRun(ctx, run.ID); ok {
+		if report, ok := c.workReportForStep(ctx, run.ID, workStep.ID); ok {
+			in.WorkReport = report
+		}
+	}
+
 	// The changed-file list and the prior-attempt count come from the risk
 	// facts already persisted at cycle 1 (ObserveWorkspace + workflow_attempts).
 	// Re-observing here would be a second, possibly-divergent reading of a

@@ -22616,6 +22616,8 @@ components:
           type: string
         recoveryGeneration:
           type: integer
+        reusedCheckCount:
+          type: integer
         reviewedFingerprint:
           type: string
         scope:

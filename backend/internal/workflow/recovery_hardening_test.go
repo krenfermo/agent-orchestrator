@@ -70,8 +70,8 @@ func TestAuthorizedFixChangeGetsAFreshReviewInsteadOfAnUnexplainedStop(t *testin
 		reason := latestStopReason(t, store, runID)
 		t.Fatalf("run parked on %q with its own authorized fix in the worktree — this is the wf-cd5bad10 regression", reason)
 	}
-	if runner.calls != 0 {
-		t.Fatalf("verification ran %d times against a tree no reviewer has read; it must wait for the fresh review", runner.calls)
+	if n := verifyRunnerCalls(t, store, runID, runner.calls); n != 0 {
+		t.Fatalf("verification ran %d times against a tree no reviewer has read; it must wait for the fresh review", n)
 	}
 
 	// The safety rule is intact: what AO did instead is ask for a review, and
@@ -138,8 +138,8 @@ func TestUnattributableWorkspaceChangeStaysBlocked(t *testing.T) {
 		t.Fatalf("GetRun after the foreign edit: %v", err)
 	}
 
-	if runner.calls != 0 {
-		t.Fatalf("verification ran %d times over an unattributable change; the guard must fire before execution", runner.calls)
+	if n := verifyRunnerCalls(t, store, runID, runner.calls); n != 0 {
+		t.Fatalf("verification ran %d times over an unattributable change; the guard must fire before execution", n)
 	}
 	if got.Run.State != domain.WorkflowRunNeedsAttention {
 		t.Fatalf("run state = %q, want needs_attention: an unowned edit must still stop the run", got.Run.State)

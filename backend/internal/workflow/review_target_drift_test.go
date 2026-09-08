@@ -102,6 +102,20 @@ func driftStartRun(t *testing.T, c *workflowcore.Coordinator, store *fakeStore, 
 		t.Fatalf("CreateRun: %v", err)
 	}
 	runID := created.Run.ID
+	// P5-A phase 2: these scenarios are ALL about what happens around a real
+	// reviewer's approval — drift after it, a branch advancing past it, a fresh
+	// review replacing it. So the run has to be one that gets a reviewer.
+	//
+	// A plain task run no longer is. Its frozen request is `none`, and once AO
+	// runs the task's planned checks itself and watches them pass, the
+	// deterministic policy legitimately completes the review step without a
+	// reviewer (review_evidence_relief.go). That is the feature, not a
+	// regression — but it makes the reviewer path these fixtures exercise
+	// unreachable, so they now ask for a bounded review explicitly instead of
+	// depending on a default that no longer means what it did.
+	if err := c.ApplyReviewDepthPolicy(ctx, runID, domain.ReviewDepthLight); err != nil {
+		t.Fatalf("ApplyReviewDepthPolicy: %v", err)
+	}
 
 	plan := workflowcore.VerificationPlan{Commands: []workflowcore.VerificationCommandCheck{{Command: "go", Args: []string{"build", "./..."}, RequiredExitCode: 0, RetrySafe: true}}}
 	artifact := workflowcore.BuildPlanArtifact("proj-1", "ship the board card", "v1", plan)
@@ -247,8 +261,8 @@ func TestVerifyStillFailsOnAPostApprovalChange(t *testing.T) {
 		t.Fatalf("GetRun after approval: %v", err)
 	}
 	verify := driftVerifyStep(t, got)
-	if runner.calls != 0 {
-		t.Fatalf("verify commands ran %d times, want 0 — the guard must fire before execution", runner.calls)
+	if n := verifyRunnerCalls(t, store, runID, runner.calls); n != 0 {
+		t.Fatalf("verify commands ran %d times, want 0 — the guard must fire before execution", n)
 	}
 	found := false
 	for _, a := range verify.Attempts {
