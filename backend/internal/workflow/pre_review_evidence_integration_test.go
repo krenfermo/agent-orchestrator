@@ -862,3 +862,61 @@ func TestATaskWithNoVerificationAtAllSaysSo(t *testing.T) {
 		t.Fatal("an unverifiable task skipped its reviewer")
 	}
 }
+
+// A run that asks for a bounded review still gets one, even with perfect
+// evidence — a request may always ask for MORE scrutiny than the floor. And the
+// reviewer it launches receives AO's own checks, which is what makes the
+// bounded pass bounded: it does not have to re-establish what AO already ran.
+func TestABoundedReviewStillRunsAndReceivesTheObservedEvidence(t *testing.T) {
+	sessionFacts := newFakeSessionFacts()
+	dir := t.TempDir()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: dir}}, facts: sessionFacts}
+	workspaceFacts := &fakeWorkspaceFacts{}
+	reviewRuns := newFakeReviewRuns()
+	launcher := &fakeReviewerLauncher{}
+	runner := passingRunner()
+	c, store, clk := newCoordinatorWithReviewAndVerifier(spawner, sessionFacts, workspaceFacts, reviewRuns, launcher, runner)
+	ctx := context.Background()
+
+	created, err := c.CreateRun(ctx, "proj-1", "rename a helper", verifiablePlan())
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	// Ask for a bounded review explicitly: max(light, relieved floor none) is
+	// light, so the request wins.
+	if err := c.ApplyReviewDepthPolicy(ctx, created.Run.ID, domain.ReviewDepthLight); err != nil {
+		t.Fatalf("ApplyReviewDepthPolicy: %v", err)
+	}
+	completeWorkStepInDir(t, c, clk, sessionFacts, workspaceFacts, created.Run.ID, dir, ordinaryCodeChange())
+	if _, err := c.SubmitWorkReport(ctx, created.Run.ID, domain.WorkReport{
+		Summary:       "Renamed the helper and updated its call sites.",
+		TestsReported: []domain.WorkReportTestClaim{{Command: "go test ./pkg/...", ClaimedOutcome: domain.WorkReportOutcomeClaimedPassed}},
+	}); err != nil {
+		t.Fatalf("SubmitWorkReport: %v", err)
+	}
+	got, err := c.ContinueRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("ContinueRun: %v", err)
+	}
+	if reviewStepFrom(got).Step.ReviewRunID == nil {
+		t.Fatal("an explicit bounded-review request was not honoured")
+	}
+	d := depthDecisionsFor(t, store, created.Run.ID)[0]
+	if d.Effective != domain.ReviewDepthLight {
+		t.Fatalf("effective depth = %q, want light", d.Effective)
+	}
+
+	// The bounded prompt carries BOTH accounts, and keeps them apart.
+	for _, want := range []string{
+		"This is a BOUNDED review",
+		"Checks AO RAN ITSELF against this exact tree",
+		"observed every one of them pass",
+		"What the WORKER SAYS it did",
+		"CLAIMS (unverified) it passed",
+		"AO's observations win",
+	} {
+		if !strings.Contains(launcher.lastPrompt, want) {
+			t.Errorf("the bounded prompt is missing %q", want)
+		}
+	}
+}
