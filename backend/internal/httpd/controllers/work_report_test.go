@@ -173,3 +173,13 @@ func TestWorkReportRouteWithoutTheCapability(t *testing.T) {
 		t.Fatalf("status=%d body=%s", status, body)
 	}
 }
+
+// workReportReceiptFor is a minimal accepted receipt, shared with the OIDC
+// tests next door.
+func workReportReceiptFor(runID string) workflowcore.WorkReportReceipt {
+	return workflowcore.WorkReportReceipt{
+		WorkflowRunID:  runID,
+		WorkflowStepID: "wfs-1",
+		Report:         domain.WorkReport{Version: domain.WorkReportVersion},
+	}
+}

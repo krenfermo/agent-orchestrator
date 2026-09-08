@@ -168,6 +168,72 @@ fingerprint. A report attached to the work step displaced those facts the moment
 it was newer — which is every real run — and the dispatch then stopped as
 `ambiguous_review_state`.
 
+## Worker identity (phase 2C)
+
+Under OIDC a worker needs a credential of its own, and there is an ordering
+problem in the way of one:
+
+- the CLI finds its credential only through `AO_AGENT_CREDENTIAL_FILE`, set in
+  the pane's environment **at spawn**;
+- a credential must be bound to the session it may speak for;
+- a worker's session **does not exist until that spawn returns**.
+
+A reviewer has no such problem: its credential is bound to the *worker's*
+session, which already exists. So a worker credential is minted **unbound**,
+handed over, and bound exactly once when the launch reports which session it
+produced:
+
+```
+1. Issue(role=worker, run, step, attempt, project, owner)   session_id = ''
+2. env[AO_AGENT_CREDENTIAL_FILE] = <dataDir>/agent-credentials/workflow-worker-<attempt>
+3. Spawn(...)                                               -> session
+4. BindAgentCredentialSession(credID, session)              CAS, once
+```
+
+The window between 1 and 4 grants nothing: `AgentAuthority.MayReachSession`
+refuses every session route while `SessionID` is empty, so an unbound credential
+is **inert rather than permissive**. The bind is one guarded statement
+(`WHERE id = ? AND session_id = '' AND revoked_at IS NULL`), so it can only ever
+move a credential from unbound to bound, once — a second bind, on any session,
+changes nothing, and a revoked credential can never be resurrected into one.
+
+**A binding that does not land is a failed launch.** The credential is taken
+back and its file removed, because a pane holding a token AO cannot account for
+is the state the mechanism exists to prevent.
+
+### What a worker credential can do
+
+Its ceiling is the pre-existing `AgentRoleWorker` one — session read/write and
+workflow read — bound to one project, one run, one step and one attempt. Project
+binding is what carries cross-project *and cross-tenant* refusal: a project
+belongs to exactly one tenant, and `AgentAuthority.Allows` denies every project
+but the bound one whatever the account behind it may do elsewhere.
+
+### When it ends
+
+| Ending | How |
+|---|---|
+| Spawn failed, launch named no session, bind failed | Immediately, by the launcher |
+| Replaced by a new attempt on the same step | Immediately, by the launcher, keyed on the **attempt** |
+| Turn ended, cancelled, failed, step gone | The derived sweep, ≤ one reconcile interval |
+
+The sweep is the guarantee and the eager paths are optimizations, which is the
+same split the reviewer half already makes. Its rule mirrors the review one
+exactly:
+
+> a worker credential may live exactly as long as its work step is running.
+
+`NOT EXISTS` rather than a state comparison, so a step whose row is gone counts
+as finished too — an orphan left by a daemon that died mid-launch is discharged
+on the next boot rather than living out its TTL. Nothing is remembered and
+nothing needs replaying: a pass that failed and a pass that never ran are the
+same situation next time round.
+
+Replacement is the one ending the sweep cannot see — a step being re-dispatched
+is still running — so it is handled explicitly at the single site that knows a
+replacement is happening, rather than at the twenty-three places a step can
+transition.
+
 ## Bounds
 
 - `preReviewEvidenceMaxCommands` (12): a plan larger than this is a suite, and a

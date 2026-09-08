@@ -189,9 +189,19 @@ type AgentCredential struct {
 // the runtime handle in order to remove the file the token was handed over in.
 // It never needs the token hash, so it never carries it.
 type RevocableAgentCredential struct {
-	CredentialID  string
-	ReviewRunID   string
-	RuntimeHandle string
+	CredentialID string
+	// ReviewRunID names the review run that ended, for a reviewer credential.
+	// Empty for a worker's.
+	ReviewRunID string
+	// WorkflowStepID names the work step that stopped running, for a worker
+	// credential. Empty for a reviewer's.
+	//
+	// The two are separate fields rather than one "reason" string because a
+	// revocation has to be able to say WHICH obligation it discharged, and a
+	// reader that cannot tell a finished review from a finished work step
+	// cannot check the sweep did the right thing.
+	WorkflowStepID string
+	RuntimeHandle  string
 }
 
 // Authority projects the row onto the non-secret shape a request carries.

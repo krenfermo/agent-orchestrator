@@ -224,7 +224,7 @@ func (c coordinatorLockClassifier) ClassifyLockOwner(ctx context.Context, run do
 // it, at runtime, on every run. Pinning it here makes that a compile error.
 var _ workflowcore.DispatchRecorder = (*sqlite.Store)(nil)
 
-func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememory.Service, memoryProvisioning *durablememory.Provisioner, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, workItemSync workItemSyncer, agents ports.AgentResolver, terminalRuntimes workflowcore.TerminalRuntimeReclaimer, plannerUsage workflowcore.PlannerUsageRecorder, reviewerIdentity workflowcore.ReviewerIdentityLedger, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
+func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememory.Service, memoryProvisioning *durablememory.Provisioner, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, workItemSync workItemSyncer, agents ports.AgentResolver, terminalRuntimes workflowcore.TerminalRuntimeReclaimer, plannerUsage workflowcore.PlannerUsageRecorder, reviewerIdentity workflowcore.ReviewerIdentityLedger, workerCredentials workerCredentialIssuer, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {
 		plannerBinary = "claude"
@@ -286,8 +286,23 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		SessionFacts:     store,
 		WorkspaceFacts:   workspace,
 		ReviewerLauncher: reviewerLauncher,
-		MessageSender:    sessionMgr,
-		Verifier:         workflowVerifyRunner{},
+		// P5-A phase 2C: workers launch through their own launcher now, so
+		// they get an identity of their own the way reviewers already do.
+		// Spawner above stays wired: it is still the transport this launcher
+		// calls, and every other dispatch site keeps using it directly.
+		WorkerLauncher: &workflowWorkerLauncher{
+			spawner:     sessionMgr,
+			dataDir:     cfg.DataDir,
+			log:         log,
+			credentials: workerCredentials,
+			// Same judgement the reviewer launcher makes: where a cookie-less
+			// request resolves nobody, a worker with no credential provably
+			// cannot report on its own work, so refuse the launch rather than
+			// start it into a dead end.
+			requireAgentIdentity: !cfg.TrustedLocalMode,
+		},
+		MessageSender: sessionMgr,
+		Verifier:      workflowVerifyRunner{},
 		// P1-F: a terminal run ends the runtime it owns immediately, through
 		// the same sweeper that would have reclaimed it fifteen minutes later.
 		TerminalRuntimes: terminalRuntimes,

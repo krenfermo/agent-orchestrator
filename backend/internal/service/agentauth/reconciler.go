@@ -137,6 +137,23 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) ([]domain.RevocableAgent
 	if err != nil {
 		return nil, err
 	}
+	// P5-A phase 2C: the worker half of the same obligation, swept in the same
+	// pass and by the same rule — a worker credential may live exactly as long
+	// as its work step is running.
+	//
+	// A failure in the reviewer half above has already returned, because a pass
+	// that cannot read the store cannot do either half honestly. What neither
+	// half may do is let its own failure be reported as the other's success, so
+	// both feed the same return value and the same error.
+	workers, err := r.svc.ReconcileStaleWorkerCredentials(ctx)
+	if err != nil {
+		// The reviewer half already landed; say so by returning what it took
+		// back alongside the error, so a caller cannot read a partial pass as
+		// a total failure and re-derive nothing.
+		r.removeFiles(revoked)
+		return revoked, err
+	}
+	revoked = append(revoked, workers...)
 	r.removeFiles(revoked)
 	return revoked, nil
 }

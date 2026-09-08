@@ -2,6 +2,7 @@ package agentauth_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,7 +17,15 @@ type fakeStore struct {
 	// A run this map does not name is a run that no longer exists, which the
 	// real predicate also treats as closed.
 	runs map[string]domain.ReviewRunStatus
-	seq  int
+	// steps is the durable work-step state a WORKER credential derives its life
+	// from (P5-A phase 2C). A step this map does not name is one that no longer
+	// exists, which the real predicate also treats as finished.
+	steps map[string]domain.WorkflowStepState
+	// mu models the store's own serialized writes. Without it, a test that
+	// exercises two passes at once would be testing this map rather than the
+	// rule the SQL enforces.
+	mu  sync.Mutex
+	seq int
 	// listErr and revokeErr make a pass fail the way a locked database would,
 	// so the recovery behaviour can be tested rather than argued about.
 	listErr   error
@@ -335,4 +344,122 @@ func TestEverIssuedSurvivesRevocation(t *testing.T) {
 	if ever, err := svc.EverIssuedForReviewRun(context.Background(), ""); err != nil || ever {
 		t.Fatalf("EverIssued for no run = %v, %v; want false, nil", ever, err)
 	}
+}
+
+// --- P5-A phase 2C: the worker half of the fake store. -----------------------
+//
+// Each method implements the same predicate its SQL does, from the same durable
+// facts, so a test that passes here is testing the rule rather than the fake.
+// Every one takes f.mu for its whole body: the real store serializes writes, and
+// a fake that does not would fail differently from production.
+
+func (f *fakeStore) stepRunning(stepID string) bool {
+	switch f.steps[stepID] {
+	case domain.WorkflowStepReady, domain.WorkflowStepRunning, domain.WorkflowStepWaiting:
+		return true
+	default:
+		return false
+	}
+}
+
+// BindAgentCredentialSession mirrors the guarded UPDATE: unbound and live, or
+// nothing happens.
+func (f *fakeStore) BindAgentCredentialSession(_ context.Context, credentialID string, sessionID domain.SessionID) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.revokeErr != nil {
+		return false, f.revokeErr
+	}
+	for hash, c := range f.creds {
+		if c.ID != credentialID || c.SessionID != "" || c.RevokedAt != nil {
+			continue
+		}
+		c.SessionID = sessionID
+		f.creds[hash] = c
+		return true, nil
+	}
+	return false, nil
+}
+
+func (f *fakeStore) RevokeAgentCredential(_ context.Context, credentialID string, at time.Time) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.revokeErr != nil {
+		return 0, f.revokeErr
+	}
+	for hash, c := range f.creds {
+		if c.ID != credentialID || c.RevokedAt != nil {
+			continue
+		}
+		revoked := at
+		c.RevokedAt = &revoked
+		f.creds[hash] = c
+		return 1, nil
+	}
+	return 0, nil
+}
+
+func (f *fakeStore) RevokeSupersededWorkerAgentCredentials(_ context.Context, stepID, keepAttemptID string, at time.Time) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.revokeErr != nil {
+		return 0, f.revokeErr
+	}
+	var n int64
+	for hash, c := range f.creds {
+		if c.Role != domain.AgentRoleWorker || c.WorkflowStepID == "" || c.WorkflowStepID != stepID ||
+			c.RuntimeInstanceID == keepAttemptID || c.RevokedAt != nil {
+			continue
+		}
+		revoked := at
+		c.RevokedAt = &revoked
+		f.creds[hash] = c
+		n++
+	}
+	return n, nil
+}
+
+func (f *fakeStore) ListRevocableWorkerAgentCredentials(_ context.Context) ([]domain.RevocableAgentCredential, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	var out []domain.RevocableAgentCredential
+	for _, c := range f.creds {
+		if c.Role != domain.AgentRoleWorker || c.WorkflowStepID == "" || c.RevokedAt != nil {
+			continue
+		}
+		if f.stepRunning(c.WorkflowStepID) {
+			continue
+		}
+		out = append(out, domain.RevocableAgentCredential{
+			CredentialID:   c.ID,
+			WorkflowStepID: c.WorkflowStepID,
+			RuntimeHandle:  c.RuntimeHandle,
+		})
+	}
+	return out, nil
+}
+
+func (f *fakeStore) RevokeStaleWorkerAgentCredentials(_ context.Context, at time.Time) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.revokeErr != nil {
+		return 0, f.revokeErr
+	}
+	var n int64
+	for hash, c := range f.creds {
+		if c.Role != domain.AgentRoleWorker || c.WorkflowStepID == "" || c.RevokedAt != nil {
+			continue
+		}
+		if f.stepRunning(c.WorkflowStepID) {
+			continue
+		}
+		revoked := at
+		c.RevokedAt = &revoked
+		f.creds[hash] = c
+		n++
+	}
+	return n, nil
 }
