@@ -251,6 +251,49 @@ revoked credential authenticates for nothing at all.** Since the session is
 reused across the loop, revoking is the only correct answer — fencing one route
 would leave the rest reachable.
 
+### The central fence: authority is derived, not remembered
+
+Revocation alone could not close the window, because revocation is something
+that must have **happened**. An authorization taken in the interval before the
+eager close or the sweep ran would be taken on a launch that is already over —
+and with session write over a session the whole step reuses, that interval is
+not one anybody should have to reason about.
+
+So authority is asked **per request, from durable rows**, at
+`AuthorizeSessionAccess` — the one boundary every session route already passes
+through. For a worker credential the predicate is one statement:
+
+```
+not revoked
+  AND bound, to the session the step is CURRENTLY dispatched into
+  AND the step is live (ready | running | waiting)
+  AND the credential's attempt IS the step's latest attempt
+```
+
+Its invariants:
+
+1. **It only ever denies.** It grants nothing the bindings would refuse, so it
+   cannot widen an authority.
+2. **It cannot be stale.** No sweep needs to have run; the answer is derived at
+   the moment of the request.
+3. **It fails closed.** A checker that errors denies — an authority AO cannot
+   evaluate is not an authority.
+4. **Workers only.** A reviewer's lifetime is its review run, already handled;
+   asking this of it would be asking about a step it has no attempt on.
+5. **Humans are untouched.** It is never consulted for a request carrying no
+   agent credential.
+
+The attempt clause is what fences a stale generation. A step's session is
+**write-once** (`UpdateWorkflowStepSession` is guarded on `session_id IS NULL`),
+so the session cannot move — which is precisely why the *attempt*, not the
+session, is the discriminator between one generation and the next. A step
+reopened from `failed` into a new attempt does **not** hand the old credential
+its authority back when it becomes live again, which a liveness-only check
+would have done.
+
+Revocation stays, eager and swept, as defence in depth: **the fence stops use,
+revocation ends existence.**
+
 ### When it ends
 
 | Ending | How |

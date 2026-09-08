@@ -336,3 +336,20 @@ func (s *Store) RevokeStaleWorkerAgentCredentials(ctx context.Context, at time.T
 	}
 	return n, nil
 }
+
+// IsWorkerCredentialAuthorized reports whether a worker credential is STILL the
+// authorized one for its step, derived from durable rows at the moment of the
+// call.
+//
+// It is deliberately a read rather than a reliance on revocation having already
+// happened. Revocation is eager and swept, and both are kept -- but an
+// authorization decision that depends on a sweep having run leaves an interval
+// in which a finished attempt can still act, and that interval is exactly what
+// this removes.
+func (s *Store) IsWorkerCredentialAuthorized(ctx context.Context, credentialID string) (bool, error) {
+	authorized, err := s.qr.IsWorkerCredentialAuthorized(ctx, credentialID)
+	if err != nil {
+		return false, fmt.Errorf("check worker credential %s authority: %w", credentialID, err)
+	}
+	return authorized, nil
+}

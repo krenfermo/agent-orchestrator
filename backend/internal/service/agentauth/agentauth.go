@@ -68,6 +68,7 @@ type Store interface {
 	RevokeSupersededWorkerAgentCredentials(ctx context.Context, stepID, keepAttemptID string, at time.Time) (int64, error)
 	ListRevocableWorkerAgentCredentials(ctx context.Context) ([]domain.RevocableAgentCredential, error)
 	RevokeStaleWorkerAgentCredentials(ctx context.Context, at time.Time) (int64, error)
+	IsWorkerCredentialAuthorized(ctx context.Context, credentialID string) (bool, error)
 	ListRevocableAgentCredentials(ctx context.Context) ([]domain.RevocableAgentCredential, error)
 	RevokeClosedReviewRunAgentCredentials(ctx context.Context, at time.Time) (int64, error)
 	GetUserByID(ctx context.Context, id domain.UserID) (domain.User, bool, error)
@@ -426,6 +427,36 @@ func (s *Service) RevokeSupersededWorkers(ctx context.Context, stepID, keepAttem
 		return 0, nil
 	}
 	return s.store.RevokeSupersededWorkerAgentCredentials(ctx, stepID, keepAttemptID, s.now().UTC())
+}
+
+// StillAuthorized reports whether an agent's authority is still current.
+//
+// This is P5-A phase 2C's CENTRAL FENCE, and it exists because revocation alone
+// cannot close the window it needs to close. Revocation is eager and swept, but
+// both are things that must have HAPPENED; an authorization taken in the
+// interval before either ran would be taken on a credential whose launch is
+// over. AgentRoleWorker holds session write -- /send, /kill, /rollback,
+// /restore, /resume-agent, /switch-agent, /reviewer, /auto-review -- over a
+// session that Checkpoint 8D reuses for the whole step, so that interval is not
+// one anybody should have to reason about.
+//
+// So the question is answered from durable rows, per request, and the answer
+// cannot be stale. Three rules:
+//
+//   - it only ever DENIES. It grants nothing the binding checks would refuse,
+//     so it cannot widen an authority;
+//   - it applies to WORKERS only. A reviewer's lifetime is its review run and is
+//     already handled; asking this question of it would be asking about a step
+//     it has no attempt on;
+//   - it FAILS CLOSED. An authority AO cannot evaluate is not an authority.
+func (s *Service) StillAuthorized(ctx context.Context, authority domain.AgentAuthority) (bool, error) {
+	if authority.Role != domain.AgentRoleWorker {
+		return true, nil
+	}
+	if strings.TrimSpace(authority.CredentialID) == "" {
+		return false, nil
+	}
+	return s.store.IsWorkerCredentialAuthorized(ctx, authority.CredentialID)
 }
 
 // CloseFinishedWorkers takes back the authority of every worker whose step has

@@ -69,10 +69,13 @@ type ConversationsController struct {
 	// owner-equality checks with the canonical permission evaluator; a zero
 	// Guard preserves the pre-P4-B behavior exactly.
 	Guard Guard
+	// AgentAuthority is P5-A phase 2C's central fence; see
+	// AgentAuthorityChecker. Nil leaves behaviour unchanged.
+	AgentAuthority AgentAuthorityChecker
 }
 
 func (c *ConversationsController) scoping() SessionScoping {
-	return SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal, Guard: c.Guard}
+	return SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal, Guard: c.Guard, AgentAuthority: c.AgentAuthority}
 }
 
 // requireSessionAccess is this controller's session-authorization

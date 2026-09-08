@@ -105,6 +105,12 @@ type AgentAuthority struct {
 	// ReviewRunID is the review_run a reviewer credential was minted for, empty
 	// for a worker.
 	ReviewRunID string
+	// AttemptID is the launch this credential was minted for -- the work step's
+	// attempt row, for a worker. It is what separates one generation of a step
+	// from the next, and it is projected here (rather than left on the row)
+	// because the authorization fence has to be able to ask "is this still the
+	// authorized launch?" from the request's own principal.
+	AttemptID string
 	// Permissions is the durable grant, already capped by Role at issue time.
 	Permissions []Permission
 }
@@ -214,6 +220,7 @@ func (c AgentCredential) Authority() AgentAuthority {
 		WorkflowRunID:  c.WorkflowRunID,
 		WorkflowStepID: c.WorkflowStepID,
 		ReviewRunID:    c.ReviewRunID,
+		AttemptID:      c.RuntimeInstanceID,
 		Permissions:    c.Permissions,
 	}
 }

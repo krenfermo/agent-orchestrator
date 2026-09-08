@@ -148,6 +148,10 @@ type APIDeps struct {
 	// instead of with none. Optional: nil leaves the X-AO-Agent-Token header
 	// resolving nothing, which is exactly the pre-P4-I behavior.
 	AgentAuth identity.AgentResolver
+	// AgentAuthority is P5-A phase 2C's central fence: per request, whether an
+	// AO-launched agent's credential still belongs to the launch that is
+	// currently authorized. Nil leaves the pre-2C behaviour exactly as it was.
+	AgentAuthority controllers.AgentAuthorityChecker
 	// SSO backs P4-A's OIDC surface (/auth/providers, /auth/oidc/*).
 	// Optional in exactly the same sense as every other surface here: nil
 	// leaves those routes answering 501 and leaves the installation
@@ -316,16 +320,21 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			Ownership:     deps.SessionOwnership,
 			TrustedLocal:  cfg.TrustedLocalMode,
 			Guard:         guard,
+			// P5-A phase 2C: this controller owns /send, /kill, /rollback,
+			// /switch-agent and the rest of the session writes, so the fence
+			// matters here more than anywhere.
+			AgentAuthority: deps.AgentAuthority,
 		},
 		// P3-E: the loopback callback a reviewer or decision-resolver pane uses
 		// to report its OWN token spend. Wired to the same collector the session
 		// hook uses, through a strictly narrower entry point.
 		usageSubject: &controllers.UsageSubjectController{Usage: deps.UsageSubjectHooks},
 		usage: &controllers.UsageController{
-			Svc:          deps.UsageSummary,
-			Ownership:    deps.SessionOwnership,
-			TrustedLocal: cfg.TrustedLocalMode,
-			Guard:        guard,
+			Svc:            deps.UsageSummary,
+			Ownership:      deps.SessionOwnership,
+			TrustedLocal:   cfg.TrustedLocalMode,
+			Guard:          guard,
+			AgentAuthority: deps.AgentAuthority,
 		},
 		capacity:           &controllers.CapacityController{Svc: deps.Capacity},
 		projectMemory:      &controllers.ProjectMemoryController{Svc: deps.ProjectMemory, Guard: guard},
@@ -338,19 +347,21 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		workItems:     &controllers.WorkItemsController{Svc: deps.WorkItems, Guard: guard},
 		prs:           &controllers.PRsController{Svc: deps.PRs},
 		reviews: &controllers.ReviewsController{
-			Svc:          deps.Reviews,
-			Ownership:    deps.SessionOwnership,
-			TrustedLocal: cfg.TrustedLocalMode,
-			Guard:        guard,
+			Svc:            deps.Reviews,
+			Ownership:      deps.SessionOwnership,
+			TrustedLocal:   cfg.TrustedLocalMode,
+			Guard:          guard,
+			AgentAuthority: deps.AgentAuthority,
 		},
 		// P5-A phase 2B: the worker's own declaration, scoped exactly like a
 		// reviewer's verdict — same ownership store, same trusted-local rule,
 		// same guard.
 		workReports: &controllers.WorkReportsController{
-			Svc:          deps.Workflows,
-			Ownership:    deps.SessionOwnership,
-			TrustedLocal: cfg.TrustedLocalMode,
-			Guard:        guard,
+			Svc:            deps.Workflows,
+			Ownership:      deps.SessionOwnership,
+			TrustedLocal:   cfg.TrustedLocalMode,
+			Guard:          guard,
+			AgentAuthority: deps.AgentAuthority,
 		},
 		decisions:     &controllers.DecisionsController{Svc: deps.Decisions},
 		notifications: &controllers.NotificationsController{Svc: deps.Notifications, Stream: deps.NotificationStream, Guard: guard},
@@ -358,10 +369,11 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		imports:       &controllers.ImportController{Svc: deps.Import},
 		shellTerms:    &controllers.ShellTerminalsController{Svc: deps.ShellTerminals},
 		conversations: &controllers.ConversationsController{
-			Svc:          deps.Conversations,
-			Ownership:    deps.SessionOwnership,
-			TrustedLocal: cfg.TrustedLocalMode,
-			Guard:        guard,
+			Svc:            deps.Conversations,
+			Ownership:      deps.SessionOwnership,
+			TrustedLocal:   cfg.TrustedLocalMode,
+			Guard:          guard,
+			AgentAuthority: deps.AgentAuthority,
 		},
 		settings: &controllers.SettingsController{Svc: deps.Settings, MemoryMode: deps.MemoryMode},
 		dev:      &controllers.DevController{Import: deps.DevImport},

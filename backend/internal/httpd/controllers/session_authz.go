@@ -32,6 +32,10 @@ type SessionScoping struct {
 	// session visible to the team that was granted the project and invisible
 	// to everyone else. A zero Guard leaves 8P-B.2's behavior untouched.
 	Guard Guard
+	// AgentAuthority is P5-A phase 2C's central fence: for an AO-launched
+	// agent, whether the launch its credential belongs to is still the
+	// authorized one. Nil leaves behaviour exactly as it was.
+	AgentAuthority AgentAuthorityChecker
 }
 
 func (s SessionScoping) enforced() bool {
@@ -74,7 +78,7 @@ func AuthorizeSessionAccess(w http.ResponseWriter, r *http.Request, scoping Sess
 	// CREDENTIAL, not of the installation's authorization posture. A desktop
 	// install with scoping off must still not let a reviewer steer a session it
 	// has no business in. Every non-agent request passes straight through.
-	if !agentMayReachSession(w, r, id) {
+	if !agentMayReachSession(w, r, id, scoping.AgentAuthority) {
 		return false
 	}
 	if scoping.Guard.Enabled() {

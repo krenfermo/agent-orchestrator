@@ -21,6 +21,12 @@ type fakeStore struct {
 	// from (P5-A phase 2C). A step this map does not name is one that no longer
 	// exists, which the real predicate also treats as finished.
 	steps map[string]domain.WorkflowStepState
+	// stepSessions and attempts are the other two durable facts the phase 2C
+	// authority fence derives from: which session a step is CURRENTLY
+	// dispatched into, and its launch history newest-last.
+	stepSessions  map[string]domain.SessionID
+	attempts      map[string][]string
+	authorizedErr error
 	// mu models the store's own serialized writes. Without it, a test that
 	// exercises two passes at once would be testing this map rather than the
 	// rule the SQL enforces.
@@ -462,4 +468,44 @@ func (f *fakeStore) RevokeStaleWorkerAgentCredentials(_ context.Context, at time
 		n++
 	}
 	return n, nil
+}
+
+// attempts is the step's launch history the fence reads: the credential must
+// belong to the LATEST one. Keyed by step id, newest last.
+func (f *fakeStore) latestAttempt(stepID string) string {
+	list := f.attempts[stepID]
+	if len(list) == 0 {
+		return ""
+	}
+	return list[len(list)-1]
+}
+
+// IsWorkerCredentialAuthorized mirrors the SQL predicate exactly: live step,
+// bound to the session the step is currently dispatched into, and the step's
+// latest attempt.
+func (f *fakeStore) IsWorkerCredentialAuthorized(_ context.Context, credentialID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.authorizedErr != nil {
+		return false, f.authorizedErr
+	}
+	for _, c := range f.creds {
+		if c.ID != credentialID {
+			continue
+		}
+		if c.Role != domain.AgentRoleWorker || c.RevokedAt != nil {
+			return false, nil
+		}
+		if c.SessionID == "" || c.SessionID != f.stepSessions[c.WorkflowStepID] {
+			return false, nil
+		}
+		if !f.stepRunning(c.WorkflowStepID) {
+			return false, nil
+		}
+		if c.RuntimeInstanceID == "" || c.RuntimeInstanceID != f.latestAttempt(c.WorkflowStepID) {
+			return false, nil
+		}
+		return true, nil
+	}
+	return false, nil
 }

@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -40,16 +41,53 @@ func agentPrincipal(r *http.Request) (domain.AgentAuthority, bool) {
 // agentMayReachSession enforces the session binding. It returns true for every
 // non-agent request, so a human's path through the gate is byte-for-byte
 // unchanged.
-func agentMayReachSession(w http.ResponseWriter, r *http.Request, id domain.SessionID) bool {
+func agentMayReachSession(w http.ResponseWriter, r *http.Request, id domain.SessionID, authorized AgentAuthorityChecker) bool {
 	authority, ok := agentPrincipal(r)
 	if !ok {
 		return true
 	}
-	if authority.MayReachSession(id) {
+	if !authority.MayReachSession(id) {
+		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "SESSION_NOT_FOUND", "session not found", nil)
+		return false
+	}
+	// P5-A phase 2C: the binding says which session this credential was minted
+	// for. It does NOT say whether the launch it was minted for is still the
+	// authorized one, and for a worker those are different questions.
+	//
+	// A worker holds session WRITE -- /send, /kill, /rollback, /restore,
+	// /resume-agent, /switch-agent, /reviewer, /auto-review -- over a session
+	// Checkpoint 8D reuses for the step's whole loop. Revocation ends such a
+	// credential eagerly and, failing that, on the reconciler's sweep; but an
+	// authorization that trusted revocation to have ALREADY happened would leave
+	// an interval in which a finished attempt still acts on the session its
+	// successor is working in.
+	//
+	// So the question is asked here, per request, derived from durable rows, and
+	// the answer cannot be stale. It only ever denies, and a checker that cannot
+	// answer denies too: an authority AO cannot evaluate is not an authority.
+	if authorized == nil {
 		return true
 	}
-	envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "SESSION_NOT_FOUND", "session not found", nil)
-	return false
+	ok, err := authorized.StillAuthorized(r.Context(), authority)
+	if err != nil || !ok {
+		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "SESSION_NOT_FOUND", "session not found", nil)
+		return false
+	}
+	return true
+}
+
+// AgentAuthorityChecker answers whether an agent's authority is still the
+// current one, from durable state, at the moment of the request.
+//
+// It is separate from the bindings above because it answers a different
+// question. A binding is fixed at mint time and says WHERE a credential may
+// act; this says WHETHER the launch it belongs to is still the authorized one.
+// Only the second can go stale while a credential sits in a pane.
+//
+// Nil disables it, which leaves every pre-P5-A deployment and every test that
+// does not wire it byte-for-byte unchanged.
+type AgentAuthorityChecker interface {
+	StillAuthorized(ctx context.Context, authority domain.AgentAuthority) (bool, error)
 }
 
 // agentMayReachWorkflowRun enforces the run binding.

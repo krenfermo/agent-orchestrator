@@ -41,10 +41,13 @@ type WorkReportsController struct {
 	Ownership    SessionOwnershipStore
 	TrustedLocal bool
 	Guard        Guard
+	// AgentAuthority is P5-A phase 2C's central fence; see
+	// AgentAuthorityChecker. Nil leaves behaviour unchanged.
+	AgentAuthority AgentAuthorityChecker
 }
 
 func (c *WorkReportsController) scoping() SessionScoping {
-	return SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal, Guard: c.Guard}
+	return SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal, Guard: c.Guard, AgentAuthority: c.AgentAuthority}
 }
 
 // Register mounts the work-report route.

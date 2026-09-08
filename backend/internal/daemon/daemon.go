@@ -912,17 +912,21 @@ func RunWithConfig(cfg config.Config) error {
 		SessionCapabilities: browserAuthority,
 		Auth:                authMgr,
 		AgentAuth:           agentAuthMgr,
-		SSO:                 ssoMgr,
-		ProjectOwnership:    store,
-		ProjectTenancy:      store,
-		WorkflowOwnership:   store,
-		SessionOwnership:    store,
-		Authz:               authzSvc,
-		ProjectScope:        store,
-		RBAC:                rbacSvc,
-		ProviderProfiles:    providerProfilesSvc,
-		ProviderSetup:       providerSetupSvc,
-		ExecutionPolicy:     executionPolicySvc,
+		// P5-A phase 2C: the same service also answers, per request, whether an
+		// agent's launch is still the authorized one -- the fence that makes
+		// revocation a defence in depth rather than the only barrier.
+		AgentAuthority:    agentAuthMgr,
+		SSO:               ssoMgr,
+		ProjectOwnership:  store,
+		ProjectTenancy:    store,
+		WorkflowOwnership: store,
+		SessionOwnership:  store,
+		Authz:             authzSvc,
+		ProjectScope:      store,
+		RBAC:              rbacSvc,
+		ProviderProfiles:  providerProfilesSvc,
+		ProviderSetup:     providerSetupSvc,
+		ExecutionPolicy:   executionPolicySvc,
 	})
 	if err != nil {
 		stop()

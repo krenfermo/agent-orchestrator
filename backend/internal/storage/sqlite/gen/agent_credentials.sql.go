@@ -159,6 +159,57 @@ func (q *Queries) InsertAgentCredential(ctx context.Context, arg InsertAgentCred
 	return i, err
 }
 
+const isWorkerCredentialAuthorized = `-- name: IsWorkerCredentialAuthorized :one
+SELECT EXISTS (
+  SELECT 1
+  FROM agent_credentials c
+  JOIN workflow_steps s ON s.id = c.workflow_step_id
+  WHERE c.id = ?
+    AND c.role = 'worker'
+    AND c.revoked_at IS NULL
+    AND c.session_id != ''
+    AND c.session_id = COALESCE(s.session_id, '')
+    AND s.state IN ('ready', 'running', 'waiting')
+    AND c.runtime_instance_id != ''
+    AND c.runtime_instance_id = (
+      SELECT a.id FROM workflow_attempts a
+      WHERE a.workflow_step_id = s.id
+        AND a.attempt_number = (
+          SELECT MAX(a2.attempt_number) FROM workflow_attempts a2
+          WHERE a2.workflow_step_id = s.id
+        )
+    )
+) AS authorized
+`
+
+// P5-A phase 2C, the central authority fence.
+//
+// Answers, from durable rows and at the moment of the request, whether one
+// worker credential is STILL the authorized one. It is a read rather than a
+// reliance on revocation having already run, which is the whole point: a sweep
+// that has not happened yet must not leave an interval in which a finished
+// attempt can still act.
+//
+// Four conditions, and each closes a different way authority ends:
+//   - not revoked -- the eager close and the sweep still do their work, this
+//     simply does not depend on them having done it yet;
+//   - bound, and bound to the session the step is CURRENTLY dispatched into --
+//     so a credential whose session was replaced cannot act on the new one;
+//   - the step is live -- so a completed, failed, cancelled or reopened-to-
+//     pending step's credential is refused with no window at all;
+//   - the attempt is the step's LATEST -- so a superseded launch, or one whose
+//     step was reopened into a new generation, cannot act even while the step
+//     is running again.
+//
+// MAX(attempt_number) rather than ORDER BY/LIMIT: see this file's header on the
+// sqlc SQLite codegen bug. KEEP THIS FILE PURE ASCII.
+func (q *Queries) IsWorkerCredentialAuthorized(ctx context.Context, id string) (bool, error) {
+	row := q.db.QueryRowContext(ctx, isWorkerCredentialAuthorized, id)
+	var authorized bool
+	err := row.Scan(&authorized)
+	return authorized, err
+}
+
 const listAgentCredentialsForReviewRun = `-- name: ListAgentCredentialsForReviewRun :many
 SELECT id, token_hash, role, user_id, project_id, session_id,
     workflow_run_id, workflow_step_id, review_run_id,
