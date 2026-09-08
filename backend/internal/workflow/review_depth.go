@@ -72,6 +72,11 @@ var standardRiskReviewReasons = map[ReviewReason]struct{}{
 	ReasonInsufficientVerify:    {},
 	ReasonDefaultConservative:   {},
 	ReasonNoChangedFiles:        {},
+	// P5-A: a change set AO could not establish. Standard rather than high --
+	// it keeps a review without claiming the change is sensitive, which is a
+	// claim AO has no basis for either way -- and it is relief-blocking, so it
+	// can never buy a cheaper review.
+	ReasonUnprovableChangeSet: {},
 }
 
 // lowRiskReviewReasons are the reasons AO can already prove safe

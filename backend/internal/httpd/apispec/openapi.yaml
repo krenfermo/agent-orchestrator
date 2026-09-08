@@ -21969,16 +21969,30 @@ components:
       properties:
         acceptanceCriteriaEmpty:
           type: boolean
+        changeSetBaseFrom:
+          type: string
+        changeSetBaseSha:
+          type: string
+        changeSetHeadSha:
+          type: string
         changedFileCount:
           type: integer
         changedFilePaths:
           items:
             type: string
           type: array
+        changedFilesSource:
+          type: string
+        changedFilesUnprovable:
+          type: boolean
+        committedChangedFileCount:
+          type: integer
         hasExactContentCheckForSoleChangedFile:
           type: boolean
         priorWorkProviderAttempts:
           type: integer
+        unprovableChangeSetReason:
+          type: string
         verifyCommandCount:
           type: integer
         verifyFileCheckCount:
