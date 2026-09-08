@@ -42,6 +42,7 @@ var (
 	ErrBranchCheckedOutElsewhere = ports.ErrWorkspaceBranchCheckedOutElsewhere
 	ErrBranchNotFetched          = ports.ErrWorkspaceBranchNotFetched
 	ErrBranchInvalid             = ports.ErrWorkspaceBranchInvalid
+	ErrProbeInconclusive         = ports.ErrWorkspaceProbeInconclusive
 	// ErrWorktreeLocked is an adapter-local alias of ports.ErrWorkspaceLocked,
 	// following the same aliasing convention as the branch sentinels above.
 	ErrWorktreeLocked = ports.ErrWorkspaceLocked
@@ -1249,11 +1250,30 @@ func (w *Workspace) revParse(ctx context.Context, repo, ref string) (string, err
 	return strings.TrimSpace(string(out)), nil
 }
 
+// validateBranch asks git whether a branch name is well formed, and reports
+// the answer ONLY when git gave one.
+//
+// The distinction is the whole point. `git check-ref-format` exiting non-zero
+// is git rejecting the name: a permanent, terminal fact about the caller's
+// input. A check-ref-format process that was KILLED -- a cancelled request
+// context, a deadline, an operator, the OOM killer -- or that never started
+// rendered no verdict at all, and calling that "invalid branch name" invents a
+// permanent refusal out of a transient one.
+//
+// That is not hypothetical: `git check-ref-format --branch ao/sige-12/root`
+// came back `signal: killed`, and AO answered INVALID_BRANCH for a name git
+// accepts. The validation is unchanged -- git is still the only authority on
+// whether a name is legal, and nothing here substitutes a different branch.
+// What changed is that a probe with no answer is reported as having no answer.
 func (w *Workspace) validateBranch(ctx context.Context, repo, branch string) error {
-	if _, err := w.run(ctx, w.binary, checkRefFormatBranchArgs(repo, branch)...); err != nil {
-		return fmt.Errorf("%w: %q (%w)", ErrBranchInvalid, branch, err)
+	_, err := w.run(ctx, w.binary, checkRefFormatBranchArgs(repo, branch)...)
+	if err == nil {
+		return nil
 	}
-	return nil
+	if !aoprocess.RenderedVerdict(ctx, err) {
+		return fmt.Errorf("%w: git check-ref-format --branch %q (%w)", ErrProbeInconclusive, branch, err)
+	}
+	return fmt.Errorf("%w: %q (%w)", ErrBranchInvalid, branch, err)
 }
 
 // errNoBaseRef is an internal sentinel: every candidate base ref is missing.

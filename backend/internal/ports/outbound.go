@@ -363,7 +363,22 @@ var (
 	ErrWorkspaceBranchNotFetched = errors.New("workspace: branch is not fetched")
 	// ErrWorkspaceBranchInvalid reports the requested branch name is not a valid
 	// git ref (rejected by `git check-ref-format`).
+	//
+	// It means git LOOKED at the name and said no. It is never returned for a
+	// probe that did not run to completion; see ErrWorkspaceProbeInconclusive.
 	ErrWorkspaceBranchInvalid = errors.New("workspace: invalid branch name")
+	// ErrWorkspaceProbeInconclusive reports that a read-only git probe did not
+	// return a verdict: it was killed (a cancelled context, a deadline, an
+	// operator, the OOM killer) or could not be started at all.
+	//
+	// It exists because the alternative is worse than an unclear error. AO ran
+	// `git check-ref-format --branch ao/sige-12/root`, got `signal: killed`,
+	// and reported INVALID_BRANCH for a name git accepts — a permanent verdict
+	// invented from a process that never rendered one. A probe that could not
+	// run is still a failure; it is a failure about AO's environment rather
+	// than about the caller's input, and it is retryable where an invalid name
+	// is not.
+	ErrWorkspaceProbeInconclusive = errors.New("workspace: git probe did not return a verdict")
 	// ErrWorkspaceDirty reports Destroy refused to remove a workspace because
 	// it holds uncommitted changes or untracked files. Teardown is never
 	// forced; callers treat the workspace as intentionally preserved.

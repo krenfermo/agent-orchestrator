@@ -42,6 +42,7 @@ const (
 // callers outside match on the port-level errors.
 var (
 	ErrBranchInvalid      = ports.ErrWorkspaceBranchInvalid
+	ErrProbeInconclusive  = ports.ErrWorkspaceProbeInconclusive
 	ErrBranchNotFetched   = ports.ErrWorkspaceBranchNotFetched
 	ErrRepositoryDirty    = ports.ErrWorkspaceRepositoryDirty
 	ErrNotSupported       = ports.ErrWorkspaceOperationUnsupported
@@ -443,11 +444,22 @@ func (w *Workspace) ensureRepository(ctx context.Context, repo string) error {
 	return nil
 }
 
+// validateBranchName is gitworktree.validateBranch's counterpart, and it draws
+// the same line for the same reason: git rejecting a name is a verdict, a
+// check-ref-format process that was killed or never started is not.
+//
+// It also keeps the cause now. The previous form discarded it entirely, so the
+// `signal: killed` that produced a spurious INVALID_BRANCH never reached the
+// operator who had to explain it.
 func (w *Workspace) validateBranchName(ctx context.Context, repo, branch string) error {
-	if _, err := w.run(ctx, w.binary, "-C", repo, "check-ref-format", "--branch", branch); err != nil {
-		return fmt.Errorf("directbranch: branch %q: %w", branch, ErrBranchInvalid)
+	_, err := w.run(ctx, w.binary, "-C", repo, "check-ref-format", "--branch", branch)
+	if err == nil {
+		return nil
 	}
-	return nil
+	if !aoprocess.RenderedVerdict(ctx, err) {
+		return fmt.Errorf("directbranch: branch %q: %w (%w)", branch, ErrProbeInconclusive, err)
+	}
+	return fmt.Errorf("directbranch: branch %q: %w (%w)", branch, ErrBranchInvalid, err)
 }
 
 // ensureBranchCheckedOut is where BRANCH FIDELITY is enforced. The configured
