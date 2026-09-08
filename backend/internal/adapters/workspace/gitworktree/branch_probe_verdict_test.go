@@ -44,7 +44,7 @@ func killedError(t *testing.T) error {
 	if !errors.As(err, &exit) {
 		t.Fatalf("wait = %v, want an *exec.ExitError", err)
 	}
-	if exit.ProcessState.Exited() {
+	if exit.Exited() {
 		t.Fatalf("helper exited normally; this test needs a signalled process")
 	}
 	return err

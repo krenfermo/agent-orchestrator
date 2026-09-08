@@ -47,11 +47,11 @@ func ExitStatus(err error) (int, bool) {
 	if !errors.As(err, &exit) || exit.ProcessState == nil {
 		return 0, false
 	}
-	if !exit.ProcessState.Exited() {
+	if !exit.Exited() {
 		// Terminated by a signal: there is no exit status to report.
 		return 0, false
 	}
-	return exit.ProcessState.ExitCode(), true
+	return exit.ExitCode(), true
 }
 
 // RenderedVerdict reports whether err came from a process that ran to

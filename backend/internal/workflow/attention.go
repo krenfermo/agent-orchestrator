@@ -325,7 +325,7 @@ const (
 	// Distinct from ReasonWorkerDispatchAmbiguous, which is the neighbouring
 	// question: that one is "AO cannot prove whether a worker exists", this one
 	// is "AO knows the worker exists and cannot prove which token it holds".
-	ReasonWorkerCredentialUnadoptable = "worker_credential_unadoptable"
+	ReasonWorkerCredentialUnadoptable = "worker_credential_unadoptable" //nolint:gosec // G101 false positive: an attention reason, not a secret.
 	// ReasonWorkerWorkspaceUnreadable is a worker whose turn AO can PROVE
 	// finished — the provider's own turn receipt for this dispatch — and whose
 	// repository AO could not read, so what the turn produced is unknown.
