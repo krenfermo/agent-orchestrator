@@ -13,6 +13,39 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
+const bindAgentCredentialSession = `-- name: BindAgentCredentialSession :execrows
+UPDATE agent_credentials SET session_id = ?
+WHERE id = ?
+  AND session_id = ''
+  AND revoked_at IS NULL
+`
+
+type BindAgentCredentialSessionParams struct {
+	SessionID domain.SessionID
+	ID        string
+}
+
+// P5-A phase 2C: worker credentials.
+//
+// A worker's session does not exist until the spawn that creates it returns,
+// and the credential has to be in that spawn's environment. So a worker
+// credential is minted UNBOUND and bound exactly once, by the statement below,
+// when the launch confirms which session it produced.
+//
+// The guard is what keeps "a binding is not a hint" true. session_id = ”
+// means the credential has never been bound and AgentAuthority.MayReachSession
+// already refuses every session route for it, so an unbound credential is inert
+// rather than permissive. The WHERE clause can therefore only ever move it from
+// unbound to bound, once: a second attempt matches no row, and a revoked
+// credential can never be resurrected into a binding.
+func (q *Queries) BindAgentCredentialSession(ctx context.Context, arg BindAgentCredentialSessionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, bindAgentCredentialSession, arg.SessionID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getAgentCredentialByTokenHash = `-- name: GetAgentCredentialByTokenHash :one
 SELECT id, token_hash, role, user_id, project_id, session_id,
     workflow_run_id, workflow_step_id, review_run_id,
@@ -126,6 +159,57 @@ func (q *Queries) InsertAgentCredential(ctx context.Context, arg InsertAgentCred
 	return i, err
 }
 
+const isWorkerCredentialAuthorized = `-- name: IsWorkerCredentialAuthorized :one
+SELECT EXISTS (
+  SELECT 1
+  FROM agent_credentials c
+  JOIN workflow_steps s ON s.id = c.workflow_step_id
+  WHERE c.id = ?
+    AND c.role = 'worker'
+    AND c.revoked_at IS NULL
+    AND c.session_id != ''
+    AND c.session_id = COALESCE(s.session_id, '')
+    AND s.state IN ('ready', 'running', 'waiting')
+    AND c.runtime_instance_id != ''
+    AND c.runtime_instance_id = (
+      SELECT a.id FROM workflow_attempts a
+      WHERE a.workflow_step_id = s.id
+        AND a.attempt_number = (
+          SELECT MAX(a2.attempt_number) FROM workflow_attempts a2
+          WHERE a2.workflow_step_id = s.id
+        )
+    )
+) AS authorized
+`
+
+// P5-A phase 2C, the central authority fence.
+//
+// Answers, from durable rows and at the moment of the request, whether one
+// worker credential is STILL the authorized one. It is a read rather than a
+// reliance on revocation having already run, which is the whole point: a sweep
+// that has not happened yet must not leave an interval in which a finished
+// attempt can still act.
+//
+// Four conditions, and each closes a different way authority ends:
+//   - not revoked -- the eager close and the sweep still do their work, this
+//     simply does not depend on them having done it yet;
+//   - bound, and bound to the session the step is CURRENTLY dispatched into --
+//     so a credential whose session was replaced cannot act on the new one;
+//   - the step is live -- so a completed, failed, cancelled or reopened-to-
+//     pending step's credential is refused with no window at all;
+//   - the attempt is the step's LATEST -- so a superseded launch, or one whose
+//     step was reopened into a new generation, cannot act even while the step
+//     is running again.
+//
+// MAX(attempt_number) rather than ORDER BY/LIMIT: see this file's header on the
+// sqlc SQLite codegen bug. KEEP THIS FILE PURE ASCII.
+func (q *Queries) IsWorkerCredentialAuthorized(ctx context.Context, id string) (bool, error) {
+	row := q.db.QueryRowContext(ctx, isWorkerCredentialAuthorized, id)
+	var authorized bool
+	err := row.Scan(&authorized)
+	return authorized, err
+}
+
 const listAgentCredentialsForReviewRun = `-- name: ListAgentCredentialsForReviewRun :many
 SELECT id, token_hash, role, user_id, project_id, session_id,
     workflow_run_id, workflow_step_id, review_run_id,
@@ -227,6 +311,75 @@ func (q *Queries) ListRevocableAgentCredentials(ctx context.Context) ([]ListRevo
 	return items, nil
 }
 
+const listRevocableWorkerAgentCredentials = `-- name: ListRevocableWorkerAgentCredentials :many
+SELECT id, workflow_step_id, runtime_handle
+FROM agent_credentials
+WHERE revoked_at IS NULL
+  AND role = 'worker'
+  AND workflow_step_id != ''
+  AND NOT EXISTS (
+    SELECT 1 FROM workflow_steps s
+    WHERE s.id = agent_credentials.workflow_step_id
+      AND s.state IN ('ready', 'running', 'waiting')
+  )
+`
+
+type ListRevocableWorkerAgentCredentialsRow struct {
+	ID             string
+	WorkflowStepID string
+	RuntimeHandle  string
+}
+
+// The worker half of the derived-lifetime rule the two review-run queries above
+// implement, and deliberately the same shape:
+//
+//	a worker credential may live exactly as long as its work step is running.
+//
+// NOT EXISTS rather than a state comparison so a step whose row is gone also
+// counts as finished. `pending` is excluded from the live set on purpose: a step
+// that has gone back to pending is not the launch this credential was minted
+// for, and a credential outliving its own launch is the whole failure mode.
+func (q *Queries) ListRevocableWorkerAgentCredentials(ctx context.Context) ([]ListRevocableWorkerAgentCredentialsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listRevocableWorkerAgentCredentials)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListRevocableWorkerAgentCredentialsRow{}
+	for rows.Next() {
+		var i ListRevocableWorkerAgentCredentialsRow
+		if err := rows.Scan(&i.ID, &i.WorkflowStepID, &i.RuntimeHandle); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const revokeAgentCredential = `-- name: RevokeAgentCredential :execrows
+UPDATE agent_credentials SET revoked_at = ?
+WHERE id = ? AND revoked_at IS NULL
+`
+
+type RevokeAgentCredentialParams struct {
+	RevokedAt sql.NullTime
+	ID        string
+}
+
+func (q *Queries) RevokeAgentCredential(ctx context.Context, arg RevokeAgentCredentialParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, revokeAgentCredential, arg.RevokedAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const revokeAgentCredentialsForClosedReviewRun = `-- name: RevokeAgentCredentialsForClosedReviewRun :execrows
 UPDATE agent_credentials SET revoked_at = ?
 WHERE review_run_id = ?
@@ -299,6 +452,77 @@ WHERE revoked_at IS NULL
 
 func (q *Queries) RevokeClosedReviewRunAgentCredentials(ctx context.Context, revokedAt sql.NullTime) (int64, error) {
 	result, err := q.db.ExecContext(ctx, revokeClosedReviewRunAgentCredentials, revokedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const revokeStaleWorkerAgentCredentials = `-- name: RevokeStaleWorkerAgentCredentials :execrows
+UPDATE agent_credentials SET revoked_at = ?
+WHERE revoked_at IS NULL
+  AND role = 'worker'
+  AND workflow_step_id != ''
+  AND NOT EXISTS (
+    SELECT 1 FROM workflow_steps s
+    WHERE s.id = agent_credentials.workflow_step_id
+      AND s.state IN ('ready', 'running', 'waiting')
+  )
+`
+
+func (q *Queries) RevokeStaleWorkerAgentCredentials(ctx context.Context, revokedAt sql.NullTime) (int64, error) {
+	result, err := q.db.ExecContext(ctx, revokeStaleWorkerAgentCredentials, revokedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const revokeSupersededWorkerAgentCredentials = `-- name: RevokeSupersededWorkerAgentCredentials :execrows
+UPDATE agent_credentials SET revoked_at = ?
+WHERE workflow_step_id = ?
+  AND workflow_step_id != ''
+  AND role = 'worker'
+  AND runtime_instance_id != ?
+  AND revoked_at IS NULL
+`
+
+type RevokeSupersededWorkerAgentCredentialsParams struct {
+	RevokedAt         sql.NullTime
+	WorkflowStepID    string
+	RuntimeInstanceID string
+}
+
+// REPLACEMENT. The sweep above cannot discharge this one: when a step is
+// re-dispatched, the step is still running, so its predecessor's credential
+// still satisfies the "may live" predicate even though the launch it was minted
+// for is over.
+//
+// So a replacement ends its predecessors explicitly, and the discriminator is
+// the ATTEMPT rather than the step: every worker credential for this step that
+// belongs to a DIFFERENT attempt is, by definition, one whose launch has been
+// superseded. Called from exactly one place -- the launcher, as it mints the new
+// one -- which is what keeps this from becoming the "remember to revoke at every
+// transition" design the reconciler exists to avoid.
+//
+// REPLACEMENT. The sweep above cannot discharge this one: when a step is
+// re-dispatched, the step is still running, so its predecessor's credential
+// still satisfies the "may live" predicate even though the launch it was minted
+// for is over.
+//
+// So a replacement ends its predecessors explicitly, and the discriminator is
+// the ATTEMPT rather than the step: every worker credential for this step that
+// belongs to a DIFFERENT attempt is one whose launch has been superseded.
+// Called from exactly one place, the launcher, as it mints the new one, which
+// is what keeps this from becoming the "remember to revoke at every transition"
+// design the reconciler exists to avoid.
+//
+// KEEP THIS FILE PURE ASCII. sqlc v1.31.1 slices these statements by rune index
+// against a byte offset, so a single non-ASCII character anywhere above -- an
+// em dash in a comment is enough -- silently truncates a later statement
+// mid-token and produces SQL that fails at runtime with "incomplete input".
+func (q *Queries) RevokeSupersededWorkerAgentCredentials(ctx context.Context, arg RevokeSupersededWorkerAgentCredentialsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, revokeSupersededWorkerAgentCredentials, arg.RevokedAt, arg.WorkflowStepID, arg.RuntimeInstanceID)
 	if err != nil {
 		return 0, err
 	}

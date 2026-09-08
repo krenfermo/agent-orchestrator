@@ -604,17 +604,64 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		if err := c.persistReviewPolicyDecision(ctx, run, reviewStep, decision); err != nil {
 			return reviewStep, err
 		}
+		// P5-A phase 2: BEFORE the depth is chosen, AO runs this task's own
+		// planned checks itself, once, at the tree about to be reviewed. That
+		// is the fact review depth never had — "does this change work" — and
+		// it is what makes `none` reachable for ordinary code without anybody
+		// taking the worker's word for it. See pre_review_evidence.go.
+		//
+		// A SKIPPED decision deliberately still collects it: a review that
+		// never ran should be able to say what AO knew at the moment it
+		// decided not to run one.
+		// The tier this change's floor comes from. Computed BEFORE the evidence
+		// pass, because it decides whether that pass can buy anything at all:
+		// when max(request, floor) is already deep, no evidence can change the
+		// depth, the deep prompt does not render it, and Verify will run the
+		// same plan itself. See collectPreReviewEvidence.
+		tier, riskReasons := ReviewRiskTierFor(decision)
+		frozenDepth := policyForRun(run).EffectiveReviewDepthPolicy()
+		floorAlreadyDeep := domain.DeeperOf(frozenDepth.Requested, tier.MinimumDepth()).AtLeast(domain.ReviewDepthDeep)
+
+		evidence, err := c.collectPreReviewEvidence(ctx, run, reviewStep, workCP, decision, policyArtifact, floorAlreadyDeep)
+		if err != nil {
+			return reviewStep, err
+		}
+		// Whether the evidence above is allowed to lower that floor by one
+		// step. Recorded durably before it is acted on.
+		reviewTargetFingerprint := workCP.FingerprintAfter
+		if reviewTargetFingerprint == "" {
+			reviewTargetFingerprint = workCP.HeadSHA
+		}
+		relief, evidence, err := c.resolveReviewEvidenceRelief(
+			ctx, run, workStep, reviewStep, decision, tier, evidence, reviewTargetFingerprint)
+		if err != nil {
+			return reviewStep, err
+		}
 		// P5-A: the depth this review step will run at, resolved from the very
 		// decision above and recorded as its own checkpoint. It is written
 		// BEFORE the SKIPPED short-circuit deliberately: a review that never
 		// ran should still be able to say what depth it would have run at and
 		// which risk tier authorized that, rather than leaving a gap a later
 		// reader has to guess across.
-		if _, err := c.resolveReviewDepthDecision(ctx, run, reviewStep, decision); err != nil {
+		depth, err := c.resolveReviewDepthDecisionWithRelief(ctx, run, reviewStep, tier, riskReasons, relief)
+		if err != nil {
 			return reviewStep, err
 		}
 		if decision.Decision == ReviewSkipped {
 			return c.applyReviewPolicySkip(ctx, run, reviewStep)
+		}
+		// A depth of `none` reached through the evidence door completes the
+		// review step without a reviewer — and says so in its own durable
+		// phase, carrying the evidence it stood on. It never fabricates a
+		// verdict: no review_run exists, and Verify still runs afterwards on
+		// its own authority.
+		//
+		// The two conditions are deliberately BOTH required. `none` alone is
+		// not enough (a legacy or unreadable decision must not buy a skip), and
+		// a granted relief alone is not enough (the request may still have
+		// asked for something deeper, and a request may always deepen).
+		if depth.Effective == domain.ReviewDepthNone && relief.Granted {
+			return c.applyReviewSkippedByEvidence(ctx, run, reviewStep, relief, evidence, depth)
 		}
 
 		// Checkpoint 8D: target_sha is the work-completion checkpoint's own

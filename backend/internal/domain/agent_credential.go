@@ -105,6 +105,12 @@ type AgentAuthority struct {
 	// ReviewRunID is the review_run a reviewer credential was minted for, empty
 	// for a worker.
 	ReviewRunID string
+	// AttemptID is the launch this credential was minted for -- the work step's
+	// attempt row, for a worker. It is what separates one generation of a step
+	// from the next, and it is projected here (rather than left on the row)
+	// because the authorization fence has to be able to ask "is this still the
+	// authorized launch?" from the request's own principal.
+	AttemptID string
 	// Permissions is the durable grant, already capped by Role at issue time.
 	Permissions []Permission
 }
@@ -189,9 +195,19 @@ type AgentCredential struct {
 // the runtime handle in order to remove the file the token was handed over in.
 // It never needs the token hash, so it never carries it.
 type RevocableAgentCredential struct {
-	CredentialID  string
-	ReviewRunID   string
-	RuntimeHandle string
+	CredentialID string
+	// ReviewRunID names the review run that ended, for a reviewer credential.
+	// Empty for a worker's.
+	ReviewRunID string
+	// WorkflowStepID names the work step that stopped running, for a worker
+	// credential. Empty for a reviewer's.
+	//
+	// The two are separate fields rather than one "reason" string because a
+	// revocation has to be able to say WHICH obligation it discharged, and a
+	// reader that cannot tell a finished review from a finished work step
+	// cannot check the sweep did the right thing.
+	WorkflowStepID string
+	RuntimeHandle  string
 }
 
 // Authority projects the row onto the non-secret shape a request carries.
@@ -204,6 +220,7 @@ func (c AgentCredential) Authority() AgentAuthority {
 		WorkflowRunID:  c.WorkflowRunID,
 		WorkflowStepID: c.WorkflowStepID,
 		ReviewRunID:    c.ReviewRunID,
+		AttemptID:      c.RuntimeInstanceID,
 		Permissions:    c.Permissions,
 	}
 }

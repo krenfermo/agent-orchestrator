@@ -31,6 +31,9 @@ type UsageController struct {
 	// owner-equality checks with the canonical permission evaluator; a zero
 	// Guard preserves the pre-P4-B behavior exactly.
 	Guard Guard
+	// AgentAuthority is P5-A phase 2C's central fence; see
+	// AgentAuthorityChecker. Nil leaves behaviour unchanged.
+	AgentAuthority AgentAuthorityChecker
 }
 
 // Register mounts usage routes on the supplied router.
@@ -69,7 +72,7 @@ func (c *UsageController) getSession(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/usage/sessions/{sessionId}")
 		return
 	}
-	if !AuthorizeSessionAccess(w, r, SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal, Guard: c.Guard}, sessionID(r)) {
+	if !AuthorizeSessionAccess(w, r, SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal, Guard: c.Guard, AgentAuthority: c.AgentAuthority}, sessionID(r)) {
 		return
 	}
 	summary, err := c.Svc.Get(r.Context(), domain.SessionID(chi.URLParam(r, "sessionId")))

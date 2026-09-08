@@ -201,6 +201,17 @@ type ReviewDepthManager interface {
 	RunReviewDepthPolicy(ctx context.Context, runID string) (domain.ReviewDepthPolicySnapshot, error)
 }
 
+// WorkReportManager is P5-A phase 2B's worker-declaration surface: a worker
+// records what it says it did, addressed by its own session.
+//
+// Optional and type-asserted like every other manager here, so a deployment
+// without the capability simply has no worker reports — which is exactly the
+// state every run was in before this existed, and one the review policy already
+// handles: a report that is absent is neither credited nor penalised.
+type WorkReportManager interface {
+	SubmitWorkReportForSession(ctx context.Context, sessionID string, report domain.WorkReport) (workflowcore.WorkReportReceipt, error)
+}
+
 // BoardReader is Checkpoint 8P-E.12's project Board projection. Optional
 // (type-asserted by the controller, mirroring PlannerManager) so a Manager
 // implementation or test double that predates it keeps compiling unchanged.
@@ -374,6 +385,11 @@ func (s *Service) DispatchAutomaticRecovery(ctx context.Context, runID string) (
 // RevalidateActionAuthority implements AdvisorManager.
 func (s *Service) RevalidateActionAuthority(ctx context.Context, runID string, action workflowcore.ActionID, expected workflowcore.AdviceAuthority) (workflowcore.ActionAuthorityMismatch, error) {
 	return s.coordinator.RevalidateActionAuthority(ctx, runID, action, expected)
+}
+
+// SubmitWorkReportForSession implements WorkReportManager.
+func (s *Service) SubmitWorkReportForSession(ctx context.Context, sessionID string, report domain.WorkReport) (workflowcore.WorkReportReceipt, error) {
+	return s.coordinator.SubmitWorkReportForSession(ctx, sessionID, report)
 }
 
 // ApplyReviewDepthPolicy implements ReviewDepthManager.

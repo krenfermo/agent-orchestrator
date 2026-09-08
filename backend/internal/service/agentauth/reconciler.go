@@ -137,6 +137,23 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) ([]domain.RevocableAgent
 	if err != nil {
 		return nil, err
 	}
+	// P5-A phase 2C: the worker half of the same obligation, swept in the same
+	// pass and by the same rule — a worker credential may live exactly as long
+	// as its work step is running.
+	//
+	// A failure in the reviewer half above has already returned, because a pass
+	// that cannot read the store cannot do either half honestly. What neither
+	// half may do is let its own failure be reported as the other's success, so
+	// both feed the same return value and the same error.
+	workers, err := r.svc.ReconcileStaleWorkerCredentials(ctx)
+	if err != nil {
+		// The reviewer half already landed; say so by returning what it took
+		// back alongside the error, so a caller cannot read a partial pass as
+		// a total failure and re-derive nothing.
+		r.removeFiles(revoked)
+		return revoked, err
+	}
+	revoked = append(revoked, workers...)
 	r.removeFiles(revoked)
 	return revoked, nil
 }
@@ -157,6 +174,29 @@ func (r *Reconciler) CloseReviewRun(ctx context.Context, reviewRunID string) err
 		return nil
 	}
 	revoked, err := r.svc.RevokeForClosedReviewRun(ctx, reviewRunID)
+	if err != nil {
+		return err
+	}
+	r.removeFiles(revoked)
+	return nil
+}
+
+// CloseFinishedWorkers ends the authority of every worker whose step has
+// stopped running, and removes the files those credentials were handed over in.
+//
+// The eager twin of CloseReviewRun, and guarded the same way: while a step is
+// still running this is a no-op, which is what makes it safe to call from the
+// coordinator's ordinary observation of a step transition rather than from each
+// of the places a step can transition.
+//
+// It returns an error only so a caller that wants to log one can. No caller may
+// fail on it: work that finished finished, and a cleanup that did not land is
+// picked up by the next sweep.
+func (r *Reconciler) CloseFinishedWorkers(ctx context.Context) error {
+	if r == nil || r.svc == nil {
+		return nil
+	}
+	revoked, err := r.svc.CloseFinishedWorkers(ctx)
 	if err != nil {
 		return err
 	}

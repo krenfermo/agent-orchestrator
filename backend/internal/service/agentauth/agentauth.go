@@ -62,6 +62,13 @@ type Store interface {
 	RevokeAgentCredentialsForReviewRun(ctx context.Context, reviewRunID string, at time.Time) (int64, error)
 	RevokeAgentCredentialsForClosedReviewRun(ctx context.Context, reviewRunID string, at time.Time) (int64, error)
 	RevokeAgentCredentialsForSession(ctx context.Context, sessionID domain.SessionID, at time.Time) (int64, error)
+	// P5-A phase 2C: the worker half.
+	BindAgentCredentialSession(ctx context.Context, credentialID string, sessionID domain.SessionID) (bool, error)
+	RevokeAgentCredential(ctx context.Context, credentialID string, at time.Time) (int64, error)
+	RevokeSupersededWorkerAgentCredentials(ctx context.Context, stepID, keepAttemptID string, at time.Time) (int64, error)
+	ListRevocableWorkerAgentCredentials(ctx context.Context) ([]domain.RevocableAgentCredential, error)
+	RevokeStaleWorkerAgentCredentials(ctx context.Context, at time.Time) (int64, error)
+	IsWorkerCredentialAuthorized(ctx context.Context, credentialID string) (bool, error)
 	ListRevocableAgentCredentials(ctx context.Context) ([]domain.RevocableAgentCredential, error)
 	RevokeClosedReviewRunAgentCredentials(ctx context.Context, at time.Time) (int64, error)
 	GetUserByID(ctx context.Context, id domain.UserID) (domain.User, bool, error)
@@ -127,7 +134,19 @@ func (s *Service) Issue(ctx context.Context, in IssueInput) (Issued, error) {
 	if strings.TrimSpace(string(in.ProjectID)) == "" {
 		return Issued{}, fmt.Errorf("agent credential: a project binding is required")
 	}
-	if strings.TrimSpace(string(in.SessionID)) == "" {
+	// A session binding is required for every role EXCEPT a worker's, and the
+	// exception is an ordering fact rather than a relaxation.
+	//
+	// A reviewer is bound to the worker's session, which already exists when it
+	// launches. A worker's session is created BY the spawn that must already
+	// carry its credential in the environment, so at this moment there is no
+	// session to name. It is therefore minted UNBOUND and bound exactly once,
+	// by BindSession, when the launch reports which session it produced.
+	//
+	// An unbound credential is inert, not permissive: AgentAuthority.
+	// MayReachSession refuses every session route while SessionID is empty, so
+	// the window between minting and binding grants nothing at all.
+	if strings.TrimSpace(string(in.SessionID)) == "" && in.Role != domain.AgentRoleWorker {
 		return Issued{}, fmt.Errorf("agent credential: a session binding is required")
 	}
 	// The account has to exist and be active AT ISSUE TIME. Minting a
@@ -352,4 +371,142 @@ func randomToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(buf), nil
+}
+
+// BindSession binds a worker credential to the session its launch produced.
+//
+// This is the second half of the deferred binding described in Issue, and it is
+// deliberately one guarded statement rather than a read-then-write: two passes
+// racing over the same launch cannot both succeed, and a credential can only
+// ever travel from unbound to bound, once.
+//
+// It reports whether it bound anything. A false with no error means the
+// credential was already bound, already revoked, or gone — three different
+// histories that are one answer here, because in none of them may this call be
+// the one that decides which session the credential speaks for. Callers treat
+// that as a failed launch and take the credential back rather than proceeding
+// with an authority they cannot account for.
+func (s *Service) BindSession(ctx context.Context, credentialID string, sessionID domain.SessionID) (bool, error) {
+	if strings.TrimSpace(credentialID) == "" {
+		return false, fmt.Errorf("agent credential: a credential id is required to bind a session")
+	}
+	if strings.TrimSpace(string(sessionID)) == "" {
+		// Binding to nothing would leave the credential unbound while telling
+		// the caller it succeeded, which is the one outcome this call must not
+		// produce.
+		return false, fmt.Errorf("agent credential: refusing to bind %s to an empty session", credentialID)
+	}
+	return s.store.BindAgentCredentialSession(ctx, credentialID, sessionID)
+}
+
+// Revoke ends one credential by id. Idempotent: revoking an already-revoked
+// credential is a no-op that reports zero, never an error, because the state
+// the caller wanted is the state that already holds.
+func (s *Service) Revoke(ctx context.Context, credentialID string) (int64, error) {
+	if strings.TrimSpace(credentialID) == "" {
+		return 0, nil
+	}
+	return s.store.RevokeAgentCredential(ctx, credentialID, s.now().UTC())
+}
+
+// RevokeSupersededWorkers ends every worker credential for one step whose
+// attempt is not keepAttemptID.
+//
+// The one eager path a worker credential has, and it covers the one ending the
+// derived sweep cannot see: a step being re-dispatched is still running, so a
+// superseded launch's credential still satisfies the sweep's "may live" rule.
+// It is called from exactly one place, as a replacement is minted, rather than
+// from every transition a step can make — which is the distinction the
+// reconciler's own design note draws between an obligation that is derived and
+// one that has to be remembered.
+func (s *Service) RevokeSupersededWorkers(ctx context.Context, stepID, keepAttemptID string) (int64, error) {
+	if strings.TrimSpace(stepID) == "" || strings.TrimSpace(keepAttemptID) == "" {
+		// Without both, this cannot tell a predecessor from the launch it is
+		// about to authorize, and revoking on a guess would end the credential
+		// of the worker that is starting.
+		return 0, nil
+	}
+	return s.store.RevokeSupersededWorkerAgentCredentials(ctx, stepID, keepAttemptID, s.now().UTC())
+}
+
+// StillAuthorized reports whether an agent's authority is still current.
+//
+// This is P5-A phase 2C's CENTRAL FENCE, and it exists because revocation alone
+// cannot close the window it needs to close. Revocation is eager and swept, but
+// both are things that must have HAPPENED; an authorization taken in the
+// interval before either ran would be taken on a credential whose launch is
+// over. AgentRoleWorker holds session write -- /send, /kill, /rollback,
+// /restore, /resume-agent, /switch-agent, /reviewer, /auto-review -- over a
+// session that Checkpoint 8D reuses for the whole step, so that interval is not
+// one anybody should have to reason about.
+//
+// So the question is answered from durable rows, per request, and the answer
+// cannot be stale. Three rules:
+//
+//   - it only ever DENIES. It grants nothing the binding checks would refuse,
+//     so it cannot widen an authority;
+//   - it applies to WORKERS only. A reviewer's lifetime is its review run and is
+//     already handled; asking this question of it would be asking about a step
+//     it has no attempt on;
+//   - it FAILS CLOSED. An authority AO cannot evaluate is not an authority.
+func (s *Service) StillAuthorized(ctx context.Context, authority domain.AgentAuthority) (bool, error) {
+	if authority.Role != domain.AgentRoleWorker {
+		return true, nil
+	}
+	if strings.TrimSpace(authority.CredentialID) == "" {
+		return false, nil
+	}
+	return s.store.IsWorkerCredentialAuthorized(ctx, authority.CredentialID)
+}
+
+// CloseFinishedWorkers takes back the authority of every worker whose step has
+// stopped running, and returns what it took.
+//
+// It is the same guarded predicate the sweep applies -- deliberately the same,
+// so eager and swept cannot disagree about what "finished" means -- which is
+// what makes it safe to call from the coordinator's ordinary observation pass
+// instead of from each of the twenty-three places a step can transition. While
+// the step runs it is a no-op; the moment it stops, the credential is gone.
+//
+// It exists because the window it closes is not innocuous. AgentRoleWorker
+// holds session WRITE, and AuthorizeSessionAccess gates /send, /kill,
+// /rollback, /restore, /resume-agent, /switch-agent, /pr/claim, /reviewer and
+// /auto-review on exactly that permission. A worker session is reused across a
+// step's whole loop (Checkpoint 8D), so a credential that outlived its turn
+// could type into the session a later agent is working in. Waiting a
+// reconciliation interval for that is a wait with no upside.
+//
+// The sweep remains the guarantee: this is an optimization that shortens the
+// window, not a replacement for an obligation that must survive a crash.
+func (s *Service) CloseFinishedWorkers(ctx context.Context) ([]domain.RevocableAgentCredential, error) {
+	return s.ReconcileStaleWorkerCredentials(ctx)
+}
+
+// ListPendingWorkerRevocations reports the worker credentials whose work step
+// has stopped running. The read half of the sweep's own predicate, so a caller
+// can see what it is about to discharge — and so a test can prove the sweep and
+// the listing cannot disagree about what "finished" means.
+func (s *Service) ListPendingWorkerRevocations(ctx context.Context) ([]domain.RevocableAgentCredential, error) {
+	return s.store.ListRevocableWorkerAgentCredentials(ctx)
+}
+
+// ReconcileStaleWorkerCredentials revokes every worker credential whose work
+// step is no longer running, in one set-based statement.
+//
+// Same derived-obligation design as ReconcileClosedReviewRuns: nothing is
+// remembered, everything is re-derived, and a pass that failed is
+// indistinguishable from one that never ran. It returns what it revoked so the
+// caller can remove the files those credentials were handed over in.
+func (s *Service) ReconcileStaleWorkerCredentials(ctx context.Context) ([]domain.RevocableAgentCredential, error) {
+	pending, err := s.store.ListRevocableWorkerAgentCredentials(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(pending) == 0 {
+		return nil, nil
+	}
+	if _, err := s.store.RevokeStaleWorkerAgentCredentials(ctx, s.now().UTC()); err != nil {
+		return nil, err
+	}
+	return pending, nil
 }

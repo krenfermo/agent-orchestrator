@@ -222,6 +222,19 @@ PR actions are available through `ao pr merge` and
 `ao review trigger` (also `execute` and `restart`), `ao review cancel` (also
 `stop`), and `ao review submit`.
 
+A worker records what it says it did with `ao work report`, which defaults its
+session to `$AO_SESSION_ID`. The report is a DECLARATION, never evidence: AO
+runs the task's own planned checks itself before any reviewer is dispatched and
+judges the change on what it observes, so claiming a test passed buys nothing.
+Declaring a limitation, a risk or an unaddressed criterion makes AO review the
+change more carefully, never less.
+
+The worker authenticates with its own agent credential, minted for that launch
+and bound to that one session, run, step and attempt — so it can report on its
+own work and on nothing else. On a trusted-local desktop the cookie-less call
+resolves the bootstrap admin as it always did. See
+`docs/pre-review-evidence.md`.
+
 ## Configuration
 
 The CLI and daemon share the same environment-driven config:

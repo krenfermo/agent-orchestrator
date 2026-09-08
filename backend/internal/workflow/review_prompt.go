@@ -61,6 +61,16 @@ type ReviewPromptInput struct {
 	// than one means a retry or a failover happened before the code reached
 	// review, which is a thing a reviewer should know and cannot see in a diff.
 	PriorWorkerAttempts int
+
+	// PreReviewEvidence is P5-A phase 2's pack of checks AO RAN ITSELF against
+	// this exact tree, before this review was dispatched. It is the strongest
+	// thing in the prompt and the only executable evidence in it.
+	PreReviewEvidence domain.PreReviewEvidence
+	// WorkReport is the worker's own structured declaration. It is rendered in
+	// its own section, under its own heading, and the prompt says in as many
+	// words that it is a claim by the party under review. It is never merged
+	// into the evidence section, and no verdict may rest on it.
+	WorkReport domain.WorkReport
 }
 
 // lightReviewMaxChangedPaths bounds the changed-path list rendered into a light
@@ -269,8 +279,11 @@ What is evidence here:
 - The diff is evidence. Read it with git status and git diff, directly in this
   worktree.
 - AO's own observations above are evidence.
-- The worker's account of what it did is NOT in front of you and is NOT evidence.
-  Nothing you approve may rest on it.
+- The worker's own report, when it appears above, is a CLAIM by the party under
+  review. It is useful for knowing where to look and what it says it left undone.
+  It is NOT evidence, and nothing you approve may rest on it.
+- Where the worker's claims and AO's observations disagree, AO's observations win
+  and the disagreement is itself a finding.
 
 Scope discipline for this bounded pass (follow all of these):
 - Read the changed files and only what the diff genuinely requires you to open to
@@ -397,10 +410,141 @@ func lightEvidenceSection(in ReviewPromptInput) string {
 			"Nothing downstream will catch what you do not, so weigh that in your verdict.\n")
 	}
 
+	if in.PreReviewEvidence.Recorded() {
+		b.WriteString(lightPreReviewEvidenceSection(in.PreReviewEvidence))
+	}
+	// The worker's declaration goes LAST and under its own heading, immediately
+	// before the prompt's "what is evidence here" rules — so the reviewer reads
+	// the claim and the rule about claims in the same breath.
+	b.WriteString(lightWorkReportSection(in.WorkReport))
+
 	if in.PriorWorkerAttempts > 1 {
 		b.WriteString("\nThe work step took " + strconv.Itoa(in.PriorWorkerAttempts) +
 			" provider attempts before reaching review: a retry or a provider failover\nhappened. Partially-applied work from an abandoned attempt is worth looking for.\n")
 	}
 
 	return b.String()
+}
+
+// lightPreReviewEvidenceSection renders the checks AO ran itself.
+//
+// It states the outcome in AO's own voice and it states the provenance, because
+// a reviewer that is told "the checks passed" without being told who ran them
+// has been handed exactly the claim this whole phase exists to stop trusting.
+// A non-observed status is rendered as the refusal it is: the reviewer is told
+// AO could NOT establish the result, and told not to treat that as a pass.
+func lightPreReviewEvidenceSection(e domain.PreReviewEvidence) string {
+	var b strings.Builder
+	b.WriteString("\nChecks AO RAN ITSELF against this exact tree, before dispatching this review\n")
+	b.WriteString("(AO executed these; they are not the worker's report):\n")
+
+	switch e.Status {
+	case domain.PreReviewEvidenceObserved:
+		b.WriteString("- Outcome: AO ran " + strconv.Itoa(e.ExecutedCommandCount) +
+			" command(s) and observed every one of them pass.\n")
+	case domain.PreReviewEvidenceFailed:
+		b.WriteString("- Outcome: AO ran these commands and AT LEAST ONE FAILED. " +
+			"A failing check is a finding; do not approve around it.\n")
+	case domain.PreReviewEvidenceTimedOut:
+		b.WriteString("- Outcome: AO stopped waiting for these commands. A timeout is not a pass " +
+			"and says nothing about whether the change works.\n")
+	case domain.PreReviewEvidenceUnattributed:
+		b.WriteString("- Outcome: AO ran checks but CANNOT ATTRIBUTE their results to the tree in " +
+			"front of you, because the worktree moved. Treat them as absent.\n")
+	case domain.PreReviewEvidenceNotPlanned:
+		b.WriteString("- Outcome: this task declares no executable verification, so AO has run " +
+			"nothing of its own. Nothing downstream will catch what you do not.\n")
+	default:
+		b.WriteString("- Outcome: AO could not run this task's checks (" + string(e.Status) + "). " +
+			"That is not evidence the change is fine.\n")
+	}
+	if e.Note != "" {
+		b.WriteString("- AO's note: " + e.Note + "\n")
+	}
+	if e.Scope != nil && e.Scope.Scope != "" {
+		b.WriteString("- Scope AO ran them at: " + e.Scope.Scope + "\n")
+	}
+	for _, c := range e.Checks {
+		line := "- " + c.Label + ": "
+		switch {
+		case c.TimedOut:
+			line += "TIMED OUT"
+		case c.Passed:
+			line += "passed"
+		default:
+			line += "FAILED"
+		}
+		if c.ExitCode != nil {
+			line += " (exit " + strconv.Itoa(*c.ExitCode) + ")"
+		}
+		if c.FailureReason != "" {
+			line += " — " + c.FailureReason
+		}
+		b.WriteString(line + "\n")
+	}
+	if e.PlanFileCheckCount > 0 {
+		b.WriteString("- AO will additionally run " + strconv.Itoa(e.PlanFileCheckCount) +
+			" planned file check(s) itself during Verify, after this review.\n")
+	}
+	if e.ReportContradicted {
+		b.WriteString("- WARNING: the worker's report claims a command passed that AO watched FAIL. " +
+			"Weigh the rest of its report accordingly.\n")
+	}
+	return b.String()
+}
+
+// lightWorkReportSection renders the worker's declaration, fenced off from
+// everything AO observed and labelled as what it is.
+//
+// It is genuinely useful — it points a bounded reviewer at what the worker
+// thinks it did and, more usefully, at what it thinks it did NOT finish — and
+// it is never a reason to approve. The heading says so, and the closing line
+// says so again, because this is the one section of the prompt whose content
+// was written by the party under review.
+func lightWorkReportSection(r domain.WorkReport) string {
+	if !r.Recorded() {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nWhat the WORKER SAYS it did (a claim by the party under review — NOT evidence,\n")
+	b.WriteString("and never a reason on its own to approve anything):\n")
+	if r.Summary != "" {
+		b.WriteString("- Its summary: " + collapseForPrompt(r.Summary) + "\n")
+	}
+	for _, c := range r.Criteria {
+		state := "says it did NOT address"
+		if c.Addressed {
+			state = "claims it addressed"
+		}
+		b.WriteString("- It " + state + ": " + collapseForPrompt(c.Criterion) + "\n")
+	}
+	for _, t := range r.TestsReported {
+		claim := "made no claim about"
+		switch t.ClaimedOutcome {
+		case domain.WorkReportOutcomeClaimedPassed:
+			claim = "CLAIMS (unverified) it passed"
+		case domain.WorkReportOutcomeClaimedFailed:
+			claim = "says it FAILED"
+		case domain.WorkReportOutcomeClaimedSkipped:
+			claim = "says it did not run"
+		}
+		b.WriteString("- On `" + collapseForPrompt(t.Command) + "` it " + claim + ".\n")
+	}
+	for _, l := range r.Limitations {
+		b.WriteString("- Limitation it declared: " + collapseForPrompt(l) + "\n")
+	}
+	for _, k := range r.Risks {
+		b.WriteString("- Risk it declared: " + collapseForPrompt(k) + "\n")
+	}
+	for _, f := range r.FollowUp {
+		b.WriteString("- Follow-up it left: " + collapseForPrompt(f) + "\n")
+	}
+	b.WriteString("Use this to know WHERE TO LOOK. Verify anything you rely on against the diff.\n")
+	return b.String()
+}
+
+// collapseForPrompt flattens worker prose onto one line so a report cannot
+// forge headings or bullets inside the prompt it is embedded in.
+func collapseForPrompt(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }

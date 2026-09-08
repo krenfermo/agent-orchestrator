@@ -236,3 +236,120 @@ func agentCredentialFromRow(row gen.AgentCredential) (domain.AgentCredential, er
 		RevokedAt:         nullTimeToTimePtr(row.RevokedAt),
 	}, nil
 }
+
+// BindAgentCredentialSession binds an unbound worker credential to the session
+// its launch produced, exactly once.
+//
+// It reports whether it bound anything. False is not an error: it means the row
+// was already bound, already revoked, or gone — three different histories that
+// are the same answer here, because in all of them this call must not be the
+// one that decides which session the credential speaks for.
+//
+// The guard lives in the SQL rather than in a read-then-write, so two passes
+// racing over the same launch cannot both succeed.
+func (s *Store) BindAgentCredentialSession(ctx context.Context, credentialID string, sessionID domain.SessionID) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	n, err := s.qw.BindAgentCredentialSession(ctx, gen.BindAgentCredentialSessionParams{
+		SessionID: sessionID,
+		ID:        credentialID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("bind agent credential %s to session %s: %w", credentialID, sessionID, err)
+	}
+	return n > 0, nil
+}
+
+// RevokeAgentCredential revokes one credential by id. Idempotent: revoking an
+// already-revoked credential reports zero rows rather than failing, because the
+// state the caller wanted is the state that already holds.
+func (s *Store) RevokeAgentCredential(ctx context.Context, credentialID string, at time.Time) (int64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	n, err := s.qw.RevokeAgentCredential(ctx, gen.RevokeAgentCredentialParams{
+		RevokedAt: timePtrToNullTime(&at),
+		ID:        credentialID,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("revoke agent credential %s: %w", credentialID, err)
+	}
+	return n, nil
+}
+
+// RevokeSupersededWorkerAgentCredentials ends every live worker credential for
+// one step that belongs to an attempt other than the one given.
+//
+// This is the replacement case the derived sweep cannot reach: while a step is
+// being re-dispatched it is still running, so a predecessor's credential still
+// satisfies "may live" even though its launch is over. The attempt is the
+// discriminator, which is why it is also what fences the credential file.
+func (s *Store) RevokeSupersededWorkerAgentCredentials(ctx context.Context, stepID, keepAttemptID string, at time.Time) (int64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	n, err := s.qw.RevokeSupersededWorkerAgentCredentials(ctx, gen.RevokeSupersededWorkerAgentCredentialsParams{
+		RevokedAt:         timePtrToNullTime(&at),
+		WorkflowStepID:    stepID,
+		RuntimeInstanceID: keepAttemptID,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("revoke superseded worker agent credentials for step %s: %w", stepID, err)
+	}
+	return n, nil
+}
+
+// ListRevocableWorkerAgentCredentials returns the worker credentials a
+// reconciliation pass would revoke: those whose work step is no longer running.
+// The read half of the same predicate the write below applies.
+func (s *Store) ListRevocableWorkerAgentCredentials(ctx context.Context) ([]domain.RevocableAgentCredential, error) {
+	rows, err := s.qr.ListRevocableWorkerAgentCredentials(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list revocable worker agent credentials: %w", err)
+	}
+	out := make([]domain.RevocableAgentCredential, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, domain.RevocableAgentCredential{
+			CredentialID:   row.ID,
+			WorkflowStepID: row.WorkflowStepID,
+			RuntimeHandle:  row.RuntimeHandle,
+		})
+	}
+	return out, nil
+}
+
+// RevokeStaleWorkerAgentCredentials revokes every live worker credential whose
+// work step has stopped running, in one set-based statement.
+//
+// Same recovery property as its review-run twin: the obligation is re-derived
+// from durable rows on every pass, so a pass that failed, a daemon that died
+// mid-pass, and a revocation nobody ever attempted are the same situation next
+// time round.
+func (s *Store) RevokeStaleWorkerAgentCredentials(ctx context.Context, at time.Time) (int64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	n, err := s.qw.RevokeStaleWorkerAgentCredentials(ctx, timePtrToNullTime(&at))
+	if err != nil {
+		return 0, fmt.Errorf("revoke stale worker agent credentials: %w", err)
+	}
+	return n, nil
+}
+
+// IsWorkerCredentialAuthorized reports whether a worker credential is STILL the
+// authorized one for its step, derived from durable rows at the moment of the
+// call.
+//
+// It is deliberately a read rather than a reliance on revocation having already
+// happened. Revocation is eager and swept, and both are kept -- but an
+// authorization decision that depends on a sweep having run leaves an interval
+// in which a finished attempt can still act, and that interval is exactly what
+// this removes.
+func (s *Store) IsWorkerCredentialAuthorized(ctx context.Context, credentialID string) (bool, error) {
+	authorized, err := s.qr.IsWorkerCredentialAuthorized(ctx, credentialID)
+	if err != nil {
+		return false, fmt.Errorf("check worker credential %s authority: %w", credentialID, err)
+	}
+	return authorized, nil
+}

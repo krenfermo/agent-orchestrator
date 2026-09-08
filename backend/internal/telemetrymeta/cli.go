@@ -59,6 +59,14 @@ func CLIActorType(actorType, commandPath string) string {
 	if normalized == "ao hooks" {
 		return "agent"
 	}
+	// P5-A phase 2B: `ao work report` is issued BY the worker agent AO
+	// launched, never by a person at a shell — the same shape as `ao hooks`,
+	// and the reason it is classified here rather than added to a
+	// legacyActorless* map. Those maps exist for commands that predate the
+	// actor-type mechanism; a command added today should say what it is.
+	if normalized == "ao work" || normalized == "ao work report" {
+		return "agent"
+	}
 	return "system"
 }
 

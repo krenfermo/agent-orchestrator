@@ -721,7 +721,7 @@ func RunWithConfig(cfg config.Config) error {
 	workItemsDone := workitems.NewWorker(workItemsSvc, workitems.WorkerConfig{Logger: log}).Start(ctx)
 	_ = workItemsDone
 
-	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, projectMemory, memoryProvisioning, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, incidentAgentLauncher, notificationWriter, workItemsSvc, agents, newTerminalRuntimeReclaimer(runtimeGC, lcStack.LCM, log), plannerUsageRecorderFor(usageCollector), agentAuthMgr, log)
+	workflowCoordinator, workflowSvc, wakeScheduler := startWorkflows(cfg, store, projectMemory, memoryProvisioning, rawSessionMgr, workspaceObserver, branchLocks, workflowReviewerLauncher, runtimeAdapter, decisionResolverLauncher, incidentAgentLauncher, notificationWriter, workItemsSvc, agents, newTerminalRuntimeReclaimer(runtimeGC, lcStack.LCM, log), plannerUsageRecorderFor(usageCollector), agentAuthMgr, agentAuthMgr, agentCredentialReaper, log)
 	// Checkpoint 8P-E.13A: reconciliation can only decide a stopped owner's
 	// lock once it can ask what that stop means, and only the coordinator knows
 	// (branchlock/retention.go). The coordinator needs the lock manager to
@@ -912,17 +912,21 @@ func RunWithConfig(cfg config.Config) error {
 		SessionCapabilities: browserAuthority,
 		Auth:                authMgr,
 		AgentAuth:           agentAuthMgr,
-		SSO:                 ssoMgr,
-		ProjectOwnership:    store,
-		ProjectTenancy:      store,
-		WorkflowOwnership:   store,
-		SessionOwnership:    store,
-		Authz:               authzSvc,
-		ProjectScope:        store,
-		RBAC:                rbacSvc,
-		ProviderProfiles:    providerProfilesSvc,
-		ProviderSetup:       providerSetupSvc,
-		ExecutionPolicy:     executionPolicySvc,
+		// P5-A phase 2C: the same service also answers, per request, whether an
+		// agent's launch is still the authorized one -- the fence that makes
+		// revocation a defence in depth rather than the only barrier.
+		AgentAuthority:    agentAuthMgr,
+		SSO:               ssoMgr,
+		ProjectOwnership:  store,
+		ProjectTenancy:    store,
+		WorkflowOwnership: store,
+		SessionOwnership:  store,
+		Authz:             authzSvc,
+		ProjectScope:      store,
+		RBAC:              rbacSvc,
+		ProviderProfiles:  providerProfilesSvc,
+		ProviderSetup:     providerSetupSvc,
+		ExecutionPolicy:   executionPolicySvc,
 	})
 	if err != nil {
 		stop()

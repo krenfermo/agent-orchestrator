@@ -145,8 +145,8 @@ func TestBranchAdvanceAfterApprovalIsNotVerifiedOnTheStaleApproval(t *testing.T)
 	if got.Run.State == domain.WorkflowRunCompleted {
 		t.Fatal("the run completed on a head no review approved")
 	}
-	if runner.calls != 0 {
-		t.Fatalf("verification commands ran %d times on an unreviewed head; want 0", runner.calls)
+	if n := verifyRunnerCalls(t, st, runID, runner.calls); n != 0 {
+		t.Fatalf("verification commands ran %d times on an unreviewed head; want 0", n)
 	}
 	// And the stale approval must be recorded as superseded, not reused: either
 	// a fresh review is now due, or the run stopped fail-closed. What it must
@@ -217,8 +217,8 @@ func TestBranchAdvanceReReviewSurvivesRestartAndIsIdempotent(t *testing.T) {
 	if n := len(authorityCheckpoints(st, runID, "verify_provenance_fresh_review")); n > 1 {
 		t.Fatalf("%d provenance fresh reviews authorized for one advance; want at most 1", n)
 	}
-	if runner.calls != 0 {
-		t.Fatalf("verification commands ran %d times against an unreviewed head; want 0", runner.calls)
+	if n := verifyRunnerCalls(t, st, runID, runner.calls); n != 0 {
+		t.Fatalf("verification commands ran %d times against an unreviewed head; want 0", n)
 	}
 }
 

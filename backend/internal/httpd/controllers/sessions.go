@@ -179,12 +179,15 @@ type SessionsController struct {
 	// owner-equality checks with the canonical permission evaluator; a zero
 	// Guard preserves the pre-P4-B behavior exactly.
 	Guard Guard
+	// AgentAuthority is P5-A phase 2C's central fence; see
+	// AgentAuthorityChecker. Nil leaves behaviour unchanged.
+	AgentAuthority AgentAuthorityChecker
 }
 
 // scoping adapts this controller's two ownership fields into the shared
 // SessionScoping value AuthorizeSessionAccess expects.
 func (c *SessionsController) scoping() SessionScoping {
-	return SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal, Guard: c.Guard}
+	return SessionScoping{Ownership: c.Ownership, TrustedLocal: c.TrustedLocal, Guard: c.Guard, AgentAuthority: c.AgentAuthority}
 }
 
 // sessionAccessAllowed is this controller's call site for the canonical

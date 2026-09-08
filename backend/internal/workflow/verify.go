@@ -130,6 +130,16 @@ type VerifyResult struct {
 	// generation's answer, or the generation would close on the question it just
 	// asked. See verifyRecoveryLedger.executed.
 	SupersededByFreshReview bool `json:"supersededByFreshReview,omitempty"`
+	// ReusedCheckCount is how many of this attempt's command checks were
+	// replayed from the pre-review evidence pass instead of executed again
+	// (P5-A phase 2). It is the measurement the "did proportional review
+	// actually save anything" question is answered from, and it is recorded on
+	// the attempt itself so the saving is auditable per run rather than
+	// estimated.
+	//
+	// A reused check is still a check: its exit code, its output tails and its
+	// duration are the real ones AO observed, carried forward verbatim.
+	ReusedCheckCount int `json:"reusedCheckCount,omitempty"`
 	// StopReason, when set, is the canonical attention reason (attention.go)
 	// finishVerifyFailure records instead of deriving one from the error class.
 	// It exists for the failures whose remedy is genuinely different from
@@ -338,10 +348,26 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 		reviewed = reviewRun.TargetSHA
 	} else {
 		decision, ok := c.reviewPolicyDecisionForStep(ctx, run.ID, reviewStep.ID)
-		if !ok || decision.Decision != ReviewSkipped {
-			// No review_run AND no recorded SKIPPED decision: an ambiguous
-			// state Verify must not guess about (mirrors every other
-			// "cannot durably prove" branch in this package).
+		policySkipped := ok && decision.Decision == ReviewSkipped
+		// P5-A phase 2: the SECOND way a review step legitimately completes
+		// without a review_run — AO ran this task's own checks itself, watched
+		// them pass, and the deterministic policy allowed the reviewer to be
+		// skipped on that evidence (review_evidence_relief.go).
+		//
+		// It is a separate, explicitly named door rather than an extension of
+		// the SKIPPED one. Conflating them would make a run that was checked
+		// indistinguishable from one that was merely cheap to classify, and it
+		// would let a future edit to ReviewPolicy silently change what an
+		// evidence-backed skip means.
+		//
+		// The target is derived identically in both cases, which is what keeps
+		// the review-authority invariant below untouched: `reviewed` is still
+		// the work step's own completion fingerprint, never a tree AO chose.
+		_, evidenceSkipped := c.reviewSkippedByEvidence(ctx, run.ID, reviewStep.ID)
+		if !policySkipped && !evidenceSkipped {
+			// No review_run, no recorded SKIPPED decision, and no evidence
+			// skip: an ambiguous state Verify must not guess about (mirrors
+			// every other "cannot durably prove" branch in this package).
 			return run, verifyStep, nil
 		}
 		reviewed = workCP.FingerprintAfter
@@ -663,6 +689,19 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 	// — it fails with exit code 1 and a message about the main module, which is
 	// indistinguishable from a broken build unless AO knows where the module is.
 	repairsUsed := c.verifyContextRepairCount(ctx, run.ID)
+	// P5-A phase 2: results AO already produced for THIS EXACT question.
+	//
+	// The pre-review evidence pass ran the same narrowed plan, through the same
+	// VerifyRunner, against the same tree. reusableEvidence proves all three by
+	// comparing verificationTargetKey over (fingerprint, narrowed plan) — and
+	// the fingerprint it compares is `pre`, which the authority check above has
+	// ALREADY proven equal to the approved target. So reuse is decided after
+	// the authority question, never instead of it, and nothing here relaxes a
+	// SHA or a CAS to obtain it.
+	//
+	// A fix cycle changes the tree, which changes the key, which ends reuse by
+	// construction rather than by a rule anyone has to remember.
+	reusable := c.reusablePreReviewEvidence(ctx, run, reviewStep, pre, narrowedPlan)
 	// effectiveDirs collects where each command ACTUALLY ran, after any
 	// pre-flight resolution and any mid-attempt repair. It is what the file
 	// checks below derive their namespace from, which is the whole reason the
@@ -686,6 +725,17 @@ func (c *Coordinator) maybeVerify(ctx stdctx.Context, run domain.WorkflowRun, wo
 		timeout := time.Duration(check.TimeoutSeconds) * time.Second
 		if timeout == 0 {
 			timeout = 10 * time.Minute
+		}
+		// A command whose answer AO already has, for this identical tree and
+		// this identical plan, is not re-run. The recorded execution is
+		// replayed verbatim into this attempt's checks and marked as reused, so
+		// the verification record still states every exit code it stood on —
+		// it simply does not spend the suite twice.
+		if replay, ok := reusable[commandLabel(check)]; ok {
+			result.Checks = append(result.Checks, replay)
+			result.ReusedCheckCount++
+			effectiveDirs = append(effectiveDirs, normalizeRel(check.WorkingDirectory))
+			continue
 		}
 		transientRetries := 0
 		for {

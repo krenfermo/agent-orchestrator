@@ -2560,6 +2560,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/work-report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Record a worker's declaration about the change it delivered (never evidence) */
+        post: operations["submitWorkReport"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/workspace/events": {
         parameters: {
             query?: never;
@@ -6988,6 +7005,27 @@ export interface components {
             /** @description Review verdict: approved or changes_requested. */
             verdict: string;
         };
+        SubmitWorkReportCriterion: {
+            addressed: boolean;
+            criterion: string;
+            note?: string;
+        };
+        SubmitWorkReportRequest: {
+            claimedChangedPaths?: string[];
+            commit?: string;
+            criteria?: components["schemas"]["SubmitWorkReportCriterion"][];
+            followUp?: string[];
+            limitations?: string[];
+            risks?: string[];
+            summary?: string;
+            testsReported?: components["schemas"]["SubmitWorkReportTestClaim"][];
+        };
+        SubmitWorkReportTestClaim: {
+            /** @enum {string} */
+            claimedOutcome?: "claimed_passed" | "claimed_failed" | "claimed_skipped";
+            command: string;
+            note?: string;
+        };
         SwitchAgentRequest: {
             /** @description Optional retry key. Reusing it with a different request is rejected. */
             idempotencyKey?: string;
@@ -7243,6 +7281,13 @@ export interface components {
             delivered: number;
             failed: number;
             skipped: number;
+        };
+        WorkReportResponse: {
+            superseded?: boolean;
+            truncated?: string[];
+            version: string;
+            workflowRunId: string;
+            workflowStepId: string;
         };
         WorkflowAttemptView: {
             /** Format: int64 */
@@ -8019,6 +8064,7 @@ export interface components {
             postFingerprint: string;
             preFingerprint: string;
             recoveryGeneration?: number;
+            reusedCheckCount?: number;
             reviewedFingerprint: string;
             scope?: components["schemas"]["WorkflowVerifyScopeDecision"];
             scopeAppliedTransforms?: string[];
@@ -17267,6 +17313,69 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    submitWorkReport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SubmitWorkReportRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkReportResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
