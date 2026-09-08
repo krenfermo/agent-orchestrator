@@ -118,11 +118,15 @@ func (s *Service) Config(ctx context.Context, projectID domain.ProjectID) (Confi
 // page still saying so, and a background sync that starts failing should be
 // able to mark the integration degraded through the same field.
 func (s *Service) TestConnection(ctx context.Context, projectID domain.ProjectID) (ports.WorkItemsIdentity, error) {
-	client, cfg, err := s.client(ctx, projectID)
+	// Judged Reachable, not Usable: a preflight asks whether this token can see
+	// this workspace, and that has to be answerable BEFORE the integration is
+	// switched on -- otherwise the only way to test a credential is to commit
+	// to it first. It reads and records; it writes nothing to the provider.
+	client, cfg, err := s.discoveryClient(ctx, projectID)
 	if err != nil {
 		if errors.Is(err, ErrNotConfigured) {
 			return ports.WorkItemsIdentity{}, apierr.Invalid("PLANE_NOT_CONFIGURED",
-				"this project has no work-management provider configured", nil)
+				"a workspace and an API token are required before the connection can be tested", nil)
 		}
 		return ports.WorkItemsIdentity{}, err
 	}
@@ -154,7 +158,10 @@ func (s *Service) TestConnection(ctx context.Context, projectID domain.ProjectID
 // ListProviderProjects enumerates the provider's projects, so a person mapping
 // this AO project can choose from a list.
 func (s *Service) ListProviderProjects(ctx context.Context, projectID domain.ProjectID) ([]domain.WorkItemProject, error) {
-	client, _, err := s.client(ctx, projectID)
+	// Reachable, for the reason the picker exists: it is how somebody finds the
+	// project id in the first place, so requiring one to list them made it
+	// useless. Read-only, workspace-scoped, names no project.
+	client, _, err := s.discoveryClient(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}

@@ -47,6 +47,10 @@ export function WorkItemsSettingsSection({ projectId }: { projectId: string }) {
 
 	const [workspace, setWorkspace] = useState<string | null>(null);
 	const [baseURL, setBaseURL] = useState<string | null>(null);
+	// The Plane project id, typed. It used to be settable ONLY through the
+	// picker below, and the picker could not load until a project was already
+	// mapped -- so a project that had never been mapped could never become one.
+	const [externalProjectID, setExternalProjectID] = useState<string | null>(null);
 	const [token, setToken] = useState("");
 	const [error, setError] = useState<string | null>(null);
 	const [tested, setTested] = useState<string | null>(null);
@@ -166,10 +170,17 @@ export function WorkItemsSettingsSection({ projectId }: { projectId: string }) {
 	const current = config.data;
 	const workspaceValue = workspace ?? current?.workspace ?? "";
 	const baseURLValue = baseURL ?? current?.baseUrl ?? "";
+	const projectIDValue = externalProjectID ?? current?.externalProjectId ?? "";
+	// Judged against what the daemon has STORED, not what is typed: the toggle
+	// saves immediately, and the daemon refuses to enable a configuration it
+	// has not been given. Showing it as available before Save would offer a
+	// click that can only fail.
 	const canEnable =
-		Boolean(workspaceValue) &&
+		Boolean(current?.workspace) &&
 		Boolean(current?.externalProjectId) &&
-		(Boolean(current?.tokenConfigured) || token.trim() !== "");
+		Boolean(current?.tokenConfigured);
+	// Something typed but not yet saved, which is why the toggle is still off.
+	const unsavedMapping = projectIDValue.trim() !== (current?.externalProjectId ?? "");
 
 	return (
 		<SettingsSection title={t("workitems.title")}>
@@ -199,6 +210,17 @@ export function WorkItemsSettingsSection({ projectId }: { projectId: string }) {
 				</label>
 
 				<label className="block space-y-1">
+					<span className="text-sm font-medium">{t("workitems.projectIdLabel")}</span>
+					<Input
+						aria-label={t("workitems.projectIdLabel")}
+						placeholder="00000000-0000-0000-0000-000000000000"
+						value={projectIDValue}
+						onChange={(e) => setExternalProjectID(e.target.value)}
+					/>
+					<span className="text-xs text-muted-foreground">{t("workitems.projectIdHint")}</span>
+				</label>
+
+				<label className="block space-y-1">
 					<span className="text-sm font-medium">{t("workitems.tokenLabel")}</span>
 					<Input
 						aria-label={t("workitems.tokenLabel")}
@@ -223,6 +245,7 @@ export function WorkItemsSettingsSection({ projectId }: { projectId: string }) {
 							save.mutate({
 								baseUrl: baseURLValue,
 								workspace: workspaceValue,
+								externalProjectId: projectIDValue.trim(),
 								// Omitted when blank, so saving the form does not erase a
 								// stored credential.
 								...(token.trim() ? { apiToken: token.trim() } : {}),
@@ -234,7 +257,7 @@ export function WorkItemsSettingsSection({ projectId }: { projectId: string }) {
 					<Button
 						size="sm"
 						variant="outline"
-						disabled={test.isPending || !current?.tokenConfigured}
+						disabled={test.isPending || !current?.tokenConfigured || !current?.workspace}
 						onClick={() => test.mutate()}
 					>
 						{test.isPending ? t("workitems.testing") : t("workitems.test")}
@@ -245,8 +268,11 @@ export function WorkItemsSettingsSection({ projectId }: { projectId: string }) {
 					<label className="block space-y-1">
 						<span className="text-sm font-medium">{t("workitems.projectLabel")}</span>
 						<Select
-							value={current?.externalProjectId ?? ""}
-							onValueChange={(value) => save.mutate({ externalProjectId: value })}
+							value={projectIDValue}
+							onValueChange={(value) => {
+								setExternalProjectID(value);
+								save.mutate({ externalProjectId: value });
+							}}
 						>
 							<SelectTrigger aria-label={t("workitems.projectLabel")}>
 								<SelectValue placeholder={t("workitems.projectPlaceholder")} />
@@ -270,6 +296,14 @@ export function WorkItemsSettingsSection({ projectId }: { projectId: string }) {
 						disabled={!canEnable && !current?.enabled}
 						onChange={(next) => save.mutate({ enabled: next })}
 					/>
+					{/* A disabled toggle with no explanation is the state this bug
+					    presented as. Say which of the three things is missing, or
+					    that what is typed has not been saved yet. */}
+					{!canEnable && !current?.enabled ? (
+						<p className="text-xs text-muted-foreground" data-testid="workitems-enable-blocked">
+							{unsavedMapping ? t("workitems.enableNeedsSave") : t("workitems.enableNeedsConfig")}
+						</p>
+					) : null}
 					<Toggle
 						label={t("workitems.syncStatesLabel")}
 						hint={t("workitems.syncStatesHint")}
