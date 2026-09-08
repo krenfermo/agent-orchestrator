@@ -101,6 +101,7 @@ func (c *Coordinator) collectPreReviewEvidence(
 	workCP domain.WorkflowCheckpoint,
 	policyDecision ReviewPolicyDecision,
 	artifact PlanArtifact,
+	floorAlreadyDeep bool,
 ) (domain.PreReviewEvidence, error) {
 	started := c.clock()
 
@@ -113,12 +114,7 @@ func (c *Coordinator) collectPreReviewEvidence(
 	// contradiction computed after the row was written would never reach disk,
 	// and a reader after a restart would see a report AO had already caught
 	// lying and no record that it had.
-	var report domain.WorkReport
-	if workCP.WorkflowStepID != nil {
-		if r, ok := c.workReportForStep(ctx, run.ID, *workCP.WorkflowStepID); ok {
-			report = r
-		}
-	}
+	report, _ := c.workReportForRun(ctx, run.ID)
 	// finish stamps those facts and writes the row. Every return path below
 	// goes through it, so no status can accidentally omit them.
 	finish := func(record domain.PreReviewEvidence) (domain.PreReviewEvidence, error) {
@@ -131,6 +127,26 @@ func (c *Coordinator) collectPreReviewEvidence(
 			record.DurationMS = record.DecidedAt.Sub(started).Milliseconds()
 		}
 		return c.persistPreReviewEvidence(ctx, run, reviewStep, record)
+	}
+
+	// NOTHING TO BUY. A change whose review floor is already deep gets a full
+	// independent review whatever these checks say, the deep prompt does not
+	// render them, and Verify runs the same plan itself on its own authority
+	// shortly afterwards. Running them here would buy one reuse if the tree
+	// holds still, and cost one entire wasted suite the moment a fix cycle
+	// moves it — which on a high-risk change is a repository-wide suite,
+	// because VerifyScopePolicy refuses to narrow exactly those.
+	//
+	// So AO does not run them, and says so. The decision is recorded rather
+	// than silent: a reader must be able to tell "AO chose not to look" from
+	// "AO looked and could not tell".
+	if floorAlreadyDeep {
+		return finish(domain.PreReviewEvidence{
+			Version:   domain.PreReviewEvidenceVersion,
+			Status:    domain.PreReviewEvidenceNotNeeded,
+			Note:      "this change is reviewed in full whatever the checks say, and Verify runs them itself afterwards",
+			StartedAt: started,
+		})
 	}
 
 	// A coordinator with no verification runtime cannot observe anything. That

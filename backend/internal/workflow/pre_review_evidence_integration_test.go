@@ -920,3 +920,91 @@ func TestABoundedReviewStillRunsAndReceivesTheObservedEvidence(t *testing.T) {
 		}
 	}
 }
+
+// THE BOUNDED OPTIMIZATION. A change that is going to be reviewed in full gets
+// no pre-review pass, because nothing about that review could change if it did.
+//
+// The decision is still recorded, the review is still deep, and Verify still
+// runs the plan itself — so the total number of executions is unchanged on the
+// happy path and strictly lower whenever a fix cycle would have invalidated an
+// early run.
+func TestAChangeReviewedInFullGetsNoPreReviewPass(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		changes []ports.WorkspaceChange
+		request domain.ReviewDepth
+	}{
+		{"because its risk tier demands it", []ports.WorkspaceChange{{Path: "internal/auth/session.go", Status: " M"}}, ""},
+		{"because the run asked for it", ordinaryCodeChange(), domain.ReviewDepthDeep},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sessionFacts := newFakeSessionFacts()
+			dir := t.TempDir()
+			spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: dir}}, facts: sessionFacts}
+			workspaceFacts := &fakeWorkspaceFacts{}
+			reviewRuns := newFakeReviewRuns()
+			launcher := &fakeReviewerLauncher{}
+			runner := passingRunner()
+			c, store, clk := newCoordinatorWithReviewAndVerifier(spawner, sessionFacts, workspaceFacts, reviewRuns, launcher, runner)
+			ctx := context.Background()
+
+			created, err := c.CreateRun(ctx, "proj-1", "tidy the helper", verifiablePlan())
+			if err != nil {
+				t.Fatalf("CreateRun: %v", err)
+			}
+			if tc.request != "" {
+				if err := c.ApplyReviewDepthPolicy(ctx, created.Run.ID, tc.request); err != nil {
+					t.Fatalf("ApplyReviewDepthPolicy: %v", err)
+				}
+			}
+			completeWorkStepInDir(t, c, clk, sessionFacts, workspaceFacts, created.Run.ID, dir, tc.changes)
+			got, err := c.ContinueRun(ctx, created.Run.ID)
+			if err != nil {
+				t.Fatalf("ContinueRun: %v", err)
+			}
+
+			// Nothing ran before the review.
+			if len(runner.calls) != 0 {
+				t.Fatalf("AO executed %d commands before a review it was always going to run in full", len(runner.calls))
+			}
+			// But the decision is on the record, and says which it was.
+			rec, ok := evidenceFor(t, store, created.Run.ID)
+			if !ok {
+				t.Fatal("AO recorded nothing at all; the choice must be visible")
+			}
+			if rec.Status != domain.PreReviewEvidenceNotNeeded {
+				t.Fatalf("evidence status = %q, want not_needed", rec.Status)
+			}
+			// The review is unchanged: full, independent, with the deep prompt.
+			review := reviewStepFrom(got)
+			if review.Step.ReviewRunID == nil {
+				t.Fatal("no reviewer ran")
+			}
+			if d := depthDecisionsFor(t, store, created.Run.ID)[0]; d.Effective != domain.ReviewDepthDeep {
+				t.Fatalf("effective depth = %q, want deep", d.Effective)
+			}
+			if strings.Contains(launcher.lastPrompt, "This is a BOUNDED review") {
+				t.Error("a full review was given the bounded prompt")
+			}
+
+			// And Verify still runs the plan itself, on its own authority.
+			reviewRuns.setStatus(*review.Step.ReviewRunID, domain.ReviewRunComplete, domain.VerdictApproved)
+			clk.Advance(time.Minute)
+			final, err := c.GetRun(ctx, created.Run.ID)
+			if err != nil {
+				t.Fatalf("GetRun: %v", err)
+			}
+			if len(runner.calls) != 1 {
+				t.Fatalf("verification executed %d commands, want exactly 1", len(runner.calls))
+			}
+			for _, r := range verifyResultsFor(t, store, created.Run.ID) {
+				if n := reusedChecks(r); n != 0 {
+					t.Fatalf("verification reused %d checks, but nothing was measured to reuse", n)
+				}
+			}
+			if verifyStepFrom(final).Step.State != domain.WorkflowStepCompleted {
+				t.Fatalf("verify step = %q, want completed", verifyStepFrom(final).Step.State)
+			}
+		})
+	}
+}

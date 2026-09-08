@@ -163,7 +163,24 @@ When you are done (or if you get stuck), report the outcome clearly in your
 final message: what changed, what you tested, and whether it succeeded. This
 report is informational only — AO verifies your work independently from the
 actual state of the worktree, not from what you say here, so be honest about
-partial progress or failures.`, artifact.Objective, task, criteria, effectiveSpec, extraGuardrail)
+partial progress or failures.
+
+Before you finish, ALSO record that report in a form AO keeps and hands to the
+reviewer:
+
+  ao work report --json -
+
+reading a JSON object on stdin with any of: summary, criteria
+[{criterion, addressed, note}], testsReported [{command, claimedOutcome:
+claimed_passed|claimed_failed|claimed_skipped, note}], limitations, risks,
+followUp, claimedChangedPaths, commit. The short form works too, e.g.
+%[6]sao work report --summary "..." --test "go test ./...=passed" --limitation "..."%[6]s.
+
+Two things about it. It is a DECLARATION, not proof: AO runs this task's own
+checks itself before anyone reviews the change, and claiming a test passed
+gains you nothing. And declaring a limitation, a risk, or a criterion you did
+NOT address makes AO review the change more carefully rather than less — so
+saying what you did not finish is the most useful thing you can put in it.`, artifact.Objective, task, criteria, effectiveSpec, extraGuardrail, "`")
 }
 
 // promptForRun reconstructs the work step's task prompt from the plan step's

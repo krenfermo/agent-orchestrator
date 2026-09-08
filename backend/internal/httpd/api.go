@@ -253,6 +253,7 @@ type API struct {
 	capacity           *controllers.CapacityController
 	prs                *controllers.PRsController
 	reviews            *controllers.ReviewsController
+	workReports        *controllers.WorkReportsController
 	decisions          *controllers.DecisionsController
 	notifications      *controllers.NotificationsController
 	push               *controllers.PushController
@@ -338,6 +339,15 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		prs:           &controllers.PRsController{Svc: deps.PRs},
 		reviews: &controllers.ReviewsController{
 			Svc:          deps.Reviews,
+			Ownership:    deps.SessionOwnership,
+			TrustedLocal: cfg.TrustedLocalMode,
+			Guard:        guard,
+		},
+		// P5-A phase 2B: the worker's own declaration, scoped exactly like a
+		// reviewer's verdict — same ownership store, same trusted-local rule,
+		// same guard.
+		workReports: &controllers.WorkReportsController{
+			Svc:          deps.Workflows,
 			Ownership:    deps.SessionOwnership,
 			TrustedLocal: cfg.TrustedLocalMode,
 			Guard:        guard,
@@ -430,6 +440,7 @@ func (a *API) Register(root chi.Router) {
 			a.workItems.Register(r)
 			a.prs.Register(r)
 			a.reviews.Register(r)
+			a.workReports.Register(r)
 			a.decisions.Register(r)
 			a.notifications.Register(r)
 			a.push.Register(r)

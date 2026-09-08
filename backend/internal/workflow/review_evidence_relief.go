@@ -38,7 +38,7 @@ func (c *Coordinator) resolveReviewEvidenceRelief(
 	// evidence row by collectPreReviewEvidence, which is the single writer of
 	// that record — recomputing them here would be a second opinion about a
 	// fact already on disk.
-	report, _ := c.workReportForStep(ctx, run.ID, workStep.ID)
+	report, _ := c.workReportForRun(ctx, run.ID)
 
 	relief := domain.EvaluateReviewEvidenceRelief(domain.ReviewEvidenceReliefInput{
 		Tier:                    tier,

@@ -375,10 +375,8 @@ func (c *Coordinator) attachLightReviewEvidence(
 	if evidence, ok := c.preReviewEvidenceForStep(ctx, run.ID, reviewStep.ID); ok {
 		in.PreReviewEvidence = evidence
 	}
-	if workStep, ok := c.workStepForRun(ctx, run.ID); ok {
-		if report, ok := c.workReportForStep(ctx, run.ID, workStep.ID); ok {
-			in.WorkReport = report
-		}
+	if report, ok := c.workReportForRun(ctx, run.ID); ok {
+		in.WorkReport = report
 	}
 
 	// The changed-file list and the prior-attempt count come from the risk

@@ -613,14 +613,21 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		// A SKIPPED decision deliberately still collects it: a review that
 		// never ran should be able to say what AO knew at the moment it
 		// decided not to run one.
-		evidence, err := c.collectPreReviewEvidence(ctx, run, reviewStep, workCP, decision, policyArtifact)
+		// The tier this change's floor comes from. Computed BEFORE the evidence
+		// pass, because it decides whether that pass can buy anything at all:
+		// when max(request, floor) is already deep, no evidence can change the
+		// depth, the deep prompt does not render it, and Verify will run the
+		// same plan itself. See collectPreReviewEvidence.
+		tier, riskReasons := ReviewRiskTierFor(decision)
+		frozenDepth := policyForRun(run).EffectiveReviewDepthPolicy()
+		floorAlreadyDeep := domain.DeeperOf(frozenDepth.Requested, tier.MinimumDepth()).AtLeast(domain.ReviewDepthDeep)
+
+		evidence, err := c.collectPreReviewEvidence(ctx, run, reviewStep, workCP, decision, policyArtifact, floorAlreadyDeep)
 		if err != nil {
 			return reviewStep, err
 		}
-		// The tier this change's floor comes from, and then whether the
-		// evidence above is allowed to lower that floor by one step. Both are
-		// recorded durably before either is acted on.
-		tier, riskReasons := ReviewRiskTierFor(decision)
+		// Whether the evidence above is allowed to lower that floor by one
+		// step. Recorded durably before it is acted on.
 		reviewTargetFingerprint := workCP.FingerprintAfter
 		if reviewTargetFingerprint == "" {
 			reviewTargetFingerprint = workCP.HeadSHA

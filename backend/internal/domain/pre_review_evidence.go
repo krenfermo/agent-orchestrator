@@ -66,6 +66,23 @@ const (
 	// was simply nothing to run, and a change nobody can check automatically
 	// is precisely a change a person should look at.
 	PreReviewEvidenceNotPlanned PreReviewEvidenceStatus = "not_planned"
+	// PreReviewEvidenceNotNeeded — AO did not run the checks because nothing
+	// about this review could have changed if it had.
+	//
+	// Reachable on exactly one route: a change whose review floor is ALREADY
+	// deep, either because its risk tier demands a full independent pass or
+	// because the run asked for one. There, max(requested, floor) is deep
+	// whatever the evidence says, the deep prompt does not render evidence at
+	// all, and Verify runs the same plan itself minutes later on its own
+	// authority. Running it early would buy one reuse when the tree holds still
+	// and cost one whole wasted suite when a fix cycle moves it.
+	//
+	// It is its own status rather than `not_planned` or `unavailable` because
+	// it is neither: there was a plan, AO could have run it, and it chose not
+	// to for a reason a reader should be able to see. Like every other
+	// non-observed status it can never support relief — and on this route it
+	// could not have anyway.
+	PreReviewEvidenceNotNeeded PreReviewEvidenceStatus = "not_needed"
 	// PreReviewEvidenceTimedOut — AO started the checks and stopped waiting.
 	// Explicitly its own status rather than folded into failed, because a
 	// timeout says nothing about whether the work passed.
@@ -80,7 +97,8 @@ func (s PreReviewEvidenceStatus) Observed() bool { return s == PreReviewEvidence
 func (s PreReviewEvidenceStatus) Valid() bool {
 	switch s {
 	case PreReviewEvidenceObserved, PreReviewEvidenceFailed, PreReviewEvidenceUnavailable,
-		PreReviewEvidenceUnattributed, PreReviewEvidenceNotPlanned, PreReviewEvidenceTimedOut:
+		PreReviewEvidenceUnattributed, PreReviewEvidenceNotPlanned, PreReviewEvidenceTimedOut,
+		PreReviewEvidenceNotNeeded:
 		return true
 	default:
 		return false
@@ -99,20 +117,23 @@ func evidenceStatusSeverity(s PreReviewEvidenceStatus) int {
 	switch s {
 	case PreReviewEvidenceObserved:
 		return 0
-	case PreReviewEvidenceNotPlanned:
+	case PreReviewEvidenceNotNeeded:
+		// Nothing went wrong; AO deliberately did not look.
 		return 1
-	case PreReviewEvidenceFailed:
+	case PreReviewEvidenceNotPlanned:
 		return 2
-	case PreReviewEvidenceTimedOut:
+	case PreReviewEvidenceFailed:
 		return 3
-	case PreReviewEvidenceUnavailable:
+	case PreReviewEvidenceTimedOut:
 		return 4
-	case PreReviewEvidenceUnattributed:
+	case PreReviewEvidenceUnavailable:
 		return 5
+	case PreReviewEvidenceUnattributed:
+		return 6
 	default:
 		// A status this build does not recognise is the most serious thing
 		// there is, for the same reason an unclassified risk reason is high.
-		return 6
+		return 7
 	}
 }
 

@@ -7764,6 +7764,58 @@ paths:
       summary: Switch a logical AO session to another agent harness
       tags:
       - sessions
+  /api/v1/sessions/{sessionId}/work-report:
+    post:
+      operationId: submitWorkReport
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitWorkReportRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkReportResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Record a worker's declaration about the change it delivered (never
+        evidence)
+      tags:
+      - workflows
   /api/v1/sessions/{sessionId}/workspace/events:
     get:
       operationId: streamSessionWorkspaceChanges
@@ -19712,6 +19764,64 @@ components:
       - runId
       - verdict
       type: object
+    SubmitWorkReportCriterion:
+      properties:
+        addressed:
+          type: boolean
+        criterion:
+          type: string
+        note:
+          type: string
+      required:
+      - criterion
+      - addressed
+      type: object
+    SubmitWorkReportRequest:
+      properties:
+        claimedChangedPaths:
+          items:
+            type: string
+          type: array
+        commit:
+          type: string
+        criteria:
+          items:
+            $ref: '#/components/schemas/SubmitWorkReportCriterion'
+          type: array
+        followUp:
+          items:
+            type: string
+          type: array
+        limitations:
+          items:
+            type: string
+          type: array
+        risks:
+          items:
+            type: string
+          type: array
+        summary:
+          type: string
+        testsReported:
+          items:
+            $ref: '#/components/schemas/SubmitWorkReportTestClaim'
+          type: array
+      type: object
+    SubmitWorkReportTestClaim:
+      properties:
+        claimedOutcome:
+          enum:
+          - claimed_passed
+          - claimed_failed
+          - claimed_skipped
+          type: string
+        command:
+          type: string
+        note:
+          type: string
+      required:
+      - command
+      type: object
     SwitchAgentRequest:
       properties:
         idempotencyKey:
@@ -20399,6 +20509,25 @@ components:
       - deferred
       - failed
       - skipped
+      type: object
+    WorkReportResponse:
+      properties:
+        superseded:
+          type: boolean
+        truncated:
+          items:
+            type: string
+          type: array
+        version:
+          type: string
+        workflowRunId:
+          type: string
+        workflowStepId:
+          type: string
+      required:
+      - workflowRunId
+      - workflowStepId
+      - version
       type: object
     WorkflowAttemptView:
       properties:

@@ -15,7 +15,7 @@ ordinary code by one step.
 ## The shape of a fast Task
 
 ```
-objective → worker implements → (optional) structured report
+objective → worker implements → (optional) `ao work report`
           → AO runs the planned checks itself   ← pre_review_evidence
           → risk tier + evidence → depth decision
           → no reviewer | light review | deep review
@@ -79,7 +79,7 @@ already contain.
 | `review_evidence_relief` | review step | granted/denied, the stable reason code, the evidence key it stands on |
 | `review_depth_decision` | review step | phase 1's decision, now resolved against the relieved floor |
 | `review_skipped_by_evidence` | review step | why nobody reviewed: reason, evidence key, status, fingerprint, tier, depths |
-| `work_report` | work step | the worker's bounded, versioned declaration |
+| `work_report` | the run (no step id — see below) | the worker's bounded, versioned declaration |
 
 `review_skipped_by_evidence` is deliberately **not** `review_policy_skipped`.
 The latter means "the paths alone said no reviewer was needed"; the former means
@@ -112,6 +112,62 @@ by Verify, because a failing verification is the entry point to infra
 classification, transient retries and the fix cycle — and file checks are always
 performed by Verify itself.
 
+## When AO does not look at all
+
+A change whose review floor is **already deep** — its risk tier demands a full
+independent pass, or the run asked for one — gets no pre-review pass. Nothing
+about that review could change if it did: `max(request, floor)` is deep whatever
+the checks say, the deep prompt does not render evidence, and Verify runs the
+same plan itself on its own authority minutes later.
+
+Running it early would buy one reuse when the tree holds still, and cost one
+entire wasted suite the moment a fix cycle moves it — which on a high-risk
+change is a *repository-wide* suite, because `VerifyScopePolicy` deliberately
+refuses to narrow exactly those.
+
+The choice is recorded as `not_needed`, which is its own status precisely
+because it is neither `not_planned` nor `unavailable`: there was a plan, AO
+could have run it, and it chose not to. A reader must be able to tell "AO chose
+not to look" from "AO looked and could not tell".
+
+## The transport (phase 2B)
+
+A worker records its declaration with:
+
+```
+ao work report --json -          # or --summary / --test / --limitation / ...
+```
+
+addressed by **session**, defaulting to `AO_SESSION_ID`, which AO sets in every
+pane it launches. The route is `POST /api/v1/sessions/{sessionId}/work-report`,
+under the same session-ownership scoping and the same session-write permission
+`ao review submit` uses — no new permission, no new ownership model, no new
+table.
+
+Addressing by session rather than by run id is what makes a worker only able to
+report on the work it is actually doing: the session is the thing it provably
+is, whereas a run id is a string it would have to be told.
+
+Four states are refused:
+
+| State | Answer |
+|---|---|
+| No non-terminal run has a work step in this session | `404` — covers a cancelled run, a finished one, and a pane from a superseded launch generation |
+| The run has already resolved its review depth | `409` — the report can no longer inform the decision it sits next to |
+| The body is unusable | `400` |
+| The daemon predates the capability | `501` |
+
+A second report supersedes the first as the one policy reads; both stay on the
+ledger, because the write is append-only and a worker that changes its story
+should leave a history rather than an edit.
+
+The report is stored **run-scoped, with no step id**. That is load-bearing: a
+checkpoint carrying a step id becomes that step's latest, and `dispatchReviewStep`
+reads exactly that row to recover the session, worktree, branch and completion
+fingerprint. A report attached to the work step displaced those facts the moment
+it was newer — which is every real run — and the dispatch then stopped as
+`ambiguous_review_state`.
+
 ## Bounds
 
 - `preReviewEvidenceMaxCommands` (12): a plan larger than this is a suite, and a
@@ -131,9 +187,6 @@ everything a per-phase cost view needs. Building that view is phase 4.
 
 ## Still outstanding
 
-- **Phase 2B** — the worker-report *transport*: `ao work report` plus its HTTP
-  route. The contract, validation, storage and consumption all exist and are
-  tested; only the wire path is missing, and it carries no safety semantics.
 - **Phase 3** — post-approval escalation.
 - **Phase 4** — full per-phase metrics.
 - **Phase 5** — time budgets per depth.
