@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -18,6 +19,18 @@ const (
 	delegatedTaskTitleLimit             = 20
 	delegatedTaskUntitledName           = "Untitled task"
 	delegatedTaskTitleRefinementTimeout = time.Minute
+
+	// delegatedTaskTitleBriefBytes bounds how much of the brief the
+	// title-refinement request carries to the orchestrator.
+	//
+	// A brief may now be a full 128 KiB specification (see
+	// domain.MaxWorkflowObjectiveBytes). This message exists only so an agent
+	// can pick a <=20 character title, and the worker that actually does the
+	// work already has the whole specification -- so sending the entire thing
+	// a second time would spend an orchestrator's context window on a naming
+	// errand. The opening of a specification is where its subject is stated,
+	// which is exactly what a title needs.
+	delegatedTaskTitleBriefBytes = 4 << 10
 )
 
 // DelegateTaskInput describes a task AO should spawn as a worker session. Brief
@@ -168,6 +181,22 @@ func delegatedTaskDisplayName(brief string) string {
 	return strings.TrimSpace(string([]rune(title)[:delegatedTaskTitleLimit]))
 }
 
+// briefExcerpt returns at most max bytes of brief, cut on a rune boundary so a
+// multibyte specification is never sliced through the middle of a character,
+// and reports whether anything was left out. It is only ever used for the
+// title-refinement message -- the specification the worker receives is never
+// excerpted.
+func briefExcerpt(brief string, maxBytes int) (string, bool) {
+	if len(brief) <= maxBytes {
+		return brief, false
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(brief[cut]) {
+		cut--
+	}
+	return brief[:cut], true
+}
+
 func taskTitleDelegationMessage(workerID domain.SessionID, in DelegateTaskInput) string {
 	var b strings.Builder
 	b.WriteString("AO TASK TITLE UPDATE\n")
@@ -178,8 +207,17 @@ func taskTitleDelegationMessage(workerID domain.SessionID, in DelegateTaskInput)
 	b.WriteString(" \"<title, max 20 chars>\"\n\n")
 	b.WriteString("Worker session id: ")
 	b.WriteString(string(workerID))
-	b.WriteString("\nTask brief:\n")
-	b.WriteString(in.Brief)
+	brief, truncated := briefExcerpt(in.Brief, delegatedTaskTitleBriefBytes)
+	if truncated {
+		b.WriteString("\nTask brief (first ")
+		b.WriteString(strconv.Itoa(len(brief)))
+		b.WriteString(" bytes of ")
+		b.WriteString(strconv.Itoa(len(in.Brief)))
+		b.WriteString("; the worker has the full specification, you only need a title):\n")
+	} else {
+		b.WriteString("\nTask brief:\n")
+	}
+	b.WriteString(brief)
 	if model := strings.TrimSpace(in.Model); model != "" {
 		b.WriteString("\nRequested model: ")
 		b.WriteString(model)

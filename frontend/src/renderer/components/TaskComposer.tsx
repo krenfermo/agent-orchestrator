@@ -5,7 +5,7 @@ import {
 	type TaskComposerModelCatalog,
 	type TaskComposerModelControl,
 } from "@aoagents/product-ui";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Loader2 } from "lucide-react";
 import { RequiredAgentField } from "./CreateProjectAgentSheet";
@@ -21,6 +21,12 @@ import {
 	revalidateAgentModels,
 } from "../hooks/useAgentModelsQuery";
 import { cn } from "../lib/utils";
+import {
+	MAX_TASK_SPECIFICATION_BYTES,
+	SPECIFICATION_ATTACHMENT_NAME,
+	SPECIFICATION_COUNTER_FROM_BYTES,
+	specificationByteLength,
+} from "../../shared/task-specification";
 import { AgentModelCombobox } from "./settings/AgentModelCombobox";
 import { SettingsOptionMenu } from "./settings/SettingsOptionMenu";
 
@@ -219,6 +225,29 @@ export function TaskComposer({
 		}
 	}, [defaultModelForSelectedAgent, defaultModeForSelectedAgent, modelTouched]);
 
+	// Byte length, recomputed only when the text changes: running TextEncoder
+	// on every keystroke of a 100 KB specification would be felt. Bytes, not
+	// characters, because that is the unit the daemon's limit is in.
+	const promptBytes = useMemo(() => specificationByteLength(prompt), [prompt]);
+	const promptTooLong = promptBytes > MAX_TASK_SPECIFICATION_BYTES;
+
+	// The way out for a specification past even the raised ceiling: it becomes
+	// a Markdown attachment, verbatim, and the brief becomes the line that
+	// points the agent at it. The text is not discarded and not truncated --
+	// it moves into a durable file the daemon writes into the worktree, which
+	// is the container a document that long belongs in.
+	//
+	// The replacement brief deliberately does NOT name a path. The daemon owns
+	// the on-disk name (.ao/attachments/attachment-N.md -- the upload carries
+	// only a mime type and bytes) and already appends the real, worktree-
+	// relative reference after the brief. Naming SPECIFICATION_ATTACHMENT_NAME
+	// here would send the agent looking for a file that does not exist.
+	const attachSpecificationAsFile = useCallback(() => {
+		const file = new File([prompt], SPECIFICATION_ATTACHMENT_NAME, { type: "text/markdown" });
+		void addFiles([file]);
+		setPrompt(t("newTask.taskAttachedBrief"));
+	}, [addFiles, prompt, t]);
+
 	const isDirty = prompt.trim() !== "" || modelTouched || attachments.length > 0;
 	useEffect(() => {
 		onDirtyChange?.(isDirty);
@@ -232,7 +261,7 @@ export function TaskComposer({
 	useEffect(() => () => clearAttachments(), [clearAttachments]);
 
 	const submitTask = async (interfaceMode?: "tui") => {
-		if (!projectId || isSubmitting) return;
+		if (!projectId || isSubmitting || promptTooLong) return;
 
 		const cleanModel = model.trim();
 		const cleanMode = mode.trim();
@@ -324,6 +353,21 @@ export function TaskComposer({
 					setModel("");
 					setModelTouched(true);
 				},
+			}}
+			specification={{
+				bytes: promptBytes,
+				maxBytes: MAX_TASK_SPECIFICATION_BYTES,
+				counterFromBytes: SPECIFICATION_COUNTER_FROM_BYTES,
+				sizeLabel: t("newTask.taskSize", {
+					bytes: promptBytes.toLocaleString(),
+					max: MAX_TASK_SPECIFICATION_BYTES.toLocaleString(),
+				}),
+				tooLongLabel: t("newTask.taskTooLong", {
+					over: (promptBytes - MAX_TASK_SPECIFICATION_BYTES).toLocaleString(),
+					max: MAX_TASK_SPECIFICATION_BYTES.toLocaleString(),
+				}),
+				attachLabel: t("newTask.taskAttachSpecification"),
+				onAttachAsFile: attachSpecificationAsFile,
 			}}
 			attachments={{
 				items: attachments.map(({ id, name, dataUrl }) => ({ id, name, previewUrl: dataUrl })),

@@ -16152,7 +16152,10 @@ components:
             $ref: '#/components/schemas/AttachmentInput'
           type: array
         brief:
-          maxLength: 4096
+          description: 'The task''s full specification: multi-line and markdown-friendly,
+            preserved verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long
+            brief is refused.'
+          maxLength: 131072
           type: string
         mode:
           enum:
@@ -19552,7 +19555,10 @@ components:
         projectId:
           type: string
         prompt:
-          maxLength: 4096
+          description: 'The session''s task specification: multi-line and markdown-friendly,
+            preserved verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long
+            prompt is refused.'
+          maxLength: 131072
           type: string
         trackerProvider:
           enum:

@@ -34,7 +34,25 @@ import (
 )
 
 const (
-	maxPromptLen      = 4096
+	// maxPromptLen bounds a task specification: the spawn prompt and the
+	// delegate brief are the same thing a workflow objective is -- what the
+	// task IS -- so they share its ceiling rather than keeping a second,
+	// smaller one of their own.
+	//
+	// It used to be 4096 bytes, which is about six hundred words. That is not
+	// a specification; it is a sentence. A real brief carries scope,
+	// constraints, acceptance criteria, a test matrix and an explicit
+	// NOT-doing list, and the form refused all of it with TASK_TOO_LONG. The
+	// workflow create path already resolved this at
+	// domain.MaxWorkflowObjectiveBytes (128 KiB), so pointing here at that
+	// same constant is what stops the two halves of AO disagreeing about how
+	// long a task may be. The text is never truncated: over the limit is a
+	// refusal that names both sizes.
+	maxPromptLen = domain.MaxWorkflowObjectiveBytes
+	// maxMessageLen bounds a follow-up message to a live session, which is a
+	// different thing from the task's specification and keeps its own,
+	// smaller cap. A long specification belongs in the task or in an
+	// attachment, not pasted turn by turn into a running agent.
 	maxMessageLen     = 4096
 	maxModelLen       = 256
 	maxDisplayNameLen = 20
@@ -305,8 +323,13 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.Mode = mode
-	if len(in.Prompt) > maxPromptLen {
-		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "PROMPT_TOO_LONG", "prompt is too long", nil)
+	// Measured in BYTES, and on the trimmed text so the size the refusal
+	// reports is the size the limit was applied to. The prompt itself travels
+	// on untrimmed and untruncated: an over-long brief is refused outright,
+	// never silently shortened into one the author never wrote.
+	if len(strings.TrimSpace(in.Prompt)) > maxPromptLen {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "PROMPT_TOO_LONG",
+			domain.ObjectiveTooLongMessage(in.Prompt), nil)
 		return
 	}
 	// displayName is optional at the API (the desktop new-task dialog omits it
@@ -352,6 +375,12 @@ func extensionForMimeType(mimeType string) string {
 		"image/jpeg": ".jpg",
 		"image/jpg":  ".jpg",
 		"text/plain": ".txt",
+		// A long task specification is attached as Markdown, and the system
+		// mime table does not reliably map text/markdown -- without this the
+		// fallback below names the file ".markdown", which is the same bytes
+		// under a name no editor or agent expects.
+		"text/markdown":   ".md",
+		"text/x-markdown": ".md",
 	}
 
 	// Check if we have a preferred extension for this MIME type
@@ -1445,8 +1474,12 @@ func (c *SessionsController) delegateTask(w http.ResponseWriter, r *http.Request
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "PROJECT_ID_REQUIRED", "projectId is required", nil)
 		return
 	}
-	if len(in.Brief) > maxPromptLen {
-		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "TASK_TOO_LONG", "Task is too long", nil)
+	// Same ceiling and same reasoning as spawn above: the brief IS the task's
+	// specification, so it is bounded where a workflow objective is bounded
+	// and is never truncated.
+	if len(strings.TrimSpace(in.Brief)) > maxPromptLen {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "TASK_TOO_LONG",
+			domain.ObjectiveTooLongMessage(in.Brief), nil)
 		return
 	}
 	if utf8.RuneCountInString(strings.TrimSpace(in.Model)) > maxModelLen {

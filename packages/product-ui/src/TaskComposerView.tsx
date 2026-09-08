@@ -83,6 +83,37 @@ export type TaskComposerSubmission = {
 	onSubmitAsTui: () => void;
 };
 
+/**
+ * TaskComposerSpecification is the size budget for the task's specification.
+ *
+ * A task brief is bounded in UTF-8 BYTES by the daemon, and before this the
+ * composer said nothing about that at all: an over-long specification was
+ * accepted by the textarea, sent, and refused by the daemon with a code. So
+ * the size is shown as it approaches the ceiling, the refusal is stated here
+ * rather than discovered after submitting, and — because a specification too
+ * long to type is exactly the case where a file is the right container — the
+ * refusal carries the action that moves it into one.
+ *
+ * Every number and string arrives already formatted and translated: this
+ * package owns no locale and no limit.
+ */
+export type TaskComposerSpecification = {
+	/** UTF-8 byte length of the current prompt. */
+	bytes: number;
+	/** Above this the prompt is over the daemon's ceiling. */
+	maxBytes: number;
+	/** Below this the counter stays hidden. */
+	counterFromBytes: number;
+	/** Shown while the prompt fits, e.g. "12,000 / 131,072 bytes". */
+	sizeLabel: string;
+	/** Shown when it does not: names the overage and the way out. */
+	tooLongLabel: string;
+	/** Label for the action that moves the prompt into an attached file. */
+	attachLabel: string;
+	/** Moves the prompt into an attached Markdown file, verbatim. */
+	onAttachAsFile: () => void;
+};
+
 export type TaskComposerLabels = {
 	addFile: string;
 	createAsTui: string;
@@ -105,6 +136,8 @@ export type TaskComposerViewProps = {
 	prompt: string;
 	renderAgentControl: (control: TaskComposerAgentControl) => ReactNode;
 	renderModelControl: (control: TaskComposerModelControl) => ReactNode;
+	/** Omitted by callers that impose no size budget. */
+	specification?: TaskComposerSpecification;
 	submission: TaskComposerSubmission;
 };
 
@@ -119,6 +152,7 @@ export function TaskComposerView({
 	prompt,
 	renderAgentControl,
 	renderModelControl,
+	specification,
 	submission,
 }: TaskComposerViewProps) {
 	const promptId = useId();
@@ -126,9 +160,15 @@ export function TaskComposerView({
 	const agentId = useId();
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const [isDragging, setIsDragging] = useState(false);
+	const tooLong = specification !== undefined && specification.bytes > specification.maxBytes;
+	const showCounter = specification !== undefined && specification.bytes > specification.counterFromBytes;
 
 	const submit = (event: FormEvent<HTMLFormElement>) => {
 		event.preventDefault();
+		// An over-long specification is refused here rather than sent to be
+		// refused: the author gets the same answer without losing the round
+		// trip, and without the daemon spawning anything.
+		if (tooLong) return;
 		submission.onSubmit();
 	};
 
@@ -176,6 +216,7 @@ export function TaskComposerView({
 				value={prompt}
 				onChange={(event) => onPromptChange(event.target.value)}
 				onPaste={handlePaste}
+				aria-invalid={tooLong || undefined}
 				onKeyDown={(event) => {
 					if (event.key === "Enter" && !event.shiftKey && !event.altKey && !event.nativeEvent.isComposing) {
 						event.preventDefault();
@@ -183,6 +224,35 @@ export function TaskComposerView({
 					}
 				}}
 			/>
+
+			{specification && (showCounter || tooLong) ? (
+				<div className="flex flex-col gap-1 px-4 pb-2">
+					<span
+						className={
+							tooLong
+								? "self-end text-caption font-medium text-destructive"
+								: "self-end text-caption text-muted-foreground"
+						}
+					>
+						{specification.sizeLabel}
+					</span>
+					{tooLong ? (
+						<div
+							className="flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+							role="alert"
+						>
+							<span>{specification.tooLongLabel}</span>
+							<button
+								type="button"
+								onClick={specification.onAttachAsFile}
+								className="inline-flex h-control-md shrink-0 items-center justify-center rounded-md border border-border bg-background px-2.5 text-xs text-foreground transition-colors hover:bg-muted"
+							>
+								{specification.attachLabel}
+							</button>
+						</div>
+					) : null}
+				</div>
+			) : null}
 
 			{attachments.items.length > 0 && (
 				<ul className="scrollbar-none flex max-h-24 flex-wrap gap-2 overflow-y-auto px-3 pb-2">
@@ -272,7 +342,7 @@ export function TaskComposerView({
 				</button>
 				<button
 					type="submit"
-					disabled={submission.isSubmitting || !canSubmit}
+					disabled={submission.isSubmitting || !canSubmit || tooLong}
 					className="inline-flex h-(--size-settings-action-height) min-w-(--size-composer-start-button) shrink-0 items-center justify-center gap-1.5 rounded-md bg-primary px-3 text-xs text-primary-foreground transition-colors hover:bg-primary/80 disabled:pointer-events-none disabled:opacity-50"
 				>
 					{submission.isSubmitting ? <Loader2 className="size-icon-base animate-spin" aria-hidden="true" /> : null}

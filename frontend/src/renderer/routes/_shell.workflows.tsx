@@ -29,6 +29,11 @@ import type { TFunction } from "i18next";
 import { WorkflowStageBadge } from "../components/workflow-status";
 import { translateDynamic } from "../components/workflow-activity";
 import { summaryKey } from "../lib/workflow-presentation";
+import {
+	MAX_TASK_SPECIFICATION_BYTES,
+	SPECIFICATION_COUNTER_FROM_BYTES,
+	specificationByteLength,
+} from "../../shared/task-specification";
 
 /**
  * A workflow's name is the thing it was asked to do — its objective's first
@@ -40,27 +45,16 @@ function objectiveTitle(objective: string): string {
 }
 
 /**
- * MAX_OBJECTIVE_BYTES mirrors domain.MaxWorkflowObjectiveBytes.
- *
- * It is duplicated rather than fetched because the check it drives is a
- * courtesy: the browser tells you before you submit, and the daemon is the
- * authority that refuses. The two must agree, so the value is asserted against
- * the generated OpenAPI schema in the route's test — a limit that drifted
- * would let the UI accept text the daemon rejects, which is exactly the
- * silent-failure shape this change exists to remove.
+ * The objective ceiling and its byte count now live in
+ * shared/task-specification, because the new-task composer needs exactly the
+ * same two things and a second copy of the number is how the UI and the daemon
+ * came to disagree in the first place. Re-exported under the names this route
+ * has always used so nothing that reads the workflow form has to care.
  */
-export const MAX_OBJECTIVE_BYTES = 131072;
+export const MAX_OBJECTIVE_BYTES = MAX_TASK_SPECIFICATION_BYTES;
+export const objectiveByteLength = specificationByteLength;
 
-/**
- * Below this the counter stays hidden. A specification only becomes something
- * you have to budget once it is genuinely long.
- */
-const OBJECTIVE_COUNTER_FROM_BYTES = 2000;
-
-/** Bytes, not characters: the limit is in UTF-8 bytes and so is this. */
-export function objectiveByteLength(value: string): number {
-	return new TextEncoder().encode(value.trim()).length;
-}
+const OBJECTIVE_COUNTER_FROM_BYTES = SPECIFICATION_COUNTER_FROM_BYTES;
 
 export const Route = createFileRoute("/_shell/workflows")({
 	component: WorkflowsListRoute,
