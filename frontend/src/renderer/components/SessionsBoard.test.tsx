@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceSession, WorkspaceSummary } from "../types/workspace";
@@ -168,12 +168,32 @@ describe("SessionsBoard", () => {
 
 		expect(screen.getByTestId("board-topbar-label").textContent).toContain("Board");
 		expect(screen.queryByText("solkit-ui")).toBeNull();
-		expect(screen.getByRole("button", { name: "New task" }).closest(".center-panel-titlebar")).toHaveClass(
+		expect(screen.getByRole("button", { name: "New session" }).closest(".center-panel-titlebar")).toHaveClass(
 			"workspace-topbar-container",
 		);
 		expect(
-			within(screen.getByRole("button", { name: "New task" })).getByText("Task").hasAttribute("data-compact-label"),
+			within(screen.getByRole("button", { name: "New session" })).getByText("Session").hasAttribute("data-compact-label"),
 		).toBe(true);
+	});
+
+	// The two buttons beside each other do different things, and the board is
+	// where that was confusable: "New session" delegates a worker through
+	// /orchestrators/delegate, "New workflow run" opens the workflow form with
+	// this project preselected. This asserts the second one exists on a board
+	// with no workflow runs at all -- ProjectWorkflowLane renders nothing then,
+	// which is exactly when there was no way to reach a real workflow.
+	it("offers a way to start a real workflow run, with the project preselected", () => {
+		workspaceQueryMock.mockReturnValue({
+			data: [{ id: "p1", name: "solkit-ui", path: "/tmp/solkit-ui", sessions: [] }],
+			isError: false,
+			isSuccess: true,
+		});
+
+		renderBoard("p1");
+
+		fireEvent.click(screen.getByRole("button", { name: "New workflow run" }));
+
+		expect(navigateMock).toHaveBeenCalledWith({ to: "/workflows", search: { projectId: "p1" } });
 	});
 
 	it.each([

@@ -99,8 +99,8 @@ describe("TaskComposer", () => {
 		);
 
 		expect(task()).toHaveAttribute("placeholder", "e.g. Fix the flaky checkout test (optional)…");
-		expect(screen.getByRole("button", { name: "Start task" })).toBeEnabled();
-		fireEvent.click(screen.getByText("Start task"));
+		expect(screen.getByRole("button", { name: "Start worker" })).toBeEnabled();
+		fireEvent.click(screen.getByText("Start worker"));
 
 		await waitFor(() =>
 			expect(h.post).toHaveBeenCalledWith(
@@ -164,7 +164,7 @@ describe("TaskComposer", () => {
 		);
 
 		fireEvent.change(task(), { target: { value: "Do the thing" } });
-		fireEvent.click(screen.getByText("Start task"));
+		fireEvent.click(screen.getByText("Start worker"));
 
 		await waitFor(() => expect(onSubmittingChange).toHaveBeenLastCalledWith(true));
 		expect(h.post).toHaveBeenCalledWith(
@@ -201,7 +201,7 @@ describe("TaskComposer", () => {
 		expect(await screen.findByText("notes.txt")).toBeInTheDocument();
 
 		fireEvent.change(task(), { target: { value: "Use the notes" } });
-		fireEvent.click(screen.getByText("Start task"));
+		fireEvent.click(screen.getByText("Start worker"));
 
 		await waitFor(() => expect(h.post).toHaveBeenCalledTimes(1));
 		const body = h.post.mock.calls[0][1].body as {
@@ -241,7 +241,7 @@ describe("TaskComposer", () => {
 			target: { files: [new File([new Uint8Array([1, 2, 3])], "slow.txt", { type: "text/plain" })] },
 		});
 		fireEvent.change(task(), { target: { value: "Use the slow file" } });
-		fireEvent.click(screen.getByText("Start task"));
+		fireEvent.click(screen.getByText("Start worker"));
 
 		expect(h.post).not.toHaveBeenCalled();
 
@@ -270,7 +270,7 @@ describe("TaskComposer", () => {
 		await waitFor(() => expect(screen.queryByText("notes.txt")).not.toBeInTheDocument());
 
 		fireEvent.change(task(), { target: { value: "No attachment now" } });
-		fireEvent.click(screen.getByText("Start task"));
+		fireEvent.click(screen.getByText("Start worker"));
 
 		await waitFor(() => expect(h.post).toHaveBeenCalledTimes(1));
 		expect(h.post.mock.calls[0][1].body).not.toHaveProperty("attachments");
@@ -287,7 +287,7 @@ describe("TaskComposer", () => {
 		);
 
 		fireEvent.change(task(), { target: { value: "B" } });
-		fireEvent.click(screen.getByText("Start task"));
+		fireEvent.click(screen.getByText("Start worker"));
 
 		await waitFor(() => expect(screen.getByText("nope")).toBeInTheDocument());
 		expect(onSubmittingChange).toHaveBeenLastCalledWith(false);
@@ -305,7 +305,7 @@ describe("TaskComposer", () => {
 			</Wrap>,
 		);
 		fireEvent.change(task(), { target: { value: "Do the thing" } });
-		fireEvent.click(screen.getByText("Start task"));
+		fireEvent.click(screen.getByText("Start worker"));
 
 		const fallback = await screen.findByRole("button", { name: "Create as Terminal UI" });
 		fireEvent.click(fallback);
@@ -349,7 +349,7 @@ describe("TaskComposer", () => {
 		await waitFor(() => expect(screen.getByTestId("agent-field")).toHaveAttribute("data-value", "codex"));
 
 		fireEvent.change(task(), { target: { value: "Ship it" } });
-		fireEvent.click(screen.getByText("Start task"));
+		fireEvent.click(screen.getByText("Start worker"));
 
 		await waitFor(() =>
 			expect(h.post).toHaveBeenCalledWith(
@@ -544,7 +544,7 @@ describe("TaskComposer", () => {
 		const model = await screen.findByDisplayValue("gpt-5");
 		fireEvent.change(model, { target: { value: "gpt-5.1" } });
 		fireEvent.change(task(), { target: { value: "Use the selected model" } });
-		fireEvent.click(screen.getByText("Start task"));
+		fireEvent.click(screen.getByText("Start worker"));
 
 		await waitFor(() =>
 			expect(h.post).toHaveBeenCalledWith(

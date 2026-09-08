@@ -243,7 +243,7 @@ export function ShellTopbar({
 										variant="accent"
 									>
 										<Plus className="size-icon-md" aria-hidden="true" />
-										<span data-compact-label>{t("newTask.task")}</span>
+										<span data-compact-label>{t("shell.newSessionCompact")}</span>
 									</TopbarButton>
 								</span>
 							</TooltipTrigger>
@@ -296,7 +296,7 @@ export function ShellTopbar({
 												variant="accent"
 											>
 												<Plus className="size-icon-md" aria-hidden="true" />
-												<span data-compact-label>{t("newTask.task")}</span>
+												<span data-compact-label>{t("shell.newSessionCompact")}</span>
 											</TopbarButton>
 										</span>
 									</TooltipTrigger>

@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { SessionsArchiveView, SessionsBoardGridView } from "@aoagents/product-ui";
-import { AlertTriangle, LayoutDashboard, Plus, RotateCw } from "lucide-react";
+import { AlertTriangle, LayoutDashboard, Plus, RotateCw, Workflow } from "lucide-react";
 import {
 	type WorkspaceSession,
 	hasConfiguredOrchestratorAgent,
@@ -265,11 +265,36 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 							variant="accent"
 						>
 							<Plus className="size-icon-md" aria-hidden="true" />
-							<span data-compact-label>{t("newTask.task")}</span>
+							<span data-compact-label>{t("shell.newSessionCompact")}</span>
 						</TopbarButton>
 					</span>
 				</TooltipTrigger>
 				<TooltipContent side="bottom">{t("shell.newTask")}</TooltipContent>
+			</Tooltip>
+			{/* The board's only always-visible way to reach a real workflow run.
+			    ProjectWorkflowLane renders nothing until a run exists, so a project
+			    that has never had one offered no entry point at all -- and the
+			    button beside this one delegates a worker session, which is a
+			    different thing with a confusingly similar name. This navigates to
+			    the existing /workflows form with the project preselected; it does
+			    not duplicate that form, and creates nothing by itself. */}
+			<Tooltip>
+				<TooltipTrigger asChild>
+					<span className="inline-flex">
+						<TopbarButton
+							aria-label={t("shell.newWorkflowRun")}
+							className="topbar-control--labeled"
+							data-priority="secondary"
+							disabled={isProjectRestarting}
+							onClick={() => projectId && void navigate({ to: "/workflows", search: { projectId } })}
+							variant="primary"
+						>
+							<Workflow className="size-icon-md" aria-hidden="true" />
+							<span data-compact-label>{t("shell.newWorkflowRunCompact")}</span>
+						</TopbarButton>
+					</span>
+				</TooltipTrigger>
+				<TooltipContent side="bottom">{t("shell.newWorkflowRun")}</TooltipContent>
 			</Tooltip>
 			<Tooltip>
 				<TooltipTrigger asChild>
@@ -373,6 +398,9 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 						isSpawning={isSpawning}
 						isProjectRestarting={isProjectRestarting}
 						onNewTask={() => projectId && requestNewTask(projectId)}
+						onNewWorkflowRun={
+							projectId ? () => void navigate({ to: "/workflows", search: { projectId } }) : undefined
+						}
 						onOpenOrchestrator={() => void openOrchestrator()}
 						onOpenOrchestratorAsTui={canCreateAsTui ? () => void openOrchestrator("tui") : undefined}
 						spawnError={visibleSpawnError}
