@@ -274,6 +274,10 @@ var evidenceReliefBlockingReasons = map[ReviewReason]struct{}{
 	ReasonLargeOrMultiModule:    {},
 	ReasonPriorProviderAttempts: {},
 	ReasonNoChangedFiles:        {},
+	// A change set AO could not establish. Green tests over a change AO cannot
+	// see prove the tree, not the work -- and unlike the reasons above, this one
+	// also means the sensitive-path tables never got to look at it.
+	ReasonUnprovableChangeSet: {},
 }
 
 // hasEvidenceReliefBlockingReason reports whether a decision carries any reason

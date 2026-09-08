@@ -7781,10 +7781,17 @@ export interface components {
         };
         WorkflowReviewRiskFacts: {
             acceptanceCriteriaEmpty: boolean;
+            changeSetBaseFrom?: string;
+            changeSetBaseSha?: string;
+            changeSetHeadSha?: string;
             changedFileCount: number;
             changedFilePaths: string[];
+            changedFilesSource?: string;
+            changedFilesUnprovable?: boolean;
+            committedChangedFileCount?: number;
             hasExactContentCheckForSoleChangedFile: boolean;
             priorWorkProviderAttempts: number;
+            unprovableChangeSetReason?: string;
             verifyCommandCount: number;
             verifyFileCheckCount: number;
         };

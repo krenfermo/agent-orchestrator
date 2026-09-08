@@ -74,6 +74,11 @@ func ordinaryCodeChange() []ports.WorkspaceChange {
 	return []ports.WorkspaceChange{{Path: "pkg/helper.go", Status: " M"}}
 }
 
+// fixtureHeadSHA is the worktree HEAD these fixtures dispatch from. Production
+// always records one (dispatch.go writes base_sha on the worker_dispatched
+// checkpoint); a fixture that leaves it empty models a state AO never produces.
+const fixtureHeadSHA = "5fe3e1c129211f12975929b407590e87573d5493"
+
 // completeWorkStepInDir is completeWorkStepWithChanges against a REAL directory.
 //
 // Phase 2 needs one: the evidence pass resolves each command's working
@@ -89,6 +94,11 @@ func completeWorkStepInDir(
 ) workflowcore.RunDetail {
 	t.Helper()
 	ctx := context.Background()
+	// A HEAD before the run starts, so the dispatch checkpoint records a real
+	// base the way production does. Without it the work step has no base, and
+	// the change set is (correctly) unprovable -- a state a real run never
+	// reaches, because dispatch.go always records one.
+	workspaceFacts.obs = ports.WorkspaceObservation{Path: dir, Branch: "ao/wf", HeadSHA: fixtureHeadSHA}
 	detail, err := c.StartRun(ctx, runID)
 	if err != nil {
 		t.Fatalf("StartRun: %v", err)
@@ -99,7 +109,11 @@ func completeWorkStepInDir(
 		Activity: domain.Activity{State: domain.ActivityIdle}, IsTerminated: false,
 		Metadata: domain.SessionMetadata{WorkspacePath: dir, Branch: "ao/wf"},
 	})
-	workspaceFacts.obs = ports.WorkspaceObservation{Path: dir, Branch: "ao/wf", Dirty: true, Changes: changes}
+	// The worker delivered without committing: HEAD is still the base, so the
+	// dirty tree IS the whole change and the set is provable from it alone.
+	workspaceFacts.obs = ports.WorkspaceObservation{
+		Path: dir, Branch: "ao/wf", HeadSHA: fixtureHeadSHA, Dirty: true, Changes: changes,
+	}
 	clk.Advance(10 * time.Second)
 	got, err := c.GetRun(ctx, runID)
 	if err != nil {

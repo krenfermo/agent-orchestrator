@@ -3,6 +3,7 @@ package workflow
 import (
 	stdctx "context"
 	"encoding/json"
+	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -45,9 +46,36 @@ func (c *Coordinator) computeReviewRiskFacts(ctx stdctx.Context, run domain.Work
 			ProjectID: domain.ProjectID(run.ProjectID),
 		})
 		if err == nil {
-			paths := workspaceChangedPaths(obs)
-			facts.ChangedFilePaths = paths
-			facts.ChangedFileCount = len(paths)
+			// The task's change is its commits AND its dirty tree, measured
+			// against the base its work started from -- not `git status` alone.
+			//
+			// Reading only the dirty tree is the defect the P5-A phase 2 smoke
+			// found: a worker that COMMITS its work leaves a clean worktree, and
+			// a change that added a function and a test was classified as no
+			// change at all. See review_changed_files.go.
+			//
+			// The base is read from the work step's own dispatch checkpoint
+			// rather than from whatever the latest checkpoint still carries --
+			// see taskChangeBaseSHA. The fallback below only ever runs if that
+			// read fails outright, and it is still a checkpoint AO wrote, never
+			// a base AO chose.
+			baseSHA, baseFrom := c.taskChangeBaseSHA(ctx, run.ID, workStep.ID)
+			if baseSHA == "" {
+				baseSHA = strings.TrimSpace(workCP.BaseSHA)
+				baseFrom = workCP.DurablePhase
+			}
+			set := c.taskChangedFiles(ctx, workCP.WorktreePath, baseSHA, obs)
+			facts.ChangedFilePaths = set.Paths
+			facts.ChangedFileCount = len(set.Paths)
+			facts.ChangedFilesSource = string(set.Source)
+			facts.CommittedChangedFileCount = set.CommittedCount
+			facts.ChangeSetBaseSHA = set.BaseSHA
+			facts.ChangeSetHeadSHA = set.HeadSHA
+			facts.ChangeSetBaseFrom = baseFrom
+			if !set.Proven() {
+				facts.ChangedFilesUnprovable = true
+				facts.UnprovableChangeSetReason = set.Unprovable
+			}
 		}
 		// A failed observation leaves ChangedFilePaths empty: the policy's
 		// own "no changed files" default resolves to REQUIRED (see

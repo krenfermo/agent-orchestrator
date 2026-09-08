@@ -56,6 +56,16 @@ const (
 	ReasonExactContentSingleFile ReviewReason = "exact_content_single_file_change"
 	ReasonDefaultConservative    ReviewReason = "default_conservative_required"
 	ReasonNoChangedFiles         ReviewReason = "no_changed_files_observed"
+	// ReasonUnprovableChangeSet means AO could not establish WHAT this task
+	// changed: no recorded base, no readable head, a base that is no longer in
+	// the branch's history, or a diff that failed.
+	//
+	// It is deliberately distinct from ReasonNoChangedFiles. "Nothing changed"
+	// and "AO cannot tell what changed" are different facts, and collapsing
+	// them is exactly how a task whose worker committed its work came to be
+	// classified as a task that did none. A set AO cannot prove also cannot be
+	// classified by path, so it can never be shown to be low risk.
+	ReasonUnprovableChangeSet ReviewReason = "unprovable_change_set"
 )
 
 // sensitive* pattern tables are the single centralized source of path-based
@@ -127,6 +137,35 @@ type ReviewRiskFacts struct {
 
 	VerifyCommandCount   int `json:"verifyCommandCount"`
 	VerifyFileCheckCount int `json:"verifyFileCheckCount"`
+
+	// ChangedFilesSource names how ChangedFilePaths was derived: from the
+	// task's base..head diff plus the worktree, from the worktree alone when
+	// nothing was committed, or not at all. It is persisted so a decision can
+	// say where its evidence came from rather than assert it.
+	ChangedFilesSource string `json:"changedFilesSource,omitempty"`
+	// ChangedFilesUnprovable is true when AO could not establish the set. The
+	// policy treats it as a risk in its own right; see ReasonUnprovableChangeSet.
+	ChangedFilesUnprovable bool `json:"changedFilesUnprovable,omitempty"`
+	// UnprovableChangeSetReason explains that, in terms a person can act on.
+	UnprovableChangeSetReason string `json:"unprovableChangeSetReason,omitempty"`
+	// CommittedChangedFileCount is how many of ChangedFilePaths came from the
+	// branch's HISTORY rather than from the dirty worktree.
+	//
+	// It is recorded so a commit is never silently attributed to the worker: a
+	// reader can see that a path entered the risk set because it was committed
+	// on this branch, and go and check whose commit it was. The risk
+	// classification deliberately covers them either way -- a sensitive path is
+	// sensitive whoever committed it, and that is the safe direction -- but the
+	// decision says so out loud.
+	CommittedChangedFileCount int `json:"committedChangedFileCount,omitempty"`
+	// ChangeSetBaseSHA and ChangeSetHeadSHA are the two ends of the diff, so
+	// the set can be re-derived rather than trusted.
+	ChangeSetBaseSHA string `json:"changeSetBaseSha,omitempty"`
+	ChangeSetHeadSHA string `json:"changeSetHeadSha,omitempty"`
+	// ChangeSetBaseFrom names the durable phase whose checkpoint proved the
+	// base, so a decision can be re-derived from the ledger rather than
+	// trusted.
+	ChangeSetBaseFrom string `json:"changeSetBaseFrom,omitempty"`
 
 	// HasExactContentCheckForSoleChangedFile is true only when exactly one
 	// file changed AND the plan's VerificationPlan contains a file check for
@@ -330,7 +369,14 @@ func EvaluateReviewPolicy(facts ReviewRiskFacts) ReviewPolicyDecision {
 	}
 
 	reason := ReasonDefaultConservative
-	if facts.ChangedFileCount == 0 {
+	switch {
+	case facts.ChangedFilesUnprovable:
+		// AO could not establish what this task changed. That is not a small
+		// change; it is an unanswered question, and the path tables above could
+		// not have classified it however sensitive the real change was. It keeps
+		// the review and it can never earn relief.
+		reason = ReasonUnprovableChangeSet
+	case facts.ChangedFileCount == 0:
 		reason = ReasonNoChangedFiles
 	}
 	return ReviewPolicyDecision{
