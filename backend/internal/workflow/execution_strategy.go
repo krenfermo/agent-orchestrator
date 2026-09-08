@@ -196,6 +196,15 @@ func withStrategy(policy domain.WorkflowPolicy, sel domain.ExecutionStrategySele
 	if !policy.Autonomy.Recorded() {
 		policy.Autonomy = domain.DefaultQuestionAutonomyPolicy(sel.At)
 	}
+	// P5-A: and the review-depth request, in the same write and for the same
+	// reason. The default is the STRATEGY's default rather than one global
+	// value, which is what makes a master run keep asking for a full
+	// independent review while a bounded task asks for a proportional one --
+	// and, because the effective depth is always the deeper of the request and
+	// the change's own risk tier, what makes that safe.
+	if !policy.ReviewDepth.Recorded() {
+		policy.ReviewDepth = domain.DefaultReviewDepthPolicy(sel.Effective, sel.At)
+	}
 	return policy
 }
 

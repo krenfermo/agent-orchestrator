@@ -394,6 +394,7 @@ var schemaNames = map[string]string{
 	"ControllersWorkflowRunView":                  "WorkflowRunView",
 	"ControllersWorkflowStrategySignals":          "WorkflowStrategySignals",
 	"ControllersWorkflowExecutionStrategyView":    "WorkflowExecutionStrategyView",
+	"ControllersWorkflowReviewDepthView":          "WorkflowReviewDepthView",
 	"ControllersWorkflowRecoveryView":             "WorkflowRecoveryView",
 	"ControllersWorkflowResumeView":               "WorkflowResumeView",
 	"ControllersWorkflowPlanReuseView":            "WorkflowPlanReuseView",

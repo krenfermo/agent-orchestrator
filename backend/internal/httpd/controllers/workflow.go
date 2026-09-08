@@ -122,6 +122,19 @@ type CreateWorkflowRunRequest struct {
 	// credential-touching or security-adjacent question is a person's under
 	// every one of them.
 	AutonomyPolicy string `json:"autonomyPolicy,omitempty" enum:"ask_always,auto_decide_low_risk,full_autonomy"`
+	// ReviewDepth is P5-A's frozen review-depth REQUEST for this run: how much
+	// scrutiny it asks for its delivered changes to receive. "none" runs no
+	// reviewer, "light" a bounded pass over the diff and AO's own evidence,
+	// "deep" the full independent review AO has always run. Omitting the field
+	// (or sending "auto") freezes the execution strategy's default: none for a
+	// task, light for autonomous, deep for master.
+	//
+	// It is a REQUEST, not a guarantee of cheapness. Every review's effective
+	// depth is the deeper of this request and the delivered change's own
+	// deterministic risk tier, so a change touching security, authentication,
+	// payments, migrations, concurrency, infrastructure, a public contract or
+	// dependency configuration is reviewed in full whatever is asked for here.
+	ReviewDepth string `json:"reviewDepth,omitempty" enum:"auto,none,light,deep"`
 	// Placement is P3-A §7's explicit "where should this work happen" choice,
 	// made at creation rather than only after the fact through the override
 	// route. It is recorded as a durable placement override BEFORE anything
@@ -466,6 +479,12 @@ type WorkflowRunView struct {
 	// a second query -- the run's next boot reconciliation records the
 	// mapping durably and it is present from then on.
 	ExecutionStrategy *WorkflowExecutionStrategyView `json:"executionStrategy,omitempty"`
+	// ReviewDepth is P5-A's frozen review-depth REQUEST for this run, and the
+	// source that set it. It is what the run asked for, never what a
+	// particular review resolved to: the effective depth of any one review is
+	// the deeper of this request and that change's own risk tier, and lives on
+	// the review step's durable decision rather than on the run.
+	ReviewDepth *WorkflowReviewDepthView `json:"reviewDepth,omitempty"`
 	// Recovery is P1-B's deterministic recovery assessment. It is populated
 	// only by the routes a person explicitly took -- recovery, resume,
 	// continue, plan reuse/regenerate, repair -- because deciding it probes
@@ -870,6 +889,39 @@ func workflowRunView(run domain.WorkflowRun, nextAction string) WorkflowRunView 
 		// must not go and fetch one per run just to label a list. A legacy run
 		// simply omits the field until boot reconciliation records its mapping.
 		ExecutionStrategy: executionStrategyView(workflowcore.RecordedExecutionStrategy(run)),
+		ReviewDepth:       reviewDepthView(run),
+	}
+}
+
+// WorkflowReviewDepthView is the read-only projection of a run's frozen
+// review-depth request.
+type WorkflowReviewDepthView struct {
+	// RequestedDepth is the depth this run asks its reviews to run at.
+	RequestedDepth string `json:"requestedDepth" enum:"none,light,deep"`
+	// Source is whether a person named it ("explicit"), the execution
+	// strategy's default supplied it ("policy"), or the run predates the model
+	// and is being read as the depth it already ran at ("recovered").
+	Source string `json:"source,omitempty" enum:"explicit,policy,recovered"`
+	// PolicyVersion is the depth-policy version in force when it was frozen.
+	PolicyVersion string `json:"policyVersion,omitempty"`
+}
+
+// reviewDepthView projects a run's frozen review-depth request. A run whose
+// policy snapshot is unreadable projects nothing rather than a default: a
+// depth this response cannot state is a depth it should not claim to know.
+func reviewDepthView(run domain.WorkflowRun) *WorkflowReviewDepthView {
+	if run.PolicySnapshot == "" || run.PolicySnapshot == "{}" {
+		return nil
+	}
+	var p domain.WorkflowPolicy
+	if err := json.Unmarshal([]byte(run.PolicySnapshot), &p); err != nil {
+		return nil
+	}
+	depth := p.EffectiveReviewDepthPolicy()
+	return &WorkflowReviewDepthView{
+		RequestedDepth: string(depth.Requested),
+		Source:         string(depth.Source),
+		PolicyVersion:  depth.Version,
 	}
 }
 
@@ -1494,6 +1546,22 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var reviewDepth domain.ReviewDepth
+	if raw := strings.TrimSpace(in.ReviewDepth); raw != "" {
+		requested := domain.NormalizeRequestedReviewDepth(raw)
+		if !requested.Valid() {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_REVIEW_DEPTH",
+				"reviewDepth must be one of: auto, none, light, deep", nil)
+			return
+		}
+		// "auto" names no depth: it asks for the strategy default, which
+		// creation already froze. Leaving reviewDepth empty here is what makes
+		// the apply below a no-op for it.
+		if explicit, ok := requested.Explicit(); ok {
+			reviewDepth = explicit
+		}
+	}
+
 	var autonomyMode domain.QuestionAutonomyMode
 	if raw := strings.TrimSpace(in.AutonomyPolicy); raw != "" {
 		autonomyMode = domain.NormalizeQuestionAutonomyMode(raw)
@@ -1589,6 +1657,14 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 	if autonomyMode != "" {
 		if svc, ok := c.Svc.(workflowsvc.AdvisorManager); ok {
 			_ = svc.ApplyAutonomyPolicy(r.Context(), detail.Run.ID, autonomyMode)
+		}
+	}
+	// P5-A: and this run's review-depth request, in the same window and for the
+	// same reason. Creation already froze the strategy's default, so a request
+	// that named nothing (or said "auto") is unaffected.
+	if reviewDepth != "" {
+		if svc, ok := c.Svc.(workflowsvc.ReviewDepthManager); ok {
+			_ = svc.ApplyReviewDepthPolicy(r.Context(), detail.Run.ID, reviewDepth)
 		}
 	}
 	// Re-fetch after stampOwner: it just wrote the caller's (possibly

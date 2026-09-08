@@ -34,6 +34,8 @@ vi.mock("../hooks/useWorkflowRuns", () => ({
 	APPROVAL_POLICIES: ["automatic", "manual"] as const,
 	REPAIR_POLICIES: ["disabled", "suggest", "automatic"] as const,
 	PLACEMENTS: ["direct_branch", "isolated_worktree", "auto"] as const,
+	REVIEW_DEPTHS: ["none", "light", "deep"] as const,
+	DEFAULT_REVIEW_DEPTH: { task: "none", autonomous: "light", master: "deep" } as const,
 }));
 vi.mock("../hooks/useExecutionPolicy", () => ({ useExecutionPolicy: useExecutionPolicyMock }));
 

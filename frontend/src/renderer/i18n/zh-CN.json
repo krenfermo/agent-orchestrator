@@ -2237,5 +2237,13 @@
 	"zone.done": "已终止",
 	"zone.merge": "可合并",
 	"zone.pending": "评审中",
-	"zone.working": "工作中"
+	"zone.working": "工作中",
+	"wf.reviewDepth.legend": "评审深度",
+	"wf.reviewDepth.none": "无评审者",
+	"wf.reviewDepth.noneExplainer": "只有 AO 自身的验证作为关卡。适用于 AO 已能证明安全的变更。",
+	"wf.reviewDepth.light": "有界评审",
+	"wf.reviewDepth.lightExplainer": "评审者依据验收标准和 AO 的证据判断差异，不再通读仓库。",
+	"wf.reviewDepth.deep": "完整评审",
+	"wf.reviewDepth.deepExplainer": "对变更进行完整的独立评审。这是 AO 一直以来的做法。",
+	"wf.reviewDepth.clampNote": "AO 会按你的选择与变更自身风险中较深的一方进行评审。安全、认证、支付、迁移、并发、基础设施、公共契约和依赖变更始终获得完整评审。"
 }

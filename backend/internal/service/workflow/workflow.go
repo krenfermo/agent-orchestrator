@@ -182,6 +182,25 @@ type AdvisorManager interface {
 	ApplyAutonomyPolicy(ctx context.Context, runID string, mode domain.QuestionAutonomyMode) error
 }
 
+// ReviewDepthManager is P5-A's review-depth surface: freezing how much scrutiny
+// a just-created run asks for, and reading that request back.
+//
+// Optional and type-asserted, exactly like RecoveryManager and AdvisorManager,
+// so an implementation or test double that predates P5-A keeps compiling and a
+// deployment without the capability simply leaves the run on its strategy's
+// frozen default rather than failing the create.
+//
+// There is deliberately no method here for lowering a running review's depth.
+// The depth a review actually runs at is resolved per review step against that
+// change's own risk tier, and nothing outside that resolution may make a review
+// shallower.
+type ReviewDepthManager interface {
+	// ApplyReviewDepthPolicy freezes a just-created run's review-depth request.
+	ApplyReviewDepthPolicy(ctx context.Context, runID string, depth domain.ReviewDepth) error
+	// RunReviewDepthPolicy reads a run's frozen review-depth request back.
+	RunReviewDepthPolicy(ctx context.Context, runID string) (domain.ReviewDepthPolicySnapshot, error)
+}
+
 // BoardReader is Checkpoint 8P-E.12's project Board projection. Optional
 // (type-asserted by the controller, mirroring PlannerManager) so a Manager
 // implementation or test double that predates it keeps compiling unchanged.
@@ -355,6 +374,16 @@ func (s *Service) DispatchAutomaticRecovery(ctx context.Context, runID string) (
 // RevalidateActionAuthority implements AdvisorManager.
 func (s *Service) RevalidateActionAuthority(ctx context.Context, runID string, action workflowcore.ActionID, expected workflowcore.AdviceAuthority) (workflowcore.ActionAuthorityMismatch, error) {
 	return s.coordinator.RevalidateActionAuthority(ctx, runID, action, expected)
+}
+
+// ApplyReviewDepthPolicy implements ReviewDepthManager.
+func (s *Service) ApplyReviewDepthPolicy(ctx context.Context, runID string, depth domain.ReviewDepth) error {
+	return s.coordinator.ApplyReviewDepthPolicy(ctx, runID, depth)
+}
+
+// RunReviewDepthPolicy implements ReviewDepthManager.
+func (s *Service) RunReviewDepthPolicy(ctx context.Context, runID string) (domain.ReviewDepthPolicySnapshot, error) {
+	return s.coordinator.RunReviewDepthPolicy(ctx, runID)
 }
 
 // ApplyAutonomyPolicy implements AdvisorManager.

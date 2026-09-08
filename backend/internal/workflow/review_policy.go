@@ -41,6 +41,7 @@ type ReviewReason string
 // the rules that produced it.
 const (
 	ReasonAuthOrSecurityPath     ReviewReason = "auth_or_security_path"
+	ReasonPaymentsOrBillingPath  ReviewReason = "payments_or_billing_path"
 	ReasonMigrationOrSchemaPath  ReviewReason = "migration_or_schema_path"
 	ReasonConcurrencyPath        ReviewReason = "concurrency_sensitive_path"
 	ReasonInfraOrCICDPath        ReviewReason = "infrastructure_or_cicd_path"
@@ -66,6 +67,15 @@ var (
 	authOrSecurityPathPatterns = []string{
 		"auth", "session", "login", "logout", "credential", "secret",
 		"token", "permission", "acl", "oauth", "jwt", "password",
+	}
+	// Payments and billing are named non-degradable alongside auth and
+	// migrations, and no existing table covered them. The patterns are
+	// deliberately narrow -- "charge" and "subscription" match far too much
+	// ordinary code -- because a false REQUIRED here costs a full review pass
+	// on work that never needed one.
+	paymentsOrBillingPathPatterns = []string{
+		"payment", "billing", "invoice", "checkout", "stripe",
+		"paypal", "refund", "payout",
 	}
 	migrationOrSchemaPathPatterns = []string{
 		"migrations/", "/migrations/", "schema.sql", ".sql", "goose",
@@ -244,6 +254,9 @@ func EvaluateReviewPolicy(facts ReviewRiskFacts) ReviewPolicyDecision {
 	for _, p := range lowerPaths {
 		if matchesAny(p, authOrSecurityPathPatterns) {
 			required = append(required, ReasonAuthOrSecurityPath)
+		}
+		if matchesAny(p, paymentsOrBillingPathPatterns) {
+			required = append(required, ReasonPaymentsOrBillingPath)
 		}
 		if matchesAny(p, migrationOrSchemaPathPatterns) {
 			required = append(required, ReasonMigrationOrSchemaPath)

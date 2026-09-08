@@ -5591,6 +5591,8 @@ export interface components {
             /** @enum {string} */
             repairPolicy?: "disabled" | "suggest" | "automatic";
             /** @enum {string} */
+            reviewDepth?: "auto" | "none" | "light" | "deep";
+            /** @enum {string} */
             strategy?: "task" | "autonomous" | "master" | "auto";
             strategySignals?: components["schemas"]["WorkflowStrategySignals"];
             verification?: components["schemas"]["WorkflowVerificationPlan"];
@@ -7716,6 +7718,13 @@ export interface components {
             obligationDetail?: string;
             performed: boolean;
         };
+        WorkflowReviewDepthView: {
+            policyVersion?: string;
+            /** @enum {string} */
+            requestedDepth: "none" | "light" | "deep";
+            /** @enum {string} */
+            source?: "explicit" | "policy" | "recovered";
+        };
         WorkflowReviewPolicyDecision: {
             complexity: string;
             decision: string;
@@ -7790,6 +7799,7 @@ export interface components {
             repair?: components["schemas"]["WorkflowRepairStateView"];
             repairOfWorkflowId?: string;
             requiresHuman?: boolean;
+            reviewDepth?: components["schemas"]["WorkflowReviewDepthView"];
             /** @enum {string} */
             stage?: "preparing" | "planning" | "working" | "reviewing" | "correcting" | "verifying" | "integrating" | "waiting" | "needs_attention" | "completed" | "cancelled" | "failed";
             /** @enum {string} */

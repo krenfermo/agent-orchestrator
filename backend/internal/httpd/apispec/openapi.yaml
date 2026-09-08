@@ -16073,6 +16073,13 @@ components:
           - suggest
           - automatic
           type: string
+        reviewDepth:
+          enum:
+          - auto
+          - none
+          - light
+          - deep
+          type: string
         strategy:
           enum:
           - task
@@ -21785,6 +21792,25 @@ components:
       - obligation
       - performed
       type: object
+    WorkflowReviewDepthView:
+      properties:
+        policyVersion:
+          type: string
+        requestedDepth:
+          enum:
+          - none
+          - light
+          - deep
+          type: string
+        source:
+          enum:
+          - explicit
+          - policy
+          - recovered
+          type: string
+      required:
+      - requestedDepth
+      type: object
     WorkflowReviewPolicyDecision:
       properties:
         complexity:
@@ -21988,6 +22014,8 @@ components:
           type: string
         requiresHuman:
           type: boolean
+        reviewDepth:
+          $ref: '#/components/schemas/WorkflowReviewDepthView'
         stage:
           enum:
           - preparing

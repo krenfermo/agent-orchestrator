@@ -2255,5 +2255,13 @@
 	"zone.done": "종료됨",
 	"zone.merge": "병합 준비 완료",
 	"zone.pending": "리뷰 중",
-	"zone.working": "작업 중"
+	"zone.working": "작업 중",
+	"wf.reviewDepth.legend": "리뷰 깊이",
+	"wf.reviewDepth.none": "리뷰어 없음",
+	"wf.reviewDepth.noneExplainer": "AO 자체 검증만이 관문입니다. AO가 이미 안전함을 증명할 수 있는 변경에 사용할 수 있습니다.",
+	"wf.reviewDepth.light": "제한된 리뷰",
+	"wf.reviewDepth.lightExplainer": "리뷰어가 저장소를 다시 읽지 않고 수용 기준과 AO의 증거에 비추어 diff를 판단합니다.",
+	"wf.reviewDepth.deep": "전체 리뷰",
+	"wf.reviewDepth.deepExplainer": "변경에 대한 완전한 독립 리뷰. AO가 지금까지 해 온 방식입니다.",
+	"wf.reviewDepth.clampNote": "AO는 선택한 깊이와 변경 자체의 위험 중 더 깊은 쪽으로 리뷰합니다. 보안, 인증, 결제, 마이그레이션, 동시성, 인프라, 공개 계약, 의존성 변경은 항상 전체 리뷰를 받습니다."
 }

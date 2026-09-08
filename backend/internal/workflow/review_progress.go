@@ -182,6 +182,19 @@ func (c *Coordinator) applyTerminalReviewRun(
 		// wf-724a1e97 report "6 review cycles" against a budget of 3 and,
 		// far worse, made every post-recovery fresh review land already
 		// over budget. See fix_budget.go for the full accounting.
+		// P5-A: a bounded reviewer's escalation channel. A light review that
+		// cannot honestly judge the change says so with a fixed marker on the
+		// first line of its findings, and AO durably raises this step's depth
+		// so the NEXT cycle runs as a full independent review.
+		//
+		// The verdict itself is still an ordinary changes_requested and takes
+		// the ordinary path: the reviewer's stated concern is real findings,
+		// the fix worker should have them, and routing an escalation through a
+		// separate transition would be a second way for a review to end.
+		// Recording is best-effort — see recordReviewDepthEscalation.
+		if reviewBodyRequestsEscalation(reviewRun.EffectiveBody()) {
+			c.recordReviewDepthEscalation(ctx, run, step, domain.ReviewDepthReasonEscalatedByReviewer)
+		}
 		budget := c.fixBudget(ctx, run)
 		// Fail closed only in the direction that costs nothing: an
 		// unreadable budget does not manufacture a stop here (it refuses
