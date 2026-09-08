@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -135,6 +135,9 @@ describe("Task specification input", () => {
 		// default.
 		await userEvent.click(screen.getByRole("radio", { name: /task/i }));
 		await pasteObjective(SPECIFICATION);
+		// A Task must state how it will be checked. Nothing here is read out of
+		// the specification, however long it is -- the command is typed.
+		await userEvent.type(within(screen.getByTestId("task-verification")).getByLabelText("Command"), "go");
 		await userEvent.click(screen.getByRole("button", { name: /create|crear/i }));
 
 		expect(createRun).toHaveBeenCalledTimes(1);

@@ -1585,6 +1585,30 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A TASK run has no planner to derive its checks, so an empty or unusable
+	// verification plan is not a smaller task -- it is a run that does the whole
+	// job and then fails at Verify with verify_ambiguous, six steps after the
+	// only moment anybody could have fixed it. That is exactly how
+	// wf-aee38f69-081c-48d1-a3a4-53430ca70682 died: plan artifact verification
+	// `{}`, work succeeded, review approved, verify refused.
+	//
+	// The rule applied here is verify's OWN rule (VerificationPlan.Validate),
+	// not a second one written for the API: a plan accepted at creation is a
+	// plan the verify step can execute. Nothing is inferred from the objective
+	// prose -- AO does not invent checks, so a caller who names none is refused
+	// rather than given commands it did not ask for.
+	//
+	// Planned strategies are untouched: their planner produces the plan, and it
+	// does not exist yet at creation.
+	if strategy.Effective == domain.ExecutionStrategyTask {
+		if verr := verification.Validate(); verr != nil {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "VERIFICATION_REQUIRED",
+				"A task run must declare how it will be verified: "+
+					strings.TrimPrefix(verr.Error(), workflowcore.ErrInvalid.Error()+": "), nil)
+			return
+		}
+	}
+
 	var detail workflowcore.RunDetail
 	var err error
 	strategySvc, hasStrategySvc := c.Svc.(workflowsvc.StrategyManager)

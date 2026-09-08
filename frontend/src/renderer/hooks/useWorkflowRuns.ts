@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
 import { apiClient, apiErrorMessage, hasTrustedApiBaseUrl } from "../lib/api-client";
+import type { VerificationPlan } from "../lib/task-verification";
 
 export type WorkflowRunView = components["schemas"]["WorkflowRunView"];
 
@@ -103,6 +104,13 @@ export function useWorkflowRuns(projectId?: string) {
 			repairPolicy: RepairPolicy;
 			placement: Placement;
 			reviewDepth: ReviewDepth;
+			// A TASK run has no planner, so the two things a planner would
+			// otherwise have produced come from the form. Both are optional in
+			// the request; the daemon refuses a task whose verification cannot
+			// be executed, which is why the form requires one before it gets
+			// this far.
+			acceptanceCriteria?: string[];
+			verification?: VerificationPlan;
 		}) => {
 			const { data, error } = await apiClient.POST("/api/v1/projects/{projectId}/workflows", {
 				params: { path: { projectId: input.projectId } },
@@ -127,6 +135,17 @@ export function useWorkflowRuns(projectId?: string) {
 					// shallower than the change's risk tier allows; that clamp is
 					// the daemon's and is not expressible here.
 					reviewDepth: input.reviewDepth,
+					// The task's acceptance criteria and its verification plan,
+					// sent verbatim. They are bound into the run's plan artifact
+					// by the SAME transaction that creates it, so a task can
+					// never durably exist without the checks it was asked for.
+					// Omitted entirely when empty: an absent field leaves the
+					// daemon's own default criteria in place, where an empty
+					// array would replace them with nothing.
+					...(input.acceptanceCriteria && input.acceptanceCriteria.length > 0
+						? { acceptanceCriteria: input.acceptanceCriteria }
+						: {}),
+					...(input.verification ? { verification: input.verification } : {}),
 				},
 			});
 			if (error) throw error;

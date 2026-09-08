@@ -317,7 +317,7 @@ func TestCreateRunFreezesTheRepairPolicy(t *testing.T) {
 	svc := newRecoverySvc()
 	srv := newWorkflowTestServer(t, svc)
 	body, status, _ := doRequest(t, srv, "POST", "/api/v1/projects/proj-1/workflows",
-		`{"objective":"x","strategy":"task","repairPolicy":"automatic"}`)
+		`{"objective":"x","strategy":"task","repairPolicy":"automatic",`+taskVerificationBody+`}`)
 	if status != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", status, body)
 	}
@@ -328,7 +328,7 @@ func TestCreateRunFreezesTheRepairPolicy(t *testing.T) {
 	svc2 := newRecoverySvc()
 	srv2 := newWorkflowTestServer(t, svc2)
 	body2, status2, _ := doRequest(t, srv2, "POST", "/api/v1/projects/proj-1/workflows",
-		`{"objective":"x","strategy":"task","repairPolicy":"whenever"}`)
+		`{"objective":"x","strategy":"task","repairPolicy":"whenever",`+taskVerificationBody+`}`)
 	if status2 != http.StatusBadRequest || !strings.Contains(string(body2), "INVALID_REPAIR_POLICY") {
 		t.Fatalf("status=%d body=%s, want 400 INVALID_REPAIR_POLICY", status2, body2)
 	}

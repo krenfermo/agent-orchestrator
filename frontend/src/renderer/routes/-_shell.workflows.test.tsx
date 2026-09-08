@@ -72,6 +72,16 @@ beforeEach(() => {
 	});
 });
 
+/**
+ * Fills the first (always-present) verification command row. A Task cannot be
+ * created without one, so every test that submits a Task goes through here.
+ */
+async function fillFirstVerificationCommand(command: string, args: string) {
+	const verification = screen.getByTestId("task-verification");
+	await userEvent.type(within(verification).getByLabelText("Command"), command);
+	if (args !== "") await userEvent.type(within(verification).getByLabelText("Arguments"), args);
+}
+
 describe("WorkflowsList", () => {
 	it("renders a project select, never a free-text projectId input", () => {
 		useProjectsListMock.mockReturnValue({ projects: PROJECTS, isLoading: false, error: undefined });
@@ -141,6 +151,8 @@ describe("WorkflowsList", () => {
 		await userEvent.click(await screen.findByText("Project B"));
 		await userEvent.type(screen.getByLabelText(/objective/i), "Rename the flag");
 		await userEvent.click(within(screen.getByRole("group", { name: "Execution strategy" })).getByRole("radio", { name: /^Task/ }));
+		// A Task must say how it will be checked before it can be created.
+		await fillFirstVerificationCommand("go", "test ./...");
 		await userEvent.click(screen.getByRole("button", { name: /create/i }));
 
 		expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ strategy: "task" }));
@@ -343,5 +355,203 @@ describe("WorkflowsList", () => {
 		await userEvent.click(screen.getByRole("button", { name: /create/i }));
 
 		expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ approvalPolicy: "automatic" }));
+	});
+
+	// The defect: the form offered no way to say how a Task would be verified,
+	// so it sent none, the daemon accepted the empty plan, and
+	// wf-aee38f69-081c-48d1-a3a4-53430ca70682 did the whole job and then failed
+	// at Verify with verify_ambiguous. Nothing could be fixed at that point --
+	// the checks could only have been supplied here.
+	describe("task verification", () => {
+		const selectTask = async () =>
+			userEvent.click(
+				within(screen.getByRole("group", { name: "Execution strategy" })).getByRole("radio", { name: /^Task/ }),
+			);
+
+		const readyToCreate = async () => {
+			await userEvent.click(screen.getByRole("combobox", { name: "Project" }));
+			await userEvent.click(await screen.findByText("Project B"));
+			await userEvent.type(screen.getByLabelText(/objective/i), "Add Farewell()");
+			await selectTask();
+		};
+
+		it("offers verification commands and acceptance criteria for a Task, and nothing for a planned strategy", async () => {
+			useProjectsListMock.mockReturnValue({ projects: PROJECTS, isLoading: false, error: undefined });
+			render(<WorkflowsList />);
+
+			// Autonomous is the default strategy, and its checks are its
+			// planner's output -- there is nothing for the user to state here.
+			expect(screen.queryByTestId("task-verification")).not.toBeInTheDocument();
+
+			await selectTask();
+			const verification = screen.getByTestId("task-verification");
+			expect(within(verification).getByLabelText("Command")).toBeInTheDocument();
+			expect(within(verification).getByLabelText("Arguments")).toBeInTheDocument();
+			expect(within(verification).getByLabelText(/Acceptance criteria/)).toBeInTheDocument();
+
+			await userEvent.click(
+				within(screen.getByRole("group", { name: "Execution strategy" })).getByRole("radio", { name: /^Master/ }),
+			);
+			expect(screen.queryByTestId("task-verification")).not.toBeInTheDocument();
+		});
+
+		it("sends the commands and criteria exactly as typed", async () => {
+			const createRun = vi.fn().mockResolvedValue({});
+			useWorkflowRunsMock.mockReturnValue({
+				runs: [], isLoading: false, error: undefined, createRun, creating: false, createError: undefined,
+			});
+			useProjectsListMock.mockReturnValue({ projects: PROJECTS, isLoading: false, error: undefined });
+			render(<WorkflowsList />);
+
+			await readyToCreate();
+			const verification = screen.getByTestId("task-verification");
+			await userEvent.type(within(verification).getByLabelText("Command"), "go");
+			await userEvent.type(within(verification).getByLabelText("Arguments"), "test ./...");
+			await userEvent.type(within(verification).getByLabelText(/Working directory/), "backend");
+			await userEvent.type(within(verification).getByLabelText(/Timeout/), "120");
+			await userEvent.type(
+				within(verification).getByLabelText(/Acceptance criteria/),
+				'Farewell("") returns "Goodbye!"\nNo unrelated files are modified.',
+			);
+
+			// A second command, added by the user rather than invented for them.
+			await userEvent.click(within(verification).getByRole("button", { name: "Add a command" }));
+			const rows = within(screen.getByTestId("task-verification")).getAllByLabelText("Command");
+			await userEvent.type(rows[1], "go");
+			const argRows = within(screen.getByTestId("task-verification")).getAllByLabelText("Arguments");
+			await userEvent.type(argRows[1], "build ./...");
+			const retrySafe = within(screen.getByTestId("task-verification")).getAllByRole("checkbox");
+			await userEvent.click(retrySafe[1]);
+
+			await userEvent.click(screen.getByRole("button", { name: /create/i }));
+
+			expect(createRun).toHaveBeenCalledWith(
+				expect.objectContaining({
+					strategy: "task",
+					acceptanceCriteria: ['Farewell("") returns "Goodbye!"', "No unrelated files are modified."],
+					verification: {
+						commands: [
+							{
+								command: "go",
+								args: ["test", "./..."],
+								workingDirectory: "backend",
+								timeoutSeconds: 120,
+								requiredExitCode: 0,
+								retrySafe: true,
+							},
+							{ command: "go", args: ["build", "./..."], requiredExitCode: 0, retrySafe: false },
+						],
+					},
+				}),
+			);
+		});
+
+		it("will not create a Task with no command, and says why", async () => {
+			const createRun = vi.fn().mockResolvedValue({});
+			useWorkflowRunsMock.mockReturnValue({
+				runs: [], isLoading: false, error: undefined, createRun, creating: false, createError: undefined,
+			});
+			useProjectsListMock.mockReturnValue({ projects: PROJECTS, isLoading: false, error: undefined });
+			render(<WorkflowsList />);
+
+			await readyToCreate();
+
+			const create = screen.getByRole("button", { name: /create/i });
+			expect(create).toBeDisabled();
+			expect(screen.getByText(/at least one command AO can run/i)).toBeInTheDocument();
+
+			await userEvent.click(create);
+			expect(createRun).not.toHaveBeenCalled();
+
+			// One command is enough, and the refusal goes away with it.
+			await fillFirstVerificationCommand("go", "test ./...");
+			expect(screen.queryByText(/at least one command AO can run/i)).not.toBeInTheDocument();
+			expect(screen.getByRole("button", { name: /create/i })).toBeEnabled();
+		});
+
+		it("refuses a half-typed command rather than sending it", async () => {
+			const createRun = vi.fn().mockResolvedValue({});
+			useWorkflowRunsMock.mockReturnValue({
+				runs: [], isLoading: false, error: undefined, createRun, creating: false, createError: undefined,
+			});
+			useProjectsListMock.mockReturnValue({ projects: PROJECTS, isLoading: false, error: undefined });
+			render(<WorkflowsList />);
+
+			await readyToCreate();
+			const verification = screen.getByTestId("task-verification");
+
+			// Arguments with no program to run them.
+			await userEvent.type(within(verification).getByLabelText("Arguments"), "test ./...");
+			expect(screen.getByText("Name the program to run.")).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: /create/i })).toBeDisabled();
+
+			await userEvent.type(within(verification).getByLabelText("Command"), "go");
+			expect(screen.queryByText("Name the program to run.")).not.toBeInTheDocument();
+
+			// A working directory that leaves the workspace.
+			await userEvent.type(within(verification).getByLabelText(/Working directory/), "../../etc");
+			expect(screen.getByText(/must stay inside the workspace/i)).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: /create/i })).toBeDisabled();
+			await userEvent.clear(within(verification).getByLabelText(/Working directory/));
+
+			// A timeout past the daemon's ceiling.
+			await userEvent.type(within(verification).getByLabelText(/Timeout/), "7200");
+			expect(screen.getByText(/between 0 and 3600/i)).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: /create/i })).toBeDisabled();
+			await userEvent.clear(within(verification).getByLabelText(/Timeout/));
+
+			// An exit code that is not a number.
+			await userEvent.type(within(verification).getByLabelText(/Exit code/), "ok");
+			expect(screen.getByText(/must be a whole number/i)).toBeInTheDocument();
+			expect(screen.getByRole("button", { name: /create/i })).toBeDisabled();
+			await userEvent.clear(within(verification).getByLabelText(/Exit code/));
+
+			await userEvent.click(screen.getByRole("button", { name: /create/i }));
+			expect(createRun).toHaveBeenCalledWith(
+				expect.objectContaining({
+					verification: { commands: [{ command: "go", args: ["test", "./..."], requiredExitCode: 0, retrySafe: true }] },
+				}),
+			);
+		});
+
+		it("states the commands and criteria in the summary above the button", async () => {
+			useProjectsListMock.mockReturnValue({ projects: PROJECTS, isLoading: false, error: undefined });
+			render(<WorkflowsList />);
+
+			// A planned run says where its checks come from rather than showing
+			// an empty row that reads as "none".
+			expect(screen.getByTestId("task-creation-summary")).toHaveTextContent("Derived by the planner");
+
+			await selectTask();
+			expect(screen.getByTestId("task-creation-summary")).toHaveTextContent("No command declared yet");
+			expect(screen.getByTestId("task-creation-summary")).toHaveTextContent("AO's own criteria");
+
+			await fillFirstVerificationCommand("go", "test ./...");
+			await userEvent.type(
+				within(screen.getByTestId("task-verification")).getByLabelText(/Acceptance criteria/),
+				"Both cases are covered by a test.",
+			);
+			const summary = screen.getByTestId("task-creation-summary");
+			expect(summary).toHaveTextContent("go test ./...");
+			expect(summary).toHaveTextContent("Both cases are covered by a test.");
+		});
+
+		it("sends no verification and no criteria for a planned strategy", async () => {
+			const createRun = vi.fn().mockResolvedValue({});
+			useWorkflowRunsMock.mockReturnValue({
+				runs: [], isLoading: false, error: undefined, createRun, creating: false, createError: undefined,
+			});
+			useProjectsListMock.mockReturnValue({ projects: PROJECTS, isLoading: false, error: undefined });
+			render(<WorkflowsList />);
+
+			await userEvent.click(screen.getByRole("combobox", { name: "Project" }));
+			await userEvent.click(await screen.findByText("Project B"));
+			await userEvent.type(screen.getByLabelText(/objective/i), "Build search");
+			await userEvent.click(screen.getByRole("button", { name: /create/i }));
+
+			const sent = createRun.mock.calls[0][0];
+			expect(sent).not.toHaveProperty("verification");
+			expect(sent).not.toHaveProperty("acceptanceCriteria");
+		});
 	});
 });

@@ -68,7 +68,7 @@ func TestWorkflowCreateAcceptsALongSpecificationVerbatim(t *testing.T) {
 		svc := &fakeWorkflowService{}
 		srv := newWorkflowTestServer(t, svc)
 
-		payload, err := json.Marshal(map[string]any{"objective": spec, "strategy": "task"})
+		payload, err := json.Marshal(map[string]any{"objective": spec, "strategy": "task", "verification": taskVerificationMap()})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -99,7 +99,7 @@ func TestWorkflowCreateAtTheLimitIsAccepted(t *testing.T) {
 	spec := strings.Repeat("a", domain.MaxWorkflowObjectiveBytes)
 	svc := &fakeWorkflowService{}
 	srv := newWorkflowTestServer(t, svc)
-	payload, _ := json.Marshal(map[string]any{"objective": spec})
+	payload, _ := json.Marshal(map[string]any{"objective": spec, "verification": taskVerificationMap()})
 	body, status, _ := doRequest(t, srv, "POST", "/api/v1/projects/proj-1/workflows", string(payload))
 	if status != http.StatusCreated {
 		t.Fatalf("a specification exactly at the limit was refused: status=%d body=%s", status, body)

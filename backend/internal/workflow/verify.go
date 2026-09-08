@@ -242,6 +242,15 @@ func (p VerificationPlan) allCommandsRetrySafe() bool {
 	return true
 }
 
+// Validate is validate() under an exported name, for callers outside this
+// package that must apply the SAME rule the verify step applies -- notably the
+// create-workflow route, which refuses a task run whose verification could
+// never execute rather than letting it fail six steps later. Two copies of this
+// policy is how the API and the verify step would come to disagree about what
+// "verifiable" means, and the disagreement would only surface after a worker
+// had already done the work.
+func (p VerificationPlan) Validate() error { return p.validate() }
+
 func (p VerificationPlan) validate() error {
 	if len(p.Commands) == 0 && len(p.Files) == 0 {
 		return fmt.Errorf("%w: verify requires at least one structured check", ErrInvalid)
