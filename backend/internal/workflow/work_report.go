@@ -307,3 +307,20 @@ func (c *Coordinator) workReportWindowClosed(ctx stdctx.Context, runID string) b
 	}
 	return false
 }
+
+// closeFinishedWorkerCredentials ends the identity of any worker whose step has
+// stopped running.
+//
+// Best-effort on purpose: a credential AO could not take back is taken back by
+// the derived sweep on its next pass, and failing a run over a cleanup would
+// turn a security improvement into a lifecycle failure. What it must not do is
+// stay silent, so a failure is logged with the run it belonged to.
+func (c *Coordinator) closeFinishedWorkerCredentials(ctx stdctx.Context, runID string) {
+	if c.workerCredentials == nil {
+		return
+	}
+	if err := c.workerCredentials.CloseFinishedWorkers(ctx); err != nil && c.log != nil {
+		c.log.Warn("workflow: could not end a finished worker's credential; the sweep will retry",
+			"run", runID, "err", err)
+	}
+}

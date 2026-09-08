@@ -3,6 +3,7 @@ package workflow_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -405,5 +406,110 @@ func TestAWorkReportDoesNotDisplaceTheWorkStepCheckpoint(t *testing.T) {
 	}
 	if n := len(checkpointsWithPhase(t, store, created.Run.ID, "review_dispatch_ambiguous")); n != 0 {
 		t.Fatalf("the review dispatch went ambiguous (%d rows)", n)
+	}
+}
+
+// fakeWorkerCredentialCloser records that the coordinator asked for a finished
+// worker's identity to be taken back.
+type fakeWorkerCredentialCloser struct {
+	calls int
+	err   error
+}
+
+func (f *fakeWorkerCredentialCloser) CloseFinishedWorkers(_ context.Context) error {
+	f.calls++
+	return f.err
+}
+
+// P5-A phase 2C audit: a worker's identity ends when its turn does, at the
+// transition rather than a reconciliation interval later.
+//
+// The window matters because AgentRoleWorker holds session WRITE, which gates
+// /send, /kill, /rollback, /switch-agent and the rest — and a worker session is
+// reused across a step's whole loop, so a credential that outlived its turn
+// could steer the session a later agent works in.
+func TestAFinishedWorkStepEndsItsWorkerCredential(t *testing.T) {
+	sessionFacts := newFakeSessionFacts()
+	dir := t.TempDir()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: dir}}, facts: sessionFacts}
+	workspaceFacts := &fakeWorkspaceFacts{}
+	reviewRuns := newFakeReviewRuns()
+	closer := &fakeWorkerCredentialCloser{}
+
+	store := newFakeStore()
+	store.reviewRuns = reviewRuns
+	clk := &fakeClock{t: time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)}
+	var idSeq int
+	c := workflowcore.New(workflowcore.Deps{
+		Store: store, Spawner: spawner, SessionFacts: sessionFacts, WorkspaceFacts: workspaceFacts,
+		ReviewRuns: reviewRuns, ReviewerLauncher: &fakeReviewerLauncher{}, Verifier: passingRunner(),
+		WorkerCredentials: closer, Clock: clk.Now,
+		NewID: func() string { idSeq++; return fmt.Sprintf("id%d", idSeq) },
+	})
+	ctx := context.Background()
+
+	created, err := c.CreateRun(ctx, "proj-1", "rename a helper", verifiablePlan())
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	completeWorkStepInDir(t, c, clk, sessionFacts, workspaceFacts, created.Run.ID, dir, ordinaryCodeChange())
+
+	if closer.calls == 0 {
+		t.Fatal("the work step finished and nothing asked for its worker's credential back")
+	}
+}
+
+// A closer that fails must not fail the run: work that finished finished, and
+// the derived sweep re-derives the obligation on its next pass.
+func TestAFailedCredentialCloseDoesNotFailTheRun(t *testing.T) {
+	sessionFacts := newFakeSessionFacts()
+	dir := t.TempDir()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: dir}}, facts: sessionFacts}
+	workspaceFacts := &fakeWorkspaceFacts{}
+	reviewRuns := newFakeReviewRuns()
+	closer := &fakeWorkerCredentialCloser{err: errors.New("database is locked")}
+
+	store := newFakeStore()
+	store.reviewRuns = reviewRuns
+	clk := &fakeClock{t: time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)}
+	var idSeq int
+	c := workflowcore.New(workflowcore.Deps{
+		Store: store, Spawner: spawner, SessionFacts: sessionFacts, WorkspaceFacts: workspaceFacts,
+		ReviewRuns: reviewRuns, ReviewerLauncher: &fakeReviewerLauncher{}, Verifier: passingRunner(),
+		WorkerCredentials: closer, Clock: clk.Now,
+		NewID: func() string { idSeq++; return fmt.Sprintf("id%d", idSeq) },
+	})
+	ctx := context.Background()
+
+	created, err := c.CreateRun(ctx, "proj-1", "rename a helper", verifiablePlan())
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	// completeWorkStepInDir fails the test if the run does not reach completed,
+	// so reaching the end of it IS the assertion.
+	completeWorkStepInDir(t, c, clk, sessionFacts, workspaceFacts, created.Run.ID, dir, ordinaryCodeChange())
+	if closer.calls == 0 {
+		t.Fatal("the closer was never called")
+	}
+}
+
+// A coordinator with no closer wired behaves exactly as it did before phase 2C:
+// the derived sweep remains the only path, and it still converges.
+func TestACoordinatorWithoutACloserIsUnchanged(t *testing.T) {
+	sessionFacts := newFakeSessionFacts()
+	dir := t.TempDir()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: dir}}, facts: sessionFacts}
+	workspaceFacts := &fakeWorkspaceFacts{}
+	reviewRuns := newFakeReviewRuns()
+	c, _, clk := newCoordinatorWithReviewAndVerifier(spawner, sessionFacts, workspaceFacts, reviewRuns, &fakeReviewerLauncher{}, passingRunner())
+	ctx := context.Background()
+
+	created, err := c.CreateRun(ctx, "proj-1", "rename a helper", verifiablePlan())
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	completeWorkStepInDir(t, c, clk, sessionFacts, workspaceFacts, created.Run.ID, dir, ordinaryCodeChange())
+	if _, err := c.ContinueRun(ctx, created.Run.ID); err != nil {
+		t.Fatalf("ContinueRun: %v", err)
 	}
 }

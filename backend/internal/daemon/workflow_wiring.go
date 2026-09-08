@@ -224,7 +224,7 @@ func (c coordinatorLockClassifier) ClassifyLockOwner(ctx context.Context, run do
 // it, at runtime, on every run. Pinning it here makes that a compile error.
 var _ workflowcore.DispatchRecorder = (*sqlite.Store)(nil)
 
-func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememory.Service, memoryProvisioning *durablememory.Provisioner, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, workItemSync workItemSyncer, agents ports.AgentResolver, terminalRuntimes workflowcore.TerminalRuntimeReclaimer, plannerUsage workflowcore.PlannerUsageRecorder, reviewerIdentity workflowcore.ReviewerIdentityLedger, workerCredentials workerCredentialIssuer, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
+func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememory.Service, memoryProvisioning *durablememory.Provisioner, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, workItemSync workItemSyncer, agents ports.AgentResolver, terminalRuntimes workflowcore.TerminalRuntimeReclaimer, plannerUsage workflowcore.PlannerUsageRecorder, reviewerIdentity workflowcore.ReviewerIdentityLedger, workerCredentials workerCredentialIssuer, workerCredentialCloser workflowcore.WorkerCredentialCloser, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {
 		plannerBinary = "claude"
@@ -286,6 +286,10 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		SessionFacts:     store,
 		WorkspaceFacts:   workspace,
 		ReviewerLauncher: reviewerLauncher,
+		// P5-A phase 2C: and a finished worker's identity ends with its turn,
+		// rather than waiting out a reconciliation interval during which it
+		// could still reach the session writes its role permits.
+		WorkerCredentials: workerCredentialCloser,
 		// P5-A phase 2C: workers launch through their own launcher now, so
 		// they get an identity of their own the way reviewers already do.
 		// Spawner above stays wired: it is still the transport this launcher

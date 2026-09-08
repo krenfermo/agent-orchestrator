@@ -209,13 +209,56 @@ binding is what carries cross-project *and cross-tenant* refusal: a project
 belongs to exactly one tenant, and `AgentAuthority.Allows` denies every project
 but the bound one whatever the account behind it may do elsewhere.
 
+### What that authority actually buys (audit)
+
+`AgentRoleWorker`'s ceiling is session read, session write and workflow read.
+Session **write** is not a narrow grant: `AuthorizeSessionAccess` gates all of
+these on it, and a live worker credential reaches every one of them **for its
+own session**:
+
+| | |
+|---|---|
+| `POST /sessions/{id}/send` | type into the session |
+| `POST /sessions/{id}/kill` | end it |
+| `POST /sessions/{id}/rollback` | roll it back |
+| `POST /sessions/{id}/restore`, `/resume-agent` | restart it |
+| `POST /sessions/{id}/switch-agent` | change its agent |
+| `POST /sessions/{id}/pr/claim` | claim a PR |
+| `PUT /sessions/{id}/reviewer`, `/auto-review` | change its review configuration |
+
+That set is why the window between "the turn ended" and "the credential was
+taken back" is **not** innocuous. Checkpoint 8D reuses one worker session across
+a step's whole loop, so a credential that outlived its turn would be able to
+steer the session a *later* agent is working in.
+
+So the close is eager, at the transition, and the sweep is the backstop rather
+than the mechanism. The eager call is guarded by the same predicate the sweep
+uses, which is what lets it live at the single place a work step is observed out
+of `running` (`GetRun`'s `observeWorkStep` branch) instead of at each of the
+twenty-three places a step can transition.
+
+### The generation fence covers every action, not one route
+
+`ao work report` is fenced twice — by the credential, and by the route resolving
+"the non-terminal run whose work step is dispatched into this session", which a
+superseded pane no longer satisfies. The other session writes have no such
+route-level check: `/send` and `/kill` are gated on the bound session and
+nothing else.
+
+Their fence is therefore the credential itself, and it is strictly stronger than
+a per-route rule: **a replacement revokes its predecessors by attempt, and a
+revoked credential authenticates for nothing at all.** Since the session is
+reused across the loop, revoking is the only correct answer — fencing one route
+would leave the rest reachable.
+
 ### When it ends
 
 | Ending | How |
 |---|---|
 | Spawn failed, launch named no session, bind failed | Immediately, by the launcher |
 | Replaced by a new attempt on the same step | Immediately, by the launcher, keyed on the **attempt** |
-| Turn ended, cancelled, failed, step gone | The derived sweep, ≤ one reconcile interval |
+| Turn ended (observed out of `running`) | Immediately, at the transition |
+| Cancelled, failed, step gone, anything unobserved | The derived sweep, ≤ one reconcile interval |
 
 The sweep is the guarantee and the eager paths are optimizations, which is the
 same split the reviewer half already makes. Its rule mirrors the review one
@@ -250,6 +293,24 @@ transition.
 `VerifyResult.ReusedCheckCount` records how many executions it saved. Together
 with the attempt timestamps AO already keeps for review and verify, that is
 everything a per-phase cost view needs. Building that view is phase 4.
+
+## Known debt: `worker_launch_recovery.go` parity
+
+The recovery path reopens a durably failed pre-work dispatch and re-enters the
+ordinary dispatch, so a re-launch goes through the same launcher and gets its
+own credential, superseding the old one. Every launch-time failure the launcher
+owns already revokes immediately. What is **not** built, and is stated here
+rather than implied:
+
+- **No credential-aware recovery.** If the daemon dies after `Spawn` succeeded
+  but before the bind landed, the credential stays *unbound*. That is safe — an
+  unbound credential reaches nothing — and it is also unrepaired: the worker in
+  that pane has no usable identity and cannot `ao work report`. AO neither
+  detects nor re-binds it; the row is swept when the step stops.
+- **Adopted sessions have no identity.** `adoptOrMarkAmbiguous` adopts a session
+  AO cannot prove it launched. The bind never ran for it, so the same applies.
+- Both degrade the report, never the safety property: the change is still
+  verified, and the review depth still comes from evidence AO gathered itself.
 
 ## Still outstanding
 

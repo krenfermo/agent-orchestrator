@@ -320,6 +320,9 @@ type Deps struct {
 	SessionFacts   SessionFacts
 	WorkspaceFacts WorkspaceFacts
 
+	// WorkerCredentials ends a finished worker's identity eagerly (P5-A phase
+	// 2C). Optional; see the field on Coordinator.
+	WorkerCredentials WorkerCredentialCloser
 	// WorkerLauncher and SessionOwnership override the phased dispatch state
 	// machine's launch boundary (dispatch_state_machine.go). Both optional and
 	// both default to adapters over Spawner/SessionFacts, so production wiring
@@ -676,6 +679,12 @@ type Coordinator struct {
 	// mutationProvenance is the durable mutation-boundary writer (P2-D). Nil
 	// disables recording; see mutation_provenance.go.
 	mutationProvenance MutationProvenance
+	// workerCredentials ends a worker's identity the moment its turn does
+	// (P5-A phase 2C). Optional: nil leaves the derived sweep as the only path,
+	// which still converges -- this only shortens the window in which a
+	// finished worker's credential could still reach the session writes its
+	// role's ceiling permits. See WorkerCredentialCloser.
+	workerCredentials WorkerCredentialCloser
 	// qaGate and reviewThreads are the durable sources a finished task's risks
 	// are derived from. Both optional; see task_knowledge_sources.go.
 	qaGate        QAGate
@@ -831,6 +840,7 @@ func New(d Deps) *Coordinator {
 		plannerContextBuilder:    d.PlannerContextBuilder,
 		taskMemory:               d.TaskMemory,
 		mutationProvenance:       d.MutationProvenance,
+		workerCredentials:        d.WorkerCredentials,
 		qaGate:                   d.QAGate,
 		reviewThreads:            d.ReviewThreads,
 		switcher:                 d.Switcher,
@@ -1281,6 +1291,26 @@ func (c *Coordinator) createRunWithPlanArtifact(ctx stdctx.Context, projectID, o
 	return detail, nil
 }
 
+// WorkerCredentialCloser ends the identity of every worker whose step has
+// stopped running.
+//
+// It exists because AgentRoleWorker's ceiling includes session WRITE, and
+// AuthorizeSessionAccess gates a real set of actions on it: /send (type into
+// the session), /kill, /rollback, /restore, /resume-agent, /switch-agent,
+// /pr/claim, /reviewer and /auto-review. A worker session is reused across a
+// step's whole loop (Checkpoint 8D), so a credential that outlived its turn
+// could steer the session a later agent is working in. The derived sweep in
+// service/agentauth takes it back within a reconciliation interval; this takes
+// it back at the transition instead.
+//
+// Optional, and best-effort by design. A nil closer leaves the sweep as the
+// only path and the run behaves exactly as it did; an error is logged and never
+// fails a run, because work that finished finished and the obligation is
+// re-derived on the next pass either way.
+type WorkerCredentialCloser interface {
+	CloseFinishedWorkers(ctx stdctx.Context) error
+}
+
 // GetRun reads one workflow run with its steps and each step's attempts.
 // While the run is non-terminal and a work step is running, it opportunistically
 // observes that step's real progress (session + throttled workspace facts) and
@@ -1315,6 +1345,14 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 				return RunDetail{}, err
 			}
 			steps[i] = updated
+			// P5-A phase 2C: the turn just ended, so the worker's identity ends
+			// with it. This branch runs only for a step that WAS running, so a
+			// state change here is exactly that transition -- and the close is
+			// guarded by the same predicate the sweep uses, so a step that merely
+			// moved to `waiting` keeps its credential.
+			if updated.State != domain.WorkflowStepRunning {
+				c.closeFinishedWorkerCredentials(ctx, runID)
+			}
 			if refreshed, ok2, rerr := c.store.GetWorkflowRun(ctx, runID); rerr == nil && ok2 {
 				run = refreshed
 				detail.Run = run

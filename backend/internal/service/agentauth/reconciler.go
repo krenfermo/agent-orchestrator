@@ -181,6 +181,29 @@ func (r *Reconciler) CloseReviewRun(ctx context.Context, reviewRunID string) err
 	return nil
 }
 
+// CloseFinishedWorkers ends the authority of every worker whose step has
+// stopped running, and removes the files those credentials were handed over in.
+//
+// The eager twin of CloseReviewRun, and guarded the same way: while a step is
+// still running this is a no-op, which is what makes it safe to call from the
+// coordinator's ordinary observation of a step transition rather than from each
+// of the places a step can transition.
+//
+// It returns an error only so a caller that wants to log one can. No caller may
+// fail on it: work that finished finished, and a cleanup that did not land is
+// picked up by the next sweep.
+func (r *Reconciler) CloseFinishedWorkers(ctx context.Context) error {
+	if r == nil || r.svc == nil {
+		return nil
+	}
+	revoked, err := r.svc.CloseFinishedWorkers(ctx)
+	if err != nil {
+		return err
+	}
+	r.removeFiles(revoked)
+	return nil
+}
+
 // pass is one sweep, with its failure absorbed. A sweep that cannot read or
 // write must not take the daemon down and must not be retried in a tight loop:
 // the obligation is durable, so the next tick is a complete retry.

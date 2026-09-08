@@ -428,6 +428,29 @@ func (s *Service) RevokeSupersededWorkers(ctx context.Context, stepID, keepAttem
 	return s.store.RevokeSupersededWorkerAgentCredentials(ctx, stepID, keepAttemptID, s.now().UTC())
 }
 
+// CloseFinishedWorkers takes back the authority of every worker whose step has
+// stopped running, and returns what it took.
+//
+// It is the same guarded predicate the sweep applies -- deliberately the same,
+// so eager and swept cannot disagree about what "finished" means -- which is
+// what makes it safe to call from the coordinator's ordinary observation pass
+// instead of from each of the twenty-three places a step can transition. While
+// the step runs it is a no-op; the moment it stops, the credential is gone.
+//
+// It exists because the window it closes is not innocuous. AgentRoleWorker
+// holds session WRITE, and AuthorizeSessionAccess gates /send, /kill,
+// /rollback, /restore, /resume-agent, /switch-agent, /pr/claim, /reviewer and
+// /auto-review on exactly that permission. A worker session is reused across a
+// step's whole loop (Checkpoint 8D), so a credential that outlived its turn
+// could type into the session a later agent is working in. Waiting a
+// reconciliation interval for that is a wait with no upside.
+//
+// The sweep remains the guarantee: this is an optimization that shortens the
+// window, not a replacement for an obligation that must survive a crash.
+func (s *Service) CloseFinishedWorkers(ctx context.Context) ([]domain.RevocableAgentCredential, error) {
+	return s.ReconcileStaleWorkerCredentials(ctx)
+}
+
 // ListPendingWorkerRevocations reports the worker credentials whose work step
 // has stopped running. The read half of the sweep's own predicate, so a caller
 // can see what it is about to discharge — and so a test can prove the sweep and
