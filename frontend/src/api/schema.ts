@@ -5609,6 +5609,7 @@ export interface components {
             /** @enum {string} */
             agent?: "claude-code" | "codex" | "aider" | "opencode" | "grok" | "droid" | "amp" | "agy" | "crush" | "cursor" | "qwen" | "copilot" | "goose" | "auggie" | "continue" | "devin" | "cline" | "kimi" | "muse" | "kiro" | "kilocode" | "vibe" | "pi" | "kimchi" | "prime-agent" | "autohand" | "fake";
             attachments?: components["schemas"]["AttachmentInput"][];
+            /** @description The task's full specification: multi-line and markdown-friendly, preserved verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long brief is refused. */
             brief: string;
             /** @enum {string} */
             mode?: "tui" | "chat";
@@ -6917,6 +6918,7 @@ export interface components {
             /** @enum {string} */
             mode?: "chat" | "tui";
             projectId: string;
+            /** @description The session's task specification: multi-line and markdown-friendly, preserved verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long prompt is refused. */
             prompt?: string;
             /** @enum {string} */
             trackerProvider?: "github" | "gitlab";

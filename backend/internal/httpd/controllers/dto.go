@@ -186,8 +186,13 @@ type SpawnSessionRequest struct {
 	// interface-transition endpoint; the default never mutates existing sessions
 	// automatically. An unsupported explicit request fails rather than quietly
 	// producing the other kind of session.
-	Mode   domain.SessionMode `json:"mode,omitempty" enum:"chat,tui"`
-	Prompt string             `json:"prompt,omitempty" maxLength:"4096"`
+	Mode domain.SessionMode `json:"mode,omitempty" enum:"chat,tui"`
+	// Prompt is the session's task specification: multi-line,
+	// markdown-friendly, and stored exactly as sent. It is bounded at
+	// domain.MaxWorkflowObjectiveBytes (128 KiB of UTF-8) -- the same ceiling
+	// a workflow objective has -- and is NEVER truncated; an over-long prompt
+	// is refused with PROMPT_TOO_LONG naming both sizes.
+	Prompt string `json:"prompt,omitempty" maxLength:"131072" description:"The session's task specification: multi-line and markdown-friendly, preserved verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long prompt is refused."`
 
 	// DisplayName is the sidebar label for the session, capped at 20 characters.
 	// `ao spawn --name` always sets it; other clients (e.g. the desktop new-task
@@ -597,10 +602,13 @@ type SendSessionMessageResponse struct {
 // DelegateTaskRequest is the body of POST /api/v1/orchestrators/delegate.
 // An omitted agent tells the orchestrator to use the project's worker default.
 type DelegateTaskRequest struct {
-	ProjectID domain.ProjectID    `json:"projectId"`
-	Brief     string              `json:"brief" maxLength:"4096"`
-	Agent     domain.AgentHarness `json:"agent,omitempty" enum:"claude-code,codex,aider,opencode,grok,droid,amp,agy,crush,cursor,qwen,copilot,goose,auggie,continue,devin,cline,kimi,muse,kiro,kilocode,vibe,pi,kimchi,prime-agent,autohand,fake"`
-	Model     string              `json:"model,omitempty" maxLength:"256"`
+	ProjectID domain.ProjectID `json:"projectId"`
+	// Brief is the task's full specification, bounded and preserved on the
+	// same terms as SpawnSessionRequest.Prompt: 128 KiB of UTF-8, verbatim,
+	// never truncated. Over the limit is refused with TASK_TOO_LONG.
+	Brief string              `json:"brief" maxLength:"131072" description:"The task's full specification: multi-line and markdown-friendly, preserved verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long brief is refused."`
+	Agent domain.AgentHarness `json:"agent,omitempty" enum:"claude-code,codex,aider,opencode,grok,droid,amp,agy,crush,cursor,qwen,copilot,goose,auggie,continue,devin,cline,kimi,muse,kiro,kilocode,vibe,pi,kimchi,prime-agent,autohand,fake"`
+	Model string              `json:"model,omitempty" maxLength:"256"`
 	// Mode is omitted for the daemon-owned default. The UI sends tui only when
 	// the user explicitly accepts the fallback after Chat preflight fails.
 	Mode domain.SessionMode `json:"mode,omitempty" enum:"tui,chat"`

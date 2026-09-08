@@ -934,15 +934,24 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	}
 
 	metadata := domain.SessionMetadata{
-		Branch:                    ws.Branch,
-		WorkspacePath:             ws.Path,
-		WorkspaceRepoPath:         ws.RepoPath,
-		RuntimeHandleID:           handle.ID,
-		RuntimeInstanceID:         handle.InstanceID,
-		RuntimeOwnerToken:         ownerToken,
-		RuntimeLaunchID:           launchID,
-		Prompt:                    prompt,
-		LatestUserPrompt:          prompt,
+		Branch:            ws.Branch,
+		WorkspacePath:     ws.Path,
+		WorkspaceRepoPath: ws.RepoPath,
+		RuntimeHandleID:   handle.ID,
+		RuntimeInstanceID: handle.InstanceID,
+		RuntimeOwnerToken: ownerToken,
+		RuntimeLaunchID:   launchID,
+		// Prompt is the durable, complete task specification and is stored
+		// whole -- it is the record of what this session was asked to do.
+		Prompt: prompt,
+		// LatestUserPrompt is the bounded recognition/handoff fact, not the
+		// specification. It goes through the field's own definition of the
+		// bytes it holds, the same one the send path and workflow's delivery
+		// recovery use: a spawn prompt may now be a 128 KiB specification, and
+		// storing it raw here would both blow past the field's documented
+		// 16 KiB bound and make promptReceiptDigest unable to recognise the
+		// prompt it wrote.
+		LatestUserPrompt:          domain.BoundLatestUserPrompt(prompt),
 		BrowserCapabilityVerifier: browserCapabilityVerifier,
 	}
 	if projectKind == domain.ProjectKindSingleRepo {
