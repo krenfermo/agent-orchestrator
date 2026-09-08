@@ -785,3 +785,80 @@ func TestEvidenceTargetKeyMovesWithTheTree(t *testing.T) {
 		t.Fatalf("two different trees produced %d distinct reuse keys; the key is not tree-sensitive", len(keys))
 	}
 }
+
+// A plan AO is not allowed to run is recorded as such and never as a pass, and
+// nothing is executed for it. The 8E command policy is enforced by the real
+// runner too; this asserts AO refuses BEFORE reaching it, so the refusal is
+// explainable rather than surfacing later as an infrastructure error.
+func TestAPlanAOMayNotRunIsRefusedBeforeExecution(t *testing.T) {
+	sessionFacts := newFakeSessionFacts()
+	dir := t.TempDir()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: dir}}, facts: sessionFacts}
+	workspaceFacts := &fakeWorkspaceFacts{}
+	reviewRuns := newFakeReviewRuns()
+	launcher := &fakeReviewerLauncher{}
+	runner := passingRunner()
+	c, store, clk := newCoordinatorWithReviewAndVerifier(spawner, sessionFacts, workspaceFacts, reviewRuns, launcher, runner)
+	ctx := context.Background()
+
+	// A working directory that climbs out of the workspace: refused by the same
+	// validation Verify applies.
+	plan := workflowcore.VerificationPlan{
+		Commands: []workflowcore.VerificationCommandCheck{
+			{Command: "go", Args: []string{"test", "./..."}, WorkingDirectory: "../../etc", RetrySafe: true},
+		},
+	}
+	created, err := c.CreateRun(ctx, "proj-1", "rename a helper", plan)
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	completeWorkStepInDir(t, c, clk, sessionFacts, workspaceFacts, created.Run.ID, dir, ordinaryCodeChange())
+	got, err := c.ContinueRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("ContinueRun: %v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("AO executed %d commands from a plan it may not run", len(runner.calls))
+	}
+	rec, ok := evidenceFor(t, store, created.Run.ID)
+	if !ok || rec.Status != domain.PreReviewEvidenceUnavailable {
+		t.Fatalf("evidence status = %q, want unavailable", rec.Status)
+	}
+	if reviewStepFrom(got).Step.ReviewRunID == nil {
+		t.Fatal("a task AO could not check skipped its reviewer")
+	}
+}
+
+// A task with no verification at all is its own fact, distinct from a plan AO
+// refuses to run: nothing failed, there was simply nothing to check.
+func TestATaskWithNoVerificationAtAllSaysSo(t *testing.T) {
+	sessionFacts := newFakeSessionFacts()
+	dir := t.TempDir()
+	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: dir}}, facts: sessionFacts}
+	workspaceFacts := &fakeWorkspaceFacts{}
+	reviewRuns := newFakeReviewRuns()
+	launcher := &fakeReviewerLauncher{}
+	runner := passingRunner()
+	c, store, clk := newCoordinatorWithReviewAndVerifier(spawner, sessionFacts, workspaceFacts, reviewRuns, launcher, runner)
+	ctx := context.Background()
+
+	created, err := c.CreateRun(ctx, "proj-1", "rename a helper")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	completeWorkStepInDir(t, c, clk, sessionFacts, workspaceFacts, created.Run.ID, dir, ordinaryCodeChange())
+	got, err := c.ContinueRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatalf("ContinueRun: %v", err)
+	}
+	rec, ok := evidenceFor(t, store, created.Run.ID)
+	if !ok || rec.Status != domain.PreReviewEvidenceNotPlanned {
+		t.Fatalf("evidence status = %q, want not_planned", rec.Status)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("AO executed %d commands for a task with no verification", len(runner.calls))
+	}
+	if reviewStepFrom(got).Step.ReviewRunID == nil {
+		t.Fatal("an unverifiable task skipped its reviewer")
+	}
+}

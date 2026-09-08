@@ -172,6 +172,38 @@ func (c *Coordinator) collectPreReviewEvidence(
 	}
 	fingerprint := WorkspaceFingerprint(obs)
 
+	// A task that declares no verification at all is a distinct fact from one
+	// whose plan AO refuses to run, and it is checked first so it says so. It
+	// is not a failure and not a refusal: there was simply nothing to run, and
+	// a change nobody can check automatically is exactly one a person should
+	// look at.
+	if len(artifact.Verification.Commands) == 0 && len(artifact.Verification.Files) == 0 {
+		return finish(domain.PreReviewEvidence{
+			Version:     domain.PreReviewEvidenceVersion,
+			Status:      domain.PreReviewEvidenceNotPlanned,
+			Note:        "this task declares no verification at all, so AO has nothing of its own to run",
+			Fingerprint: fingerprint,
+			StartedAt:   started,
+		})
+	}
+
+	// The SAME gate Verify applies before it executes anything: the shared 8E
+	// safety policy on every command, plus the workspace-escape and timeout
+	// bounds. The production VerifyRunner validates each request again on its
+	// own, so this is defence in depth rather than the only check — but a plan
+	// AO would refuse to verify is a plan it must refuse to run early, and
+	// saying so here makes the refusal explicit instead of a runtime error
+	// surfacing later as an unexplained infrastructure failure.
+	if err := artifact.Verification.validate(); err != nil {
+		return finish(domain.PreReviewEvidence{
+			Version:     domain.PreReviewEvidenceVersion,
+			Status:      domain.PreReviewEvidenceUnavailable,
+			Note:        "this task's verification plan is not one AO may run: " + err.Error(),
+			Fingerprint: fingerprint,
+			StartedAt:   started,
+		})
+	}
+
 	// The same narrowing Verify applies, from the same inputs, so the plan that
 	// runs here is the plan that would run there. Deriving it from the decision
 	// AO just persisted rather than re-deriving risk keeps the "one risk
