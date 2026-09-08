@@ -330,6 +330,12 @@ type Deps struct {
 	// ownership proof read back from it, can each be faked independently.
 	WorkerLauncher   WorkerLauncher
 	SessionOwnership SessionOwnership
+	// WorkerCredentialAdopter re-attaches an orphaned worker credential when a
+	// launch is adopted after a crash between Spawn and bind
+	// (worker_credential_adoption.go). Optional: a nil adopter is the pre-P5
+	// behaviour, and the correct behaviour where a worker needs no identity of
+	// its own.
+	WorkerCredentialAdopter WorkerCredentialAdopter
 
 	// ReviewerLauncher backs Checkpoint 8C's review-step dispatch
 	// (review_dispatch.go). Optional: a nil ReviewerLauncher means
@@ -628,6 +634,9 @@ type Coordinator struct {
 	// process or a timer.
 	workerLauncher   WorkerLauncher
 	sessionOwnership SessionOwnership
+	// workerCredentialAdopter re-attaches an orphaned worker credential on the
+	// adoption path. Optional.
+	workerCredentialAdopter WorkerCredentialAdopter
 
 	// reviewerLauncher backs Checkpoint 8C's review-step dispatch. Optional.
 	reviewerLauncher ReviewerLauncher
@@ -826,6 +835,7 @@ func New(d Deps) *Coordinator {
 		workspaceFacts:           d.WorkspaceFacts,
 		workerLauncher:           d.WorkerLauncher,
 		sessionOwnership:         d.SessionOwnership,
+		workerCredentialAdopter:  d.WorkerCredentialAdopter,
 		reviewerLauncher:         d.ReviewerLauncher,
 		incidentAgents:           d.IncidentAgents,
 		selfRepairProjectID:      d.SelfRepairProjectID,

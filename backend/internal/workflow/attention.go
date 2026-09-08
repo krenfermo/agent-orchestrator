@@ -310,6 +310,22 @@ const (
 	// one. Parking is scoped to this run: every other run reconciles normally.
 	ReasonRecoveryUnreconcilable  = "recovery_unreconcilable"
 	ReasonWorkerDispatchAmbiguous = "worker_dispatch_ambiguous"
+	// ReasonWorkerCredentialUnadoptable is a worker AO adopted after a restart
+	// that is holding a credential AO cannot account for.
+	//
+	// It is the Spawn/bind window: a credential is minted before the spawn,
+	// because the environment is fixed at spawn, and bound after it, because
+	// the session does not exist before it. A daemon that dies in between
+	// leaves a running worker with a token bound to nothing, which every
+	// session route refuses -- so the worker keeps working and can never report
+	// on its own work. Recovery re-attaches that credential when it can prove
+	// which launch it belongs to; when it cannot, this names the stop rather
+	// than confirming a dispatch over an identity nobody decided.
+	//
+	// Distinct from ReasonWorkerDispatchAmbiguous, which is the neighbouring
+	// question: that one is "AO cannot prove whether a worker exists", this one
+	// is "AO knows the worker exists and cannot prove which token it holds".
+	ReasonWorkerCredentialUnadoptable = "worker_credential_unadoptable" //nolint:gosec // G101 false positive: an attention reason, not a secret.
 	// ReasonWorkerWorkspaceUnreadable is a worker whose turn AO can PROVE
 	// finished — the provider's own turn receipt for this dispatch — and whose
 	// repository AO could not read, so what the turn produced is unknown.
@@ -373,8 +389,20 @@ const (
 	// provider's configuration is known to be wrong, the launch just would not
 	// take.
 	ReasonWorkerLaunchRetriesExhausted = "worker_launch_retries_exhausted"
-	ReasonCapacityRetryExhausted       = string(domain.WorkflowErrorCapacityExhausted)
-	ReasonQuestionHumanRequired        = "question_human_required"
+	// ReasonPlacementUnenforceable is a launch AO refused because it could not
+	// prove where the work belongs: the run's frozen placement could not be
+	// read, or records a placement type this build does not understand.
+	//
+	// A stop rather than a retry, and deliberately not self-remediable. The
+	// alternative AO used to take was to continue with no placement at all,
+	// which routes the launch by the PROJECT's current execution mode -- so a
+	// run frozen into an isolated worktree, in a project since switched to
+	// direct-branch, wrote into the operator's own checkout. That is not a
+	// degraded launch, it is a different one, and it is the one thing the
+	// frozen placement exists to make impossible.
+	ReasonPlacementUnenforceable = "placement_unenforceable"
+	ReasonCapacityRetryExhausted = string(domain.WorkflowErrorCapacityExhausted)
+	ReasonQuestionHumanRequired  = "question_human_required"
 	// The three provider-preflight reasons are declared in
 	// provider_preflight.go, next to the classes they mirror, and registered in
 	// the dispositions table below. They name the one thing AO can now detect
@@ -450,6 +478,10 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonWorkerDispatchAmbiguous: {
 		HumanAction: "Confirm whether the worker session actually produced work, then continue or cancel this run.",
+	},
+	ReasonWorkerCredentialUnadoptable: {
+		Recovery:    domain.RecoveryOperatorAction,
+		HumanAction: "AO restarted between starting this worker and giving it its identity, and it cannot prove which credential that worker is holding — so the worker is running but cannot report on its own work. The checkpoint names the session. Cancel that worker and continue this run, and AO starts exactly one replacement with an identity of its own.",
 	},
 	ReasonProviderDialogUnreadable: {
 		HumanAction: "AO decided this question automatically but cannot read the prompt the agent is showing, so it has not sent the answer. Open that session and choose the option AO recorded, then continue this run.",
@@ -631,6 +663,10 @@ var attentionDispositions = map[string]AttentionDisposition{
 	},
 	ReasonWorkerLaunchRetriesExhausted: {
 		HumanAction: "The worker failed to start on every automatic retry, without naming a configuration problem. Check the terminal/runtime and the provider's process, then continue this run — AO reopens the dispatch and starts exactly one worker.",
+	},
+	ReasonPlacementUnenforceable: {
+		Recovery:    domain.RecoveryOperatorAction,
+		HumanAction: "AO could not establish where this task's work belongs — its frozen execution placement could not be read — so it started nothing rather than fall back to the project's current setting and risk writing to the wrong checkout. The checkpoint names the placement generation. Check the run's placement, then continue this run.",
 	},
 	ReasonWorkerBlocked: {
 		HumanAction: "The worker is waiting on input inside its own session (often an interactive trust or auth prompt). Answer it in the session, then continue this run.",

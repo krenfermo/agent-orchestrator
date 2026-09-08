@@ -224,7 +224,7 @@ func (c coordinatorLockClassifier) ClassifyLockOwner(ctx context.Context, run do
 // it, at runtime, on every run. Pinning it here makes that a compile error.
 var _ workflowcore.DispatchRecorder = (*sqlite.Store)(nil)
 
-func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememory.Service, memoryProvisioning *durablememory.Provisioner, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, workItemSync workItemSyncer, agents ports.AgentResolver, terminalRuntimes workflowcore.TerminalRuntimeReclaimer, plannerUsage workflowcore.PlannerUsageRecorder, reviewerIdentity workflowcore.ReviewerIdentityLedger, workerCredentials workerCredentialIssuer, workerCredentialCloser workflowcore.WorkerCredentialCloser, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
+func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememory.Service, memoryProvisioning *durablememory.Provisioner, sessionMgr *sessionmanager.Manager, workspace *workspacerouter.Workspace, branchLocks *branchlock.Manager, reviewerLauncher workflowcore.ReviewerLauncher, paneReader workflowcore.PaneReader, decisionResolverLauncher workflowcore.DecisionResolverLauncher, incidentAgents workflowcore.IncidentAgentLauncher, notifications workflowcore.NotificationSink, workItemSync workItemSyncer, agents ports.AgentResolver, terminalRuntimes workflowcore.TerminalRuntimeReclaimer, plannerUsage workflowcore.PlannerUsageRecorder, reviewerIdentity workflowcore.ReviewerIdentityLedger, workerCredentials workerCredentialAdopter, workerCredentialCloser workflowcore.WorkerCredentialCloser, log *slog.Logger) (*workflowcore.Coordinator, *workflowsvc.Service, *wake.Scheduler) {
 	plannerBinary := os.Getenv("AO_PLANNER_BIN")
 	if plannerBinary == "" {
 		plannerBinary = "claude"
@@ -303,6 +303,15 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 			// request resolves nobody, a worker with no credential provably
 			// cannot report on its own work, so refuse the launch rather than
 			// start it into a dead end.
+			requireAgentIdentity: !cfg.TrustedLocalMode,
+		},
+		// P5: and the other end of that identity's life. A daemon that died
+		// between Spawn and bind left the worker it started holding a
+		// credential bound to nothing; the recovery that adopts the session
+		// re-attaches the credential too, or refuses and says so.
+		WorkerCredentialAdopter: &workflowWorkerAdopter{
+			credentials:          workerCredentials,
+			log:                  log,
 			requireAgentIdentity: !cfg.TrustedLocalMode,
 		},
 		MessageSender: sessionMgr,

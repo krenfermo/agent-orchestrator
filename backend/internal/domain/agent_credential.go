@@ -229,3 +229,26 @@ func (c AgentCredential) Authority() AgentAuthority {
 func (c AgentCredential) Active(now time.Time) bool {
 	return c.RevokedAt == nil && c.ExpiresAt.After(now)
 }
+
+// AdoptableAgentCredential names one worker credential that was minted for a
+// launch and never bound to a session -- the state a daemon leaves behind when
+// it dies between Spawn and the bind that follows it.
+//
+// It is a projection, like RevocableAgentCredential, and it carries exactly
+// what an adoption has to CHECK before it acts: which run and project the
+// credential was minted under (so a candidate belonging to different work is
+// refused rather than adopted), the handle naming the file the token was handed
+// over in, and the attempt it was fenced to. Never the token hash: adoption
+// re-points an authority, it never reads one.
+type AdoptableAgentCredential struct {
+	CredentialID   string
+	WorkflowRunID  string
+	WorkflowStepID string
+	ProjectID      ProjectID
+	RuntimeHandle  string
+	// RuntimeInstanceID is the attempt this credential was minted for -- the
+	// launch that crashed. An adoption replaces it with the attempt doing the
+	// adopting, because the attempt fence must name the current attempt for the
+	// credential to be authorized at all.
+	RuntimeInstanceID string
+}

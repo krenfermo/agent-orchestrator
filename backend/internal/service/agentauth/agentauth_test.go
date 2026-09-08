@@ -509,3 +509,78 @@ func (f *fakeStore) IsWorkerCredentialAuthorized(_ context.Context, credentialID
 	}
 	return false, nil
 }
+
+// ---- P5: adoption ----------------------------------------------------------
+//
+// These three mirror the SQL exactly, because what the adoption rests on IS the
+// guard in the statement: a row that has never been bound and has not been
+// revoked, and a write that can only ever move it once.
+
+func (f *fakeStore) ListAdoptableWorkerAgentCredentials(_ context.Context, stepID string) ([]domain.AdoptableAgentCredential, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	out := []domain.AdoptableAgentCredential{}
+	for _, c := range f.creds {
+		if c.Role != domain.AgentRoleWorker || c.RevokedAt != nil ||
+			c.SessionID != "" || c.WorkflowStepID == "" || c.WorkflowStepID != stepID {
+			continue
+		}
+		out = append(out, domain.AdoptableAgentCredential{
+			CredentialID:      c.ID,
+			WorkflowRunID:     c.WorkflowRunID,
+			WorkflowStepID:    c.WorkflowStepID,
+			ProjectID:         c.ProjectID,
+			RuntimeHandle:     c.RuntimeHandle,
+			RuntimeInstanceID: c.RuntimeInstanceID,
+		})
+	}
+	return out, nil
+}
+
+func (f *fakeStore) CountLiveWorkerAgentCredentialsForSession(_ context.Context, sessionID domain.SessionID) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return 0, f.listErr
+	}
+	var n int64
+	for _, c := range f.creds {
+		if c.Role == domain.AgentRoleWorker && c.RevokedAt == nil && c.SessionID != "" && c.SessionID == sessionID {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (f *fakeStore) AdoptWorkerAgentCredential(_ context.Context, credentialID string, sessionID domain.SessionID, attemptID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.revokeErr != nil {
+		return false, f.revokeErr
+	}
+	for hash, c := range f.creds {
+		if c.ID != credentialID || c.Role != domain.AgentRoleWorker || c.SessionID != "" || c.RevokedAt != nil {
+			continue
+		}
+		c.SessionID = sessionID
+		c.RuntimeInstanceID = attemptID
+		f.creds[hash] = c
+		return true, nil
+	}
+	return false, nil
+}
+
+// credentialByID reads a credential back the way a later request would.
+func (f *fakeStore) credentialByID(id string) domain.AgentCredential {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.creds {
+		if c.ID == id {
+			return c
+		}
+	}
+	return domain.AgentCredential{}
+}

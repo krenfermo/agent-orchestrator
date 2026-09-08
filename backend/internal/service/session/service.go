@@ -935,6 +935,17 @@ func toAPIError(err error) error {
 		return apierr.Invalid("BRANCH_NOT_FETCHED", err.Error(), nil)
 	case errors.Is(err, ports.ErrWorkspaceBranchInvalid):
 		return apierr.Invalid("INVALID_BRANCH", err.Error(), nil)
+	// Deliberately NOT INVALID_BRANCH, and deliberately not a 400. A git probe
+	// that was killed or could not start said nothing about the branch name, so
+	// answering "your branch name is invalid" would be AO inventing a permanent
+	// verdict for a transient condition -- which is exactly what turned a
+	// killed `git check-ref-format --branch ao/sige-12/root` into a terminal
+	// INVALID_BRANCH for a name git accepts. A conflict is the honest shape:
+	// the request was not wrong, AO could not resolve it, and retrying is the
+	// remedy.
+	case errors.Is(err, ports.ErrWorkspaceProbeInconclusive):
+		return apierr.Conflict("BRANCH_CHECK_INCONCLUSIVE",
+			"AO could not get an answer from git about this branch (the check was killed or could not run), so it made no claim about the name: "+err.Error(), nil)
 	case errors.Is(err, ports.ErrAgentBinaryNotFound):
 		return apierr.Invalid("AGENT_BINARY_NOT_FOUND", err.Error(), nil)
 	case errors.Is(err, ports.ErrRuntimePrerequisite):

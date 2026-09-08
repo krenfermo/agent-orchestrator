@@ -3,6 +3,7 @@ package workflow
 import (
 	stdctx "context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -117,6 +118,14 @@ const (
 	// prompt. It is the earliest stage there is, and the only one at which AO
 	// can be certain nothing was created.
 	workerLaunchStagePreflight workerLaunchStage = "preflight"
+	// workerLaunchStagePlacement is a launch refused because AO could not read
+	// the run's FROZEN execution placement. Like preflight it is a stage at
+	// which nothing was created -- it sits between the preflight and the
+	// launcher call -- and unlike every other stage its remedy is never "try a
+	// different provider": where the work belongs does not depend on who does
+	// it, so a failover here would place the same work wrongly with a different
+	// agent.
+	workerLaunchStagePlacement workerLaunchStage = "placement"
 )
 
 // workerLaunchClassification is the verdict on one worker-launch failure: which
@@ -148,6 +157,23 @@ type workerLaunchClassification struct {
 // maxWorkerLaunchAttempts guarantees an unnameable failure still reaches a
 // human quickly instead of looping.
 func classifyWorkerLaunchFailure(err error) workerLaunchClassification {
+	// A placement AO cannot enforce is never retried into a launch and never
+	// failed over to another provider. Both sentinels mean the same thing at
+	// this gate -- AO does not know where this work belongs -- and no amount of
+	// waiting or provider-hopping produces the answer. The certainty is actual
+	// rather than inferred: it is decided by a sentinel AO itself returned, not
+	// by reading somebody's error text.
+	//
+	// The alternative is what this replaces: continuing with an empty placement,
+	// which hands the decision to the project's current execution mode and puts
+	// an isolated run on a direct branch without a word.
+	if errors.Is(err, ErrPlacementNotEnforceable) || errors.Is(err, ErrPlacementUnprovable) {
+		return workerLaunchClassification{
+			Class:     domain.WorkflowErrorInvalidPlacement,
+			Certainty: CertaintyActual,
+			Reason:    ReasonPlacementUnenforceable,
+		}
+	}
 	// A refused provider preflight already carries its own proven class and its
 	// own precise attention reason (provider_preflight.go). It is never
 	// retryable — no amount of waiting installs a credential or trusts a folder

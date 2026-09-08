@@ -69,6 +69,10 @@ type Store interface {
 	ListRevocableWorkerAgentCredentials(ctx context.Context) ([]domain.RevocableAgentCredential, error)
 	RevokeStaleWorkerAgentCredentials(ctx context.Context, at time.Time) (int64, error)
 	IsWorkerCredentialAuthorized(ctx context.Context, credentialID string) (bool, error)
+	// P5: adoption, for the window between Spawn and bind.
+	ListAdoptableWorkerAgentCredentials(ctx context.Context, stepID string) ([]domain.AdoptableAgentCredential, error)
+	CountLiveWorkerAgentCredentialsForSession(ctx context.Context, sessionID domain.SessionID) (int64, error)
+	AdoptWorkerAgentCredential(ctx context.Context, credentialID string, sessionID domain.SessionID, attemptID string) (bool, error)
 	ListRevocableAgentCredentials(ctx context.Context) ([]domain.RevocableAgentCredential, error)
 	RevokeClosedReviewRunAgentCredentials(ctx context.Context, at time.Time) (int64, error)
 	GetUserByID(ctx context.Context, id domain.UserID) (domain.User, bool, error)

@@ -806,6 +806,34 @@ func (c *Coordinator) adoptLiveLaunch(
 	if err != nil {
 		return result, run, err
 	}
+	// The attempt is settled BEFORE anything is recorded, because the credential
+	// adoption below has to be fenced to it and because a record that does not
+	// name the attempt it belongs to is a record nobody can follow back.
+	if !hasAttempt {
+		opened, oerr := c.openWorkerAttempt(ctx, step.ID, rec.Harness, c.clock())
+		if oerr != nil {
+			return result, run, oerr
+		}
+		attempt = opened
+		hasAttempt = true
+		result.AttemptID = opened.ID
+	}
+	// P5: this is the adoption that matters most for the Spawn/bind window,
+	// because it is the one reached by a daemon that died with a live worker
+	// still running. Adopting the SESSION and leaving its credential bound to
+	// nothing brings back a worker that provably cannot report on its own work,
+	// for the rest of the run.
+	//
+	// A refusal is a stop rather than a degraded adoption, and it is the same
+	// stop this file makes for every other contradiction it cannot resolve: the
+	// live worker is left alone, the evidence is recorded, and a person decides.
+	if cerr := c.adoptWorkerCredential(ctx, run, step, owned.SessionID, attempt.ID); cerr != nil {
+		result.Contradiction = ContradictionUnprovable
+		result.Detail = fmt.Sprintf(
+			"worker session %s is alive and was launched by AO, but %v", owned.SessionID, cerr)
+		return c.stopReconciledDispatchFor(ctx, run, step, attempt, hasAttempt, owned, result,
+			ReasonWorkerCredentialUnadoptable)
+	}
 	result.Contradiction = ContradictionLaunchUnconfirmed
 	result.Action = DispatchReconcileAdopted
 	result.Detail = fmt.Sprintf(
@@ -814,14 +842,6 @@ func (c *Coordinator) adoptLiveLaunch(
 	if err := c.recordDispatchReconciliation(ctx, run, step, entry, attempt, owned, result,
 		domain.LaunchStageConfirm, domain.LaunchOutcomeIntended); err != nil {
 		return result, run, err
-	}
-	if !hasAttempt {
-		opened, oerr := c.openWorkerAttempt(ctx, step.ID, rec.Harness, c.clock())
-		if oerr != nil {
-			return result, run, oerr
-		}
-		attempt = opened
-		result.AttemptID = opened.ID
 	}
 	// A step parked by an earlier reconciliation stop has to come back before
 	// the confirmation lands on it: confirmWorkerDispatch moves ready -> running
@@ -964,6 +984,29 @@ func (c *Coordinator) stopReconciledDispatch(
 	owned ownedExecution,
 	result DispatchReconciliation,
 ) (DispatchReconciliation, domain.WorkflowRun, error) {
+	return c.stopReconciledDispatchFor(ctx, run, step, attempt, hasAttempt, owned, result, ReasonWorkerDispatchAmbiguous)
+}
+
+// stopReconciledDispatchFor is stopReconciledDispatch with the attention reason
+// named by the caller.
+//
+// Every stop this file makes has the same SHAPE -- record the evidence, raise
+// the gate, close the attempt, park the step and the run -- and until P5 they
+// all had the same NAME too, because there was only one kind of thing
+// reconciliation could fail to prove. There are two now: "AO cannot prove what
+// happened to this launch" and "AO knows what happened and cannot prove which
+// credential the worker it found is holding". The remedies differ, so the
+// reasons do; the machinery does not.
+func (c *Coordinator) stopReconciledDispatchFor(
+	ctx stdctx.Context,
+	run domain.WorkflowRun,
+	step domain.WorkflowStep,
+	attempt domain.WorkflowAttempt,
+	hasAttempt bool,
+	owned ownedExecution,
+	result DispatchReconciliation,
+	reason string,
+) (DispatchReconciliation, domain.WorkflowRun, error) {
 	entry, err := c.dispatchOutboxEntry(ctx, run, step)
 	if err != nil {
 		return result, run, err
@@ -977,9 +1020,9 @@ func (c *Coordinator) stopReconciledDispatch(
 		return result, run, err
 	}
 
-	detail := fmt.Sprintf("%s: %s", ReasonWorkerDispatchAmbiguous, result.Detail)
+	detail := fmt.Sprintf("%s: %s", reason, result.Detail)
 	raise, rerr := c.raiseAmbiguousWorkerState(ctx, run, step,
-		ReasonWorkerDispatchAmbiguous, detail,
+		reason, detail,
 		c.observedWorkerFactsFor(ctx, owned.SessionID, nil))
 	if rerr != nil {
 		// The gate refused because the evidence could not be made durable. The
@@ -1002,7 +1045,7 @@ func (c *Coordinator) stopReconciledDispatch(
 		}
 		step.State = domain.WorkflowStepWaiting
 	}
-	c.recordAttentionStop(ctx, run, &step.ID, ReasonWorkerDispatchAmbiguous, result.Detail)
+	c.recordAttentionStop(ctx, run, &step.ID, reason, result.Detail)
 	if c.log != nil {
 		c.log.Warn("workflow: dispatch reconciliation stopped with evidence",
 			"run", run.ID, "step", step.ID, "contradiction", result.Contradiction, "detail", result.Detail)

@@ -271,3 +271,78 @@ func (l *workflowWorkerLauncher) now() time.Time {
 	}
 	return time.Now().UTC()
 }
+
+// ---- P5: adoption, for a crash between Spawn and bind -----------------------
+//
+// This launcher's ordering -- mint, spawn, bind -- has one window that cannot
+// be closed by ordering alone, because the two ends need different things: the
+// credential must be in the environment at spawn, and the session it speaks for
+// does not exist until spawn returns. A daemon that dies in between leaves a
+// running worker holding a token bound to nothing.
+//
+// The launcher cannot fix that, because it is not running any more. The
+// coordinator's recovery path can, and this is what it calls: the same
+// credential authority, the same requireAgentIdentity judgement, asked the
+// recovery question instead of the launch one.
+
+// workerCredentialAdopter is service/agentauth as the ADOPTION needs it: one
+// method, asked once, on a recovery path.
+//
+// It is declared as an extension of workerCredentialIssuer rather than beside
+// it because the daemon holds one credential authority and passes it to both,
+// and two unrelated interfaces over one value would mean two places to keep in
+// step with it. The launcher still depends only on the issuer half.
+type workerCredentialAdopter interface {
+	workerCredentialIssuer
+	AdoptWorkerSession(ctx context.Context, in agentauth.WorkerAdoptionInput) (agentauth.WorkerAdoptionResult, error)
+}
+
+// workflowWorkerAdopter is the daemon's workflowcore.WorkerCredentialAdopter.
+type workflowWorkerAdopter struct {
+	credentials workerCredentialAdopter
+	log         *slog.Logger
+	// requireAgentIdentity carries exactly the judgement the launcher makes
+	// when it MINTS, applied to the same question at recovery time. Where a
+	// cookie-less call resolves the operator anyway, a worker with an
+	// unaccounted-for credential loses nothing, and stopping a run over it
+	// would be a stop with no remedy. Where an identity is required, that same
+	// worker provably cannot report, and continuing quietly is how a run gets
+	// to the end of its work with nothing recorded.
+	requireAgentIdentity bool
+}
+
+var _ workflowcore.WorkerCredentialAdopter = (*workflowWorkerAdopter)(nil)
+
+func (a *workflowWorkerAdopter) AdoptWorkerCredential(
+	ctx context.Context, req workflowcore.WorkerCredentialAdoptionRequest,
+) (workflowcore.WorkerCredentialAdoption, error) {
+	if a == nil || a.credentials == nil {
+		return workflowcore.WorkerCredentialAdoption{}, nil
+	}
+	res, err := a.credentials.AdoptWorkerSession(ctx, agentauth.WorkerAdoptionInput{
+		StepID:    req.StepID,
+		RunID:     req.RunID,
+		ProjectID: req.ProjectID,
+		SessionID: req.SessionID,
+		AttemptID: req.AttemptID,
+	})
+	if err != nil {
+		return workflowcore.WorkerCredentialAdoption{}, err
+	}
+	switch res.Outcome {
+	case agentauth.WorkerAdoptionAdopted:
+		return workflowcore.WorkerCredentialAdoption{CredentialID: res.CredentialID}, nil
+	case agentauth.WorkerAdoptionUnprovable:
+		if a.log != nil {
+			a.log.Warn("worker identity: an adopted worker's credential could not be accounted for",
+				"step", req.StepID, "session", req.SessionID, "detail", res.Detail,
+				"required", a.requireAgentIdentity)
+		}
+		return workflowcore.WorkerCredentialAdoption{
+			Blocked: a.requireAgentIdentity,
+			Detail:  res.Detail,
+		}, nil
+	default:
+		return workflowcore.WorkerCredentialAdoption{}, nil
+	}
+}

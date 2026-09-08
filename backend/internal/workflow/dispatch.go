@@ -612,7 +612,25 @@ func (c *Coordinator) attemptWorkHarness(ctx stdctx.Context, run domain.Workflow
 	// which branch is checked out there. Reading one from the record and the
 	// other from project configuration is what produced a direct-branch run
 	// pointed at a generated ao/* branch that does not exist.
-	placementType, placementBranch := c.frozenPlacementTarget(ctx, run, step)
+	//
+	// P5: and a placement AO cannot read is a launch AO does not perform.
+	// Passing the empty placement on would hand the decision back to the
+	// PROJECT's current execution mode, which is how an isolated_worktree run
+	// inside a direct-branch project ends up writing to the user's own
+	// checkout. This is a pre-work stage in the strictest sense -- nothing has
+	// been spawned, no workspace exists, no branch has been taken -- so it
+	// travels through the same bounded-retry-then-stop path every other
+	// pre-work failure does.
+	placementType, placementBranch, placementErr := c.frozenPlacementTarget(ctx, run, step)
+	if placementErr != nil {
+		now := c.clock()
+		class := classifyWorkerLaunchFailure(placementErr).Class
+		if aerr := c.concludeWorkerAttemptFailure(ctx, intent, class, now); aerr != nil {
+			return step, aerr
+		}
+		c.recordLaunchFailureBoundary(ctx, run, step, entry, intent, domain.LaunchStagePreflight, class, placementErr)
+		return c.recordWorkerLaunchFailure(ctx, run, step, entry, harness, workerLaunchStagePlacement, placementErr)
+	}
 
 	// PHASE 2 -- LAUNCH. Through the injectable launcher, with the process/
 	// session ownership proof read back through the injectable prober.
@@ -822,8 +840,78 @@ func (c *Coordinator) recordDispatchSuccess(ctx stdctx.Context, run domain.Workf
 	// before the worker path stamped tokens carries "", and an empty token is
 	// exactly what completes an unclaimed row.
 	intent := workerDispatchIntent{attempt: attempt, harness: rec.Harness, generation: entry.DispatchGeneration}
+	// P5: adopt the LAUNCH's identity as well as its session.
+	//
+	// A daemon that died between Spawn and bind left this worker holding a
+	// credential bound to nothing, which MayReachSession refuses for every
+	// session route -- so adopting the session alone brought back a worker that
+	// provably could not report on its own work, for the rest of the run. The
+	// attempt opened just above is what the re-attached credential is fenced
+	// to, which is why this happens here rather than inside the launcher.
+	//
+	// A refusal is a real stop and it is deliberately NOT confirmed past: a
+	// worker running with a credential AO cannot account for is exactly the
+	// ambiguity this dispatch path exists to escalate rather than to resolve on
+	// its own. It is reported in the vocabulary a person already reads for that.
+	if err := c.adoptWorkerCredential(ctx, run, step, rec.ID, attempt.ID); err != nil {
+		return c.raiseUnadoptableWorkerCredential(ctx, run, step, attempt, rec, err)
+	}
 	ownership := c.sessionOwnershipOrDefault().ObserveSessionOwnership(ctx, rec.ID)
 	return c.confirmWorkerDispatch(ctx, run, step, entry, intent, WorkerLaunchResult{Session: rec}, ownership)
+}
+
+// raiseUnadoptableWorkerCredential parks a run whose adopted worker holds a
+// credential AO cannot account for.
+//
+// It reuses the ambiguity raise rather than inventing a second stop shape,
+// because it IS one: the difference between "AO cannot prove whether this
+// launch produced a worker" and "AO cannot prove which worker holds this token"
+// is the sentence, not the remedy. The bounded evidence snapshot is collected
+// before any state moves, so a daemon that dies here still leaves something
+// readable.
+func (c *Coordinator) raiseUnadoptableWorkerCredential(
+	ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep,
+	attempt domain.WorkflowAttempt, rec domain.SessionRecord, cause error,
+) (domain.WorkflowStep, error) {
+	now := c.clock()
+	detail := fmt.Sprintf("%s: session %s was adopted but %v", ReasonWorkerCredentialUnadoptable, rec.ID, cause)
+	if c.log != nil {
+		c.log.Warn("workflow: an adopted worker's credential could not be accounted for",
+			"step", step.ID, "session", rec.ID, "err", cause)
+	}
+	// Evidence before any state moves, so a daemon that dies here leaves a
+	// readable stop rather than an unexplained one.
+	raise, rerr := c.raiseAmbiguousWorkerState(ctx, run, step, ReasonWorkerCredentialUnadoptable, detail,
+		c.observedWorkerFactsFor(ctx, rec.ID, nil))
+	if rerr != nil {
+		return step, rerr
+	}
+	// The attempt opened for this adoption is concluded rather than abandoned.
+	// An attempt row left with no outcome says work is in flight, and the one
+	// thing this stop is certain of is that no work is being accepted from this
+	// adoption.
+	if _, aerr := c.store.ClaimWorkflowAttemptOutcome(ctx, attempt.ID, now,
+		domain.WorkflowAttemptFailed, raise.ErrorClass()); aerr != nil {
+		return step, aerr
+	}
+	if step.State == domain.WorkflowStepRunning || step.State == domain.WorkflowStepReady {
+		if _, err := c.store.UpdateWorkflowStepState(ctx, step.ID, step.State, domain.WorkflowStepWaiting, now); err != nil {
+			return step, err
+		}
+		step.State = domain.WorkflowStepWaiting
+	}
+	if run.State == domain.WorkflowRunRunning || run.State == domain.WorkflowRunWaiting {
+		if _, err := c.store.UpdateWorkflowRunState(ctx, run.ID, run.State, domain.WorkflowRunNeedsAttention, now); err != nil {
+			return step, err
+		}
+	}
+	// The reason is written where every other stop writes it, so a parked run's
+	// newest checkpoint NAMES the stop rather than only explaining it.
+	c.recordAttentionStop(ctx, run, &step.ID, ReasonWorkerCredentialUnadoptable, detail)
+	// The outbox is deliberately left `dispatched`, exactly as the sibling
+	// ambiguity does: the launch really happened, nothing may re-launch over
+	// it, and a person decides what to do with the worker that is running.
+	return step, nil
 }
 
 // confirmWorkerDispatch is phase 3 followed by phase 4, and the ordering
