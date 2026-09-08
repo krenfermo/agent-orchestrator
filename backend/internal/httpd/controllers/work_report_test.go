@@ -3,6 +3,7 @@ package controllers_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -132,6 +133,9 @@ func TestWorkReportRouteStatusCodes(t *testing.T) {
 		{"the window has closed", workflowcore.ErrWorkReportWindowClosed, http.StatusConflict, "WORK_REPORT_WINDOW_CLOSED"},
 		{"no work step in this session", workflowcore.ErrNotFound, http.StatusNotFound, "WORK_REPORT_NO_ACTIVE_STEP"},
 		{"the request is unusable", workflowcore.ErrInvalid, http.StatusBadRequest, "WORK_REPORT_INVALID"},
+		// A durable-write failure: the report did not land, and the caller is
+		// told so rather than getting a success it cannot rely on.
+		{"the store would not write it", errors.New("database is locked"), http.StatusInternalServerError, "WORK_REPORT_FAILED"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := &workReportService{err: tc.err}
