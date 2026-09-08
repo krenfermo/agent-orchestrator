@@ -186,6 +186,23 @@ func (c ResolvedConfig) Usable() bool {
 	return c.Enabled && c.Workspace != "" && c.ExternalProjectID != "" && c.APIToken != ""
 }
 
+// Reachable reports whether the WORKSPACE can be talked to, which is a strictly
+// weaker question than Usable and the only one the two discovery calls need.
+//
+// Preflight and ListProjects are workspace-scoped: plane.New takes a base URL,
+// a workspace and a token, and neither call names a project. Judging them by
+// Usable made them unreachable exactly when they are useful -- before the
+// mapping exists -- and produced the deadlock this fixes: the project picker
+// could not list projects until a project was already chosen, and the chosen
+// project could not be verified until the integration was already switched on.
+//
+// It deliberately does NOT require Enabled. "Is this token good for this
+// workspace?" is the question somebody asks BEFORE promising AO will write to
+// their board, and a test that can only be run after committing is not a test.
+func (c ResolvedConfig) Reachable() bool {
+	return c.Workspace != "" && c.APIToken != ""
+}
+
 // ErrNotConfigured is the sentinel every "there is no integration here" answer
 // wraps. It is a normal, expected state — the DEFAULT state — so callers
 // branch on it rather than treating it as a failure.
@@ -264,6 +281,28 @@ func (s *Service) client(ctx context.Context, projectID domain.ProjectID) (ports
 		return nil, ResolvedConfig{}, err
 	}
 	if !cfg.Usable() {
+		return nil, cfg, ErrNotConfigured
+	}
+	c, err := s.provider(cfg)
+	if err != nil {
+		return nil, cfg, err
+	}
+	return c, cfg, nil
+}
+
+// discoveryClient builds a client for the read-only, workspace-scoped calls:
+// the connection preflight and the project listing. Both are GETs, neither
+// names a project, and neither writes anything anywhere.
+//
+// Every other provider path still goes through client() and its full Usable()
+// gate, so nothing that can change somebody's board became reachable by a
+// configuration that is merely half-written.
+func (s *Service) discoveryClient(ctx context.Context, projectID domain.ProjectID) (ports.WorkItems, ResolvedConfig, error) {
+	cfg, err := s.Resolve(ctx, projectID)
+	if err != nil {
+		return nil, ResolvedConfig{}, err
+	}
+	if !cfg.Reachable() {
 		return nil, cfg, ErrNotConfigured
 	}
 	c, err := s.provider(cfg)

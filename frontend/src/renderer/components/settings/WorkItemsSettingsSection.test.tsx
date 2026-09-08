@@ -49,6 +49,16 @@ const DISCONNECTED = {
 	degraded: false,
 };
 
+// The state MEDUSA was actually stuck in: a base URL, a workspace and a stored
+// token, no project mapping, and the connection off. Every field here is the
+// shape of the real row (work_item_configs), not an invented one.
+const HALF_CONFIGURED = {
+	...DISCONNECTED,
+	baseUrl: "http://plane.example.test",
+	workspace: "acme-dev",
+	tokenConfigured: true,
+};
+
 const CONNECTED = {
 	...DISCONNECTED,
 	workspace: "acme",
@@ -281,5 +291,112 @@ describe("Planning settings", () => {
 		await user.click(await screen.findByRole("button", { name: /test connection/i }));
 		expect(await screen.findByTestId("workitems-error")).toHaveTextContent("Plane rejected the API token");
 		expect(screen.getByLabelText(/workspace slug/i)).toHaveValue("acme");
+	});
+
+	// The deadlock, at the widget. A stored token plus a workspace and no
+	// mapping used to be a terminal state: the project id was settable ONLY
+	// through the picker, and the picker could not load until a project was
+	// already mapped.
+	describe("a configuration with no project mapping", () => {
+		it("offers a project id field so the mapping can be typed", async () => {
+			answer({
+				"/api/v1/projects/{id}/workitems": HALF_CONFIGURED,
+				"/api/v1/projects/{id}/workitems/projects": { projects: [] },
+			});
+			render(<WorkItemsSettingsSection projectId="p1" />, { wrapper });
+
+			const field = await screen.findByLabelText(/plane project id/i);
+			expect(field).toHaveValue("");
+			// The picker is not rendered — there is nothing to pick from — and
+			// that must not be the only way in.
+			expect(screen.queryByLabelText("Plane project")).not.toBeInTheDocument();
+		});
+
+		it("saves the typed project id alongside the rest, without erasing the stored token", async () => {
+			answer({
+				"/api/v1/projects/{id}/workitems": HALF_CONFIGURED,
+				"/api/v1/projects/{id}/workitems/projects": { projects: [] },
+			});
+			apiPUT.mockResolvedValue({ data: { ...HALF_CONFIGURED, externalProjectId: "uuid-1" } });
+			render(<WorkItemsSettingsSection projectId="p1" />, { wrapper });
+
+			await userEvent.type(await screen.findByLabelText(/plane project id/i), "uuid-1");
+			await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+			const body = apiPUT.mock.calls[0][1].body;
+            expect(body.externalProjectId).toBe("uuid-1");
+			expect(body.workspace).toBe("acme-dev");
+			expect(body.baseUrl).toBe("http://plane.example.test");
+			// The credential field was untouched, so it must not travel at all.
+			expect(body).not.toHaveProperty("apiToken");
+		});
+
+		it("says why the connection cannot be switched on yet", async () => {
+			answer({
+				"/api/v1/projects/{id}/workitems": HALF_CONFIGURED,
+				"/api/v1/projects/{id}/workitems/projects": { projects: [] },
+			});
+			render(<WorkItemsSettingsSection projectId="p1" />, { wrapper });
+
+			expect(await screen.findByTestId("workitems-enable-blocked")).toHaveTextContent(
+				"A workspace, a project id and an API token are all required",
+			);
+
+			// Typing is not saving, and the toggle says so rather than looking
+			// broken.
+			await userEvent.type(screen.getByLabelText(/plane project id/i), "uuid-1");
+			expect(screen.getByTestId("workitems-enable-blocked")).toHaveTextContent(
+				"Save the project id before switching the connection on",
+			);
+		});
+
+		it("can still test the connection: a preflight needs a workspace and a token, not a mapping", async () => {
+			answer({
+				"/api/v1/projects/{id}/workitems": HALF_CONFIGURED,
+				"/api/v1/projects/{id}/workitems/projects": { projects: [] },
+			});
+			apiPOST.mockResolvedValue({ data: { provider: "plane", workspace: "acme-dev", projects: 4 } });
+			render(<WorkItemsSettingsSection projectId="p1" />, { wrapper });
+
+			const testButton = await screen.findByRole("button", { name: "Test connection" });
+			expect(testButton).toBeEnabled();
+			await userEvent.click(testButton);
+
+			expect(apiPOST).toHaveBeenCalledWith(
+				"/api/v1/projects/{id}/workitems/test",
+				expect.objectContaining({ params: { path: { id: "p1" } } }),
+			);
+			expect(await screen.findByText(/Connected to acme-dev/)).toBeInTheDocument();
+		});
+
+		it("enables the toggle once the daemon has the mapping stored", async () => {
+			answer({
+				"/api/v1/projects/{id}/workitems": { ...HALF_CONFIGURED, externalProjectId: "uuid-1" },
+				"/api/v1/projects/{id}/workitems/projects": { projects: [] },
+			});
+			render(<WorkItemsSettingsSection projectId="p1" />, { wrapper });
+
+			await screen.findByLabelText(/plane project id/i);
+			expect(screen.queryByTestId("workitems-enable-blocked")).not.toBeInTheDocument();
+			expect(screen.getByRole("checkbox", { name: /Connect this project/ })).toBeEnabled();
+		});
+
+		it("keeps the picker as the shortcut it was meant to be", async () => {
+			answer({
+				"/api/v1/projects/{id}/workitems": HALF_CONFIGURED,
+				"/api/v1/projects/{id}/workitems/projects": {
+					projects: [{ id: "uuid-9", name: "Medusa", identifier: "MED" }],
+				},
+			});
+			apiPUT.mockResolvedValue({ data: { ...HALF_CONFIGURED, externalProjectId: "uuid-9" } });
+			render(<WorkItemsSettingsSection projectId="p1" />, { wrapper });
+
+			await userEvent.click(await screen.findByLabelText("Plane project"));
+			await userEvent.click(await screen.findByText("Medusa (MED)"));
+
+			expect(apiPUT.mock.calls[0][1].body).toEqual({ externalProjectId: "uuid-9" });
+			// And the choice lands in the field, so the two controls agree.
+			expect(screen.getByLabelText(/plane project id/i)).toHaveValue("uuid-9");
+		});
 	});
 });
