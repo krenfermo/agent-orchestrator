@@ -30,6 +30,8 @@ vi.mock("../hooks/useWorkflowRuns", () => ({
 	APPROVAL_POLICIES: ["automatic", "manual"] as const,
 	REPAIR_POLICIES: ["disabled", "suggest", "automatic"] as const,
 	PLACEMENTS: ["direct_branch", "isolated_worktree", "auto"] as const,
+	REVIEW_DEPTHS: ["none", "light", "deep"] as const,
+	DEFAULT_REVIEW_DEPTH: { task: "none", autonomous: "light", master: "deep" } as const,
 }));
 
 vi.mock("../hooks/useExecutionPolicy", () => ({
@@ -230,6 +232,64 @@ describe("WorkflowsList", () => {
 		await userEvent.click(screen.getByRole("button", { name: /create/i }));
 
 		expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ placement: "direct_branch" }));
+	});
+
+	// P5-A: review depth is a fifth independent axis. Its default TRACKS the
+	// selected strategy (none for a bounded Task, light for Autonomous, deep
+	// for Master) until the user expresses an opinion of their own, which is
+	// the same shape the approval default already uses.
+	it("defaults the review depth from the selected strategy and sends the one picked", async () => {
+		const createRun = vi.fn().mockResolvedValue({});
+		useWorkflowRunsMock.mockReturnValue({
+			runs: [],
+			isLoading: false,
+			error: undefined,
+			createRun,
+			creating: false,
+			createError: undefined,
+		});
+		useProjectsListMock.mockReturnValue({ projects: PROJECTS, isLoading: false, error: undefined });
+		render(<WorkflowsList />);
+
+		const depth = screen.getByRole("group", { name: "Review depth" });
+		const strategies = screen.getByRole("group", { name: "Execution strategy" });
+
+		// Autonomous is the form's default strategy, so a bounded review is the
+		// default depth.
+		expect(within(depth).getByRole("radio", { name: /^Bounded review/ })).toBeChecked();
+
+		// Switching to Master moves the default to a full review, without the
+		// user having touched the depth control.
+		await userEvent.click(within(strategies).getByRole("radio", { name: /^Master/ }));
+		expect(within(depth).getByRole("radio", { name: /^Full review/ })).toBeChecked();
+
+		// Switching to Task moves it to no reviewer.
+		await userEvent.click(within(strategies).getByRole("radio", { name: /^Task/ }));
+		expect(within(depth).getByRole("radio", { name: /^No reviewer/ })).toBeChecked();
+
+		// And an explicit click wins from then on: changing the strategy again
+		// must not silently overwrite a choice the user made.
+		await userEvent.click(within(depth).getByRole("radio", { name: /^Full review/ }));
+		await userEvent.click(within(strategies).getByRole("radio", { name: /^Autonomous/ }));
+		expect(within(depth).getByRole("radio", { name: /^Full review/ })).toBeChecked();
+
+		await userEvent.click(screen.getByRole("combobox", { name: "Project" }));
+		await userEvent.click(await screen.findByText("Project B"));
+		await userEvent.type(screen.getByLabelText(/objective/i), "Ship the thing");
+		await userEvent.click(screen.getByRole("button", { name: /create/i }));
+
+		expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ reviewDepth: "deep" }));
+	});
+
+	// A user who picks the cheapest option must be able to see, right there,
+	// that AO will not honour it for a change that matters.
+	it("states the risk clamp next to the review-depth control", async () => {
+		useProjectsListMock.mockReturnValue({ projects: PROJECTS, isLoading: false, error: undefined });
+		render(<WorkflowsList />);
+
+		const depth = screen.getByRole("group", { name: "Review depth" });
+		expect(within(depth).getByText(/deeper of your choice and the change's own risk/i)).toBeInTheDocument();
+		expect(within(depth).getByText(/payments/i)).toBeInTheDocument();
 	});
 
 	// §12: the choices that change execution semantics are restated where the

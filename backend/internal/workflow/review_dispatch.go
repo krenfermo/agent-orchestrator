@@ -604,6 +604,15 @@ func (c *Coordinator) dispatchReviewStep(ctx stdctx.Context, run domain.Workflow
 		if err := c.persistReviewPolicyDecision(ctx, run, reviewStep, decision); err != nil {
 			return reviewStep, err
 		}
+		// P5-A: the depth this review step will run at, resolved from the very
+		// decision above and recorded as its own checkpoint. It is written
+		// BEFORE the SKIPPED short-circuit deliberately: a review that never
+		// ran should still be able to say what depth it would have run at and
+		// which risk tier authorized that, rather than leaving a gap a later
+		// reader has to guess across.
+		if _, err := c.resolveReviewDepthDecision(ctx, run, reviewStep, decision); err != nil {
+			return reviewStep, err
+		}
 		if decision.Decision == ReviewSkipped {
 			return c.applyReviewPolicySkip(ctx, run, reviewStep)
 		}
@@ -1539,7 +1548,14 @@ func (c *Coordinator) dispatchReviewFromPending(
 	// correctly-scoped child task for work the plan had assigned to later tasks
 	// — every cycle, until the fix budget ran out. See ReviewTaskScope.
 	scope := c.reviewScopeForRun(ctx, run)
-	prompt := BuildReviewPrompt(ReviewPromptInput{
+	// P5-A: how deep this cycle reviews, and the evidence a bounded pass is
+	// judged against. Both are read from durable checkpoints rather than
+	// recomputed here, so every cycle of this step — including one dispatched
+	// after a restart — asks the same question against the same facts.
+	// EffectiveReviewDepth resolves to deep on any read failure, so a prompt
+	// AO cannot justify shortening is never shortened.
+	depth := c.EffectiveReviewDepth(ctx, run, reviewStep)
+	in := ReviewPromptInput{
 		Objective:             run.Objective,
 		AcceptanceCriteria:    scope.AcceptanceCriteria,
 		EffectiveSpec:         RenderEffectiveSpecification(c.effectiveTaskSpecification(ctx, run, scope.AcceptanceCriteria)),
@@ -1551,7 +1567,12 @@ func (c *Coordinator) dispatchReviewFromPending(
 		BaseSHA:               baseSHA,
 		HeadSHA:               targetSHA,
 		ReviewRunID:           reviewRunID,
-	})
+		Depth:                 depth.Effective,
+	}
+	if depth.Effective == domain.ReviewDepthLight {
+		c.attachLightReviewEvidence(ctx, &in, run, reviewStep, depth)
+	}
+	prompt := BuildReviewPrompt(in)
 
 	// Every failure from here on has already inserted a review_run: reviewRunID
 	// is handed to the recorder so that partial durable state is closed out

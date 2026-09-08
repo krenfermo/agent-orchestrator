@@ -2271,5 +2271,13 @@
 	"zone.done": "Encerrado",
 	"zone.merge": "Pronto para merge",
 	"zone.pending": "Em revisão",
-	"zone.working": "Em andamento"
+	"zone.working": "Em andamento",
+	"wf.reviewDepth.legend": "Profundidade da revisão",
+	"wf.reviewDepth.none": "Sem revisor",
+	"wf.reviewDepth.noneExplainer": "A verificação do próprio AO é a única barreira. Disponível para mudanças que o AO já consegue provar seguras.",
+	"wf.reviewDepth.light": "Revisão limitada",
+	"wf.reviewDepth.lightExplainer": "Um revisor julga o diff em relação aos critérios de aceitação e às evidências do AO, sem reler o repositório.",
+	"wf.reviewDepth.deep": "Revisão completa",
+	"wf.reviewDepth.deepExplainer": "Uma revisão independente completa da mudança. É o que o AO sempre fez.",
+	"wf.reviewDepth.clampNote": "O AO revisa pela maior entre a sua escolha e o risco da mudança. Segurança, autenticação, pagamentos, migrações, concorrência, infraestrutura, contratos públicos e dependências sempre recebem revisão completa."
 }

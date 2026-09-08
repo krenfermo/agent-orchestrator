@@ -2255,5 +2255,13 @@
 	"zone.done": "Beendet",
 	"zone.merge": "Bereit zum Mergen",
 	"zone.pending": "In Review",
-	"zone.working": "In Arbeit"
+	"zone.working": "In Arbeit",
+	"wf.reviewDepth.legend": "Prüftiefe",
+	"wf.reviewDepth.none": "Kein Prüfer",
+	"wf.reviewDepth.noneExplainer": "Nur die eigene Verifikation von AO greift. Verfügbar für Änderungen, deren Sicherheit AO bereits belegen kann.",
+	"wf.reviewDepth.light": "Begrenzte Prüfung",
+	"wf.reviewDepth.lightExplainer": "Ein Prüfer beurteilt das Diff anhand der Abnahmekriterien und der Belege von AO, ohne das Repository erneut zu lesen.",
+	"wf.reviewDepth.deep": "Vollständige Prüfung",
+	"wf.reviewDepth.deepExplainer": "Ein vollständiger unabhängiger Prüfdurchlauf. Das ist, was AO immer getan hat.",
+	"wf.reviewDepth.clampNote": "AO prüft mit der größeren Tiefe aus Ihrer Wahl und dem Risiko der Änderung. Sicherheit, Authentifizierung, Zahlungen, Migrationen, Nebenläufigkeit, Infrastruktur, öffentliche Verträge und Abhängigkeiten erhalten stets eine vollständige Prüfung."
 }

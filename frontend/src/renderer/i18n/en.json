@@ -2237,5 +2237,13 @@
 	"zone.done": "Terminated",
 	"zone.merge": "Ready to merge",
 	"zone.pending": "In review",
-	"zone.working": "Working"
+	"zone.working": "Working",
+	"wf.reviewDepth.legend": "Review depth",
+	"wf.reviewDepth.none": "No reviewer",
+	"wf.reviewDepth.noneExplainer": "AO's own verification is the only gate. Available for changes AO can already prove safe.",
+	"wf.reviewDepth.light": "Bounded review",
+	"wf.reviewDepth.lightExplainer": "A reviewer judges the diff against the acceptance criteria and AO's evidence, without re-reading the repository.",
+	"wf.reviewDepth.deep": "Full review",
+	"wf.reviewDepth.deepExplainer": "A full independent review pass over the change. This is what AO has always done.",
+	"wf.reviewDepth.clampNote": "AO reviews at the deeper of your choice and the change's own risk. Security, authentication, payments, migrations, concurrency, infrastructure, public contracts and dependency changes always get a full review."
 }

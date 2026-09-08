@@ -5,14 +5,17 @@ import { useExecutionPolicy } from "../hooks/useExecutionPolicy";
 import { useProjectsList } from "../hooks/useProjectsList";
 import {
 	APPROVAL_POLICIES,
+	DEFAULT_REVIEW_DEPTH,
 	EXECUTION_STRATEGIES,
 	PLACEMENTS,
 	REPAIR_POLICIES,
+	REVIEW_DEPTHS,
 	useWorkflowRuns,
 	type ApprovalPolicy,
 	type ExecutionStrategy,
 	type Placement,
 	type RepairPolicy,
+	type ReviewDepth,
 } from "../hooks/useWorkflowRuns";
 import { useSettings } from "../hooks/useSettings";
 import { useUiStore } from "../stores/ui-store";
@@ -120,6 +123,37 @@ export function WorkflowsList() {
 			explainer: t("shell.workflowsStrategyMasterExplainer"),
 		},
 	};
+	// P5-A: how much scrutiny the delivered change gets — a fifth independent
+	// axis, frozen at creation like the others.
+	//
+	// `depthChoice` starts undefined so the radio follows the selected
+	// strategy's own default (none for a bounded Task, light for Autonomous,
+	// deep for Master) until somebody clicks, and any explicit click wins from
+	// then on. That is deliberately the same shape `approvalChoice` uses: a
+	// default that visibly tracks another choice, and stops the moment the user
+	// expresses one of their own.
+	//
+	// Nothing selected here can make a review shallower than the change's risk
+	// requires. The daemon reviews at the deeper of this request and the
+	// change's deterministic risk tier, so a sensitive change is reviewed in
+	// full whatever this says — which is why the form can offer the cheap
+	// options without a warning banner.
+	const [depthChoice, setDepthChoice] = useState<ReviewDepth | undefined>(undefined);
+	const reviewDepth = depthChoice ?? DEFAULT_REVIEW_DEPTH[strategy];
+	const reviewDepthLabels: Record<ReviewDepth, { label: string; explainer: string }> = {
+		none: {
+			label: t("wf.reviewDepth.none"),
+			explainer: t("wf.reviewDepth.noneExplainer"),
+		},
+		light: {
+			label: t("wf.reviewDepth.light"),
+			explainer: t("wf.reviewDepth.lightExplainer"),
+		},
+		deep: {
+			label: t("wf.reviewDepth.deep"),
+			explainer: t("wf.reviewDepth.deepExplainer"),
+		},
+	};
 	// P1-B: auto-repair is a third independent axis, frozen at creation.
 	// "suggest" is the default because a repair writes code, and opting into
 	// that unattended should be a decision somebody made.
@@ -182,6 +216,7 @@ export function WorkflowsList() {
 			approvalPolicy,
 			repairPolicy,
 			placement,
+			reviewDepth,
 		}).then(() => {
 			setObjective("");
 		});
@@ -365,6 +400,33 @@ export function WorkflowsList() {
 								</label>
 							))}
 						</fieldset>
+						<fieldset className="flex flex-col gap-2">
+							<legend className="text-sm">{t("wf.reviewDepth.legend")}</legend>
+							{REVIEW_DEPTHS.map((value) => (
+								<label
+									className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
+										reviewDepth === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
+									}`}
+									key={value}
+								>
+									<span className="flex items-center gap-2 font-medium text-foreground">
+										<input
+											checked={reviewDepth === value}
+											name="workflow-review-depth"
+											onChange={() => setDepthChoice(value)}
+											type="radio"
+											value={value}
+										/>
+										{reviewDepthLabels[value].label}
+									</span>
+									<span className="pl-5 text-muted-foreground">{reviewDepthLabels[value].explainer}</span>
+								</label>
+							))}
+							{/* The clamp, stated once, next to the dial it applies to.
+							    A user who picks the cheapest option must be able to see
+							    that AO will not honour it for a change that matters. */}
+							<p className="text-xs text-muted-foreground">{t("wf.reviewDepth.clampNote")}</p>
+						</fieldset>
 					</div>
 					{/* §12: every choice that changes what AO actually does, in one
 					    place, before the button that starts it. None of it is hidden
@@ -376,6 +438,7 @@ export function WorkflowsList() {
 						placement={placement}
 						project={selectedProject}
 						repairPolicy={repairPolicy}
+						reviewDepth={reviewDepth}
 						strategy={strategy}
 					/>
 					<button
@@ -450,6 +513,7 @@ function TaskCreationSummary({
 	approvalPolicy,
 	repairPolicy,
 	placement,
+	reviewDepth,
 	project,
 	memoryMode,
 }: {
@@ -457,6 +521,7 @@ function TaskCreationSummary({
 	approvalPolicy: ApprovalPolicy;
 	repairPolicy: RepairPolicy;
 	placement: Placement;
+	reviewDepth: ReviewDepth;
 	project: { name: string; path?: string; repo?: string; config?: { defaultBranch?: string } } | undefined;
 	memoryMode: string | undefined;
 }) {
@@ -481,6 +546,8 @@ function TaskCreationSummary({
 				</dd>
 				<dt>{t("wf.create.placement")}</dt>
 				<dd>{t(`wf.placement.${placement}` as "wf.placement.auto")}</dd>
+				<dt>{t("wf.reviewDepth.legend")}</dt>
+				<dd>{t(`wf.reviewDepth.${reviewDepth}` as "wf.reviewDepth.light")}</dd>
 				<dt>{t("wf.create.memory")}</dt>
 				<dd>{memoryMode ? t(`wf.memory.${memoryMode}` as "wf.memory.off") : t("wf.memory.unknown")}</dd>
 				{project ? (

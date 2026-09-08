@@ -2255,5 +2255,13 @@
 	"zone.done": "終了済み",
 	"zone.merge": "マージ準備完了",
 	"zone.pending": "レビュー中",
-	"zone.working": "作業中"
+	"zone.working": "作業中",
+	"wf.reviewDepth.legend": "レビューの深さ",
+	"wf.reviewDepth.none": "レビュアーなし",
+	"wf.reviewDepth.noneExplainer": "AO 自身の検証だけがゲートになります。AO がすでに安全だと証明できる変更で利用できます。",
+	"wf.reviewDepth.light": "限定レビュー",
+	"wf.reviewDepth.lightExplainer": "レビュアーはリポジトリを読み直さず、受け入れ基準と AO の証跡に照らして差分を判断します。",
+	"wf.reviewDepth.deep": "完全レビュー",
+	"wf.reviewDepth.deepExplainer": "変更に対する完全な独立レビュー。AO がこれまで行ってきたものです。",
+	"wf.reviewDepth.clampNote": "AO は選択と変更自体のリスクのうち、深いほうでレビューします。セキュリティ、認証、決済、マイグレーション、並行処理、インフラ、公開契約、依存関係の変更は常に完全レビューになります。"
 }

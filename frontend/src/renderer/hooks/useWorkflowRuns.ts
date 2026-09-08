@@ -39,6 +39,38 @@ export type RepairPolicy = (typeof REPAIR_POLICIES)[number];
 export const PLACEMENTS = ["direct_branch", "isolated_worktree", "auto"] as const;
 export type Placement = (typeof PLACEMENTS)[number];
 
+/**
+ * P5-A: how much scrutiny this run asks its delivered changes to receive.
+ *
+ * The order is cheapest first, which is also the order of increasing cost, so
+ * the list reads as a dial rather than as three unrelated options.
+ *
+ * It is a REQUEST, not a guarantee. The daemon reviews every change at the
+ * deeper of this request and that change's own deterministic risk tier, so a
+ * change touching security, authentication, payments, migrations, concurrency,
+ * infrastructure, a public contract or dependency configuration gets a full
+ * independent review whatever is selected here. The renderer only has to stop
+ * describing the choice as a ceiling.
+ *
+ * `auto` is not offered: the daemon's default is per-strategy, and the form
+ * already shows which strategy is selected, so an explicit dial is clearer than
+ * a fourth option meaning "whatever the other radio group implies".
+ */
+export const REVIEW_DEPTHS = ["none", "light", "deep"] as const;
+export type ReviewDepth = (typeof REVIEW_DEPTHS)[number];
+
+/**
+ * The depth each execution strategy asks for when nobody chose one. It mirrors
+ * domain.DefaultRequestedReviewDepth, and it is duplicated here only so the
+ * form can pre-select the honest default as the strategy radio changes — the
+ * daemon still freezes its own default and would ignore a disagreeing renderer.
+ */
+export const DEFAULT_REVIEW_DEPTH: Record<ExecutionStrategy, ReviewDepth> = {
+	task: "none",
+	autonomous: "light",
+	master: "deep",
+};
+
 export function workflowRunsQueryKey(projectId?: string) {
 	return ["workflow-runs", projectId ?? ""] as const;
 }
@@ -70,6 +102,7 @@ export function useWorkflowRuns(projectId?: string) {
 			approvalPolicy: ApprovalPolicy;
 			repairPolicy: RepairPolicy;
 			placement: Placement;
+			reviewDepth: ReviewDepth;
 		}) => {
 			const { data, error } = await apiClient.POST("/api/v1/projects/{projectId}/workflows", {
 				params: { path: { projectId: input.projectId } },
@@ -88,6 +121,12 @@ export function useWorkflowRuns(projectId?: string) {
 					// autonomous kickoff, and losing that race is exactly how an
 					// explicit "current branch" became a worktree nobody asked for.
 					placement: input.placement,
+					// P5-A: the review-depth request travels with the create
+					// request for the same reason placement does — it is frozen
+					// before anything can execute. It cannot make a review
+					// shallower than the change's risk tier allows; that clamp is
+					// the daemon's and is not expressible here.
+					reviewDepth: input.reviewDepth,
 				},
 			});
 			if (error) throw error;

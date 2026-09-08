@@ -115,6 +115,36 @@ type WorkflowPolicy struct {
 	// of zero. A run created before anybody could set a budget never opted into
 	// being stopped by one.
 	Usage UsageBudgetPolicy `json:"usage,omitempty"`
+	// ReviewDepth is P5-A's frozen review-depth request: how much scrutiny this
+	// run asks for its delivered changes to receive. Frozen at creation for the
+	// same reason Repair, Autonomy and Usage are -- a later Settings change must
+	// not make an in-flight run's reviews shallower, and a restart must not
+	// change the answer.
+	//
+	// It records the REQUEST, not an answer: the effective depth of any one
+	// review also depends on that change's risk tier, which does not exist
+	// until a worker has delivered something. See domain.ResolveReviewDepth.
+	//
+	// A snapshot decoded from before P5-A has this at its zero value; callers
+	// must use EffectiveReviewDepthPolicy, never read ReviewDepth directly.
+	ReviewDepth ReviewDepthPolicySnapshot `json:"reviewDepth,omitempty"`
+}
+
+// EffectiveReviewDepthPolicy returns p.ReviewDepth with the forward-compatible
+// default filled in. The fallback is deliberately `deep`: a run created before
+// anybody could choose a depth ran under a full independent review, and reading
+// it as anything cheaper would retroactively downgrade scrutiny nobody chose to
+// downgrade.
+func (p WorkflowPolicy) EffectiveReviewDepthPolicy() ReviewDepthPolicySnapshot {
+	depth := p.ReviewDepth
+	if !depth.Requested.Valid() {
+		depth.Requested = ReviewDepthDeep
+		depth.Source = ReviewDepthRecovered
+	}
+	if depth.Version == "" {
+		depth.Version = ReviewDepthPolicyVersion
+	}
+	return depth
 }
 
 // UsageBudgetPolicyVersion identifies the shape of a frozen usage budget.

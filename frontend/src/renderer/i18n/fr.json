@@ -2271,5 +2271,13 @@
 	"zone.done": "Terminé",
 	"zone.merge": "Prêt à fusionner",
 	"zone.pending": "En revue",
-	"zone.working": "En cours"
+	"zone.working": "En cours",
+	"wf.reviewDepth.legend": "Profondeur de revue",
+	"wf.reviewDepth.none": "Aucun relecteur",
+	"wf.reviewDepth.noneExplainer": "La vérification d'AO est le seul garde-fou. Disponible pour les changements qu'AO peut déjà prouver sûrs.",
+	"wf.reviewDepth.light": "Revue bornée",
+	"wf.reviewDepth.lightExplainer": "Un relecteur juge le diff au regard des critères d'acceptation et des preuves d'AO, sans relire le dépôt.",
+	"wf.reviewDepth.deep": "Revue complète",
+	"wf.reviewDepth.deepExplainer": "Une revue indépendante complète du changement. C'est ce qu'AO a toujours fait.",
+	"wf.reviewDepth.clampNote": "AO revoit à la plus profonde des deux : votre choix et le risque du changement. Sécurité, authentification, paiements, migrations, concurrence, infrastructure, contrats publics et dépendances reçoivent toujours une revue complète."
 }
