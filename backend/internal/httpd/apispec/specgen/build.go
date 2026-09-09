@@ -221,6 +221,19 @@ var schemaNames = map[string]string{
 	"ControllersSkillCapabilityDecisionView":          "SkillCapabilityDecisionView",
 	"ControllersSkillRunnerStatusView":                "SkillRunnerStatusView",
 	"ControllersSkillDryRunResponse":                  "SkillDryRunResponse",
+	"ControllersSkillRegistryView":                    "SkillRegistryView",
+	"ControllersSkillRegistryListResponse":            "SkillRegistryListResponse",
+	"ControllersSaveSkillRegistryRequest":             "SaveSkillRegistryRequest",
+	"ControllersSkillReleaseModeView":                 "SkillReleaseModeView",
+	"ControllersSkillReleaseView":                     "SkillReleaseView",
+	"ControllersSkillRegistryNoteView":                "SkillRegistryNoteView",
+	"ControllersSkillMarketplaceSearchResponse":       "SkillMarketplaceSearchResponse",
+	"ControllersSkillReleaseDetailResponse":           "SkillReleaseDetailResponse",
+	"ControllersInstallSkillReleaseRequest":           "InstallSkillReleaseRequest",
+	"ControllersSkillInstallOriginView":               "SkillInstallOriginView",
+	"ControllersSkillInstallOutcomeView":              "SkillInstallOutcomeView",
+	"ControllersSkillUpdateStatusView":                "SkillUpdateStatusView",
+	"ControllersSkillUpdateCheckResponse":             "SkillUpdateCheckResponse",
 	"ControllersSettingsResponse":                     "SettingsResponse",
 	"ControllersUpdateSessionInterfaceRequest":        "UpdateSessionInterfaceRequest",
 	"ControllersConversationSnapshotResponse":         "ConversationSnapshotResponse",
@@ -1187,6 +1200,85 @@ func authOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodGet, path: "/api/v1/skills/registries", id: "listSkillRegistries", tag: "skills",
+			summary: "Skills: every skill registry this installation is configured to install from, with its type, location, trust policy and priority. A registry scoped to one organization is listed only to that organization's members. The response also carries the trust model in words - installing verifies INTEGRITY (AO fetches the package and computes both digests itself), which is not the same as knowing who wrote it, because AO verifies no publisher signature. Requires settings.read.",
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillRegistryListResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPut, path: "/api/v1/skills/registries/{registryId}", id: "saveSkillRegistry", tag: "skills",
+			summary:    "Skills: add or update one registry configuration. AO opens it before recording it - a registry it cannot read is refused, because one that answers every search with silence reads as \"this registry has nothing\". A credential is stored as the NAME of a sealed secret, never a value. A registry scoped to a tenant can only be configured by a member of that tenant. Requires settings.manage.",
+			pathParams: []any{controllers.SkillRegistryParams{}},
+			reqBody:    controllers.SaveSkillRegistryRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillRegistryView{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/skills/registries/{registryId}", id: "removeSkillRegistry", tag: "skills",
+			summary:    "Skills: remove one registry configuration. Every package installed from it stays installed and keeps its recorded provenance: removing a compromised registry must not erase the evidence of what it served, and must not silently uninstall a package a project may have pinned. Requires settings.manage.",
+			pathParams: []any{controllers.SkillRegistryParams{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.OKResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/skills/marketplace", id: "searchSkillMarketplace", tag: "skills",
+			summary:    "Skills: search every enabled registry you can see. It downloads no package code - fetching is a separate step that only an install performs - and it stores no query. Every result reports trust \"unverified\", because a search hashed nothing; a release only becomes \"verified\" once AO has fetched and measured its bytes at install. A registry that could not be read is NAMED in notes rather than silently absent, since \"this registry has nothing\" and \"AO could not read it\" are different answers. Requires settings.read.",
+			pathParams: []any{skillMarketplaceQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillMarketplaceSearchResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/skills/marketplace/{registryId}/{skillId}", id: "getSkillRelease", tag: "skills",
+			summary:    "Skills: one release and every version of it the registry offers, including deprecated and revoked ones - the version list is where somebody finds out the version they wanted was withdrawn. Carries the requested capabilities, the execution modes, the publisher, both digests, any provenance the release CLAIMS (AO validates none of it), the compatibility verdict against this build, and whether it is already installed. Requires settings.read.",
+			pathParams: []any{controllers.SkillReleaseParams{}, skillReleaseQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillReleaseDetailResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/skills/marketplace/install", id: "installSkillRelease", tag: "skills",
+			summary: "Skills: install ONE exact release from one configured registry. A version is required and exact - there is no latest. AO re-resolves the release, refuses it if the registry has revoked it, checks the registry's trust policy and the AO version range, fetches the package into a quarantine directory, and verifies BOTH digests plus the manifest's agreement with the listing over the bytes that landed before anything reaches the catalog. A symlink anywhere in the package is refused rather than followed. This enables the skill on NO project, grants no capability, approves no container image and runs no publisher script. Requires settings.manage.",
+			reqBody: controllers.InstallSkillReleaseRequest{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.SkillInstallOutcomeView{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/skills/updates", id: "checkSkillUpdates", tag: "skills",
+			summary: "Skills: ask each installed release's registry what it says now. AO polls nothing on its own - this is a request a person made. It reports a newer installable version where one exists, names a registry it could not reach without touching that install's recorded provenance, and marks any installed release the registry has since REVOKED. A revocation blocks new installs and nothing else: AO does not uninstall it, does not disable it on any project, and does not stop a run already under way. Requires settings.read.",
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillUpdateCheckResponse{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodGet, path: "/api/v1/skills/{skillId}/audit", id: "getSkillAudit", tag: "skills",
 			summary:    "Skills: the catalog audit trail for one skill - who installed it, who enabled it where, and who changed its grant. Requires audit.read, which is stricter than the rest of this family: the trail names actors and carries the host path each package came from.",
 			pathParams: []any{controllers.SkillIDParams{}},
@@ -1837,6 +1929,13 @@ func browserOperations() []operation {
 type projectUsageQuery struct {
 	Range *string `query:"range,omitempty" enum:"today,7d,30d,all" description:"Rollup period. Defaults to 7d. Buckets by dispatch time, not by any provider billing period."`
 }
+
+// skillMarketplaceQuery and skillReleaseQuery mirror the controller's query
+// structs. They live in controllers so the handler and the spec read the same
+// declaration.
+type skillMarketplaceQuery = controllers.SkillMarketplaceQuery
+
+type skillReleaseQuery = controllers.SkillReleaseQuery
 
 type conversationSnapshotQuery struct {
 	BeforeSequence *int64 `query:"beforeSequence,omitempty" minimum:"1" description:"Read items older than this conversation sequence. Omit for the newest page."`

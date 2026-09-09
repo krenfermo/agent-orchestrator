@@ -2907,6 +2907,109 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/skills/marketplace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: search every enabled registry you can see. It downloads no package code - fetching is a separate step that only an install performs - and it stores no query. Every result reports trust "unverified", because a search hashed nothing; a release only becomes "verified" once AO has fetched and measured its bytes at install. A registry that could not be read is NAMED in notes rather than silently absent, since "this registry has nothing" and "AO could not read it" are different answers. Requires settings.read. */
+        get: operations["searchSkillMarketplace"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/marketplace/{registryId}/{skillId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: one release and every version of it the registry offers, including deprecated and revoked ones - the version list is where somebody finds out the version they wanted was withdrawn. Carries the requested capabilities, the execution modes, the publisher, both digests, any provenance the release CLAIMS (AO validates none of it), the compatibility verdict against this build, and whether it is already installed. Requires settings.read. */
+        get: operations["getSkillRelease"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/marketplace/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: install ONE exact release from one configured registry. A version is required and exact - there is no latest. AO re-resolves the release, refuses it if the registry has revoked it, checks the registry's trust policy and the AO version range, fetches the package into a quarantine directory, and verifies BOTH digests plus the manifest's agreement with the listing over the bytes that landed before anything reaches the catalog. A symlink anywhere in the package is refused rather than followed. This enables the skill on NO project, grants no capability, approves no container image and runs no publisher script. Requires settings.manage. */
+        post: operations["installSkillRelease"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/registries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: every skill registry this installation is configured to install from, with its type, location, trust policy and priority. A registry scoped to one organization is listed only to that organization's members. The response also carries the trust model in words - installing verifies INTEGRITY (AO fetches the package and computes both digests itself), which is not the same as knowing who wrote it, because AO verifies no publisher signature. Requires settings.read. */
+        get: operations["listSkillRegistries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/registries/{registryId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Skills: add or update one registry configuration. AO opens it before recording it - a registry it cannot read is refused, because one that answers every search with silence reads as "this registry has nothing". A credential is stored as the NAME of a sealed secret, never a value. A registry scoped to a tenant can only be configured by a member of that tenant. Requires settings.manage. */
+        put: operations["saveSkillRegistry"];
+        post?: never;
+        /** Skills: remove one registry configuration. Every package installed from it stays installed and keeps its recorded provenance: removing a compromised registry must not erase the evidence of what it served, and must not silently uninstall a package a project may have pinned. Requires settings.manage. */
+        delete: operations["removeSkillRegistry"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/updates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: ask each installed release's registry what it says now. AO polls nothing on its own - this is a request a person made. It reports a newer installable version where one exists, names a registry it could not reach without touching that install's recorded provenance, and marks any installed release the registry has since REVOKED. A revocation blocks new installs and nothing else: AO does not uninstall it, does not disable it on any project, and does not stop a run already under way. Requires settings.read. */
+        get: operations["checkSkillUpdates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/teams": {
         parameters: {
             query?: never;
@@ -5949,6 +6052,12 @@ export interface components {
         InitializeRepositoryResult: {
             path: string;
         };
+        InstallSkillReleaseRequest: {
+            asUpdate?: boolean;
+            registryId: string;
+            skillId: string;
+            version: string;
+        };
         InstallSkillRequest: {
             sourceDir: string;
         };
@@ -6815,6 +6924,19 @@ export interface components {
         RuntimeGCRequest: {
             dryRun?: boolean;
         };
+        SaveSkillRegistryRequest: {
+            credentialSecretName?: string;
+            displayName: string;
+            enabled: boolean;
+            location: string;
+            pinnedPublisher?: string;
+            priority?: number;
+            tenantId?: string;
+            /** @enum {string} */
+            trustPolicy: "digest" | "pinned_publisher" | "signed";
+            /** @enum {string} */
+            type: "local" | "https" | "git";
+        };
         SchedulerStatusResponse: {
             global: components["schemas"]["CapacityUsageView"];
             held: components["schemas"]["CapacityClaimView"][];
@@ -7216,6 +7338,34 @@ export interface components {
             tool: string;
             version: string;
         };
+        SkillInstallOriginView: {
+            artifactDigest: string;
+            /** @enum {string} */
+            compatibility: "compatible" | "ao-too-old" | "ao-too-new" | "unknown";
+            /** Format: date-time */
+            installedAt: string;
+            installedBy?: string;
+            manifestDigest: string;
+            publisher: string;
+            registryId: string;
+            registryName?: string;
+            registryType: string;
+            revocationReason?: string;
+            revoked?: boolean;
+            skillId: string;
+            sourceUrl?: string;
+            /** @enum {string} */
+            trust: "revoked" | "unverified" | "verified" | "trusted";
+            trustExplanation: string;
+            trustPolicy: string;
+            version: string;
+        };
+        SkillInstallOutcomeView: {
+            install: components["schemas"]["SkillInstallView"];
+            nextStep: string;
+            origin: components["schemas"]["SkillInstallOriginView"];
+            updated: boolean;
+        };
         SkillInstallView: {
             /** @enum {string} */
             approval: "none" | "per_activation" | "per_run" | "per_target";
@@ -7242,6 +7392,11 @@ export interface components {
             capabilities: components["schemas"]["SkillCapabilityView"][];
             skills: components["schemas"]["SkillInstallView"][];
         };
+        SkillMarketplaceSearchResponse: {
+            installNotice: string;
+            notes: components["schemas"]["SkillRegistryNoteView"][];
+            releases: components["schemas"]["SkillReleaseView"][];
+        };
         SkillModeView: {
             /** @enum {string} */
             approval: "none" | "per_activation" | "per_run" | "per_target";
@@ -7251,6 +7406,79 @@ export interface components {
             name: string;
             /** @enum {string} */
             riskLevel: "low" | "medium" | "high" | "critical";
+        };
+        SkillRegistryListResponse: {
+            registries: components["schemas"]["SkillRegistryView"][];
+            trustModel: string;
+        };
+        SkillRegistryNoteView: {
+            reason: string;
+            registryId: string;
+        };
+        SkillRegistryView: {
+            credentialSecretName?: string;
+            displayName: string;
+            enabled: boolean;
+            id: string;
+            location: string;
+            pinnedPublisher?: string;
+            priority: number;
+            tenantId?: string;
+            /** @enum {string} */
+            trustPolicy: "digest" | "pinned_publisher" | "signed";
+            trustPolicyEnforceable: boolean;
+            /** @enum {string} */
+            type: "local" | "https" | "git";
+        };
+        SkillReleaseDetailResponse: {
+            installNotice: string;
+            release: components["schemas"]["SkillReleaseView"];
+            versions: components["schemas"]["SkillReleaseView"][];
+        };
+        SkillReleaseModeView: {
+            capabilities: string[];
+            description: string;
+            id: string;
+            name: string;
+            /** @enum {string} */
+            riskLevel: "low" | "medium" | "high" | "critical";
+        };
+        SkillReleaseView: {
+            aoMaxVersion?: string;
+            aoMinVersion: string;
+            artifactDigest: string;
+            attestationUrl?: string;
+            changelog?: string;
+            changelogUrl?: string;
+            /** @enum {string} */
+            compatibility: "compatible" | "ao-too-old" | "ao-too-new" | "unknown";
+            deprecated?: boolean;
+            deprecationNote?: string;
+            description: string;
+            executionModes: components["schemas"]["SkillReleaseModeView"][];
+            installed: boolean;
+            installedVersion?: string;
+            keyId?: string;
+            manifestDigest: string;
+            name: string;
+            /** Format: date-time */
+            publishedAt: string;
+            publisher: string;
+            registryId: string;
+            registryName: string;
+            requestedCapabilities: string[];
+            revocationReason?: string;
+            revoked?: boolean;
+            /** @enum {string} */
+            riskLevel: "low" | "medium" | "high" | "critical";
+            signatureFormat?: string;
+            skillId: string;
+            sourceUrl?: string;
+            /** @enum {string} */
+            trust: "revoked" | "unverified" | "verified" | "trusted";
+            trustExplanation: string;
+            updateAvailable: boolean;
+            version: string;
         };
         SkillRunnerStatusView: {
             available: boolean;
@@ -7262,6 +7490,20 @@ export interface components {
             needsIsolation: boolean;
             runnerId: string;
             unavailable?: string;
+        };
+        SkillUpdateCheckResponse: {
+            revocationPolicy: string;
+            statuses: components["schemas"]["SkillUpdateStatusView"][];
+        };
+        SkillUpdateStatusView: {
+            latestVersion?: string;
+            origin: components["schemas"]["SkillInstallOriginView"];
+            revocationReason?: string;
+            revokedNow: boolean;
+            skillId: string;
+            unreachable?: string;
+            updateAvailable: boolean;
+            version: string;
         };
         SpawnOrchestratorRequest: {
             clean?: boolean;
@@ -19154,6 +19396,399 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    searchSkillMarketplace: {
+        parameters: {
+            query?: {
+                /** @description Free text matched against a release's id, name, description and publisher. */
+                q?: null | string;
+                /** @description Search only this registry. Omit to search every enabled registry you can see. */
+                registryId?: null | string;
+                /** @description Exact publisher match. */
+                publisher?: null | string;
+                /** @description Keep only releases that request this AO capability. */
+                capability?: null | string;
+                /** @description Include releases the publisher superseded. Off by default, so the ordinary listing is the installable one. */
+                includeDeprecated?: null | boolean;
+                /** @description Include withdrawn releases. They can never be installed; showing them answers "where did that version go". */
+                includeRevoked?: null | boolean;
+                /** @description Maximum releases to return. Defaults to 100. */
+                limit?: null | number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillMarketplaceSearchResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getSkillRelease: {
+        parameters: {
+            query?: {
+                /** @description Which version to feature. Omit for the newest the registry offers. */
+                version?: null | string;
+            };
+            header?: never;
+            path: {
+                /** @description Registry identifier (kebab-case). */
+                registryId: string;
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillReleaseDetailResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    installSkillRelease: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InstallSkillReleaseRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillInstallOutcomeView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listSkillRegistries: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillRegistryListResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    saveSkillRegistry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Registry identifier (kebab-case). */
+                registryId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveSkillRegistryRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillRegistryView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    removeSkillRegistry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Registry identifier (kebab-case). */
+                registryId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OKResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    checkSkillUpdates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillUpdateCheckResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

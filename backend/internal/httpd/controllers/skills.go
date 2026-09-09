@@ -354,7 +354,16 @@ type SkillsController struct {
 	// "manage the catalog", the other is "decide what this installation may
 	// execute" -- and an installation can have the first without the second.
 	Images SkillImageTrust
-	Guard  Guard
+	// Marketplace is the registry surface. A THIRD port, again because it
+	// answers to a different question -- "which outside sources may this
+	// installation install from" -- and an installation can have the catalog
+	// without ever configuring one.
+	Marketplace SkillMarketplace
+	// Tenancy resolves which organizations the caller belongs to, which is
+	// what makes a private registry private. Nil yields no memberships, so a
+	// caller sees installation-wide registries and no private ones.
+	Tenancy SkillTenancy
+	Guard   Guard
 }
 
 // Register mounts the skill routes.
@@ -368,6 +377,9 @@ func (c *SkillsController) Register(r chi.Router) {
 	// The image trust root, same family and therefore the same gate:
 	// settings.read to look, settings.manage to change.
 	c.registerImageRoutes(r)
+	// The registry / marketplace surface, same family and therefore the same
+	// gate. It has no Run route and nothing that would give a client one.
+	c.registerMarketplaceRoutes(r)
 
 	// Project-scoped. Gated per project inside each handler.
 	r.Get("/projects/{id}/skills", c.projectSkills)

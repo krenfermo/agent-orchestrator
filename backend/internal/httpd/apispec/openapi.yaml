@@ -8942,6 +8942,397 @@ paths:
         already delivered to one. Requires settings.manage.'
       tags:
       - skills
+  /api/v1/skills/marketplace:
+    get:
+      operationId: searchSkillMarketplace
+      parameters:
+      - description: Free text matched against a release's id, name, description and
+          publisher.
+        in: query
+        name: q
+        schema:
+          description: Free text matched against a release's id, name, description
+            and publisher.
+          type:
+          - "null"
+          - string
+      - description: Search only this registry. Omit to search every enabled registry
+          you can see.
+        in: query
+        name: registryId
+        schema:
+          description: Search only this registry. Omit to search every enabled registry
+            you can see.
+          type:
+          - "null"
+          - string
+      - description: Exact publisher match.
+        in: query
+        name: publisher
+        schema:
+          description: Exact publisher match.
+          type:
+          - "null"
+          - string
+      - description: Keep only releases that request this AO capability.
+        in: query
+        name: capability
+        schema:
+          description: Keep only releases that request this AO capability.
+          type:
+          - "null"
+          - string
+      - description: Include releases the publisher superseded. Off by default, so
+          the ordinary listing is the installable one.
+        in: query
+        name: includeDeprecated
+        schema:
+          description: Include releases the publisher superseded. Off by default,
+            so the ordinary listing is the installable one.
+          type:
+          - "null"
+          - boolean
+      - description: Include withdrawn releases. They can never be installed; showing
+          them answers "where did that version go".
+        in: query
+        name: includeRevoked
+        schema:
+          description: Include withdrawn releases. They can never be installed; showing
+            them answers "where did that version go".
+          type:
+          - "null"
+          - boolean
+      - description: Maximum releases to return. Defaults to 100.
+        in: query
+        name: limit
+        schema:
+          description: Maximum releases to return. Defaults to 100.
+          maximum: 500
+          minimum: 1
+          type:
+          - "null"
+          - integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillMarketplaceSearchResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: search every enabled registry you can see. It downloads no
+        package code - fetching is a separate step that only an install performs -
+        and it stores no query. Every result reports trust "unverified", because a
+        search hashed nothing; a release only becomes "verified" once AO has fetched
+        and measured its bytes at install. A registry that could not be read is NAMED
+        in notes rather than silently absent, since "this registry has nothing" and
+        "AO could not read it" are different answers. Requires settings.read.'
+      tags:
+      - skills
+  /api/v1/skills/marketplace/{registryId}/{skillId}:
+    get:
+      operationId: getSkillRelease
+      parameters:
+      - description: Registry identifier (kebab-case).
+        in: path
+        name: registryId
+        required: true
+        schema:
+          description: Registry identifier (kebab-case).
+          type: string
+      - description: Skill identifier (kebab-case).
+        in: path
+        name: skillId
+        required: true
+        schema:
+          description: Skill identifier (kebab-case).
+          type: string
+      - description: Which version to feature. Omit for the newest the registry offers.
+        in: query
+        name: version
+        schema:
+          description: Which version to feature. Omit for the newest the registry
+            offers.
+          type:
+          - "null"
+          - string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillReleaseDetailResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: one release and every version of it the registry offers, including
+        deprecated and revoked ones - the version list is where somebody finds out
+        the version they wanted was withdrawn. Carries the requested capabilities,
+        the execution modes, the publisher, both digests, any provenance the release
+        CLAIMS (AO validates none of it), the compatibility verdict against this build,
+        and whether it is already installed. Requires settings.read.'
+      tags:
+      - skills
+  /api/v1/skills/marketplace/install:
+    post:
+      operationId: installSkillRelease
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstallSkillReleaseRequest'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillInstallOutcomeView'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: install ONE exact release from one configured registry. A
+        version is required and exact - there is no latest. AO re-resolves the release,
+        refuses it if the registry has revoked it, checks the registry''s trust policy
+        and the AO version range, fetches the package into a quarantine directory,
+        and verifies BOTH digests plus the manifest''s agreement with the listing
+        over the bytes that landed before anything reaches the catalog. A symlink
+        anywhere in the package is refused rather than followed. This enables the
+        skill on NO project, grants no capability, approves no container image and
+        runs no publisher script. Requires settings.manage.'
+      tags:
+      - skills
+  /api/v1/skills/registries:
+    get:
+      operationId: listSkillRegistries
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillRegistryListResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: every skill registry this installation is configured to install
+        from, with its type, location, trust policy and priority. A registry scoped
+        to one organization is listed only to that organization''s members. The response
+        also carries the trust model in words - installing verifies INTEGRITY (AO
+        fetches the package and computes both digests itself), which is not the same
+        as knowing who wrote it, because AO verifies no publisher signature. Requires
+        settings.read.'
+      tags:
+      - skills
+  /api/v1/skills/registries/{registryId}:
+    delete:
+      operationId: removeSkillRegistry
+      parameters:
+      - description: Registry identifier (kebab-case).
+        in: path
+        name: registryId
+        required: true
+        schema:
+          description: Registry identifier (kebab-case).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OKResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: remove one registry configuration. Every package installed
+        from it stays installed and keeps its recorded provenance: removing a compromised
+        registry must not erase the evidence of what it served, and must not silently
+        uninstall a package a project may have pinned. Requires settings.manage.'
+      tags:
+      - skills
+    put:
+      operationId: saveSkillRegistry
+      parameters:
+      - description: Registry identifier (kebab-case).
+        in: path
+        name: registryId
+        required: true
+        schema:
+          description: Registry identifier (kebab-case).
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveSkillRegistryRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillRegistryView'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: add or update one registry configuration. AO opens it before
+        recording it - a registry it cannot read is refused, because one that answers
+        every search with silence reads as "this registry has nothing". A credential
+        is stored as the NAME of a sealed secret, never a value. A registry scoped
+        to a tenant can only be configured by a member of that tenant. Requires settings.manage.'
+      tags:
+      - skills
+  /api/v1/skills/updates:
+    get:
+      operationId: checkSkillUpdates
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillUpdateCheckResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: ask each installed release''s registry what it says now. AO
+        polls nothing on its own - this is a request a person made. It reports a newer
+        installable version where one exists, names a registry it could not reach
+        without touching that install''s recorded provenance, and marks any installed
+        release the registry has since REVOKED. A revocation blocks new installs and
+        nothing else: AO does not uninstall it, does not disable it on any project,
+        and does not stop a run already under way. Requires settings.read.'
+      tags:
+      - skills
   /api/v1/teams:
     get:
       operationId: listTeams
@@ -17281,6 +17672,21 @@ components:
       required:
       - path
       type: object
+    InstallSkillReleaseRequest:
+      properties:
+        asUpdate:
+          type: boolean
+        registryId:
+          type: string
+        skillId:
+          type: string
+        version:
+          type: string
+      required:
+      - registryId
+      - skillId
+      - version
+      type: object
     InstallSkillRequest:
       properties:
         sourceDir:
@@ -19503,6 +19909,41 @@ components:
         dryRun:
           type: boolean
       type: object
+    SaveSkillRegistryRequest:
+      properties:
+        credentialSecretName:
+          type: string
+        displayName:
+          type: string
+        enabled:
+          type: boolean
+        location:
+          type: string
+        pinnedPublisher:
+          type: string
+        priority:
+          type: integer
+        tenantId:
+          type: string
+        trustPolicy:
+          enum:
+          - digest
+          - pinned_publisher
+          - signed
+          type: string
+        type:
+          enum:
+          - local
+          - https
+          - git
+          type: string
+      required:
+      - displayName
+      - type
+      - location
+      - enabled
+      - trustPolicy
+      type: object
     SchedulerStatusResponse:
       properties:
         global:
@@ -20595,6 +21036,83 @@ components:
       - note
       - active
       type: object
+    SkillInstallOriginView:
+      properties:
+        artifactDigest:
+          type: string
+        compatibility:
+          enum:
+          - compatible
+          - ao-too-old
+          - ao-too-new
+          - unknown
+          type: string
+        installedAt:
+          format: date-time
+          type: string
+        installedBy:
+          type: string
+        manifestDigest:
+          type: string
+        publisher:
+          type: string
+        registryId:
+          type: string
+        registryName:
+          type: string
+        registryType:
+          type: string
+        revocationReason:
+          type: string
+        revoked:
+          type: boolean
+        skillId:
+          type: string
+        sourceUrl:
+          type: string
+        trust:
+          enum:
+          - revoked
+          - unverified
+          - verified
+          - trusted
+          type: string
+        trustExplanation:
+          type: string
+        trustPolicy:
+          type: string
+        version:
+          type: string
+      required:
+      - skillId
+      - version
+      - registryId
+      - registryType
+      - publisher
+      - manifestDigest
+      - artifactDigest
+      - trust
+      - trustExplanation
+      - trustPolicy
+      - compatibility
+      - installedAt
+      type: object
+    SkillInstallOutcomeView:
+      properties:
+        install:
+          $ref: '#/components/schemas/SkillInstallView'
+        nextStep:
+          type: string
+        origin:
+          $ref: '#/components/schemas/SkillInstallOriginView'
+        updated:
+          type: boolean
+      required:
+      - install
+      - origin
+      - updated
+      - nextStep
+      type: object
     SkillInstallView:
       properties:
         approval:
@@ -20677,6 +21195,23 @@ components:
       - skills
       - capabilities
       type: object
+    SkillMarketplaceSearchResponse:
+      properties:
+        installNotice:
+          type: string
+        notes:
+          items:
+            $ref: '#/components/schemas/SkillRegistryNoteView'
+          type: array
+        releases:
+          items:
+            $ref: '#/components/schemas/SkillReleaseView'
+          type: array
+      required:
+      - releases
+      - notes
+      - installNotice
+      type: object
     SkillModeView:
       properties:
         approval:
@@ -20711,6 +21246,216 @@ components:
       - capabilities
       - approval
       type: object
+    SkillRegistryListResponse:
+      properties:
+        registries:
+          items:
+            $ref: '#/components/schemas/SkillRegistryView'
+          type: array
+        trustModel:
+          type: string
+      required:
+      - registries
+      - trustModel
+      type: object
+    SkillRegistryNoteView:
+      properties:
+        reason:
+          type: string
+        registryId:
+          type: string
+      required:
+      - registryId
+      - reason
+      type: object
+    SkillRegistryView:
+      properties:
+        credentialSecretName:
+          type: string
+        displayName:
+          type: string
+        enabled:
+          type: boolean
+        id:
+          type: string
+        location:
+          type: string
+        pinnedPublisher:
+          type: string
+        priority:
+          type: integer
+        tenantId:
+          type: string
+        trustPolicy:
+          enum:
+          - digest
+          - pinned_publisher
+          - signed
+          type: string
+        trustPolicyEnforceable:
+          type: boolean
+        type:
+          enum:
+          - local
+          - https
+          - git
+          type: string
+      required:
+      - id
+      - displayName
+      - type
+      - location
+      - enabled
+      - trustPolicy
+      - trustPolicyEnforceable
+      - priority
+      type: object
+    SkillReleaseDetailResponse:
+      properties:
+        installNotice:
+          type: string
+        release:
+          $ref: '#/components/schemas/SkillReleaseView'
+        versions:
+          items:
+            $ref: '#/components/schemas/SkillReleaseView'
+          type: array
+      required:
+      - release
+      - versions
+      - installNotice
+      type: object
+    SkillReleaseModeView:
+      properties:
+        capabilities:
+          items:
+            type: string
+          type: array
+        description:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+        riskLevel:
+          enum:
+          - low
+          - medium
+          - high
+          - critical
+          type: string
+      required:
+      - id
+      - name
+      - description
+      - riskLevel
+      - capabilities
+      type: object
+    SkillReleaseView:
+      properties:
+        aoMaxVersion:
+          type: string
+        aoMinVersion:
+          type: string
+        artifactDigest:
+          type: string
+        attestationUrl:
+          type: string
+        changelog:
+          type: string
+        changelogUrl:
+          type: string
+        compatibility:
+          enum:
+          - compatible
+          - ao-too-old
+          - ao-too-new
+          - unknown
+          type: string
+        deprecated:
+          type: boolean
+        deprecationNote:
+          type: string
+        description:
+          type: string
+        executionModes:
+          items:
+            $ref: '#/components/schemas/SkillReleaseModeView'
+          type: array
+        installed:
+          type: boolean
+        installedVersion:
+          type: string
+        keyId:
+          type: string
+        manifestDigest:
+          type: string
+        name:
+          type: string
+        publishedAt:
+          format: date-time
+          type: string
+        publisher:
+          type: string
+        registryId:
+          type: string
+        registryName:
+          type: string
+        requestedCapabilities:
+          items:
+            type: string
+          type: array
+        revocationReason:
+          type: string
+        revoked:
+          type: boolean
+        riskLevel:
+          enum:
+          - low
+          - medium
+          - high
+          - critical
+          type: string
+        signatureFormat:
+          type: string
+        skillId:
+          type: string
+        sourceUrl:
+          type: string
+        trust:
+          enum:
+          - revoked
+          - unverified
+          - verified
+          - trusted
+          type: string
+        trustExplanation:
+          type: string
+        updateAvailable:
+          type: boolean
+        version:
+          type: string
+      required:
+      - registryId
+      - registryName
+      - skillId
+      - name
+      - version
+      - publisher
+      - description
+      - riskLevel
+      - manifestDigest
+      - artifactDigest
+      - requestedCapabilities
+      - executionModes
+      - aoMinVersion
+      - compatibility
+      - publishedAt
+      - trust
+      - trustExplanation
+      - installed
+      - updateAvailable
+      type: object
     SkillRunnerStatusView:
       properties:
         available:
@@ -20744,6 +21489,43 @@ components:
       - missingControls
       - needsIsolation
       - needsEgressControl
+      type: object
+    SkillUpdateCheckResponse:
+      properties:
+        revocationPolicy:
+          type: string
+        statuses:
+          items:
+            $ref: '#/components/schemas/SkillUpdateStatusView'
+          type: array
+      required:
+      - statuses
+      - revocationPolicy
+      type: object
+    SkillUpdateStatusView:
+      properties:
+        latestVersion:
+          type: string
+        origin:
+          $ref: '#/components/schemas/SkillInstallOriginView'
+        revocationReason:
+          type: string
+        revokedNow:
+          type: boolean
+        skillId:
+          type: string
+        unreachable:
+          type: string
+        updateAvailable:
+          type: boolean
+        version:
+          type: string
+      required:
+      - skillId
+      - version
+      - origin
+      - updateAvailable
+      - revokedNow
       type: object
     SpawnOrchestratorRequest:
       properties:

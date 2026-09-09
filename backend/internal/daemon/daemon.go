@@ -72,6 +72,7 @@ import (
 	usagesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/usage"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/workitems"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillassets"
+	"github.com/aoagents/agent-orchestrator/backend/internal/skillregistry"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillrunner"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
@@ -273,6 +274,23 @@ func RunWithConfig(cfg config.Config) error {
 	skillsSvc := skills.New(store, cfg.DataDir,
 		skills.WithSkillExecutor(skillRunner, skillImages, store, cfg.SkillStagingRoot,
 			skillRunner.Unavailable()))
+	// Phase 10: the registry / marketplace. It ships with NO registry
+	// configured and no default endpoint, so an installation that configures
+	// nothing can install nothing from one.
+	//
+	// The AO version comes from cfg.Telemetry.AppVersion, which the desktop
+	// supervisor stamps, and NOT from cli.Version -- that symbol lives in the
+	// package that imports this one, and its own doc records that release
+	// tooling does not currently override it. On a build launched without a
+	// supervisor the value is empty, and skillregistry.CheckCompatibility then
+	// reports that the check DID NOT RUN rather than that it passed. That is
+	// the deliberate asymmetry: a trust check that cannot run must refuse,
+	// because what it defends against is an attacker; a compatibility check
+	// that cannot run must say so, because what it defends against is a bad
+	// afternoon -- and refusing every install on every source build would only
+	// teach people to route around the checks that do matter.
+	skillMarketplace := skills.NewMarketplace(store, skillsSvc,
+		skillregistry.DefaultProviderFactory{}, cfg.Telemetry.AppVersion, cfg.DataDir)
 	log.Info("skills: execution environment probed",
 		"runtime", skillRunner.Runtime().Describe(),
 		"available", skillRunner.Available(),
@@ -960,6 +978,8 @@ func RunWithConfig(cfg config.Config) error {
 		RBAC:              rbacSvc,
 		Skills:            skillsSvc,
 		SkillImages:       skillsSvc,
+		SkillMarketplace:  skillMarketplace,
+		SkillTenancy:      store,
 		ProviderProfiles:  providerProfilesSvc,
 		ProviderSetup:     providerSetupSvc,
 		ExecutionPolicy:   executionPolicySvc,
