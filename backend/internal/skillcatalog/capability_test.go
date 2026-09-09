@@ -16,6 +16,14 @@ func completeRunner() RunnerAttestation {
 	return RunnerAttestation{RunnerID: "test-complete", Controls: AllControls()}
 }
 
+// confiningRunner is what internal/skillrunner's container actually attests:
+// the five confinement controls and nothing more. Read modes need exactly
+// this, which is why they run today; the five blocked capabilities each need
+// one control beyond it, which is why they do not.
+func confiningRunner() RunnerAttestation {
+	return RunnerAttestation{RunnerID: "container/docker", Controls: confinementControls()}
+}
+
 func testManifest(t *testing.T) Manifest {
 	t.Helper()
 	m, err := decode(t, validManifestYAML)
@@ -41,7 +49,9 @@ func TestAuthorize_GrantsWhenEverythingLinesUp(t *testing.T) {
 		ModeID:             "quick",
 		Grant:              Grant{Capabilities: []Capability{CapRepoRead, CapReportWrite}},
 		SubjectPermissions: []domain.Permission{domain.PermProjectRead},
-		Runner:             NoRunner(),
+		// Reading needs confinement too: there is no AO-enforced boundary for
+		// "an agent reads the checkout" outside the container.
+		Runner: confiningRunner(),
 	})
 	if err != nil {
 		t.Fatalf("Authorize: %v", err)
@@ -156,6 +166,14 @@ func TestAuthorize_ConfinementAloneUnblocksNothing(t *testing.T) {
 	}
 	if !confined.Isolated() {
 		t.Fatal("this environment should read as isolated")
+	}
+	// Reading IS unblocked by confinement -- that is the whole of what the
+	// approved option-B decision permits.
+	for _, readable := range []Capability{CapRepoRead, CapDepsRead} {
+		spec, _ := readable.Spec()
+		if _, ok := firstMissingControl(spec, confined); !ok {
+			t.Fatalf("%s should be carried by a confining runner", readable)
+		}
 	}
 	if confined.EgressControlled() {
 		t.Fatal("deny-all was mistaken for an allowlist")

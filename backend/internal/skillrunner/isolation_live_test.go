@@ -2,6 +2,7 @@ package skillrunner
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -356,4 +357,27 @@ func firstMissingControlFor(needs []skillcatalog.Control, att skillcatalog.Runne
 		}
 	}
 	return "", true
+}
+
+// listSkillRunContainers reports AO's own skill-run containers, by label, so a
+// leak check never touches anybody else's.
+func listSkillRunContainers(t *testing.T, r *Runner) string {
+	t.Helper()
+	out, err := exec.Command(r.runtime.Binary, "ps", "-a",
+		"--filter", "label="+RunLabel+"=1", "--format", "{{.Names}}").Output()
+	if err != nil {
+		t.Fatalf("list containers: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// reportText renders a report as JSON so a test can assert that a value never
+// appears anywhere in it, rather than checking field by field and missing one.
+func reportText(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	return string(b)
 }

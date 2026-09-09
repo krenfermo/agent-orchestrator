@@ -1,9 +1,9 @@
 # 4. Skill runner: a Linux container is the only boundary AO will accept
 
 Date: 2026-09-09
-Status: Accepted (boundary decision + prototype). **No capability is unblocked
-by this ADR.** The prototype attests a strict subset of the controls the
-blocked capabilities require; see "What is still missing" below.
+Status: Accepted. Phase 4 (2026-09-09) turned the prototype into one real
+execution path — see the "Phase 4" note at the end. Four controls remain
+unbuilt and are designed in ADR 0005.
 
 ## Context
 
@@ -240,3 +240,51 @@ this ADR adds can be reached by a person clicking through the app.
 - **Docker socket exposure is never granted.** Mounting `/var/run/docker.sock`
   into a skill container would hand it the host; the runner has no option to do
   so, and adding one would void every claim here.
+
+
+---
+
+## Phase 4 note: option B, and what its condition actually decided
+
+The approved architecture decision was **option B, conditioned**: a read mode
+may run without the runtime only if it is built on capabilities AO itself
+effectively restricts, and neither a prompt, a manifest nor a CLI permission
+counts as a boundary.
+
+Applying that condition honestly excluded every read mode. The only thing that
+would have confined an agent reading a repository outside a container is the
+agent CLI's own tool allowlist, and AGENTS.md records that as void under
+`bypassPermissions` — a launch flag, not a frontier. So `repo.read` and
+`deps.read` now require the same five confinement controls as everything else.
+
+The distinction option B was reaching for survives, just one level down: read
+capabilities need confinement and **nothing beyond it**, while the five blocked
+capabilities each need one further control that does not exist. So with a
+container runtime the read modes run and everything else refuses; with no
+runtime, nothing runs. That is a sharper and more defensible line than "reads
+are exempt", and it is what the condition was for.
+
+`report.write` remains the one capability requiring no control: it is AO
+storing a document on AO's own side of the boundary.
+
+### What executes
+
+`static-code`, through `ao.static-scan/v1`. AO stages only the in-scope files,
+mounts them read-only, runs a command AO authored in an image AO pinned, and
+verifies before emitting a report that the boundary held and that the container
+saw every file AO staged. A run that cannot prove what it read produces no
+report, because the report a caller would then act on says "clean" about files
+nobody opened.
+
+Two defects found by writing the tests, both of which would have produced
+exactly that false-clean result in production:
+
+  - busybox `echo` does not interpret `\x1f`, so the tool's separator bytes
+    were emitted literally and every finding was dropped at parse time. A scan
+    that matched would have reported nothing.
+  - `grep` omits the filename prefix when given a single file, so a one-file
+    scope — the narrowest, most deliberate scan somebody can ask for — parsed
+    as pathless and yielded zero findings. Fixed with `-H`, and asserted.
+
+Neither was reachable by reading the code, and both are why the live tests run
+against a real container rather than a fake.

@@ -64,20 +64,42 @@ type CapabilitySpec struct {
 
 // capabilitySpecs is the authoritative capability table.
 var capabilitySpecs = map[Capability]CapabilitySpec{
-	// The three that need nothing from a runner: AO hands over the checkout
-	// and stores the report itself, so there is no boundary to attest.
+	// Reading is NOT free of controls.
+	//
+	// Phase 3 left repo.read and deps.read requiring nothing, on the reasoning
+	// that AO already had the checkout so there was no boundary to attest.
+	// That reasoning does not survive the question "restricted by what?".
+	//
+	// A skill that reads a repository is an agent plus tools reading
+	// attacker-influenced content, and the only thing that would have confined
+	// it outside a container is the agent CLI's own tool allowlist -- which
+	// AGENTS.md records as void under bypassPermissions, and which is a launch
+	// flag rather than a boundary. A prompt, a manifest and a CLI permission
+	// are none of them a security frontier, so "just reading" gets the same
+	// confinement as everything else: it runs inside the container or it does
+	// not run.
+	//
+	// The distinction that survives is which controls each needs. Reading
+	// needs the five the container prototype demonstrates; the five blocked
+	// capabilities each need one more that does not exist yet.
 	CapRepoRead: {
 		Risk:               RiskLow,
 		MinApproval:        ApprovalNone,
+		RequiresControls:   confinementControls(),
 		RequiredPermission: domain.PermProjectRead,
-		Description:        "Read the project's source in a checkout.",
+		Description:        "Read the project's source in a confined checkout.",
 	},
 	CapDepsRead: {
 		Risk:               RiskLow,
 		MinApproval:        ApprovalNone,
+		RequiresControls:   confinementControls(),
 		RequiredPermission: domain.PermProjectRead,
 		Description:        "Read dependency manifests and lockfiles.",
 	},
+	// report.write is the one that genuinely needs nothing: it is AO storing a
+	// document AO already holds, on AO's side of the boundary. It is listed
+	// with no controls so a mode that only reports -- and reads nothing --
+	// stays possible, not as a loophole for a mode that reads.
 	CapReportWrite: {
 		Risk:               RiskLow,
 		MinApproval:        ApprovalNone,
@@ -150,6 +172,19 @@ var capabilitySpecs = map[Capability]CapabilitySpec{
 		RequiredPermission: domain.PermSettingsManage,
 		Description:        "Send probing traffic to an explicitly authorized target.",
 	},
+}
+
+// confinementControls are the five a container boundary provides and that any
+// skill work -- including reading -- must have. They are a function rather than
+// a package var so no caller can append to the shared backing array.
+func confinementControls() []Control {
+	return []Control{
+		ControlFilesystemIsolation,
+		ControlProcessIsolation,
+		ControlNoCredentialInheritance,
+		ControlResourceLimits,
+		ControlEgressDenyAll,
+	}
 }
 
 // Spec returns the fixed policy for a capability.

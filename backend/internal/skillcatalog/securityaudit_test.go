@@ -145,18 +145,28 @@ func TestSecurityAudit_InstallEnablePerProjectThenPlanPerMode(t *testing.T) {
 
 	perms := []domain.Permission{domain.PermProjectRead, domain.PermProjectManage, domain.PermSettingsManage}
 
-	// Read-only modes plan successfully on today's runner.
+	// Read-only modes plan successfully against the confining container the
+	// runner prototype provides -- and ONLY against it. Reading is not exempt
+	// from confinement; it simply needs no control beyond it.
 	for _, mode := range []string{"static-code", "secret-scan", "authz-review"} {
 		plan, err := PlanRun(r, RunRequest{
 			ProjectID: "medusa", SkillID: "security-audit", ModeID: mode,
 			Inputs:             map[string]string{"mode": mode},
 			SubjectPermissions: perms,
-		}, NoRunner())
+		}, confiningRunner())
 		if err != nil {
 			t.Fatalf("PlanRun %s: %v", mode, err)
 		}
 		if !plan.Decision.Allowed() {
 			t.Fatalf("%s was not allowed: %#v", mode, plan.Decision)
+		}
+
+		if _, err := PlanRun(r, RunRequest{
+			ProjectID: "medusa", SkillID: "security-audit", ModeID: mode,
+			Inputs:             map[string]string{"mode": mode},
+			SubjectPermissions: perms,
+		}, NoRunner()); !errors.Is(err, ErrCapabilityDenied) {
+			t.Fatalf("%s ran with no boundary at all: %v", mode, err)
 		}
 	}
 
@@ -166,9 +176,9 @@ func TestSecurityAudit_InstallEnablePerProjectThenPlanPerMode(t *testing.T) {
 		ProjectID: "medusa", SkillID: "security-audit", ModeID: "dependencies",
 		Inputs:             map[string]string{"mode": "dependencies"},
 		SubjectPermissions: perms,
-	}, NoRunner())
-	if !errors.Is(err, ErrCapabilityDenied) || !strings.Contains(err.Error(), "does not provide") {
-		t.Fatalf("dependencies = %v, want a missing-control denial", err)
+	}, confiningRunner())
+	if !errors.Is(err, ErrCapabilityDenied) || !strings.Contains(err.Error(), "egress_allowlist") {
+		t.Fatalf("dependencies = %v, want an egress-allowlist denial", err)
 	}
 
 	// Poseidon never granted net.egress, so the same mode is refused there for
@@ -177,7 +187,7 @@ func TestSecurityAudit_InstallEnablePerProjectThenPlanPerMode(t *testing.T) {
 		ProjectID: "poseidon", SkillID: "security-audit", ModeID: "dependencies",
 		Inputs:             map[string]string{"mode": "dependencies"},
 		SubjectPermissions: perms,
-	}, NoRunner())
+	}, confiningRunner())
 	if !errors.Is(err, ErrCapabilityDenied) || !strings.Contains(err.Error(), "did not grant") {
 		t.Fatalf("poseidon dependencies = %v, want a missing-grant denial", err)
 	}
@@ -188,7 +198,7 @@ func TestSecurityAudit_InstallEnablePerProjectThenPlanPerMode(t *testing.T) {
 		Inputs:             map[string]string{"mode": "active-pentest", "target": "staging.example.com:443"},
 		SubjectPermissions: perms,
 		AuthorizedTargets:  []string{"staging.example.com:443"},
-	}, NoRunner())
+	}, confiningRunner())
 	if !errors.Is(err, ErrCapabilityDenied) {
 		t.Fatalf("active-pentest = %v, want ErrCapabilityDenied", err)
 	}

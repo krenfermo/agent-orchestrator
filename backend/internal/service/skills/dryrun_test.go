@@ -37,8 +37,10 @@ func decisionFor(dr skills.DryRun, want skillcatalog.Capability) (skills.Capabil
 	return skills.CapabilityDecision{}, false
 }
 
-// The read-only mode is the one AO can honestly answer "yes" to today.
-func TestDryRun_ReadOnlyModeIsExecutable(t *testing.T) {
+// With no runner wired, even the read-only mode is refused: reading a
+// checkout has no AO-enforced boundary outside the container, so it is not
+// exempt from confinement.
+func TestDryRun_ReadOnlyModeNeedsConfinementToo(t *testing.T) {
 	f, medusa := enabledFixture(t, []skillcatalog.Capability{
 		skillcatalog.CapRepoRead, skillcatalog.CapReportWrite,
 	})
@@ -50,7 +52,7 @@ func TestDryRun_ReadOnlyModeIsExecutable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DryRun: %v", err)
 	}
-	if dr.Verdict != skills.DryRunExecutable {
+	if dr.Verdict != skills.DryRunBlocked {
 		t.Fatalf("verdict = %q, reasons = %v", dr.Verdict, dr.Reasons)
 	}
 	if dr.SkillID != "security-audit" || dr.Version == "" || dr.ModeName == "" {
@@ -59,27 +61,42 @@ func TestDryRun_ReadOnlyModeIsExecutable(t *testing.T) {
 	if len(dr.Decisions) != 2 {
 		t.Fatalf("decisions = %#v", dr.Decisions)
 	}
-	for _, d := range dr.Decisions {
-		if !d.Satisfied || d.Description == "" || d.RequiredPermission == "" {
-			t.Fatalf("decision = %#v", d)
-		}
+	// It needs containment, and only containment -- no control beyond the five
+	// a container provides.
+	if !dr.Runner.NeedsIsolation {
+		t.Fatalf("a read mode must need confinement: %#v", dr.Runner)
 	}
-	if dr.Runner.NeedsIsolation || dr.Runner.NeedsEgressControl {
-		t.Fatalf("a read-only mode should need no containment: %#v", dr.Runner)
+	if dr.Runner.NeedsEgressControl {
+		t.Fatalf("a read mode must not need an egress allowlist: %#v", dr.Runner)
 	}
-	if len(dr.MissingPermissions) != 0 || len(dr.Reasons) != 0 {
-		t.Fatalf("executable run reported blockers: %#v %#v", dr.MissingPermissions, dr.Reasons)
+	repo, ok := decisionFor(dr, skillcatalog.CapRepoRead)
+	if !ok || repo.MissingControl != skillcatalog.ControlFilesystemIsolation {
+		t.Fatalf("repo.read = %#v", repo)
+	}
+	// report.write genuinely needs nothing: it is AO storing a document on
+	// AO's side of the boundary.
+	report, ok := decisionFor(dr, skillcatalog.CapReportWrite)
+	if !ok || !report.Satisfied {
+		t.Fatalf("report.write = %#v", report)
 	}
 }
 
-// The same skill, a different mode: granted by the project, and still blocked,
-// because no runner attests the containment net.egress needs.
-func TestDryRun_BlocksOnTheMissingRunnerEvenWithAFullGrant(t *testing.T) {
+// The same skill, a different mode: granted by the project, carried by a
+// confining runner, and STILL blocked — because the control it is missing is
+// the egress allowlist, which confinement does not provide.
+func TestDryRun_BlocksOnTheMissingEgressAllowlistEvenWithAFullGrant(t *testing.T) {
 	f, medusa := enabledFixture(t, []skillcatalog.Capability{
 		skillcatalog.CapRepoRead, skillcatalog.CapDepsRead,
 		skillcatalog.CapReportWrite, skillcatalog.CapNetEgress,
 	})
-	dr, err := f.svc.DryRun(context.Background(), skills.DryRunRequest{
+	svc := skills.New(f.store, f.dataDir, skills.WithRunner(fixedRunner{
+		skillcatalog.RunnerAttestation{RunnerID: "container/docker", Controls: []skillcatalog.Control{
+			skillcatalog.ControlFilesystemIsolation, skillcatalog.ControlProcessIsolation,
+			skillcatalog.ControlNoCredentialInheritance, skillcatalog.ControlResourceLimits,
+			skillcatalog.ControlEgressDenyAll,
+		}},
+	}, ""))
+	dr, err := svc.DryRun(context.Background(), skills.DryRunRequest{
 		ProjectID: medusa, SkillID: "security-audit", ModeID: "dependencies",
 		Inputs:           map[string]string{"mode": "dependencies"},
 		ActorPermissions: adminPerms(),
@@ -97,8 +114,8 @@ func TestDryRun_BlocksOnTheMissingRunnerEvenWithAFullGrant(t *testing.T) {
 	if egress.DenialReason != skillcatalog.DenyMissingControl {
 		t.Fatalf("reason = %q, want missing_control", egress.DenialReason)
 	}
-	if egress.MissingControl == "" {
-		t.Fatalf("the denial must name the control: %#v", egress)
+	if egress.MissingControl != skillcatalog.ControlEgressAllowlist {
+		t.Fatalf("missing control = %q, want egress_allowlist", egress.MissingControl)
 	}
 	if len(egress.RequiresControls) == 0 {
 		t.Fatalf("the decision must carry the full requirement: %#v", egress)
@@ -106,14 +123,16 @@ func TestDryRun_BlocksOnTheMissingRunnerEvenWithAFullGrant(t *testing.T) {
 	if !dr.Runner.NeedsIsolation || !dr.Runner.NeedsEgressControl {
 		t.Fatalf("runner requirements = %#v", dr.Runner)
 	}
-	// The missing-control list is what says WHAT has to be built.
-	if len(dr.Runner.MissingControls) == 0 {
-		t.Fatalf("a blocked run must name the controls it lacks: %#v", dr.Runner)
+	// The missing-control list is exactly the one thing that has to be built.
+	if len(dr.Runner.MissingControls) != 1 ||
+		dr.Runner.MissingControls[0] != skillcatalog.ControlEgressAllowlist {
+		t.Fatalf("missing controls = %v", dr.Runner.MissingControls)
 	}
-	if dr.Runner.Available || dr.Runner.Isolated || dr.Runner.EgressControlled {
-		t.Fatalf("AO reported a runner it does not have: %#v", dr.Runner)
+	// Confinement is reported honestly and is NOT mistaken for an allowlist.
+	if !dr.Runner.Isolated || dr.Runner.EgressControlled {
+		t.Fatalf("confinement without an allowlist was misreported: %#v", dr.Runner)
 	}
-	if dr.Runner.RunnerID != "none" {
+	if dr.Runner.RunnerID != "container/docker" {
 		t.Fatalf("runner id = %q", dr.Runner.RunnerID)
 	}
 	// The capabilities that are fine report as satisfied, so a user can see
@@ -121,7 +140,7 @@ func TestDryRun_BlocksOnTheMissingRunnerEvenWithAFullGrant(t *testing.T) {
 	// four things. The RUN is still refused -- that is what Verdict says.
 	repo, _ := decisionFor(dr, skillcatalog.CapRepoRead)
 	if !repo.Satisfied || repo.DenialReason != "" {
-		t.Fatalf("repo.read should pass its own checks: %#v", repo)
+		t.Fatalf("repo.read should pass its own checks under confinement: %#v", repo)
 	}
 }
 
@@ -407,4 +426,120 @@ func (f fixedRunner) Attestation() skillcatalog.RunnerAttestation { return f.att
 
 func (fixedRunner) Execute(context.Context, skillcatalog.Plan) (skillcatalog.Result, error) {
 	return skillcatalog.Result{}, skillcatalog.ErrNoRunner
+}
+
+// Phase 4: with the real confining runner, the read modes become executable
+// and everything else stays blocked — per project, so one project's grant
+// cannot make another's run possible.
+func TestDryRun_ProjectIsolationHoldsUnderAConfiningRunner(t *testing.T) {
+	f := newFixture(t)
+	version := mustInstall(t, f)
+	medusa := f.seedProject(t, "medusa")
+	poseidon := f.seedProject(t, "poseidon")
+	confined := fixedRunner{skillcatalog.RunnerAttestation{
+		RunnerID: "container/docker",
+		Controls: []skillcatalog.Control{
+			skillcatalog.ControlFilesystemIsolation,
+			skillcatalog.ControlProcessIsolation,
+			skillcatalog.ControlNoCredentialInheritance,
+			skillcatalog.ControlResourceLimits,
+			skillcatalog.ControlEgressDenyAll,
+		},
+	}}
+	svc := skills.New(f.store, f.dataDir, skills.WithRunner(confined, ""))
+	ctx := context.Background()
+
+	// Only medusa is granted the read capabilities.
+	if _, err := svc.Enable(ctx, skills.EnableRequest{
+		ProjectID: medusa, SkillID: "security-audit", Version: version,
+		Capabilities: []skillcatalog.Capability{
+			skillcatalog.CapRepoRead, skillcatalog.CapReportWrite,
+		},
+		Actor: admin, ActorPermissions: adminPerms(),
+	}); err != nil {
+		t.Fatalf("Enable medusa: %v", err)
+	}
+	// Poseidon enables the same skill but grants only the report capability.
+	if _, err := svc.Enable(ctx, skills.EnableRequest{
+		ProjectID: poseidon, SkillID: "security-audit", Version: version,
+		Capabilities: []skillcatalog.Capability{skillcatalog.CapReportWrite},
+		Actor:        admin, ActorPermissions: adminPerms(),
+	}); err != nil {
+		t.Fatalf("Enable poseidon: %v", err)
+	}
+
+	medusaRun, err := svc.DryRun(ctx, skills.DryRunRequest{
+		ProjectID: medusa, SkillID: "security-audit", ModeID: "static-code",
+		Inputs: map[string]string{"mode": "static-code"}, ActorPermissions: adminPerms(),
+	})
+	if err != nil || medusaRun.Verdict != skills.DryRunExecutable {
+		t.Fatalf("medusa static-code = %q %v", medusaRun.Verdict, err)
+	}
+
+	// Same skill, same version, same runner, different project: refused,
+	// because the grant is per project and poseidon's omits repo.read.
+	poseidonRun, err := svc.DryRun(ctx, skills.DryRunRequest{
+		ProjectID: poseidon, SkillID: "security-audit", ModeID: "static-code",
+		Inputs: map[string]string{"mode": "static-code"}, ActorPermissions: adminPerms(),
+	})
+	if err != nil {
+		t.Fatalf("poseidon DryRun: %v", err)
+	}
+	if poseidonRun.Verdict != skills.DryRunBlocked {
+		t.Fatalf("poseidon static-code = %q, reasons %v", poseidonRun.Verdict, poseidonRun.Reasons)
+	}
+	repo, ok := decisionFor(poseidonRun, skillcatalog.CapRepoRead)
+	if !ok || repo.DenialReason != skillcatalog.DenyNotGranted {
+		t.Fatalf("poseidon repo.read = %#v", repo)
+	}
+}
+
+// A caller with too few permissions is refused even on a project that granted
+// the capability and with a runner that carries it. Capability authorization,
+// user authorization and runtime enforcement are three separate gates and none
+// substitutes for another.
+func TestDryRun_InsufficientUserAuthorizationStillRefuses(t *testing.T) {
+	f := newFixture(t)
+	version := mustInstall(t, f)
+	medusa := f.seedProject(t, "medusa")
+	confined := fixedRunner{skillcatalog.RunnerAttestation{
+		RunnerID: "container/docker", Controls: []skillcatalog.Control{
+			skillcatalog.ControlFilesystemIsolation,
+			skillcatalog.ControlProcessIsolation,
+			skillcatalog.ControlNoCredentialInheritance,
+			skillcatalog.ControlResourceLimits,
+			skillcatalog.ControlEgressDenyAll,
+		},
+	}}
+	svc := skills.New(f.store, f.dataDir, skills.WithRunner(confined, ""))
+	ctx := context.Background()
+	if _, err := svc.Enable(ctx, skills.EnableRequest{
+		ProjectID: medusa, SkillID: "security-audit", Version: version,
+		Capabilities: []skillcatalog.Capability{
+			skillcatalog.CapRepoRead, skillcatalog.CapReportWrite,
+		},
+		Actor: admin, ActorPermissions: adminPerms(),
+	}); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+
+	// The project granted it and the runner carries it; the CALLER holds
+	// nothing, so the run is refused on the third gate.
+	dr, err := svc.DryRun(ctx, skills.DryRunRequest{
+		ProjectID: medusa, SkillID: "security-audit", ModeID: "static-code",
+		Inputs: map[string]string{"mode": "static-code"}, ActorPermissions: nil,
+	})
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+	if dr.Verdict != skills.DryRunBlocked {
+		t.Fatalf("verdict = %q", dr.Verdict)
+	}
+	if len(dr.MissingPermissions) == 0 {
+		t.Fatalf("the refusal did not name a missing permission: %#v", dr)
+	}
+	// And the reason is the permission, not the runner: the runner is fine.
+	if len(dr.Runner.MissingControls) != 0 {
+		t.Fatalf("the runner was blamed for a permission problem: %#v", dr.Runner)
+	}
 }

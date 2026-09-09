@@ -5,8 +5,8 @@ any of it to work. The decision behind this is
 [`docs/adr/0004-skill-runner-isolation.md`](../adr/0004-skill-runner-isolation.md);
 this page is the operational half.
 
-**Nothing here is wired into AO's production path.** The runner exists,
-its boundary is tested, and no capability is unblocked by it.
+**One mode executes: `static-code`, via `ao.static-scan/v1`.** Everything else
+is refused with the missing control named. See "What can actually run" below.
 
 ## Controls
 
@@ -25,6 +25,38 @@ missing one — until all of them are attested.
 | `writable_workspace` | The run may modify a workspace and AO can return the changes under review |
 | `scoped_secret_delivery` | AO can hand the run one named secret, scoped to it, without an env var |
 | `arbitrary_process_execution` | A skill may run commands it authored (needs the skill-image contract) |
+
+## What can actually run
+
+`static-code`. It stages a scope-limited copy of the checkout, runs AO's own
+`ao.static-scan/v1` pattern scanner inside a container with no network, and
+returns a report whose coverage lists the files scanned, the files skipped and
+why, the rules that ran, and the tool's own limitations.
+
+**Reading is not exempt from confinement.** Phase 3 left `repo.read` requiring
+no control, on the reasoning that AO already had the checkout. That does not
+survive the question "restricted by what?": the only thing that would have
+confined an agent reading a repository outside a container is the agent CLI's
+tool allowlist, which AGENTS.md records as void under `bypassPermissions`. A
+prompt, a manifest and a CLI permission are none of them a boundary, so reading
+now requires the same five controls as everything else — it simply needs
+nothing beyond them, which is why it is the mode that runs.
+
+`ao.static-scan/v1` is a **pattern scanner, not a static analyzer**. It matches
+text; it does not parse, and it cannot follow a value to a sink. Its report says
+so in `coverage.limitations`, and an empty findings list means "these eight
+rules matched nothing in the files listed as scanned" — never "no
+vulnerabilities".
+
+### The tool contract
+
+A manifest names a **tool** from a closed vocabulary. It cannot name an image,
+a binary, or one argument. AO resolves the tool to a base image present on this
+host, pins it by digest, and authors the command in Go. Two validated integers
+(file budget, per-file size cap) are the only variable part.
+
+That is why `arbitrary_process_execution` remains a separate control: the
+contract is deliberately not general.
 
 ## Platform matrix
 
@@ -99,6 +131,30 @@ Two consequences:
 Operators: add the project checkout's parent to the VM's mounts —
 `colima start --mount <path>:w`, or Docker Desktop → Settings → Resources →
 File sharing.
+
+### Where inputs are staged
+
+AO copies **only the in-scope files** to a staging directory and mounts that
+read-only, rather than mounting the checkout. Scope is then enforced by what
+exists on the mount instead of by an instruction a skill may ignore, and `.git`
+(every version of every file, including deleted secrets), `node_modules`,
+`vendor` and friends never cross the boundary at all.
+
+The staging root defaults to `<project-parent>/.ao-skill-staging`, because the
+project's parent is the one path AO can reason about being inside the VM's
+shared tree. It is never `~/.ao` (outside the mount set on a normal colima
+install) and never the home directory itself. An operator whose layout differs
+can override it.
+
+Per-run directories are removed on every exit path, success or failure. The
+root itself is kept: removing and recreating it churns a path virtiofs caches,
+and the next run's mount then fails to resolve a directory that demonstrably
+exists on the host.
+
+Files AO cannot stage are **recorded, not dropped**: a filename the tool cannot
+address unambiguously through a shell, or a file it could not read, appears in
+`coverage.skipped` with a reason. A file counted as staged but never scanned
+would be a coverage lie, which is the failure this whole path exists to prevent.
 
 ### What a run gets
 

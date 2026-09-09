@@ -373,14 +373,21 @@ func TestSkills_DryRunReportsWhatIsMissing(t *testing.T) {
 		return out
 	}
 
-	// The read-only mode is executable today.
+	// The daemon under test wires no runner, so even the read-only mode is
+	// blocked: reading a checkout has no AO-enforced boundary outside the
+	// container, so it is not exempt from confinement.
 	static := decode(w.expect(http.MethodPost, "/api/v1/projects/medusa/skills/security-audit/dry-run",
 		ownerCookie, `{"modeId":"static-code","inputs":{"mode":"static-code"}}`, http.StatusOK))
-	if static.Verdict != "executable" {
+	if static.Verdict != "blocked" {
 		t.Fatalf("static-code verdict = %q, reasons = %v", static.Verdict, static.Reasons)
 	}
-	if static.Runner.NeedsIsolation {
-		t.Fatalf("a read-only mode should need no containment: %+v", static.Runner)
+	if !static.Runner.NeedsIsolation {
+		t.Fatalf("a read mode must need confinement: %+v", static.Runner)
+	}
+	// It needs confinement and nothing beyond it — which is what makes it the
+	// first mode that becomes executable once a runner is wired.
+	if static.Runner.NeedsEgressControl {
+		t.Fatalf("a read mode must not need an egress allowlist: %+v", static.Runner)
 	}
 
 	// The dependency mode is granted and still blocked, because AO has no

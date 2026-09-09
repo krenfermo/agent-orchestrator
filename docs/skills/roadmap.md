@@ -1,8 +1,10 @@
 # Skills catalog — integration roadmap
 
-**Status: subfases 1 and 2 mostly done (phase 2). Subfase 3 is PARTLY done
-(phase 3, 2026-09-09): the boundary is decided, built and tested, and it
-unblocks nothing.** Nothing executes.
+**Status: subfases 1-2 mostly done; subfase 3 partly done. Phase 4
+(2026-09-09) made ONE mode execute: `static-code`, inside the container, over a
+staged scope-limited copy.** Four controls remain unbuilt and each blocks one
+capability — see `docs/adr/0005-pending-capability-controls.md` for the design
+of all four and the implementation of none.
 
 Phase 1 delivered the catalog core and the `security-audit` package. Phase 2
 made it administrable: SQLite persistence, an audit trail, HTTP routes, `ao
@@ -90,6 +92,12 @@ is no longer the open question; four specific controls are.
 | `writable_workspace` | `repo.write` | A writable overlay and a reviewed path to return changes to the host |
 | `scoped_secret_delivery` | `secrets.read` | Per-run injection of one named secret from AO's store, without an env var — follow `agentcred`'s file-not-env rule |
 | `arbitrary_process_execution` | `process.exec` | The skill-image contract: what a skill may ship, how it is built, how its command is authored and pinned |
+
+**ADR 0005 designs all four**, with the negative tests each needs and a
+recommended order: secret delivery, then writable workspace, then the egress
+proxy, then arbitrary execution. None is implemented, deliberately — each needs
+a negative test proving it cannot exceed its scope, and building four at once is
+how one ships without its test.
 
 Note the shape of the remaining work: none of it is "make the sandbox
 stronger". The sandbox holds. What is missing is four narrower mechanisms, each
@@ -190,7 +198,9 @@ Only once the core is stable and subfase 3 has landed.
    c. **Ship a runtime.** AO bundles or manages a VM. Largest scope by far, and
       it puts AO in the business of maintaining a Linux distribution.
 
-   Option (b) is the recommendation, with (a) as the fallback if the read-only
-   modes ever grow a capability that needs a control. It should be decided
-   before the four missing controls are built, because it determines whether the
-   proxy work or the skill-image contract comes first.
+   ~~Option (b) is the recommendation~~ **Decided: option B, conditioned.** The
+   condition — a read mode may skip the runtime only if AO itself effectively
+   restricts it — turned out to exclude every read mode, because AO has no such
+   restriction outside the container. So reading requires confinement too, and
+   the practical effect of option B is: with a container runtime, the read modes
+   run; without one, nothing does. Recorded in ADR 0004's phase-4 note.

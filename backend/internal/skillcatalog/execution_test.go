@@ -33,7 +33,7 @@ func TestPlanRun_BuildsAnAuthorizedPlanWithoutRunningAnything(t *testing.T) {
 		Inputs:             map[string]string{"mode": "deep"},
 		RequestedBy:        admin,
 		SubjectPermissions: []domain.Permission{domain.PermProjectRead},
-	}, NoRunner())
+	}, confiningRunner())
 	if err != nil {
 		t.Fatalf("PlanRun: %v", err)
 	}
@@ -51,9 +51,23 @@ func TestPlanRun_FailsClosedWhenTheGrantIsMissing(t *testing.T) {
 		ProjectID: "medusa", SkillID: "example-audit", ModeID: "quick",
 		Inputs:             map[string]string{"mode": "quick"},
 		SubjectPermissions: []domain.Permission{domain.PermProjectRead},
-	}, NoRunner())
+	}, confiningRunner())
 	if !errors.Is(err, ErrCapabilityDenied) {
 		t.Fatalf("err = %v, want ErrCapabilityDenied", err)
+	}
+}
+
+// The same plan against an environment that attests nothing is refused for a
+// different, equally correct reason: reading needs confinement.
+func TestPlanRun_RefusesReadingWithoutAConfiningRunner(t *testing.T) {
+	r := enabledRegistry(t, []Capability{CapRepoRead, CapReportWrite})
+	_, err := PlanRun(r, RunRequest{
+		ProjectID: "medusa", SkillID: "example-audit", ModeID: "quick",
+		Inputs:             map[string]string{"mode": "quick"},
+		SubjectPermissions: []domain.Permission{domain.PermProjectRead},
+	}, NoRunner())
+	if !errors.Is(err, ErrCapabilityDenied) || !strings.Contains(err.Error(), "filesystem_isolation") {
+		t.Fatalf("err = %v, want a confinement refusal", err)
 	}
 }
 
@@ -75,7 +89,7 @@ func TestPlanRun_ValidatesInputsAgainstTheManifest(t *testing.T) {
 			_, err := PlanRun(r, RunRequest{
 				ProjectID: "medusa", SkillID: "example-audit", ModeID: "quick",
 				Inputs: tc.inputs, SubjectPermissions: perms,
-			}, NoRunner())
+			}, confiningRunner())
 			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
 				t.Fatalf("err = %v, want %q", err, tc.wantSub)
 			}
@@ -92,7 +106,7 @@ func TestPlanRun_RefusesADisabledSkill(t *testing.T) {
 		ProjectID: "medusa", SkillID: "example-audit", ModeID: "quick",
 		Inputs:             map[string]string{"mode": "quick"},
 		SubjectPermissions: []domain.Permission{domain.PermProjectRead},
-	}, NoRunner())
+	}, confiningRunner())
 	if !errors.Is(err, ErrNotEnabled) {
 		t.Fatalf("err = %v, want ErrNotEnabled", err)
 	}
@@ -107,7 +121,7 @@ func TestUnavailableRunner_RefusesEveryPlan(t *testing.T) {
 		ProjectID: "medusa", SkillID: "example-audit", ModeID: "quick",
 		Inputs:             map[string]string{"mode": "quick"},
 		SubjectPermissions: []domain.Permission{domain.PermProjectRead},
-	}, NoRunner())
+	}, confiningRunner())
 	if err != nil {
 		t.Fatalf("PlanRun: %v", err)
 	}

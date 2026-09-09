@@ -64,22 +64,56 @@ holding every permission — the same passthrough every other AO route has there
 
 ## What is blocked, and why
 
-AO has **no isolated runner**. Every capability that needs real containment is
-refused at plan time, with the reason:
+Every capability names the execution-environment **controls** it needs, and is
+refused — naming the missing one — until they are all attested.
 
-| Capability | Blocked because |
+The container runner provides five: `filesystem_isolation`,
+`process_isolation`, `no_credential_inheritance`, `resource_limits` and
+`egress_deny_all`. That is enough for reading, and not enough for anything else.
+
+| Capability | Missing control |
 | --- | --- |
-| `repo.write`, `process.exec`, `secrets.read` | needs an isolated execution environment |
-| `net.egress`, `net.active_scan` | needs isolation *and* controlled egress |
+| `repo.write` | `writable_workspace` |
+| `process.exec` | `arbitrary_process_execution` |
+| `secrets.read` | `scoped_secret_delivery` |
+| `net.egress`, `net.active_scan` | `egress_allowlist` — "the network is off" is not "the network is limited to these hosts" |
 
-So for the shipped `security-audit` package: `static-code`, `secret-scan` and
-`authz-review` come back *Can run*; `dependencies`, `api-infra-review` and
-`active-pentest` come back *Blocked*.
+**Reading is not exempt.** There is no AO-enforced boundary for "an agent reads
+the checkout" outside the container — the agent CLI's tool allowlist is void
+under `bypassPermissions`, and a prompt, a manifest and a CLI permission are
+none of them a security frontier. So the read modes require confinement too;
+they simply need nothing beyond it.
 
-That refusal is the control working. A manifest and a prompt are not a security
-boundary — the dry run trusts exactly one value for containment, the runner's
-own attestation, and AO's runner honestly attests nothing. Nothing in the API
-accepts a self-declared `isolated: true` from a caller.
+With no container runtime, every mode reports *Blocked*. With one:
+
+| Mode | Result |
+| --- | --- |
+| `static-code` | **Can run** — and actually executes, via `ao.static-scan/v1` |
+| `secret-scan`, `authz-review` | *Can run* per the capability check; no tool contract is wired for them yet |
+| `dependencies`, `api-infra-review` | *Blocked* — needs `egress_allowlist` |
+| `active-pentest` | *Blocked* — needs `egress_allowlist`, and per-target approval besides |
+
+That refusal is the control working. The dry run trusts exactly one value for
+containment — the runner's own attestation — and it takes none from the caller.
+There is no API field for a client to declare `isolated: true`.
+
+## What `static-code` actually does
+
+It stages **only the in-scope files** into a directory AO owns, mounts that
+read-only, and runs AO's own pattern scanner in a container with no network.
+`.git`, `node_modules` and `vendor` never cross the boundary.
+
+The report carries coverage, not just findings: files staged, files the
+container could actually see, files scanned, every file skipped with a reason,
+the eight rules that ran, and the tool's own limitations. An empty findings list
+means "these rules matched nothing in the files listed as scanned" — the report
+never says "no vulnerabilities", because a pattern scan over a subset of files
+cannot support that claim.
+
+If the container saw fewer files than AO staged, **the run fails** rather than
+producing a report. On macOS a bind mount from a path the VM does not share
+arrives empty and silent, and a clean audit of a project nobody read is the
+worst output this system could produce.
 
 ## Failure modes you may hit
 
