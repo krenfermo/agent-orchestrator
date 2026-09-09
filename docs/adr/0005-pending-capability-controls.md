@@ -1,8 +1,9 @@
 # 5. The four controls that stay unimplemented, and what each one requires
 
 Date: 2026-09-09
-Status: `scoped_secret_delivery` is **IMPLEMENTED** (phase 5, 2026-09-09) — see
-the note at the end of its section. The other three remain design only.
+Status: `scoped_secret_delivery` (phase 5) and `writable_workspace` (phase 6)
+are **IMPLEMENTED** — see the notes at the end of their sections. The other two
+remain design only.
 
 ## Context
 
@@ -14,7 +15,7 @@ That leaves four controls, each blocking exactly one capability:
 
 | Control | Blocks | Status |
 | --- | --- | --- |
-| `writable_workspace` | `repo.write` | design only |
+| `writable_workspace` | `repo.write` | **built, phase 6** |
 | `egress_allowlist` | `net.egress`, `net.active_scan` | design only |
 | `scoped_secret_delivery` | `secrets.read` | **built, phase 5** |
 | `arbitrary_process_execution` | `process.exec` | design only |
@@ -25,11 +26,11 @@ scope, and a control whose negative test does not exist yet is a control that
 should not be attested. Building four of them at once is how one of them ships
 without its test.
 
-**Do not read the three remaining sections as available.** The capability table
+**Do not read the two remaining sections as available.** The capability table
 names these controls, `internal/skillrunner` attests only
-`scoped_secret_delivery` (and only when both a container and a working
-authority exist), and every other affected capability is refused with the
-missing control named.
+`scoped_secret_delivery` and `writable_workspace` — each only when both a
+container and its own second half exist — and every other affected capability is
+refused with the missing control named.
 
 ## 1. `writable_workspace` — for `repo.write`
 
@@ -64,11 +65,53 @@ setting rather than a property.
 5. A symlink created inside `/workspace` pointing outside it does not let the
    diff read or write through it.
 
-### Why not now
+### Built, phase 6 — and what changed from this design
 
-The patch-review path is a product surface, not a runner detail: somebody has
-to see the diff and approve it, and that is the review UI's job. Building the
-runner half first would produce writes nobody can inspect.
+The design said "a `tmpfs` or a bind mount with a size cap". Measurement made
+that a real choice rather than an either/or:
+
+**A writable bind mount has no cap AO can enforce, and `--memory` does not help**
+— pages written to a bind mount are page cache, not the cgroup's. **A tmpfs is
+charged to the memory cgroup and its `size=` is kernel-enforced**: a 4 MiB write
+into a 1 MiB tmpfs stopped at exactly 1 MiB. So `/workspace` is a tmpfs.
+
+The cost, also measured: **a tmpfs dies with the container and `docker cp`
+cannot reach it afterwards** — the copy comes back empty. So AO's own wrapper
+transfers `/workspace` into a bind-mounted `/out` as its last act. What reaches
+the host is bounded by the tmpfs cap by construction, whatever the workload did.
+
+Two things the design did not say:
+
+**The transfer deliberately preserves file types.** A symlink the run created
+arrives on the host pointing at the *host's* filesystem, and a FIFO arrives as a
+FIFO. Dropping them in the transfer would have left the host-side validator
+untested, and the validator is the actual defense. Everything that arrives is
+quarantined, not trusted: `Collect` uses `Lstat` and never follows a link,
+refuses symlinks, hardlinks (an artifact whose bytes another name can change is
+not an artifact), special files, traversing or over-long paths, oversize files
+and over-budget counts — and **reports every refusal** rather than dropping it,
+because a caller who sees three files and expected four needs to know which one
+was refused and why. A refused file stays in quarantine so a person can look at
+it.
+
+**Cleanup fails closed and KEEPS the directory.** A per-run marker records the
+owner, the run, the attempt and a token minted at preparation. A missing,
+unreadable or mismatched marker refuses the removal: an orphan somebody deletes
+by hand is recoverable, and deleting a directory that turned out to be somebody
+else's is not. A leftover from a crashed attempt is likewise kept, never reused.
+
+The result carries `Applied: false` as a field rather than an omission, so a
+consumer reading it sees the answer instead of assuming one. Applying a patch
+remains a separate, human-approved act through AO's review path — nothing here
+writes to the operator's checkout, and a test fingerprints the whole checkout
+before and after to prove it.
+
+### Still open
+
+The patch-review surface. `WorkspaceResult` is the input it needs — artifacts by
+digest, a diff against the staged inputs, deletions, and the inputs actually
+used — but there is no HTTP route, CLI verb or UI, so nothing here is reachable
+from the app. Base/HEAD checking at apply time belongs there, not in the runner.
 
 ## 2. `egress_allowlist` — for `net.egress` and `net.active_scan`
 

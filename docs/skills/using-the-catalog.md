@@ -73,7 +73,7 @@ The container runner provides five: `filesystem_isolation`,
 
 | Capability | Missing control |
 | --- | --- |
-| `repo.write` | `writable_workspace` |
+| `repo.write` | *(none — built in phase 6; writes go to an isolated workspace and are never applied to your checkout. No UI or CLI yet)* |
 | `process.exec` | `arbitrary_process_execution` |
 | `secrets.read` | *(none — built in phase 5; needs a secret authority configured, and there is no UI or CLI for it yet)* |
 | `net.egress`, `net.active_scan` | `egress_allowlist` — "the network is off" is not "the network is limited to these hosts" |

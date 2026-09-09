@@ -89,14 +89,15 @@ is no longer the open question; four specific controls are.
 | Control | Blocks | What has to be built |
 | --- | --- | --- |
 | `egress_allowlist` | `net.egress`, `net.active_scan` | An AO-owned forward proxy on an `--internal` network enforcing `scope.network.allow`; the skill container gets no other route |
-| `writable_workspace` | `repo.write` | A writable overlay and a reviewed path to return changes to the host |
+| ~~`writable_workspace`~~ | ~~`repo.write`~~ | **Built (phase 6).** A capped tmpfs the run writes to, transferred into quarantine and validated on the host; artifacts and a diff, never applied. The patch-review surface is still missing. |
 | ~~`scoped_secret_delivery`~~ | ~~`secrets.read`~~ | **Built (phase 5).** Scope-bound grants with expiry and revocation, single-use per-attempt leases, 0600 files at /run/secrets, never an env var. No HTTP/CLI/UI surface yet, deliberately. |
 | `arbitrary_process_execution` | `process.exec` | The skill-image contract: what a skill may ship, how it is built, how its command is authored and pinned |
 
-**ADR 0005 designs all four.** Secret delivery is now built with its negative
-tests; the remaining three are design only, in the recommended order: writable
-workspace, then the egress proxy, then arbitrary execution. Each still needs a
-negative test proving it cannot exceed its scope before it may be attested.
+**ADR 0005 designs all four.** Secret delivery (phase 5) and the writable
+workspace (phase 6) are built with their negative tests. The remaining two are
+design only, in the recommended order: the egress proxy, then arbitrary
+execution. Each still needs a negative test proving it cannot exceed its scope
+before it may be attested.
 
 Note the shape of the remaining work: none of it is "make the sandbox
 stronger". The sandbox holds. What is missing is four narrower mechanisms, each

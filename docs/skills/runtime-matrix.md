@@ -68,7 +68,7 @@ contract is deliberately not general.
 | `resource_limits` | **Yes** (cgroup v2) | **Yes** (cgroup v2 in the VM) | **No** — macOS has no cgroups | No |
 | `egress_deny_all` | **Yes** | **Yes** | **Yes** (`-n no-network`) | No |
 | `egress_allowlist` | Not built | Not built | **Not possible** | No |
-| `writable_workspace` | Not built | Not built | Not built | No |
+| `writable_workspace` | **Yes**, with a usable workspace root | **Yes**, with a usable workspace root | **No** — no confinement to write inside | No |
 | `scoped_secret_delivery` | **Yes**, with a secret authority | **Yes**, with a secret authority | **No** — no confinement to deliver into | No |
 | `arbitrary_process_execution` | Not built | Not built | Not built | No |
 
@@ -246,6 +246,77 @@ secret and granting one are Go APIs only, so nothing here is reachable from the
 app. That is deliberate — which secrets a skill may request, and who approves
 each name, is a policy decision that should precede the surface.
 
+## Writable workspace
+
+A run may write, and it may write only to a filesystem that exists for the
+length of the container. **The operator's checkout is never mounted — writable
+or otherwise.** What the run sees is the staged copy at `/work`, read-only.
+
+```
+/work        read-only   the staged, scope-limited copy
+/workspace   read-write  a tmpfs, size-capped, where the run writes
+/out         read-write  a bind mount AO's own wrapper transfers into
+```
+
+### Why a tmpfs and not a writable bind mount
+
+A bind mount has no size limit AO can enforce, and `--memory` does not help
+because pages written to one are page cache rather than the cgroup's. A tmpfs is
+charged to the memory cgroup and its `size=` is enforced by the kernel —
+measured: a 4 MiB write into a 1 MiB tmpfs stops at exactly 1 MiB.
+
+The cost, also measured: a tmpfs dies with the container and `docker cp` cannot
+reach it afterwards. So AO's wrapper transfers `/workspace` into `/out` as its
+last act, and what reaches the host is bounded by the cap by construction.
+
+### Everything collected is quarantined, not trusted
+
+The transfer preserves file types on purpose, so the host-side validator faces
+the real thing: a symlink the run created arrives pointing at the **host's**
+filesystem, and a FIFO arrives as a FIFO. Collection uses `Lstat` and never
+follows a link. It refuses, and **reports**:
+
+| Refusal | Why |
+| --- | --- |
+| `symlink` | Arrives pointing at the host; deciding one is harmless is not AO's judgement to make |
+| `hardlink` | An artifact whose bytes another name can change is not an artifact |
+| `special_file` | A device, socket or FIFO is not a change to a repository |
+| `path_escapes_workspace` | Lexical traversal out of the quarantine |
+| `path_too_long` | Refuses the directory and skips the subtree |
+| `file_too_large`, `total_size_exceeded`, `file_budget_exhausted` | The caps, re-checked on the host so a runtime that ignored the tmpfs flag produces a refusal rather than a surprise |
+
+A refused file is left in quarantine rather than deleted, so a person can look
+at it. A caller who sees three artifacts and expected four is told which one was
+refused and why.
+
+### What comes out, and what does not happen to it
+
+`WorkspaceResult` carries the artifacts by digest, each marked added, modified
+or unchanged against the staged inputs; the deletions; the refusals; and the
+inputs actually used, by digest — evidence of what the run read, not only of
+what it wrote.
+
+`Applied` is a field on that struct and it is always `false`. **Nothing is ever
+written to the operator's checkout.** Applying is a separate, human-approved act
+with its own base/HEAD check, and there is no route, CLI verb or UI for it yet.
+
+### Ownership and cleanup
+
+Each workspace is one run AND one attempt — the directory name carries both, so
+two attempts never share one. A marker records the owner, the ids and a token
+minted at preparation.
+
+Cleanup **fails closed**: a missing, unreadable or mismatched marker refuses the
+removal and keeps the directory. An orphan somebody deletes by hand is
+recoverable; deleting a directory that turned out to be somebody else's is not.
+A leftover from a crashed attempt is kept, never reused.
+
+### What writing does NOT unblock
+
+`process.exec`, `secrets.read`, `net.egress` and `net.active_scan` are untouched
+by this control, and a test asserts it. Writing is not a reason to reach the
+network, run a chosen command, or read a credential.
+
 ## Failure behavior
 
 Every one of these refuses **without executing anything on the host**:
@@ -262,6 +333,9 @@ Every one of these refuses **without executing anything on the host**:
 | A secret grant that never expires | Refused — one nobody removes |
 | A lease redeemed twice, or by another attempt | Refused |
 | A grant revoked between minting and launch | Refused at redemption |
+| A workspace whose ownership cannot be proven | Kept for recovery, not deleted |
+| A leftover workspace from a crashed attempt | Kept, never reused |
+| A run that produced a symlink, hardlink or special file | Refused and reported; the file stays in quarantine |
 
 There is no host fallback and no degraded mode. A capability that needed
 containment and did not get it is refused, never downgraded.

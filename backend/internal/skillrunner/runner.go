@@ -69,7 +69,11 @@ type Request struct {
 	// variables, and this struct cannot carry a VALUE at any point: the values
 	// were written by the authority before the Request was built.
 	Secrets *SecretDelivery
-	Limits  Limits
+	// Workspace, when set, gives the run a capped tmpfs it may write to and a
+	// quarantine directory AO's own wrapper transfers into. The operator's
+	// checkout is never mounted writable -- or at all.
+	Workspace *Workspace
+	Limits    Limits
 }
 
 // BoundaryEvidence is what AO observed about the boundary, collected from the
@@ -107,6 +111,15 @@ type BoundaryEvidence struct {
 	SecretRefsDelivered []string
 	// SecretsMounted records that a delivery was expected and arrived.
 	SecretsMounted bool
+	// WorkspaceBytes and WorkspaceFiles are what the run reported writing,
+	// from inside the capped tmpfs. AO re-measures at collection, so a
+	// mismatch shows up rather than being taken on trust.
+	WorkspaceBytes int64
+	WorkspaceFiles int
+	// WorkspaceTransferred records that AO's wrapper moved the output into
+	// quarantine. False with a workspace configured means nothing was
+	// collected, which is a refusal rather than an empty result.
+	WorkspaceTransferred bool
 	// Controls are what this run demonstrated, derived from the fields above.
 	Controls []skillcatalog.Control
 }
@@ -133,12 +146,28 @@ type Runner struct {
 	// probeErr is why the runtime is unusable, when it is. It is kept so the
 	// refusal can say what is wrong rather than only that something is.
 	probeErr error
+	// workspaceAvailable records that AO can prepare, collect and clean up a
+	// writable workspace on this host. Like secretsAvailable it is set by the
+	// daemon from a resolved fact, never from a manifest and never from a flag
+	// a caller passes.
+	workspaceAvailable bool
 	// secretsAvailable records that a trusted authority can actually deliver
 	// values. It is set by WithSecretDelivery from the AUTHORITY's own
 	// readiness, never from a flag a caller passes and never from a manifest —
 	// a runner that attested this because somebody asked it to would defeat
 	// every check the capability table makes.
 	secretsAvailable bool
+}
+
+// WithWritableWorkspace records that AO can give a run a writable workspace on
+// this host: a usable workspace root, resolved by the daemon at construction.
+//
+// It is the one thing that lets this runner attest ControlWritableWorkspace,
+// and it unblocks repo.write and nothing else — writing is not a reason to
+// reach the network, run a chosen command, or read a secret.
+func (r *Runner) WithWritableWorkspace(rootUsable bool) *Runner {
+	r.workspaceAvailable = rootUsable
+	return r
 }
 
 // WithSecretDelivery records that a working secret authority is wired.
@@ -191,6 +220,12 @@ func (r *Runner) Attestation() skillcatalog.RunnerAttestation {
 	// runtime alone proves nothing about where a secret would come from.
 	if r.secretsAvailable {
 		controls = append(controls, skillcatalog.ControlScopedSecretDelivery)
+	}
+	// A writable workspace needs somewhere to put one. A container alone
+	// proves nothing about where the output would land or whether AO could
+	// clean it up afterwards.
+	if r.workspaceAvailable {
+		controls = append(controls, skillcatalog.ControlWritableWorkspace)
 	}
 	return skillcatalog.RunnerAttestation{
 		RunnerID: "container/" + r.runtime.Binary,
@@ -338,11 +373,15 @@ func (r *Runner) containerArgs(name string, req Request, limits Limits) []string
 		"--workdir", "/work",
 		"-v", req.InputDir + ":/work:ro",
 	}
-	// The secrets mount is read-only and is the ONLY additional mount a run
-	// ever gets. There is no code path here that mounts a home directory, a
-	// credential file, AO's data dir or the container socket.
+	// The secrets mount is read-only, and the workspace pair is the only
+	// writable thing a run ever gets. There is no code path here that mounts a
+	// home directory, a credential file, AO's data dir or the container
+	// socket, and none that mounts the project checkout at all.
 	if req.Secrets != nil {
 		args = append(args, req.Secrets.MountArgs()...)
+	}
+	if req.Workspace != nil {
+		args = append(args, req.Workspace.MountArgs()...)
 	}
 	for key, value := range req.Env {
 		args = append(args, "-e", key+"="+value)
@@ -392,6 +431,15 @@ func (r *Runner) evidenceFrom(res Result, req Request, limits Limits) BoundaryEv
 			ev.ReadOnlyRootFS = value == "true"
 		case "ao_daemon_env_leaked":
 			ev.InheritedDaemonEnv, _ = strconv.Atoi(value)
+		case "ao_workspace_bytes":
+			// The tool reports kilobytes; AO stores bytes.
+			if kb, err := strconv.ParseInt(value, 10, 64); err == nil {
+				ev.WorkspaceBytes = kb * 1024
+			}
+		case "ao_workspace_files":
+			ev.WorkspaceFiles, _ = strconv.Atoi(value)
+		case "ao_workspace_transferred":
+			ev.WorkspaceTransferred = value == "true"
 		case "ao_secret_refs":
 			if value != "" {
 				ev.SecretRefsDelivered = strings.Split(value, ",")
