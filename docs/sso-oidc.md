@@ -101,6 +101,74 @@ fails, which is the failure mode `internal/runtimehome` was already burned by
 the secret in Keychain and have a login-time launcher materialize the `0600`
 file, accepting that the file then exists for the daemon's lifetime.
 
+### Activar el archivo en una instalación ya corriendo
+
+El daemon lanzado por la app hereda su entorno del **login shell**: `main.ts`
+sondea `$SHELL -ilc` y `buildDaemonEnv` fusiona ese entorno sin filtrar nada, de
+modo que cualquier `AO_OIDC_*` exportado en la configuración del shell llega al
+daemon. Esa es la palanca de activación, y también el motivo por el que la
+variable inline debe desaparecer de ahí.
+
+Que el entorno del daemon no es sitio para un secreto ya está asumido en el
+propio launcher: el token del runtime del navegador se entrega por el stdin
+privado del hijo, con el comentario *"Never put it in the daemon environment,
+where a same-UID worker could inspect the parent process."* Esto aplica la misma
+regla al secreto OIDC.
+
+1. Escribe el secreto en su archivo, sin que pase por argv ni por el historial:
+
+   ```bash
+   ./scripts/ao-set-oidc-secret.sh          # pide el valor con la entrada oculta
+   pbpaste | ./scripts/ao-set-oidc-secret.sh   # o desde el portapapeles
+   ```
+
+   Confirma que imprime `mode: 600` y una longitud en bytes que coincide con la
+   del secreto emitido por la consola. **El script no imprime el valor.**
+
+2. En la configuración del login shell (`~/.zshrc` con zsh, que `-ilc` lee),
+   añade la ruta y **elimina la variable inline**:
+
+   ```bash
+   export AO_OIDC_CLIENT_SECRET_FILE="$HOME/.ao/oidc-client-secret"
+   # borra cualquier: export AO_OIDC_CLIENT_SECRET=...
+   ```
+
+   Si la variable inline sólo estaba exportada en una terminal suelta, basta con
+   cerrar esa terminal: no hay nada persistente que limpiar.
+
+3. Reinicia el daemon **desde la app** (salir y volver a abrir AO). Este
+   documento no lo reinicia por ti: hacerlo corta las sesiones vivas.
+
+4. Comprueba que el proceso nuevo **no** recibe el secreto inline. Debe imprimir
+   `0`:
+
+   ```bash
+   ps eww -p "$(pgrep -f 'exe/ao|/ao start' | head -1)" \
+     | tr ' ' '\n' | grep -c '^AO_OIDC_CLIENT_SECRET='
+   ```
+
+   Y que sí recibe la ruta (que no es secreta):
+
+   ```bash
+   ps eww -p "$(pgrep -f 'exe/ao|/ao start' | head -1)" \
+     | tr ' ' '\n' | grep '^AO_OIDC_CLIENT_SECRET_FILE='
+   ```
+
+5. Haz un **login real** por SSO. Hasta que ese login funcione, el secreto
+   anterior sigue siendo el único que se sabe bueno: no lo deshabilites.
+
+#### Lo que esto NO arregla en el proceso que ya está corriendo
+
+El daemon en ejecución arrancó con la variable inline. macOS fotografía el
+entorno de un proceso en el `exec`, así que **`ps eww` sigue mostrando el valor
+en ese proceso mientras viva, y `os.Unsetenv` no lo cambia**: desasignar sólo
+afecta a lo que hereden los hijos lanzados a partir de ese momento. Comprobado
+en esta plataforma, no supuesto.
+
+La única forma de que desaparezca de `ps` es que el proceso termine y el
+siguiente arranque sin la variable, que es lo que hace el paso 3. Por eso un
+secreto expuesto se **rota**, no se limpia.
+
 ### Rotating the client secret
 
 Google (and every provider that allows more than one active secret) lets a new
