@@ -76,17 +76,96 @@ type ScanFinding struct {
 type SkippedFile struct {
 	Path   string `json:"path"`
 	Reason string `json:"reason"`
+	// Stage says WHERE the file was dropped, because the two answers send a
+	// reader to different places. SkipAtStaging means AO never put it on the
+	// mount, so the container could not have read it whatever it did.
+	// SkipAtScan means it was on the mount and the rules did not run over it.
+	// Merged into one list, as they used to be, neither of the two coverage
+	// equations below can be checked.
+	Stage string `json:"stage"`
+	// Bytes and Limit are set for a size-bounded reason, so a reader can see
+	// how far over the bound a file was without going to look at it.
+	Bytes int64 `json:"bytes,omitempty"`
+	Limit int64 `json:"limit,omitempty"`
 }
 
+// Where a file was dropped. These are the only two values Stage takes.
+const (
+	SkipAtStaging = "staging"
+	SkipAtScan    = "scan"
+)
+
+// Stable skip reasons. They are part of the report's contract -- a caller may
+// branch on them -- so they are named here rather than spelled inline.
+const (
+	// SkipReasonTooLarge is a file above the per-file byte bound. STAGING owns
+	// this decision; see the note on the scanner's residual size guard in
+	// staticScanArgv for why there is exactly one source of truth for it.
+	SkipReasonTooLarge = "too_large"
+	// SkipReasonSymlink is a symlink inside the checkout. It is never followed
+	// and never copied: it could point at a credential outside the scope.
+	SkipReasonSymlink = "symlink"
+	// SkipReasonNotRegular is a socket, device or fifo. Nothing a scanner can
+	// read as source, but it was in the tree and the accounting has to say so.
+	SkipReasonNotRegular = "not_a_regular_file"
+	// SkipReasonExcludedName is a FILE whose own name is in
+	// excludedFromStaging. A pruned DIRECTORY is not discovered at all and is
+	// therefore not one of these; see the note on FilesDiscovered.
+	SkipReasonExcludedName = "excluded_name"
+	// SkipReasonUnaddressable is a name the scan tool's shell cannot pass
+	// through word-splitting intact.
+	SkipReasonUnaddressable = "unaddressable_filename"
+	// SkipReasonUnreadable is a file AO could not open.
+	SkipReasonUnreadable = "unreadable"
+	// SkipReasonBudget is a file past the run's file budget.
+	SkipReasonBudget = "file_budget_exhausted"
+	// SkipReasonUnsupportedExt is the scanner's own reason: the file was on the
+	// mount, and its extension is outside what the rules understand.
+	SkipReasonUnsupportedExt = "unsupported_extension"
+)
+
 // ScanCoverage is the honest half of the report.
+//
+// It carries a DENOMINATOR, not just a numerator, and it says out loud whether
+// the two add up. Two equations have to hold for the coverage to describe the
+// project rather than a subset of it that happens to be what survived:
+//
+//	FilesDiscovered = FilesStaged  + FilesSkippedPreStage
+//	FilesStaged     = FilesScanned + FilesSkippedByScanner
+//
+// Reconciled reports whether both held. When either does not, the report says
+// so instead of printing counts that quietly do not add up -- an unreconciled
+// coverage block is a coverage block a reader must not treat as complete.
 type ScanCoverage struct {
+	// FilesDiscovered is every candidate file the staging walk ENCOUNTERED,
+	// counted once per path. It is the denominator the other counts are read
+	// against: without it "staged 3" is a number with nothing to compare to,
+	// which is exactly how an omitted file used to disappear.
+	//
+	// Excluded DIRECTORIES (.git, node_modules, ...) are pruned before descent
+	// and their contents are never discovered, so they are not counted here.
+	// That boundary is deliberate: enumerating a .git tree to report it as
+	// skipped would cost more than the scan and tell a reader nothing.
+	FilesDiscovered int `json:"filesDiscovered"`
 	// FilesStaged is what AO put on the mount; FilesVisible is what the
 	// container could see. They must match or the run is refused.
 	FilesStaged  int `json:"filesStaged"`
 	FilesVisible int `json:"filesVisible"`
 	// FilesScanned is what the rules actually ran over.
-	FilesScanned int           `json:"filesScanned"`
-	Skipped      []SkippedFile `json:"skipped"`
+	FilesScanned int `json:"filesScanned"`
+	// FilesSkippedPreStage and FilesSkippedByScanner are EXACT counts, always,
+	// even when the Skipped list below was capped. The equations are checked
+	// against these, never against len(Skipped).
+	FilesSkippedPreStage  int `json:"filesSkippedPreStage"`
+	FilesSkippedByScanner int `json:"filesSkippedByScanner"`
+	// SkippedListTruncated says the detail list holds fewer entries than the
+	// counts above. The counts stay true; only the enumeration was bounded.
+	SkippedListTruncated bool `json:"skippedListTruncated,omitempty"`
+	// Reconciled is both equations holding. ReconciliationNote names the one
+	// that did not, with its arithmetic.
+	Reconciled         bool          `json:"reconciled"`
+	ReconciliationNote string        `json:"reconciliationNote,omitempty"`
+	Skipped            []SkippedFile `json:"skipped"`
 	// RulesRun names every rule that executed, so an empty findings list can
 	// be read as "these checks found nothing" rather than "nothing was checked".
 	RulesRun []string `json:"rulesRun"`
@@ -95,6 +174,40 @@ type ScanCoverage struct {
 	// Limitations is the tool telling the reader what it cannot know. It is
 	// not boilerplate: without it a caller reads "0 findings" as "secure".
 	Limitations []string `json:"limitations"`
+}
+
+// reconcile checks the two coverage equations and records the answer on the
+// coverage itself.
+//
+// It does NOT fail the run. The distinction matters: staged != visible means
+// the container read a tree that is not the project, so its findings describe
+// something else and the run is refused. Counts that do not add up mean the
+// ACCOUNTING is wrong while the findings are still real, and throwing those
+// away over an arithmetic bug would trade a reporting defect for an outage.
+// So the report is produced and says, in the one place a reader looks for
+// coverage, that it could not be reconciled.
+func (c *ScanCoverage) reconcile() {
+	staged := c.FilesStaged + c.FilesSkippedPreStage
+	scanned := c.FilesScanned + c.FilesSkippedByScanner
+
+	var notes []string
+	if c.FilesDiscovered != staged {
+		notes = append(notes, fmt.Sprintf(
+			"discovered %d != staged %d + skipped-before-staging %d",
+			c.FilesDiscovered, c.FilesStaged, c.FilesSkippedPreStage))
+	}
+	if c.FilesStaged != scanned {
+		notes = append(notes, fmt.Sprintf(
+			"staged %d != scanned %d + skipped-by-scanner %d",
+			c.FilesStaged, c.FilesScanned, c.FilesSkippedByScanner))
+	}
+	c.Reconciled = len(notes) == 0
+	if c.Reconciled {
+		c.ReconciliationNote = ""
+		return
+	}
+	c.ReconciliationNote = "coverage does not add up (" + strings.Join(notes, "; ") +
+		"); treat this report as incomplete rather than as a scan of the whole scope"
 }
 
 // StaticScanReport is the structured result.
@@ -277,14 +390,18 @@ func parseStaticScan(res Result, staging Staging, contract ToolContract, project
 		Truncated:     res.Truncated,
 		Findings:      []ScanFinding{},
 		Coverage: ScanCoverage{
-			FilesStaged:  len(staging.Inputs),
-			FilesVisible: res.Evidence.InputFilesVisible,
-			Extensions:   append([]string(nil), scannedExtensions...),
-			Limitations:  append([]string(nil), staticScanLimitations...),
+			FilesDiscovered: staging.Discovered,
+			FilesStaged:     len(staging.Inputs),
+			FilesVisible:    res.Evidence.InputFilesVisible,
+			Extensions:      append([]string(nil), scannedExtensions...),
+			Limitations:     append([]string(nil), staticScanLimitations...),
 			// Staging's own skips are part of coverage: a file AO never put
 			// on the mount was never scanned, and the report has to say so.
-			Skipped:  append([]SkippedFile{}, staging.Skipped...),
-			RulesRun: []string{},
+			// The COUNT is authoritative even when the list was capped.
+			Skipped:              append([]SkippedFile{}, staging.Skipped...),
+			FilesSkippedPreStage: staging.SkippedCount,
+			SkippedListTruncated: staging.SkippedTruncated,
+			RulesRun:             []string{},
 		},
 	}
 	byRule := map[string]scanRule{}
@@ -302,8 +419,15 @@ func parseStaticScan(res Result, staging Staging, contract ToolContract, project
 			continue
 		}
 		if key, value, ok := strings.Cut(line, "="); ok && strings.HasPrefix(key, "ao_") {
-			if key == "ao_scanned_files" {
+			switch key {
+			case "ao_scanned_files":
 				report.Coverage.FilesScanned, _ = strconv.Atoi(value)
+			case "ao_skipped_files":
+				// The tool has always emitted this and AO has always dropped
+				// it. It is the authoritative count for the second equation:
+				// parsing the skipped SECTION instead would silently under-
+				// count whenever the tool's output hit AO's byte cap.
+				report.Coverage.FilesSkippedByScanner, _ = strconv.Atoi(value)
 			}
 			continue
 		}
@@ -314,7 +438,7 @@ func parseStaticScan(res Result, staging Staging, contract ToolContract, project
 				continue
 			}
 			report.Coverage.Skipped = append(report.Coverage.Skipped, SkippedFile{
-				Path: containerRelPath(path), Reason: reason,
+				Path: containerRelPath(path), Reason: reason, Stage: SkipAtScan,
 			})
 		case "findings":
 			ruleID, hit, ok := strings.Cut(line, sep)
@@ -351,8 +475,14 @@ func parseStaticScan(res Result, staging Staging, contract ToolContract, project
 		return report.Findings[i].RuleID < report.Findings[j].RuleID
 	})
 	sort.Slice(report.Coverage.Skipped, func(i, j int) bool {
-		return report.Coverage.Skipped[i].Path < report.Coverage.Skipped[j].Path
+		if report.Coverage.Skipped[i].Path != report.Coverage.Skipped[j].Path {
+			return report.Coverage.Skipped[i].Path < report.Coverage.Skipped[j].Path
+		}
+		return report.Coverage.Skipped[i].Stage < report.Coverage.Skipped[j].Stage
 	})
+	// Last, once every count is in: does the coverage add up, and if not, say
+	// which half of it does not.
+	report.Coverage.reconcile()
 	return report
 }
 

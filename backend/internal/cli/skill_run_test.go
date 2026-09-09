@@ -17,10 +17,20 @@ import (
 const staticRunBody = `{"skillId":"security-audit","version":"1.2.0","modeId":"static-code",
  "tool":"ao.static-scan/v1","report":{"schemaVersion":"1","imageDigest":"sha256:dddd",
  "approvalId":"skimg-9","approvedBy":"admin","approvalRevokedDuringRun":false,
- "coverage":{"filesStaged":12,"filesVisible":12,"filesScanned":10,
+ "coverage":{"filesDiscovered":13,"filesStaged":12,"filesVisible":12,"filesScanned":10,
+   "filesSkippedPreStage":1,"filesSkippedByScanner":2,"reconciled":true,
    "rulesRun":["hardcoded-secret","weak-hash"],"extensions":[".go",".ts"],
-   "skipped":[{"path":"vendor/big.bin","reason":"binary"}],
+   "skipped":[{"path":"src/huge.go","reason":"too_large","stage":"staging",
+     "bytes":600000,"limit":524288},
+    {"path":"vendor/big.bin","reason":"binary","stage":"scan"},
+    {"path":"README.md","reason":"unsupported_extension","stage":"scan"}],
    "limitations":["This is a pattern scanner, not a static analyzer."]},
+ "evidence":{"Runtime":"docker","EffectiveUID":65534,"MemoryMaxBytes":536870912,
+   "PIDsMax":128,"CPUMax":"100000/100000","NetworkReachable":false,
+   "InputFilesVisible":12,"InputDigest":"ab12cd34ef56","ReadOnlyRootFS":true,
+   "InheritedDaemonEnv":0,
+   "Controls":["filesystem_isolation","process_isolation","no_credential_inheritance",
+     "resource_limits","egress_deny_all"]},
  "findings":[{"ruleId":"hardcoded-secret","severity":"high","category":"secrets",
    "title":"Possible hardcoded credential","path":"src/db.go","line":42,
    "recommendation":"Move it to a secret store.","confidence":"possible"}]}}`
@@ -65,9 +75,15 @@ func TestSkillsRun_SendsNoCommandAndRendersCoverageFirst(t *testing.T) {
 		t.Fatalf("coverage must be rendered before findings:\n%s", out)
 	}
 	for _, want := range []string{
-		"staged 12, visible 12, scanned 10",
-		"hardcoded-secret", "vendor/big.bin (binary)",
+		// The denominator comes first: "scanned 10" alone cannot be read.
+		"discovered 13, staged 12, visible 12, scanned 10",
+		"hardcoded-secret", "vendor/big.bin (binary, at scan)",
 		"[HIGH] Possible hardcoded credential", "src/db.go:42",
+		// The oversized file, its stage AND the numbers behind the verdict.
+		"src/huge.go (too_large, at staging, 600000 bytes over a 524288-byte limit)",
+		"skipped 3 file(s) (1 before staging, 2 by the scanner)",
+		// The coverage says out loud that it adds up.
+		"reconciled", "13 = 12 + 1", "12 = 10 + 2",
 		// The tool saying what it cannot know.
 		"what this cannot tell you", "pattern scanner",
 	} {
