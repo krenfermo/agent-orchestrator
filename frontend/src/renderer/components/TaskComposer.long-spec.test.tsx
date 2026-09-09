@@ -46,7 +46,7 @@ function Wrap({ children }: { children: ReactNode }) {
 	return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
 }
 
-const task = () => screen.getByRole("textbox", { name: "Task" });
+const task = () => screen.getByRole("textbox", { name: "Instructions" });
 const start = () => screen.getByRole("button", { name: "Start worker" });
 
 /** The shape of the brief that provoked this work: a full RBAC specification. */

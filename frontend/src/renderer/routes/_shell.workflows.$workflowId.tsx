@@ -15,6 +15,9 @@ import { WorkflowCapacityWaitBanner } from "../components/workflow-capacity-wait
 import { WorkflowBranchWaitBanner } from "../components/workflow-branch-wait-banner";
 import { WorkflowRoutingSummary } from "../components/workflow-routing-summary";
 import { WorkflowIncidentDialog } from "../components/workflow-incident-dialog";
+import { WorkflowAdvicePanel } from "../components/workflow-advice-panel";
+import { WorkflowChangeSet } from "../components/workflow-change-set";
+import { WorkflowDiagnosticsButton } from "../components/workflow-diagnostics-button";
 import { WorkflowResumeButton } from "../components/workflow-resume-button";
 import { WorkflowRecoveryPanel } from "../components/workflow-recovery-panel";
 import { WorkItemLinkPanel } from "../components/workitem-link-panel";
@@ -321,6 +324,12 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				    the board card cannot tell two different stories. The technical
 				    vocabulary keeps its place further down, in a disclosure. */}
 				{presentation ? <WorkflowStatusPanel presentation={presentation} /> : null}
+				{/* P3-C: the daemon's own answer to "what do I do now" -- whether
+				    anyone is needed, what AO will do by itself, what comes next,
+				    and every action it is refusing WITH the reason. It sits
+				    between the status and the buttons because that is the order
+				    the questions arrive in. It renders no control of its own. */}
+				<WorkflowAdvicePanel advice={workflow.advice} />
 				{presentation ? (
 					<WorkflowActions busy={continuing || cancelling || recoveryPending} handlers={actionHandlers} presentation={presentation} />
 				) : null}
@@ -379,7 +388,7 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				{workflow.plan?.status === "pending" && (
 					<div>
 						<button className="rounded border border-border px-3 py-1.5 text-sm disabled:opacity-50" disabled={generatingPlan} onClick={() => void generatePlan()} type="button">
-							{generatingPlan ? "Generating plan…" : "Generate Plan"}
+							{generatingPlan ? t("shell.workflowsGeneratingPlan") : t("shell.workflowsGeneratePlan")}
 						</button>
 						{generatePlanError && <p className="mt-1 text-sm text-destructive">{generatePlanError}</p>}
 					</div>
@@ -387,7 +396,7 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				{workflow.plan?.status === "validated" && workflow.plan.approvalMode === "manual" && (
 					<div>
 						<button className="rounded border border-primary bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50" disabled={approvingPlan} onClick={() => void approvePlan()} type="button">
-							{approvingPlan ? "Approving…" : "Approve Plan"}
+							{approvingPlan ? t("shell.workflowsApprovingPlan") : t("shell.workflowsApprovePlan")}
 						</button>
 						{approvePlanError && <p className="mt-1 text-sm text-destructive">{approvePlanError}</p>}
 					</div>
@@ -399,7 +408,7 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				{workflow.plan && workflow.plan.status !== "approved" && workflow.plan.status !== "rejected" && (
 					<div>
 						<button className="rounded border border-border px-3 py-1.5 text-sm disabled:opacity-50" disabled={rejectingPlan} onClick={() => void rejectPlan()} type="button">
-							{rejectingPlan ? "Cancelling…" : "Cancel"}
+							{rejectingPlan ? t("shell.workflowsRejectingPlan") : t("shell.workflowsRejectPlan")}
 						</button>
 						{rejectPlanError && <p className="mt-1 text-sm text-destructive">{rejectPlanError}</p>}
 					</div>
@@ -453,6 +462,11 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 					/>
 				) : null}
 				{cancelError && <p className="text-sm text-destructive">{cancelError}</p>}
+				{/* Everything an operator needs to explain this run, in one
+				    paste. It replaces the "read the id, open a terminal, query
+				    SQLite" loop, and it is an allowlist so it cannot start
+				    carrying more than it says. */}
+				<WorkflowDiagnosticsButton detail={workflow} />
 				<WorkflowCancelAndArchiveButton run={workflow.run} />
 			</div>
 
@@ -638,6 +652,14 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 									</>
 								)}
 							</dl>
+						)}
+						{/* What AO observed the work change, and how it knows. Without
+						    it a task whose output landed somewhere Git ignores read
+						    as a run where nothing happened -- AO had already recorded
+						    that it could not PROVE the set, which is a different fact
+						    from an empty one. */}
+						{step.kind === "review" && step.reviewPolicy?.facts && (
+							<WorkflowChangeSet facts={step.reviewPolicy.facts} />
 						)}
 						{step.kind === "review" && (step.reviewRunId || step.reviewer) && (
 							<dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 border-t border-border pt-2 text-xs text-muted-foreground">

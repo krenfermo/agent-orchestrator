@@ -681,7 +681,7 @@ function ImportRepoRow({ failed = false, repo }: { failed?: boolean; repo: Impor
 			</div>
 			<div className="hidden max-w-[260px] shrink-0 truncate text-right font-mono text-[12px] text-[var(--color-text-import-muted)] sm:block">
 				{repo.needsGitInit
-					? "Needs git init"
+					? t("createProject.repoNeedsGitInit")
 					: failed
 						? (repo.reason ?? t("createProject.repoCannotImport"))
 						: `${repo.branch} ${remoteDisplay(repo.remote)}`}

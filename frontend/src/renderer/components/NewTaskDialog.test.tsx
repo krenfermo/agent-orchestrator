@@ -98,7 +98,7 @@ describe("NewTaskDialog", () => {
 		expect(screen.getByRole("button", { name: "Agent" })).toHaveTextContent("Claude Code");
 		expect(await screen.findByLabelText("Model")).toHaveValue("");
 		expect(screen.getByRole("button", { name: "Add file" })).toBeInTheDocument();
-		expect(screen.getByLabelText("Task")).toHaveAttribute("placeholder", "e.g. Fix the flaky checkout test (optional)…");
+		expect(screen.getByLabelText("Instructions")).toHaveAttribute("placeholder", "e.g. Fix the flaky checkout test (optional)…");
 		expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
 		expect(screen.queryByLabelText("Branch")).not.toBeInTheDocument();
 	});
@@ -119,7 +119,7 @@ describe("NewTaskDialog", () => {
 
 		await waitForAgentCatalog();
 
-		await user.type(screen.getByLabelText("Task"), brief);
+		await user.type(screen.getByLabelText("Instructions"), brief);
 		await user.type(screen.getByLabelText("Model"), "placeholder-model");
 		await user.click(screen.getByRole("button", { name: "Start worker" }));
 
@@ -152,7 +152,7 @@ describe("NewTaskDialog", () => {
 		const user = userEvent.setup();
 		await waitForAgentCatalog();
 
-		await user.type(screen.getByLabelText("Task"), "Fix it");
+		await user.type(screen.getByLabelText("Instructions"), "Fix it");
 		await user.click(screen.getByRole("button", { name: "Start worker" }));
 
 		const fallback = await screen.findByRole("button", { name: "Create as Terminal UI" });
@@ -170,7 +170,7 @@ describe("NewTaskDialog", () => {
 		const user = userEvent.setup();
 		await waitForAgentCatalog();
 
-		await user.type(screen.getByLabelText("Task"), "B");
+		await user.type(screen.getByLabelText("Instructions"), "B");
 
 		await user.click(screen.getByRole("button", { name: "Agent" }));
 		await user.click(await screen.findByRole("menuitem", { name: "Cursor" }));
@@ -192,7 +192,7 @@ describe("NewTaskDialog", () => {
 		expect(options[2]).not.toHaveAttribute("aria-disabled", "true");
 		await user.click(options[2]);
 
-		await user.type(screen.getByLabelText("Task"), "B");
+		await user.type(screen.getByLabelText("Instructions"), "B");
 		await user.click(screen.getByRole("button", { name: "Start worker" }));
 
 		await waitFor(() => expect(requestBody).not.toThrow());
@@ -244,7 +244,7 @@ describe("NewTaskDialog", () => {
 		expect(screen.queryByLabelText("Branch")).not.toBeInTheDocument();
 		expect(await screen.findByLabelText("Model")).toHaveValue("");
 
-		await user.type(screen.getByLabelText("Task"), "Build a quick prototype in scratch.");
+		await user.type(screen.getByLabelText("Instructions"), "Build a quick prototype in scratch.");
 		await user.click(screen.getByRole("button", { name: "Start worker" }));
 
 		await waitFor(() => expect(requestBody).not.toThrow());
@@ -257,7 +257,7 @@ describe("NewTaskDialog", () => {
 		const user = userEvent.setup();
 		await waitForAgentCatalog();
 
-		const task = screen.getByLabelText("Task");
+		const task = screen.getByLabelText("Instructions");
 		await user.type(task, "First line");
 		// Shift+Enter must NOT submit — it adds a newline.
 		await user.keyboard("{Shift>}{Enter}{/Shift}");
@@ -275,7 +275,7 @@ describe("NewTaskDialog", () => {
 		const user = userEvent.setup();
 		await waitForAgentCatalog();
 
-		const task = screen.getByLabelText("Task");
+		const task = screen.getByLabelText("Instructions");
 		await user.type(task, "Line");
 
 		// Alt+Enter must NOT submit — Alt is excluded so it can't submit by accident.
@@ -309,7 +309,7 @@ describe("NewTaskDialog", () => {
 		const user = userEvent.setup();
 		await waitForAgentCatalog();
 
-		await user.type(screen.getByLabelText("Task"), "Restore fallback renderer.");
+		await user.type(screen.getByLabelText("Instructions"), "Restore fallback renderer.");
 		await user.click(screen.getByRole("button", { name: "Start worker" }));
 
 		expect(await screen.findByText(`${message} (${code})`)).toBeInTheDocument();

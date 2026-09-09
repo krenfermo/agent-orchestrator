@@ -156,6 +156,11 @@ function useSelection() {
 		goIntelligence: (projectId: string) =>
 			void navigate({ to: "/projects/$projectId/intelligence", params: { projectId } }),
 		goWorkflows: () => void navigate({ to: "/workflows" }),
+		// The same form, with the project already chosen. It navigates and
+		// creates nothing: the run is created by the /workflows form itself,
+		// so there is exactly one place that POSTs a workflow.
+		goProjectWorkflows: (projectId: string) =>
+			void navigate({ to: "/workflows", search: { projectId } }),
 		goDecisions: () => void navigate({ to: "/decisions" }),
 		goProject: (projectId: string) => void navigate({ to: "/projects/$projectId", params: { projectId } }),
 		goSession: (projectId: string, sessionId: string) =>
@@ -827,6 +832,13 @@ function ProjectItem({
 						<Plus aria-hidden="true" />
 						{t("shell.newSession")}
 					</DropdownMenuItem>
+					{/* Two entries, never one: delegating a freeform worker and
+					    creating a workflow run are different objects, and the
+					    project menu used to offer only the first. */}
+					<DropdownMenuItem onSelect={() => selection.goProjectWorkflows(workspace.id)}>
+						<Workflow aria-hidden="true" />
+						{t("shell.newWorkflowRun")}
+					</DropdownMenuItem>
 					<DropdownMenuSeparator />
 					<DropdownMenuItem onSelect={() => selection.goIntelligence(workspace.id)}>
 						<Brain aria-hidden="true" />
@@ -913,6 +925,10 @@ function ProjectItem({
 			<ContextMenuItem disabled={isProjectRestarting} onSelect={() => requestNewTask(workspace.id)}>
 				<Plus aria-hidden="true" />
 				{t("shell.newSession")}
+			</ContextMenuItem>
+			<ContextMenuItem onSelect={() => selection.goProjectWorkflows(workspace.id)}>
+				<Workflow aria-hidden="true" />
+				{t("shell.newWorkflowRun")}
 			</ContextMenuItem>
 			<ContextMenuSeparator />
 			<ContextMenuItem onSelect={() => selection.goIntelligence(workspace.id)}>

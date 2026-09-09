@@ -60,7 +60,7 @@ function Wrap({ children }: { children: ReactNode }) {
 	return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
 }
 
-const task = () => screen.getByRole("textbox", { name: "Task" });
+const task = () => screen.getByRole("textbox", { name: "Instructions" });
 
 beforeEach(() => {
 	h.get.mockImplementation(async (path: string) => {

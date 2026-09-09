@@ -1,5 +1,5 @@
 import { createFileRoute, Link, Outlet, useMatchRoute } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useExecutionPolicy } from "../hooks/useExecutionPolicy";
 import { useProjectsList } from "../hooks/useProjectsList";
@@ -69,24 +69,33 @@ export const objectiveByteLength = specificationByteLength;
 
 const OBJECTIVE_COUNTER_FROM_BYTES = SPECIFICATION_COUNTER_FROM_BYTES;
 
+/**
+ * `?projectId=` is how the Board hands this form the project the user was
+ * already looking at, so creating a run does not start with re-picking it.
+ *
+ * It is read through the router rather than off `window.location` because the
+ * desktop app runs on HASH history (see router.tsx): there the whole location
+ * lives after the `#`, `window.location.search` is empty, and the preselect
+ * silently did nothing in the one build almost everybody uses.
+ */
 export const Route = createFileRoute("/_shell/workflows")({
 	component: WorkflowsListRoute,
+	validateSearch: (search: Record<string, unknown>): { projectId?: string } => {
+		const projectId = search.projectId;
+		return typeof projectId === "string" && projectId !== "" ? { projectId } : {};
+	},
 });
 
 function WorkflowsListRoute() {
 	const matchRoute = useMatchRoute();
+	const { projectId } = Route.useSearch();
 	if (matchRoute({ to: "/workflows/$workflowId", fuzzy: true })) {
 		return <Outlet />;
 	}
-	return <WorkflowsList />;
+	return <WorkflowsList initialProjectId={projectId} />;
 }
 
-function initialProjectIdFromSearch(): string {
-	if (typeof window === "undefined") return "";
-	return new URLSearchParams(window.location.search).get("projectId") ?? "";
-}
-
-export function WorkflowsList() {
+export function WorkflowsList({ initialProjectId }: { initialProjectId?: string } = {}) {
 	const { t } = useTranslation();
 	const { runs, isLoading, error, createRun, creating, createError } = useWorkflowRuns();
 	const { projects, isLoading: projectsLoading } = useProjectsList();
@@ -97,7 +106,14 @@ export function WorkflowsList() {
 	// whether AO will bring remembered project knowledge to this work.
 	const { settings } = useSettings();
 	const memoryMode = settings?.memoryMode;
-	const [projectId, setProjectId] = useState(initialProjectIdFromSearch);
+	const [projectId, setProjectId] = useState(initialProjectId ?? "");
+	// Arriving from the Board a second time, for a different project, navigates
+	// to a route that is already mounted -- so seeding state at mount is not
+	// enough on its own. Only a real, non-empty change follows; clearing the
+	// search must not wipe a choice the user made here by hand.
+	useEffect(() => {
+		if (initialProjectId) setProjectId(initialProjectId);
+	}, [initialProjectId]);
 	const [objective, setObjective] = useState("");
 	// Byte length, recomputed only when the text changes: TextEncoder on every
 	// keystroke of a 100 KB specification would be felt.
@@ -250,11 +266,17 @@ export function WorkflowsList() {
 			...(needsVerification
 				? { acceptanceCriteria, verification: buildVerificationPlan(commandDrafts) }
 				: {}),
-		}).then(() => {
-			setObjective("");
-			setCriteriaText("");
-			setCommandDrafts([newCommandDraft()]);
-		});
+		})
+			.then(() => {
+				setObjective("");
+				setCriteriaText("");
+				setCommandDrafts([newCommandDraft()]);
+			})
+			// A refused create is already reported through `createError`, which
+			// the form renders. The catch is here so the rejection mutateAsync
+			// re-throws does not surface as an unhandled promise rejection -- and
+			// so a daemon refusal never clears the form the user has to correct.
+			.catch(() => undefined);
 	};
 
 	const noProjects = !projectsLoading && projects.length === 0;
@@ -284,7 +306,7 @@ export function WorkflowsList() {
 					<label className="flex flex-col gap-1 text-sm">
 						{t("shell.workflowsProjectLabel")}
 						<Select value={projectId} onValueChange={setProjectId}>
-							<SelectTrigger className="w-full" aria-label={t("shell.workflowsProjectLabel")}>
+							<SelectTrigger className="w-full" aria-label={t("shell.workflowsProjectLabel")} data-testid="workflow-project-trigger">
 								<SelectValue placeholder={t("shell.workflowsSelectProjectPlaceholder")}>
 									{selectedProject ? selectedProject.name : undefined}
 								</SelectValue>
