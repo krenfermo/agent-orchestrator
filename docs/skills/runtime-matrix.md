@@ -69,7 +69,7 @@ contract is deliberately not general.
 | `egress_deny_all` | **Yes** | **Yes** | **Yes** (`-n no-network`) | No |
 | `egress_allowlist` | Not built | Not built | **Not possible** | No |
 | `writable_workspace` | Not built | Not built | Not built | No |
-| `scoped_secret_delivery` | Not built | Not built | Not built | No |
+| `scoped_secret_delivery` | **Yes**, with a secret authority | **Yes**, with a secret authority | **No** — no confinement to deliver into | No |
 | `arbitrary_process_execution` | Not built | Not built | Not built | No |
 
 "Not built" is AO's gap. "No"/"Not possible" is the platform's.
@@ -179,6 +179,73 @@ memory limit on the *daemon*, which no container flag protects.
   runner has no option to do so.
 - A writable host path. Every mount is read-only.
 
+## Scoped secret delivery
+
+A run receives a secret only when **both** halves exist: a container to deliver
+into, and a working authority (a store plus a sealing key) to produce the value.
+A container alone proves nothing about where a secret would come from, and a
+value handed to an unconfined process is a value handed to the host — so
+`secrets.read` needs the five confinement controls *and* the delivery control.
+
+### What authorizes one delivery
+
+A grant is bound to a full scope with no wildcard: **tenant + project + skill +
+version + mode**. A lease on top of it is bound to **one run and one attempt**
+and is redeemable exactly once. So a secret granted for medusa's `dependencies`
+mode at version 0.1.0 is unusable from poseidon, from another organization, from
+version 0.2.0, from `active-pentest`, from a previous attempt, and from a second
+redemption of the same lease.
+
+Grants expire — a grant with no expiry is refused, because it is one nobody
+removes — and revocation is re-checked **at redemption**, not only when the
+lease was minted. A lease is a right to ask, not a right to receive.
+
+Granting requires `settings.manage`. Handing a credential to a package is an
+installation-level act however narrow the scope, so a project administrator who
+can activate a skill still cannot give it a secret.
+
+Partial authorization delivers **nothing**. A run written against two secrets
+and handed one behaves in ways nobody designed.
+
+### How it arrives
+
+A per-run directory, mode 0700, one 0600 file per reference, bind-mounted
+read-only at `/run/secrets`. **Never an environment variable** — the reasons
+`internal/agentcred` records have not changed: an env var is readable from the
+process table by anything running as this user, is inherited by every child, and
+lands in crash dumps.
+
+Never mounted: the home directory, the Keychain, a credential file, AO's data
+dir, or the container socket. The secrets mount is the only mount a run gets
+beyond its read-only inputs.
+
+Cleanup overwrites and removes on **every** exit path — success, failure,
+timeout, cancellation — and refuses any path outside AO's own namespace, so a
+bug in root selection cannot turn teardown into a delete of somebody's files.
+
+### What never carries a value
+
+`SecretValue.String`, `GoString` and `MarshalJSON` all redact, and
+`UnmarshalJSON` refuses. `%v`, `%+v`, `%#v`, `fmt.Errorf`, `slog` and
+`json.Marshal` are the six routes a leak takes, and all six are closed by
+construction. Evidence and reports carry **names only** — not values, and not
+prefixes or hashes of them, because a prefix is enough to confirm a guess.
+
+### Residual risk
+
+The value transits the host filesystem. A container runtime cannot pre-fill a
+tmpfs, so a bind mount is the mechanism available. The file is 0600 for the
+length of the run and is overwritten before unlinking, which removes it from
+everything that reads by path — but that is not a guarantee about the medium on
+a copy-on-write or journaling filesystem. A real vault delivers over a channel
+the value never leaves; AO is not one, and this is where somebody deciding
+whether that is good enough finds out.
+
+There is also **no surface**: no HTTP route, no CLI verb, no UI. Registering a
+secret and granting one are Go APIs only, so nothing here is reachable from the
+app. That is deliberate — which secrets a skill may request, and who approves
+each name, is a policy decision that should precede the surface.
+
 ## Failure behavior
 
 Every one of these refuses **without executing anything on the host**:
@@ -191,6 +258,10 @@ Every one of these refuses **without executing anything on the host**:
 | Image given by tag | Refused — a tag is a mutable pointer |
 | Input directory empty on the host | Refused — a run over no inputs reports a clean audit of nothing |
 | Credential-shaped env name | Refused — a backstop; the real control is that AO never reads its own env |
+| No secret store or no sealing key | Every secret operation refused; the control is not attested |
+| A secret grant that never expires | Refused — one nobody removes |
+| A lease redeemed twice, or by another attempt | Refused |
+| A grant revoked between minting and launch | Refused at redemption |
 
 There is no host fallback and no degraded mode. A capability that needed
 containment and did not get it is refused, never downgraded.

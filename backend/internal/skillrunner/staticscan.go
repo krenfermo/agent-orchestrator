@@ -138,6 +138,10 @@ else
   echo "ao_rootfs_readonly=true"
 fi
 echo "ao_daemon_env_leaked=$(env | grep -Ec '^[^=]*(TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY)[^=]*=' || true)"
+# The NAMES of delivered secrets, never their contents. AO checks these against
+# what it delivered; a file the container has that AO did not write is worse
+# than a missing one and must not read as success.
+` + SecretEvidenceScript + `
 if wget -T 2 -q -O- http://1.1.1.1/ >/dev/null 2>&1; then
   echo "ao_network_reachable=true"
 else

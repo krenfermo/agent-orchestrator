@@ -1,7 +1,8 @@
 # 5. The four controls that stay unimplemented, and what each one requires
 
 Date: 2026-09-09
-Status: **Design only. Nothing in this ADR is implemented.**
+Status: `scoped_secret_delivery` is **IMPLEMENTED** (phase 5, 2026-09-09) — see
+the note at the end of its section. The other three remain design only.
 
 ## Context
 
@@ -11,12 +12,12 @@ copy, with a report whose coverage says what was and was not read.
 
 That leaves four controls, each blocking exactly one capability:
 
-| Control | Blocks |
-| --- | --- |
-| `writable_workspace` | `repo.write` |
-| `egress_allowlist` | `net.egress`, `net.active_scan` |
-| `scoped_secret_delivery` | `secrets.read` |
-| `arbitrary_process_execution` | `process.exec` |
+| Control | Blocks | Status |
+| --- | --- | --- |
+| `writable_workspace` | `repo.write` | design only |
+| `egress_allowlist` | `net.egress`, `net.active_scan` | design only |
+| `scoped_secret_delivery` | `secrets.read` | **built, phase 5** |
+| `arbitrary_process_execution` | `process.exec` | design only |
 
 This ADR is the design for all four and the implementation of none. The reason
 is stated plainly: each needs a negative test proving it cannot exceed its
@@ -24,9 +25,11 @@ scope, and a control whose negative test does not exist yet is a control that
 should not be attested. Building four of them at once is how one of them ships
 without its test.
 
-**Do not read any section below as available.** The capability table names
-these controls, `internal/skillrunner` attests none of them, and every affected
-capability is refused with the missing control named.
+**Do not read the three remaining sections as available.** The capability table
+names these controls, `internal/skillrunner` attests only
+`scoped_secret_delivery` (and only when both a container and a working
+authority exist), and every other affected capability is refused with the
+missing control named.
 
 ## 1. `writable_workspace` — for `repo.write`
 
@@ -149,11 +152,55 @@ run only, and the daemon's own credentials never come near it.
 4. The secret file is gone after the run, including after a timeout kill.
 5. A run cannot read another run's secret file.
 
-### Why not now
+### Built, phase 5 — and what changed from this design
 
-It is small, and it is gated on the product question it implies: which secrets
-may a skill request at all, and who approves each name? Shipping delivery
-before that answer means the mechanism decides the policy.
+The design above held. Three things it did not say, which the implementation
+had to decide:
+
+**A grant needs a full scope, and a lease needs an attempt.** The design said
+"the activation's grant". That is not narrow enough: a grant bound to a project
+is still usable by a different package version, or by the same package's pentest
+mode. `skillsecrets.Scope` binds tenant + project + skill + version + mode, with
+no wildcard, and every field must match exactly. On top of it a `Lease` binds to
+one run AND one attempt and is redeemable exactly once, which is what makes
+replay answerable: attempt N-1 cannot redeem attempt N's lease, and a redeemed
+lease is spent.
+
+**Revocation is re-checked at redemption, not only at minting.** A lease is a
+right to ask, not a right to receive. Somebody who revokes a grant between
+launch and delivery expects the delivery to stop, and "verifiable revocation"
+has to mean that.
+
+**A value cannot become text.** `SecretValue.String`, `GoString` and
+`MarshalJSON` all redact, and `UnmarshalJSON` refuses outright. That is the
+control doing the most work here: `%v`, `%+v`, `%#v`, `fmt.Errorf`, `slog` and
+`json.Marshal` are the six routes a real leak takes, and all six are closed by
+construction rather than by remembering. `Reveal` is the one door, and it is
+greppable.
+
+Partial authorization delivers **nothing**: a run written against two secrets
+and handed one behaves in ways nobody designed.
+
+The mechanism is a per-run directory, 0700, one 0600 file per reference,
+bind-mounted read-only at `/run/secrets`. Never an environment variable, for the
+reasons `internal/agentcred` already records. Never the home directory, the
+Keychain, a credential file or AO's data dir. Cleanup overwrites and removes on
+every exit path including timeout, and refuses any path outside AO's own
+namespace so a bug in root selection cannot become a delete of somebody's files.
+
+**The residual risk, stated plainly:** the value transits the host filesystem.
+A container runtime cannot pre-fill a tmpfs, so a bind mount is the mechanism
+available. The file exists for the length of the run with restrictive
+permissions and is overwritten before unlinking — which removes it from
+everything that reads by path, but is not a guarantee about the medium on a
+copy-on-write or journaling filesystem. A real vault delivers over a channel the
+value never leaves; AO is not one.
+
+**Still open, deliberately:** the product question this section originally
+raised. There is no HTTP route, no CLI verb and no UI for registering a secret
+or granting one, so nothing here is reachable from the app. Which secrets a
+skill may request, and who approves each name, is a policy decision that should
+be made before the surface exists — otherwise the mechanism decides the policy.
 
 ## 4. `arbitrary_process_execution` — for `process.exec`
 

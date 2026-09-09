@@ -987,6 +987,44 @@ type SkillInstall struct {
 	InstalledBy  string
 }
 
+type SkillSecret struct {
+	Name        string
+	Description string
+	SealedValue string
+	CreatedAt   time.Time
+	CreatedBy   string
+	UpdatedAt   time.Time
+}
+
+type SkillSecretGrant struct {
+	ID         string
+	SecretName string
+	TenantID   domain.TenantID
+	ProjectID  domain.ProjectID
+	SkillID    string
+	Version    string
+	ModeID     string
+	GrantedBy  string
+	GrantedAt  time.Time
+	ExpiresAt  time.Time
+	RevokedAt  sql.NullTime
+}
+
+type SkillSecretLease struct {
+	ID         string
+	TenantID   domain.TenantID
+	ProjectID  domain.ProjectID
+	SkillID    string
+	Version    string
+	ModeID     string
+	RunID      string
+	AttemptID  string
+	Refs       string
+	IssuedAt   time.Time
+	ExpiresAt  time.Time
+	ConsumedAt sql.NullTime
+}
+
 type Team struct {
 	ID          domain.TeamID
 	Name        string

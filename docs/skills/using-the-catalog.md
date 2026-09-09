@@ -75,7 +75,7 @@ The container runner provides five: `filesystem_isolation`,
 | --- | --- |
 | `repo.write` | `writable_workspace` |
 | `process.exec` | `arbitrary_process_execution` |
-| `secrets.read` | `scoped_secret_delivery` |
+| `secrets.read` | *(none — built in phase 5; needs a secret authority configured, and there is no UI or CLI for it yet)* |
 | `net.egress`, `net.active_scan` | `egress_allowlist` — "the network is off" is not "the network is limited to these hosts" |
 
 **Reading is not exempt.** There is no AO-enforced boundary for "an agent reads

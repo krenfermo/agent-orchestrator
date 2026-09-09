@@ -63,8 +63,13 @@ type Request struct {
 	InputDir string
 	// Env is an explicit allowlist forwarded into the container. It must not
 	// carry a credential; nothing here reads the daemon's own environment.
-	Env    map[string]string
-	Limits Limits
+	Env map[string]string
+	// Secrets is an already-materialized delivery, mounted read-only at
+	// ContainerSecretsPath. It is a directory of files, never environment
+	// variables, and this struct cannot carry a VALUE at any point: the values
+	// were written by the authority before the Request was built.
+	Secrets *SecretDelivery
+	Limits  Limits
 }
 
 // BoundaryEvidence is what AO observed about the boundary, collected from the
@@ -95,6 +100,13 @@ type BoundaryEvidence struct {
 	// InheritedDaemonEnv is the count of environment variables that leaked in
 	// from the daemon. Non-zero fails the run.
 	InheritedDaemonEnv int
+	// SecretRefsDelivered are the NAMES the container saw under
+	// ContainerSecretsPath. Names only: a value never reaches evidence, and
+	// neither does a prefix or a hash of one, because a prefix is enough to
+	// confirm a guess.
+	SecretRefsDelivered []string
+	// SecretsMounted records that a delivery was expected and arrived.
+	SecretsMounted bool
 	// Controls are what this run demonstrated, derived from the fields above.
 	Controls []skillcatalog.Control
 }
@@ -121,6 +133,23 @@ type Runner struct {
 	// probeErr is why the runtime is unusable, when it is. It is kept so the
 	// refusal can say what is wrong rather than only that something is.
 	probeErr error
+	// secretsAvailable records that a trusted authority can actually deliver
+	// values. It is set by WithSecretDelivery from the AUTHORITY's own
+	// readiness, never from a flag a caller passes and never from a manifest —
+	// a runner that attested this because somebody asked it to would defeat
+	// every check the capability table makes.
+	secretsAvailable bool
+}
+
+// WithSecretDelivery records that a working secret authority is wired.
+//
+// It is the one thing that lets this runner attest
+// ControlScopedSecretDelivery. The parameter is the authority's own Available()
+// answer, resolved by the daemon at construction: there is deliberately no way
+// to pass true without a store and a sealing key existing.
+func (r *Runner) WithSecretDelivery(authorityAvailable bool) *Runner {
+	r.secretsAvailable = authorityAvailable
+	return r
 }
 
 // New probes the host and returns a Runner. A probe failure is NOT an error
@@ -156,9 +185,16 @@ func (r *Runner) Attestation() skillcatalog.RunnerAttestation {
 	if !r.Available() {
 		return skillcatalog.NoRunner()
 	}
+	controls := r.runtime.Controls()
+	// Scoped secret delivery is attested only when BOTH halves exist: a
+	// container to deliver into, and an authority that can produce values. A
+	// runtime alone proves nothing about where a secret would come from.
+	if r.secretsAvailable {
+		controls = append(controls, skillcatalog.ControlScopedSecretDelivery)
+	}
 	return skillcatalog.RunnerAttestation{
 		RunnerID: "container/" + r.runtime.Binary,
-		Controls: r.runtime.Controls(),
+		Controls: controls,
 	}
 }
 
@@ -302,6 +338,12 @@ func (r *Runner) containerArgs(name string, req Request, limits Limits) []string
 		"--workdir", "/work",
 		"-v", req.InputDir + ":/work:ro",
 	}
+	// The secrets mount is read-only and is the ONLY additional mount a run
+	// ever gets. There is no code path here that mounts a home directory, a
+	// credential file, AO's data dir or the container socket.
+	if req.Secrets != nil {
+		args = append(args, req.Secrets.MountArgs()...)
+	}
 	for key, value := range req.Env {
 		args = append(args, "-e", key+"="+value)
 	}
@@ -350,6 +392,11 @@ func (r *Runner) evidenceFrom(res Result, req Request, limits Limits) BoundaryEv
 			ev.ReadOnlyRootFS = value == "true"
 		case "ao_daemon_env_leaked":
 			ev.InheritedDaemonEnv, _ = strconv.Atoi(value)
+		case "ao_secret_refs":
+			if value != "" {
+				ev.SecretRefsDelivered = strings.Split(value, ",")
+			}
+			ev.SecretsMounted = true
 		}
 	}
 	ev.Controls = demonstratedControls(ev, limits)
@@ -449,6 +496,7 @@ fi
 # Any credential-shaped variable here came from outside; a clean container has
 # none. This counts the leak rather than trusting that none happened.
 echo "ao_daemon_env_leaked=$(env | grep -Ec '^[^=]*(TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY)[^=]*=' || true)"
+` + SecretEvidenceScript + `
 if wget -T 2 -q -O- http://1.1.1.1/ >/dev/null 2>&1; then
   echo "ao_network_reachable=true"
 else

@@ -90,14 +90,13 @@ is no longer the open question; four specific controls are.
 | --- | --- | --- |
 | `egress_allowlist` | `net.egress`, `net.active_scan` | An AO-owned forward proxy on an `--internal` network enforcing `scope.network.allow`; the skill container gets no other route |
 | `writable_workspace` | `repo.write` | A writable overlay and a reviewed path to return changes to the host |
-| `scoped_secret_delivery` | `secrets.read` | Per-run injection of one named secret from AO's store, without an env var — follow `agentcred`'s file-not-env rule |
+| ~~`scoped_secret_delivery`~~ | ~~`secrets.read`~~ | **Built (phase 5).** Scope-bound grants with expiry and revocation, single-use per-attempt leases, 0600 files at /run/secrets, never an env var. No HTTP/CLI/UI surface yet, deliberately. |
 | `arbitrary_process_execution` | `process.exec` | The skill-image contract: what a skill may ship, how it is built, how its command is authored and pinned |
 
-**ADR 0005 designs all four**, with the negative tests each needs and a
-recommended order: secret delivery, then writable workspace, then the egress
-proxy, then arbitrary execution. None is implemented, deliberately — each needs
-a negative test proving it cannot exceed its scope, and building four at once is
-how one ships without its test.
+**ADR 0005 designs all four.** Secret delivery is now built with its negative
+tests; the remaining three are design only, in the recommended order: writable
+workspace, then the egress proxy, then arbitrary execution. Each still needs a
+negative test proving it cannot exceed its scope before it may be attested.
 
 Note the shape of the remaining work: none of it is "make the sandbox
 stronger". The sandbox holds. What is missing is four narrower mechanisms, each
