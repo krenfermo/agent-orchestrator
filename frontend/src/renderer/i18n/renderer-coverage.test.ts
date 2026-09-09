@@ -29,7 +29,7 @@ const approvedLiterals: Record<string, readonly string[]> = {
 	],
 	"components/SessionFilesView.tsx": ["-&gt;"],
 	"components/SessionInspector.tsx": ["PR #"],
-	"components/Sidebar.tsx": ["Agent Orchestrator", "daemon"],
+	"components/Sidebar.tsx": ["Agent Orchestrator", "daemon", "AO Cloud"],
 	"components/WindowTitlebar.tsx": [
 		"Alt+F4",
 		"Ctrl+Z",
@@ -51,7 +51,16 @@ const approvedLiterals: Record<string, readonly string[]> = {
 		"smtp.gmail.com",
 		"you@gmail.com",
 	],
+	"components/TerminalPane.tsx": [
+		"(standalone shell — a live PTY here in the desktop app)",
+		"reverbcode",
+	],
 	"components/settings/UpdatesSection.tsx": ["PR #"],
+	// Fallbacks for absent daemon-supplied values, not English copy: the two
+	// halves of a "provider/model" pair and the default reviewer's own id.
+	// Translating any of them would print a localized name for a real,
+	// non-localized identifier.
+	"routes/_shell.workflows.$workflowId.tsx": ["planner", "default", "claude-code"],
 	// A URL and a workspace slug shown as form placeholders. Both are examples
 	// of what to type, not English copy, and translating either would make the
 	// example wrong.
@@ -103,7 +112,12 @@ function literalBranches(expression: ts.Expression): string[] {
 		return [...literalBranches(expression.whenTrue), ...literalBranches(expression.whenFalse)];
 	}
 	if (ts.isParenthesizedExpression(expression)) return literalBranches(expression.expression);
-	if (ts.isBinaryExpression(expression) && expression.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+	if (
+		ts.isBinaryExpression(expression) &&
+		(expression.operatorToken.kind === ts.SyntaxKind.PlusToken ||
+			expression.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
+			expression.operatorToken.kind === ts.SyntaxKind.BarBarToken)
+	) {
 		return [...literalBranches(expression.left), ...literalBranches(expression.right)];
 	}
 	return [];
@@ -133,6 +147,19 @@ describe("renderer localization coverage", () => {
 			};
 			const visit = (node: ts.Node) => {
 				if (ts.isJsxText(node)) record(node, node.getText(sourceFile));
+				// A literal rendered as a CHILD expression -- `{busy ? "Saving…" : "Save"}`
+				// -- is chrome exactly like plain JSX text is, but it is neither
+				// JsxText nor an attribute, so it used to pass this gate unseen.
+				// That is how the plan-approval buttons on the workflow run detail
+				// stayed hardcoded English through several localization passes.
+				if (
+					ts.isJsxExpression(node) &&
+					node.expression &&
+					node.parent &&
+					(ts.isJsxElement(node.parent) || ts.isJsxFragment(node.parent))
+				) {
+					for (const branch of literalBranches(node.expression)) record(node, branch);
+				}
 				if (ts.isJsxAttribute(node) && displayAttributes.has(node.name.getText(sourceFile)) && node.initializer) {
 					if (ts.isStringLiteral(node.initializer)) record(node, node.initializer.text);
 					if (ts.isJsxExpression(node.initializer) && node.initializer.expression) {

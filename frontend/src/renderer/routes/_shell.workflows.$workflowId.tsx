@@ -379,7 +379,7 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				{workflow.plan?.status === "pending" && (
 					<div>
 						<button className="rounded border border-border px-3 py-1.5 text-sm disabled:opacity-50" disabled={generatingPlan} onClick={() => void generatePlan()} type="button">
-							{generatingPlan ? "Generating plan…" : "Generate Plan"}
+							{generatingPlan ? t("shell.workflowsGeneratingPlan") : t("shell.workflowsGeneratePlan")}
 						</button>
 						{generatePlanError && <p className="mt-1 text-sm text-destructive">{generatePlanError}</p>}
 					</div>
@@ -387,7 +387,7 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				{workflow.plan?.status === "validated" && workflow.plan.approvalMode === "manual" && (
 					<div>
 						<button className="rounded border border-primary bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50" disabled={approvingPlan} onClick={() => void approvePlan()} type="button">
-							{approvingPlan ? "Approving…" : "Approve Plan"}
+							{approvingPlan ? t("shell.workflowsApprovingPlan") : t("shell.workflowsApprovePlan")}
 						</button>
 						{approvePlanError && <p className="mt-1 text-sm text-destructive">{approvePlanError}</p>}
 					</div>
@@ -399,7 +399,7 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				{workflow.plan && workflow.plan.status !== "approved" && workflow.plan.status !== "rejected" && (
 					<div>
 						<button className="rounded border border-border px-3 py-1.5 text-sm disabled:opacity-50" disabled={rejectingPlan} onClick={() => void rejectPlan()} type="button">
-							{rejectingPlan ? "Cancelling…" : "Cancel"}
+							{rejectingPlan ? t("shell.workflowsRejectingPlan") : t("shell.workflowsRejectPlan")}
 						</button>
 						{rejectPlanError && <p className="mt-1 text-sm text-destructive">{rejectPlanError}</p>}
 					</div>

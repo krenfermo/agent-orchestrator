@@ -1537,7 +1537,7 @@ function ReviewPanel({
 					<div className="mt-3 flex items-center gap-2 border-t border-border pt-3">
 						<Loader2 aria-hidden="true" className="size-icon-sm shrink-0 animate-spin text-muted-foreground" />
 						<span className="min-w-0 flex-1 truncate text-2xs font-medium text-muted-foreground">
-							{isCancelling ? t("inspector.review.cancelling") : `Review in progress · ${harness}`}
+							{isCancelling ? t("inspector.review.cancelling") : t("inspector.review.inProgressWith", { harness })}
 						</span>
 					</div>
 				) : null}
