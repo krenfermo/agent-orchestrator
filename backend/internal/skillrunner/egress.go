@@ -183,7 +183,7 @@ func (r *Runner) measureNetworkBoundary(ctx context.Context, b EgressBoundary) E
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, egressProbeTimeout)
 	defer cancel()
-	contract, err := r.ResolveContract(probeCtx, ToolStaticScan)
+	contract, err := r.resolveProbeContract(probeCtx, ToolStaticScan)
 	if err != nil {
 		b.Err = fmt.Errorf("cannot measure the egress boundary: %w", err)
 		return b

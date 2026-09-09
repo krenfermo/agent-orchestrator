@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -313,10 +314,24 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, error) {
 	return res, nil
 }
 
+// imageRefRe is the only shape an image reference may take: a bare digest, or
+// a name pinned to one. The digest half is checked properly rather than by
+// substring -- "name@sha256:oops" contained "@sha256:" and passed the previous
+// check, which made the pin a spelling convention rather than a constraint.
+var imageRefRe = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._/-]*@)?sha256:[0-9a-f]{64}$`)
+
+// validateImageRef refuses anything that is not exactly one image.
+func validateImageRef(ref string) error {
+	if !imageRefRe.MatchString(ref) {
+		return fmt.Errorf("skillrunner: image %q must be a sha256 digest, or a name pinned to one; "+
+			"a tag is a mutable pointer and would not mean one thing over time", ref)
+	}
+	return nil
+}
+
 func validateRequest(req Request) error {
-	if !strings.Contains(req.Image, "@sha256:") {
-		return fmt.Errorf("skillrunner: image %q must be pinned by digest (name@sha256:...); "+
-			"a tag is a mutable pointer and %q would not mean one thing over time", req.Image, req.Image)
+	if err := validateImageRef(req.Image); err != nil {
+		return err
 	}
 	if len(req.Argv) == 0 {
 		return errors.New("skillrunner: a command is required")
@@ -366,6 +381,11 @@ func (r *Runner) containerArgs(name string, req Request, limits Limits) []string
 	args := []string{
 		"run", "--rm", "--name", name,
 		"--label", RunLabel + "=1",
+		// AO never fetches an image. The approved digest must already be on
+		// this host; an absent one is a refusal, not a download. Without this
+		// flag a run could quietly pull whatever a registry currently serves
+		// under a name, which is the trust root defeated at the last step.
+		"--pull=never",
 		// No network at all. Deny-all is a control this runner attests; an
 		// allowlist is a different control it does not.
 		"--network", "none",

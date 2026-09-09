@@ -26,7 +26,7 @@ func TestValidateRequest_RefusesBeforeStartingAnything(t *testing.T) {
 		mutate  func(*Request)
 		wantSub string
 	}{
-		{"tagged image", func(r *Request) { r.Image = "alpine:3.19" }, "pinned by digest"},
+		{"tagged image", func(r *Request) { r.Image = "alpine:3.19" }, "must be a sha256 digest"},
 		{"no command", func(r *Request) { r.Argv = nil }, "a command is required"},
 		{"no input dir", func(r *Request) { r.InputDir = "" }, "input directory is required"},
 		{"relative input dir", func(r *Request) { r.InputDir = "relative/path" }, "must be absolute"},

@@ -59,7 +59,9 @@ func TestLiveScan_ProducesAReportWithHonestCoverage(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	report, err := r.RunStaticScan(ctx, StaticScanRequest{
+	auth, scope := liveApproval(t, r)
+	report, err := r.RunStaticScan(ctx, auth, StaticScanRequest{
+		Scope:     scope,
 		ProjectID: "medusa", ProjectPath: project,
 		StagingRootOverride: stagingOverride(t),
 		Params:              DefaultToolParams(),
@@ -137,8 +139,19 @@ func TestLiveScan_ProducesAReportWithHonestCoverage(t *testing.T) {
 	if report.Evidence.EffectiveUID == 0 || !report.Evidence.ReadOnlyRootFS {
 		t.Fatalf("evidence = %+v", report.Evidence)
 	}
-	if !strings.HasPrefix(report.ImageDigest, "alpine@sha256:") {
-		t.Fatalf("image = %q, want a digest-pinned reference", report.ImageDigest)
+	// The report names the bytes the RUNTIME resolved -- a bare digest, not a
+	// name. A name would put back the mutable pointer the approval exists to
+	// remove.
+	if report.ImageDigest != hostAlpineDigest(t, r) {
+		t.Fatalf("image = %q, want the approved digest %q", report.ImageDigest, hostAlpineDigest(t, r))
+	}
+	// And it names who allowed them. A report that says which bytes ran
+	// without saying who approved them answers the less useful half.
+	if report.ApprovalID != "img-1" || report.ApprovedBy != "ada" {
+		t.Fatalf("report does not name the approval: %q by %q", report.ApprovalID, report.ApprovedBy)
+	}
+	if report.ApprovalRevokedDuringRun {
+		t.Fatal("the approval was live throughout and the report says it was revoked")
 	}
 }
 
@@ -151,7 +164,9 @@ func TestLiveScan_ExcludesGitAndVendorFromStaging(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	report, err := r.RunStaticScan(ctx, StaticScanRequest{
+	auth, scope := liveApproval(t, r)
+	report, err := r.RunStaticScan(ctx, auth, StaticScanRequest{
+		Scope:     scope,
 		ProjectID: "medusa", ProjectPath: project,
 		StagingRootOverride: stagingOverride(t), Params: DefaultToolParams(),
 		Limits: Limits{Wall: 60 * time.Second, MemoryBytes: 256 << 20, CPUs: 1, MaxPIDs: 64, MaxOutputBytes: 128 << 10},
@@ -175,7 +190,9 @@ func TestLiveScan_ScopeLimitsWhatIsStaged(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	report, err := r.RunStaticScan(ctx, StaticScanRequest{
+	auth, scope := liveApproval(t, r)
+	report, err := r.RunStaticScan(ctx, auth, StaticScanRequest{
+		Scope:     scope,
 		ProjectID: "medusa", ProjectPath: project, ScopePaths: []string{"api"},
 		StagingRootOverride: stagingOverride(t), Params: DefaultToolParams(),
 		Limits: Limits{Wall: 60 * time.Second, MemoryBytes: 256 << 20, CPUs: 1, MaxPIDs: 64, MaxOutputBytes: 128 << 10},
@@ -217,7 +234,9 @@ func TestLiveScan_CleansUpItsStaging(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if _, err := r.RunStaticScan(ctx, StaticScanRequest{
+	auth, scope := liveApproval(t, r)
+	if _, err := r.RunStaticScan(ctx, auth, StaticScanRequest{
+		Scope:     scope,
 		ProjectID: "medusa", ProjectPath: project, StagingRootOverride: root,
 		Params: DefaultToolParams(),
 		Limits: Limits{Wall: 60 * time.Second, MemoryBytes: 256 << 20, CPUs: 1, MaxPIDs: 64, MaxOutputBytes: 128 << 10},
@@ -245,7 +264,7 @@ func TestLiveScan_CleansUpItsStaging(t *testing.T) {
 // A tool AO does not ship a contract for is refused, and nothing runs.
 func TestLiveScan_RefusesAnUnapprovedTool(t *testing.T) {
 	r := liveRunner(t)
-	_, err := r.ResolveContract(context.Background(), Tool("nmap"))
+	_, err := r.resolveProbeContract(context.Background(), Tool("nmap"))
 	if !errors.Is(err, ErrToolNotApproved) {
 		t.Fatalf("err = %v, want ErrToolNotApproved", err)
 	}
@@ -267,7 +286,9 @@ func TestLiveScan_RefusesAnEmptyScope(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(empty) })
 
-	_, err := r.RunStaticScan(context.Background(), StaticScanRequest{
+	auth, scope := liveApproval(t, r)
+	_, err := r.RunStaticScan(context.Background(), auth, StaticScanRequest{
+		Scope:     scope,
 		ProjectID: "medusa", ProjectPath: empty,
 		StagingRootOverride: stagingOverride(t), Params: DefaultToolParams(),
 	})
@@ -284,7 +305,7 @@ func TestLiveScan_RefusesAnEmptyScope(t *testing.T) {
 
 func requireAlpine(t *testing.T, r *Runner) {
 	t.Helper()
-	if _, err := r.ResolveContract(context.Background(), ToolStaticScan); err != nil {
+	if _, err := r.resolveProbeContract(context.Background(), ToolStaticScan); err != nil {
 		t.Skipf("static-scan base image is unavailable: %v", err)
 	}
 }

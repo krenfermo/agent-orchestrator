@@ -307,7 +307,7 @@ func TestLive_RefusesATaggedImageWithoutStartingAnything(t *testing.T) {
 	_, err := r.Run(context.Background(), Request{
 		Image: "alpine:3.19", Argv: []string{"true"}, InputDir: inputDir, Limits: DefaultLimits(),
 	})
-	if err == nil || !strings.Contains(err.Error(), "pinned by digest") {
+	if err == nil || !strings.Contains(err.Error(), "must be a sha256 digest") {
 		t.Fatalf("err = %v, want a digest refusal", err)
 	}
 	out, listErr := exec.Command(r.runtime.Binary, "ps", "-a", "--filter", "label="+RunLabel+"=1",

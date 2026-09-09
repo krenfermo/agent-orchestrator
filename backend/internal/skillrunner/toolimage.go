@@ -84,10 +84,11 @@ var digestRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 // change and a release — which is the point, because it is the moment somebody
 // decides a new thing may run as AO.
 //
-// The digest is empty here and resolved at startup from the image actually
-// present on the host (see ResolveContract). AO ships no registry credentials
-// and pulls nothing: an image that is not already on the host makes the tool
-// unavailable, which is a refusal rather than a silent network fetch.
+// The digest is empty here and comes from an ADMINISTRATOR'S APPROVAL at
+// execution time (see imagetrust.go), not from whatever the host happens to
+// hold. AO ships no registry credentials and pulls nothing: an image that is
+// not already on the host makes the tool unavailable, which is a refusal rather
+// than a silent network fetch.
 var approvedTools = map[Tool]ToolContract{
 	ToolStaticScan: {
 		Tool:        ToolStaticScan,
@@ -107,13 +108,21 @@ func ApprovedTools() []Tool {
 	return out
 }
 
-// ResolveContract binds a tool to the image digest present on this host.
+// resolveProbeContract binds a tool to whatever image the host currently has
+// under the base name.
 //
-// It refuses when the tool is unknown, when the base image is absent, or when
-// the runtime answers with anything but a well-formed digest. Every one of
-// those is "AO cannot prove what would run", and the answer to that is not to
-// run it.
-func (r *Runner) ResolveContract(ctx context.Context, tool Tool) (ToolContract, error) {
+// It is UNEXPORTED, and it is not an execution path. It exists for one caller:
+// the egress boundary probe, which needs some container to observe a network
+// refusal from. That container runs an AO-authored `nc` loop over no inputs and
+// produces no report, so "whichever alpine is on this host" is an acceptable
+// answer there.
+//
+// It is deliberately NOT how a skill runs. Trusting the image that happens to
+// be present trusts whoever last ran `docker pull`; a skill execution goes
+// through ResolveApprovedImage, which requires an administrator's recorded
+// decision about an exact digest. Re-exporting this, or calling it from a run
+// path, would put the trust root back where it was.
+func (r *Runner) resolveProbeContract(ctx context.Context, tool Tool) (ToolContract, error) {
 	contract, ok := approvedTools[tool]
 	if !ok {
 		return ToolContract{}, fmt.Errorf("%w: %q (approved: %s)",

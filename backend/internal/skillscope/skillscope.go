@@ -36,25 +36,40 @@ type Scope struct {
 
 // Validate rejects a partially-specified scope.
 func (s Scope) Validate() error {
-	missing := make([]string, 0, 5)
-	if strings.TrimSpace(string(s.TenantID)) == "" {
-		missing = append(missing, "tenantId")
+	fields := []struct {
+		name  string
+		value string
+	}{
+		{"tenantId", string(s.TenantID)},
+		{"projectId", string(s.ProjectID)},
+		{"skillId", s.SkillID},
+		{"version", s.Version},
+		{"modeId", s.ModeID},
 	}
-	if strings.TrimSpace(string(s.ProjectID)) == "" {
-		missing = append(missing, "projectId")
-	}
-	if strings.TrimSpace(s.SkillID) == "" {
-		missing = append(missing, "skillId")
-	}
-	if strings.TrimSpace(s.Version) == "" {
-		missing = append(missing, "version")
-	}
-	if strings.TrimSpace(s.ModeID) == "" {
-		missing = append(missing, "modeId")
+	missing := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if strings.TrimSpace(f.value) == "" {
+			missing = append(missing, f.name)
+		}
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("%w: scope is missing %s; a grant without every field is a grant to "+
 			"somebody, somewhere, running something", ErrInvalid, strings.Join(missing, ", "))
+	}
+	// A wildcard is refused OUTRIGHT rather than left to fail at Matches.
+	//
+	// Matches is exact equality, so a scope holding "*" would simply never
+	// match anything and the grant would be dead rather than dangerous. That is
+	// the wrong failure: somebody who wrote "*" meant "all of them", and a
+	// grant that silently means "none of them" teaches them the syntax works.
+	// The next person to read the row sees a wildcard grant that appears to
+	// exist. Refusing at the boundary keeps "what may this scope do" answerable
+	// by reading the row.
+	for _, f := range fields {
+		if strings.ContainsAny(f.value, "*?") {
+			return fmt.Errorf("%w: %s is %q; a scope has no wildcards, and one that appeared to "+
+				"have them would be a grant nobody can enumerate", ErrInvalid, f.name, f.value)
+		}
 	}
 	return nil
 }

@@ -972,6 +972,23 @@ type SkillAudit struct {
 	Detail       string
 }
 
+type SkillImageApproval struct {
+	ID         string
+	TenantID   domain.TenantID
+	ProjectID  domain.ProjectID
+	SkillID    string
+	Version    string
+	ModeID     string
+	Tool       string
+	Reference  string
+	Digest     string
+	ApprovedBy string
+	ApprovedAt time.Time
+	ExpiresAt  sql.NullTime
+	RevokedAt  sql.NullTime
+	Note       string
+}
+
 type SkillInstall struct {
 	SkillID      string
 	Version      string

@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/skillimage"
 )
 
 // staticrun.go — the one execution path AO ships.
@@ -30,6 +32,11 @@ import (
 
 // StaticScanRequest is one static-code run.
 type StaticScanRequest struct {
+	// Scope is what authorizes this run: tenant, project, skill, version and
+	// mode, every field, no wildcard. It is what the image approval is looked
+	// up against, and it comes from the resolved activation -- never from a
+	// caller who could widen it.
+	Scope skillimage.Scope
 	// ProjectID and ProjectPath identify the checkout to scan.
 	ProjectID   string
 	ProjectPath string
@@ -87,15 +94,28 @@ type ScanCoverage struct {
 
 // StaticScanReport is the structured result.
 type StaticScanReport struct {
-	SchemaVersion string           `json:"schemaVersion"`
-	ProjectID     string           `json:"projectId"`
-	Tool          string           `json:"tool"`
-	ImageDigest   string           `json:"imageDigest"`
-	StartedAt     time.Time        `json:"startedAt"`
-	EndedAt       time.Time        `json:"endedAt"`
-	Coverage      ScanCoverage     `json:"coverage"`
-	Findings      []ScanFinding    `json:"findings"`
-	Evidence      BoundaryEvidence `json:"evidence"`
+	SchemaVersion string `json:"schemaVersion"`
+	ProjectID     string `json:"projectId"`
+	Tool          string `json:"tool"`
+	// ImageDigest is what the RUNTIME resolved, read back from it, not the
+	// reference AO passed. The two are the same on a healthy host and the
+	// difference is the whole point of checking.
+	ImageDigest string `json:"imageDigest"`
+	// ApprovalID and ApprovedBy name the decision that authorized this image.
+	// A report that says which bytes ran without saying who allowed them
+	// leaves the more important half of the question unanswered.
+	ApprovalID string `json:"approvalId"`
+	ApprovedBy string `json:"approvedBy"`
+	// ApprovalRevokedDuringRun records that the approval stopped being active
+	// while the container was running. AO does not kill a running container
+	// (see RevocationPolicy), so this is how the fact reaches the reader
+	// instead of disappearing.
+	ApprovalRevokedDuringRun bool             `json:"approvalRevokedDuringRun"`
+	StartedAt                time.Time        `json:"startedAt"`
+	EndedAt                  time.Time        `json:"endedAt"`
+	Coverage                 ScanCoverage     `json:"coverage"`
+	Findings                 []ScanFinding    `json:"findings"`
+	Evidence                 BoundaryEvidence `json:"evidence"`
 	// Truncated says the tool's own output hit AO's cap, so the finding list
 	// may be incomplete. A truncated report is not a clean one.
 	Truncated bool `json:"truncated"`
@@ -114,8 +134,15 @@ var staticScanLimitations = []string{
 	"No dependency, network, runtime or configuration-at-deploy checking is performed.",
 }
 
-// RunStaticScan executes the one enabled mode.
-func (r *Runner) RunStaticScan(ctx context.Context, req StaticScanRequest) (StaticScanReport, error) {
+// RunStaticScan executes the one enabled mode, against the image an
+// administrator approved for this exact scope.
+//
+// The authority is a required argument rather than a field on the Runner, so
+// there is no way to construct a runner that executes without one. A nil
+// authority is an installation with no trust root, which authorizes nothing.
+func (r *Runner) RunStaticScan(
+	ctx context.Context, authority ImageAuthority, req StaticScanRequest,
+) (StaticScanReport, error) {
 	if !r.Available() {
 		return StaticScanReport{}, fmt.Errorf("%w: %s", ErrRuntimeUnavailable, r.Unavailable())
 	}
@@ -131,10 +158,15 @@ func (r *Runner) RunStaticScan(ctx context.Context, req StaticScanRequest) (Stat
 		limits = DefaultLimits()
 	}
 
-	contract, err := r.ResolveContract(ctx, ToolStaticScan)
+	// The trust root, first: nothing is staged for a run that is not authorized
+	// to happen. Staging copies somebody's source, and doing it before the
+	// authorization check would leave a copy behind for a run that was always
+	// going to be refused.
+	image, err := r.ResolveApprovedImage(ctx, authority, req.Scope, ToolStaticScan)
 	if err != nil {
 		return StaticScanReport{}, err
 	}
+	contract := image.Contract
 
 	root, err := StagingRootFor(req.ProjectPath, req.StagingRootOverride)
 	if err != nil {
@@ -153,8 +185,15 @@ func (r *Runner) RunStaticScan(ctx context.Context, req StaticScanRequest) (Stat
 	// is the kind of thing that is discovered months later.
 	defer func() { _ = staging.Cleanup() }()
 
+	// The last check before anything starts. Staging took real time, and an
+	// approval withdrawn during it must stop the launch rather than be noticed
+	// afterwards.
+	if err := r.RecheckBeforeLaunch(ctx, authority, image); err != nil {
+		return StaticScanReport{}, err
+	}
+
 	res, err := r.Run(ctx, Request{
-		Image:    contract.PinnedRef(),
+		Image:    image.Ref(),
 		Argv:     contract.Argv(params),
 		InputDir: staging.Dir,
 		Limits:   limits,
@@ -181,6 +220,13 @@ func (r *Runner) RunStaticScan(ctx context.Context, req StaticScanRequest) (Stat
 	}
 
 	report := parseStaticScan(res, staging, contract, req.ProjectID)
+	report.ImageDigest = image.Digest
+	report.ApprovalID = image.Approval.ID
+	report.ApprovedBy = image.Approval.ApprovedBy
+	// Asked after the fact, deliberately. AO does not kill a running container
+	// on revocation -- RevocationPolicy says why -- so the only honest thing
+	// left is to say so in the report the reader will act on.
+	report.ApprovalRevokedDuringRun = r.RevokedSince(ctx, authority, image, time.Now().UTC())
 	return report, nil
 }
 
@@ -193,7 +239,6 @@ func parseStaticScan(res Result, staging Staging, contract ToolContract, project
 		SchemaVersion: "ao.static-scan/v1",
 		ProjectID:     projectID,
 		Tool:          string(contract.Tool),
-		ImageDigest:   contract.PinnedRef(),
 		StartedAt:     res.Started,
 		EndedAt:       res.Ended,
 		Evidence:      res.Evidence,

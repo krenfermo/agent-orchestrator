@@ -32,15 +32,15 @@ func TestApprovedTools_IsAClosedVocabulary(t *testing.T) {
 	}
 }
 
-func TestResolveContract_RefusesAnUnapprovedTool(t *testing.T) {
+func TestResolveProbeContract_RefusesAnUnapprovedTool(t *testing.T) {
 	r := &Runner{runtime: Runtime{Binary: "docker"}, runner: fakeCLI{}}
-	_, err := r.ResolveContract(context.Background(), Tool("nmap"))
+	_, err := r.resolveProbeContract(context.Background(), Tool("nmap"))
 	if !errors.Is(err, ErrToolNotApproved) {
 		t.Fatalf("err = %v, want ErrToolNotApproved", err)
 	}
 }
 
-func TestResolveContract_RefusesWhenAOCannotProveWhatWouldRun(t *testing.T) {
+func TestResolveProbeContract_RefusesWhenAOCannotProveWhatWouldRun(t *testing.T) {
 	cases := []struct {
 		name    string
 		cli     fakeCLI
@@ -60,7 +60,7 @@ func TestResolveContract_RefusesWhenAOCannotProveWhatWouldRun(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &Runner{runtime: Runtime{Binary: "docker"}, runner: tc.cli}
-			_, err := r.ResolveContract(context.Background(), ToolStaticScan)
+			_, err := r.resolveProbeContract(context.Background(), ToolStaticScan)
 			if !errors.Is(err, ErrRuntimeUnavailable) {
 				t.Fatalf("err = %v, want ErrRuntimeUnavailable", err)
 			}
@@ -71,12 +71,12 @@ func TestResolveContract_RefusesWhenAOCannotProveWhatWouldRun(t *testing.T) {
 	}
 }
 
-func TestResolveContract_PinsByDigest(t *testing.T) {
+func TestResolveProbeContract_PinsByDigest(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("b", 64)
 	r := &Runner{runtime: Runtime{Binary: "docker"}, runner: fakeCLI{out: []byte(digest + "\n")}}
-	contract, err := r.ResolveContract(context.Background(), ToolStaticScan)
+	contract, err := r.resolveProbeContract(context.Background(), ToolStaticScan)
 	if err != nil {
-		t.Fatalf("ResolveContract: %v", err)
+		t.Fatalf("resolveProbeContract: %v", err)
 	}
 	if contract.PinnedRef() != "alpine@"+digest {
 		t.Fatalf("pinned ref = %q", contract.PinnedRef())
