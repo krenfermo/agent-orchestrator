@@ -22,6 +22,41 @@ type SkillInstall = components["schemas"]["SkillInstallView"];
 type SkillCapability = components["schemas"]["SkillCapabilityView"];
 type SkillActivation = components["schemas"]["SkillActivationView"];
 type SkillDryRun = components["schemas"]["SkillDryRunResponse"];
+type SkillRun = components["schemas"]["ControllersSkillRunView"];
+
+/**
+ * The static scan's report, as this panel reads it.
+ *
+ * The wire type is an opaque JSON document on purpose — the report belongs to
+ * the tool, and a generated TypeScript mirror of it would go stale the moment a
+ * rule was added. Only the fields this panel renders are named here, and every
+ * one is optional: a report missing a field renders as missing, never as zero.
+ */
+type StaticScanReport = {
+	imageDigest?: string;
+	approvalId?: string;
+	approvedBy?: string;
+	approvalRevokedDuringRun?: boolean;
+	truncated?: boolean;
+	coverage?: {
+		filesStaged?: number;
+		filesVisible?: number;
+		filesScanned?: number;
+		rulesRun?: string[];
+		skipped?: { path: string; reason: string }[];
+		limitations?: string[];
+	};
+	findings?: {
+		ruleId: string;
+		severity: string;
+		category: string;
+		title: string;
+		path: string;
+		line: number;
+		recommendation: string;
+		confidence: string;
+	}[];
+};
 
 /**
  * Project settings → Skills. Which skills are enabled on THIS project, with
@@ -54,6 +89,7 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 	const [grant, setGrant] = useState<Record<string, boolean>>({});
 	const [dryRunMode, setDryRunMode] = useState<Record<string, string>>({});
 	const [dryRun, setDryRun] = useState<SkillDryRun | null>(null);
+	const [run, setRun] = useState<SkillRun | null>(null);
 
 	const skills = useQuery({
 		queryKey: skillsKey,
@@ -154,6 +190,36 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 		},
 		onError: (err: Error) => {
 			setDryRun(null);
+			setError(err.message);
+		},
+	});
+
+	// Executing. Separate from `check` in every way that matters: a different
+	// endpoint, a different permission on the daemon, and its own button that
+	// only appears once a dry run has said this mode is executable. The dry run
+	// is the honest way to find out; this is the thing that acts.
+	const execute = useMutation({
+		mutationFn: async ({ skill, modeId }: { skill: string; modeId: string }): Promise<SkillRun> => {
+			const { data, error: apiError } = await apiClient.POST(
+				"/api/v1/projects/{id}/skills/{skillId}/run",
+				{
+					credentials: "include",
+					params: { path: { id: projectId, skillId: skill } },
+					body: { modeId, inputs: { mode: modeId } },
+				},
+			);
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data;
+		},
+		onSuccess: (data) => {
+			setRun(data);
+			setError(null);
+			// A run leaves an audit row; the activation view carries the last
+			// one, so the list is no longer current.
+			invalidate();
+		},
+		onError: (err: Error) => {
+			setRun(null);
 			setError(err.message);
 		},
 	});
@@ -275,7 +341,126 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 				) : null}
 
 				{dryRun && dryRun.skillId === row.skillId ? dryRunPanel(dryRun) : null}
+
+				{/* Executing is offered only after a dry run has said this mode
+				    is executable. That is not a convenience: the dry run is the
+				    surface that explains WHY something cannot run, and putting a
+				    Run button next to a blocked mode would invite a click whose
+				    only outcome is an error. */}
+				{dryRun && dryRun.skillId === row.skillId && dryRun.verdict === "executable" ? (
+					<div className="flex items-center gap-2">
+						<Button
+							variant="primary"
+							size="sm"
+							disabled={execute.isPending}
+							onClick={() => execute.mutate({ skill: row.skillId, modeId: dryRun.modeId })}
+							data-testid="project-skill-run"
+						>
+							{execute.isPending
+								? t("settings.project.skills.running")
+								: t("settings.project.skills.run")}
+						</Button>
+						<span className="text-caption text-settings-muted">
+							{t("settings.project.skills.runNote")}
+						</span>
+					</div>
+				) : null}
+
+				{run && run.skillId === row.skillId ? runPanel(run) : null}
 			</li>
+		);
+	};
+
+	// The report. COVERAGE FIRST, then findings.
+	//
+	// That order is the whole point of the panel. "0 findings" is not a result
+	// until you know what was read, and a scan that staged nothing and found
+	// nothing must not render like a clean bill of health — so when nothing was
+	// scanned, this says so in words rather than showing an empty list.
+	const runPanel = (result: SkillRun) => {
+		const report = (result.report ?? {}) as StaticScanReport;
+		const coverage = report.coverage ?? {};
+		const findings = report.findings ?? [];
+		const scanned = coverage.filesScanned ?? 0;
+		return (
+			<div
+				className="flex flex-col gap-2 rounded-(--radius-settings-dialog-lg) border border-[var(--color-border-settings-input)] p-3"
+				data-testid="project-skill-run-report"
+			>
+				{/* Which bytes ran, and who allowed them. A report that says one
+				    without the other leaves the more important half unanswered. */}
+				<p className="text-caption text-settings-muted">
+					{t("settings.project.skills.ranImage", {
+						digest: report.imageDigest ?? "-",
+						actor: report.approvedBy ?? "-",
+					})}
+				</p>
+				{report.approvalRevokedDuringRun ? (
+					<p className="flex items-start gap-2 text-caption text-error">
+						<CircleAlert className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+						{t("settings.project.skills.revokedDuringRun")}
+					</p>
+				) : null}
+
+				<p className="text-caption font-medium">
+					{t("settings.project.skills.coverage", {
+						staged: coverage.filesStaged ?? 0,
+						visible: coverage.filesVisible ?? 0,
+						scanned,
+					})}
+				</p>
+				{coverage.skipped && coverage.skipped.length > 0 ? (
+					<ul className="flex flex-col gap-0.5">
+						{coverage.skipped.map((sk) => (
+							<li className="text-caption text-settings-muted" key={sk.path}>
+								{t("settings.project.skills.skipped", { path: sk.path, reason: sk.reason })}
+							</li>
+						))}
+					</ul>
+				) : null}
+				{report.truncated ? (
+					<p className="text-caption text-error">{t("settings.project.skills.truncated")}</p>
+				) : null}
+
+				<p className="text-caption font-medium">
+					{t("settings.project.skills.findingsCount", { count: findings.length })}
+				</p>
+				{findings.length === 0 && scanned === 0 ? (
+					// The one sentence that stops an empty report reading as clean.
+					<p className="flex items-start gap-2 text-caption text-error">
+						<CircleAlert className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+						{t("settings.project.skills.nothingScanned")}
+					</p>
+				) : null}
+				<ul className="flex flex-col gap-1">
+					{findings.map((f) => (
+						<li className="text-caption" key={`${f.ruleId}:${f.path}:${f.line}`}>
+							<span className="font-medium">
+								[{f.severity.toUpperCase()}] {f.title}
+							</span>
+							<span className="text-settings-muted">
+								{" "}
+								{f.path}:{f.line} · {f.ruleId} · {f.confidence}
+							</span>
+						</li>
+					))}
+				</ul>
+
+				{coverage.limitations && coverage.limitations.length > 0 ? (
+					<>
+						<p className="text-caption font-medium">
+							{t("settings.project.skills.limitations")}
+						</p>
+						<ul className="flex flex-col gap-0.5">
+							{coverage.limitations.map((l) => (
+								<li className="text-caption text-settings-muted" key={l}>
+									{l}
+								</li>
+							))}
+						</ul>
+					</>
+				) : null}
+			</div>
 		);
 	};
 
