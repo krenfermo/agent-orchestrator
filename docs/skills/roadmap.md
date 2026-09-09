@@ -1,7 +1,8 @@
 # Skills catalog — integration roadmap
 
-**Status: subfase 1 is DONE and subfase 2 is mostly done (phase 2, 2026-09-09).**
-Subfase 3 remains the gate on everything executable, and nothing executes.
+**Status: subfases 1 and 2 mostly done (phase 2). Subfase 3 is PARTLY done
+(phase 3, 2026-09-09): the boundary is decided, built and tested, and it
+unblocks nothing.** Nothing executes.
 
 Phase 1 delivered the catalog core and the `security-audit` package. Phase 2
 made it administrable: SQLite persistence, an audit trail, HTTP routes, `ao
@@ -56,32 +57,55 @@ a package, see what it asks for, and grant a subset per project.
   (`service/rbac`, `controllers.AuthAudit`) so one reader covers both.
 - **Touches:** service + HTTP + UI only. **Conflict risk: low.**
 
-## Subfase 3 — Isolated runner and egress control (**the gate — next**)
+## Subfase 3 — Isolated runner and egress control (**the gate — partly done**)
 
-Nothing that needs containment runs until this exists. Requirements, not
-suggestions:
+ADR 0004 decides the boundary and `internal/skillrunner` proves it. Containment
+is no longer the open question; four specific controls are.
 
-- A container or equivalent boundary with its own filesystem view. The project
-  checkout is mounted read-only unless `repo.write` was granted.
-- **Default-deny egress**, opened only to `scope.network.allow` plus the run's
-  explicitly authorized targets. This is the single hardest requirement and the
-  reason the roadmap has this shape.
-- No AO credentials in the runner's environment. Follow `agentcred`'s pattern:
-  the secret in a `0600` file, the filename in the env, never the value.
-- Wall-clock and resource limits, with a hard kill.
-- An honest `RunnerAttestation`. Returning `Isolated: true` without the boundary
-  defeats every check in `skillcatalog`.
-- `Execute` re-runs `Authorize` against its own attestation. A `Plan` is an
-  input to re-check, never a permission slip.
+**Done (phase 3):**
 
-Reuse rather than rebuild: `internal/reviewgateway` already prepares private
-config/state/cache/temp roots and an empty git-hooks dir per reviewer, and ADR
-0002 records that it is waiting on exactly this platform isolation. Generalize
-it; do not write a second one.
+- ✅ A Linux container boundary: no network, non-root, no capabilities,
+  immutable rootfs, read-only input mount, cgroup v2 limits, digest-pinned
+  image, an explicit env allowlist.
+- ✅ Fail-closed on every unusable runtime — missing binary, unreachable
+  daemon, Windows containers, cgroup v1. No host fallback exists to fall into.
+- ✅ Attestation as a set of named `Control` values that AO derives from
+  probes, replacing two coarse booleans. A caller cannot supply one; the
+  dry-run API has no attestation field.
+- ✅ Boundary evidence collected from inside the container — uid, the cgroup
+  values the kernel reports, an actual outbound attempt, the image digest, and
+  **how many input files were visible**, because on macOS an unshared bind
+  mount arrives empty and silent and would otherwise produce a clean audit of
+  nothing.
+- ✅ Wall clock, memory, CPU, pid and output-size limits, with teardown that
+  leaves no orphan.
+- ✅ Seven isolation tests against a real runtime, plus fail-closed tests that
+  run everywhere.
 
-- **Touches:** new runtime package, likely `internal/process` and
-  `internal/runtimehome`. **Conflict risk: medium** — schedule after
-  stabilization settles.
+**Still missing — each blocks one capability:**
+
+| Control | Blocks | What has to be built |
+| --- | --- | --- |
+| `egress_allowlist` | `net.egress`, `net.active_scan` | An AO-owned forward proxy on an `--internal` network enforcing `scope.network.allow`; the skill container gets no other route |
+| `writable_workspace` | `repo.write` | A writable overlay and a reviewed path to return changes to the host |
+| `scoped_secret_delivery` | `secrets.read` | Per-run injection of one named secret from AO's store, without an env var — follow `agentcred`'s file-not-env rule |
+| `arbitrary_process_execution` | `process.exec` | The skill-image contract: what a skill may ship, how it is built, how its command is authored and pinned |
+
+Note the shape of the remaining work: none of it is "make the sandbox
+stronger". The sandbox holds. What is missing is four narrower mechanisms, each
+of which can be built and tested on its own.
+
+`skillrunner.Runner.Execute` is deliberately still refused: proving the boundary
+is not the same as having a contract for what may run inside it. That contract
+is `arbitrary_process_execution`, above.
+
+- **Touched:** `internal/skillrunner` (new), the attestation model in
+  `internal/skillcatalog`, and the dry-run projection. **Conflict risk: low** —
+  no lifecycle, planner, placement or migration file.
+- **Reuse note:** `internal/reviewgateway` already prepares private
+  config/state/cache/temp roots per reviewer, and ADR 0002 records it waiting on
+  exactly this platform isolation. When the runner is wired for real, generalize
+  that package rather than writing a second one.
 
 ## Subfase 4 — Workflow and reviewer integration — **blocked on subfase 3**
 
@@ -128,12 +152,12 @@ Only once the core is stable and subfase 3 has landed.
 
 ## Open questions to settle before subfase 3
 
-1. **Container runtime.** Docker is already a dependency for container reaping
-   (`ContainerReapConfig`). Is it a hard requirement for skills, and what
-   happens on a desktop without it — refuse, or degrade to read-only modes?
-2. **Egress enforcement on macOS.** The most likely answer is that egress
-   control only exists inside a container, which makes the previous question
-   load-bearing.
+1. ~~**Container runtime.**~~ **Settled in phase 3 (ADR 0004):** a Linux
+   container is required, and a desktop without one gets a refusal, not a
+   degraded run. What is NOT settled is the product decision below.
+2. ~~**Egress enforcement on macOS.**~~ **Settled:** it exists only inside a
+   container. `sandbox-exec` was measured and gives a binary network switch with
+   no filesystem boundary and no resource limits.
 3. **Secret scoping.** `secrets.read` has no store to read from. Which secrets
    can a skill request, and who approves each name?
 4. **Signature verification.** `provenance.signature` is rejected today. Adding
@@ -147,3 +171,26 @@ Only once the core is stable and subfase 3 has landed.
 6. **Install sources.** Only a local absolute directory is supported. Adding a
    git or registry source means deciding a trust root first, which is the same
    decision `provenance.signature` is blocked on (question 4).
+
+7. **THE DECISION THIS PHASE NEEDS.** Docker (or an equivalent Linux VM) is now
+   a hard requirement for any skill that needs containment. Three options, and
+   the answer changes what gets built next:
+
+   a. **Require it.** Skills are unavailable on a desktop without a container
+      runtime; the UI says so and points at the install. Simplest and most
+      honest, and it makes AO's first-run story heavier.
+
+   b. **Require it only for what needs it.** The read-only audit modes
+      (`static-code`, `secret-scan`, `authz-review`) need no control at all —
+      they are AO's own agent reading a checkout AO already has. Those could run
+      with no runner, and everything else refuses. Best user experience;
+      requires being very careful that "needs no control" stays true as the
+      modes evolve, since it is the one path with no boundary.
+
+   c. **Ship a runtime.** AO bundles or manages a VM. Largest scope by far, and
+      it puts AO in the business of maintaining a Linux distribution.
+
+   Option (b) is the recommendation, with (a) as the fallback if the read-only
+   modes ever grow a capability that needs a control. It should be decided
+   before the four missing controls are built, because it determines whether the
+   proxy work or the skill-image contract comes first.

@@ -114,7 +114,7 @@ func TestUnavailableRunner_RefusesEveryPlan(t *testing.T) {
 	if _, err := (UnavailableRunner{}).Execute(context.Background(), plan); !errors.Is(err, ErrNoRunner) {
 		t.Fatalf("Execute = %v, want ErrNoRunner", err)
 	}
-	if att := (UnavailableRunner{}).Attestation(); att.Isolated || att.EgressControlled {
+	if att := (UnavailableRunner{}).Attestation(); att.Isolated() || att.EgressControlled() || len(att.Controls) != 0 {
 		t.Fatalf("the shipped runner attests containment: %#v", att)
 	}
 }

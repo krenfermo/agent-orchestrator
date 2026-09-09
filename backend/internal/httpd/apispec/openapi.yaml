@@ -20112,8 +20112,14 @@ components:
           type: string
         detail:
           type: string
+        missingControl:
+          type: string
         requiredPermission:
           type: string
+        requiresControls:
+          items:
+            type: string
+          type: array
         risk:
           enum:
           - low
@@ -20129,6 +20135,7 @@ components:
       - risk
       - description
       - requiredPermission
+      - requiresControls
       type: object
     SkillCapabilityView:
       properties:
@@ -20145,10 +20152,10 @@ components:
           type: string
         requiredPermission:
           type: string
-        requiresEgressControl:
-          type: boolean
-        requiresIsolation:
-          type: boolean
+        requiresControls:
+          items:
+            type: string
+          type: array
         risk:
           enum:
           - low
@@ -20161,8 +20168,7 @@ components:
       - description
       - risk
       - minApproval
-      - requiresIsolation
-      - requiresEgressControl
+      - requiresControls
       - requiredPermission
       type: object
     SkillDryRunRequest:
@@ -20365,21 +20371,33 @@ components:
       properties:
         available:
           type: boolean
+        controls:
+          items:
+            type: string
+          type: array
         egressControlled:
           type: boolean
         isolated:
           type: boolean
+        missingControls:
+          items:
+            type: string
+          type: array
         needsEgressControl:
           type: boolean
         needsIsolation:
           type: boolean
         runnerId:
           type: string
+        unavailable:
+          type: string
       required:
       - runnerId
       - available
       - isolated
       - egressControlled
+      - controls
+      - missingControls
       - needsIsolation
       - needsEgressControl
       type: object

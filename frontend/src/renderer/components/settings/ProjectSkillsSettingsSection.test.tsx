@@ -28,18 +28,19 @@ const securityAudit = {
 const capabilityPolicy = [
 	{
 		name: "repo.read", description: "Read the project's source in a checkout.",
-		risk: "low", minApproval: "none", requiresIsolation: false,
-		requiresEgressControl: false, requiredPermission: "project.read",
+		risk: "low", minApproval: "none", requiresControls: [],
+		requiredPermission: "project.read",
 	},
 	{
 		name: "report.write", description: "Write a structured report.",
-		risk: "low", minApproval: "none", requiresIsolation: false,
-		requiresEgressControl: false, requiredPermission: "project.read",
+		risk: "low", minApproval: "none", requiresControls: [],
+		requiredPermission: "project.read",
 	},
 	{
 		name: "net.egress", description: "Open outbound network connections.",
-		risk: "high", minApproval: "per_run", requiresIsolation: true,
-		requiresEgressControl: true, requiredPermission: "project.manage",
+		risk: "high", minApproval: "per_run",
+		requiresControls: ["filesystem_isolation", "egress_allowlist"],
+		requiredPermission: "project.manage",
 	},
 ];
 
@@ -136,9 +137,11 @@ describe("ProjectSkillsSettingsSection", () => {
 		expect(screen.getByText("Open outbound network connections.")).toBeInTheDocument();
 		// net.egress needs an isolated runner AO does not have; the screen says
 		// so rather than offering it as if it would work.
+		// The capability names the controls it needs, so the reason reads as
+		// "this has to be built" rather than a vague "not isolated".
 		expect(
 			screen.getByText(
-				"Needs an isolated runner, which AO does not have yet, so it stays blocked at run time.",
+				"Needs from the runner: filesystem_isolation, egress_allowlist. Blocked until those exist.",
 			),
 		).toBeInTheDocument();
 		expect(screen.getByText("Grant only the capabilities this project actually needs. Anything you leave off is refused at run time.")).toBeInTheDocument();
@@ -161,23 +164,30 @@ describe("ProjectSkillsSettingsSection", () => {
 					{
 						capability: "repo.read", satisfied: true, risk: "low",
 						description: "Read the project's source in a checkout.",
-						requiredPermission: "project.read",
+						requiredPermission: "project.read", requiresControls: [],
 					},
 					{
 						capability: "net.egress", satisfied: false, risk: "high",
 						description: "Open outbound network connections.",
 						requiredPermission: "project.manage",
-						denialReason: "needs_isolated_runner",
-						detail: "no runner attests an isolated execution environment",
+						denialReason: "missing_control",
+						missingControl: "egress_allowlist",
+						requiresControls: ["filesystem_isolation", "egress_allowlist"],
+						detail: "the execution environment (container/docker) does not provide egress_allowlist",
 					},
 				],
 				missingPermissions: ["project.manage"],
 				effectiveRisk: "high",
 				runner: {
-					runnerId: "none", available: false, isolated: false,
-					egressControlled: false, needsIsolation: true, needsEgressControl: true,
+					runnerId: "container/docker", available: true, isolated: true,
+					egressControlled: false,
+					controls: ["filesystem_isolation", "process_isolation", "egress_deny_all"],
+					missingControls: ["egress_allowlist"],
+					needsIsolation: true, needsEgressControl: true,
 				},
-				reasons: ["net.egress: no runner attests an isolated execution environment"],
+				reasons: [
+					"net.egress: the execution environment (container/docker) does not provide egress_allowlist",
+				],
 			},
 		} as never);
 
@@ -187,13 +197,20 @@ describe("ProjectSkillsSettingsSection", () => {
 
 		expect(await screen.findByText("Blocked")).toBeInTheDocument();
 		expect(screen.getByText("This check starts no process and changes nothing.")).toBeInTheDocument();
-		expect(screen.getByText("no runner attests an isolated execution environment")).toBeInTheDocument();
-		expect(screen.getByText("You are missing: project.manage")).toBeInTheDocument();
 		expect(
 			screen.getByText(
-				"This mode needs an isolated runner with controlled network egress. AO has none, so it stays blocked.",
+				"the execution environment (container/docker) does not provide egress_allowlist",
 			),
 		).toBeInTheDocument();
+		expect(screen.getByText("You are missing: project.manage")).toBeInTheDocument();
+		// The panel says what the environment IS and what is still missing.
+		// "Blocked" without the gap is not actionable.
+		expect(
+			screen.getByText(
+				"Runner container/docker provides: filesystem_isolation, process_isolation, egress_deny_all.",
+			),
+		).toBeInTheDocument();
+		expect(screen.getByText("Missing for this run: egress_allowlist.")).toBeInTheDocument();
 		expect(post).toHaveBeenCalledOnce();
 	});
 

@@ -142,6 +142,8 @@ func (s *Service) DrySkillRun(ctx context.Context, in controllers.SkillDryRunInp
 			RequiredPermission: string(d.RequiredPermission),
 			DenialReason:       string(d.DenialReason),
 			Detail:             d.Detail,
+			MissingControl:     string(d.MissingControl),
+			RequiresControls:   controlNames(d.RequiresControls),
 		})
 	}
 	missing := make([]string, 0, len(dr.MissingPermissions))
@@ -169,8 +171,11 @@ func (s *Service) DrySkillRun(ctx context.Context, in controllers.SkillDryRunInp
 			Available:          dr.Runner.Available,
 			Isolated:           dr.Runner.Isolated,
 			EgressControlled:   dr.Runner.EgressControlled,
+			Controls:           controlNames(dr.Runner.Controls),
+			MissingControls:    controlNames(dr.Runner.MissingControls),
 			NeedsIsolation:     dr.Runner.NeedsIsolation,
 			NeedsEgressControl: dr.Runner.NeedsEgressControl,
+			Unavailable:        dr.Runner.Unavailable,
 		},
 		Reasons: reasons,
 	}, nil
@@ -237,6 +242,14 @@ func installView(rec store.SkillInstallRecord) controllers.SkillInstallView {
 		InstalledAt:            rec.InstalledAt,
 		InstalledBy:            rec.InstalledBy,
 	}
+}
+
+func controlNames(controls []skillcatalog.Control) []string {
+	out := make([]string, 0, len(controls))
+	for _, c := range controls {
+		out = append(out, string(c))
+	}
+	return out
 }
 
 func capabilityNamesOf(caps []skillcatalog.Capability) []string {

@@ -7071,7 +7071,9 @@ export interface components {
             denialReason?: string;
             description: string;
             detail?: string;
+            missingControl?: string;
             requiredPermission: string;
+            requiresControls: string[];
             /** @enum {string} */
             risk: "low" | "medium" | "high" | "critical";
             satisfied: boolean;
@@ -7082,8 +7084,7 @@ export interface components {
             minApproval: "none" | "per_activation" | "per_run" | "per_target";
             name: string;
             requiredPermission: string;
-            requiresEgressControl: boolean;
-            requiresIsolation: boolean;
+            requiresControls: string[];
             /** @enum {string} */
             risk: "low" | "medium" | "high" | "critical";
         };
@@ -7151,11 +7152,14 @@ export interface components {
         };
         SkillRunnerStatusView: {
             available: boolean;
+            controls: string[];
             egressControlled: boolean;
             isolated: boolean;
+            missingControls: string[];
             needsEgressControl: boolean;
             needsIsolation: boolean;
             runnerId: string;
+            unavailable?: string;
         };
         SpawnOrchestratorRequest: {
             clean?: boolean;

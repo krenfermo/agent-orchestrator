@@ -54,6 +54,11 @@ type CapabilityDecision struct {
 	// it is.
 	Risk        skillcatalog.RiskLevel
 	Description string
+	// RequiresControls is everything the execution environment must provide
+	// for this capability.
+	RequiresControls []skillcatalog.Control
+	// MissingControl is the one it did not, set only when unsatisfied.
+	MissingControl skillcatalog.Control
 	// RequiredPermission is the AO permission this capability is gated on.
 	RequiredPermission domain.Permission
 	// DenialReason and Detail are set only when Granted is false.
@@ -68,12 +73,19 @@ type RunnerStatus struct {
 	RunnerID string
 	// Available is whether any runner could carry this run at all.
 	Available bool
-	// Isolated and EgressControlled are what the runner attests.
+	// Isolated and EgressControlled are coarse summaries of Controls, for a
+	// compact UI. Controls is the real answer.
 	Isolated         bool
 	EgressControlled bool
+	// Controls are the guarantees the environment has demonstrated.
+	Controls []skillcatalog.Control
+	// MissingControls are the guarantees this run needs and does not have.
+	MissingControls []skillcatalog.Control
 	// NeedsIsolation and NeedsEgressControl are what this run requires.
 	NeedsIsolation     bool
 	NeedsEgressControl bool
+	// Unavailable explains an environmental refusal, when there is one.
+	Unavailable string
 }
 
 // DryRun is the full answer.
@@ -97,6 +109,17 @@ type DryRun struct {
 	// Reasons are the structured blockers, one line each, for a client that
 	// wants a summary rather than the per-capability table.
 	Reasons []string
+}
+
+// containsControl reports membership without pulling in a generics helper for
+// one call site.
+func containsControl(list []skillcatalog.Control, want skillcatalog.Control) bool {
+	for _, c := range list {
+		if c == want {
+			return true
+		}
+	}
+	return false
 }
 
 // DryRunRequest asks what one mode would need on one project.
@@ -138,7 +161,9 @@ func (s *Service) DryRun(ctx context.Context, req DryRunRequest) (DryRun, error)
 			fmt.Sprintf("%s has no mode %q", req.SkillID, req.ModeID), nil)
 	}
 
-	runner := skillcatalog.NoRunner()
+	// The attestation comes from AO's own runner, never from the request.
+	// DryRunRequest deliberately has no attestation field.
+	runner := s.runner.Attestation()
 	decision, _ := skillcatalog.Authorize(skillcatalog.AuthorizationRequest{
 		Manifest:           manifest,
 		ModeID:             mode.ID,
@@ -159,9 +184,11 @@ func (s *Service) DryRun(ctx context.Context, req DryRunRequest) (DryRun, error)
 		EffectiveRisk:    decision.EffectiveRisk,
 		Runner: RunnerStatus{
 			RunnerID:         runner.RunnerID,
-			Available:        runner.Isolated,
-			Isolated:         runner.Isolated,
-			EgressControlled: runner.EgressControlled,
+			Available:        runner.Isolated(),
+			Isolated:         runner.Isolated(),
+			EgressControlled: runner.EgressControlled(),
+			Controls:         append([]skillcatalog.Control(nil), runner.Controls...),
+			Unavailable:      s.runnerUnavailable,
 		},
 	}
 
@@ -180,11 +207,17 @@ func (s *Service) DryRun(ctx context.Context, req DryRunRequest) (DryRun, error)
 			RequiredPermission: spec.RequiredPermission,
 		}
 		if known {
-			if spec.RequiresIsolation {
-				out.Runner.NeedsIsolation = true
-			}
-			if spec.RequiresEgressControl {
-				out.Runner.NeedsEgressControl = true
+			entry.RequiresControls = append([]skillcatalog.Control(nil), spec.RequiresControls...)
+			for _, need := range spec.RequiresControls {
+				if !runner.Provides(need) && !containsControl(out.Runner.MissingControls, need) {
+					out.Runner.MissingControls = append(out.Runner.MissingControls, need)
+				}
+				switch need {
+				case skillcatalog.ControlFilesystemIsolation:
+					out.Runner.NeedsIsolation = true
+				case skillcatalog.ControlEgressAllowlist:
+					out.Runner.NeedsEgressControl = true
+				}
 			}
 			// The approval floor is a property of the capability, so it holds
 			// even for a capability this run cannot currently carry.
@@ -193,6 +226,7 @@ func (s *Service) DryRun(ctx context.Context, req DryRunRequest) (DryRun, error)
 		if d, denied := denials[want]; denied {
 			entry.DenialReason = d.Reason
 			entry.Detail = d.Detail
+			entry.MissingControl = d.MissingControl
 			if d.Reason == skillcatalog.DenyMissingPermission {
 				missing[spec.RequiredPermission] = true
 			}

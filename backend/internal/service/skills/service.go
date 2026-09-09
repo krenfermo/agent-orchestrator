@@ -65,16 +65,48 @@ type Service struct {
 	now  func() time.Time
 	// newID mints audit row ids; injectable so tests get stable output.
 	newID func() string
+	// runner is the execution environment AO would use. The service asks IT
+	// what controls exist; there is deliberately no path for a caller to
+	// supply an attestation, because a self-declared guarantee is exactly the
+	// claim this design refuses as proof (ADR 0004).
+	//
+	// The default attests nothing, so every capability needing a control is
+	// refused until a runner is wired in explicitly.
+	runner skillcatalog.Runner
+	// runnerUnavailable explains an environmental refusal ("no container
+	// runtime on this host") as distinct from "no runner is configured".
+	runnerUnavailable string
 }
 
-// New builds the service over a catalog rooted at dataDir.
-func New(st Store, dataDir string) *Service {
-	return &Service{
-		store: st,
-		root:  skillcatalog.Dir(dataDir),
-		now:   func() time.Time { return time.Now().UTC() },
-		newID: randomAuditID,
+// Option configures a Service at construction.
+type Option func(*Service)
+
+// WithRunner supplies the execution environment. The service reads its
+// attestation and never accepts one from a request.
+func WithRunner(r skillcatalog.Runner, unavailable string) Option {
+	return func(s *Service) {
+		if r != nil {
+			s.runner = r
+		}
+		s.runnerUnavailable = unavailable
 	}
+}
+
+// New builds the service over a catalog rooted at dataDir. With no options it
+// has no runner, so nothing can execute and every control-requiring capability
+// is refused.
+func New(st Store, dataDir string, opts ...Option) *Service {
+	svc := &Service{
+		store:  st,
+		root:   skillcatalog.Dir(dataDir),
+		now:    func() time.Time { return time.Now().UTC() },
+		newID:  randomAuditID,
+		runner: skillcatalog.UnavailableRunner{},
+	}
+	for _, opt := range opts {
+		opt(svc)
+	}
+	return svc
 }
 
 // Root is the catalog directory this service owns.

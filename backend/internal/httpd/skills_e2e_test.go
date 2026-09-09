@@ -346,16 +346,20 @@ func TestSkills_DryRunReportsWhatIsMissing(t *testing.T) {
 		Verdict   string `json:"verdict"`
 		ModeID    string `json:"modeId"`
 		Decisions []struct {
-			Capability   string `json:"capability"`
-			Satisfied    bool   `json:"satisfied"`
-			DenialReason string `json:"denialReason"`
+			Capability     string   `json:"capability"`
+			Satisfied      bool     `json:"satisfied"`
+			DenialReason   string   `json:"denialReason"`
+			MissingControl string   `json:"missingControl"`
+			Requires       []string `json:"requiresControls"`
 		} `json:"decisions"`
 		Runner struct {
-			RunnerID           string `json:"runnerId"`
-			Available          bool   `json:"available"`
-			Isolated           bool   `json:"isolated"`
-			NeedsIsolation     bool   `json:"needsIsolation"`
-			NeedsEgressControl bool   `json:"needsEgressControl"`
+			RunnerID           string   `json:"runnerId"`
+			Available          bool     `json:"available"`
+			Isolated           bool     `json:"isolated"`
+			Controls           []string `json:"controls"`
+			MissingControls    []string `json:"missingControls"`
+			NeedsIsolation     bool     `json:"needsIsolation"`
+			NeedsEgressControl bool     `json:"needsEgressControl"`
 		} `json:"runner"`
 		RequiredApproval string   `json:"requiredApproval"`
 		Reasons          []string `json:"reasons"`
@@ -392,14 +396,26 @@ func TestSkills_DryRunReportsWhatIsMissing(t *testing.T) {
 	if deps.Runner.Available || deps.Runner.Isolated || deps.Runner.RunnerID != "none" {
 		t.Fatalf("AO reported a runner it does not have: %+v", deps.Runner)
 	}
-	var egressReason string
+	var egress struct {
+		reason, missing string
+		requires        []string
+	}
 	for _, d := range deps.Decisions {
 		if d.Capability == "net.egress" {
-			egressReason = d.DenialReason
+			egress.reason, egress.missing, egress.requires = d.DenialReason, d.MissingControl, d.Requires
 		}
 	}
-	if egressReason != "needs_isolated_runner" {
-		t.Fatalf("net.egress denial = %q", egressReason)
+	if egress.reason != "missing_control" || egress.missing == "" {
+		t.Fatalf("net.egress denial = %+v", egress)
+	}
+	// The wire carries the whole requirement, not only the first blocker, so a
+	// client can show what has to exist.
+	if len(egress.requires) == 0 || len(deps.Runner.MissingControls) == 0 {
+		t.Fatalf("the response does not say what is missing: %+v %+v", egress, deps.Runner)
+	}
+	// The default daemon wires no runner, so it attests nothing.
+	if len(deps.Runner.Controls) != 0 {
+		t.Fatalf("the daemon reported controls it does not have: %v", deps.Runner.Controls)
 	}
 
 	// The active pentest stays blocked on every axis, and reports per_target.

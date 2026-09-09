@@ -94,11 +94,21 @@ func TestDryRun_BlocksOnTheMissingRunnerEvenWithAFullGrant(t *testing.T) {
 	if !ok || egress.Satisfied {
 		t.Fatalf("net.egress decision = %#v ok=%v", egress, ok)
 	}
-	if egress.DenialReason != skillcatalog.DenyNeedsIsolation {
-		t.Fatalf("reason = %q, want needs_isolated_runner", egress.DenialReason)
+	if egress.DenialReason != skillcatalog.DenyMissingControl {
+		t.Fatalf("reason = %q, want missing_control", egress.DenialReason)
+	}
+	if egress.MissingControl == "" {
+		t.Fatalf("the denial must name the control: %#v", egress)
+	}
+	if len(egress.RequiresControls) == 0 {
+		t.Fatalf("the decision must carry the full requirement: %#v", egress)
 	}
 	if !dr.Runner.NeedsIsolation || !dr.Runner.NeedsEgressControl {
 		t.Fatalf("runner requirements = %#v", dr.Runner)
+	}
+	// The missing-control list is what says WHAT has to be built.
+	if len(dr.Runner.MissingControls) == 0 {
+		t.Fatalf("a blocked run must name the controls it lacks: %#v", dr.Runner)
 	}
 	if dr.Runner.Available || dr.Runner.Isolated || dr.Runner.EgressControlled {
 		t.Fatalf("AO reported a runner it does not have: %#v", dr.Runner)
@@ -316,4 +326,85 @@ func TestDryRun_TakesNoRunnerAttestationFromTheCaller(t *testing.T) {
 	if dr.Runner.Isolated || dr.Runner.EgressControlled || dr.Runner.Available {
 		t.Fatalf("the dry run reported containment AO cannot provide: %#v", dr.Runner)
 	}
+	if len(dr.Runner.Controls) != 0 {
+		t.Fatalf("the default service attested %v", dr.Runner.Controls)
+	}
+}
+
+// Phase 3: a service wired to a REAL confining runner reports that
+// environment truthfully -- and still refuses every blocked capability,
+// because confinement is not the control any of them is missing.
+func TestDryRun_ReportsAConfiningRunnerAndStillBlocks(t *testing.T) {
+	f := newFixture(t)
+	version := mustInstall(t, f)
+	medusa := f.seedProject(t, "medusa")
+	confined := skillcatalog.RunnerAttestation{
+		RunnerID: "container/docker",
+		Controls: []skillcatalog.Control{
+			skillcatalog.ControlFilesystemIsolation,
+			skillcatalog.ControlProcessIsolation,
+			skillcatalog.ControlNoCredentialInheritance,
+			skillcatalog.ControlResourceLimits,
+			skillcatalog.ControlEgressDenyAll,
+		},
+	}
+	svc := skills.New(f.store, f.dataDir, skills.WithRunner(fixedRunner{confined}, ""))
+	ctx := context.Background()
+	if _, err := svc.Enable(ctx, skills.EnableRequest{
+		ProjectID: medusa, SkillID: "security-audit", Version: version,
+		Capabilities: []skillcatalog.Capability{
+			skillcatalog.CapRepoRead, skillcatalog.CapReportWrite,
+			skillcatalog.CapDepsRead, skillcatalog.CapNetEgress,
+		},
+		Actor: admin, ActorPermissions: adminPerms(),
+	}); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+
+	// The read-only mode is executable, and now says so against a real runner.
+	static, err := svc.DryRun(ctx, skills.DryRunRequest{
+		ProjectID: medusa, SkillID: "security-audit", ModeID: "static-code",
+		Inputs: map[string]string{"mode": "static-code"}, ActorPermissions: adminPerms(),
+	})
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+	if static.Verdict != skills.DryRunExecutable {
+		t.Fatalf("static-code = %q, reasons %v", static.Verdict, static.Reasons)
+	}
+	if static.Runner.RunnerID != "container/docker" || !static.Runner.Available {
+		t.Fatalf("the dry run did not report the real runner: %#v", static.Runner)
+	}
+
+	// The dependency mode is still blocked, and the reason has moved from "no
+	// runner at all" to the one control this runner does not implement.
+	deps, err := svc.DryRun(ctx, skills.DryRunRequest{
+		ProjectID: medusa, SkillID: "security-audit", ModeID: "dependencies",
+		Inputs: map[string]string{"mode": "dependencies"}, ActorPermissions: adminPerms(),
+	})
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+	if deps.Verdict != skills.DryRunBlocked {
+		t.Fatalf("dependencies = %q", deps.Verdict)
+	}
+	egress, ok := decisionFor(deps, skillcatalog.CapNetEgress)
+	if !ok || egress.MissingControl != skillcatalog.ControlEgressAllowlist {
+		t.Fatalf("net.egress denial = %#v", egress)
+	}
+	if deps.Runner.EgressControlled {
+		t.Fatalf("deny-all was reported as an egress allowlist: %#v", deps.Runner)
+	}
+}
+
+// fixedRunner is a runner that attests a fixed set and executes nothing. It
+// stands in for internal/skillrunner so this package's tests need no container.
+type fixedRunner struct {
+	att skillcatalog.RunnerAttestation
+}
+
+func (f fixedRunner) Attestation() skillcatalog.RunnerAttestation { return f.att }
+
+func (fixedRunner) Execute(context.Context, skillcatalog.Plan) (skillcatalog.Result, error) {
+	return skillcatalog.Result{}, skillcatalog.ErrNoRunner
 }

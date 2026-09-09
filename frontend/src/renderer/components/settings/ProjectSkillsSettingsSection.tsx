@@ -320,9 +320,21 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 					})}
 				</p>
 			) : null}
-			{result.runner.needsIsolation || result.runner.needsEgressControl ? (
-				<p className="text-caption text-settings-muted">
-					{t("settings.project.skills.runnerMissing")}
+			{/* Say what the environment IS, then what this run still needs
+			    from it. "Blocked" without the gap is not actionable. */}
+			<p className="text-caption text-settings-muted">
+				{(result.runner.controls ?? []).length > 0
+					? t("settings.project.skills.runnerProvides", {
+							runner: result.runner.runnerId,
+							list: (result.runner.controls ?? []).join(", "),
+						})
+					: t("settings.project.skills.runnerNone")}
+			</p>
+			{(result.runner.missingControls ?? []).length > 0 ? (
+				<p className="text-caption text-error">
+					{t("settings.project.skills.runnerMissingControls", {
+						list: (result.runner.missingControls ?? []).join(", "),
+					})}
 				</p>
 			) : null}
 		</div>
@@ -418,9 +430,15 @@ export function ProjectSkillsSettingsSection({ projectId }: { projectId: string 
 														})}
 													</span>
 												) : null}
-												{policy?.requiresIsolation ? (
+												{/* A capability that needs guarantees the runner
+												    does not provide is named with the control, so
+												    the reason is "this has to be built" rather than
+												    a vague "not isolated". */}
+												{policy && (policy.requiresControls ?? []).length > 0 ? (
 													<span className="block text-caption text-settings-muted">
-														{t("settings.project.skills.needsRunner")}
+														{t("settings.project.skills.needsControls", {
+															list: (policy.requiresControls ?? []).join(", "),
+														})}
 													</span>
 												) : null}
 											</span>

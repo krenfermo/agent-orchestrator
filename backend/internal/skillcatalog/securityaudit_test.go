@@ -167,8 +167,8 @@ func TestSecurityAudit_InstallEnablePerProjectThenPlanPerMode(t *testing.T) {
 		Inputs:             map[string]string{"mode": "dependencies"},
 		SubjectPermissions: perms,
 	}, NoRunner())
-	if !errors.Is(err, ErrCapabilityDenied) || !strings.Contains(err.Error(), "isolated execution environment") {
-		t.Fatalf("dependencies = %v, want a runner-isolation denial", err)
+	if !errors.Is(err, ErrCapabilityDenied) || !strings.Contains(err.Error(), "does not provide") {
+		t.Fatalf("dependencies = %v, want a missing-control denial", err)
 	}
 
 	// Poseidon never granted net.egress, so the same mode is refused there for
@@ -197,9 +197,9 @@ func TestSecurityAudit_InstallEnablePerProjectThenPlanPerMode(t *testing.T) {
 	}
 }
 
-// Even with a runner that fully attests containment, the active pentest still
-// needs the project to have granted it and a human to have named the target.
-// The runner removes one obstacle, not the approval.
+// Even with an environment that attests EVERY control, the active pentest
+// still needs the project to have granted it and a human to have named the
+// target. A runner removes one obstacle, not the approval.
 func TestSecurityAudit_ActivePentestStillNeedsAGrantAndATarget(t *testing.T) {
 	r := newRegistry(t)
 	entry, err := r.Install(securityAuditDir, admin)
@@ -223,13 +223,13 @@ func TestSecurityAudit_ActivePentestStillNeedsAGrantAndATarget(t *testing.T) {
 		SubjectPermissions: perms,
 	}
 
-	if _, err := PlanRun(r, req, isolatedRunner()); !errors.Is(err, ErrCapabilityDenied) ||
+	if _, err := PlanRun(r, req, completeRunner()); !errors.Is(err, ErrCapabilityDenied) ||
 		!strings.Contains(err.Error(), string(DenyTargetNotAuthorized)) {
 		t.Fatalf("unnamed target = %v, want a target-authorization denial", err)
 	}
 
 	req.AuthorizedTargets = []string{"staging.example.com:443"}
-	plan, err := PlanRun(r, req, isolatedRunner())
+	plan, err := PlanRun(r, req, completeRunner())
 	if err != nil {
 		t.Fatalf("PlanRun with a named target: %v", err)
 	}

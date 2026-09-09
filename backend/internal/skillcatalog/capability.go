@@ -46,13 +46,15 @@ type CapabilitySpec struct {
 	// MinApproval is the weakest approval mode AO will accept for it. A
 	// manifest may demand more; it can never accept less.
 	MinApproval ApprovalMode
-	// RequiresIsolation means this capability must not be exercised in the
-	// daemon process or in an ordinary worker worktree. Only a runner that
-	// attests isolation may carry it.
-	RequiresIsolation bool
-	// RequiresEgressControl means the runner must be able to actually
-	// constrain outbound network to the declared allowlist.
-	RequiresEgressControl bool
+	// RequiresControls are the execution-environment guarantees that must ALL
+	// be attested before this capability may be carried. An empty list means
+	// the capability needs nothing from the runner -- reading a file AO
+	// already handed over, or writing a report AO stores itself.
+	//
+	// These are the controls the capability actually needs, not a blanket
+	// "isolated": net.egress needs an allowlist that repo.write does not, and
+	// process.exec needs an image contract that neither of them does.
+	RequiresControls []Control
 	// RequiredPermission is the AO RBAC permission a human must hold on the
 	// project before this capability may be granted there.
 	RequiredPermission domain.Permission
@@ -62,6 +64,8 @@ type CapabilitySpec struct {
 
 // capabilitySpecs is the authoritative capability table.
 var capabilitySpecs = map[Capability]CapabilitySpec{
+	// The three that need nothing from a runner: AO hands over the checkout
+	// and stores the report itself, so there is no boundary to attest.
 	CapRepoRead: {
 		Risk:               RiskLow,
 		MinApproval:        ApprovalNone,
@@ -80,42 +84,71 @@ var capabilitySpecs = map[Capability]CapabilitySpec{
 		RequiredPermission: domain.PermProjectRead,
 		Description:        "Write a structured report into AO's evidence store.",
 	},
+
+	// Everything below needs a boundary. Each names the controls it actually
+	// depends on, so a refusal can say which one is missing.
 	CapRepoWrite: {
-		Risk:               RiskMedium,
-		MinApproval:        ApprovalPerRun,
-		RequiresIsolation:  true,
+		Risk:        RiskMedium,
+		MinApproval: ApprovalPerRun,
+		RequiresControls: []Control{
+			ControlFilesystemIsolation, ControlProcessIsolation,
+			ControlNoCredentialInheritance, ControlResourceLimits,
+			// Confinement is not enough: AO must also be able to return the
+			// changes to the host under review.
+			ControlWritableWorkspace,
+		},
 		RequiredPermission: domain.PermProjectManage,
 		Description:        "Modify files in the project checkout.",
 	},
 	CapProcessExec: {
-		Risk:               RiskHigh,
-		MinApproval:        ApprovalPerRun,
-		RequiresIsolation:  true,
+		Risk:        RiskHigh,
+		MinApproval: ApprovalPerRun,
+		RequiresControls: []Control{
+			ControlFilesystemIsolation, ControlProcessIsolation,
+			ControlNoCredentialInheritance, ControlResourceLimits,
+			// A sandbox says where a command may run. It does not say which
+			// command, shipped by whom, built how -- that is the skill-image
+			// contract, and it is a separate control.
+			ControlArbitraryProcessExecution,
+		},
 		RequiredPermission: domain.PermProjectManage,
 		Description:        "Run arbitrary subprocesses.",
 	},
 	CapSecretsRead: {
-		Risk:               RiskHigh,
-		MinApproval:        ApprovalPerRun,
-		RequiresIsolation:  true,
+		Risk:        RiskHigh,
+		MinApproval: ApprovalPerRun,
+		RequiresControls: []Control{
+			ControlFilesystemIsolation, ControlProcessIsolation,
+			ControlNoCredentialInheritance, ControlResourceLimits,
+			ControlScopedSecretDelivery,
+		},
 		RequiredPermission: domain.PermSettingsManage,
 		Description:        "Read named secrets from AO's secret store.",
 	},
 	CapNetEgress: {
-		Risk:                  RiskHigh,
-		MinApproval:           ApprovalPerRun,
-		RequiresIsolation:     true,
-		RequiresEgressControl: true,
-		RequiredPermission:    domain.PermProjectManage,
-		Description:           "Open outbound network connections, limited to the declared allowlist.",
+		Risk:        RiskHigh,
+		MinApproval: ApprovalPerRun,
+		RequiresControls: []Control{
+			ControlFilesystemIsolation, ControlProcessIsolation,
+			ControlNoCredentialInheritance, ControlResourceLimits,
+			// Deny-all is deliberately NOT listed: an environment that can
+			// only switch the network off cannot carry a capability whose
+			// whole point is reaching declared destinations.
+			ControlEgressAllowlist,
+		},
+		RequiredPermission: domain.PermProjectManage,
+		Description:        "Open outbound network connections, limited to the declared allowlist.",
 	},
 	CapNetActiveScan: {
-		Risk:                  RiskCritical,
-		MinApproval:           ApprovalPerTarget,
-		RequiresIsolation:     true,
-		RequiresEgressControl: true,
-		RequiredPermission:    domain.PermSettingsManage,
-		Description:           "Send probing traffic to an explicitly authorized target.",
+		Risk:        RiskCritical,
+		MinApproval: ApprovalPerTarget,
+		RequiresControls: []Control{
+			ControlFilesystemIsolation, ControlProcessIsolation,
+			ControlNoCredentialInheritance, ControlResourceLimits,
+			ControlEgressAllowlist, ControlArbitraryProcessExecution,
+		},
+		RequiredPermission: domain.PermSettingsManage,
+		Description:        "Send probing traffic to an explicitly authorized target.",
 	},
 }
 
@@ -158,24 +191,104 @@ func validateCapabilityList(field string, caps []Capability) error {
 	return nil
 }
 
-// RunnerAttestation is what an execution runner claims it actually provides.
-// It is supplied by the runner, never by the skill, and an absent runner
-// attests nothing — which is why every isolation-requiring capability is
-// refused until a real runner exists.
+// Control is one named guarantee an execution environment either provides or
+// does not. Containment used to be two booleans here (isolated, egress
+// controlled) and that was too coarse: "the process is confined" and "this
+// skill may write to your repository" are different claims, and one boolean
+// cannot carry both. Naming each control lets a runner attest exactly the
+// subset it has actually demonstrated, and lets a refusal say which control is
+// missing rather than "not isolated".
+type Control string
+
+const (
+	// ControlFilesystemIsolation is "the run sees only the inputs AO mounted".
+	// Nothing else on the host filesystem is reachable.
+	ControlFilesystemIsolation Control = "filesystem_isolation"
+	// ControlProcessIsolation is "the run's processes are contained and die
+	// with it" -- its own PID namespace, no orphan surviving teardown.
+	ControlProcessIsolation Control = "process_isolation"
+	// ControlNoCredentialInheritance is "the run receives none of AO's
+	// environment": no provider token, no agent credential, no daemon env.
+	ControlNoCredentialInheritance Control = "no_credential_inheritance" //nolint:gosec // G101: a control NAME, and the one that says no credential is passed.
+	// ControlResourceLimits is "CPU, memory, process count, wall clock and
+	// output size are all bounded and enforced by the kernel".
+	ControlResourceLimits Control = "resource_limits"
+	// ControlEgressDenyAll is "the run cannot open any outbound connection".
+	ControlEgressDenyAll Control = "egress_deny_all"
+	// ControlEgressAllowlist is "outbound traffic is limited to the declared
+	// destinations". It is a STRICTER and DIFFERENT claim from deny-all: an
+	// environment that provides deny-all provides no allowlist, because there
+	// is nothing to allow. Conflating them is the mistake ADR 0004 exists to
+	// avoid.
+	ControlEgressAllowlist Control = "egress_allowlist"
+	// ControlWritableWorkspace is "the run may modify a workspace and AO can
+	// return those changes to the host under review".
+	ControlWritableWorkspace Control = "writable_workspace"
+	// ControlScopedSecretDelivery is "AO can hand the run a named secret
+	// scoped to it, without an environment variable and without inheritance".
+	ControlScopedSecretDelivery Control = "scoped_secret_delivery" //nolint:gosec // G101: a control name, not a secret.
+	// ControlArbitraryProcessExecution is "a skill may run commands it
+	// authored". It needs the skill-image contract -- what a skill may ship,
+	// how it is built, how its command is pinned -- not merely a sandbox.
+	ControlArbitraryProcessExecution Control = "arbitrary_process_execution"
+)
+
+// AllControls is every control in a stable order, for the runtime matrix and
+// for tests that assert the capability table only names controls that exist.
+func AllControls() []Control {
+	return []Control{
+		ControlFilesystemIsolation,
+		ControlProcessIsolation,
+		ControlNoCredentialInheritance,
+		ControlResourceLimits,
+		ControlEgressDenyAll,
+		ControlEgressAllowlist,
+		ControlWritableWorkspace,
+		ControlScopedSecretDelivery,
+		ControlArbitraryProcessExecution,
+	}
+}
+
+// RunnerAttestation is what an execution runner has DEMONSTRATED it provides.
+// It is produced by the runner from its own probes, never supplied by a caller
+// and never read off a manifest: a self-declared guarantee is the claim this
+// whole design refuses to accept as proof.
 type RunnerAttestation struct {
 	// RunnerID names the runner making the claim, for the audit record.
 	RunnerID string
-	// Isolated means the skill runs in a container or equivalent boundary
-	// with its own filesystem view, not in the daemon process or a worker
-	// worktree.
-	Isolated bool
-	// EgressControlled means outbound network is denied by default and only
-	// the declared allowlist can be reached.
-	EgressControlled bool
+	// Controls are the guarantees this environment provides. A control absent
+	// here is a control AO does not have, whatever the runtime may in
+	// principle be capable of.
+	Controls []Control
 }
 
-// NoRunner is the attestation AO has today: nothing is isolated and nothing
-// constrains egress, because no skill runner is wired.
+// Provides reports whether this environment attests one control.
+func (a RunnerAttestation) Provides(c Control) bool {
+	for _, got := range a.Controls {
+		if got == c {
+			return true
+		}
+	}
+	return false
+}
+
+// Isolated reports whether the environment confines the filesystem, the
+// process tree and AO's credentials -- the three that together mean "this is
+// not running in the daemon or a worker worktree".
+func (a RunnerAttestation) Isolated() bool {
+	return a.Provides(ControlFilesystemIsolation) &&
+		a.Provides(ControlProcessIsolation) &&
+		a.Provides(ControlNoCredentialInheritance)
+}
+
+// EgressControlled reports whether outbound traffic can be limited to declared
+// destinations. Deny-all alone is deliberately NOT enough.
+func (a RunnerAttestation) EgressControlled() bool {
+	return a.Provides(ControlEgressAllowlist)
+}
+
+// NoRunner is the attestation AO makes when no runner is wired: it provides
+// nothing, so every capability requiring any control is refused.
 func NoRunner() RunnerAttestation { return RunnerAttestation{RunnerID: "none"} }
 
 // DenialReason classifies why a capability was refused.
@@ -187,11 +300,10 @@ const (
 	// DenyMissingPermission is "the requesting principal lacks the AO
 	// permission this capability is gated on".
 	DenyMissingPermission DenialReason = "missing_permission"
-	// DenyNeedsIsolation is "no runner attests the isolation this capability
-	// requires".
-	DenyNeedsIsolation DenialReason = "needs_isolated_runner"
-	// DenyNeedsEgressControl is "no runner attests it can constrain egress".
-	DenyNeedsEgressControl DenialReason = "needs_egress_control"
+	// DenyMissingControl is "the execution environment does not attest a
+	// control this capability requires". The denial names the control, so a
+	// refusal says what has to be built rather than "not isolated".
+	DenyMissingControl DenialReason = "missing_control"
 	// DenyApprovalTooWeak is "the manifest's approval mode is weaker than the
 	// capability's floor".
 	DenyApprovalTooWeak DenialReason = "approval_too_weak"
@@ -207,10 +319,32 @@ type Denial struct {
 	Capability Capability
 	Reason     DenialReason
 	Detail     string
+	// MissingControl is set when Reason is DenyMissingControl: the specific
+	// guarantee the execution environment did not attest.
+	MissingControl Control
 }
 
 func (d Denial) String() string {
 	return fmt.Sprintf("%s: %s (%s)", d.Capability, d.Detail, d.Reason)
+}
+
+// firstMissingControl returns the first required control the environment does
+// not attest. Controls are checked in the order the capability declares them,
+// so the reported blocker is stable rather than map-order dependent.
+func firstMissingControl(spec CapabilitySpec, runner RunnerAttestation) (Control, bool) {
+	for _, need := range spec.RequiresControls {
+		if !runner.Provides(need) {
+			return need, false
+		}
+	}
+	return "", true
+}
+
+func runnerName(runner RunnerAttestation) string {
+	if strings.TrimSpace(runner.RunnerID) == "" {
+		return "none"
+	}
+	return runner.RunnerID
 }
 
 // ErrCapabilityDenied is returned whenever any requested capability is
@@ -322,17 +456,11 @@ func Authorize(req AuthorizationRequest) (Decision, error) {
 			})
 			continue
 		}
-		if spec.RequiresIsolation && !req.Runner.Isolated {
+		if missing, ok := firstMissingControl(spec, req.Runner); !ok {
 			decision.Denials = append(decision.Denials, Denial{
-				Capability: c, Reason: DenyNeedsIsolation,
-				Detail: "no runner attests an isolated execution environment",
-			})
-			continue
-		}
-		if spec.RequiresEgressControl && !req.Runner.EgressControlled {
-			decision.Denials = append(decision.Denials, Denial{
-				Capability: c, Reason: DenyNeedsEgressControl,
-				Detail: "no runner attests it can confine outbound network to the allowlist",
+				Capability: c, Reason: DenyMissingControl, MissingControl: missing,
+				Detail: fmt.Sprintf("the execution environment (%s) does not provide %s",
+					runnerName(req.Runner), missing),
 			})
 			continue
 		}

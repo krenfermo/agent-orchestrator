@@ -122,10 +122,12 @@ type SkillCapabilityView struct {
 	Description string `json:"description"`
 	Risk        string `json:"risk" enum:"low,medium,high,critical"`
 	MinApproval string `json:"minApproval" enum:"none,per_activation,per_run,per_target"`
-	// RequiresIsolation and RequiresEgressControl say what an execution
-	// environment must actually provide before this capability can be carried.
-	RequiresIsolation     bool `json:"requiresIsolation"`
-	RequiresEgressControl bool `json:"requiresEgressControl"`
+	// RequiresControls names the execution-environment guarantees that must
+	// ALL be attested before this capability can be carried. Empty means the
+	// capability needs nothing from a runner. A client shows this so a person
+	// approving a grant can see what has to exist, not merely that something
+	// is "not isolated".
+	RequiresControls []string `json:"requiresControls"`
 	// RequiredPermission is the AO permission a person must hold to grant it.
 	RequiredPermission string `json:"requiredPermission"`
 }
@@ -243,17 +245,36 @@ type SkillCapabilityDecisionView struct {
 	RequiredPermission string `json:"requiredPermission"`
 	DenialReason       string `json:"denialReason,omitempty"`
 	Detail             string `json:"detail,omitempty"`
+	// MissingControl is the specific execution-environment guarantee this
+	// capability needed and did not get.
+	MissingControl string `json:"missingControl,omitempty"`
+	// RequiresControls is everything this capability depends on, so a client
+	// can show the whole requirement rather than only the first blocker.
+	RequiresControls []string `json:"requiresControls"`
 }
 
 // SkillRunnerStatusView is what the execution environment provides, and what
 // the run would need from it.
 type SkillRunnerStatusView struct {
-	RunnerID           string `json:"runnerId"`
-	Available          bool   `json:"available"`
-	Isolated           bool   `json:"isolated"`
-	EgressControlled   bool   `json:"egressControlled"`
-	NeedsIsolation     bool   `json:"needsIsolation"`
-	NeedsEgressControl bool   `json:"needsEgressControl"`
+	RunnerID string `json:"runnerId"`
+	// Available is whether any runner could carry this run at all.
+	Available bool `json:"available"`
+	// Isolated and EgressControlled are the two coarse summaries a compact UI
+	// renders. Controls is the real answer.
+	Isolated         bool `json:"isolated"`
+	EgressControlled bool `json:"egressControlled"`
+	// Controls are the guarantees this environment has DEMONSTRATED. It is
+	// produced by AO from the runner's own probes; a caller cannot supply it,
+	// and no request field can influence it.
+	Controls []string `json:"controls"`
+	// MissingControls are the guarantees this run needs and does not have,
+	// which is the list that says what has to be built.
+	MissingControls    []string `json:"missingControls"`
+	NeedsIsolation     bool     `json:"needsIsolation"`
+	NeedsEgressControl bool     `json:"needsEgressControl"`
+	// Unavailable explains why no runner is usable, when Available is false
+	// for an environmental reason rather than because none is configured.
+	Unavailable string `json:"unavailable,omitempty"`
 }
 
 // SkillDryRunResponse is the body of the dry run. It describes a run that has
@@ -530,6 +551,16 @@ func (c *SkillsController) callerProjectPermissions(r *http.Request, id domain.P
 	return sub.ProjectPermissions(id)
 }
 
+// controlNames renders a control list for the wire, never nil so a client can
+// treat "no controls needed" and "field absent" the same way.
+func controlNames(controls []skillcatalog.Control) []string {
+	out := make([]string, 0, len(controls))
+	for _, c := range controls {
+		out = append(out, string(c))
+	}
+	return out
+}
+
 // SkillCapabilityCatalog projects AO's capability table onto the wire. It is a
 // function rather than a constant so the response can never disagree with the
 // table the authorization decision actually uses.
@@ -542,13 +573,12 @@ func SkillCapabilityCatalog() []SkillCapabilityView {
 			continue
 		}
 		out = append(out, SkillCapabilityView{
-			Name:                  string(name),
-			Description:           spec.Description,
-			Risk:                  string(spec.Risk),
-			MinApproval:           string(spec.MinApproval),
-			RequiresIsolation:     spec.RequiresIsolation,
-			RequiresEgressControl: spec.RequiresEgressControl,
-			RequiredPermission:    string(spec.RequiredPermission),
+			Name:               string(name),
+			Description:        spec.Description,
+			Risk:               string(spec.Risk),
+			MinApproval:        string(spec.MinApproval),
+			RequiresControls:   controlNames(spec.RequiresControls),
+			RequiredPermission: string(spec.RequiredPermission),
 		})
 	}
 	return out

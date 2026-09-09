@@ -8,10 +8,12 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
-// isolatedRunner is the attestation a real containerised runner would make.
-// It exists only in tests: AO ships no runner that can honestly return this.
-func isolatedRunner() RunnerAttestation {
-	return RunnerAttestation{RunnerID: "test-isolated", Isolated: true, EgressControlled: true}
+// completeRunner is the attestation a hypothetical runner would make if it
+// provided EVERY control. Nothing AO ships can honestly return this; it exists
+// so a test can isolate one variable at a time against a fully-equipped
+// environment. internal/skillrunner's real attestation is a strict subset.
+func completeRunner() RunnerAttestation {
+	return RunnerAttestation{RunnerID: "test-complete", Controls: AllControls()}
 }
 
 func testManifest(t *testing.T) Manifest {
@@ -61,7 +63,7 @@ func TestAuthorize_DeniesAnUngrantedCapability(t *testing.T) {
 		ModeID:             "quick",
 		Grant:              Grant{Capabilities: []Capability{CapRepoRead}},
 		SubjectPermissions: []domain.Permission{domain.PermProjectRead},
-		Runner:             isolatedRunner(),
+		Runner:             completeRunner(),
 	})
 	if !errors.Is(err, ErrCapabilityDenied) {
 		t.Fatalf("err = %v, want ErrCapabilityDenied", err)
@@ -84,7 +86,7 @@ func TestAuthorize_DeniesWhenThePrincipalHoldsNoPermissions(t *testing.T) {
 		Manifest: m,
 		ModeID:   "quick",
 		Grant:    Grant{Capabilities: []Capability{CapRepoRead, CapReportWrite}},
-		Runner:   isolatedRunner(),
+		Runner:   completeRunner(),
 	})
 	if decision.Allowed() {
 		t.Fatal("a principal with no permissions was authorized")
@@ -97,19 +99,15 @@ func TestAuthorize_DeniesWhenThePrincipalHoldsNoPermissions(t *testing.T) {
 	}
 }
 
-// This is the load-bearing one: without a runner that attests isolation, every
-// capability that needs containment is refused. It is what makes "a manifest
-// is not a security boundary" true in code rather than in a comment.
-func TestAuthorize_DeniesIsolationCapabilitiesWithoutARunner(t *testing.T) {
+// This is the load-bearing one: without an environment that attests the
+// controls, every capability that needs containment is refused, and the
+// refusal names the control. It is what makes "a manifest is not a security
+// boundary" true in code rather than in a comment.
+func TestAuthorize_DeniesControlRequiringCapabilitiesWithoutARunner(t *testing.T) {
 	cases := []struct {
-		cap        Capability
-		wantReason DenialReason
+		cap Capability
 	}{
-		{CapRepoWrite, DenyNeedsIsolation},
-		{CapProcessExec, DenyNeedsIsolation},
-		{CapSecretsRead, DenyNeedsIsolation},
-		{CapNetEgress, DenyNeedsIsolation},
-		{CapNetActiveScan, DenyNeedsIsolation},
+		{CapRepoWrite}, {CapProcessExec}, {CapSecretsRead}, {CapNetEgress}, {CapNetActiveScan},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.cap), func(t *testing.T) {
@@ -131,16 +129,72 @@ func TestAuthorize_DeniesIsolationCapabilitiesWithoutARunner(t *testing.T) {
 				t.Fatalf("err = %v, want ErrCapabilityDenied", err)
 			}
 			den, ok := denialFor(decision, tc.cap)
-			if !ok || den.Reason != tc.wantReason {
+			if !ok || den.Reason != DenyMissingControl {
 				t.Fatalf("denial = %#v ok=%v", den, ok)
+			}
+			if den.MissingControl == "" {
+				t.Fatalf("the refusal must name the control: %#v", den)
+			}
+			if !strings.Contains(den.Detail, string(den.MissingControl)) {
+				t.Fatalf("detail should name the control: %q", den.Detail)
 			}
 		})
 	}
 }
 
-// An isolated runner with no egress control still cannot carry network
-// capabilities: the two attestations are independent claims.
-func TestAuthorize_DeniesEgressWithoutEgressControl(t *testing.T) {
+// The five blocked capabilities each need a DIFFERENT control beyond
+// confinement. An environment that confines perfectly but implements none of
+// those four still unblocks nothing -- which is exactly the position AO is in
+// after the phase-3 prototype.
+func TestAuthorize_ConfinementAloneUnblocksNothing(t *testing.T) {
+	confined := RunnerAttestation{
+		RunnerID: "container/docker",
+		Controls: []Control{
+			ControlFilesystemIsolation, ControlProcessIsolation,
+			ControlNoCredentialInheritance, ControlResourceLimits, ControlEgressDenyAll,
+		},
+	}
+	if !confined.Isolated() {
+		t.Fatal("this environment should read as isolated")
+	}
+	if confined.EgressControlled() {
+		t.Fatal("deny-all was mistaken for an allowlist")
+	}
+	wantMissing := map[Capability]Control{
+		CapRepoWrite:     ControlWritableWorkspace,
+		CapProcessExec:   ControlArbitraryProcessExecution,
+		CapSecretsRead:   ControlScopedSecretDelivery,
+		CapNetEgress:     ControlEgressAllowlist,
+		CapNetActiveScan: ControlEgressAllowlist,
+	}
+	for capability, wantControl := range wantMissing {
+		m := testManifest(t)
+		m.Capabilities = []Capability{capability}
+		m.Authorization.Approval = ApprovalPerTarget
+		m.Modes = []Mode{{ID: "only", Capabilities: []Capability{capability}, Approval: ApprovalPerTarget}}
+		decision, err := Authorize(AuthorizationRequest{
+			Manifest: m, ModeID: "only",
+			Grant: Grant{Capabilities: []Capability{capability}},
+			SubjectPermissions: []domain.Permission{
+				domain.PermProjectRead, domain.PermProjectManage, domain.PermSettingsManage,
+			},
+			Runner:            confined,
+			AuthorizedTargets: []string{"staging.example.com:443"},
+		})
+		if err == nil {
+			t.Fatalf("%s was authorized by confinement alone", capability)
+		}
+		den, ok := denialFor(decision, capability)
+		if !ok || den.MissingControl != wantControl {
+			t.Fatalf("%s denial = %#v, want missing %s", capability, den, wantControl)
+		}
+	}
+}
+
+// An environment that can only switch the network OFF cannot carry a
+// capability whose whole point is reaching declared destinations. Deny-all and
+// allowlist are different claims.
+func TestAuthorize_DeniesEgressWithoutAnAllowlist(t *testing.T) {
 	m := testManifest(t)
 	m.Capabilities = []Capability{CapNetEgress}
 	m.Authorization.Approval = ApprovalPerRun
@@ -150,10 +204,13 @@ func TestAuthorize_DeniesEgressWithoutEgressControl(t *testing.T) {
 		ModeID:             "only",
 		Grant:              Grant{Capabilities: []Capability{CapNetEgress}},
 		SubjectPermissions: []domain.Permission{domain.PermProjectManage},
-		Runner:             RunnerAttestation{RunnerID: "half", Isolated: true},
+		Runner: RunnerAttestation{RunnerID: "deny-all-only", Controls: []Control{
+			ControlFilesystemIsolation, ControlProcessIsolation,
+			ControlNoCredentialInheritance, ControlResourceLimits, ControlEgressDenyAll,
+		}},
 	})
 	den, ok := denialFor(decision, CapNetEgress)
-	if !ok || den.Reason != DenyNeedsEgressControl {
+	if !ok || den.Reason != DenyMissingControl || den.MissingControl != ControlEgressAllowlist {
 		t.Fatalf("denial = %#v ok=%v", den, ok)
 	}
 }
@@ -171,7 +228,7 @@ func TestAuthorize_DeniesActiveScanWithoutAnAuthorizedTarget(t *testing.T) {
 		ModeID:             "only",
 		Grant:              Grant{Capabilities: []Capability{CapNetActiveScan}},
 		SubjectPermissions: []domain.Permission{domain.PermSettingsManage},
-		Runner:             isolatedRunner(),
+		Runner:             completeRunner(),
 	})
 	den, ok := denialFor(decision, CapNetActiveScan)
 	if !ok || den.Reason != DenyTargetNotAuthorized {
@@ -183,7 +240,7 @@ func TestAuthorize_DeniesActiveScanWithoutAnAuthorizedTarget(t *testing.T) {
 		ModeID:             "only",
 		Grant:              Grant{Capabilities: []Capability{CapNetActiveScan}},
 		SubjectPermissions: []domain.Permission{domain.PermSettingsManage},
-		Runner:             isolatedRunner(),
+		Runner:             completeRunner(),
 		AuthorizedTargets:  []string{"staging.example.com:443"},
 	})
 	if err != nil || !allowed.Allowed() {
@@ -206,7 +263,7 @@ func TestAuthorize_DeniesWhenTheManifestApprovalIsTooWeak(t *testing.T) {
 		ModeID:             "only",
 		Grant:              Grant{Capabilities: []Capability{CapProcessExec}},
 		SubjectPermissions: []domain.Permission{domain.PermProjectManage},
-		Runner:             isolatedRunner(),
+		Runner:             completeRunner(),
 	})
 	den, ok := denialFor(decision, CapProcessExec)
 	if !ok || den.Reason != DenyApprovalTooWeak {
@@ -252,25 +309,36 @@ func TestCapabilityTable_IsTotalAndUsesRealPermissions(t *testing.T) {
 		if strings.TrimSpace(spec.Description) == "" {
 			t.Fatalf("%s has no description for the approver to read", c)
 		}
-		// Egress control without isolation would be a claim nothing can back:
+		known := map[Control]bool{}
+		for _, ctrl := range AllControls() {
+			known[ctrl] = true
+		}
+		needs := map[Control]bool{}
+		for _, need := range spec.RequiresControls {
+			if !known[need] {
+				t.Fatalf("%s requires %q, which is not a control AO defines", c, need)
+			}
+			needs[need] = true
+		}
+		// An allowlist without confinement would be a claim nothing can back:
 		// a process that is not contained can always open its own socket.
-		if spec.RequiresEgressControl && !spec.RequiresIsolation {
-			t.Fatalf("%s requires egress control but not isolation", c)
+		if needs[ControlEgressAllowlist] && !needs[ControlFilesystemIsolation] {
+			t.Fatalf("%s requires an egress allowlist but not confinement", c)
 		}
 	}
 }
 
-// Nothing that needs containment may be reachable on the runner AO actually
-// ships. This test is the tripwire for a future change that quietly relaxes
-// the table.
-func TestNoRunner_CarriesNoIsolationCapability(t *testing.T) {
+// Nothing that needs a control may be reachable on the runner AO ships by
+// default. This is the tripwire for a future change that quietly relaxes the
+// table.
+func TestNoRunner_CarriesNoControlRequiringCapability(t *testing.T) {
 	runner := NoRunner()
-	if runner.Isolated || runner.EgressControlled {
+	if len(runner.Controls) != 0 || runner.Isolated() || runner.EgressControlled() {
 		t.Fatalf("NoRunner attests containment: %#v", runner)
 	}
 	for _, c := range AllCapabilities() {
 		spec, _ := c.Spec()
-		if !spec.RequiresIsolation {
+		if len(spec.RequiresControls) == 0 {
 			continue
 		}
 		m := testManifest(t)
