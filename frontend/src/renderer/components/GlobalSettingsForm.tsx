@@ -11,6 +11,7 @@ import { GeneralSettingsSection } from "./settings/GeneralSettingsSection";
 import { ProjectsSettingsSection } from "./settings/ProjectsSettingsSection";
 import { ReportProblemDialog } from "./settings/ReportProblemDialog";
 import { SessionLifecyclePolicySettingsSection } from "./settings/SessionLifecyclePolicySettingsSection";
+import { SkillImagesSettingsSection } from "./settings/SkillImagesSettingsSection";
 import { SettingsLinkRow } from "./settings/SettingsRow";
 import { SettingsSection } from "./settings/SettingsSection";
 import { SourceControlSettingsSection } from "./settings/SourceControlSettingsSection";
@@ -67,6 +68,7 @@ export function GlobalSettingsForm({
 						<EfficiencyPolicySettingsSection />
 						<ExecutionPolicySettingsSection />
 						<SessionLifecyclePolicySettingsSection />
+						<SkillImagesSettingsSection />
 					</>
 				)}
 				{(section === "all" || section === "environment") && (

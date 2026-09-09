@@ -252,3 +252,165 @@ describe("ProjectSkillsSettingsSection", () => {
 		);
 	});
 });
+
+// The execution surface, and the rule the report is built around.
+describe("ProjectSkillsSettingsSection — running", () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	const executableDryRun = {
+		skillId: "security-audit", version: "0.1.0", skillName: "Security Audit",
+		modeId: "static-code", modeName: "Static code review", modeRisk: "low",
+		verdict: "executable", requiredApproval: "per_activation",
+		decisions: [{
+			capability: "repo.read", satisfied: true, risk: "low",
+			description: "Read the project's source in a checkout.",
+			requiredPermission: "project.read", requiresControls: [],
+		}],
+		missingPermissions: [], effectiveRisk: "low",
+		runner: {
+			runnerId: "container/docker", available: true, isolated: true,
+			egressControlled: false, controls: ["filesystem_isolation"], missingControls: [],
+			needsIsolation: true, needsEgressControl: false,
+		},
+		reasons: [],
+	};
+
+	// Run is offered only after a dry run says the mode is executable. A Run
+	// button beside a blocked mode invites a click whose only outcome is an
+	// error, and the dry run is the surface that explains why.
+	it("offers Run only once a dry run says the mode is executable", async () => {
+		mockSkills({ permissions: ["project.read", "project.manage"], activations: [enabledActivation] });
+		vi.spyOn(apiClient, "POST").mockResolvedValue({
+			data: { ...executableDryRun, verdict: "blocked" },
+		} as never);
+		renderSection();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Check what a run needs" }));
+		await screen.findByTestId("project-skill-dry-run");
+		expect(screen.queryByTestId("project-skill-run")).not.toBeInTheDocument();
+	});
+
+	it("renders coverage before findings, and names the bytes that ran", async () => {
+		mockSkills({ permissions: ["project.read", "project.manage"], activations: [enabledActivation] });
+		const post = vi.spyOn(apiClient, "POST").mockImplementation((async (path: string) => {
+			if (path.endsWith("/dry-run")) return { data: executableDryRun } as never;
+			return {
+				data: {
+					skillId: "security-audit", version: "0.1.0", modeId: "static-code",
+					tool: "ao.static-scan/v1",
+					report: {
+						imageDigest: "sha256:dddd", approvalId: "skimg-9", approvedBy: "ada",
+						coverage: {
+							filesStaged: 12, filesVisible: 12, filesScanned: 10,
+							skipped: [{ path: "vendor/big.bin", reason: "binary" }],
+							limitations: ["This is a pattern scanner, not a static analyzer."],
+						},
+						findings: [{
+							ruleId: "hardcoded-secret", severity: "high", category: "secrets",
+							title: "Possible hardcoded credential", path: "src/db.go", line: 42,
+							recommendation: "Move it to a secret store.", confidence: "possible",
+						}],
+					},
+				},
+			} as never;
+		}) as never);
+		renderSection();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Check what a run needs" }));
+		await userEvent.click(await screen.findByTestId("project-skill-run"));
+
+		const report = await screen.findByTestId("project-skill-run-report");
+		expect(post).toHaveBeenCalledWith(
+			"/api/v1/projects/{id}/skills/{skillId}/run",
+			expect.objectContaining({
+				params: { path: { id: "medusa", skillId: "security-audit" } },
+			}),
+		);
+		// Which bytes ran and who allowed them.
+		expect(report).toHaveTextContent("sha256:dddd");
+		expect(report).toHaveTextContent("ada");
+		// Coverage strictly before findings.
+		const text = report.textContent ?? "";
+		expect(text.indexOf("Coverage:")).toBeGreaterThanOrEqual(0);
+		expect(text.indexOf("Coverage:")).toBeLessThan(text.indexOf("finding"));
+		expect(report).toHaveTextContent("12 staged, 12 visible, 10 scanned");
+		expect(report).toHaveTextContent("Skipped vendor/big.bin (binary)");
+		expect(report).toHaveTextContent("[HIGH] Possible hardcoded credential");
+		// The tool saying what it cannot know, next to the findings.
+		expect(report).toHaveTextContent("pattern scanner");
+	});
+
+	// The failure this panel exists to prevent.
+	it("says an empty scan is not a clean result", async () => {
+		mockSkills({ permissions: ["project.read", "project.manage"], activations: [enabledActivation] });
+		vi.spyOn(apiClient, "POST").mockImplementation((async (path: string) => {
+			if (path.endsWith("/dry-run")) return { data: executableDryRun } as never;
+			return {
+				data: {
+					skillId: "security-audit", version: "0.1.0", modeId: "static-code",
+					tool: "ao.static-scan/v1",
+					report: {
+						imageDigest: "sha256:dddd", approvalId: "skimg-9", approvedBy: "ada",
+						coverage: { filesStaged: 0, filesVisible: 0, filesScanned: 0 },
+						findings: [],
+					},
+				},
+			} as never;
+		}) as never);
+		renderSection();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Check what a run needs" }));
+		await userEvent.click(await screen.findByTestId("project-skill-run"));
+
+		const report = await screen.findByTestId("project-skill-run-report");
+		expect(report).toHaveTextContent("Nothing was scanned, so nothing was found");
+		expect(report).toHaveTextContent("This is not a clean result");
+	});
+
+	// AO does not stop a running container, so a revocation mid-run is a fact
+	// about the results and has to reach the reader.
+	it("reports an approval revoked while the run was in flight", async () => {
+		mockSkills({ permissions: ["project.read", "project.manage"], activations: [enabledActivation] });
+		vi.spyOn(apiClient, "POST").mockImplementation((async (path: string) => {
+			if (path.endsWith("/dry-run")) return { data: executableDryRun } as never;
+			return {
+				data: {
+					skillId: "security-audit", version: "0.1.0", modeId: "static-code",
+					tool: "ao.static-scan/v1",
+					report: {
+						imageDigest: "sha256:dddd", approvalId: "skimg-9", approvedBy: "ada",
+						approvalRevokedDuringRun: true,
+						coverage: { filesStaged: 3, filesVisible: 3, filesScanned: 3 },
+						findings: [],
+					},
+				},
+			} as never;
+		}) as never);
+		renderSection();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Check what a run needs" }));
+		await userEvent.click(await screen.findByTestId("project-skill-run"));
+
+		expect(await screen.findByTestId("project-skill-run-report"))
+			.toHaveTextContent("revoked while this was running");
+	});
+
+	// A refused run must not render an empty report that reads as a completed
+	// scan with nothing found.
+	it("surfaces a refusal instead of an empty report", async () => {
+		mockSkills({ permissions: ["project.read", "project.manage"], activations: [enabledActivation] });
+		vi.spyOn(apiClient, "POST").mockImplementation((async (path: string) => {
+			if (path.endsWith("/dry-run")) return { data: executableDryRun } as never;
+			return { error: { message: "no image is approved for this scope" } } as never;
+		}) as never);
+		renderSection();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Check what a run needs" }));
+		await userEvent.click(await screen.findByTestId("project-skill-run"));
+
+		await waitFor(() =>
+			expect(screen.getByText(/no image is approved for this scope/)).toBeInTheDocument(),
+		);
+		expect(screen.queryByTestId("project-skill-run-report")).not.toBeInTheDocument();
+	});
+});

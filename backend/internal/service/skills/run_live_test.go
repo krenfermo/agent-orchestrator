@@ -108,7 +108,7 @@ func liveFixture(t *testing.T, r *skillrunner.Runner, approve bool) (fixture, *s
 		t.Fatalf("Enable: %v", err)
 	}
 
-	auth := skills.NewImageAuthority(f.store, f.store)
+	auth := skills.NewImageAuthority(f.store, f.store).WithImageInspector(acceptAll())
 	// Staging goes beside the project, inside the shared tree.
 	svc := skills.New(f.store, f.dataDir,
 		skills.WithSkillExecutor(r, auth, f.store, filepath.Dir(project), r.Unavailable()))

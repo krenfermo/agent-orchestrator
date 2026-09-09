@@ -2,6 +2,7 @@ package skills_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +24,7 @@ func imageFixture(t *testing.T) (fixture, *skills.ImageAuthority, skillimage.Sco
 	t.Helper()
 	f := newFixture(t)
 	project := f.seedProject(t, "medusa")
-	auth := skills.NewImageAuthority(f.store, f.store)
+	auth := skills.NewImageAuthority(f.store, f.store).WithImageInspector(acceptAll())
 	scope := skillimage.Scope{
 		TenantID: domain.DefaultTenantID, ProjectID: project,
 		SkillID: "security-audit", Version: "1.2.0", ModeID: "static-code",
@@ -320,5 +321,107 @@ func TestListApprovalsForProject_StaysInsideTheProject(t *testing.T) {
 	}
 	if all, err := auth.ListApprovals(ctx); err != nil || len(all) != 2 {
 		t.Fatalf("the installation listing returned %d approvals (%v)", len(all), err)
+	}
+}
+
+// The trust root must not record a decision about bytes it cannot see. A digest
+// in an approval request is CLIENT-SUPPLIED — it is whatever the form sent —
+// and until the host is asked, it is a claim about an artifact rather than the
+// artifact. These are the four ways that claim fails, and each must refuse
+// BEFORE anything is stored.
+func TestApprove_RefusesADigestThisHostCannotShowIt(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("the host does not have it", func(t *testing.T) {
+		f := newFixture(t)
+		project := f.seedProject(t, "medusa")
+		auth := skills.NewImageAuthority(f.store, f.store).
+			WithImageInspector(&stubInspector{present: map[string]string{digestOf('a'): digestOf('a')}})
+		scope := skillimage.Scope{
+			TenantID: domain.DefaultTenantID, ProjectID: project,
+			SkillID: "security-audit", Version: "1.2.0", ModeID: "static-code",
+		}
+
+		if _, err := auth.Approve(ctx, approveRequest(scope, digestOf('b'))); err == nil {
+			t.Fatal("approved a digest that is not on this host")
+		}
+		// Nothing may be stored: a refused approval that left a row would be a
+		// trust root that records what it rejected.
+		if _, ok, _ := f.store.GetSkillImageApprovalForScope(ctx, scope, staticScanTool); ok {
+			t.Fatal("a refused approval was stored anyway")
+		}
+	})
+
+	t.Run("the host holds something else under that name", func(t *testing.T) {
+		f := newFixture(t)
+		project := f.seedProject(t, "medusa")
+		// Asked for 'a', the runtime answers 'c'. Approving would record a
+		// decision about bytes nobody reviewed.
+		auth := skills.NewImageAuthority(f.store, f.store).
+			WithImageInspector(&stubInspector{present: map[string]string{digestOf('a'): digestOf('c')}})
+		scope := skillimage.Scope{
+			TenantID: domain.DefaultTenantID, ProjectID: project,
+			SkillID: "security-audit", Version: "1.2.0", ModeID: "static-code",
+		}
+
+		_, err := auth.Approve(ctx, approveRequest(scope, digestOf('a')))
+		if err == nil {
+			t.Fatal("approved a digest the host resolves to different bytes")
+		}
+		if !strings.Contains(err.Error(), digestOf('c')) {
+			t.Fatalf("the refusal must name what the host actually holds; got: %v", err)
+		}
+	})
+
+	t.Run("the runtime is unusable", func(t *testing.T) {
+		f := newFixture(t)
+		project := f.seedProject(t, "medusa")
+		auth := skills.NewImageAuthority(f.store, f.store).
+			WithImageInspector(&stubInspector{err: errors.New("no container runtime on this host")})
+		scope := skillimage.Scope{
+			TenantID: domain.DefaultTenantID, ProjectID: project,
+			SkillID: "security-audit", Version: "1.2.0", ModeID: "static-code",
+		}
+
+		if _, err := auth.Approve(ctx, approveRequest(scope, digestOf('a'))); err == nil {
+			t.Fatal("approved while the runtime could not answer")
+		}
+	})
+
+	// No inspector at all is a REFUSAL, not a skip. "Record it now, find out at
+	// run time" is exactly the trust-what-you-were-told this check exists to
+	// prevent.
+	t.Run("there is no inspector wired", func(t *testing.T) {
+		f := newFixture(t)
+		project := f.seedProject(t, "medusa")
+		auth := skills.NewImageAuthority(f.store, f.store)
+		scope := skillimage.Scope{
+			TenantID: domain.DefaultTenantID, ProjectID: project,
+			SkillID: "security-audit", Version: "1.2.0", ModeID: "static-code",
+		}
+
+		if _, err := auth.Approve(ctx, approveRequest(scope, digestOf('a'))); err == nil {
+			t.Fatal("an installation with no runtime approved an image anyway")
+		}
+	})
+}
+
+// Verifying presence must never be a way to make AO fetch or start anything.
+// The inspector is only ever asked to look.
+func TestApprove_VerificationOnlyReads(t *testing.T) {
+	f := newFixture(t)
+	project := f.seedProject(t, "medusa")
+	spy := &countingInspector{inner: acceptAll()}
+	auth := skills.NewImageAuthority(f.store, f.store).WithImageInspector(spy)
+	scope := skillimage.Scope{
+		TenantID: domain.DefaultTenantID, ProjectID: project,
+		SkillID: "security-audit", Version: "1.2.0", ModeID: "static-code",
+	}
+
+	if _, err := auth.Approve(context.Background(), approveRequest(scope, digestOf('a'))); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if spy.calls != 1 {
+		t.Fatalf("the host was asked %d times; approval looks exactly once", spy.calls)
 	}
 }

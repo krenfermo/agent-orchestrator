@@ -1271,6 +1271,21 @@ func authOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodPost, path: "/api/v1/projects/{id}/skills/{skillId}/run", id: "runProjectSkill", tag: "skills",
+			summary:    "Skills: execute one authorized mode of an activated skill. Requires project.manage -- the dry run reports what WOULD happen, this makes it happen. Refused unless the skill is installed and enabled, the version is pinned, an administrator has approved an image digest for this exact scope, every capability the mode declares is granted, and the runtime attests every control the mode needs. The caller contributes no image, no command and no argv. Only ao.static-scan/v1 is implemented; every other tool is refused with the missing control named.",
+			pathParams: []any{controllers.ProjectSkillParams{}},
+			reqBody:    controllers.SkillRunRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SkillRunResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodGet, path: "/api/v1/auth/providers", id: "getAuthProviders", tag: "auth",
 			summary: "P4-A: report which sign-in methods this installation offers. Public by necessity — the sign-in screen renders from it — and it carries no issuer, client id, client secret, scope or constraint.",
 			resps: []respUnit{

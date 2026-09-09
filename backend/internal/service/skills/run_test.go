@@ -103,7 +103,7 @@ func newRunFixture(t *testing.T, exec *recordingExecutor, approve bool) (fixture
 		t.Fatalf("Enable: %v", err)
 	}
 
-	auth := skills.NewImageAuthority(f.store, f.store)
+	auth := skills.NewImageAuthority(f.store, f.store).WithImageInspector(acceptAll())
 	svc := skills.New(f.store, f.dataDir,
 		skills.WithSkillExecutor(exec, auth, f.store, "", ""))
 	scope := skillimage.Scope{
@@ -222,6 +222,13 @@ func TestRunSkill_RefusesWithNoExecutor(t *testing.T) {
 	f := newFixture(t)
 	version := mustInstall(t, f)
 	medusa := f.seedProject(t, "medusa")
+	// A service wired exactly as the daemon wires it on a host with no
+	// container runtime: the trust root and the project reader are there, the
+	// executor is not. Enabling still goes through f.svc, which shares the
+	// store.
+	svc := skills.New(f.store, f.dataDir, skills.WithSkillExecutor(
+		nil, skills.NewImageAuthority(f.store, f.store).WithImageInspector(acceptAll()),
+		f.store, "", "no container runtime on this host"))
 	if _, err := f.svc.Enable(context.Background(), skills.EnableRequest{
 		ProjectID: medusa, SkillID: "security-audit", Version: version,
 		Capabilities: []skillcatalog.Capability{skillcatalog.CapRepoRead, skillcatalog.CapReportWrite},
@@ -230,7 +237,7 @@ func TestRunSkill_RefusesWithNoExecutor(t *testing.T) {
 		t.Fatalf("Enable: %v", err)
 	}
 
-	_, err := f.svc.RunSkill(context.Background(), skills.RunRequest{
+	_, err := svc.RunSkill(context.Background(), skills.RunRequest{
 		ProjectID: medusa, SkillID: "security-audit", ModeID: "static-code",
 		Actor: admin, ActorPermissions: adminPerms(),
 	})
@@ -416,5 +423,54 @@ func TestRunSkill_DistinguishesTheKindsOfFailure(t *testing.T) {
 				t.Fatalf("code = %q, want %q", code, tc.want)
 			}
 		})
+	}
+}
+
+// A refusal has to name the real problem.
+//
+// The executor check used to run before anything was resolved, so a skill that
+// was never enabled on this project was answered with "this installation has no
+// skill runner" — sending somebody to install a container runtime to fix an
+// activation. The order the RunSkill docstring promises is now the order the
+// code runs in, and this pins it: with NO executor wired, a not-enabled skill
+// still reports the activation, and only a properly enabled one gets as far as
+// reporting the missing environment.
+func TestRunSkill_NamesTheRealProblemBeforeTheMissingRuntime(t *testing.T) {
+	f := newFixture(t)
+	version := mustInstall(t, f)
+	medusa := f.seedProject(t, "medusa")
+	svc := skills.New(f.store, f.dataDir, skills.WithSkillExecutor(
+		nil, skills.NewImageAuthority(f.store, f.store).WithImageInspector(acceptAll()),
+		f.store, "", "no container runtime on this host"))
+
+	run := func() error {
+		_, err := svc.RunSkill(context.Background(), skills.RunRequest{
+			ProjectID: medusa, SkillID: "security-audit", ModeID: "static-code",
+			Actor: admin, ActorPermissions: adminPerms(),
+		})
+		return err
+	}
+
+	// Installed but not activated on this project. The answer is about the
+	// activation, not about the runtime.
+	err := run()
+	if err == nil {
+		t.Fatal("ran a skill this project has not enabled")
+	}
+	if code := apiCode(t, err); code == "SKILL_RUNNER_UNAVAILABLE" {
+		t.Fatalf("a not-enabled skill was reported as a missing runtime: %v", err)
+	}
+
+	if _, err := f.svc.Enable(context.Background(), skills.EnableRequest{
+		ProjectID: medusa, SkillID: "security-audit", Version: version,
+		Capabilities: []skillcatalog.Capability{skillcatalog.CapRepoRead, skillcatalog.CapReportWrite},
+		Actor:        admin, ActorPermissions: adminPerms(),
+	}); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+
+	// Now the activation is fine and the environment is the only thing wrong.
+	if code := apiCode(t, run()); code != "SKILL_RUNNER_UNAVAILABLE" {
+		t.Fatalf("code = %q; an enabled skill with no runtime must say so", code)
 	}
 }
