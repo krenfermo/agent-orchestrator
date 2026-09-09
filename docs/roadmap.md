@@ -1,6 +1,10 @@
 # AO — hoja de ruta consolidada
 
-**Versión 1.0 · 2026-09-09 · base `feat/engineering-control-center` @ `6942e2ee0`**
+**Versión 1.1 · 2026-09-09 · base `feat/engineering-control-center` @ `43883a5c2`**
+
+> **v1.1** — Integrados los cinco lotes temáticos en ECC (`44589cbc5`, y los
+> merges de los lotes 2–4), más la limpieza de lint `43883a5c2`. Registradas las
+> cuatro decisiones del usuario. **Nada empujado a `origin`; `main` sigue sin tocar.**
 
 Este documento **no sustituye** a los planes que ya existen en el repositorio y
 no reclama ser el original. Consolida y da estado a lo que ya está escrito:
@@ -16,6 +20,19 @@ Lo que este documento añade es lo que ninguna de esas fuentes tiene: **un estad
 por elemento respaldado por commits, pruebas o evidencia operativa**, agrupado en
 los nueve frentes, con dependencias, criterios de aceptación, riesgos y el
 siguiente subalcance.
+
+## Decisiones tomadas (2026-09-09)
+
+1. **Integración por tramos temáticos con gates de validación.** Hecho para este
+   lote: cuatro tramos, cada uno con build, vet y pruebas propias.
+2. **Respaldo restaurable y procedimiento de recuperación ANTES del soak 24 h.**
+   Procedimiento diseñado y probado — `docs/backup-restore.md`, rama
+   `feat/backup-restore`. El soak queda bloqueado hasta que exista respaldo
+   automatizado.
+3. **Frente 9 (arquitectura empresarial) queda en diseño** hasta estabilizar.
+4. **Congelar funcionalidad nueva en ECC** tras integrar estas correcciones.
+   Skills sigue aislado en `feat/skills-catalog-foundation` y **no** forma parte
+   de este lote.
 
 ## Cómo leer los estados
 
@@ -52,7 +69,8 @@ No estaba en la lista de nueve frentes y va primero porque condiciona a todos.
 | --- | --- | --- |
 | ECC → `main` | **Pendiente** | `git rev-list --count main..feat/engineering-control-center` = 303 |
 | Ramas mergeadas en ECC y no en `main` | **Integrado (ECC)** | 28 ramas de feature mergeadas en ECC, incluidas `p4a-sso-oidc`, `p4b-users-teams-rbac`, `p4c-multitenancy` |
-| Ramas listas y **no** integradas | **Implementado** | `fix/migration-rebuild-fk-gate`, `fix/workflow-attention-i18n`, `fix/oidc-secret-out-of-process-env`, `feat/planner-rejected-result-evidence`, `feat/skills-catalog-foundation`, `fix/new-session-naming` |
+| Lote de correcciones 2026-09-09 | **Integrado (ECC)** | `fix/oidc-secret-out-of-process-env`, `fix/migration-rebuild-fk-gate`, `feat/planner-rejected-result-evidence`, `fix/workflow-attention-i18n`, `docs/consolidated-roadmap` — cuatro merges `--no-ff` + `43883a5c2` |
+| Ramas listas y **no** integradas | **Implementado** | `feat/backup-restore` (respaldo restaurable), `feat/skills-catalog-foundation` (aislada por decisión), `fix/new-session-naming` |
 
 **Criterio de aceptación:** una release desde `main` que arranque, migre una
 `ao.db` real y pase el gate de `npm run lint` + `go test -race`.
@@ -79,8 +97,8 @@ Planner, worker lifecycle, placement, recovery, tmux E2E, sqlc y migraciones.
 | Credenciales de worker y revocación | **Integrado** | `fix/agent-credential-revocation` | — |
 | Recuperación de sesiones y tareas | **Integrado** | `autonomous-recovery.md`, `p1b-recovery-and-repair.md` | Riesgo residual de *natural-key adoption* y multi-repo, sin cerrar |
 | Detector F2 de resultado de planner | **Integrado + activado + probado en producción** | `consistency.go`; disparó correctamente el 2026-09-09 en MEDUSA y se recuperó solo en 1 reintento | — |
-| Evidencia de resultado rechazado | **Implementado, no integrado** | `feat/planner-rejected-result-evidence` @ `04751b186` | Merge |
-| Migraciones: gate de rebuild con FKs entrantes | **Implementado, no integrado** | `fix/migration-rebuild-fk-gate` @ `027a21f99` | Merge |
+| Evidencia de resultado rechazado | **Integrado (ECC)** | `04751b186`, merge lote 3 | Activo en el próximo arranque |
+| Migraciones: gate de rebuild con FKs entrantes | **Integrado + probado** | `027a21f99`, merge lote 2; suite sqlite en verde | — |
 | Verify estructurado, evidencia pre-review | **Integrado** | `pre-review-evidence.md`, `feat/proportional-execution-review` | — |
 | **Tests E2E contra tmux real** | **Parcial** | `p0c-runtime-evidence.md` cubre tmux real | Cobertura E2E del ciclo completo workflow→worker→review→verify sobre tmux real: **pendiente** |
 | **Soak 24 h** | **Pendiente** | `p0d-reliability-validation.md` define el criterio | No hay evidencia de una corrida completa reciente |
@@ -192,7 +210,7 @@ obligatoria antes de cualquier ejecución en producción.**
 | --- | --- | --- |
 | Runtime GC | **Integrado** | `p1c-capacity-and-runtime-gc.md` |
 | Watchdog/autostart, caffeinate | **Pendiente** | — |
-| Backups / DR | **Ad-hoc, no automatizado** | Existen copias manuales en `~/.ao/data/` (`ao.db.backup-before-0119-…`, `data.backup-recovery-hardening-…`) |
+| Backups / DR | **Implementado + probado, no integrado ni automatizado** | `feat/backup-restore` @ `5bc7bfc5d`: `VACUUM INTO` bajo escritura concurrente, restauración verificada (integridad, FK, versión de esquema, apertura como store). **Sigue sin automatizar y sin retención** |
 | Soak 24/48/72 h | **Pendiente** | Criterio en `p0d`, sin corrida registrada |
 
 **Riesgo verificado:** `~/.ao/data/ao.db` pesa **823 MB** con un WAL de 4,7 MB.
@@ -215,8 +233,8 @@ riesgo, no una prueba.
 | Notificaciones (P4-D) | **Integrado + activado** | `STATUS.md` |
 | Board / Control Center | **Integrado** | `presentation.go`, `board.go` |
 | Decisiones humanas y auditoría | **Integrado** | `workflow_questions`, `attention.go` |
-| **i18n de mensajes de workflow** | **Implementado, no integrado** | `fix/workflow-attention-i18n` @ `7519689a5` |
-| **Higiene del secreto OIDC** | **Implementado, no integrado** | `fix/oidc-secret-out-of-process-env` @ `0d289a124` |
+| **i18n de mensajes de workflow** | **Integrado (ECC)** | `7519689a5`, merge lote 4a; 240/240 ficheros de frontend en verde |
+| **Higiene del secreto OIDC** | **Integrado (ECC), pendiente de activar** | `0d289a124`, merge lote 1. Activarlo exige mover el secreto al archivo `0600` y reiniciar el daemon |
 
 **Defecto conocido, sin corregir:** `AGENTS.md` declara como regla dura que el
 listener loopback permanece **sin autenticación**. Con `AO_AUTH_MODE=oidc` el
