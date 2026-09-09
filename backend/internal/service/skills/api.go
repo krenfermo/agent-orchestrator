@@ -2,6 +2,7 @@ package skills
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -355,3 +356,34 @@ func imageApprovalView(a skillimage.Approval, now time.Time) controllers.SkillIm
 
 // Compile-time proof that the service satisfies the trust-root port.
 var _ controllers.SkillImageTrust = (*Service)(nil)
+
+// ExecuteSkill implements the controller's execution route.
+//
+// It is a thin adapter and nothing more: every refusal — not installed, not
+// enabled, a control the runtime does not attest, an image nobody approved —
+// belongs to RunSkill and is not re-decided here. The one thing this does own
+// is the wire shape: the report is marshalled as it stands, so what a reader
+// sees is what the tool produced.
+func (s *Service) ExecuteSkill(
+	ctx context.Context, in controllers.SkillRunInput,
+) (controllers.SkillRunView, error) {
+	res, err := s.RunSkill(ctx, RunRequest{
+		ProjectID:        in.ProjectID,
+		SkillID:          in.SkillID,
+		ModeID:           in.ModeID,
+		Inputs:           in.Inputs,
+		Actor:            in.Actor,
+		ActorPermissions: in.ActorPermissions,
+	})
+	if err != nil {
+		return controllers.SkillRunView{}, err
+	}
+	report, err := json.Marshal(res.Report)
+	if err != nil {
+		return controllers.SkillRunView{}, err
+	}
+	return controllers.SkillRunView{
+		SkillID: res.SkillID, Version: res.Version, ModeID: res.ModeID,
+		Tool: res.Tool, Report: report,
+	}, nil
+}

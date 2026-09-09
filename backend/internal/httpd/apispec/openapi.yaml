@@ -3424,6 +3424,83 @@ paths:
         no process, opens no socket and changes nothing. Requires project.read.'
       tags:
       - skills
+  /api/v1/projects/{id}/skills/{skillId}/run:
+    post:
+      operationId: runProjectSkill
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Skill identifier (kebab-case).
+        in: path
+        name: skillId
+        required: true
+        schema:
+          description: Skill identifier (kebab-case).
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersSkillRunRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersSkillRunView'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: execute one authorized mode of an activated skill. Requires
+        project.manage -- the dry run reports what WOULD happen, this makes it happen.
+        Refused unless the skill is installed and enabled, the version is pinned,
+        an administrator has approved an image digest for this exact scope, every
+        capability the mode declares is granted, and the runtime attests every control
+        the mode needs. The caller contributes no image, no command and no argv. Only
+        ao.static-scan/v1 is implemented; every other tool is refused with the missing
+        control named.'
+      tags:
+      - skills
   /api/v1/projects/{id}/workitems:
     delete:
       operationId: deleteProjectWorkItemsConfig
@@ -14915,6 +14992,33 @@ components:
           type: boolean
       required:
       - setupRequired
+      type: object
+    ControllersSkillRunRequest:
+      properties:
+        inputs:
+          additionalProperties:
+            type: string
+          type: object
+        modeId:
+          type: string
+      type: object
+    ControllersSkillRunView:
+      properties:
+        modeId:
+          type: string
+        report: {}
+        skillId:
+          type: string
+        tool:
+          type: string
+        version:
+          type: string
+      required:
+      - skillId
+      - version
+      - modeId
+      - tool
+      - report
       type: object
     ControllersStartProviderSetupResponse:
       properties:

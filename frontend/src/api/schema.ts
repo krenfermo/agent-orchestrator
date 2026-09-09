@@ -1186,6 +1186,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/skills/{skillId}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: execute one authorized mode of an activated skill. Requires project.manage -- the dry run reports what WOULD happen, this makes it happen. Refused unless the skill is installed and enabled, the version is pinned, an administrator has approved an image digest for this exact scope, every capability the mode declares is granted, and the runtime attests every control the mode needs. The caller contributes no image, no command and no argv. Only ao.static-scan/v1 is implemented; every other tool is refused with the missing control named. */
+        post: operations["runProjectSkill"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/workitems": {
         parameters: {
             query?: never;
@@ -5053,6 +5070,19 @@ export interface components {
         };
         ControllersSetupStatusResponse: {
             setupRequired: boolean;
+        };
+        ControllersSkillRunRequest: {
+            inputs?: {
+                [key: string]: string;
+            };
+            modeId?: string;
+        };
+        ControllersSkillRunView: {
+            modeId: string;
+            report: unknown;
+            skillId: string;
+            tool: string;
+            version: string;
         };
         ControllersStartProviderSetupResponse: {
             handleId: string;
@@ -12363,6 +12393,89 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    runProjectSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersSkillRunRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersSkillRunView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

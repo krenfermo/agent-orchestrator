@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -45,6 +46,14 @@ type SkillCatalog interface {
 	EnableSkill(ctx context.Context, in EnableSkillInput) (SkillActivationView, error)
 	DisableSkill(ctx context.Context, projectID domain.ProjectID, skillID, actor string) error
 	DrySkillRun(ctx context.Context, in SkillDryRunInput) (SkillDryRunView, error)
+	// ExecuteSkill runs one authorized mode. It is a separate method from
+	// DrySkillRun on purpose: the dry run answers "would this be allowed",
+	// this one acts, and a single method with a boolean would let a caller
+	// flip a read into an execution by changing one field.
+	//
+	// Named for the boundary rather than for the service method it adapts to,
+	// which keeps skills.Service.RunSkill free to take the domain request.
+	ExecuteSkill(ctx context.Context, in SkillRunInput) (SkillRunView, error)
 }
 
 // EnableSkillInput carries an activation from the controller to the service,
@@ -232,6 +241,42 @@ type SkillDryRunRequest struct {
 	AuthorizedTargets []string `json:"authorizedTargets,omitempty"`
 }
 
+// SkillRunInput carries an execution from the controller to the service.
+//
+// It deliberately carries no image, no command and no argv. What runs is
+// decided by the approved digest for this scope and by AO's own Go code; a
+// caller that could contribute any part of the command line would be the
+// arbitrary-execution capability this phase does not have.
+type SkillRunInput struct {
+	ProjectID        domain.ProjectID
+	SkillID          string
+	ModeID           string
+	Inputs           map[string]string
+	Actor            string
+	ActorPermissions []domain.Permission
+}
+
+// SkillRunView is one completed execution, as the wire sees it.
+type SkillRunView struct {
+	SkillID string `json:"skillId"`
+	Version string `json:"version"`
+	ModeID  string `json:"modeId"`
+	Tool    string `json:"tool"`
+	// Report is the tool's own structured output: coverage first, then
+	// findings. Coverage is not decoration -- a scan that read nothing and
+	// found nothing must not render like a clean bill of health.
+	Report json.RawMessage `json:"report"`
+}
+
+// SkillRunResponse is the body of a completed execution.
+type SkillRunResponse = SkillRunView
+
+// SkillRunRequest is the wire body for an execution.
+type SkillRunRequest struct {
+	ModeID string            `json:"modeId,omitempty"`
+	Inputs map[string]string `json:"inputs,omitempty"`
+}
+
 // SkillCapabilityDecisionView is one capability's outcome in a dry run.
 type SkillCapabilityDecisionView struct {
 	Capability string `json:"capability"`
@@ -329,6 +374,7 @@ func (c *SkillsController) Register(r chi.Router) {
 	r.Put("/projects/{id}/skills/{skillId}", c.enable)
 	r.Delete("/projects/{id}/skills/{skillId}", c.disable)
 	r.Post("/projects/{id}/skills/{skillId}/dry-run", c.dryRun)
+	r.Post("/projects/{id}/skills/{skillId}/run", c.runSkill)
 }
 
 func (c *SkillsController) list(w http.ResponseWriter, r *http.Request) {
@@ -518,6 +564,44 @@ func (c *SkillsController) dryRun(w http.ResponseWriter, r *http.Request) {
 		Inputs:            in.Inputs,
 		AuthorizedTargets: in.AuthorizedTargets,
 		ActorPermissions:  c.callerProjectPermissions(r, id),
+	})
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, view)
+}
+
+// runSkill executes one authorized mode of one activated skill.
+//
+// The gate here is project.manage, not project.read: a dry run reports what
+// would happen and this one makes it happen. Everything else the run needs --
+// the activation, the pinned version, the approved image, every capability the
+// mode declares and every control the runtime must attest -- is checked by the
+// service, against AO's own attestation, and is deliberately not re-derived
+// here. A controller that re-implemented any of it would be a second answer to
+// a question that must have one.
+func (c *SkillsController) runSkill(w http.ResponseWriter, r *http.Request) {
+	if c.Catalog == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/projects/{id}/skills/{skillId}/run")
+		return
+	}
+	id := projectID(r)
+	if !c.Guard.AllowProject(w, r, domain.PermProjectManage, id, "PROJECT_NOT_FOUND", "project not found") {
+		return
+	}
+	var in SkillRunRequest
+	if err := decodeJSONStrict(r, &in); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	view, err := c.Catalog.ExecuteSkill(r.Context(), SkillRunInput{
+		ProjectID:        id,
+		SkillID:          chi.URLParam(r, "skillId"),
+		ModeID:           in.ModeID,
+		Inputs:           in.Inputs,
+		Actor:            c.actor(r),
+		ActorPermissions: c.callerProjectPermissions(r, id),
 	})
 	if err != nil {
 		envelope.WriteError(w, r, err)
