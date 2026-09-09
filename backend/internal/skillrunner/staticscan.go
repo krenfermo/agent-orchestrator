@@ -77,7 +77,44 @@ var staticScanRules = []scanRule{
 		// Deliberately anchored on an assignment to a credential-named
 		// identifier with a long literal. The report cites the location only;
 		// the value never leaves the container.
-		Pattern: `(password|passwd|secret|api_?key|token|private_?key)[[:space:]]*[:=][[:space:]]*['\"][^'\"]{12,}['\"]`,
+		//
+		// CASE. The rules run under `grep -HInE` -- capital I is "skip
+		// binaries", there is no -i -- so this rule used to be case-SENSITIVE
+		// and could not see `apiKey`, which is how Go, JS and TS spell it
+		// nearly always. A critical secret rule that misses the dominant
+		// spelling returns a clean report on a tree that has the secret.
+		//
+		// The fix is per-rule character classes, NOT a global -i on the grep.
+		// -i would apply to all eight rules, and AOSS-003 matches `exec(`:
+		// case-insensitively that hits `cmd.Exec(`, `.Exec(`, `Executor(` in
+		// every Go codebase, which buries the real findings. AOSS-008's
+		// `DEBUG = 1` would likewise match `debug: 1` in any config. So the
+		// widening is spelled out here, where its blast radius is one rule.
+		//
+		// SEPARATOR. [-_]? covers apiKey / api_key / api-key / apikey in one
+		// alternative. `token` unanchored already covers apiToken and
+		// authToken; `secret`, however, does not cover secretKey, because the
+		// assignment must follow the identifier immediately -- hence the
+		// explicit secret[-_]?key and private[-_]?key alternatives.
+		//
+		// ASSIGNMENT. (:=|[:=]) accepts Go's `:=` as well as `=` and YAML/JSON
+		// `:`. The old [:=] matched exactly one character, so `apiKey := "..."`
+		// -- the most common form in Go -- silently did not match either.
+		//
+		// The 12-character quoted-literal requirement is what keeps this off a
+		// mention in a comment, a bare identifier, an empty string and an
+		// indirection like os.Getenv("API_KEY"): none of them put a long
+		// literal immediately after the assignment operator.
+		Pattern: `([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]` +
+			`|[Pp][Aa][Ss][Ss][Ww][Dd]` +
+			`|[Ss][Ee][Cc][Rr][Ee][Tt][-_]?[Kk][Ee][Yy]` +
+			`|[Ss][Ee][Cc][Rr][Ee][Tt]` +
+			`|[Aa][Pp][Ii][-_]?[Kk][Ee][Yy]` +
+			`|[Aa][Pp][Ii][-_]?[Tt][Oo][Kk][Ee][Nn]` +
+			`|[Aa][Cc][Cc][Ee][Ss][Ss][-_]?[Kk][Ee][Yy]` +
+			`|[Pp][Rr][Ii][Vv][Aa][Tt][Ee][-_]?[Kk][Ee][Yy]` +
+			`|[Tt][Oo][Kk][Ee][Nn])` +
+			`[[:space:]]*(:=|[:=])[[:space:]]*['\"][^'\"]{12,}['\"]`,
 		Recommendation: "Rotate the credential first, then remove it from the tree AND from history — " +
 			"deleting it from the working tree does not un-leak it.",
 	},
