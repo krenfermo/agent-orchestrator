@@ -58,7 +58,71 @@ type Staging struct {
 	// Skipped are files AO deliberately did not stage, with the reason. They
 	// belong in the report's coverage: "we did not look" and "we looked and
 	// found nothing" are different results.
+	//
+	// The list is CAPPED at maxRecordedSkips; SkippedCount is not. Read the
+	// count for the arithmetic and the list for the detail.
 	Skipped []SkippedFile
+	// Discovered is every candidate file the walk encountered, counted once
+	// per path, before any exclusion. It is the denominator: Discovered ==
+	// len(Inputs) + SkippedCount is the invariant that makes a file
+	// impossible to lose between the tree and the report.
+	Discovered int
+	// SkippedCount is the exact number of pre-staging exclusions, whether or
+	// not each one is enumerated in Skipped.
+	SkippedCount int
+	// SkippedTruncated says Skipped holds fewer entries than SkippedCount.
+	SkippedTruncated bool
+}
+
+// maxRecordedSkips bounds the ENUMERATION of skipped files, never the count.
+// A repository whose file budget is exhausted can produce hundreds of
+// thousands of exclusions; listing every one would make the report unusable
+// and the response enormous. Losing the COUNT, on the other hand, is the
+// defect this file exists to prevent, so the count is always exact.
+const maxRecordedSkips = 500
+
+// skip records one pre-staging exclusion.
+//
+// Every path out of the walk that does not stage a file goes through here.
+// That is the point: the previous version had four such paths and only two of
+// them recorded anything, so a file could leave the walk without leaving a
+// trace, and the report then described a smaller project than the one on disk.
+func (s *Staging) skip(rel, reason string, size, limit int64) {
+	s.SkippedCount++
+	if len(s.Skipped) >= maxRecordedSkips {
+		s.SkippedTruncated = true
+		return
+	}
+	s.Skipped = append(s.Skipped, SkippedFile{
+		Path:   filepath.ToSlash(rel),
+		Reason: reason,
+		Stage:  SkipAtStaging,
+		Bytes:  size,
+		Limit:  limit,
+	})
+}
+
+// skipSummary is a reason histogram for the refusal message when a project
+// stages nothing. "Nothing to scan" and "everything was excluded, here is why"
+// are different answers, and only the second one tells an operator what to do.
+func skipSummary(skipped []SkippedFile, total int) string {
+	if total == 0 {
+		return "no candidate files"
+	}
+	counts := map[string]int{}
+	order := []string{}
+	for _, sk := range skipped {
+		if _, seen := counts[sk.Reason]; !seen {
+			order = append(order, sk.Reason)
+		}
+		counts[sk.Reason]++
+	}
+	sort.Strings(order)
+	parts := make([]string, 0, len(order))
+	for _, reason := range order {
+		parts = append(parts, fmt.Sprintf("%s x%d", reason, counts[reason]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // stagingDirName marks the root as AO's. Cleanup refuses to remove a directory
@@ -169,23 +233,49 @@ func Stage(req StageRequest) (Staging, error) {
 				}
 				return nil
 			}
+			// The candidate is counted HERE, once per path, before any
+			// exclusion can send it down one of the branches below. Counting
+			// later -- as each branch's business -- is how a branch that
+			// forgot to count made a file vanish.
+			//
+			// `seen` now means "already considered", not "already staged", so
+			// a path reachable through two scope roots is one candidate.
+			if seen[rel] {
+				return nil
+			}
+			seen[rel] = true
+			staging.Discovered++
+
 			// A symlink is refused, not followed and not copied: following one
 			// is how a credential outside the checkout ends up inside the
-			// boundary.
+			// boundary. It is RECORDED, because "we refused to read this" and
+			// "this was not here" are different facts about the scope.
 			if d.Type()&os.ModeSymlink != 0 {
+				staging.skip(rel, SkipReasonSymlink, 0, 0)
 				return nil
 			}
-			if !d.Type().IsRegular() || excludedFromStaging[d.Name()] {
+			if excludedFromStaging[d.Name()] {
+				staging.skip(rel, SkipReasonExcludedName, 0, 0)
 				return nil
 			}
-			if seen[rel] {
+			if !d.Type().IsRegular() {
+				staging.skip(rel, SkipReasonNotRegular, 0, 0)
 				return nil
 			}
 			info, infoErr := d.Info()
 			if infoErr != nil {
 				return infoErr
 			}
+			// Oversize, recorded with the size AND the bound.
+			//
+			// This is the single source of truth for the size decision. The
+			// scan tool carries its own MAX_BYTES guard against the same
+			// bound, so nothing that reaches the mount can trip it -- see the
+			// note in staticScanArgv. Keeping the decision here means the
+			// oversized file is never copied into the container, and keeping
+			// it in exactly one place means it cannot be counted twice.
 			if info.Size() > req.MaxFileBytes {
+				staging.skip(rel, SkipReasonTooLarge, info.Size(), req.MaxFileBytes)
 				return nil
 			}
 			// A path the scan tool cannot address unambiguously is skipped
@@ -193,16 +283,20 @@ func Stage(req StageRequest) (Staging, error) {
 			// shell, where a space or a quote would word-split the name and
 			// the file would simply not be scanned -- and a file that was
 			// never scanned but was counted as staged is a coverage lie, which
-			// is the one failure this whole path exists to prevent. These are
-			// rare in source trees, and Staging.Skipped records every one.
+			// is the one failure this whole path exists to prevent.
 			if hasShellHostileName(rel) {
-				staging.Skipped = append(staging.Skipped, SkippedFile{
-					Path: filepath.ToSlash(rel), Reason: "unaddressable_filename",
-				})
+				staging.skip(rel, SkipReasonUnaddressable, 0, 0)
 				return nil
 			}
+			// Past the budget the walk CONTINUES, recording rather than
+			// stopping. It used to return fs.SkipAll, which abandoned the walk
+			// and left every remaining file uncounted: the report then had no
+			// way to say how much of the project it had not looked at, on
+			// exactly the repositories -- the large ones -- where that matters
+			// most. Continuing costs a stat per file and no read or copy.
 			if len(staging.Inputs) >= req.MaxFiles {
-				return fs.SkipAll
+				staging.skip(rel, SkipReasonBudget, info.Size(), 0)
+				return nil
 			}
 			body, readErr := os.ReadFile(p) //nolint:gosec // path from the walked project root.
 			if readErr != nil {
@@ -211,9 +305,7 @@ func Stage(req StageRequest) (Staging, error) {
 				// rather than dropped, because a file nobody could read is a
 				// gap in coverage, and a gap the report does not mention reads
 				// as a clean result.
-				staging.Skipped = append(staging.Skipped, SkippedFile{
-					Path: filepath.ToSlash(rel), Reason: "unreadable",
-				})
+				staging.skip(rel, SkipReasonUnreadable, 0, 0)
 				return nil //nolint:nilerr // deliberate: one unreadable file must not fail the scan.
 			}
 			target := filepath.Join(dir, rel)
@@ -224,7 +316,6 @@ func Stage(req StageRequest) (Staging, error) {
 				return err
 			}
 			sum := sha256.Sum256(body)
-			seen[rel] = true
 			staging.Inputs = append(staging.Inputs, StagedInput{
 				RelPath: filepath.ToSlash(rel),
 				SHA256:  hex.EncodeToString(sum[:]),
@@ -232,7 +323,9 @@ func Stage(req StageRequest) (Staging, error) {
 			})
 			return nil
 		})
-		if err != nil && !errors.Is(err, fs.SkipAll) {
+		// No branch returns fs.SkipAll any more: the budget path records and
+		// carries on, so any error here is a real one.
+		if err != nil {
 			_ = os.RemoveAll(dir)
 			return Staging{}, fmt.Errorf("%w: stage %q: %w", ErrStagingUnusable, root, err)
 		}
@@ -240,9 +333,14 @@ func Stage(req StageRequest) (Staging, error) {
 
 	if len(staging.Inputs) == 0 {
 		_ = os.RemoveAll(dir)
-		return Staging{}, fmt.Errorf("%w: nothing in scope to stage from %q; "+
+		// The reasons are named. A project of nothing but oversized files and
+		// a project of nothing at all both stage zero inputs, and an operator
+		// can act on the first one the moment the message distinguishes them.
+		return Staging{}, fmt.Errorf("%w: nothing in scope to stage from %q: "+
+			"%d candidate file(s), all excluded before staging (%s); "+
 			"a run over no inputs would report a clean result for a project it never read",
-			ErrStagingUnusable, req.SourceDir)
+			ErrStagingUnusable, req.SourceDir, staging.Discovered,
+			skipSummary(staging.Skipped, staging.SkippedCount))
 	}
 	sort.Slice(staging.Inputs, func(i, j int) bool {
 		return staging.Inputs[i].RelPath < staging.Inputs[j].RelPath

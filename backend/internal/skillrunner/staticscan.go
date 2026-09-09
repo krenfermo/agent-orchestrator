@@ -180,6 +180,16 @@ while IFS= read -r f; do
     *" $ext "*) ;;
     *) printf '%s\037%s\n' "$f" "unsupported_extension" >> /tmp/skipped; continue ;;
   esac
+  # SINGLE SOURCE OF TRUTH for the size bound: STAGING, not this.
+  #
+  # Stage() applies the same MaxFileBytes on the host and records the file as
+  # skipped there, so an oversized file is never copied into the container --
+  # which is the point, since copying it is the cost the bound exists to
+  # avoid. This guard is therefore unreachable on the normal path and is kept
+  # only as a fail-safe: if staging ever regresses and lets an oversized file
+  # through, the file is REPORTED here rather than quietly scanned. It cannot
+  # double-count, because a file that reaches this line was, by construction,
+  # not counted as skipped by staging.
   size=$(wc -c < "$f" 2>/dev/null || echo 0)
   if [ "$size" -gt "$MAX_BYTES" ]; then
     printf '%s\037%s\n' "$f" "too_large" >> /tmp/skipped; continue
