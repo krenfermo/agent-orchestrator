@@ -212,12 +212,3 @@ func truncateShape(s string) string {
 	}
 	return s[:maxShapeBytes] + "..."
 }
-
-// logArgs renders the evidence for a log line, omitting an absent shape.
-func (r rejectedResult) logArgs() []any {
-	args := []any{"rejectedResultKind", r.Kind, "rejectedResultBytes", r.Bytes, "rejectedResultHash", r.Hash}
-	if r.Shape != "" {
-		args = append(args, "rejectedResultShape", r.Shape)
-	}
-	return args
-}

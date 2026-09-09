@@ -493,27 +493,47 @@ func incomingForeignKeys(t *testing.T, db *sql.DB) map[string][]incomingRef {
 	t.Helper()
 	out := map[string][]incomingRef{}
 	for _, child := range userTables(t, db) {
-		rows, err := db.Query("PRAGMA foreign_key_list(" + child + ")")
-		if err != nil {
-			t.Fatalf("foreign_key_list(%s): %v", child, err)
+		for _, ref := range tableForeignKeys(t, db, child) {
+			out[ref.parent] = append(out[ref.parent], ref.incomingRef)
 		}
-		for rows.Next() {
-			rec := scanRowAsMap(t, rows)
-			parent := fmt.Sprintf("%v", rec["table"])
-			if parent == child {
-				continue
-			}
-			out[parent] = append(out[parent], incomingRef{
+	}
+	return out
+}
+
+type parentedRef struct {
+	incomingRef
+	parent string
+}
+
+// tableForeignKeys reads one table's outgoing references. It is its own
+// function so the rows handle can be deferred rather than closed by hand on
+// each path out of the loop.
+func tableForeignKeys(t *testing.T, db *sql.DB, child string) []parentedRef {
+	t.Helper()
+	rows, err := db.Query("PRAGMA foreign_key_list(" + child + ")")
+	if err != nil {
+		t.Fatalf("foreign_key_list(%s): %v", child, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []parentedRef
+	for rows.Next() {
+		rec := scanRowAsMap(t, rows)
+		parent := fmt.Sprintf("%v", rec["table"])
+		if parent == child {
+			continue
+		}
+		out = append(out, parentedRef{
+			incomingRef: incomingRef{
 				child:    child,
 				column:   fmt.Sprintf("%v", rec["from"]),
 				onDelete: fmt.Sprintf("%v", rec["on_delete"]),
-			})
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			t.Fatalf("iterate foreign_key_list(%s): %v", child, err)
-		}
-		_ = rows.Close()
+			},
+			parent: parent,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate foreign_key_list(%s): %v", child, err)
 	}
 	return out
 }
@@ -690,7 +710,7 @@ func syntheticValue(table string, c syntheticColumn) string {
 	switch declType := strings.ToUpper(c.declType); {
 	case strings.Contains(declType, "INT"):
 		return "1"
-	case strings.Contains(declType, "REAL"), strings.Contains(declType, "FLOA"), strings.Contains(declType, "DOUB"):
+	case strings.Contains(declType, "REAL"), strings.Contains(declType, "FLOA"), strings.Contains(declType, "DOUBLE"):
 		return "1.0"
 	case strings.Contains(declType, "BLOB"):
 		return "x'00'"
@@ -729,6 +749,9 @@ func assertReferencesIntact(t *testing.T, db *sql.DB, refs []incomingRef, parent
 	defer func() { _ = rows.Close() }()
 	if rows.Next() {
 		t.Errorf("%s: foreign_key_check reports a violation", when)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate foreign_key_check %s: %v", when, err)
 	}
 }
 

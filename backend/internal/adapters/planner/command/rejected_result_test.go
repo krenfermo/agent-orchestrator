@@ -95,10 +95,10 @@ func TestRejectedResultNeverCarriesContent(t *testing.T) {
 // this, that was the whole record; the shape is what makes it answerable.
 func TestPlaceholderIsDistinguishableFromARealPlanOfTheSameSize(t *testing.T) {
 	placeholder := `{"version":"v1","objective":"o","summary":"test","steps":[{"id":"s1","title":"t","description":"d","acceptanceCriteria":["a"]}]}`
-	real := `{"version":"v1","objective":"Documentar el runbook operativo de AO para el backlog de Plane con el contrato exacto","summary":"Crear el documento con los cuatro estados, las transiciones y los criterios de exclusion","steps":[{"id":"s1","title":"Escribir el runbook completo","description":"Crear docs/ao-plane-backlog-runbook.md con todas las secciones","acceptanceCriteria":["el archivo existe y describe los cuatro estados"]}]}`
+	realPlan := `{"version":"v1","objective":"Documentar el runbook operativo de AO para el backlog de Plane con el contrato exacto","summary":"Crear el documento con los cuatro estados, las transiciones y los criterios de exclusion","steps":[{"id":"s1","title":"Escribir el runbook completo","description":"Crear docs/ao-plane-backlog-runbook.md con todas las secciones","acceptanceCriteria":["el archivo existe y describe los cuatro estados"]}]}`
 
 	p := describeRejectedResult([]byte(placeholder), "ratio")
-	r := describeRejectedResult([]byte(real), "ratio")
+	r := describeRejectedResult([]byte(realPlan), "ratio")
 	if p.Kind != rejectedKindPlaceholder {
 		t.Fatalf("placeholder classified as %q", p.Kind)
 	}
@@ -113,7 +113,9 @@ func TestPlaceholderIsDistinguishableFromARealPlanOfTheSameSize(t *testing.T) {
 // The same failure twice is provably the same failure.
 func TestIdenticalResultsHashIdentically(t *testing.T) {
 	raw := []byte(`{"summary":"test","steps":[]}`)
-	if describeRejectedResult(raw, "s").Hash != describeRejectedResult(raw, "s").Hash {
+	first := describeRejectedResult(raw, "s")
+	second := describeRejectedResult(append([]byte(nil), raw...), "s")
+	if first.Hash != second.Hash {
 		t.Fatal("the hash is not stable for identical bytes")
 	}
 }
