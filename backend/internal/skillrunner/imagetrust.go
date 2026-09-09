@@ -16,9 +16,10 @@ import (
 //
 // Until this file, ResolveContract asked the runtime what `alpine:3.19` was and
 // used the answer. That trusts whoever last ran `docker pull` on this machine.
-// It is the "confianza implícita en imágenes presentes en el host" the trust-root
-// decision rules out, and it is not a small gap: a compromised base image nobody
-// reviewed would have executed as AO, with AO's staging mounted into it.
+// Implicit trust in whatever image happens to be on the host is what the
+// trust-root decision rules out, and it is not a small gap: a compromised base
+// image nobody reviewed would have executed as AO, with AO's staging mounted
+// into it.
 //
 // Now an execution needs an APPROVAL — a named administrator's recorded decision
 // that this exact scope may run this exact digest to back this exact tool — and
@@ -176,7 +177,7 @@ func (r *Runner) effectiveDigest(ctx context.Context, digest string) (string, er
 	defer cancel()
 	out, err := r.runner.Output(ctx, r.runtime.Binary, "image", "inspect", digest, "--format", "{{.Id}}")
 	if err != nil {
-		return "", fmt.Errorf("%w: %s is not present on this host, and AO does not pull: %v",
+		return "", fmt.Errorf("%w: %s is not present on this host, and AO does not pull: %w",
 			ErrImageNotApproved, digest, err)
 	}
 	effective := strings.TrimSpace(string(out))

@@ -956,6 +956,7 @@ func RunWithConfig(cfg config.Config) error {
 		ProjectScope:      store,
 		RBAC:              rbacSvc,
 		Skills:            skillsSvc,
+		SkillImages:       skillsSvc,
 		ProviderProfiles:  providerProfilesSvc,
 		ProviderSetup:     providerSetupSvc,
 		ExecutionPolicy:   executionPolicySvc,

@@ -228,6 +228,10 @@ func TestLiveScan_ScopeLimitsWhatIsStaged(t *testing.T) {
 // later.
 func TestLiveScan_CleansUpItsStaging(t *testing.T) {
 	r := liveRunner(t)
+	// Snapshot first: the label marks every AO skill run on this host, and
+	// another package's live tests may have containers of their own in
+	// flight. What this test means is "this refusal added nothing".
+	containersBefore := listSkillRunContainers(t, r)
 	requireAlpine(t, r)
 	project := syntheticProject(t)
 	root := stagingOverride(t)
@@ -256,14 +260,16 @@ func TestLiveScan_CleansUpItsStaging(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(project, ".ao-skill-staging")); err == nil {
 		t.Fatal("staging was written inside the project checkout")
 	}
-	if leftover := listSkillRunContainers(t, r); leftover != "" {
-		t.Fatalf("containers survived: %s", leftover)
-	}
+	noNewSkillRunContainers(t, r, containersBefore)
 }
 
 // A tool AO does not ship a contract for is refused, and nothing runs.
 func TestLiveScan_RefusesAnUnapprovedTool(t *testing.T) {
 	r := liveRunner(t)
+	// Snapshot first: the label marks every AO skill run on this host, and
+	// another package's live tests may have containers of their own in
+	// flight. What this test means is "this refusal added nothing".
+	containersBefore := listSkillRunContainers(t, r)
 	_, err := r.resolveProbeContract(context.Background(), Tool("nmap"))
 	if !errors.Is(err, ErrToolNotApproved) {
 		t.Fatalf("err = %v, want ErrToolNotApproved", err)
@@ -271,15 +277,17 @@ func TestLiveScan_RefusesAnUnapprovedTool(t *testing.T) {
 	if !strings.Contains(err.Error(), string(ToolStaticScan)) {
 		t.Fatalf("the refusal should list what IS approved: %v", err)
 	}
-	if leftover := listSkillRunContainers(t, r); leftover != "" {
-		t.Fatalf("a refused tool started a container: %s", leftover)
-	}
+	noNewSkillRunContainers(t, r, containersBefore)
 }
 
 // An empty scope refuses before a container starts, rather than producing a
 // clean report of nothing.
 func TestLiveScan_RefusesAnEmptyScope(t *testing.T) {
 	r := liveRunner(t)
+	// Snapshot first: the label marks every AO skill run on this host, and
+	// another package's live tests may have containers of their own in
+	// flight. What this test means is "this refusal added nothing".
+	containersBefore := listSkillRunContainers(t, r)
 	empty := filepath.Join(repoScratchRoot(t), "empty-"+randomToken())
 	if err := os.MkdirAll(empty, 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -298,9 +306,7 @@ func TestLiveScan_RefusesAnEmptyScope(t *testing.T) {
 	if !strings.Contains(err.Error(), "never read") {
 		t.Fatalf("the refusal should say why an empty scan is worse than none: %v", err)
 	}
-	if leftover := listSkillRunContainers(t, r); leftover != "" {
-		t.Fatalf("an empty scope started a container: %s", leftover)
-	}
+	noNewSkillRunContainers(t, r, containersBefore)
 }
 
 func requireAlpine(t *testing.T, r *Runner) {

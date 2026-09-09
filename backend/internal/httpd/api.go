@@ -218,6 +218,11 @@ type APIDeps struct {
 	// to execute with -- so a nil here costs a daemon no capability it
 	// otherwise had.
 	Skills controllers.SkillCatalog
+	// SkillImages is the image trust root's administrative surface. It is a
+	// separate dependency from Skills because it answers to a different
+	// authority: managing the catalog and deciding what this installation may
+	// execute are not the same permission to hold.
+	SkillImages controllers.SkillImageTrust
 }
 
 // normalizeAPIDeps closes the Presence/DeviceLive duplication trap structurally.
@@ -419,7 +424,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		teams:            &controllers.TeamsController{Mgr: deps.RBAC},
 		tenants:          &controllers.TenantsController{Mgr: deps.RBAC, Guard: guard},
 		projectAccess:    &controllers.ProjectAccessController{Mgr: deps.RBAC, Guard: guard},
-		skills:           &controllers.SkillsController{Catalog: deps.Skills, Guard: guard},
+		skills:           &controllers.SkillsController{Catalog: deps.Skills, Images: deps.SkillImages, Guard: guard},
 	}
 }
 

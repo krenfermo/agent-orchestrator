@@ -87,6 +87,10 @@ func newSkillsWorld(t *testing.T) *skillsWorld {
 	}
 
 	rbacSvc := rbac.New(st, nil, rbac.NoopAudit{}, nil)
+	// One service instance backs both ports: the catalog and the image trust
+	// root are two authorities over one store, not two stores.
+	skillsSvc := skills.New(st, dataDir,
+		skills.WithSkillExecutor(nil, skills.NewImageAuthority(st, st), st, "", ""))
 	deps := APIDeps{
 		Auth:             authMgr,
 		Projects:         &fakeProjectManager{items: projects},
@@ -95,7 +99,8 @@ func newSkillsWorld(t *testing.T) *skillsWorld {
 		Authz:            authz.New(st),
 		ProjectScope:     st,
 		RBAC:             rbacSvc,
-		Skills:           skills.New(st, dataDir),
+		Skills:           skillsSvc,
+		SkillImages:      skillsSvc,
 	}
 	srv := httptest.NewServer(NewRouterWithControl(
 		config.Config{TrustedLocalMode: false}, discardLogger(), nil, deps, ControlDeps{}))

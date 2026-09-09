@@ -2,10 +2,13 @@ package skills
 
 import (
 	"context"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillcatalog"
+	"github.com/aoagents/agent-orchestrator/backend/internal/skillimage"
+	"github.com/aoagents/agent-orchestrator/backend/internal/skillrunner"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
 )
 
@@ -271,3 +274,84 @@ func parseCapabilities(names []string) []skillcatalog.Capability {
 // Compile-time proof that the service satisfies the controller's port. It is
 // here rather than in the controller so the dependency points one way.
 var _ controllers.SkillCatalog = (*Service)(nil)
+
+// ListImageApprovals implements the controller's trust-root listing.
+func (s *Service) ListImageApprovals(ctx context.Context) ([]controllers.SkillImageApprovalView, error) {
+	approvals, err := s.images.ListApprovals(ctx)
+	if err != nil {
+		return nil, err
+	}
+	now := s.now()
+	out := make([]controllers.SkillImageApprovalView, 0, len(approvals))
+	for _, a := range approvals {
+		out = append(out, imageApprovalView(a, now))
+	}
+	return out, nil
+}
+
+// ApproveImage implements the controller's approval.
+func (s *Service) ApproveImage(
+	ctx context.Context, in controllers.ApproveSkillImageInput,
+) (controllers.SkillImageApprovalView, error) {
+	approval, err := s.images.Approve(ctx, ApproveRequest{
+		Scope: skillimage.Scope{
+			TenantID: in.TenantID, ProjectID: in.ProjectID,
+			SkillID: in.SkillID, Version: in.Version, ModeID: in.ModeID,
+		},
+		Tool: in.Tool, Reference: in.Reference, Digest: in.Digest,
+		ExpiresIn: time.Duration(in.ExpiresInSeconds) * time.Second,
+		Note:      in.Note, Confirm: in.Confirm,
+		Actor: in.Actor, ActorPermissions: in.ActorPermissions,
+	})
+	if err != nil {
+		return controllers.SkillImageApprovalView{}, err
+	}
+	return imageApprovalView(approval, s.now()), nil
+}
+
+// RevokeImageApproval implements the controller's revocation.
+func (s *Service) RevokeImageApproval(
+	ctx context.Context, id string, in controllers.RevokeSkillImageInput,
+) error {
+	return s.images.Revoke(ctx, id, in.Actor, in.ActorPermissions)
+}
+
+// RevocationPolicy is the exact promise and non-promise of revoking, served
+// with the listing so a client rendering it shows the same words the runner
+// enforces rather than a paraphrase.
+func (s *Service) RevocationPolicy() string { return skillrunner.RevocationPolicy }
+
+// imageApprovalView projects one approval onto the wire.
+//
+// Active and InactiveReason are COMPUTED here rather than stored, so a client
+// cannot read a stale row as permission, and so "expired" and "revoked" stay
+// distinguishable instead of collapsing into one false.
+func imageApprovalView(a skillimage.Approval, now time.Time) controllers.SkillImageApprovalView {
+	view := controllers.SkillImageApprovalView{
+		ID:        a.ID,
+		TenantID:  string(a.Scope.TenantID),
+		ProjectID: string(a.Scope.ProjectID),
+		SkillID:   a.Scope.SkillID,
+		Version:   a.Scope.Version,
+		ModeID:    a.Scope.ModeID,
+		Tool:      a.Tool,
+		Reference: a.Reference,
+		Digest:    a.Digest,
+
+		ApprovedBy:     a.ApprovedBy,
+		ApprovedAt:     a.ApprovedAt.UTC().Format(time.RFC3339),
+		Note:           a.Note,
+		Active:         a.Active(now),
+		InactiveReason: a.InactiveReason(now),
+	}
+	if a.ExpiresAt != nil {
+		view.ExpiresAt = a.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	if a.RevokedAt != nil {
+		view.RevokedAt = a.RevokedAt.UTC().Format(time.RFC3339)
+	}
+	return view
+}
+
+// Compile-time proof that the service satisfies the trust-root port.
+var _ controllers.SkillImageTrust = (*Service)(nil)

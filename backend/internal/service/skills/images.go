@@ -61,7 +61,7 @@ func NewImageAuthority(st ImageStore, audit ImageAuditSink) *ImageAuthority {
 	return &ImageAuthority{
 		store: st, audit: audit,
 		now:   func() time.Time { return time.Now().UTC() },
-		newID: func() string { return "skimg-" + randomHex(16) },
+		newID: func() string { return "skimg-" + randomHex() },
 	}
 }
 
@@ -148,7 +148,7 @@ func (a *ImageAuthority) Approve(ctx context.Context, req ApproveRequest) (skill
 // must not be summarized more optimistically anywhere: it stops new executions
 // immediately, it does not kill a container already running, and it does not
 // recall a secret already delivered.
-func (a *ImageAuthority) Revoke(ctx context.Context, id string, actor string, perms []domain.Permission) error {
+func (a *ImageAuthority) Revoke(ctx context.Context, id, actor string, perms []domain.Permission) error {
 	if err := a.requireAvailable(); err != nil {
 		return err
 	}
@@ -273,7 +273,7 @@ func (a *ImageAuthority) record(
 	}
 	projectID := approval.Scope.ProjectID
 	_ = a.audit.AppendSkillAudit(ctx, store.SkillAuditEntry{
-		ID:         "skaud-" + randomHex(16),
+		ID:         "skaud-" + randomHex(),
 		OccurredAt: a.now(),
 		Actor:      approval.ApprovedBy,
 		Action:     action,

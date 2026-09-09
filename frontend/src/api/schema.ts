@@ -2855,6 +2855,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/skills/images": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: every container image this installation has decided it may execute, with the scope, the digest, who approved it and whether it is still active. Revoked and expired approvals are included: they are the history of what was once allowed. The response also carries the trust model in words - an approval is an administrator's decision about inspected bytes, NOT a publisher signature - and the exact promise and non-promise of revoking. Requires settings.read. */
+        get: operations["listSkillImageApprovals"];
+        put?: never;
+        /** Skills: approve one immutable image digest for one exact scope (tenant, project, skill, version, mode) to back one AO tool. A tag is refused - it is a mutable pointer. Requires an explicit confirmation flag and a note saying what was checked, and re-approving the same scope REPLACES rather than accumulating. This does NOT run anything: a run additionally needs the skill installed, activated, its capabilities granted and every required control attested. Requires settings.manage. */
+        post: operations["approveSkillImage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/images/{approvalId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Skills: revoke one image approval. This stops NEW executions immediately - the approval is re-checked at the last point before a container starts. It does NOT stop a container already running, and it does NOT recall a secret already delivered to one. Requires settings.manage. */
+        delete: operations["revokeSkillImageApproval"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/teams": {
         parameters: {
             query?: never;
@@ -3848,6 +3883,20 @@ export interface components {
             choiceId?: null | string;
             /** @description Free-text human answer, when no structured choice applies. */
             customText?: null | string;
+        };
+        ApproveSkillImageRequest: {
+            confirm: boolean;
+            digest: string;
+            /** Format: int64 */
+            expiresInSeconds?: number;
+            modeId: string;
+            note: string;
+            projectId: string;
+            reference: string;
+            skillId: string;
+            tenantId: string;
+            tool: string;
+            version: string;
         };
         AttachmentInput: {
             data: string;
@@ -7112,6 +7161,29 @@ export interface components {
             skillName: string;
             /** @enum {string} */
             verdict: "executable" | "requires_approval" | "blocked";
+            version: string;
+        };
+        SkillImageApprovalListResponse: {
+            approvals: components["schemas"]["SkillImageApprovalView"][];
+            revocationPolicy: string;
+            trustModel: string;
+        };
+        SkillImageApprovalView: {
+            active: boolean;
+            approvedAt: string;
+            approvedBy: string;
+            digest: string;
+            expiresAt?: string;
+            id: string;
+            inactiveReason?: string;
+            modeId: string;
+            note: string;
+            projectId: string;
+            reference: string;
+            revokedAt?: string;
+            skillId: string;
+            tenantId: string;
+            tool: string;
             version: string;
         };
         SkillInstallView: {
@@ -18776,6 +18848,181 @@ export interface operations {
             };
             /** @description Unauthorized */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listSkillImageApprovals: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillImageApprovalListResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    approveSkillImage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApproveSkillImageRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillImageApprovalView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    revokeSkillImageApproval: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Image approval identifier. */
+                approvalId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OKResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

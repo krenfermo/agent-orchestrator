@@ -8726,6 +8726,145 @@ paths:
         and the digest verified at install. Requires settings.read.'
       tags:
       - skills
+  /api/v1/skills/images:
+    get:
+      operationId: listSkillImageApprovals
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillImageApprovalListResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: every container image this installation has decided it may
+        execute, with the scope, the digest, who approved it and whether it is still
+        active. Revoked and expired approvals are included: they are the history of
+        what was once allowed. The response also carries the trust model in words
+        - an approval is an administrator''s decision about inspected bytes, NOT a
+        publisher signature - and the exact promise and non-promise of revoking. Requires
+        settings.read.'
+      tags:
+      - skills
+    post:
+      operationId: approveSkillImage
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApproveSkillImageRequest'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillImageApprovalView'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: approve one immutable image digest for one exact scope (tenant,
+        project, skill, version, mode) to back one AO tool. A tag is refused - it
+        is a mutable pointer. Requires an explicit confirmation flag and a note saying
+        what was checked, and re-approving the same scope REPLACES rather than accumulating.
+        This does NOT run anything: a run additionally needs the skill installed,
+        activated, its capabilities granted and every required control attested. Requires
+        settings.manage.'
+      tags:
+      - skills
+  /api/v1/skills/images/{approvalId}:
+    delete:
+      operationId: revokeSkillImageApproval
+      parameters:
+      - description: Image approval identifier.
+        in: path
+        name: approvalId
+        required: true
+        schema:
+          description: Image approval identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OKResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: revoke one image approval. This stops NEW executions immediately
+        - the approval is re-checked at the last point before a container starts.
+        It does NOT stop a container already running, and it does NOT recall a secret
+        already delivered to one. Requires settings.manage.'
+      tags:
+      - skills
   /api/v1/teams:
     get:
       operationId: listTeams
@@ -11695,6 +11834,43 @@ components:
           type:
           - "null"
           - string
+      type: object
+    ApproveSkillImageRequest:
+      properties:
+        confirm:
+          type: boolean
+        digest:
+          type: string
+        expiresInSeconds:
+          format: int64
+          type: integer
+        modeId:
+          type: string
+        note:
+          type: string
+        projectId:
+          type: string
+        reference:
+          type: string
+        skillId:
+          type: string
+        tenantId:
+          type: string
+        tool:
+          type: string
+        version:
+          type: string
+      required:
+      - tenantId
+      - projectId
+      - skillId
+      - version
+      - modeId
+      - tool
+      - reference
+      - digest
+      - note
+      - confirm
       type: object
     AttachmentInput:
       properties:
@@ -20250,6 +20426,70 @@ components:
       - requiredApproval
       - runner
       - reasons
+      type: object
+    SkillImageApprovalListResponse:
+      properties:
+        approvals:
+          items:
+            $ref: '#/components/schemas/SkillImageApprovalView'
+          type: array
+        revocationPolicy:
+          type: string
+        trustModel:
+          type: string
+      required:
+      - approvals
+      - trustModel
+      - revocationPolicy
+      type: object
+    SkillImageApprovalView:
+      properties:
+        active:
+          type: boolean
+        approvedAt:
+          type: string
+        approvedBy:
+          type: string
+        digest:
+          type: string
+        expiresAt:
+          type: string
+        id:
+          type: string
+        inactiveReason:
+          type: string
+        modeId:
+          type: string
+        note:
+          type: string
+        projectId:
+          type: string
+        reference:
+          type: string
+        revokedAt:
+          type: string
+        skillId:
+          type: string
+        tenantId:
+          type: string
+        tool:
+          type: string
+        version:
+          type: string
+      required:
+      - id
+      - tenantId
+      - projectId
+      - skillId
+      - version
+      - modeId
+      - tool
+      - reference
+      - digest
+      - approvedBy
+      - approvedAt
+      - note
+      - active
       type: object
     SkillInstallView:
       properties:

@@ -73,7 +73,7 @@ func NewSecretAuthority(st SecretStore, sealer SecretSealer) *SecretAuthority {
 	return &SecretAuthority{
 		store: st, sealer: sealer,
 		now:   func() time.Time { return time.Now().UTC() },
-		newID: func() string { return "sec-" + randomHex(16) },
+		newID: func() string { return "sec-" + randomHex() },
 	}
 }
 
@@ -287,7 +287,7 @@ func (a *SecretAuthority) MintLease(ctx context.Context, req LeaseRequest) (skil
 	}
 
 	lease := skillsecrets.Lease{
-		ID: "lease-" + randomHex(16), Scope: req.Scope,
+		ID: "lease-" + randomHex(), Scope: req.Scope,
 		RunID: req.RunID, AttemptID: req.AttemptID,
 		Refs:     append([]skillsecrets.Ref(nil), req.Requested...),
 		IssuedAt: now, ExpiresAt: now.Add(ttl),
@@ -404,8 +404,11 @@ func holdsPermission(held []domain.Permission, want domain.Permission) bool {
 	return false
 }
 
-func randomHex(n int) string {
-	b := make([]byte, n)
+// randomHex mints a 16-byte identifier. The length is fixed rather than a
+// parameter: every id in this package is the same width, and a caller able to
+// ask for a shorter one could ask for a guessable one.
+func randomHex() string {
+	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		panic(fmt.Sprintf("skills: read random: %v", err))
 	}

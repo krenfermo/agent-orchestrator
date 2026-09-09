@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
@@ -377,11 +376,6 @@ func declaredInput(m skillcatalog.Manifest, name string) (skillcatalog.InputPara
 // mode. When a package declares it, AO fills it in from the mode it authorized
 // rather than trusting the caller to agree with itself.
 const modeInputName = "mode"
-
-// runDeadline is not enforced here: the runner owns the wall clock, because a
-// timeout the caller could raise is not a limit. It is named so the value is
-// greppable next to the code that would be tempted to add one.
-const runDeadline = time.Duration(0)
 
 // Compile-time proof that AO's real runner satisfies the execution port. It is
 // here rather than in skillrunner so the dependency points one way: the service

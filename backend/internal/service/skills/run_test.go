@@ -88,18 +88,6 @@ func fullyAttested() skillcatalog.RunnerAttestation {
 	}
 }
 
-type runFixture struct {
-	svc   *skills.Service
-	auth  *skills.ImageAuthority
-	exec  *recordingExecutor
-	scope skillimage.Scope
-	store interface {
-		ListSkillAuditForProject(ctx context.Context, projectID domain.ProjectID) ([]auditRow, error)
-	}
-}
-
-type auditRow = struct{}
-
 // newRunFixture installs and enables security-audit, wires an executor and a
 // trust root, and approves an image unless approve is false.
 func newRunFixture(t *testing.T, exec *recordingExecutor, approve bool) (fixture, *skills.Service, *skills.ImageAuthority, skillimage.Scope) {

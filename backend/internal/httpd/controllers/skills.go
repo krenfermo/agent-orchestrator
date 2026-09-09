@@ -304,7 +304,12 @@ type SkillDryRunView = SkillDryRunResponse
 // SkillsController owns both skill route families.
 type SkillsController struct {
 	Catalog SkillCatalog
-	Guard   Guard
+	// Images is the trust root's administrative surface. It is a SEPARATE
+	// port from Catalog because it answers to a different authority -- one is
+	// "manage the catalog", the other is "decide what this installation may
+	// execute" -- and an installation can have the first without the second.
+	Images SkillImageTrust
+	Guard  Guard
 }
 
 // Register mounts the skill routes.
@@ -315,6 +320,9 @@ func (c *SkillsController) Register(r chi.Router) {
 	r.Get("/skills/{skillId}/audit", c.audit)
 	r.Get("/skills/{skillId}/versions/{version}", c.detail)
 	r.Delete("/skills/{skillId}/versions/{version}", c.uninstall)
+	// The image trust root, same family and therefore the same gate:
+	// settings.read to look, settings.manage to change.
+	c.registerImageRoutes(r)
 
 	// Project-scoped. Gated per project inside each handler.
 	r.Get("/projects/{id}/skills", c.projectSkills)

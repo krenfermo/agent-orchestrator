@@ -276,11 +276,17 @@ func TestLiveRunSkill_RevocationDuringStagingStopsTheLaunch(t *testing.T) {
 	if !strings.Contains(err.Error(), "revoked") {
 		t.Fatalf("the refusal should say the approval was revoked: %v", err)
 	}
-	// Nothing started. A refusal that leaves a container behind is not one.
-	out, listErr := exec.Command(r.Runtime().Binary, "ps", "-a",
-		"--filter", "label="+skillrunner.RunLabel+"=1", "--format", "{{.Names}}").Output()
-	if listErr == nil && strings.TrimSpace(string(out)) != "" {
-		t.Fatalf("a refused run left containers behind: %s", out)
+	// Nothing was staged, so nothing could have started: staging precedes the
+	// container, and this assertion is scoped to THIS package's staging root.
+	//
+	// It deliberately does not list containers by label. The label marks every
+	// AO skill run on the host, and `go test ./...` runs package binaries in
+	// parallel -- skillrunner's own live tests have containers in flight -- so
+	// an empty-list assertion here would fail on somebody else's work.
+	base, _ := filepath.Abs("testdata")
+	matches, _ := filepath.Glob(filepath.Join(base, ".ao-skill-staging", "run-*"))
+	if len(matches) != 0 {
+		t.Fatalf("a revoked run staged %d directories", len(matches))
 	}
 }
 

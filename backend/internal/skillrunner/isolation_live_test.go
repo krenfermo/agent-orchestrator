@@ -263,6 +263,7 @@ func TestLive_OutputIsTruncatedAtTheCap(t *testing.T) {
 // container spawns children specifically so "no orphan" means something.
 func TestLive_TimeoutKillsTheRunAndLeavesNoOrphan(t *testing.T) {
 	r := liveRunner(t)
+	containersBefore := listSkillRunContainers(t, r)
 	inputDir, _ := workspace(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -286,22 +287,17 @@ func TestLive_TimeoutKillsTheRunAndLeavesNoOrphan(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 60*time.Second {
 		t.Fatalf("the timeout did not bound the run: %s", elapsed)
 	}
-	// Nothing AO started may survive. The label is what makes this checkable
-	// without touching anybody else's containers.
-	out, err := exec.Command(r.runtime.Binary, "ps", "-a", "--filter", "label="+RunLabel+"=1",
-		"--format", "{{.Names}}").Output()
-	if err != nil {
-		t.Fatalf("list containers: %v", err)
-	}
-	if leftover := strings.TrimSpace(string(out)); leftover != "" {
-		t.Fatalf("containers survived teardown: %s", leftover)
-	}
+	// Nothing AO started HERE may survive. Compared against a snapshot rather
+	// than required to be empty: the label marks every AO skill run on the
+	// host, and another package's live tests run in parallel.
+	noNewSkillRunContainers(t, r, containersBefore)
 }
 
 // Requirement 7 against the real API surface: a digest-less image is refused
 // before anything starts, so "we ran what we tested" stays true.
 func TestLive_RefusesATaggedImageWithoutStartingAnything(t *testing.T) {
 	r := liveRunner(t)
+	containersBefore := listSkillRunContainers(t, r)
 	inputDir, _ := workspace(t)
 
 	_, err := r.Run(context.Background(), Request{
@@ -310,14 +306,7 @@ func TestLive_RefusesATaggedImageWithoutStartingAnything(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "must be a sha256 digest") {
 		t.Fatalf("err = %v, want a digest refusal", err)
 	}
-	out, listErr := exec.Command(r.runtime.Binary, "ps", "-a", "--filter", "label="+RunLabel+"=1",
-		"--format", "{{.Names}}").Output()
-	if listErr != nil {
-		t.Fatalf("list containers: %v", listErr)
-	}
-	if strings.TrimSpace(string(out)) != "" {
-		t.Fatalf("a refused request started a container: %s", out)
-	}
+	noNewSkillRunContainers(t, r, containersBefore)
 }
 
 // A runtime that IS available still attests only its five controls, so nothing
@@ -369,6 +358,29 @@ func listSkillRunContainers(t *testing.T, r *Runner) string {
 		t.Fatalf("list containers: %v", err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// noNewSkillRunContainers asserts that a refusal started nothing, by comparing
+// against a snapshot taken before it.
+//
+// It cannot simply require the list to be EMPTY. The RunLabel marks every AO
+// skill run on the host, and `go test ./...` runs package binaries in parallel:
+// service/skills drives live containers of its own, so an empty-list assertion
+// here fails on somebody else's container and passes or fails depending on
+// scheduling. A before/after comparison is the property this test actually
+// means -- "this refusal added nothing" -- and it is true regardless of what
+// else the host is doing.
+func noNewSkillRunContainers(t *testing.T, r *Runner, before string) {
+	t.Helper()
+	existing := map[string]bool{}
+	for _, name := range strings.Fields(before) {
+		existing[name] = true
+	}
+	for _, name := range strings.Fields(listSkillRunContainers(t, r)) {
+		if !existing[name] {
+			t.Fatalf("a refusal started container %q", name)
+		}
+	}
 }
 
 // reportText renders a report as JSON so a test can assert that a value never
