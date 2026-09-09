@@ -1,7 +1,9 @@
 # 3. Skill catalog foundation: versioned manifests, explicit activation, fail-closed capabilities
 
 Date: 2026-09-08
-Status: Accepted (catalog core); **not wired into the daemon, and no runner exists**
+Status: Accepted. Phase 2 (2026-09-09) moved the registry into SQLite and added
+the API, CLI and UI; **no runner exists, so nothing executes**. See the
+"Phase 2" section at the end for what changed.
 
 ## Context
 
@@ -142,6 +144,9 @@ schema, and a catalog that cannot ship without a migration cannot ship now.
 Moving it into SQLite is a deliberate later step (roadmap subfase 5), and the
 registry's shape was chosen to map onto two tables cleanly.
 
+*(Phase 2 did exactly that — see below. `skillcatalog.Registry` remains, and is
+still the file-backed implementation the package's own tests exercise.)*
+
 ### Costs accepted
 
 - No concurrency control on the registry file. It is safe for the single-writer
@@ -166,3 +171,89 @@ until the catalog is wired.
 would execute in the daemon's process or a worker worktree. Calling that a
 sandbox would make every check in this package cosmetic, which is precisely the
 failure ADR 0002 refused for reviewers.
+
+
+---
+
+## Phase 2 (2026-09-09): durable catalog, administrative surface, dry run
+
+Everything above stands. This section records what changed and the three
+decisions that were not implied by the original ADR.
+
+### Persistence moved to SQLite
+
+Migration 0161 adds `skill_installs`, `skill_activations` and `skill_audit`.
+The package FILES stay on disk under `<dataDir>/skills/catalog/packages`; the
+row carries the manifest and the digest verified at install, and resolution
+re-reads the files and re-verifies the digest, so a package edited underneath AO
+fails closed rather than resolving from a stale row.
+
+`skill_activations` carries a composite foreign key to `(skill_id, version)`, so
+"an activation cannot outlive the exact version it pinned" is an invariant of
+the schema and not only of the service that usually enforces it.
+
+`internal/service/skills` sequences verify → write → audit. It re-implements no
+rule: `skillcatalog.ValidateGrant`, `skillcatalog.Authorize` and
+`skillcatalog.ValidateInputs` are exported and shared with the file-backed
+`Registry`, because a second copy of the capability table is how the two would
+come to disagree.
+
+### Installs are installation-wide; activations are per project
+
+A package is an artifact an administrator vetted once, and reach is granted per
+project on top of it. Tenant isolation therefore rides on project access — every
+activation route resolves through the same project authorization as the rest of
+AO — so there is deliberately no `tenant_id` column. A second scope here would
+be a second answer to a question projects already answer. (This closes open
+question 5 in the roadmap.)
+
+### Three authorization decisions
+
+**`/skills` joins the global rule table under `settings.read` /
+`settings.manage`.** Installing a package puts code on this host that projects
+can then be granted reach with, so it sits with settings rather than with any one
+project. `/projects/{id}/skills` is gated per project in the controller, exactly
+as `/projects/{id}/access` is, so a project administrator activates a skill on
+their own project without holding installation authority.
+
+**The audit trail is gated on `audit.read`, stricter than its family's
+`settings.read` floor.** The trail names actors and carries the host path each
+package came from, and a member holds `settings.read`. This gives
+`domain.PermAuditRead` the enforced consumer its own doc comment says it has
+been waiting for.
+
+**A disabled guard yields the full permission vocabulary, not an empty set.**
+On the default single-user desktop AGENTS.md keeps the loopback listener
+unauthenticated and trusted, and `Guard.Subject` resolves nothing there. An
+empty set would refuse every grant and block every dry run — a new, silent trust
+boundary on the one listener AO deliberately does not gate, and a feature broken
+on the default install. When the guard IS enabled, an unresolvable subject
+yields nothing, which is the fail-closed answer for a multi-user install.
+
+### The dry run
+
+`POST /api/v1/projects/{id}/skills/{skillId}/dry-run` resolves, authorizes and
+reports — skill and version, mode, which capabilities are satisfied, which
+permissions the caller lacks by name, what approval is outstanding, and what the
+runner does and does not provide — then answers `executable`,
+`requires_approval` or `blocked`. It starts no process, opens no socket and
+writes no row; a test asserts that by snapshotting the catalog files, the audit
+and the activations across four dry runs.
+
+It takes **no attestation from its caller**. A self-declared `Isolated: true` is
+exactly the claim this design refuses to accept as proof, so the only
+attestation this surface uses is the one AO can make truthfully, which is
+`NoRunner()`. Read-only modes come back executable; every capability needing
+containment comes back blocked with the reason.
+
+`CapabilityDecision.Satisfied` is per-capability diagnostics, not the verdict.
+Authorization stays fail-closed — one unsatisfied capability refuses the whole
+run — but reporting the others as unsatisfied would tell a user to grant
+something that is not the problem. `Verdict` is the field that answers "can this
+run".
+
+### Still not claimed
+
+No runner. Nothing executes. Everything under "What is explicitly not claimed"
+above is unchanged, and subfase 3 of `docs/skills/roadmap.md` remains the gate
+on every executable capability.
