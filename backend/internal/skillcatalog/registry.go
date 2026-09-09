@@ -171,7 +171,7 @@ func (r *Registry) Install(srcDir, installedBy string) (Installed, error) {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return Installed{}, fmt.Errorf("skillcatalog: create package dir: %w", err)
 	}
-	if err := copyPackage(srcDir, dest); err != nil {
+	if err := CopyPackage(srcDir, dest); err != nil {
 		return Installed{}, err
 	}
 	// Re-verify from the installed copy, not the source: the digest that
@@ -317,7 +317,7 @@ func (r *Registry) Enable(req EnableRequest) (Activation, error) {
 	if err != nil {
 		return Activation{}, err
 	}
-	if err := validateGrant(pkg.Manifest, req); err != nil {
+	if err := ValidateGrant(pkg.Manifest, req); err != nil {
 		return Activation{}, err
 	}
 
@@ -349,7 +349,11 @@ func (r *Registry) Enable(req EnableRequest) (Activation, error) {
 	return activation, nil
 }
 
-func validateGrant(m Manifest, req EnableRequest) error {
+// ValidateGrant is the whole rule set for "may this person enable this skill
+// on this project with this grant". It is exported and store-agnostic so the
+// file-backed Registry and the SQLite-backed catalog decide identically; a
+// second copy of these rules is how the two would drift apart.
+func ValidateGrant(m Manifest, req EnableRequest) error {
 	if strings.TrimSpace(req.ApprovedBy) == "" {
 		return errors.New("skillcatalog: approvedBy is required; an activation records who authorized it")
 	}

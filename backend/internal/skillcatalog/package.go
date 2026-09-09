@@ -134,10 +134,10 @@ func ComputePackageDigest(dir string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// copyPackage copies a validated package tree into destDir. It refuses
+// CopyPackage copies a validated package tree into destDir. It refuses
 // anything that is not a regular file: a symlink inside a package could point
 // at a credential outside it and the copy would follow it into the catalog.
-func copyPackage(srcDir, destDir string) error {
+func CopyPackage(srcDir, destDir string) error {
 	if err := os.RemoveAll(destDir); err != nil {
 		return fmt.Errorf("skillcatalog: clear %q: %w", destDir, err)
 	}

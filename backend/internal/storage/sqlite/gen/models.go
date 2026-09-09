@@ -948,6 +948,45 @@ type ShellTerminal struct {
 	SessionID  sql.NullString
 }
 
+type SkillActivation struct {
+	ProjectID    domain.ProjectID
+	SkillID      string
+	Version      string
+	Enabled      int64
+	Capabilities string
+	ApprovedBy   string
+	ApprovedAt   sql.NullTime
+	UpdatedAt    time.Time
+}
+
+type SkillAudit struct {
+	ID           string
+	OccurredAt   time.Time
+	Actor        string
+	Action       string
+	SkillID      string
+	Version      string
+	ProjectID    *domain.ProjectID
+	Digest       string
+	Capabilities string
+	Detail       string
+}
+
+type SkillInstall struct {
+	SkillID      string
+	Version      string
+	Name         string
+	Description  string
+	RiskLevel    string
+	OriginType   string
+	OriginRef    string
+	Digest       string
+	ManifestJson string
+	PackageDir   string
+	InstalledAt  time.Time
+	InstalledBy  string
+}
+
 type Team struct {
 	ID          domain.TeamID
 	Name        string

@@ -164,6 +164,7 @@ var shippedMigrations = map[int64]string{
 	158: "0158_work_items.sql",
 	159: "0159_agent_credentials.sql",
 	160: "0160_workflow_attempt_invalid_placement.sql",
+	161: "0161_skill_catalog.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

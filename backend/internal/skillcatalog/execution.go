@@ -101,7 +101,7 @@ func PlanRun(r *Registry, req RunRequest, runner RunnerAttestation) (Plan, error
 	if !ok {
 		return Plan{}, invalidf("skill %q has no mode %q", req.SkillID, req.ModeID)
 	}
-	inputs, err := resolveInputs(resolved.Package.Manifest, req.Inputs)
+	inputs, err := ResolveInputs(resolved.Package.Manifest, req.Inputs)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -126,9 +126,18 @@ func PlanRun(r *Registry, req RunRequest, runner RunnerAttestation) (Plan, error
 	}, nil
 }
 
-// resolveInputs validates the caller's values against the manifest's declared
-// inputs: required values present, no unknown keys, enums in range.
-func resolveInputs(m Manifest, got map[string]string) (map[string]string, error) {
+// ValidateInputs reports whether the caller's values satisfy the manifest's
+// declared inputs, discarding the normalised result. It exists so a dry run can
+// report a bad parameter without pretending to build a plan.
+func ValidateInputs(m Manifest, got map[string]string) error {
+	_, err := ResolveInputs(m, got)
+	return err
+}
+
+// ResolveInputs validates the caller's values against the manifest's declared
+// inputs -- required values present, no unknown keys, enums in range -- and
+// returns them normalised.
+func ResolveInputs(m Manifest, got map[string]string) (map[string]string, error) {
 	declared := map[string]InputParam{}
 	for _, in := range m.Inputs {
 		declared[in.Name] = in
