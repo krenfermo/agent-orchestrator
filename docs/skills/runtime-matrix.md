@@ -67,7 +67,7 @@ contract is deliberately not general.
 | `no_credential_inheritance` | **Yes** | **Yes** | Yes (AO clears the env) | No |
 | `resource_limits` | **Yes** (cgroup v2) | **Yes** (cgroup v2 in the VM) | **No** — macOS has no cgroups | No |
 | `egress_deny_all` | **Yes** | **Yes** | **Yes** (`-n no-network`) | No |
-| `egress_allowlist` | **Yes**, with the proxy sidecar | **Yes**, with the proxy sidecar | **Not possible** | No |
+| `egress_allowlist` | **Yes**, with the packaged proxy sidecar | **Yes**, with the packaged proxy sidecar | **Not possible** | No |
 | `writable_workspace` | **Yes**, with a usable workspace root | **Yes**, with a usable workspace root | **No** — no confinement to write inside | No |
 | `scoped_secret_delivery` | **Yes**, with a secret authority | **Yes**, with a secret authority | **No** — no confinement to deliver into | No |
 | `arbitrary_process_execution` | Not built | Not built | Not built | No |
@@ -398,13 +398,92 @@ system may be attacked.
 
 `process.exec`, `secrets.read` and `repo.write` are untouched too.
 
-### Packaging is the open gap
+### How the proxy reaches the container (phase 8)
 
-The proxy is a Go binary that must reach the container. This phase
-cross-compiles it in the test and bind-mounts it — which proves the enforcement
-and is **not** how it should ship. Production needs an embedded binary written
-out at run time, or a small AO-owned image. The runner therefore attests this
-control only when the daemon confirms the binary is actually present.
+The proxy is a Go binary that must run inside a Linux container. It is **not**
+compiled while a skill runs. It is built ahead of time, pinned by digest, and
+embedded into the daemon.
+
+```
+scripts/build-egress-proxy.sh          build linux/amd64 + linux/arm64, verify digests
+  --check                              build twice, compare bytes  (reproducibility)
+  --record                             rewrite provenance.json     (a reviewable act)
+
+backend/internal/skillegress/proxybin/
+  provenance.json                      committed: version, toolchain, flags, sha256 per arch
+  artifacts/ao-egress-proxy-linux-{amd64,arm64}   built, gitignored, 6 MiB each
+```
+
+The build is reproducible by construction — `CGO_ENABLED=0`, `-trimpath`,
+`-buildvcs=false`, `-ldflags="-s -w -buildid="` — and measured so: `--check`
+rebuilds both architectures byte-identical. A Go version change moves every
+digest, and the verify path says exactly that instead of failing opaquely.
+
+**Release builds carry the proxy; nothing else does.**
+
+| Build | Carries the proxy | Attests `egress_allowlist` |
+| --- | --- | --- |
+| `go build ./...` (any developer, any test) | No | **No** — refuses, naming the build tag |
+| `go build -tags ao_embed_egress_proxy ./...` | Both architectures | Only after the boundary is measured |
+
+The embed directive names both artifacts, so a release missing one **fails to
+compile** rather than shipping and refusing on exactly the machines that needed
+it.
+
+### What the runner checks before attesting
+
+`VerifyEgressBoundary` measures two things. Neither is a flag a caller passes —
+the boolean that phase 7 accepted is gone, because a promise is not an
+attestation.
+
+1. **The right proxy is present.** Packaged in this build; for the architecture
+   the **container runtime** reports (on macOS the VM's, not the daemon's);
+   hashing to the digest `provenance.json` records. Checked again after the file
+   is written to staging, because "AO carried the right binary" and "the right
+   binary is what the container will mount" are different claims.
+2. **The boundary holds.** AO creates an `--internal` network, confirms the
+   runtime reports it as internal, and watches a container on it **fail** to
+   reach `192.0.2.1` (RFC 5737) and `169.254.169.254`. Nothing external is
+   contacted: with no default route the kernel refuses locally.
+
+The artifact check runs first and short-circuits — a build with no proxy cannot
+enforce anything however good the host's topology is.
+
+### The staged mount
+
+```
+<project parent>/.ao-egress-proxy/<run id>/     0711   traversable, not listable
+  ao-egress-proxy                               0555   no write bit for anybody
+  policy.json                                   0444   destinations and a lease, never a credential
+                                                       mounted read-only at /aoproxy
+```
+
+Two files and nothing else: a read-only mount still exposes everything under it.
+The permissions look loose and are not — the container runs as uid 65534 and
+owns nothing, so it needs other-execute and other-read; what is absent is any
+write bit. **Neither the home directory nor AO's data dir may be the mount
+source**: AO's data dir holds the database and every project's state, and
+mounting it to deliver one binary would put all of that inside a container.
+
+### Two findings from building this
+
+**A caller must not be able to name the architecture.** `StageRequest` takes what
+the runtime *reported* (`"aarch64"`, `"x86_64"`) and maps it itself. A field
+called `GOARCH` is one somebody fills in with the daemon's own architecture,
+which on macOS is the wrong one.
+
+**The kernel is not the safeguard.** A `linux/amd64` proxy on a `linux/arm64`
+runtime does *not* fail with an exec-format error on Docker Desktop: binfmt
+emulation is registered inside the VM, and the foreign binary starts and serves
+normally (measured — it ran for five minutes until the test was killed). The
+architecture check is AO's control, not the kernel's, and the live test asserts
+it by hashing the mounted binary from inside the container.
+
+### Still open
+
+Wiring `-tags ao_embed_egress_proxy` into the desktop release pipeline. Until
+that lands, every shipped daemon is an unpackaged one that refuses egress —
+which is the correct failure, and still a failure.
 
 ## Failure behavior
 
@@ -429,6 +508,12 @@ Every one of these refuses **without executing anything on the host**:
 | A granted name that resolves into a blocked range | Refused at connection time, recorded with the address |
 | An expired egress lease | Refused per request, so a run loses the network mid-run |
 | The proxy down, or refusing its policy | No egress at all; there is no fallback route |
+| A daemon built without `-tags ao_embed_egress_proxy` | `egress_allowlist` not attested; `net.egress` refused, naming the tag |
+| A proxy artifact for another architecture | Refused at selection; the foreign binary is never staged |
+| Proxy bytes that do not hash to `provenance.json` | Refused before staging, and again after the file is written |
+| An `--internal` network the runtime does not report as internal | The boundary is not attested |
+| A container on AO's internal network that DOES reach out | The boundary is not attested; the evidence records what was reached |
+| A leftover proxy staging directory | Kept, never reused |
 
 There is no host fallback and no degraded mode. A capability that needed
 containment and did not get it is refused, never downgraded.

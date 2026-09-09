@@ -429,8 +429,16 @@ func TestAttestation_EgressUnblocksTrafficNotScanning(t *testing.T) {
 		t.Fatal("deny-all was mistaken for an allowlist")
 	}
 
+	// A MEASURED boundary: a verified proxy for this runtime's architecture and
+	// an outbound connection observed to fail on an internal network. Nothing
+	// short of both halves reaches Attestation — TestEgressBoundary_* below
+	// covers each way the measurement can come back short.
 	with := (&Runner{runtime: runtime, runner: fakeCLI{}}).
-		WithEgressAllowlist(true).Attestation()
+		WithEgressBoundary(EgressBoundary{
+			ProxyPackaged: true, ProxyArch: "arm64", ProxyVersion: "1",
+			ProxyDigest:     strings.Repeat("a", 64),
+			InternalNetwork: true, OutboundBlocked: true,
+		}).Attestation()
 	if !with.EgressControlled() {
 		t.Fatal("a wired proxy did not attest an allowlist")
 	}

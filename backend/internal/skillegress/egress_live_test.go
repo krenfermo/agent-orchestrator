@@ -97,13 +97,28 @@ func newWorld(t *testing.T) *world {
 	w.run("network", "create", "--label", egressLabel+"=1", w.extNet)
 	t.Cleanup(w.teardown)
 
-	w.proxyBin = filepath.Join(dir, "ao-egress-proxy")
-	build := exec.Command("go", "build", "-o", w.proxyBin, "./cmd/ao-egress-proxy")
-	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+containerArch(t))
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("cross-compile the proxy: %v\n%s", err, out)
-	}
 	return w
+}
+
+// crossCompiledProxy builds the proxy into the world's directory, on demand.
+//
+// It is how the tests in THIS file get a binary, and it is deliberately not how
+// AO gets one: packaging_live_test.go exercises the artifact the daemon
+// actually carries. Compiling here keeps these tests independent of whether the
+// build was run with -tags ao_embed_egress_proxy.
+func (w *world) crossCompiledProxy() string {
+	w.t.Helper()
+	if w.proxyBin != "" {
+		return w.proxyBin
+	}
+	bin := filepath.Join(w.dir, "ao-egress-proxy")
+	build := exec.Command("go", "build", "-o", bin, "./cmd/ao-egress-proxy")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+containerArch(w.t))
+	if out, err := build.CombinedOutput(); err != nil {
+		w.t.Fatalf("cross-compile the proxy: %v\n%s", err, out)
+	}
+	w.proxyBin = bin
+	return bin
 }
 
 func containerArch(t *testing.T) string {
@@ -178,6 +193,7 @@ func (w *world) startProxy(policy Policy, hosts ...string) string {
 	if err := os.WriteFile(filepath.Join(w.dir, "policy.json"), body, 0o600); err != nil {
 		w.t.Fatalf("write policy: %v", err)
 	}
+	w.crossCompiledProxy()
 	name := "ao-eg-proxy-" + w.id
 	args := []string{"run", "-d", "--name", name, "--label", egressLabel + "=1",
 		"--network", w.intNet, "--user", "65534:65534", "--read-only"}
@@ -377,6 +393,9 @@ func TestLiveEgress_ProxyDownMeansNoNetwork(t *testing.T) {
 // permissive fallback to fall into.
 func TestLiveEgress_TamperedPolicyRefusesToStart(t *testing.T) {
 	w := newWorld(t)
+	// This one starts the container itself rather than through startProxy, so
+	// it has to ask for the binary explicitly.
+	w.crossCompiledProxy()
 	if err := os.WriteFile(filepath.Join(w.dir, "policy.json"),
 		[]byte(`{"leaseId":"x","destinations":[{"scheme":"http","host":"*.example.test","port":80}],`+
 			`"expiresAt":"2030-01-01T00:00:00Z"}`), 0o600); err != nil {

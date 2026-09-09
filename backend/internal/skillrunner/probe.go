@@ -39,6 +39,12 @@ type Runtime struct {
 	OSType string
 	// SecurityOptions are what the daemon reports (seccomp, apparmor, ...).
 	SecurityOptions []string
+	// Architecture is what the DAEMON runs, not what AO runs. On macOS those
+	// differ whenever the VM is emulating: an arm64 `ao` can be driving an
+	// amd64 Linux VM, and a binary AO ships into a container has to match the
+	// VM. It is reported last so a runtime that does not answer leaves it
+	// empty and every architecture-dependent decision fails closed.
+	Architecture string
 }
 
 // commandRunner abstracts exec for tests, matching the pattern
@@ -77,7 +83,8 @@ func probeWith(ctx context.Context, runner commandRunner, binary string) (Runtim
 
 	// One call: an unreachable daemon fails here rather than three times.
 	out, err := runner.Output(ctx, binary, "info", "--format",
-		"{{.ServerVersion}}\n{{.CgroupVersion}}\n{{.OSType}}\n{{range .SecurityOptions}}{{.}} {{end}}")
+		"{{.ServerVersion}}\n{{.CgroupVersion}}\n{{.OSType}}\n"+
+			"{{range .SecurityOptions}}{{.}} {{end}}\n{{.Architecture}}")
 	if err != nil {
 		return Runtime{}, fmt.Errorf("%w: %w", ErrRuntimeUnavailable, err)
 	}
@@ -93,6 +100,9 @@ func probeWith(ctx context.Context, runner commandRunner, binary string) (Runtim
 	}
 	if len(lines) > 3 {
 		rt.SecurityOptions = strings.Fields(lines[3])
+	}
+	if len(lines) > 4 {
+		rt.Architecture = strings.TrimSpace(lines[4])
 	}
 	if rt.ServerVersion == "" {
 		return Runtime{}, fmt.Errorf("%w: %s reported no server version, so no daemon is reachable",
@@ -121,7 +131,8 @@ func probeWith(ctx context.Context, runner commandRunner, binary string) (Runtim
 // What is deliberately ABSENT is the point of the list:
 //
 //   - egress_allowlist — deny-all is implemented; limiting traffic to declared
-//     destinations needs the forward proxy, which is designed and not built.
+//     destinations needs the packaged forward proxy AND a measured boundary,
+//     which VerifyEgressBoundary establishes and this list cannot.
 //   - writable_workspace — every mount is read-only and there is no reviewed
 //     path to return changes to the host.
 //   - scoped_secret_delivery — the container receives no secret by any route.
@@ -149,5 +160,9 @@ func (r Runtime) Describe() string {
 	if r.Binary == "" {
 		return "none"
 	}
-	return fmt.Sprintf("%s %s (%s, cgroup v%s)", r.Binary, r.ServerVersion, r.OSType, r.CgroupVersion)
+	arch := r.Architecture
+	if arch == "" {
+		arch = "unknown arch"
+	}
+	return fmt.Sprintf("%s %s (%s/%s, cgroup v%s)", r.Binary, r.ServerVersion, r.OSType, arch, r.CgroupVersion)
 }

@@ -2,8 +2,9 @@
 
 Date: 2026-09-09
 Status: `scoped_secret_delivery` (phase 5), `writable_workspace` (phase 6) and
-`egress_allowlist` (phase 7) are **IMPLEMENTED** — see the notes at the end of
-their sections. `arbitrary_process_execution` remains design only.
+`egress_allowlist` (phase 7, packaged in phase 8) are **IMPLEMENTED** — see the
+notes at the end of their sections. `arbitrary_process_execution` remains design
+only.
 
 ## Context
 
@@ -16,7 +17,7 @@ That leaves four controls, each blocking exactly one capability:
 | Control | Blocks | Status |
 | --- | --- | --- |
 | `writable_workspace` | `repo.write` | **built, phase 6** |
-| `egress_allowlist` | `net.egress` | **built, phase 7** |
+| `egress_allowlist` | `net.egress` | **built, phase 7; packaged, phase 8** |
 | `scoped_secret_delivery` | `secrets.read` | **built, phase 5** |
 | `arbitrary_process_execution` | `process.exec` | design only |
 
@@ -27,9 +28,10 @@ should not be attested. Building four of them at once is how one of them ships
 without its test.
 
 **Do not read the remaining section as available.** The capability table
-names these controls, `internal/skillrunner` attests only
-`scoped_secret_delivery` and `writable_workspace` — each only when both a
-container and its own second half exist — and every other affected capability is
+names these controls; `internal/skillrunner` attests `scoped_secret_delivery`,
+`writable_workspace` and `egress_allowlist` — each only when both a container and
+its own second half exist, and the last only on a build that packages the proxy
+and a host whose boundary was measured — and every other affected capability is
 refused with the missing control named.
 
 ## 1. `writable_workspace` — for `repo.write`
@@ -208,14 +210,86 @@ Active testing also needs what a network control cannot provide: named targets,
 a time window, rate limits, and an approval that says which system may be
 attacked. Those belong with the capability, not with the proxy.
 
-### Still open: packaging
+### Packaged, phase 8 — and what the packaging decided
 
-The proxy is a Go binary that must reach the container. This phase
-cross-compiles it in the test and bind-mounts it, which proves the enforcement
-end to end and is **not** how it should ship. Production needs either an
-embedded binary written out at run time or a small AO-owned image — a
-build-pipeline change, and the reason the runner attests this control only when
-the daemon says the binary is actually present.
+Phase 7 left the proxy as a binary the TEST cross-compiled and bind-mounted:
+enforcement proven, distribution unsolved. Phase 8 makes it an artifact AO
+carries. Nothing is compiled while a skill runs, and no new capability is
+unblocked.
+
+**The binaries are built, not committed; the provenance is committed, not
+built.** `scripts/build-egress-proxy.sh` cross-compiles `linux/amd64` and
+`linux/arm64` with `CGO_ENABLED=0 -trimpath -buildvcs=false -ldflags="-s -w
+-buildid="`, which removes the build machine's paths, the commit, the dirty bit
+and the content-derived build id — everything that varies between two people
+building the same source. `--check` builds twice into different directories and
+compares: **measured byte-identical for both architectures.** The digests, the
+sizes, the toolchain and the flag set land in `provenance.json`, which is 30
+lines of reviewable text; the artifacts are 6 MiB each and are reviewable by
+nobody, so they stay out of git. `--record` is the only thing that rewrites the
+provenance, and the diff it produces is exactly "these bytes changed, on this
+toolchain".
+
+The cost, stated plainly: **a Go version change moves every digest.** The verify
+path detects that case and says so — naming the recorded toolchain and the one
+in use — rather than failing with an opaque mismatch.
+
+**`go:embed`, behind a build tag, is the answer.** A release is built with
+`-tags ao_embed_egress_proxy`; the embed directive names both artifacts, so a
+release that would have shipped without one **does not compile**. Every other
+build — every `go build ./...`, every `go test ./...` — carries no proxy at all,
+`Packaged()` is false, and the runner attests no allowlist. That is not a
+degraded mode to work around: a development daemon that reported an allowlist it
+could not enforce would be worse than one that refuses.
+
+**The runner now MEASURES instead of being told.** `WithEgressAllowlist(bool)`
+is gone. `VerifyEgressBoundary` checks two things and attests only when both
+hold: the right proxy is present (packaged, matching the architecture the
+**container runtime** reports — on macOS the VM's, not the daemon's — and
+hashing to the recorded digest), and the boundary works (AO creates an
+`--internal` network, confirms the runtime reports it as internal, and watches a
+container on it **fail** to reach `192.0.2.1` and `169.254.169.254`). Neither
+address is an external service: on an internal network there is no default
+route, so the kernel refuses locally. The artifact check runs first and
+short-circuits, because a build with no proxy cannot enforce anything however
+good the host's topology is.
+
+**Extraction is its own control.** `proxybin.Stage` writes the binary and the
+policy — and nothing else — into a fresh per-run directory, `0711`, mounted
+read-only at `/aoproxy`. The binary is `0555` and the policy `0444`: the
+container runs as uid 65534 and owns nothing, so it needs other-execute and
+other-read; what is absent is a write bit for anybody. The digest is verified
+**twice** — on the embedded bytes, and again by reading the file back after it
+is written — because "AO carried the right binary" and "the right binary is what
+the container will mount" are different claims and only the second one is the
+mount. Neither the home directory nor AO's data dir may be the mount source: AO's
+data dir holds the database and every project's state, and mounting it to
+deliver one binary would put all of that inside a container. A leftover
+directory from a crashed attempt is kept, never reused.
+
+**Two things the design did not anticipate:**
+
+*A caller must not be able to name the architecture.* `StageRequest` takes what
+the runtime **reported** — `"aarch64"`, `"x86_64"` — and maps it itself. A field
+called `GOARCH` is a field somebody fills in with the daemon's own architecture,
+which on macOS is the wrong one.
+
+*The kernel is not the safeguard.* A `linux/amd64` proxy on a `linux/arm64`
+runtime does **not** produce an exec-format error on Docker Desktop: binfmt
+emulation is registered inside the VM, and the foreign binary starts and serves
+normally (measured — it ran for five minutes until the test was killed). So the
+architecture check is AO's control, and the live test asserts it by hashing the
+mounted binary from inside the container rather than by waiting for a failure
+that does not come.
+
+### Still open after phase 8
+
+- **Where the release build runs.** The build script and the tag exist; wiring
+  them into the desktop release pipeline is a separate change, and until it
+  happens every shipped daemon is an unpackaged one that refuses egress.
+- **The trust root.** `provenance.json` says which bytes AO's own build produced.
+  It is not a signature, and it is not evidence to anybody who did not run the
+  build. See section 4.
 
 ## 3. `scoped_secret_delivery` — for `secrets.read`
 

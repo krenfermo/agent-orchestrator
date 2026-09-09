@@ -88,15 +88,23 @@ is no longer the open question; four specific controls are.
 
 | Control | Blocks | What has to be built |
 | --- | --- | --- |
-| ~~`egress_allowlist`~~ | ~~`net.egress`~~ | **Built (phase 7).** An `--internal` network with no route out, a dual-homed proxy sidecar enforcing an exact scheme/host/port allowlist, resolve-once-and-dial-the-address against rebinding. Packaging the binary is the remaining gap. |
+| ~~`egress_allowlist`~~ | ~~`net.egress`~~ | **Built (phase 7), packaged (phase 8).** An `--internal` network with no route out, a dual-homed proxy sidecar enforcing an exact scheme/host/port allowlist, resolve-once-and-dial-the-address against rebinding. The proxy now ships as a reproducibly built, digest-pinned artifact embedded under `-tags ao_embed_egress_proxy`; the runner attests the control only after verifying the artifact and measuring the boundary. Wiring the tag into the release pipeline is the remaining gap. |
 | ~~`writable_workspace`~~ | ~~`repo.write`~~ | **Built (phase 6).** A capped tmpfs the run writes to, transferred into quarantine and validated on the host; artifacts and a diff, never applied. The patch-review surface is still missing. |
 | ~~`scoped_secret_delivery`~~ | ~~`secrets.read`~~ | **Built (phase 5).** Scope-bound grants with expiry and revocation, single-use per-attempt leases, 0600 files at /run/secrets, never an env var. No HTTP/CLI/UI surface yet, deliberately. |
 | `arbitrary_process_execution` | `process.exec` | The skill-image contract: what a skill may ship, how it is built, how its command is authored and pinned |
 
 **ADR 0005 designs all four.** Secret delivery (phase 5), the writable
-workspace (phase 6) and the egress allowlist (phase 7) are built with their
-negative tests. Only `arbitrary_process_execution` remains design only — and it
-is the one gated on a trust-root decision nobody has made.
+workspace (phase 6) and the egress allowlist (phase 7, packaged in phase 8) are
+built with their negative tests. Only `arbitrary_process_execution` remains
+design only — and it is the one gated on a trust-root decision nobody has made.
+
+**Phase 8 changed what an attestation is.** `WithEgressAllowlist(bool)` is gone:
+a boolean a caller passes is a promise, and the point of an attestation is that
+somebody measured something. `VerifyEgressBoundary` verifies the packaged proxy
+(architecture from the container runtime, digest from a committed provenance)
+and then measures the boundary against a real `--internal` network. Anything
+short of both halves leaves `net.egress` refused with the control named — which
+is the state of every developer build, deliberately.
 
 `net.active_scan` stays blocked even with egress: it additionally requires
 `arbitrary_process_execution`, and active testing needs named targets, a window,

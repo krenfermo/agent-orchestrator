@@ -146,10 +146,13 @@ type Runner struct {
 	// probeErr is why the runtime is unusable, when it is. It is kept so the
 	// refusal can say what is wrong rather than only that something is.
 	probeErr error
-	// egressAvailable records that AO can stand up the proxy sidecar and the
-	// internal network the allowlist depends on. Like the others it is set by
-	// the daemon from a resolved fact, never by a manifest or a caller.
-	egressAvailable bool
+	// egress is what AO MEASURED about its ability to limit outbound traffic:
+	// a packaged proxy for this runtime's architecture, verified by digest, and
+	// an internal network on which an outbound connection was observed to fail.
+	// It is produced by VerifyEgressBoundary and by nothing else — a boolean a
+	// caller could pass was the previous phase's placeholder, and a promise is
+	// not an attestation.
+	egress EgressBoundary
 	// workspaceAvailable records that AO can prepare, collect and clean up a
 	// writable workspace on this host. Like secretsAvailable it is set by the
 	// daemon from a resolved fact, never from a manifest and never from a flag
@@ -171,17 +174,6 @@ type Runner struct {
 // reach the network, run a chosen command, or read a secret.
 func (r *Runner) WithWritableWorkspace(rootUsable bool) *Runner {
 	r.workspaceAvailable = rootUsable
-	return r
-}
-
-// WithEgressAllowlist records that AO can enforce an outbound allowlist on
-// this host: the proxy binary exists and the internal network can be created.
-//
-// It unblocks net.egress and NOT net.active_scan. "May open a connection to
-// this host" and "may probe this host for weaknesses" are different
-// permissions, and only the first is what a forward proxy can express.
-func (r *Runner) WithEgressAllowlist(available bool) *Runner {
-	r.egressAvailable = available
 	return r
 }
 
@@ -242,11 +234,11 @@ func (r *Runner) Attestation() skillcatalog.RunnerAttestation {
 	if r.workspaceAvailable {
 		controls = append(controls, skillcatalog.ControlWritableWorkspace)
 	}
-	// An allowlist needs somewhere to enforce it. A container alone provides
-	// deny-all, which is a different and weaker claim.
-	if r.egressAvailable {
-		controls = append(controls, skillcatalog.ControlEgressAllowlist)
-	}
+	// An allowlist needs a proxy to decide and a topology to enforce it. A
+	// container alone provides deny-all, which is a different and weaker claim,
+	// and a proxy AO cannot identify is one it cannot attest. Both halves were
+	// measured by VerifyEgressBoundary or neither is claimed here.
+	controls = append(controls, r.egress.controls()...)
 	return skillcatalog.RunnerAttestation{
 		RunnerID: "container/" + r.runtime.Binary,
 		Controls: controls,
