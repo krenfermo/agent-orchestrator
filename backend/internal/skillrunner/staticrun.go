@@ -45,6 +45,11 @@ type StaticScanRequest struct {
 	// StagingRootOverride lets an operator place staging somewhere the
 	// container runtime definitely shares, when the default does not work.
 	StagingRootOverride string
+	// DataDir is AO's own data directory, passed so the staging root can be
+	// refused if it resolves inside it. A run must never be able to see AO's
+	// database or the credentials in it, and the cheapest place to enforce
+	// that is before anything is staged.
+	DataDir string
 	// Params are the tool's two validated integers.
 	Params ToolParams
 	Limits Limits
@@ -172,6 +177,23 @@ func (r *Runner) RunStaticScan(
 	if err != nil {
 		return StaticScanReport{}, err
 	}
+	// Two checks on the staging root, both BEFORE a single file is copied.
+	//
+	// The order matters. Validate is cheap and local: it refuses a root that is
+	// a symlink, world-writable, traversing, or inside AO's data dir. Verify
+	// costs a container start, so it runs second, and it answers the question
+	// no amount of local checking can: does the RUNTIME see this path at all?
+	//
+	// Doing both here means a host whose runtime cannot see the staging root
+	// finds out before somebody's source is copied to disk, and finds out with
+	// the mount named — not three layers later as an unexplained failure to
+	// attest filesystem isolation.
+	if err := ValidateStagingRoot(root, req.DataDir); err != nil {
+		return StaticScanReport{}, err
+	}
+	if err := r.VerifyStagingVisible(ctx, root, image); err != nil {
+		return StaticScanReport{}, err
+	}
 	runID := "run-" + randomToken()
 	staging, err := Stage(StageRequest{
 		SourceDir: req.ProjectPath, ScopePaths: req.ScopePaths, Root: root, RunID: runID,
@@ -199,6 +221,16 @@ func (r *Runner) RunStaticScan(
 		Limits:   limits,
 	})
 	if err != nil {
+		return StaticScanReport{}, err
+	}
+	// The mount delivered what AO staged, or the run does not produce a report.
+	//
+	// The visibility probe proved the runtime can see the ROOT; this proves it
+	// delivered THESE bytes. They are different failures: a share added between
+	// the probe and the launch, a stale VM cache, a partial copy. A scan over a
+	// tree that is not the project is not a scan of the project, and reporting
+	// it as one is the single most misleading thing this runner could do.
+	if err := verifyStagedInputsDelivered(staging, res.Evidence); err != nil {
 		return StaticScanReport{}, err
 	}
 	if res.TimedOut {

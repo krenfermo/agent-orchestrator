@@ -100,6 +100,12 @@ type BoundaryEvidence struct {
 	// InputFilesVisible is how many files the container could see under
 	// /work. Zero means the mount did not arrive, which fails the run.
 	InputFilesVisible int
+	// InputDigest is the container's own fingerprint of the mounted tree,
+	// computed inside from sorted "relpath\0size\0sha256" rows. AO compares it
+	// against the fingerprint of what it staged: a COUNT can match by accident,
+	// and a mount carrying a stale or partial tree reports a plausible number.
+	// Empty when the runtime produced no digest, which is itself a refusal.
+	InputDigest string
 	// ReadOnlyRootFS records that a write to the container root was refused.
 	ReadOnlyRootFS bool
 	// InheritedDaemonEnv is the count of environment variables that leaked in
@@ -459,6 +465,8 @@ func (r *Runner) evidenceFrom(res Result, req Request, limits Limits) BoundaryEv
 			ev.NetworkReachable = value == "true"
 		case "ao_input_files":
 			ev.InputFilesVisible, _ = strconv.Atoi(value)
+		case "ao_input_digest":
+			ev.InputDigest = value
 		case "ao_rootfs_readonly":
 			ev.ReadOnlyRootFS = value == "true"
 		case "ao_daemon_env_leaked":

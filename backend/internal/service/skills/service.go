@@ -62,7 +62,11 @@ type Service struct {
 	// every daemon boot; nothing here writes inside that path, so a boot can
 	// never overwrite an installed package.
 	root string
-	now  func() time.Time
+	// dataDir is AO's own data directory, kept so a run can refuse a staging
+	// root that resolves inside it. The container must never be able to see
+	// AO's database or the credentials it holds.
+	dataDir string
+	now     func() time.Time
 	// newID mints audit row ids; injectable so tests get stable output.
 	newID func() string
 	// runner is the execution environment AO would use. The service asks IT
@@ -145,11 +149,12 @@ func (s *Service) Images() *ImageAuthority { return s.images }
 // is refused.
 func New(st Store, dataDir string, opts ...Option) *Service {
 	svc := &Service{
-		store:  st,
-		root:   skillcatalog.Dir(dataDir),
-		now:    func() time.Time { return time.Now().UTC() },
-		newID:  randomAuditID,
-		runner: skillcatalog.UnavailableRunner{},
+		store:   st,
+		root:    skillcatalog.Dir(dataDir),
+		dataDir: dataDir,
+		now:     func() time.Time { return time.Now().UTC() },
+		newID:   randomAuditID,
+		runner:  skillcatalog.UnavailableRunner{},
 	}
 	for _, opt := range opts {
 		opt(svc)
