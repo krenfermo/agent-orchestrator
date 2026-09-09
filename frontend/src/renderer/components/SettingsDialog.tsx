@@ -8,6 +8,7 @@ import {
 	SquareKanban,
 	Link2,
 	MonitorCog,
+	Puzzle,
 	RefreshCw,
 	Settings2,
 	ShieldCheck,
@@ -94,6 +95,11 @@ export function SettingsDialog() {
 		// administration entry, whether the caller may CHANGE it is a per-project
 		// answer only the daemon has, and the panel renders read-only when it
 		// reports no manage permission.
+		// Skills is always offered, for the same reason as access and planning:
+		// whether anything is installed, and whether the caller may activate
+		// it, are per-project answers only the daemon has. The panel renders
+		// its own empty and read-only states.
+		{ id: "skills", label: t("settings.project.skills"), icon: Puzzle },
 		{ id: "access", label: t("settings.project.access"), icon: ShieldCheck },
 	];
 
