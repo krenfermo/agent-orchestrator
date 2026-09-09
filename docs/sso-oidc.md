@@ -37,7 +37,8 @@ response shape renders `AO_OIDC_CLIENT_SECRET`.
 | --- | --- |
 | `AO_OIDC_ISSUER` | issuer identifier; must equal the `iss` in the discovery document and in every ID token. https, except a loopback issuer |
 | `AO_OIDC_CLIENT_ID` | client id |
-| `AO_OIDC_CLIENT_SECRET` | client secret; omit for a public (PKCE-only) client |
+| `AO_OIDC_CLIENT_SECRET_FILE` | **preferred.** Path to a `0600` file holding the client secret. Keeps it out of the process environment — see "Where the client secret lives" |
+| `AO_OIDC_CLIENT_SECRET` | client secret inline; omit for a public (PKCE-only) client. Legacy: readable with `ps eww`, and unset from the process as soon as it is read |
 | `AO_OIDC_REDIRECT_URL` | callback registered with the provider (default `http://127.0.0.1:<port>/api/v1/auth/oidc/callback`) |
 | `AO_OIDC_SCOPES` | requested scopes (default `openid profile email`; `openid` is prepended if omitted) |
 | `AO_OIDC_DISPLAY_NAME` | the sign-in button's label |
@@ -51,6 +52,93 @@ A configuration that is half-set is rejected at boot rather than silently
 disabling SSO: an issuer with no client id, `AO_AUTH_MODE=oidc` with no
 provider, a non-loopback `http` issuer, and a malformed required claim are all
 startup errors.
+
+## Where the client secret lives
+
+A process environment is not a private place. On macOS any process running as
+the same user can read another's with `ps eww`, and AO spawns every agent,
+reviewer, planner and verify subprocess with a copy of its own environment — so
+a secret passed as `AO_OIDC_CLIENT_SECRET` was handed to every agent AO ran.
+
+Point `AO_OIDC_CLIENT_SECRET_FILE` at a `0600` file instead:
+
+```bash
+umask 077
+printf %s 'THE-SECRET' > ~/.ao/oidc-client-secret   # no trailing newline needed; one is trimmed
+chmod 600 ~/.ao/oidc-client-secret
+export AO_OIDC_CLIENT_SECRET_FILE=~/.ao/oidc-client-secret
+```
+
+AO refuses a secret file that is readable by group or other, refuses an empty
+one, and refuses having both variables set at once — during a rotation you must
+be able to say which secret is live.
+
+**What this does and does not buy you.** Measured, not assumed:
+
+| | secret in `AO_OIDC_CLIENT_SECRET` | secret in a `0600` file |
+| --- | --- | --- |
+| Visible in `ps eww` on the daemon | **yes, for the process's whole life** | no |
+| Inherited by agent/reviewer/planner subprocesses | no (AO unsets it after reading) | no |
+| Readable by another process running as the same user | yes | yes |
+
+The middle row is the fix that also covers the legacy variable: AO unsets it
+once it is read, and `os.Environ()` no longer carries it, so children do not
+inherit it. The top row is why that is not sufficient on its own — macOS
+snapshots a process's environment at `exec`, so unsetting afterwards does not
+change what `ps` prints for the daemon itself. Only never putting it there does.
+
+Neither option is a security boundary against a same-user attacker, and AO does
+not claim one: a process running as the operator can read a `0600` file exactly
+as it can read `~/.ao/data/cli-credentials.json`. What the file removes is
+casual and incidental exposure — a process listing, a pasted bug report, a
+screen share, and every agent subprocess's own environment.
+
+macOS Keychain was evaluated and is deliberately **not** the default. Reading an
+item at daemon start needs the keychain unlocked and the ACL to admit the
+caller; a daemon launched non-interactively either blocks on a GUI prompt or
+fails, which is the failure mode `internal/runtimehome` was already burned by
+(see `keychain_darwin.go`). An operator who wants at-rest protection can keep
+the secret in Keychain and have a login-time launcher materialize the `0600`
+file, accepting that the file then exists for the daemon's lifetime.
+
+### Rotating the client secret
+
+Google (and every provider that allows more than one active secret) lets a new
+secret exist alongside the old one, so rotation costs no downtime and needs no
+change to the client ID, the issuer, the redirect URL, the allowed domains or
+any authorized account. The existing sessions are AO's own cookies and are not
+re-validated against the provider, so they survive.
+
+1. In Google Cloud Console → **APIs & Services → Credentials**, open the OAuth
+   2.0 Client ID AO uses (match it against `AO_OIDC_CLIENT_ID`; the client ID is
+   not secret). Choose **Add secret**. Do not delete the old one yet.
+2. Write the new secret straight into the file, without it passing through a
+   shell history, a chat, or a shared terminal:
+
+   ```bash
+   umask 077
+   pbpaste > ~/.ao/oidc-client-secret     # after copying it from the console
+   chmod 600 ~/.ao/oidc-client-secret
+   ```
+
+   If the daemon still uses the inline variable, switch it to
+   `AO_OIDC_CLIENT_SECRET_FILE` in the same step and remove the export.
+3. Restart the daemon so it re-reads the configuration. A sign-in performed
+   after the restart exercises the token endpoint with the new secret.
+4. Only once a real sign-in has succeeded, **disable** the old secret in the
+   console, then delete it. Disabling first is the rollback: if a sign-in fails,
+   re-enable the old secret and put it back in the file.
+
+**Rollback.** Keep the previous secret in the console until step 4 completes.
+The rollback is re-enabling it and restoring the file — no schema, no session
+and no account state is involved in a rotation.
+
+**If a secret was exposed** (a process listing, a screen share, a transcript),
+treat it as compromised and rotate it, then delete the old one rather than
+leaving it disabled. A Google OAuth client secret does not by itself grant
+access to any account: an attacker also needs a valid authorization code for
+your redirect URL, which is loopback-only here. That lowers the urgency; it does
+not remove the need to rotate.
 
 ## The flow
 
