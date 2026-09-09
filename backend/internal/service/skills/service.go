@@ -242,8 +242,9 @@ func (s *Service) Uninstall(ctx context.Context, skillID, version, actor string)
 	return nil
 }
 
-// ListInstalled returns every installed version, ordered by id then version.
-func (s *Service) ListInstalled(ctx context.Context) ([]store.SkillInstallRecord, error) {
+// ListInstalledRecords returns every installed version, ordered by id then
+// version. The controller-facing projection is ListInstalled in api.go.
+func (s *Service) ListInstalledRecords(ctx context.Context) ([]store.SkillInstallRecord, error) {
 	recs, err := s.store.ListSkillInstalls(ctx)
 	if err != nil {
 		return nil, err
@@ -257,8 +258,9 @@ func (s *Service) ListInstalled(ctx context.Context) ([]store.SkillInstallRecord
 	return recs, nil
 }
 
-// GetInstalled returns one installed version.
-func (s *Service) GetInstalled(ctx context.Context, skillID, version string) (store.SkillInstallRecord, error) {
+// InstalledRecord returns one installed version. The controller-facing
+// projection is GetInstalled in api.go.
+func (s *Service) InstalledRecord(ctx context.Context, skillID, version string) (store.SkillInstallRecord, error) {
 	rec, ok, err := s.store.GetSkillInstall(ctx, skillID, version)
 	if err != nil {
 		return store.SkillInstallRecord{}, err

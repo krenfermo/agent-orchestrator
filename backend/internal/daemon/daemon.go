@@ -67,6 +67,7 @@ import (
 	questionssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/questions"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/rbac"
 	settingssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/settings"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/skills"
 	ssosvc "github.com/aoagents/agent-orchestrator/backend/internal/service/ssosvc"
 	usagesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/usage"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/workitems"
@@ -243,6 +244,12 @@ func RunWithConfig(cfg config.Config) error {
 	// happened to be configured.
 	authzSvc := authz.New(store)
 	rbacSvc := rbac.New(store, authsvcCreator{authMgr}, rbac.LogAudit{Log: log, Sink: telemetrySink}, nil)
+	// The skill catalog. It reads and writes <dataDir>/skills/catalog, a
+	// SIBLING of the using-ao directory skillassets.Install clobbers above --
+	// nothing here is inside that path, so a boot cannot overwrite an
+	// installed package. It executes nothing: there is no isolated runner, and
+	// every capability that would need one is refused at plan time.
+	skillsSvc := skills.New(store, cfg.DataDir)
 
 	telemetrySink.Emit(context.Background(), ports.TelemetryEvent{
 		Name:       "ao.daemon.started",
@@ -924,6 +931,7 @@ func RunWithConfig(cfg config.Config) error {
 		Authz:             authzSvc,
 		ProjectScope:      store,
 		RBAC:              rbacSvc,
+		Skills:            skillsSvc,
 		ProviderProfiles:  providerProfilesSvc,
 		ProviderSetup:     providerSetupSvc,
 		ExecutionPolicy:   executionPolicySvc,

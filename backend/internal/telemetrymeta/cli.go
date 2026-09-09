@@ -67,6 +67,14 @@ func CLIActorType(actorType, commandPath string) string {
 	if normalized == "ao work" || normalized == "ao work report" {
 		return "agent"
 	}
+	// The skill catalog is administration: a person installs a package,
+	// activates it on a project, or asks what a run would need. No agent
+	// issues these -- an agent credential holds neither settings.manage nor
+	// project.manage -- so classifying them as anything but "user" would
+	// mislabel every row.
+	if normalized == "ao skills" || strings.HasPrefix(normalized, "ao skills ") {
+		return "user"
+	}
 	return "system"
 }
 

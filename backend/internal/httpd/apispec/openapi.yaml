@@ -3206,6 +3206,224 @@ paths:
         repo or a named workspace child repo
       tags:
       - projects
+  /api/v1/projects/{id}/skills:
+    get:
+      operationId: listProjectSkills
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectSkillsResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: what this project has activated, what is available to activate,
+        and what the caller may do here. Requires project.read on the project.'
+      tags:
+      - skills
+  /api/v1/projects/{id}/skills/{skillId}:
+    delete:
+      operationId: disableProjectSkill
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Skill identifier (kebab-case).
+        in: path
+        name: skillId
+        required: true
+        schema:
+          description: Skill identifier (kebab-case).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OKResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: disable a skill on this project and revoke its grant. Requires
+        project.manage.'
+      tags:
+      - skills
+    put:
+      operationId: enableProjectSkill
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Skill identifier (kebab-case).
+        in: path
+        name: skillId
+        required: true
+        schema:
+          description: Skill identifier (kebab-case).
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnableSkillRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillActivationView'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: enable an installed skill on this project, pinned to one version,
+        with an explicit capability grant. The grant may never exceed the approver''s
+        own permissions. Enabling runs nothing. Requires project.manage.'
+      tags:
+      - skills
+  /api/v1/projects/{id}/skills/{skillId}/dry-run:
+    post:
+      operationId: dryRunProjectSkill
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      - description: Skill identifier (kebab-case).
+        in: path
+        name: skillId
+        required: true
+        schema:
+          description: Skill identifier (kebab-case).
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SkillDryRunRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillDryRunResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: report what a run WOULD need - capabilities, missing permissions,
+        outstanding approval, and what the runner does and does not provide. Starts
+        no process, opens no socket and changes nothing. Requires project.read.'
+      tags:
+      - skills
   /api/v1/projects/{id}/workitems:
     delete:
       operationId: deleteProjectWorkItemsConfig
@@ -8291,6 +8509,223 @@ paths:
       summary: Rename a standalone shell terminal tab
       tags:
       - shellTerminals
+  /api/v1/skills:
+    get:
+      operationId: listSkills
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillListResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: every installed package, with AO''s capability vocabulary
+        and the fixed policy for each capability. Requires settings.read.'
+      tags:
+      - skills
+    post:
+      operationId: installSkill
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstallSkillRequest'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillInstallView'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: install a package from an absolute directory on the daemon
+        host. Validates the manifest and verifies the content digest before recording
+        anything, and enables the skill on no project. Requires settings.manage.'
+      tags:
+      - skills
+  /api/v1/skills/{skillId}/audit:
+    get:
+      operationId: getSkillAudit
+      parameters:
+      - description: Skill identifier (kebab-case).
+        in: path
+        name: skillId
+        required: true
+        schema:
+          description: Skill identifier (kebab-case).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillAuditResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: the catalog audit trail for one skill - who installed it,
+        who enabled it where, and who changed its grant. Requires audit.read, which
+        is stricter than the rest of this family: the trail names actors and carries
+        the host path each package came from.'
+      tags:
+      - skills
+  /api/v1/skills/{skillId}/versions/{version}:
+    delete:
+      operationId: uninstallSkill
+      parameters:
+      - description: Skill identifier (kebab-case).
+        in: path
+        name: skillId
+        required: true
+        schema:
+          description: Skill identifier (kebab-case).
+          type: string
+      - description: Installed version (MAJOR.MINOR.PATCH).
+        in: path
+        name: version
+        required: true
+        schema:
+          description: Installed version (MAJOR.MINOR.PATCH).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OKResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: remove one installed version. Refused while any project still
+        has that version enabled. Requires settings.manage.'
+      tags:
+      - skills
+    get:
+      operationId: getSkill
+      parameters:
+      - description: Skill identifier (kebab-case).
+        in: path
+        name: skillId
+        required: true
+        schema:
+          description: Skill identifier (kebab-case).
+          type: string
+      - description: Installed version (MAJOR.MINOR.PATCH).
+        in: path
+        name: version
+        required: true
+        schema:
+          description: Installed version (MAJOR.MINOR.PATCH).
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillInstallView'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: one installed version, its declared capabilities, its modes
+        and the digest verified at install. Requires settings.read.'
+      tags:
+      - skills
   /api/v1/teams:
     get:
       operationId: listTeams
@@ -16352,6 +16787,18 @@ components:
       - sourceBranchId
       - activeBranchId
       type: object
+    EnableSkillRequest:
+      properties:
+        capabilities:
+          items:
+            type: string
+          type: array
+        version:
+          type: string
+      required:
+      - version
+      - capabilities
+      type: object
     EnvironmentAgentCapability:
       properties:
         authState:
@@ -16553,6 +17000,13 @@ components:
           type: string
       required:
       - path
+      type: object
+    InstallSkillRequest:
+      properties:
+        sourceDir:
+          type: string
+      required:
+      - sourceDir
       type: object
     KillReviewResponse:
       properties:
@@ -18333,6 +18787,28 @@ components:
       required:
       - project
       type: object
+    ProjectSkillsResponse:
+      properties:
+        activations:
+          items:
+            $ref: '#/components/schemas/SkillActivationView'
+          type: array
+        installed:
+          items:
+            $ref: '#/components/schemas/SkillInstallView'
+          type: array
+        permissions:
+          items:
+            type: string
+          type: array
+        projectId:
+          type: string
+      required:
+      - projectId
+      - installed
+      - activations
+      - permissions
+      type: object
     ProjectSummary:
       properties:
         defaultBranch:
@@ -19537,6 +20013,375 @@ components:
       - workingDir
       - title
       - createdAt
+      type: object
+    SkillActivationView:
+      properties:
+        approvedAt:
+          format: date-time
+          type: string
+        approvedBy:
+          type: string
+        available:
+          type: boolean
+        enabled:
+          type: boolean
+        grantedCapabilities:
+          items:
+            type: string
+          type: array
+        requestedCapabilities:
+          items:
+            type: string
+          type: array
+        skillId:
+          type: string
+        skillName:
+          type: string
+        unavailable:
+          type: string
+        updatedAt:
+          format: date-time
+          type: string
+        version:
+          type: string
+      required:
+      - skillId
+      - skillName
+      - version
+      - enabled
+      - grantedCapabilities
+      - requestedCapabilities
+      - approvedAt
+      - updatedAt
+      - available
+      type: object
+    SkillAuditResponse:
+      properties:
+        entries:
+          items:
+            $ref: '#/components/schemas/SkillAuditView'
+          type: array
+      required:
+      - entries
+      type: object
+    SkillAuditView:
+      properties:
+        action:
+          enum:
+          - install
+          - uninstall
+          - enable
+          - disable
+          - grant_changed
+          - install_rejected
+          type: string
+        actor:
+          type: string
+        capabilities:
+          items:
+            type: string
+          type: array
+        detail:
+          type: string
+        digest:
+          type: string
+        id:
+          type: string
+        occurredAt:
+          format: date-time
+          type: string
+        projectId:
+          type: string
+        skillId:
+          type: string
+        version:
+          type: string
+      required:
+      - id
+      - occurredAt
+      - action
+      - capabilities
+      type: object
+    SkillCapabilityDecisionView:
+      properties:
+        capability:
+          type: string
+        denialReason:
+          type: string
+        description:
+          type: string
+        detail:
+          type: string
+        requiredPermission:
+          type: string
+        risk:
+          enum:
+          - low
+          - medium
+          - high
+          - critical
+          type: string
+        satisfied:
+          type: boolean
+      required:
+      - capability
+      - satisfied
+      - risk
+      - description
+      - requiredPermission
+      type: object
+    SkillCapabilityView:
+      properties:
+        description:
+          type: string
+        minApproval:
+          enum:
+          - none
+          - per_activation
+          - per_run
+          - per_target
+          type: string
+        name:
+          type: string
+        requiredPermission:
+          type: string
+        requiresEgressControl:
+          type: boolean
+        requiresIsolation:
+          type: boolean
+        risk:
+          enum:
+          - low
+          - medium
+          - high
+          - critical
+          type: string
+      required:
+      - name
+      - description
+      - risk
+      - minApproval
+      - requiresIsolation
+      - requiresEgressControl
+      - requiredPermission
+      type: object
+    SkillDryRunRequest:
+      properties:
+        authorizedTargets:
+          items:
+            type: string
+          type: array
+        inputs:
+          additionalProperties:
+            type: string
+          type: object
+        modeId:
+          type: string
+      type: object
+    SkillDryRunResponse:
+      properties:
+        decisions:
+          items:
+            $ref: '#/components/schemas/SkillCapabilityDecisionView'
+          type: array
+        effectiveRisk:
+          enum:
+          - low
+          - medium
+          - high
+          - critical
+          type: string
+        missingPermissions:
+          items:
+            type: string
+          type: array
+        modeId:
+          type: string
+        modeName:
+          type: string
+        modeRisk:
+          enum:
+          - low
+          - medium
+          - high
+          - critical
+          type: string
+        reasons:
+          items:
+            type: string
+          type: array
+        requiredApproval:
+          enum:
+          - none
+          - per_activation
+          - per_run
+          - per_target
+          type: string
+        runner:
+          $ref: '#/components/schemas/SkillRunnerStatusView'
+        skillId:
+          type: string
+        skillName:
+          type: string
+        verdict:
+          enum:
+          - executable
+          - requires_approval
+          - blocked
+          type: string
+        version:
+          type: string
+      required:
+      - skillId
+      - version
+      - skillName
+      - modeId
+      - modeName
+      - modeRisk
+      - verdict
+      - decisions
+      - missingPermissions
+      - requiredApproval
+      - runner
+      - reasons
+      type: object
+    SkillInstallView:
+      properties:
+        approval:
+          enum:
+          - none
+          - per_activation
+          - per_run
+          - per_target
+          type: string
+        capabilities:
+          items:
+            type: string
+          type: array
+        description:
+          type: string
+        digest:
+          type: string
+        id:
+          type: string
+        installedAt:
+          format: date-time
+          type: string
+        installedBy:
+          type: string
+        modes:
+          items:
+            $ref: '#/components/schemas/SkillModeView'
+          type: array
+        name:
+          type: string
+        originRef:
+          type: string
+        originType:
+          enum:
+          - builtin
+          - local
+          - git
+          type: string
+        publisher:
+          type: string
+        requiresIsolatedRunner:
+          type: boolean
+        riskLevel:
+          enum:
+          - low
+          - medium
+          - high
+          - critical
+          type: string
+        sourceUrl:
+          type: string
+        version:
+          type: string
+      required:
+      - id
+      - version
+      - name
+      - description
+      - riskLevel
+      - originType
+      - publisher
+      - digest
+      - capabilities
+      - modes
+      - requiresIsolatedRunner
+      - approval
+      - installedAt
+      type: object
+    SkillListResponse:
+      properties:
+        capabilities:
+          items:
+            $ref: '#/components/schemas/SkillCapabilityView'
+          type: array
+        skills:
+          items:
+            $ref: '#/components/schemas/SkillInstallView'
+          type: array
+      required:
+      - skills
+      - capabilities
+      type: object
+    SkillModeView:
+      properties:
+        approval:
+          enum:
+          - none
+          - per_activation
+          - per_run
+          - per_target
+          type: string
+        capabilities:
+          items:
+            type: string
+          type: array
+        description:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+        riskLevel:
+          enum:
+          - low
+          - medium
+          - high
+          - critical
+          type: string
+      required:
+      - id
+      - name
+      - description
+      - riskLevel
+      - capabilities
+      - approval
+      type: object
+    SkillRunnerStatusView:
+      properties:
+        available:
+          type: boolean
+        egressControlled:
+          type: boolean
+        isolated:
+          type: boolean
+        needsEgressControl:
+          type: boolean
+        needsIsolation:
+          type: boolean
+        runnerId:
+          type: string
+      required:
+      - runnerId
+      - available
+      - isolated
+      - egressControlled
+      - needsIsolation
+      - needsEgressControl
       type: object
     SpawnOrchestratorRequest:
       properties:

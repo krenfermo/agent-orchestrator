@@ -1134,6 +1134,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/skills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: what this project has activated, what is available to activate, and what the caller may do here. Requires project.read on the project. */
+        get: operations["listProjectSkills"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/skills/{skillId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Skills: enable an installed skill on this project, pinned to one version, with an explicit capability grant. The grant may never exceed the approver's own permissions. Enabling runs nothing. Requires project.manage. */
+        put: operations["enableProjectSkill"];
+        post?: never;
+        /** Skills: disable a skill on this project and revoke its grant. Requires project.manage. */
+        delete: operations["disableProjectSkill"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{id}/skills/{skillId}/dry-run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: report what a run WOULD need - capabilities, missing permissions, outstanding approval, and what the runner does and does not provide. Starts no process, opens no socket and changes nothing. Requires project.read. */
+        post: operations["dryRunProjectSkill"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{id}/workitems": {
         parameters: {
             query?: never;
@@ -2748,6 +2800,59 @@ export interface paths {
         head?: never;
         /** Rename a standalone shell terminal tab */
         patch: operations["renameShellTerminal"];
+        trace?: never;
+    };
+    "/api/v1/skills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: every installed package, with AO's capability vocabulary and the fixed policy for each capability. Requires settings.read. */
+        get: operations["listSkills"];
+        put?: never;
+        /** Skills: install a package from an absolute directory on the daemon host. Validates the manifest and verifies the content digest before recording anything, and enables the skill on no project. Requires settings.manage. */
+        post: operations["installSkill"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/{skillId}/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: the catalog audit trail for one skill - who installed it, who enabled it where, and who changed its grant. Requires audit.read, which is stricter than the rest of this family: the trail names actors and carries the host path each package came from. */
+        get: operations["getSkillAudit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/{skillId}/versions/{version}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: one installed version, its declared capabilities, its modes and the digest verified at install. Requires settings.read. */
+        get: operations["getSkill"];
+        put?: never;
+        post?: never;
+        /** Skills: remove one installed version. Refused while any project still has that version enabled. Requires settings.manage. */
+        delete: operations["uninstallSkill"];
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/teams": {
@@ -5683,6 +5788,10 @@ export interface components {
             state?: "queued" | "running" | "completed" | "interrupted" | "failed";
             turnId?: string;
         };
+        EnableSkillRequest: {
+            capabilities: string[];
+            version: string;
+        };
         EnvironmentAgentCapability: {
             /** @enum {string} */
             authState: "authorized" | "unauthorized" | "unknown";
@@ -5760,6 +5869,9 @@ export interface components {
         };
         InitializeRepositoryResult: {
             path: string;
+        };
+        InstallSkillRequest: {
+            sourceDir: string;
         };
         KillReviewResponse: {
             reviewerHandleId: string;
@@ -6451,6 +6563,12 @@ export interface components {
         ProjectResponse: {
             project: components["schemas"]["Project"];
         };
+        ProjectSkillsResponse: {
+            activations: components["schemas"]["SkillActivationView"][];
+            installed: components["schemas"]["SkillInstallView"][];
+            permissions: string[];
+            projectId: string;
+        };
         ProjectSummary: {
             defaultBranch?: string;
             id: string;
@@ -6915,6 +7033,129 @@ export interface components {
             sessionId?: string;
             title: string;
             workingDir: string;
+        };
+        SkillActivationView: {
+            /** Format: date-time */
+            approvedAt: string;
+            approvedBy?: string;
+            available: boolean;
+            enabled: boolean;
+            grantedCapabilities: string[];
+            requestedCapabilities: string[];
+            skillId: string;
+            skillName: string;
+            unavailable?: string;
+            /** Format: date-time */
+            updatedAt: string;
+            version: string;
+        };
+        SkillAuditResponse: {
+            entries: components["schemas"]["SkillAuditView"][];
+        };
+        SkillAuditView: {
+            /** @enum {string} */
+            action: "install" | "uninstall" | "enable" | "disable" | "grant_changed" | "install_rejected";
+            actor?: string;
+            capabilities: string[];
+            detail?: string;
+            digest?: string;
+            id: string;
+            /** Format: date-time */
+            occurredAt: string;
+            projectId?: string;
+            skillId?: string;
+            version?: string;
+        };
+        SkillCapabilityDecisionView: {
+            capability: string;
+            denialReason?: string;
+            description: string;
+            detail?: string;
+            requiredPermission: string;
+            /** @enum {string} */
+            risk: "low" | "medium" | "high" | "critical";
+            satisfied: boolean;
+        };
+        SkillCapabilityView: {
+            description: string;
+            /** @enum {string} */
+            minApproval: "none" | "per_activation" | "per_run" | "per_target";
+            name: string;
+            requiredPermission: string;
+            requiresEgressControl: boolean;
+            requiresIsolation: boolean;
+            /** @enum {string} */
+            risk: "low" | "medium" | "high" | "critical";
+        };
+        SkillDryRunRequest: {
+            authorizedTargets?: string[];
+            inputs?: {
+                [key: string]: string;
+            };
+            modeId?: string;
+        };
+        SkillDryRunResponse: {
+            decisions: components["schemas"]["SkillCapabilityDecisionView"][];
+            /** @enum {string} */
+            effectiveRisk?: "low" | "medium" | "high" | "critical";
+            missingPermissions: string[];
+            modeId: string;
+            modeName: string;
+            /** @enum {string} */
+            modeRisk: "low" | "medium" | "high" | "critical";
+            reasons: string[];
+            /** @enum {string} */
+            requiredApproval: "none" | "per_activation" | "per_run" | "per_target";
+            runner: components["schemas"]["SkillRunnerStatusView"];
+            skillId: string;
+            skillName: string;
+            /** @enum {string} */
+            verdict: "executable" | "requires_approval" | "blocked";
+            version: string;
+        };
+        SkillInstallView: {
+            /** @enum {string} */
+            approval: "none" | "per_activation" | "per_run" | "per_target";
+            capabilities: string[];
+            description: string;
+            digest: string;
+            id: string;
+            /** Format: date-time */
+            installedAt: string;
+            installedBy?: string;
+            modes: components["schemas"]["SkillModeView"][];
+            name: string;
+            originRef?: string;
+            /** @enum {string} */
+            originType: "builtin" | "local" | "git";
+            publisher: string;
+            requiresIsolatedRunner: boolean;
+            /** @enum {string} */
+            riskLevel: "low" | "medium" | "high" | "critical";
+            sourceUrl?: string;
+            version: string;
+        };
+        SkillListResponse: {
+            capabilities: components["schemas"]["SkillCapabilityView"][];
+            skills: components["schemas"]["SkillInstallView"][];
+        };
+        SkillModeView: {
+            /** @enum {string} */
+            approval: "none" | "per_activation" | "per_run" | "per_target";
+            capabilities: string[];
+            description: string;
+            id: string;
+            name: string;
+            /** @enum {string} */
+            riskLevel: "low" | "medium" | "high" | "critical";
+        };
+        SkillRunnerStatusView: {
+            available: boolean;
+            egressControlled: boolean;
+            isolated: boolean;
+            needsEgressControl: boolean;
+            needsIsolation: boolean;
+            runnerId: string;
         };
         SpawnOrchestratorRequest: {
             clean?: boolean;
@@ -11805,6 +12046,256 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listProjectSkills: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectSkillsResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    enableProjectSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EnableSkillRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillActivationView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    disableProjectSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OKResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    dryRunProjectSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SkillDryRunRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillDryRunResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -18029,6 +18520,276 @@ export interface operations {
             };
             /** @description Internal Server Error */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listSkills: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillListResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    installSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InstallSkillRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillInstallView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getSkillAudit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillAuditResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+                /** @description Installed version (MAJOR.MINOR.PATCH). */
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillInstallView"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    uninstallSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Skill identifier (kebab-case). */
+                skillId: string;
+                /** @description Installed version (MAJOR.MINOR.PATCH). */
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OKResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

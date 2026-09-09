@@ -221,6 +221,7 @@ func NewRootCommand(deps Deps) *cobra.Command {
 	root.AddCommand(newIncidentCommand(ctx))
 	root.AddCommand(newWorkflowCommand(ctx))
 	root.AddCommand(newCapacityCommand(ctx))
+	root.AddCommand(newSkillsCommand(ctx))
 	root.AddCommand(newMemoryCommand(ctx))
 	root.AddCommand(newProviderCommand(ctx))
 	root.AddCommand(newRuntimeCommand(ctx))

@@ -42,6 +42,15 @@ var globalRouteRules = []globalRule{
 	{segment: "providers", read: domain.PermProviderRead, write: domain.PermProviderManage},
 	{segment: "agents", read: domain.PermProviderRead, write: domain.PermProviderManage},
 
+	// Skills phase 2: the catalog is installation administration. Installing a
+	// package puts code on this host that projects can then be granted reach
+	// with, so it sits with settings rather than with any one project. The
+	// per-project ACTIVATION routes are deliberately absent from this table:
+	// they live under /projects and are gated per project in the controller,
+	// so a project administrator activates a skill on their own project
+	// without holding installation authority.
+	{segment: "skills", read: domain.PermSettingsRead, write: domain.PermSettingsManage},
+
 	// P4-B's own administration surfaces.
 	{segment: "users", read: domain.PermUsersRead, write: domain.PermUsersManage},
 	{segment: "teams", read: domain.PermTeamsRead, write: domain.PermTeamsManage},

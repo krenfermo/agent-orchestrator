@@ -106,7 +106,7 @@ func TestInstall_PersistsAndEnablesNothing(t *testing.T) {
 		t.Fatalf("package files were not copied: %v", err)
 	}
 
-	installed, err := f.svc.ListInstalled(ctx)
+	installed, err := f.svc.ListInstalledRecords(ctx)
 	if err != nil || len(installed) != 1 {
 		t.Fatalf("ListInstalled = %#v, %v", installed, err)
 	}
@@ -168,7 +168,7 @@ func TestInstall_RejectsATamperedPackageAndAuditsTheRejection(t *testing.T) {
 	if code := apiCode(t, err); code != "SKILL_MANIFEST_INVALID" {
 		t.Fatalf("code = %q", code)
 	}
-	installed, err := f.svc.ListInstalled(ctx)
+	installed, err := f.svc.ListInstalledRecords(ctx)
 	if err != nil || len(installed) != 0 {
 		t.Fatalf("a tampered package was recorded: %#v, %v", installed, err)
 	}
@@ -372,7 +372,7 @@ func TestResolve_FailsClosedOnAnAlteredPackage(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Enable: %v", err)
 	}
-	rec, err := f.svc.GetInstalled(ctx, "security-audit", version)
+	rec, err := f.svc.InstalledRecord(ctx, "security-audit", version)
 	if err != nil {
 		t.Fatalf("GetInstalled: %v", err)
 	}
@@ -433,7 +433,7 @@ func TestUninstall_RefusesWhileEnabledThenSucceeds(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Enable: %v", err)
 	}
-	rec, err := f.svc.GetInstalled(ctx, "security-audit", version)
+	rec, err := f.svc.InstalledRecord(ctx, "security-audit", version)
 	if err != nil {
 		t.Fatalf("GetInstalled: %v", err)
 	}
@@ -526,7 +526,7 @@ func TestDaemonBootDoesNotOverwriteInstalledPackages(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	version := mustInstall(t, f)
-	rec, err := f.svc.GetInstalled(ctx, "security-audit", version)
+	rec, err := f.svc.InstalledRecord(ctx, "security-audit", version)
 	if err != nil {
 		t.Fatalf("GetInstalled: %v", err)
 	}
@@ -621,7 +621,7 @@ func TestInstall_StoresTheManifestVerbatim(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	version := mustInstall(t, f)
-	rec, err := f.svc.GetInstalled(ctx, "security-audit", version)
+	rec, err := f.svc.InstalledRecord(ctx, "security-audit", version)
 	if err != nil {
 		t.Fatalf("GetInstalled: %v", err)
 	}

@@ -211,6 +211,13 @@ type APIDeps struct {
 	// surfaces. Optional: nil leaves those routes answering 501, matching
 	// every other optional-surface convention here.
 	RBAC rbacsvc.Manager
+
+	// Skills backs the skill catalog: installing packages, activating them per
+	// project, and the dry run that reports what a run would need. Optional,
+	// with the same 501 convention. It executes nothing -- there is no runner
+	// to execute with -- so a nil here costs a daemon no capability it
+	// otherwise had.
+	Skills controllers.SkillCatalog
 }
 
 // normalizeAPIDeps closes the Presence/DeviceLive duplication trap structurally.
@@ -283,6 +290,7 @@ type API struct {
 	teams              *controllers.TeamsController
 	tenants            *controllers.TenantsController
 	projectAccess      *controllers.ProjectAccessController
+	skills             *controllers.SkillsController
 	// guard is P4-B's authorization gate, built once and shared by every
 	// controller that scopes a resource. One value, so a route can never be
 	// gated by a differently-configured evaluator than its neighbour.
@@ -411,6 +419,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		teams:            &controllers.TeamsController{Mgr: deps.RBAC},
 		tenants:          &controllers.TenantsController{Mgr: deps.RBAC, Guard: guard},
 		projectAccess:    &controllers.ProjectAccessController{Mgr: deps.RBAC, Guard: guard},
+		skills:           &controllers.SkillsController{Catalog: deps.Skills, Guard: guard},
 	}
 }
 
@@ -472,6 +481,7 @@ func (a *API) Register(root chi.Router) {
 			a.teams.Register(r)
 			a.tenants.Register(r)
 			a.projectAccess.Register(r)
+			a.skills.Register(r)
 			// Sibling REST controllers plug in here.
 		})
 		// Agent switching synchronously collects a handoff, starts the target,
