@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { attentionActionMessageKey } from "../i18n/key-maps";
 import { ProjectUsageSummary } from "./project-usage-summary";
 import { useNavigate } from "@tanstack/react-router";
 import { AlertTriangle, Archive, Hourglass, Wrench } from "lucide-react";
@@ -590,6 +591,11 @@ function BranchWaitLine({ wait }: { wait: BoardBranchWait }) {
  */
 function HumanDecisionNotice({ workflow }: { workflow: BoardWorkflow }) {
 	const { t } = useTranslation();
+	// The reason code is stable vocabulary and selects the copy; the daemon's
+	// own English sentence is the fallback for a code this build does not know,
+	// so a newer daemon degrades to English rather than to a missing key.
+	const actionKey = attentionActionMessageKey(workflow.attentionReason);
+	const attentionActionText = actionKey ? t(actionKey) : workflow.attentionAction;
 	return (
 		<div className="flex flex-col gap-0.5 rounded border border-warning/50 bg-warning/10 px-2 py-1.5" role="note">
 			<span className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-warning">
@@ -604,8 +610,8 @@ function HumanDecisionNotice({ workflow }: { workflow: BoardWorkflow }) {
 			) : (
 				<span className="text-xs text-muted-foreground">{t("board.noRecordedReason")}</span>
 			)}
-			{workflow.attentionAction ? (
-				<span className="text-xs text-muted-foreground">{workflow.attentionAction}</span>
+			{attentionActionText ? (
+				<span className="text-xs text-muted-foreground">{attentionActionText}</span>
 			) : null}
 		</div>
 	);
