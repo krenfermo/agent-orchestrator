@@ -82,7 +82,9 @@ const OIDCCallbackPath = "/api/v1/auth/oidc/callback"
 //	AO_AUTH_MODE            trusted_local|oidc (default: derived)
 //	AO_OIDC_ISSUER          provider issuer identifier
 //	AO_OIDC_CLIENT_ID       client id
-//	AO_OIDC_CLIENT_SECRET   client secret (omit for a public/PKCE-only client)
+//	AO_OIDC_CLIENT_SECRET_FILE  path to a 0600 file holding the client secret
+//	                        (preferred: keeps it out of the process environment)
+//	AO_OIDC_CLIENT_SECRET   client secret inline (legacy; scrubbed after load)
 //	AO_OIDC_REDIRECT_URL    callback URL (default http://127.0.0.1:<port>/api/v1/auth/oidc/callback)
 //	AO_OIDC_SCOPES          space- or comma-separated (default "openid profile email")
 //	AO_OIDC_DISPLAY_NAME    sign-in button label
@@ -90,12 +92,95 @@ const OIDCCallbackPath = "/api/v1/auth/oidc/callback"
 //	AO_OIDC_REQUIRED_CLAIM  claim=value that a signing-in identity must carry
 //	AO_OIDC_LINK_VERIFIED_EMAIL  link a first federated login to an existing
 //	                        local account on a verified email match (default on)
+//
+// resolveClientSecret reads the OIDC client secret and takes it out of the
+// process environment.
+//
+// THE INCIDENT. The secret was passed to the daemon as AO_OIDC_CLIENT_SECRET,
+// and a process environment on macOS is readable with `ps eww` by any process
+// of the same user. Worse, and less obvious: the daemon spawns every agent,
+// reviewer, planner and verify subprocess with a copy of os.Environ(), so the
+// secret was handed to every AGENT AO ran -- a far larger blast radius than
+// the operator's own shell.
+//
+// TWO MECHANISMS, and what each one actually buys, measured on macOS rather
+// than assumed:
+//
+//   - AO_OIDC_CLIENT_SECRET_FILE names a 0600 file. The secret is never in the
+//     environment, so `ps eww` has nothing to show and no child inherits it.
+//     This is the supported mechanism.
+//   - AO_OIDC_CLIENT_SECRET stays supported for compatibility, and is UNSET
+//     from this process as soon as it is read. That is verifiably enough to
+//     stop children inheriting it (os.Environ no longer carries it) and
+//     verifiably NOT enough to hide it from `ps eww`: macOS snapshots a
+//     process's environment at exec, so the daemon's own row keeps showing the
+//     value for its whole lifetime no matter what it unsets afterwards. An
+//     operator who cares about `ps` must move to the file.
+//
+// Neither is a boundary against a same-user attacker, and this does not claim
+// to be one: a process running as the operator can read a 0600 file exactly as
+// it can read ~/.ao/data/cli-credentials.json. What it removes is casual and
+// incidental exposure -- a process listing, a bug report, a screen share, and
+// every agent subprocess's own environment.
+func resolveClientSecret() (string, error) {
+	path := strings.TrimSpace(os.Getenv("AO_OIDC_CLIENT_SECRET_FILE"))
+	inline, inlineSet := os.LookupEnv("AO_OIDC_CLIENT_SECRET")
+	// Scrub unconditionally, including on every error path below: a
+	// misconfiguration must not leave the value in the environment of the
+	// children this process goes on to spawn.
+	if inlineSet {
+		if err := os.Unsetenv("AO_OIDC_CLIENT_SECRET"); err != nil {
+			return "", fmt.Errorf("scrub AO_OIDC_CLIENT_SECRET from the process environment: %w", err)
+		}
+	}
+	if path == "" {
+		return inline, nil
+	}
+	if inlineSet && strings.TrimSpace(inline) != "" {
+		// Refused rather than silently preferring one: an operator who set
+		// both does not know which secret the daemon is using, and that is
+		// precisely the question a rotation has to be able to answer.
+		return "", fmt.Errorf("AO_OIDC_CLIENT_SECRET and AO_OIDC_CLIENT_SECRET_FILE are both set: use one")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("read AO_OIDC_CLIENT_SECRET_FILE %s: %w", path, err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("AO_OIDC_CLIENT_SECRET_FILE %s is a directory", path)
+	}
+	// The point of moving the secret to a file is that it is not readable by
+	// anyone else; a file the rest of the machine can read gives that up
+	// silently, so it is refused rather than warned about.
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return "", fmt.Errorf(
+			"AO_OIDC_CLIENT_SECRET_FILE %s is mode %04o: it must not be readable by group or other (chmod 600 it)",
+			path, perm)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read AO_OIDC_CLIENT_SECRET_FILE %s: %w", path, err)
+	}
+	// A secret written with `printf` and one written by an editor differ only
+	// by the trailing newline, and a client secret never legitimately carries
+	// surrounding whitespace.
+	value := strings.TrimSpace(string(raw))
+	if value == "" {
+		return "", fmt.Errorf("AO_OIDC_CLIENT_SECRET_FILE %s is empty", path)
+	}
+	return value, nil
+}
+
 func loadOIDC(cfg *Config) error {
+	secret, err := resolveClientSecret()
+	if err != nil {
+		return err
+	}
 	oidc := OIDCConfig{
 		LinkVerifiedEmail: true,
 		Issuer:            strings.TrimSpace(os.Getenv("AO_OIDC_ISSUER")),
 		ClientID:          strings.TrimSpace(os.Getenv("AO_OIDC_CLIENT_ID")),
-		ClientSecret:      os.Getenv("AO_OIDC_CLIENT_SECRET"),
+		ClientSecret:      secret,
 		RedirectURL:       strings.TrimSpace(os.Getenv("AO_OIDC_REDIRECT_URL")),
 		DisplayName:       strings.TrimSpace(os.Getenv("AO_OIDC_DISPLAY_NAME")),
 	}
