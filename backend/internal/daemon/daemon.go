@@ -266,7 +266,10 @@ func RunWithConfig(cfg config.Config) error {
 	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 20*time.Second)
 	skillRunner := skillrunner.New(probeCtx)
 	cancelProbe()
-	skillImages := skills.NewImageAuthority(store, store)
+	// The trust root gets the runner as its inspector: an approval is refused
+	// unless this host can show AO the exact bytes under that digest. Without
+	// it the daemon would record decisions about images nobody here has.
+	skillImages := skills.NewImageAuthority(store, store).WithImageInspector(skillRunner)
 	skillsSvc := skills.New(store, cfg.DataDir,
 		skills.WithSkillExecutor(skillRunner, skillImages, store, cfg.SkillStagingRoot,
 			skillRunner.Unavailable()))

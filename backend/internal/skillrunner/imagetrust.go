@@ -236,3 +236,30 @@ func (r *Runner) RevokedSince(
 	}
 	return again.Digest != image.Digest || !again.Active(now)
 }
+
+// VerifyImagePresent reports the digest this host actually holds under the one
+// it was given, for an approval that has not been made yet.
+//
+// It exists so an administrator cannot approve bytes nobody can see. A digest
+// is supplied by whoever fills in the approval form, and a digest is only a
+// claim until something looks: accepting it unchecked would make the trust
+// root record a decision about an artifact this installation may not have, and
+// the mismatch would surface later as a refused run with no explanation of
+// which side was wrong.
+//
+// It is a READ. `image inspect` neither pulls nor starts anything, which is
+// what makes it usable on the approval path — approving an image must not be a
+// way to make AO fetch or execute one.
+//
+// The returned digest is what the runtime resolved, not what was asked for.
+// The caller compares them; a mismatch means the host holds something else
+// under that name and the approval must not be recorded.
+func (r *Runner) VerifyImagePresent(ctx context.Context, digest string) (string, error) {
+	if !r.Available() {
+		return "", fmt.Errorf("%w: %s", ErrRuntimeUnavailable, r.Unavailable())
+	}
+	if _, err := skillimage.ParseDigest(digest); err != nil {
+		return "", err
+	}
+	return r.effectiveDigest(ctx, digest)
+}

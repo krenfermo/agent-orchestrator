@@ -48,12 +48,33 @@ type ImageAuditSink interface {
 	AppendSkillAudit(ctx context.Context, entry store.SkillAuditEntry) error
 }
 
+// ImageInspector reports what the host actually holds under a digest.
+//
+// It is the difference between an approval about bytes and an approval about a
+// string somebody typed. Implemented by *skillrunner.Runner; nil on an
+// installation with no container runtime, which is why Approve refuses rather
+// than skipping the check — see verifyPresence.
+type ImageInspector interface {
+	VerifyImagePresent(ctx context.Context, digest string) (string, error)
+}
+
 // ImageAuthority is AO's trust root for container images.
 type ImageAuthority struct {
-	store ImageStore
-	audit ImageAuditSink
-	now   func() time.Time
-	newID func() string
+	store   ImageStore
+	audit   ImageAuditSink
+	inspect ImageInspector
+	now     func() time.Time
+	newID   func() string
+}
+
+// WithImageInspector wires the host check Approve performs before recording a
+// decision. Without it Approve refuses every approval: an unverifiable digest
+// is a claim, and the trust root does not record claims.
+func (a *ImageAuthority) WithImageInspector(in ImageInspector) *ImageAuthority {
+	if a != nil {
+		a.inspect = in
+	}
+	return a
 }
 
 // NewImageAuthority builds the trust root over a store.
@@ -131,6 +152,9 @@ func (a *ImageAuthority) Approve(ctx context.Context, req ApproveRequest) (skill
 	}
 	if err := approval.Validate(); err != nil {
 		return skillimage.Approval{}, apierr.Invalid("SKILL_IMAGE_APPROVAL_INVALID", err.Error(), nil)
+	}
+	if err := a.verifyPresence(ctx, approval.Digest); err != nil {
+		return skillimage.Approval{}, err
 	}
 
 	stored, err := a.store.UpsertSkillImageApproval(ctx, approval)
@@ -250,6 +274,43 @@ func sortApprovals(in []skillimage.Approval) {
 		}
 		return in[i].ID < in[j].ID
 	})
+}
+
+// verifyPresence refuses an approval for bytes this host cannot show AO.
+//
+// A digest in an approval request is CLIENT-SUPPLIED: it arrives from whoever
+// filled in the form, and until something looks at the host it is a claim about
+// an artifact, not the artifact. Recording it unchecked is the one thing a
+// trust root must not do -- it would attest on the strength of its own input,
+// and the mismatch would surface much later as a refused run that names no
+// cause.
+//
+// It is a read. `image inspect` does not pull and does not start anything, so
+// approving an image cannot become a way to make AO fetch or run one.
+//
+// No inspector, or an unusable runtime, is a REFUSAL rather than a skip. The
+// alternative -- record it now, find out at run time -- is precisely the
+// "trust what you were told" this exists to prevent, and an installation that
+// cannot see the bytes is not one that can vouch for them.
+func (a *ImageAuthority) verifyPresence(ctx context.Context, digest string) error {
+	if a.inspect == nil {
+		return apierr.Conflict("SKILL_IMAGE_UNVERIFIABLE",
+			"this installation has no container runtime to verify the image against, so it "+
+				"cannot approve one; a digest nobody can look at is a claim, not an artifact", nil)
+	}
+	effective, err := a.inspect.VerifyImagePresent(ctx, digest)
+	if err != nil {
+		return apierr.Invalid("SKILL_IMAGE_NOT_PRESENT",
+			fmt.Sprintf("%s is not on this host, and AO does not pull to find out: %v", digest, err), nil)
+	}
+	if effective != digest {
+		// The host holds something else under that name. Approving would record
+		// a decision about bytes nobody reviewed.
+		return apierr.Invalid("SKILL_IMAGE_DIGEST_MISMATCH",
+			fmt.Sprintf("this host resolves %s to %s; AO approves the digest it can see and nothing else",
+				digest, effective), nil)
+	}
+	return nil
 }
 
 func (a *ImageAuthority) requireAvailable() error {

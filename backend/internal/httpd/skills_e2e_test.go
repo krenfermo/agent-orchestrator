@@ -90,7 +90,11 @@ func newSkillsWorld(t *testing.T) *skillsWorld {
 	// One service instance backs both ports: the catalog and the image trust
 	// root are two authorities over one store, not two stores.
 	skillsSvc := skills.New(st, dataDir,
-		skills.WithSkillExecutor(nil, skills.NewImageAuthority(st, st), st, "", ""))
+		skills.WithSkillExecutor(nil,
+			// The trust root refuses to approve bytes it cannot see, so the
+			// e2e harness supplies the host check a real daemon gets from the
+			// container runtime.
+			skills.NewImageAuthority(st, st).WithImageInspector(presentInspector{}), st, "", ""))
 	deps := APIDeps{
 		Auth:             authMgr,
 		Projects:         &fakeProjectManager{items: projects},
@@ -516,4 +520,13 @@ func TestSkills_AuditIsRecordedAndGated(t *testing.T) {
 	if !strings.Contains(body, string(w.owner.ID)) {
 		t.Fatalf("audit does not record the actor: %s", body)
 	}
+}
+
+// presentInspector answers every digest with itself: on this host, the bytes
+// are there under the name they were approved by. The refusal paths have their
+// own coverage in internal/service/skills.
+type presentInspector struct{}
+
+func (presentInspector) VerifyImagePresent(_ context.Context, digest string) (string, error) {
+	return digest, nil
 }

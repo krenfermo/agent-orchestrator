@@ -103,7 +103,7 @@ func newRunFixture(t *testing.T, exec *recordingExecutor, approve bool) (fixture
 		t.Fatalf("Enable: %v", err)
 	}
 
-	auth := skills.NewImageAuthority(f.store, f.store)
+	auth := skills.NewImageAuthority(f.store, f.store).WithImageInspector(acceptAll())
 	svc := skills.New(f.store, f.dataDir,
 		skills.WithSkillExecutor(exec, auth, f.store, "", ""))
 	scope := skillimage.Scope{
