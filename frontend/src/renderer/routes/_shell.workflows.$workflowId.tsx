@@ -17,6 +17,7 @@ import { WorkflowRoutingSummary } from "../components/workflow-routing-summary";
 import { WorkflowIncidentDialog } from "../components/workflow-incident-dialog";
 import { WorkflowAdvicePanel } from "../components/workflow-advice-panel";
 import { WorkflowChangeSet } from "../components/workflow-change-set";
+import { WorkflowDiagnosticsButton } from "../components/workflow-diagnostics-button";
 import { WorkflowResumeButton } from "../components/workflow-resume-button";
 import { WorkflowRecoveryPanel } from "../components/workflow-recovery-panel";
 import { WorkItemLinkPanel } from "../components/workitem-link-panel";
@@ -461,6 +462,11 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 					/>
 				) : null}
 				{cancelError && <p className="text-sm text-destructive">{cancelError}</p>}
+				{/* Everything an operator needs to explain this run, in one
+				    paste. It replaces the "read the id, open a terminal, query
+				    SQLite" loop, and it is an allowlist so it cannot start
+				    carrying more than it says. */}
+				<WorkflowDiagnosticsButton detail={workflow} />
 				<WorkflowCancelAndArchiveButton run={workflow.run} />
 			</div>
 
