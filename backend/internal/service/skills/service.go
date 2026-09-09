@@ -76,6 +76,22 @@ type Service struct {
 	// runnerUnavailable explains an environmental refusal ("no container
 	// runtime on this host") as distinct from "no runner is configured".
 	runnerUnavailable string
+	// executor is the execution environment, when one is wired. It is a
+	// SEPARATE field from runner on purpose: runner answers "what can this
+	// environment prove", which every dry run needs, and executor answers "run
+	// this", which only a real container runtime can do. A service with an
+	// attestation and no executor reports honestly and refuses to run.
+	executor SkillExecutor
+	// images is the trust root. A nil one authorizes nothing rather than
+	// everything, which is what makes an unconfigured installation fail closed.
+	images *ImageAuthority
+	// projects resolves the checkout and the tenant a run belongs to. The
+	// tenant comes from here rather than from a request: a caller who could
+	// name their own tenant could name one with a wider approval attached.
+	projects ProjectReader
+	// stagingRoot optionally overrides where inputs are staged, for a host
+	// whose container runtime shares only certain paths.
+	stagingRoot string
 }
 
 // Option configures a Service at construction.
@@ -91,6 +107,38 @@ func WithRunner(r skillcatalog.Runner, unavailable string) Option {
 		s.runnerUnavailable = unavailable
 	}
 }
+
+// WithSkillExecutor supplies the execution environment, the trust root that
+// says which image it may run, and the project reader a scope is derived from.
+//
+// All four arrive together because none of them is useful alone: an executor
+// with no trust root can run nothing, a trust root with no executor authorizes
+// nothing, and a scope with no project has no tenant. Wiring them one at a time
+// would create half-configured states whose behaviour nobody specified.
+func WithSkillExecutor(
+	exec SkillExecutor, images *ImageAuthority, projects ProjectReader,
+	stagingRoot, unavailable string,
+) Option {
+	return func(s *Service) {
+		if exec != nil {
+			s.executor = exec
+			// The attestation a dry run reports and the one a real run is
+			// authorized against must be the same value, or a dry run would be
+			// telling people about a different environment than the one that
+			// executes.
+			s.runner = exec
+		}
+		s.images = images
+		s.projects = projects
+		s.stagingRoot = stagingRoot
+		s.runnerUnavailable = unavailable
+	}
+}
+
+// Images is the trust root this service was built with, or nil. It is exposed
+// so the HTTP layer can offer the administrative surface without a second
+// construction path that could be wired to a different store.
+func (s *Service) Images() *ImageAuthority { return s.images }
 
 // New builds the service over a catalog rooted at dataDir. With no options it
 // has no runner, so nothing can execute and every control-requiring capability

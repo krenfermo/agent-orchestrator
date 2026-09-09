@@ -51,6 +51,14 @@ const (
 	SkillAuditDisable         SkillAuditAction = "disable"
 	SkillAuditGrantChanged    SkillAuditAction = "grant_changed"
 	SkillAuditInstallRejected SkillAuditAction = "install_rejected"
+	// Phase 8, the image trust root (migration 0163). These live in the same
+	// trail as the install/enable actions above because it is the same reviewer
+	// asking the same kind of question, and two audit tables would be two
+	// places to forget to look.
+	SkillAuditImageApproved SkillAuditAction = "image_approved"
+	SkillAuditImageRevoked  SkillAuditAction = "image_revoked"
+	SkillAuditRunExecuted   SkillAuditAction = "run_executed"
+	SkillAuditRunRefused    SkillAuditAction = "run_refused"
 )
 
 // SkillAuditEntry is one row of the catalog's audit trail.

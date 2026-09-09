@@ -117,6 +117,12 @@ type Config struct {
 	// DataDir is the directory holding durable SQLite state: DB and WAL files.
 	// It is created on first use by the storage layer.
 	DataDir string
+	// SkillStagingRoot optionally overrides where a skill run stages its
+	// inputs (AO_SKILL_STAGING_ROOT). Empty means the runner's own default:
+	// the project's parent directory, which is the one place AO can reason
+	// about when the container runtime is a VM sharing only certain host paths.
+	// An operator whose layout differs sets this; nothing else does.
+	SkillStagingRoot string
 	// WebRoot is an optional directory containing the compiled React renderer.
 	// Empty keeps the daemon API-only (the Electron desktop default); ao server
 	// sets it for headless browser mode.
@@ -339,6 +345,9 @@ func Load() (Config, error) {
 		cfg.ShutdownTimeout = d
 	}
 
+	if raw := os.Getenv("AO_SKILL_STAGING_ROOT"); raw != "" {
+		cfg.SkillStagingRoot = raw
+	}
 	if raw := os.Getenv("AO_AGENT"); raw != "" {
 		cfg.Agent = raw
 	}
