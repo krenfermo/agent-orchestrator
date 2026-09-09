@@ -91,12 +91,31 @@ is no longer the open question; four specific controls are.
 | ~~`egress_allowlist`~~ | ~~`net.egress`~~ | **Built (phase 7), packaged (phase 8).** An `--internal` network with no route out, a dual-homed proxy sidecar enforcing an exact scheme/host/port allowlist, resolve-once-and-dial-the-address against rebinding. The proxy now ships as a reproducibly built, digest-pinned artifact embedded under `-tags ao_embed_egress_proxy`; the runner attests the control only after verifying the artifact and measuring the boundary. Wiring the tag into the release pipeline is the remaining gap. |
 | ~~`writable_workspace`~~ | ~~`repo.write`~~ | **Built (phase 6).** A capped tmpfs the run writes to, transferred into quarantine and validated on the host; artifacts and a diff, never applied. The patch-review surface is still missing. |
 | ~~`scoped_secret_delivery`~~ | ~~`secrets.read`~~ | **Built (phase 5).** Scope-bound grants with expiry and revocation, single-use per-attempt leases, 0600 files at /run/secrets, never an env var. No HTTP/CLI/UI surface yet, deliberately. |
-| `arbitrary_process_execution` | `process.exec` | The skill-image contract: what a skill may ship, how it is built, how its command is authored and pinned |
+| `arbitrary_process_execution` | `process.exec` | **Trust root decided and built (phase 8).** What remains is the command contract: what a skill may ship, and how its entrypoint is declared and pinned |
 
 **ADR 0005 designs all four.** Secret delivery (phase 5), the writable
 workspace (phase 6) and the egress allowlist (phase 7, packaged in phase 8) are
 built with their negative tests. Only `arbitrary_process_execution` remains
 design only — and it is the one gated on a trust-root decision nobody has made.
+
+**Phase 8 also settled the trust root and wired the runner.** Open question 4 --
+who may publish an image this installation executes -- is answered: explicit
+administrative approval, per immutable digest and per full scope, recorded with
+the approver and their stated reason. Not a publisher signature (AO verifies
+none), not an AO registry (there is none), and emphatically not "whatever image
+is on the host", which is what the runner did before. Every container now runs
+with `--pull=never`.
+
+That unblocks exactly ONE mode -- `static-code`, the one with a live boundary
+test -- and only when the runtime is usable AND an approval exists for the exact
+scope. `process.exec`, `repo.write`, `net.active_scan` and `secrets.read` gain
+no surface.
+
+Revocation stops new executions immediately and is re-checked at the last point
+before a container starts. It does **not** kill a container already running, and
+it does **not** recall a secret already delivered -- both stated in
+`skillrunner.RevocationPolicy` and served in the API response, because a runbook
+needs the non-promises as much as the promise.
 
 **Phase 8 changed what an attestation is.** `WithEgressAllowlist(bool)` is gone:
 a boolean a caller passes is a promise, and the point of an attestation is that
@@ -179,17 +198,24 @@ Only once the core is stable and subfase 3 has landed.
    no filesystem boundary and no resource limits.
 3. **Secret scoping.** `secrets.read` has no store to read from. Which secrets
    can a skill request, and who approves each name?
-4. **Signature verification.** `provenance.signature` is rejected today. Adding
-   verification means deciding a trust root before the catalog accepts anything
-   from outside this repository.
+4. ~~**Signature verification.**~~ **Partly settled in phase 8.** The trust root
+   for EXECUTION is decided and built: explicit administrative approval, per
+   immutable digest and per full scope. It is not a signature, and it is
+   documented as not being one -- an approval records that a named administrator
+   inspected those bytes, and the residual risk (an administrator who approves a
+   malicious digest) is stated rather than disguised. What is still open is
+   verification for PACKAGES arriving from outside this repository, which is
+   question 6 and a different artifact.
 5. ~~**Multi-tenancy.**~~ **Settled in phase 2:** installs are
    installation-wide, activations are per project, and tenant isolation rides on
    project access. There is deliberately no tenant column — a second scope would
    be a second answer to a question projects already answer.
 
 6. **Install sources.** Only a local absolute directory is supported. Adding a
-   git or registry source means deciding a trust root first, which is the same
-   decision `provenance.signature` is blocked on (question 4).
+   git or registry source means deciding a trust root for PACKAGES. Phase 8's
+   per-digest administrative approval is the precedent to follow, but it is not
+   the same decision: an image is bytes an administrator can inspect once, and a
+   package is source that changes with every version.
 
 7. **THE DECISION THIS PHASE NEEDS.** Docker (or an equivalent Linux VM) is now
    a hard requirement for any skill that needs containment. Three options, and

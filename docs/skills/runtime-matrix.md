@@ -485,6 +485,56 @@ Wiring `-tags ao_embed_egress_proxy` into the desktop release pipeline. Until
 that lands, every shipped daemon is an unpackaged one that refuses egress —
 which is the correct failure, and still a failure.
 
+## Which image AO may execute (phase 8)
+
+The trust root is **explicit administrative approval, per immutable digest and
+per full scope**. It replaces what the runner did before, which was to ask the
+runtime what `alpine:3.19` was and use the answer -- trusting whoever last ran
+`docker pull` on the host.
+
+```
+approval = (tenant, project, skill, version, mode) + tool + sha256 digest
+           + approver + stated reason + optional expiry + revocation
+```
+
+| Property | Answer |
+| --- | --- |
+| Who may approve | `settings.manage`. A **project** administrator is not enough |
+| What is approved | One immutable `sha256:` digest. A tag is refused |
+| For what | One exact scope AND one AO tool. Nothing neighbouring |
+| Resolved how | By digest, against what the runtime reports it holds. Never by name |
+| Pulling | Never. `--pull=never` on every container; an absent image is a refusal |
+| Re-approving | REPLACES. One scope has one answer, never an accumulating list |
+| Checked when | At resolution, and **again immediately before the container starts** |
+
+**What an approval is not:** a publisher signature. AO verifies none, contacts
+no registry and pulls nothing. An administrator who approves a malicious digest
+has approved a malicious image; what AO guarantees is that the decision was made
+by somebody with administrative permission, recorded with their name and reason,
+scoped to one thing, and that the bytes which run are the bytes approved.
+
+### Revocation
+
+| | |
+| --- | --- |
+| Stops new executions | **Yes**, immediately -- re-checked at the last point before launch |
+| Stops a container already running | **No.** A kill mid-run produces a truncated report a reader could mistake for a complete one, and the blast radius is bounded: no network, read-only mount, wall clock in minutes. The report records that the approval was withdrawn during the run |
+| Recalls a delivered secret | **No.** A value in a container's memory does not come back. Rotate it if it matters |
+
+The exact wording lives in `skillrunner.RevocationPolicy` and is served in the
+API response, so a client shows the same promise the runner enforces.
+
+## What can actually execute
+
+One mode: `static-code`. Only when the runtime is usable AND an approval covers
+the exact scope. The caller supplies a project, a skill, a mode, who they are,
+and the manifest's declared inputs -- and cannot supply an attestation, a
+command, an image, an isolation flag, a scope, or the files to read.
+
+`process.exec`, `repo.write`, `net.active_scan` and `secrets.read` gain no
+surface from this. They are refused by the capability table with the missing
+control named, and a test with the real runner wired asserts exactly that.
+
 ## Failure behavior
 
 Every one of these refuses **without executing anything on the host**:
@@ -514,6 +564,13 @@ Every one of these refuses **without executing anything on the host**:
 | An `--internal` network the runtime does not report as internal | The boundary is not attested |
 | A container on AO's internal network that DOES reach out | The boundary is not attested; the evidence records what was reached |
 | A leftover proxy staging directory | Kept, never reused |
+| No image approved for this scope | Refused before staging; no copy of the source is made |
+| An approval for another tenant, project, version, mode or tool | Refused; there is no neighbouring match |
+| An approval expired or revoked | Refused, and the two stay distinguishable from "never approved" |
+| An approval revoked between resolution and launch | Refused at the pre-launch re-check |
+| The runtime holds different bytes under the approved digest | Refused, naming both digests |
+| The approved image is absent from the host | Refused. AO does not pull, build or import |
+| A manifest read scope AO cannot express as files | Refused, rather than widened to the whole checkout |
 
 There is no host fallback and no degraded mode. A capability that needed
 containment and did not get it is refused, never downgraded.

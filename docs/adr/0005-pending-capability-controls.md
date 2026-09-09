@@ -3,8 +3,9 @@
 Date: 2026-09-09
 Status: `scoped_secret_delivery` (phase 5), `writable_workspace` (phase 6) and
 `egress_allowlist` (phase 7, packaged in phase 8) are **IMPLEMENTED** — see the
-notes at the end of their sections. `arbitrary_process_execution` remains design
-only.
+notes at the end of their sections. The **image trust root** is decided and
+built (phase 8, section 4). `arbitrary_process_execution` remains design only,
+and section 5 says what it still needs.
 
 ## Context
 
@@ -19,7 +20,7 @@ That leaves four controls, each blocking exactly one capability:
 | `writable_workspace` | `repo.write` | **built, phase 6** |
 | `egress_allowlist` | `net.egress` | **built, phase 7; packaged, phase 8** |
 | `scoped_secret_delivery` | `secrets.read` | **built, phase 5** |
-| `arbitrary_process_execution` | `process.exec` | design only |
+| `arbitrary_process_execution` | `process.exec` | design only; its trust-root blocker is now resolved (section 4) |
 
 This ADR is the design for all four and the implementation of none. The reason
 is stated plainly: each needs a negative test proving it cannot exceed its
@@ -373,7 +374,149 @@ or granting one, so nothing here is reachable from the app. Which secrets a
 skill may request, and who approves each name, is a policy decision that should
 be made before the surface exists — otherwise the mechanism decides the policy.
 
-## 4. `arbitrary_process_execution` — for `process.exec`
+## 4. The image trust root — decided and built (phase 8)
+
+`arbitrary_process_execution` stays **design only**. What phase 8 settled is the
+decision that section 5 said was blocking it: **who may publish an image this
+installation will execute.**
+
+### The decision
+
+**Explicit administrative approval, per digest and per scope.** The most
+conservative of the three options this ADR listed, and the only one AO can
+honour today.
+
+What it is NOT, stated plainly because the words matter:
+
+- **Not signature verification.** AO verifies no Notary, cosign or sigstore
+  attestation, and an approval must never be described as "the publisher vouches
+  for this". It says: a named administrator of this installation inspected these
+  exact bytes and allowed this scope to execute them.
+- **Not an AO-operated registry.** There is none. Nothing contacts a registry
+  and nothing pulls; every container now runs with `--pull=never`.
+- **Not trust in what is on the host.** This is the gap phase 8 closed. The
+  previous `ResolveContract` asked the runtime what `alpine:3.19` was and used
+  the answer — which trusts whoever last ran `docker pull`. A compromised base
+  image nobody reviewed would have executed as AO, with AO's staging mounted
+  into it. That function is now unexported, has one caller (the egress boundary
+  probe, which produces no report and reads no inputs), and is not an execution
+  path.
+
+**The residual risk, stated rather than disguised:** an administrator who
+approves a malicious digest has approved a malicious image, and AO will run it.
+What AO guarantees is narrower and checkable: the decision was made by somebody
+holding `settings.manage`, it is recorded with their name and their stated
+reason, it covers exactly one scope, and the bytes that run are the bytes that
+were approved.
+
+### The scope is the full one
+
+An approval binds tenant + project + skill + version + mode — the same
+`skillscope.Scope` that secrets (phase 5) and egress (phase 7) use. "Approved
+for the static-code mode of security-audit 1.2.0 on this project" is a statement
+somebody can evaluate; "approved for this installation" is not, because a newer
+package version is a different manifest asking for different capabilities and
+has to be looked at again.
+
+`skillscope` now **rejects wildcards outright**. `Matches` is exact equality, so
+a scope holding `*` would simply never match and the grant would be dead rather
+than dangerous. That is the wrong failure: somebody who wrote `*` meant "all of
+them", and a grant that silently means "none of them" teaches them the syntax
+works. The next person reads the row as a wildcard grant that appears to exist.
+
+### What is checked, and when
+
+| Moment | Check |
+| --- | --- |
+| Approval | `settings.manage`, explicit confirmation, a stated reason, a well-formed digest, a full scope |
+| Resolution | An active approval for this exact scope AND tool; the digest is what the **runtime** reports it holds |
+| **Immediately before launch** | The approval is asked for **again** and must be unchanged |
+| After the run | Whether the approval stopped being active during it — recorded in the report |
+
+The pre-launch re-check is the one that needed its own step. Staging a checkout
+takes real seconds, and an approval withdrawn during them must stop the launch
+rather than be noticed afterwards. A test proves the authority is actually
+re-consulted rather than a cached answer reused — a cache would pass every other
+assertion in the file.
+
+`BoundaryEvidence.ImageDigest` used to be the reference AO **passed**, which is
+an echo and proves nothing. It is now what the runtime resolved, read back from
+it, alongside the approval id and the approver: a report saying which bytes ran
+without saying who allowed them answers the less useful half.
+
+### Revocation: the promise and the two non-promises
+
+Written as a constant (`skillrunner.RevocationPolicy`) and served in the API
+response, because whoever writes a runbook needs both halves:
+
+- **It stops new executions immediately.** The re-check above is what makes that
+  true at the last possible moment.
+- **It does NOT stop a container already running.** Deliberately. A kill
+  mid-run produces a truncated report a reader could mistake for a completed
+  one, and the blast radius is already bounded — no network, a read-only mount,
+  a wall clock in minutes. The run's report records that the approval was
+  withdrawn during it, so the fact is visible rather than absent. An operator
+  who needs one stopped now stops it by hand; `ao.skillrun=1` identifies exactly
+  AO's runs.
+- **It does NOT recall a secret already delivered.** A value in a container's
+  memory does not come back. Revocation stops the *next* delivery. Treat a
+  secret a revoked run received as exposed for that run's lifetime and rotate it
+  if that matters.
+
+### The runner is now wired, and it unblocks one mode
+
+`service/skills` drives `skillrunner` through one execution path. What it
+enables is **`static-code` and nothing else** — the one mode with a live
+boundary test — and only when the runtime is usable AND an approval exists for
+the exact scope.
+
+The caller supplies a project, a skill, a mode, who they are, and the manifest's
+**declared** inputs. It cannot supply: an attestation (AO's own runner answers),
+a command (AO authors the argv in Go; for the static scan the inputs never reach
+a command line at all), an image (the approval decides), an isolation flag (ADR
+0004's minimum is fixed), a scope (derived from the resolved activation), or the
+files to read (the manifest's declared read scope).
+
+Two things the manifest forced into the open:
+
+**Globs and staging are different languages.** The manifest says `**`; staging
+copies directories. `**` maps to "no scope paths", a literal path passes
+through, and **any other glob is refused**. Falling back to "the whole checkout"
+for a pattern AO cannot express would widen the scope silently — the manifest
+would have been reviewed for `src/**` and the run would read everything.
+
+**A mode-selecting input is filled in by AO**, from the mode it authorized. Two
+answers to "which mode is this" is how a run gets authorized as one thing and
+instructed as another.
+
+`process.exec`, `repo.write`, `net.egress`, `net.active_scan` and
+`secrets.read` gain no surface. A test with the real runner wired asserts the
+capability table still refuses them — the failure that would matter most if
+wiring the runner had bypassed it.
+
+### The administrative surface
+
+`/api/v1/skills/images` — list, approve, revoke — under the `/skills` family and
+therefore already gated on `settings.read` / `settings.manage`. No RBAC change
+was needed. A **project** administrator is not enough, and a test proves it.
+
+Approving is not running: there is no route that does both, because one click
+doing both would collapse two decisions a reviewer is supposed to make
+separately. The React UI is deliberately left to a later subphase; the contract
+is here.
+
+### Still open after phase 8
+
+- **The UI.** The routes exist; nothing renders them yet.
+- **Approval is per project.** An installation with fifty projects approves the
+  same base image fifty times. That is the conservative direction and it will
+  become tedious before it becomes dangerous; a scope wider than a project is a
+  decision to make deliberately, not a convenience to add quietly.
+- **Nothing revalidates an approved digest over time.** An image approved today
+  is approved until somebody revokes it. Optional expiry exists and is not
+  required, for the reason stated below.
+
+## 5. `arbitrary_process_execution` — for `process.exec`
 
 ### What it must be
 
@@ -408,12 +551,45 @@ is the trust root).
 4. An entrypoint not declared by the verified image is refused.
 5. A skill cannot cause a pull; an absent image is a refusal, as today.
 
-### Why not now
+### What phase 8 already supplied
 
-It requires the trust-root decision, which is a product and operational choice
-about who may publish a skill image for this installation. Implementing before
-that produces a mechanism that trusts whatever is on the host, which is
-indistinguishable from no control at all.
+Three of the five negative tests above now pass against the image trust root
+built in section 4, because they are the same tests:
+
+1. An unapproved digest is refused. **Done** — `ErrImageNotApproved`, with
+   negative tests for a substituted digest, a foreign scope, a foreign tool, an
+   expired approval and a revoked one.
+2. An approval that does not verify is refused. **Done** for the approval model
+   this installation uses; there is still no signature to verify.
+5. A skill cannot cause a pull; an absent image is a refusal. **Done** —
+   `--pull=never` on every container, plus a test asserting AO ran no `pull`,
+   `build`, `import` or `load` while resolving an absent image.
+
+### What it still needs
+
+The trust-root blocker is gone. What remains is the **command contract**, which
+is a different problem and the one this control is actually about:
+
+3. **A parameter cannot inject a shell metacharacter or an extra argument.**
+   Today this is true by construction and not by validation: AO builds the argv
+   in Go from two integers, so there is nothing to inject into. Generalising to
+   a skill-declared entrypoint means the validation has to become real.
+4. **An entrypoint not declared by the verified image is refused.** There is no
+   notion of a declared entrypoint yet. An approval today names the image and
+   the AO tool it backs; it does not name what inside the image may run, because
+   AO decides that.
+
+Two further decisions nobody has made:
+
+- **What a skill may ship.** An approval covers a base image AO runs its own
+  script inside. A skill shipping its own tool image is a different artifact
+  with a different review, and the manifest has no field for one.
+- **Whether an approval may cover an entrypoint at all.** "This digest may run"
+  and "this digest may run *this program*" are different grants, and the second
+  is the one `process.exec` needs.
+
+Until both exist, `process.exec` stays refused with the control named. The
+closed tool vocabulary makes that cheap: AO can add approved tools without it.
 
 ## Ordering recommendation
 
@@ -424,14 +600,19 @@ indistinguishable from no control at all.
 3. **`egress_allowlist`** — large, and the only one needing a second container.
    It unblocks two capabilities, including the dependency audit that is the most
    asked-for mode after static analysis.
-4. **`arbitrary_process_execution`** — last, because it is gated on a trust-root
-   decision nobody has made, and because the closed tool contract makes it the
-   least urgent: AO can add approved tools without it.
+4. **`arbitrary_process_execution`** — last. Its trust-root blocker is resolved
+   (section 4); what remains is the command contract, and the closed tool
+   vocabulary keeps it the least urgent: AO can add approved tools without it.
 
 ## What this ADR does not change
 
-`internal/skillrunner` attests five controls and no more.
-`repo.write`, `process.exec`, `secrets.read`, `net.egress` and
-`net.active_scan` are refused with the missing control named. Nothing above is
-reachable by a person clicking through the app, and nothing above should be
-described to anyone as available.
+`process.exec`, `secrets.read` and `net.active_scan` are still refused with the
+missing control named. `repo.write` and `net.egress` are unblocked only where
+their controls are genuinely attested — a writable workspace root, and a
+packaged proxy on a host whose boundary was measured.
+
+What phase 8 changed is narrower than it may read: **one mode of one skill can
+now execute**, on a host with a container runtime, after an administrator has
+approved a specific digest for that exact scope. Everything else in this
+document is still refused, and nothing here should be described to anyone as
+"AO can run skills".
