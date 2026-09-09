@@ -49,3 +49,50 @@ export const agentSwitchErrorLabelKeys: Record<AgentSwitchErrorCode, MessageKey>
 	switch_failed: "switchAgent.error.switchFailed",
 	target_start_unconfirmed: "switchAgent.error.targetStartUnconfirmed",
 };
+
+/**
+ * Workflow attention copy, keyed by the backend's stable attention reason.
+ *
+ * The daemon composes its own English sentence for a stop (workflow.attention's
+ * HumanAction, and the checkpoint's next action) and the UI used to print that
+ * string verbatim — so a Spanish install read "The worker reported its turn
+ * finished and left no change in its workspace." The reason CODE beside it is
+ * stable, typed vocabulary; the sentence is not. So the code selects the copy
+ * and the locale decides its language.
+ *
+ * Only the codes a person is actually asked to act on are mapped. Anything
+ * absent falls back to the daemon's own sentence, which is why an older UI
+ * against a newer daemon loses nothing: it shows the English the daemon sent
+ * rather than a missing-key placeholder. The reason code itself is NEVER
+ * translated — it stays beside the copy for diagnosis.
+ */
+export const attentionActionLabelKeys: Record<string, MessageKey> = {
+	worker_turn_produced_nothing: "attention.action.workerTurnProducedNothing",
+	worker_workspace_unreadable: "attention.action.workerWorkspaceUnreadable",
+	worker_dispatch_ambiguous: "attention.action.workerDispatchAmbiguous",
+	worker_credential_unadoptable: "attention.action.workerCredentialUnadoptable",
+	ambiguous_worker_state: "attention.action.ambiguousWorkerState",
+	worker_terminated_unexpectedly: "attention.action.workerTerminatedUnexpectedly",
+};
+
+/** The observation sentence for the same stops, shown as the run's next action. */
+export const attentionNextActionLabelKeys: Record<string, MessageKey> = {
+	worker_turn_produced_nothing: "attention.next.workerTurnProducedNothing",
+	worker_workspace_unreadable: "attention.next.workerWorkspaceUnreadable",
+	worker_dispatch_ambiguous: "attention.next.workerDispatchAmbiguous",
+	worker_credential_unadoptable: "attention.next.workerCredentialUnadoptable",
+	ambiguous_worker_state: "attention.next.ambiguousWorkerState",
+	worker_terminated_unexpectedly: "attention.next.workerTerminatedUnexpectedly",
+};
+
+/**
+ * The translated sentence for a stop, or undefined when the daemon's own string
+ * is the only thing available. Callers render `key ? t(key) : backendSentence`.
+ */
+export function attentionActionMessageKey(reason: string | undefined): MessageKey | undefined {
+	return reason ? attentionActionLabelKeys[reason] : undefined;
+}
+
+export function attentionNextActionMessageKey(reason: string | undefined): MessageKey | undefined {
+	return reason ? attentionNextActionLabelKeys[reason] : undefined;
+}

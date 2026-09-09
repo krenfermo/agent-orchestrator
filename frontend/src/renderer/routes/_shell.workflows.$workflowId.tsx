@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { attentionNextActionMessageKey } from "../i18n/key-maps";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Archive } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -56,6 +57,23 @@ const executionStrategyKeys = {
 
 function executionStrategyLabel(t: TranslateFn, strategy: keyof typeof executionStrategyKeys): string {
 	return t(executionStrategyKeys[strategy]);
+}
+
+/**
+ * The run's next action in the reader's language.
+ *
+ * The daemon composes this sentence in English. Its attention REASON is stable
+ * typed vocabulary, so the code selects the copy and the locale decides its
+ * language; a reason this build does not map falls back to the daemon's own
+ * sentence, so nothing is lost against a newer daemon.
+ */
+function attentionNextActionText(
+	t: TranslateFn,
+	attentionReason: string | undefined,
+	nextAction: string,
+): string {
+	const key = attentionNextActionMessageKey(attentionReason);
+	return key ? t(key) : nextAction;
 }
 
 function statusLabelText(t: TranslateFn, label: NonNullable<ReturnType<typeof useWorkflowStatusLabel>>): string {
@@ -328,7 +346,13 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				</p>
 				{workflow.run.nextAction && (
 					<p className="text-sm text-muted-foreground">
-						{t("shell.workflowsNextAction", { nextAction: workflow.run.nextAction })}
+						{t("shell.workflowsNextAction", {
+							nextAction: attentionNextActionText(
+								t as TranslateFn,
+								workflow.run.attentionReason,
+								workflow.run.nextAction,
+							),
+						})}
 					</p>
 				)}
 				<WorkflowActivityPanel
