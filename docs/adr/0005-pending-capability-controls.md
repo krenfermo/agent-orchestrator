@@ -1,9 +1,9 @@
 # 5. The four controls that stay unimplemented, and what each one requires
 
 Date: 2026-09-09
-Status: `scoped_secret_delivery` (phase 5) and `writable_workspace` (phase 6)
-are **IMPLEMENTED** — see the notes at the end of their sections. The other two
-remain design only.
+Status: `scoped_secret_delivery` (phase 5), `writable_workspace` (phase 6) and
+`egress_allowlist` (phase 7) are **IMPLEMENTED** — see the notes at the end of
+their sections. `arbitrary_process_execution` remains design only.
 
 ## Context
 
@@ -16,7 +16,7 @@ That leaves four controls, each blocking exactly one capability:
 | Control | Blocks | Status |
 | --- | --- | --- |
 | `writable_workspace` | `repo.write` | **built, phase 6** |
-| `egress_allowlist` | `net.egress`, `net.active_scan` | design only |
+| `egress_allowlist` | `net.egress` | **built, phase 7** |
 | `scoped_secret_delivery` | `secrets.read` | **built, phase 5** |
 | `arbitrary_process_execution` | `process.exec` | design only |
 
@@ -26,7 +26,7 @@ scope, and a control whose negative test does not exist yet is a control that
 should not be attested. Building four of them at once is how one of them ships
 without its test.
 
-**Do not read the two remaining sections as available.** The capability table
+**Do not read the remaining section as available.** The capability table
 names these controls, `internal/skillrunner` attests only
 `scoped_secret_delivery` and `writable_workspace` — each only when both a
 container and its own second half exist — and every other affected capability is
@@ -156,12 +156,66 @@ The evidence in ADR 0004 already shows the substrate: a container on a Docker
 6. A redirect from an allowlisted host to a non-allowlisted one is not followed.
 7. The proxy container is torn down with the run and leaves no network behind.
 
-### Why not now
+### Built, phase 7 — and what changed from this design
 
-This is the largest of the four and the only one that needs a second container
-with its own lifecycle. It is also the one whose failure is most expensive: a
-partial allowlist reads as a control while leaving exfiltration open, which is
-worse than the current honest refusal.
+The design held in outline. Four things it did not say:
+
+**The topology is the control; the proxy only decides.** Measured on the
+implemented design, from inside the skill container: an internet IP is "Network
+unreachable", the cloud-metadata address is "Network unreachable", the embedded
+resolver answers SERVFAIL for external names, and a container on the neighbouring
+network is not resolvable. A live test unsets `HTTP_PROXY`, `http_proxy` and
+`HTTPS_PROXY` and confirms that restores nothing — the variables are a
+convenience for well-behaved clients, and there is no route to bypass.
+
+**Rebinding is answered by resolving once and dialling the address.** The proxy
+looks the host up itself, checks **every** returned address against the blocked
+ranges, and then dials the checked IP rather than the name — so the second
+lookup that would have answered differently never happens. A name that resolves
+to both a usable address and a blocked one is refused outright: allowing it
+would leave which one gets used to chance.
+
+**IP literals are refused as destinations.** An allowlist entry is meant to be
+read by whoever approves it, and "may reach 34.117.x.y" is not a statement
+anybody can evaluate. Wildcards are refused for the same reason — a grant
+covering hosts that do not exist yet is one nobody can enumerate.
+
+**The blanket refusal of private addresses needed an escape valve, and it is
+written down.** An installation whose artifact registry genuinely lives at 10.x
+would otherwise have to turn the control off, and a control nobody can use is a
+control that gets turned off. So a policy may list `permittedPrivateCidrs`. Each
+entry is validated, appears in the proxy's startup line and in the audit summary,
+and **can never re-open link-local**: 169.254.0.0/16 is where cloud metadata
+hands out the host's own credentials, and no exception may reach it. That
+refusal is asserted directly.
+
+The proxy runs with the same posture as a skill container — non-root, immutable
+root filesystem, no capabilities, one bounded tmpfs for its decision log — and
+refuses to start on a policy it cannot accept rather than falling back to
+anything permissive.
+
+### net.active_scan is deliberately still blocked
+
+`egress_allowlist` unblocks `net.egress` and **not** `net.active_scan`. A
+forward proxy can express "may open a connection to this host"; it cannot
+express "may probe this host for weaknesses", because it does not inspect
+payloads and would not know the difference. The capability table keeps them
+apart by requiring `arbitrary_process_execution` for the scan as well — a test
+asserts that granting egress leaves the scan refused, and names the control it
+still lacks.
+
+Active testing also needs what a network control cannot provide: named targets,
+a time window, rate limits, and an approval that says which system may be
+attacked. Those belong with the capability, not with the proxy.
+
+### Still open: packaging
+
+The proxy is a Go binary that must reach the container. This phase
+cross-compiles it in the test and bind-mounts it, which proves the enforcement
+end to end and is **not** how it should ship. Production needs either an
+embedded binary written out at run time or a small AO-owned image — a
+build-pipeline change, and the reason the runner attests this control only when
+the daemon says the binary is actually present.
 
 ## 3. `scoped_secret_delivery` — for `secrets.read`
 

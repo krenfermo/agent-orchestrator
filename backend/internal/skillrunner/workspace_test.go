@@ -409,3 +409,53 @@ func TestAttestation_WorkspaceControlUnblocksOnlyWriting(t *testing.T) {
 		t.Fatalf("an unusable runtime attested %v", unusable.Controls)
 	}
 }
+
+// The egress control unblocks net.egress and NOT net.active_scan. Being
+// allowed to open a connection is not being allowed to probe what is on the
+// other end, and the capability table keeps them apart by requiring one more
+// control for the scan.
+func TestAttestation_EgressUnblocksTrafficNotScanning(t *testing.T) {
+	runtime := Runtime{Binary: "docker", ServerVersion: "29.2.1", CgroupVersion: "2", OSType: "linux"}
+
+	without := (&Runner{runtime: runtime, runner: fakeCLI{}}).Attestation()
+	if without.Provides(skillcatalog.ControlEgressAllowlist) {
+		t.Fatal("a runtime with no proxy attested egress_allowlist")
+	}
+	// Deny-all is what a plain container gives, and it is NOT an allowlist.
+	if !without.Provides(skillcatalog.ControlEgressDenyAll) {
+		t.Fatal("a plain container should attest deny-all")
+	}
+	if without.EgressControlled() {
+		t.Fatal("deny-all was mistaken for an allowlist")
+	}
+
+	with := (&Runner{runtime: runtime, runner: fakeCLI{}}).
+		WithEgressAllowlist(true).Attestation()
+	if !with.EgressControlled() {
+		t.Fatal("a wired proxy did not attest an allowlist")
+	}
+
+	netEgress, _ := skillcatalog.CapNetEgress.Spec()
+	if _, ok := firstMissingControlFor(netEgress.RequiresControls, with); !ok {
+		t.Fatal("net.egress was still refused with every control it names present")
+	}
+	// The scan is not unblocked: it needs arbitrary_process_execution too,
+	// which nothing here provides.
+	activeScan, _ := skillcatalog.CapNetActiveScan.Spec()
+	missing, ok := firstMissingControlFor(activeScan.RequiresControls, with)
+	if ok {
+		t.Fatal("net.active_scan became grantable when traffic was allowed")
+	}
+	if missing != skillcatalog.ControlArbitraryProcessExecution {
+		t.Fatalf("active scan is missing %q, want arbitrary_process_execution", missing)
+	}
+	// And nothing else moved either.
+	for _, stillBlocked := range []skillcatalog.Capability{
+		skillcatalog.CapProcessExec, skillcatalog.CapSecretsRead, skillcatalog.CapRepoWrite,
+	} {
+		spec, _ := stillBlocked.Spec()
+		if _, ok := firstMissingControlFor(spec.RequiresControls, with); ok {
+			t.Fatalf("%s became grantable when egress arrived", stillBlocked)
+		}
+	}
+}

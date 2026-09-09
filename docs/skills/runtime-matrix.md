@@ -67,7 +67,7 @@ contract is deliberately not general.
 | `no_credential_inheritance` | **Yes** | **Yes** | Yes (AO clears the env) | No |
 | `resource_limits` | **Yes** (cgroup v2) | **Yes** (cgroup v2 in the VM) | **No** — macOS has no cgroups | No |
 | `egress_deny_all` | **Yes** | **Yes** | **Yes** (`-n no-network`) | No |
-| `egress_allowlist` | Not built | Not built | **Not possible** | No |
+| `egress_allowlist` | **Yes**, with the proxy sidecar | **Yes**, with the proxy sidecar | **Not possible** | No |
 | `writable_workspace` | **Yes**, with a usable workspace root | **Yes**, with a usable workspace root | **No** — no confinement to write inside | No |
 | `scoped_secret_delivery` | **Yes**, with a secret authority | **Yes**, with a secret authority | **No** — no confinement to deliver into | No |
 | `arbitrary_process_execution` | Not built | Not built | Not built | No |
@@ -317,6 +317,95 @@ A leftover from a crashed attempt is kept, never reused.
 by this control, and a test asserts it. Writing is not a reason to reach the
 network, run a chosen command, or read a credential.
 
+## Egress allowlist
+
+Outbound traffic is limited to destinations granted for this run. Not "the
+network is off" — that is `egress_deny_all`, which a plain container already
+gives — and not a promise the tool is asked to keep.
+
+### The topology is the control
+
+```
+ao-egress-int-<run>   --internal   skill + proxy
+ao-egress-ext-<run>   bridge       proxy + the outside
+```
+
+The skill joins **only** the internal network. Measured from inside it: an
+internet IP is "Network unreachable", the cloud-metadata address is "Network
+unreachable", and Docker's embedded resolver answers **SERVFAIL** for external
+names — so DNS exfiltration through the resolver is closed too.
+
+A live test unsets `HTTP_PROXY`, `http_proxy` and `HTTPS_PROXY` inside the
+container and confirms that restores nothing. The variables are a convenience
+for well-behaved clients; **there is no route to bypass**.
+
+### What a destination may be
+
+`scheme://host:port`, matched exactly on all three. A grant for
+`https://api.example.test:443` does not authorize `http://` to the same host, a
+different port, a subdomain, or `api.example.test.evil.test`.
+
+Refused outright: **wildcards** (a grant covering hosts that do not exist yet is
+one nobody can enumerate), **IP literals** ("may reach 34.117.x.y" is not a
+statement anybody can evaluate, and it is the shape an exfiltration destination
+takes), unqualified names, paths, and embedded credentials.
+
+### DNS rebinding
+
+The proxy resolves the host **itself**, checks **every** returned address
+against the blocked ranges, and then dials the checked address rather than the
+name — so the second lookup that would have answered differently never happens.
+A name that resolves to both a usable address and a blocked one is refused
+outright: allowing it would leave which one gets used to chance.
+
+Blocked whatever a name resolves to: link-local (including 169.254.169.254),
+loopback, RFC1918, carrier-grade NAT, unique-local v6, multicast and reserved.
+
+### Redirects
+
+The proxy does not follow them. A 30x reaches the client, and the client's next
+request comes back through the proxy and is checked like any other. For a
+CONNECT tunnel there is nothing to follow — one authority is authorized and
+that is what the tunnel carries.
+
+### The private-range exception
+
+`permittedPrivateCidrs` lets an installation whose artifact registry genuinely
+lives at 10.x use this control instead of turning it off. Each entry is
+validated, appears in the proxy's startup line and in the audit summary, and
+**can never re-open link-local** — 169.254.0.0/16 is where cloud metadata hands
+out the host's own credentials.
+
+It widens which **addresses a granted name may resolve to**, never which names
+may be reached.
+
+### Evidence
+
+Every authorization is recorded: the method, scheme, host, port, the address it
+resolved to, whether it was allowed and, if not, why. Destinations and outcomes
+only — never payloads, never credentials. `Proxy-Authorization` and every other
+hop-by-hop header are stripped before a request reaches an upstream.
+
+### What egress does NOT unblock
+
+**`net.active_scan` stays blocked.** A forward proxy can express "may open a
+connection to this host"; it cannot express "may probe this host for
+weaknesses", because it does not inspect payloads and would not know the
+difference. The scan additionally requires `arbitrary_process_execution`, which
+nothing provides — and active testing needs what no network control can give:
+named targets, a time window, rate limits, and an approval that says which
+system may be attacked.
+
+`process.exec`, `secrets.read` and `repo.write` are untouched too.
+
+### Packaging is the open gap
+
+The proxy is a Go binary that must reach the container. This phase
+cross-compiles it in the test and bind-mounts it — which proves the enforcement
+and is **not** how it should ship. Production needs an embedded binary written
+out at run time, or a small AO-owned image. The runner therefore attests this
+control only when the daemon confirms the binary is actually present.
+
 ## Failure behavior
 
 Every one of these refuses **without executing anything on the host**:
@@ -336,6 +425,10 @@ Every one of these refuses **without executing anything on the host**:
 | A workspace whose ownership cannot be proven | Kept for recovery, not deleted |
 | A leftover workspace from a crashed attempt | Kept, never reused |
 | A run that produced a symlink, hardlink or special file | Refused and reported; the file stays in quarantine |
+| A destination not in this run's allowlist | Refused by the proxy, recorded with the reason |
+| A granted name that resolves into a blocked range | Refused at connection time, recorded with the address |
+| An expired egress lease | Refused per request, so a run loses the network mid-run |
+| The proxy down, or refusing its policy | No egress at all; there is no fallback route |
 
 There is no host fallback and no degraded mode. A capability that needed
 containment and did not get it is refused, never downgraded.

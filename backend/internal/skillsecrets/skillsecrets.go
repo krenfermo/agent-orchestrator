@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/skillscope"
 )
 
 // ErrInvalid marks a malformed reference, name or scope.
@@ -103,64 +103,11 @@ func (v *SecretValue) UnmarshalJSON([]byte) error {
 	return fmt.Errorf("%w: a secret value may not be decoded from JSON", ErrInvalid)
 }
 
-// Scope is what a grant is bound to. Every field narrows; none is optional,
-// because a grant missing one of them answers "who may read this" with
-// "somebody, somewhere, running something".
-type Scope struct {
-	// TenantID and ProjectID bind the grant to one organization's project. A
-	// grant is unusable from any other, which is the isolation the negative
-	// tests assert.
-	TenantID  domain.TenantID
-	ProjectID domain.ProjectID
-	// SkillID and Version bind it to the exact package. A newer version is a
-	// different package with a different manifest, so it needs its own grant.
-	SkillID string
-	Version string
-	// ModeID binds it to one mode. A package that reads secrets in its
-	// dependency mode does not get them in its pentest mode.
-	ModeID string
-}
-
-// Validate rejects a partially-specified scope.
-func (s Scope) Validate() error {
-	missing := make([]string, 0, 5)
-	if strings.TrimSpace(string(s.TenantID)) == "" {
-		missing = append(missing, "tenantId")
-	}
-	if strings.TrimSpace(string(s.ProjectID)) == "" {
-		missing = append(missing, "projectId")
-	}
-	if strings.TrimSpace(s.SkillID) == "" {
-		missing = append(missing, "skillId")
-	}
-	if strings.TrimSpace(s.Version) == "" {
-		missing = append(missing, "version")
-	}
-	if strings.TrimSpace(s.ModeID) == "" {
-		missing = append(missing, "modeId")
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("%w: scope is missing %s; a grant without every field is a grant to "+
-			"somebody, somewhere, running something", ErrInvalid, strings.Join(missing, ", "))
-	}
-	return nil
-}
-
-// Matches reports whether this scope is exactly the other. Every field must
-// match: there is no wildcard, and adding one would be adding a way to write a
-// grant nobody can reason about.
-func (s Scope) Matches(other Scope) bool {
-	return s.TenantID == other.TenantID &&
-		s.ProjectID == other.ProjectID &&
-		s.SkillID == other.SkillID &&
-		s.Version == other.Version &&
-		s.ModeID == other.ModeID
-}
-
-// String renders the scope for an audit line. It contains no secret material.
-func (s Scope) String() string {
-	return fmt.Sprintf("%s/%s %s@%s#%s", s.TenantID, s.ProjectID, s.SkillID, s.Version, s.ModeID)
-}
+// Scope is re-exported from internal/skillscope so secrets and egress share one
+// definition of "which run may do this". Two copies of the every-field-matches
+// rule would drift, and the drift would be a grant one subsystem honours and
+// the other does not.
+type Scope = skillscope.Scope
 
 // Grant is permission for one scope to receive one secret, until it expires or
 // is revoked.

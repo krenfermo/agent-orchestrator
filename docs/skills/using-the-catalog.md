@@ -76,7 +76,8 @@ The container runner provides five: `filesystem_isolation`,
 | `repo.write` | *(none — built in phase 6; writes go to an isolated workspace and are never applied to your checkout. No UI or CLI yet)* |
 | `process.exec` | `arbitrary_process_execution` |
 | `secrets.read` | *(none — built in phase 5; needs a secret authority configured, and there is no UI or CLI for it yet)* |
-| `net.egress`, `net.active_scan` | `egress_allowlist` — "the network is off" is not "the network is limited to these hosts" |
+| `net.egress` | *(none — built in phase 7; needs the proxy binary present. No UI or CLI yet)* |
+| `net.active_scan` | `arbitrary_process_execution` — being allowed to open a connection is not being allowed to probe what answers |
 
 **Reading is not exempt.** There is no AO-enforced boundary for "an agent reads
 the checkout" outside the container — the agent CLI's tool allowlist is void
