@@ -15,6 +15,7 @@ import { WorkflowCapacityWaitBanner } from "../components/workflow-capacity-wait
 import { WorkflowBranchWaitBanner } from "../components/workflow-branch-wait-banner";
 import { WorkflowRoutingSummary } from "../components/workflow-routing-summary";
 import { WorkflowIncidentDialog } from "../components/workflow-incident-dialog";
+import { WorkflowAdvicePanel } from "../components/workflow-advice-panel";
 import { WorkflowResumeButton } from "../components/workflow-resume-button";
 import { WorkflowRecoveryPanel } from "../components/workflow-recovery-panel";
 import { WorkItemLinkPanel } from "../components/workitem-link-panel";
@@ -321,6 +322,12 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				    the board card cannot tell two different stories. The technical
 				    vocabulary keeps its place further down, in a disclosure. */}
 				{presentation ? <WorkflowStatusPanel presentation={presentation} /> : null}
+				{/* P3-C: the daemon's own answer to "what do I do now" -- whether
+				    anyone is needed, what AO will do by itself, what comes next,
+				    and every action it is refusing WITH the reason. It sits
+				    between the status and the buttons because that is the order
+				    the questions arrive in. It renders no control of its own. */}
+				<WorkflowAdvicePanel advice={workflow.advice} />
 				{presentation ? (
 					<WorkflowActions busy={continuing || cancelling || recoveryPending} handlers={actionHandlers} presentation={presentation} />
 				) : null}
