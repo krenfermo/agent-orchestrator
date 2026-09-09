@@ -190,6 +190,16 @@ type InstallRequest struct {
 	SourceDir string
 	// Actor is the principal performing the install, for the audit trail.
 	Actor string
+	// SourceLabel replaces SourceDir in the audit line when set.
+	//
+	// A registry install stages the package in a quarantine directory before
+	// verifying it, so SourceDir is a temporary path that exists for
+	// milliseconds and tells a later reader nothing. The label is what the
+	// package actually came from -- "registry company-private, release
+	// security-audit@0.1.0" -- because the trail's job is to answer "where did
+	// this come from", and a scratch path answers it wrongly rather than not
+	// at all.
+	SourceLabel string
 }
 
 // Install validates a package, copies it into the catalog, records it and
@@ -264,13 +274,17 @@ func (s *Service) Install(ctx context.Context, req InstallRequest) (store.SkillI
 		_ = os.RemoveAll(dest)
 		return store.SkillInstallRecord{}, err
 	}
+	origin := source
+	if label := strings.TrimSpace(req.SourceLabel); label != "" {
+		origin = label
+	}
 	s.audit(ctx, store.SkillAuditEntry{
 		Actor:   req.Actor,
 		Action:  store.SkillAuditInstall,
 		SkillID: rec.Manifest.ID,
 		Version: rec.Manifest.Version,
 		Digest:  rec.Digest,
-		Detail:  "installed from " + source,
+		Detail:  "installed from " + origin,
 	})
 	return rec, nil
 }

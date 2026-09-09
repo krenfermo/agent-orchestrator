@@ -126,7 +126,7 @@ func (a *ImageAuthority) Approve(ctx context.Context, req ApproveRequest) (skill
 	if err := a.requireAvailable(); err != nil {
 		return skillimage.Approval{}, err
 	}
-	if !holdsPermission(req.ActorPermissions, domain.PermSettingsManage) {
+	if !holdsSettingsManage(req.ActorPermissions) {
 		return skillimage.Approval{}, apierr.Forbidden("SKILL_IMAGE_APPROVAL_REFUSED",
 			"approving a container image for execution requires the settings.manage permission")
 	}
@@ -176,7 +176,7 @@ func (a *ImageAuthority) Revoke(ctx context.Context, id, actor string, perms []d
 	if err := a.requireAvailable(); err != nil {
 		return err
 	}
-	if !holdsPermission(perms, domain.PermSettingsManage) {
+	if !holdsSettingsManage(perms) {
 		return apierr.Forbidden("SKILL_IMAGE_REVOKE_REFUSED",
 			"revoking an image approval requires the settings.manage permission")
 	}
