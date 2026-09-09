@@ -91,6 +91,7 @@ For code entry points:
 - Do not treat failed/unknown runtime probes as proof a session is dead.
 - Do not force-delete dirty registered worktrees.
 - Do not modify already-merged SQLite migrations. Add a new migration instead.
+- A migration that rebuilds a table (create-copy-drop-rename, which SQLite forces for any CHECK change) must handle the foreign keys pointing INTO that table, because SQLite treats `DROP TABLE` as deleting every row of it. Either park each incoming reference and restore it after the rebuild (see `0160`), or set `PRAGMA foreign_keys=OFF` **together with** `-- +goose NO TRANSACTION` — the pragma is silently ignored inside goose's transaction, so one without the other does nothing. `backend/internal/storage/sqlite/migrate_rebuild_fk_safety_test.go` derives the incoming-reference inventory from the schema, requires every rebuild to be declared, and runs each one against a database that actually holds the referencing rows; a fresh database has none, which is why an ordinary migration test cannot catch this.
 - Do not hand-edit `backend/internal/storage/sqlite/gen/*`; change `backend/internal/storage/sqlite/queries/*` or migrations and run `npm run sqlc`.
 - SQLite change events come from DB triggers into `change_log`; do not add parallel manual CDC emission from store methods unless the architecture changes explicitly.
 - Keep generated OpenAPI/API DTO drift in mind: controller response shapes live in `backend/internal/httpd/controllers/dto.go` and tests may assert CLI/HTTP wire compatibility.
