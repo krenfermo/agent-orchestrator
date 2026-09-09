@@ -948,6 +948,100 @@ type ShellTerminal struct {
 	SessionID  sql.NullString
 }
 
+type SkillActivation struct {
+	ProjectID    domain.ProjectID
+	SkillID      string
+	Version      string
+	Enabled      int64
+	Capabilities string
+	ApprovedBy   string
+	ApprovedAt   sql.NullTime
+	UpdatedAt    time.Time
+}
+
+type SkillAudit struct {
+	ID           string
+	OccurredAt   time.Time
+	Actor        string
+	Action       string
+	SkillID      string
+	Version      string
+	ProjectID    *domain.ProjectID
+	Digest       string
+	Capabilities string
+	Detail       string
+}
+
+type SkillImageApproval struct {
+	ID         string
+	TenantID   domain.TenantID
+	ProjectID  domain.ProjectID
+	SkillID    string
+	Version    string
+	ModeID     string
+	Tool       string
+	Reference  string
+	Digest     string
+	ApprovedBy string
+	ApprovedAt time.Time
+	ExpiresAt  sql.NullTime
+	RevokedAt  sql.NullTime
+	Note       string
+}
+
+type SkillInstall struct {
+	SkillID      string
+	Version      string
+	Name         string
+	Description  string
+	RiskLevel    string
+	OriginType   string
+	OriginRef    string
+	Digest       string
+	ManifestJson string
+	PackageDir   string
+	InstalledAt  time.Time
+	InstalledBy  string
+}
+
+type SkillSecret struct {
+	Name        string
+	Description string
+	SealedValue string
+	CreatedAt   time.Time
+	CreatedBy   string
+	UpdatedAt   time.Time
+}
+
+type SkillSecretGrant struct {
+	ID         string
+	SecretName string
+	TenantID   domain.TenantID
+	ProjectID  domain.ProjectID
+	SkillID    string
+	Version    string
+	ModeID     string
+	GrantedBy  string
+	GrantedAt  time.Time
+	ExpiresAt  time.Time
+	RevokedAt  sql.NullTime
+}
+
+type SkillSecretLease struct {
+	ID         string
+	TenantID   domain.TenantID
+	ProjectID  domain.ProjectID
+	SkillID    string
+	Version    string
+	ModeID     string
+	RunID      string
+	AttemptID  string
+	Refs       string
+	IssuedAt   time.Time
+	ExpiresAt  time.Time
+	ConsumedAt sql.NullTime
+}
+
 type Team struct {
 	ID          domain.TeamID
 	Name        string

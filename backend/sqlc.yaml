@@ -523,3 +523,42 @@ sql:
             go_type:
               import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
               type: "WorkflowOutboxStatus"
+          # Skills phase 2: the catalog's project scope is AO's project id.
+          - column: "skill_activations.project_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "ProjectID"
+          # Nullable: an install/uninstall is installation-wide and belongs to
+          # no project, while an enable/disable names one.
+          - column: "skill_audit.project_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "ProjectID"
+              pointer: true
+          # Skills phase 5: scoped secret delivery.
+          - column: "skill_secret_grants.project_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "ProjectID"
+          - column: "skill_secret_grants.tenant_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "TenantID"
+          - column: "skill_secret_leases.project_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "ProjectID"
+          - column: "skill_secret_leases.tenant_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "TenantID"
+          # Skills phase 8: the image trust root. Same scope columns as the
+          # secret grants above, for the same reason.
+          - column: "skill_image_approvals.project_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "ProjectID"
+          - column: "skill_image_approvals.tenant_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "TenantID"

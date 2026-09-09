@@ -1,0 +1,161 @@
+apiVersion: ao.skill/v1
+id: security-audit
+name: Security Audit
+version: 0.1.0
+description: >-
+  On-demand security review of one selected project: static code review,
+  dependency and secret scanning, authorization and API review, and — only
+  against an explicitly authorized target — an active pentest pass.
+
+origin:
+  type: builtin
+
+riskLevel: critical
+
+# Union of every mode's capabilities. A run is authorized against ONE mode, so
+# selecting the read-only review never carries the active-scan permissions.
+capabilities:
+  - repo.read
+  - deps.read
+  - report.write
+  - net.egress
+  - net.active_scan
+
+tools:
+  allowed:
+    - Read
+    - Grep
+    - Glob
+  denied:
+    - Write
+    - Edit
+    - NotebookEdit
+
+scope:
+  files:
+    read:
+      - "**"
+    deny:
+      - ".env"
+      - ".env.*"
+      - "**/*.pem"
+      - "**/*.key"
+      - "**/id_rsa*"
+  repos:
+    mode: worktree
+  network:
+    mode: allowlist
+    allow:
+      - "api.osv.dev:443"
+    perRunTargets: true
+
+inputs:
+  - name: mode
+    type: enum
+    required: true
+    enum: [static-code, dependencies, secret-scan, authz-review, api-infra-review, active-pentest]
+    description: Which audit mode to run. One run is one mode.
+  - name: scopePaths
+    type: list
+    required: false
+    description: Repo-relative paths to limit the audit to. Empty means the whole checkout.
+  - name: target
+    type: string
+    required: false
+    description: >-
+      Host:port of the system under test. Required by active-pentest, ignored by
+      every other mode, and only honoured when it is also an explicitly
+      authorized target for the run.
+  - name: authorizationRef
+    type: string
+    required: false
+    description: >-
+      Reference to the written authorization for an active test (ticket, contract
+      clause, or signed scope document). Required by active-pentest.
+
+outputs:
+  format: json
+  schemaRef: schemas/findings.v1.json
+
+authorization:
+  requiredPermissions:
+    - project.read
+  approval: per_activation
+  requiresIsolatedRunner: true
+
+compatibility:
+  aoMinVersion: 0.11.0
+
+integrity:
+  algorithm: sha256
+  digest: "6500761dd694c343285e07877e241d316d944a0e2e18e5f17fbd6d4c4b0c6ca4"
+
+provenance:
+  publisher: agent-orchestrator
+  sourceUrl: https://github.com/aoagents/agent-orchestrator
+
+policy:
+  update: manual
+  deactivateRevokesGrants: true
+
+modes:
+  - id: static-code
+    name: Static code review
+    description: >-
+      Agent-driven reading of the checkout for injection, unsafe deserialization,
+      path traversal, unsafe defaults and missing input validation. Reads only;
+      runs no third-party analyzer.
+    riskLevel: low
+    capabilities: [repo.read, report.write]
+    approval: per_activation
+    guide: modes/static-code.md
+
+  - id: dependencies
+    name: Dependency review
+    description: >-
+      Reads dependency manifests and lockfiles and checks them against published
+      advisories.
+    riskLevel: medium
+    capabilities: [repo.read, deps.read, net.egress, report.write]
+    approval: per_run
+    guide: modes/dependencies.md
+
+  - id: secret-scan
+    name: Secret and configuration scan
+    description: >-
+      Looks for committed credentials, weak or default configuration, and
+      permissive CORS/cookie/TLS settings. Reports locations, never values.
+    riskLevel: low
+    capabilities: [repo.read, report.write]
+    approval: per_activation
+    guide: modes/secret-scan.md
+
+  - id: authz-review
+    name: Authentication and authorization review
+    description: >-
+      Reviews authentication, session handling, RBAC enforcement, tenant
+      isolation and IDOR exposure at every write and read boundary.
+    riskLevel: low
+    capabilities: [repo.read, report.write]
+    approval: per_activation
+    guide: modes/authz-review.md
+
+  - id: api-infra-review
+    name: API and infrastructure review
+    description: >-
+      Reviews API surface, rate limiting, error disclosure, container and CI
+      configuration, and deployment posture from the repository's own files.
+    riskLevel: medium
+    capabilities: [repo.read, report.write]
+    approval: per_run
+    guide: modes/api-infra-review.md
+
+  - id: active-pentest
+    name: Active penetration test
+    description: >-
+      Sends probing traffic to a named, explicitly authorized, non-production
+      target within a bounded network allowlist.
+    riskLevel: critical
+    capabilities: [repo.read, net.egress, net.active_scan, report.write]
+    approval: per_target
+    guide: modes/active-pentest.md

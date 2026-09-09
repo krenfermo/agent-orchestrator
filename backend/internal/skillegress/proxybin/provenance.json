@@ -1,0 +1,23 @@
+{
+  "artifactVersion": "1",
+  "source": "./internal/skillegress/cmd/ao-egress-proxy",
+  "toolchain": "go1.26.6",
+  "buildEnv": "CGO_ENABLED=0",
+  "buildFlags": "-trimpath -buildvcs=false -ldflags=-s -w -buildid=",
+  "artifacts": [
+    {
+      "goos": "linux",
+      "goarch": "amd64",
+      "file": "ao-egress-proxy-linux-amd64",
+      "sha256": "4f74e1e4fea931dc02f07d178c57e7b1947c706764043c7c3846aedbd36fce55",
+      "bytes": 6557822
+    },
+    {
+      "goos": "linux",
+      "goarch": "arm64",
+      "file": "ao-egress-proxy-linux-arm64",
+      "sha256": "742ee07b1bf38a3417bd5f827cee9f835d4fe00607775f643431241dcf97ee18",
+      "bytes": 6094974
+    }
+  ]
+}

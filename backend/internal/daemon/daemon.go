@@ -67,10 +67,12 @@ import (
 	questionssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/questions"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/rbac"
 	settingssvc "github.com/aoagents/agent-orchestrator/backend/internal/service/settings"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/skills"
 	ssosvc "github.com/aoagents/agent-orchestrator/backend/internal/service/ssosvc"
 	usagesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/usage"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/workitems"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillassets"
+	"github.com/aoagents/agent-orchestrator/backend/internal/skillrunner"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
 	"github.com/aoagents/agent-orchestrator/backend/internal/workflow/wakepoller"
@@ -243,6 +245,35 @@ func RunWithConfig(cfg config.Config) error {
 	// happened to be configured.
 	authzSvc := authz.New(store)
 	rbacSvc := rbac.New(store, authsvcCreator{authMgr}, rbac.LogAudit{Log: log, Sink: telemetrySink}, nil)
+	// The skill catalog. It reads and writes <dataDir>/skills/catalog, a
+	// SIBLING of the using-ao directory skillassets.Install clobbers above --
+	// nothing here is inside that path, so a boot cannot overwrite an
+	// installed package.
+	//
+	// Phase 8 wires the isolated runner and the image trust root. What that
+	// unblocks is exactly ONE mode -- static-code, the one with a live boundary
+	// test -- and only when the container runtime is usable AND an
+	// administrator has approved a digest for the exact scope. Everything else
+	// is refused with the missing control named, as before: process.exec,
+	// repo.write, net.egress, net.active_scan and secrets.read gain no surface
+	// here.
+	//
+	// The runner is probed once, at boot. A probe failure is not fatal: the
+	// runner still exists, attests nothing, and refuses every execution, which
+	// is the shape a fail-closed component needs.
+	// A bounded context, not the caller's: a wedged container daemon must make
+	// the runner report unavailable, not hold up the boot.
+	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 20*time.Second)
+	skillRunner := skillrunner.New(probeCtx)
+	cancelProbe()
+	skillImages := skills.NewImageAuthority(store, store)
+	skillsSvc := skills.New(store, cfg.DataDir,
+		skills.WithSkillExecutor(skillRunner, skillImages, store, cfg.SkillStagingRoot,
+			skillRunner.Unavailable()))
+	log.Info("skills: execution environment probed",
+		"runtime", skillRunner.Runtime().Describe(),
+		"available", skillRunner.Available(),
+		"controls", len(skillRunner.Attestation().Controls))
 
 	telemetrySink.Emit(context.Background(), ports.TelemetryEvent{
 		Name:       "ao.daemon.started",
@@ -924,6 +955,8 @@ func RunWithConfig(cfg config.Config) error {
 		Authz:             authzSvc,
 		ProjectScope:      store,
 		RBAC:              rbacSvc,
+		Skills:            skillsSvc,
+		SkillImages:       skillsSvc,
 		ProviderProfiles:  providerProfilesSvc,
 		ProviderSetup:     providerSetupSvc,
 		ExecutionPolicy:   executionPolicySvc,

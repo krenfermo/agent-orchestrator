@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-orchestrator.dev/schemas/security-audit/findings.v1.json",
+  "title": "Security audit report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "run", "findings", "coverage"],
+  "properties": {
+    "schemaVersion": { "const": "security-audit/findings/v1" },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectId", "mode", "startedAt", "endedAt", "skillVersion"],
+      "properties": {
+        "projectId": { "type": "string" },
+        "skillVersion": { "type": "string" },
+        "mode": {
+          "enum": ["static-code", "dependencies", "secret-scan", "authz-review", "api-infra-review", "active-pentest"]
+        },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "endedAt": { "type": "string", "format": "date-time" },
+        "commit": { "type": "string" },
+        "target": {
+          "type": "string",
+          "description": "Only present for active-pentest, and only the target that was explicitly authorized."
+        },
+        "authorizationRef": { "type": "string" }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "description": "What the run actually looked at, so an empty findings list can be told apart from a run that examined nothing.",
+      "additionalProperties": false,
+      "required": ["examined", "skipped"],
+      "properties": {
+        "examined": { "type": "array", "items": { "type": "string" } },
+        "skipped": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "reason"],
+            "properties": {
+              "path": { "type": "string" },
+              "reason": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "severity", "confidence", "category", "evidence", "reproduction", "recommendation"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Z0-9]+-[0-9]+$" },
+          "title": { "type": "string", "maxLength": 120 },
+          "severity": { "enum": ["info", "low", "medium", "high", "critical"] },
+          "confidence": { "enum": ["confirmed", "probable", "possible"] },
+          "category": {
+            "enum": ["injection", "authn", "authz", "idor", "secret", "crypto", "config", "dependency", "dos", "disclosure", "supply-chain", "other"]
+          },
+          "cwe": { "type": "string", "pattern": "^CWE-[0-9]+$" },
+          "evidence": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["locations", "summary"],
+            "properties": {
+              "summary": { "type": "string" },
+              "locations": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["path"],
+                  "properties": {
+                    "path": { "type": "string" },
+                    "line": { "type": "integer", "minimum": 1 },
+                    "excerpt": {
+                      "type": "string",
+                      "maxLength": 400,
+                      "description": "Redacted excerpt. Must never contain a credential, token, key or personal data; cite the location instead."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "reproduction": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["reproducible", "steps"],
+            "properties": {
+              "reproducible": { "type": "boolean" },
+              "steps": { "type": "array", "items": { "type": "string" } },
+              "preconditions": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "falsePositiveAssessment": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["consideredAlternatives", "whyNotAFalsePositive"],
+            "properties": {
+              "consideredAlternatives": { "type": "array", "items": { "type": "string" } },
+              "whyNotAFalsePositive": { "type": "string" }
+            }
+          },
+          "recommendation": { "type": "string" },
+          "references": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  }
+}
