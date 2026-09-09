@@ -97,10 +97,11 @@ func TestSkillImagesList_ScopesToOneProject(t *testing.T) {
 
 func TestSkillImagesApprove_SendsTheWholeScopeAndTheConfirmation(t *testing.T) {
 	capture, deps := skillImagesCLI(t, http.StatusOK,
-		`{"approval":{"id":"skimg-9","tenantId":"default","projectId":"medusa",
+		// The bare view, which is what envelope.WriteJSON writes here.
+		`{"id":"skimg-9","tenantId":"default","projectId":"medusa",
 		  "skillId":"security-audit","version":"1.2.0","modeId":"static-code",
 		  "tool":"ao.static-scan/v1","digest":"sha256:cccc","approvedBy":"admin",
-		  "approvedAt":"2026-09-09T11:00:00Z","active":true}}`)
+		  "approvedAt":"2026-09-09T11:00:00Z","active":true}`)
 
 	out, errOut, err := executeCLI(t, deps, "skills", "images", "approve",
 		"--tenant", "default", "--project", "medusa", "--skill", "security-audit",
@@ -139,7 +140,7 @@ func TestSkillImagesApprove_SendsTheWholeScopeAndTheConfirmation(t *testing.T) {
 // sent as zero: a zero the daemon read as "expires now" would be a silent
 // difference between "no expiry" and "already expired".
 func TestSkillImagesApprove_OmitsExpiryWhenNoneIsGiven(t *testing.T) {
-	capture, deps := skillImagesCLI(t, http.StatusOK, `{"approval":{"id":"skimg-9"}}`)
+	capture, deps := skillImagesCLI(t, http.StatusOK, `{"id":"skimg-9"}`)
 
 	if _, errOut, err := executeCLI(t, deps, "skills", "images", "approve",
 		"--tenant", "default", "--project", "medusa", "--skill", "security-audit",
@@ -247,4 +248,65 @@ func TestSkillImagesRevoke_RequiresConfirmationAndStatesTheNonPromises(t *testin
 			}
 		}
 	})
+}
+
+// The REAL contract, taken from the controller rather than from what the CLI
+// wished it were.
+//
+// controllers.approveImage writes the approval BARE — envelope.WriteJSON of the
+// view itself, no wrapper. The CLI decoded into a struct with an "approval"
+// field, so every value came back zero and a successful approval printed as
+// blank lines. The approval was stored correctly; only the echo was wrong,
+// which is the worst shape for this particular command: an administrator who
+// cannot see what was recorded has no way to check it.
+//
+// The first pilot caught this. The CLI's own earlier test did not, because it
+// asserted against a fixture the CLI author wrote — the same wrong assumption,
+// stated twice. This one is copied from the controller's actual response.
+func TestSkillImagesApprove_RendersTheBareContractTheAPIReturns(t *testing.T) {
+	// Exactly what `envelope.WriteJSON(w, http.StatusCreated, view)` produces.
+	const bareApproval = `{
+	  "id":"skimg-c340996fe15f9437e2ef8162e7affef5",
+	  "tenantId":"tnt_default","projectId":"ao-pilot-static",
+	  "skillId":"security-audit","version":"0.1.0","modeId":"static-code",
+	  "tool":"ao.static-scan/v1","reference":"alpine",
+	  "digest":"sha256:6baf43584bcb78f2e5847d1de515f23499913ac9f12bdf834811a3145eb11ca1",
+	  "approvedBy":"36d87de2-b48a-40ef-9261-91c5e80ccf6d",
+	  "approvedAt":"2026-09-09T18:59:00Z",
+	  "note":"alpine:3.19 already present on this host",
+	  "active":true}`
+
+	_, deps := skillImagesCLI(t, http.StatusCreated, bareApproval)
+
+	out, errOut, err := executeCLI(t, deps, "skills", "images", "approve",
+		"--tenant", "tnt_default", "--project", "ao-pilot-static",
+		"--skill", "security-audit", "--version", "0.1.0",
+		"--mode", "static-code", "--tool", "ao.static-scan/v1",
+		"--reference", "alpine",
+		"--digest", "sha256:6baf43584bcb78f2e5847d1de515f23499913ac9f12bdf834811a3145eb11ca1",
+		"--note", "alpine:3.19 already present on this host", "--confirm")
+	if err != nil {
+		t.Fatalf("approve: %v (%s)", err, errOut)
+	}
+
+	// Everything an administrator needs to check what was recorded. Each of
+	// these was empty before the fix.
+	for _, want := range []string{
+		"skimg-c340996fe15f9437e2ef8162e7affef5",
+		"sha256:6baf43584bcb78f2e5847d1de515f23499913ac9f12bdf834811a3145eb11ca1",
+		"tnt_default/ao-pilot-static",
+		"security-audit@0.1.0",
+		"static-code",
+		"ao.static-scan/v1",
+		"36d87de2-b48a-40ef-9261-91c5e80ccf6d",
+		"2026-09-09T18:59:00Z",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the approval echo is missing %q:\n%s", want, out)
+		}
+	}
+	// And it must not print empty scaffolding where a value should be.
+	if strings.Contains(out, "for / @") || strings.Contains(out, "by  at") {
+		t.Fatalf("the echo printed empty fields:\n%s", out)
+	}
 }

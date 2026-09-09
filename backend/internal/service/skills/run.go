@@ -257,6 +257,7 @@ func (s *Service) RunSkill(ctx context.Context, req RunRequest) (RunResult, erro
 		// manifest was reviewed for not naming.
 		ScopePaths:          stagingPaths,
 		StagingRootOverride: s.stagingRoot,
+		DataDir:             s.dataDir,
 		Params:              skillrunner.DefaultToolParams(),
 		Limits:              skillrunner.DefaultLimits(),
 	})

@@ -157,6 +157,20 @@ for d in $SKIP_DIRS; do prune="$prune -name $d -prune -o"; done
 find /work $prune -type f -print 2>/dev/null | sort > /tmp/all_files
 echo "ao_input_files=$(wc -l < /tmp/all_files | tr -d ' ')"
 
+# The fingerprint of what the container ACTUALLY sees on the mount, in exactly
+# the form AO computed for what it staged: sorted "relpath\0size\0sha256"
+# lines, hashed once. A count can match by accident -- an empty mount and an
+# empty project both report zero -- and a path list can match a tree carrying
+# different bytes. This cannot.
+: > /tmp/input_rows
+while IFS= read -r f; do
+  rel="${f#/work/}"
+  sz=$(wc -c < "$f" 2>/dev/null || echo 0)
+  hs=$(sha256sum "$f" 2>/dev/null | cut -d" " -f1)
+  printf '%s\000%s\000%s\n' "$rel" "$sz" "$hs" >> /tmp/input_rows
+done < /tmp/all_files
+echo "ao_input_digest=$(sha256sum < /tmp/input_rows | cut -d' ' -f1)"
+
 : > /tmp/scan_files
 : > /tmp/skipped
 scanned=0
