@@ -118,6 +118,19 @@ type PlannerAttemptEvidence struct {
 	StructuredOutputBytes int `json:"structuredOutputBytes,omitempty"`
 	ResultBytes           int `json:"resultBytes,omitempty"`
 	PlanBytes             int `json:"planBytes,omitempty"`
+	// RejectedResultKind, RejectedResultBytes, RejectedResultHash and
+	// RejectedResultShape describe a result F2 refused, WITHOUT keeping any of
+	// it. The bytes are arbitrary model output derived from the user's
+	// objective, so none of them is stored -- not even a prefix. What is kept
+	// is a SHA-256 of the exact bytes (so the same failure seen twice is
+	// provably the same one), the kind the bytes themselves establish, and a
+	// shape built from AO's OWN plan field names with value LENGTHS in place of
+	// values. `{summary:len4,steps:[1x{title:len1}]}` identifies a placeholder
+	// without quoting a character the model wrote. Empty on an accepted result.
+	RejectedResultKind  string `json:"rejectedResultKind,omitempty"`
+	RejectedResultBytes int    `json:"rejectedResultBytes,omitempty"`
+	RejectedResultHash  string `json:"rejectedResultHash,omitempty"`
+	RejectedResultShape string `json:"rejectedResultShape,omitempty"`
 	// ConsistencySignal names why the result was refused, empty when it was
 	// accepted. It is the operator-facing half of ErrPlannerResultInconsistent.
 	ConsistencySignal string `json:"consistencySignal,omitempty"`
@@ -198,6 +211,15 @@ func (e PlannerAttemptEvidence) LogArgs() []any {
 	}
 	if e.ConsistencySignal != "" {
 		args = append(args, "consistencySignal", e.ConsistencySignal)
+		if e.RejectedResultKind != "" {
+			args = append(args,
+				"rejectedResultKind", e.RejectedResultKind,
+				"rejectedResultBytes", e.RejectedResultBytes,
+				"rejectedResultHash", e.RejectedResultHash)
+		}
+		if e.RejectedResultShape != "" {
+			args = append(args, "rejectedResultShape", e.RejectedResultShape)
+		}
 	}
 	if e.BinaryPath != "" {
 		args = append(args, "binaryPath", e.BinaryPath)

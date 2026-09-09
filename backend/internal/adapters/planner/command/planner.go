@@ -367,6 +367,13 @@ func (p Planner) attempt(ctx context.Context, launch launchPlan, timeout time.Du
 	}
 	if reason := resultConsistency(envelope, len(raw), reportedOutputTokens); reason != "" {
 		evidence.ConsistencySignal = reason
+		// What was refused, described without keeping any of it. See
+		// rejected_result.go for why there is no prefix here.
+		rejected := describeRejectedResult(raw, reason)
+		evidence.RejectedResultKind = rejected.Kind
+		evidence.RejectedResultBytes = rejected.Bytes
+		evidence.RejectedResultHash = rejected.Hash
+		evidence.RejectedResultShape = rejected.Shape
 		return fail(workflowcore.PlannerAttemptResultInconsistent,
 			fmt.Errorf("planner result inconsistent: %w: %s", ports.ErrPlannerResultInconsistent, reason))
 	}
