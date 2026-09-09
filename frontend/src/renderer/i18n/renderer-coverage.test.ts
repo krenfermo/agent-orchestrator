@@ -133,44 +133,91 @@ function approved(file: string, value: string): boolean {
 	return approvedLiterals[relative]?.includes(value) ?? false;
 }
 
+/**
+ * Scans one TSX source for hardcoded display text and returns the violations.
+ *
+ * Split out of the sweep below so the detector itself is testable: a gate that
+ * silently stops detecting is worse than no gate, and this one already did
+ * exactly that once — it walked JSX text and attributes but never an
+ * expression used as a CHILD, so `{busy ? "Saving…" : "Save"}` passed unseen
+ * and the workflow run detail's plan-approval buttons stayed English through
+ * several localization passes.
+ */
+export function findHardcodedLiterals(file: string, source: string): string[] {
+	const violations: string[] = [];
+	const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+	const record = (node: ts.Node, rawValue: string) => {
+		const value = normalized(rawValue);
+		if (!value || !potentialDisplayText(value) || approved(file, value)) return;
+		const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+		violations.push(`${path.relative(rendererDirectory, file)}:${line} ${JSON.stringify(value)}`);
+	};
+	const visit = (node: ts.Node) => {
+		if (ts.isJsxText(node)) record(node, node.getText(sourceFile));
+		if (
+			ts.isJsxExpression(node) &&
+			node.expression &&
+			node.parent &&
+			(ts.isJsxElement(node.parent) || ts.isJsxFragment(node.parent))
+		) {
+			for (const branch of literalBranches(node.expression)) record(node, branch);
+		}
+		if (ts.isJsxAttribute(node) && displayAttributes.has(node.name.getText(sourceFile)) && node.initializer) {
+			if (ts.isStringLiteral(node.initializer)) record(node, node.initializer.text);
+			if (ts.isJsxExpression(node.initializer) && node.initializer.expression) {
+				for (const branch of literalBranches(node.initializer.expression)) record(node, branch);
+			}
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+	return violations;
+}
+
 describe("renderer localization coverage", () => {
 	it("does not introduce hardcoded English JSX chrome", () => {
-		const violations: string[] = [];
-		for (const file of rendererFiles(rendererDirectory)) {
-			const source = readFileSync(file, "utf8");
-			const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-			const record = (node: ts.Node, rawValue: string) => {
-				const value = normalized(rawValue);
-				if (!value || !potentialDisplayText(value) || approved(file, value)) return;
-				const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
-				violations.push(`${path.relative(rendererDirectory, file)}:${line} ${JSON.stringify(value)}`);
-			};
-			const visit = (node: ts.Node) => {
-				if (ts.isJsxText(node)) record(node, node.getText(sourceFile));
-				// A literal rendered as a CHILD expression -- `{busy ? "Saving…" : "Save"}`
-				// -- is chrome exactly like plain JSX text is, but it is neither
-				// JsxText nor an attribute, so it used to pass this gate unseen.
-				// That is how the plan-approval buttons on the workflow run detail
-				// stayed hardcoded English through several localization passes.
-				if (
-					ts.isJsxExpression(node) &&
-					node.expression &&
-					node.parent &&
-					(ts.isJsxElement(node.parent) || ts.isJsxFragment(node.parent))
-				) {
-					for (const branch of literalBranches(node.expression)) record(node, branch);
-				}
-				if (ts.isJsxAttribute(node) && displayAttributes.has(node.name.getText(sourceFile)) && node.initializer) {
-					if (ts.isStringLiteral(node.initializer)) record(node, node.initializer.text);
-					if (ts.isJsxExpression(node.initializer) && node.initializer.expression) {
-						for (const branch of literalBranches(node.initializer.expression)) record(node, branch);
-					}
-				}
-				ts.forEachChild(node, visit);
-			};
-			visit(sourceFile);
-		}
-
+		const violations = rendererFiles(rendererDirectory).flatMap((file) =>
+			findHardcodedLiterals(file, readFileSync(file, "utf8")),
+		);
 		expect(violations, violations.join("\n")).toEqual([]);
+	});
+});
+
+/**
+ * The gate, gated. Each case is a shape that must NOT get past it; the last two
+ * are the shapes that legitimately do.
+ */
+describe("the hardcoded-literal detector", () => {
+	const scan = (body: string) => findHardcodedLiterals(path.join(rendererDirectory, "Probe.tsx"), body);
+
+	it("catches a ternary rendered as a JSX child — the shape that escaped before", () => {
+		expect(scan('const C = () => <button>{busy ? "Approving…" : "Approve plan"}</button>;')).toEqual([
+			expect.stringContaining('"Approving…"'),
+			expect.stringContaining('"Approve plan"'),
+		]);
+	});
+
+	it("catches a bare string literal rendered as a JSX child", () => {
+		expect(scan('const C = () => <p>{"Nothing to do here"}</p>;')).toEqual([
+			expect.stringContaining('"Nothing to do here"'),
+		]);
+	});
+
+	it("catches a ?? or || fallback rendered as a JSX child", () => {
+		expect(scan("const C = () => <p>{name ?? \"Unknown project\"}</p>;")).toEqual([
+			expect.stringContaining('"Unknown project"'),
+		]);
+	});
+
+	it("catches plain JSX text and a display attribute", () => {
+		expect(scan('const C = () => <p aria-label="Close dialog">Save changes</p>;')).toHaveLength(2);
+	});
+
+	it("passes a translated child, which is the shape every fix takes", () => {
+		expect(scan('const C = () => <button>{busy ? t("a.saving") : t("a.save")}</button>;')).toEqual([]);
+	});
+
+	it("passes a non-display attribute and an interpolated value", () => {
+		expect(scan("const C = () => <p className=\"flex items-center\">{count}</p>;")).toEqual([]);
 	});
 });

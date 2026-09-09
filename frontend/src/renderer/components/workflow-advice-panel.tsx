@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { Ban, Bot, CircleCheck, Clock, UserRoundCheck } from "lucide-react";
 import type { components } from "../../api/schema";
-import { actionLabelKey, stageLabelKey } from "../lib/workflow-presentation";
+import { actionLabelKey, stageLabelKey, summaryKey } from "../lib/workflow-presentation";
 import { translateDynamic } from "./workflow-activity";
 import { cn } from "../lib/utils";
 
@@ -108,6 +108,17 @@ export function WorkflowAdvicePanel({ advice }: { advice: WorkflowAdvice | undef
 	// The budget line is worth a row only while repair is actually part of this
 	// run's story. A budget of zero on a run nobody would repair is noise.
 	const showRepair = advice.repairable || advice.repairBudget > 0 || advice.repairSpent > 0;
+
+	// The daemon is explicit that `explanation` is AO's OWN English and a
+	// FALLBACK for a client with no localized copy for `summaryCode` -- never
+	// the primary contract (workflow.Advice). Rendering it directly, as this
+	// panel first did, left an English sentence in every other locale for a
+	// code the renderer already has 34 translations of. So: the localized
+	// summary when there is one, AO's sentence only when there is not.
+	const localizedSummary = advice.summaryCode
+		? translateDynamic(t, summaryKey(advice.summaryCode), "")
+		: "";
+	const explanation = localizedSummary || advice.explanation || "";
 	const repairEligibility = advice.repairEligibility
 		? translateDynamic(
 				t,
@@ -125,11 +136,9 @@ export function WorkflowAdvicePanel({ advice }: { advice: WorkflowAdvice | undef
 				<Icon aria-hidden="true" className="mt-0.5 size-icon-sm shrink-0 text-muted-foreground" />
 				<div className="flex min-w-0 flex-col gap-0.5">
 					<p className="text-sm font-medium">{translateDynamic(t, categoryKey(category), category)}</p>
-					{/* AO's own sentence, shown only when it adds something the
-					    category label does not already say. */}
-					{advice.explanation ? (
-						<p className="text-xs text-muted-foreground">{advice.explanation}</p>
-					) : null}
+					{/* The localized sentence for this stop, falling back to AO's
+					    own English only for a code with no copy yet. */}
+					{explanation ? <p className="text-xs text-muted-foreground">{explanation}</p> : null}
 				</div>
 			</div>
 

@@ -89,6 +89,48 @@ describe("WorkflowAdvicePanel", () => {
 		expect(screen.getByText("teleport — no_flux")).toBeInTheDocument();
 	});
 
+	// The daemon documents `explanation` as AO's own English and a FALLBACK for a
+	// client with no localized copy of `summaryCode`. The panel first rendered it
+	// directly, which left an English sentence in every non-English locale for a
+	// code the renderer already has copy for.
+	it("prefers the localized summary over AO's English explanation", () => {
+		renderPanel(
+			advice({
+				summaryCode: "provider_auth_required",
+				explanation: "The provider rejected the credentials for this run.",
+			}),
+		);
+		expect(
+			screen.queryByText("The provider rejected the credentials for this run."),
+		).not.toBeInTheDocument();
+		expect(screen.getByText(/sign in/i)).toBeInTheDocument();
+	});
+
+	it("shows the same stop in Spanish, not in English", () => {
+		renderPanel(
+			advice({
+				summaryCode: "provider_auth_required",
+				explanation: "The provider rejected the credentials for this run.",
+			}),
+			"es",
+		);
+		expect(
+			screen.queryByText("The provider rejected the credentials for this run."),
+		).not.toBeInTheDocument();
+		// Whatever the Spanish copy says, it is the Spanish catalog's, not AO's.
+		const paragraphs = [...document.querySelectorAll("p")].map((p) => p.textContent ?? "");
+		expect(paragraphs.some((text) => /proveedor|sesión|inicia/i.test(text))).toBe(true);
+	});
+
+	// A code the daemon emits before any locale has copy for it must still say
+	// something: that is the case AO's English fallback exists for.
+	it("falls back to AO's English sentence for a summaryCode with no copy", () => {
+		renderPanel(
+			advice({ summaryCode: "brand_new_stop_code", explanation: "AO stopped for a brand new reason." }),
+		);
+		expect(screen.getByText("AO stopped for a brand new reason.")).toBeInTheDocument();
+	});
+
 	it("localizes the whole panel, so a Spanish user is not sent back to English codes", () => {
 		renderPanel(
 			advice({
