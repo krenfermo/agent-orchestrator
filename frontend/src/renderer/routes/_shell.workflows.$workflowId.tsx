@@ -16,6 +16,7 @@ import { WorkflowBranchWaitBanner } from "../components/workflow-branch-wait-ban
 import { WorkflowRoutingSummary } from "../components/workflow-routing-summary";
 import { WorkflowIncidentDialog } from "../components/workflow-incident-dialog";
 import { WorkflowAdvicePanel } from "../components/workflow-advice-panel";
+import { WorkflowChangeSet } from "../components/workflow-change-set";
 import { WorkflowResumeButton } from "../components/workflow-resume-button";
 import { WorkflowRecoveryPanel } from "../components/workflow-recovery-panel";
 import { WorkItemLinkPanel } from "../components/workitem-link-panel";
@@ -645,6 +646,14 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 									</>
 								)}
 							</dl>
+						)}
+						{/* What AO observed the work change, and how it knows. Without
+						    it a task whose output landed somewhere Git ignores read
+						    as a run where nothing happened -- AO had already recorded
+						    that it could not PROVE the set, which is a different fact
+						    from an empty one. */}
+						{step.kind === "review" && step.reviewPolicy?.facts && (
+							<WorkflowChangeSet facts={step.reviewPolicy.facts} />
 						)}
 						{step.kind === "review" && (step.reviewRunId || step.reviewer) && (
 							<dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 border-t border-border pt-2 text-xs text-muted-foreground">
