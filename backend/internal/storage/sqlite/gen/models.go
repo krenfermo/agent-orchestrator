@@ -1004,6 +1004,49 @@ type SkillInstall struct {
 	InstalledBy  string
 }
 
+type SkillInstallOrigin struct {
+	SkillID              string
+	Version              string
+	RegistryID           string
+	RegistryName         string
+	RegistryType         string
+	RegistryLocation     string
+	Publisher            string
+	SourceURL            string
+	ManifestDigest       string
+	ArtifactDigest       string
+	TrustState           string
+	TrustPolicy          string
+	SignatureFormat      string
+	Signature            string
+	KeyID                string
+	AttestationURL       string
+	CompatibilityVerdict string
+	PublishedAt          sql.NullTime
+	InstalledAt          time.Time
+	InstalledBy          string
+	RevokedAt            sql.NullTime
+	RevocationReason     string
+	RevocationSeenAt     sql.NullTime
+}
+
+type SkillRegistry struct {
+	ID                   string
+	DisplayName          string
+	Type                 string
+	Location             string
+	Enabled              int64
+	TrustPolicy          string
+	PinnedPublisher      string
+	Priority             int64
+	TenantID             *domain.TenantID
+	CredentialSecretName string
+	CreatedAt            time.Time
+	CreatedBy            string
+	UpdatedAt            time.Time
+	UpdatedBy            string
+}
+
 type SkillSecret struct {
 	Name        string
 	Description string

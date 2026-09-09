@@ -562,3 +562,11 @@ sql:
             go_type:
               import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
               type: "TenantID"
+          # Skills phase 10: the registry / marketplace foundation.
+          # Nullable: NULL means the registry is installation-wide, which is a
+          # different fact from "belongs to the default tenant".
+          - column: "skill_registries.tenant_id"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "TenantID"
+              pointer: true

@@ -59,6 +59,21 @@ const (
 	SkillAuditImageRevoked  SkillAuditAction = "image_revoked"
 	SkillAuditRunExecuted   SkillAuditAction = "run_executed"
 	SkillAuditRunRefused    SkillAuditAction = "run_refused"
+	// Phase 10, the registry / marketplace foundation (migration 0164). Same
+	// trail again: "which registry did this package come from, and who decided
+	// this installation may install from it" is the same reviewer's question.
+	//
+	// There is deliberately no skill_searched and no skill_release_viewed. A
+	// search query is text a person typed, it can name an internal package or
+	// a vulnerability they are hunting, and a row per search buys an auditor
+	// nothing the install trail does not already carry.
+	SkillAuditRegistryAdded      SkillAuditAction = "registry_added"
+	SkillAuditRegistryUpdated    SkillAuditAction = "registry_updated"
+	SkillAuditRegistryRemoved    SkillAuditAction = "registry_removed"
+	SkillAuditInstallRefused     SkillAuditAction = "install_refused"
+	SkillAuditUpdateAvailable    SkillAuditAction = "update_available"
+	SkillAuditUpdateInstalled    SkillAuditAction = "update_installed"
+	SkillAuditReleaseRevokedSeen SkillAuditAction = "release_revoked_seen"
 )
 
 // SkillAuditEntry is one row of the catalog's audit trail.
