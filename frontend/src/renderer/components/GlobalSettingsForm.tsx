@@ -11,7 +11,7 @@ import { GeneralSettingsSection } from "./settings/GeneralSettingsSection";
 import { ProjectsSettingsSection } from "./settings/ProjectsSettingsSection";
 import { ReportProblemDialog } from "./settings/ReportProblemDialog";
 import { SessionLifecyclePolicySettingsSection } from "./settings/SessionLifecyclePolicySettingsSection";
-import { SkillImagesSettingsSection } from "./settings/SkillImagesSettingsSection";
+import { SkillsSettingsSection } from "./settings/SkillsSettingsSection";
 import { SettingsLinkRow } from "./settings/SettingsRow";
 import { SettingsSection } from "./settings/SettingsSection";
 import { SourceControlSettingsSection } from "./settings/SourceControlSettingsSection";
@@ -23,6 +23,7 @@ export type GlobalSettingsSection =
 	| "agents"
 	| "sourceControl"
 	| "projects"
+	| "skills"
 	| "updates"
 	| "account"
 	| "access"
@@ -68,7 +69,6 @@ export function GlobalSettingsForm({
 						<EfficiencyPolicySettingsSection />
 						<ExecutionPolicySettingsSection />
 						<SessionLifecyclePolicySettingsSection />
-						<SkillImagesSettingsSection />
 					</>
 				)}
 				{(section === "all" || section === "environment") && (
@@ -82,6 +82,13 @@ export function GlobalSettingsForm({
 				)}
 				{(section === "all" || section === "projects") && (
 					<ProjectsSettingsSection titleHidden={leadingTitleHidden} />
+				)}
+				{/* Skills moved out of General with phase 10: the marketplace, the
+				    registries it installs from and the image trust root are three
+				    installation-wide decisions, and one of them was already living
+				    under General with no room for the other two. */}
+				{(section === "all" || section === "skills") && (
+					<SkillsSettingsSection titleHidden={leadingTitleHidden} />
 				)}
 				{(section === "all" || section === "updates") && <UpdatesSection titleHidden={leadingTitleHidden} />}
 				{(section === "all" || section === "account") && (

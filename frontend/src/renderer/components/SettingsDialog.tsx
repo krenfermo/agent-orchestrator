@@ -70,6 +70,10 @@ export function SettingsDialog() {
 		{ id: "agents", label: "Development Agents", icon: Bot },
 		{ id: "sourceControl", label: "Source Control", icon: Link2 },
 		{ id: "projects", label: "Projects", icon: FolderGit2 },
+		// Always offered, like project Skills below: whether a registry is
+		// configured and whether anything is installed are answers only the
+		// daemon has, and the panel renders its own empty states.
+		{ id: "skills", label: t("settings.skills.title"), icon: Puzzle },
 		{ id: "updates", label: t("settings.updates"), icon: RefreshCw },
 		{ id: "account", label: t("settings.account"), icon: UserCircle },
 		// P4-B: the administration entry appears only when the BACKEND reports a

@@ -34,6 +34,7 @@ export type GlobalSettingsSectionId =
 	| "agents"
 	| "sourceControl"
 	| "projects"
+	| "skills"
 	| "updates"
 	| "access"
 	| "help";
