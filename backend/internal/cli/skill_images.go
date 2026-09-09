@@ -64,9 +64,15 @@ type approveSkillImageDTO struct {
 	Confirm          bool   `json:"confirm"`
 }
 
-type approveSkillImageResultDTO struct {
-	Approval skillImageApprovalDTO `json:"approval"`
-}
+// The approve route returns the approval BARE -- envelope.WriteJSON of the view
+// itself, with no wrapper object. An earlier version of this file decoded into
+// a struct with an "approval" field, so every value came back zero and a
+// successful approval printed blank lines. The approval was stored correctly;
+// only the echo was wrong, which is the worst place for it: an administrator
+// who cannot see what was recorded cannot check it.
+//
+// Mirror what the API sends. The API is not changed to suit the client.
+type approveSkillImageResultDTO = skillImageApprovalDTO
 
 func newSkillImagesCommand(ctx *commandContext) *cobra.Command {
 	cmd := &cobra.Command{
@@ -207,10 +213,19 @@ func newSkillImagesApproveCommand(ctx *commandContext) *cobra.Command {
 			if err := ctx.postJSON(cmd.Context(), "skills/images", body, &res); err != nil {
 				return err
 			}
-			a := res.Approval
+			a := res
+			state := "active"
+			if !a.Active {
+				state = "INACTIVE"
+				if a.InactiveReason != "" {
+					state += " (" + a.InactiveReason + ")"
+				}
+			}
 			_, err := fmt.Fprintf(cmd.OutOrStdout(),
-				"approved %s\n  %s to back %s for %s/%s %s@%s mode=%s\n  by %s at %s\n",
-				a.ID, a.Digest, a.Tool, a.TenantID, a.ProjectID, a.SkillID, a.Version, a.ModeID,
+				"approved %s  %s\n  image   %s (%s)\n  scope   %s/%s %s@%s mode=%s tool=%s\n  by      %s at %s\n",
+				a.ID, state,
+				a.Digest, a.Reference,
+				a.TenantID, a.ProjectID, a.SkillID, a.Version, a.ModeID, a.Tool,
 				a.ApprovedBy, a.ApprovedAt)
 			return err
 		},
