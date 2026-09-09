@@ -174,6 +174,121 @@ attempt 1: failed · verify_ambiguous · claude-code/opus · 2026-09-09T10:20:00
 5. **The creation flow is untouched.** The headline complaint — that "Task" can mean two
    different things — is not fixed by this branch. See below.
 
+## Round 2 — the creation flow and the last English sentences
+
+Three more commits close the criteria the first round left open.
+
+| Commit | What it closes |
+| --- | --- |
+| `f63a9d875` | The two creation surfaces are named for the object each makes, the project preselect actually works, and a contract test pins each surface to its endpoint. |
+| `bd710947d` | The advice panel uses the daemon's stable code instead of its English fallback; the guardrail now tests itself. |
+
+### The preselect was broken in the build almost everyone uses
+
+The Board's "New workflow run" button already navigated to `/workflows?projectId=…`, and
+the form already read `?projectId=`. It read it off `window.location.search` — and in
+desktop mode the router runs on **hash history** (`router.tsx`), where the whole location
+lives after the `#` and `window.location.search` is empty. So the preselect silently did
+nothing in the Electron app, and creating a run from a project still started by re-picking
+that project.
+
+Fixed by reading it through the router's own `validateSearch`, which is history-agnostic.
+This introduces the first `validateSearch` in the codebase; it is the TanStack-native way
+and it is what makes the same code correct under both histories.
+
+### The naming collision, concretely
+
+The prompt field inside "Delegate a worker" was labelled **"Task"** — the same word that
+names a workflow strategy. It is now "Instructions", and the dialog's description, which
+was `sr-only` and therefore invisible to anyone not using a screen reader, is now visible
+and says which object this makes and which surface makes the other:
+
+```
+[en] TITLE: Delegate a worker            [es] TITLE: Delegar un worker
+[en] FIELD: Instructions                 [es] FIELD: Instrucciones
+[en] DESC : This starts an interactive   [es] DESC : Esto inicia un worker interactivo
+     worker you drive yourself. It does        que tú diriges. No crea una ejecución de
+     not create a workflow run — use            workflow: usa «Nueva ejecución de
+     "New workflow run" for a Task,             workflow» para un run Task, Autónoma o
+     Autonomous or Master run with checks.      Master con checks.
+```
+
+### The contract test asserts endpoints, not navigation
+
+The original failure was not a broken button — both surfaces worked. It was that a surface
+labelled **Task** created a *session*. A navigation test would not have caught that, so
+`-creation-surface-contract.test.tsx` mocks `apiClient`, lets the real hooks and real
+validation run, and asserts the endpoint actually reached:
+
+- "New workflow run" → `POST /api/v1/projects/{projectId}/workflows`, and **never**
+  `/orchestrators/delegate`
+- "New session" → `POST /api/v1/orchestrators/delegate`, and **never** the workflows path,
+  with no `strategy` and no `verification` in the body
+
+11 tests, also covering: a Task with no executable check POSTs *nothing at all*; 401 and
+403 refusals are shown and the typed objective survives them; a refused delegate never
+reports a session that does not exist; and strategy, placement, approval, repair and
+review depth all travel in the create body, where the daemon freezes them.
+
+### One real bug found while writing those tests
+
+The form did `void createRun(...).then(...)` with no `.catch`. The refusal *was* shown
+(`createError` renders), but the rejection `mutateAsync` re-throws surfaced as an
+unhandled promise rejection. Now caught — and a daemon refusal no longer clears the form
+the user has to correct.
+
+### Localization
+
+`workflow.Advice` documents `Summary`/`Explanation` as AO's own English and a **fallback**
+for a client with no localized copy of `SummaryCode`. The advice panel was rendering the
+fallback as the source, leaving an English sentence in every other locale for a code the
+renderer already had 34 translations of. It now prefers `wf.summary.<summaryCode>` and
+falls back only when there is no copy.
+
+The second sentence, `unprovableChangeSetReason`, genuinely needs a new code in
+`backend/internal/workflow/` — the package the lifecycle front is stabilising. Not
+touched. Specified in `docs/contracts/unprovable-change-set-code.md`: the seven causes
+already distinguishable in `review_changed_files.go`, the five-step change, the API
+regeneration, and its acceptance criteria.
+
+The guardrail now tests itself. Detection moved into `findHardcodedLiterals`, and six
+cases assert which shapes must not pass — starting with the JSX-child ternary that escaped
+it — and which legitimately do. A gate that silently stops detecting is worse than no gate.
+
+### Verified, with exit codes
+
+| Command | Exit | Result |
+| --- | --- | --- |
+| `npm run typecheck` | **0** | clean |
+| `npm test` | **0** | 245 files, 2871 passed, 1 skipped, 0 failed |
+| `npm run build` | **0** | built |
+
+Backend still untouched across the whole branch.
+
+### Criteria, closed
+
+1. **Met.** A Task is created from the Board or the sidebar project menu, and the contract
+   test proves a `workflow_run` POST is what happens.
+2. **Met.** The two surfaces have different names, the field no longer says "Task", and
+   the dialog states its consequence before the click.
+3. **Met** (round 1) — on the run detail route.
+4. **Met** (round 1).
+5. **Met** (round 1).
+6. **Met**, except the one daemon-composed sentence that has a written contract and no
+   implementation.
+7. **Not this branch's** — the lifecycle front's, already covered by its regression suite.
+
+### Residual risks
+
+- Still no screenshot: the Chrome extension was not connected. Evidence is rendered-DOM
+  text from the real components.
+- Still fixtures, not a live run. The contract test exercises the real form, real hooks and
+  real validation against a mocked `apiClient`; it does not prove the daemon accepts the
+  body. The field names are checked against the CI-enforced generated schema.
+- The advice panel remains only on the run detail route.
+- `validateSearch` is new to this codebase. It is scoped to `/workflows` and covered, but
+  it is a pattern the next router change should be aware of.
+
 ## The follow-up contract: one "Nuevo trabajo" entry
 
 Deliberately deferred, because it is a navigation and information-architecture change
