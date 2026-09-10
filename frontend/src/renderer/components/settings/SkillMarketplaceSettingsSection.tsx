@@ -442,6 +442,18 @@ export function SkillMarketplaceSettingsSection() {
 						{/* Served by the daemon, so this screen cannot describe the
 						    trust model more optimistically than the thing enforcing it. */}
 						<p className="text-caption text-settings-muted">{release.trustExplanation}</p>
+						{/* A listing has checked NO signature, exactly as it has hashed
+						    no bytes. So this says the material is there and which key
+						    claims it -- never that it verifies. Verification happens at
+						    install and is shown on the installed row. */}
+						{release.signed ? (
+							<p className="text-caption text-settings-muted" data-testid="skill-release-signed">
+								{t("settings.skillMarketplace.signedBy", {
+									keyId: release.signatureKeyId || "-",
+									scheme: release.signatureScheme || "-",
+								})}
+							</p>
+						) : null}
 						{release.revoked ? (
 							<p className="text-caption text-error">
 								{t("settings.skillMarketplace.revokedReason", {

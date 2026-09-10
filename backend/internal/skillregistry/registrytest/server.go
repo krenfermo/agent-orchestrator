@@ -189,6 +189,15 @@ func (s *Server) RequireAPIKey(header, token string) {
 	s.requireToken, s.authHeader = token, header
 }
 
+// RegistryID is the id this fixture reports in its handshake. It is what AO
+// stamps onto every release from this registry, and therefore what a release
+// signature is bound to.
+func (s *Server) RegistryID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.registryID
+}
+
 // SetRegistryID changes what the handshake reports.
 func (s *Server) SetRegistryID(id string) {
 	s.mu.Lock()

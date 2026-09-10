@@ -235,6 +235,12 @@ type APIDeps struct {
 	// memberships, so a caller sees installation-wide registries and no
 	// private ones -- the fail-closed direction.
 	SkillTenancy controllers.SkillTenancy
+	// SkillTrust is the trust-root surface: whose signatures this installation
+	// will accept. A FOURTH dependency, and nil is the fail-closed state --
+	// the Trust routes return OpenAPI-backed 501s, and a registry on a
+	// signature-requiring trust policy installs nothing, because there is
+	// nothing for a signature to chain to.
+	SkillTrust controllers.SkillTrust
 }
 
 // normalizeAPIDeps closes the Presence/DeviceLive duplication trap structurally.
@@ -438,7 +444,8 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		projectAccess:    &controllers.ProjectAccessController{Mgr: deps.RBAC, Guard: guard},
 		skills: &controllers.SkillsController{
 			Catalog: deps.Skills, Images: deps.SkillImages,
-			Marketplace: deps.SkillMarketplace, Tenancy: deps.SkillTenancy, Guard: guard,
+			Marketplace: deps.SkillMarketplace, Trust: deps.SkillTrust,
+			Tenancy: deps.SkillTenancy, Guard: guard,
 		},
 	}
 }

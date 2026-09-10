@@ -97,6 +97,22 @@ type releaseBody struct {
 // deletes a compromised release and serves 404 has told AO nothing, and 404 is
 // indistinguishable from a typo.
 type Revocation struct {
+	// Subject is WHAT was withdrawn. Empty means "release", which is what
+	// every phase-11 registry serves and what keeps the protocol version
+	// unchanged: a field whose absence has the old meaning is a compatible
+	// addition.
+	//
+	// A registry may also withdraw a signing key, a publisher or a trust root.
+	// AO accepts those and scopes them to installs from THAT registry, because
+	// a registry that could revoke AO's official key globally could switch off
+	// every trusted install on the machine. A registry's word can refuse; it
+	// can never accept, and it can never reach past its own installs.
+	Subject RevocationSubject `json:"subject,omitempty"`
+	// SubjectID identifies a non-release subject: a key id, a publisher, or a
+	// trust root id. It is ignored for a release revocation, which is
+	// identified by SkillID and Version.
+	SubjectID string `json:"subjectId,omitempty"`
+
 	SkillID string `json:"skillId"`
 	Version string `json:"version"`
 	Reason  string `json:"reason"`
@@ -106,11 +122,42 @@ type Revocation struct {
 	RevokedAt time.Time `json:"revokedAt,omitzero"`
 }
 
-// Ref is the "<skillId>@<version>" identity.
-func (r Revocation) Ref() string { return r.SkillID + "@" + r.Version }
+// EffectiveSubject is what this revocation withdraws. An empty subject is a
+// release, which is the only thing the phase-11 protocol could express.
+func (r Revocation) EffectiveSubject() RevocationSubject {
+	if strings.TrimSpace(string(r.Subject)) == "" {
+		return SubjectRelease
+	}
+	return r.Subject
+}
+
+// Ref is the identity this revocation names, for a message and an audit line.
+func (r Revocation) Ref() string {
+	if s := r.EffectiveSubject(); s != SubjectRelease {
+		return string(s) + " " + r.SubjectID
+	}
+	return r.SkillID + "@" + r.Version
+}
 
 // Validate enforces the revocation contract.
 func (r Revocation) Validate() error {
+	subject := r.EffectiveSubject()
+	if !subject.Valid() {
+		return invalidf("revocation subject %q is not one of release, signing_key, publisher, "+
+			"trust_root", r.Subject)
+	}
+	if subject != SubjectRelease {
+		if strings.TrimSpace(r.SubjectID) == "" {
+			return invalidf("a %s revocation must name what it withdraws", subject)
+		}
+		if len(r.SubjectID) > 128 {
+			return invalidf("revocation subjectId is longer than 128 characters")
+		}
+		if strings.TrimSpace(r.Reason) == "" {
+			return invalidf("revocation of %s must say why", r.Ref())
+		}
+		return nil
+	}
 	if !idRe.MatchString(r.SkillID) {
 		return invalidf("revocation skillId %q must be lowercase kebab-case", r.SkillID)
 	}

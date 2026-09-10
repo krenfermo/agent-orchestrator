@@ -2,6 +2,7 @@ package skillregistry
 
 import (
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -94,36 +95,56 @@ func TestAssessAvailable_NeverClaimsVerification(t *testing.T) {
 	}
 }
 
-func TestAssessInstalled_IsVerifiedNeverTrusted(t *testing.T) {
+func TestAssessInstalled_LadderNeverSkipsAStep(t *testing.T) {
 	r := validRelease()
+	// Phase 10/11 provenance is an uninterpreted CLAIM, and a claim never
+	// moves the state. Only a verification AO performed does.
 	r.Provenance = Provenance{SignatureFormat: "cosign", Signature: "MEUCIQ...", KeyID: "abc"}
-	if got := AssessInstalled(r, true); got != TrustVerified {
-		t.Fatalf("AssessInstalled = %q, want verified", got)
+	if got := AssessInstalled(r, true, false); got != TrustVerified {
+		t.Fatalf("AssessInstalled(matched, unsigned) = %q, want verified", got)
 	}
-	if got := AssessInstalled(r, false); got != TrustUnverified {
+	if got := AssessInstalled(r, false, false); got != TrustUnverified {
 		t.Fatalf("AssessInstalled(unmatched) = %q, want unverified", got)
 	}
+	if got := AssessInstalled(r, true, true); got != TrustTrusted {
+		t.Fatalf("AssessInstalled(matched, verified signature) = %q, want trusted", got)
+	}
+	// The step that must never be skipped: a signature over a description of
+	// bytes AO does not hold says nothing about the bytes AO does hold.
+	if got := AssessInstalled(r, false, true); got != TrustUnverified {
+		t.Fatalf("a verified signature over UNMATCHED bytes assessed as %q; "+
+			"a signature is not a substitute for the hash", got)
+	}
 	r.Revoked, r.RevocationReason = true, "withdrawn"
-	if got := AssessInstalled(r, true); got != TrustRevoked {
-		t.Fatalf("a revoked release assessed as %q even with matching bytes", got)
+	if got := AssessInstalled(r, true, true); got != TrustRevoked {
+		t.Fatalf("a revoked release assessed as %q even with a verified signature", got)
 	}
 }
 
-// TestTrustedIsUnreachable is the guard ADR 0006 depends on.
+// TestTrustedIsReachableOnlyFromAssessInstalled is the guard ADR 0006 asked
+// for, inverted by ADR 0008.
+//
+// Phase 11 held that NOTHING in this package returns TrustTrusted, because
+// nothing could verify a signature. Phase 12 can, so the claim changes shape
+// rather than disappearing: TrustTrusted may be returned from exactly ONE
+// place, AssessInstalled in release.go, which is the one function that takes
+// both the integrity result and the signature result and can therefore refuse
+// to promote one without the other.
 //
 // It reads the package's own source rather than exercising a code path,
-// because the claim is a NEGATIVE one -- "nothing returns this" -- and no
-// number of passing calls proves it. AO verifies no signature; the day it
-// does, this test is the thing that has to be deliberately changed, which is
-// exactly when somebody should be forced to think about it.
-func TestTrustedIsUnreachable(t *testing.T) {
+// because the claim is about where a value may originate and no number of
+// passing calls proves that. A second site appearing -- a helper that returns
+// trusted because a release "looks signed", a cache path that carries the
+// state through -- is exactly the regression this catches, and it is the kind
+// that no ordinary test notices.
+func TestTrustedIsReachableOnlyFromAssessInstalled(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("read package dir: %v", err)
 	}
 	fset := token.NewFileSet()
 	var offenders []string
-	scanned := 0
+	scanned, permitted := 0, 0
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -134,28 +155,47 @@ func TestTrustedIsUnreachable(t *testing.T) {
 			t.Fatalf("parse %s: %v", name, err)
 		}
 		scanned++
-		ast.Inspect(file, func(n ast.Node) bool {
-			ret, ok := n.(*ast.ReturnStmt)
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
 			if !ok {
-				return true
+				continue
 			}
-			for _, res := range ret.Results {
-				if ident, ok := res.(*ast.Ident); ok && ident.Name == "TrustTrusted" {
-					offenders = append(offenders, fset.Position(ident.Pos()).String())
+			inAssessInstalled := name == "release.go" && fn.Name.Name == "AssessInstalled"
+			ast.Inspect(fn, func(n ast.Node) bool {
+				ret, ok := n.(*ast.ReturnStmt)
+				if !ok {
+					return true
 				}
-			}
-			return true
-		})
+				for _, res := range ret.Results {
+					ident, ok := res.(*ast.Ident)
+					if !ok || ident.Name != "TrustTrusted" {
+						continue
+					}
+					if inAssessInstalled {
+						permitted++
+						continue
+					}
+					offenders = append(offenders, fmt.Sprintf("%s (in %s)",
+						fset.Position(ident.Pos()), fn.Name.Name))
+				}
+				return true
+			})
+		}
 	}
 	// A guard that scanned nothing would pass for the wrong reason.
 	if scanned == 0 {
 		t.Fatal("no source files were scanned; this guard would pass vacuously")
 	}
+	if permitted == 0 {
+		t.Fatal("AssessInstalled never returns TrustTrusted, so trusted is unreachable again. " +
+			"If that is deliberate, this test is the thing to change -- do not delete it.")
+	}
 	if len(offenders) > 0 {
-		t.Fatalf("TrustTrusted is returned by %v.\n"+
-			"AO verifies no signature. Calling something trusted because two hashes matched is the\n"+
-			"overstatement ADR 0006 exists to prevent. If signature verification now exists, change\n"+
-			"this test deliberately -- do not delete it.", offenders)
+		t.Fatalf("TrustTrusted is returned outside AssessInstalled, by %v.\n"+
+			"Trusted must be reachable from exactly one place: the function that holds BOTH the\n"+
+			"integrity result and the signature result, and can refuse to promote one without the\n"+
+			"other. A second site is how a signature over bytes AO never hashed comes to read as\n"+
+			"trusted. See ADR 0008.", offenders)
 	}
 }
 

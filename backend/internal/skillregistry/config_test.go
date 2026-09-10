@@ -94,21 +94,37 @@ func TestRegistry_PinnedPublisherPolicyIsValid(t *testing.T) {
 	}
 }
 
-// The signed policy is CONFIGURABLE and not ENFORCEABLE. An administrator may
-// legitimately want a registry inert until AO can verify signatures; what must
-// not happen is the strictest-looking setting behaving as the weakest.
-func TestSignedPolicyIsConfigurableAndNotEnforceable(t *testing.T) {
-	r := validRegistry()
-	r.TrustPolicy = TrustPolicySigned
-	if err := r.Validate(); err != nil {
-		t.Fatalf("the signed policy must be configurable: %v", err)
-	}
-	if r.TrustPolicy.Enforceable() {
-		t.Fatal("Enforceable() = true, but AO verifies no signature")
+// Phase 11 held that the signed policy was CONFIGURABLE and not ENFORCEABLE,
+// because AO verified no signature and the strictest-looking setting must not
+// behave as the weakest. Phase 12 verifies signatures, so the claim changes
+// rather than disappears: every policy is now enforceable in principle, and
+// what makes one unsatisfiable is a missing trust root rather than a missing
+// implementation. See ADR 0008.
+//
+// The invariant that must NOT change is the one below it: a policy requiring a
+// signature is never satisfied by a merely verified release.
+func TestSignedAndOfficialPoliciesAreConfigurable(t *testing.T) {
+	for _, policy := range []TrustPolicy{TrustPolicySigned, TrustPolicyOfficial} {
+		r := validRegistry()
+		r.TrustPolicy = policy
+		if err := r.Validate(); err != nil {
+			t.Fatalf("policy %q must be configurable: %v", policy, err)
+		}
+		if !r.TrustPolicy.Enforceable() {
+			t.Fatalf("%q is not enforceable; phase 12 implemented verification", policy)
+		}
+		if !policy.RequiresSignature() {
+			t.Fatalf("%q does not require a signature, so a verified release would satisfy it "+
+				"-- which is exactly the conflation of integrity and provenance these two "+
+				"states exist to prevent", policy)
+		}
 	}
 	for _, p := range []TrustPolicy{TrustPolicyDigest, TrustPolicyPinnedPublisher} {
 		if !p.Enforceable() {
 			t.Fatalf("%q should be enforceable", p)
+		}
+		if p.RequiresSignature() {
+			t.Fatalf("%q requires a signature", p)
 		}
 	}
 }

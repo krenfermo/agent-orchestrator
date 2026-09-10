@@ -20,26 +20,38 @@
 //	revoked     the registry says this exact release must not be installed
 //	unverified  nothing has been hashed yet, or nothing beyond the provider's word
 //	verified    AO fetched the bytes and computed both digests itself, and they matched
-//	trusted     a signature chained to a configured anchor was verified
+//	trusted     and a signature over those bytes chained to a configured root
 //
-// TrustTrusted is DEFINED AND UNREACHABLE. AO verifies no signature, so nothing
-// here returns it, and TestTrustedIsUnreachable holds that true. It exists so
-// that "verified" cannot quietly become the top of the ladder and get rendered
-// as trust: integrity checked by hash is not provenance, and this package's
-// whole job is to keep those two words apart. See docs/adr/0006.
+// TrustTrusted became REACHABLE in phase 12 (docs/adr/0008). It requires
+// everything verified requires and then a signature in AO's own scheme, made
+// by a key AO holds, chaining to a trust root this installation configured,
+// bound to the publisher the release names.
+//
+// The two states stay strictly apart, and the ladder only goes up when the
+// step below it held. Integrity checked by hash is not provenance; a signature
+// over a description of bytes AO does not hold is not integrity. A release
+// that passes one and fails the other never reads as though it passed both.
 //
 // # What this package does not do
 //
 // It does not execute, and it does not decide capabilities. Installing a
 // release approves no image, grants no capability, enables no project and runs
-// no publisher hook or script. It also opens no socket: the only implementation
-// here reads a directory, and Search is structurally unable to move bytes
+// no publisher hook or script. Search is structurally unable to move bytes
 // because fetching is a separate method on the Provider.
+//
+// It also does not SIGN. There is no private key in this package, in the
+// daemon, or anywhere this process can reach: a consumer that could sign is a
+// consumer that can mint its own trusted releases, at which point the
+// signature proves that this host trusts itself. Signing happens elsewhere,
+// offline, by whoever holds the root -- and in this repository only inside
+// test fixtures.
 //
 // # Deliberate isolation
 //
 // A leaf package. It imports internal/domain for the existing TenantID
 // vocabulary and internal/skillcatalog for the version/digest primitives the
-// catalog already defines, and nothing else from AO. It adds no migration, no
+// catalog already defines, and nothing else from AO. The cryptography is
+// crypto/ed25519 from the standard library; this package implements no
+// primitive. It adds no migration, no
 // HTTP route and no CLI command; that wiring is internal/service/skills.
 package skillregistry

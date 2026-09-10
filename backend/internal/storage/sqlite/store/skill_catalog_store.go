@@ -104,6 +104,43 @@ const (
 	SkillAuditRevocationsSynced        SkillAuditAction = "registry_revocations_synced"
 )
 
+// Skills phase 12: the trust decisions (migration 0166).
+//
+// They are in this trail rather than a new one because it is the same reviewer
+// asking a continuous question -- "how did this package get here and what did
+// AO check" -- and two audit tables are two places to forget to look.
+//
+// None of these carries key material beyond what is public. signing_key_seen
+// and signature_verified record a key id and a fingerprint, both derived from
+// a public key and both meant to be compared out of band. Nothing here has a
+// place for a private key, a credential, or the full signed payload.
+const (
+	SkillAuditTrustRootAdded   SkillAuditAction = "trust_root_added"
+	SkillAuditTrustRootUpdated SkillAuditAction = "trust_root_updated"
+	SkillAuditTrustRootRevoked SkillAuditAction = "trust_root_revoked"
+
+	// SkillAuditSigningKeySeen records the first time AO encountered a key id
+	// in a signature it checked. It is deliberately separate from
+	// signature_verified: a key showing up that nobody expected is worth
+	// noticing whether or not its signature checked out.
+	SkillAuditSigningKeySeen    SkillAuditAction = "signing_key_seen"
+	SkillAuditSigningKeyAdded   SkillAuditAction = "signing_key_added"
+	SkillAuditSigningKeyRotated SkillAuditAction = "signing_key_rotated"
+	SkillAuditSigningKeyRevoked SkillAuditAction = "signing_key_revoked"
+	SkillAuditKeyRevokedSeen    SkillAuditAction = "key_revoked_seen"
+
+	SkillAuditSignatureVerified SkillAuditAction = "signature_verified"
+	SkillAuditSignatureRefused  SkillAuditAction = "signature_refused"
+	SkillAuditPublisherMismatch SkillAuditAction = "publisher_mismatch"
+	SkillAuditPublisherRevoked  SkillAuditAction = "publisher_revoked"
+
+	// SkillAuditTrustedInstall and its refusal are the two lines an auditor
+	// looks for first: what reached trusted on this host, and what tried and
+	// was turned away.
+	SkillAuditTrustedInstall        SkillAuditAction = "trusted_install"
+	SkillAuditTrustedInstallRefused SkillAuditAction = "trusted_install_refused"
+)
+
 // SkillAuditEntry is one row of the catalog's audit trail.
 type SkillAuditEntry struct {
 	ID           string

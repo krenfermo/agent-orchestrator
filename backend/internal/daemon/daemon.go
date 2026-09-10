@@ -301,10 +301,20 @@ func RunWithConfig(cfg config.Config) error {
 	// That is what makes "AO verifies the certificate" a property of the build
 	// rather than a default somebody can flip.
 	registrySecrets := skills.NewRegistrySecrets(store, secretbox.New(cfg.DataDir))
+	// The trust roots signatures chain to. The BUILT-IN set comes from
+	// skillregistry rather than from configuration or a file, because a trust
+	// root in a file is a trust root an attacker with write access to ~/.ao
+	// replaces -- and one in the binary requires replacing the binary, at
+	// which point they did not need the root.
+	//
+	// It is empty in this build, deliberately: no genuine AO signing key has
+	// been published, and a plausible-looking one would be a forgery this
+	// repository handed out. See internal/skillregistry/official.go.
+	skillTrust := skills.NewTrustAuthority(store, skillregistry.BuiltinOfficialRoots())
 	skillMarketplace := skills.NewMarketplace(store, skillsSvc,
 		skillregistry.DefaultProviderFactory{Secrets: registrySecrets},
 		cfg.Telemetry.AppVersion, cfg.DataDir,
-	).WithConnectivity(store, registrySecrets)
+	).WithConnectivity(store, registrySecrets).WithTrust(skillTrust)
 	log.Info("skills: execution environment probed",
 		"runtime", skillRunner.Runtime().Describe(),
 		"available", skillRunner.Available(),
@@ -993,6 +1003,7 @@ func RunWithConfig(cfg config.Config) error {
 		Skills:            skillsSvc,
 		SkillImages:       skillsSvc,
 		SkillMarketplace:  skillMarketplace,
+		SkillTrust:        skillTrust,
 		SkillTenancy:      store,
 		ProviderProfiles:  providerProfilesSvc,
 		ProviderSetup:     providerSetupSvc,

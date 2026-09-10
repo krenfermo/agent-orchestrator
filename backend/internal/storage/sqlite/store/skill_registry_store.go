@@ -59,6 +59,27 @@ type SkillInstallOrigin struct {
 	// interpreted none of it.
 	Provenance skillregistry.Provenance
 
+	// Verification is the phase-12 provenance chain: what AO verified about
+	// the SIGNATURE over these bytes, or the refusal it recorded instead.
+	//
+	// It is the whole struct rather than a handful of columns lifted out of
+	// it, because the answer to "why does this say trusted" is the chain, and
+	// a UI that had to reassemble it from six fields would eventually
+	// reassemble it wrong. A zero value means AO never checked a signature --
+	// an install from a digest-policy registry, or one that predates this
+	// phase -- which is a different fact from having checked and refused, and
+	// Verification.RefusalCode is what tells them apart.
+	Verification skillregistry.Verification
+
+	// RevocationStateObserved is what the revocation picture looked like at
+	// install time: "none-known", or a note that AO could not ask. It lets a
+	// later reader tell "nothing was revoked then" from "nobody checked".
+	RevocationStateObserved string
+	// MetadataFetchedAt is when the metadata this install acted on was
+	// fetched. Freshness travels beside provenance and into neither trust nor
+	// compatibility.
+	MetadataFetchedAt *time.Time
+
 	// CompatibilityVerdict records whether the check ran, not only what it
 	// said: "unknown" must never read as a pass.
 	CompatibilityVerdict skillregistry.CompatibilityVerdict
@@ -185,12 +206,26 @@ func (s *Store) UpsertSkillInstallOrigin(
 		KeyID:                o.Provenance.KeyID,
 		AttestationURL:       o.Provenance.AttestationURL,
 		CompatibilityVerdict: string(o.CompatibilityVerdict),
-		PublishedAt:          timePtrToNullTime(o.PublishedAt),
-		InstalledAt:          o.InstalledAt,
-		InstalledBy:          o.InstalledBy,
-		RevokedAt:            timePtrToNullTime(o.RevokedAt),
-		RevocationReason:     o.RevocationReason,
-		RevocationSeenAt:     timePtrToNullTime(o.RevocationSeenAt),
+		// The verified chain. Every value here is public: a key id, a
+		// fingerprint derived from public bytes, a root id and a verdict.
+		SignatureScheme:         string(o.Verification.Scheme),
+		SignatureAlgorithm:      o.Verification.Algorithm,
+		SigningKeyID:            o.Verification.KeyID,
+		SigningKeyFingerprint:   o.Verification.KeyFingerprint,
+		SigningKeyOrigin:        string(o.Verification.KeyOrigin),
+		TrustRootID:             o.Verification.TrustRootID,
+		TrustRootTier:           string(o.Verification.TrustRootTier),
+		SignatureSignedAt:       nullTimeOrAbsent(o.Verification.SignedAt),
+		SignatureVerifiedAt:     nullTimeOrAbsent(o.Verification.VerifiedAt),
+		SignatureResult:         signatureResult(o.Verification),
+		RevocationStateObserved: o.RevocationStateObserved,
+		MetadataFetchedAt:       timePtrToNullTime(o.MetadataFetchedAt),
+		PublishedAt:             timePtrToNullTime(o.PublishedAt),
+		InstalledAt:             o.InstalledAt,
+		InstalledBy:             o.InstalledBy,
+		RevokedAt:               timePtrToNullTime(o.RevokedAt),
+		RevocationReason:        o.RevocationReason,
+		RevocationSeenAt:        timePtrToNullTime(o.RevocationSeenAt),
 	})
 	if err != nil {
 		return SkillInstallOrigin{}, fmt.Errorf("upsert skill install origin: %w", err)
@@ -347,12 +382,72 @@ func originFromRow(row gen.SkillInstallOrigin) SkillInstallOrigin {
 			KeyID:           row.KeyID,
 			AttestationURL:  row.AttestationURL,
 		},
-		CompatibilityVerdict: skillregistry.CompatibilityVerdict(row.CompatibilityVerdict),
-		PublishedAt:          nullTimeToPtr(row.PublishedAt),
-		InstalledAt:          row.InstalledAt,
-		InstalledBy:          row.InstalledBy,
-		RevokedAt:            nullTimeToPtr(row.RevokedAt),
-		RevocationReason:     row.RevocationReason,
-		RevocationSeenAt:     nullTimeToPtr(row.RevocationSeenAt),
+		Verification: skillregistry.Verification{
+			// Verified is derived from the recorded RESULT rather than stored
+			// as its own flag. One column, one truth: a boolean beside the
+			// verdict is a second thing that can disagree with it.
+			Verified:       row.SignatureResult == signatureResultVerified,
+			Scheme:         skillregistry.SignatureScheme(row.SignatureScheme),
+			Algorithm:      row.SignatureAlgorithm,
+			KeyID:          row.SigningKeyID,
+			KeyFingerprint: row.SigningKeyFingerprint,
+			KeyOrigin:      skillregistry.KeyOrigin(row.SigningKeyOrigin),
+			TrustRootID:    row.TrustRootID,
+			TrustRootTier:  skillregistry.TrustTier(row.TrustRootTier),
+			SignedAt:       nullTimeToTime(row.SignatureSignedAt),
+			VerifiedAt:     nullTimeToTime(row.SignatureVerifiedAt),
+			// The publisher comes from the row's own column rather than from a
+			// second one of its own. An install whose release publisher and
+			// verified publisher disagreed is refused before it is stored, so
+			// there is exactly one publisher per row and duplicating it would
+			// only create something that can disagree with itself.
+			Publisher: verifiedPublisher(row),
+		},
+		RevocationStateObserved: row.RevocationStateObserved,
+		MetadataFetchedAt:       nullTimeToPtr(row.MetadataFetchedAt),
+		CompatibilityVerdict:    skillregistry.CompatibilityVerdict(row.CompatibilityVerdict),
+		PublishedAt:             nullTimeToPtr(row.PublishedAt),
+		InstalledAt:             row.InstalledAt,
+		InstalledBy:             row.InstalledBy,
+		RevokedAt:               nullTimeToPtr(row.RevokedAt),
+		RevocationReason:        row.RevocationReason,
+		RevocationSeenAt:        nullTimeToPtr(row.RevocationSeenAt),
 	}
+}
+
+// The three values signature_result can hold. Three, not a boolean: "AO
+// checked and refused" and "AO never checked" are different facts, and merging
+// them would let an unsigned install and a rejected signature render the same.
+const (
+	signatureResultVerified = "verified"
+	signatureResultRefused  = "refused"
+)
+
+// verifiedPublisher is the publisher a stored verification was checked
+// against, or empty when no signature was checked at all.
+func verifiedPublisher(row gen.SkillInstallOrigin) string {
+	if row.SignatureResult == "" {
+		return ""
+	}
+	return row.Publisher
+}
+
+func signatureResult(v skillregistry.Verification) string {
+	switch {
+	case v.Verified:
+		return signatureResultVerified
+	case v.RefusalCode != "":
+		return signatureResultRefused
+	}
+	return ""
+}
+
+// nullTimeOrAbsent keeps a zero time NULL rather than storing the zero
+// instant. A row saying a signature was verified in year 1 is a row somebody
+// renders.
+func nullTimeOrAbsent(t time.Time) sql.NullTime {
+	if t.IsZero() {
+		return sql.NullTime{}
+	}
+	return sql.NullTime{Time: t.UTC(), Valid: true}
 }

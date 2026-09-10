@@ -30,7 +30,11 @@ SELECT skill_id, version, registry_id, registry_name, registry_type,
     registry_location, publisher, source_url, manifest_digest, artifact_digest,
     trust_state, trust_policy, signature_format, signature, key_id,
     attestation_url, compatibility_verdict, published_at, installed_at,
-    installed_by, revoked_at, revocation_reason, revocation_seen_at
+    installed_by, revoked_at, revocation_reason, revocation_seen_at,
+    signature_scheme, signature_algorithm, signing_key_id,
+    signing_key_fingerprint, signing_key_origin, trust_root_id,
+    trust_root_tier, signature_signed_at, signature_verified_at,
+    signature_result, revocation_state_observed, metadata_fetched_at
 FROM skill_install_origins WHERE skill_id = ? AND version = ?
 `
 
@@ -66,6 +70,18 @@ func (q *Queries) GetSkillInstallOrigin(ctx context.Context, arg GetSkillInstall
 		&i.RevokedAt,
 		&i.RevocationReason,
 		&i.RevocationSeenAt,
+		&i.SignatureScheme,
+		&i.SignatureAlgorithm,
+		&i.SigningKeyID,
+		&i.SigningKeyFingerprint,
+		&i.SigningKeyOrigin,
+		&i.TrustRootID,
+		&i.TrustRootTier,
+		&i.SignatureSignedAt,
+		&i.SignatureVerifiedAt,
+		&i.SignatureResult,
+		&i.RevocationStateObserved,
+		&i.MetadataFetchedAt,
 	)
 	return i, err
 }
@@ -104,22 +120,24 @@ func (q *Queries) GetSkillRegistry(ctx context.Context, id string) (SkillRegistr
 }
 
 const getSkillRegistryRevocation = `-- name: GetSkillRegistryRevocation :one
-SELECT registry_id, skill_id, version, reason, revoked_at, observed_at
+SELECT registry_id, subject, subject_key, skill_id, version, reason, revoked_at, observed_at
 FROM skill_registry_revocations
-WHERE registry_id = ? AND skill_id = ? AND version = ?
+WHERE registry_id = ? AND subject = ? AND subject_key = ?
 `
 
 type GetSkillRegistryRevocationParams struct {
 	RegistryID string
-	SkillID    string
-	Version    string
+	Subject    string
+	SubjectKey string
 }
 
 func (q *Queries) GetSkillRegistryRevocation(ctx context.Context, arg GetSkillRegistryRevocationParams) (SkillRegistryRevocation, error) {
-	row := q.db.QueryRowContext(ctx, getSkillRegistryRevocation, arg.RegistryID, arg.SkillID, arg.Version)
+	row := q.db.QueryRowContext(ctx, getSkillRegistryRevocation, arg.RegistryID, arg.Subject, arg.SubjectKey)
 	var i SkillRegistryRevocation
 	err := row.Scan(
 		&i.RegistryID,
+		&i.Subject,
+		&i.SubjectKey,
 		&i.SkillID,
 		&i.Version,
 		&i.Reason,
@@ -152,7 +170,7 @@ func (q *Queries) GetSkillRegistryStatus(ctx context.Context, registryID string)
 }
 
 const listAllSkillRegistryRevocations = `-- name: ListAllSkillRegistryRevocations :many
-SELECT registry_id, skill_id, version, reason, revoked_at, observed_at
+SELECT registry_id, subject, subject_key, skill_id, version, reason, revoked_at, observed_at
 FROM skill_registry_revocations
 `
 
@@ -167,6 +185,8 @@ func (q *Queries) ListAllSkillRegistryRevocations(ctx context.Context) ([]SkillR
 		var i SkillRegistryRevocation
 		if err := rows.Scan(
 			&i.RegistryID,
+			&i.Subject,
+			&i.SubjectKey,
 			&i.SkillID,
 			&i.Version,
 			&i.Reason,
@@ -191,7 +211,11 @@ SELECT skill_id, version, registry_id, registry_name, registry_type,
     registry_location, publisher, source_url, manifest_digest, artifact_digest,
     trust_state, trust_policy, signature_format, signature, key_id,
     attestation_url, compatibility_verdict, published_at, installed_at,
-    installed_by, revoked_at, revocation_reason, revocation_seen_at
+    installed_by, revoked_at, revocation_reason, revocation_seen_at,
+    signature_scheme, signature_algorithm, signing_key_id,
+    signing_key_fingerprint, signing_key_origin, trust_root_id,
+    trust_root_tier, signature_signed_at, signature_verified_at,
+    signature_result, revocation_state_observed, metadata_fetched_at
 FROM skill_install_origins
 `
 
@@ -228,6 +252,18 @@ func (q *Queries) ListSkillInstallOrigins(ctx context.Context) ([]SkillInstallOr
 			&i.RevokedAt,
 			&i.RevocationReason,
 			&i.RevocationSeenAt,
+			&i.SignatureScheme,
+			&i.SignatureAlgorithm,
+			&i.SigningKeyID,
+			&i.SigningKeyFingerprint,
+			&i.SigningKeyOrigin,
+			&i.TrustRootID,
+			&i.TrustRootTier,
+			&i.SignatureSignedAt,
+			&i.SignatureVerifiedAt,
+			&i.SignatureResult,
+			&i.RevocationStateObserved,
+			&i.MetadataFetchedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -247,7 +283,11 @@ SELECT skill_id, version, registry_id, registry_name, registry_type,
     registry_location, publisher, source_url, manifest_digest, artifact_digest,
     trust_state, trust_policy, signature_format, signature, key_id,
     attestation_url, compatibility_verdict, published_at, installed_at,
-    installed_by, revoked_at, revocation_reason, revocation_seen_at
+    installed_by, revoked_at, revocation_reason, revocation_seen_at,
+    signature_scheme, signature_algorithm, signing_key_id,
+    signing_key_fingerprint, signing_key_origin, trust_root_id,
+    trust_root_tier, signature_signed_at, signature_verified_at,
+    signature_result, revocation_state_observed, metadata_fetched_at
 FROM skill_install_origins WHERE skill_id = ?
 `
 
@@ -284,6 +324,18 @@ func (q *Queries) ListSkillInstallOriginsForSkill(ctx context.Context, skillID s
 			&i.RevokedAt,
 			&i.RevocationReason,
 			&i.RevocationSeenAt,
+			&i.SignatureScheme,
+			&i.SignatureAlgorithm,
+			&i.SigningKeyID,
+			&i.SigningKeyFingerprint,
+			&i.SigningKeyOrigin,
+			&i.TrustRootID,
+			&i.TrustRootTier,
+			&i.SignatureSignedAt,
+			&i.SignatureVerifiedAt,
+			&i.SignatureResult,
+			&i.RevocationStateObserved,
+			&i.MetadataFetchedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -348,7 +400,7 @@ func (q *Queries) ListSkillRegistries(ctx context.Context) ([]SkillRegistry, err
 }
 
 const listSkillRegistryRevocations = `-- name: ListSkillRegistryRevocations :many
-SELECT registry_id, skill_id, version, reason, revoked_at, observed_at
+SELECT registry_id, subject, subject_key, skill_id, version, reason, revoked_at, observed_at
 FROM skill_registry_revocations WHERE registry_id = ?
 `
 
@@ -363,6 +415,8 @@ func (q *Queries) ListSkillRegistryRevocations(ctx context.Context, registryID s
 		var i SkillRegistryRevocation
 		if err := rows.Scan(
 			&i.RegistryID,
+			&i.Subject,
+			&i.SubjectKey,
 			&i.SkillID,
 			&i.Version,
 			&i.Reason,
@@ -461,9 +515,14 @@ INSERT INTO skill_install_origins (
     registry_location, publisher, source_url, manifest_digest, artifact_digest,
     trust_state, trust_policy, signature_format, signature, key_id,
     attestation_url, compatibility_verdict, published_at, installed_at,
-    installed_by, revoked_at, revocation_reason, revocation_seen_at
+    installed_by, revoked_at, revocation_reason, revocation_seen_at,
+    signature_scheme, signature_algorithm, signing_key_id,
+    signing_key_fingerprint, signing_key_origin, trust_root_id,
+    trust_root_tier, signature_signed_at, signature_verified_at,
+    signature_result, revocation_state_observed, metadata_fetched_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (skill_id, version) DO UPDATE SET
     registry_id = excluded.registry_id,
     registry_name = excluded.registry_name,
@@ -482,38 +541,66 @@ ON CONFLICT (skill_id, version) DO UPDATE SET
     compatibility_verdict = excluded.compatibility_verdict,
     published_at = excluded.published_at,
     installed_at = excluded.installed_at,
-    installed_by = excluded.installed_by
+    installed_by = excluded.installed_by,
+    signature_scheme = excluded.signature_scheme,
+    signature_algorithm = excluded.signature_algorithm,
+    signing_key_id = excluded.signing_key_id,
+    signing_key_fingerprint = excluded.signing_key_fingerprint,
+    signing_key_origin = excluded.signing_key_origin,
+    trust_root_id = excluded.trust_root_id,
+    trust_root_tier = excluded.trust_root_tier,
+    signature_signed_at = excluded.signature_signed_at,
+    signature_verified_at = excluded.signature_verified_at,
+    signature_result = excluded.signature_result,
+    revocation_state_observed = excluded.revocation_state_observed,
+    metadata_fetched_at = excluded.metadata_fetched_at
 RETURNING skill_id, version, registry_id, registry_name, registry_type,
     registry_location, publisher, source_url, manifest_digest, artifact_digest,
     trust_state, trust_policy, signature_format, signature, key_id,
     attestation_url, compatibility_verdict, published_at, installed_at,
-    installed_by, revoked_at, revocation_reason, revocation_seen_at
+    installed_by, revoked_at, revocation_reason, revocation_seen_at,
+    signature_scheme, signature_algorithm, signing_key_id,
+    signing_key_fingerprint, signing_key_origin, trust_root_id,
+    trust_root_tier, signature_signed_at, signature_verified_at,
+    signature_result, revocation_state_observed, metadata_fetched_at
 `
 
 type UpsertSkillInstallOriginParams struct {
-	SkillID              string
-	Version              string
-	RegistryID           string
-	RegistryName         string
-	RegistryType         string
-	RegistryLocation     string
-	Publisher            string
-	SourceURL            string
-	ManifestDigest       string
-	ArtifactDigest       string
-	TrustState           string
-	TrustPolicy          string
-	SignatureFormat      string
-	Signature            string
-	KeyID                string
-	AttestationURL       string
-	CompatibilityVerdict string
-	PublishedAt          sql.NullTime
-	InstalledAt          time.Time
-	InstalledBy          string
-	RevokedAt            sql.NullTime
-	RevocationReason     string
-	RevocationSeenAt     sql.NullTime
+	SkillID                 string
+	Version                 string
+	RegistryID              string
+	RegistryName            string
+	RegistryType            string
+	RegistryLocation        string
+	Publisher               string
+	SourceURL               string
+	ManifestDigest          string
+	ArtifactDigest          string
+	TrustState              string
+	TrustPolicy             string
+	SignatureFormat         string
+	Signature               string
+	KeyID                   string
+	AttestationURL          string
+	CompatibilityVerdict    string
+	PublishedAt             sql.NullTime
+	InstalledAt             time.Time
+	InstalledBy             string
+	RevokedAt               sql.NullTime
+	RevocationReason        string
+	RevocationSeenAt        sql.NullTime
+	SignatureScheme         string
+	SignatureAlgorithm      string
+	SigningKeyID            string
+	SigningKeyFingerprint   string
+	SigningKeyOrigin        string
+	TrustRootID             string
+	TrustRootTier           string
+	SignatureSignedAt       sql.NullTime
+	SignatureVerifiedAt     sql.NullTime
+	SignatureResult         string
+	RevocationStateObserved string
+	MetadataFetchedAt       sql.NullTime
 }
 
 func (q *Queries) UpsertSkillInstallOrigin(ctx context.Context, arg UpsertSkillInstallOriginParams) (SkillInstallOrigin, error) {
@@ -541,6 +628,18 @@ func (q *Queries) UpsertSkillInstallOrigin(ctx context.Context, arg UpsertSkillI
 		arg.RevokedAt,
 		arg.RevocationReason,
 		arg.RevocationSeenAt,
+		arg.SignatureScheme,
+		arg.SignatureAlgorithm,
+		arg.SigningKeyID,
+		arg.SigningKeyFingerprint,
+		arg.SigningKeyOrigin,
+		arg.TrustRootID,
+		arg.TrustRootTier,
+		arg.SignatureSignedAt,
+		arg.SignatureVerifiedAt,
+		arg.SignatureResult,
+		arg.RevocationStateObserved,
+		arg.MetadataFetchedAt,
 	)
 	var i SkillInstallOrigin
 	err := row.Scan(
@@ -567,6 +666,18 @@ func (q *Queries) UpsertSkillInstallOrigin(ctx context.Context, arg UpsertSkillI
 		&i.RevokedAt,
 		&i.RevocationReason,
 		&i.RevocationSeenAt,
+		&i.SignatureScheme,
+		&i.SignatureAlgorithm,
+		&i.SigningKeyID,
+		&i.SigningKeyFingerprint,
+		&i.SigningKeyOrigin,
+		&i.TrustRootID,
+		&i.TrustRootTier,
+		&i.SignatureSignedAt,
+		&i.SignatureVerifiedAt,
+		&i.SignatureResult,
+		&i.RevocationStateObserved,
+		&i.MetadataFetchedAt,
 	)
 	return i, err
 }
@@ -670,17 +781,21 @@ func (q *Queries) UpsertSkillRegistry(ctx context.Context, arg UpsertSkillRegist
 const upsertSkillRegistryRevocation = `-- name: UpsertSkillRegistryRevocation :one
 
 INSERT INTO skill_registry_revocations (
-    registry_id, skill_id, version, reason, revoked_at, observed_at
+    registry_id, subject, subject_key, skill_id, version, reason, revoked_at, observed_at
 )
-VALUES (?, ?, ?, ?, ?, ?)
-ON CONFLICT (registry_id, skill_id, version) DO UPDATE SET
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (registry_id, subject, subject_key) DO UPDATE SET
+    skill_id = excluded.skill_id,
+    version = excluded.version,
     reason = excluded.reason,
     revoked_at = COALESCE(skill_registry_revocations.revoked_at, excluded.revoked_at)
-RETURNING registry_id, skill_id, version, reason, revoked_at, observed_at
+RETURNING registry_id, subject, subject_key, skill_id, version, reason, revoked_at, observed_at
 `
 
 type UpsertSkillRegistryRevocationParams struct {
 	RegistryID string
+	Subject    string
+	SubjectKey string
 	SkillID    string
 	Version    string
 	Reason     string
@@ -696,6 +811,8 @@ type UpsertSkillRegistryRevocationParams struct {
 func (q *Queries) UpsertSkillRegistryRevocation(ctx context.Context, arg UpsertSkillRegistryRevocationParams) (SkillRegistryRevocation, error) {
 	row := q.db.QueryRowContext(ctx, upsertSkillRegistryRevocation,
 		arg.RegistryID,
+		arg.Subject,
+		arg.SubjectKey,
 		arg.SkillID,
 		arg.Version,
 		arg.Reason,
@@ -705,6 +822,8 @@ func (q *Queries) UpsertSkillRegistryRevocation(ctx context.Context, arg UpsertS
 	var i SkillRegistryRevocation
 	err := row.Scan(
 		&i.RegistryID,
+		&i.Subject,
+		&i.SubjectKey,
 		&i.SkillID,
 		&i.Version,
 		&i.Reason,
