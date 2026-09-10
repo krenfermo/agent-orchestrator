@@ -223,6 +223,18 @@ type APIDeps struct {
 	// authority: managing the catalog and deciding what this installation may
 	// execute are not the same permission to hold.
 	SkillImages controllers.SkillImageTrust
+	// SkillMarketplace is the registry surface: which outside sources this
+	// installation may install packages from, and the install itself. A THIRD
+	// dependency for the same reason SkillImages is a second one -- an
+	// installation can have a catalog and an image trust root without ever
+	// configuring a registry, and nil here leaves those routes returning
+	// OpenAPI-backed 501s rather than half-working.
+	SkillMarketplace controllers.SkillMarketplace
+	// SkillTenancy resolves which organizations the caller belongs to, which
+	// is what makes a tenant-scoped registry private. Nil yields no
+	// memberships, so a caller sees installation-wide registries and no
+	// private ones -- the fail-closed direction.
+	SkillTenancy controllers.SkillTenancy
 }
 
 // normalizeAPIDeps closes the Presence/DeviceLive duplication trap structurally.
@@ -424,7 +436,10 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		teams:            &controllers.TeamsController{Mgr: deps.RBAC},
 		tenants:          &controllers.TenantsController{Mgr: deps.RBAC, Guard: guard},
 		projectAccess:    &controllers.ProjectAccessController{Mgr: deps.RBAC, Guard: guard},
-		skills:           &controllers.SkillsController{Catalog: deps.Skills, Images: deps.SkillImages, Guard: guard},
+		skills: &controllers.SkillsController{
+			Catalog: deps.Skills, Images: deps.SkillImages,
+			Marketplace: deps.SkillMarketplace, Tenancy: deps.SkillTenancy, Guard: guard,
+		},
 	}
 }
 

@@ -177,7 +177,7 @@ func (a *SecretAuthority) Grant(ctx context.Context, req GrantRequest) (skillsec
 	if err := a.requireAvailable(); err != nil {
 		return skillsecrets.Grant{}, err
 	}
-	if !holdsPermission(req.ActorPermissions, domain.PermSettingsManage) {
+	if !holdsSettingsManage(req.ActorPermissions) {
 		return skillsecrets.Grant{}, apierr.Forbidden("SECRET_GRANT_REFUSED",
 			"granting a secret to a skill requires the settings.manage permission")
 	}
@@ -395,9 +395,17 @@ func (a *SecretAuthority) PruneExpiredLeases(ctx context.Context) (int64, error)
 	return a.store.DeleteExpiredSkillSecretLeases(ctx, a.now())
 }
 
-func holdsPermission(held []domain.Permission, want domain.Permission) bool {
+// holdsSettingsManage reports whether these permissions include settings.manage.
+//
+// It names the permission rather than taking it as a parameter because every
+// administrative write in this package is gated on the same one: handing a
+// secret to a package, approving an image for execution, configuring a registry
+// and installing from one are all decisions about the INSTALLATION, not about
+// any one project. A parameter that is always the same value would suggest
+// those four could diverge, and they are deliberately one rule.
+func holdsSettingsManage(held []domain.Permission) bool {
 	for _, p := range held {
-		if p == want {
+		if p == domain.PermSettingsManage {
 			return true
 		}
 	}

@@ -55,6 +55,10 @@ const approvedLiterals: Record<string, readonly string[]> = {
 		"(standalone shell — a live PTY here in the desktop app)",
 		"reverbcode",
 	],
+	// An example registry identifier and an example absolute path, shown as form
+	// placeholders. Both say what SHAPE to type; a localized identifier or a
+	// localized directory name would be an example that does not work.
+	"components/settings/SkillRegistriesSettingsSection.tsx": ["company-private", "/srv/ao/registry"],
 	"components/settings/UpdatesSection.tsx": ["PR #"],
 	// Fallbacks for absent daemon-supplied values, not English copy: the two
 	// halves of a "provider/model" pair and the default reviewer's own id.

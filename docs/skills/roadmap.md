@@ -2,7 +2,9 @@
 
 **Status: subfases 1-2 mostly done; subfase 3 partly done. Phase 4
 (2026-09-09) made ONE mode execute: `static-code`, inside the container, over a
-staged scope-limited copy.** Four controls remain unbuilt and each blocks one
+staged scope-limited copy. Phase 10 (2026-09-09) added the registry /
+marketplace foundation and settled open question 6 -- see
+`docs/skills/registry.md` and ADR 0006; it added no execution surface.** Four controls remain unbuilt and each blocks one
 capability — see `docs/adr/0005-pending-capability-controls.md` for the design
 of all four and the implementation of none.
 
@@ -211,11 +213,28 @@ Only once the core is stable and subfase 3 has landed.
    project access. There is deliberately no tenant column — a second scope would
    be a second answer to a question projects already answer.
 
-6. **Install sources.** Only a local absolute directory is supported. Adding a
-   git or registry source means deciding a trust root for PACKAGES. Phase 8's
-   per-digest administrative approval is the precedent to follow, but it is not
-   the same decision: an image is bytes an administrator can inspect once, and a
-   package is source that changes with every version.
+6. ~~**Install sources.**~~ **Settled in phase 10 (ADR 0006).** The trust root
+   for PACKAGES is an administrator's decision to install one exact release
+   from one configured registry, recorded with its provenance. Not a signature:
+   AO verifies none, so a `signed` trust policy refuses everything and the
+   `trusted` state is defined and unreachable, with a test that reads the
+   package's own source to keep it that way.
+
+   What EXISTS: a `RegistryProvider` contract, a deterministic local/offline
+   provider, per-version install with both digests verified over the bytes that
+   landed in quarantine, exact manifest-versus-listing agreement, cross-registry
+   id binding, revocation that blocks new installs and removes nothing, durable
+   provenance that outlives the registry, a Marketplace tab, `ao skills
+   marketplace` / `ao skills registry`, and the supply-chain negative tests.
+   See `docs/skills/registry.md`.
+
+   What does NOT exist: any network provider (`https` and `git` are declared and
+   refused), signature verification, registry authentication, a publishing
+   story, and any automatic synchronization. AO polls nothing.
+
+   What phase 10 deliberately did NOT change: nothing gained an execution
+   surface. `process.exec`, `net.active_scan`, `repo.write`, `net.egress` and
+   `secrets.read` are exactly as blocked as they were before it.
 
 7. **THE DECISION THIS PHASE NEEDS.** Docker (or an equivalent Linux VM) is now
    a hard requirement for any skill that needs containment. Three options, and
