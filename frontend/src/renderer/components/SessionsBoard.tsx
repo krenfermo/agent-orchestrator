@@ -31,7 +31,7 @@ import { OrchestratorActivityIndicator } from "./OrchestratorActivityIndicator";
 import { TopbarButton, TopbarKillError, topbarProjectLabelClass } from "./TopbarButton";
 import { isChatPreflightError, spawnOrchestrator } from "../lib/spawn-orchestrator";
 import { restartProjectOrchestrator } from "../lib/restart-orchestrator";
-import { usesPreviewWorkspaceData } from "../lib/preview-mode";
+import { usesDemoWorkspaceData } from "../lib/preview-mode";
 import { isLinuxPlatform, isMacPlatform, usesBoardActionsInPanel } from "../lib/platform";
 import { cn } from "../lib/utils";
 import { useUiStore } from "../stores/ui-store";
@@ -129,7 +129,11 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 	// query has resolved, so the welcome never flashes over real data): the
 	// global board teaches the app before any project exists, and a fresh
 	// project board invites the first task instead of showing four zeros.
-	const isDaemonReady = usesPreviewWorkspaceData || (shell ? shell.daemonStatus.state === "ready" : true);
+	// Demo mode may pretend the daemon is ready; the browser build on its own
+	// may not. Reporting "ready" because Electron is absent is how a real
+	// outage renders as a working board.
+	const isDaemonReady =
+		usesDemoWorkspaceData() || (shell ? shell.daemonStatus.state === "ready" : true);
 	const daemonHasFailed = Boolean(shell?.daemonStatus.code);
 	const workspaceStartupState = shell?.workspaceStartupState ?? "ready";
 	const isLoaded = isDaemonReady && workspaceStartupState === "ready" && workspaceQuery.isSuccess;
