@@ -529,10 +529,15 @@ func TestInstall_RefusesAnIncompatibleRelease(t *testing.T) {
 	}
 }
 
-// A registry requiring a signature must install NOTHING, and say why. The
-// alternative is a setting that reads as the strictest and behaves as the
-// weakest.
-func TestInstall_RefusesEverythingUnderTheSignedPolicy(t *testing.T) {
+// A registry requiring a signature must install NOTHING on an installation
+// that holds no trust root, and say why.
+//
+// Phase 11 refused here because AO verified no signature at all. Phase 12
+// verifies them, so the reason changes and the outcome does not: this fixture
+// wires no trust authority, so there is nothing for a signature to chain to,
+// and the strictest-looking setting must not quietly behave as the weakest.
+// The satisfiable path is covered in trustedinstall_test.go.
+func TestInstall_RefusesUnderSignedPolicyWithNoTrustStore(t *testing.T) {
 	rf := newRegistryFixture(t)
 	rf.publish(t, published{SkillID: "security-audit", Version: "0.1.0"})
 	reg := defaultRegistry(rf.root)
@@ -546,8 +551,26 @@ func TestInstall_RefusesEverythingUnderTheSignedPolicy(t *testing.T) {
 	if code := apiCode(t, err); code != "SKILL_TRUST_POLICY_UNSATISFIABLE" {
 		t.Fatalf("refusal code = %q", code)
 	}
-	if !strings.Contains(err.Error(), "AO verifies none") {
+	if !strings.Contains(err.Error(), "no trust store") {
 		t.Fatalf("the refusal did not say why: %v", err)
+	}
+}
+
+// The official policy is configurable and unsatisfiable on a build that ships
+// no AO Official root -- which this one does not, deliberately.
+func TestInstall_RefusesUnderOfficialPolicyWithNoOfficialRoot(t *testing.T) {
+	rf := newRegistryFixture(t)
+	rf.publish(t, published{SkillID: "security-audit", Version: "0.1.0"})
+	reg := defaultRegistry(rf.root)
+	reg.TrustPolicy = skillregistry.TrustPolicyOfficial
+	rf.addRegistry(t, reg)
+
+	_, err := rf.install(t, skills.InstallReleaseRequest{SkillID: "security-audit", Version: "0.1.0"})
+	if err == nil {
+		t.Fatal("an official-policy registry installed something with no official root configured")
+	}
+	if code := apiCode(t, err); code != "SKILL_TRUST_POLICY_UNSATISFIABLE" {
+		t.Fatalf("refusal code = %q", code)
 	}
 }
 

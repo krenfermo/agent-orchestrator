@@ -41,7 +41,7 @@ func (m *Marketplace) ListRegistryViews(
 	}
 	out := make([]controllers.SkillRegistryView, 0, len(regs))
 	for _, reg := range regs {
-		view := registryView(reg)
+		view := m.registryView(reg)
 		view.Status = statusView(statuses[reg.ID])
 		out = append(out, view)
 	}
@@ -154,7 +154,7 @@ func (m *Marketplace) SaveRegistryView(
 	if err != nil {
 		return controllers.SkillRegistryView{}, err
 	}
-	return registryView(saved), nil
+	return m.registryView(saved), nil
 }
 
 // RemoveRegistryView implements the controller's registry removal.
@@ -313,7 +313,16 @@ func (m *Marketplace) CheckMarketplaceUpdates(
 	return out, nil
 }
 
-func registryView(reg skillregistry.Registry) controllers.SkillRegistryView {
+// registryView renders one registry, including whether its trust policy can
+// actually be satisfied HERE.
+//
+// It is a method rather than a function because "enforceable" stopped being a
+// property of the policy in phase 12 and became a property of the
+// INSTALLATION: signed works when a trust root exists, and official works when
+// an AO Official root ships. A constant answer would have told a settings
+// screen that the official policy works on a build that refuses every install
+// under it.
+func (m *Marketplace) registryView(reg skillregistry.Registry) controllers.SkillRegistryView {
 	return controllers.SkillRegistryView{
 		ID:          reg.ID,
 		DisplayName: reg.DisplayName,
@@ -324,7 +333,7 @@ func registryView(reg skillregistry.Registry) controllers.SkillRegistryView {
 		// A policy this build cannot satisfy installs nothing. A client has to
 		// be able to say so rather than showing the strictest-looking setting
 		// as if it were working.
-		TrustPolicyEnforceable: reg.TrustPolicy.Enforceable(),
+		TrustPolicyEnforceable: m.policySatisfiable(reg.TrustPolicy),
 		PinnedPublisher:        reg.PinnedPublisher,
 		Priority:               reg.Priority,
 		TenantID:               string(reg.TenantID),
@@ -355,22 +364,27 @@ func releaseView(f FoundRelease) controllers.SkillReleaseView {
 		})
 	}
 	return controllers.SkillReleaseView{
-		RegistryID:            rel.RegistryID,
-		RegistryName:          f.RegistryName,
-		SkillID:               rel.SkillID,
-		Name:                  rel.Name,
-		Version:               rel.Version,
-		Publisher:             rel.Publisher,
-		Description:           rel.Description,
-		RiskLevel:             rel.RiskLevel,
-		SourceURL:             rel.SourceURL,
-		ChangelogURL:          rel.ChangelogURL,
-		Changelog:             rel.Changelog,
-		ManifestDigest:        rel.ManifestDigest,
-		ArtifactDigest:        rel.ArtifactDigest,
-		SignatureFormat:       rel.Provenance.SignatureFormat,
-		KeyID:                 rel.Provenance.KeyID,
-		AttestationURL:        rel.Provenance.AttestationURL,
+		RegistryID:      rel.RegistryID,
+		RegistryName:    f.RegistryName,
+		SkillID:         rel.SkillID,
+		Name:            rel.Name,
+		Version:         rel.Version,
+		Publisher:       rel.Publisher,
+		Description:     rel.Description,
+		RiskLevel:       rel.RiskLevel,
+		SourceURL:       rel.SourceURL,
+		ChangelogURL:    rel.ChangelogURL,
+		Changelog:       rel.Changelog,
+		ManifestDigest:  rel.ManifestDigest,
+		ArtifactDigest:  rel.ArtifactDigest,
+		SignatureFormat: rel.Provenance.SignatureFormat,
+		KeyID:           rel.Provenance.KeyID,
+		AttestationURL:  rel.Provenance.AttestationURL,
+		// Signed says the material is THERE. It never says it verifies: a
+		// search checks no signature, exactly as it hashes no bytes.
+		Signed:                rel.Signed(),
+		SignatureKeyID:        rel.Signature.KeyID,
+		SignatureScheme:       string(rel.Signature.Scheme),
 		RequestedCapabilities: nonNil(rel.RequestedCapabilities),
 		ExecutionModes:        modes,
 		AOMinVersion:          rel.Compatibility.AOMinVersion,
@@ -441,8 +455,13 @@ func originView(o store.SkillInstallOrigin) controllers.SkillInstallOriginView {
 		Compatibility:    string(o.CompatibilityVerdict),
 		InstalledAt:      o.InstalledAt,
 		InstalledBy:      o.InstalledBy,
-		Revoked:          o.Revoked(),
-		RevocationReason: o.RevocationReason,
+		// The chain, as one object. A client that had to reassemble it from
+		// loose fields would eventually render half a chain as a whole one.
+		Provenance:              provenanceView(o.Verification),
+		RevocationStateObserved: o.RevocationStateObserved,
+		MetadataAsOf:            asOfOrZero(o.MetadataFetchedAt),
+		Revoked:                 o.Revoked(),
+		RevocationReason:        o.RevocationReason,
 	}
 }
 
@@ -462,10 +481,11 @@ func TrustExplanation(state skillregistry.TrustState) string {
 			"resolved. That is integrity, not provenance: AO verified no signature and does not know " +
 			"who wrote this code."
 	case skillregistry.TrustTrusted:
-		// Unreachable in this build; see skillregistry's package doc and ADR
-		// 0006. The sentence exists so that if it ever IS reachable, somebody
-		// had to write what it would mean.
-		return "A signature chained to a trust anchor this installation configured was verified."
+		return "AO verified the bytes AND a signature over exactly those bytes, made by a key " +
+			"that chains to a trust root this installation configured and held by the publisher " +
+			"this release names. That says WHO signed it. It does not say the code is safe, that " +
+			"it has no vulnerabilities, that its capabilities are benign, or that anybody " +
+			"reviewed it."
 	}
 	return "Nothing has been checked. AO has not fetched these bytes, so it has verified nothing " +
 		"about them -- the digests below are what the registry claims, not what AO measured."

@@ -82,6 +82,12 @@ type RegistryStatusStore interface {
 
 	UpsertSkillRegistryRevocation(ctx context.Context, in store.SkillRegistryRevocation) (store.SkillRegistryRevocation, error)
 	GetSkillRegistryRevocation(ctx context.Context, registryID, skillID, version string) (store.SkillRegistryRevocation, bool, error)
+	// GetSkillRegistryTrustRevocation is the phase-12 half: a registry
+	// withdrawing a signing key, a publisher or a trust root rather than a
+	// release. It is a separate method from the release lookup because the two
+	// are asked at different points, and one method with a subject parameter
+	// is one somebody calls with the wrong constant.
+	GetSkillRegistryTrustRevocation(ctx context.Context, registryID string, subject skillregistry.RevocationSubject, subjectID string) (store.SkillRegistryRevocation, bool, error)
 	ListSkillRegistryRevocations(ctx context.Context, registryID string) ([]store.SkillRegistryRevocation, error)
 }
 
@@ -114,6 +120,12 @@ type Marketplace struct {
 	secrets skillregistry.SecretResolver
 	// cache is the metadata/artifact cache. Nil is a working "no cache".
 	cache *skillregistry.Cache
+	// trust is the phase-12 half: the trust store the verifier reads through
+	// and the audit surface for what it decided. Nil means AO holds no trust
+	// roots, which makes every signature refusal say so rather than pretend a
+	// key was missing -- and makes a signed-policy registry install nothing,
+	// which is the fail-closed direction.
+	trust *TrustAuthority
 	now   func() time.Time
 	newID func() string
 }
@@ -157,6 +169,49 @@ func (m *Marketplace) WithConnectivity(
 	m.status = status
 	m.secrets = secrets
 	return m
+}
+
+// WithTrust wires the phase-12 half: the trust store signatures chain to.
+//
+// Separate from WithConnectivity for the same reason that one is separate from
+// the constructor -- most call sites are tests with a local fixture registry
+// that verify nothing, and a parameter they would pass nil to is a parameter
+// somebody has to read.
+func (m *Marketplace) WithTrust(trust *TrustAuthority) *Marketplace {
+	if m == nil {
+		return nil
+	}
+	m.trust = trust
+	return m
+}
+
+// policySatisfiable reports whether an install under this policy could ever
+// succeed on THIS installation.
+//
+// It is the honest half of what phase 11 called "enforceable". A policy is now
+// always implementable; what varies is whether the trust roots it needs are
+// present, and a settings screen that showed "official" as working on a build
+// with no official root would be describing a check that refuses every time.
+func (m *Marketplace) policySatisfiable(p skillregistry.TrustPolicy) bool {
+	if !p.RequiresSignature() {
+		return true
+	}
+	if !m.trust.Available() {
+		return false
+	}
+	if p == skillregistry.TrustPolicyOfficial {
+		return m.trust.HasOfficialRoot()
+	}
+	return true
+}
+
+// verifier is the signature checker for this marketplace, or nil when this
+// installation holds no trust store.
+func (m *Marketplace) verifier() *skillregistry.Verifier {
+	if m == nil || !m.trust.Available() {
+		return nil
+	}
+	return skillregistry.NewVerifier(m.trust, m.now)
 }
 
 // httpOptions are the client options every provider this marketplace opens
@@ -768,6 +823,12 @@ type InstallOutcome struct {
 	// proceeded on evidence AO already held. It is never true unless the
 	// caller asked for it.
 	Offline bool
+	// Verification is what AO established about the SIGNATURE, or the refusal
+	// it recorded instead. A zero value means no signature was checked: an
+	// unsigned release from a digest-policy registry, which is a different
+	// fact from a signature that failed, and Verification.RefusalCode is what
+	// tells them apart.
+	Verification skillregistry.Verification
 }
 
 // InstallRelease resolves, verifies and installs one exact release.
@@ -828,16 +889,34 @@ func (m *Marketplace) InstallRelease(
 	}
 
 	// 3. The registry's trust policy, beyond integrity.
-	if !reg.TrustPolicy.Enforceable() {
-		return InstallOutcome{}, m.refuse(ctx, req, reg, "SKILL_TRUST_POLICY_UNSATISFIABLE",
-			fmt.Sprintf("registry %s requires a verified signature and AO verifies none; "+
-				"nothing can be installed from it until it can", reg.ID))
-	}
 	if reg.TrustPolicy == skillregistry.TrustPolicyPinnedPublisher &&
 		rel.Publisher != reg.PinnedPublisher {
 		return InstallOutcome{}, m.refuse(ctx, req, reg, "SKILL_PUBLISHER_MISMATCH",
 			fmt.Sprintf("%s is published by %q and registry %s is pinned to %q",
 				rel.Ref(), rel.Publisher, reg.ID, reg.PinnedPublisher))
+	}
+	// A policy that demands a signature and an installation that can verify
+	// none is refused HERE, before any bytes move. It is the same honest shape
+	// phase 11 gave the signed policy, narrowed to the case that is genuinely
+	// unsatisfiable: this build carries no AO Official root, so the official
+	// policy installs nothing, and a signed policy on an installation with no
+	// trust store installs nothing either.
+	if reg.TrustPolicy.RequiresSignature() && m.verifier() == nil {
+		return InstallOutcome{}, m.refuse(ctx, req, reg, "SKILL_TRUST_POLICY_UNSATISFIABLE",
+			fmt.Sprintf("registry %s requires a verified signature and this installation has no "+
+				"trust store to chain one to", reg.ID))
+	}
+	if reg.TrustPolicy == skillregistry.TrustPolicyOfficial && !m.trust.HasOfficialRoot() {
+		return InstallOutcome{}, m.refuse(ctx, req, reg, "SKILL_TRUST_POLICY_UNSATISFIABLE",
+			skillregistry.OfficialPolicyUnsatisfiable(reg.ID))
+	}
+	// The signature is checked over METADATA here and the bytes are checked
+	// later, and both must hold. Checking the signature first is what makes an
+	// unsigned release under a signed policy cost nothing: AO refuses before
+	// it downloads, rather than fetching a package it was never going to keep.
+	verification, err := m.verifySignature(ctx, req, reg, rel)
+	if err != nil {
+		return InstallOutcome{}, err
 	}
 
 	// 4. Compatibility. An unknown verdict does NOT refuse -- see the note on
@@ -911,23 +990,28 @@ func (m *Marketplace) InstallRelease(
 	//    survives the release disappearing from the registry entirely.
 	published := rel.PublishedAt
 	origin, err := m.store.UpsertSkillInstallOrigin(ctx, store.SkillInstallOrigin{
-		SkillID:              rel.SkillID,
-		Version:              rel.Version,
-		RegistryID:           reg.ID,
-		RegistryName:         reg.DisplayName,
-		RegistryType:         string(reg.Type),
-		RegistryLocation:     reg.Location,
-		Publisher:            rel.Publisher,
-		SourceURL:            rel.SourceURL,
-		ManifestDigest:       rel.ManifestDigest,
-		ArtifactDigest:       rel.ArtifactDigest,
-		TrustState:           skillregistry.AssessInstalled(rel, true),
-		TrustPolicy:          reg.TrustPolicy,
-		Provenance:           rel.Provenance,
-		CompatibilityVerdict: compat,
-		PublishedAt:          &published,
-		InstalledAt:          m.now(),
-		InstalledBy:          req.Actor,
+		SkillID:          rel.SkillID,
+		Version:          rel.Version,
+		RegistryID:       reg.ID,
+		RegistryName:     reg.DisplayName,
+		RegistryType:     string(reg.Type),
+		RegistryLocation: reg.Location,
+		Publisher:        rel.Publisher,
+		SourceURL:        rel.SourceURL,
+		ManifestDigest:   rel.ManifestDigest,
+		ArtifactDigest:   rel.ArtifactDigest,
+		// integrityMatched is true here because every path that reaches this
+		// line ran verifyBytes over the quarantine and did not return.
+		TrustState:              skillregistry.AssessInstalled(rel, true, verification.Verified),
+		TrustPolicy:             reg.TrustPolicy,
+		Provenance:              rel.Provenance,
+		Verification:            verification,
+		RevocationStateObserved: m.observedRevocationState(reg, offline),
+		MetadataFetchedAt:       metadataFetchedAt(provider),
+		CompatibilityVerdict:    compat,
+		PublishedAt:             &published,
+		InstalledAt:             m.now(),
+		InstalledBy:             req.Actor,
 	})
 	if err != nil {
 		return InstallOutcome{}, err
@@ -939,6 +1023,19 @@ func (m *Marketplace) InstallRelease(
 	//     passed every check.
 	m.cacheArtifact(reg, rel, quarantine)
 
+	if verification.Verified {
+		m.audit(ctx, store.SkillAuditEntry{
+			Actor:   req.Actor,
+			Action:  store.SkillAuditTrustedInstall,
+			SkillID: rel.SkillID,
+			Version: rel.Version,
+			Digest:  installed.Digest,
+			Detail: fmt.Sprintf("trusted: signed by key %s (%s) under trust root %s (%s tier), "+
+				"publisher %q. AO verified the bytes and the signature; it did not review the code",
+				verification.KeyID, skillregistry.ShortFingerprint(verification.KeyFingerprint),
+				verification.TrustRootID, verification.TrustRootTier, verification.Publisher),
+		})
+	}
 	if req.AsUpdate {
 		m.audit(ctx, store.SkillAuditEntry{
 			Actor:   req.Actor,
@@ -951,8 +1048,175 @@ func (m *Marketplace) InstallRelease(
 	}
 	return InstallOutcome{
 		Install: installed, Origin: origin, Release: rel, Updated: req.AsUpdate,
-		FromCache: fromCache, Offline: offline,
+		FromCache: fromCache, Offline: offline, Verification: verification,
 	}, nil
+}
+
+// verifySignature is steps 8 to 15 of the trust chain, run over the release
+// METADATA before any bytes are fetched.
+//
+// # Why the answer is not a boolean
+//
+// Three outcomes, not two. A release can be unsigned under a policy that does
+// not ask for one, in which case AO checked nothing and says so; it can be
+// signed and verify; or it can fail, which under a signature-requiring policy
+// is a refusal and under a digest policy is a recorded fact that does NOT
+// block the install -- because a digest-policy registry never promised a
+// signature, and refusing there would make attaching a broken signature a way
+// to break somebody else's working registry.
+//
+// What a failed signature never does, under any policy, is produce
+// TrustTrusted. That is the invariant the whole phase rests on.
+func (m *Marketplace) verifySignature(
+	ctx context.Context, req InstallReleaseRequest,
+	reg skillregistry.Registry, rel skillregistry.Release,
+) (skillregistry.Verification, error) {
+	verifier := m.verifier()
+	if verifier == nil {
+		// No trust store. A signature-requiring policy was already refused
+		// above, so this is a digest-policy registry on an installation that
+		// verifies nothing, and the honest record is an empty verification.
+		return skillregistry.Verification{}, nil
+	}
+	if !rel.Signed() && !reg.TrustPolicy.RequiresSignature() {
+		// Unsigned under a policy that does not require one. Nothing was
+		// checked and nothing is claimed.
+		return skillregistry.Verification{}, nil
+	}
+
+	// A key id AO has never seen before is worth a line whether or not its
+	// signature checks out: an unexpected key appearing in a registry AO reads
+	// is the first observable of a publisher compromise.
+	m.noteKeySeen(ctx, req.Actor, rel)
+
+	verification, verifyErr := verifier.VerifyRelease(ctx, rel, rel.Signature)
+	if verifyErr == nil && reg.TrustPolicy.RequiresSignature() {
+		// The tier narrowing is POLICY and runs after the cryptography, so a
+		// genuine signature under the wrong tier reads as a policy refusal
+		// rather than as a forgery.
+		if tierErr := skillregistry.RequireTier(
+			verification, reg.TrustPolicy.AcceptedTiers()...); tierErr != nil {
+			verification.Verified = false
+			verification.RefusalCode = skillregistry.RefusePolicyTier
+			verification.Refusal = tierErr.Error()
+			verifyErr = tierErr
+		}
+	}
+	// A registry may also have withdrawn the key that signed this, which is
+	// scoped to this registry's own installs -- see migration 0166 on why a
+	// registry's word cannot reach further than that.
+	if verifyErr == nil {
+		if rev, ok := m.knownTrustRevocation(
+			ctx, reg.ID, skillregistry.SubjectSigningKey, verification.KeyID); ok {
+			verification.Verified = false
+			verification.RefusalCode = skillregistry.RefuseKeyUnusable
+			verification.Refusal = fmt.Sprintf(
+				"registry %s withdrew signing key %s on %s: %s", reg.ID, verification.KeyID,
+				rev.ObservedAt.UTC().Format(time.RFC3339), rev.Reason)
+			verifyErr = errors.New(verification.Refusal)
+			m.audit(ctx, store.SkillAuditEntry{
+				Actor: req.Actor, Action: store.SkillAuditKeyRevokedSeen,
+				SkillID: rel.SkillID, Version: rel.Version, Detail: verification.Refusal,
+			})
+		}
+	}
+
+	if verifyErr != nil {
+		m.audit(ctx, store.SkillAuditEntry{
+			Actor: req.Actor, Action: store.SkillAuditSignatureRefused,
+			SkillID: rel.SkillID, Version: rel.Version,
+			Detail: fmt.Sprintf("%s: %s (registry %s)",
+				verification.RefusalCode, verification.Refusal, reg.ID),
+		})
+		if verification.RefusalCode == skillregistry.RefusePublisherMismatch {
+			m.audit(ctx, store.SkillAuditEntry{
+				Actor: req.Actor, Action: store.SkillAuditPublisherMismatch,
+				SkillID: rel.SkillID, Version: rel.Version, Detail: verification.Refusal,
+			})
+		}
+		if !reg.TrustPolicy.RequiresSignature() {
+			// A digest-policy registry: the failure is RECORDED and the
+			// install proceeds as verified. The provenance row keeps the
+			// refusal, so nobody later reads "no signature checked" where AO
+			// checked one and it failed.
+			return verification, nil
+		}
+		m.audit(ctx, store.SkillAuditEntry{
+			Actor: req.Actor, Action: store.SkillAuditTrustedInstallRefused,
+			SkillID: rel.SkillID, Version: rel.Version,
+			Detail: fmt.Sprintf("registry %s requires %s trust and %s did not reach it: %s",
+				reg.ID, reg.TrustPolicy, rel.Ref(), verification.Refusal),
+		})
+		return verification, m.refuse(ctx, req, reg, "SKILL_SIGNATURE_REFUSED", verification.Refusal)
+	}
+
+	m.audit(ctx, store.SkillAuditEntry{
+		Actor: req.Actor, Action: store.SkillAuditSignatureVerified,
+		SkillID: rel.SkillID, Version: rel.Version,
+		Detail: fmt.Sprintf("key %s (%s) under trust root %s (%s tier)", verification.KeyID,
+			skillregistry.ShortFingerprint(verification.KeyFingerprint),
+			verification.TrustRootID, verification.TrustRootTier),
+	})
+	return verification, nil
+}
+
+// noteKeySeen records a key id appearing in a signature AO is about to check.
+func (m *Marketplace) noteKeySeen(ctx context.Context, actor string, rel skillregistry.Release) {
+	keyID := strings.TrimSpace(rel.Signature.KeyID)
+	if keyID == "" {
+		return
+	}
+	m.audit(ctx, store.SkillAuditEntry{
+		Actor: actor, Action: store.SkillAuditSigningKeySeen,
+		SkillID: rel.SkillID, Version: rel.Version,
+		Detail: fmt.Sprintf("release %s names signing key %s (%s)",
+			rel.Ref(), keyID, rel.Signature.Scheme),
+	})
+}
+
+// knownTrustRevocation reads a registry-reported withdrawal of a key, a
+// publisher or a root.
+func (m *Marketplace) knownTrustRevocation(
+	ctx context.Context, registryID string,
+	subject skillregistry.RevocationSubject, subjectID string,
+) (store.SkillRegistryRevocation, bool) {
+	if m.status == nil || strings.TrimSpace(subjectID) == "" {
+		return store.SkillRegistryRevocation{}, false
+	}
+	row, ok, err := m.status.GetSkillRegistryTrustRevocation(ctx, registryID, subject, subjectID)
+	if err != nil || !ok {
+		return store.SkillRegistryRevocation{}, false
+	}
+	return row, true
+}
+
+// observedRevocationState is what the revocation picture looked like at
+// install time, in the words a later reader needs.
+//
+// "not-checked" and "none-known" are deliberately different. A person reading
+// a provenance row a year from now must be able to tell "AO asked and nothing
+// was withdrawn" from "AO could not ask", and a single empty string would have
+// merged them into the more comfortable one.
+func (m *Marketplace) observedRevocationState(reg skillregistry.Registry, offline bool) string {
+	switch {
+	case m.status == nil:
+		return "not-checked: this installation records no revocation state"
+	case offline:
+		return "not-confirmed: registry " + reg.ID + " was unreachable; AO consulted only what it " +
+			"had already recorded"
+	}
+	return "none-known: neither the registry nor AO's record listed this release, its key, its " +
+		"publisher or its trust root as withdrawn"
+}
+
+// metadataFetchedAt is when the metadata this install acted on was read.
+func metadataFetchedAt(p skillregistry.Provider) *time.Time {
+	state := skillregistry.StateOf(p)
+	if state.FetchedAt.IsZero() {
+		return nil
+	}
+	at := state.FetchedAt.UTC()
+	return &at
 }
 
 // resolveForInstall re-reads one exact release, and decides what to do when the
