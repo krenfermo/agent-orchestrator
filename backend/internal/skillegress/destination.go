@@ -239,3 +239,46 @@ func blockedIn(nets []*net.IPNet, ip net.IP) (string, bool) {
 	}
 	return "", false
 }
+
+// ---------------------------------------------------------------------------
+// Reuse by other AO components.
+//
+// The daemon itself reaches out to a configured private skill registry
+// (internal/skillregistry), and that is a second place where "which addresses
+// may AO connect to" gets decided. It is deliberately NOT a second policy: the
+// two functions below are the ONLY way that decision is made outside this
+// package, and they are thin exports of the same blocked-range list and the
+// same never-re-openable link-local rule the skill proxy enforces.
+//
+// Two incompatible network policies in one product is how the metadata address
+// ends up reachable through the half nobody audited.
+
+// ParsePermittedCIDRs validates private-range exceptions and returns them
+// parsed.
+//
+// It refuses any entry that overlaps a range no exception may re-open --
+// link-local, and therefore the cloud metadata address. A caller that ignores
+// the error and uses a nil list gets the full denylist, which is the safe
+// direction.
+func ParsePermittedCIDRs(raw []string) ([]*net.IPNet, error) { return validatePermittedCIDRs(raw) }
+
+// AddressBlocked reports whether AO may connect to ip, and why not.
+//
+// permitted are ranges an operator explicitly re-opened for one destination --
+// an on-premises registry that genuinely lives at 10.x. They widen which
+// ADDRESSES are acceptable and never which hosts may be reached: the caller's
+// own allowlist is a separate, earlier check, and this one runs against the
+// address a name actually resolved to, which is what makes DNS rebinding
+// ineffective.
+func AddressBlocked(ip net.IP, permitted []*net.IPNet) (string, bool) {
+	reason, blocked := blockedIn(blockedNets, ip)
+	if !blocked {
+		return "", false
+	}
+	for _, network := range permitted {
+		if network.Contains(ip) {
+			return "", false
+		}
+	}
+	return reason, true
+}
