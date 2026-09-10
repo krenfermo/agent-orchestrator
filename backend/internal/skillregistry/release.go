@@ -159,6 +159,25 @@ type Release struct {
 
 	Provenance Provenance `json:"provenance"`
 
+	// Source is where the bytes physically live when the registry is an
+	// EXTERNAL one -- a repository, a tag, and above all a commit SHA.
+	//
+	// It is empty for a local directory and for a private HTTPS registry,
+	// which serve one immutable artifact per version and have nothing a commit
+	// would add. It is REQUIRED for an external registry, because there the
+	// version string is a label the publisher chose and the commit is the only
+	// thing that identifies one exact tree.
+	//
+	// It is deliberately NOT covered by the release signature. See
+	// SigningPayload: the signature already covers both digests, and the
+	// digests are what the fetched bytes are checked against -- so a signature
+	// that also covered the commit would add nothing to the integrity claim
+	// while making every existing signature unverifiable and forcing a
+	// publisher to know the commit before signing. Where the bytes were
+	// FETCHED FROM is AO's own observation, recorded in provenance; whether
+	// they are the right bytes is the digests' job.
+	Source GitSource `json:"source,omitzero"`
+
 	// Signature is the detached AO signature over this release, when the
 	// registry serves one. Absent means unsigned, which is a legitimate state
 	// for a digest-policy registry and a refusal under signed or official.
@@ -273,6 +292,14 @@ func (r Release) Validate() error {
 	if r.Revoked && strings.TrimSpace(r.RevocationReason) == "" {
 		return invalidf("a revoked release must say why; one that does not is indistinguishable from a mistake")
 	}
+	// A source is optional -- most releases have none -- and one that is
+	// PRESENT and malformed is refused rather than ignored, because the fields
+	// in it become path segments in requests AO builds.
+	if r.Source.Declared() {
+		if err := r.Source.Validate(); err != nil {
+			return invalidf("release %s: %v", r.Ref(), err)
+		}
+	}
 	// A signature is optional; one that is PRESENT and unparseable is not.
 	// Accepting malformed signature material and deciding about it later would
 	// mean a listing could display "signed" for bytes nothing could ever
@@ -289,6 +316,9 @@ func (r Release) Validate() error {
 // Signed reports whether the release carries AO signature material at all. It
 // says nothing about whether that material verifies.
 func (r Release) Signed() bool { return r.Signature.Declared() }
+
+// External reports whether this release names a git source.
+func (r Release) External() bool { return r.Source.Declared() }
 
 // Ref is the "<skillId>@<version>" identity used in messages and audit lines.
 func (r Release) Ref() string { return r.SkillID + "@" + r.Version }

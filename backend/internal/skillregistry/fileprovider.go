@@ -336,8 +336,8 @@ func FileDigest(path string) (string, error) {
 // DefaultProviderFactory opens the provider a registry's type calls for.
 //
 // It is the ONE place that maps a configured type onto an implementation, so
-// adding an AO official registry or a GitHub-backed one is a case here rather
-// than a change at every call site. A type with no implementation is refused
+// adding an AO official registry is a case here rather than a change at every
+// call site -- which is exactly how the GitHub-backed one arrived in phase 13. A type with no implementation is refused
 // rather than silently answering nothing.
 //
 // The two fields are the factory's whole configuration, and neither is
@@ -380,6 +380,8 @@ func (f DefaultProviderFactory) OpenWith(
 		return NewFileProvider(reg.ID, reg.Location)
 	case RegistryHTTPS:
 		return NewHTTPSProvider(ctx, reg, f.Secrets, merged)
+	case RegistryGitHub:
+		return NewGitHubProvider(ctx, reg, f.Secrets, merged)
 	case RegistryGit:
 		// Declared and refused. A git remote is a fetch of a whole history
 		// where AO wants one immutable release, and "git clone and trust the

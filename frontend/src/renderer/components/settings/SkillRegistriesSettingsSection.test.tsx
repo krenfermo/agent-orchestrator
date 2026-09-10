@@ -407,3 +407,89 @@ describe("SkillRegistriesSettingsSection", () => {
 		});
 	});
 });
+
+// ---------------------------------------------------------------- external
+
+describe("SkillRegistriesSettingsSection, external registries", () => {
+	// A registry serving somebody else's packages is marked as such, and the
+	// sentence beside it is the one nobody may leave implicit.
+	it("marks an external registry and says what hosting does not mean", async () => {
+		mockReads([
+			{
+				id: "ext",
+				displayName: "Acme skills",
+				type: "github",
+				location: "https://api.github.com",
+				enabled: true,
+				trustPolicy: "external_integrity",
+				trustPolicyEnforceable: true,
+				external: true,
+				owner: "acme",
+				repository: "skills",
+				priority: 100,
+				authType: "none",
+				networkPolicySummary: "public addresses only",
+				status: { lastProbeState: "" },
+			},
+		]);
+		renderSection();
+
+		expect(await screen.findByTestId("skill-registry-external-ext")).toHaveTextContent(
+			"External",
+		);
+		const rows = screen.getByTestId("skill-registries");
+		expect(rows).toHaveTextContent("acme/skills");
+		expect(rows).toHaveTextContent("Hosting on a forge is not a statement about the publisher");
+		// The policy line says where this one stops.
+		expect(rows).toHaveTextContent("Reaches VERIFIED, never TRUSTED");
+	});
+
+	// The allowlist is a control, so it is shown. An exception nobody can see
+	// is one nobody reviews.
+	it("shows the owner allowlist on a registry that has one", async () => {
+		mockReads([
+			{
+				id: "ext",
+				displayName: "Acme skills",
+				type: "github",
+				location: "https://api.github.com",
+				enabled: true,
+				trustPolicy: "external_org_allowlist",
+				trustPolicyEnforceable: true,
+				external: true,
+				owner: "acme",
+				allowedOwners: ["acme", "globex"],
+				priority: 100,
+				authType: "none",
+				networkPolicySummary: "public addresses only",
+				status: { lastProbeState: "" },
+			},
+		]);
+		renderSection();
+
+		await screen.findByTestId("skill-registry-external-ext");
+		const rows = screen.getByTestId("skill-registries");
+		expect(rows).toHaveTextContent("acme, globex");
+		expect(rows).toHaveTextContent("That is permission, not trust");
+	});
+
+	// The form offers the external vocabulary only for an external type, and
+	// the private-registry vocabulary only for the others. The daemon refuses
+	// the mixture; the form does not offer it.
+	it("swaps the trust policies when the type becomes a forge", async () => {
+		mockReads([]);
+		renderSection();
+		await screen.findByTestId("skill-registry-add-form");
+
+		const policy = screen.getByLabelText("Trust policy");
+		expect(policy).toHaveTextContent("Verify digests");
+
+		await pickOption("Type", "GitHub repository");
+
+		// The owner field appears, and the external help sentence with it.
+		expect(await screen.findByLabelText("Owner or organization")).toBeInTheDocument();
+		expect(screen.getByTestId("skill-registry-external-help")).toHaveTextContent(
+			"None of the external policies reaches TRUSTED on its own",
+		);
+	});
+});

@@ -118,3 +118,15 @@ FROM skill_trust_revocations WHERE subject = ? AND subject_id = ?;
 -- name: ListSkillTrustRevocations :many
 SELECT subject, subject_id, reason, revoked_at, revoked_by
 FROM skill_trust_revocations;
+
+-- Skills phase 13: lifting an administrative revocation.
+--
+-- It exists because the external subjects are a judgement about a place rather
+-- than a cryptographic fact: a repository transferred to somebody who was then
+-- vetted, an owner banned during an incident that turned out to be a false
+-- alarm. A key or a root revocation is not lifted this way and never should
+-- be -- a key somebody else may have held is compromised forever -- but the Go
+-- layer is what enforces that, so the refusal can carry a sentence.
+
+-- name: DeleteSkillTrustRevocation :execrows
+DELETE FROM skill_trust_revocations WHERE subject = ? AND subject_id = ?;

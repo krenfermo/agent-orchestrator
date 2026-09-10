@@ -27,6 +27,33 @@
 // by a key AO holds, chaining to a trust root this installation configured,
 // bound to the publisher the release names.
 //
+// # Where a release can come from, and the one that is different
+//
+//	local    a directory on this host
+//	https    a company-private registry (phase 11)
+//	github   a repository on a git forge (phase 13, docs/adr/0009)
+//	git      declared and refused: a clone runs code before anybody looks
+//
+// The first two serve ONE IMMUTABLE ARTIFACT per version, so a version string
+// is an identity there and two digests pin it. A forge is different in one way
+// that everything about the github type follows from: ITS NAMES ARE MUTABLE. A
+// branch is a different tree every afternoon and a tag is whatever the
+// publisher last pointed it at. So an external release is identified by a
+// COMMIT SHA, the tag is a label recorded beside it, and AO keeps a ledger of
+// where each tag pointed so that one moving is a fact somebody is told about
+// rather than a substitution nobody sees.
+//
+// # Hosting is not authorship
+//
+// None of the four external trust policies reaches trusted on its own. That is
+// not temporary. A repository being on a well-known forge says who HOSTS the
+// bytes, and the ladder above is about who WROTE them -- which only a
+// signature chaining to a configured root can answer. An allowlisted
+// organization is permission to install, not a cryptographic fact, and
+// ExternalIdentity keeps the four different answers to "who published this"
+// (the host account, the name in the package, the key that signed it, and what
+// this installation expected) apart rather than merging them into a name.
+//
 // The two states stay strictly apart, and the ladder only goes up when the
 // step below it held. Integrity checked by hash is not provenance; a signature
 // over a description of bytes AO does not hold is not integrity. A release
@@ -38,6 +65,12 @@
 // release approves no image, grants no capability, enables no project and runs
 // no publisher hook or script. Search is structurally unable to move bytes
 // because fetching is a separate method on the Provider.
+//
+// It does not CLONE, either. The github type is an HTTP metadata API and one
+// archive of one commit, read by the same client, behind the same origin
+// guard, under the same ceilings and into the same quarantine as every other
+// remote registry. There is no git binary, no checkout, no hook and no working
+// tree anywhere in this package.
 //
 // It also does not SIGN. There is no private key in this package, in the
 // daemon, or anywhere this process can reach: a consumer that could sign is a

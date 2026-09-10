@@ -146,6 +146,15 @@ func (r Revocation) Validate() error {
 		return invalidf("revocation subject %q is not one of release, signing_key, publisher, "+
 			"trust_root", r.Subject)
 	}
+	if !subject.RegistryReportable() {
+		// An external subject in a registry's own feed. It is refused rather
+		// than scoped, because a registry claiming to withdraw an ACCOUNT is a
+		// registry asserting an authority no forge gives it -- and accepting
+		// it, even narrowly, would put "somebody else says this org is banned"
+		// into a screen next to decisions this installation made.
+		return invalidf("revocation subject %q is administrative and local; a registry does not "+
+			"revoke an account, a repository or a commit on somebody else's forge", subject)
+	}
 	if subject != SubjectRelease {
 		if strings.TrimSpace(r.SubjectID) == "" {
 			return invalidf("a %s revocation must name what it withdraws", subject)

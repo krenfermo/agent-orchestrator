@@ -139,6 +139,28 @@ const (
 	// was turned away.
 	SkillAuditTrustedInstall        SkillAuditAction = "trusted_install"
 	SkillAuditTrustedInstallRefused SkillAuditAction = "trusted_install_refused"
+
+	// Phase 13, external registries. Five actions, and the interesting ones
+	// are the two about tags.
+	//
+	// external_release_pinned records that AO resolved a tag to a commit and
+	// acted on the commit. It is the line that answers "which tree did we
+	// actually install" a year later, when the tag has been re-pointed twice
+	// and the repository has been renamed.
+	//
+	// external_tag_moved is the one an auditor goes looking for. A tag that
+	// moves is not an error and is not necessarily an attack -- publishers
+	// re-tag by mistake -- but it is the single observable that a
+	// supply-chain substitution shares with an honest accident, so it is
+	// recorded whether or not anything was installed afterwards.
+	SkillAuditExternalReleasePinned SkillAuditAction = "external_release_pinned"
+	SkillAuditExternalTagMoved      SkillAuditAction = "external_tag_moved"
+	// The administrative half. A forge publishes no revocation feed, so these
+	// two record a decision somebody here made rather than something AO
+	// learned.
+	SkillAuditExternalRevoked        SkillAuditAction = "external_revoked"
+	SkillAuditExternalRevocationLift SkillAuditAction = "external_revocation_lifted"
+	SkillAuditExternalInstallRefused SkillAuditAction = "external_install_refused"
 )
 
 // SkillAuditEntry is one row of the catalog's audit trail.

@@ -379,6 +379,13 @@ type SkillsController struct {
 	// root, and nil here means every signature-requiring policy refuses rather
 	// than a half-working trust surface.
 	Trust SkillTrust
+	// External is the FIFTH port: what this installation has administratively
+	// withdrawn on a forge, and which tags it has seen move. Separate again,
+	// because an installation can run all four surfaces above and never
+	// configure an external registry -- and because the questions it answers
+	// exist ONLY for a source whose names are mutable and whose host publishes
+	// no revocation feed.
+	External SkillExternal
 	// Tenancy resolves which organizations the caller belongs to, which is
 	// what makes a private registry private. Nil yields no memberships, so a
 	// caller sees installation-wide registries and no private ones.
@@ -401,6 +408,7 @@ func (c *SkillsController) Register(r chi.Router) {
 	// gate. It has no Run route and nothing that would give a client one.
 	c.registerMarketplaceRoutes(r)
 	c.registerTrustRoutes(r)
+	c.registerExternalRoutes(r)
 
 	// Project-scoped. Gated per project inside each handler.
 	r.Get("/projects/{id}/skills", c.projectSkills)

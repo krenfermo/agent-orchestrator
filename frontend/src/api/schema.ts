@@ -2872,6 +2872,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/skills/external/revocations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: what this installation has administratively withdrawn on a git forge - an account, a repository, or one exact commit. A forge publishes NO revocation feed, so this list is a decision made here rather than something AO was told, and no endpoint AO could poll would change that. Withdrawing blocks NEW installs; it uninstalls nothing, deletes no file, disables no skill on any project and stops no run already under way. Requires settings.read. */
+        get: operations["listSkillExternalRevocations"];
+        put?: never;
+        /** Skills: withdraw a forge account, a repository, or one exact commit. Three different blast radii, and the NARROWEST is usually the most useful during an incident: a repository that shipped one bad release stays installable at every other commit, so an administrator can act immediately without taking a dependency away from everybody on a good version. A commit is named "owner/repository@<sha>" - a bare SHA is meaningless without the repository it belongs to, since two repositories can hold the same commit. It blocks NEW installs and removes nothing. Requires settings.manage. */
+        post: operations["revokeSkillExternal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/external/revocations/lift": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: lift an external withdrawal. It exists for the external subjects ONLY, and the asymmetry is deliberate: a signing key somebody else may have held is compromised forever, so trust revocations are one-way and stay that way. An external subject is a judgement about a PLACE - a repository transferred to somebody who was then vetted, an account banned during an incident that turned out to be a false alarm - and places get re-vetted. Requires settings.manage. */
+        post: operations["liftSkillExternalRevocation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/external/tags": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: every git tag AO has seen point somewhere else than it recorded. A tag is a name somebody can re-point and the commit is the release, so AO writes down where each tag pointed and says when that changes. Both SHAs are returned in full, because deciding two commits are different needs every character. Nothing already installed is changed by a tag moving: its provenance still records the commit its bytes actually came from. Filtered to the registries you can see. Requires settings.read. */
+        get: operations["listSkillMovedTags"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/skills/images": {
         parameters: {
             query?: never;
@@ -6183,6 +6235,7 @@ export interface components {
             path: string;
         };
         InstallSkillReleaseRequest: {
+            acknowledgeMovedTag?: boolean;
             allowOfflineFromCache?: boolean;
             asUpdate?: boolean;
             registryId: string;
@@ -6202,6 +6255,11 @@ export interface components {
             freed?: boolean;
             ok: boolean;
             sessionId: string;
+        };
+        LiftSkillExternalRevocationRequest: {
+            /** @enum {string} */
+            subject: "external_owner" | "external_repository" | "external_commit";
+            subjectId: string;
         };
         ListAgentSwitchesResponse: {
             switches: components["schemas"]["AgentSwitch"][];
@@ -7015,6 +7073,12 @@ export interface components {
             reviewerHandleId: string;
             reviews: components["schemas"]["ReviewRun"][];
         };
+        RevokeSkillExternalRequest: {
+            reason: string;
+            /** @enum {string} */
+            subject: "external_owner" | "external_repository" | "external_commit";
+            subjectId: string;
+        };
         RevokeSkillTrustRequest: {
             reason: string;
             /** @enum {string} */
@@ -7066,6 +7130,7 @@ export interface components {
             dryRun?: boolean;
         };
         SaveSkillRegistryRequest: {
+            allowedOwners?: string[];
             apiKeyHeader?: string;
             /** @enum {string} */
             authType?: "none" | "bearer" | "api_key_header";
@@ -7073,14 +7138,16 @@ export interface components {
             displayName: string;
             enabled: boolean;
             location: string;
+            owner?: string;
             permittedPrivateCidrs?: string[];
             pinnedPublisher?: string;
             priority?: number;
+            repository?: string;
             tenantId?: string;
             /** @enum {string} */
-            trustPolicy: "digest" | "pinned_publisher" | "signed" | "official";
+            trustPolicy: "digest" | "pinned_publisher" | "signed" | "official" | "external_integrity" | "external_signed" | "external_org_allowlist" | "external_deny";
             /** @enum {string} */
-            type: "local" | "https" | "git";
+            type: "local" | "https" | "git" | "github";
         };
         SaveSkillTrustRootRequest: {
             displayName: string;
@@ -7468,6 +7535,19 @@ export interface components {
             verdict: "executable" | "requires_approval" | "blocked";
             version: string;
         };
+        SkillExternalRevocationListResponse: {
+            policy: string;
+            revocations: components["schemas"]["SkillExternalRevocationView"][];
+        };
+        SkillExternalRevocationView: {
+            reason: string;
+            /** Format: date-time */
+            revokedAt: string;
+            revokedBy?: string;
+            /** @enum {string} */
+            subject: "external_owner" | "external_repository" | "external_commit";
+            subjectId: string;
+        };
         SkillImageApprovalListResponse: {
             approvals: components["schemas"]["SkillImageApprovalView"][];
             revocationPolicy: string;
@@ -7495,6 +7575,7 @@ export interface components {
             artifactDigest: string;
             /** @enum {string} */
             compatibility: "compatible" | "ao-too-old" | "ao-too-new" | "unknown";
+            identityExplanation?: string;
             /** Format: date-time */
             installedAt: string;
             installedBy?: string;
@@ -7510,7 +7591,19 @@ export interface components {
             revocationStateObserved?: string;
             revoked?: boolean;
             skillId: string;
+            sourceCommit?: string;
+            /** Format: date-time */
+            sourceFetchedAt?: null | string;
+            sourceOwner?: string;
+            sourcePath?: string;
+            /** @enum {string} */
+            sourceProvider?: "" | "github";
+            sourceRepository?: string;
+            sourceShortCommit?: string;
+            sourceTag?: string;
             sourceUrl?: string;
+            /** @enum {string} */
+            sourceVisibility?: "" | "public" | "private";
             /** @enum {string} */
             trust: "revoked" | "unverified" | "verified" | "trusted";
             trustExplanation: string;
@@ -7566,6 +7659,7 @@ export interface components {
             skills: components["schemas"]["SkillInstallView"][];
         };
         SkillMarketplaceSearchResponse: {
+            externalNotice: string;
             freshnessNotice?: string;
             installNotice: string;
             notes: components["schemas"]["SkillRegistryNoteView"][];
@@ -7582,6 +7676,23 @@ export interface components {
             name: string;
             /** @enum {string} */
             riskLevel: "low" | "medium" | "high" | "critical";
+        };
+        SkillMovedTagListResponse: {
+            policy: string;
+            tags: components["schemas"]["SkillMovedTagView"][];
+        };
+        SkillMovedTagView: {
+            commit: string;
+            explanation: string;
+            /** Format: date-time */
+            firstSeenAt: string;
+            /** Format: date-time */
+            movedAt?: null | string;
+            owner: string;
+            previousCommit: string;
+            registryId: string;
+            repository: string;
+            tag: string;
         };
         SkillProvenanceView: {
             algorithm?: string;
@@ -7677,6 +7788,7 @@ export interface components {
             lastSyncAt?: null | string;
         };
         SkillRegistryView: {
+            allowedOwners?: string[];
             apiKeyHeader?: string;
             /** @enum {string} */
             authType: "none" | "bearer" | "api_key_header";
@@ -7685,19 +7797,22 @@ export interface components {
             credentialSecretName?: string;
             displayName: string;
             enabled: boolean;
+            external: boolean;
             id: string;
             location: string;
             networkPolicySummary: string;
+            owner?: string;
             permittedPrivateCidrs?: string[];
             pinnedPublisher?: string;
             priority: number;
+            repository?: string;
             status: components["schemas"]["SkillRegistryStatusView"];
             tenantId?: string;
             /** @enum {string} */
-            trustPolicy: "digest" | "pinned_publisher" | "signed" | "official";
+            trustPolicy: "digest" | "pinned_publisher" | "signed" | "official" | "external_integrity" | "external_signed" | "external_org_allowlist" | "external_deny";
             trustPolicyEnforceable: boolean;
             /** @enum {string} */
-            type: "local" | "https" | "git";
+            type: "local" | "https" | "git" | "github";
             /** Format: date-time */
             updatedAt: string;
         };
@@ -7730,6 +7845,8 @@ export interface components {
             deprecationNote?: string;
             description: string;
             executionModes: components["schemas"]["SkillReleaseModeView"][];
+            externalRevoked?: boolean;
+            externalRevokedReason?: string;
             installed: boolean;
             installedVersion?: string;
             keyId?: string;
@@ -7755,7 +7872,22 @@ export interface components {
             signatureScheme?: string;
             signed: boolean;
             skillId: string;
+            sourceCommit?: string;
+            sourceOwner?: string;
+            sourcePath?: string;
+            /** @enum {string} */
+            sourceProvider?: "" | "github";
+            sourceRepository?: string;
+            sourceShortCommit?: string;
+            sourceTag?: string;
             sourceUrl?: string;
+            /** @enum {string} */
+            sourceVisibility?: "" | "public" | "private";
+            tagMoved?: boolean;
+            /** Format: date-time */
+            tagMovedAt?: null | string;
+            tagMovedExplanation?: string;
+            tagMovedFromCommit?: string;
             /** @enum {string} */
             trust: "revoked" | "unverified" | "verified" | "trusted";
             trustExplanation: string;
@@ -19568,6 +19700,229 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listSkillExternalRevocations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillExternalRevocationListResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    revokeSkillExternal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RevokeSkillExternalRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillExternalRevocationView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    liftSkillExternalRevocation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LiftSkillExternalRevocationRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OKResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listSkillMovedTags: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillMovedTagListResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

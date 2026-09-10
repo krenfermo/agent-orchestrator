@@ -366,6 +366,12 @@ func (c *SkillsController) retireSigningKey(w http.ResponseWriter, r *http.Reque
 	envelope.WriteJSON(w, http.StatusOK, map[string]string{"status": "retired"})
 }
 
+// revokeTrust shares its HTTP shape with revokeExternal on the external port.
+// The two stay separate handlers deliberately: one withdraws a key, a
+// publisher or a root, and the other withdraws a place on somebody else's
+// forge, and phase 13 spent a migration keeping those apart.
+//
+//nolint:dupl // two ports, one HTTP shape; sharing the handler would share the ports.
 func (c *SkillsController) revokeTrust(w http.ResponseWriter, r *http.Request) {
 	if c.Trust == nil {
 		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/skills/trust/revocations")

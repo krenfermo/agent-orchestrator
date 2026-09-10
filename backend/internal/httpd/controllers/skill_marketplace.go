@@ -109,14 +109,22 @@ type SkillMarketplaceSearchInput struct {
 	IncludeDeprecated bool
 	IncludeRevoked    bool
 	Limit             int
-	ActorTenants      []domain.TenantID
+	// Actor is who is looking. The QUERY is never recorded -- a search string
+	// can name an internal package or a vulnerability somebody is hunting --
+	// and this is used for one thing only: attributing the audit line an
+	// external registry writes when it first pins a tag to a commit, or
+	// notices one has moved.
+	Actor        string
+	ActorTenants []domain.TenantID
 }
 
 // SkillReleaseLookupInput identifies one release for display.
 type SkillReleaseLookupInput struct {
-	RegistryID   string
-	SkillID      string
-	Version      string
+	RegistryID string
+	SkillID    string
+	Version    string
+	// Actor is who is looking, for the tag-ledger audit line only.
+	Actor        string
 	ActorTenants []domain.TenantID
 }
 
@@ -127,6 +135,10 @@ type SkillInstallReleaseInput struct {
 	Version               string
 	AsUpdate              bool
 	AllowOfflineFromCache bool
+	// AcknowledgeMovedTag is a person saying explicitly that they mean to take
+	// the commit a tag points at now rather than the one AO recorded. It
+	// acknowledges the MOVE and skips no check.
+	AcknowledgeMovedTag bool
 
 	Actor            string
 	ActorPermissions []domain.Permission
@@ -159,17 +171,32 @@ type SkillUpdateCheckInput struct {
 type SkillRegistryView struct {
 	ID          string `json:"id"`
 	DisplayName string `json:"displayName"`
-	Type        string `json:"type" enum:"local,https,git"`
+	Type        string `json:"type" enum:"local,https,git,github"`
 	Location    string `json:"location"`
 	Enabled     bool   `json:"enabled"`
-	TrustPolicy string `json:"trustPolicy" enum:"digest,pinned_publisher,signed,official"`
+	TrustPolicy string `json:"trustPolicy" enum:"digest,pinned_publisher,signed,official,external_integrity,external_signed,external_org_allowlist,external_deny"`
 	// TrustPolicyEnforceable is false for a policy this build cannot satisfy.
 	// A registry requiring a verified signature installs nothing, and a client
 	// has to be able to say so rather than showing the strictest-looking
 	// setting as if it were working.
 	TrustPolicyEnforceable bool   `json:"trustPolicyEnforceable"`
 	PinnedPublisher        string `json:"pinnedPublisher,omitempty"`
-	Priority               int    `json:"priority"`
+	// Owner and Repository are the external scope. Owner is the account or
+	// organization; an empty Repository means every repository under it that
+	// publishes AO releases, discovered under a hard request budget. Both are
+	// empty for every registry that is not external.
+	Owner      string `json:"owner,omitempty"`
+	Repository string `json:"repository,omitempty"`
+	// AllowedOwners is the external_org_allowlist control. Plain owner names,
+	// never patterns. It is sent so a settings screen can SHOW it: an
+	// allowlist nobody can read is one nobody reviews, and what it grants is
+	// PERMISSION TO INSTALL rather than trust.
+	AllowedOwners []string `json:"allowedOwners,omitempty"`
+	// External reports whether this registry serves somebody else's packages.
+	// It is the daemon's answer rather than a client comparing type strings,
+	// because it is what decides whether the hosting notice must be shown.
+	External bool `json:"external"`
+	Priority int  `json:"priority"`
 	// TenantID is empty for an installation-wide registry.
 	TenantID string `json:"tenantId,omitempty"`
 	// CredentialSecretName is the NAME of a sealed secret. The value is not
@@ -286,14 +313,31 @@ type SkillRegistryListResponse struct {
 
 // SaveSkillRegistryRequest is the wire body for PUT /skills/registries/{id}.
 type SaveSkillRegistryRequest struct {
-	DisplayName     string `json:"displayName"`
-	Type            string `json:"type" enum:"local,https,git"`
-	Location        string `json:"location"`
-	Enabled         bool   `json:"enabled"`
-	TrustPolicy     string `json:"trustPolicy" enum:"digest,pinned_publisher,signed,official"`
+	DisplayName string `json:"displayName"`
+	Type        string `json:"type" enum:"local,https,git,github"`
+	// Location is a directory for local, a baseURL for https, and the API BASE
+	// URL for github -- https://api.github.com, or a GitHub-compatible
+	// endpoint this installation was pointed at. Deliberately not a repository
+	// page: a client pointed at an HTML page follows whatever it redirects to.
+	Location    string `json:"location"`
+	Enabled     bool   `json:"enabled"`
+	TrustPolicy string `json:"trustPolicy" enum:"digest,pinned_publisher,signed,official,external_integrity,external_signed,external_org_allowlist,external_deny"`
+	// PinnedPublisher is required by pinned_publisher, optional on an external
+	// registry -- where it is the "this repository must keep publishing as
+	// acme" control -- and refused everywhere else.
 	PinnedPublisher string `json:"pinnedPublisher,omitempty"`
-	Priority        int    `json:"priority,omitempty"`
-	TenantID        string `json:"tenantId,omitempty"`
+	// Owner is required for a github registry and refused for every other
+	// type. Repository narrows it to one repository; empty means every
+	// repository the owner has that publishes AO releases, under a bounded
+	// scan.
+	Owner      string `json:"owner,omitempty"`
+	Repository string `json:"repository,omitempty"`
+	// AllowedOwners is required by external_org_allowlist and refused
+	// otherwise. Plain owner names: a wildcard here is how an organization
+	// allowlist becomes an everything allowlist, and one is refused outright.
+	AllowedOwners []string `json:"allowedOwners,omitempty"`
+	Priority      int      `json:"priority,omitempty"`
+	TenantID      string   `json:"tenantId,omitempty"`
 	// CredentialSecretName is the NAME of a sealed secret, never a value.
 	CredentialSecretName string `json:"credentialSecretName,omitempty"`
 	// AuthType is how that credential is presented. Explicit rather than
@@ -372,6 +416,41 @@ type SkillReleaseView struct {
 	DeprecationNote  string    `json:"deprecationNote,omitempty"`
 	Revoked          bool      `json:"revoked,omitempty"`
 	RevocationReason string    `json:"revocationReason,omitempty"`
+
+	// The git source, when this release came from a forge. Every field is what
+	// AO RESOLVED, never what a descriptor claimed: the provider re-stamps the
+	// owner, the repository and the commit from its own lookup, so a
+	// repository cannot publish a descriptor claiming to be somebody else's
+	// code at somebody else's commit.
+	SourceProvider   string `json:"sourceProvider,omitempty" enum:",github"`
+	SourceOwner      string `json:"sourceOwner,omitempty"`
+	SourceRepository string `json:"sourceRepository,omitempty"`
+	// SourceTag is a LABEL and never the identity. SourceCommit is the
+	// identity: a full 40-character SHA. ShortCommit is the first twelve, for
+	// a place the full one does not fit -- twelve and not seven, because seven
+	// collides in a large repository and a display abbreviation that can
+	// collide is one somebody eventually compares two of.
+	SourceTag         string `json:"sourceTag,omitempty"`
+	SourceCommit      string `json:"sourceCommit,omitempty"`
+	SourceShortCommit string `json:"sourceShortCommit,omitempty"`
+	SourcePath        string `json:"sourcePath,omitempty"`
+	// SourceVisibility is what the forge said about the repository. Display
+	// metadata and a warning surface, never a trust input.
+	SourceVisibility string `json:"sourceVisibility,omitempty" enum:",public,private"`
+	// TagMoved reports that the tag this release is published under points
+	// somewhere else than AO recorded. It travels BESIDE trust and into none
+	// of it: a moved tag does not make a release less verified, it makes the
+	// name it was found under mean something else.
+	TagMoved            bool       `json:"tagMoved,omitempty"`
+	TagMovedFromCommit  string     `json:"tagMovedFromCommit,omitempty"`
+	TagMovedAt          *time.Time `json:"tagMovedAt,omitempty"`
+	TagMovedExplanation string     `json:"tagMovedExplanation,omitempty"`
+	// ExternalRevoked is an administrative withdrawal made HERE, of this
+	// release's account, repository or commit. It is separate from Revoked,
+	// which is what a registry said, because only one of the two is this
+	// installation's own decision.
+	ExternalRevoked       bool   `json:"externalRevoked,omitempty"`
+	ExternalRevokedReason string `json:"externalRevokedReason,omitempty"`
 
 	// Trust is what AO can honestly say about this release right now. In a
 	// listing it is "unverified" for everything installable, because a search
@@ -455,6 +534,11 @@ type SkillMarketplaceSearchResponse struct {
 	Offline bool `json:"offline"`
 	// FreshnessNotice is the sentence a client must show when Offline is true.
 	FreshnessNotice string `json:"freshnessNotice,omitempty"`
+	// ExternalNotice is the sentence a client must show before installing from
+	// a forge. It is served so a screen cannot describe hosting more warmly
+	// than the daemon does, and the warm version of this one -- "from GitHub"
+	// -- reads as an endorsement to almost everybody.
+	ExternalNotice string `json:"externalNotice"`
 	// InstallNotice is the sentence a client must show before installing. It
 	// comes from the daemon so the promise on screen and the behaviour in the
 	// service cannot drift apart.
@@ -491,25 +575,62 @@ type InstallSkillReleaseRequest struct {
 	// and a release AO has never downloaded cannot be installed this way at
 	// all.
 	AllowOfflineFromCache bool `json:"allowOfflineFromCache,omitempty"`
+	// AcknowledgeMovedTag is a person saying, explicitly, that they mean to
+	// take the commit a tag points at NOW rather than the one AO recorded for
+	// it.
+	//
+	// It exists because a moved tag is not always an attack -- publishers
+	// re-tag by mistake -- and a system that refused forever is one people
+	// route around. What it must never be is the default: a silent reinstall
+	// of "the same version" from different bytes is the substitution this
+	// whole surface exists to catch. It acknowledges the MOVE and skips no
+	// check: the digests, the manifest, the capabilities, the signature and
+	// the revocations all still run, against the new commit.
+	AcknowledgeMovedTag bool `json:"acknowledgeMovedTag,omitempty"`
 }
 
 // SkillInstallOriginView is the recorded provenance of one installed version.
 type SkillInstallOriginView struct {
-	SkillID          string    `json:"skillId"`
-	Version          string    `json:"version"`
-	RegistryID       string    `json:"registryId"`
-	RegistryName     string    `json:"registryName,omitempty"`
-	RegistryType     string    `json:"registryType"`
-	Publisher        string    `json:"publisher"`
-	SourceURL        string    `json:"sourceUrl,omitempty"`
-	ManifestDigest   string    `json:"manifestDigest"`
-	ArtifactDigest   string    `json:"artifactDigest"`
-	Trust            string    `json:"trust" enum:"revoked,unverified,verified,trusted"`
-	TrustExplanation string    `json:"trustExplanation"`
-	TrustPolicy      string    `json:"trustPolicy"`
-	Compatibility    string    `json:"compatibility" enum:"compatible,ao-too-old,ao-too-new,unknown"`
-	InstalledAt      time.Time `json:"installedAt"`
-	InstalledBy      string    `json:"installedBy,omitempty"`
+	SkillID        string `json:"skillId"`
+	Version        string `json:"version"`
+	RegistryID     string `json:"registryId"`
+	RegistryName   string `json:"registryName,omitempty"`
+	RegistryType   string `json:"registryType"`
+	Publisher      string `json:"publisher"`
+	SourceURL      string `json:"sourceUrl,omitempty"`
+	ManifestDigest string `json:"manifestDigest"`
+	ArtifactDigest string `json:"artifactDigest"`
+	Trust          string `json:"trust" enum:"revoked,unverified,verified,trusted"`
+	// The git provenance, written once at install and never rewritten. If the
+	// tag later points elsewhere these fields still say what they said: the
+	// bytes on this host came from this commit, and AO verified them against
+	// this commit's digests. That is true forever, and rewriting it because
+	// somebody moved a pointer would erase the only evidence of what was
+	// actually installed.
+	SourceProvider    string     `json:"sourceProvider,omitempty" enum:",github"`
+	SourceOwner       string     `json:"sourceOwner,omitempty"`
+	SourceRepository  string     `json:"sourceRepository,omitempty"`
+	SourceTag         string     `json:"sourceTag,omitempty"`
+	SourceCommit      string     `json:"sourceCommit,omitempty"`
+	SourceShortCommit string     `json:"sourceShortCommit,omitempty"`
+	SourcePath        string     `json:"sourcePath,omitempty"`
+	SourceVisibility  string     `json:"sourceVisibility,omitempty" enum:",public,private"`
+	SourceFetchedAt   *time.Time `json:"sourceFetchedAt,omitempty"`
+	// IdentityExplanation is the daemon's sentence about WHO this release is
+	// by, kept as the several separate facts it actually is: the host account,
+	// the publisher the package declares, and whether anything cryptographic
+	// ties that name to whoever wrote the code. Empty for a non-external
+	// install.
+	//
+	// It is served rather than composed in a UI because the comfortable
+	// version -- "published by acme" -- is exactly the impersonation this
+	// phase exists to refuse.
+	IdentityExplanation string    `json:"identityExplanation,omitempty"`
+	TrustExplanation    string    `json:"trustExplanation"`
+	TrustPolicy         string    `json:"trustPolicy"`
+	Compatibility       string    `json:"compatibility" enum:"compatible,ao-too-old,ao-too-new,unknown"`
+	InstalledAt         time.Time `json:"installedAt"`
+	InstalledBy         string    `json:"installedBy,omitempty"`
 
 	// Provenance is the verified chain, present when AO checked a signature.
 	// It is the answer to "why does this say trusted", and it is served as one
@@ -754,6 +875,7 @@ func (c *SkillsController) searchMarketplace(w http.ResponseWriter, r *http.Requ
 		IncludeDeprecated: queryBool(q.Get("includeDeprecated")),
 		IncludeRevoked:    queryBool(q.Get("includeRevoked")),
 		Limit:             queryInt(q.Get("limit")),
+		Actor:             c.actor(r),
 		ActorTenants:      c.callerTenants(r),
 	})
 	if err != nil {
@@ -772,6 +894,7 @@ func (c *SkillsController) marketplaceRelease(w http.ResponseWriter, r *http.Req
 		RegistryID:   chi.URLParam(r, "registryId"),
 		SkillID:      chi.URLParam(r, "skillId"),
 		Version:      strings.TrimSpace(r.URL.Query().Get("version")),
+		Actor:        c.actor(r),
 		ActorTenants: c.callerTenants(r),
 	})
 	if err != nil {
@@ -797,6 +920,7 @@ func (c *SkillsController) installRelease(w http.ResponseWriter, r *http.Request
 		Version:               in.Version,
 		AsUpdate:              in.AsUpdate,
 		AllowOfflineFromCache: in.AllowOfflineFromCache,
+		AcknowledgeMovedTag:   in.AcknowledgeMovedTag,
 		Actor:                 c.actor(r),
 		ActorPermissions:      c.callerGlobalPermissions(r),
 		ActorTenants:          c.callerTenants(r),

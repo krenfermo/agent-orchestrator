@@ -39,6 +39,21 @@ import (
 // second reads like a configuration problem and sends somebody to change a
 // setting.
 
+// ExternalRevocationStore is what this installation has administratively
+// withdrawn on a forge.
+//
+// It is a separate interface from TrustStore because it answers a different
+// question with a different author: TrustStore is about keys and roots, and
+// this is about places. A verifier that could also decide "this repository is
+// banned" would be a verifier doing policy.
+type ExternalRevocationStore interface {
+	// ExternalRevocation reports an administrative withdrawal of an owner, a
+	// repository or a commit.
+	ExternalRevocation(
+		ctx context.Context, subject RevocationSubject, subjectID string,
+	) (TrustRevocation, bool, error)
+}
+
 // TrustStore is AO's own record of what it will verify against.
 //
 // It is read-only here. Nothing in the verification path writes a key, adopts
@@ -70,6 +85,33 @@ const (
 	SubjectPublisher RevocationSubject = "publisher"
 	// SubjectTrustRoot withdraws an anchor and, with it, every key under it.
 	SubjectTrustRoot RevocationSubject = "trust_root"
+
+	// The three below arrived with external registries in phase 13. They exist
+	// because a forge publishes NO REVOCATION FEED: there is no endpoint AO
+	// could poll to learn that a repository was compromised, and inventing one
+	// would mean inventing semantics GitHub does not have.
+	//
+	// So external revocation is ADMINISTRATIVE and LOCAL. Somebody here reads
+	// an advisory and writes down what this installation will no longer
+	// install, and the three subjects are three different blast radii that a
+	// single flag would have flattened.
+
+	// SubjectExternalOwner withdraws an account or organization entirely.
+	// Every repository under it, and every release in those, is refused for
+	// new installs. It is the control for "that whole org was taken over".
+	SubjectExternalOwner RevocationSubject = "external_owner"
+	// SubjectExternalRepository withdraws one repository, named "owner/repo".
+	// It is the ordinary case: one project turned out to be malicious, or was
+	// transferred to somebody nobody vetted.
+	SubjectExternalRepository RevocationSubject = "external_repository"
+	// SubjectExternalCommit withdraws one exact commit, named
+	// "owner/repo@<sha>".
+	//
+	// It is the narrowest and the most useful during an incident: a repository
+	// that shipped one bad release stays installable at every other commit,
+	// which means an administrator can act immediately without taking a
+	// dependency away from everybody who is on a good version.
+	SubjectExternalCommit RevocationSubject = "external_commit"
 )
 
 // Valid reports whether s is a declared subject.
@@ -78,7 +120,68 @@ func (s RevocationSubject) Valid() bool {
 	case SubjectRelease, SubjectSigningKey, SubjectPublisher, SubjectTrustRoot:
 		return true
 	}
+	return s.External()
+}
+
+// External reports whether this subject withdraws something on a forge.
+func (s RevocationSubject) External() bool {
+	switch s {
+	case SubjectExternalOwner, SubjectExternalRepository, SubjectExternalCommit:
+		return true
+	}
 	return false
+}
+
+// RegistryReportable reports whether a REGISTRY may report this subject in its
+// own withdrawal feed.
+//
+// The external three may not, and the reason is the point of the whole split:
+// a forge publishes no revocation feed, so a registry claiming to revoke an
+// owner would be a registry inventing an authority the transport does not give
+// it. An administrator here revokes those, through settings.manage, and that
+// decision is this installation's rather than a stranger's.
+func (s RevocationSubject) RegistryReportable() bool { return s.Valid() && !s.External() }
+
+// Global reports whether a revocation of this subject applies across every
+// registry rather than only to installs from the one that reported it.
+//
+// The external subjects are global for the same reason an administrative key
+// revocation is: they are AO's own decision, not a claim AO accepted from
+// somewhere. "We do not install anything from this account" would be a strange
+// thing to scope to one registry row, especially since two rows can point at
+// the same owner.
+func (s RevocationSubject) Global() bool { return s.External() }
+
+// ExternalRevocationSubjects is the vocabulary an administrator may use when
+// withdrawing something on a forge.
+func ExternalRevocationSubjects() []RevocationSubject {
+	return []RevocationSubject{
+		SubjectExternalOwner, SubjectExternalRepository, SubjectExternalCommit,
+	}
+}
+
+// ExternalSubjectsFor is every administrative revocation that would block this
+// source, in widening order.
+//
+// The order is the message: an install refused because the COMMIT was
+// withdrawn is a different conversation from one refused because the whole
+// ACCOUNT was, and a caller that checked them in an arbitrary order would
+// sometimes report the broadest reason for the narrowest fact.
+func ExternalSubjectsFor(src GitSource) []struct {
+	Subject RevocationSubject
+	ID      string
+} {
+	if !src.Declared() {
+		return nil
+	}
+	return []struct {
+		Subject RevocationSubject
+		ID      string
+	}{
+		{SubjectExternalCommit, src.CommitRef()},
+		{SubjectExternalRepository, src.Slug()},
+		{SubjectExternalOwner, src.Owner},
+	}
 }
 
 // TrustRevocation is one administrative withdrawal recorded by this

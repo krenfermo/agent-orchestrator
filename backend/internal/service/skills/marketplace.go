@@ -126,8 +126,14 @@ type Marketplace struct {
 	// key was missing -- and makes a signed-policy registry install nothing,
 	// which is the fail-closed direction.
 	trust *TrustAuthority
-	now   func() time.Time
-	newID func() string
+	// external is the phase-13 half: the moved-tag ledger and the
+	// administrative revocations of an owner, a repository or a commit. Nil
+	// means this installation installs nothing from a forge -- see
+	// externalAvailable for why that is the fail-closed direction rather than
+	// a degradation.
+	external ExternalStore
+	now      func() time.Time
+	newID    func() string
 }
 
 // NewMarketplace builds the marketplace over a store and a catalog service.
@@ -489,7 +495,14 @@ type SearchRequest struct {
 	Query skillregistry.Query
 	// RegistryID narrows the search to one registry. Empty searches every
 	// enabled registry the caller can see.
-	RegistryID   string
+	RegistryID string
+	// Actor is who is searching. It is used for ONE thing: the audit line an
+	// external registry writes when it first pins a tag to a commit, or when
+	// it notices one has moved. The query itself is never recorded -- see the
+	// note on Search and migration 0164 -- and an empty actor produces a
+	// system-attributed line rather than none, because a tag moving is worth
+	// recording whoever happened to be looking.
+	Actor        string
 	ActorTenants []domain.TenantID
 }
 
@@ -512,6 +525,21 @@ type FoundRelease struct {
 	UpdateAvailable bool
 	// Compatibility is the verdict against the running AO version.
 	Compatibility skillregistry.CompatibilityVerdict
+	// TagMoved reports that the tag this release is published under has moved
+	// since AO recorded it, and the two commits involved.
+	//
+	// It is carried on the ROW rather than on the registry, because it is a
+	// fact about one release: two releases from the same repository can differ
+	// on this, and a per-registry flag would mark the innocent ones.
+	TagMoved     bool
+	TagMovedFrom string
+	TagMovedAt   *time.Time
+	// ExternalRevoked reports an administrative withdrawal of this release's
+	// account, repository or commit on THIS installation. It is separate from
+	// Release.Revoked, which is what a registry said, and it is separate
+	// because only one of the two is this installation's own decision.
+	ExternalRevoked       bool
+	ExternalRevokedReason string
 	// Metadata is how AO came by this row: live from the registry, or from
 	// cache because the registry could not be reached.
 	//
@@ -621,13 +649,42 @@ func (m *Marketplace) Search(ctx context.Context, req SearchRequest) (SearchResu
 				SearchNote{RegistryID: reg.ID, Reason: searchErr.Error(), Metadata: state})
 			continue
 		}
+		// A scan that stopped early has told the caller less than the source
+		// offers. Reporting it as a NOTE rather than an error is the right
+		// shape -- there are real rows to show -- but reporting it not at all
+		// would be a search that quietly lies about what is available.
+		for _, note := range scanNotes(provider) {
+			result.Notes = append(result.Notes,
+				SearchNote{RegistryID: reg.ID, Reason: note.Error(), Metadata: state})
+		}
 		for _, rel := range rels {
-			result.Releases = append(result.Releases, m.decorate(rel, reg, installed, state))
+			// An external row is compared against the tag ledger AS IT IS
+			// LISTED, not only when somebody installs. A marketplace that
+			// only noticed a moved tag at install time would show the old
+			// commit right up until the moment it mattered.
+			if reg.Type.External() {
+				m.observeTag(ctx, searchActor(req.Actor), rel)
+			}
+			result.Releases = append(result.Releases, m.decorate(ctx, rel, reg, installed, state))
 		}
 	}
 	sortFound(result.Releases)
 	sortSources(result.Sources)
 	return result, nil
+}
+
+// scanNotes is what a scanning provider could not do, when it can say.
+//
+// It is a type assertion rather than a Provider method for the reason
+// MetadataFresher is: three of the four implementations scan nothing and have
+// no partial answer to report, and a method they would implement by returning
+// nil is a method somebody has to read.
+func scanNotes(p skillregistry.Provider) []error {
+	reporter, ok := p.(interface{ ScanNotes() []error })
+	if !ok {
+		return nil
+	}
+	return reporter.ScanNotes()
 }
 
 func sourceOf(reg skillregistry.Registry, state skillregistry.MetadataState) RegistrySource {
@@ -693,11 +750,27 @@ func (m *Marketplace) installedIndex(ctx context.Context) (installedIndex, error
 	return idx, nil
 }
 
+// searchActor attributes a ledger line from a read path.
+//
+// A search is not an authenticated act in this surface and the row it can
+// produce is not about the searcher: it is about a tag on somebody else's
+// forge. Attributing it to the system rather than dropping it is the choice
+// that keeps a moved tag observable when it is noticed by a listing nobody
+// signed for.
+func searchActor(actor string) string {
+	if strings.TrimSpace(actor) == "" {
+		return "system"
+	}
+	return actor
+}
+
 func (m *Marketplace) decorate(
-	rel skillregistry.Release, reg skillregistry.Registry, idx installedIndex,
-	state skillregistry.MetadataState,
+	ctx context.Context, rel skillregistry.Release, reg skillregistry.Registry,
+	idx installedIndex, state skillregistry.MetadataState,
 ) FoundRelease {
 	installedVersion := idx.newest[rel.SkillID]
+	moved, movedFrom, movedAt := m.tagMoveOf(ctx, rel)
+	revoked, reason := m.externalRevocationOf(ctx, rel)
 	return FoundRelease{
 		Release:      rel,
 		RegistryName: reg.DisplayName,
@@ -711,8 +784,50 @@ func (m *Marketplace) decorate(
 		InstalledVersion: installedVersion,
 		UpdateAvailable:  installedVersion != "" && skillregistry.NewerThan(rel.Version, installedVersion),
 		Compatibility:    skillregistry.CheckCompatibility(rel, m.aoVersion),
-		Metadata:         state.Normalized(),
+		// Three facts that travel BESIDE trust and into none of it. A moved
+		// tag does not make a release less verified; it makes the name it was
+		// found under mean something else, which is a different thing to put
+		// in front of a person. An administrative revocation does block the
+		// install, and it is still not a trust state: it is this
+		// installation's decision about a place.
+		TagMoved:              moved,
+		TagMovedFrom:          movedFrom,
+		TagMovedAt:            movedAt,
+		ExternalRevoked:       revoked,
+		ExternalRevokedReason: reason,
+		Metadata:              state.Normalized(),
 	}
+}
+
+// tagMoveOf reads the ledger for one release's tag.
+func (m *Marketplace) tagMoveOf(
+	ctx context.Context, rel skillregistry.Release,
+) (bool, string, *time.Time) {
+	if !m.externalAvailable() || !rel.Source.Declared() || rel.Source.Tag == "" {
+		return false, "", nil
+	}
+	row, ok, err := m.external.GetSkillExternalTag(
+		ctx, rel.RegistryID, rel.Source.Owner, rel.Source.Repository, rel.Source.Tag)
+	if err != nil || !ok || !row.Moved() {
+		return false, "", nil
+	}
+	return true, row.MovedFromCommit, row.MovedAt
+}
+
+// externalRevocationOf reads this installation's administrative withdrawals
+// for one release's source.
+func (m *Marketplace) externalRevocationOf(
+	ctx context.Context, rel skillregistry.Release,
+) (bool, string) {
+	if !rel.Source.Declared() {
+		return false, ""
+	}
+	rev, subject, ok := m.externalRevocation(ctx, rel.Source)
+	if !ok {
+		return false, ""
+	}
+	return true, fmt.Sprintf("%s was withdrawn on this installation: %s",
+		describeExternalSubject(subject, rev.SubjectID), rev.Reason)
 }
 
 func sortFound(found []FoundRelease) {
@@ -730,7 +845,8 @@ func sortFound(found []FoundRelease) {
 // GetRelease returns one release for display, with every version of the same
 // skill the registry offers.
 func (m *Marketplace) GetRelease(
-	ctx context.Context, registryID, skillID, version string, tenants []domain.TenantID,
+	ctx context.Context, registryID, skillID, version, actor string,
+	tenants []domain.TenantID,
 ) (FoundRelease, []FoundRelease, error) {
 	if err := m.requireAvailable(); err != nil {
 		return FoundRelease{}, nil, err
@@ -756,7 +872,10 @@ func (m *Marketplace) GetRelease(
 	var current FoundRelease
 	var found bool
 	for _, rel := range versions {
-		decorated := m.decorate(rel, reg, idx, state)
+		if reg.Type.External() {
+			m.observeTag(ctx, searchActor(actor), rel)
+		}
+		decorated := m.decorate(ctx, rel, reg, idx, state)
 		all = append(all, decorated)
 		if rel.Version == version || (version == "" && !found) {
 			current, found = decorated, true
@@ -788,6 +907,20 @@ type InstallReleaseRequest struct {
 	// allowed: versions live side by side and an activation pins one, so an
 	// install can never change what a project already resolves to.
 	AsUpdate bool
+	// AcknowledgeMovedTag is a person saying, explicitly, that they mean to
+	// take the commit a tag points at NOW rather than the one AO recorded.
+	//
+	// It exists because a moved tag is not always an attack -- publishers
+	// re-tag by mistake -- and a system that refused forever would be a system
+	// people route around. What it must never be is the default: a silent
+	// reinstall of "the same version" from different bytes is the force-push
+	// substitution completing, so this is a field a caller sets deliberately
+	// and a UI asks for in words.
+	//
+	// It acknowledges the MOVE. It skips no check: the digests, the manifest,
+	// the capabilities, the signature and the revocations all still run
+	// against the new commit, which is the whole point of resolving it.
+	AcknowledgeMovedTag bool
 	// AllowOfflineFromCache permits an install to proceed when the registry
 	// cannot be reached, using bytes AO already fetched and verified.
 	//
@@ -829,6 +962,15 @@ type InstallOutcome struct {
 	// fact from a signature that failed, and Verification.RefusalCode is what
 	// tells them apart.
 	Verification skillregistry.Verification
+	// Identity is who this external release is BY, as the four separate facts
+	// it actually is: the host account, the declared publisher, the signing
+	// publisher when one verified, and what this installation expected. Zero
+	// for an install that did not come from a forge.
+	Identity skillregistry.ExternalIdentity
+	// TagStatus is what the moved-tag ledger concluded about the tag this was
+	// resolved through. Zero for a release with no tag and for every
+	// non-external install.
+	TagStatus TagStatus
 }
 
 // InstallRelease resolves, verifies and installs one exact release.
@@ -888,7 +1030,40 @@ func (m *Marketplace) InstallRelease(
 				rel.Ref(), reg.ID, known.ObservedAt.Format(time.RFC3339), known.Reason))
 	}
 
-	// 3. The registry's trust policy, beyond integrity.
+	// 3. What an EXTERNAL registry adds, before anything else about trust.
+	//
+	//    It runs here, after revocation and before the signature, because
+	//    every refusal in it is about WHERE the release is rather than about
+	//    the package -- and "this account is withdrawn" is a much more useful
+	//    thing to be told than "the signature did not verify", which is what
+	//    a person would otherwise chase.
+	var tagStatus TagStatus
+	var tagKnown bool
+	if reg.Type.External() {
+		if err := m.checkExternalPolicy(ctx, reg, rel); err != nil {
+			return InstallOutcome{}, m.refuseExternal(ctx, req, reg, rel, err)
+		}
+		// The tag is compared against the ledger and the comparison is
+		// RECORDED whichever way it goes, before the refusal below: a moved
+		// tag that blocked an install is still a moved tag, and the audit
+		// trail has to hold it even when nothing was installed.
+		//
+		// OFFLINE is the exception, and it is not an omission: the release
+		// came from AO's own artifact cache rather than from a resolution, so
+		// writing it into the ledger would record "the tag points here" on the
+		// strength of a copy AO could not confirm. resolveForInstall has
+		// already checked the cached bytes against the ledger instead, which
+		// is the direction that can only ever refuse.
+		if !offline {
+			tagStatus, tagKnown = m.observeTag(ctx, req.Actor, rel)
+			if err := m.checkTagNotMoved(
+				ctx, reg, rel, tagStatus, tagKnown, req.AcknowledgeMovedTag); err != nil {
+				return InstallOutcome{}, m.refuseExternal(ctx, req, reg, rel, err)
+			}
+		}
+	}
+
+	// 4. The registry's trust policy, beyond integrity.
 	if reg.TrustPolicy == skillregistry.TrustPolicyPinnedPublisher &&
 		rel.Publisher != reg.PinnedPublisher {
 		return InstallOutcome{}, m.refuse(ctx, req, reg, "SKILL_PUBLISHER_MISMATCH",
@@ -919,7 +1094,7 @@ func (m *Marketplace) InstallRelease(
 		return InstallOutcome{}, err
 	}
 
-	// 4. Compatibility. An unknown verdict does NOT refuse -- see the note on
+	// 5. Compatibility. An unknown verdict does NOT refuse -- see the note on
 	//    skillregistry.CheckCompatibility -- but it is recorded as unknown so
 	//    nobody later reads it as a pass.
 	compat := skillregistry.CheckCompatibility(rel, m.aoVersion)
@@ -934,21 +1109,21 @@ func (m *Marketplace) InstallRelease(
 				rel.Ref(), rel.Compatibility.AOMaxVersion, m.describeAOVersion()))
 	}
 
-	// 5. A skill id belongs to the registry that first installed it. Two
+	// 6. A skill id belongs to the registry that first installed it. Two
 	//    registries taking turns publishing one id is the collision this rule
 	//    exists to stop.
 	if err := m.checkRegistryBinding(ctx, rel.SkillID, reg.ID); err != nil {
 		return InstallOutcome{}, m.refuseErr(ctx, req, reg, err)
 	}
 
-	// 6. No-downgrade, when this was asked for as an update.
+	// 7. No-downgrade, when this was asked for as an update.
 	if req.AsUpdate {
 		if err := m.checkIsAnUpdate(ctx, rel); err != nil {
 			return InstallOutcome{}, m.refuseErr(ctx, req, reg, err)
 		}
 	}
 
-	// 7. Fetch into quarantine, and verify EVERYTHING against the bytes that
+	// 8. Fetch into quarantine, and verify EVERYTHING against the bytes that
 	//    landed. The quarantine is removed whichever way this goes.
 	quarantine, cleanup, err := m.quarantine(rel)
 	if err != nil {
@@ -975,7 +1150,18 @@ func (m *Marketplace) InstallRelease(
 		return InstallOutcome{}, m.refuseErr(ctx, req, reg, err)
 	}
 
-	// 8. Install through the ordinary catalog path, which re-verifies from the
+	// The moment the bytes arrived, recorded only for a release that has a
+	// forge behind it: it is distinct from installedAt (when they reached the
+	// catalog) and from metadataFetchedAt (when the description AO acted on
+	// was read), and a timestamp on a local install would be a third name for
+	// the same instant.
+	fetchedAtValue := m.now()
+	var fetchedAt *time.Time
+	if rel.Source.Declared() {
+		fetchedAt = &fetchedAtValue
+	}
+
+	// 9. Install through the ordinary catalog path, which re-verifies from the
 	//    INSTALLED copy and refuses a version whose bytes changed.
 	installed, err := m.catalog.Install(ctx, InstallRequest{
 		SourceDir:   quarantine,
@@ -986,8 +1172,8 @@ func (m *Marketplace) InstallRelease(
 		return InstallOutcome{}, err
 	}
 
-	// 9. Record the provenance. It is AO's row, not the registry's, and it
-	//    survives the release disappearing from the registry entirely.
+	// 10. Record the provenance. It is AO's row, not the registry's, and it
+	//     survives the release disappearing from the registry entirely.
 	published := rel.PublishedAt
 	origin, err := m.store.UpsertSkillInstallOrigin(ctx, store.SkillInstallOrigin{
 		SkillID:          rel.SkillID,
@@ -1008,16 +1194,21 @@ func (m *Marketplace) InstallRelease(
 		Verification:            verification,
 		RevocationStateObserved: m.observedRevocationState(reg, offline),
 		MetadataFetchedAt:       metadataFetchedAt(provider),
-		CompatibilityVerdict:    compat,
-		PublishedAt:             &published,
-		InstalledAt:             m.now(),
-		InstalledBy:             req.Actor,
+		// The git provenance, written once and never rewritten. If the tag
+		// later points elsewhere this row still says what it says: these bytes
+		// came from this commit and AO verified them against its digests.
+		Source:               rel.Source,
+		SourceFetchedAt:      fetchedAt,
+		CompatibilityVerdict: compat,
+		PublishedAt:          &published,
+		InstalledAt:          m.now(),
+		InstalledBy:          req.Actor,
 	})
 	if err != nil {
 		return InstallOutcome{}, err
 	}
 
-	// 10. Keep the verified bytes, addressed by the digest AO computed. This
+	// 11. Keep the verified bytes, addressed by the digest AO computed. This
 	//     is what makes a later offline install possible, and it is written
 	//     AFTER the install succeeded so the cache only ever holds trees that
 	//     passed every check.
@@ -1046,10 +1237,63 @@ func (m *Marketplace) InstallRelease(
 			Detail:  fmt.Sprintf("updated from registry %s", reg.ID),
 		})
 	}
+	if rel.Source.Declared() {
+		// One line that says, in an auditable place, exactly which tree
+		// reached this host: the repository, the tag it was found under, the
+		// commit that is the actual identity, and what the archive unpacked
+		// to. A year from now the tag may mean something else and the
+		// repository may have been renamed; the commit and the digest will
+		// still be true.
+		m.audit(ctx, store.SkillAuditEntry{
+			Actor: req.Actor, Action: store.SkillAuditExternalReleasePinned,
+			SkillID: rel.SkillID, Version: rel.Version, Digest: installed.Digest,
+			Detail: fmt.Sprintf("installed from %s; %s", rel.Source.Describe(),
+				archiveNote(provider)),
+		})
+	}
 	return InstallOutcome{
 		Install: installed, Origin: origin, Release: rel, Updated: req.AsUpdate,
 		FromCache: fromCache, Offline: offline, Verification: verification,
+		Identity:  skillregistry.ExternalIdentityOf(rel, reg).WithSigner(verification),
+		TagStatus: tagStatus,
 	}, nil
+}
+
+// refuseExternal audits an external refusal in ITS OWN action as well as the
+// generic install_refused, and returns the error.
+//
+// Two rows for one refusal, because they answer different questions. The
+// generic one belongs to "what did somebody try to install and fail"; this one
+// belongs to "what did this forge do", which is the trail somebody reads when
+// a repository turns out to have been compromised and they need to know what
+// this installation saw and when.
+func (m *Marketplace) refuseExternal(
+	ctx context.Context, req InstallReleaseRequest, reg skillregistry.Registry,
+	rel skillregistry.Release, err error,
+) error {
+	m.audit(ctx, store.SkillAuditEntry{
+		Actor: req.Actor, Action: store.SkillAuditExternalInstallRefused,
+		SkillID: req.SkillID, Version: req.Version,
+		Detail: fmt.Sprintf("%s from registry %s: %v", rel.Source.Describe(), reg.ID, err),
+	})
+	return m.refuseErr(ctx, req, reg, err)
+}
+
+// archiveNote is what the last archive unpack actually did, when the provider
+// can say.
+//
+// It is worth a line because it is the only explanation for a class of digest
+// mismatch that otherwise reads as inexplicable: an archive whose root was not
+// what AO expected, or whose package subdirectory matched fewer files than the
+// publisher thought.
+func archiveNote(p skillregistry.Provider) string {
+	reporter, ok := p.(interface {
+		LastArchive() skillregistry.ArchiveReport
+	})
+	if !ok {
+		return "the bytes arrived as a published artifact"
+	}
+	return skillregistry.DescribeArchive(reporter.LastArchive())
 }
 
 // verifySignature is steps 8 to 15 of the trust chain, run over the release
@@ -1248,6 +1492,14 @@ func (m *Marketplace) resolveForInstall(
 				reg.ID, req.SkillID, version, err))
 	}
 	cached, ok := m.cachedRelease(reg.ID, req.SkillID, version)
+	if ok {
+		// On a forge, "whatever I have for this version" is not one answer:
+		// a moved tag means two commits have both been published under it.
+		// The ledger is local and still readable, so it is what decides.
+		if pinErr := m.checkOfflineExternalPin(ctx, reg, cached); pinErr != nil {
+			return skillregistry.Release{}, false, m.refuseErr(ctx, req, reg, pinErr)
+		}
+	}
 	if !ok {
 		// The rule that matters most in offline mode: a release AO never
 		// downloaded cannot be installed, whatever anybody asks for.

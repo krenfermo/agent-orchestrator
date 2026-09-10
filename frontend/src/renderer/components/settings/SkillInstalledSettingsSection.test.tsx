@@ -193,3 +193,64 @@ describe("SkillInstalledSettingsSection", () => {
 		}
 	});
 });
+
+// ---------------------------------------------------------------- external
+
+const COMMIT = "e".repeat(40);
+
+const forgeOrigin = {
+	...verifiedOrigin,
+	registryId: "ext",
+	registryName: "Acme skills",
+	registryType: "github",
+	sourceProvider: "github",
+	sourceOwner: "acme",
+	sourceRepository: "skills",
+	sourceTag: "v1.0.0",
+	sourceCommit: COMMIT,
+	sourceShortCommit: COMMIT.slice(0, 12),
+	sourceVisibility: "public",
+	sourceFetchedAt: "2026-09-10T09:00:00Z",
+	identityExplanation:
+		'hosted at github acme/skills; declares publisher "acme" (a claim in the package, not a fact ' +
+		"AO checked); and nothing cryptographic ties that name to whoever wrote the code.",
+};
+
+describe("SkillInstalledSettingsSection, forge provenance", () => {
+	// What was actually installed, in the terms that stay true: the commit,
+	// not the tag. Both spellings of the commit, because recognising one and
+	// comparing two are different jobs.
+	it("records the repository, the tag and the commit these bytes came from", async () => {
+		mockSkills([{ ...base, origin: forgeOrigin }]);
+		renderSection();
+
+		const source = await screen.findByTestId("skill-installed-source");
+		expect(source).toHaveTextContent("acme/skills");
+		expect(source).toHaveTextContent("github");
+		expect(source).toHaveTextContent("public");
+		expect(source).toHaveTextContent("v1.0.0");
+		expect(source).toHaveTextContent(COMMIT.slice(0, 12));
+		expect(source).toHaveTextContent(COMMIT);
+	});
+
+	// The sentence that keeps the four different answers to "who published
+	// this" apart, and it is the daemon's.
+	it("says what is a claim and what was checked, and never that the code is safe", async () => {
+		mockSkills([{ ...base, origin: forgeOrigin }]);
+		renderSection();
+
+		const source = await screen.findByTestId("skill-installed-source");
+		expect(source).toHaveTextContent("a claim in the package, not a fact AO checked");
+		expect(source).toHaveTextContent("nothing cryptographic ties that name");
+		expect(source.textContent ?? "").not.toMatch(/\bsafe\b/i);
+	});
+
+	// A local install has no forge behind it, so the block is absent rather
+	// than rendered empty.
+	it("shows no forge block for an install that did not come from one", async () => {
+		mockSkills([{ ...base, origin: verifiedOrigin }]);
+		renderSection();
+		await screen.findByTestId("skill-installed-list");
+		expect(screen.queryByTestId("skill-installed-source")).toBeNull();
+	});
+});

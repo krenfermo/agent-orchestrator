@@ -972,6 +972,18 @@ type SkillAudit struct {
 	Detail       string
 }
 
+type SkillExternalTag struct {
+	RegistryID      string
+	Owner           string
+	Repository      string
+	Tag             string
+	CommitSha       string
+	FirstObservedAt time.Time
+	LastObservedAt  time.Time
+	MovedFromCommit string
+	MovedAt         sql.NullTime
+}
+
 type SkillImageApproval struct {
 	ID         string
 	TenantID   domain.TenantID
@@ -1040,6 +1052,14 @@ type SkillInstallOrigin struct {
 	SignatureResult         string
 	RevocationStateObserved string
 	MetadataFetchedAt       sql.NullTime
+	SourceProvider          string
+	SourceOwner             string
+	SourceRepository        string
+	SourceTag               string
+	SourceCommit            string
+	SourcePath              string
+	SourceVisibility        string
+	SourceFetchedAt         sql.NullTime
 }
 
 type SkillRegistry struct {
@@ -1056,6 +1076,9 @@ type SkillRegistry struct {
 	AuthType             string
 	ApiKeyHeader         string
 	NetworkPolicy        string
+	Owner                string
+	Repository           string
+	AllowedOwners        string
 	CreatedAt            time.Time
 	CreatedBy            string
 	UpdatedAt            time.Time

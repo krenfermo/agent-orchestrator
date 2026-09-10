@@ -447,3 +447,120 @@ describe("SkillMarketplaceSettingsSection", () => {
 		expect(options.body).toMatchObject({ allowOfflineFromCache: false });
 	});
 });
+
+// ---------------------------------------------------------------- external
+
+const EXTERNAL_NOTICE =
+	"Source: GitHub. Hosting on GitHub does not mean AO trusts the publisher.";
+const OLD_COMMIT = "a".repeat(40);
+const NEW_COMMIT = "b".repeat(40);
+
+const externalRelease = {
+	...release,
+	registryId: "ext",
+	registryName: "Acme skills",
+	sourceProvider: "github",
+	sourceOwner: "acme",
+	sourceRepository: "skills",
+	sourceTag: "v0.1.0",
+	sourceCommit: NEW_COMMIT,
+	sourceShortCommit: NEW_COMMIT.slice(0, 12),
+	sourceVisibility: "public",
+};
+
+describe("SkillMarketplaceSettingsSection, external sources", () => {
+	// The three facts a person needs before deciding: where it is, what tag it
+	// was found under, and which commit is actually going to be installed.
+	it("names the repository, the tag and the commit in full", async () => {
+		mockSearch([externalRelease], { externalNotice: EXTERNAL_NOTICE });
+		renderSection();
+
+		const source = await screen.findByTestId("skill-release-source-security-audit");
+		expect(source).toHaveTextContent("acme/skills");
+		expect(source).toHaveTextContent("public");
+		expect(source).toHaveTextContent("v0.1.0");
+		// Short for recognition AND full for comparison: deciding two commits
+		// are the same one needs every character.
+		expect(source).toHaveTextContent(NEW_COMMIT.slice(0, 12));
+		expect(source).toHaveTextContent(NEW_COMMIT);
+	});
+
+	// The sentence that must never be left implicit, and it is the daemon's.
+	it("shows the hosting notice before an install from a forge", async () => {
+		mockSearch([externalRelease], { externalNotice: EXTERNAL_NOTICE });
+		renderSection();
+		expect(await screen.findByTestId("skill-external-notice")).toHaveTextContent(
+			EXTERNAL_NOTICE,
+		);
+	});
+
+	// A local or private-registry release has no forge behind it, so the
+	// notice would be a line printed on rows it does not describe.
+	it("does not show the hosting notice for a release with no forge", async () => {
+		mockSearch([release], { externalNotice: EXTERNAL_NOTICE });
+		renderSection();
+		await screen.findByTestId("skill-install-notice");
+		expect(screen.queryByTestId("skill-external-notice")).toBeNull();
+	});
+
+	// The heart of phase 13 on screen: a tag that moved is stated with both
+	// commits, the install is blocked, and taking the new commit is an
+	// explicit decision this screen asks for in words.
+	it("blocks a moved tag until somebody says they mean to take the new commit", async () => {
+		const moved = {
+			...externalRelease,
+			tagMoved: true,
+			tagMovedFromCommit: OLD_COMMIT,
+			tagMovedExplanation: `tag v0.1.0 in acme/skills moved: AO recorded it at commit ${OLD_COMMIT} and it now points at ${NEW_COMMIT}.`,
+		};
+		mockSearch([moved], { externalNotice: EXTERNAL_NOTICE });
+		const post = vi.spyOn(apiClient, "POST").mockResolvedValue({
+			data: { nextStep: INSTALLED_NOTICE },
+		} as never);
+		renderSection();
+
+		const warning = await screen.findByTestId("skill-release-tag-moved");
+		expect(warning).toHaveTextContent(OLD_COMMIT);
+		expect(warning).toHaveTextContent(NEW_COMMIT);
+
+		const install = screen.getByRole("button", { name: /Install/ });
+		expect(install).toBeDisabled();
+
+		const acknowledge = screen
+			.getByTestId("skill-release-acknowledge-moved")
+			.querySelector("input") as HTMLInputElement;
+		await userEvent.click(acknowledge);
+		expect(install).toBeEnabled();
+		await userEvent.click(install);
+
+		await waitFor(() => expect(post).toHaveBeenCalled());
+		const [, options] = post.mock.calls[0] as [string, { body: Record<string, unknown> }];
+		// The acknowledgement travels; nothing else about the request changes,
+		// because acknowledging the move skips no check.
+		expect(options.body.acknowledgeMovedTag).toBe(true);
+		expect(options.body.version).toBe("0.1.0");
+		expect(options.body.allowOfflineFromCache).toBe(false);
+	});
+
+	// A revocation made HERE is not the registry's word and not a trust state.
+	// It blocks the install and says why, in the daemon's sentence.
+	it("blocks and explains a release whose source this installation withdrew", async () => {
+		mockSearch(
+			[
+				{
+					...externalRelease,
+					externalRevoked: true,
+					externalRevokedReason:
+						"the repository acme/skills was withdrawn on this installation: under investigation",
+				},
+			],
+			{ externalNotice: EXTERNAL_NOTICE },
+		);
+		renderSection();
+
+		expect(await screen.findByTestId("skill-release-external-revoked")).toHaveTextContent(
+			"under investigation",
+		);
+		expect(screen.getByRole("button", { name: /Install/ })).toBeDisabled();
+	});
+});

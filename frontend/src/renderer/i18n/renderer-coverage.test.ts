@@ -68,6 +68,22 @@ const approvedLiterals: Record<string, readonly string[]> = {
 		"https://registry.corp.example",
 		"X-API-Key",
 		"CORP_REGISTRY_TOKEN",
+		// An API endpoint and example account/repository names, shown as form
+		// placeholders. A localized account name is an example that does not
+		// work, and a localized API URL is one that does not resolve.
+		"https://api.github.com",
+		"acme",
+		"skills",
+		"acme, globex",
+	],
+	// Example forge identifiers, shown as placeholders so the SHAPE of each
+	// subject is visible: an account, "owner/repository", and
+	// "owner/repository@<sha>". Translating them would print a localized
+	// identifier for something that is never localized.
+	"components/settings/SkillExternalSettingsSection.tsx": [
+		"acme",
+		"acme/skills",
+		"acme/skills@0f1e2d3c4b5a69788796a5b4c3d2e1f001122334",
 	],
 	"components/settings/UpdatesSection.tsx": ["PR #"],
 	// Fallbacks for absent daemon-supplied values, not English copy: the two

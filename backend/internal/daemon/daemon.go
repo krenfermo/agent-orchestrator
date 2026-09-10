@@ -318,7 +318,13 @@ func RunWithConfig(cfg config.Config) error {
 	skillMarketplace := skills.NewMarketplace(store, skillsSvc,
 		skillregistry.DefaultProviderFactory{Secrets: registrySecrets},
 		cfg.Telemetry.AppVersion, cfg.DataDir,
-	).WithConnectivity(store, registrySecrets).WithTrust(skillTrust)
+	).WithConnectivity(store, registrySecrets).WithTrust(skillTrust).WithExternal(store)
+	// The external surface: what this installation has administratively
+	// withdrawn on a forge, and which tags it has seen move. It reads the
+	// trust store (the revocations live beside the key and root ones, because
+	// all three are "what an administrator here decided") and the marketplace
+	// (the tag ledger).
+	skillExternal := skills.NewExternalAuthority(skillTrust, skillMarketplace)
 	log.Info("skills: execution environment probed",
 		"runtime", skillRunner.Runtime().Describe(),
 		"available", skillRunner.Available(),
@@ -1008,6 +1014,7 @@ func RunWithConfig(cfg config.Config) error {
 		SkillImages:       skillsSvc,
 		SkillMarketplace:  skillMarketplace,
 		SkillTrust:        skillTrust,
+		SkillExternal:     skillExternal,
 		SkillTenancy:      store,
 		ProviderProfiles:  providerProfilesSvc,
 		ProviderSetup:     providerSetupSvc,

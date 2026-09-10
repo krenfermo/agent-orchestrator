@@ -178,6 +178,7 @@ func (m *Marketplace) SearchMarketplace(
 			IncludeRevoked:    in.IncludeRevoked,
 			Limit:             in.Limit,
 		},
+		Actor:        in.Actor,
 		ActorTenants: in.ActorTenants,
 	})
 	if err != nil {
@@ -185,11 +186,12 @@ func (m *Marketplace) SearchMarketplace(
 	}
 	offline := res.Offline()
 	out := controllers.SkillMarketplaceSearchResponse{
-		Releases:      make([]controllers.SkillReleaseView, 0, len(res.Releases)),
-		Notes:         make([]controllers.SkillRegistryNoteView, 0, len(res.Notes)),
-		Sources:       make([]controllers.SkillRegistryFreshnessView, 0, len(res.Sources)),
-		Offline:       offline,
-		InstallNotice: controllers.RegistryInstallNotice,
+		Releases:       make([]controllers.SkillReleaseView, 0, len(res.Releases)),
+		Notes:          make([]controllers.SkillRegistryNoteView, 0, len(res.Notes)),
+		Sources:        make([]controllers.SkillRegistryFreshnessView, 0, len(res.Sources)),
+		Offline:        offline,
+		InstallNotice:  controllers.RegistryInstallNotice,
+		ExternalNotice: controllers.ExternalHostingNotice,
 	}
 	if offline {
 		// Said by the daemon, so the sentence on screen and the behaviour in
@@ -232,7 +234,7 @@ func freshnessView(src RegistrySource) controllers.SkillRegistryFreshnessView {
 func (m *Marketplace) GetMarketplaceRelease(
 	ctx context.Context, in controllers.SkillReleaseLookupInput,
 ) (controllers.SkillReleaseDetailResponse, error) {
-	current, versions, err := m.GetRelease(ctx, in.RegistryID, in.SkillID, in.Version, in.ActorTenants)
+	current, versions, err := m.GetRelease(ctx, in.RegistryID, in.SkillID, in.Version, in.Actor, in.ActorTenants)
 	if err != nil {
 		return controllers.SkillReleaseDetailResponse{}, err
 	}
@@ -267,6 +269,7 @@ func (m *Marketplace) InstallMarketplaceRelease(
 		Version:               in.Version,
 		AsUpdate:              in.AsUpdate,
 		AllowOfflineFromCache: in.AllowOfflineFromCache,
+		AcknowledgeMovedTag:   in.AcknowledgeMovedTag,
 		Actor:                 in.Actor,
 		ActorPermissions:      in.ActorPermissions,
 		ActorTenants:          in.ActorTenants,
@@ -335,8 +338,17 @@ func (m *Marketplace) registryView(reg skillregistry.Registry) controllers.Skill
 		// as if it were working.
 		TrustPolicyEnforceable: m.policySatisfiable(reg.TrustPolicy),
 		PinnedPublisher:        reg.PinnedPublisher,
-		Priority:               reg.Priority,
-		TenantID:               string(reg.TenantID),
+		// The external scope, sent so a settings screen can show it. An
+		// allowlist nobody can read is one nobody reviews, and an owner
+		// nobody can see is an install source nobody notices.
+		Owner:         reg.Owner,
+		Repository:    reg.Repository,
+		AllowedOwners: nonNil(reg.AllowedOwners),
+		// The daemon's answer, not a client comparing type strings: it is what
+		// decides whether the hosting notice has to be shown.
+		External: reg.Type.External(),
+		Priority: reg.Priority,
+		TenantID: string(reg.TenantID),
 		// The NAME only. The value lives sealed and is never loaded here.
 		CredentialSecretName: reg.CredentialSecretName,
 		AuthType:             string(reg.EffectiveAuthType()),
@@ -395,6 +407,22 @@ func releaseView(f FoundRelease) controllers.SkillReleaseView {
 		DeprecationNote:       rel.DeprecationNote,
 		Revoked:               rel.Revoked,
 		RevocationReason:      rel.RevocationReason,
+		// The git source, as AO resolved it.
+		SourceProvider:    string(rel.Source.Provider),
+		SourceOwner:       rel.Source.Owner,
+		SourceRepository:  rel.Source.Repository,
+		SourceTag:         rel.Source.Tag,
+		SourceCommit:      rel.Source.Commit,
+		SourceShortCommit: rel.Source.ShortCommit(),
+		SourcePath:        rel.Source.Path,
+		SourceVisibility:  rel.Source.Visibility,
+		// A moved tag travels beside trust and into none of it.
+		TagMoved:              f.TagMoved,
+		TagMovedFromCommit:    f.TagMovedFrom,
+		TagMovedAt:            f.TagMovedAt,
+		TagMovedExplanation:   movedTagExplanation(f),
+		ExternalRevoked:       f.ExternalRevoked,
+		ExternalRevokedReason: f.ExternalRevokedReason,
 		Trust:                 string(f.Trust),
 		TrustExplanation:      TrustExplanation(f.Trust),
 		Installed:             f.Installed,
@@ -405,6 +433,26 @@ func releaseView(f FoundRelease) controllers.SkillReleaseView {
 		MetadataOffline:   f.Metadata.Offline,
 		MetadataAsOf:      f.Metadata.FetchedAt,
 	}
+}
+
+// movedTagExplanation is the daemon's sentence for a row whose tag moved.
+//
+// It is composed here rather than in a UI for the reason every other
+// explanatory sentence on this surface is: a screen that wrote its own would
+// eventually write a shorter, kinder one, and the kind version of this
+// particular sentence ("updated") is exactly the reading the attack wants.
+func movedTagExplanation(f FoundRelease) string {
+	if !f.TagMoved {
+		return ""
+	}
+	return skillregistry.DescribeTagMove(store.SkillExternalTag{
+		Owner:           f.Release.Source.Owner,
+		Repository:      f.Release.Source.Repository,
+		Tag:             f.Release.Source.Tag,
+		Commit:          f.Release.Source.Commit,
+		MovedFromCommit: f.TagMovedFrom,
+		MovedAt:         f.TagMovedAt,
+	})
 }
 
 // FreshnessExplanation says in words what a metadata state means.
@@ -453,8 +501,19 @@ func originView(o store.SkillInstallOrigin) controllers.SkillInstallOriginView {
 		TrustExplanation: TrustExplanation(o.TrustState),
 		TrustPolicy:      string(o.TrustPolicy),
 		Compatibility:    string(o.CompatibilityVerdict),
-		InstalledAt:      o.InstalledAt,
-		InstalledBy:      o.InstalledBy,
+		// The git provenance, exactly as it was written at install.
+		SourceProvider:      string(o.Source.Provider),
+		SourceOwner:         o.Source.Owner,
+		SourceRepository:    o.Source.Repository,
+		SourceTag:           o.Source.Tag,
+		SourceCommit:        o.Source.Commit,
+		SourceShortCommit:   o.Source.ShortCommit(),
+		SourcePath:          o.Source.Path,
+		SourceVisibility:    o.Source.Visibility,
+		SourceFetchedAt:     o.SourceFetchedAt,
+		IdentityExplanation: originIdentityExplanation(o),
+		InstalledAt:         o.InstalledAt,
+		InstalledBy:         o.InstalledBy,
 		// The chain, as one object. A client that had to reassemble it from
 		// loose fields would eventually render half a chain as a whole one.
 		Provenance:              provenanceView(o.Verification),
@@ -463,6 +522,31 @@ func originView(o store.SkillInstallOrigin) controllers.SkillInstallOriginView {
 		Revoked:                 o.Revoked(),
 		RevocationReason:        o.RevocationReason,
 	}
+}
+
+// originIdentityExplanation says who an installed external release is BY, as
+// the several separate facts it actually is.
+//
+// It is empty for every install that did not come from a forge, because there
+// the publisher and the registry are the same administrator's decision and
+// there is nothing to disentangle. On a forge there are four different answers
+// to "who published this" and they are routinely different people -- see
+// skillregistry/publisheridentity.go -- and a screen that merged them would
+// say "published by acme" because a repository at github.com/acme said so.
+func originIdentityExplanation(o store.SkillInstallOrigin) string {
+	if !o.Source.Declared() {
+		return ""
+	}
+	identity := skillregistry.ExternalIdentity{
+		Provider:          o.Source.Provider,
+		Owner:             o.Source.Owner,
+		Repository:        o.Source.Repository,
+		DeclaredPublisher: o.Publisher,
+	}
+	if o.Verification.Verified {
+		identity.SigningPublisher = o.Verification.Publisher
+	}
+	return identity.Describe()
 }
 
 // TrustExplanation says in words what a trust state means.

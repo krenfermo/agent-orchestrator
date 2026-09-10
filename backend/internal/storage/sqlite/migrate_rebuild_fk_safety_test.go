@@ -235,6 +235,22 @@ var knownTableRebuilds = []tableRebuild{
 		},
 		handling: handlingPragmaOff, outcome: outcomePreserved,
 	},
+	{
+		// 0167 widens skill_registries.type to accept 'github' and
+		// trust_policy to accept the four external policies, and adds the
+		// owner/repository scope columns.
+		//
+		// The same two children as 0166 and the same consequence if it were
+		// done naively: skill_registry_revocations cascading away would
+		// re-enable installs of releases somebody withdrew, silently. Same
+		// recipe, declared for the same reason.
+		version: 167, table: "skill_registries",
+		children: []string{
+			"skill_registry_revocations.registry_id ON DELETE CASCADE",
+			"skill_registry_status.registry_id ON DELETE CASCADE",
+		},
+		handling: handlingPragmaOff, outcome: outcomePreserved,
+	},
 }
 
 // TestTableRebuildInventoryIsComplete walks the migrations in order, and at

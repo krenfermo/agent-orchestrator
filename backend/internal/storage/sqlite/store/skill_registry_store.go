@@ -59,6 +59,21 @@ type SkillInstallOrigin struct {
 	// interpreted none of it.
 	Provenance skillregistry.Provenance
 
+	// Source is the phase-13 git provenance: the repository, the tag as it was
+	// at install time, and above all the COMMIT these bytes came from. Empty
+	// for every install that did not come from a forge.
+	//
+	// It is never rewritten. If the tag later points elsewhere, this row still
+	// says what it said: the bytes on this host came from this commit, AO
+	// verified them against this commit's digests, and that is true forever.
+	// The moved tag is recorded separately, as a change in the world rather
+	// than a correction to the record.
+	Source skillregistry.GitSource
+	// SourceFetchedAt is when AO pulled the archive. Distinct from InstalledAt
+	// (when the bytes reached the catalog) and from MetadataFetchedAt (when
+	// the description AO acted on was read).
+	SourceFetchedAt *time.Time
+
 	// Verification is the phase-12 provenance chain: what AO verified about
 	// the SIGNATURE over these bytes, or the refusal it recorded instead.
 	//
@@ -123,6 +138,13 @@ func (s *Store) UpsertSkillRegistry(
 		// a proxy exception) belongs beside it rather than in a new column
 		// each time.
 		NetworkPolicy: encodeNetworkPolicy(reg.NetworkPolicy),
+		// The external scope. Empty for every registry that is not one, which
+		// the Go validator enforces before this point: a stored owner on a
+		// local directory would be a field nothing reads and everybody
+		// believes.
+		Owner:         reg.Owner,
+		Repository:    reg.Repository,
+		AllowedOwners: encodeAllowedOwners(reg.AllowedOwners),
 		CreatedAt:     at,
 		CreatedBy:     actor,
 		UpdatedAt:     at,
@@ -226,6 +248,18 @@ func (s *Store) UpsertSkillInstallOrigin(
 		RevokedAt:               timePtrToNullTime(o.RevokedAt),
 		RevocationReason:        o.RevocationReason,
 		RevocationSeenAt:        timePtrToNullTime(o.RevocationSeenAt),
+		// The git provenance, written once. The query's conflict clause
+		// refuses to move an existing commit, so a second install record for
+		// the same skill@version cannot rewrite where the bytes on this host
+		// came from.
+		SourceProvider:   string(o.Source.Provider),
+		SourceOwner:      o.Source.Owner,
+		SourceRepository: o.Source.Repository,
+		SourceTag:        o.Source.Tag,
+		SourceCommit:     o.Source.Commit,
+		SourcePath:       o.Source.Path,
+		SourceVisibility: o.Source.Visibility,
+		SourceFetchedAt:  timePtrToNullTime(o.SourceFetchedAt),
 	})
 	if err != nil {
 		return SkillInstallOrigin{}, fmt.Errorf("upsert skill install origin: %w", err)
@@ -319,6 +353,9 @@ func registryFromRow(row gen.SkillRegistry) skillregistry.Registry {
 		AuthType:             skillregistry.AuthType(row.AuthType),
 		APIKeyHeader:         row.ApiKeyHeader,
 		NetworkPolicy:        decodeNetworkPolicy(row.NetworkPolicy),
+		Owner:                row.Owner,
+		Repository:           row.Repository,
+		AllowedOwners:        decodeAllowedOwners(row.AllowedOwners),
 		CreatedAt:            row.CreatedAt,
 		UpdatedAt:            row.UpdatedAt,
 	}
@@ -338,6 +375,35 @@ func encodeNetworkPolicy(p skillregistry.NetworkPolicy) string {
 		return "{}"
 	}
 	return string(b)
+}
+
+// encodeAllowedOwners renders the org allowlist for the column. A list that
+// will not marshal is stored EMPTY, which under the allowlist policy refuses
+// everything -- the safe direction, and the only one available when the
+// alternative is storing something the reader cannot enforce.
+func encodeAllowedOwners(owners []string) string {
+	if len(owners) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(owners)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
+// decodeAllowedOwners reads it back. A malformed column yields an empty list,
+// for the same reason: an unreadable allowlist must widen nothing.
+func decodeAllowedOwners(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "[]" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(trimmed), &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 // decodeNetworkPolicy reads it back. A malformed column yields the empty
@@ -403,6 +469,16 @@ func originFromRow(row gen.SkillInstallOrigin) SkillInstallOrigin {
 			// only create something that can disagree with itself.
 			Publisher: verifiedPublisher(row),
 		},
+		Source: skillregistry.GitSource{
+			Provider:   skillregistry.SourceProvider(row.SourceProvider),
+			Owner:      row.SourceOwner,
+			Repository: row.SourceRepository,
+			Tag:        row.SourceTag,
+			Commit:     row.SourceCommit,
+			Path:       row.SourcePath,
+			Visibility: row.SourceVisibility,
+		},
+		SourceFetchedAt:         nullTimeToPtr(row.SourceFetchedAt),
 		RevocationStateObserved: row.RevocationStateObserved,
 		MetadataFetchedAt:       nullTimeToPtr(row.MetadataFetchedAt),
 		CompatibilityVerdict:    skillregistry.CompatibilityVerdict(row.CompatibilityVerdict),

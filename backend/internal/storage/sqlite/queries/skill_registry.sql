@@ -7,9 +7,10 @@
 INSERT INTO skill_registries (
     id, display_name, type, location, enabled, trust_policy, pinned_publisher,
     priority, tenant_id, credential_secret_name, auth_type, api_key_header,
-    network_policy, created_at, created_by, updated_at, updated_by
+    network_policy, owner, repository, allowed_owners,
+    created_at, created_by, updated_at, updated_by
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO UPDATE SET
     display_name = excluded.display_name,
     type = excluded.type,
@@ -23,24 +24,27 @@ ON CONFLICT (id) DO UPDATE SET
     auth_type = excluded.auth_type,
     api_key_header = excluded.api_key_header,
     network_policy = excluded.network_policy,
+    owner = excluded.owner,
+    repository = excluded.repository,
+    allowed_owners = excluded.allowed_owners,
     updated_at = excluded.updated_at,
     updated_by = excluded.updated_by
 RETURNING id, display_name, type, location, enabled, trust_policy,
     pinned_publisher, priority, tenant_id, credential_secret_name,
-    auth_type, api_key_header, network_policy,
+    auth_type, api_key_header, network_policy, owner, repository, allowed_owners,
     created_at, created_by, updated_at, updated_by;
 
 -- name: GetSkillRegistry :one
 SELECT id, display_name, type, location, enabled, trust_policy,
     pinned_publisher, priority, tenant_id, credential_secret_name,
-    auth_type, api_key_header, network_policy,
+    auth_type, api_key_header, network_policy, owner, repository, allowed_owners,
     created_at, created_by, updated_at, updated_by
 FROM skill_registries WHERE id = ?;
 
 -- name: ListSkillRegistries :many
 SELECT id, display_name, type, location, enabled, trust_policy,
     pinned_publisher, priority, tenant_id, credential_secret_name,
-    auth_type, api_key_header, network_policy,
+    auth_type, api_key_header, network_policy, owner, repository, allowed_owners,
     created_at, created_by, updated_at, updated_by
 FROM skill_registries;
 
@@ -57,10 +61,12 @@ INSERT INTO skill_install_origins (
     signature_scheme, signature_algorithm, signing_key_id,
     signing_key_fingerprint, signing_key_origin, trust_root_id,
     trust_root_tier, signature_signed_at, signature_verified_at,
-    signature_result, revocation_state_observed, metadata_fetched_at
+    signature_result, revocation_state_observed, metadata_fetched_at,
+    source_provider, source_owner, source_repository, source_tag,
+    source_commit, source_path, source_visibility, source_fetched_at
 )
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (skill_id, version) DO UPDATE SET
     registry_id = excluded.registry_id,
     registry_name = excluded.registry_name,
@@ -91,7 +97,29 @@ ON CONFLICT (skill_id, version) DO UPDATE SET
     signature_verified_at = excluded.signature_verified_at,
     signature_result = excluded.signature_result,
     revocation_state_observed = excluded.revocation_state_observed,
-    metadata_fetched_at = excluded.metadata_fetched_at
+    metadata_fetched_at = excluded.metadata_fetched_at,
+    -- The git provenance is written ONCE, at install, and never rewritten. The
+    -- COALESCE is what enforces that on the conflict path: re-recording an
+    -- install of the same skill@version must not be able to move the commit,
+    -- because the bytes on this host came from the commit that is already
+    -- there and editing the record would erase the only evidence of what was
+    -- actually installed.
+    source_provider = CASE WHEN skill_install_origins.source_commit = ''
+        THEN excluded.source_provider ELSE skill_install_origins.source_provider END,
+    source_owner = CASE WHEN skill_install_origins.source_commit = ''
+        THEN excluded.source_owner ELSE skill_install_origins.source_owner END,
+    source_repository = CASE WHEN skill_install_origins.source_commit = ''
+        THEN excluded.source_repository ELSE skill_install_origins.source_repository END,
+    source_tag = CASE WHEN skill_install_origins.source_commit = ''
+        THEN excluded.source_tag ELSE skill_install_origins.source_tag END,
+    source_commit = CASE WHEN skill_install_origins.source_commit = ''
+        THEN excluded.source_commit ELSE skill_install_origins.source_commit END,
+    source_path = CASE WHEN skill_install_origins.source_commit = ''
+        THEN excluded.source_path ELSE skill_install_origins.source_path END,
+    source_visibility = CASE WHEN skill_install_origins.source_commit = ''
+        THEN excluded.source_visibility ELSE skill_install_origins.source_visibility END,
+    source_fetched_at = CASE WHEN skill_install_origins.source_commit = ''
+        THEN excluded.source_fetched_at ELSE skill_install_origins.source_fetched_at END
 RETURNING skill_id, version, registry_id, registry_name, registry_type,
     registry_location, publisher, source_url, manifest_digest, artifact_digest,
     trust_state, trust_policy, signature_format, signature, key_id,
@@ -100,7 +128,9 @@ RETURNING skill_id, version, registry_id, registry_name, registry_type,
     signature_scheme, signature_algorithm, signing_key_id,
     signing_key_fingerprint, signing_key_origin, trust_root_id,
     trust_root_tier, signature_signed_at, signature_verified_at,
-    signature_result, revocation_state_observed, metadata_fetched_at;
+    signature_result, revocation_state_observed, metadata_fetched_at,
+    source_provider, source_owner, source_repository, source_tag,
+    source_commit, source_path, source_visibility, source_fetched_at;
 
 -- name: GetSkillInstallOrigin :one
 SELECT skill_id, version, registry_id, registry_name, registry_type,
@@ -111,7 +141,9 @@ SELECT skill_id, version, registry_id, registry_name, registry_type,
     signature_scheme, signature_algorithm, signing_key_id,
     signing_key_fingerprint, signing_key_origin, trust_root_id,
     trust_root_tier, signature_signed_at, signature_verified_at,
-    signature_result, revocation_state_observed, metadata_fetched_at
+    signature_result, revocation_state_observed, metadata_fetched_at,
+    source_provider, source_owner, source_repository, source_tag,
+    source_commit, source_path, source_visibility, source_fetched_at
 FROM skill_install_origins WHERE skill_id = ? AND version = ?;
 
 -- name: ListSkillInstallOrigins :many
@@ -123,7 +155,9 @@ SELECT skill_id, version, registry_id, registry_name, registry_type,
     signature_scheme, signature_algorithm, signing_key_id,
     signing_key_fingerprint, signing_key_origin, trust_root_id,
     trust_root_tier, signature_signed_at, signature_verified_at,
-    signature_result, revocation_state_observed, metadata_fetched_at
+    signature_result, revocation_state_observed, metadata_fetched_at,
+    source_provider, source_owner, source_repository, source_tag,
+    source_commit, source_path, source_visibility, source_fetched_at
 FROM skill_install_origins;
 
 -- name: ListSkillInstallOriginsForSkill :many
@@ -135,7 +169,9 @@ SELECT skill_id, version, registry_id, registry_name, registry_type,
     signature_scheme, signature_algorithm, signing_key_id,
     signing_key_fingerprint, signing_key_origin, trust_root_id,
     trust_root_tier, signature_signed_at, signature_verified_at,
-    signature_result, revocation_state_observed, metadata_fetched_at
+    signature_result, revocation_state_observed, metadata_fetched_at,
+    source_provider, source_owner, source_repository, source_tag,
+    source_commit, source_path, source_visibility, source_fetched_at
 FROM skill_install_origins WHERE skill_id = ?;
 
 -- MarkSkillInstallOriginRevoked records a revocation AO OBSERVED after the
@@ -215,3 +251,45 @@ FROM skill_registry_revocations WHERE registry_id = ?;
 -- name: ListAllSkillRegistryRevocations :many
 SELECT registry_id, subject, subject_key, skill_id, version, reason, revoked_at, observed_at
 FROM skill_registry_revocations;
+
+-- Skills phase 13: where each tag pointed, and whether it has moved.
+--
+-- A ledger rather than a column on an install: AO has to be able to notice a
+-- tag moving whether or not anybody ever installed it, and it has to keep
+-- noticing after the install is gone. The row KEEPS the commit the tag moved
+-- away from rather than overwriting it, because "this tag moved in March" is
+-- exactly the fact an incident review needs and exactly the one an overwrite
+-- destroys.
+
+-- name: UpsertSkillExternalTag :one
+INSERT INTO skill_external_tags (
+    registry_id, owner, repository, tag, commit_sha,
+    first_observed_at, last_observed_at, moved_from_commit, moved_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (registry_id, owner, repository, tag) DO UPDATE SET
+    commit_sha = excluded.commit_sha,
+    last_observed_at = excluded.last_observed_at,
+    -- first_observed_at is never moved forward: it is when AO first saw this
+    -- tag at all, and an update that reset it would erase how long the mapping
+    -- had been stable before it changed.
+    moved_from_commit = excluded.moved_from_commit,
+    moved_at = excluded.moved_at
+RETURNING registry_id, owner, repository, tag, commit_sha,
+    first_observed_at, last_observed_at, moved_from_commit, moved_at;
+
+-- name: GetSkillExternalTag :one
+SELECT registry_id, owner, repository, tag, commit_sha,
+    first_observed_at, last_observed_at, moved_from_commit, moved_at
+FROM skill_external_tags
+WHERE registry_id = ? AND owner = ? AND repository = ? AND tag = ?;
+
+-- name: ListSkillExternalTags :many
+SELECT registry_id, owner, repository, tag, commit_sha,
+    first_observed_at, last_observed_at, moved_from_commit, moved_at
+FROM skill_external_tags WHERE registry_id = ?;
+
+-- name: ListMovedSkillExternalTags :many
+SELECT registry_id, owner, repository, tag, commit_sha,
+    first_observed_at, last_observed_at, moved_from_commit, moved_at
+FROM skill_external_tags WHERE moved_from_commit <> '';

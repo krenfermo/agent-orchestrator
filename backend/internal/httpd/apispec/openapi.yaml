@@ -8803,6 +8803,182 @@ paths:
         and the digest verified at install. Requires settings.read.'
       tags:
       - skills
+  /api/v1/skills/external/revocations:
+    get:
+      operationId: listSkillExternalRevocations
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillExternalRevocationListResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: what this installation has administratively withdrawn on a
+        git forge - an account, a repository, or one exact commit. A forge publishes
+        NO revocation feed, so this list is a decision made here rather than something
+        AO was told, and no endpoint AO could poll would change that. Withdrawing
+        blocks NEW installs; it uninstalls nothing, deletes no file, disables no skill
+        on any project and stops no run already under way. Requires settings.read.'
+      tags:
+      - skills
+    post:
+      operationId: revokeSkillExternal
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevokeSkillExternalRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillExternalRevocationView'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: withdraw a forge account, a repository, or one exact commit.
+        Three different blast radii, and the NARROWEST is usually the most useful
+        during an incident: a repository that shipped one bad release stays installable
+        at every other commit, so an administrator can act immediately without taking
+        a dependency away from everybody on a good version. A commit is named "owner/repository@<sha>"
+        - a bare SHA is meaningless without the repository it belongs to, since two
+        repositories can hold the same commit. It blocks NEW installs and removes
+        nothing. Requires settings.manage.'
+      tags:
+      - skills
+  /api/v1/skills/external/revocations/lift:
+    post:
+      operationId: liftSkillExternalRevocation
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LiftSkillExternalRevocationRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OKResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: lift an external withdrawal. It exists for the external subjects
+        ONLY, and the asymmetry is deliberate: a signing key somebody else may have
+        held is compromised forever, so trust revocations are one-way and stay that
+        way. An external subject is a judgement about a PLACE - a repository transferred
+        to somebody who was then vetted, an account banned during an incident that
+        turned out to be a false alarm - and places get re-vetted. Requires settings.manage.'
+      tags:
+      - skills
+  /api/v1/skills/external/tags:
+    get:
+      operationId: listSkillMovedTags
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillMovedTagListResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: every git tag AO has seen point somewhere else than it recorded.
+        A tag is a name somebody can re-point and the commit is the release, so AO
+        writes down where each tag pointed and says when that changes. Both SHAs are
+        returned in full, because deciding two commits are different needs every character.
+        Nothing already installed is changed by a tag moving: its provenance still
+        records the commit its bytes actually came from. Filtered to the registries
+        you can see. Requires settings.read.'
+      tags:
+      - skills
   /api/v1/skills/images:
     get:
       operationId: listSkillImageApprovals
@@ -18122,6 +18298,8 @@ components:
       type: object
     InstallSkillReleaseRequest:
       properties:
+        acknowledgeMovedTag:
+          type: boolean
         allowOfflineFromCache:
           type: boolean
         asUpdate:
@@ -18174,6 +18352,20 @@ components:
       required:
       - ok
       - sessionId
+      type: object
+    LiftSkillExternalRevocationRequest:
+      properties:
+        subject:
+          enum:
+          - external_owner
+          - external_repository
+          - external_commit
+          type: string
+        subjectId:
+          type: string
+      required:
+      - subject
+      - subjectId
       type: object
     ListAgentSwitchesResponse:
       properties:
@@ -20259,6 +20451,23 @@ components:
       - reviews
       - reviewerHandleId
       type: object
+    RevokeSkillExternalRequest:
+      properties:
+        reason:
+          type: string
+        subject:
+          enum:
+          - external_owner
+          - external_repository
+          - external_commit
+          type: string
+        subjectId:
+          type: string
+      required:
+      - subject
+      - subjectId
+      - reason
+      type: object
     RevokeSkillTrustRequest:
       properties:
         reason:
@@ -20386,6 +20595,10 @@ components:
       type: object
     SaveSkillRegistryRequest:
       properties:
+        allowedOwners:
+          items:
+            type: string
+          type: array
         apiKeyHeader:
           type: string
         authType:
@@ -20402,6 +20615,8 @@ components:
           type: boolean
         location:
           type: string
+        owner:
+          type: string
         permittedPrivateCidrs:
           items:
             type: string
@@ -20410,6 +20625,8 @@ components:
           type: string
         priority:
           type: integer
+        repository:
+          type: string
         tenantId:
           type: string
         trustPolicy:
@@ -20418,12 +20635,17 @@ components:
           - pinned_publisher
           - signed
           - official
+          - external_integrity
+          - external_signed
+          - external_org_allowlist
+          - external_deny
           type: string
         type:
           enum:
           - local
           - https
           - git
+          - github
           type: string
       required:
       - displayName
@@ -21480,6 +21702,41 @@ components:
       - runner
       - reasons
       type: object
+    SkillExternalRevocationListResponse:
+      properties:
+        policy:
+          type: string
+        revocations:
+          items:
+            $ref: '#/components/schemas/SkillExternalRevocationView'
+          type: array
+      required:
+      - revocations
+      - policy
+      type: object
+    SkillExternalRevocationView:
+      properties:
+        reason:
+          type: string
+        revokedAt:
+          format: date-time
+          type: string
+        revokedBy:
+          type: string
+        subject:
+          enum:
+          - external_owner
+          - external_repository
+          - external_commit
+          type: string
+        subjectId:
+          type: string
+      required:
+      - subject
+      - subjectId
+      - reason
+      - revokedAt
+      type: object
     SkillImageApprovalListResponse:
       properties:
         approvals:
@@ -21555,6 +21812,8 @@ components:
           - ao-too-new
           - unknown
           type: string
+        identityExplanation:
+          type: string
         installedAt:
           format: date-time
           type: string
@@ -21583,7 +21842,35 @@ components:
           type: boolean
         skillId:
           type: string
+        sourceCommit:
+          type: string
+        sourceFetchedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        sourceOwner:
+          type: string
+        sourcePath:
+          type: string
+        sourceProvider:
+          enum:
+          - ""
+          - github
+          type: string
+        sourceRepository:
+          type: string
+        sourceShortCommit:
+          type: string
+        sourceTag:
+          type: string
         sourceUrl:
+          type: string
+        sourceVisibility:
+          enum:
+          - ""
+          - public
+          - private
           type: string
         trust:
           enum:
@@ -21752,6 +22039,8 @@ components:
       type: object
     SkillMarketplaceSearchResponse:
       properties:
+        externalNotice:
+          type: string
         freshnessNotice:
           type: string
         installNotice:
@@ -21775,6 +22064,7 @@ components:
       - notes
       - sources
       - offline
+      - externalNotice
       - installNotice
       type: object
     SkillModeView:
@@ -21810,6 +22100,52 @@ components:
       - riskLevel
       - capabilities
       - approval
+      type: object
+    SkillMovedTagListResponse:
+      properties:
+        policy:
+          type: string
+        tags:
+          items:
+            $ref: '#/components/schemas/SkillMovedTagView'
+          type: array
+      required:
+      - tags
+      - policy
+      type: object
+    SkillMovedTagView:
+      properties:
+        commit:
+          type: string
+        explanation:
+          type: string
+        firstSeenAt:
+          format: date-time
+          type: string
+        movedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        owner:
+          type: string
+        previousCommit:
+          type: string
+        registryId:
+          type: string
+        repository:
+          type: string
+        tag:
+          type: string
+      required:
+      - registryId
+      - owner
+      - repository
+      - tag
+      - commit
+      - previousCommit
+      - firstSeenAt
+      - explanation
       type: object
     SkillProvenanceView:
       properties:
@@ -22055,6 +22391,10 @@ components:
       type: object
     SkillRegistryView:
       properties:
+        allowedOwners:
+          items:
+            type: string
+          type: array
         apiKeyHeader:
           type: string
         authType:
@@ -22072,11 +22412,15 @@ components:
           type: string
         enabled:
           type: boolean
+        external:
+          type: boolean
         id:
           type: string
         location:
           type: string
         networkPolicySummary:
+          type: string
+        owner:
           type: string
         permittedPrivateCidrs:
           items:
@@ -22086,6 +22430,8 @@ components:
           type: string
         priority:
           type: integer
+        repository:
+          type: string
         status:
           $ref: '#/components/schemas/SkillRegistryStatusView'
         tenantId:
@@ -22096,6 +22442,10 @@ components:
           - pinned_publisher
           - signed
           - official
+          - external_integrity
+          - external_signed
+          - external_org_allowlist
+          - external_deny
           type: string
         trustPolicyEnforceable:
           type: boolean
@@ -22104,6 +22454,7 @@ components:
           - local
           - https
           - git
+          - github
           type: string
         updatedAt:
           format: date-time
@@ -22116,6 +22467,7 @@ components:
       - enabled
       - trustPolicy
       - trustPolicyEnforceable
+      - external
       - priority
       - authType
       - networkPolicySummary
@@ -22203,6 +22555,10 @@ components:
           items:
             $ref: '#/components/schemas/SkillReleaseModeView'
           type: array
+        externalRevoked:
+          type: boolean
+        externalRevokedReason:
+          type: string
         installed:
           type: boolean
         installedVersion:
@@ -22259,7 +22615,41 @@ components:
           type: boolean
         skillId:
           type: string
+        sourceCommit:
+          type: string
+        sourceOwner:
+          type: string
+        sourcePath:
+          type: string
+        sourceProvider:
+          enum:
+          - ""
+          - github
+          type: string
+        sourceRepository:
+          type: string
+        sourceShortCommit:
+          type: string
+        sourceTag:
+          type: string
         sourceUrl:
+          type: string
+        sourceVisibility:
+          enum:
+          - ""
+          - public
+          - private
+          type: string
+        tagMoved:
+          type: boolean
+        tagMovedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        tagMovedExplanation:
+          type: string
+        tagMovedFromCommit:
           type: string
         trust:
           enum:

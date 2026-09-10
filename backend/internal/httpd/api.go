@@ -241,6 +241,11 @@ type APIDeps struct {
 	// signature-requiring trust policy installs nothing, because there is
 	// nothing for a signature to chain to.
 	SkillTrust controllers.SkillTrust
+	// SkillExternal is the external-registry surface: the administrative
+	// revocation list a forge cannot publish, and the tags AO has seen move.
+	// Nil answers 501, which an installation with no external registry never
+	// notices.
+	SkillExternal controllers.SkillExternal
 }
 
 // normalizeAPIDeps closes the Presence/DeviceLive duplication trap structurally.
@@ -445,7 +450,8 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		skills: &controllers.SkillsController{
 			Catalog: deps.Skills, Images: deps.SkillImages,
 			Marketplace: deps.SkillMarketplace, Trust: deps.SkillTrust,
-			Tenancy: deps.SkillTenancy, Guard: guard,
+			External: deps.SkillExternal,
+			Tenancy:  deps.SkillTenancy, Guard: guard,
 		},
 	}
 }

@@ -11,6 +11,32 @@ import (
 	"time"
 )
 
+const deleteSkillTrustRevocation = `-- name: DeleteSkillTrustRevocation :execrows
+
+DELETE FROM skill_trust_revocations WHERE subject = ? AND subject_id = ?
+`
+
+type DeleteSkillTrustRevocationParams struct {
+	Subject   string
+	SubjectID string
+}
+
+// Skills phase 13: lifting an administrative revocation.
+//
+// It exists because the external subjects are a judgement about a place rather
+// than a cryptographic fact: a repository transferred to somebody who was then
+// vetted, an owner banned during an incident that turned out to be a false
+// alarm. A key or a root revocation is not lifted this way and never should
+// be -- a key somebody else may have held is compromised forever -- but the Go
+// layer is what enforces that, so the refusal can carry a sentence.
+func (q *Queries) DeleteSkillTrustRevocation(ctx context.Context, arg DeleteSkillTrustRevocationParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteSkillTrustRevocation, arg.Subject, arg.SubjectID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getSkillSigningKey = `-- name: GetSkillSigningKey :one
 SELECT key_id, trust_root_id, publisher, is_root_key, algorithm, public_key,
     fingerprint, origin, status, valid_from, valid_until, revoked_at,

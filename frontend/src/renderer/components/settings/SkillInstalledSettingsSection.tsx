@@ -37,6 +37,18 @@ type Origin = components["schemas"]["SkillInstallOriginView"];
  * claim". This answers "what is here and what did AO actually check". They
  * share a skill id and nothing else: one is a claim, the other is a record.
  *
+ * # An external install shows WHERE, not just WHO
+ *
+ * A package from a git forge carries a repository, a tag and a COMMIT, and the
+ * three are not interchangeable. The tag is a label somebody can re-point; the
+ * commit is what these bytes actually came from, and this row keeps saying so
+ * whatever the tag does afterwards. The identity sentence beside it is the
+ * daemon's, because the four different answers to "who published this" on a
+ * forge -- the account, the name in the package, the key that signed it, and
+ * what this installation expected -- are routinely different people, and a
+ * screen that merged them would print "published by acme" because a repository
+ * at github.com/acme said so.
+ *
  * # The sentences are the daemon's
  *
  * `trustExplanation` is served, not written here, for the reason the rest of
@@ -198,6 +210,48 @@ export function SkillInstalledSettingsSection() {
 												: origin.registryId,
 										)}
 										{line(t("settings.skillInstalled.trustPolicy"), origin.trustPolicy)}
+										{/* The forge provenance, when there is one. The commit
+										    is shown short AND full: recognising a commit and
+										    deciding two are the same one are different jobs,
+										    and only the second needs every character. */}
+										{origin.sourceProvider ? (
+											<div
+												className="flex flex-col gap-0.5"
+												data-testid="skill-installed-source"
+											>
+												{line(
+													t("settings.skillInstalled.sourceRepository"),
+													`${origin.sourceOwner}/${origin.sourceRepository} (${origin.sourceProvider}, ${t(
+														origin.sourceVisibility === "private"
+															? "settings.skillMarketplace.sourcePrivate"
+															: "settings.skillMarketplace.sourcePublic",
+													)})`,
+												)}
+												{line(t("settings.skillInstalled.sourceTag"), origin.sourceTag)}
+												{line(
+													t("settings.skillInstalled.sourceCommit"),
+													origin.sourceCommit
+														? `${origin.sourceShortCommit} (${origin.sourceCommit})`
+														: null,
+													true,
+												)}
+												{line(t("settings.skillInstalled.sourcePath"), origin.sourcePath)}
+												{line(
+													t("settings.skillInstalled.sourceFetchedAt"),
+													origin.sourceFetchedAt
+														? new Date(origin.sourceFetchedAt).toLocaleString()
+														: null,
+												)}
+												{/* The daemon's sentence about identity. It says
+												    what is a claim and what was checked, and it
+												    never says the code is safe. */}
+												{origin.identityExplanation ? (
+													<p className="text-caption text-settings-muted">
+														{origin.identityExplanation}
+													</p>
+												) : null}
+											</div>
+										) : null}
 										{line(t("settings.skillInstalled.artifactDigest"), origin.artifactDigest, true)}
 										{line(t("settings.skillInstalled.manifestDigest"), origin.manifestDigest, true)}
 										{provenance(origin)}

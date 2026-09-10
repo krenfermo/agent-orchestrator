@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
+import { SkillExternalSettingsSection } from "./SkillExternalSettingsSection";
 import { SkillImagesSettingsSection } from "./SkillImagesSettingsSection";
 import { SkillInstalledSettingsSection } from "./SkillInstalledSettingsSection";
 import { SkillMarketplaceSettingsSection } from "./SkillMarketplaceSettingsSection";
@@ -28,6 +29,12 @@ import { SkillTrustSettingsSection } from "./SkillTrustSettingsSection";
  * package comes from and a trust root is WHO signed it. Conflating them is
  * exactly the mistake TLS invites: authenticating the server says nothing
  * about who wrote the code.
+ * **External** — the two things a git forge cannot tell AO: which tags have
+ * moved under it, and what this installation has decided not to install from.
+ * It is separate from Registries because a registry is a configuration and
+ * these are OBSERVATIONS and DECISIONS about the world outside it, and separate
+ * from Trust because a trust root is about who signed and these are about
+ * where the bytes live.
  * **Container images** — decide which bytes this installation may EXECUTE, per
  * digest and per exact scope.
  *
@@ -57,6 +64,7 @@ export function SkillsSettingsSection({ titleHidden }: { titleHidden?: boolean }
 					<TabsTrigger value="installed">{t("settings.skills.tab.installed")}</TabsTrigger>
 					<TabsTrigger value="registries">{t("settings.skills.tab.registries")}</TabsTrigger>
 					<TabsTrigger value="trust">{t("settings.skills.tab.trust")}</TabsTrigger>
+					<TabsTrigger value="external">{t("settings.skills.tab.external")}</TabsTrigger>
 					<TabsTrigger value="images">{t("settings.skills.tab.images")}</TabsTrigger>
 				</TabsList>
 				<TabsContent value="marketplace" className="pt-3">
@@ -70,6 +78,9 @@ export function SkillsSettingsSection({ titleHidden }: { titleHidden?: boolean }
 				</TabsContent>
 				<TabsContent value="trust" className="pt-3">
 					<SkillTrustSettingsSection />
+				</TabsContent>
+				<TabsContent value="external" className="pt-3">
+					<SkillExternalSettingsSection />
 				</TabsContent>
 				<TabsContent value="images" className="pt-3">
 					<SkillImagesSettingsSection />
