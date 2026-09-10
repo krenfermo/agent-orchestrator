@@ -86,6 +86,15 @@ type SaveSkillRegistryInput struct {
 	AuthType              string
 	APIKeyHeader          string
 	PermittedPrivateCIDRs []string
+	// Owner, Repository and AllowedOwners are the external scope. They are on
+	// the INPUT and not only on the wire body because the two are separate
+	// types on purpose, and a field that exists in one and not the other is a
+	// field a client can send and nothing will ever read -- which is how a
+	// whole registry type ends up impossible to configure while every test
+	// that talks to the service directly still passes.
+	Owner         string
+	Repository    string
+	AllowedOwners []string
 
 	Actor            string
 	ActorPermissions []domain.Permission
@@ -833,6 +842,9 @@ func (c *SkillsController) saveRegistry(w http.ResponseWriter, r *http.Request) 
 		AuthType:              in.AuthType,
 		APIKeyHeader:          in.APIKeyHeader,
 		PermittedPrivateCIDRs: in.PermittedPrivateCIDRs,
+		Owner:                 in.Owner,
+		Repository:            in.Repository,
+		AllowedOwners:         in.AllowedOwners,
 		Actor:                 c.actor(r),
 		ActorPermissions:      c.callerGlobalPermissions(r),
 		ActorTenants:          c.callerTenants(r),

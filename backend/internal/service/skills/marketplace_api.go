@@ -146,6 +146,9 @@ func (m *Marketplace) SaveRegistryView(
 			NetworkPolicy: skillregistry.NetworkPolicy{
 				PermittedPrivateCIDRs: in.PermittedPrivateCIDRs,
 			},
+			Owner:         in.Owner,
+			Repository:    in.Repository,
+			AllowedOwners: in.AllowedOwners,
 		},
 		Actor:            in.Actor,
 		ActorPermissions: in.ActorPermissions,
