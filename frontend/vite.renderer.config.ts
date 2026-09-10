@@ -100,9 +100,18 @@ export default defineConfig({
 			),
 		},
 	},
-	// Dev proxy for VITE_NO_ELECTRON=1 browser preview — forwards /api and /mux
-	// to the daemon so the renderer can be tested against a running daemon from
-	// a plain browser without an Electron shell.
+	// Dev proxy for VITE_NO_ELECTRON=1 browser preview — forwards /api, /mux and
+	// the daemon health probes so the renderer can be tested against a running
+	// daemon from a plain browser without an Electron shell.
+	//
+	// /healthz and /readyz are proxied for a reason that is easy to miss: the
+	// renderer probes /readyz SAME-ORIGIN (see lib/platform-adapter.ts) to
+	// decide whether a daemon is there at all. Without them in this list Vite
+	// answers its own index.html, the probe reads that as a malformed daemon
+	// response, and the app declares the daemon unreachable and falls back to
+	// demo fixtures -- while every /api call beside it is succeeding. The
+	// result is a browser preview that silently shows fixture data, which is
+	// the one thing a preview must never do.
 	server: {
 		proxy: {
 			"/api": {
@@ -113,6 +122,14 @@ export default defineConfig({
 				target: process.env.AO_DEV_API_TARGET ?? "http://127.0.0.1:3001",
 				changeOrigin: false,
 				ws: true,
+			},
+			"/healthz": {
+				target: process.env.AO_DEV_API_TARGET ?? "http://127.0.0.1:3001",
+				changeOrigin: false,
+			},
+			"/readyz": {
+				target: process.env.AO_DEV_API_TARGET ?? "http://127.0.0.1:3001",
+				changeOrigin: false,
 			},
 		},
 	},
