@@ -7,6 +7,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillregistry"
+	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
 )
 
 // trust_api.go -- the API-shaped half of the trust authority.
@@ -240,4 +241,15 @@ func asOfOrZero(t *time.Time) time.Time {
 		return time.Time{}
 	}
 	return *t
+}
+
+// originViewPtr renders one provenance row for a response that carries it
+// optionally.
+//
+// It shares originView with the marketplace rather than re-deriving the
+// mapping: two renderings of the same row would eventually disagree about what
+// "trusted" prints as, which is the one field that must not drift.
+func originViewPtr(o store.SkillInstallOrigin) *controllers.SkillInstallOriginView {
+	v := originView(o)
+	return &v
 }

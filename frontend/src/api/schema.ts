@@ -7537,6 +7537,7 @@ export interface components {
             installedBy?: string;
             modes: components["schemas"]["SkillModeView"][];
             name: string;
+            origin?: components["schemas"]["SkillInstallOriginView"];
             originRef?: string;
             /** @enum {string} */
             originType: "builtin" | "local" | "git";

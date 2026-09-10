@@ -112,6 +112,20 @@ type SkillInstallView struct {
 	Approval               string    `json:"approval" enum:"none,per_activation,per_run,per_target"`
 	InstalledAt            time.Time `json:"installedAt"`
 	InstalledBy            string    `json:"installedBy,omitempty"`
+
+	// Origin is where this version came from and what AO verified about it,
+	// including the signature chain when there was one.
+	//
+	// It is a POINTER and it is absent for an install that has no registry
+	// origin -- a package installed from a local directory somebody vetted by
+	// hand. That is the honest shape: an absent origin means "AO has no
+	// provenance record for this", which is a different fact from a record
+	// saying nothing was verified, and a zero-valued struct would have merged
+	// the two.
+	//
+	// It is read from AO's own table, never from a registry, so listing
+	// installed skills opens no socket.
+	Origin *SkillInstallOriginView `json:"origin,omitempty"`
 }
 
 // SkillListResponse is the body of GET /api/v1/skills.

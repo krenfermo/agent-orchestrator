@@ -26,7 +26,7 @@ import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
 import { useWorkspaceQuery, workspaceQueryKey, workspaceQueryOptions } from "../hooks/useWorkspaceQuery";
 import { apiClient, apiErrorCode, apiErrorMessage, hasTrustedApiBaseUrl } from "../lib/api-client";
 import { refreshDaemonStatus } from "../lib/daemon-status";
-import { usesPreviewWorkspaceData } from "../lib/preview-mode";
+import { usesDemoWorkspaceData } from "../lib/preview-mode";
 import { addRendererExceptionStep, captureRendererEvent, captureRendererException } from "../lib/telemetry";
 import { ShellProvider } from "../lib/shell-context";
 import { restartProjectOrchestrator } from "../lib/restart-orchestrator";
@@ -56,7 +56,7 @@ export const Route = createFileRoute("/_shell")({
 	// nav target is warm before the click.
 	loader: async ({ context }) => {
 		await refreshDaemonStatus().catch(() => undefined);
-		if (usesPreviewWorkspaceData) return context.queryClient.ensureQueryData(workspaceQueryOptions);
+		if (usesDemoWorkspaceData()) return context.queryClient.ensureQueryData(workspaceQueryOptions);
 		if (!hasTrustedApiBaseUrl()) return;
 		// Awaited, not fired and forgotten. Prefetching the workspace list is a
 		// protected request, and issuing it before the daemon has said who is
@@ -228,7 +228,7 @@ function ShellLayout() {
 	const setOrchestratorStartupError = useUiStore((state) => state.setOrchestratorStartupError);
 	const replacementErrorProjectId = Object.keys(orchestratorReplacementErrors)[0] ?? null;
 	const isStartupLoading =
-		!usesPreviewWorkspaceData &&
+		!usesDemoWorkspaceData() &&
 		!daemonStatus.code &&
 		(daemonStatus.state !== "ready" || workspaceStartupState === "loading");
 	const cancelSidebarPeekClose = useCallback(() => {
@@ -454,7 +454,10 @@ function ShellLayout() {
 	// between projects and the first-run import flow.
 	useEffect(() => {
 		let active = true;
-		if (usesPreviewWorkspaceData) {
+		// Demo mode may declare the shell ready without a daemon. The browser
+		// build on its own may not: skipping the readiness machinery because
+		// Electron is absent is how a real outage renders as a working board.
+		if (usesDemoWorkspaceData()) {
 			workspaceStartupBaselineRef.current = 0;
 			setWorkspaceStartupState("ready");
 			return () => {
@@ -492,7 +495,7 @@ function ShellLayout() {
 	// shell without requiring a daemon restart or port change.
 	useEffect(() => {
 		if (
-			usesPreviewWorkspaceData ||
+			usesDemoWorkspaceData() ||
 			daemonStatus.state !== "ready" ||
 			workspaceStartupState === "ready" ||
 			!workspaceQuery.isSuccess ||

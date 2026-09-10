@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/skills"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillregistry"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillregistry/registrytest"
@@ -533,3 +534,69 @@ func assertNoKeyMaterialInAudit(t *testing.T, pf privateFixture) {
 }
 
 var _ = store.SkillAuditTrustedInstall
+
+// TestInstalledListCarriesProvenance is the gap phase 12.1 closes on the API
+// side: the provenance existed and no read exposed it, so no screen could tell
+// a VERIFIED install from a TRUSTED one.
+//
+// It also pins the distinction the pointer exists for: an install with no
+// registry origin has NO origin object, which is a different fact from an
+// origin saying nothing was verified.
+func TestInstalledListCarriesProvenance(t *testing.T) {
+	tf := newTrustedFixture(t, skillregistry.TierEnterprise, skillregistry.TrustPolicySigned)
+	ctx := context.Background()
+	tf.publishSigned(t, "security-audit", "1.0.0")
+	if _, err := tf.install(t, "security-audit", "1.0.0"); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	// The service the HTTP layer reads through, wired the way the daemon wires
+	// it. Without the origin source it reports no provenance at all, which is
+	// the fail-honest direction and is asserted below.
+	withOrigins := skills.New(tf.store, tf.dataDir, skills.WithOriginSource(tf.store))
+	views, err := withOrigins.ListInstalled(ctx)
+	if err != nil {
+		t.Fatalf("ListInstalled: %v", err)
+	}
+	var found *controllers.SkillInstallView
+	for i := range views {
+		if views[i].ID == "security-audit" {
+			found = &views[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("the installed skill is missing from the listing")
+	}
+	if found.Origin == nil {
+		t.Fatal("the installed skill carries no origin; a screen cannot tell verified from trusted")
+	}
+	if found.Origin.Trust != string(skillregistry.TrustTrusted) {
+		t.Fatalf("origin trust = %q, want trusted", found.Origin.Trust)
+	}
+	p := found.Origin.Provenance
+	if p == nil || !p.Verified {
+		t.Fatalf("provenance is absent or unverified: %+v", p)
+	}
+	if p.KeyID != tf.fix.Signer.KeyID || p.KeyFingerprint != tf.fix.Signer.Fingerprint(t) {
+		t.Fatalf("provenance names the wrong key: %+v", p)
+	}
+	if p.TrustRootID != tf.fix.Root.ID || p.TrustRootTier != string(skillregistry.TierEnterprise) {
+		t.Fatalf("provenance names the wrong root: %+v", p)
+	}
+	if p.VerifiedAt.IsZero() {
+		t.Fatal("provenance records no verification time")
+	}
+
+	// And a service with NO origin source reports no provenance rather than
+	// inventing an empty one.
+	withoutOrigins := skills.New(tf.store, tf.dataDir)
+	bare, err := withoutOrigins.ListInstalled(ctx)
+	if err != nil {
+		t.Fatalf("ListInstalled(no origins): %v", err)
+	}
+	for _, v := range bare {
+		if v.Origin != nil {
+			t.Fatalf("an installation with no origin source reported provenance: %+v", v.Origin)
+		}
+	}
+}

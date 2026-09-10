@@ -27,11 +27,43 @@ func (s *Service) ListInstalled(ctx context.Context) ([]controllers.SkillInstall
 	if err != nil {
 		return nil, err
 	}
+	// One read for every origin rather than one per install: a settings screen
+	// listing twenty skills should not become twenty queries, and this is a
+	// local table.
+	origins := s.originIndex(ctx)
 	out := make([]controllers.SkillInstallView, 0, len(recs))
 	for _, rec := range recs {
-		out = append(out, installView(rec))
+		view := installView(rec)
+		if o, ok := origins[originKey(rec.Manifest.ID, rec.Manifest.Version)]; ok {
+			view.Origin = originViewPtr(o)
+		}
+		out = append(out, view)
 	}
 	return out, nil
+}
+
+// originKey identifies one installed version.
+func originKey(skillID, version string) string { return skillID + "@" + version }
+
+// originIndex reads every recorded provenance row.
+//
+// A failure to read provenance does NOT fail the listing: what is installed is
+// a fact this service owns, and losing the provenance table must not make the
+// catalog unreadable. The rows simply come back absent, which the view already
+// distinguishes from "nothing was verified".
+func (s *Service) originIndex(ctx context.Context) map[string]store.SkillInstallOrigin {
+	if s.origins == nil {
+		return nil
+	}
+	rows, err := s.origins.ListSkillInstallOrigins(ctx)
+	if err != nil {
+		return nil
+	}
+	idx := make(map[string]store.SkillInstallOrigin, len(rows))
+	for _, row := range rows {
+		idx[originKey(row.SkillID, row.Version)] = row
+	}
+	return idx
 }
 
 // GetInstalled implements the controller's detail read.
@@ -40,7 +72,13 @@ func (s *Service) GetInstalled(ctx context.Context, skillID, version string) (co
 	if err != nil {
 		return controllers.SkillInstallView{}, err
 	}
-	return installView(rec), nil
+	view := installView(rec)
+	if s.origins != nil {
+		if o, ok, err := s.origins.GetSkillInstallOrigin(ctx, skillID, version); err == nil && ok {
+			view.Origin = originViewPtr(o)
+		}
+	}
+	return view, nil
 }
 
 // InstallSkill implements the controller's install.
