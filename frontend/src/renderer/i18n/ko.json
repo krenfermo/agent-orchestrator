@@ -2546,5 +2546,10 @@
 	"settings.skillMarketplace.offlineBody": "{{registry}}에 도달할 수 없었습니다. 여기 표시된 내용은 AO가 마지막으로 받은 것이며 현재 제공 내용이 아닙니다.",
 	"settings.skillMarketplace.registrySource": "레지스트리: {{registry}}",
 	"settings.skillMarketplace.fromCache": "AO의 검증된 아티팩트 캐시에서 설치했습니다. 두 다이제스트를 바이트에 대해 다시 계산했습니다.",
-	"settings.skillMarketplace.offlineInstall": "레지스트리에 도달할 수 없는 동안, AO가 이미 가져와 검증한 바이트에서 설치했습니다."
+	"settings.skillMarketplace.offlineInstall": "레지스트리에 도달할 수 없는 동안, AO가 이미 가져와 검증한 바이트에서 설치했습니다.",
+	"settings.skillMarketplace.freshness.live": "최신",
+	"settings.skillMarketplace.freshness.cached": "캐시에서",
+	"settings.skillMarketplace.freshness.stale": "캐시, 기한 지남",
+	"settings.skillMarketplace.freshness.offline": "캐시, 레지스트리에 연결할 수 없음",
+	"settings.skillMarketplace.metadataAsOf": "{{time}} 기준. 지금 레지스트리의 내용이 아닙니다."
 }

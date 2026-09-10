@@ -371,6 +371,23 @@ type SkillReleaseView struct {
 	Installed        bool   `json:"installed"`
 	InstalledVersion string `json:"installedVersion,omitempty"`
 	UpdateAvailable  bool   `json:"updateAvailable"`
+
+	// MetadataFreshness is how AO came by this row: "live" means the registry
+	// answered during this request, and the other three all mean it did not.
+	// It is sent per release because a search spans registries and one being
+	// offline must not colour the rows that came from the ones that answered.
+	//
+	// It says nothing about Trust and nothing about Compatibility. A cached
+	// row is not less trusted and not less compatible; it is less CURRENT.
+	MetadataFreshness string `json:"metadataFreshness" enum:"live,cached,stale,offline"`
+	// MetadataOffline reports that the registry could not be reached for this
+	// row. It is a separate field from the freshness, and never inferred from
+	// it, so a client renders the outage rather than deducing it.
+	MetadataOffline bool `json:"metadataOffline"`
+	// MetadataAsOf is when the registry actually answered. For anything other
+	// than "live" it is in the past, and it is what a client shows instead of
+	// presenting the row as current.
+	MetadataAsOf time.Time `json:"metadataAsOf,omitempty"`
 }
 
 // SkillRegistryNoteView names a registry the search could not read. It exists
@@ -380,12 +397,51 @@ type SkillReleaseView struct {
 type SkillRegistryNoteView struct {
 	RegistryID string `json:"registryId"`
 	Reason     string `json:"reason"`
+	// MetadataFreshness and MetadataOffline say how far AO got. A registry
+	// that was UNREACHABLE with nothing cached reads offline; one whose
+	// configuration could not be opened does not, because no network was
+	// involved and the two want different fixes.
+	MetadataFreshness string `json:"metadataFreshness" enum:"live,cached,stale,offline"`
+	MetadataOffline   bool   `json:"metadataOffline"`
+}
+
+// SkillRegistryFreshnessView is one registry the read consulted and how it
+// answered.
+//
+// It is sent for EVERY consulted registry, answered or not, so that "is any of
+// this cached" is a field a client reads rather than something it deduces from
+// an empty note list. Deducing it is what let a stale answer pass for a live
+// one.
+type SkillRegistryFreshnessView struct {
+	RegistryID   string `json:"registryId"`
+	RegistryName string `json:"registryName,omitempty"`
+	// Freshness is one of live, cached, stale, offline. Only "live" means the
+	// registry confirmed this during the request.
+	Freshness string `json:"freshness" enum:"live,cached,stale,offline"`
+	// Offline reports that the registry could not be reached.
+	Offline bool `json:"offline"`
+	// FetchedAt is when the registry last actually answered. Zero means never.
+	FetchedAt time.Time `json:"fetchedAt,omitempty"`
+	// Explanation says in words what the state means, from the daemon, for the
+	// same reason TrustExplanation is served: a screen that wrote its own
+	// version of these sentences would eventually write a more comfortable
+	// one, and the most comfortable available lie here is "up to date".
+	Explanation string `json:"explanation"`
 }
 
 // SkillMarketplaceSearchResponse is the body of GET /api/v1/skills/marketplace.
 type SkillMarketplaceSearchResponse struct {
 	Releases []SkillReleaseView      `json:"releases"`
 	Notes    []SkillRegistryNoteView `json:"notes"`
+	// Sources is every registry consulted and how fresh what it gave is.
+	Sources []SkillRegistryFreshnessView `json:"sources"`
+	// Offline is true when ANY consulted registry could not be reached, so
+	// results on screen include cached metadata. It is computed by the daemon
+	// and sent, rather than each client folding over sources and reaching its
+	// own conclusion.
+	Offline bool `json:"offline"`
+	// FreshnessNotice is the sentence a client must show when Offline is true.
+	FreshnessNotice string `json:"freshnessNotice,omitempty"`
 	// InstallNotice is the sentence a client must show before installing. It
 	// comes from the daemon so the promise on screen and the behaviour in the
 	// service cannot drift apart.
@@ -396,6 +452,13 @@ type SkillMarketplaceSearchResponse struct {
 type SkillReleaseDetailResponse struct {
 	Release  SkillReleaseView   `json:"release"`
 	Versions []SkillReleaseView `json:"versions"`
+	// Source is the registry this was read from and how fresh the read is.
+	Source SkillRegistryFreshnessView `json:"source"`
+	// Offline is true when the registry could not be reached and this detail
+	// came from cache.
+	Offline bool `json:"offline"`
+	// FreshnessNotice is the sentence a client must show when Offline is true.
+	FreshnessNotice string `json:"freshnessNotice,omitempty"`
 	// InstalledNotice is what a client must show AFTER installing.
 	InstallNotice string `json:"installNotice"`
 }
@@ -816,6 +879,24 @@ const RegistryProbeAssurance = "A connection test reads one small metadata endpo
 	"changes no catalog, installs nothing, enables nothing on any project and approves no container image. " +
 	"CONNECTED means this registry answered AS ITSELF over verified TLS, speaking a protocol version this " +
 	"build knows -- not merely that something answered on that address."
+
+// RegistryMetadataFreshnessNotice is what a client must show when a listing
+// includes metadata AO could not confirm with the registry during the request.
+//
+// It is served for the same reason RegistryProbeAssurance is: the sentence and
+// the behaviour must not drift, and the comfortable version of this sentence
+// ("everything looks fine") is exactly the one a screen would write for itself.
+//
+// The second half is the part that matters. Installing does NOT run off this
+// listing: it re-resolves the exact release from the registry, and an install
+// that cannot reach the registry is refused unless a person explicitly asks
+// for the cached-bytes path, which re-hashes everything and re-checks the
+// recorded revocations.
+const RegistryMetadataFreshnessNotice = "A registry could not be reached, so some of what is listed is metadata AO " +
+	"cached earlier and could not confirm just now. It is shown with the time it was fetched and is NOT current: a " +
+	"release withdrawn since then would still appear here. Installing is unaffected -- an install re-resolves the " +
+	"exact release from the registry and is refused when it cannot, so nothing is ever installed on the strength " +
+	"of this listing."
 
 // RegistryInstallNotice is what a client must show BEFORE installing.
 const RegistryInstallNotice = "This installs the Skill but does not enable it on any project."

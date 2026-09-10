@@ -2564,5 +2564,10 @@
 	"settings.skillMarketplace.offlineBody": "Não foi possível alcançar {{registry}}. O que aparece aqui é o que o AO recebeu por último, não o que ele oferece agora.",
 	"settings.skillMarketplace.registrySource": "Registro: {{registry}}",
 	"settings.skillMarketplace.fromCache": "Instalado a partir do cache de artefatos verificado do AO; os dois digests foram recalculados sobre os bytes.",
-	"settings.skillMarketplace.offlineInstall": "Instalado enquanto o registro estava inalcançável, a partir de bytes que o AO já havia buscado e verificado."
+	"settings.skillMarketplace.offlineInstall": "Instalado enquanto o registro estava inalcançável, a partir de bytes que o AO já havia buscado e verificado.",
+	"settings.skillMarketplace.freshness.live": "Atual",
+	"settings.skillMarketplace.freshness.cached": "Do cache",
+	"settings.skillMarketplace.freshness.stale": "Em cache, desatualizado",
+	"settings.skillMarketplace.freshness.offline": "Em cache, registry inacessivel",
+	"settings.skillMarketplace.metadataAsOf": "Em {{time}}. Nao e o que o registry diz agora."
 }

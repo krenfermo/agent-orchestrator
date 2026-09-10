@@ -2546,5 +2546,10 @@
 	"settings.skillMarketplace.offlineBody": "{{registry}} war nicht erreichbar. Was hier steht, ist das zuletzt Empfangene, nicht das aktuelle Angebot.",
 	"settings.skillMarketplace.registrySource": "Registry: {{registry}}",
 	"settings.skillMarketplace.fromCache": "Aus AOs verifiziertem Artefakt-Cache installiert; beide Digests wurden über die Bytes neu berechnet.",
-	"settings.skillMarketplace.offlineInstall": "Installiert, während das Registry nicht erreichbar war, aus Bytes, die AO bereits geholt und verifiziert hatte."
+	"settings.skillMarketplace.offlineInstall": "Installiert, während das Registry nicht erreichbar war, aus Bytes, die AO bereits geholt und verifiziert hatte.",
+	"settings.skillMarketplace.freshness.live": "Aktuell",
+	"settings.skillMarketplace.freshness.cached": "Aus dem Cache",
+	"settings.skillMarketplace.freshness.stale": "Im Cache, veraltet",
+	"settings.skillMarketplace.freshness.offline": "Im Cache, Registry nicht erreichbar",
+	"settings.skillMarketplace.metadataAsOf": "Stand {{time}}. Das ist nicht, was die Registry jetzt sagt."
 }

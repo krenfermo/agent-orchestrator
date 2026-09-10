@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/secretbox"
@@ -665,4 +666,218 @@ func TestConnectionTestRequiresSettingsManage(t *testing.T) {
 			t.Fatalf("a caller holding %v synced revocations", held)
 		}
 	}
+}
+
+// ---------------------------------------------------------------- freshness
+
+// freshness_test cases -- the phase-11 check that the metadata state survives
+// the trip from the provider to the API.
+//
+// The bug they exist for is subtle and was invisible from the outside: the
+// provider knew perfectly well it had answered from cache, and every layer
+// above it threw that away, so a search run with the registry down looked
+// exactly like a search run with the registry up. "Looks the same" is the worst
+// possible failure mode for a listing whose whole job is to be current.
+
+// TestSearchReportsLiveThenOfflineThenLiveAgain is Check 19 as a test: query
+// with the registry up, take it down, query again, bring it back.
+func TestSearchReportsLiveThenOfflineThenLiveAgain(t *testing.T) {
+	pf := newPrivateFixture(t)
+	pf.srv.Publish(t, registrytest.Spec{SkillID: "security-audit", Version: "1.0.0"})
+
+	live, err := pf.mp.Search(context.Background(), skills.SearchRequest{})
+	if err != nil {
+		t.Fatalf("live search: %v", err)
+	}
+	if live.Offline() {
+		t.Fatal("a search against a running registry reported offline")
+	}
+	assertSource(t, live, pf.reg.ID, skillregistry.FreshnessLive, false)
+	if len(live.Releases) != 1 {
+		t.Fatalf("live search returned %d releases", len(live.Releases))
+	}
+	if !live.Releases[0].Metadata.Current() {
+		t.Fatalf("a live row reported %+v", live.Releases[0].Metadata)
+	}
+
+	pf.srv.Pause()
+	offline, err := pf.mp.Search(context.Background(), skills.SearchRequest{})
+	if err != nil {
+		t.Fatalf("offline search: %v", err)
+	}
+	// The results are still there -- that is the point of the cache -- and
+	// every one of them is labelled.
+	if len(offline.Releases) != 1 {
+		t.Fatalf("offline search returned %d releases; the cache held one", len(offline.Releases))
+	}
+	if !offline.Offline() {
+		t.Fatal("a search with the registry down did not report offline")
+	}
+	assertSource(t, offline, pf.reg.ID, skillregistry.FreshnessOffline, true)
+	row := offline.Releases[0].Metadata
+	if !row.Offline || row.Current() {
+		t.Fatalf("an offline row reported %+v", row)
+	}
+	if row.FetchedAt.IsZero() {
+		t.Fatalf("an offline row carried no as-of time")
+	}
+	// A search moves no package bytes, offline least of all: falling back to
+	// cached metadata must not turn into fetching anything.
+	if pf.srv.FetchedArtifact() {
+		t.Fatal("the offline search fetched an artifact")
+	}
+
+	pf.srv.Resume()
+	back, err := pf.mp.Search(context.Background(), skills.SearchRequest{})
+	if err != nil {
+		t.Fatalf("search after recovery: %v", err)
+	}
+	if back.Offline() {
+		t.Fatal("the search still reported offline after the registry came back")
+	}
+	assertSource(t, back, pf.reg.ID, skillregistry.FreshnessLive, false)
+	if !back.Releases[0].Metadata.Current() {
+		t.Fatalf("a recovered row reported %+v", back.Releases[0].Metadata)
+	}
+}
+
+// TestOfflineSearchPastTheTTLReportsStale is the other half of the offline
+// state: a copy AO could not confirm AND that the cache no longer considers
+// current. It still says offline, because a stale row must not hide the
+// outage.
+func TestOfflineSearchPastTheTTLReportsStale(t *testing.T) {
+	pf := newPrivateFixture(t)
+	pf.srv.Publish(t, registrytest.Spec{SkillID: "security-audit", Version: "1.0.0"})
+	if _, err := pf.mp.Search(context.Background(), skills.SearchRequest{}); err != nil {
+		t.Fatalf("warming search: %v", err)
+	}
+
+	// Past the default ten-minute metadata TTL, without sleeping.
+	pf.mp.SetClockForTest(func() time.Time { return time.Now().UTC().Add(48 * time.Hour) })
+	pf.srv.Stop()
+
+	res, err := pf.mp.Search(context.Background(), skills.SearchRequest{})
+	if err != nil {
+		t.Fatalf("stale search: %v", err)
+	}
+	assertSource(t, res, pf.reg.ID, skillregistry.FreshnessStale, true)
+	if !res.Offline() {
+		t.Fatal("a stale search did not report offline")
+	}
+	if len(res.Releases) != 1 || res.Releases[0].Metadata.Current() {
+		t.Fatalf("a stale row was presented as current: %+v", res.Releases)
+	}
+}
+
+// TestUnreachableRegistryWithNoCacheIsNamedOffline: nothing to show, and the
+// reason is the network rather than an empty registry.
+func TestUnreachableRegistryWithNoCacheIsNamedOffline(t *testing.T) {
+	pf := newPrivateFixture(t)
+	pf.srv.Publish(t, registrytest.Spec{SkillID: "security-audit", Version: "1.0.0"})
+	pf.srv.Stop()
+
+	res, err := pf.mp.Search(context.Background(), skills.SearchRequest{})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(res.Releases) != 0 {
+		t.Fatalf("a registry that never answered produced %d releases", len(res.Releases))
+	}
+	if len(res.Notes) != 1 {
+		t.Fatalf("expected one note naming the registry, got %d", len(res.Notes))
+	}
+	if !res.Notes[0].Metadata.Offline {
+		t.Fatalf("the note did not say offline: %+v", res.Notes[0])
+	}
+	if !res.Offline() {
+		t.Fatal("a search that reached nothing did not report offline")
+	}
+	assertSource(t, res, pf.reg.ID, skillregistry.FreshnessOffline, true)
+}
+
+// TestFreshnessChangesNoTrustAndNoCompatibility is the boundary the brief
+// draws. Freshness is a fact about the metadata; trust and compatibility are
+// facts about the release, and going offline moves neither.
+func TestFreshnessChangesNoTrustAndNoCompatibility(t *testing.T) {
+	pf := newPrivateFixture(t)
+	pf.srv.Publish(t, registrytest.Spec{SkillID: "security-audit", Version: "1.0.0"})
+
+	live, err := pf.mp.Search(context.Background(), skills.SearchRequest{})
+	if err != nil {
+		t.Fatalf("live search: %v", err)
+	}
+	pf.srv.Stop()
+	offline, err := pf.mp.Search(context.Background(), skills.SearchRequest{})
+	if err != nil {
+		t.Fatalf("offline search: %v", err)
+	}
+	if len(live.Releases) != 1 || len(offline.Releases) != 1 {
+		t.Fatalf("searches returned %d and %d releases", len(live.Releases), len(offline.Releases))
+	}
+	l, o := live.Releases[0], offline.Releases[0]
+	if l.Trust != o.Trust {
+		t.Fatalf("going offline moved trust from %s to %s", l.Trust, o.Trust)
+	}
+	if o.Trust == skillregistry.TrustTrusted {
+		t.Fatalf("an offline row reported trusted")
+	}
+	if l.Compatibility != o.Compatibility {
+		t.Fatalf("going offline moved compatibility from %s to %s", l.Compatibility, o.Compatibility)
+	}
+	if l.Installed != o.Installed || l.UpdateAvailable != o.UpdateAvailable {
+		t.Fatal("going offline changed what AO says is installed")
+	}
+}
+
+// TestOfflineSearchDoesNotWeakenInstall: the listing may fall back to cache;
+// the install may not. An install still re-resolves from the registry and is
+// refused when it cannot, unless a person explicitly asks for cached bytes.
+func TestOfflineSearchDoesNotWeakenInstall(t *testing.T) {
+	pf := newPrivateFixture(t)
+	pf.srv.Publish(t, registrytest.Spec{SkillID: "security-audit", Version: "1.0.0"})
+	if _, err := pf.mp.Search(context.Background(), skills.SearchRequest{}); err != nil {
+		t.Fatalf("warming search: %v", err)
+	}
+	pf.srv.Stop()
+
+	// The search is happy to answer from cache and says so.
+	res, err := pf.mp.Search(context.Background(), skills.SearchRequest{})
+	if err != nil {
+		t.Fatalf("offline search: %v", err)
+	}
+	if !res.Offline() || len(res.Releases) != 1 {
+		t.Fatalf("expected one cached, offline-labelled row, got %+v", res.Sources)
+	}
+	// The install is not.
+	if _, err := pf.install(t, "security-audit", "1.0.0"); err == nil {
+		t.Fatal("an install proceeded on a cached listing while the registry was unreachable")
+	}
+	if pf.srv.FetchedArtifact() {
+		t.Fatal("the refused install fetched an artifact")
+	}
+}
+
+// assertSource checks the per-registry freshness the daemon sends, which is
+// what a client renders instead of inferring the outage from the shape of the
+// result.
+func assertSource(
+	t *testing.T, res skills.SearchResult, registryID string,
+	want skillregistry.Freshness, offline bool,
+) {
+	t.Helper()
+	for _, src := range res.Sources {
+		if src.RegistryID != registryID {
+			continue
+		}
+		if src.Metadata.Freshness != want {
+			t.Fatalf("registry %s reported freshness %s, want %s",
+				registryID, src.Metadata.Freshness, want)
+		}
+		if src.Metadata.Offline != offline {
+			t.Fatalf("registry %s reported offline=%v, want %v",
+				registryID, src.Metadata.Offline, offline)
+		}
+		return
+	}
+	t.Fatalf("the search reported no source for registry %s: %+v", registryID, res.Sources)
 }

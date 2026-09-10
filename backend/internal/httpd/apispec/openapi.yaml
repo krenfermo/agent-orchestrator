@@ -21330,19 +21330,29 @@ components:
       type: object
     SkillMarketplaceSearchResponse:
       properties:
+        freshnessNotice:
+          type: string
         installNotice:
           type: string
         notes:
           items:
             $ref: '#/components/schemas/SkillRegistryNoteView'
           type: array
+        offline:
+          type: boolean
         releases:
           items:
             $ref: '#/components/schemas/SkillReleaseView'
           type: array
+        sources:
+          items:
+            $ref: '#/components/schemas/SkillRegistryFreshnessView'
+          type: array
       required:
       - releases
       - notes
+      - sources
+      - offline
       - installNotice
       type: object
     SkillModeView:
@@ -21379,6 +21389,32 @@ components:
       - capabilities
       - approval
       type: object
+    SkillRegistryFreshnessView:
+      properties:
+        explanation:
+          type: string
+        fetchedAt:
+          format: date-time
+          type: string
+        freshness:
+          enum:
+          - live
+          - cached
+          - stale
+          - offline
+          type: string
+        offline:
+          type: boolean
+        registryId:
+          type: string
+        registryName:
+          type: string
+      required:
+      - registryId
+      - freshness
+      - offline
+      - explanation
+      type: object
     SkillRegistryListResponse:
       properties:
         registries:
@@ -21393,6 +21429,15 @@ components:
       type: object
     SkillRegistryNoteView:
       properties:
+        metadataFreshness:
+          enum:
+          - live
+          - cached
+          - stale
+          - offline
+          type: string
+        metadataOffline:
+          type: boolean
         reason:
           type: string
         registryId:
@@ -21400,6 +21445,8 @@ components:
       required:
       - registryId
       - reason
+      - metadataFreshness
+      - metadataOffline
       type: object
     SkillRegistryProbeView:
       properties:
@@ -21608,10 +21655,16 @@ components:
       type: object
     SkillReleaseDetailResponse:
       properties:
+        freshnessNotice:
+          type: string
         installNotice:
           type: string
+        offline:
+          type: boolean
         release:
           $ref: '#/components/schemas/SkillReleaseView'
+        source:
+          $ref: '#/components/schemas/SkillRegistryFreshnessView'
         versions:
           items:
             $ref: '#/components/schemas/SkillReleaseView'
@@ -21619,6 +21672,8 @@ components:
       required:
       - release
       - versions
+      - source
+      - offline
       - installNotice
       type: object
     SkillReleaseModeView:
@@ -21686,6 +21741,18 @@ components:
           type: string
         manifestDigest:
           type: string
+        metadataAsOf:
+          format: date-time
+          type: string
+        metadataFreshness:
+          enum:
+          - live
+          - cached
+          - stale
+          - offline
+          type: string
+        metadataOffline:
+          type: boolean
         name:
           type: string
         publishedAt:
@@ -21751,6 +21818,8 @@ components:
       - trustExplanation
       - installed
       - updateAvailable
+      - metadataFreshness
+      - metadataOffline
       type: object
     SkillRunnerStatusView:
       properties:

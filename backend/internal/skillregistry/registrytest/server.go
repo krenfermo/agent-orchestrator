@@ -45,6 +45,11 @@ type Server struct {
 	UntrustedCA *CA
 
 	http *httptest.Server
+	// port is captured once, at New, so Pause can free the listener and Resume
+	// can bring the same registry back at the SAME location. Without it a test
+	// could only ever take a registry down, and "the outage ended" is half the
+	// offline contract.
+	port int
 
 	mu sync.Mutex
 	// releases is the catalogue, keyed by "<skillId>@<version>".
@@ -116,21 +121,36 @@ func New(t *testing.T, registryID string) *Server {
 		Certificates: []tls.Certificate{ca.Issue(t, DNSName)},
 	}
 	srv.StartTLS()
-	t.Cleanup(srv.Close)
 	s.http = srv
+	s.port = listenerPort(srv)
+	t.Cleanup(func() { s.current().Close() })
 	return s
+}
+
+func listenerPort(srv *httptest.Server) int {
+	addr, ok := srv.Listener.Addr().(*net.TCPAddr)
+	if !ok {
+		return 0
+	}
+	return addr.Port
+}
+
+func (s *Server) current() *httptest.Server {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.http
 }
 
 // TrustPool is the CA pool a client must be given to reach this fixture.
 func (s *Server) TrustPool() *x509.CertPool { return s.ca.Pool }
 
-// Port is the port the fixture listens on.
+// Port is the port the fixture listens on. It is fixed for the fixture's life,
+// including across Pause and Resume, so a registry configuration written once
+// stays valid through an outage.
 func (s *Server) Port() int {
-	addr, ok := s.http.Listener.Addr().(*net.TCPAddr)
-	if !ok {
-		return 0
-	}
-	return addr.Port
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.port
 }
 
 // BaseURL is what a registry row's location is set to. It is the reserved DNS
@@ -184,7 +204,38 @@ func (s *Server) Fail(f Failures) {
 }
 
 // Stop closes the listener, which is how a test goes offline.
-func (s *Server) Stop() { s.http.Close() }
+func (s *Server) Stop() { s.current().Close() }
+
+// Pause takes the registry down without giving up its address. It is Stop with
+// the intent named: a test that pauses is going to Resume.
+func (s *Server) Pause() { s.Stop() }
+
+// Resume brings the registry back at the same host and port, with the same
+// catalogue and the same CA.
+//
+// It is what proves the offline state is a STATE and not a latch: a client
+// that reported cached metadata while the registry was down has to go back to
+// reporting live when it comes back, without being restarted or reconfigured.
+func (s *Server) Resume() {
+	s.t.Helper()
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", s.Port()))
+	if err != nil {
+		s.t.Fatalf("registrytest: resuming on port %d: %v", s.Port(), err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(s.serve))
+	// The listener httptest picked for us is not the one we need; the port
+	// the client is configured for is.
+	_ = srv.Listener.Close()
+	srv.Listener = ln
+	srv.TLS = &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{s.ca.Issue(s.t, DNSName)},
+	}
+	srv.StartTLS()
+	s.mu.Lock()
+	s.http = srv
+	s.mu.Unlock()
+}
 
 // Requests returns every path the fixture was asked for, in order. It is what
 // proves a search downloaded nothing.

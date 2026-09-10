@@ -40,6 +40,14 @@ type ReleaseDetail = components["schemas"]["SkillReleaseDetailResponse"];
  *
  * **A revoked release stays on screen, greyed and uninstallable.** Hiding it
  * would answer "where did that version go" with silence.
+ *
+ * **Freshness is read, never inferred.** The daemon says, per registry and per
+ * row, whether what is on screen came from the registry just now or from AO's
+ * cache because the registry could not be reached — and this component renders
+ * that field. It does not deduce "everything is current" from an empty note
+ * list, which is exactly the deduction that let cached results pass for live
+ * ones. Freshness is also kept apart from trust: a cached row is not less
+ * trusted, it is less current, and the two badges never merge.
  */
 export function SkillMarketplaceSettingsSection() {
 	const { t } = useTranslation();
@@ -161,6 +169,12 @@ export function SkillMarketplaceSettingsSection() {
 
 	const allReleases = search.data?.releases ?? [];
 	const notes = search.data?.notes ?? [];
+	// The freshness of every registry the daemon consulted, and its own verdict
+	// on whether any of them was unreachable. Both are fields; neither is
+	// worked out here.
+	const sources = search.data?.sources ?? [];
+	const offline = search.data?.offline ?? false;
+	const offlineSources = sources.filter((source) => source.offline);
 	const registryRows = registries.data?.registries ?? [];
 	// Every capability any result asks for, so the filter offers the ones that
 	// exist here rather than AO's whole table.
@@ -286,20 +300,54 @@ export function SkillMarketplaceSettingsSection() {
 				<p className="text-caption text-error">{(search.error as Error).message}</p>
 			) : null}
 
-			{/* An unreadable registry is NAMED. "This registry has nothing" is a
-			    materially more comfortable fact than the truth.
-
-			    A registry that could not be REACHED gets the stronger banner:
-			    anything still listed for it came from AO's cache, and cached
-			    data must never be presented as current. */}
-			{notes.map((note) => (
-				<div key={note.registryId} data-testid="skill-registry-note">
+			{/* Cached metadata is never presented as current. The banner is driven
+			    by the daemon's own `offline` field and its own sentence, so this
+			    screen cannot describe the state more comfortably than the thing
+			    that measured it. */}
+			{offline ? (
+				<div
+					className="flex flex-col gap-1 rounded-(--radius-settings-dialog-lg) border border-[var(--color-border-settings-input)] p-3"
+					data-testid="skill-marketplace-offline"
+					role="status"
+				>
 					<p className="text-caption font-medium text-warning">
 						{t("settings.skillMarketplace.offlineTitle")}
 					</p>
-					<p className="text-caption text-warning">
-						{t("settings.skillMarketplace.offlineBody", { registry: note.registryId })}
-					</p>
+					{offlineSources.map((source) => (
+						<p className="text-caption text-warning" key={source.registryId}>
+							{t("settings.skillMarketplace.offlineBody", {
+								registry: source.registryName || source.registryId,
+							})}
+							{source.fetchedAt
+								? ` ${t("settings.skillMarketplace.metadataAsOf", {
+										time: formatAsOf(source.fetchedAt),
+									})}`
+								: null}
+						</p>
+					))}
+					{/* The daemon's sentence, including the part that says the
+					    install path is unaffected. */}
+					{search.data?.freshnessNotice ? (
+						<p className="text-caption text-settings-muted">{search.data.freshnessNotice}</p>
+					) : null}
+				</div>
+			) : null}
+
+			{/* An unreadable registry is NAMED. "This registry has nothing" is a
+			    materially more comfortable fact than the truth.
+
+			    Whether it was UNREACHABLE is the daemon's field, not a guess
+			    from the wording of the reason: a registry whose configuration
+			    could not be opened and one the network could not carry a request
+			    to want different fixes. The offline banner above covers the
+			    second; this names both. */}
+			{notes.map((note) => (
+				<div key={note.registryId} data-testid="skill-registry-note">
+					{note.metadataOffline ? (
+						<p className="text-caption font-medium text-warning">
+							{t("settings.skillMarketplace.offlineTitle")}
+						</p>
+					) : null}
 					<p className="text-caption text-warning">
 						{t("settings.skillMarketplace.registryUnreadable", {
 							registry: note.registryId,
@@ -373,8 +421,24 @@ export function SkillMarketplaceSettingsSection() {
 							<Badge variant={release.compatibility === "compatible" ? "outline" : "warning"}>
 								{t(`settings.skillMarketplace.compatibility.${release.compatibility}`)}
 							</Badge>
+							{/* A row AO could not confirm carries its own badge, beside
+							    trust and never inside it. */}
+							{release.metadataOffline ? (
+								<Badge variant="warning" data-testid="skill-release-freshness">
+									{t(`settings.skillMarketplace.freshness.${release.metadataFreshness}`)}
+								</Badge>
+							) : null}
 							<span>{t(`settings.project.skills.risk.${release.riskLevel}`)}</span>
 						</div>
+						{/* "As of" is the only honest way to show something that may
+						    have changed since AO last looked. */}
+						{release.metadataOffline && release.metadataAsOf ? (
+							<p className="text-caption text-warning" data-testid="skill-release-as-of">
+								{t("settings.skillMarketplace.metadataAsOf", {
+									time: formatAsOf(release.metadataAsOf),
+								})}
+							</p>
+						) : null}
 						{/* Served by the daemon, so this screen cannot describe the
 						    trust model more optimistically than the thing enforcing it. */}
 						<p className="text-caption text-settings-muted">{release.trustExplanation}</p>
@@ -490,4 +554,15 @@ export function SkillMarketplaceSettingsSection() {
 			</ul>
 		</SettingsSection>
 	);
+}
+
+/**
+ * formatAsOf renders the moment the registry last answered, in the viewer's
+ * locale. A raw RFC 3339 string is a timestamp somebody has to decode; the
+ * point of the line is that a reader sees at a glance how old this is.
+ */
+function formatAsOf(iso: string): string {
+	const at = new Date(iso);
+	if (Number.isNaN(at.getTime())) return iso;
+	return at.toLocaleString();
 }

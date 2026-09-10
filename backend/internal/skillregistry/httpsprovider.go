@@ -80,10 +80,15 @@ type HTTPSProvider struct {
 	cache      *Cache
 	metaTTL    time.Duration
 	now        func() time.Time
-	// lastFreshness records how the most recent metadata answer was obtained,
-	// so the service can say OFFLINE/STALE on screen without every method
-	// growing a second return value the Provider interface does not have.
-	lastFreshness Freshness
+	// lastState records how the most recent metadata answer was obtained, so
+	// the service can say OFFLINE/STALE on screen without every method growing
+	// a second return value the Provider interface does not have.
+	//
+	// It is set on EVERY metadata path, including the failing ones: a search
+	// that returned an error because the registry was unreachable and there
+	// was nothing cached is exactly the case a caller must be able to label
+	// offline rather than "empty".
+	lastState MetadataState
 }
 
 // NewHTTPSProvider opens a private registry.
@@ -206,10 +211,15 @@ func (p *HTTPSProvider) GoString() string { return p.String() }
 // Freshness reports how the last metadata answer was obtained. It is what the
 // service turns into "OFFLINE / STALE METADATA" on screen.
 func (p *HTTPSProvider) Freshness() Freshness {
-	if p.lastFreshness == "" {
-		return FreshnessLive
-	}
-	return p.lastFreshness
+	return p.MetadataState().Freshness
+}
+
+// MetadataState implements MetadataFresher.
+//
+// A provider that has not been asked anything yet reports live rather than an
+// empty badge: it has served nothing, so it has served nothing stale.
+func (p *HTTPSProvider) MetadataState() MetadataState {
+	return p.lastState.Normalized()
 }
 
 // ------------------------------------------------------------------ requests
@@ -220,7 +230,7 @@ func (p *HTTPSProvider) Freshness() Freshness {
 // registry cannot be reached, and mark the result. A cache-first client would
 // be a client that answers from a copy while the registry is sitting there with
 // a revocation.
-func (p *HTTPSProvider) get(ctx context.Context, endpoint string) ([]byte, Freshness, error) {
+func (p *HTTPSProvider) get(ctx context.Context, endpoint string) ([]byte, MetadataState, error) {
 	key := endpoint
 	cached, cacheErr := p.cache.GetMetadata(p.registryID, key)
 	hasCache := cacheErr == nil
@@ -229,7 +239,7 @@ func (p *HTTPSProvider) get(ctx context.Context, endpoint string) ([]byte, Fresh
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
-		return nil, "", fmt.Errorf("%w: %w", ErrRegistryUnreadable, err)
+		return nil, MetadataState{}, fmt.Errorf("%w: %w", ErrRegistryUnreadable, err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", userAgent)
@@ -245,36 +255,44 @@ func (p *HTTPSProvider) get(ctx context.Context, endpoint string) ([]byte, Fresh
 		}
 	}
 	if err := p.creds.applyTo(req); err != nil {
-		return nil, "", err
+		return nil, MetadataState{}, err
 	}
 
 	resp, err := p.client.Do(req)
 	if err != nil {
 		if hasCache {
 			// Offline. The answer is the one AO already verified it received,
-			// and it is marked stale whatever its age -- AO could not ask, and
-			// "could not ask" is not "unchanged".
-			return cached.Body, FreshnessStale, nil
+			// and it is NEVER live -- AO could not ask, and "could not ask" is
+			// not "unchanged". Past the TTL it is stale on top of that; either
+			// way the state carries Offline, so a client cannot render this as
+			// current and cannot have to guess why.
+			return cached.Body, OfflineState(cached, p.now(), p.metaTTL), nil
 		}
-		return nil, "", classifyTransportError(err)
+		// Unreachable with nothing cached. The caller gets an error, and the
+		// state still says offline: a registry that answered nothing because
+		// the network was down is a different row from one that answered
+		// "nothing matched".
+		return nil, UnreachableState(), classifyTransportError(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotModified && hasCache {
+		// The registry spoke: it said the copy AO holds is still its answer.
+		// That is live, and the fetch time is now.
 		refreshed := cached
 		refreshed.FetchedAt = p.now()
 		p.cache.PutMetadata(p.registryID, key, refreshed)
-		return cached.Body, FreshnessLive, nil
+		return cached.Body, LiveState(p.now()), nil
 	}
 	if err := checkStatus(resp, p.creds.Ref()); err != nil {
-		return nil, "", err
+		return nil, MetadataState{}, err
 	}
 	if err := checkContentType(resp, "application/json"); err != nil {
-		return nil, "", err
+		return nil, MetadataState{}, err
 	}
 	body, err := readBounded(resp.Body, MaxMetadataBytes)
 	if err != nil {
-		return nil, "", err
+		return nil, MetadataState{}, err
 	}
 	p.cache.PutMetadata(p.registryID, key, MetadataEntry{
 		Body:         body,
@@ -282,7 +300,7 @@ func (p *HTTPSProvider) get(ctx context.Context, endpoint string) ([]byte, Fresh
 		LastModified: strings.TrimSpace(resp.Header.Get("Last-Modified")),
 		FetchedAt:    p.now(),
 	})
-	return body, FreshnessLive, nil
+	return body, LiveState(p.now()), nil
 }
 
 const userAgent = "ao-skill-registry/1 (+https://github.com/aoagents/agent-orchestrator)"
@@ -400,11 +418,11 @@ func redactURLError(err error) error {
 // package bytes; there is nowhere in the response schema for a package to be.
 func (p *HTTPSProvider) Search(ctx context.Context, q Query) ([]Release, error) {
 	q = q.Normalized()
-	body, freshness, err := p.get(ctx, p.endpoints.search(q))
+	body, state, err := p.get(ctx, p.endpoints.search(q))
+	p.lastState = state
 	if err != nil {
 		return nil, err
 	}
-	p.lastFreshness = freshness
 	releases, err := p.decodeReleases(body)
 	if err != nil {
 		return nil, err
@@ -437,24 +455,24 @@ func (p *HTTPSProvider) Search(ctx context.Context, q Query) ([]Release, error) 
 
 // Get implements Provider: the DISPLAY read.
 func (p *HTTPSProvider) Get(ctx context.Context, skillID, version string) (Release, error) {
-	body, freshness, err := p.get(ctx, p.endpoints.release(skillID, version))
+	body, state, err := p.get(ctx, p.endpoints.release(skillID, version))
+	p.lastState = state
 	if err != nil {
 		return Release{}, err
 	}
-	p.lastFreshness = freshness
 	return p.decodeRelease(body, skillID, version)
 }
 
 // ListVersions implements Provider, including deprecated and revoked releases.
 func (p *HTTPSProvider) ListVersions(ctx context.Context, skillID string) ([]Release, error) {
-	body, freshness, err := p.get(ctx, p.endpoints.versions(skillID))
+	body, state, err := p.get(ctx, p.endpoints.versions(skillID))
+	p.lastState = state
 	if err != nil {
 		if errors.Is(err, ErrNoSuchSkill) {
 			return nil, fmt.Errorf("%w: %s", ErrNoSuchSkill, skillID)
 		}
 		return nil, err
 	}
-	p.lastFreshness = freshness
 	releases, err := p.decodeReleases(body)
 	if err != nil {
 		return nil, err
@@ -501,7 +519,9 @@ func (p *HTTPSProvider) ResolveExactRelease(ctx context.Context, skillID, versio
 		}
 		return Release{}, err
 	}
-	p.lastFreshness = FreshnessLive
+	// An install read is live by construction: getFresh has no cache in either
+	// direction, so reaching here means the registry answered just now.
+	p.lastState = LiveState(p.now())
 	return p.decodeRelease(body, skillID, version)
 }
 

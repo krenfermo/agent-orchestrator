@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -54,8 +55,13 @@ func TestMetadataCacheRevalidatesWithETag(t *testing.T) {
 }
 
 // TestOfflineFallsBackToCacheAndSaysSo is the offline contract: the answer is
-// the one AO already received, and it is marked stale rather than presented as
-// current.
+// the one AO already received, and it is marked OFFLINE rather than presented
+// as current.
+//
+// The cached copy here is seconds old -- inside the TTL -- and that is exactly
+// the case that used to read as "live" to everything above the provider,
+// because a young cache and a fresh answer are indistinguishable once the
+// signal is thrown away. Young is not confirmed.
 func TestOfflineFallsBackToCacheAndSaysSo(t *testing.T) {
 	srv := registrytest.New(t, "corp")
 	srv.Publish(t, registrytest.Spec{SkillID: "security-audit", Version: "1.0.0"})
@@ -69,8 +75,12 @@ func TestOfflineFallsBackToCacheAndSaysSo(t *testing.T) {
 	if _, err := p.Search(context.Background(), skillregistry.Query{}); err != nil {
 		t.Fatalf("warming search: %v", err)
 	}
-	if got := p.Freshness(); got != skillregistry.FreshnessLive {
-		t.Fatalf("a live search reported %s", got)
+	live := p.MetadataState()
+	if live.Freshness != skillregistry.FreshnessLive || live.Offline {
+		t.Fatalf("a live search reported %+v", live)
+	}
+	if !live.Current() {
+		t.Fatal("a live search did not report itself current")
 	}
 
 	srv.Stop()
@@ -81,9 +91,264 @@ func TestOfflineFallsBackToCacheAndSaysSo(t *testing.T) {
 	if len(rels) != 1 {
 		t.Fatalf("offline search returned %d releases", len(rels))
 	}
-	if got := p.Freshness(); got != skillregistry.FreshnessStale {
-		t.Fatalf("an offline answer reported %s, want stale", got)
+	state := p.MetadataState()
+	if state.Freshness != skillregistry.FreshnessOffline {
+		t.Fatalf("an offline answer reported %s, want offline", state.Freshness)
 	}
+	if !state.Offline {
+		t.Fatal("an offline answer did not set Offline")
+	}
+	if state.Current() {
+		t.Fatal("an offline answer reported itself current")
+	}
+	if state.FetchedAt.IsZero() {
+		t.Fatal("an offline answer carried no as-of time")
+	}
+	// The freshness signal must never move an artifact. Nothing was fetched.
+	if srv.FetchedArtifact() {
+		t.Fatal("the offline search fetched an artifact")
+	}
+}
+
+// TestOfflineWithFreshCacheIsOfflineNotStale and its sibling below are the two
+// halves of "explicitly not current": a cached copy inside the TTL says the
+// registry could not be REACHED, and one past the TTL says that AND that the
+// copy is old. Neither is ever live.
+func TestOfflineWithFreshCacheIsOfflineNotStale(t *testing.T) {
+	srv := registrytest.New(t, "corp")
+	srv.Publish(t, registrytest.Spec{SkillID: "security-audit", Version: "1.0.0"})
+
+	clock := &testClock{at: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)}
+	opts := srv.Options()
+	opts.Cache = skillregistry.NewCache(t.TempDir(), skillregistry.CacheLimits{MetadataTTL: time.Hour})
+	opts.Now = clock.now
+	p, err := skillregistry.NewHTTPSProvider(context.Background(), srv.Registry("corp"), nil, opts)
+	if err != nil {
+		t.Fatalf("NewHTTPSProvider: %v", err)
+	}
+	if _, err := p.Search(context.Background(), skillregistry.Query{}); err != nil {
+		t.Fatalf("warming search: %v", err)
+	}
+	fetchedAt := p.MetadataState().FetchedAt
+
+	srv.Stop()
+	// Well inside the one-hour TTL.
+	clock.advance(10 * time.Minute)
+	if _, err := p.Search(context.Background(), skillregistry.Query{}); err != nil {
+		t.Fatalf("offline search: %v", err)
+	}
+	state := p.MetadataState()
+	if state.Freshness != skillregistry.FreshnessOffline || !state.Offline {
+		t.Fatalf("a fresh cached copy served offline reported %+v", state)
+	}
+	// The as-of time is when the REGISTRY answered, not when AO looked at its
+	// own cache. A clock that moved is not a registry that spoke.
+	if !state.FetchedAt.Equal(fetchedAt) {
+		t.Fatalf("as-of moved from %s to %s without the registry answering", fetchedAt, state.FetchedAt)
+	}
+}
+
+// TestOfflinePastTTLIsStale is the other half.
+func TestOfflinePastTTLIsStale(t *testing.T) {
+	srv := registrytest.New(t, "corp")
+	srv.Publish(t, registrytest.Spec{SkillID: "security-audit", Version: "1.0.0"})
+
+	clock := &testClock{at: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)}
+	opts := srv.Options()
+	opts.Cache = skillregistry.NewCache(t.TempDir(), skillregistry.CacheLimits{MetadataTTL: time.Minute})
+	opts.Now = clock.now
+	p, err := skillregistry.NewHTTPSProvider(context.Background(), srv.Registry("corp"), nil, opts)
+	if err != nil {
+		t.Fatalf("NewHTTPSProvider: %v", err)
+	}
+	if _, err := p.Search(context.Background(), skillregistry.Query{}); err != nil {
+		t.Fatalf("warming search: %v", err)
+	}
+
+	srv.Stop()
+	clock.advance(48 * time.Hour)
+	rels, err := p.Search(context.Background(), skillregistry.Query{})
+	if err != nil {
+		t.Fatalf("offline search: %v", err)
+	}
+	if len(rels) != 1 {
+		t.Fatalf("a stale offline search returned %d releases", len(rels))
+	}
+	state := p.MetadataState()
+	if state.Freshness != skillregistry.FreshnessStale {
+		t.Fatalf("a copy 48h past a one-minute TTL reported %s, want stale", state.Freshness)
+	}
+	// Stale must not hide the outage: an operator reading "stale" still needs
+	// to know AO could not ask.
+	if !state.Offline {
+		t.Fatal("a stale offline answer did not set Offline")
+	}
+	if state.Current() {
+		t.Fatal("a stale answer reported itself current")
+	}
+}
+
+// TestUnreachableWithNoCacheIsOffline: a registry that failed BECAUSE the
+// network was down is a different row from one that answered "nothing
+// matched", and the state has to say so even though the call returns an error.
+func TestUnreachableWithNoCacheIsOffline(t *testing.T) {
+	srv := registrytest.New(t, "corp")
+	srv.Publish(t, registrytest.Spec{SkillID: "security-audit", Version: "1.0.0"})
+
+	opts := srv.Options()
+	opts.Cache = skillregistry.NewCache(t.TempDir(), skillregistry.CacheLimits{})
+	p, err := skillregistry.NewHTTPSProvider(context.Background(), srv.Registry("corp"), nil, opts)
+	if err != nil {
+		t.Fatalf("NewHTTPSProvider: %v", err)
+	}
+	srv.Stop()
+	if _, err := p.Search(context.Background(), skillregistry.Query{}); err == nil {
+		t.Fatal("a search with no cache and no registry succeeded")
+	}
+	state := p.MetadataState()
+	if state.Freshness != skillregistry.FreshnessOffline || !state.Offline {
+		t.Fatalf("an unreachable registry with no cache reported %+v", state)
+	}
+	if !state.FetchedAt.IsZero() {
+		t.Fatalf("a registry that never answered carried an as-of time: %s", state.FetchedAt)
+	}
+}
+
+// TestFreshnessRecoversWhenTheRegistryReturns is the state-not-latch contract.
+// A provider that reported offline during an outage must report live again
+// once the registry answers, without being reconfigured.
+func TestFreshnessRecoversWhenTheRegistryReturns(t *testing.T) {
+	srv := registrytest.New(t, "corp")
+	srv.Publish(t, registrytest.Spec{SkillID: "security-audit", Version: "1.0.0"})
+
+	opts := srv.Options()
+	opts.Cache = skillregistry.NewCache(t.TempDir(), skillregistry.CacheLimits{})
+	p, err := skillregistry.NewHTTPSProvider(context.Background(), srv.Registry("corp"), nil, opts)
+	if err != nil {
+		t.Fatalf("NewHTTPSProvider: %v", err)
+	}
+	if _, err := p.Search(context.Background(), skillregistry.Query{}); err != nil {
+		t.Fatalf("warming search: %v", err)
+	}
+
+	srv.Pause()
+	if _, err := p.Search(context.Background(), skillregistry.Query{}); err != nil {
+		t.Fatalf("offline search: %v", err)
+	}
+	if got := p.MetadataState(); !got.Offline {
+		t.Fatalf("the search during the outage reported %+v", got)
+	}
+
+	srv.Resume()
+	if _, err := p.Search(context.Background(), skillregistry.Query{}); err != nil {
+		t.Fatalf("search after recovery: %v", err)
+	}
+	state := p.MetadataState()
+	if state.Freshness != skillregistry.FreshnessLive || state.Offline {
+		t.Fatalf("after the registry returned, the search reported %+v", state)
+	}
+	if !state.Current() {
+		t.Fatal("a recovered search did not report itself current")
+	}
+}
+
+// TestCachedFreshnessIsUnreachable holds the doc comment true. Every display
+// read revalidates against the registry, so "served from cache without asking"
+// is a state this build never produces -- and the value exists so a future
+// cache-first read has an honest name rather than borrowing "live".
+func TestCachedFreshnessIsUnreachable(t *testing.T) {
+	srv := registrytest.New(t, "corp")
+	srv.Publish(t, registrytest.Spec{SkillID: "security-audit", Version: "1.0.0"})
+
+	clock := &testClock{at: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)}
+	opts := srv.Options()
+	opts.Cache = skillregistry.NewCache(t.TempDir(), skillregistry.CacheLimits{MetadataTTL: time.Hour})
+	opts.Now = clock.now
+	p, err := skillregistry.NewHTTPSProvider(context.Background(), srv.Registry("corp"), nil, opts)
+	if err != nil {
+		t.Fatalf("NewHTTPSProvider: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := p.Search(context.Background(), skillregistry.Query{}); err != nil {
+			t.Fatalf("search %d: %v", i, err)
+		}
+		clock.advance(time.Second)
+		if got := p.MetadataState().Freshness; got != skillregistry.FreshnessLive {
+			t.Fatalf("a revalidated search reported %s; the registry answered every time", got)
+		}
+	}
+	// And the reason it is live every time: the request went out every time.
+	hits := 0
+	for _, path := range srv.Requests() {
+		if path == "/v1/skills" {
+			hits++
+		}
+	}
+	if hits != 3 {
+		t.Fatalf("expected three revalidating searches, saw %d: %v", hits, srv.Requests())
+	}
+}
+
+// TestFreshnessNeverTouchesTrust is the boundary the phase brief names: a
+// cached row is not less trusted, and an offline read may not downgrade or
+// upgrade what AO says it verified.
+func TestFreshnessNeverTouchesTrust(t *testing.T) {
+	srv := registrytest.New(t, "corp")
+	srv.Publish(t, registrytest.Spec{SkillID: "security-audit", Version: "1.0.0"})
+
+	opts := srv.Options()
+	opts.Cache = skillregistry.NewCache(t.TempDir(), skillregistry.CacheLimits{})
+	p, err := skillregistry.NewHTTPSProvider(context.Background(), srv.Registry("corp"), nil, opts)
+	if err != nil {
+		t.Fatalf("NewHTTPSProvider: %v", err)
+	}
+	live, err := p.Search(context.Background(), skillregistry.Query{})
+	if err != nil {
+		t.Fatalf("warming search: %v", err)
+	}
+	srv.Stop()
+	offline, err := p.Search(context.Background(), skillregistry.Query{})
+	if err != nil {
+		t.Fatalf("offline search: %v", err)
+	}
+	if len(live) != 1 || len(offline) != 1 {
+		t.Fatalf("searches returned %d and %d releases", len(live), len(offline))
+	}
+	if got := skillregistry.AssessAvailable(offline[0]); got != skillregistry.AssessAvailable(live[0]) {
+		t.Fatalf("an offline read changed the trust state to %s", got)
+	}
+	if got := skillregistry.AssessAvailable(offline[0]); got == skillregistry.TrustTrusted {
+		t.Fatal("an offline read reported trusted")
+	}
+	// And the other direction the brief names: an unknown compatibility
+	// verdict stays unknown when the answer came from cache. "AO could not
+	// ask" is not evidence that a release fits.
+	if got := skillregistry.CheckCompatibility(offline[0], "not-a-version"); got != skillregistry.CompatibilityUnknown {
+		t.Fatalf("an offline read turned an unknown compatibility into %s", got)
+	}
+	if live, off := skillregistry.CheckCompatibility(live[0], "1.0.0"),
+		skillregistry.CheckCompatibility(offline[0], "1.0.0"); live != off {
+		t.Fatalf("an offline read changed compatibility from %s to %s", live, off)
+	}
+}
+
+// testClock is a clock a test moves by hand, so staleness is a decision rather
+// than a sleep.
+type testClock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func (c *testClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+func (c *testClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at = c.at.Add(d)
 }
 
 // TestInstallResolutionNeverAnswersFromCache is the rule revocation depends on.

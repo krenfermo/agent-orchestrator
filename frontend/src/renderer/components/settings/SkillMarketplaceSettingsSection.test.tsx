@@ -7,6 +7,9 @@ import { SkillMarketplaceSettingsSection } from "./SkillMarketplaceSettingsSecti
 
 const INSTALL_NOTICE = "This installs the Skill but does not enable it on any project.";
 const INSTALLED_NOTICE = "Installed. Choose a project to enable it.";
+const FRESHNESS_NOTICE =
+	"A registry could not be reached, so some of what is listed is metadata AO cached earlier.";
+const CACHED_AT = "2026-06-01T12:00:00Z";
 
 const release = {
 	registryId: "ao-fixture",
@@ -215,7 +218,8 @@ describe("SkillMarketplaceSettingsSection", () => {
 	// ------------------------------------------------ phase 11: connectivity
 
 	// Cached data must never be presented as current. A registry AO could not
-	// reach gets the banner, in those words.
+	// reach gets the banner, in those words -- and it comes from the daemon's
+	// `offline` field, not from the wording of an error string.
 	it("says OFFLINE / STALE METADATA for a registry it could not reach", async () => {
 		vi.spyOn(apiClient, "GET").mockImplementation((async (path: string) => {
 			if (path === "/api/v1/skills/registries") {
@@ -228,19 +232,141 @@ describe("SkillMarketplaceSettingsSection", () => {
 						{
 							registryId: "company-private",
 							reason: "registry company-private could not be read: connection refused",
+							metadataFreshness: "offline",
+							metadataOffline: true,
 						},
 					],
+					sources: [
+						{
+							registryId: "company-private",
+							registryName: "Company Private",
+							freshness: "offline",
+							offline: true,
+							fetchedAt: CACHED_AT,
+							explanation: "AO could not reach this registry.",
+						},
+					],
+					offline: true,
+					freshnessNotice: FRESHNESS_NOTICE,
 					installNotice: INSTALL_NOTICE,
 				},
 			};
 		}) as never);
 		renderSection();
 
-		const note = await screen.findByTestId("skill-registry-note");
-		expect(note).toHaveTextContent("OFFLINE / STALE METADATA");
-		expect(note).toHaveTextContent(
+		const banner = await screen.findByTestId("skill-marketplace-offline");
+		expect(banner).toHaveTextContent("OFFLINE / STALE METADATA");
+		expect(banner).toHaveTextContent(
 			"What is listed for it is what AO last received, not what it offers now.",
 		);
+		// The daemon's own sentence, including the half that says the install
+		// path is unaffected.
+		expect(banner).toHaveTextContent(FRESHNESS_NOTICE);
+		// The registry is still named, with its reason.
+		expect(await screen.findByTestId("skill-registry-note")).toHaveTextContent(
+			"could not be read: registry company-private could not be read: connection refused",
+		);
+	});
+
+	// This is Check 19 on screen: a search whose rows came from cache must not
+	// look like a search whose rows came from the registry.
+	it("labels a cached row and never presents it as current", async () => {
+		mockSearch([{ ...release, metadataFreshness: "offline", metadataOffline: true, metadataAsOf: CACHED_AT }], {
+			sources: [
+				{
+					registryId: "ao-fixture",
+					registryName: "AO Fixture",
+					freshness: "offline",
+					offline: true,
+					fetchedAt: CACHED_AT,
+					explanation: "AO could not reach this registry.",
+				},
+			],
+			offline: true,
+			freshnessNotice: FRESHNESS_NOTICE,
+		});
+		renderSection();
+
+		expect(await screen.findByTestId("skill-release-freshness")).toHaveTextContent(
+			"Cached, registry unreachable",
+		);
+		expect(await screen.findByTestId("skill-release-as-of")).toHaveTextContent(
+			"This is not what the registry says now.",
+		);
+		// The row is still there. Offline labels; it does not hide.
+		expect(screen.getByText("Security Audit")).toBeInTheDocument();
+		// And freshness did not move trust: a cached row is not less trusted.
+		expect(screen.getByText("Nothing checked yet")).toBeInTheDocument();
+	});
+
+	// A copy AO could not confirm AND that the cache no longer considers
+	// current is the stronger of the two offline states, and reads as such.
+	it("distinguishes a stale cached row from a merely unconfirmed one", async () => {
+		mockSearch([{ ...release, metadataFreshness: "stale", metadataOffline: true, metadataAsOf: CACHED_AT }], {
+			sources: [
+				{
+					registryId: "ao-fixture",
+					freshness: "stale",
+					offline: true,
+					fetchedAt: CACHED_AT,
+					explanation: "AO could not reach this registry.",
+				},
+			],
+			offline: true,
+			freshnessNotice: FRESHNESS_NOTICE,
+		});
+		renderSection();
+
+		expect(await screen.findByTestId("skill-release-freshness")).toHaveTextContent(
+			"Cached, out of date",
+		);
+	});
+
+	// A line printed on every search is a line people stop reading, and then
+	// stop seeing when it changes. A live search says nothing about freshness.
+	it("shows no freshness banner or badge when everything came from the registry", async () => {
+		mockSearch([{ ...release, metadataFreshness: "live", metadataOffline: false }], {
+			sources: [
+				{
+					registryId: "ao-fixture",
+					freshness: "live",
+					offline: false,
+					explanation: "The registry answered during this request.",
+				},
+			],
+			offline: false,
+		});
+		renderSection();
+
+		await screen.findByText("Security Audit");
+		expect(screen.queryByTestId("skill-marketplace-offline")).not.toBeInTheDocument();
+		expect(screen.queryByTestId("skill-release-freshness")).not.toBeInTheDocument();
+		expect(screen.queryByTestId("skill-release-as-of")).not.toBeInTheDocument();
+	});
+
+	// An unreadable registry is not an unreachable one, and the two want
+	// different fixes. Only the daemon's own field decides which banner shows.
+	it("does not call an unreadable registry offline", async () => {
+		mockSearch([], {
+			notes: [
+				{
+					registryId: "company-private",
+					reason: "registry.json is missing",
+					metadataFreshness: "live",
+					metadataOffline: false,
+				},
+			],
+			sources: [
+				{ registryId: "company-private", freshness: "live", offline: false, explanation: "" },
+			],
+			offline: false,
+		});
+		renderSection();
+
+		const note = await screen.findByTestId("skill-registry-note");
+		expect(note).toHaveTextContent("registry.json is missing");
+		expect(note).not.toHaveTextContent("OFFLINE / STALE METADATA");
+		expect(screen.queryByTestId("skill-marketplace-offline")).not.toBeInTheDocument();
 	});
 
 	// With more than one registry configured, "where did this come from" is the
