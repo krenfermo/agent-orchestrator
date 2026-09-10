@@ -134,6 +134,16 @@ type Failures struct {
 	ArchiveHardlink  bool
 	ArchiveTraversal bool
 	ArchiveDevice    bool
+	// ArchiveFifo adds a named pipe, which nothing in a package needs and
+	// which a naive unpacker would create and then block reading from.
+	ArchiveFifo bool
+	// ArchiveAbsolutePath names an entry at "/etc/...". It is the traversal's
+	// blunter sibling: no "..", just a leading slash.
+	ArchiveAbsolutePath bool
+	// ArchiveDuplicateEntry writes skill.yaml twice with different contents.
+	// Whichever is read last would win, and which one that is is the archive's
+	// choice rather than AO's.
+	ArchiveDuplicateEntry bool
 	// ArchiveBomb serves a small gzip that expands past the budget.
 	ArchiveBomb bool
 	// ArchiveEntryFlood serves more entries than the ceiling allows.
@@ -721,6 +731,27 @@ func tarGz(root string, files map[string]string, fail Failures) []byte {
 			Name: prefix + "dev/null", Mode: 0o666, Typeflag: tar.TypeChar,
 			Devmajor: 1, Devminor: 3,
 		})
+	}
+	if fail.ArchiveFifo {
+		_ = tw.WriteHeader(&tar.Header{
+			Name: prefix + "pipe", Mode: 0o600, Typeflag: tar.TypeFifo,
+		})
+	}
+	if fail.ArchiveAbsolutePath {
+		body := "owned"
+		_ = tw.WriteHeader(&tar.Header{
+			Name: "/etc/cron.d/ao-owned", Mode: 0o644,
+			Size: int64(len(body)), Typeflag: tar.TypeReg,
+		})
+		_, _ = tw.Write([]byte(body))
+	}
+	if fail.ArchiveDuplicateEntry {
+		body := "a second skill.yaml, with different contents"
+		_ = tw.WriteHeader(&tar.Header{
+			Name: prefix + "skill.yaml", Mode: 0o644,
+			Size: int64(len(body)), Typeflag: tar.TypeReg,
+		})
+		_, _ = tw.Write([]byte(body))
 	}
 	if fail.ArchiveTwoRoots {
 		body := "second root"

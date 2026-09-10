@@ -229,6 +229,12 @@ func TestHostileArchivesAreRefused(t *testing.T) {
 		{"hardlink", githubtest.Failures{ArchiveHardlink: true}, "hard link"},
 		{"traversal", githubtest.Failures{ArchiveTraversal: true}, "traverses"},
 		{"device node", githubtest.Failures{ArchiveDevice: true}, "device node"},
+		{"named pipe", githubtest.Failures{ArchiveFifo: true}, "FIFO"},
+		// The traversal's blunter sibling: no "..", just a leading slash.
+		{"absolute path", githubtest.Failures{ArchiveAbsolutePath: true}, "absolute path"},
+		// Two entries for one path: whichever is read last wins, and which one
+		// that is is the archive's choice rather than AO's.
+		{"duplicate entry", githubtest.Failures{ArchiveDuplicateEntry: true}, "appears twice"},
 		{"decompression bomb", githubtest.Failures{ArchiveBomb: true}, "budget"},
 		{"entry flood", githubtest.Failures{ArchiveEntryFlood: true}, "entries"},
 		{"two roots", githubtest.Failures{ArchiveTwoRoots: true}, "top-level"},
