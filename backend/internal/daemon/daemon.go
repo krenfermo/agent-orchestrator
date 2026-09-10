@@ -289,8 +289,22 @@ func RunWithConfig(cfg config.Config) error {
 	// that cannot run must say so, because what it defends against is a bad
 	// afternoon -- and refusing every install on every source build would only
 	// teach people to route around the checks that do matter.
+	//
+	// Phase 11 adds the private-registry half. The credential resolver reads
+	// the SAME sealed store every other AO credential lives in -- there is no
+	// second, registry-specific home for a secret -- and it is handed to the
+	// provider factory rather than to the marketplace, because the factory is
+	// the one place a registry type turns into a client.
+	//
+	// The two test-only seams on HTTPSOptions (a trust anchor and a resolver)
+	// are deliberately NOT set here and have no configuration reaching them.
+	// That is what makes "AO verifies the certificate" a property of the build
+	// rather than a default somebody can flip.
+	registrySecrets := skills.NewRegistrySecrets(store, secretbox.New(cfg.DataDir))
 	skillMarketplace := skills.NewMarketplace(store, skillsSvc,
-		skillregistry.DefaultProviderFactory{}, cfg.Telemetry.AppVersion, cfg.DataDir)
+		skillregistry.DefaultProviderFactory{Secrets: registrySecrets},
+		cfg.Telemetry.AppVersion, cfg.DataDir,
+	).WithConnectivity(store, registrySecrets)
 	log.Info("skills: execution environment probed",
 		"runtime", skillRunner.Runtime().Describe(),
 		"available", skillRunner.Available(),

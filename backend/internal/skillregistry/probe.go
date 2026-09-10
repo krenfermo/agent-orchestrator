@@ -90,73 +90,86 @@ type ProbeResult struct {
 	Latency time.Duration `json:"latencyMs"`
 }
 
-// Probe performs one connection test against a configured registry.
+// ConnectionProbe is a provider that can be asked to identify itself.
 //
-// It builds its own provider rather than reusing a cached one, because the
-// point of the button is to test the configuration as saved -- including
-// resolving the credential, which is the step that fails most often and is
-// invisible from anywhere else.
-func Probe(
-	ctx context.Context, reg Registry, resolver SecretResolver, opts HTTPSOptions, now func() time.Time,
-) ProbeResult {
+// It is an OPTIONAL interface on Provider rather than a sixth method, because
+// four of the five Provider methods are about releases and this one is about
+// the registry. A fixture provider that implements the five and not this one is
+// a fixture with nothing to test, and should say so rather than be forced to
+// invent an answer.
+type ConnectionProbe interface {
+	Probe(ctx context.Context, now func() time.Time) ProbeResult
+}
+
+// ProbeRefused is the result for a registry AO would not even open.
+//
+// It is POLICY_BLOCKED and not UNREACHABLE, deliberately: nothing was sent, AO
+// itself refused, and "unreachable" would send an operator to look at the
+// network instead of at the configuration in front of them.
+func ProbeRefused(reg Registry, err error, now func() time.Time) ProbeResult {
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
 	result := ProbeResult{
 		RegistryID: reg.ID,
+		State:      ProbePolicyBlocked,
 		AuthType:   string(reg.EffectiveAuthType()),
 		SecretRef:  reg.CredentialSecretName,
 		TestedAt:   now(),
 	}
-	if reg.Type == RegistryLocal {
-		// A local registry has no connection to test. Saying so beats
-		// answering CONNECTED for a directory, which would teach people the
-		// green badge means something it does not.
-		if _, err := NewFileProvider(reg.ID, reg.Location); err != nil {
-			result.State, result.Detail = ProbeInvalidResponse, err.Error()
-			return result
-		}
-		result.State = ProbeConnected
-		result.Detail = "This is a local directory registry; its index reads correctly. Nothing was fetched over the network."
-		result.Origin = reg.Location
-		return result
+	switch {
+	case errors.Is(err, ErrSecretUnavailable):
+		result.Detail = fmt.Sprintf("the credential %s could not be resolved: %v",
+			reg.CredentialSecretName, err)
+	default:
+		result.Detail = err.Error()
 	}
-	if reg.Type != RegistryHTTPS {
-		result.State = ProbePolicyBlocked
-		result.Detail = fmt.Sprintf("registry type %q cannot be tested by this build", reg.Type)
-		return result
+	if origin, _, parseErr := ParseBaseURL(reg.Location); parseErr == nil {
+		result.Origin = origin.String()
 	}
+	return result
+}
 
-	origin, _, err := ParseBaseURL(reg.Location)
-	if err != nil {
-		result.State, result.Detail = ProbePolicyBlocked, err.Error()
+// Probe implements ConnectionProbe for a local directory registry.
+//
+// A directory has no connection to test, and the honest answer says so rather
+// than showing a green badge for something that never opened a socket -- a
+// badge that meant two different things would teach people it means nothing.
+func (p *FileProvider) Probe(_ context.Context, now func() time.Time) ProbeResult {
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
+	}
+	result := ProbeResult{RegistryID: p.registryID, Origin: p.root, TestedAt: now()}
+	if _, err := p.load(); err != nil {
+		result.State, result.Detail = ProbeInvalidResponse, err.Error()
 		return result
 	}
-	result.Origin = origin.String()
+	result.State = ProbeConnected
+	result.Detail = "This is a local directory registry and its index reads correctly. " +
+		"No socket was opened and nothing was fetched over the network."
+	return result
+}
 
-	provider, err := NewHTTPSProvider(ctx, reg, resolver, opts)
-	if err != nil {
-		// A credential that will not resolve and a policy that refuses the
-		// origin both land here, and both are AO's own refusal rather than
-		// anything the registry did.
-		switch {
-		case errors.Is(err, ErrSecretUnavailable):
-			result.State = ProbePolicyBlocked
-			result.Detail = fmt.Sprintf("the credential %s could not be resolved: %v",
-				reg.CredentialSecretName, err)
-		default:
-			result.State, result.Detail = ProbePolicyBlocked, err.Error()
-		}
-		return result
+// Probe implements ConnectionProbe: one GET of the smallest endpoint the
+// protocol has, checked against the configuration.
+func (p *HTTPSProvider) Probe(ctx context.Context, now func() time.Time) ProbeResult {
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
 	}
-
+	result := ProbeResult{
+		RegistryID: p.registryID,
+		Origin:     p.endpoints.origin.String(),
+		AuthType:   string(p.creds.AuthType()),
+		SecretRef:  p.creds.Ref(),
+		TestedAt:   now(),
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, ProbeTimeout)
 	defer cancel()
 	started := now()
-	descriptor, err := provider.describe(probeCtx)
+	descriptor, err := p.describe(probeCtx)
 	result.Latency = now().Sub(started)
 	if err != nil {
-		result.State, result.Detail = classifyProbeError(err, reg)
+		result.State, result.Detail = classifyProbeError(err, p.creds, p.endpoints.origin)
 		return result
 	}
 	result.ProtocolVersion = descriptor.APIVersion
@@ -166,31 +179,31 @@ func Probe(
 		result.State, result.Detail = ProbeInvalidResponse, err.Error()
 		return result
 	}
-	if strings.TrimSpace(descriptor.RegistryID) != reg.ID {
+	if strings.TrimSpace(descriptor.RegistryID) != p.registryID {
 		// Not CONNECTED. Something answered, and it is not the registry this
 		// row is configured for.
 		result.State = ProbeInvalidResponse
 		result.Detail = fmt.Sprintf("this endpoint calls itself %q and this registry is configured as %q; "+
 			"AO will not treat one registry's answers as another's",
-			strings.TrimSpace(descriptor.RegistryID), reg.ID)
+			strings.TrimSpace(descriptor.RegistryID), p.registryID)
 		return result
 	}
 	result.State = ProbeConnected
 	result.Detail = fmt.Sprintf("%s answered as %s over verified TLS, speaking %s. "+
 		"Metadata only: no artifact was downloaded and nothing was installed, enabled or approved.",
-		origin, reg.ID, descriptor.APIVersion)
+		p.endpoints.origin, p.registryID, descriptor.APIVersion)
 	return result
 }
 
 // classifyProbeError maps a failed handshake onto one of the six states.
-func classifyProbeError(err error, reg Registry) (ProbeState, string) {
+func classifyProbeError(err error, creds Credentials, origin Origin) (ProbeState, string) {
 	switch {
 	case errors.Is(err, ErrNetworkPolicy):
 		return ProbePolicyBlocked, err.Error()
 	case errors.Is(err, ErrRegistryTLS):
 		return ProbeTLSFailed, err.Error()
 	case errors.Is(err, ErrRegistryAuth):
-		if reg.EffectiveAuthType() == AuthNone {
+		if creds.AuthType() == AuthNone || creds.AuthType() == "" {
 			return ProbeAuthFailed, fmt.Sprintf(
 				"the registry requires a credential and this registry is configured with authType none: %v", err)
 		}
@@ -201,7 +214,7 @@ func classifyProbeError(err error, reg Registry) (ProbeState, string) {
 		// The handshake endpoint answering 404 means the base URL points at
 		// something that is not an AO registry -- a web root, a different API.
 		return ProbeInvalidResponse, fmt.Sprintf(
-			"%s answered 404; this base URL does not serve the AO registry protocol", reg.Location)
+			"%s answered 404; this base URL does not serve the AO registry protocol", origin)
 	case errors.Is(err, ErrRegistryResponse):
 		return ProbeInvalidResponse, err.Error()
 	}

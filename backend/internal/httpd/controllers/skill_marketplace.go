@@ -50,6 +50,12 @@ type SkillMarketplace interface {
 	GetMarketplaceRelease(ctx context.Context, in SkillReleaseLookupInput) (SkillReleaseDetailResponse, error)
 	InstallMarketplaceRelease(ctx context.Context, in SkillInstallReleaseInput) (SkillInstallOutcomeView, error)
 	CheckMarketplaceUpdates(ctx context.Context, in SkillUpdateCheckInput) (SkillUpdateCheckResponse, error)
+
+	// Phase 11: the two operations that only exist once a registry is on the
+	// other end of a socket. Both are settings.manage, because both make AO
+	// act on the network with a credential somebody granted it.
+	TestSkillRegistryConnection(ctx context.Context, in SkillRegistryProbeInput) (SkillRegistryProbeView, error)
+	SyncSkillRegistryRevocations(ctx context.Context, in SkillRegistryProbeInput) (SkillRegistryRevocationSyncView, error)
 }
 
 // SkillTenancy resolves which organizations a caller belongs to.
@@ -67,16 +73,19 @@ type SkillTenancy interface {
 
 // SaveSkillRegistryInput carries a registry configuration to the service.
 type SaveSkillRegistryInput struct {
-	ID                   string
-	DisplayName          string
-	Type                 string
-	Location             string
-	Enabled              bool
-	TrustPolicy          string
-	PinnedPublisher      string
-	Priority             int
-	TenantID             string
-	CredentialSecretName string
+	ID                    string
+	DisplayName           string
+	Type                  string
+	Location              string
+	Enabled               bool
+	TrustPolicy           string
+	PinnedPublisher       string
+	Priority              int
+	TenantID              string
+	CredentialSecretName  string
+	AuthType              string
+	APIKeyHeader          string
+	PermittedPrivateCIDRs []string
 
 	Actor            string
 	ActorPermissions []domain.Permission
@@ -113,11 +122,22 @@ type SkillReleaseLookupInput struct {
 
 // SkillInstallReleaseInput carries an install.
 type SkillInstallReleaseInput struct {
-	RegistryID string
-	SkillID    string
-	Version    string
-	AsUpdate   bool
+	RegistryID            string
+	SkillID               string
+	Version               string
+	AsUpdate              bool
+	AllowOfflineFromCache bool
 
+	Actor            string
+	ActorPermissions []domain.Permission
+	ActorTenants     []domain.TenantID
+}
+
+// SkillRegistryProbeInput identifies one registry to act on, and the caller's
+// authority. It serves both the connection test and the revocation sync: they
+// take the same three things and are gated identically.
+type SkillRegistryProbeInput struct {
+	ID               string
 	Actor            string
 	ActorPermissions []domain.Permission
 	ActorTenants     []domain.TenantID
@@ -151,8 +171,108 @@ type SkillRegistryView struct {
 	PinnedPublisher        string `json:"pinnedPublisher,omitempty"`
 	Priority               int    `json:"priority"`
 	// TenantID is empty for an installation-wide registry.
-	TenantID             string `json:"tenantId,omitempty"`
+	TenantID string `json:"tenantId,omitempty"`
+	// CredentialSecretName is the NAME of a sealed secret. The value is not
+	// omitted here -- it is never loaded on this path at all.
 	CredentialSecretName string `json:"credentialSecretName,omitempty"`
+	// AuthType is how the credential is presented. A NAME, safe to render.
+	AuthType string `json:"authType" enum:"none,bearer,api_key_header"`
+	// APIKeyHeader is the header name an api_key_header registry uses.
+	APIKeyHeader string `json:"apiKeyHeader,omitempty"`
+	// PermittedPrivateCIDRs are the private ranges this registry -- and only
+	// this registry -- may resolve into. They are sent so a settings screen can
+	// SHOW them: an exception nobody can see is one nobody reviews. No
+	// exception can ever re-open link-local, and therefore none can reach the
+	// cloud metadata address.
+	PermittedPrivateCIDRs []string `json:"permittedPrivateCidrs,omitempty"`
+	// NetworkPolicySummary says the same thing in a sentence, from the daemon.
+	NetworkPolicySummary string `json:"networkPolicySummary"`
+
+	CreatedAt time.Time `json:"createdAt,omitzero"`
+	UpdatedAt time.Time `json:"updatedAt,omitzero"`
+
+	// Status is what AO last observed about this registry. It is zero-valued
+	// and "never tested" for a registry nobody has tested, which is a real
+	// state and not a failure.
+	Status SkillRegistryStatusView `json:"status"`
+}
+
+// SkillRegistryStatusView is what the network last said about one registry.
+type SkillRegistryStatusView struct {
+	// LastProbeState is empty when no connection test has ever run. A client
+	// must render that as "never tested" rather than as a failure.
+	LastProbeState string `json:"lastProbeState" enum:",CONNECTED,AUTH_FAILED,TLS_FAILED,UNREACHABLE,INVALID_RESPONSE,POLICY_BLOCKED"`
+	// LastProbeDetail names a secretRef on an auth failure and never a value.
+	LastProbeDetail  string     `json:"lastProbeDetail,omitempty"`
+	LastProbeAt      *time.Time `json:"lastProbeAt,omitempty"`
+	LastProbeLatency int64      `json:"lastProbeLatencyMs,omitempty"`
+	// LastSyncAt is the last successful metadata read. It is what an "as of"
+	// on a stale listing is measured against.
+	LastSyncAt *time.Time `json:"lastSyncAt,omitempty"`
+	// LastRevocationSyncAt is separate: a registry can be answering metadata
+	// and still not have had its withdrawal list read today.
+	LastRevocationSyncAt *time.Time `json:"lastRevocationSyncAt,omitempty"`
+}
+
+// SkillRegistryProbeView is one connection test.
+type SkillRegistryProbeView struct {
+	RegistryID string `json:"registryId"`
+	// State is one of six. CONNECTED is deliberately the hardest to reach: a
+	// socket opening, TLS verifying and a 200 arriving are each necessary and
+	// none is sufficient, because a load balancer, a captive portal and an
+	// unrelated service on the right port all produce one.
+	State string `json:"state" enum:"CONNECTED,AUTH_FAILED,TLS_FAILED,UNREACHABLE,INVALID_RESPONSE,POLICY_BLOCKED"`
+	// Detail is the sentence to show. It names a secretRef on an auth failure
+	// and never a credential value.
+	Detail string `json:"detail"`
+	// Origin is what AO actually tried to reach, so "it works in my browser"
+	// and "AO cannot reach it" can be compared.
+	Origin string `json:"origin,omitempty"`
+	// ReportedRegistryID is what the far end called itself. Shown on a
+	// mismatch, because "you have pointed this at a different registry" is the
+	// most useful thing to say when it happens.
+	ReportedRegistryID string    `json:"reportedRegistryId,omitempty"`
+	ProtocolVersion    string    `json:"protocolVersion,omitempty"`
+	AuthType           string    `json:"authType,omitempty"`
+	SecretRef          string    `json:"secretRef,omitempty"`
+	TestedAt           time.Time `json:"testedAt"`
+	LatencyMs          int64     `json:"latencyMs"`
+	// Assurance states what a connection test does and does not do. It comes
+	// from the daemon so a client cannot describe it more optimistically than
+	// the thing performing it.
+	Assurance string `json:"assurance"`
+}
+
+// SkillRegistryRevocationView is one withdrawal AO has recorded.
+type SkillRegistryRevocationView struct {
+	RegistryID string `json:"registryId"`
+	SkillID    string `json:"skillId"`
+	Version    string `json:"version"`
+	Reason     string `json:"reason"`
+	// RevokedAt is when the registry says it withdrew the release; ObservedAt
+	// is when AO first saw it. Two facts, and only the second is AO's.
+	RevokedAt  *time.Time `json:"revokedAt,omitempty"`
+	ObservedAt time.Time  `json:"observedAt"`
+	// Installed reports that this exact release is on this host. AO marked it
+	// and blocks new installs of it; it uninstalled nothing.
+	Installed bool `json:"installed"`
+}
+
+// SkillRegistryRevocationSyncView is one revocation sync.
+type SkillRegistryRevocationSyncView struct {
+	RegistryID    string `json:"registryId"`
+	Fetched       int    `json:"fetched"`
+	NewlyRecorded int    `json:"newlyRecorded"`
+	// AffectedInstalls names the installed releases this sync marked revoked.
+	AffectedInstalls []string `json:"affectedInstalls"`
+	// Unreachable names why AO could not ask. What it already knows is
+	// unchanged and stays in force.
+	Unreachable string    `json:"unreachable,omitempty"`
+	SyncedAt    time.Time `json:"syncedAt"`
+	// Revocations is everything AO now holds for this registry.
+	Revocations []SkillRegistryRevocationView `json:"revocations"`
+	// Policy is the exact promise and non-promise of a revocation.
+	Policy string `json:"policy"`
 }
 
 // SkillRegistryListResponse is the body of GET /api/v1/skills/registries.
@@ -176,6 +296,19 @@ type SaveSkillRegistryRequest struct {
 	TenantID        string `json:"tenantId,omitempty"`
 	// CredentialSecretName is the NAME of a sealed secret, never a value.
 	CredentialSecretName string `json:"credentialSecretName,omitempty"`
+	// AuthType is how that credential is presented. Explicit rather than
+	// inferred from the presence of a secret: "AO guessed bearer and the
+	// registry wanted a header" is a 401 nobody can debug from a settings
+	// screen.
+	AuthType string `json:"authType,omitempty" enum:"none,bearer,api_key_header"`
+	// APIKeyHeader is the header name for api_key_header. A name, never a
+	// value; Authorization, Cookie, Proxy-Authorization and Host are refused.
+	APIKeyHeader string `json:"apiKeyHeader,omitempty"`
+	// PermittedPrivateCIDRs re-opens private ranges for THIS registry only. It
+	// exists because refusing every private address is right by default and
+	// wrong for an installation whose registry genuinely lives at 10.x. No
+	// entry may overlap link-local, so none can reach cloud metadata.
+	PermittedPrivateCIDRs []string `json:"permittedPrivateCidrs,omitempty"`
 }
 
 // SkillReleaseModeView is one execution mode a release advertises.
@@ -276,6 +409,12 @@ type InstallSkillReleaseRequest struct {
 	// AsUpdate refuses anything that is not strictly newer than the installed
 	// version, so a person clicking Update cannot be handed an older release.
 	AsUpdate bool `json:"asUpdate,omitempty"`
+	// AllowOfflineFromCache permits the install to proceed when the registry
+	// cannot be reached, using bytes AO already fetched and verified. It
+	// weakens no check: the cached tree is re-hashed, the manifest is re-read,
+	// and a release AO has never downloaded cannot be installed this way at
+	// all.
+	AllowOfflineFromCache bool `json:"allowOfflineFromCache,omitempty"`
 }
 
 // SkillInstallOriginView is the recorded provenance of one installed version.
@@ -306,6 +445,14 @@ type SkillInstallOutcomeView struct {
 	Install SkillInstallView       `json:"install"`
 	Origin  SkillInstallOriginView `json:"origin"`
 	Updated bool                   `json:"updated"`
+	// FromCache reports that the bytes came from AO's verified artifact cache
+	// rather than the network. They were verified identically; the distinction
+	// is here because "where did these bytes come from" is what an incident
+	// review asks.
+	FromCache bool `json:"fromCache,omitempty"`
+	// Offline reports that the registry could not be reached and the install
+	// proceeded on evidence AO already held.
+	Offline bool `json:"offline,omitempty"`
 	// NextStep is the sentence a client shows after installing. Installing
 	// reaches no project, and the response says so rather than leaving the UI
 	// to imply otherwise.
@@ -372,6 +519,12 @@ func (c *SkillsController) registerMarketplaceRoutes(r chi.Router) {
 	r.Get("/skills/registries", c.listRegistries)
 	r.Put("/skills/registries/{registryId}", c.saveRegistry)
 	r.Delete("/skills/registries/{registryId}", c.removeRegistry)
+	// Both are POST rather than GET despite reading nothing of AO's: each
+	// makes the daemon open a connection and present a stored credential, and
+	// a GET that reaches the network is a GET something will eventually
+	// prefetch.
+	r.Post("/skills/registries/{registryId}/test", c.testRegistry)
+	r.Post("/skills/registries/{registryId}/revocations/sync", c.syncRegistryRevocations)
 
 	r.Get("/skills/marketplace", c.searchMarketplace)
 	r.Get("/skills/marketplace/{registryId}/{skillId}", c.marketplaceRelease)
@@ -407,19 +560,22 @@ func (c *SkillsController) saveRegistry(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	view, err := c.Marketplace.SaveRegistryView(r.Context(), SaveSkillRegistryInput{
-		ID:                   chi.URLParam(r, "registryId"),
-		DisplayName:          in.DisplayName,
-		Type:                 in.Type,
-		Location:             in.Location,
-		Enabled:              in.Enabled,
-		TrustPolicy:          in.TrustPolicy,
-		PinnedPublisher:      in.PinnedPublisher,
-		Priority:             in.Priority,
-		TenantID:             in.TenantID,
-		CredentialSecretName: in.CredentialSecretName,
-		Actor:                c.actor(r),
-		ActorPermissions:     c.callerGlobalPermissions(r),
-		ActorTenants:         c.callerTenants(r),
+		ID:                    chi.URLParam(r, "registryId"),
+		DisplayName:           in.DisplayName,
+		Type:                  in.Type,
+		Location:              in.Location,
+		Enabled:               in.Enabled,
+		TrustPolicy:           in.TrustPolicy,
+		PinnedPublisher:       in.PinnedPublisher,
+		Priority:              in.Priority,
+		TenantID:              in.TenantID,
+		CredentialSecretName:  in.CredentialSecretName,
+		AuthType:              in.AuthType,
+		APIKeyHeader:          in.APIKeyHeader,
+		PermittedPrivateCIDRs: in.PermittedPrivateCIDRs,
+		Actor:                 c.actor(r),
+		ActorPermissions:      c.callerGlobalPermissions(r),
+		ActorTenants:          c.callerTenants(r),
 	})
 	if err != nil {
 		envelope.WriteError(w, r, err)
@@ -497,10 +653,33 @@ func (c *SkillsController) installRelease(w http.ResponseWriter, r *http.Request
 		return
 	}
 	view, err := c.Marketplace.InstallMarketplaceRelease(r.Context(), SkillInstallReleaseInput{
-		RegistryID:       in.RegistryID,
-		SkillID:          in.SkillID,
-		Version:          in.Version,
-		AsUpdate:         in.AsUpdate,
+		RegistryID:            in.RegistryID,
+		SkillID:               in.SkillID,
+		Version:               in.Version,
+		AsUpdate:              in.AsUpdate,
+		AllowOfflineFromCache: in.AllowOfflineFromCache,
+		Actor:                 c.actor(r),
+		ActorPermissions:      c.callerGlobalPermissions(r),
+		ActorTenants:          c.callerTenants(r),
+	})
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusCreated, view)
+}
+
+// testRegistry runs one connection test. It reads one small metadata endpoint
+// and does nothing else -- no download, no catalog change, no install, no
+// enable, no image approval -- and the response says so in a sentence from the
+// daemon.
+func (c *SkillsController) testRegistry(w http.ResponseWriter, r *http.Request) {
+	if c.Marketplace == nil {
+		apispec.NotImplemented(w, r, http.MethodPost, "/api/v1/skills/registries/{registryId}/test")
+		return
+	}
+	view, err := c.Marketplace.TestSkillRegistryConnection(r.Context(), SkillRegistryProbeInput{
+		ID:               chi.URLParam(r, "registryId"),
 		Actor:            c.actor(r),
 		ActorPermissions: c.callerGlobalPermissions(r),
 		ActorTenants:     c.callerTenants(r),
@@ -509,7 +688,36 @@ func (c *SkillsController) installRelease(w http.ResponseWriter, r *http.Request
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusCreated, view)
+	// 200 whatever the verdict. A failed connection test is a successful
+	// answer to the question that was asked, and a 502 here would make a
+	// client unable to tell "the registry is down" from "AO could not run the
+	// test".
+	envelope.WriteJSON(w, http.StatusOK, view)
+}
+
+// syncRegistryRevocations asks one registry what it has withdrawn.
+//
+// It marks, it blocks new installs, and it puts the sentence on screen. It
+// never uninstalls, never deletes files and never disables a skill on a
+// project: deciding what to do about an installed release that was withdrawn is
+// a human's call, one package at a time.
+func (c *SkillsController) syncRegistryRevocations(w http.ResponseWriter, r *http.Request) {
+	if c.Marketplace == nil {
+		apispec.NotImplemented(w, r, http.MethodPost,
+			"/api/v1/skills/registries/{registryId}/revocations/sync")
+		return
+	}
+	view, err := c.Marketplace.SyncSkillRegistryRevocations(r.Context(), SkillRegistryProbeInput{
+		ID:               chi.URLParam(r, "registryId"),
+		Actor:            c.actor(r),
+		ActorPermissions: c.callerGlobalPermissions(r),
+		ActorTenants:     c.callerTenants(r),
+	})
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, view)
 }
 
 func (c *SkillsController) checkUpdates(w http.ResponseWriter, r *http.Request) {
@@ -596,6 +804,18 @@ const RegistryTrustModelStatement = "Installing verifies INTEGRITY: AO fetches t
 	"knowing who wrote it. AO verifies no publisher signature, so a release is never better than \"verified\", " +
 	"and \"verified\" means the bytes match what the registry named -- not that the code is safe. Installing " +
 	"enables the skill on no project, grants no capability and approves no container image."
+
+// RegistryProbeAssurance states exactly what a connection test does, served
+// from the daemon so a client cannot describe it more generously than the thing
+// performing it.
+//
+// The second sentence is the one that matters. A green badge that appeared
+// whenever a socket opened would be worse than no badge, because people act on
+// it.
+const RegistryProbeAssurance = "A connection test reads one small metadata endpoint. It downloads no package, " +
+	"changes no catalog, installs nothing, enables nothing on any project and approves no container image. " +
+	"CONNECTED means this registry answered AS ITSELF over verified TLS, speaking a protocol version this " +
+	"build knows -- not merely that something answered on that address."
 
 // RegistryInstallNotice is what a client must show BEFORE installing.
 const RegistryInstallNotice = "This installs the Skill but does not enable it on any project."

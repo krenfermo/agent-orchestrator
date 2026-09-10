@@ -89,21 +89,33 @@ func (r *RegistrySecrets) ResolveRegistrySecret(
 
 	// Re-read the row. The Registry handed in came from a caller, and a caller
 	// who could name a secretRef could name one attached to another tenant's
-	// registry. The stored row is what an administrator actually saved.
+	// registry. The stored row is what an administrator actually saved, and it
+	// is the only thing that can authorize reading a secret through it.
 	stored, ok, err := r.store.GetSkillRegistry(ctx, reg.ID)
 	if err != nil {
 		return skillsecrets.SecretValue{}, err
 	}
-	if !ok {
-		return skillsecrets.SecretValue{}, fmt.Errorf(
-			"registry %s is not configured, so %s is not its credential to use", reg.ID, name)
-	}
-	if stored.CredentialSecretName != name {
+	switch {
+	case !ok:
+		// The registry is not stored YET. This is the first save: SaveRegistry
+		// opens a registry before recording it, precisely so a configuration
+		// AO cannot act on is refused rather than persisted, and opening one
+		// with a credential means resolving it.
+		//
+		// There is no row to check against, so the check that remains is the
+		// one the caller already passed: SaveRegistry requires settings.manage
+		// AND membership of the tenant a tenant-scoped registry names. What
+		// this leaves reachable is narrow and worth stating: somebody who
+		// already holds settings.manage can learn whether an arbitrary secret
+		// NAME exists, by watching whether a save is accepted. They could
+		// equally attach that name to a registry and save it, so the leak is
+		// existence, to somebody who could have had it anyway -- and never a
+		// value.
+	case stored.CredentialSecretName != name:
 		return skillsecrets.SecretValue{}, fmt.Errorf(
 			"registry %s is configured with a different credential than %s; "+
 				"a secret is reachable only through the registry it was attached to", reg.ID, name)
-	}
-	if stored.TenantID != reg.TenantID {
+	case stored.TenantID != reg.TenantID:
 		return skillsecrets.SecretValue{}, fmt.Errorf(
 			"registry %s belongs to a different organization than the request claims; "+
 				"%s was not resolved", reg.ID, name)
@@ -146,7 +158,11 @@ func (m *Marketplace) TestConnection(
 		return skillregistry.ProbeResult{}, err
 	}
 
-	result := skillregistry.Probe(ctx, reg, m.secrets, m.httpOptions(), m.now)
+	// The provider comes from the factory, which is the one place a registry
+	// type turns into a client. Probing with a client built here instead would
+	// be probing a DIFFERENT client than the one every other operation uses --
+	// a connection test that passes for a configuration installs then fail on.
+	result := m.probe(ctx, reg)
 	m.recordProbe(ctx, reg, result)
 
 	m.audit(ctx, store.SkillAuditEntry{
@@ -168,6 +184,27 @@ func (m *Marketplace) TestConnection(
 		})
 	}
 	return result, nil
+}
+
+// probe opens the registry the ordinary way and asks it to identify itself.
+//
+// A provider that cannot be opened at all -- an unresolvable credential, a base
+// URL the network policy refuses -- is POLICY_BLOCKED: AO refused, before any
+// packet, and saying "unreachable" would send an operator to look at the
+// network instead of at the configuration.
+func (m *Marketplace) probe(
+	ctx context.Context, reg skillregistry.Registry,
+) skillregistry.ProbeResult {
+	provider, err := m.openProvider(ctx, reg)
+	if err != nil {
+		return skillregistry.ProbeRefused(reg, err, m.now)
+	}
+	prober, ok := provider.(skillregistry.ConnectionProbe)
+	if !ok {
+		return skillregistry.ProbeRefused(reg,
+			fmt.Errorf("a %s registry has no connection to test", reg.Type), m.now)
+	}
+	return prober.Probe(ctx, m.now)
 }
 
 // recordProbe stores the verdict. It is best-effort for the same reason audit

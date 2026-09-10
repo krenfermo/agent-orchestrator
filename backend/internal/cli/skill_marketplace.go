@@ -36,6 +36,49 @@ type skillRegistryDTO struct {
 	Priority               int    `json:"priority"`
 	TenantID               string `json:"tenantId"`
 	CredentialSecretName   string `json:"credentialSecretName"`
+	AuthType               string `json:"authType"`
+	APIKeyHeader           string `json:"apiKeyHeader"`
+	NetworkPolicySummary   string `json:"networkPolicySummary"`
+	Status                 struct {
+		LastProbeState       string     `json:"lastProbeState"`
+		LastProbeDetail      string     `json:"lastProbeDetail"`
+		LastProbeAt          *time.Time `json:"lastProbeAt"`
+		LastProbeLatencyMs   int64      `json:"lastProbeLatencyMs"`
+		LastSyncAt           *time.Time `json:"lastSyncAt"`
+		LastRevocationSyncAt *time.Time `json:"lastRevocationSyncAt"`
+	} `json:"status"`
+}
+
+// skillRegistryProbeDTO mirrors controllers.SkillRegistryProbeView.
+type skillRegistryProbeDTO struct {
+	RegistryID         string    `json:"registryId"`
+	State              string    `json:"state"`
+	Detail             string    `json:"detail"`
+	Origin             string    `json:"origin"`
+	ReportedRegistryID string    `json:"reportedRegistryId"`
+	ProtocolVersion    string    `json:"protocolVersion"`
+	AuthType           string    `json:"authType"`
+	SecretRef          string    `json:"secretRef"`
+	TestedAt           time.Time `json:"testedAt"`
+	LatencyMs          int64     `json:"latencyMs"`
+	Assurance          string    `json:"assurance"`
+}
+
+// skillRegistryRevocationSyncDTO mirrors controllers.SkillRegistryRevocationSyncView.
+type skillRegistryRevocationSyncDTO struct {
+	RegistryID       string   `json:"registryId"`
+	Fetched          int      `json:"fetched"`
+	NewlyRecorded    int      `json:"newlyRecorded"`
+	AffectedInstalls []string `json:"affectedInstalls"`
+	Unreachable      string   `json:"unreachable"`
+	Revocations      []struct {
+		SkillID    string    `json:"skillId"`
+		Version    string    `json:"version"`
+		Reason     string    `json:"reason"`
+		ObservedAt time.Time `json:"observedAt"`
+		Installed  bool      `json:"installed"`
+	} `json:"revocations"`
+	Policy string `json:"policy"`
 }
 
 // skillRegistryListDTO mirrors controllers.SkillRegistryListResponse.
@@ -46,15 +89,18 @@ type skillRegistryListDTO struct {
 
 // saveSkillRegistryRequest mirrors controllers.SaveSkillRegistryRequest.
 type saveSkillRegistryRequest struct {
-	DisplayName          string `json:"displayName"`
-	Type                 string `json:"type"`
-	Location             string `json:"location"`
-	Enabled              bool   `json:"enabled"`
-	TrustPolicy          string `json:"trustPolicy"`
-	PinnedPublisher      string `json:"pinnedPublisher,omitempty"`
-	Priority             int    `json:"priority,omitempty"`
-	TenantID             string `json:"tenantId,omitempty"`
-	CredentialSecretName string `json:"credentialSecretName,omitempty"`
+	DisplayName           string   `json:"displayName"`
+	Type                  string   `json:"type"`
+	Location              string   `json:"location"`
+	Enabled               bool     `json:"enabled"`
+	TrustPolicy           string   `json:"trustPolicy"`
+	PinnedPublisher       string   `json:"pinnedPublisher,omitempty"`
+	Priority              int      `json:"priority,omitempty"`
+	TenantID              string   `json:"tenantId,omitempty"`
+	CredentialSecretName  string   `json:"credentialSecretName,omitempty"`
+	AuthType              string   `json:"authType,omitempty"`
+	APIKeyHeader          string   `json:"apiKeyHeader,omitempty"`
+	PermittedPrivateCIDRs []string `json:"permittedPrivateCidrs,omitempty"`
 }
 
 // skillReleaseDTO mirrors controllers.SkillReleaseView.
@@ -177,6 +223,8 @@ func newSkillRegistryCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newSkillRegistryListCommand(ctx))
 	cmd.AddCommand(newSkillRegistryAddCommand(ctx))
 	cmd.AddCommand(newSkillRegistryRemoveCommand(ctx))
+	cmd.AddCommand(newSkillRegistryTestCommand(ctx))
+	cmd.AddCommand(newSkillRegistryRevocationsCommand(ctx))
 	return cmd
 }
 
@@ -229,6 +277,31 @@ func (c *commandContext) listSkillRegistries(cmd *cobra.Command) error {
 				return err
 			}
 		}
+		if reg.AuthType != "" && reg.AuthType != "none" {
+			// The NAME, never a value.
+			if _, err := fmt.Fprintf(out, "  auth: %s from secret %s\n",
+				reg.AuthType, reg.CredentialSecretName); err != nil {
+				return err
+			}
+		}
+		if reg.NetworkPolicySummary != "" {
+			// An exception nobody can see is one nobody reviews.
+			if _, err := fmt.Fprintf(out, "  network: %s\n", reg.NetworkPolicySummary); err != nil {
+				return err
+			}
+		}
+		// "Never tested" is a real state and reads as one. Rendering it as a
+		// failure would teach people that red means nothing.
+		probe := "never tested"
+		if reg.Status.LastProbeState != "" {
+			probe = reg.Status.LastProbeState
+			if reg.Status.LastProbeAt != nil {
+				probe += " at " + reg.Status.LastProbeAt.Format(time.RFC3339)
+			}
+		}
+		if _, err := fmt.Fprintf(out, "  last connection test: %s\n", probe); err != nil {
+			return err
+		}
 	}
 	if res.TrustModel != "" {
 		if _, err := fmt.Fprintf(out, "\n%s\n", res.TrustModel); err != nil {
@@ -248,6 +321,9 @@ func newSkillRegistryAddCommand(ctx *commandContext) *cobra.Command {
 		priority    int
 		tenant      string
 		credential  string
+		authType    string
+		apiKeyHdr   string
+		privateCIDR []string
 		disabled    bool
 	)
 	cmd := &cobra.Command{
@@ -260,29 +336,158 @@ func newSkillRegistryAddCommand(ctx *commandContext) *cobra.Command {
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return ctx.saveSkillRegistry(cmd, args[0], saveSkillRegistryRequest{
-				DisplayName:          strings.TrimSpace(name),
-				Type:                 strings.TrimSpace(regType),
-				Location:             strings.TrimSpace(location),
-				Enabled:              !disabled,
-				TrustPolicy:          strings.TrimSpace(trustPolicy),
-				PinnedPublisher:      strings.TrimSpace(publisher),
-				Priority:             priority,
-				TenantID:             strings.TrimSpace(tenant),
-				CredentialSecretName: strings.TrimSpace(credential),
+				DisplayName:           strings.TrimSpace(name),
+				Type:                  strings.TrimSpace(regType),
+				Location:              strings.TrimSpace(location),
+				Enabled:               !disabled,
+				TrustPolicy:           strings.TrimSpace(trustPolicy),
+				PinnedPublisher:       strings.TrimSpace(publisher),
+				Priority:              priority,
+				TenantID:              strings.TrimSpace(tenant),
+				CredentialSecretName:  strings.TrimSpace(credential),
+				AuthType:              strings.TrimSpace(authType),
+				APIKeyHeader:          strings.TrimSpace(apiKeyHdr),
+				PermittedPrivateCIDRs: privateCIDR,
 			})
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "Display name (required)")
-	cmd.Flags().StringVar(&regType, "type", "local", "Registry type: local (https and git are declared but not implemented)")
-	cmd.Flags().StringVar(&location, "location", "", "Absolute directory holding registry.json (required)")
+	cmd.Flags().StringVar(&regType, "type", "local", "Registry type: local or https (git is declared but not implemented)")
+	cmd.Flags().StringVar(&location, "location", "",
+		"For local, the absolute directory holding registry.json. For https, the base URL: https only, one host, one port, no credentials in it (required)")
 	cmd.Flags().StringVar(&trustPolicy, "trust-policy", "digest",
 		"What this registry must satisfy beyond integrity: digest, pinned_publisher, or signed (signed installs nothing; AO verifies no signature)")
 	cmd.Flags().StringVar(&publisher, "pinned-publisher", "", "Required by --trust-policy pinned_publisher")
 	cmd.Flags().IntVar(&priority, "priority", 100, "Display ordering when two registries offer the same skill")
 	cmd.Flags().StringVar(&tenant, "tenant", "", "Limit this registry to one organization")
 	cmd.Flags().StringVar(&credential, "credential-secret", "", "NAME of a sealed secret holding this registry's credential, never a value")
+	cmd.Flags().StringVar(&authType, "auth-type", "",
+		"How the credential is presented: none, bearer, or api_key_header. Explicit rather than guessed, because a wrong guess is a 401 nobody can debug")
+	cmd.Flags().StringVar(&apiKeyHdr, "api-key-header", "",
+		"Header NAME for --auth-type api_key_header (default X-API-Key). Authorization, Cookie, Proxy-Authorization and Host are refused")
+	cmd.Flags().StringArrayVar(&privateCIDR, "permit-private-cidr", nil,
+		"Let THIS registry resolve into a private range, e.g. 10.4.0.0/16. No entry may overlap link-local, so none can reach cloud metadata. Repeatable")
 	cmd.Flags().BoolVar(&disabled, "disabled", false, "Record the registry without letting it answer searches or serve installs")
 	return cmd
+}
+
+func newSkillRegistryTestCommand(ctx *commandContext) *cobra.Command {
+	return &cobra.Command{
+		Use:   "test <registry-id>",
+		Short: "Test one registry's connection, reading one small metadata endpoint",
+		Long: "Reads ONE small metadata endpoint. It downloads no package, changes no catalog, " +
+			"installs nothing, enables nothing on any project and approves no container image.\n\n" +
+			"CONNECTED means the registry answered AS ITSELF over verified TLS, speaking a " +
+			"protocol version this build knows -- not merely that something answered on that " +
+			"address. Requires settings.manage, because it makes AO open a connection and " +
+			"present a stored credential.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id := strings.TrimSpace(args[0])
+			if id == "" {
+				return usageError{errors.New("usage: a registry id is required")}
+			}
+			return ctx.testSkillRegistry(cmd, id)
+		},
+	}
+}
+
+func (c *commandContext) testSkillRegistry(cmd *cobra.Command, id string) error {
+	var res skillRegistryProbeDTO
+	if err := c.postJSON(cmd.Context(),
+		"skills/registries/"+url.PathEscape(id)+"/test", struct{}{}, &res); err != nil {
+		return err
+	}
+	out := cmd.OutOrStdout()
+	if _, err := fmt.Fprintf(out, "%s: %s\n", res.RegistryID, res.State); err != nil {
+		return err
+	}
+	if res.Origin != "" {
+		if _, err := fmt.Fprintf(out, "  origin: %s\n", res.Origin); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintf(out, "  %s\n", res.Detail); err != nil {
+		return err
+	}
+	if res.AuthType != "" && res.AuthType != "none" {
+		// The NAME. Nothing on this path holds the value.
+		if _, err := fmt.Fprintf(out, "  auth: %s from secret %s\n", res.AuthType, res.SecretRef); err != nil {
+			return err
+		}
+	}
+	if res.LatencyMs > 0 {
+		if _, err := fmt.Fprintf(out, "  round trip: %dms\n", res.LatencyMs); err != nil {
+			return err
+		}
+	}
+	if res.Assurance != "" {
+		if _, err := fmt.Fprintf(out, "\n%s\n", res.Assurance); err != nil {
+			return err
+		}
+	}
+	// A failed test is a successful ANSWER to the question asked, so the exit
+	// code stays 0. `ao skills registry test` is a diagnostic, and a non-zero
+	// exit would make it unusable in the shell pipelines people diagnose with.
+	return nil
+}
+
+func newSkillRegistryRevocationsCommand(ctx *commandContext) *cobra.Command {
+	return &cobra.Command{
+		Use:   "revocations <registry-id>",
+		Short: "Ask one registry what it has withdrawn, and record it",
+		Long: "AO polls nothing on its own; this is a request you made.\n\n" +
+			"A recorded revocation blocks new installs of that exact release and marks an " +
+			"installed copy. It NEVER uninstalls, never deletes files, never disables a skill on " +
+			"any project and never stops a run already under way -- deciding what to do about an " +
+			"installed release that was withdrawn is your call, one package at a time.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id := strings.TrimSpace(args[0])
+			if id == "" {
+				return usageError{errors.New("usage: a registry id is required")}
+			}
+			return ctx.syncSkillRegistryRevocations(cmd, id)
+		},
+	}
+}
+
+func (c *commandContext) syncSkillRegistryRevocations(cmd *cobra.Command, id string) error {
+	var res skillRegistryRevocationSyncDTO
+	if err := c.postJSON(cmd.Context(),
+		"skills/registries/"+url.PathEscape(id)+"/revocations/sync", struct{}{}, &res); err != nil {
+		return err
+	}
+	out := cmd.OutOrStdout()
+	if res.Unreachable != "" {
+		// What AO already recorded is unchanged and stays in force. Saying so
+		// is the difference between "nothing is revoked" and "AO could not ask".
+		if _, err := fmt.Fprintf(out,
+			"%s\nwhat AO already recorded is unchanged and still blocks those installs\n",
+			res.Unreachable); err != nil {
+			return err
+		}
+	} else if _, err := fmt.Fprintf(out,
+		"registry %s listed %d revocation(s); %d were new to AO\n",
+		res.RegistryID, res.Fetched, res.NewlyRecorded); err != nil {
+		return err
+	}
+	for _, rev := range res.Revocations {
+		marker := ""
+		if rev.Installed {
+			marker = "  [INSTALLED HERE]"
+		}
+		if _, err := fmt.Fprintf(out, "  %s@%s - %s%s\n",
+			rev.SkillID, rev.Version, rev.Reason, marker); err != nil {
+			return err
+		}
+	}
+	if len(res.AffectedInstalls) > 0 && res.Policy != "" {
+		if _, err := fmt.Fprintf(out, "\n%s\n", res.Policy); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *commandContext) saveSkillRegistry(cmd *cobra.Command, id string, req saveSkillRegistryRequest) error {

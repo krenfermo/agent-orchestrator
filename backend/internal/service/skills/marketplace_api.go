@@ -32,11 +32,96 @@ func (m *Marketplace) ListRegistryViews(
 	if err != nil {
 		return nil, err
 	}
+	// One read for every registry's observed status. A per-row lookup would
+	// be N+1 queries to render a settings panel.
+	statuses, err := m.RegistryStatuses(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]controllers.SkillRegistryView, 0, len(regs))
 	for _, reg := range regs {
-		out = append(out, registryView(reg))
+		view := registryView(reg)
+		view.Status = statusView(statuses[reg.ID])
+		out = append(out, view)
 	}
 	return out, nil
+}
+
+// TestSkillRegistryConnection implements the controller's connection test.
+func (m *Marketplace) TestSkillRegistryConnection(
+	ctx context.Context, in controllers.SkillRegistryProbeInput,
+) (controllers.SkillRegistryProbeView, error) {
+	result, err := m.TestConnection(ctx, in.ID, in.Actor, in.ActorPermissions, in.ActorTenants)
+	if err != nil {
+		return controllers.SkillRegistryProbeView{}, err
+	}
+	return controllers.SkillRegistryProbeView{
+		RegistryID:         result.RegistryID,
+		State:              string(result.State),
+		Detail:             result.Detail,
+		Origin:             result.Origin,
+		ReportedRegistryID: result.ReportedRegistryID,
+		ProtocolVersion:    result.ProtocolVersion,
+		AuthType:           result.AuthType,
+		// The NAME. There is no code path on this side that holds the value.
+		SecretRef: result.SecretRef,
+		TestedAt:  result.TestedAt,
+		LatencyMs: result.Latency.Milliseconds(),
+		// Said by the daemon, so the promise on screen and the behaviour in
+		// the service cannot drift apart.
+		Assurance: controllers.RegistryProbeAssurance,
+	}, nil
+}
+
+// SyncSkillRegistryRevocations implements the controller's revocation sync.
+func (m *Marketplace) SyncSkillRegistryRevocations(
+	ctx context.Context, in controllers.SkillRegistryProbeInput,
+) (controllers.SkillRegistryRevocationSyncView, error) {
+	result, err := m.SyncRevocations(ctx, in.ID, in.Actor, in.ActorPermissions, in.ActorTenants)
+	if err != nil {
+		return controllers.SkillRegistryRevocationSyncView{}, err
+	}
+	rows, err := m.RegistryRevocations(ctx, in.ID, in.ActorTenants)
+	if err != nil {
+		return controllers.SkillRegistryRevocationSyncView{}, err
+	}
+	installed, err := m.installedIndex(ctx)
+	if err != nil {
+		return controllers.SkillRegistryRevocationSyncView{}, err
+	}
+	out := controllers.SkillRegistryRevocationSyncView{
+		RegistryID:       result.RegistryID,
+		Fetched:          result.Fetched,
+		NewlyRecorded:    result.NewlyRecorded,
+		AffectedInstalls: nonNil(result.AffectedInstalls),
+		Unreachable:      result.Unreachable,
+		SyncedAt:         result.SyncedAt,
+		Revocations:      make([]controllers.SkillRegistryRevocationView, 0, len(rows)),
+		Policy:           controllers.RegistryRevocationPolicy,
+	}
+	for _, row := range rows {
+		out.Revocations = append(out.Revocations, controllers.SkillRegistryRevocationView{
+			RegistryID: row.RegistryID,
+			SkillID:    row.SkillID,
+			Version:    row.Version,
+			Reason:     row.Reason,
+			RevokedAt:  row.RevokedAt,
+			ObservedAt: row.ObservedAt,
+			Installed:  installed.present[row.Ref()],
+		})
+	}
+	return out, nil
+}
+
+func statusView(st store.SkillRegistryStatus) controllers.SkillRegistryStatusView {
+	return controllers.SkillRegistryStatusView{
+		LastProbeState:       string(st.LastProbeState),
+		LastProbeDetail:      st.LastProbeDetail,
+		LastProbeAt:          st.LastProbeAt,
+		LastProbeLatency:     st.LastProbeLatency.Milliseconds(),
+		LastSyncAt:           st.LastSyncAt,
+		LastRevocationSyncAt: st.LastRevocationSyncAt,
+	}
 }
 
 // SaveRegistryView implements the controller's registry write.
@@ -55,6 +140,11 @@ func (m *Marketplace) SaveRegistryView(
 			Priority:             in.Priority,
 			TenantID:             domain.TenantID(in.TenantID),
 			CredentialSecretName: in.CredentialSecretName,
+			AuthType:             skillregistry.AuthType(in.AuthType),
+			APIKeyHeader:         in.APIKeyHeader,
+			NetworkPolicy: skillregistry.NetworkPolicy{
+				PermittedPrivateCIDRs: in.PermittedPrivateCIDRs,
+			},
 		},
 		Actor:            in.Actor,
 		ActorPermissions: in.ActorPermissions,
@@ -132,21 +222,24 @@ func (m *Marketplace) InstallMarketplaceRelease(
 	ctx context.Context, in controllers.SkillInstallReleaseInput,
 ) (controllers.SkillInstallOutcomeView, error) {
 	outcome, err := m.InstallRelease(ctx, InstallReleaseRequest{
-		RegistryID:       in.RegistryID,
-		SkillID:          in.SkillID,
-		Version:          in.Version,
-		AsUpdate:         in.AsUpdate,
-		Actor:            in.Actor,
-		ActorPermissions: in.ActorPermissions,
-		ActorTenants:     in.ActorTenants,
+		RegistryID:            in.RegistryID,
+		SkillID:               in.SkillID,
+		Version:               in.Version,
+		AsUpdate:              in.AsUpdate,
+		AllowOfflineFromCache: in.AllowOfflineFromCache,
+		Actor:                 in.Actor,
+		ActorPermissions:      in.ActorPermissions,
+		ActorTenants:          in.ActorTenants,
 	})
 	if err != nil {
 		return controllers.SkillInstallOutcomeView{}, err
 	}
 	return controllers.SkillInstallOutcomeView{
-		Install: installView(outcome.Install),
-		Origin:  originView(outcome.Origin),
-		Updated: outcome.Updated,
+		Install:   installView(outcome.Install),
+		Origin:    originView(outcome.Origin),
+		Updated:   outcome.Updated,
+		FromCache: outcome.FromCache,
+		Offline:   outcome.Offline,
 		// Said by the daemon, so the promise on screen and the behaviour in
 		// the service cannot drift apart.
 		NextStep: controllers.RegistryInstalledNotice,
@@ -197,6 +290,15 @@ func registryView(reg skillregistry.Registry) controllers.SkillRegistryView {
 		TenantID:               string(reg.TenantID),
 		// The NAME only. The value lives sealed and is never loaded here.
 		CredentialSecretName: reg.CredentialSecretName,
+		AuthType:             string(reg.EffectiveAuthType()),
+		APIKeyHeader:         reg.APIKeyHeader,
+		// Sent so a settings screen can SHOW them. An exception nobody can see
+		// is one nobody reviews, and this is the one setting on the row that
+		// widens what AO may connect to.
+		PermittedPrivateCIDRs: nonNil(reg.NetworkPolicy.PermittedPrivateCIDRs),
+		NetworkPolicySummary:  reg.NetworkPolicy.Summary(),
+		CreatedAt:             reg.CreatedAt,
+		UpdatedAt:             reg.UpdatedAt,
 	}
 }
 

@@ -18,11 +18,31 @@ import (
 // SomethingAnswered: a green badge that appears whenever a socket opens is
 // worse than no badge, because people act on it.
 
+// probeOf opens the registry the way the service does -- through the factory --
+// and asks it to identify itself. A test that built its own client would be
+// testing a different client than the one every other operation uses.
 func probeOf(t *testing.T, reg skillregistry.Registry, srv *registrytest.Server,
 	resolver skillregistry.SecretResolver,
 ) skillregistry.ProbeResult {
 	t.Helper()
-	return skillregistry.Probe(context.Background(), reg, resolver, srv.Options(), nil)
+	return probeWith(t, reg, skillregistry.DefaultProviderFactory{
+		Secrets: resolver, Options: srv.Options(),
+	})
+}
+
+func probeWith(
+	t *testing.T, reg skillregistry.Registry, factory skillregistry.DefaultProviderFactory,
+) skillregistry.ProbeResult {
+	t.Helper()
+	provider, err := factory.Open(context.Background(), reg)
+	if err != nil {
+		return skillregistry.ProbeRefused(reg, err, nil)
+	}
+	prober, ok := provider.(skillregistry.ConnectionProbe)
+	if !ok {
+		t.Fatalf("%T cannot be probed", provider)
+	}
+	return prober.Probe(context.Background(), nil)
 }
 
 func TestProbeConnected(t *testing.T) {
@@ -90,7 +110,7 @@ func TestProbeTLSFailed(t *testing.T) {
 	srv := registrytest.New(t, "corp")
 	opts := srv.Options()
 	opts.RootCAs = srv.UntrustedCA.Pool
-	got := skillregistry.Probe(context.Background(), srv.Registry("corp"), nil, opts, nil)
+	got := probeWith(t, srv.Registry("corp"), skillregistry.DefaultProviderFactory{Options: opts})
 	if got.State != skillregistry.ProbeTLSFailed {
 		t.Fatalf("state %s: %s", got.State, got.Detail)
 	}
@@ -129,7 +149,7 @@ func TestProbePolicyBlocked(t *testing.T) {
 		srv := registrytest.New(t, "corp")
 		opts := srv.Options()
 		opts.Resolver = registrytest.FixedResolver{IPs: []net.IP{net.ParseIP("169.254.169.254")}}
-		got := skillregistry.Probe(context.Background(), srv.Registry("corp"), nil, opts, nil)
+		got := probeWith(t, srv.Registry("corp"), skillregistry.DefaultProviderFactory{Options: opts})
 		if got.State != skillregistry.ProbePolicyBlocked {
 			t.Fatalf("state %s: %s", got.State, got.Detail)
 		}
