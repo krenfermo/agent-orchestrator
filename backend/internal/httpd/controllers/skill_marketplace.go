@@ -162,7 +162,7 @@ type SkillRegistryView struct {
 	Type        string `json:"type" enum:"local,https,git"`
 	Location    string `json:"location"`
 	Enabled     bool   `json:"enabled"`
-	TrustPolicy string `json:"trustPolicy" enum:"digest,pinned_publisher,signed"`
+	TrustPolicy string `json:"trustPolicy" enum:"digest,pinned_publisher,signed,official"`
 	// TrustPolicyEnforceable is false for a policy this build cannot satisfy.
 	// A registry requiring a verified signature installs nothing, and a client
 	// has to be able to say so rather than showing the strictest-looking
@@ -290,7 +290,7 @@ type SaveSkillRegistryRequest struct {
 	Type            string `json:"type" enum:"local,https,git"`
 	Location        string `json:"location"`
 	Enabled         bool   `json:"enabled"`
-	TrustPolicy     string `json:"trustPolicy" enum:"digest,pinned_publisher,signed"`
+	TrustPolicy     string `json:"trustPolicy" enum:"digest,pinned_publisher,signed,official"`
 	PinnedPublisher string `json:"pinnedPublisher,omitempty"`
 	Priority        int    `json:"priority,omitempty"`
 	TenantID        string `json:"tenantId,omitempty"`
@@ -338,11 +338,24 @@ type SkillReleaseView struct {
 	ManifestDigest string `json:"manifestDigest"`
 	ArtifactDigest string `json:"artifactDigest"`
 
-	// SignatureFormat and KeyID are what the release CLAIMS. AO validates
-	// neither, which is why Trust is never better than "verified".
+	// SignatureFormat, KeyID and AttestationURL are what the release CLAIMS in
+	// the pre-signature vocabulary: free-form strings from some other
+	// ecosystem that AO records and never checks. They are NOT the AO
+	// signature -- that is Signed/SignatureKeyID below, and it is the one AO
+	// verifies.
 	SignatureFormat string `json:"signatureFormat,omitempty"`
 	KeyID           string `json:"keyId,omitempty"`
 	AttestationURL  string `json:"attestationUrl,omitempty"`
+
+	// Signed reports that the release carries AO signature material. It says
+	// NOTHING about whether that material verifies: a listing has checked no
+	// signature, exactly as it has hashed no bytes, and a client that rendered
+	// "signed" as an assurance would be describing a check nobody ran.
+	Signed bool `json:"signed"`
+	// SignatureKeyID and SignatureScheme are what the release names, for a
+	// person who wants to see which key claims it before installing.
+	SignatureKeyID  string `json:"signatureKeyId,omitempty"`
+	SignatureScheme string `json:"signatureScheme,omitempty"`
 
 	RequestedCapabilities []string               `json:"requestedCapabilities"`
 	ExecutionModes        []SkillReleaseModeView `json:"executionModes"`
@@ -497,10 +510,73 @@ type SkillInstallOriginView struct {
 	Compatibility    string    `json:"compatibility" enum:"compatible,ao-too-old,ao-too-new,unknown"`
 	InstalledAt      time.Time `json:"installedAt"`
 	InstalledBy      string    `json:"installedBy,omitempty"`
+
+	// Provenance is the verified chain, present when AO checked a signature.
+	// It is the answer to "why does this say trusted", and it is served as one
+	// object rather than as loose fields so a client cannot render half a
+	// chain as a whole one.
+	Provenance *SkillProvenanceView `json:"provenance,omitempty"`
+	// RevocationStateObserved is what the revocation picture looked like at
+	// install time. "not-checked" and "none-known" are deliberately different
+	// sentences: a reader must be able to tell "AO asked and nothing was
+	// withdrawn" from "AO could not ask".
+	RevocationStateObserved string `json:"revocationStateObserved,omitempty"`
+	// MetadataAsOf is when the metadata this install acted on was fetched.
+	MetadataAsOf time.Time `json:"metadataAsOf,omitempty"`
 	// Revoked reports a revocation AO OBSERVED after the install. AO did not
 	// uninstall it and did not disable it on any project.
 	Revoked          bool   `json:"revoked,omitempty"`
 	RevocationReason string `json:"revocationReason,omitempty"`
+}
+
+// SkillProvenanceView is the verified signature chain behind one install.
+//
+// Every value here is PUBLIC: a key id, a fingerprint derived from public key
+// bytes, a trust root id and a verdict. There is no field a private key or a
+// credential could occupy, and the signed payload itself is deliberately
+// absent -- it is reconstructible from the release, and a second copy would be
+// a second thing that can disagree with the first.
+type SkillProvenanceView struct {
+	// Verified is the verdict. When it is false the fields below record how
+	// far AO got before it refused, which is more useful than an empty object.
+	Verified bool `json:"verified"`
+
+	Scheme    string `json:"scheme,omitempty"`
+	Algorithm string `json:"algorithm,omitempty"`
+
+	KeyID string `json:"keyId,omitempty"`
+	// KeyFingerprint is sha256 over the raw public key, lowercase hex. It is
+	// what a person compares against a fingerprint the publisher published
+	// somewhere else -- which is the only way a first key is ever verified.
+	KeyFingerprint string `json:"keyFingerprint,omitempty"`
+	// KeyFingerprintShort is the same value grouped for a screen. The full
+	// value is always beside it: a truncated fingerprint is for RECOGNISING a
+	// key you already know, never for deciding two keys are the same one.
+	KeyFingerprintShort string `json:"keyFingerprintShort,omitempty"`
+	// KeyOrigin is how this key reached AO's trust store: "certificate" means
+	// a root signed a statement authorizing it, "administrative" means
+	// somebody here vouched for it, "built-in" means it arrived with the AO
+	// build. Three different assurances, and a screen that rendered them
+	// identically would be overstating one.
+	KeyOrigin string `json:"keyOrigin,omitempty" enum:"certificate,administrative,built-in"`
+
+	TrustRootID   string `json:"trustRootId,omitempty"`
+	TrustRootName string `json:"trustRootName,omitempty"`
+	TrustRootTier string `json:"trustRootTier,omitempty" enum:"official,enterprise,external"`
+
+	Publisher string `json:"publisher,omitempty"`
+
+	// SignedAt is the publisher's claim, covered by the signature. VerifiedAt
+	// is AO's own clock at the moment it checked. Two facts, and only the
+	// second one is AO's.
+	SignedAt   time.Time `json:"signedAt,omitzero"`
+	VerifiedAt time.Time `json:"verifiedAt,omitzero"`
+
+	// RefusalCode and Refusal are present when AO checked and said no. They
+	// are recorded rather than dropped, because "AO checked and refused" and
+	// "AO never checked" are different facts about an installed package.
+	RefusalCode string `json:"refusalCode,omitempty"`
+	Refusal     string `json:"refusal,omitempty"`
 }
 
 // SkillInstallOutcomeView is one completed marketplace install.
@@ -863,10 +939,12 @@ func queryInt(raw string) int {
 // trustModelStatement is: a screen that wrote its own version of this sentence
 // would eventually write a nicer one.
 const RegistryTrustModelStatement = "Installing verifies INTEGRITY: AO fetches the package, computes both digests " +
-	"itself, and refuses anything that is not byte-for-byte the release it resolved. That is not the same as " +
-	"knowing who wrote it. AO verifies no publisher signature, so a release is never better than \"verified\", " +
-	"and \"verified\" means the bytes match what the registry named -- not that the code is safe. Installing " +
-	"enables the skill on no project, grants no capability and approves no container image."
+	"itself, and refuses anything that is not byte-for-byte the release it resolved. That is \"verified\". " +
+	"\"Trusted\" is verified PLUS a signature over those exact bytes, made by a key that chains to a trust root " +
+	"this installation configured and held by the publisher the release names -- so trusted says who signed it, " +
+	"never that the code is safe, that it has no vulnerabilities, that its capabilities are benign or that " +
+	"anybody reviewed it. Installing enables the skill on no project, grants no capability and approves no " +
+	"container image."
 
 // RegistryProbeAssurance states exactly what a connection test does, served
 // from the daemon so a client cannot describe it more generously than the thing

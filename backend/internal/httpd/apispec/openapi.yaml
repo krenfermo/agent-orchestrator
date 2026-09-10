@@ -9417,6 +9417,313 @@ paths:
         it makes AO open a connection and present a stored credential.'
       tags:
       - skills
+  /api/v1/skills/trust:
+    get:
+      operationId: listSkillTrust
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillTrustListResponse'
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: the trust roots this installation will accept signatures from,
+        their public signing keys, and every administrative revocation. A trust root
+        NEVER arrives from a registry or from a release - AO Official''s is compiled
+        into the build, and an enterprise root is added here by an administrator and
+        recorded in the audit trail. Keys are served with their sha256 fingerprints
+        so an operator can compare one against what a publisher published elsewhere,
+        which is the only way a first key is ever verified. Everything here is PUBLIC:
+        there is no private key in the daemon, in this schema, or in any response.
+        Requires settings.read.'
+      tags:
+      - skills
+  /api/v1/skills/trust/keys/{keyId}:
+    put:
+      operationId: addSkillSigningKey
+      parameters:
+      - description: 'Signing key identifier. Permanent: the public key under a given
+          id never changes.'
+        in: path
+        name: keyId
+        required: true
+        schema:
+          description: 'Signing key identifier. Permanent: the public key under a
+            given id never changes.'
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddSkillSigningKeyRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillSigningKeyView'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: register one PUBLIC signing key under a trust root. The key
+        is 32 bytes of ed25519 public key, base64 - a 64-byte value, which is what
+        somebody pasting the wrong half of a keypair sends, is refused on length rather
+        than stored. There is no route that generates a key: the daemon verifies and
+        does not sign, because a consumer that could sign could mint its own trusted
+        releases. Supplying a certificate the ROOT key signed makes the chain cryptographic
+        and records the key''s origin as "certificate"; omitting it records "administrative",
+        which is what an administrator vouching for a key actually is, and the two
+        are never rendered as the same fact. A key id is permanent: replacing the
+        material under an existing one is refused as a substitution. Requires settings.manage.'
+      tags:
+      - skills
+  /api/v1/skills/trust/keys/{keyId}/retire:
+    post:
+      operationId: retireSkillSigningKey
+      parameters:
+      - description: 'Signing key identifier. Permanent: the public key under a given
+          id never changes.'
+        in: path
+        name: keyId
+        required: true
+        schema:
+          description: 'Signing key identifier. Permanent: the public key under a
+            given id never changes.'
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetireSkillSigningKeyRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OKResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: close a signing key''s validity window without calling it
+        compromised. Retiring is deliberately a DIFFERENT verb from revoking, because
+        the consequence for history is different: a retired key''s earlier signatures
+        still verify and a revoked key''s do not. Merging them would mean every scheduled
+        rotation invalidated the releases the outgoing key had legitimately signed,
+        which is a system that punishes rotating on time. Requires settings.manage.'
+      tags:
+      - skills
+  /api/v1/skills/trust/revocations:
+    post:
+      operationId: revokeSkillTrust
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevokeSkillTrustRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillTrustRevocationView'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: withdraw a signing key, a publisher identity, or a whole trust
+        root - globally, and one-way. A revoked key''s EARLIER signatures are refused
+        too, because a key somebody else may have held for an unknown period proves
+        nothing about who used it and when. Revoking a root refuses every key under
+        it at once. What it does not do is uninstall anything, delete any file, disable
+        a skill on any project, or stop a run already under way: it blocks NEW trusted
+        installs and marks what is already here as affected, and deciding what to
+        do about those is a human''s call, one package at a time. A RELEASE is not
+        revocable here - that is the publishing registry''s act. Built-in roots and
+        keys are refused: a revocation a local attacker could write would be a way
+        to turn off official trust. Requires settings.manage.'
+      tags:
+      - skills
+  /api/v1/skills/trust/roots/{trustRootId}:
+    put:
+      operationId: saveSkillTrustRoot
+      parameters:
+      - description: Trust root identifier (kebab-case). 'ao-official' is reserved
+          for the build-embedded root and is refused here.
+        in: path
+        name: trustRootId
+        required: true
+        schema:
+          description: Trust root identifier (kebab-case). 'ao-official' is reserved
+            for the build-embedded root and is refused here.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveSkillTrustRootRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillTrustRootView'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: 'Skills: create or update an ENTERPRISE trust root. There is no tier
+        field and no way to create an official one: AO Official arrives with the build,
+        and the id "ao-official" and the publisher "ao" are refused as input, so the
+        one name worth impersonating is the one nobody can claim. A root''s publisher
+        cannot be changed once keys chain to it - repointing an anchor would silently
+        re-attribute every release those keys signed. A revoked root does not come
+        back because a form was re-submitted. Requires settings.manage.'
+      tags:
+      - skills
   /api/v1/skills/updates:
     get:
       operationId: checkSkillUpdates
@@ -12158,6 +12465,32 @@ components:
           type: string
       required:
       - path
+      type: object
+    AddSkillSigningKeyRequest:
+      properties:
+        certificate:
+          $ref: '#/components/schemas/SkillKeyCertificateInput'
+        isRootKey:
+          type: boolean
+        publicKey:
+          type: string
+        rotatedFromKeyId:
+          type: string
+        trustRootId:
+          type: string
+        validFrom:
+          format: date-time
+          type:
+          - "null"
+          - string
+        validUntil:
+          format: date-time
+          type:
+          - "null"
+          - string
+      required:
+      - trustRootId
+      - publicKey
       type: object
     AddTeamMemberRequest:
       properties:
@@ -19837,6 +20170,14 @@ components:
       - resumeMode
       - session
       type: object
+    RetireSkillSigningKeyRequest:
+      properties:
+        validUntil:
+          format: date-time
+          type:
+          - "null"
+          - string
+      type: object
     ReviewRun:
       properties:
         autoInjectReview:
@@ -19917,6 +20258,23 @@ components:
       - review
       - reviews
       - reviewerHandleId
+      type: object
+    RevokeSkillTrustRequest:
+      properties:
+        reason:
+          type: string
+        subject:
+          enum:
+          - signing_key
+          - publisher
+          - trust_root
+          type: string
+        subjectId:
+          type: string
+      required:
+      - subject
+      - subjectId
+      - reason
       type: object
     RoleOverride:
       properties:
@@ -20059,6 +20417,7 @@ components:
           - digest
           - pinned_publisher
           - signed
+          - official
           type: string
         type:
           enum:
@@ -20072,6 +20431,26 @@ components:
       - location
       - enabled
       - trustPolicy
+      type: object
+    SaveSkillTrustRootRequest:
+      properties:
+        displayName:
+          type: string
+        publisher:
+          type: string
+        validFrom:
+          format: date-time
+          type:
+          - "null"
+          - string
+        validUntil:
+          format: date-time
+          type:
+          - "null"
+          - string
+      required:
+      - displayName
+      - publisher
       type: object
     SchedulerStatusResponse:
       properties:
@@ -21183,6 +21562,11 @@ components:
           type: string
         manifestDigest:
           type: string
+        metadataAsOf:
+          format: date-time
+          type: string
+        provenance:
+          $ref: '#/components/schemas/SkillProvenanceView'
         publisher:
           type: string
         registryId:
@@ -21192,6 +21576,8 @@ components:
         registryType:
           type: string
         revocationReason:
+          type: string
+        revocationStateObserved:
           type: string
         revoked:
           type: boolean
@@ -21314,6 +21700,40 @@ components:
       - approval
       - installedAt
       type: object
+    SkillKeyCertificateInput:
+      properties:
+        keyId:
+          type: string
+        publicKey:
+          type: string
+        publisher:
+          type: string
+        rootKeyId:
+          type: string
+        scheme:
+          type: string
+        trustRootId:
+          type: string
+        validFrom:
+          format: date-time
+          type: string
+        validUntil:
+          format: date-time
+          type:
+          - "null"
+          - string
+        value:
+          type: string
+      required:
+      - scheme
+      - trustRootId
+      - rootKeyId
+      - keyId
+      - publicKey
+      - publisher
+      - validFrom
+      - value
+      type: object
     SkillListResponse:
       properties:
         capabilities:
@@ -21388,6 +21808,53 @@ components:
       - riskLevel
       - capabilities
       - approval
+      type: object
+    SkillProvenanceView:
+      properties:
+        algorithm:
+          type: string
+        keyFingerprint:
+          type: string
+        keyFingerprintShort:
+          type: string
+        keyId:
+          type: string
+        keyOrigin:
+          enum:
+          - certificate
+          - administrative
+          - built-in
+          type: string
+        publisher:
+          type: string
+        refusal:
+          type: string
+        refusalCode:
+          type: string
+        scheme:
+          type: string
+        signedAt:
+          format: date-time
+          type: string
+        trustRootId:
+          type: string
+        trustRootName:
+          type: string
+        trustRootTier:
+          enum:
+          - official
+          - enterprise
+          - external
+          type: string
+        verified:
+          type: boolean
+        verifiedAt:
+          format: date-time
+          type: string
+      required:
+      - verified
+      - signedAt
+      - verifiedAt
       type: object
     SkillRegistryFreshnessView:
       properties:
@@ -21626,6 +22093,7 @@ components:
           - digest
           - pinned_publisher
           - signed
+          - official
           type: string
         trustPolicyEnforceable:
           type: boolean
@@ -21781,6 +22249,12 @@ components:
           type: string
         signatureFormat:
           type: string
+        signatureKeyId:
+          type: string
+        signatureScheme:
+          type: string
+        signed:
+          type: boolean
         skillId:
           type: string
         sourceUrl:
@@ -21809,6 +22283,7 @@ components:
       - riskLevel
       - manifestDigest
       - artifactDigest
+      - signed
       - requestedCapabilities
       - executionModes
       - aoMinVersion
@@ -21854,6 +22329,180 @@ components:
       - missingControls
       - needsIsolation
       - needsEgressControl
+      type: object
+    SkillSigningKeyView:
+      properties:
+        algorithm:
+          type: string
+        createdAt:
+          format: date-time
+          type: string
+        createdBy:
+          type: string
+        fingerprint:
+          type: string
+        fingerprintShort:
+          type: string
+        isRootKey:
+          type: boolean
+        keyId:
+          type: string
+        origin:
+          enum:
+          - certificate
+          - administrative
+          - built-in
+          type: string
+        publicKey:
+          type: string
+        publisher:
+          type: string
+        revocationReason:
+          type: string
+        revokedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        rotatedFromKeyId:
+          type: string
+        status:
+          enum:
+          - active
+          - retired
+          - revoked
+          type: string
+        trustRootId:
+          type: string
+        validFrom:
+          format: date-time
+          type: string
+        validUntil:
+          format: date-time
+          type:
+          - "null"
+          - string
+      required:
+      - keyId
+      - trustRootId
+      - publisher
+      - isRootKey
+      - algorithm
+      - publicKey
+      - fingerprint
+      - fingerprintShort
+      - origin
+      - status
+      - validFrom
+      - createdAt
+      type: object
+    SkillTrustListResponse:
+      properties:
+        officialRootAvailable:
+          type: boolean
+        officialRootNote:
+          type: string
+        revocations:
+          items:
+            $ref: '#/components/schemas/SkillTrustRevocationView'
+          type: array
+        roots:
+          items:
+            $ref: '#/components/schemas/SkillTrustRootView'
+          type: array
+        trustModel:
+          type: string
+      required:
+      - roots
+      - revocations
+      - trustModel
+      - officialRootAvailable
+      type: object
+    SkillTrustRevocationView:
+      properties:
+        reason:
+          type: string
+        revokedAt:
+          format: date-time
+          type: string
+        revokedBy:
+          type: string
+        subject:
+          enum:
+          - signing_key
+          - publisher
+          - trust_root
+          type: string
+        subjectId:
+          type: string
+      required:
+      - subject
+      - subjectId
+      - reason
+      - revokedAt
+      type: object
+    SkillTrustRootView:
+      properties:
+        builtIn:
+          type: boolean
+        createdAt:
+          format: date-time
+          type: string
+        createdBy:
+          type: string
+        displayName:
+          type: string
+        keys:
+          items:
+            $ref: '#/components/schemas/SkillSigningKeyView'
+          type: array
+        publisher:
+          type: string
+        revocationReason:
+          type: string
+        revokedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        status:
+          enum:
+          - active
+          - retired
+          - revoked
+          type: string
+        tier:
+          enum:
+          - official
+          - enterprise
+          - external
+          type: string
+        trustRootId:
+          type: string
+        updatedAt:
+          format: date-time
+          type: string
+        updatedBy:
+          type: string
+        validFrom:
+          format: date-time
+          type: string
+        validUntil:
+          format: date-time
+          type:
+          - "null"
+          - string
+      required:
+      - trustRootId
+      - tier
+      - displayName
+      - publisher
+      - status
+      - validFrom
+      - builtIn
+      - keys
+      - createdAt
+      - updatedAt
       type: object
     SkillUpdateCheckResponse:
       properties:

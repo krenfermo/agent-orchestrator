@@ -3027,6 +3027,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/skills/trust": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Skills: the trust roots this installation will accept signatures from, their public signing keys, and every administrative revocation. A trust root NEVER arrives from a registry or from a release - AO Official's is compiled into the build, and an enterprise root is added here by an administrator and recorded in the audit trail. Keys are served with their sha256 fingerprints so an operator can compare one against what a publisher published elsewhere, which is the only way a first key is ever verified. Everything here is PUBLIC: there is no private key in the daemon, in this schema, or in any response. Requires settings.read. */
+        get: operations["listSkillTrust"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/trust/keys/{keyId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Skills: register one PUBLIC signing key under a trust root. The key is 32 bytes of ed25519 public key, base64 - a 64-byte value, which is what somebody pasting the wrong half of a keypair sends, is refused on length rather than stored. There is no route that generates a key: the daemon verifies and does not sign, because a consumer that could sign could mint its own trusted releases. Supplying a certificate the ROOT key signed makes the chain cryptographic and records the key's origin as "certificate"; omitting it records "administrative", which is what an administrator vouching for a key actually is, and the two are never rendered as the same fact. A key id is permanent: replacing the material under an existing one is refused as a substitution. Requires settings.manage. */
+        put: operations["addSkillSigningKey"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/trust/keys/{keyId}/retire": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: close a signing key's validity window without calling it compromised. Retiring is deliberately a DIFFERENT verb from revoking, because the consequence for history is different: a retired key's earlier signatures still verify and a revoked key's do not. Merging them would mean every scheduled rotation invalidated the releases the outgoing key had legitimately signed, which is a system that punishes rotating on time. Requires settings.manage. */
+        post: operations["retireSkillSigningKey"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/trust/revocations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: withdraw a signing key, a publisher identity, or a whole trust root - globally, and one-way. A revoked key's EARLIER signatures are refused too, because a key somebody else may have held for an unknown period proves nothing about who used it and when. Revoking a root refuses every key under it at once. What it does not do is uninstall anything, delete any file, disable a skill on any project, or stop a run already under way: it blocks NEW trusted installs and marks what is already here as affected, and deciding what to do about those is a human's call, one package at a time. A RELEASE is not revocable here - that is the publishing registry's act. Built-in roots and keys are refused: a revocation a local attacker could write would be a way to turn off official trust. Requires settings.manage. */
+        post: operations["revokeSkillTrust"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/trust/roots/{trustRootId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Skills: create or update an ENTERPRISE trust root. There is no tier field and no way to create an official one: AO Official arrives with the build, and the id "ao-official" and the publisher "ao" are refused as input, so the one name worth impersonating is the one nobody can claim. A root's publisher cannot be changed once keys chain to it - repointing an anchor would silently re-attribute every release those keys signed. A revoked root does not come back because a form was re-submitted. Requires settings.manage. */
+        put: operations["saveSkillTrustRoot"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/skills/updates": {
         parameters: {
             query?: never;
@@ -3942,6 +4027,17 @@ export interface components {
             path: string;
             projectId?: null | string;
             tenantId?: string;
+        };
+        AddSkillSigningKeyRequest: {
+            certificate?: components["schemas"]["SkillKeyCertificateInput"];
+            isRootKey?: boolean;
+            publicKey: string;
+            rotatedFromKeyId?: string;
+            trustRootId: string;
+            /** Format: date-time */
+            validFrom?: null | string;
+            /** Format: date-time */
+            validUntil?: null | string;
         };
         AddTeamMemberRequest: {
             /** @enum {string} */
@@ -6885,6 +6981,10 @@ export interface components {
             session: components["schemas"]["ControllersSessionView"];
             sessionId: string;
         };
+        RetireSkillSigningKeyRequest: {
+            /** Format: date-time */
+            validUntil?: null | string;
+        };
         ReviewRun: {
             autoInjectReview: boolean;
             batchId: string;
@@ -6914,6 +7014,12 @@ export interface components {
             review: components["schemas"]["ReviewRun"];
             reviewerHandleId: string;
             reviews: components["schemas"]["ReviewRun"][];
+        };
+        RevokeSkillTrustRequest: {
+            reason: string;
+            /** @enum {string} */
+            subject: "signing_key" | "publisher" | "trust_root";
+            subjectId: string;
         };
         RoleOverride: {
             agent?: string;
@@ -6972,9 +7078,17 @@ export interface components {
             priority?: number;
             tenantId?: string;
             /** @enum {string} */
-            trustPolicy: "digest" | "pinned_publisher" | "signed";
+            trustPolicy: "digest" | "pinned_publisher" | "signed" | "official";
             /** @enum {string} */
             type: "local" | "https" | "git";
+        };
+        SaveSkillTrustRootRequest: {
+            displayName: string;
+            publisher: string;
+            /** Format: date-time */
+            validFrom?: null | string;
+            /** Format: date-time */
+            validUntil?: null | string;
         };
         SchedulerStatusResponse: {
             global: components["schemas"]["CapacityUsageView"];
@@ -7385,11 +7499,15 @@ export interface components {
             installedAt: string;
             installedBy?: string;
             manifestDigest: string;
+            /** Format: date-time */
+            metadataAsOf?: string;
+            provenance?: components["schemas"]["SkillProvenanceView"];
             publisher: string;
             registryId: string;
             registryName?: string;
             registryType: string;
             revocationReason?: string;
+            revocationStateObserved?: string;
             revoked?: boolean;
             skillId: string;
             sourceUrl?: string;
@@ -7429,6 +7547,19 @@ export interface components {
             sourceUrl?: string;
             version: string;
         };
+        SkillKeyCertificateInput: {
+            keyId: string;
+            publicKey: string;
+            publisher: string;
+            rootKeyId: string;
+            scheme: string;
+            trustRootId: string;
+            /** Format: date-time */
+            validFrom: string;
+            /** Format: date-time */
+            validUntil?: null | string;
+            value: string;
+        };
         SkillListResponse: {
             capabilities: components["schemas"]["SkillCapabilityView"][];
             skills: components["schemas"]["SkillInstallView"][];
@@ -7450,6 +7581,27 @@ export interface components {
             name: string;
             /** @enum {string} */
             riskLevel: "low" | "medium" | "high" | "critical";
+        };
+        SkillProvenanceView: {
+            algorithm?: string;
+            keyFingerprint?: string;
+            keyFingerprintShort?: string;
+            keyId?: string;
+            /** @enum {string} */
+            keyOrigin?: "certificate" | "administrative" | "built-in";
+            publisher?: string;
+            refusal?: string;
+            refusalCode?: string;
+            scheme?: string;
+            /** Format: date-time */
+            signedAt: string;
+            trustRootId?: string;
+            trustRootName?: string;
+            /** @enum {string} */
+            trustRootTier?: "official" | "enterprise" | "external";
+            verified: boolean;
+            /** Format: date-time */
+            verifiedAt: string;
         };
         SkillRegistryFreshnessView: {
             explanation: string;
@@ -7541,7 +7693,7 @@ export interface components {
             status: components["schemas"]["SkillRegistryStatusView"];
             tenantId?: string;
             /** @enum {string} */
-            trustPolicy: "digest" | "pinned_publisher" | "signed";
+            trustPolicy: "digest" | "pinned_publisher" | "signed" | "official";
             trustPolicyEnforceable: boolean;
             /** @enum {string} */
             type: "local" | "https" | "git";
@@ -7598,6 +7750,9 @@ export interface components {
             /** @enum {string} */
             riskLevel: "low" | "medium" | "high" | "critical";
             signatureFormat?: string;
+            signatureKeyId?: string;
+            signatureScheme?: string;
+            signed: boolean;
             skillId: string;
             sourceUrl?: string;
             /** @enum {string} */
@@ -7616,6 +7771,71 @@ export interface components {
             needsIsolation: boolean;
             runnerId: string;
             unavailable?: string;
+        };
+        SkillSigningKeyView: {
+            algorithm: string;
+            /** Format: date-time */
+            createdAt: string;
+            createdBy?: string;
+            fingerprint: string;
+            fingerprintShort: string;
+            isRootKey: boolean;
+            keyId: string;
+            /** @enum {string} */
+            origin: "certificate" | "administrative" | "built-in";
+            publicKey: string;
+            publisher: string;
+            revocationReason?: string;
+            /** Format: date-time */
+            revokedAt?: null | string;
+            rotatedFromKeyId?: string;
+            /** @enum {string} */
+            status: "active" | "retired" | "revoked";
+            trustRootId: string;
+            /** Format: date-time */
+            validFrom: string;
+            /** Format: date-time */
+            validUntil?: null | string;
+        };
+        SkillTrustListResponse: {
+            officialRootAvailable: boolean;
+            officialRootNote?: string;
+            revocations: components["schemas"]["SkillTrustRevocationView"][];
+            roots: components["schemas"]["SkillTrustRootView"][];
+            trustModel: string;
+        };
+        SkillTrustRevocationView: {
+            reason: string;
+            /** Format: date-time */
+            revokedAt: string;
+            revokedBy?: string;
+            /** @enum {string} */
+            subject: "signing_key" | "publisher" | "trust_root";
+            subjectId: string;
+        };
+        SkillTrustRootView: {
+            builtIn: boolean;
+            /** Format: date-time */
+            createdAt: string;
+            createdBy?: string;
+            displayName: string;
+            keys: components["schemas"]["SkillSigningKeyView"][];
+            publisher: string;
+            revocationReason?: string;
+            /** Format: date-time */
+            revokedAt?: null | string;
+            /** @enum {string} */
+            status: "active" | "retired" | "revoked";
+            /** @enum {string} */
+            tier: "official" | "enterprise" | "external";
+            trustRootId: string;
+            /** Format: date-time */
+            updatedAt: string;
+            updatedBy?: string;
+            /** Format: date-time */
+            validFrom: string;
+            /** Format: date-time */
+            validUntil?: null | string;
         };
         SkillUpdateCheckResponse: {
             revocationPolicy: string;
@@ -20004,6 +20224,356 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    listSkillTrust: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillTrustListResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    addSkillSigningKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Signing key identifier. Permanent: the public key under a given id never changes. */
+                keyId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddSkillSigningKeyRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillSigningKeyView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    retireSkillSigningKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Signing key identifier. Permanent: the public key under a given id never changes. */
+                keyId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RetireSkillSigningKeyRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OKResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    revokeSkillTrust: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RevokeSkillTrustRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillTrustRevocationView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    saveSkillTrustRoot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Trust root identifier (kebab-case). 'ao-official' is reserved for the build-embedded root and is refused here. */
+                trustRootId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveSkillTrustRootRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillTrustRootView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -359,6 +359,12 @@ type SkillsController struct {
 	// installation install from" -- and an installation can have the catalog
 	// without ever configuring one.
 	Marketplace SkillMarketplace
+	// Trust is the FOURTH port: whose signatures this installation will
+	// accept. Separate again, and for the same reason -- an installation can
+	// run the whole catalog and marketplace without ever configuring a trust
+	// root, and nil here means every signature-requiring policy refuses rather
+	// than a half-working trust surface.
+	Trust SkillTrust
 	// Tenancy resolves which organizations the caller belongs to, which is
 	// what makes a private registry private. Nil yields no memberships, so a
 	// caller sees installation-wide registries and no private ones.
@@ -380,6 +386,7 @@ func (c *SkillsController) Register(r chi.Router) {
 	// The registry / marketplace surface, same family and therefore the same
 	// gate. It has no Run route and nothing that would give a client one.
 	c.registerMarketplaceRoutes(r)
+	c.registerTrustRoutes(r)
 
 	// Project-scoped. Gated per project inside each handler.
 	r.Get("/projects/{id}/skills", c.projectSkills)
