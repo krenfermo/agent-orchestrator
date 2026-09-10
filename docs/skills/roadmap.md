@@ -4,7 +4,12 @@
 (2026-09-09) made ONE mode execute: `static-code`, inside the container, over a
 staged scope-limited copy. Phase 10 (2026-09-09) added the registry /
 marketplace foundation and settled open question 6 -- see
-`docs/skills/registry.md` and ADR 0006; it added no execution surface.** Four controls remain unbuilt and each blocks one
+`docs/skills/registry.md` and ADR 0006; it added no execution surface.
+Phase 11 (2026-09-09) connected AO to a real PRIVATE registry over HTTPS --
+one origin, a sealed credential, a connection test, a two-part cache, an
+offline install that runs only on bytes AO already verified, and revocation
+sync; see `docs/skills/private-registry.md` and ADR 0007. It added no
+execution surface either, and `trusted` is still unreachable.** Four controls remain unbuilt and each blocks one
 capability — see `docs/adr/0005-pending-capability-controls.md` for the design
 of all four and the implementation of none.
 
@@ -228,9 +233,17 @@ Only once the core is stable and subfase 3 has landed.
    marketplace` / `ao skills registry`, and the supply-chain negative tests.
    See `docs/skills/registry.md`.
 
-   What does NOT exist: any network provider (`https` and `git` are declared and
-   refused), signature verification, registry authentication, a publishing
-   story, and any automatic synchronization. AO polls nothing.
+   Phase 11 added the PRIVATE half: an HTTPS provider bound to one configured
+   origin, bearer / API-key authentication whose credential is the NAME of a
+   sealed secret, a six-verdict connection test, a metadata + content-addressed
+   artifact cache, an offline install that runs only on bytes AO already
+   fetched and verified, and revocation sync that keeps blocking while the
+   registry is unreachable. See `docs/skills/private-registry.md` and ADR 0007.
+
+   What still does NOT exist: a public marketplace, AO Official, a `git` /
+   GitHub provider (still declared and refused), signature verification, a
+   publishing story, and any automatic synchronization. AO polls nothing --
+   every network read in phase 11 is a request a person made.
 
    What phase 10 deliberately did NOT change: nothing gained an execution
    surface. `process.exec`, `net.active_scan`, `repo.write`, `net.egress` and

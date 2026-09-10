@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -92,10 +94,18 @@ func (s *Store) UpsertSkillRegistry(
 		Priority:             int64(reg.Priority),
 		TenantID:             tenantPtr(reg),
 		CredentialSecretName: reg.CredentialSecretName,
-		CreatedAt:            at,
-		CreatedBy:            actor,
-		UpdatedAt:            at,
-		UpdatedBy:            actor,
+		AuthType:             string(reg.EffectiveAuthType()),
+		ApiKeyHeader:         reg.APIKeyHeader,
+		// The network policy is stored as JSON because it is a policy with
+		// room to grow, not a single value: today it is a CIDR list, and the
+		// next thing an on-premises registry needs (a client certificate ref,
+		// a proxy exception) belongs beside it rather than in a new column
+		// each time.
+		NetworkPolicy: encodeNetworkPolicy(reg.NetworkPolicy),
+		CreatedAt:     at,
+		CreatedBy:     actor,
+		UpdatedAt:     at,
+		UpdatedBy:     actor,
 	})
 	if err != nil {
 		return skillregistry.Registry{}, fmt.Errorf("upsert skill registry: %w", err)
@@ -271,11 +281,42 @@ func registryFromRow(row gen.SkillRegistry) skillregistry.Registry {
 		PinnedPublisher:      row.PinnedPublisher,
 		Priority:             int(row.Priority),
 		CredentialSecretName: row.CredentialSecretName,
+		AuthType:             skillregistry.AuthType(row.AuthType),
+		APIKeyHeader:         row.ApiKeyHeader,
+		NetworkPolicy:        decodeNetworkPolicy(row.NetworkPolicy),
+		CreatedAt:            row.CreatedAt,
+		UpdatedAt:            row.UpdatedAt,
 	}
 	if row.TenantID != nil {
 		reg.TenantID = *row.TenantID
 	}
 	return reg
+}
+
+// encodeNetworkPolicy renders the policy for the column. A policy that will not
+// marshal is stored as the empty one, which is the FULL denylist -- the safe
+// direction, and the only one available when the alternative is storing
+// something the reader cannot enforce.
+func encodeNetworkPolicy(p skillregistry.NetworkPolicy) string {
+	b, err := json.Marshal(p)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+// decodeNetworkPolicy reads it back. A malformed column yields the empty
+// policy, for the same reason: an unreadable exception must widen nothing.
+func decodeNetworkPolicy(raw string) skillregistry.NetworkPolicy {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "{}" {
+		return skillregistry.NetworkPolicy{}
+	}
+	var p skillregistry.NetworkPolicy
+	if err := json.Unmarshal([]byte(trimmed), &p); err != nil {
+		return skillregistry.NetworkPolicy{}
+	}
+	return p
 }
 
 func originsFromRows(rows []gen.SkillInstallOrigin) []SkillInstallOrigin {

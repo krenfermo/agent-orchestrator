@@ -2993,6 +2993,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/skills/registries/{registryId}/revocations/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: ask one registry what it has withdrawn, and record it. AO polls nothing on its own - this is a request a person made. A recorded revocation blocks new installs of that exact release and marks an installed copy, and it stays in force while the registry is unreachable: silence is not consent. It never uninstalls, never deletes files, never disables a skill on any project and never stops a run already under way - deciding what to do about an installed release that was withdrawn is a human's call, one package at a time. A registry that could not be asked is NAMED rather than treated as having nothing withdrawn. Requires settings.manage. */
+        post: operations["syncSkillRegistryRevocations"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/registries/{registryId}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Skills: test one registry's connection. It reads ONE small metadata endpoint: it downloads no package, changes no catalog, installs nothing, enables nothing on any project and approves no container image. The verdict is one of CONNECTED, AUTH_FAILED, TLS_FAILED, UNREACHABLE, INVALID_RESPONSE or POLICY_BLOCKED, and CONNECTED is deliberately the hardest to reach - a socket opening, TLS verifying and a 200 arriving are each necessary and none is sufficient, because a load balancer, a captive portal and an unrelated service on the right port all produce one. CONNECTED means the registry answered AS ITSELF, speaking a protocol version this build knows. An auth failure names the secretRef and never a credential value. Answers 200 whatever the verdict: a failed test is a successful answer to the question asked. Requires settings.manage, because it makes AO open a connection and present a stored credential. */
+        post: operations["testSkillRegistryConnection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/skills/updates": {
         parameters: {
             query?: never;
@@ -6053,6 +6087,7 @@ export interface components {
             path: string;
         };
         InstallSkillReleaseRequest: {
+            allowOfflineFromCache?: boolean;
             asUpdate?: boolean;
             registryId: string;
             skillId: string;
@@ -6925,10 +6960,14 @@ export interface components {
             dryRun?: boolean;
         };
         SaveSkillRegistryRequest: {
+            apiKeyHeader?: string;
+            /** @enum {string} */
+            authType?: "none" | "bearer" | "api_key_header";
             credentialSecretName?: string;
             displayName: string;
             enabled: boolean;
             location: string;
+            permittedPrivateCidrs?: string[];
             pinnedPublisher?: string;
             priority?: number;
             tenantId?: string;
@@ -7361,8 +7400,10 @@ export interface components {
             version: string;
         };
         SkillInstallOutcomeView: {
+            fromCache?: boolean;
             install: components["schemas"]["SkillInstallView"];
             nextStep: string;
+            offline?: boolean;
             origin: components["schemas"]["SkillInstallOriginView"];
             updated: boolean;
         };
@@ -7415,20 +7456,81 @@ export interface components {
             reason: string;
             registryId: string;
         };
+        SkillRegistryProbeView: {
+            assurance: string;
+            authType?: string;
+            detail: string;
+            /** Format: int64 */
+            latencyMs: number;
+            origin?: string;
+            protocolVersion?: string;
+            registryId: string;
+            reportedRegistryId?: string;
+            secretRef?: string;
+            /** @enum {string} */
+            state: "CONNECTED" | "AUTH_FAILED" | "TLS_FAILED" | "UNREACHABLE" | "INVALID_RESPONSE" | "POLICY_BLOCKED";
+            /** Format: date-time */
+            testedAt: string;
+        };
+        SkillRegistryRevocationSyncView: {
+            affectedInstalls: string[];
+            fetched: number;
+            newlyRecorded: number;
+            policy: string;
+            registryId: string;
+            revocations: components["schemas"]["SkillRegistryRevocationView"][];
+            /** Format: date-time */
+            syncedAt: string;
+            unreachable?: string;
+        };
+        SkillRegistryRevocationView: {
+            installed: boolean;
+            /** Format: date-time */
+            observedAt: string;
+            reason: string;
+            registryId: string;
+            /** Format: date-time */
+            revokedAt?: null | string;
+            skillId: string;
+            version: string;
+        };
+        SkillRegistryStatusView: {
+            /** Format: date-time */
+            lastProbeAt?: null | string;
+            lastProbeDetail?: string;
+            /** Format: int64 */
+            lastProbeLatencyMs?: number;
+            /** @enum {string} */
+            lastProbeState: "" | "CONNECTED" | "AUTH_FAILED" | "TLS_FAILED" | "UNREACHABLE" | "INVALID_RESPONSE" | "POLICY_BLOCKED";
+            /** Format: date-time */
+            lastRevocationSyncAt?: null | string;
+            /** Format: date-time */
+            lastSyncAt?: null | string;
+        };
         SkillRegistryView: {
+            apiKeyHeader?: string;
+            /** @enum {string} */
+            authType: "none" | "bearer" | "api_key_header";
+            /** Format: date-time */
+            createdAt: string;
             credentialSecretName?: string;
             displayName: string;
             enabled: boolean;
             id: string;
             location: string;
+            networkPolicySummary: string;
+            permittedPrivateCidrs?: string[];
             pinnedPublisher?: string;
             priority: number;
+            status: components["schemas"]["SkillRegistryStatusView"];
             tenantId?: string;
             /** @enum {string} */
             trustPolicy: "digest" | "pinned_publisher" | "signed";
             trustPolicyEnforceable: boolean;
             /** @enum {string} */
             type: "local" | "https" | "git";
+            /** Format: date-time */
+            updatedAt: string;
         };
         SkillReleaseDetailResponse: {
             installNotice: string;
@@ -19729,6 +19831,133 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OKResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    syncSkillRegistryRevocations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Registry identifier (kebab-case). */
+                registryId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillRegistryRevocationSyncView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    testSkillRegistryConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Registry identifier (kebab-case). */
+                registryId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillRegistryProbeView"];
                 };
             };
             /** @description Unauthorized */

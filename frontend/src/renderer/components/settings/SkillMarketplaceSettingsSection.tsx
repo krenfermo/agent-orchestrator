@@ -49,11 +49,39 @@ export function SkillMarketplaceSettingsSection() {
 	// request per keystroke at a registry.
 	const [submitted, setSubmitted] = useState("");
 	const [includeRevoked, setIncludeRevoked] = useState(false);
+	// Filters. They narrow what is SHOWN and never what was asked for: the
+	// daemon already decided which registries this caller may see, and a
+	// filter that changed that would be an access rule written in React.
+	const [sourceRegistry, setSourceRegistry] = useState("");
+	const [capability, setCapability] = useState("");
+	const [onlyInstalled, setOnlyInstalled] = useState(false);
+	const [onlyVerified, setOnlyVerified] = useState(false);
+	const [onlyCompatible, setOnlyCompatible] = useState(false);
 	const [openRelease, setOpenRelease] = useState<{ registryId: string; skillId: string } | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const [installed, setInstalled] = useState<string | null>(null);
 
-	const searchKey = ["skills", "marketplace", submitted, includeRevoked] as const;
+	// Registries are read so the source filter can name them, and so a registry
+	// that answered nothing can still be offered as a choice.
+	const registries = useQuery({
+		queryKey: ["skills", "registries"],
+		queryFn: async () => {
+			const { data, error: apiError } = await apiClient.GET("/api/v1/skills/registries", {
+				credentials: "include",
+			});
+			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
+			return data;
+		},
+	});
+
+	const searchKey = [
+		"skills",
+		"marketplace",
+		submitted,
+		includeRevoked,
+		sourceRegistry,
+		capability,
+	] as const;
 	const search = useQuery<SearchResponse>({
 		queryKey: searchKey,
 		queryFn: async () => {
@@ -63,6 +91,11 @@ export function SkillMarketplaceSettingsSection() {
 					query: {
 						...(submitted ? { q: submitted } : {}),
 						...(includeRevoked ? { includeRevoked: true } : {}),
+						// Source and capability narrow the QUERY, because the
+						// daemon can answer them without sending everything
+						// first. The rest are display filters below.
+						...(sourceRegistry ? { registryId: sourceRegistry } : {}),
+						...(capability ? { capability } : {}),
 					},
 				},
 			});
@@ -99,6 +132,10 @@ export function SkillMarketplaceSettingsSection() {
 					skillId: release.skillId,
 					version: release.version,
 					asUpdate: release.updateAvailable,
+					// Offline installs are a separate, explicit act with their
+					// own button; the ordinary install never quietly falls back
+					// to cached bytes when a registry cannot be reached.
+					allowOfflineFromCache: false,
 				},
 			});
 			if (apiError || !data) throw new Error(apiErrorMessage(apiError));
@@ -106,8 +143,14 @@ export function SkillMarketplaceSettingsSection() {
 		},
 		onSuccess: (data) => {
 			setError(null);
-			// The daemon's own sentence, not one written here.
-			setInstalled(data.nextStep);
+			// The daemon's own sentence, not one written here. Where the bytes
+			// came from is appended, because "verified" says nothing about
+			// whether AO went to the network for them.
+			setInstalled(
+				data.fromCache
+					? `${data.nextStep} ${t("settings.skillMarketplace.fromCache")}`
+					: data.nextStep,
+			);
 			void queryClient.invalidateQueries({ queryKey: ["skills"] });
 		},
 		onError: (err: Error) => {
@@ -116,8 +159,23 @@ export function SkillMarketplaceSettingsSection() {
 		},
 	});
 
-	const releases = search.data?.releases ?? [];
+	const allReleases = search.data?.releases ?? [];
 	const notes = search.data?.notes ?? [];
+	const registryRows = registries.data?.registries ?? [];
+	// Every capability any result asks for, so the filter offers the ones that
+	// exist here rather than AO's whole table.
+	const capabilities = Array.from(
+		new Set(allReleases.flatMap((release) => release.requestedCapabilities)),
+	).sort();
+	// Display filters. An unverified release is never HIDDEN by default —
+	// hiding it would answer "what else is out there" with a curated lie — but
+	// somebody narrowing deliberately is a different thing.
+	const releases = allReleases.filter((release) => {
+		if (onlyInstalled && !release.installed) return false;
+		if (onlyVerified && release.trust !== "verified") return false;
+		if (onlyCompatible && release.compatibility !== "compatible") return false;
+		return true;
+	});
 
 	return (
 		<SettingsSection title={t("settings.skillMarketplace.title")} data-testid="skill-marketplace-settings">
@@ -145,14 +203,72 @@ export function SkillMarketplaceSettingsSection() {
 					{t("settings.skillMarketplace.searchAction")}
 				</Button>
 			</form>
-			<label className="flex items-center gap-2 text-caption text-settings-muted">
-				<input
-					type="checkbox"
-					checked={includeRevoked}
-					onChange={(e) => setIncludeRevoked(e.target.checked)}
-				/>
-				{t("settings.skillMarketplace.includeRevoked")}
-			</label>
+			<div className="flex flex-wrap items-center gap-3" data-testid="skill-marketplace-filters">
+				<label className="flex items-center gap-2 text-caption text-settings-muted">
+					{t("settings.skillMarketplace.sourceFilter")}
+					<select
+						className="rounded-(--radius-settings-dialog-sm) border border-[var(--color-border-settings-input)] bg-transparent px-2 py-1"
+						value={sourceRegistry}
+						aria-label={t("settings.skillMarketplace.sourceFilter")}
+						onChange={(e) => setSourceRegistry(e.target.value)}
+					>
+						<option value="">{t("settings.skillMarketplace.sourceAll")}</option>
+						{registryRows.map((reg) => (
+							<option key={reg.id} value={reg.id}>
+								{reg.displayName}
+							</option>
+						))}
+					</select>
+				</label>
+				<label className="flex items-center gap-2 text-caption text-settings-muted">
+					{t("settings.skillMarketplace.capabilityFilter")}
+					<select
+						className="rounded-(--radius-settings-dialog-sm) border border-[var(--color-border-settings-input)] bg-transparent px-2 py-1"
+						value={capability}
+						aria-label={t("settings.skillMarketplace.capabilityFilter")}
+						onChange={(e) => setCapability(e.target.value)}
+					>
+						<option value="">{t("settings.skillMarketplace.capabilityAny")}</option>
+						{capabilities.map((name) => (
+							<option key={name} value={name}>
+								{name}
+							</option>
+						))}
+					</select>
+				</label>
+				<label className="flex items-center gap-2 text-caption text-settings-muted">
+					<input
+						type="checkbox"
+						checked={includeRevoked}
+						onChange={(e) => setIncludeRevoked(e.target.checked)}
+					/>
+					{t("settings.skillMarketplace.includeRevoked")}
+				</label>
+				<label className="flex items-center gap-2 text-caption text-settings-muted">
+					<input
+						type="checkbox"
+						checked={onlyInstalled}
+						onChange={(e) => setOnlyInstalled(e.target.checked)}
+					/>
+					{t("settings.skillMarketplace.filterInstalled")}
+				</label>
+				<label className="flex items-center gap-2 text-caption text-settings-muted">
+					<input
+						type="checkbox"
+						checked={onlyVerified}
+						onChange={(e) => setOnlyVerified(e.target.checked)}
+					/>
+					{t("settings.skillMarketplace.filterVerified")}
+				</label>
+				<label className="flex items-center gap-2 text-caption text-settings-muted">
+					<input
+						type="checkbox"
+						checked={onlyCompatible}
+						onChange={(e) => setOnlyCompatible(e.target.checked)}
+					/>
+					{t("settings.skillMarketplace.filterCompatible")}
+				</label>
+			</div>
 
 			{error ? (
 				<p className="flex items-start gap-2 text-caption text-error" role="alert">
@@ -171,14 +287,26 @@ export function SkillMarketplaceSettingsSection() {
 			) : null}
 
 			{/* An unreadable registry is NAMED. "This registry has nothing" is a
-			    materially more comfortable fact than the truth. */}
+			    materially more comfortable fact than the truth.
+
+			    A registry that could not be REACHED gets the stronger banner:
+			    anything still listed for it came from AO's cache, and cached
+			    data must never be presented as current. */}
 			{notes.map((note) => (
-				<p className="text-caption text-warning" key={note.registryId} data-testid="skill-registry-note">
-					{t("settings.skillMarketplace.registryUnreadable", {
-						registry: note.registryId,
-						reason: note.reason,
-					})}
-				</p>
+				<div key={note.registryId} data-testid="skill-registry-note">
+					<p className="text-caption font-medium text-warning">
+						{t("settings.skillMarketplace.offlineTitle")}
+					</p>
+					<p className="text-caption text-warning">
+						{t("settings.skillMarketplace.offlineBody", { registry: note.registryId })}
+					</p>
+					<p className="text-caption text-warning">
+						{t("settings.skillMarketplace.registryUnreadable", {
+							registry: note.registryId,
+							reason: note.reason,
+						})}
+					</p>
+				</div>
 			))}
 
 			{!search.isLoading && releases.length === 0 ? (
@@ -222,6 +350,14 @@ export function SkillMarketplaceSettingsSection() {
 						<p className="text-caption text-settings-muted">
 							{t("settings.skillMarketplace.origin", {
 								publisher: release.publisher,
+								registry: release.registryName || release.registryId,
+							})}
+						</p>
+						{/* The source registry, always named. With more than one
+						    configured, "where did this come from" is the first
+						    question a reader has. */}
+						<p className="text-caption text-settings-muted" data-testid="skill-release-source">
+							{t("settings.skillMarketplace.registrySource", {
 								registry: release.registryName || release.registryId,
 							})}
 						</p>

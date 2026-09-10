@@ -48,10 +48,34 @@ function renderSection() {
 	);
 }
 
+// The panel makes two reads: the search, and the registry list the source
+// filter is built from.
 function mockSearch(releases: unknown[], extra: Record<string, unknown> = {}) {
-	return vi.spyOn(apiClient, "GET").mockResolvedValue({
-		data: { releases, notes: [], installNotice: INSTALL_NOTICE, ...extra },
-	} as never);
+	return vi.spyOn(apiClient, "GET").mockImplementation((async (path: string) => {
+		if (path === "/api/v1/skills/registries") {
+			return {
+				data: {
+					registries: [
+						{
+							id: "ao-fixture",
+							displayName: "AO Fixture",
+							type: "local",
+							location: "/srv/ao/registry",
+							enabled: true,
+							trustPolicy: "digest",
+							trustPolicyEnforceable: true,
+							priority: 10,
+							authType: "none",
+							networkPolicySummary: "public addresses only",
+							status: { lastProbeState: "" },
+						},
+					],
+					trustModel: "",
+				},
+			};
+		}
+		return { data: { releases, notes: [], installNotice: INSTALL_NOTICE, ...extra } };
+	}) as never);
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -186,5 +210,114 @@ describe("SkillMarketplaceSettingsSection", () => {
 		for (const name of [/^run$/i, /dry run/i, /execute/i, /enable/i]) {
 			expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
 		}
+	});
+
+	// ------------------------------------------------ phase 11: connectivity
+
+	// Cached data must never be presented as current. A registry AO could not
+	// reach gets the banner, in those words.
+	it("says OFFLINE / STALE METADATA for a registry it could not reach", async () => {
+		vi.spyOn(apiClient, "GET").mockImplementation((async (path: string) => {
+			if (path === "/api/v1/skills/registries") {
+				return { data: { registries: [], trustModel: "" } };
+			}
+			return {
+				data: {
+					releases: [release],
+					notes: [
+						{
+							registryId: "company-private",
+							reason: "registry company-private could not be read: connection refused",
+						},
+					],
+					installNotice: INSTALL_NOTICE,
+				},
+			};
+		}) as never);
+		renderSection();
+
+		const note = await screen.findByTestId("skill-registry-note");
+		expect(note).toHaveTextContent("OFFLINE / STALE METADATA");
+		expect(note).toHaveTextContent(
+			"What is listed for it is what AO last received, not what it offers now.",
+		);
+	});
+
+	// With more than one registry configured, "where did this come from" is the
+	// first question a reader has.
+	it("names the source registry on every result", async () => {
+		mockSearch([release]);
+		renderSection();
+
+		expect(await screen.findByTestId("skill-release-source")).toHaveTextContent(
+			"Registry: AO Fixture",
+		);
+	});
+
+	// A filter narrows what is SHOWN. An unverified release is never hidden by
+	// default: hiding it would answer "what else is out there" with a curated
+	// lie.
+	it("shows unverified releases by default and hides them only when asked", async () => {
+		mockSearch([release]);
+		renderSection();
+
+		await screen.findByText("Security Audit");
+		await userEvent.click(screen.getByLabelText("Verified only"));
+		await waitFor(() =>
+			expect(screen.queryByText("Security Audit")).not.toBeInTheDocument(),
+		);
+	});
+
+	// The source filter narrows the QUERY, because the daemon can answer it.
+	it("asks the daemon for one registry when a source is chosen", async () => {
+		const get = mockSearch([release]);
+		renderSection();
+
+		await screen.findByText("Security Audit");
+		get.mockClear();
+		await userEvent.selectOptions(screen.getByLabelText("Registry"), "ao-fixture");
+
+		await waitFor(() => {
+			const calls = get.mock.calls as unknown as [
+				string,
+				{ params: { query: Record<string, unknown> } },
+			][];
+			const searchCall = calls.find(([path]) => path === "/api/v1/skills/marketplace");
+			expect(searchCall?.[1].params.query).toMatchObject({ registryId: "ao-fixture" });
+		});
+	});
+
+	// Where the bytes came from is part of what an install reports: "verified"
+	// says nothing about whether AO went to the network for them.
+	it("says when an install was served from the verified artifact cache", async () => {
+		mockSearch([release]);
+		vi.spyOn(apiClient, "POST").mockResolvedValue({
+			data: { install: {}, origin: {}, updated: false, fromCache: true, nextStep: INSTALLED_NOTICE },
+		} as never);
+		renderSection();
+
+		await userEvent.click(await screen.findByRole("button", { name: /Install 0\.1\.0/ }));
+
+		await waitFor(() =>
+			expect(screen.getByTestId("skill-marketplace-installed")).toHaveTextContent(
+				"Installed from AO's verified artifact cache",
+			),
+		);
+	});
+
+	// The ordinary install never quietly falls back to cached bytes when a
+	// registry cannot be reached. That is a separate, explicit act.
+	it("never asks for an offline install on its own", async () => {
+		mockSearch([release]);
+		const post = vi.spyOn(apiClient, "POST").mockResolvedValue({
+			data: { install: {}, origin: {}, updated: false, nextStep: INSTALLED_NOTICE },
+		} as never);
+		renderSection();
+
+		await userEvent.click(await screen.findByRole("button", { name: /Install 0\.1\.0/ }));
+
+		await waitFor(() => expect(post).toHaveBeenCalled());
+		const [, options] = post.mock.calls[0] as [string, { body: Record<string, unknown> }];
+		expect(options.body).toMatchObject({ allowOfflineFromCache: false });
 	});
 });

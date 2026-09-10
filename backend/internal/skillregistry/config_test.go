@@ -36,8 +36,27 @@ func TestRegistry_ValidateRejectsMalformedConfiguration(t *testing.T) {
 		{"no display name", func(r *Registry) { r.DisplayName = " " }, "displayName"},
 		{"unknown type", func(r *Registry) { r.Type = "ftp" }, "not one of"},
 		// A type AO can store but not read would answer every search with
-		// silence, which reads as "this registry has nothing".
-		{"declared but unimplemented type", func(r *Registry) { r.Type = RegistryHTTPS; r.Location = "https://x" }, "cannot read it"},
+		// silence, which reads as "this registry has nothing". https became
+		// readable in phase 11; git is still the case this rule is about.
+		{"declared but unimplemented type", func(r *Registry) { r.Type = RegistryGit; r.Location = "git@example.com:x.git" }, "cannot read it"},
+		// An https registry is implemented, so its location is checked as a
+		// base URL instead: one https origin, no credentials, no query.
+		{"https with an unqualified host", func(r *Registry) {
+			r.Type = RegistryHTTPS
+			r.Location = "https://x"
+		}, "fully qualified"},
+		{"https over cleartext", func(r *Registry) {
+			r.Type = RegistryHTTPS
+			r.Location = "http://registry.corp.example"
+		}, "is not https"},
+		{"https with credentials in the URL", func(r *Registry) {
+			r.Type = RegistryHTTPS
+			r.Location = "https://user:pass@registry.corp.example"
+		}, "carries credentials"},
+		{"https at an IP literal", func(r *Registry) {
+			r.Type = RegistryHTTPS
+			r.Location = "https://10.4.2.9"
+		}, "IP literal"},
 		{"relative location", func(r *Registry) { r.Location = "registry" }, "absolute path"},
 		{"traversing location", func(r *Registry) { r.Location = "/srv/../etc" }, "traverse upward"},
 		{"unknown policy", func(r *Registry) { r.TrustPolicy = "vibes" }, "trustPolicy"},

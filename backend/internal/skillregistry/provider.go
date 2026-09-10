@@ -19,6 +19,30 @@ var (
 	// empty list would read as "this registry has nothing", which is a
 	// materially different and much more comfortable fact than the truth.
 	ErrRegistryUnreadable = errors.New("skillregistry: registry is unreadable")
+
+	// The four below split "unreadable" for a registry AO reaches over the
+	// network, because an operator staring at a red row needs to know which
+	// thing to go and fix, and because three of them mean something different
+	// about whether the registry can be TRUSTED at all.
+
+	// ErrRegistryUnreachable means the network never carried a response --
+	// DNS did not answer, the connection was refused, the request timed out.
+	// It says nothing about the registry itself.
+	ErrRegistryUnreachable = errors.New("skillregistry: registry is unreachable")
+	// ErrRegistryTLS means the TLS handshake failed verification. It is
+	// deliberately NOT merged into "unreachable": an unreachable registry is
+	// an operations problem, and a registry whose certificate does not verify
+	// is either a misconfiguration or somebody in the middle.
+	ErrRegistryTLS = errors.New("skillregistry: registry TLS verification failed")
+	// ErrRegistryAuth means the registry rejected the credential (401/403).
+	// The error names the secretRef and never the value.
+	ErrRegistryAuth = errors.New("skillregistry: registry refused the credential")
+	// ErrRegistryResponse means the registry answered with something this
+	// build cannot parse or will not accept -- a wrong content type, an
+	// unsupported apiVersion, a body over the size limit. It is separate from
+	// unreadable because the registry IS answering; what it says is the
+	// problem.
+	ErrRegistryResponse = errors.New("skillregistry: registry returned an invalid response")
 )
 
 // Query is one search. Every field narrows; an empty Query lists everything
@@ -132,6 +156,18 @@ type Provider interface {
 // rather than a change to every caller.
 type ProviderFactory interface {
 	Open(ctx context.Context, reg Registry) (Provider, error)
+}
+
+// ProviderFactoryWithOptions is a factory that accepts the caller's client
+// options -- the shared cache and clock -- alongside the registry.
+//
+// It is an OPTIONAL interface rather than a widening of ProviderFactory
+// because most factories are test fixtures that have no HTTP client at all,
+// and a second parameter they would ignore is a second parameter somebody has
+// to read. A caller type-asserts for it and falls back to Open.
+type ProviderFactoryWithOptions interface {
+	ProviderFactory
+	OpenWith(ctx context.Context, reg Registry, opts HTTPSOptions) (Provider, error)
 }
 
 // ProviderFactoryFunc adapts a function to ProviderFactory.

@@ -73,6 +73,7 @@ func (q *Queries) GetSkillInstallOrigin(ctx context.Context, arg GetSkillInstall
 const getSkillRegistry = `-- name: GetSkillRegistry :one
 SELECT id, display_name, type, location, enabled, trust_policy,
     pinned_publisher, priority, tenant_id, credential_secret_name,
+    auth_type, api_key_header, network_policy,
     created_at, created_by, updated_at, updated_by
 FROM skill_registries WHERE id = ?
 `
@@ -91,12 +92,98 @@ func (q *Queries) GetSkillRegistry(ctx context.Context, id string) (SkillRegistr
 		&i.Priority,
 		&i.TenantID,
 		&i.CredentialSecretName,
+		&i.AuthType,
+		&i.ApiKeyHeader,
+		&i.NetworkPolicy,
 		&i.CreatedAt,
 		&i.CreatedBy,
 		&i.UpdatedAt,
 		&i.UpdatedBy,
 	)
 	return i, err
+}
+
+const getSkillRegistryRevocation = `-- name: GetSkillRegistryRevocation :one
+SELECT registry_id, skill_id, version, reason, revoked_at, observed_at
+FROM skill_registry_revocations
+WHERE registry_id = ? AND skill_id = ? AND version = ?
+`
+
+type GetSkillRegistryRevocationParams struct {
+	RegistryID string
+	SkillID    string
+	Version    string
+}
+
+func (q *Queries) GetSkillRegistryRevocation(ctx context.Context, arg GetSkillRegistryRevocationParams) (SkillRegistryRevocation, error) {
+	row := q.db.QueryRowContext(ctx, getSkillRegistryRevocation, arg.RegistryID, arg.SkillID, arg.Version)
+	var i SkillRegistryRevocation
+	err := row.Scan(
+		&i.RegistryID,
+		&i.SkillID,
+		&i.Version,
+		&i.Reason,
+		&i.RevokedAt,
+		&i.ObservedAt,
+	)
+	return i, err
+}
+
+const getSkillRegistryStatus = `-- name: GetSkillRegistryStatus :one
+SELECT registry_id, last_probe_state, last_probe_detail, last_probe_at,
+    last_probe_latency_ms, last_sync_at, last_revocation_sync_at, updated_at
+FROM skill_registry_status WHERE registry_id = ?
+`
+
+func (q *Queries) GetSkillRegistryStatus(ctx context.Context, registryID string) (SkillRegistryStatus, error) {
+	row := q.db.QueryRowContext(ctx, getSkillRegistryStatus, registryID)
+	var i SkillRegistryStatus
+	err := row.Scan(
+		&i.RegistryID,
+		&i.LastProbeState,
+		&i.LastProbeDetail,
+		&i.LastProbeAt,
+		&i.LastProbeLatencyMs,
+		&i.LastSyncAt,
+		&i.LastRevocationSyncAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const listAllSkillRegistryRevocations = `-- name: ListAllSkillRegistryRevocations :many
+SELECT registry_id, skill_id, version, reason, revoked_at, observed_at
+FROM skill_registry_revocations
+`
+
+func (q *Queries) ListAllSkillRegistryRevocations(ctx context.Context) ([]SkillRegistryRevocation, error) {
+	rows, err := q.db.QueryContext(ctx, listAllSkillRegistryRevocations)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SkillRegistryRevocation{}
+	for rows.Next() {
+		var i SkillRegistryRevocation
+		if err := rows.Scan(
+			&i.RegistryID,
+			&i.SkillID,
+			&i.Version,
+			&i.Reason,
+			&i.RevokedAt,
+			&i.ObservedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listSkillInstallOrigins = `-- name: ListSkillInstallOrigins :many
@@ -214,6 +301,7 @@ func (q *Queries) ListSkillInstallOriginsForSkill(ctx context.Context, skillID s
 const listSkillRegistries = `-- name: ListSkillRegistries :many
 SELECT id, display_name, type, location, enabled, trust_policy,
     pinned_publisher, priority, tenant_id, credential_secret_name,
+    auth_type, api_key_header, network_policy,
     created_at, created_by, updated_at, updated_by
 FROM skill_registries
 `
@@ -238,10 +326,86 @@ func (q *Queries) ListSkillRegistries(ctx context.Context) ([]SkillRegistry, err
 			&i.Priority,
 			&i.TenantID,
 			&i.CredentialSecretName,
+			&i.AuthType,
+			&i.ApiKeyHeader,
+			&i.NetworkPolicy,
 			&i.CreatedAt,
 			&i.CreatedBy,
 			&i.UpdatedAt,
 			&i.UpdatedBy,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSkillRegistryRevocations = `-- name: ListSkillRegistryRevocations :many
+SELECT registry_id, skill_id, version, reason, revoked_at, observed_at
+FROM skill_registry_revocations WHERE registry_id = ?
+`
+
+func (q *Queries) ListSkillRegistryRevocations(ctx context.Context, registryID string) ([]SkillRegistryRevocation, error) {
+	rows, err := q.db.QueryContext(ctx, listSkillRegistryRevocations, registryID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SkillRegistryRevocation{}
+	for rows.Next() {
+		var i SkillRegistryRevocation
+		if err := rows.Scan(
+			&i.RegistryID,
+			&i.SkillID,
+			&i.Version,
+			&i.Reason,
+			&i.RevokedAt,
+			&i.ObservedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSkillRegistryStatuses = `-- name: ListSkillRegistryStatuses :many
+SELECT registry_id, last_probe_state, last_probe_detail, last_probe_at,
+    last_probe_latency_ms, last_sync_at, last_revocation_sync_at, updated_at
+FROM skill_registry_status
+`
+
+func (q *Queries) ListSkillRegistryStatuses(ctx context.Context) ([]SkillRegistryStatus, error) {
+	rows, err := q.db.QueryContext(ctx, listSkillRegistryStatuses)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SkillRegistryStatus{}
+	for rows.Next() {
+		var i SkillRegistryStatus
+		if err := rows.Scan(
+			&i.RegistryID,
+			&i.LastProbeState,
+			&i.LastProbeDetail,
+			&i.LastProbeAt,
+			&i.LastProbeLatencyMs,
+			&i.LastSyncAt,
+			&i.LastRevocationSyncAt,
+			&i.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -411,10 +575,10 @@ const upsertSkillRegistry = `-- name: UpsertSkillRegistry :one
 
 INSERT INTO skill_registries (
     id, display_name, type, location, enabled, trust_policy, pinned_publisher,
-    priority, tenant_id, credential_secret_name,
-    created_at, created_by, updated_at, updated_by
+    priority, tenant_id, credential_secret_name, auth_type, api_key_header,
+    network_policy, created_at, created_by, updated_at, updated_by
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO UPDATE SET
     display_name = excluded.display_name,
     type = excluded.type,
@@ -425,10 +589,14 @@ ON CONFLICT (id) DO UPDATE SET
     priority = excluded.priority,
     tenant_id = excluded.tenant_id,
     credential_secret_name = excluded.credential_secret_name,
+    auth_type = excluded.auth_type,
+    api_key_header = excluded.api_key_header,
+    network_policy = excluded.network_policy,
     updated_at = excluded.updated_at,
     updated_by = excluded.updated_by
 RETURNING id, display_name, type, location, enabled, trust_policy,
     pinned_publisher, priority, tenant_id, credential_secret_name,
+    auth_type, api_key_header, network_policy,
     created_at, created_by, updated_at, updated_by
 `
 
@@ -443,6 +611,9 @@ type UpsertSkillRegistryParams struct {
 	Priority             int64
 	TenantID             *domain.TenantID
 	CredentialSecretName string
+	AuthType             string
+	ApiKeyHeader         string
+	NetworkPolicy        string
 	CreatedAt            time.Time
 	CreatedBy            string
 	UpdatedAt            time.Time
@@ -465,6 +636,9 @@ func (q *Queries) UpsertSkillRegistry(ctx context.Context, arg UpsertSkillRegist
 		arg.Priority,
 		arg.TenantID,
 		arg.CredentialSecretName,
+		arg.AuthType,
+		arg.ApiKeyHeader,
+		arg.NetworkPolicy,
 		arg.CreatedAt,
 		arg.CreatedBy,
 		arg.UpdatedAt,
@@ -482,10 +656,122 @@ func (q *Queries) UpsertSkillRegistry(ctx context.Context, arg UpsertSkillRegist
 		&i.Priority,
 		&i.TenantID,
 		&i.CredentialSecretName,
+		&i.AuthType,
+		&i.ApiKeyHeader,
+		&i.NetworkPolicy,
 		&i.CreatedAt,
 		&i.CreatedBy,
 		&i.UpdatedAt,
 		&i.UpdatedBy,
+	)
+	return i, err
+}
+
+const upsertSkillRegistryRevocation = `-- name: UpsertSkillRegistryRevocation :one
+
+INSERT INTO skill_registry_revocations (
+    registry_id, skill_id, version, reason, revoked_at, observed_at
+)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT (registry_id, skill_id, version) DO UPDATE SET
+    reason = excluded.reason,
+    revoked_at = COALESCE(skill_registry_revocations.revoked_at, excluded.revoked_at)
+RETURNING registry_id, skill_id, version, reason, revoked_at, observed_at
+`
+
+type UpsertSkillRegistryRevocationParams struct {
+	RegistryID string
+	SkillID    string
+	Version    string
+	Reason     string
+	RevokedAt  sql.NullTime
+	ObservedAt time.Time
+}
+
+// Skills phase 11: what a registry says is withdrawn.
+//
+// Persisted while the OFFER deliberately is not (see 0164). Caching "this
+// release is fine" can only be wrong in the dangerous direction; caching "this
+// release is withdrawn" can only be wrong in the safe one.
+func (q *Queries) UpsertSkillRegistryRevocation(ctx context.Context, arg UpsertSkillRegistryRevocationParams) (SkillRegistryRevocation, error) {
+	row := q.db.QueryRowContext(ctx, upsertSkillRegistryRevocation,
+		arg.RegistryID,
+		arg.SkillID,
+		arg.Version,
+		arg.Reason,
+		arg.RevokedAt,
+		arg.ObservedAt,
+	)
+	var i SkillRegistryRevocation
+	err := row.Scan(
+		&i.RegistryID,
+		&i.SkillID,
+		&i.Version,
+		&i.Reason,
+		&i.RevokedAt,
+		&i.ObservedAt,
+	)
+	return i, err
+}
+
+const upsertSkillRegistryStatus = `-- name: UpsertSkillRegistryStatus :one
+
+INSERT INTO skill_registry_status (
+    registry_id, last_probe_state, last_probe_detail, last_probe_at,
+    last_probe_latency_ms, last_sync_at, last_revocation_sync_at, updated_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (registry_id) DO UPDATE SET
+    last_probe_state = excluded.last_probe_state,
+    last_probe_detail = excluded.last_probe_detail,
+    last_probe_at = excluded.last_probe_at,
+    last_probe_latency_ms = excluded.last_probe_latency_ms,
+    last_sync_at = COALESCE(excluded.last_sync_at, skill_registry_status.last_sync_at),
+    last_revocation_sync_at = COALESCE(
+        excluded.last_revocation_sync_at, skill_registry_status.last_revocation_sync_at),
+    updated_at = excluded.updated_at
+RETURNING registry_id, last_probe_state, last_probe_detail, last_probe_at,
+    last_probe_latency_ms, last_sync_at, last_revocation_sync_at, updated_at
+`
+
+type UpsertSkillRegistryStatusParams struct {
+	RegistryID           string
+	LastProbeState       string
+	LastProbeDetail      string
+	LastProbeAt          sql.NullTime
+	LastProbeLatencyMs   int64
+	LastSyncAt           sql.NullTime
+	LastRevocationSyncAt sql.NullTime
+	UpdatedAt            time.Time
+}
+
+// Skills phase 11: what the last connection test and the last sync said.
+//
+// A side table, not columns on skill_registries: the configuration is what an
+// administrator wrote and this is what the network answered, and merging them
+// would make "when was this registry last changed" and "when did it last
+// answer" the same timestamp.
+func (q *Queries) UpsertSkillRegistryStatus(ctx context.Context, arg UpsertSkillRegistryStatusParams) (SkillRegistryStatus, error) {
+	row := q.db.QueryRowContext(ctx, upsertSkillRegistryStatus,
+		arg.RegistryID,
+		arg.LastProbeState,
+		arg.LastProbeDetail,
+		arg.LastProbeAt,
+		arg.LastProbeLatencyMs,
+		arg.LastSyncAt,
+		arg.LastRevocationSyncAt,
+		arg.UpdatedAt,
+	)
+	var i SkillRegistryStatus
+	err := row.Scan(
+		&i.RegistryID,
+		&i.LastProbeState,
+		&i.LastProbeDetail,
+		&i.LastProbeAt,
+		&i.LastProbeLatencyMs,
+		&i.LastSyncAt,
+		&i.LastRevocationSyncAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }

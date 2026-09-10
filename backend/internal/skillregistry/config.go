@@ -7,8 +7,10 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/skillegress"
 )
 
 // ErrInvalidConfig wraps every registry-configuration failure.
@@ -27,10 +29,14 @@ const (
 	// it is what a fixture, an offline mirror and an air-gapped install all
 	// use.
 	RegistryLocal RegistryType = "local"
-	// RegistryHTTPS is an AO official or company-private registry served over
-	// HTTPS. Declared so the configuration shape does not have to change when
-	// one exists; refused at construction today, because a type AO can store
-	// but not read would be a registry that silently returns nothing.
+	// RegistryHTTPS is a company-private registry served over HTTPS. It is
+	// implemented (phase 11): AO reaches exactly one configured origin, over
+	// verified TLS, for metadata only, and fetches bytes on a separate path
+	// that runs only during an install.
+	//
+	// It is NOT an open marketplace and it is not AO Official. Both of those
+	// are the same transport with a different trust root, and neither exists
+	// yet -- see docs/adr/0007.
 	RegistryHTTPS RegistryType = "https"
 	// RegistryGit is a git remote holding the same index layout. Declared and
 	// refused for the same reason.
@@ -47,7 +53,13 @@ func (t RegistryType) Valid() bool {
 }
 
 // Implemented reports whether this build can actually read this type.
-func (t RegistryType) Implemented() bool { return t == RegistryLocal }
+func (t RegistryType) Implemented() bool { return t == RegistryLocal || t == RegistryHTTPS }
+
+// Remote reports whether reading this type means opening a socket. It is what
+// decides whether a credential, a network policy and a cache are meaningful for
+// a registry -- a local directory has none of the three, and accepting a
+// credential for one would record a secret that registry never uses.
+func (t RegistryType) Remote() bool { return t == RegistryHTTPS || t == RegistryGit }
 
 // TrustPolicy is what a registry must satisfy BEYOND integrity before an
 // install from it proceeds.
@@ -98,7 +110,48 @@ var (
 	// The shape is enforced so a value pasted into this field is rejected
 	// rather than persisted.
 	secretNameRe = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+	// An API-key header name. RFC 7230 allows more, but a registry asking for
+	// a header outside this shape is a registry asking for something worth
+	// looking at by hand.
+	headerNameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]{0,63}$`)
 )
+
+// NetworkPolicy is what one registry's traffic may reach BEYOND the default,
+// which is "the configured origin, at a public address".
+//
+// It is a struct rather than a bool so the exception is written down entry by
+// entry. An installation whose registry genuinely lives at 10.4.0.0/16 says so,
+// and the entry appears in the settings screen and in the audit line -- an
+// exception nobody can see is one nobody reviews.
+type NetworkPolicy struct {
+	// PermittedPrivateCIDRs re-opens private ranges for THIS registry only.
+	//
+	// It can never re-open link-local, and therefore never the cloud metadata
+	// address: skillegress.ParsePermittedCIDRs refuses an overlapping entry,
+	// and it is the same function the skill egress proxy validates its
+	// exceptions with. One policy, two callers.
+	PermittedPrivateCIDRs []string `json:"permittedPrivateCidrs,omitempty"`
+}
+
+// Validate rejects an exception that could not be enforced or must not exist.
+func (n NetworkPolicy) Validate() error {
+	if len(n.PermittedPrivateCIDRs) > 16 {
+		return badConfigf("networkPolicy names %d private ranges; a list nobody can read is not a policy",
+			len(n.PermittedPrivateCIDRs))
+	}
+	if _, err := skillegress.ParsePermittedCIDRs(n.PermittedPrivateCIDRs); err != nil {
+		return badConfigf("networkPolicy: %v", err)
+	}
+	return nil
+}
+
+// Summary renders the policy for a settings screen and an audit line.
+func (n NetworkPolicy) Summary() string {
+	if len(n.PermittedPrivateCIDRs) == 0 {
+		return "public addresses only"
+	}
+	return "private ranges permitted: " + strings.Join(n.PermittedPrivateCIDRs, ", ")
+}
 
 // Registry is one configured source of skill releases.
 type Registry struct {
@@ -136,6 +189,42 @@ type Registry struct {
 	// key, and a second, plaintext home for a credential would be a second way
 	// to leak one.
 	CredentialSecretName string `json:"credentialSecretName,omitempty"`
+	// AuthType is how the credential is presented. Empty means none, which is
+	// the default and is what a local registry always is.
+	//
+	// It is explicit rather than inferred from the presence of a secret,
+	// because "we guessed bearer and the registry wanted a header" is a
+	// 401 nobody can debug from the settings screen.
+	AuthType AuthType `json:"authType,omitempty"`
+	// APIKeyHeader is the header name an api_key_header registry expects.
+	// Empty means DefaultAPIKeyHeader. A NAME, printed freely; the value is
+	// never here.
+	APIKeyHeader string `json:"apiKeyHeader,omitempty"`
+	// NetworkPolicy is what this registry's traffic may reach beyond the
+	// default of "the configured origin, at a public address".
+	NetworkPolicy NetworkPolicy `json:"networkPolicy,omitzero"`
+	// CreatedAt and UpdatedAt are the store's, filled on read. They are zero
+	// on a Registry a caller is submitting, and the store never takes them
+	// from one: a client that could set its own updatedAt could hide a change.
+	CreatedAt time.Time `json:"createdAt,omitzero"`
+	UpdatedAt time.Time `json:"updatedAt,omitzero"`
+}
+
+// EffectiveAuthType is the auth type this registry actually uses. An empty
+// configuration means none.
+func (r Registry) EffectiveAuthType() AuthType {
+	if strings.TrimSpace(string(r.AuthType)) == "" {
+		return AuthNone
+	}
+	return r.AuthType
+}
+
+// EffectiveAPIKeyHeader is the header an api_key_header registry uses.
+func (r Registry) EffectiveAPIKeyHeader() string {
+	if name := strings.TrimSpace(r.APIKeyHeader); name != "" {
+		return name
+	}
+	return DefaultAPIKeyHeader
 }
 
 // Validate enforces the configuration contract.
@@ -168,6 +257,15 @@ func (r Registry) Validate() error {
 			return badConfigf("a local registry location must not traverse upward")
 		}
 	}
+	if r.Type == RegistryHTTPS {
+		// The location IS the baseURL, and parsing it is the network policy:
+		// https only, one origin, no credentials in the URL, no query. A
+		// registry whose address cannot be reduced to one origin is one AO
+		// cannot bound, and an unbounded client is an SSRF gadget.
+		if _, _, err := ParseBaseURL(location); err != nil {
+			return badConfigf("location: %v", err)
+		}
+	}
 	if !r.TrustPolicy.Valid() {
 		return badConfigf("trustPolicy %q is not one of digest, pinned_publisher, signed", r.TrustPolicy)
 	}
@@ -188,9 +286,60 @@ func (r Registry) Validate() error {
 		if !secretNameRe.MatchString(name) {
 			return badConfigf("credentialSecretName %q must be an UPPER_SNAKE_CASE secret NAME, never a value", name)
 		}
-		if r.Type == RegistryLocal {
+		if !r.Type.Remote() {
 			return badConfigf("a local registry reads a directory and needs no credential; " +
 				"naming one would record a secret this registry never uses")
+		}
+	}
+	if err := r.validateAuth(); err != nil {
+		return err
+	}
+	if !r.Type.Remote() && len(r.NetworkPolicy.PermittedPrivateCIDRs) > 0 {
+		return badConfigf("a %s registry opens no socket, so a network policy on it would be a "+
+			"permission that grants nothing and reads as if it did", r.Type)
+	}
+	if err := r.NetworkPolicy.Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateAuth keeps the auth type, the secret and the header consistent.
+//
+// Each refusal below is a state where the configuration would LOOK
+// authenticated and behave otherwise, which is the failure worth catching in a
+// settings form rather than in a 401 three weeks later.
+func (r Registry) validateAuth() error {
+	authType := r.EffectiveAuthType()
+	if !authType.Valid() {
+		return badConfigf("authType %q is not one of none, bearer, api_key_header", r.AuthType)
+	}
+	if authType != AuthNone && !r.Type.Remote() {
+		return badConfigf("a %s registry reads a directory and authenticates to nothing", r.Type)
+	}
+	name := strings.TrimSpace(r.CredentialSecretName)
+	if authType.NeedsSecret() && name == "" {
+		return badConfigf("authType %s requires credentialSecretName; a registry set to authenticate "+
+			"with no secret to send would fail every request and read as configured", authType)
+	}
+	if authType == AuthNone && name != "" {
+		return badConfigf("credentialSecretName is set and authType is none, so the credential would " +
+			"never be sent; set an authType or clear the secret")
+	}
+	header := strings.TrimSpace(r.APIKeyHeader)
+	if header != "" {
+		if authType != AuthAPIKeyHeader {
+			return badConfigf("apiKeyHeader is only meaningful with authType api_key_header")
+		}
+		if !headerNameRe.MatchString(header) {
+			return badConfigf("apiKeyHeader %q is not a plain header name", header)
+		}
+		// A credential sent under these names is a credential sent somewhere
+		// it will be interpreted, cached or forwarded by something that is not
+		// the registry.
+		switch strings.ToLower(header) {
+		case "authorization", "cookie", "proxy-authorization", "host":
+			return badConfigf("apiKeyHeader %q is reserved; use authType bearer for Authorization", header)
 		}
 	}
 	return nil
