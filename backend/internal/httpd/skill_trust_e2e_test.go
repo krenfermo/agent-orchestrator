@@ -205,10 +205,10 @@ func TestTrustRoutesPilot(t *testing.T) {
 			TrustExplanation        string
 			RevocationStateObserved string
 			Provenance              struct {
-				Verified                                   bool
+				Verified                                    bool
 				Algorithm, KeyID, KeyFingerprint, KeyOrigin string
 				TrustRootID, TrustRootTier, Publisher       string
-				VerifiedAt                                 time.Time
+				VerifiedAt                                  time.Time
 			}
 		}
 	}
