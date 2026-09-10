@@ -40,12 +40,14 @@ const (
 	// a digest is caught here; one that honestly serves malicious code under a
 	// correct digest is not.
 	TrustVerified TrustState = "verified"
-	// TrustTrusted means a signature chained to a trust anchor this
-	// installation configured was verified.
+	// TrustTrusted means AO verified a signature over a canonical description
+	// of these exact bytes, made by a key that chains to a trust root this
+	// installation configured, held by the publisher the release names.
 	//
-	// AO verifies no signature, so this build never returns it, and
-	// TestTrustedIsUnreachable holds that true. The constant exists so nothing
-	// weaker gets called "trusted" -- see the package doc and ADR 0006.
+	// As of phase 12 it is REACHABLE. What it does not mean is unchanged and
+	// is the part worth repeating: it says who signed, never that the code is
+	// safe, that it has no vulnerabilities, that its capabilities are benign
+	// or that anybody read it. See ADR 0008.
 	TrustTrusted TrustState = "trusted"
 )
 
@@ -65,10 +67,15 @@ func (t TrustState) IntegrityChecked() bool {
 	return t == TrustVerified || t == TrustTrusted
 }
 
-// Provenance is what a release SAYS about its own origin. Every field here is
-// the publisher's claim; AO validates none of it cryptographically, which is
-// why a release carrying a signature is still only ever unverified until AO
-// has hashed its bytes, and never better than verified afterwards.
+// Provenance is what a release SAYS about its own origin, in the pre-signature
+// vocabulary phase 10 defined.
+//
+// Every field here is still an uninterpreted claim: SignatureFormat and
+// Signature are free-form strings from some other ecosystem (a cosign bundle,
+// a minisign line) that AO records and never checks. The field AO DOES check
+// is Release.Signature -- a ReleaseSignature in AO's own scheme -- and the two
+// are deliberately separate types so that a cosign blob in this struct can
+// never be mistaken for something that was verified.
 type Provenance struct {
 	// SignatureFormat names the scheme, e.g. "cosign" or "minisign". Empty
 	// means the release declares no signature at all.
@@ -151,6 +158,15 @@ type Release struct {
 	ArtifactDigest string `json:"artifactDigest"`
 
 	Provenance Provenance `json:"provenance"`
+
+	// Signature is the detached AO signature over this release, when the
+	// registry serves one. Absent means unsigned, which is a legitimate state
+	// for a digest-policy registry and a refusal under signed or official.
+	//
+	// It is DETACHED and outside the package because ManifestDigest is one of
+	// the things it covers: a signature inside the manifest would have to
+	// cover itself.
+	Signature ReleaseSignature `json:"signature,omitzero"`
 
 	// RequestedCapabilities is the union the package declares. AO compares it
 	// against the installed manifest and refuses a mismatch in EITHER
@@ -257,8 +273,22 @@ func (r Release) Validate() error {
 	if r.Revoked && strings.TrimSpace(r.RevocationReason) == "" {
 		return invalidf("a revoked release must say why; one that does not is indistinguishable from a mistake")
 	}
+	// A signature is optional; one that is PRESENT and unparseable is not.
+	// Accepting malformed signature material and deciding about it later would
+	// mean a listing could display "signed" for bytes nothing could ever
+	// check, which is the assurance-without-a-check this whole phase exists to
+	// prevent.
+	if r.Signature.Declared() {
+		if err := r.Signature.Validate(); err != nil {
+			return invalidf("release %s: %v", r.Ref(), err)
+		}
+	}
 	return nil
 }
+
+// Signed reports whether the release carries AO signature material at all. It
+// says nothing about whether that material verifies.
+func (r Release) Signed() bool { return r.Signature.Declared() }
 
 // Ref is the "<skillId>@<version>" identity used in messages and audit lines.
 func (r Release) Ref() string { return r.SkillID + "@" + r.Version }
@@ -279,18 +309,25 @@ func AssessAvailable(r Release) TrustState {
 // AssessInstalled is the trust state of a release whose bytes AO fetched,
 // hashed and matched against the pinned release.
 //
-// It returns verified, never trusted. Callers pass integrityMatched explicitly
-// rather than having this function assume it, so the one place that decides
-// "we checked" is the one place that actually did the comparison.
-func AssessInstalled(r Release, integrityMatched bool) TrustState {
+// Callers pass integrityMatched and signatureVerified explicitly rather than
+// having this function infer either, so the one place that decides "we
+// checked" is the one place that actually did the comparison.
+//
+// The ladder is strict and it only goes up when the step below it held:
+// a signature is never allowed to substitute for the hash. A release whose
+// signature verified but whose bytes did not match is UNVERIFIED, not trusted,
+// because a signature over a description of bytes AO does not have says
+// nothing about the bytes AO does have.
+func AssessInstalled(r Release, integrityMatched, signatureVerified bool) TrustState {
 	if r.Revoked {
 		return TrustRevoked
 	}
 	if !integrityMatched {
 		return TrustUnverified
 	}
-	// Deliberately NOT TrustTrusted, however much provenance the release
-	// declares. AO validated no signature; it compared two hashes.
+	if signatureVerified {
+		return TrustTrusted
+	}
 	return TrustVerified
 }
 

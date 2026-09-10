@@ -79,29 +79,70 @@ const (
 	// for "this registry only ever serves OUR packages", and it is what
 	// catches a registry that starts publishing somebody else's name.
 	TrustPolicyPinnedPublisher TrustPolicy = "pinned_publisher"
-	// TrustPolicySigned additionally requires a verified signature.
+	// TrustPolicySigned additionally requires a VERIFIED SIGNATURE chaining to
+	// a trust root this installation configured. It produces TrustTrusted, and
+	// as of phase 12 it is satisfiable: a release AO could only ever call
+	// verified before now reaches trusted when a key AO holds signed it.
 	//
-	// AO verifies none, so a registry on this policy installs NOTHING, and the
-	// refusal names the missing verification. That is deliberate and it is the
-	// honest shape: the alternative is a policy that reads as the strictest
-	// setting and silently behaves as the weakest.
+	// A verified result NEVER satisfies this policy. That is the whole
+	// distinction the two states exist to carry: integrity is "these are the
+	// bytes that were resolved", and trust is "and this is who said so".
 	TrustPolicySigned TrustPolicy = "signed"
+	// TrustPolicyOfficial is signed, narrowed to the OFFICIAL tier: the key
+	// must chain to a root compiled into this AO build, and the publisher must
+	// be the official one.
+	//
+	// This build carries no official root (see official.go for why shipping a
+	// placeholder would be a forgery handed out for free), so a registry on
+	// this policy installs nothing and the refusal says so. The machinery is
+	// real and tested; the key is a release-engineering act this phase does
+	// not perform.
+	TrustPolicyOfficial TrustPolicy = "official"
 )
 
 // Valid reports whether p is a supported policy.
 func (p TrustPolicy) Valid() bool {
 	switch p {
-	case TrustPolicyDigest, TrustPolicyPinnedPublisher, TrustPolicySigned:
+	case TrustPolicyDigest, TrustPolicyPinnedPublisher, TrustPolicySigned, TrustPolicyOfficial:
 		return true
 	}
 	return false
 }
 
-// Enforceable reports whether this build can actually satisfy the policy. A
-// policy that cannot be satisfied is not an error to CONFIGURE -- an
-// administrator may legitimately want their registry inert until AO can verify
-// signatures -- but every install under it is refused.
-func (p TrustPolicy) Enforceable() bool { return p != TrustPolicySigned }
+// RequiresSignature reports whether this policy refuses anything short of
+// TrustTrusted.
+//
+// It is the one place that answers "does verified count here", asked by the
+// install path and by every screen that renders a policy. Two policies
+// answering yes and a third answering no is a switch somebody widens without
+// noticing; a method is a switch the compiler helps with.
+func (p TrustPolicy) RequiresSignature() bool {
+	return p == TrustPolicySigned || p == TrustPolicyOfficial
+}
+
+// AcceptedTiers is which trust-root tiers satisfy this policy.
+//
+// signed accepts official AND enterprise: an administrator who configured
+// their own root meant it, and refusing it would make "signed" mean "signed by
+// us", which is what official is for.
+func (p TrustPolicy) AcceptedTiers() []TrustTier {
+	switch p {
+	case TrustPolicyOfficial:
+		return []TrustTier{TierOfficial}
+	case TrustPolicySigned:
+		return []TrustTier{TierOfficial, TierEnterprise}
+	}
+	return nil
+}
+
+// Enforceable reports whether this build can satisfy the policy AT ALL, before
+// any particular release is considered.
+//
+// Phase 12 made signed enforceable: AO verifies signatures now. official stays
+// unenforceable only because no official root has been published, and that is
+// answered by the caller consulting the trust store rather than by a constant
+// here -- which is why this method no longer knows about official either.
+func (p TrustPolicy) Enforceable() bool { return true }
 
 var (
 	registryIDRe = regexp.MustCompile(`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`)
@@ -267,7 +308,8 @@ func (r Registry) Validate() error {
 		}
 	}
 	if !r.TrustPolicy.Valid() {
-		return badConfigf("trustPolicy %q is not one of digest, pinned_publisher, signed", r.TrustPolicy)
+		return badConfigf("trustPolicy %q is not one of digest, pinned_publisher, signed, official",
+			r.TrustPolicy)
 	}
 	pinned := strings.TrimSpace(r.PinnedPublisher)
 	if r.TrustPolicy == TrustPolicyPinnedPublisher && pinned == "" {
