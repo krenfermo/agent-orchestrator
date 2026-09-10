@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { components } from "../../../api/schema";
 import { apiClient, apiErrorMessage } from "../../lib/api-client";
+import { classifyTrustValidity, trustValidityTone } from "../../lib/trust-validity";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -48,6 +49,17 @@ type TrustRevocation = components["schemas"]["SkillTrustRevocationView"];
  * for recognising a key you already know; deciding two keys are the same one
  * needs every character, and a screen that only offered the short form would be
  * inviting the comparison it cannot support.
+ *
+ * # Why the validity window is shown, not just the status
+ *
+ * A key's window is what decides whether a HISTORICAL signature verifies: the
+ * backend checks a signature against the moment it was made, not against now.
+ * So "active" alone is not enough to read a provenance record — a release
+ * signed last year by a key that expired in March is still legitimately
+ * trusted, and a screen showing only "Expired" would imply the opposite.
+ * Every root and key therefore prints validFrom, validUntil (or, explicitly,
+ * that there is none) and a state that distinguishes closing a window on
+ * schedule from repudiating it.
  *
  * # Why revoked and retired keys stay on screen
  *
@@ -143,8 +155,58 @@ export function SkillTrustSettingsSection() {
 		revoke.mutate({ subject, subjectId, reason });
 	};
 
-	const statusVariant = (status: string) =>
-		status === "active" ? "success" : status === "revoked" ? "error" : "warning";
+	// One clock for the whole render, so two rows cannot disagree about "now".
+	const now = new Date();
+
+	const formatDate = (value?: string | null) =>
+		value ? new Date(value).toLocaleString() : null;
+
+	// The validity block every root and key gets. It prints the window in full
+	// -- including saying so when there is no expiry -- because an absent
+	// validUntil and an unknown one look identical if you only omit the line.
+	const validity = (row: { status: string; validFrom?: string; validUntil?: string | null }) => {
+		const verdict = classifyTrustValidity(
+			{ status: row.status, validFrom: row.validFrom, validUntil: row.validUntil },
+			now,
+		);
+		return (
+			<div className="flex flex-col gap-0.5">
+				<div className="flex flex-wrap items-center gap-2">
+					{/* The state is a WORD as well as a colour. A state carried by
+					    colour alone is a state some readers cannot read. */}
+					<Badge variant={trustValidityTone(verdict.state)}>
+						{t(`settings.skillTrust.validity.${verdict.state}`)}
+					</Badge>
+					<span className="text-caption text-settings-muted">
+						{t("settings.skillTrust.validFrom", { from: formatDate(row.validFrom) ?? "—" })}
+					</span>
+					<span className="text-caption text-settings-muted">
+						{row.validUntil
+							? t("settings.skillTrust.validUntil", { until: formatDate(row.validUntil) })
+							: t("settings.skillTrust.noExpiry")}
+					</span>
+				</div>
+				{/* Closing a window on schedule keeps history; revoking repudiates
+				    it. Saying which is the difference between "this old release is
+				    still fine" and "re-check everything this key ever signed". */}
+				{verdict.state === "expired" || verdict.state === "retired" ? (
+					<p className="text-caption text-settings-muted">
+						{t("settings.skillTrust.stillVerifiesHistory")}
+					</p>
+				) : null}
+				{verdict.state === "revoked" ? (
+					<p className="text-caption text-error">
+						{t("settings.skillTrust.historyRepudiated")}
+					</p>
+				) : null}
+				{verdict.state === "not-yet-valid" ? (
+					<p className="text-caption text-settings-muted">
+						{t("settings.skillTrust.notYetValidNote")}
+					</p>
+				) : null}
+			</div>
+		);
+	};
 
 	return (
 		<SettingsSection title={t("settings.skillTrust.title")} data-testid="skill-trust-settings">
@@ -191,7 +253,7 @@ export function SkillTrustSettingsSection() {
 								<ShieldCheck className="size-3.5 shrink-0 text-settings-muted" aria-hidden="true" />
 								<span className="text-caption font-medium">{root.displayName}</span>
 								<Badge variant="outline">{t(`settings.skillTrust.tier.${root.tier}`)}</Badge>
-								<Badge variant={statusVariant(root.status)}>
+								<Badge variant="outline">
 									{t(`settings.skillTrust.status.${root.status}`)}
 								</Badge>
 								{root.builtIn ? (
@@ -206,6 +268,7 @@ export function SkillTrustSettingsSection() {
 									publisher: root.publisher,
 								})}
 							</p>
+							{validity(root)}
 							{root.revocationReason ? (
 								<p className="text-caption text-error">
 									{t("settings.skillTrust.revokedReason", { reason: root.revocationReason })}
@@ -223,7 +286,7 @@ export function SkillTrustSettingsSection() {
 											<div className="flex flex-wrap items-center gap-2 text-caption">
 												<KeyRound className="size-3 shrink-0 text-settings-muted" aria-hidden="true" />
 												<span className="font-mono">{k.keyId}</span>
-												<Badge variant={statusVariant(k.status)}>
+												<Badge variant="outline">
 													{t(`settings.skillTrust.status.${k.status}`)}
 												</Badge>
 												<Badge variant="outline">
@@ -242,6 +305,15 @@ export function SkillTrustSettingsSection() {
 													full: k.fingerprint,
 												})}
 											</p>
+											{/* The publisher a key signs for, beside the key, so a
+											    reader does not have to infer it from the root. */}
+											<p className="text-caption text-settings-muted">
+												{t("settings.skillTrust.keyPublisher", {
+													publisher: k.publisher,
+													algorithm: k.algorithm,
+												})}
+											</p>
+											{validity(k)}
 											{k.rotatedFromKeyId ? (
 												<p className="text-caption text-settings-muted">
 													{t("settings.skillTrust.rotatedFrom", { keyId: k.rotatedFromKeyId })}

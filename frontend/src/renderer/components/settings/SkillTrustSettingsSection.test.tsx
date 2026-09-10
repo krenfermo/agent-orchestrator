@@ -195,4 +195,88 @@ describe("SkillTrustSettingsSection", () => {
 			).toBeInTheDocument(),
 		);
 	});
+
+	// Phase 12.1: the window is what decides whether a HISTORICAL signature
+	// verifies, so it has to be on screen -- and the five states have to be
+	// distinguishable by their words, not only by colour.
+	it("shows the validity window and names the state in words", async () => {
+		mockTrust({ roots: [enterpriseRoot] });
+		renderSection();
+		const roots = await screen.findByTestId("skill-trust-roots");
+		expect(roots).toHaveTextContent("Active now");
+		expect(roots).toHaveTextContent("Valid from");
+		// An absent expiry is STATED, never omitted: omitting it makes "no
+		// expiry" and "unknown" look identical.
+		expect(roots).toHaveTextContent("no expiry set");
+	});
+
+	it("separates a key that is expired from one that is revoked", async () => {
+		mockTrust({
+			roots: [
+				{
+					...enterpriseRoot,
+					keys: [
+						{
+							...enterpriseRoot.keys[1],
+							keyId: "expired-key",
+							status: "active",
+							validFrom: "2026-01-01T00:00:00Z",
+							validUntil: "2026-02-01T00:00:00Z",
+						},
+						{
+							...enterpriseRoot.keys[1],
+							keyId: "revoked-key",
+							status: "revoked",
+							revokedAt: "2026-03-01T00:00:00Z",
+							revocationReason: "laptop stolen",
+						},
+					],
+				},
+			],
+		});
+		renderSection();
+		const roots = await screen.findByTestId("skill-trust-roots");
+		expect(roots).toHaveTextContent("Expired");
+		expect(roots).toHaveTextContent("Revoked");
+		// The distinction that matters: closing a window on schedule keeps
+		// history, revoking repudiates it.
+		expect(roots).toHaveTextContent("still verify");
+		expect(roots).toHaveTextContent("Signatures it made earlier are refused too");
+	});
+
+	it("marks a key whose window has not opened yet", async () => {
+		mockTrust({
+			roots: [
+				{
+					...enterpriseRoot,
+					keys: [
+						{
+							...enterpriseRoot.keys[1],
+							keyId: "future-key",
+							status: "active",
+							validFrom: "2099-01-01T00:00:00Z",
+						},
+					],
+				},
+			],
+		});
+		renderSection();
+		const roots = await screen.findByTestId("skill-trust-roots");
+		expect(roots).toHaveTextContent("Not yet valid");
+		expect(roots).toHaveTextContent("Signatures dated before this are refused");
+	});
+
+	it("shows a root whose own validFrom is in the future", async () => {
+		mockTrust({ roots: [{ ...enterpriseRoot, validFrom: "2099-01-01T00:00:00Z" }] });
+		renderSection();
+		expect(await screen.findByText("Not yet valid")).toBeInTheDocument();
+	});
+
+	it("names the publisher and algorithm a key signs for", async () => {
+		mockTrust({ roots: [enterpriseRoot] });
+		renderSection();
+		const roots = await screen.findByTestId("skill-trust-roots");
+		expect(roots).toHaveTextContent("Signs for corp");
+		expect(roots).toHaveTextContent("ed25519");
+	});
 });
