@@ -133,7 +133,7 @@ func TestArtifactCacheReVerifiesBeforeReuse(t *testing.T) {
 	if err := cache.PutArtifact(entry, staging); err != nil {
 		t.Fatalf("PutArtifact: %v", err)
 	}
-	got, err := cache.GetArtifact("corp", rel.ArtifactDigest)
+	got, err := cache.GetArtifact("corp", rel.ArtifactDigest, rel.ManifestDigest)
 	if err != nil {
 		t.Fatalf("GetArtifact: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestArtifactCacheReVerifiesBeforeReuse(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(got.Dir(), "extra-payload.sh"), []byte("#!/bin/sh\n"), 0o600); err != nil {
 		t.Fatalf("tamper: %v", err)
 	}
-	if _, err := cache.GetArtifact("corp", rel.ArtifactDigest); err == nil {
+	if _, err := cache.GetArtifact("corp", rel.ArtifactDigest, rel.ManifestDigest); err == nil {
 		t.Fatal("a tampered cache entry was reused")
 	}
 	// And the poisoned entry is gone rather than left to be found again.
@@ -194,10 +194,10 @@ func TestArtifactCacheIsNamespacedByRegistry(t *testing.T) {
 	}, dir); err != nil {
 		t.Fatalf("PutArtifact: %v", err)
 	}
-	if _, err := cache.GetArtifact("tenant-a-registry", digest); err != nil {
+	if _, err := cache.GetArtifact("tenant-a-registry", digest, manifestDigest); err != nil {
 		t.Fatalf("the owning registry cannot read its own entry: %v", err)
 	}
-	if _, err := cache.GetArtifact("tenant-b-registry", digest); err == nil {
+	if _, err := cache.GetArtifact("tenant-b-registry", digest, manifestDigest); err == nil {
 		t.Fatal("another registry read a cached artifact by digest alone")
 	}
 }
@@ -245,7 +245,7 @@ func TestNilCacheIsAWorkingNoCache(t *testing.T) {
 		t.Fatal("a nil cache reported a hit")
 	}
 	cache.PutMetadata("corp", "key", skillregistry.MetadataEntry{Body: []byte("{}")})
-	if _, err := cache.GetArtifact("corp", registrytest.Sha256("x")); err == nil {
+	if _, err := cache.GetArtifact("corp", registrytest.Sha256("x"), registrytest.Sha256("y")); err == nil {
 		t.Fatal("a nil cache reported an artifact")
 	}
 	if err := cache.PutArtifact(skillregistry.ArtifactEntry{}, t.TempDir()); err != nil {
@@ -253,5 +253,58 @@ func TestNilCacheIsAWorkingNoCache(t *testing.T) {
 	}
 	if _, err := cache.GC(); err != nil {
 		t.Fatalf("a nil cache errored on GC: %v", err)
+	}
+}
+
+// TestTwoVersionsWithIdenticalCodeDoNotShareACacheEntry is the bug that keying
+// the artifact cache on the package digest alone actually produced.
+//
+// skillcatalog.ComputePackageDigest deliberately EXCLUDES the manifest -- the
+// manifest carries that digest and so cannot cover itself -- so two releases
+// whose only difference is the version line hash to the same artifact digest.
+// That is every ordinary version bump of a skill whose code did not change.
+//
+// Keyed on the artifact digest alone, installing 0.2.0 would have been served
+// 0.1.0's tree and refused for a manifest-digest mismatch: a correct refusal of
+// a correct package, which is the worst kind of failure because it looks like
+// the security control working.
+func TestTwoVersionsWithIdenticalCodeDoNotShareACacheEntry(t *testing.T) {
+	srv := registrytest.New(t, "corp")
+	oldRel := srv.Publish(t, registrytest.Spec{SkillID: "security-audit", Version: "0.1.0"})
+	newRel := srv.Publish(t, registrytest.Spec{SkillID: "security-audit", Version: "0.2.0"})
+
+	if oldRel.ArtifactDigest != newRel.ArtifactDigest {
+		t.Fatalf("this fixture no longer reproduces the collision; the two artifact digests differ: "+
+			"%s vs %s", oldRel.ArtifactDigest, newRel.ArtifactDigest)
+	}
+	if oldRel.ManifestDigest == newRel.ManifestDigest {
+		t.Fatal("the two manifests hash the same, so the versions are indistinguishable")
+	}
+
+	cache := skillregistry.NewCache(t.TempDir(), skillregistry.CacheLimits{})
+	p, err := skillregistry.NewHTTPSProvider(context.Background(), srv.Registry("corp"), nil, srv.Options())
+	if err != nil {
+		t.Fatalf("NewHTTPSProvider: %v", err)
+	}
+	for _, rel := range []skillregistry.Release{oldRel, newRel} {
+		dir := filepath.Join(t.TempDir(), "q")
+		if err := p.FetchArtifact(context.Background(), rel, dir); err != nil {
+			t.Fatalf("FetchArtifact %s: %v", rel.Ref(), err)
+		}
+		if err := cache.PutArtifact(skillregistry.ArtifactEntry{
+			RegistryID: "corp", SkillID: rel.SkillID, Version: rel.Version,
+			ArtifactDigest: rel.ArtifactDigest, ManifestDigest: rel.ManifestDigest, Release: rel,
+		}, dir); err != nil {
+			t.Fatalf("PutArtifact %s: %v", rel.Ref(), err)
+		}
+	}
+	for _, rel := range []skillregistry.Release{oldRel, newRel} {
+		got, err := cache.GetArtifact("corp", rel.ArtifactDigest, rel.ManifestDigest)
+		if err != nil {
+			t.Fatalf("GetArtifact %s: %v", rel.Ref(), err)
+		}
+		if got.Version != rel.Version {
+			t.Fatalf("the cache served %s for a %s lookup", got.Version, rel.Version)
+		}
 	}
 }

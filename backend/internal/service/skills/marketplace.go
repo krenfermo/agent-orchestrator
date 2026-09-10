@@ -67,6 +67,24 @@ type MarketplaceStore interface {
 	AppendSkillAudit(ctx context.Context, entry store.SkillAuditEntry) error
 }
 
+// RegistryStatusStore is the phase-11 half: what the network said, and what a
+// registry has withdrawn.
+//
+// It is a SEPARATE interface from MarketplaceStore rather than more methods on
+// it, because it is optional. An installation with no status store still
+// searches and installs from a local registry; it simply cannot record a
+// connection test or a revocation sync, and the marketplace degrades to
+// exactly that rather than refusing to start.
+type RegistryStatusStore interface {
+	UpsertSkillRegistryStatus(ctx context.Context, in store.SkillRegistryStatus) (store.SkillRegistryStatus, error)
+	GetSkillRegistryStatus(ctx context.Context, registryID string) (store.SkillRegistryStatus, bool, error)
+	ListSkillRegistryStatuses(ctx context.Context) ([]store.SkillRegistryStatus, error)
+
+	UpsertSkillRegistryRevocation(ctx context.Context, in store.SkillRegistryRevocation) (store.SkillRegistryRevocation, error)
+	GetSkillRegistryRevocation(ctx context.Context, registryID, skillID, version string) (store.SkillRegistryRevocation, bool, error)
+	ListSkillRegistryRevocations(ctx context.Context, registryID string) ([]store.SkillRegistryRevocation, error)
+}
+
 // Marketplace searches configured registries and installs exact releases from
 // them.
 type Marketplace struct {
@@ -86,8 +104,18 @@ type Marketplace struct {
 	// It is under AO's data dir, beside the catalog, and every directory in it
 	// is removed whether the install succeeded or failed.
 	quarantineRoot string
-	now            func() time.Time
-	newID          func() string
+	// status records what the network said and what a registry withdrew. Nil
+	// on an installation without it; every use is guarded, and the operations
+	// that REQUIRE it say so rather than pretending to work.
+	status RegistryStatusStore
+	// secrets resolves a private registry's credential. Nil means a registry
+	// with an authType other than none cannot be opened, which is the
+	// fail-closed direction.
+	secrets skillregistry.SecretResolver
+	// cache is the metadata/artifact cache. Nil is a working "no cache".
+	cache *skillregistry.Cache
+	now   func() time.Time
+	newID func() string
 }
 
 // NewMarketplace builds the marketplace over a store and a catalog service.
@@ -104,9 +132,42 @@ func NewMarketplace(
 		store: st, catalog: catalog, providers: providers,
 		aoVersion:      strings.TrimSpace(aoVersion),
 		quarantineRoot: filepath.Join(dataDir, "skills", "quarantine"),
-		now:            func() time.Time { return time.Now().UTC() },
-		newID:          func() string { return "skreg-" + randomHex() },
+		// The cache lives under AO's data dir like everything else AO stores.
+		// It is created here rather than injected because its location is not
+		// a decision anybody should be making per installation.
+		cache: skillregistry.NewCache(
+			filepath.Join(dataDir, "skills", "registry-cache"), skillregistry.CacheLimits{}),
+		now:   func() time.Time { return time.Now().UTC() },
+		newID: func() string { return "skreg-" + randomHex() },
 	}
+}
+
+// WithConnectivity wires the phase-11 half: the status/revocation store and the
+// credential resolver.
+//
+// It is a separate call rather than four more parameters on NewMarketplace so
+// that the twelve existing call sites -- every one of them a test with a local
+// fixture registry, which needs neither -- keep saying what they mean.
+func (m *Marketplace) WithConnectivity(
+	status RegistryStatusStore, secrets skillregistry.SecretResolver,
+) *Marketplace {
+	if m == nil {
+		return nil
+	}
+	m.status = status
+	m.secrets = secrets
+	return m
+}
+
+// httpOptions are the client options every provider this marketplace opens
+// gets: the shared cache, and nothing else.
+//
+// There is deliberately no path from here to RootCAs or Resolver. Those two
+// exist for this package's HTTPS fixture and have no configuration reaching
+// them, which is what keeps "AO verifies certificates" a property rather than a
+// default.
+func (m *Marketplace) httpOptions() skillregistry.HTTPSOptions {
+	return skillregistry.HTTPSOptions{Cache: m.cache, Now: m.now}
 }
 
 // Available reports whether the marketplace can answer at all.
@@ -120,6 +181,21 @@ func (m *Marketplace) requireAvailable() error {
 			"no skill registry backend is configured on this installation", nil)
 	}
 	return nil
+}
+
+// openProvider opens one registry with this marketplace's client options.
+//
+// Every read and every install goes through here, so the cache and the clock
+// reach a provider from exactly one place. A factory that does not take options
+// -- every test fixture -- falls back to Open and simply has no cache, which is
+// the correct behaviour for a fixture.
+func (m *Marketplace) openProvider(
+	ctx context.Context, reg skillregistry.Registry,
+) (skillregistry.Provider, error) {
+	if withOpts, ok := m.providers.(skillregistry.ProviderFactoryWithOptions); ok {
+		return withOpts.OpenWith(ctx, reg, m.httpOptions())
+	}
+	return m.providers.Open(ctx, reg)
 }
 
 // ---------------------------------------------------------------- registries
@@ -166,12 +242,17 @@ func (m *Marketplace) SaveRegistry(ctx context.Context, req RegistryRequest) (sk
 		return skillregistry.Registry{}, apierr.Forbidden("SKILL_REGISTRY_TENANT_REFUSED",
 			fmt.Sprintf("you are not a member of %s, so you cannot configure a registry inside it", reg.TenantID))
 	}
-	if _, err := m.providers.Open(ctx, reg); err != nil {
+	// Opening it proves the configuration is one AO can act on: the base URL
+	// reduces to one origin, the network policy parses, and the credential
+	// resolves. It does NOT prove the registry answers -- that is what the
+	// connection test is for, and conflating the two would make saving a
+	// registry depend on it being up.
+	if _, err := m.openProvider(ctx, reg); err != nil {
 		return skillregistry.Registry{}, apierr.Invalid("SKILL_REGISTRY_UNREADABLE",
 			fmt.Sprintf("this registry cannot be read: %v", err), nil)
 	}
 
-	_, existed, err := m.store.GetSkillRegistry(ctx, reg.ID)
+	previous, existed, err := m.store.GetSkillRegistry(ctx, reg.ID)
 	if err != nil {
 		return skillregistry.Registry{}, err
 	}
@@ -188,7 +269,88 @@ func (m *Marketplace) SaveRegistry(ctx context.Context, req RegistryRequest) (sk
 		Action: action,
 		Detail: registryDetail(saved),
 	})
+	// Enabling and disabling get their own rows. They are buried inside an
+	// update otherwise, and "when did this registry start being allowed to
+	// serve this installation" is a question with a date, not a diff.
+	if existed && previous.Enabled != saved.Enabled {
+		toggled := store.SkillAuditRegistryDisabled
+		note := "it keeps every install it produced and their provenance, and stops answering " +
+			"searches and serving installs"
+		if saved.Enabled {
+			toggled = store.SkillAuditRegistryEnabled
+			note = "it may now answer searches and serve installs"
+		}
+		m.audit(ctx, store.SkillAuditEntry{
+			Actor:  req.Actor,
+			Action: toggled,
+			Detail: fmt.Sprintf("registry %s: %s", saved.ID, note),
+		})
+	}
 	return saved, nil
+}
+
+// RegistryStatus returns what AO last observed about one registry, or a zero
+// status when nothing has been observed.
+//
+// A never-tested registry is a real state and reads as such: it is not a
+// failure, and rendering it as one would teach people that red means nothing.
+func (m *Marketplace) RegistryStatus(
+	ctx context.Context, id string,
+) (store.SkillRegistryStatus, error) {
+	if m.status == nil {
+		return store.SkillRegistryStatus{RegistryID: id}, nil
+	}
+	row, ok, err := m.status.GetSkillRegistryStatus(ctx, id)
+	if err != nil || !ok {
+		return store.SkillRegistryStatus{RegistryID: id}, nil //nolint:nilerr // an unrecorded status is not an error.
+	}
+	return row, nil
+}
+
+// RegistryStatuses returns the observed status of every registry, by id.
+func (m *Marketplace) RegistryStatuses(
+	ctx context.Context,
+) (map[string]store.SkillRegistryStatus, error) {
+	out := map[string]store.SkillRegistryStatus{}
+	if m.status == nil {
+		return out, nil
+	}
+	rows, err := m.status.ListSkillRegistryStatuses(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		out[row.RegistryID] = row
+	}
+	return out, nil
+}
+
+// RegistryRevocations returns what AO has recorded as withdrawn by one
+// registry, newest observation first.
+func (m *Marketplace) RegistryRevocations(
+	ctx context.Context, id string, tenants []domain.TenantID,
+) ([]store.SkillRegistryRevocation, error) {
+	if err := m.requireAvailable(); err != nil {
+		return nil, err
+	}
+	reg, err := m.visibleRegistry(ctx, id, tenants)
+	if err != nil {
+		return nil, err
+	}
+	if m.status == nil {
+		return []store.SkillRegistryRevocation{}, nil
+	}
+	rows, err := m.status.ListSkillRegistryRevocations(ctx, reg.ID)
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		if !rows[i].ObservedAt.Equal(rows[j].ObservedAt) {
+			return rows[i].ObservedAt.After(rows[j].ObservedAt)
+		}
+		return rows[i].Ref() < rows[j].Ref()
+	})
+	return rows, nil
 }
 
 // RemoveRegistry deletes one configuration.
@@ -339,7 +501,7 @@ func (m *Marketplace) Search(ctx context.Context, req SearchRequest) (SearchResu
 
 	result := SearchResult{Releases: []FoundRelease{}, Notes: []SearchNote{}}
 	for _, reg := range registries {
-		provider, err := m.providers.Open(ctx, reg)
+		provider, err := m.openProvider(ctx, reg)
 		if err != nil {
 			result.Notes = append(result.Notes, SearchNote{RegistryID: reg.ID, Reason: err.Error()})
 			continue
@@ -445,7 +607,7 @@ func (m *Marketplace) GetRelease(
 	if err != nil {
 		return FoundRelease{}, nil, err
 	}
-	provider, err := m.providers.Open(ctx, reg)
+	provider, err := m.openProvider(ctx, reg)
 	if err != nil {
 		return FoundRelease{}, nil, registryUnreadable(reg.ID, err)
 	}
@@ -493,6 +655,17 @@ type InstallReleaseRequest struct {
 	// allowed: versions live side by side and an activation pins one, so an
 	// install can never change what a project already resolves to.
 	AsUpdate bool
+	// AllowOfflineFromCache permits an install to proceed when the registry
+	// cannot be reached, using bytes AO already fetched and verified.
+	//
+	// It is an explicit act rather than a stored setting on purpose. Every
+	// other "install anyway" in AO is a person deciding, and a checkbox in
+	// settings that quietly allowed offline installs would be a setting nobody
+	// remembers is on. What it CANNOT do is any of the checks: the cached tree
+	// is re-hashed, the manifest is re-read, the recorded revocation is
+	// re-consulted, and a release AO never downloaded cannot be installed
+	// offline at all.
+	AllowOfflineFromCache bool
 
 	Actor            string
 	ActorPermissions []domain.Permission
@@ -508,6 +681,15 @@ type InstallOutcome struct {
 	// newest. It never means a project's pinned version changed -- nothing
 	// here touches an activation.
 	Updated bool
+	// FromCache reports that the bytes came from AO's artifact cache rather
+	// than from the network. They were verified identically -- both digests,
+	// recomputed over the tree -- and the distinction is recorded because
+	// "where did these bytes come from" is what an incident review asks.
+	FromCache bool
+	// Offline reports that the registry could not be reached and the install
+	// proceeded on evidence AO already held. It is never true unless the
+	// caller asked for it.
+	Offline bool
 }
 
 // InstallRelease resolves, verifies and installs one exact release.
@@ -537,24 +719,34 @@ func (m *Marketplace) InstallRelease(
 		return InstallOutcome{}, m.refuse(ctx, req, reg, "SKILL_REGISTRY_DISABLED",
 			fmt.Sprintf("registry %s is disabled", reg.ID))
 	}
-	provider, err := m.providers.Open(ctx, reg)
+	provider, err := m.openProvider(ctx, reg)
 	if err != nil {
 		return InstallOutcome{}, registryUnreadable(reg.ID, err)
 	}
 
 	// 1. Resolve ONE exact release, re-read from the authoritative source.
-	rel, err := provider.ResolveExactRelease(ctx, req.SkillID, strings.TrimSpace(req.Version))
+	//    ResolveExactRelease never answers from cache, which is what makes
+	//    step 2 mean something.
+	rel, offline, err := m.resolveForInstall(ctx, provider, reg, req)
 	if err != nil {
-		return InstallOutcome{}, releaseLookupError(reg.ID, req.SkillID, req.Version, err)
+		return InstallOutcome{}, err
 	}
 	rel.RegistryID = reg.ID
 
-	// 2. Revocation blocks a NEW install immediately, and is re-checked here
-	//    rather than trusted from whatever a search cached, because a search
-	//    caches nothing on purpose.
+	// 2. Revocation blocks a NEW install immediately. It is checked twice, and
+	//    the second check is the one that matters when the network is down:
+	//    the registry's live answer, AND what AO has already recorded as
+	//    withdrawn. A registry AO cannot reach is not a registry with nothing
+	//    revoked, and silence is not consent.
 	if rel.Revoked {
 		return InstallOutcome{}, m.refuse(ctx, req, reg, "SKILL_RELEASE_REVOKED",
 			fmt.Sprintf("%s was revoked by %s: %s", rel.Ref(), reg.ID, rel.RevocationReason))
+	}
+	if known, ok := m.knownRevocation(ctx, reg.ID, rel.SkillID, rel.Version); ok {
+		return InstallOutcome{}, m.refuse(ctx, req, reg, "SKILL_RELEASE_REVOKED",
+			fmt.Sprintf("%s was revoked by %s on %s: %s. AO recorded this and it stands whether or "+
+				"not the registry can be reached right now",
+				rel.Ref(), reg.ID, known.ObservedAt.Format(time.RFC3339), known.Reason))
 	}
 
 	// 3. The registry's trust policy, beyond integrity.
@@ -607,10 +799,13 @@ func (m *Marketplace) InstallRelease(
 	}
 	defer cleanup()
 
-	if err := provider.FetchArtifact(ctx, rel, quarantine); err != nil {
-		return InstallOutcome{}, m.refuse(ctx, req, reg, "SKILL_ARTIFACT_UNFETCHABLE",
-			fmt.Sprintf("%s could not be fetched from %s: %v", rel.Ref(), reg.ID, err))
+	fromCache, err := m.materialize(ctx, provider, reg, rel, req, quarantine, offline)
+	if err != nil {
+		return InstallOutcome{}, err
 	}
+	// EVERY path lands here. Cached bytes and freshly downloaded bytes are
+	// verified identically, because a cache entry is a file on this host and
+	// "we checked it when we wrote it" is not a check that holds now.
 	if err := m.verifyBytes(rel, quarantine); err != nil {
 		return InstallOutcome{}, m.refuseErr(ctx, req, reg, err)
 	}
@@ -660,6 +855,12 @@ func (m *Marketplace) InstallRelease(
 		return InstallOutcome{}, err
 	}
 
+	// 10. Keep the verified bytes, addressed by the digest AO computed. This
+	//     is what makes a later offline install possible, and it is written
+	//     AFTER the install succeeded so the cache only ever holds trees that
+	//     passed every check.
+	m.cacheArtifact(reg, rel, quarantine)
+
 	if req.AsUpdate {
 		m.audit(ctx, store.SkillAuditEntry{
 			Actor:   req.Actor,
@@ -672,7 +873,152 @@ func (m *Marketplace) InstallRelease(
 	}
 	return InstallOutcome{
 		Install: installed, Origin: origin, Release: rel, Updated: req.AsUpdate,
+		FromCache: fromCache, Offline: offline,
 	}, nil
+}
+
+// resolveForInstall re-reads one exact release, and decides what to do when the
+// registry cannot be reached.
+//
+// The unreachable case is the only one with a fallback, and it is narrow: the
+// caller must have asked for it, AO must hold a release it previously resolved
+// AND verified, and everything downstream still runs. Anything else -- a 404, a
+// bad certificate, a rejected credential, a malformed answer -- is a refusal,
+// because none of those means "the network is down"; they mean something is
+// wrong that an install must not paper over.
+func (m *Marketplace) resolveForInstall(
+	ctx context.Context, provider skillregistry.Provider,
+	reg skillregistry.Registry, req InstallReleaseRequest,
+) (skillregistry.Release, bool, error) {
+	version := strings.TrimSpace(req.Version)
+	rel, err := provider.ResolveExactRelease(ctx, req.SkillID, version)
+	if err == nil {
+		return rel, false, nil
+	}
+	if !errors.Is(err, skillregistry.ErrRegistryUnreachable) {
+		return skillregistry.Release{}, false, releaseLookupError(reg.ID, req.SkillID, version, err)
+	}
+	if !req.AllowOfflineFromCache {
+		return skillregistry.Release{}, false, m.refuse(ctx, req, reg, "SKILL_REGISTRY_UNREACHABLE",
+			fmt.Sprintf("registry %s could not be reached to confirm %s@%s: %v. "+
+				"Installing without confirming is possible only from bytes AO already fetched and "+
+				"verified, and only if you ask for it",
+				reg.ID, req.SkillID, version, err))
+	}
+	cached, ok := m.cachedRelease(reg.ID, req.SkillID, version)
+	if !ok {
+		// The rule that matters most in offline mode: a release AO never
+		// downloaded cannot be installed, whatever anybody asks for.
+		return skillregistry.Release{}, false, m.refuse(ctx, req, reg, "SKILL_NOT_IN_CACHE",
+			fmt.Sprintf("registry %s cannot be reached and AO has never fetched %s@%s, so there is "+
+				"nothing verified to install from", reg.ID, req.SkillID, version))
+	}
+	return cached, true, nil
+}
+
+// materialize puts the package tree into the quarantine, from the cache when
+// AO already holds it and from the network otherwise.
+//
+// It returns whether the bytes came from cache. It does NOT verify: everything
+// it produces goes through verifyBytes next, on one path, so there is no way
+// for a source to arrive unchecked.
+func (m *Marketplace) materialize(
+	ctx context.Context, provider skillregistry.Provider, reg skillregistry.Registry,
+	rel skillregistry.Release, req InstallReleaseRequest, quarantine string, offline bool,
+) (bool, error) {
+	if entry, err := m.cache.GetArtifact(reg.ID, rel.ArtifactDigest, rel.ManifestDigest); err == nil {
+		// GetArtifact recomputed both digests over the bytes on disk before
+		// returning, so a poisoned entry is already gone rather than copied.
+		if copyErr := skillcatalog.CopyPackage(entry.Dir(), quarantine); copyErr == nil {
+			m.cache.TouchArtifact(reg.ID, rel.ArtifactDigest, rel.ManifestDigest)
+			m.audit(ctx, store.SkillAuditEntry{
+				Actor:   req.Actor,
+				Action:  store.SkillAuditCachedArtifactUsed,
+				SkillID: rel.SkillID,
+				Version: rel.Version,
+				Digest:  rel.ArtifactDigest,
+				Detail: fmt.Sprintf("registry %s: the bytes came from AO's verified artifact cache, "+
+					"not from the network; both digests were recomputed over them first", reg.ID),
+			})
+			return true, nil
+		}
+		// A cache copy that failed is not a reason to give up -- the registry
+		// is still the authority -- so fall through to the network.
+	}
+	if offline {
+		return false, m.refuse(ctx, req, reg, "SKILL_NOT_IN_CACHE",
+			fmt.Sprintf("registry %s cannot be reached and AO holds no verified copy of %s",
+				reg.ID, rel.Ref()))
+	}
+
+	m.audit(ctx, store.SkillAuditEntry{
+		Actor:   req.Actor,
+		Action:  store.SkillAuditSkillFetchStarted,
+		SkillID: rel.SkillID,
+		Version: rel.Version,
+		Digest:  rel.ArtifactDigest,
+		Detail: fmt.Sprintf("fetching %s from registry %s into quarantine; nothing is executed and "+
+			"nothing reaches the catalog until both digests match", rel.Ref(), reg.ID),
+	})
+	if err := provider.FetchArtifact(ctx, rel, quarantine); err != nil {
+		m.audit(ctx, store.SkillAuditEntry{
+			Actor:   req.Actor,
+			Action:  store.SkillAuditSkillFetchRefused,
+			SkillID: rel.SkillID,
+			Version: rel.Version,
+			Detail:  fmt.Sprintf("registry %s: %v", reg.ID, err),
+		})
+		if errors.Is(err, skillregistry.ErrRegistryAuth) {
+			m.audit(ctx, store.SkillAuditEntry{
+				Actor:  req.Actor,
+				Action: store.SkillAuditRegistryAuthFailed,
+				Detail: fmt.Sprintf("registry %s refused the credential %s while fetching %s",
+					reg.ID, reg.CredentialSecretName, rel.Ref()),
+			})
+		}
+		return false, m.refuse(ctx, req, reg, "SKILL_ARTIFACT_UNFETCHABLE",
+			fmt.Sprintf("%s could not be fetched from %s: %v", rel.Ref(), reg.ID, err))
+	}
+	return false, nil
+}
+
+// cacheArtifact stores a tree that has passed every check.
+//
+// Best-effort: a cache that could not be written costs the next install a
+// download, and failing an install that already succeeded to report it would be
+// the wrong trade.
+func (m *Marketplace) cacheArtifact(
+	reg skillregistry.Registry, rel skillregistry.Release, dir string,
+) {
+	if m.cache == nil {
+		return
+	}
+	_ = m.cache.PutArtifact(skillregistry.ArtifactEntry{
+		RegistryID:     reg.ID,
+		SkillID:        rel.SkillID,
+		Version:        rel.Version,
+		ArtifactDigest: rel.ArtifactDigest,
+		ManifestDigest: rel.ManifestDigest,
+		Release:        rel,
+	}, dir)
+}
+
+// cachedRelease returns the release AO recorded alongside a cached artifact.
+//
+// It comes from the ARTIFACT cache and not the metadata cache, deliberately:
+// the metadata cache holds whatever a registry last said, and this holds what
+// AO verified bytes against. An offline install acts on the second.
+func (m *Marketplace) cachedRelease(
+	registryID, skillID, version string,
+) (skillregistry.Release, bool) {
+	if m.cache == nil {
+		return skillregistry.Release{}, false
+	}
+	entry, ok := m.cache.FindArtifactRelease(registryID, skillID, version)
+	if !ok {
+		return skillregistry.Release{}, false
+	}
+	return entry, true
 }
 
 // quarantine creates the staging directory for one fetch and returns a cleanup
@@ -888,7 +1234,7 @@ func (m *Marketplace) checkOne(
 		status.Unreachable = fmt.Sprintf("registry %s is disabled", reg.ID)
 		return status
 	}
-	provider, err := m.providers.Open(ctx, reg)
+	provider, err := m.openProvider(ctx, reg)
 	if err != nil {
 		status.Unreachable = fmt.Sprintf("registry %s is unreadable: %v", reg.ID, err)
 		return status
@@ -980,6 +1326,14 @@ func registryDetail(reg skillregistry.Registry) string {
 	parts := []string{
 		fmt.Sprintf("registry %s (%s) at %s", reg.ID, reg.Type, reg.Location),
 		"trust policy " + string(reg.TrustPolicy),
+		// The auth TYPE and the secret NAME, never a value -- and the network
+		// exception, because an exception nobody can see is one nobody
+		// reviews.
+		"auth " + string(reg.EffectiveAuthType()),
+		reg.NetworkPolicy.Summary(),
+	}
+	if reg.CredentialSecretName != "" {
+		parts = append(parts, "credential secret "+reg.CredentialSecretName)
 	}
 	if !reg.Enabled {
 		parts = append(parts, "disabled")

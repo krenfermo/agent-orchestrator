@@ -74,6 +74,34 @@ const (
 	SkillAuditUpdateAvailable    SkillAuditAction = "update_available"
 	SkillAuditUpdateInstalled    SkillAuditAction = "update_installed"
 	SkillAuditReleaseRevokedSeen SkillAuditAction = "release_revoked_seen"
+	// Phase 11, private-registry connectivity (migration 0165). These record
+	// the decisions that only exist once a registry is on the other end of a
+	// socket: whether it was reachable, whether its credential worked, when AO
+	// started moving bytes and when it refused to.
+	//
+	// registry_auth_failed is separate from install_refused because it is the
+	// one an operator can FIX, and it is the one that means somebody's
+	// credential expired rather than somebody's package failed a check. Its
+	// detail names a secretRef and never a value.
+	//
+	// cached_artifact_used exists so an install served from cache is
+	// distinguishable in the trail from one that went to the network. They
+	// verify identically -- both recompute both digests over the bytes -- but
+	// "where did these bytes come from" is exactly the question an incident
+	// review asks, and an entry that could not answer it would be an entry
+	// nobody trusts.
+	//
+	// Still deliberately absent, for the reason recorded above and in 0164: a
+	// row per search. Reaching a private registry does not make the query worth
+	// keeping; it makes it more sensitive.
+	SkillAuditRegistryEnabled          SkillAuditAction = "registry_enabled"
+	SkillAuditRegistryDisabled         SkillAuditAction = "registry_disabled"
+	SkillAuditRegistryConnectionTested SkillAuditAction = "registry_connection_tested"
+	SkillAuditRegistryAuthFailed       SkillAuditAction = "registry_auth_failed"
+	SkillAuditSkillFetchStarted        SkillAuditAction = "skill_fetch_started"
+	SkillAuditSkillFetchRefused        SkillAuditAction = "skill_fetch_refused"
+	SkillAuditCachedArtifactUsed       SkillAuditAction = "cached_artifact_used"
+	SkillAuditRevocationsSynced        SkillAuditAction = "registry_revocations_synced"
 )
 
 // SkillAuditEntry is one row of the catalog's audit trail.

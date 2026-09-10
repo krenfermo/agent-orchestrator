@@ -158,6 +158,18 @@ type ProviderFactory interface {
 	Open(ctx context.Context, reg Registry) (Provider, error)
 }
 
+// ProviderFactoryWithOptions is a factory that accepts the caller's client
+// options -- the shared cache and clock -- alongside the registry.
+//
+// It is an OPTIONAL interface rather than a widening of ProviderFactory
+// because most factories are test fixtures that have no HTTP client at all,
+// and a second parameter they would ignore is a second parameter somebody has
+// to read. A caller type-asserts for it and falls back to Open.
+type ProviderFactoryWithOptions interface {
+	ProviderFactory
+	OpenWith(ctx context.Context, reg Registry, opts HTTPSOptions) (Provider, error)
+}
+
 // ProviderFactoryFunc adapts a function to ProviderFactory.
 type ProviderFactoryFunc func(ctx context.Context, reg Registry) (Provider, error)
 

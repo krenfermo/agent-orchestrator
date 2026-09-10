@@ -1041,10 +1041,33 @@ type SkillRegistry struct {
 	Priority             int64
 	TenantID             *domain.TenantID
 	CredentialSecretName string
+	AuthType             string
+	ApiKeyHeader         string
+	NetworkPolicy        string
 	CreatedAt            time.Time
 	CreatedBy            string
 	UpdatedAt            time.Time
 	UpdatedBy            string
+}
+
+type SkillRegistryRevocation struct {
+	RegistryID string
+	SkillID    string
+	Version    string
+	Reason     string
+	RevokedAt  sql.NullTime
+	ObservedAt time.Time
+}
+
+type SkillRegistryStatus struct {
+	RegistryID           string
+	LastProbeState       string
+	LastProbeDetail      string
+	LastProbeAt          sql.NullTime
+	LastProbeLatencyMs   int64
+	LastSyncAt           sql.NullTime
+	LastRevocationSyncAt sql.NullTime
+	UpdatedAt            time.Time
 }
 
 type SkillSecret struct {

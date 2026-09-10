@@ -169,7 +169,15 @@ type ArtifactEntry struct {
 	VerifiedAt time.Time `json:"verifiedAt"`
 	// LastUsedAt drives retention.
 	LastUsedAt time.Time `json:"lastUsedAt"`
-	dir        string
+	// Release is the exact release these bytes were verified AGAINST.
+	//
+	// It is here rather than only in the metadata cache because the two answer
+	// different questions. The metadata cache holds whatever the registry last
+	// said; this holds what AO measured bytes against and found to match. An
+	// offline install acts on the second, so an offline install can never be
+	// steered by a stale listing.
+	Release Release `json:"release"`
+	dir     string
 }
 
 // Dir is where the package tree lives.
@@ -203,8 +211,28 @@ func (c *Cache) metadataDir(registryID string) string {
 	return filepath.Join(c.root, "metadata", safeSegment(registryID))
 }
 
-func (c *Cache) artifactDir(registryID, digest string) string {
-	return filepath.Join(c.root, "artifacts", safeSegment(registryID), digest)
+func (c *Cache) artifactDir(registryID, contentKey string) string {
+	return filepath.Join(c.root, "artifacts", safeSegment(registryID), contentKey)
+}
+
+// ContentKey is the artifact cache's address: BOTH digests, together.
+//
+// The artifact digest alone is not a release identity, and this is not a
+// theoretical point -- skillcatalog.ComputePackageDigest deliberately EXCLUDES
+// the manifest, because the manifest carries that digest and so cannot cover
+// itself. Two releases whose only difference is their manifest -- which is
+// every ordinary version bump of a skill whose code did not change -- therefore
+// hash to the SAME artifact digest.
+//
+// Keying on it alone would have served 0.1.0's tree for a 0.2.0 install, and
+// the manifest check downstream would have caught it as a digest mismatch: a
+// correct refusal of a correct package, which is the worst kind of bug because
+// it looks like the security control working.
+//
+// So the key is both, and the two digests together cover every byte.
+func ContentKey(artifactDigest, manifestDigest string) string {
+	sum := sha256.Sum256([]byte(artifactDigest + ":" + manifestDigest))
+	return hex.EncodeToString(sum[:])
 }
 
 // safeSegment reduces an identifier to something that cannot escape the cache
@@ -281,11 +309,11 @@ func (c *Cache) metadataPath(registryID, key string) string {
 // the whole value of the entry: a cache directory is a file on this host, and
 // an entry that was verified when it was written is not an entry that is
 // verified now. A mismatch removes the entry and reports a miss.
-func (c *Cache) GetArtifact(registryID, artifactDigest string) (ArtifactEntry, error) {
-	if c == nil || !digestRe.MatchString(artifactDigest) {
+func (c *Cache) GetArtifact(registryID, artifactDigest, manifestDigest string) (ArtifactEntry, error) {
+	if c == nil || !digestRe.MatchString(artifactDigest) || !digestRe.MatchString(manifestDigest) {
 		return ArtifactEntry{}, ErrCacheMiss
 	}
-	dir := c.artifactDir(registryID, artifactDigest)
+	dir := c.artifactDir(registryID, ContentKey(artifactDigest, manifestDigest))
 	b, err := os.ReadFile(filepath.Join(dir, artifactMetaFile)) //nolint:gosec // path under the cache root.
 	if err != nil {
 		return ArtifactEntry{}, ErrCacheMiss
@@ -295,7 +323,8 @@ func (c *Cache) GetArtifact(registryID, artifactDigest string) (ArtifactEntry, e
 		return ArtifactEntry{}, ErrCacheMiss
 	}
 	entry.dir = filepath.Join(dir, artifactTreeDir)
-	if entry.ArtifactDigest != artifactDigest || entry.RegistryID != registryID {
+	if entry.ArtifactDigest != artifactDigest || entry.ManifestDigest != manifestDigest ||
+		entry.RegistryID != registryID {
 		// A sidecar that disagrees with the path it is stored at is a tampered
 		// sidecar, and the path is the part AO controls.
 		c.dropArtifact(dir)
@@ -307,7 +336,7 @@ func (c *Cache) GetArtifact(registryID, artifactDigest string) (ArtifactEntry, e
 		return ArtifactEntry{}, ErrCacheMiss
 	}
 	manifest, err := FileDigest(filepath.Join(entry.dir, skillcatalog.ManifestFileName))
-	if err != nil || manifest != entry.ManifestDigest {
+	if err != nil || manifest != manifestDigest {
 		c.dropArtifact(dir)
 		return ArtifactEntry{}, ErrCacheMiss
 	}
@@ -340,7 +369,18 @@ func (c *Cache) PutArtifact(entry ArtifactEntry, srcDir string) error {
 		return fmt.Errorf("skillregistry: refusing to cache %s under %s; the bytes hash to %s",
 			entry.SkillID, entry.ArtifactDigest, actual)
 	}
-	dir := c.artifactDir(entry.RegistryID, entry.ArtifactDigest)
+	// The manifest is checked too, because the package digest above cannot
+	// cover it and a sidecar naming the wrong manifest digest would make the
+	// entry unusable at read time in a way nobody could diagnose.
+	manifest, err := FileDigest(filepath.Join(srcDir, skillcatalog.ManifestFileName))
+	if err != nil {
+		return err
+	}
+	if manifest != entry.ManifestDigest {
+		return fmt.Errorf("skillregistry: refusing to cache %s; its manifest hashes to %s and the "+
+			"entry declares %s", entry.SkillID, manifest, entry.ManifestDigest)
+	}
+	dir := c.artifactDir(entry.RegistryID, ContentKey(entry.ArtifactDigest, entry.ManifestDigest))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -360,11 +400,11 @@ func (c *Cache) PutArtifact(entry ArtifactEntry, srcDir string) error {
 }
 
 // TouchArtifact records a reuse, which is what retention is measured against.
-func (c *Cache) TouchArtifact(registryID, artifactDigest string) {
+func (c *Cache) TouchArtifact(registryID, artifactDigest, manifestDigest string) {
 	if c == nil {
 		return
 	}
-	dir := c.artifactDir(registryID, artifactDigest)
+	dir := c.artifactDir(registryID, ContentKey(artifactDigest, manifestDigest))
 	path := filepath.Join(dir, artifactMetaFile)
 	b, err := os.ReadFile(path) //nolint:gosec // path under the cache root.
 	if err != nil {
@@ -381,6 +421,37 @@ func (c *Cache) TouchArtifact(registryID, artifactDigest string) {
 }
 
 func (c *Cache) dropArtifact(dir string) { _ = os.RemoveAll(dir) }
+
+// FindArtifactRelease returns the release recorded for one cached (skill,
+// version) of one registry, RE-VERIFIED against the bytes on disk.
+//
+// It walks the registry's entries rather than being keyed by name, because the
+// cache is keyed by digest on purpose: a name-keyed lookup would be a lookup a
+// registry could steer, and steering an offline install is precisely what a
+// compromised registry would want.
+func (c *Cache) FindArtifactRelease(registryID, skillID, version string) (Release, bool) {
+	if c == nil {
+		return Release{}, false
+	}
+	for _, entry := range c.listArtifacts() {
+		if entry.RegistryID != registryID || entry.SkillID != skillID || entry.Version != version {
+			continue
+		}
+		// Re-verify before handing it back. GetArtifact recomputes both
+		// digests and removes a tampered entry, so this is the same check the
+		// install itself will make -- run early so a poisoned entry cannot
+		// even be OFFERED as an offline candidate.
+		verified, err := c.GetArtifact(registryID, entry.ArtifactDigest, entry.ManifestDigest)
+		if err != nil {
+			continue
+		}
+		if verified.Release.SkillID != skillID || verified.Release.Version != version {
+			continue
+		}
+		return verified.Release, true
+	}
+	return Release{}, false
+}
 
 // ------------------------------------------------------------------- garbage
 

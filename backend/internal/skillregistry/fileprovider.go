@@ -357,11 +357,29 @@ type DefaultProviderFactory struct {
 
 // Open implements ProviderFactory.
 func (f DefaultProviderFactory) Open(ctx context.Context, reg Registry) (Provider, error) {
+	return f.OpenWith(ctx, reg, HTTPSOptions{})
+}
+
+// OpenWith implements ProviderFactoryWithOptions.
+//
+// The merge is deliberately one-directional: the CALLER supplies the cache and
+// the clock, and the FACTORY supplies the trust anchor and the resolver. A
+// caller that could pass RootCAs would be a caller that could turn certificate
+// verification into a parameter, and the whole point of the two seams living on
+// the factory is that only a test constructing one can reach them.
+func (f DefaultProviderFactory) OpenWith(
+	ctx context.Context, reg Registry, opts HTTPSOptions,
+) (Provider, error) {
+	merged := f.Options
+	merged.Cache = opts.Cache
+	if opts.Now != nil {
+		merged.Now = opts.Now
+	}
 	switch reg.Type {
 	case RegistryLocal:
 		return NewFileProvider(reg.ID, reg.Location)
 	case RegistryHTTPS:
-		return NewHTTPSProvider(ctx, reg, f.Secrets, f.Options)
+		return NewHTTPSProvider(ctx, reg, f.Secrets, merged)
 	case RegistryGit:
 		// Declared and refused. A git remote is a fetch of a whole history
 		// where AO wants one immutable release, and "git clone and trust the
