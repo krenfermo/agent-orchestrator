@@ -54,6 +54,23 @@ type Store interface {
 	ListSkillAuditForProject(ctx context.Context, projectID domain.ProjectID) ([]store.SkillAuditEntry, error)
 }
 
+// OriginSource is the OPTIONAL provenance read: where an installed version came
+// from and what AO verified about it.
+//
+// It is optional, and separate from Store, for the reason WithConnectivity and
+// WithTrust are: every existing construction of this service is a test with a
+// local catalog and no registry at all, and a required method they would all
+// have to stub is a method nobody reads. An installation without it reports no
+// provenance rather than failing to list what is installed.
+//
+// Both methods are LOCAL reads. Listing installed skills must never reach a
+// registry: that would turn opening a settings screen into network traffic on
+// somebody else's schedule.
+type OriginSource interface {
+	ListSkillInstallOrigins(ctx context.Context) ([]store.SkillInstallOrigin, error)
+	GetSkillInstallOrigin(ctx context.Context, skillID, version string) (store.SkillInstallOrigin, bool, error)
+}
+
 // Service installs, activates and resolves skills.
 type Service struct {
 	store Store
@@ -66,6 +83,10 @@ type Service struct {
 	// root that resolves inside it. The container must never be able to see
 	// AO's database or the credentials it holds.
 	dataDir string
+	// origins is the optional provenance read. Nil means this installation
+	// reports no provenance, which is what an installation with no registry
+	// support genuinely has.
+	origins OriginSource
 	now     func() time.Time
 	// newID mints audit row ids; injectable so tests get stable output.
 	newID func() string
@@ -109,6 +130,20 @@ func WithRunner(r skillcatalog.Runner, unavailable string) Option {
 			s.runner = r
 		}
 		s.runnerUnavailable = unavailable
+	}
+}
+
+// WithOriginSource supplies the provenance read for installed versions.
+//
+// It is an Option rather than a constructor parameter so the existing call
+// sites -- every one a test with a local catalog and no registry -- keep
+// saying what they mean, and so an installation that omits it degrades to
+// "no provenance recorded" instead of failing to list what is installed.
+func WithOriginSource(src OriginSource) Option {
+	return func(s *Service) {
+		if src != nil {
+			s.origins = src
+		}
 	}
 }
 

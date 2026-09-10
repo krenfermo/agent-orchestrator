@@ -273,7 +273,11 @@ func RunWithConfig(cfg config.Config) error {
 	skillImages := skills.NewImageAuthority(store, store).WithImageInspector(skillRunner)
 	skillsSvc := skills.New(store, cfg.DataDir,
 		skills.WithSkillExecutor(skillRunner, skillImages, store, cfg.SkillStagingRoot,
-			skillRunner.Unavailable()))
+			skillRunner.Unavailable()),
+		// Provenance for installed versions, read from AO's own table. It is
+		// what lets a settings screen say whether an installed package is
+		// merely verified or actually trusted, without opening a socket.
+		skills.WithOriginSource(store))
 	// Phase 10: the registry / marketplace. It ships with NO registry
 	// configured and no default endpoint, so an installation that configures
 	// nothing can install nothing from one.

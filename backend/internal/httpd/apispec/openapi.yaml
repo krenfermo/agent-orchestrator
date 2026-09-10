@@ -21662,6 +21662,8 @@ components:
           type: array
         name:
           type: string
+        origin:
+          $ref: '#/components/schemas/SkillInstallOriginView'
         originRef:
           type: string
         originType:
