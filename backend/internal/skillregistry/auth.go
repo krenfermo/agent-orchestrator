@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillsecrets"
 )
 
@@ -52,10 +51,16 @@ const (
 	// authenticates.
 	AuthNone AuthType = "none"
 	// AuthBearer sends "Authorization: Bearer <secret>".
+	//
+	//nolint:gosec // G101 flags the word "bearer"; this is the NAME of an auth
+	// scheme, and this package holds no credential value anywhere.
 	AuthBearer AuthType = "bearer"
 	// AuthAPIKeyHeader sends the secret in a named header, which is what a
 	// registry that predates OAuth vocabulary usually wants. The header NAME
 	// is configuration and is printed freely; the value is not.
+	//
+	//nolint:gosec // G101 flags "api_key"; same as above -- an auth scheme's
+	// name, in a package with no field a credential value could live in.
 	AuthAPIKeyHeader AuthType = "api_key_header"
 )
 
@@ -73,6 +78,10 @@ func (a AuthType) NeedsSecret() bool { return a == AuthBearer || a == AuthAPIKey
 
 // DefaultAPIKeyHeader is the header an api_key registry uses when the
 // configuration names none.
+//
+// clear by design, and never a value.
+//
+//nolint:gosec // G101 flags "API-Key"; this is a header NAME, sent in the
 const DefaultAPIKeyHeader = "X-API-Key"
 
 // SecretResolver turns a registry's secretRef into a value.
@@ -193,8 +202,3 @@ func (c Credentials) applyTo(req *http.Request) error {
 	}
 	return nil
 }
-
-// tenantScope is the tenant a credential may be resolved inside, or empty for
-// an installation-wide registry. It exists so the resolver's rule reads the
-// same way the registry's visibility rule does.
-func (r Registry) tenantScope() domain.TenantID { return r.TenantID }

@@ -91,7 +91,7 @@ func (s *Store) UpsertSkillRegistryStatus(
 	if err != nil {
 		return SkillRegistryStatus{}, fmt.Errorf("upsert skill registry status: %w", err)
 	}
-	return statusFromRow(gen.SkillRegistryStatus(row)), nil
+	return statusFromRow(row), nil
 }
 
 // GetSkillRegistryStatus returns one registry's status, or (zero, false, nil).
@@ -105,7 +105,7 @@ func (s *Store) GetSkillRegistryStatus(
 		}
 		return SkillRegistryStatus{}, false, fmt.Errorf("get skill registry status: %w", err)
 	}
-	return statusFromRow(gen.SkillRegistryStatus(row)), true, nil
+	return statusFromRow(row), true, nil
 }
 
 // ListSkillRegistryStatuses returns every recorded status.
@@ -116,7 +116,7 @@ func (s *Store) ListSkillRegistryStatuses(ctx context.Context) ([]SkillRegistryS
 	}
 	out := make([]SkillRegistryStatus, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, statusFromRow(gen.SkillRegistryStatus(row)))
+		out = append(out, statusFromRow(row))
 	}
 	return out, nil
 }
@@ -143,7 +143,7 @@ func (s *Store) UpsertSkillRegistryRevocation(
 	if err != nil {
 		return SkillRegistryRevocation{}, fmt.Errorf("upsert skill registry revocation: %w", err)
 	}
-	return revocationFromRow(gen.SkillRegistryRevocation(row)), nil
+	return revocationFromRow(row), nil
 }
 
 // GetSkillRegistryRevocation answers "is this exact release withdrawn", which
@@ -160,7 +160,7 @@ func (s *Store) GetSkillRegistryRevocation(
 		}
 		return SkillRegistryRevocation{}, false, fmt.Errorf("get skill registry revocation: %w", err)
 	}
-	return revocationFromRow(gen.SkillRegistryRevocation(row)), true, nil
+	return revocationFromRow(row), true, nil
 }
 
 // ListSkillRegistryRevocations returns one registry's withdrawals.
@@ -173,7 +173,7 @@ func (s *Store) ListSkillRegistryRevocations(
 	}
 	out := make([]SkillRegistryRevocation, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, revocationFromRow(gen.SkillRegistryRevocation(row)))
+		out = append(out, revocationFromRow(row))
 	}
 	return out, nil
 }
@@ -186,7 +186,7 @@ func (s *Store) ListAllSkillRegistryRevocations(ctx context.Context) ([]SkillReg
 	}
 	out := make([]SkillRegistryRevocation, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, revocationFromRow(gen.SkillRegistryRevocation(row)))
+		out = append(out, revocationFromRow(row))
 	}
 	return out, nil
 }

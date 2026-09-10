@@ -485,7 +485,7 @@ func (c *Cache) GC() (GCReport, error) {
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
 		expired := !e.LastUsedAt.IsZero() && now.Sub(e.LastUsedAt) > c.limits.Retention
-		overBudget := kept+1 > c.limits.MaxArtifactEntries || keptBytes+e.Bytes > c.limits.MaxArtifactBytes
+		overBudget := kept >= c.limits.MaxArtifactEntries || keptBytes+e.Bytes > c.limits.MaxArtifactBytes
 		if expired || overBudget {
 			c.dropArtifact(filepath.Dir(e.dir))
 			report.ArtifactRemoved++

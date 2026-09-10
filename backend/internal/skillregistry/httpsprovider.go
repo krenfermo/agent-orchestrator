@@ -227,9 +227,9 @@ func (p *HTTPSProvider) get(ctx context.Context, endpoint string) ([]byte, Fresh
 
 	reqCtx, cancel := context.WithTimeout(ctx, MetadataTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
-		return nil, "", fmt.Errorf("%w: %v", ErrRegistryUnreadable, err)
+		return nil, "", fmt.Errorf("%w: %w", ErrRegistryUnreadable, err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", userAgent)
@@ -293,7 +293,7 @@ const userAgent = "ao-skill-registry/1 (+https://github.com/aoagents/agent-orche
 func readBounded(r io.Reader, limit int64) ([]byte, error) {
 	body, err := io.ReadAll(io.LimitReader(r, limit+1))
 	if err != nil {
-		return nil, fmt.Errorf("%w: reading the response failed: %v", ErrRegistryUnreachable, err)
+		return nil, fmt.Errorf("%w: reading the response failed: %w", ErrRegistryUnreachable, err)
 	}
 	if int64(len(body)) > limit {
 		return nil, fmt.Errorf("%w: the response is larger than %d bytes", ErrRegistryResponse, limit)
@@ -357,7 +357,7 @@ func classifyTransportError(err error) error {
 		return unwrapPolicy(err)
 	}
 	if errors.Is(err, ErrRegistryUnreachable) {
-		return fmt.Errorf("%w: %v", ErrRegistryUnreachable, redactURLError(err))
+		return fmt.Errorf("%w: %w", ErrRegistryUnreachable, redactURLError(err))
 	}
 	var certErr *tls.CertificateVerificationError
 	var hostErr x509.HostnameError
@@ -365,12 +365,12 @@ func classifyTransportError(err error) error {
 	var invalidErr x509.CertificateInvalidError
 	if errors.As(err, &certErr) || errors.As(err, &hostErr) ||
 		errors.As(err, &authErr) || errors.As(err, &invalidErr) {
-		return fmt.Errorf("%w: %v", ErrRegistryTLS, redactURLError(err))
+		return fmt.Errorf("%w: %w", ErrRegistryTLS, redactURLError(err))
 	}
 	if errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) {
 		return fmt.Errorf("%w: the request timed out", ErrRegistryUnreachable)
 	}
-	return fmt.Errorf("%w: %v", ErrRegistryUnreachable, redactURLError(err))
+	return fmt.Errorf("%w: %w", ErrRegistryUnreachable, redactURLError(err))
 }
 
 func unwrapPolicy(err error) error {
@@ -511,9 +511,9 @@ func (p *HTTPSProvider) ResolveExactRelease(ctx context.Context, skillID, versio
 func (p *HTTPSProvider) getFresh(ctx context.Context, endpoint string) ([]byte, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, MetadataTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrRegistryUnreadable, err)
+		return nil, fmt.Errorf("%w: %w", ErrRegistryUnreadable, err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", userAgent)
@@ -606,7 +606,7 @@ func decodeStrict(body []byte, into any) error {
 	dec := json.NewDecoder(strings.NewReader(string(body)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(into); err != nil {
-		return fmt.Errorf("%w: %v", ErrRegistryResponse, err)
+		return fmt.Errorf("%w: %w", ErrRegistryResponse, err)
 	}
 	return nil
 }
@@ -624,9 +624,9 @@ func (p *HTTPSProvider) FetchArtifact(ctx context.Context, rel Release, destDir 
 	reqCtx, cancel := context.WithTimeout(ctx, ArtifactTimeout)
 	defer cancel()
 	endpoint := p.endpoints.artifact(rel.SkillID, rel.Version)
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrRegistryUnreadable, err)
+		return fmt.Errorf("%w: %w", ErrRegistryUnreadable, err)
 	}
 	req.Header.Set("Accept", ArtifactMediaType)
 	req.Header.Set("User-Agent", userAgent)
@@ -652,7 +652,7 @@ func (p *HTTPSProvider) FetchArtifact(ctx context.Context, rel Release, destDir 
 			resp.ContentLength, MaxArtifactDownloadBytes)
 	}
 	if err := os.MkdirAll(destDir, 0o700); err != nil {
-		return fmt.Errorf("%w: %v", ErrArtifactRefused, err)
+		return fmt.Errorf("%w: %w", ErrArtifactRefused, err)
 	}
 	if _, err := UnpackArtifact(resp.Body, destDir); err != nil {
 		return err

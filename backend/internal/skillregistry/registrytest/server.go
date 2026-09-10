@@ -126,7 +126,10 @@ func (s *Server) TrustPool() *x509.CertPool { return s.ca.Pool }
 
 // Port is the port the fixture listens on.
 func (s *Server) Port() int {
-	addr := s.http.Listener.Addr().(*net.TCPAddr)
+	addr, ok := s.http.Listener.Addr().(*net.TCPAddr)
+	if !ok {
+		return 0
+	}
 	return addr.Port
 }
 

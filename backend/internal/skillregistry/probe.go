@@ -226,9 +226,9 @@ func classifyProbeError(err error, creds Credentials, origin Origin) (ProbeState
 func (p *HTTPSProvider) describe(ctx context.Context) (registryDescriptor, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, ProbeTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, p.endpoints.registry(), nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, p.endpoints.registry(), http.NoBody)
 	if err != nil {
-		return registryDescriptor{}, fmt.Errorf("%w: %v", ErrRegistryUnreadable, err)
+		return registryDescriptor{}, fmt.Errorf("%w: %w", ErrRegistryUnreadable, err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", userAgent)

@@ -284,8 +284,12 @@ func (m *Marketplace) SyncRevocations(
 
 	source, err := m.revocationSource(ctx, reg)
 	if err != nil {
+		// Deliberately a successful answer with Unreachable set, not an error.
+		// "AO could not ask" is what the caller has to render, and returning an
+		// error here would make it indistinguishable from "the sync failed" --
+		// which would hide that what AO already recorded is still in force.
 		result.Unreachable = err.Error()
-		return result, nil
+		return result, nil //nolint:nilerr // see above: unreachable is an answer.
 	}
 	revocations, err := source.FetchRevocations(ctx)
 	if err != nil {

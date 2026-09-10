@@ -52,7 +52,7 @@ func TestCredentialsNeverRenderTheValue(t *testing.T) {
 		fmt.Sprintf("%v", p),
 		fmt.Sprintf("%+v", p),
 		fmt.Sprintf("%#v", p),
-		fmt.Sprintf("%s", p),
+		p.String(),
 		fmt.Sprintf("%v", reg),
 		fmt.Sprintf("%#v", reg),
 	}
