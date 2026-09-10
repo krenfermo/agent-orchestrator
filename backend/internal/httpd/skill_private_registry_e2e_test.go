@@ -276,3 +276,117 @@ func decodeInto(t *testing.T, body string, into any) {
 		t.Fatalf("decode %s: %v", body, err)
 	}
 }
+
+// TestMarketplaceSearchCarriesMetadataFreshness is Check 19 over HTTP: the
+// state the provider knows has to survive every layer between it and a client.
+//
+// It asserts the wire, not the service, because the whole defect was that the
+// service knew and the wire did not: a search run with the registry down came
+// back byte-identical to one run with the registry up, and no client could
+// have told the difference no matter how carefully it was written.
+func TestMarketplaceSearchCarriesMetadataFreshness(t *testing.T) {
+	w := newPrivateWorld(t)
+	w.registry.Publish(t, registrytest.Spec{SkillID: "security-audit", Version: "1.0.0"})
+	owner := w.login("owner")
+	w.configure(owner)
+
+	search := func() marketplaceSearchBody {
+		w.t.Helper()
+		raw := w.expect(http.MethodGet, "/api/v1/skills/marketplace?q=security", owner, "", http.StatusOK)
+		var out marketplaceSearchBody
+		decodeInto(t, raw, &out)
+		return out
+	}
+
+	live := search()
+	if live.Offline {
+		t.Fatalf("a search against a running registry reported offline: %+v", live.Sources)
+	}
+	if len(live.Releases) != 1 || live.Releases[0].MetadataFreshness != "live" {
+		t.Fatalf("a live search reported %+v", live.Releases)
+	}
+	if len(live.Sources) != 1 || live.Sources[0].Freshness != "live" || live.Sources[0].Offline {
+		t.Fatalf("a live search reported sources %+v", live.Sources)
+	}
+	if live.FreshnessNotice != "" {
+		t.Fatalf("a live search carried an offline notice: %s", live.FreshnessNotice)
+	}
+
+	// The registry goes away. The result is still served -- from cache -- and
+	// every part of it says so.
+	w.registry.Pause()
+	offline := search()
+	if len(offline.Releases) != 1 {
+		t.Fatalf("the cached search returned %d releases", len(offline.Releases))
+	}
+	if !offline.Offline {
+		t.Fatal("a search with the registry down did not set offline on the response")
+	}
+	rel := offline.Releases[0]
+	if rel.MetadataFreshness != "offline" || !rel.MetadataOffline {
+		t.Fatalf("a cached row reported freshness=%q offline=%v", rel.MetadataFreshness, rel.MetadataOffline)
+	}
+	if rel.MetadataAsOf.IsZero() {
+		t.Fatal("a cached row carried no as-of time")
+	}
+	if len(offline.Sources) != 1 || offline.Sources[0].Freshness != "offline" || !offline.Sources[0].Offline {
+		t.Fatalf("the offline search reported sources %+v", offline.Sources)
+	}
+	if offline.Sources[0].Explanation == "" {
+		t.Fatal("the offline source carried no explanation from the daemon")
+	}
+	if offline.FreshnessNotice == "" {
+		t.Fatal("an offline search carried no notice for a client to show")
+	}
+	// The trust state did not move because the metadata went stale.
+	if rel.Trust != live.Releases[0].Trust {
+		t.Fatalf("going offline moved trust from %s to %s", live.Releases[0].Trust, rel.Trust)
+	}
+	// And nothing was downloaded to produce any of this.
+	if w.registry.FetchedArtifact() {
+		t.Fatalf("the offline search fetched an artifact: %v", w.registry.Requests())
+	}
+
+	// An install while the registry is unreachable is still refused: the
+	// listing may come from cache, the install may not. The refusal names the
+	// unreachable registry rather than pretending the release is gone.
+	w.expect(http.MethodPost, "/api/v1/skills/marketplace/install", owner, `{
+		"registryId": "company-private", "skillId": "security-audit", "version": "1.0.0"
+	}`, http.StatusForbidden)
+
+	// The registry comes back, and the state goes back with it. Offline is a
+	// state, not a latch.
+	w.registry.Resume()
+	back := search()
+	if back.Offline {
+		t.Fatalf("the search still reported offline after recovery: %+v", back.Sources)
+	}
+	if len(back.Releases) != 1 || back.Releases[0].MetadataFreshness != "live" {
+		t.Fatalf("after recovery the search reported %+v", back.Releases)
+	}
+	if back.Sources[0].Freshness != "live" || back.Sources[0].Offline {
+		t.Fatalf("after recovery the sources reported %+v", back.Sources)
+	}
+}
+
+// marketplaceSearchBody is the wire shape this test asserts on. It is written
+// out here rather than imported from controllers so that a field quietly
+// renamed on the DTO fails this test instead of silently agreeing with it.
+type marketplaceSearchBody struct {
+	Releases []struct {
+		SkillID           string    `json:"skillId"`
+		Trust             string    `json:"trust"`
+		MetadataFreshness string    `json:"metadataFreshness"`
+		MetadataOffline   bool      `json:"metadataOffline"`
+		MetadataAsOf      time.Time `json:"metadataAsOf"`
+	} `json:"releases"`
+	Sources []struct {
+		RegistryID  string    `json:"registryId"`
+		Freshness   string    `json:"freshness"`
+		Offline     bool      `json:"offline"`
+		FetchedAt   time.Time `json:"fetchedAt"`
+		Explanation string    `json:"explanation"`
+	} `json:"sources"`
+	Offline         bool   `json:"offline"`
+	FreshnessNotice string `json:"freshnessNotice"`
+}

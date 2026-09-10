@@ -2564,5 +2564,10 @@
 	"settings.skillMarketplace.offlineBody": "{{registry}} n'a pas pu être joint. Ce qui est listé est ce qu'AO a reçu en dernier, pas ce qu'il propose maintenant.",
 	"settings.skillMarketplace.registrySource": "Registre : {{registry}}",
 	"settings.skillMarketplace.fromCache": "Installé depuis le cache d'artefacts vérifié d'AO ; les deux empreintes ont été recalculées sur les octets.",
-	"settings.skillMarketplace.offlineInstall": "Installé alors que le registre était injoignable, à partir d'octets qu'AO avait déjà récupérés et vérifiés."
+	"settings.skillMarketplace.offlineInstall": "Installé alors que le registre était injoignable, à partir d'octets qu'AO avait déjà récupérés et vérifiés.",
+	"settings.skillMarketplace.freshness.live": "A jour",
+	"settings.skillMarketplace.freshness.cached": "Depuis le cache",
+	"settings.skillMarketplace.freshness.stale": "En cache, perime",
+	"settings.skillMarketplace.freshness.offline": "En cache, registre injoignable",
+	"settings.skillMarketplace.metadataAsOf": "Etat au {{time}}. Ce n'est pas ce que le registre dit maintenant."
 }

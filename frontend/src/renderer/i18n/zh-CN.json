@@ -2528,5 +2528,10 @@
 	"settings.skillMarketplace.offlineBody": "无法连通 {{registry}}。这里列出的是 AO 最后一次收到的内容，而不是它现在提供的内容。",
 	"settings.skillMarketplace.registrySource": "注册表：{{registry}}",
 	"settings.skillMarketplace.fromCache": "从 AO 已验证的构件缓存安装；两个摘要都在字节上重新计算过。",
-	"settings.skillMarketplace.offlineInstall": "在注册表无法连通时安装，使用的是 AO 先前已下载并验证过的字节。"
+	"settings.skillMarketplace.offlineInstall": "在注册表无法连通时安装，使用的是 AO 先前已下载并验证过的字节。",
+	"settings.skillMarketplace.freshness.live": "最新",
+	"settings.skillMarketplace.freshness.cached": "来自缓存",
+	"settings.skillMarketplace.freshness.stale": "缓存，已过期",
+	"settings.skillMarketplace.freshness.offline": "缓存，无法连接注册表",
+	"settings.skillMarketplace.metadataAsOf": "截至 {{time}}。这不是注册表现在的内容。"
 }

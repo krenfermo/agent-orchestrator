@@ -145,23 +145,45 @@ type skillReleaseDTO struct {
 	Installed        bool   `json:"installed"`
 	InstalledVersion string `json:"installedVersion"`
 	UpdateAvailable  bool   `json:"updateAvailable"`
+
+	MetadataFreshness string    `json:"metadataFreshness"`
+	MetadataOffline   bool      `json:"metadataOffline"`
+	MetadataAsOf      time.Time `json:"metadataAsOf"`
+}
+
+// skillRegistryFreshnessDTO mirrors controllers.SkillRegistryFreshnessView.
+type skillRegistryFreshnessDTO struct {
+	RegistryID   string    `json:"registryId"`
+	RegistryName string    `json:"registryName"`
+	Freshness    string    `json:"freshness"`
+	Offline      bool      `json:"offline"`
+	FetchedAt    time.Time `json:"fetchedAt"`
+	Explanation  string    `json:"explanation"`
 }
 
 // skillMarketplaceSearchDTO mirrors controllers.SkillMarketplaceSearchResponse.
 type skillMarketplaceSearchDTO struct {
 	Releases []skillReleaseDTO `json:"releases"`
 	Notes    []struct {
-		RegistryID string `json:"registryId"`
-		Reason     string `json:"reason"`
+		RegistryID        string `json:"registryId"`
+		Reason            string `json:"reason"`
+		MetadataFreshness string `json:"metadataFreshness"`
+		MetadataOffline   bool   `json:"metadataOffline"`
 	} `json:"notes"`
-	InstallNotice string `json:"installNotice"`
+	Sources         []skillRegistryFreshnessDTO `json:"sources"`
+	Offline         bool                        `json:"offline"`
+	FreshnessNotice string                      `json:"freshnessNotice"`
+	InstallNotice   string                      `json:"installNotice"`
 }
 
 // skillReleaseDetailDTO mirrors controllers.SkillReleaseDetailResponse.
 type skillReleaseDetailDTO struct {
-	Release       skillReleaseDTO   `json:"release"`
-	Versions      []skillReleaseDTO `json:"versions"`
-	InstallNotice string            `json:"installNotice"`
+	Release         skillReleaseDTO           `json:"release"`
+	Versions        []skillReleaseDTO         `json:"versions"`
+	Source          skillRegistryFreshnessDTO `json:"source"`
+	Offline         bool                      `json:"offline"`
+	FreshnessNotice string                    `json:"freshnessNotice"`
+	InstallNotice   string                    `json:"installNotice"`
 }
 
 // installSkillReleaseRequest mirrors controllers.InstallSkillReleaseRequest.
@@ -637,10 +659,19 @@ func (c *commandContext) searchMarketplace(cmd *cobra.Command, params url.Values
 		if _, err := fmt.Fprintf(out, "  %s\n", rel.Description); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintf(out, "  risk=%s capabilities=[%s] compatibility=%s trust=%s\n",
+		if _, err := fmt.Fprintf(out, "  risk=%s capabilities=[%s] compatibility=%s trust=%s metadata=%s\n",
 			rel.RiskLevel, strings.Join(rel.RequestedCapabilities, " "),
-			rel.Compatibility, rel.Trust); err != nil {
+			rel.Compatibility, rel.Trust, freshnessLabel(rel.MetadataFreshness, rel.MetadataOffline)); err != nil {
 			return err
+		}
+		// A row AO could not confirm carries the moment the registry last
+		// answered, on its own line, right under the row it qualifies. "As of"
+		// is the only honest way to show something that may have changed.
+		if rel.MetadataOffline && !rel.MetadataAsOf.IsZero() {
+			if _, err := fmt.Fprintf(out, "  NOT CURRENT: cached metadata, as of %s\n",
+				rel.MetadataAsOf.UTC().Format(time.RFC3339)); err != nil {
+				return err
+			}
 		}
 		if rel.Revoked {
 			if _, err := fmt.Fprintf(out, "  REVOKED: %s\n", rel.RevocationReason); err != nil {
@@ -662,13 +693,78 @@ func (c *commandContext) searchMarketplace(cmd *cobra.Command, params url.Values
 	// registry are different answers, and only one means somebody should go
 	// and look.
 	for _, note := range res.Notes {
-		if _, err := fmt.Fprintf(out, "\nregistry %s could not be read: %s\n",
-			note.RegistryID, note.Reason); err != nil {
+		label := "could not be read"
+		if note.MetadataOffline {
+			label = "could not be reached"
+		}
+		if _, err := fmt.Fprintf(out, "\nregistry %s %s: %s\n",
+			note.RegistryID, label, note.Reason); err != nil {
 			return err
 		}
 	}
+	// Every consulted registry, with how fresh what it gave is. It is printed
+	// whenever anything is not live, so "these results are cached" is a line
+	// on the terminal rather than something a reader has to notice is missing.
+	if err := writeFreshness(out, res.Offline, res.FreshnessNotice, res.Sources); err != nil {
+		return err
+	}
 	if res.InstallNotice != "" {
 		if _, err := fmt.Fprintf(out, "\n%s\n", res.InstallNotice); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// freshnessLabel renders one metadata state for a terminal. Offline is shown
+// even when the freshness alone would not say it, because "AO could not ask"
+// is the fact somebody acts on.
+func freshnessLabel(freshness string, offline bool) string {
+	if freshness == "" {
+		freshness = "live"
+	}
+	if offline && freshness != "offline" {
+		return freshness + "/offline"
+	}
+	return freshness
+}
+
+// writeFreshness prints the metadata state of every consulted registry, plus
+// the daemon's sentence when any of them was unreachable.
+//
+// It prints nothing when everything was live: a line saying "all current" on
+// every search would be the line people stop reading, and then stop seeing
+// when it changes.
+func writeFreshness(out io.Writer, offline bool, notice string, sources []skillRegistryFreshnessDTO) error {
+	interesting := offline
+	for _, src := range sources {
+		if src.Offline || (src.Freshness != "" && src.Freshness != "live") {
+			interesting = true
+		}
+	}
+	if !interesting {
+		return nil
+	}
+	if _, err := fmt.Fprintln(out); err != nil {
+		return err
+	}
+	for _, src := range sources {
+		line := fmt.Sprintf("registry %s metadata=%s",
+			src.RegistryID, freshnessLabel(src.Freshness, src.Offline))
+		if !src.FetchedAt.IsZero() {
+			line += " as-of=" + src.FetchedAt.UTC().Format(time.RFC3339)
+		}
+		if _, err := fmt.Fprintln(out, line); err != nil {
+			return err
+		}
+		if src.Offline && src.Explanation != "" {
+			if _, err := fmt.Fprintf(out, "  %s\n", src.Explanation); err != nil {
+				return err
+			}
+		}
+	}
+	if offline && notice != "" {
+		if _, err := fmt.Fprintf(out, "\n%s\n", notice); err != nil {
 			return err
 		}
 	}
@@ -757,6 +853,25 @@ func writeSkillRelease(out io.Writer, res skillReleaseDetailDTO) error {
 	if rel.TrustExplanation != "" {
 		if _, err := fmt.Fprintf(out, "                 %s\n", rel.TrustExplanation); err != nil {
 			return err
+		}
+	}
+	// Freshness sits on its own line, below trust and never folded into it: a
+	// cached release is not less trusted, it is less current.
+	if _, err := fmt.Fprintf(out, "  metadata:      %s\n",
+		freshnessLabel(rel.MetadataFreshness, rel.MetadataOffline)); err != nil {
+		return err
+	}
+	if res.Offline {
+		if !res.Source.FetchedAt.IsZero() {
+			if _, err := fmt.Fprintf(out, "                 as of %s\n",
+				res.Source.FetchedAt.UTC().Format(time.RFC3339)); err != nil {
+				return err
+			}
+		}
+		if res.Source.Explanation != "" {
+			if _, err := fmt.Fprintf(out, "                 %s\n", res.Source.Explanation); err != nil {
+				return err
+			}
 		}
 	}
 	if rel.Revoked {

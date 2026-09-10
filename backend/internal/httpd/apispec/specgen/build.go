@@ -231,6 +231,7 @@ var schemaNames = map[string]string{
 	"ControllersSkillReleaseModeView":                 "SkillReleaseModeView",
 	"ControllersSkillReleaseView":                     "SkillReleaseView",
 	"ControllersSkillRegistryNoteView":                "SkillRegistryNoteView",
+	"ControllersSkillRegistryFreshnessView":           "SkillRegistryFreshnessView",
 	"ControllersSkillMarketplaceSearchResponse":       "SkillMarketplaceSearchResponse",
 	"ControllersSkillReleaseDetailResponse":           "SkillReleaseDetailResponse",
 	"ControllersInstallSkillReleaseRequest":           "InstallSkillReleaseRequest",

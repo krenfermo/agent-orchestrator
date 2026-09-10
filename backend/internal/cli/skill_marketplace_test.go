@@ -396,3 +396,133 @@ func TestSkillsMarketplace_RegistersNoExecutionVerb(t *testing.T) {
 		t.Fatalf("marketplace verbs = %v", got)
 	}
 }
+
+// offlineMarketplaceCLI is a daemon whose registry could not be reached: the
+// releases are cached, and every field that says so is populated.
+func offlineMarketplaceCLI(t *testing.T) Deps {
+	t.Helper()
+	cfg := setConfigEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/skills/marketplace":
+			_, _ = io.WriteString(w, `{"releases":[
+				{"registryId":"corp","skillId":"security-audit","name":"Security Audit",
+				 "version":"0.2.0","publisher":"agent-orchestrator","description":"On-demand audit.",
+				 "riskLevel":"critical","manifestDigest":"aa","artifactDigest":"bb",
+				 "requestedCapabilities":["repo.read"],"executionModes":[],
+				 "aoMinVersion":"0.11.0","compatibility":"compatible",
+				 "publishedAt":"2026-01-01T00:00:00Z","trust":"unverified",
+				 "trustExplanation":"Nothing has been checked.","installed":false,
+				 "metadataFreshness":"offline","metadataOffline":true,
+				 "metadataAsOf":"2026-06-01T12:00:00Z"}
+			],"notes":[],
+			"sources":[{"registryId":"corp","registryName":"Corp","freshness":"offline",
+			 "offline":true,"fetchedAt":"2026-06-01T12:00:00Z",
+			 "explanation":"AO could not reach this registry."}],
+			"offline":true,
+			"freshnessNotice":"A registry could not be reached, so some of what is listed is cached.",
+			"installNotice":"This installs the Skill but does not enable it on any project."}`)
+		case "/api/v1/skills/marketplace/corp/security-audit":
+			_, _ = io.WriteString(w, `{"release":
+				{"registryId":"corp","registryName":"Corp","skillId":"security-audit",
+				 "name":"Security Audit","version":"0.2.0","publisher":"agent-orchestrator",
+				 "description":"On-demand audit.","riskLevel":"critical",
+				 "manifestDigest":"aa","artifactDigest":"bb","requestedCapabilities":["repo.read"],
+				 "executionModes":[],"aoMinVersion":"0.11.0","compatibility":"compatible",
+				 "publishedAt":"2026-01-01T00:00:00Z","trust":"unverified",
+				 "trustExplanation":"Nothing has been checked.","installed":false,
+				 "metadataFreshness":"stale","metadataOffline":true,
+				 "metadataAsOf":"2026-06-01T12:00:00Z"},
+			 "versions":[],
+			 "source":{"registryId":"corp","freshness":"stale","offline":true,
+			  "fetchedAt":"2026-06-01T12:00:00Z",
+			  "explanation":"AO could not reach this registry, and what is shown was cached longer ago."},
+			 "offline":true,
+			 "freshnessNotice":"A registry could not be reached.",
+			 "installNotice":"This installs the Skill but does not enable it on any project."}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	writeRunFileFor(t, cfg, srv)
+	return Deps{ProcessAlive: func(int) bool { return true }}
+}
+
+// TestSkillsMarketplaceSearch_SaysWhenResultsAreCached is Check 19 at the
+// terminal. A search whose results came from cache must not print the same
+// thing as one whose results came from the registry.
+func TestSkillsMarketplaceSearch_SaysWhenResultsAreCached(t *testing.T) {
+	deps := offlineMarketplaceCLI(t)
+
+	out, errOut, err := executeCLI(t, deps, "skills", "marketplace", "search", "security")
+	if err != nil {
+		t.Fatalf("search: %v (%s)", err, errOut)
+	}
+	for _, want := range []string{
+		// On the row itself, beside trust and never folded into it.
+		"metadata=offline",
+		// And with the moment the registry last actually answered.
+		"NOT CURRENT: cached metadata, as of 2026-06-01T12:00:00Z",
+		// Per registry, at the bottom, with the daemon's own sentence.
+		"registry corp metadata=offline as-of=2026-06-01T12:00:00Z",
+		"AO could not reach this registry.",
+		"A registry could not be reached, so some of what is listed is cached.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output %q is missing %q", out, want)
+		}
+	}
+	// The results are still there. Offline hides nothing; it labels.
+	if !strings.Contains(out, "security-audit") {
+		t.Fatalf("the cached results were dropped: %q", out)
+	}
+	// And the freshness did not touch what AO says it verified.
+	if !strings.Contains(out, "trust=unverified") {
+		t.Fatalf("output = %q", out)
+	}
+}
+
+// TestSkillsMarketplaceShow_SaysWhenTheDetailIsStale is the same contract on
+// the detail view, where "stale" is the older of the two offline states.
+func TestSkillsMarketplaceShow_SaysWhenTheDetailIsStale(t *testing.T) {
+	deps := offlineMarketplaceCLI(t)
+
+	out, errOut, err := executeCLI(t, deps, "skills", "marketplace", "show", "security-audit",
+		"--registry", "corp")
+	if err != nil {
+		t.Fatalf("show: %v (%s)", err, errOut)
+	}
+	for _, want := range []string{
+		"metadata:      stale",
+		"as of 2026-06-01T12:00:00Z",
+		"AO could not reach this registry, and what is shown was cached longer ago.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output %q is missing %q", out, want)
+		}
+	}
+	// Freshness sits below trust and does not replace it.
+	if !strings.Contains(out, "trust:         unverified") {
+		t.Fatalf("output = %q", out)
+	}
+}
+
+// TestSkillsMarketplaceSearch_SaysNothingWhenEverythingIsLive: a line printed
+// on every search is a line people stop reading, and then stop seeing when it
+// changes.
+func TestSkillsMarketplaceSearch_SaysNothingWhenEverythingIsLive(t *testing.T) {
+	_, deps := marketplaceCLI(t)
+
+	out, errOut, err := executeCLI(t, deps, "skills", "marketplace", "search", "security")
+	if err != nil {
+		t.Fatalf("search: %v (%s)", err, errOut)
+	}
+	if strings.Contains(out, "NOT CURRENT") || strings.Contains(out, "metadata=offline") {
+		t.Fatalf("a live search claimed to be cached: %q", out)
+	}
+	if !strings.Contains(out, "metadata=live") {
+		t.Fatalf("a live search did not state its freshness: %q", out)
+	}
+}

@@ -150,6 +150,31 @@ type Provider interface {
 	FetchArtifact(ctx context.Context, rel Release, destDir string) error
 }
 
+// MetadataFresher is the OPTIONAL half of Provider: a provider that can say
+// how it came by the metadata answer it just returned.
+//
+// It is optional rather than a fifth method on Provider because a provider
+// that reads a directory has no network to be offline from and no cache to be
+// stale against -- FileProvider is always live, and a method it would have to
+// implement by returning a constant is a method somebody has to read. A caller
+// type-asserts for it and treats a provider that does not implement it as
+// live.
+type MetadataFresher interface {
+	// MetadataState describes the most recent metadata answer from this
+	// provider. It says nothing about artifacts and nothing about trust.
+	MetadataState() MetadataState
+}
+
+// StateOf reports how p came by its last metadata answer. A provider that does
+// not track freshness reads live, because a provider with no network and no
+// cache cannot be anything else.
+func StateOf(p Provider) MetadataState {
+	if fresher, ok := p.(MetadataFresher); ok {
+		return fresher.MetadataState().Normalized()
+	}
+	return MetadataState{Freshness: FreshnessLive}
+}
+
 // ProviderFactory builds a provider for a configured registry. It is an
 // interface so the service can be tested against a fixture registry with no
 // filesystem, and so adding an AO official registry later is a new case here

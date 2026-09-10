@@ -7434,9 +7434,12 @@ export interface components {
             skills: components["schemas"]["SkillInstallView"][];
         };
         SkillMarketplaceSearchResponse: {
+            freshnessNotice?: string;
             installNotice: string;
             notes: components["schemas"]["SkillRegistryNoteView"][];
+            offline: boolean;
             releases: components["schemas"]["SkillReleaseView"][];
+            sources: components["schemas"]["SkillRegistryFreshnessView"][];
         };
         SkillModeView: {
             /** @enum {string} */
@@ -7448,11 +7451,24 @@ export interface components {
             /** @enum {string} */
             riskLevel: "low" | "medium" | "high" | "critical";
         };
+        SkillRegistryFreshnessView: {
+            explanation: string;
+            /** Format: date-time */
+            fetchedAt?: string;
+            /** @enum {string} */
+            freshness: "live" | "cached" | "stale" | "offline";
+            offline: boolean;
+            registryId: string;
+            registryName?: string;
+        };
         SkillRegistryListResponse: {
             registries: components["schemas"]["SkillRegistryView"][];
             trustModel: string;
         };
         SkillRegistryNoteView: {
+            /** @enum {string} */
+            metadataFreshness: "live" | "cached" | "stale" | "offline";
+            metadataOffline: boolean;
             reason: string;
             registryId: string;
         };
@@ -7533,8 +7549,11 @@ export interface components {
             updatedAt: string;
         };
         SkillReleaseDetailResponse: {
+            freshnessNotice?: string;
             installNotice: string;
+            offline: boolean;
             release: components["schemas"]["SkillReleaseView"];
+            source: components["schemas"]["SkillRegistryFreshnessView"];
             versions: components["schemas"]["SkillReleaseView"][];
         };
         SkillReleaseModeView: {
@@ -7562,6 +7581,11 @@ export interface components {
             installedVersion?: string;
             keyId?: string;
             manifestDigest: string;
+            /** Format: date-time */
+            metadataAsOf?: string;
+            /** @enum {string} */
+            metadataFreshness: "live" | "cached" | "stale" | "offline";
+            metadataOffline: boolean;
             name: string;
             /** Format: date-time */
             publishedAt: string;

@@ -2546,5 +2546,10 @@
 	"settings.skillMarketplace.offlineBody": "{{registry}} に到達できませんでした。ここに表示されているのは AO が最後に受け取った内容であり、現在の提供内容ではありません。",
 	"settings.skillMarketplace.registrySource": "レジストリ: {{registry}}",
 	"settings.skillMarketplace.fromCache": "AO の検証済みアーティファクトキャッシュからインストールしました。両方のダイジェストをバイト列に対して再計算しています。",
-	"settings.skillMarketplace.offlineInstall": "レジストリに到達できない状態で、AO が既に取得して検証したバイト列からインストールしました。"
+	"settings.skillMarketplace.offlineInstall": "レジストリに到達できない状態で、AO が既に取得して検証したバイト列からインストールしました。",
+	"settings.skillMarketplace.freshness.live": "最新",
+	"settings.skillMarketplace.freshness.cached": "キャッシュから",
+	"settings.skillMarketplace.freshness.stale": "キャッシュ、期限切れ",
+	"settings.skillMarketplace.freshness.offline": "キャッシュ、レジストリに接続できません",
+	"settings.skillMarketplace.metadataAsOf": "{{time}} 時点。現在のレジストリの内容ではありません。"
 }

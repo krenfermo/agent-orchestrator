@@ -110,24 +110,117 @@ func (l CacheLimits) Normalized() CacheLimits {
 	return l
 }
 
-// Freshness is how current a piece of metadata is. It is three values rather
+// Freshness is how current a piece of metadata is. It is four values rather
 // than a boolean because "AO asked and this is the answer", "AO asked before
-// and could not ask again" and "AO did not ask at all" are three different
-// things to put in front of a person.
+// and could not ask again", "AO could not ask and the copy is old" and "AO
+// could not ask at all" are four different things to put in front of a person.
+//
+// The values are ORDERED by how much AO actually knows, and only the first one
+// means the registry confirmed anything during this request.
 type Freshness string
 
 const (
-	// FreshnessLive means this came from the registry during this request.
+	// FreshnessLive means this came from the registry during this request --
+	// either a 200 with a body, or a 304 saying the copy AO held is still the
+	// registry's answer. Both are the registry speaking now.
 	FreshnessLive Freshness = "live"
-	// FreshnessCached means it came from cache and is inside the TTL.
+	// FreshnessCached means it came from cache, inside the TTL, and the
+	// registry was NOT consulted for it.
+	//
+	// It is DEFINED AND UNREACHABLE in this build, in the same way and for the
+	// same kind of reason TrustTrusted is: every display read here revalidates
+	// against the registry, because a cache-first read would answer from a
+	// copy while the registry was sitting there with a revocation. The value
+	// exists so that a future cache-first read has an honest name to report
+	// and cannot quietly borrow "live". TestCachedFreshnessIsUnreachable holds
+	// that true.
 	FreshnessCached Freshness = "cached"
-	// FreshnessStale means it came from cache and the TTL has passed, or the
-	// registry could not be reached. It must be rendered as such.
+	// FreshnessStale means it came from cache, the registry could not be
+	// reached, and the TTL has passed. It is the oldest thing AO will show and
+	// it must be rendered as such.
 	FreshnessStale Freshness = "stale"
+	// FreshnessOffline means the registry could not be reached during this
+	// request. Whatever is on screen came from cache and is inside its TTL --
+	// young, but unconfirmed, which is not the same as current.
+	//
+	// It is separate from stale because an operator reading a row needs the
+	// fact that AO could not ASK, and "the copy is old" does not say that.
+	FreshnessOffline Freshness = "offline"
 )
 
-// Current reports whether this freshness may be shown without a stale marker.
-func (f Freshness) Current() bool { return f == FreshnessLive || f == FreshnessCached }
+// Valid reports whether f is one of the four states.
+func (f Freshness) Valid() bool {
+	switch f {
+	case FreshnessLive, FreshnessCached, FreshnessStale, FreshnessOffline:
+		return true
+	}
+	return false
+}
+
+// Current reports whether this freshness may be shown without an "as of"
+// marker.
+//
+// Only live qualifies. cached, stale and offline all mean the registry did not
+// confirm this during this request, and the whole point of the four states is
+// that none of the other three may be rounded up to "current".
+func (f Freshness) Current() bool { return f == FreshnessLive }
+
+// MetadataState is the explicit answer to "how did AO come by what you are
+// looking at". It is propagated from the provider to the API to the screen
+// unchanged, so no client has to infer offline from an empty error list.
+//
+// Freshness and Offline are two facts, not one, and they are carried
+// separately on purpose: freshness is how OLD the copy is, and Offline is
+// whether AO could reach the registry at all. A future cache-first read would
+// be cached-and-online; today's offline fallback is cached-and-offline. One
+// enum value cannot say both without a client guessing.
+type MetadataState struct {
+	// Freshness is the state above.
+	Freshness Freshness `json:"freshness"`
+	// Offline reports that the registry could not be reached during this
+	// request. It is never inferred downstream.
+	Offline bool `json:"offline"`
+	// FetchedAt is when the registry actually answered, which for anything
+	// other than live is in the past. Zero means the registry has never
+	// answered and there is nothing cached either.
+	FetchedAt time.Time `json:"fetchedAt"`
+}
+
+// LiveState is the state of an answer the registry just gave.
+func LiveState(now time.Time) MetadataState {
+	return MetadataState{Freshness: FreshnessLive, FetchedAt: now}
+}
+
+// OfflineState is the state of an answer served from cache because the
+// registry could not be reached. Past the TTL it is stale; inside it, it is
+// offline -- and either way Offline is true, so a stale row never hides the
+// fact that AO could not ask.
+func OfflineState(entry MetadataEntry, now time.Time, ttl time.Duration) MetadataState {
+	state := MetadataState{Freshness: FreshnessStale, Offline: true, FetchedAt: entry.FetchedAt}
+	if entry.Fresh(now, ttl) {
+		state.Freshness = FreshnessOffline
+	}
+	return state
+}
+
+// UnreachableState is the state when the registry could not be reached and
+// there is nothing cached to fall back on. Nothing is shown, and offline is
+// why.
+func UnreachableState() MetadataState {
+	return MetadataState{Freshness: FreshnessOffline, Offline: true}
+}
+
+// Current reports whether the state may be shown without an "as of" marker.
+func (s MetadataState) Current() bool { return !s.Offline && s.Freshness.Current() }
+
+// Normalized fills in a zero state as live, so a provider that never reported
+// one is not rendered as an empty badge.
+func (s MetadataState) Normalized() MetadataState {
+	if !s.Freshness.Valid() {
+		s.Freshness = FreshnessLive
+	}
+	return s
+}
 
 // MetadataEntry is one cached registry answer.
 type MetadataEntry struct {

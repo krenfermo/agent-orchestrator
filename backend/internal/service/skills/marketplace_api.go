@@ -2,6 +2,7 @@ package skills
 
 import (
 	"context"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
@@ -182,20 +183,49 @@ func (m *Marketplace) SearchMarketplace(
 	if err != nil {
 		return controllers.SkillMarketplaceSearchResponse{}, err
 	}
+	offline := res.Offline()
 	out := controllers.SkillMarketplaceSearchResponse{
 		Releases:      make([]controllers.SkillReleaseView, 0, len(res.Releases)),
 		Notes:         make([]controllers.SkillRegistryNoteView, 0, len(res.Notes)),
+		Sources:       make([]controllers.SkillRegistryFreshnessView, 0, len(res.Sources)),
+		Offline:       offline,
 		InstallNotice: controllers.RegistryInstallNotice,
+	}
+	if offline {
+		// Said by the daemon, so the sentence on screen and the behaviour in
+		// the service cannot drift apart.
+		out.FreshnessNotice = controllers.RegistryMetadataFreshnessNotice
 	}
 	for _, rel := range res.Releases {
 		out.Releases = append(out.Releases, releaseView(rel))
 	}
 	for _, note := range res.Notes {
+		state := note.Metadata.Normalized()
 		out.Notes = append(out.Notes, controllers.SkillRegistryNoteView{
-			RegistryID: note.RegistryID, Reason: note.Reason,
+			RegistryID:        note.RegistryID,
+			Reason:            note.Reason,
+			MetadataFreshness: string(state.Freshness),
+			MetadataOffline:   state.Offline,
 		})
 	}
+	for _, src := range res.Sources {
+		out.Sources = append(out.Sources, freshnessView(src))
+	}
 	return out, nil
+}
+
+// freshnessView projects one consulted registry's metadata state, with the
+// sentence that explains it.
+func freshnessView(src RegistrySource) controllers.SkillRegistryFreshnessView {
+	state := src.Metadata.Normalized()
+	return controllers.SkillRegistryFreshnessView{
+		RegistryID:   src.RegistryID,
+		RegistryName: src.RegistryName,
+		Freshness:    string(state.Freshness),
+		Offline:      state.Offline,
+		FetchedAt:    state.FetchedAt,
+		Explanation:  FreshnessExplanation(state),
+	}
 }
 
 // GetMarketplaceRelease implements the controller's release detail.
@@ -206,10 +236,20 @@ func (m *Marketplace) GetMarketplaceRelease(
 	if err != nil {
 		return controllers.SkillReleaseDetailResponse{}, err
 	}
+	state := current.Metadata.Normalized()
 	out := controllers.SkillReleaseDetailResponse{
-		Release:       releaseView(current),
-		Versions:      make([]controllers.SkillReleaseView, 0, len(versions)),
+		Release:  releaseView(current),
+		Versions: make([]controllers.SkillReleaseView, 0, len(versions)),
+		Source: freshnessView(RegistrySource{
+			RegistryID:   current.Release.RegistryID,
+			RegistryName: current.RegistryName,
+			Metadata:     state,
+		}),
+		Offline:       state.Offline,
 		InstallNotice: controllers.RegistryInstallNotice,
+	}
+	if state.Offline {
+		out.FreshnessNotice = controllers.RegistryMetadataFreshnessNotice
 	}
 	for _, rel := range versions {
 		out.Versions = append(out.Versions, releaseView(rel))
@@ -346,7 +386,42 @@ func releaseView(f FoundRelease) controllers.SkillReleaseView {
 		Installed:             f.Installed,
 		InstalledVersion:      f.InstalledVersion,
 		UpdateAvailable:       f.UpdateAvailable,
+		// Freshness travels beside trust and compatibility and into neither.
+		MetadataFreshness: string(f.Metadata.Normalized().Freshness),
+		MetadataOffline:   f.Metadata.Offline,
+		MetadataAsOf:      f.Metadata.FetchedAt,
 	}
+}
+
+// FreshnessExplanation says in words what a metadata state means.
+//
+// It is served rather than rendered in the UI for the same reason
+// TrustExplanation is: a screen that wrote its own version of these sentences
+// would eventually write a nicer one, and the nicest available lie about this
+// particular subject is "up to date".
+func FreshnessExplanation(state skillregistry.MetadataState) string {
+	asOf := ""
+	if !state.FetchedAt.IsZero() {
+		asOf = " The registry last answered at " + state.FetchedAt.UTC().Format(time.RFC3339) + "."
+	}
+	switch {
+	case state.Offline && state.Freshness == skillregistry.FreshnessStale:
+		return "AO could not reach this registry, and what is shown was cached longer ago than the cache " +
+			"considers current. It is not what the registry says now: a release withdrawn since then would " +
+			"still appear." + asOf
+	case state.Offline && state.Freshness == skillregistry.FreshnessOffline && !state.FetchedAt.IsZero():
+		return "AO could not reach this registry. What is shown is metadata AO cached recently and could not " +
+			"confirm just now -- recent is not the same as current." + asOf
+	case state.Offline:
+		return "AO could not reach this registry and has nothing cached for it, so it contributed nothing to " +
+			"this result. That is not the same as the registry having nothing."
+	case state.Freshness == skillregistry.FreshnessCached:
+		return "This came from AO's cache without asking the registry, and the cache still considers it " +
+			"current." + asOf
+	case state.Freshness == skillregistry.FreshnessStale:
+		return "This came from AO's cache and the cache no longer considers it current." + asOf
+	}
+	return "The registry answered during this request." + asOf
 }
 
 func originView(o store.SkillInstallOrigin) controllers.SkillInstallOriginView {

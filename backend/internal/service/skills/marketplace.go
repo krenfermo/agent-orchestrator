@@ -457,12 +457,39 @@ type FoundRelease struct {
 	UpdateAvailable bool
 	// Compatibility is the verdict against the running AO version.
 	Compatibility skillregistry.CompatibilityVerdict
+	// Metadata is how AO came by this row: live from the registry, or from
+	// cache because the registry could not be reached.
+	//
+	// It is carried per release rather than only per registry because a search
+	// spans registries, and one of them being offline must not colour the rows
+	// that came from the ones that answered. It touches NOTHING else on this
+	// struct: a stale row keeps the trust state and the compatibility verdict
+	// it would have had live, because freshness is a fact about the metadata
+	// and neither of those is.
+	Metadata skillregistry.MetadataState
 }
 
 // SearchNote is one thing the search could not do, named rather than swallowed.
 type SearchNote struct {
 	RegistryID string
 	Reason     string
+	// Metadata is how far AO got. A registry that was unreachable with nothing
+	// cached is offline, and saying so is what stops a client rendering a
+	// network outage as a configuration error.
+	Metadata skillregistry.MetadataState
+}
+
+// RegistrySource is one registry the search consulted, and how it answered.
+//
+// It exists so a client can render "showing cached results, this registry was
+// unreachable" WITHOUT inferring it from the shape of the result: an empty
+// note list plus some rows is not evidence that everything is current, which
+// is precisely the reading that let a stale answer pass for a live one.
+type RegistrySource struct {
+	RegistryID   string
+	RegistryName string
+	// Metadata is the explicit state, straight from the provider.
+	Metadata skillregistry.MetadataState
 }
 
 // SearchResult is a search across registries.
@@ -473,6 +500,21 @@ type SearchResult struct {
 	// nothing" and "AO could not read this registry" are different answers,
 	// and only one of them means somebody should go and look.
 	Notes []SearchNote
+	// Sources is every registry the search consulted, answered or not, with
+	// the freshness of what it gave. It is always populated, so "is any of
+	// this cached" is a field a client reads rather than a thing it deduces.
+	Sources []RegistrySource
+}
+
+// Offline reports whether any consulted registry could not be reached. It is
+// computed here, once, rather than in each client.
+func (r SearchResult) Offline() bool {
+	for _, src := range r.Sources {
+		if src.Metadata.Offline {
+			return true
+		}
+	}
+	return false
 }
 
 // Search queries every enabled, visible registry.
@@ -499,24 +541,52 @@ func (m *Marketplace) Search(ctx context.Context, req SearchRequest) (SearchResu
 		return SearchResult{}, err
 	}
 
-	result := SearchResult{Releases: []FoundRelease{}, Notes: []SearchNote{}}
+	result := SearchResult{Releases: []FoundRelease{}, Notes: []SearchNote{}, Sources: []RegistrySource{}}
 	for _, reg := range registries {
 		provider, err := m.openProvider(ctx, reg)
 		if err != nil {
-			result.Notes = append(result.Notes, SearchNote{RegistryID: reg.ID, Reason: err.Error()})
+			// The registry could not even be OPENED -- a bad configuration, an
+			// unresolvable credential. Nothing was asked of the network, so
+			// this is not offline; it is unreadable, and the two want
+			// different fixes.
+			state := skillregistry.MetadataState{Freshness: skillregistry.FreshnessLive}
+			result.Notes = append(result.Notes,
+				SearchNote{RegistryID: reg.ID, Reason: err.Error(), Metadata: state})
+			result.Sources = append(result.Sources, sourceOf(reg, state))
 			continue
 		}
-		rels, err := provider.Search(ctx, req.Query)
-		if err != nil {
-			result.Notes = append(result.Notes, SearchNote{RegistryID: reg.ID, Reason: err.Error()})
+		rels, searchErr := provider.Search(ctx, req.Query)
+		// The state is read whether or not the search succeeded: a registry
+		// that failed BECAUSE it was unreachable is the row that has to say
+		// offline.
+		state := skillregistry.StateOf(provider)
+		result.Sources = append(result.Sources, sourceOf(reg, state))
+		if searchErr != nil {
+			result.Notes = append(result.Notes,
+				SearchNote{RegistryID: reg.ID, Reason: searchErr.Error(), Metadata: state})
 			continue
 		}
 		for _, rel := range rels {
-			result.Releases = append(result.Releases, m.decorate(rel, reg, installed))
+			result.Releases = append(result.Releases, m.decorate(rel, reg, installed, state))
 		}
 	}
 	sortFound(result.Releases)
+	sortSources(result.Sources)
 	return result, nil
+}
+
+func sourceOf(reg skillregistry.Registry, state skillregistry.MetadataState) RegistrySource {
+	return RegistrySource{
+		RegistryID:   reg.ID,
+		RegistryName: reg.DisplayName,
+		Metadata:     state.Normalized(),
+	}
+}
+
+func sortSources(sources []RegistrySource) {
+	sort.SliceStable(sources, func(i, j int) bool {
+		return sources[i].RegistryID < sources[j].RegistryID
+	})
 }
 
 func (m *Marketplace) searchTargets(
@@ -570,16 +640,23 @@ func (m *Marketplace) installedIndex(ctx context.Context) (installedIndex, error
 
 func (m *Marketplace) decorate(
 	rel skillregistry.Release, reg skillregistry.Registry, idx installedIndex,
+	state skillregistry.MetadataState,
 ) FoundRelease {
 	installedVersion := idx.newest[rel.SkillID]
 	return FoundRelease{
-		Release:          rel,
-		RegistryName:     reg.DisplayName,
+		Release:      rel,
+		RegistryName: reg.DisplayName,
+		// AssessAvailable and CheckCompatibility are called with exactly what
+		// they were called with before. Freshness is passed alongside them and
+		// into neither: a cached row is not less trusted and not less
+		// compatible, it is less CURRENT, and merging those would be the same
+		// mistake in the other direction.
 		Trust:            skillregistry.AssessAvailable(rel),
 		Installed:        idx.present[rel.Ref()],
 		InstalledVersion: installedVersion,
 		UpdateAvailable:  installedVersion != "" && skillregistry.NewerThan(rel.Version, installedVersion),
 		Compatibility:    skillregistry.CheckCompatibility(rel, m.aoVersion),
+		Metadata:         state.Normalized(),
 	}
 }
 
@@ -619,11 +696,12 @@ func (m *Marketplace) GetRelease(
 	if err != nil {
 		return FoundRelease{}, nil, releaseLookupError(reg.ID, skillID, version, err)
 	}
+	state := skillregistry.StateOf(provider)
 	all := make([]FoundRelease, 0, len(versions))
 	var current FoundRelease
 	var found bool
 	for _, rel := range versions {
-		decorated := m.decorate(rel, reg, idx)
+		decorated := m.decorate(rel, reg, idx, state)
 		all = append(all, decorated)
 		if rel.Version == version || (version == "" && !found) {
 			current, found = decorated, true

@@ -2528,5 +2528,10 @@
 	"settings.skillMarketplace.offlineBody": "{{registry}} could not be reached. What is listed for it is what AO last received, not what it offers now.",
 	"settings.skillMarketplace.registrySource": "Registry: {{registry}}",
 	"settings.skillMarketplace.fromCache": "Installed from AO's verified artifact cache; both digests were recomputed over the bytes.",
-	"settings.skillMarketplace.offlineInstall": "Installed while the registry was unreachable, from bytes AO had already fetched and verified."
+	"settings.skillMarketplace.offlineInstall": "Installed while the registry was unreachable, from bytes AO had already fetched and verified.",
+	"settings.skillMarketplace.freshness.live": "Current",
+	"settings.skillMarketplace.freshness.cached": "From cache",
+	"settings.skillMarketplace.freshness.stale": "Cached, out of date",
+	"settings.skillMarketplace.freshness.offline": "Cached, registry unreachable",
+	"settings.skillMarketplace.metadataAsOf": "As of {{time}}. This is not what the registry says now."
 }
