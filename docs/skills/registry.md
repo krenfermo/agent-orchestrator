@@ -233,23 +233,31 @@ a stranger which organizations have one.
 
 ## What is missing before a real public Registry
 
-1. **A network provider.** `RegistryProvider` is shaped for it —
-   `Search`/`Get`/`ListVersions`/`ResolveExactRelease` move metadata and
-   `FetchArtifact` is the only method that moves bytes — but no HTTPS or git
-   implementation exists. Adding one means deciding TLS trust, retries,
-   timeouts, response size caps and an offline story.
+> Items 1 and 3 were delivered in phase 11 and are struck through below. See
+> `docs/skills/private-registry.md` and ADR 0007. Reaching a registry over TLS
+> changed the TRANSPORT and none of the trust model: `trusted` is still
+> unreachable, and `signed` still installs nothing.
+
+1. ~~**A network provider.**~~ Delivered: an HTTPS provider bound to one
+   configured origin, with TLS verification, a resolve-then-pin dialer that
+   defeats DNS rebinding, same-origin-only redirects, explicit timeouts and size
+   ceilings, a two-part cache and an offline story that installs only from bytes
+   AO already verified.
 2. **Signature verification.** The one thing that would make `trusted`
    reachable: a trust anchor an installation configures, a signature format AO
    validates, and a revocation path for the key rather than for the release.
    Until then `signed` refuses and `trusted` is unreachable.
-3. **Registry authentication.** The column holds the *name* of a sealed secret;
-   nothing reads it yet, because the only implemented type needs no credential.
+3. ~~**Registry authentication.**~~ Delivered: bearer and API-key-header, with
+   the credential stored as the NAME of a sealed secret and sent to exactly one
+   origin. Basic and query-string credentials are deliberately absent.
 4. **A publishing story.** AO can read a registry and cannot produce one. There
    is no `ao skills publish`, no index generator and no reproducible package
    build.
-5. **Transparency / revocation distribution.** Revocation is whatever the
-   registry says at the moment it is asked. A registry that goes silent stops
-   being able to revoke anything.
+5. **Transparency / revocation distribution.** Partly addressed in phase 11: a
+   registry serves `/v1/revocations`, AO records what it is told, and a recorded
+   revocation blocks new installs even while the registry is unreachable. What
+   is still missing is transparency — AO takes the registry's word for a
+   withdrawal, and a registry that goes silent still cannot announce a NEW one.
 6. **Rate limits and abuse controls** for a registry AO does not operate.
 
 None of that is required for the delivery goal below, and none of it is

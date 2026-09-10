@@ -58,7 +58,17 @@ const approvedLiterals: Record<string, readonly string[]> = {
 	// An example registry identifier and an example absolute path, shown as form
 	// placeholders. Both say what SHAPE to type; a localized identifier or a
 	// localized directory name would be an example that does not work.
-	"components/settings/SkillRegistriesSettingsSection.tsx": ["company-private", "/srv/ao/registry"],
+	// Placeholders that are EXAMPLES of a machine-readable value, not prose: a
+	// registry id, a path, a base URL, a header name and a secret name. Each is
+	// the literal shape the field accepts, and translating one would show a
+	// reader an example their daemon would refuse.
+	"components/settings/SkillRegistriesSettingsSection.tsx": [
+		"company-private",
+		"/srv/ao/registry",
+		"https://registry.corp.example",
+		"X-API-Key",
+		"CORP_REGISTRY_TOKEN",
+	],
 	"components/settings/UpdatesSection.tsx": ["PR #"],
 	// Fallbacks for absent daemon-supplied values, not English copy: the two
 	// halves of a "provider/model" pair and the default reviewer's own id.
