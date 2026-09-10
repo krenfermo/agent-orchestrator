@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { SkillImagesSettingsSection } from "./SkillImagesSettingsSection";
+import { SkillInstalledSettingsSection } from "./SkillInstalledSettingsSection";
 import { SkillMarketplaceSettingsSection } from "./SkillMarketplaceSettingsSection";
 import { SkillRegistriesSettingsSection } from "./SkillRegistriesSettingsSection";
 import { SkillTrustSettingsSection } from "./SkillTrustSettingsSection";
@@ -14,6 +15,11 @@ import { SkillTrustSettingsSection } from "./SkillTrustSettingsSection";
  *
  * **Marketplace** — find a package and put its bytes on this host. It reaches
  * no project.
+ * **Installed** — what is actually on this host and what AO verified about it.
+ * It is a separate tab from Marketplace because those answer two different
+ * questions: the Marketplace shows what a registry CLAIMS about something you
+ * could install, and this shows what AO RECORDED about something it already
+ * fetched and checked. A row in one is a claim; a row in the other is evidence.
  * **Registries** — decide which outside sources this installation may install
  * from at all, and see what those sources now say about what is already here.
  * **Trust** — decide whose signatures this installation will accept at all.
@@ -48,12 +54,16 @@ export function SkillsSettingsSection({ titleHidden }: { titleHidden?: boolean }
 			<Tabs value={tab} onValueChange={setTab}>
 				<TabsList>
 					<TabsTrigger value="marketplace">{t("settings.skills.tab.marketplace")}</TabsTrigger>
+					<TabsTrigger value="installed">{t("settings.skills.tab.installed")}</TabsTrigger>
 					<TabsTrigger value="registries">{t("settings.skills.tab.registries")}</TabsTrigger>
 					<TabsTrigger value="trust">{t("settings.skills.tab.trust")}</TabsTrigger>
 					<TabsTrigger value="images">{t("settings.skills.tab.images")}</TabsTrigger>
 				</TabsList>
 				<TabsContent value="marketplace" className="pt-3">
 					<SkillMarketplaceSettingsSection />
+				</TabsContent>
+				<TabsContent value="installed" className="pt-3">
+					<SkillInstalledSettingsSection />
 				</TabsContent>
 				<TabsContent value="registries" className="pt-3">
 					<SkillRegistriesSettingsSection />
