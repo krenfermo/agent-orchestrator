@@ -218,6 +218,23 @@ var knownTableRebuilds = []tableRebuild{
 		},
 		handling: handlingPark, outcome: outcomePreserved,
 	},
+	{
+		// 0166 widens skill_registries.trust_policy to accept 'official'.
+		//
+		// This is the case the guard exists for. 0165 rebuilt the SAME table
+		// for free, because it created both child tables AFTER the rebuild;
+		// four months later those children exist, and both cascade. Silently
+		// cascading skill_registry_revocations away would not be ordinary data
+		// loss -- those are the rows that block installs of withdrawn
+		// releases, so losing them re-enables exactly what revocation exists
+		// to prevent, and nothing would have said so.
+		version: 166, table: "skill_registries",
+		children: []string{
+			"skill_registry_revocations.registry_id ON DELETE CASCADE",
+			"skill_registry_status.registry_id ON DELETE CASCADE",
+		},
+		handling: handlingPragmaOff, outcome: outcomePreserved,
+	},
 }
 
 // TestTableRebuildInventoryIsComplete walks the migrations in order, and at

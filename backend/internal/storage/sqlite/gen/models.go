@@ -1005,29 +1005,41 @@ type SkillInstall struct {
 }
 
 type SkillInstallOrigin struct {
-	SkillID              string
-	Version              string
-	RegistryID           string
-	RegistryName         string
-	RegistryType         string
-	RegistryLocation     string
-	Publisher            string
-	SourceURL            string
-	ManifestDigest       string
-	ArtifactDigest       string
-	TrustState           string
-	TrustPolicy          string
-	SignatureFormat      string
-	Signature            string
-	KeyID                string
-	AttestationURL       string
-	CompatibilityVerdict string
-	PublishedAt          sql.NullTime
-	InstalledAt          time.Time
-	InstalledBy          string
-	RevokedAt            sql.NullTime
-	RevocationReason     string
-	RevocationSeenAt     sql.NullTime
+	SkillID                 string
+	Version                 string
+	RegistryID              string
+	RegistryName            string
+	RegistryType            string
+	RegistryLocation        string
+	Publisher               string
+	SourceURL               string
+	ManifestDigest          string
+	ArtifactDigest          string
+	TrustState              string
+	TrustPolicy             string
+	SignatureFormat         string
+	Signature               string
+	KeyID                   string
+	AttestationURL          string
+	CompatibilityVerdict    string
+	PublishedAt             sql.NullTime
+	InstalledAt             time.Time
+	InstalledBy             string
+	RevokedAt               sql.NullTime
+	RevocationReason        string
+	RevocationSeenAt        sql.NullTime
+	SignatureScheme         string
+	SignatureAlgorithm      string
+	SigningKeyID            string
+	SigningKeyFingerprint   string
+	SigningKeyOrigin        string
+	TrustRootID             string
+	TrustRootTier           string
+	SignatureSignedAt       sql.NullTime
+	SignatureVerifiedAt     sql.NullTime
+	SignatureResult         string
+	RevocationStateObserved string
+	MetadataFetchedAt       sql.NullTime
 }
 
 type SkillRegistry struct {
@@ -1052,6 +1064,8 @@ type SkillRegistry struct {
 
 type SkillRegistryRevocation struct {
 	RegistryID string
+	Subject    string
+	SubjectKey string
 	SkillID    string
 	Version    string
 	Reason     string
@@ -1106,6 +1120,51 @@ type SkillSecretLease struct {
 	IssuedAt   time.Time
 	ExpiresAt  time.Time
 	ConsumedAt sql.NullTime
+}
+
+type SkillSigningKey struct {
+	KeyID            string
+	TrustRootID      string
+	Publisher        string
+	IsRootKey        int64
+	Algorithm        string
+	PublicKey        string
+	Fingerprint      string
+	Origin           string
+	Status           string
+	ValidFrom        time.Time
+	ValidUntil       sql.NullTime
+	RevokedAt        sql.NullTime
+	RevocationReason string
+	RotatedFromKeyID string
+	CreatedAt        time.Time
+	CreatedBy        string
+	UpdatedAt        time.Time
+	UpdatedBy        string
+}
+
+type SkillTrustRevocation struct {
+	Subject   string
+	SubjectID string
+	Reason    string
+	RevokedAt time.Time
+	RevokedBy string
+}
+
+type SkillTrustRoot struct {
+	ID               string
+	Tier             string
+	DisplayName      string
+	Publisher        string
+	Status           string
+	ValidFrom        time.Time
+	ValidUntil       sql.NullTime
+	RevokedAt        sql.NullTime
+	RevocationReason string
+	CreatedAt        time.Time
+	CreatedBy        string
+	UpdatedAt        time.Time
+	UpdatedBy        string
 }
 
 type Team struct {

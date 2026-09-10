@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillregistry"
@@ -51,20 +52,59 @@ type SkillRegistryStatus struct {
 // Tested reports whether a connection test has ever run.
 func (s SkillRegistryStatus) Tested() bool { return s.LastProbeState != "" }
 
-// SkillRegistryRevocation is one withdrawal AO has recorded.
+// SkillRegistryRevocation is one withdrawal AO has recorded, as reported by a
+// registry.
+//
+// Phase 12 gave it a SUBJECT. A registry can now withdraw a signing key, a
+// publisher or a trust root as well as a release, and those are four different
+// facts with four different blast radii that one boolean would have flattened.
+//
+// A registry's word about a KEY, a PUBLISHER or a ROOT is scoped to installs
+// from that registry -- see the note in migration 0166. Global withdrawal of
+// those is an administrator's act and lives in skill_trust_revocations.
 type SkillRegistryRevocation struct {
 	RegistryID string
-	SkillID    string
-	Version    string
-	Reason     string
+	// Subject is what was withdrawn. Empty on a row written by a caller that
+	// predates phase 12 and read back as "release", which is what every such
+	// row is.
+	Subject skillregistry.RevocationSubject
+	// SubjectID names a non-release subject. Empty for a release, which is
+	// identified by SkillID and Version.
+	SubjectID string
+	SkillID   string
+	Version   string
+	Reason    string
 	// RevokedAt is when the REGISTRY says it withdrew the release; ObservedAt
 	// is when AO first saw it. Two facts, and only the second is AO's.
 	RevokedAt  *time.Time
 	ObservedAt time.Time
 }
 
-// Ref is the "<skillId>@<version>" identity.
-func (r SkillRegistryRevocation) Ref() string { return r.SkillID + "@" + r.Version }
+// EffectiveSubject is what this row withdraws; an empty subject is a release.
+func (r SkillRegistryRevocation) EffectiveSubject() skillregistry.RevocationSubject {
+	if strings.TrimSpace(string(r.Subject)) == "" {
+		return skillregistry.SubjectRelease
+	}
+	return r.Subject
+}
+
+// SubjectKey is the identity within (registryId, subject) that the primary key
+// uses. One function, so the write and the lookup cannot disagree about how a
+// row is addressed.
+func (r SkillRegistryRevocation) SubjectKey() string {
+	if r.EffectiveSubject() == skillregistry.SubjectRelease {
+		return r.SkillID + "@" + r.Version
+	}
+	return r.SubjectID
+}
+
+// Ref is the identity for a message and an audit line.
+func (r SkillRegistryRevocation) Ref() string {
+	if s := r.EffectiveSubject(); s != skillregistry.SubjectRelease {
+		return string(s) + " " + r.SubjectID
+	}
+	return r.SkillID + "@" + r.Version
+}
 
 // UpsertSkillRegistryStatus records what one observation saw.
 //
@@ -134,6 +174,8 @@ func (s *Store) UpsertSkillRegistryRevocation(
 
 	row, err := s.qw.UpsertSkillRegistryRevocation(ctx, gen.UpsertSkillRegistryRevocationParams{
 		RegistryID: in.RegistryID,
+		Subject:    string(in.EffectiveSubject()),
+		SubjectKey: in.SubjectKey(),
 		SkillID:    in.SkillID,
 		Version:    in.Version,
 		Reason:     in.Reason,
@@ -152,7 +194,9 @@ func (s *Store) GetSkillRegistryRevocation(
 	ctx context.Context, registryID, skillID, version string,
 ) (SkillRegistryRevocation, bool, error) {
 	row, err := s.qr.GetSkillRegistryRevocation(ctx, gen.GetSkillRegistryRevocationParams{
-		RegistryID: registryID, SkillID: skillID, Version: version,
+		RegistryID: registryID,
+		Subject:    string(skillregistry.SubjectRelease),
+		SubjectKey: skillID + "@" + version,
 	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -176,6 +220,28 @@ func (s *Store) ListSkillRegistryRevocations(
 		out = append(out, revocationFromRow(row))
 	}
 	return out, nil
+}
+
+// GetSkillRegistryTrustRevocation answers "did this registry withdraw this
+// key, publisher or root". It is a separate method from the release lookup
+// because the two are asked at different points and by different callers, and
+// a single method with a subject parameter is one somebody calls with the
+// wrong constant.
+func (s *Store) GetSkillRegistryTrustRevocation(
+	ctx context.Context, registryID string,
+	subject skillregistry.RevocationSubject, subjectID string,
+) (SkillRegistryRevocation, bool, error) {
+	row, err := s.qr.GetSkillRegistryRevocation(ctx, gen.GetSkillRegistryRevocationParams{
+		RegistryID: registryID, Subject: string(subject), SubjectKey: subjectID,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return SkillRegistryRevocation{}, false, nil
+		}
+		return SkillRegistryRevocation{}, false,
+			fmt.Errorf("get skill registry trust revocation: %w", err)
+	}
+	return revocationFromRow(row), true, nil
 }
 
 // ListAllSkillRegistryRevocations returns every recorded withdrawal.
@@ -207,10 +273,23 @@ func statusFromRow(row gen.SkillRegistryStatus) SkillRegistryStatus {
 func revocationFromRow(row gen.SkillRegistryRevocation) SkillRegistryRevocation {
 	return SkillRegistryRevocation{
 		RegistryID: row.RegistryID,
+		Subject:    skillregistry.RevocationSubject(row.Subject),
+		SubjectID:  subjectIDFromRow(row),
 		SkillID:    row.SkillID,
 		Version:    row.Version,
 		Reason:     row.Reason,
 		RevokedAt:  nullTimeToPtr(row.RevokedAt),
 		ObservedAt: row.ObservedAt,
 	}
+}
+
+// subjectIDFromRow recovers the non-release subject id. A release row's
+// subject_key is "skillId@version", which is derived rather than stored
+// separately, so returning it as a SubjectID would put a second spelling of
+// the release identity on a struct that already carries SkillID and Version.
+func subjectIDFromRow(row gen.SkillRegistryRevocation) string {
+	if skillregistry.RevocationSubject(row.Subject) == skillregistry.SubjectRelease {
+		return ""
+	}
+	return row.SubjectKey
 }

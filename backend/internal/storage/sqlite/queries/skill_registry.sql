@@ -53,9 +53,14 @@ INSERT INTO skill_install_origins (
     registry_location, publisher, source_url, manifest_digest, artifact_digest,
     trust_state, trust_policy, signature_format, signature, key_id,
     attestation_url, compatibility_verdict, published_at, installed_at,
-    installed_by, revoked_at, revocation_reason, revocation_seen_at
+    installed_by, revoked_at, revocation_reason, revocation_seen_at,
+    signature_scheme, signature_algorithm, signing_key_id,
+    signing_key_fingerprint, signing_key_origin, trust_root_id,
+    trust_root_tier, signature_signed_at, signature_verified_at,
+    signature_result, revocation_state_observed, metadata_fetched_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (skill_id, version) DO UPDATE SET
     registry_id = excluded.registry_id,
     registry_name = excluded.registry_name,
@@ -74,19 +79,39 @@ ON CONFLICT (skill_id, version) DO UPDATE SET
     compatibility_verdict = excluded.compatibility_verdict,
     published_at = excluded.published_at,
     installed_at = excluded.installed_at,
-    installed_by = excluded.installed_by
+    installed_by = excluded.installed_by,
+    signature_scheme = excluded.signature_scheme,
+    signature_algorithm = excluded.signature_algorithm,
+    signing_key_id = excluded.signing_key_id,
+    signing_key_fingerprint = excluded.signing_key_fingerprint,
+    signing_key_origin = excluded.signing_key_origin,
+    trust_root_id = excluded.trust_root_id,
+    trust_root_tier = excluded.trust_root_tier,
+    signature_signed_at = excluded.signature_signed_at,
+    signature_verified_at = excluded.signature_verified_at,
+    signature_result = excluded.signature_result,
+    revocation_state_observed = excluded.revocation_state_observed,
+    metadata_fetched_at = excluded.metadata_fetched_at
 RETURNING skill_id, version, registry_id, registry_name, registry_type,
     registry_location, publisher, source_url, manifest_digest, artifact_digest,
     trust_state, trust_policy, signature_format, signature, key_id,
     attestation_url, compatibility_verdict, published_at, installed_at,
-    installed_by, revoked_at, revocation_reason, revocation_seen_at;
+    installed_by, revoked_at, revocation_reason, revocation_seen_at,
+    signature_scheme, signature_algorithm, signing_key_id,
+    signing_key_fingerprint, signing_key_origin, trust_root_id,
+    trust_root_tier, signature_signed_at, signature_verified_at,
+    signature_result, revocation_state_observed, metadata_fetched_at;
 
 -- name: GetSkillInstallOrigin :one
 SELECT skill_id, version, registry_id, registry_name, registry_type,
     registry_location, publisher, source_url, manifest_digest, artifact_digest,
     trust_state, trust_policy, signature_format, signature, key_id,
     attestation_url, compatibility_verdict, published_at, installed_at,
-    installed_by, revoked_at, revocation_reason, revocation_seen_at
+    installed_by, revoked_at, revocation_reason, revocation_seen_at,
+    signature_scheme, signature_algorithm, signing_key_id,
+    signing_key_fingerprint, signing_key_origin, trust_root_id,
+    trust_root_tier, signature_signed_at, signature_verified_at,
+    signature_result, revocation_state_observed, metadata_fetched_at
 FROM skill_install_origins WHERE skill_id = ? AND version = ?;
 
 -- name: ListSkillInstallOrigins :many
@@ -94,7 +119,11 @@ SELECT skill_id, version, registry_id, registry_name, registry_type,
     registry_location, publisher, source_url, manifest_digest, artifact_digest,
     trust_state, trust_policy, signature_format, signature, key_id,
     attestation_url, compatibility_verdict, published_at, installed_at,
-    installed_by, revoked_at, revocation_reason, revocation_seen_at
+    installed_by, revoked_at, revocation_reason, revocation_seen_at,
+    signature_scheme, signature_algorithm, signing_key_id,
+    signing_key_fingerprint, signing_key_origin, trust_root_id,
+    trust_root_tier, signature_signed_at, signature_verified_at,
+    signature_result, revocation_state_observed, metadata_fetched_at
 FROM skill_install_origins;
 
 -- name: ListSkillInstallOriginsForSkill :many
@@ -102,7 +131,11 @@ SELECT skill_id, version, registry_id, registry_name, registry_type,
     registry_location, publisher, source_url, manifest_digest, artifact_digest,
     trust_state, trust_policy, signature_format, signature, key_id,
     attestation_url, compatibility_verdict, published_at, installed_at,
-    installed_by, revoked_at, revocation_reason, revocation_seen_at
+    installed_by, revoked_at, revocation_reason, revocation_seen_at,
+    signature_scheme, signature_algorithm, signing_key_id,
+    signing_key_fingerprint, signing_key_origin, trust_root_id,
+    trust_root_tier, signature_signed_at, signature_verified_at,
+    signature_result, revocation_state_observed, metadata_fetched_at
 FROM skill_install_origins WHERE skill_id = ?;
 
 -- MarkSkillInstallOriginRevoked records a revocation AO OBSERVED after the
@@ -160,23 +193,25 @@ FROM skill_registry_status;
 
 -- name: UpsertSkillRegistryRevocation :one
 INSERT INTO skill_registry_revocations (
-    registry_id, skill_id, version, reason, revoked_at, observed_at
+    registry_id, subject, subject_key, skill_id, version, reason, revoked_at, observed_at
 )
-VALUES (?, ?, ?, ?, ?, ?)
-ON CONFLICT (registry_id, skill_id, version) DO UPDATE SET
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (registry_id, subject, subject_key) DO UPDATE SET
+    skill_id = excluded.skill_id,
+    version = excluded.version,
     reason = excluded.reason,
     revoked_at = COALESCE(skill_registry_revocations.revoked_at, excluded.revoked_at)
-RETURNING registry_id, skill_id, version, reason, revoked_at, observed_at;
+RETURNING registry_id, subject, subject_key, skill_id, version, reason, revoked_at, observed_at;
 
 -- name: GetSkillRegistryRevocation :one
-SELECT registry_id, skill_id, version, reason, revoked_at, observed_at
+SELECT registry_id, subject, subject_key, skill_id, version, reason, revoked_at, observed_at
 FROM skill_registry_revocations
-WHERE registry_id = ? AND skill_id = ? AND version = ?;
+WHERE registry_id = ? AND subject = ? AND subject_key = ?;
 
 -- name: ListSkillRegistryRevocations :many
-SELECT registry_id, skill_id, version, reason, revoked_at, observed_at
+SELECT registry_id, subject, subject_key, skill_id, version, reason, revoked_at, observed_at
 FROM skill_registry_revocations WHERE registry_id = ?;
 
 -- name: ListAllSkillRegistryRevocations :many
-SELECT registry_id, skill_id, version, reason, revoked_at, observed_at
+SELECT registry_id, subject, subject_key, skill_id, version, reason, revoked_at, observed_at
 FROM skill_registry_revocations;
