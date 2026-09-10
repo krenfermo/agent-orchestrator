@@ -21,7 +21,11 @@ type UpdateCheck = components["schemas"]["SkillUpdateCheckResponse"];
 type Probe = components["schemas"]["SkillRegistryProbeView"];
 type RevocationSync = components["schemas"]["SkillRegistryRevocationSyncView"];
 
-const TRUST_POLICIES = ["digest", "pinned_publisher", "signed"] as const;
+// "official" is last because it is the narrowest, and it is present even
+// though no build ships an AO Official root yet: a policy an administrator can
+// choose and AO then refuses is honest, and a policy hidden until the day it
+// works is one nobody knows to plan for.
+const TRUST_POLICIES = ["digest", "pinned_publisher", "signed", "official"] as const;
 const REGISTRY_TYPES = ["local", "https"] as const;
 const AUTH_TYPES = ["none", "bearer", "api_key_header"] as const;
 
@@ -306,8 +310,10 @@ export function SkillRegistriesSettingsSection() {
 										publisher: reg.pinnedPublisher ?? "",
 									})}
 								</p>
-								{/* The strictest-looking setting must not read as if it
-								    were working: it installs nothing at all. */}
+								{/* A policy that cannot be satisfied must not read as if
+								    it were working: it installs nothing at all. The
+								    daemon decides this -- it is the thing that knows
+								    whether a matching trust root exists. */}
 								{!reg.trustPolicyEnforceable ? (
 									<p className="text-caption text-warning">
 										{t("settings.skillRegistries.policyUnenforceable")}
@@ -660,9 +666,18 @@ export function SkillRegistriesSettingsSection() {
 						</label>
 					) : null}
 				</div>
+				{/* "signed" works today against a trust root configured in
+				    Settings -> Skills -> Trust; "official" does not, because this
+				    build carries no AO Official root. Two different warnings,
+				    because they send a person to two different places. */}
 				{form.trustPolicy === "signed" ? (
+					<p className="text-caption text-settings-muted">
+						{t("settings.skillRegistries.policyNeedsTrustRoot")}
+					</p>
+				) : null}
+				{form.trustPolicy === "official" ? (
 					<p className="text-caption text-warning">
-						{t("settings.skillRegistries.policyUnenforceable")}
+						{t("settings.skillRegistries.policyOfficialUnavailable")}
 					</p>
 				) : null}
 				<Button
