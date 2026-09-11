@@ -472,7 +472,7 @@ New tests added by this checkpoint:
 | `go test ./... -short` | ok, no failures |
 | `go test ./internal/workflow/...` | ok |
 | `go test -race` on `observe/usage`, `observe/turnbench`, `domain`, `service/usage` | ok |
-| `golangci-lint v2.12.2` on every touched package | **18 findings, 17 of them pre-existing in files this branch never opened**; the one that was mine (a missing doc comment on an exported threshold accessor) is fixed. Lint delta: **0**. |
+| `golangci-lint v2.12.2` on every touched package | **17 findings after the fix, every one pre-existing.** The first pass reported 18: seventeen in files this branch never opened, plus one that was mine (a missing doc comment on an exported threshold accessor), now fixed. The only remaining finding in a file this branch touched is `workflow.go:1379`, which is the same line that sat at `workflow.go:1363` before -- my additions moved it, the diff never touches it. Lint delta: **0**. |
 | `npm run api` + `openapi-typescript@7.4.4` | both artifacts regenerated and committed |
 
 **Not run, and why.** The wide `go test -race ./internal/workflow/...` was not
@@ -484,6 +484,12 @@ fix dispatch, behind the same claim that already serialises it — so this is a
 deferred gate, not a skipped risk. Frontend Vitest was not run for the same
 reason; the frontend change is three keys in a `Record<string, string>` and
 three strings per locale, with no type surface and no render logic.
+
+The FIRST lint pass of this work reported nothing and exited 0. It was not
+clean: that is golangci-lint's known behaviour when another run holds its lock
+-- it prints zero findings and reads as green. Re-run serially, it produced the
+eighteen. Any lint result in this repo that is both empty and fast should be
+re-run before it is believed.
 
 `npm run api` exits 0 even when its `api:ts` half fails to find the binary, so
 `frontend/src/api/schema.ts` was regenerated explicitly with the pinned
