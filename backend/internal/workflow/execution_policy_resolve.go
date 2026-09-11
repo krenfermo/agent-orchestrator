@@ -233,6 +233,7 @@ func (c *Coordinator) inheritExecutionPolicySnapshot(ctx stdctx.Context, childRu
 		!snapshotHasPriorities(parentPolicy.Execution) &&
 		!parentPolicy.Repair.Mode.Valid() &&
 		!parentPolicy.Autonomy.Mode.Valid() &&
+		!parentPolicy.CompactionProvenance.Recorded() &&
 		!parentPolicy.Usage.Configured() {
 		return nil
 	}
@@ -247,6 +248,14 @@ func (c *Coordinator) inheritExecutionPolicySnapshot(ctx stdctx.Context, childRu
 		ParentRunID:         parent.ID,
 		AutonomousRequested: parentPolicy.Execution.Provenance.AutonomousRequested,
 		At:                  c.clock(),
+	}
+	// InheritWorkflowPolicy is pure and has no parent id to record, so the
+	// child's compaction record names its parent here -- the same division of
+	// labour the Execution provenance stamp above already uses. Only stamped
+	// when inheritance actually copied a choice; a child of a parent that
+	// recorded none keeps its own untouched zero value.
+	if childPolicy.CompactionProvenance.Recorded() {
+		childPolicy.CompactionProvenance.ParentRunID = parent.ID
 	}
 	snapshotJSON, err := json.Marshal(childPolicy)
 	if err != nil {

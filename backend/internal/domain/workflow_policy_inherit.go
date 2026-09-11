@@ -19,6 +19,7 @@ import "fmt"
 // The classification, field by field:
 //
 //	Version                          CHILD-LOCAL    snapshot shape, not semantics
+//	SessionCompactionEnabled         INHERIT*       may a fix cycle compact first
 //	MaxFixCycles                     INHERIT*       review<->fix budget
 //	MaxWorkProviderAttempts          INHERIT*       dispatch/failover budget
 //	MaxReviewProviderAttempts        INHERIT*       review dispatch budget
@@ -40,6 +41,28 @@ import "fmt"
 // value to exactly the same conservative default (ask_always, suggest, no
 // ceiling) on either side. Inheritance therefore never escalates autonomy: it
 // can only carry forward a choice a person actually made on the parent.
+//
+// SessionCompactionEnabled obeys that same rule, and it is the reason
+// CompactionProvenance exists at all. The field is a bare bool, so unlike
+// Repair/Autonomy/Usage it has no "unrecorded" value distinct from its
+// default -- the test AllowSameProviderResolver gets away with (copy it
+// unconditionally, false is the default on both sides) would here mean a
+// parent that merely predates compaction could hand a child a decision nobody
+// took, and a `true` that reached a snapshot by any route other than an opt-in
+// would propagate to every child of that objective. So the gate is the
+// PROVENANCE, not the value: the parent's flag travels only when the parent
+// carries a recorded choice, and the child's record says `inherited` naming
+// where it came from. An explicit false inherits exactly as an explicit true
+// does -- a run somebody told not to compact must pass that refusal down
+// rather than letting a child fall back to a default that only happens to
+// agree today.
+//
+// The child's own value never wins, for the same reason no other field's
+// does: a child run is where the parent objective's work executes, and
+// RequireInheritedWorkflowPolicy refuses a dispatch whose child disagrees with
+// the contract it is executing under. Nothing in AO creates a child through
+// the create-run API, so there is no path by which a child could hold a
+// competing explicit request in the first place.
 //
 // Strategy is the one field that is deliberately recomputed rather than
 // inherited: a child is never `master` and never deeper than
@@ -74,6 +97,19 @@ func InheritWorkflowPolicy(parent, child WorkflowPolicy) WorkflowPolicy {
 	// A bool has no "unrecorded" state distinct from false, and false is also
 	// the default on both sides, so this is safe to carry unconditionally.
 	out.AllowSameProviderResolver = parent.AllowSameProviderResolver
+
+	// Session compaction is also a bool, and is NOT safe to carry
+	// unconditionally for exactly that reason -- see the note on the legacy
+	// fallback above. The recorded choice is what travels; an unrecorded
+	// parent leaves the child at its own default, whatever the parent's raw
+	// flag happens to say. The caller stamps ParentRunID, the same way it
+	// stamps Execution.Provenance.
+	if parent.CompactionProvenance.Recorded() {
+		out.SessionCompactionEnabled = parent.SessionCompactionEnabled
+		out.CompactionProvenance = parent.CompactionProvenance
+		out.CompactionProvenance.Source = SessionCompactionInherited
+		out.CompactionProvenance.ParentRunID = ""
+	}
 
 	if parent.Routing.Version != "" {
 		out.Routing = parent.Routing
@@ -129,6 +165,19 @@ func RequireInheritedWorkflowPolicy(parent, child WorkflowPolicy) error {
 		return fmt.Errorf("usage ceiling: parent=(%d tokens, %.4f usd) child=(%d tokens, %.4f usd)",
 			parentUsage.WorkflowTokenBudget, parentUsage.WorkflowCostBudgetUSD,
 			childUsage.WorkflowTokenBudget, childUsage.WorkflowCostBudgetUSD)
+	}
+	// Compaction is compared only when the parent recorded a choice, mirroring
+	// what InheritWorkflowPolicy is willing to copy. A legacy parent whose raw
+	// flag is false and a child at the same default agree trivially and are
+	// not compared at all, so no pre-existing run is refused by this -- and a
+	// parent that DID opt in must be able to prove its children are running
+	// under that opt-in, because the child is where every fix cycle happens.
+	if enabled, recorded := parent.SessionCompactionRequested(); recorded {
+		childEnabled, childRecorded := child.SessionCompactionRequested()
+		if !childRecorded || childEnabled != enabled {
+			return fmt.Errorf("sessionCompactionEnabled: parent=%t child=%t (child recorded=%t)",
+				enabled, child.SessionCompactionEnabled, childRecorded)
+		}
 	}
 	if parent.MaxFixCycles > 0 && child.MaxFixCycles != parent.MaxFixCycles {
 		return fmt.Errorf("maxFixCycles: parent=%d child=%d", parent.MaxFixCycles, child.MaxFixCycles)
