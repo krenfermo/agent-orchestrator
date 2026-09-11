@@ -142,7 +142,7 @@ func (r *DynamicsReader) WorkflowRun(ctx context.Context, runID string, opts Dyn
 	out.Recorded = true
 	out.Trajectory = trajectoryOf(events, unplaceable)
 	out.Steps = r.stepLines(events)
-	out.Warnings = r.advise(out, events, opts)
+	out.Warnings = r.advise(out, opts)
 	return out, nil
 }
 
@@ -248,11 +248,7 @@ func (r *DynamicsReader) cost(modelID string, tokens domain.UsageTokenTotals) do
 // scope) and a store of user content AO has no reason to hold. They are named
 // here rather than approximated, in the same spirit as the pricing package
 // refusing to invent a cost.
-func (r *DynamicsReader) advise(
-	d domain.RunContextDynamics,
-	events []store.UsageTrajectoryEvent,
-	opts DynamicsOptions,
-) []domain.UsageAdvisory {
+func (r *DynamicsReader) advise(d domain.RunContextDynamics, opts DynamicsOptions) []domain.UsageAdvisory {
 	profile := domain.UsageBudgetProfileFor(opts.Strategy).WithOverrides(opts.Budget)
 	var out []domain.UsageAdvisory
 	add := func(code domain.UsageAdvisoryCode, sev domain.UsageAdvisorySeverity, observed, threshold int64) {
