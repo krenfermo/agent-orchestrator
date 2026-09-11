@@ -499,7 +499,7 @@ func (c *Coordinator) deliverFixPrompt(
 	// Checkpoint 8M §12/§27: apply the session lifecycle decision (and
 	// persist it) right here — the single outbox-idempotency-guarded point
 	// reached exactly once per real cycle dispatch, never once per poll.
-	prompt, contextPack := c.applyFixLifecycleDecision(ctx, run, reviewRun, cycleNumber, prompt)
+	prompt, contextPack := c.applyFixLifecycleDecision(ctx, run, fixStep, reviewRun, cycleNumber, prompt)
 	delivery := newPromptDeliveryRecord(prompt, gen, contextPack)
 	// Computed against the FINAL prompt — after applyFixLifecycleDecision may
 	// have prepended a context pack — so `Embedded` is a statement about the

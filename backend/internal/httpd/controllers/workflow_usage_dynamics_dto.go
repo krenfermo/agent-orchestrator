@@ -46,6 +46,37 @@ type ContextTrajectoryResponse struct {
 	// observed time and were left out. Non-zero makes every figure above a
 	// LOWER BOUND, which the UI must say rather than imply.
 	UnplaceableEvents int64 `json:"unplaceableEvents"`
+	// CumulativeInputTokens is the sum of the context over the calls -- the
+	// quantity both levers move. meanContextPerCall is it divided by the call
+	// count, null when there were no calls.
+	CumulativeInputTokens int64  `json:"cumulativeInputTokens"`
+	MeanContextPerCall    *int64 `json:"meanContextPerCall"`
+	// Turns is what the calls DID. Absent when nothing was classified.
+	Turns *TurnMixResponse `json:"turns,omitempty"`
+}
+
+// TurnMixResponse is the call-count breakdown by turn shape.
+//
+// COUNTS OF CALLS, NEVER TOKENS. Two calls of the same class can differ
+// tenfold in cost; this block answers "what was the model doing" and the
+// trajectory beside it answers "what did that cost". A UI that multiplies them
+// is making an estimate and must label it as one.
+type TurnMixResponse struct {
+	// Classified and unclassified partition the scope's calls. A non-zero
+	// unclassified makes every share below a share OF THE CLASSIFIED CALLS,
+	// which the UI must say: those calls predate the turn_class column, came
+	// from a Codex rollout, or could not be decoded.
+	Classified   int64 `json:"classified"`
+	Unclassified int64 `json:"unclassified"`
+	// Counts is keyed by the closed turn-class vocabulary. A class with no
+	// calls is ABSENT rather than present-and-zero.
+	Counts map[string]int64 `json:"counts,omitempty"`
+	// Work and coordination split the classified calls. coordinationPercent is
+	// null when nothing was classified -- rendering 0% for "AO could not look"
+	// is the exact misreport the null prevents.
+	WorkCalls           int64 `json:"workCalls"`
+	CoordinationCalls   int64 `json:"coordinationCalls"`
+	CoordinationPercent *int  `json:"coordinationPercent"`
 }
 
 // StepUsageResponse is one workflow step's spend and shape -- the answer to
@@ -68,7 +99,7 @@ type StepUsageResponse struct {
 // "something is broken", and `info` is a fact offered so a large number is not
 // left to be interpreted alone.
 type UsageAdvisoryResponse struct {
-	Code     string `json:"code" enum:"duration_above_profile,provider_calls_above_profile,context_growth_above_profile,cost_above_profile,growth_without_progress,cache_read_dominant"`
+	Code     string `json:"code" enum:"duration_above_profile,provider_calls_above_profile,context_growth_above_profile,cost_above_profile,growth_without_progress,cache_read_dominant,context_per_call_above_profile,coordination_turns_dominant,repeated_wait_check_shape"`
 	Severity string `json:"severity" enum:"info,warn"`
 	// Observed and threshold are the two numbers that produced this advisory,
 	// in the advisory's own unit: tokens for growth, calls for calls, SECONDS
@@ -140,6 +171,38 @@ func contextTrajectoryResponse(t domain.ContextTrajectory) ContextTrajectoryResp
 	}
 	if t.LastObservedAt != nil {
 		out.LastObservedAt = t.LastObservedAt.Format(rfc3339Milli)
+	}
+	out.CumulativeInputTokens = t.CumulativeInputTokens
+	if mean, ok := t.MeanContextPerCall(); ok {
+		out.MeanContextPerCall = &mean
+	}
+	out.Turns = turnMixResponse(t.Turns)
+	return out
+}
+
+// turnMixResponse projects the mix, or nil when AO classified nothing at all.
+//
+// Nil rather than an empty object on purpose: a surface that finds the key can
+// trust that at least one call in the scope was looked at, and a surface that
+// does not find it must say "not recorded" rather than draw an empty chart.
+func turnMixResponse(m domain.TurnMix) *TurnMixResponse {
+	if m.Classified <= 0 && m.Unclassified <= 0 {
+		return nil
+	}
+	out := &TurnMixResponse{
+		Classified:        m.Classified,
+		Unclassified:      m.Unclassified,
+		WorkCalls:         m.WorkCalls(),
+		CoordinationCalls: m.CoordinationCalls(),
+	}
+	if len(m.Counts) > 0 {
+		out.Counts = make(map[string]int64, len(m.Counts))
+		for class, n := range m.Counts {
+			out.Counts[string(class)] = n
+		}
+	}
+	if share, ok := m.CoordinationShare(); ok {
+		out.CoordinationPercent = &share
 	}
 	return out
 }

@@ -51,6 +51,9 @@ const ADVISORY_LABEL_KEYS: Record<string, string> = {
 	cost_above_profile: "shell.usageShape.advisory.cost",
 	growth_without_progress: "shell.usageShape.advisory.noProgress",
 	cache_read_dominant: "shell.usageShape.advisory.cacheDominant",
+	context_per_call_above_profile: "shell.usageShape.advisory.contextPerCall",
+	coordination_turns_dominant: "shell.usageShape.advisory.coordinationDominant",
+	repeated_wait_check_shape: "shell.usageShape.advisory.waitShape",
 };
 
 const SOURCE_LABEL_KEYS: Record<string, string> = {

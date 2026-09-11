@@ -334,12 +334,26 @@ func (c *Coordinator) maybeDispatchFix(ctx stdctx.Context, run domain.WorkflowRu
 }
 
 // applyFixLifecycleDecision evaluates SessionLifecyclePolicy for the fix
-// role, persists the decision for audit, and — only when it says COMPACT —
-// prepends a compact SessionContextPack recap to the fix prompt so the
-// reused session gets a fresh fact anchor instead of relying purely on
-// accumulated conversation state across many cycles. Never changes which
-// session receives the prompt.
-func (c *Coordinator) applyFixLifecycleDecision(ctx stdctx.Context, run domain.WorkflowRun, reviewRun domain.ReviewRun, cycleCount int, prompt string) (string, bool) {
+// role, persists the decision for audit, and — when it says COMPACT — asks the
+// session to compact its own conversation and prepends a fresh
+// SessionContextPack recap to the fix prompt, so the reused session gets a
+// fact anchor instead of relying on accumulated conversation state across many
+// cycles. Never changes WHICH session receives the prompt.
+//
+// Checkpoint P7 changes two things here and neither is the session.
+//
+// The request now carries a REAL context-pressure reading (P7's
+// SessionContextFacts) instead of the zero value 8M had to leave, so COMPACT
+// is reached on the fact that made it worth reaching -- a conversation already
+// larger than this strategy's profile expects a single call to be -- and not
+// only on a fix-cycle count. On the measured run that is the difference
+// between the first repair cycle deciding REUSE at a context of 196,853 and
+// deciding COMPACT.
+//
+// And COMPACT now compacts: see session_compaction.go for why that was
+// missing, and for why every one of its failure modes lands back on exactly
+// this function's previous behaviour.
+func (c *Coordinator) applyFixLifecycleDecision(ctx stdctx.Context, run domain.WorkflowRun, fixStep domain.WorkflowStep, reviewRun domain.ReviewRun, cycleCount int, prompt string) (string, bool) {
 	health := domain.SessionHealthUnknown
 	if c.sessionFacts != nil {
 		rec, found, err := c.sessionFacts.GetSession(ctx, reviewRun.SessionID)
@@ -347,11 +361,18 @@ func (c *Coordinator) applyFixLifecycleDecision(ctx stdctx.Context, run domain.W
 			health = sessionHealthFromFacts(rec, found)
 		}
 	}
+	pressure, usageKnown := c.sessionContextPressure(ctx, run, reviewRun.SessionID)
 	decision := DecideSessionLifecycle(SessionLifecycleRequest{
 		Role: domain.WorkflowRoleFixWorker, CurrentSessionID: string(reviewRun.SessionID),
 		SessionHealth: health, FixCycleCount: cycleCount, Policy: policyForRun(run),
+		ContextPressure: pressure, UsageKnown: usageKnown,
 	})
 	decision.ToSessionID = string(reviewRun.SessionID)
+	// Ask BEFORE the pack is built and prepended, so the message that
+	// re-anchors the session arrives after the conversation it re-anchors has
+	// been replaced. Best-effort throughout: every way this can fail leaves
+	// the delivery below byte-identical to what it was.
+	decision.CompactionRequested = c.maybeCompactBeforeFix(ctx, run, fixStep, reviewRun.SessionID, decision, cycleCount)
 
 	var pack *domain.SessionContextPack
 	contextPackUsed := false
@@ -387,6 +408,37 @@ func (c *Coordinator) applyFixLifecycleDecision(ctx stdctx.Context, run domain.W
 	// enough for lifecycle audit without risking that collision.
 	_ = c.persistSessionLifecycleDecision(ctx, run, nil, decision, pack)
 	return prompt, contextPackUsed
+}
+
+// sessionContextPressure reads how big this session's conversation is and
+// compares it against the strategy profile's own per-call expectation.
+//
+// The threshold is NOT a new number. domain.UsageBudgetProfile already carries
+// ContextPerCallTokens -- anchored on the measured run's own mean, 186,957,
+// rounded down to 150,000 for Task -- and the advisory that warns about it
+// reads the same field. A lifecycle decision and the warning a person sees
+// about the same run therefore agree by construction rather than by two
+// constants that happen to match today.
+//
+// The second return is UsageKnown, and it is not a convenience: a session AO
+// has not observed spending anything is unobserved, never small. The policy
+// records that as its own reason code, and a caller that flattened the two
+// into one bool would make "AO could not look" indistinguishable from "the
+// conversation is fine".
+func (c *Coordinator) sessionContextPressure(ctx stdctx.Context, run domain.WorkflowRun, sessionID domain.SessionID) (bool, bool) {
+	if c.sessionContextFacts == nil || sessionID == "" {
+		return false, false
+	}
+	reading := c.sessionContextFacts.GetSessionContextReading(ctx, string(sessionID))
+	policy := policyForRun(run)
+	// An unrecorded strategy resolves to the AUTONOMOUS profile inside
+	// UsageBudgetProfileFor, which is the wider expectation -- the same
+	// deliberate choice the advisories make. A run whose kind AO cannot read
+	// must not be held to the tightest profile by a decision that changes what
+	// AO does.
+	profile := domain.UsageBudgetProfileFor(policy.Strategy.Effective).
+		WithOverrides(policy.EffectiveUsageBudgetPolicy())
+	return reading.UnderPressure(profile.ContextPerCallTokens)
 }
 
 // planArtifactForRun re-reads the plan step's already-persisted

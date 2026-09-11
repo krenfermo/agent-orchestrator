@@ -215,6 +215,13 @@ function trajectory(overrides: Partial<Trajectory> = {}): Trajectory {
 		growthPerCall: 1_403,
 		elapsedSeconds: 3_000,
 		unplaceableEvents: 0,
+		// P7 added both of these to the response, and both are always present:
+		// the cumulative figure is a plain sum, and the mean is null rather
+		// than absent when there were no calls to divide by. The values are
+		// the worked example's own -- 36,082,816 over 193 calls is 186,957 --
+		// so this fixture keeps describing the run the rest of the file does.
+		cumulativeInputTokens: 36_082_816,
+		meanContextPerCall: 186_957,
 		...overrides,
 	};
 }

@@ -464,6 +464,7 @@ type ModelUsageEvent struct {
 	SourceEventKey      string
 	ObservedAt          sql.NullTime
 	RecordedAt          sql.NullTime
+	TurnClass           domain.TurnClass
 }
 
 type Notification struct {
@@ -1303,6 +1304,7 @@ type UsageEventAttribution struct {
 	CacheWriteTokens    int64
 	OutputTokens        int64
 	ReasoningTokens     sql.NullInt64
+	TurnClass           string
 	ObservedAt          sql.NullTime
 	RecordedAt          sql.NullTime
 	WindowID            interface{}

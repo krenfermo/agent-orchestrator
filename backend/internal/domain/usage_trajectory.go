@@ -53,6 +53,29 @@ type ContextTrajectory struct {
 	// observed_at and were therefore left out. Non-zero makes every figure
 	// above a lower bound, which the UI must say rather than imply.
 	UnplaceableEvents int64
+	// CumulativeInputTokens is the sum of the context over the calls: the
+	// quantity the identity at the top of this file is about, and the one
+	// number that moves when EITHER lever moves. The ledger's own input total
+	// is the same arithmetic over the same rows -- it is repeated here so a
+	// trajectory can be read on its own without a second fetch, and so a
+	// SEGMENT of a run (one step, one repair cycle) has the figure at all,
+	// which no run-level total can give it.
+	CumulativeInputTokens int64
+	// Turns is what those calls DID. Counts of calls, never tokens -- see
+	// TurnMix. A scope whose events all predate migration 0169 has an empty
+	// mix with every call in Unclassified, which is a different statement from
+	// "no coordination happened".
+	Turns TurnMix
+}
+
+// MeanContextPerCall is the average size of the conversation over the calls,
+// and whether it is knowable. This is the second lever stated as one number:
+// halving it halves the bill at an unchanged call count.
+func (t ContextTrajectory) MeanContextPerCall() (int64, bool) {
+	if !t.Observable || t.ProviderCalls <= 0 {
+		return 0, false
+	}
+	return t.CumulativeInputTokens / t.ProviderCalls, true
 }
 
 // GrowthPerCall is the mean growth between consecutive calls, and whether it
@@ -107,4 +130,47 @@ type RunContextDynamics struct {
 	// Recorded is false when the run has no placeable usage at all. The UI
 	// must then say "no context data recorded", never "0 tokens".
 	Recorded bool
+}
+
+// SessionContextReading is how big ONE session's conversation is, at the
+// moment a lifecycle decision has to be made about it.
+//
+// It exists because SessionLifecycleRequest.ContextPressure was declared with
+// a note saying no production call site could set it: "AO has no per-session
+// live token/context signal yet". That was true when it was written and stopped
+// being true when the usage pipeline started placing calls in time. This is
+// that signal, in the smallest shape a decision needs.
+//
+// Observable=false is the honest "AO has not seen this session spend anything
+// yet" -- a session that has just been spawned, a harness whose transcript has
+// not been discovered, a provider that reported nothing. It must never be read
+// as "the conversation is small": a decision taken from an unobserved reading
+// is a decision taken on no information, and the lifecycle policy has a
+// separate reason code (unknown_usage) for saying exactly that.
+type SessionContextReading struct {
+	Observable bool
+	// ProviderCalls is how many of this session's calls AO could place in
+	// time. Zero is what makes Observable false.
+	ProviderCalls int64
+	// LastContextTokens is the conversation's size on the most recent placeable
+	// call: the figure the NEXT call will pay, which is what a decision about
+	// the next call needs. PeakContextTokens is the largest it has been, kept
+	// beside it because a conversation that was already compacted once reads
+	// small at the end and large at the peak, and the difference is the fact.
+	LastContextTokens int64
+	PeakContextTokens int64
+}
+
+// UnderPressure reports whether the conversation is at or above a threshold,
+// and whether the question is answerable at all.
+//
+// Two returns rather than one for the reason this whole file keeps repeating:
+// an unobserved session is not a session under no pressure. A caller that
+// collapses these into a single bool re-creates the exact "unknown read as
+// zero" bug the trajectory type is built to prevent.
+func (r SessionContextReading) UnderPressure(thresholdTokens int64) (bool, bool) {
+	if !r.Observable || thresholdTokens <= 0 {
+		return false, false
+	}
+	return r.LastContextTokens >= thresholdTokens, true
 }

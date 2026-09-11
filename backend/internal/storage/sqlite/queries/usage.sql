@@ -367,7 +367,8 @@ WHERE id = sqlc.arg(usage_binding_id)
 -- name: GetModelUsageEventByKey :one
 SELECT
     model_id, input_tokens, uncached_input_tokens,
-    cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens
+    cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
+    turn_class
 FROM model_usage_events
 WHERE binding_id = ? AND source_event_key = ?;
 
@@ -375,8 +376,28 @@ WHERE binding_id = ? AND source_event_key = ?;
 INSERT INTO model_usage_events (
     binding_id, usage_source_id, model_id, input_tokens, uncached_input_tokens,
     cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
-    source_event_key, observed_at, recorded_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    source_event_key, turn_class, observed_at, recorded_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+-- name: RefineModelUsageEventTurnClass :exec
+-- Raise an already-stored event's turn class as later records of the SAME
+-- billed message arrive.
+--
+-- One assistant message routinely spans several transcript records, and the
+-- tool call is often not in the first of them. The event is inserted on the
+-- first record (that is what keeps exactly-once anchored to the message id and
+-- not to a record offset), so its class starts as whatever that record could
+-- imply and is raised here when a later record of the same message shows the
+-- turn did more.
+--
+-- This is a CLASS-ONLY write. No token column appears in it, so a refinement
+-- can never move a number; and it is guarded on turn_class <> the new value so
+-- a re-read of an unchanged transcript writes nothing at all.
+UPDATE model_usage_events
+SET turn_class = sqlc.arg(turn_class)
+WHERE binding_id = sqlc.arg(binding_id)
+  AND source_event_key = sqlc.arg(source_event_key)
+  AND turn_class <> sqlc.arg(turn_class);
 
 -- name: TouchUsageBinding :exec
 UPDATE usage_bindings SET updated_at = ? WHERE id = ?;

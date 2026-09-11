@@ -3194,7 +3194,14 @@ func TestSpawnWorker_IncludesReviewCIAndPlanningInstructions(t *testing.T) {
 		"mark every thread you fixed as resolved",
 		"multiple PRs/MRs with CI failures or review comments",
 		"decide the order based on blockers, stack order, failing scope, and user priority",
-		"Do not use the agent runtime's built-in subagent or task-delegation tools",
+		// P7 narrowed this from a blanket ban to a ban on delegating the
+		// WORK, so a bounded read-only question can be answered in a separate
+		// context instead of in this conversation. Both halves are asserted:
+		// the prohibition that protects what AO tracks, and the permission
+		// that does not touch it.
+		"Do not delegate the assigned WORK to the agent runtime's built-in subagent or task-delegation tools",
+		"must come from this AO session, because that is the session AO tracks, reviews, and verifies",
+		"Using a subagent to answer a bounded, read-only question for you",
 		"For complex tasks, write a short implementation plan before editing",
 	} {
 		if !strings.Contains(systemPrompt, want) {

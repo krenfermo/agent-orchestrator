@@ -13,6 +13,22 @@ type WorkflowPolicy struct {
 	// run before it stops dispatching another fix and instead surfaces
 	// next_action: "human_attention" on the run.
 	MaxFixCycles int `json:"maxFixCycles"`
+	// SessionCompactionEnabled turns on Checkpoint P7's compaction request:
+	// when the session lifecycle policy reaches COMPACT, AO asks the agent to
+	// replace its own conversation with a summary of it BEFORE delivering the
+	// fix cycle's fact pack and prompt.
+	//
+	// DEFAULT OFF, and the reason is stated rather than hedged. The saving is
+	// arithmetic and large -- replaying wf-1c2cb9bd with each repair cycle
+	// starting from a compacted conversation instead of a 197k-324k one gives
+	// 21,997,829 billable input tokens against the 36,082,816 actually spent,
+	// a 39.0% reduction at an unchanged 193 calls -- but the ACT has never
+	// been observed in a live run, because proving it costs real money on a
+	// real defect. A default that turns on unobserved behaviour in every
+	// repair cycle of every run would be asserting the saving rather than
+	// offering it. Flip it per run, watch the trajectory block, then argue
+	// about the default from a measurement.
+	SessionCompactionEnabled bool `json:"sessionCompactionEnabled"`
 	// MaxWorkProviderAttempts bounds how many total provider attempts
 	// (Checkpoint 8H: one per harness tried, e.g. Codex then Claude) a work
 	// step's dispatch may make before it stops trying and instead surfaces

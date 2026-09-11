@@ -113,6 +113,14 @@ type stableTailStateV1 struct {
 type claudeParserStateV1 struct {
 	ModelID        string `json:"model_id,omitempty"`
 	LegacyProvider string `json:"provider,omitempty"`
+	// OpenTurnKey / OpenTurnClasses carry the message currently being
+	// accumulated across transcript records. One billed message routinely
+	// spans several records (thinking first, the tool call after), and the
+	// tailer's batch boundary falls wherever the bytes happened to arrive --
+	// so the accumulation has to survive in durable state or a message split
+	// across two reads would be classified from half of itself.
+	OpenTurnKey     string   `json:"open_turn_key,omitempty"`
+	OpenTurnClasses []string `json:"open_turn_classes,omitempty"`
 }
 
 type codexParserStateV1 struct {
@@ -256,7 +264,24 @@ type claudeTranscriptRecord struct {
 			CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 			OutputTokens             int64 `json:"output_tokens"`
 		} `json:"usage"`
+		// Content is decoded for its block TYPES and tool NAMES only -- see
+		// claudeContentBlock. It is what turn classification reads, and it is
+		// deliberately the narrowest shape that can carry that: a struct with
+		// no field for `input` cannot accidentally hold a command.
+		Content []claudeContentBlock `json:"content"`
 	} `json:"message"`
+}
+
+// claudeContentBlock is one content block of an assistant message, decoded
+// down to the two fields turn classification needs.
+//
+// The omission is the design. `input`, `text`, `thinking` and `content` all
+// exist on real blocks and none of them is declared here, so no command, no
+// path, no prompt and no model output can reach this package through this
+// type even by accident.
+type claudeContentBlock struct {
+	Type string `json:"type"`
+	Name string `json:"name"`
 }
 
 func parseClaude(source domain.UsageSourceContext, records []jsonlRecord, state *claudeParserStateV1, result *parseResult) {
@@ -296,9 +321,18 @@ func parseClaude(source domain.UsageSourceContext, records []jsonlRecord, state 
 		model := firstNonEmpty(native.Message.Model, state.ModelID, source.InitialModelID, "unknown")
 		state.ModelID = model
 		keyID := firstNonEmpty(native.Message.ID, native.UUID, strconv.FormatInt(record.Offset, 10))
+		// Accumulate this record's tool classes into the message it belongs
+		// to. A new key closes the previous message (nothing to finalize: the
+		// class was emitted with every record of it) and opens this one.
+		if keyID != state.OpenTurnKey {
+			state.OpenTurnKey = keyID
+			state.OpenTurnClasses = nil
+		}
+		state.OpenTurnClasses = accumulateTurnClasses(state.OpenTurnClasses, native.Message.Content)
 		event := domain.ModelUsageEvent{
-			ModelID: model,
-			Tokens:  tokens,
+			ModelID:   model,
+			Tokens:    tokens,
+			TurnClass: classFromTurnClasses(state.OpenTurnClasses),
 			SourceEventKey: stableSourceEventKey(
 				"claude",
 				source.NativeRootID,

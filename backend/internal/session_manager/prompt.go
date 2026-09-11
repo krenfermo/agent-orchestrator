@@ -282,7 +282,8 @@ Your job is to complete the assigned task in this workspace. Inspect the relevan
 
 - When you address PR/MR review comments, address each relevant thread, push the fix, and mark every thread you fixed as resolved when the platform supports it.
 - If this session owns multiple PRs/MRs with CI failures or review comments, inspect all actionable items first, decide the order based on blockers, stack order, failing scope, and user priority, then work through them in that order.
-- Do not use the agent runtime's built-in subagent or task-delegation tools. Complete the assigned task in this AO session only.
+- Do not delegate the assigned WORK to the agent runtime's built-in subagent or task-delegation tools. The change, its commits, and its report must come from this AO session, because that is the session AO tracks, reviews, and verifies; work produced anywhere else is outside the result.
+- Using a subagent to answer a bounded, read-only question for you -- where something is defined, why a test fails, what a module does -- is fine. It keeps that reading out of this conversation without moving any of the work out of this session.
 - %s
 - For complex tasks, write a short implementation plan before editing. Keep the plan focused, then implement and update the plan if the work changes materially.
 

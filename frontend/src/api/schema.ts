@@ -4432,6 +4432,8 @@ export interface components {
             source: "task_spec" | "project_memory" | "shared_knowledge" | "repo_content" | "index_reuse" | "other";
         };
         ControllersContextTrajectoryResponse: {
+            /** Format: int64 */
+            cumulativeInputTokens: number;
             elapsedSeconds: null | number;
             /** Format: int64 */
             firstContextTokens: number;
@@ -4442,11 +4444,13 @@ export interface components {
             /** Format: int64 */
             lastContextTokens: number;
             lastObservedAt?: string;
+            meanContextPerCall: null | number;
             observable: boolean;
             /** Format: int64 */
             peakContextTokens: number;
             /** Format: int64 */
             providerCalls: number;
+            turns?: components["schemas"]["ControllersTurnMixResponse"];
             /** Format: int64 */
             unplaceableEvents: number;
         };
@@ -5462,6 +5466,20 @@ export interface components {
         ControllersTestRepoConnectionResponse: {
             result: components["schemas"]["ProjectConnectionTestResult"];
         };
+        ControllersTurnMixResponse: {
+            /** Format: int64 */
+            classified: number;
+            /** Format: int64 */
+            coordinationCalls: number;
+            coordinationPercent: null | number;
+            counts?: {
+                [key: string]: number;
+            };
+            /** Format: int64 */
+            unclassified: number;
+            /** Format: int64 */
+            workCalls: number;
+        };
         ControllersUpdateEmailNotificationSettingsRequest: {
             enabled: boolean;
             events?: components["schemas"]["ControllersEmailNotificationEventsPayload"];
@@ -5480,7 +5498,7 @@ export interface components {
         };
         ControllersUsageAdvisoryResponse: {
             /** @enum {string} */
-            code: "duration_above_profile" | "provider_calls_above_profile" | "context_growth_above_profile" | "cost_above_profile" | "growth_without_progress" | "cache_read_dominant";
+            code: "duration_above_profile" | "provider_calls_above_profile" | "context_growth_above_profile" | "cost_above_profile" | "growth_without_progress" | "cache_read_dominant" | "context_per_call_above_profile" | "coordination_turns_dominant" | "repeated_wait_check_shape";
             /** Format: int64 */
             observed: number;
             profile?: string;

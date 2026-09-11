@@ -163,6 +163,8 @@ func trajectoryOf(events []store.UsageTrajectoryEvent, unplaceable int64) domain
 		if e.Tokens.InputTokens > t.PeakContextTokens {
 			t.PeakContextTokens = e.Tokens.InputTokens
 		}
+		t.CumulativeInputTokens += e.Tokens.InputTokens
+		t.Turns.AddTurn(e.TurnClass)
 	}
 	// Floored at zero deliberately. A conversation that ends smaller than it
 	// started did not grow by a negative amount -- it was replaced (a session
@@ -285,6 +287,29 @@ func (r *DynamicsReader) advise(d domain.RunContextDynamics, opts DynamicsOption
 	}
 	if share, dominant := tokens.CacheReadDominant(); dominant {
 		add(domain.AdvisoryCacheReadDominant, domain.AdvisoryInfo, int64(share), cacheReadDominantSharePercent)
+	}
+
+	// P7's two shape advisories. Both read the trajectory's own figures, and
+	// both are silent on the worked example -- 186,957 mean context is above
+	// the Task line so the first one DOES fire there, which is the point of
+	// it, while the coordination and wait shapes were simply not present in
+	// that run and are not going to be invented into it.
+	if mean, ok := d.Trajectory.MeanContextPerCall(); ok &&
+		profile.ContextPerCallTokens > 0 && mean > profile.ContextPerCallTokens {
+		add(domain.AdvisoryContextPerCallHigh, domain.AdvisoryWarn, mean, profile.ContextPerCallTokens)
+	}
+	// Guarded on Classified, not on ProviderCalls: a run whose every call
+	// predates the turn_class column has a 0% coordination share that means
+	// "AO could not look", and warning from it would be a report about the
+	// migration rather than about the run.
+	if share, ok := d.Trajectory.Turns.CoordinationShare(); ok &&
+		share > domain.CoordinationDominantPercent() {
+		add(domain.AdvisoryCoordinationTurnsDominant, domain.AdvisoryWarn,
+			int64(share), int64(domain.CoordinationDominantPercent()))
+	}
+	if waits := d.Trajectory.Turns.Count(domain.TurnWait); waits > domain.RepeatedWaitShapeCalls() {
+		add(domain.AdvisoryRepeatedWaitShape, domain.AdvisoryWarn,
+			waits, domain.RepeatedWaitShapeCalls())
 	}
 
 	// The conjunction. All three terms, or nothing: growth alone is what an

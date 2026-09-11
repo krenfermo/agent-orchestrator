@@ -13536,6 +13536,9 @@ components:
       type: object
     ControllersContextTrajectoryResponse:
       properties:
+        cumulativeInputTokens:
+          format: int64
+          type: integer
         elapsedSeconds:
           type:
           - "null"
@@ -13557,6 +13560,10 @@ components:
           type: integer
         lastObservedAt:
           type: string
+        meanContextPerCall:
+          type:
+          - "null"
+          - integer
         observable:
           type: boolean
         peakContextTokens:
@@ -13565,6 +13572,8 @@ components:
         providerCalls:
           format: int64
           type: integer
+        turns:
+          $ref: '#/components/schemas/ControllersTurnMixResponse'
         unplaceableEvents:
           format: int64
           type: integer
@@ -13578,6 +13587,8 @@ components:
       - growthPerCall
       - elapsedSeconds
       - unplaceableEvents
+      - cumulativeInputTokens
+      - meanContextPerCall
       type: object
     ControllersCreateProviderProfileRequest:
       properties:
@@ -16267,6 +16278,36 @@ components:
       required:
       - result
       type: object
+    ControllersTurnMixResponse:
+      properties:
+        classified:
+          format: int64
+          type: integer
+        coordinationCalls:
+          format: int64
+          type: integer
+        coordinationPercent:
+          type:
+          - "null"
+          - integer
+        counts:
+          additionalProperties:
+            format: int64
+            type: integer
+          type: object
+        unclassified:
+          format: int64
+          type: integer
+        workCalls:
+          format: int64
+          type: integer
+      required:
+      - classified
+      - unclassified
+      - workCalls
+      - coordinationCalls
+      - coordinationPercent
+      type: object
     ControllersUpdateEmailNotificationSettingsRequest:
       properties:
         enabled:
@@ -16322,6 +16363,9 @@ components:
           - cost_above_profile
           - growth_without_progress
           - cache_read_dominant
+          - context_per_call_above_profile
+          - coordination_turns_dominant
+          - repeated_wait_check_shape
           type: string
         observed:
           format: int64
