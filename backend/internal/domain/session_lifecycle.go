@@ -108,6 +108,17 @@ type SessionLifecycleDecision struct {
 	FromSessionID   string                   `json:"fromSessionId,omitempty"`
 	ToSessionID     string                   `json:"toSessionId,omitempty"`
 	ContextPackHash string                   `json:"contextPackHash,omitempty"`
+	// CompactionRequested records whether AO actually asked the session to
+	// compact its own conversation, which is a different fact from having
+	// DECIDED to compact (Checkpoint P7).
+	//
+	// The two come apart routinely and legitimately: the policy knob is off,
+	// the harness has no compaction vocabulary, the transport refused, the
+	// directive was left unsubmitted. Every one of those leaves the action at
+	// COMPACT -- the decision was correct -- and the conversation untouched.
+	// Recording only the action would make an audit read as though the
+	// conversation had been reset when it had not.
+	CompactionRequested bool `json:"compactionRequested,omitempty"`
 }
 
 // SessionContextPackVersion is the fixed V1 format version (checkpoint

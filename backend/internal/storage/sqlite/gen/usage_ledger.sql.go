@@ -490,6 +490,54 @@ func (q *Queries) CountRunUnplaceableUsageEvents(ctx context.Context, workflowRu
 	return unplaceable, err
 }
 
+const getSessionContextReading = `-- name: GetSessionContextReading :one
+WITH placed AS (
+    SELECT e.input_tokens AS input_tokens, e.observed_at AS observed_at
+    FROM model_usage_events e
+    JOIN usage_bindings b ON b.id = e.binding_id
+    WHERE b.subject_kind = 'session'
+      AND b.subject_id = ?1
+      AND e.observed_at IS NOT NULL
+)
+SELECT
+    CAST(COUNT(*) AS INTEGER) AS calls,
+    CAST(COALESCE(MAX(input_tokens), 0) AS INTEGER) AS peak_context_tokens,
+    CAST(COALESCE((
+        SELECT p.input_tokens FROM placed p ORDER BY p.observed_at DESC LIMIT 1
+    ), 0) AS INTEGER) AS last_context_tokens
+FROM placed
+`
+
+type GetSessionContextReadingRow struct {
+	Calls             int64
+	PeakContextTokens int64
+	LastContextTokens int64
+}
+
+// How big the conversation on ONE session is right now, from the same rows
+// every other read in this file folds.
+//
+// The trajectory read above answers this for a whole run, in rows, because a
+// run's shape is a series. A lifecycle decision does not need the series: it
+// needs the last figure and the largest one, at a dispatch boundary, for a
+// single session. Returning them as a fold keeps that decision one indexed
+// round trip rather than a per-call scan it would immediately throw away.
+//
+// Scoped on the SESSION subject specifically. A reviewer pane and a planner
+// invocation are usage subjects too, and neither is a conversation anybody can
+// decide to compact.
+//
+// calls = 0 means AO has placed no call for this session in time. Every other
+// column is then meaningless and the caller must treat the reading as UNKNOWN
+// rather than as a small conversation -- which is why the count travels beside
+// the figures instead of being inferred from a zero.
+func (q *Queries) GetSessionContextReading(ctx context.Context, sessionID string) (GetSessionContextReadingRow, error) {
+	row := q.db.QueryRowContext(ctx, getSessionContextReading, sessionID)
+	var i GetSessionContextReadingRow
+	err := row.Scan(&i.Calls, &i.PeakContextTokens, &i.LastContextTokens)
+	return i, err
+}
+
 const insertDirectUsageEvent = `-- name: InsertDirectUsageEvent :exec
 INSERT INTO model_usage_events (
     binding_id, usage_source_id, model_id, input_tokens, uncached_input_tokens,

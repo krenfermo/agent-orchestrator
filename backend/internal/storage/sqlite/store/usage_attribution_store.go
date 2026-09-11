@@ -355,6 +355,28 @@ func turnClassOrUnclassified(raw string) domain.TurnClass {
 	return domain.TurnUnclassified
 }
 
+// GetSessionContextReading reports how big one session's conversation is now.
+//
+// A read failure returns an UNOBSERVABLE reading and no error: the one caller
+// is a lifecycle decision at a dispatch boundary, and a decision that fails
+// because a telemetry read failed would make observability a dependency of
+// dispatch. Unobservable is already a state that caller handles correctly (it
+// records the unknown_usage reason and reuses the session, exactly as it did
+// before this signal existed), so degrading into it is strictly safer than
+// propagating.
+func (s *Store) GetSessionContextReading(ctx context.Context, sessionID string) domain.SessionContextReading {
+	row, err := s.qr.GetSessionContextReading(ctx, sessionID)
+	if err != nil || row.Calls <= 0 {
+		return domain.SessionContextReading{}
+	}
+	return domain.SessionContextReading{
+		Observable:        true,
+		ProviderCalls:     row.Calls,
+		LastContextTokens: row.LastContextTokens,
+		PeakContextTokens: row.PeakContextTokens,
+	}
+}
+
 // CountRunUnplaceableUsageEvents reports how many of a run's usage events carry
 // no observed_at, so a trajectory can declare itself a lower bound rather than
 // implying it saw every call.

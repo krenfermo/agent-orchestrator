@@ -279,13 +279,17 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		// P3-E: the planner's own provider calls. It runs under
 		// --no-session-persistence and writes no transcript, so this
 		// response-reported path is the only way its tokens are ever seen.
-		PlannerUsage:     plannerUsage,
-		Sessions:         store,
-		ReviewRuns:       store,
-		Spawner:          sessionMgr,
-		SessionFacts:     store,
-		WorkspaceFacts:   workspace,
-		ReviewerLauncher: reviewerLauncher,
+		PlannerUsage: plannerUsage,
+		Sessions:     store,
+		ReviewRuns:   store,
+		Spawner:      sessionMgr,
+		SessionFacts: store,
+		// P7: the per-session context reading the 8M lifecycle policy declared
+		// a field for and had no source for. Same store, same rows the cost
+		// ledger reads -- no second telemetry.
+		SessionContextFacts: store,
+		WorkspaceFacts:      workspace,
+		ReviewerLauncher:    reviewerLauncher,
 		// P5-A phase 2C: and a finished worker's identity ends with its turn,
 		// rather than waiting out a reconciliation interval during which it
 		// could still reach the session writes its role permits.

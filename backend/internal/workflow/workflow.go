@@ -320,6 +320,12 @@ type Deps struct {
 	SessionFacts   SessionFacts
 	WorkspaceFacts WorkspaceFacts
 
+	// SessionContextFacts answers "how big is this session's conversation
+	// right now" (Checkpoint P7). Optional: without it every lifecycle
+	// decision sees an unobservable reading and records the unknown_usage
+	// reason, which is exactly what it did before the signal existed.
+	SessionContextFacts SessionContextFacts
+
 	// WorkerCredentials ends a finished worker's identity eagerly (P5-A phase
 	// 2C). Optional; see the field on Coordinator.
 	WorkerCredentials WorkerCredentialCloser
@@ -625,6 +631,9 @@ type Coordinator struct {
 	spawner        Spawner
 	sessionFacts   SessionFacts
 	workspaceFacts WorkspaceFacts
+	// sessionContextFacts backs Checkpoint P7's context-pressure signal.
+	// Optional; see the field on Deps.
+	sessionContextFacts SessionContextFacts
 
 	// workerLauncher and sessionOwnership are the phased dispatch state
 	// machine's launch boundary (dispatch_state_machine.go). Both optional:
@@ -832,6 +841,7 @@ func New(d Deps) *Coordinator {
 		workspacePreflight:       d.WorkspacePreflight,
 		spawner:                  d.Spawner,
 		sessionFacts:             d.SessionFacts,
+		sessionContextFacts:      d.SessionContextFacts,
 		workspaceFacts:           d.WorkspaceFacts,
 		workerLauncher:           d.WorkerLauncher,
 		sessionOwnership:         d.SessionOwnership,
