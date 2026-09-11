@@ -3,6 +3,8 @@ package controllers_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -21,6 +23,9 @@ type contextEconomyWorkflowService struct {
 	compactionCalls []bool
 	requestedBy     []string
 	tokenCalls      []int64
+
+	compactionErr error
+	tokenErr      error
 }
 
 var _ workflowsvc.ContextEconomyManager = (*contextEconomyWorkflowService)(nil)
@@ -28,6 +33,9 @@ var _ workflowsvc.ContextEconomyManager = (*contextEconomyWorkflowService)(nil)
 func (f *contextEconomyWorkflowService) ApplySessionCompactionPolicy(_ context.Context, _ string, enabled bool, requestedBy string) error {
 	f.compactionCalls = append(f.compactionCalls, enabled)
 	f.requestedBy = append(f.requestedBy, requestedBy)
+	if f.compactionErr != nil {
+		return f.compactionErr
+	}
 	f.rewrite(func(p *domain.WorkflowPolicy) {
 		p.SessionCompactionEnabled = enabled
 		p.CompactionProvenance = domain.SessionCompactionProvenance{
@@ -40,6 +48,9 @@ func (f *contextEconomyWorkflowService) ApplySessionCompactionPolicy(_ context.C
 
 func (f *contextEconomyWorkflowService) ApplyContextPerCallWarnTokens(_ context.Context, _ string, tokens int64) error {
 	f.tokenCalls = append(f.tokenCalls, tokens)
+	if f.tokenErr != nil {
+		return f.tokenErr
+	}
 	f.rewrite(func(p *domain.WorkflowPolicy) {
 		usage := p.EffectiveUsageBudgetPolicy()
 		usage.WorkflowContextPerCallWarnTokens = tokens
@@ -268,18 +279,107 @@ func TestWorkflowCreateRunBackwardCompatibleWithoutContextEconomyFields(t *testi
 	}
 }
 
-// A deployment whose service predates the capability must still create the run
-// rather than failing the request -- the same compatibility stance every other
-// Apply*Policy capability takes.
-func TestWorkflowCreateRunWithoutContextEconomyCapability(t *testing.T) {
+// A deployment whose service predates the capability must still serve every
+// request that does not ask for it -- that is the compatibility half.
+func TestWorkflowCreateRunWithoutContextEconomyCapabilityServesOldRequests(t *testing.T) {
 	svc := &strategyWorkflowService{}
 	if _, ok := any(svc).(workflowsvc.ContextEconomyManager); ok {
 		t.Fatal("this fake must NOT implement ContextEconomyManager for this test to mean anything")
 	}
 	srv := newWorkflowTestServer(t, svc)
 	body, status, _ := doRequest(t, srv, "POST", "/api/v1/projects/proj-1/workflows",
-		`{"objective":"x","strategy":"task","sessionCompaction":true,"contextPerCallWarnTokens":70000,`+taskVerificationBody+`}`)
+		`{"objective":"x","strategy":"task",`+taskVerificationBody+`}`)
 	if status != http.StatusCreated {
-		t.Fatalf("status=%d body=%s, want the run to be created anyway", status, body)
+		t.Fatalf("status=%d body=%s, want an unrelated request to be unaffected", status, body)
 	}
+}
+
+// PHASE E, the failure half of case 3. A daemon that CANNOT honour an explicit
+// choice says so instead of creating a run whose policy contradicts the
+// request. Silently returning 201 here would hand back a control run labelled
+// as a treatment run -- the measurement failure, not merely a lesser run.
+func TestWorkflowCreateRunRefusesAnExplicitChoiceWithoutTheCapability(t *testing.T) {
+	for _, tt := range []struct{ name, field string }{
+		{"compaction true", `"sessionCompaction":true`},
+		{"compaction false", `"sessionCompaction":false`},
+		{"context threshold", `"contextPerCallWarnTokens":70000`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &strategyWorkflowService{}
+			srv := newWorkflowTestServer(t, svc)
+			body, status, _ := doRequest(t, srv, "POST", "/api/v1/projects/proj-1/workflows",
+				`{"objective":"x","strategy":"task",`+tt.field+`,`+taskVerificationBody+`}`)
+			if status != http.StatusNotImplemented {
+				t.Fatalf("status=%d body=%s, want 501", status, body)
+			}
+			var env struct {
+				Code string `json:"code"`
+			}
+			if err := json.Unmarshal(body, &env); err != nil {
+				t.Fatalf("decode %s: %v", body, err)
+			}
+			if env.Code != "CONTEXT_ECONOMY_NOT_SUPPORTED" {
+				t.Fatalf("code = %q, want CONTEXT_ECONOMY_NOT_SUPPORTED (body %s)", env.Code, body)
+			}
+		})
+	}
+}
+
+// PHASE E, case 3 again, at the sharpest point: the freeze itself fails. The
+// run exists and its compaction is OFF; the caller asked for ON. The response
+// must be an error, because a 201 here is how an opted-in run and an
+// opted-out one become indistinguishable after the fact.
+func TestWorkflowCreateRunReportsAFailedContextEconomyFreeze(t *testing.T) {
+	t.Run("compaction freeze failure is reported", func(t *testing.T) {
+		svc := &contextEconomyWorkflowService{
+			compactionErr: fmt.Errorf("%w: workflow run is already running; its session-compaction choice is frozen", workflowsvc.ErrInvalid),
+		}
+		body, status := createContextEconomyRun(t, svc,
+			`{"objective":"x","strategy":"task","sessionCompaction":true,`+taskVerificationBody+`}`)
+		if status == http.StatusCreated {
+			t.Fatalf("a failed opt-in freeze returned 201: %s", body)
+		}
+		if status != http.StatusUnprocessableEntity {
+			t.Fatalf("status=%d body=%s, want 422", status, body)
+		}
+		// And the response must not carry a run view claiming a policy the
+		// run does not have.
+		if view := createdContextEconomyView(t, body); view != nil {
+			t.Fatalf("a failed freeze still returned a run view: %v", view)
+		}
+	})
+
+	t.Run("an explicit false is protected the same way", func(t *testing.T) {
+		svc := &contextEconomyWorkflowService{
+			compactionErr: fmt.Errorf("%w: store unavailable", workflowsvc.ErrInvalid),
+		}
+		body, status := createContextEconomyRun(t, svc,
+			`{"objective":"x","strategy":"task","sessionCompaction":false,`+taskVerificationBody+`}`)
+		if status == http.StatusCreated {
+			t.Fatalf("a failed control-arm freeze returned 201: %s", body)
+		}
+	})
+
+	t.Run("threshold freeze failure is reported", func(t *testing.T) {
+		svc := &contextEconomyWorkflowService{
+			tokenErr: fmt.Errorf("%w: contextPerCallWarnTokens rejected", workflowsvc.ErrInvalid),
+		}
+		body, status := createContextEconomyRun(t, svc,
+			`{"objective":"x","strategy":"task","contextPerCallWarnTokens":70000,`+taskVerificationBody+`}`)
+		if status == http.StatusCreated {
+			t.Fatalf("a failed threshold freeze returned 201: %s", body)
+		}
+		if status != http.StatusUnprocessableEntity {
+			t.Fatalf("status=%d body=%s, want 422", status, body)
+		}
+	})
+
+	t.Run("an unclassified failure is still an error, not a 201", func(t *testing.T) {
+		svc := &contextEconomyWorkflowService{compactionErr: errors.New("disk on fire")}
+		body, status := createContextEconomyRun(t, svc,
+			`{"objective":"x","strategy":"task","sessionCompaction":true,`+taskVerificationBody+`}`)
+		if status != http.StatusInternalServerError {
+			t.Fatalf("status=%d body=%s, want 500", status, body)
+		}
+	})
 }

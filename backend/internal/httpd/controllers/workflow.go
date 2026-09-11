@@ -1820,18 +1820,46 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 			_ = svc.ApplyReviewDepthPolicy(r.Context(), detail.Run.ID, reviewDepth)
 		}
 	}
-	// P7: and this run's context-economy choices, in the same window and for
-	// the same reason. Creation already wrote the safe defaults -- compaction
-	// off, the strategy's own context-pressure threshold -- so a request that
-	// named neither is unaffected, and a daemon without the capability behaves
-	// exactly as it did before these fields existed.
+	// P7: and this run's context-economy choices, in the same window.
+	// Creation already wrote the safe defaults -- compaction off, the
+	// strategy's own context-pressure threshold -- so a request that named
+	// neither is unaffected and never reaches this block at all.
+	//
+	// But a request that DID name one is reported on rather than swallowed,
+	// which is where these two part company with the repair/autonomy/depth
+	// freezes above. Those three are preferences: a lost freeze leaves the run
+	// on a default that is a legitimate way to run, and the caller can see
+	// what it got and change it. An explicit sessionCompaction is not a
+	// preference -- it is the independent variable of a measurement. A `true`
+	// silently becoming `false` after a 201 does not produce a worse run, it
+	// produces a control run wearing a treatment run's label, and every figure
+	// taken from the pair afterwards is wrong with nothing on disk saying so.
+	// An explicit `false` matters for the mirror-image reason: it is the
+	// control arm's recorded refusal, and an unrecorded run is not a control.
+	//
+	// So this follows the `placement` precedent a few lines above rather than
+	// its immediate neighbours: the run exists and its policy is not what the
+	// caller asked for, and refusing to say so would hand back a run that
+	// contradicts the request that made it. The run is left pending with
+	// compaction OFF, which is the safe direction; the error is what stops it
+	// from being mistaken for an opted-in one.
 	if in.SessionCompaction != nil || in.ContextPerCallWarnTokens != 0 {
-		if svc, ok := c.Svc.(workflowsvc.ContextEconomyManager); ok {
-			if in.SessionCompaction != nil {
-				_ = svc.ApplySessionCompactionPolicy(r.Context(), detail.Run.ID, *in.SessionCompaction, operatorIdentity(r))
+		svc, ok := c.Svc.(workflowsvc.ContextEconomyManager)
+		if !ok {
+			envelope.WriteAPIError(w, r, http.StatusNotImplemented, "not_implemented", "CONTEXT_ECONOMY_NOT_SUPPORTED",
+				"this daemon cannot honour an explicit session-compaction or context-pressure choice", nil)
+			return
+		}
+		if in.SessionCompaction != nil {
+			if err := svc.ApplySessionCompactionPolicy(r.Context(), detail.Run.ID, *in.SessionCompaction, operatorIdentity(r)); err != nil {
+				writeWorkflowError(w, r, err)
+				return
 			}
-			if in.ContextPerCallWarnTokens != 0 {
-				_ = svc.ApplyContextPerCallWarnTokens(r.Context(), detail.Run.ID, in.ContextPerCallWarnTokens)
+		}
+		if in.ContextPerCallWarnTokens != 0 {
+			if err := svc.ApplyContextPerCallWarnTokens(r.Context(), detail.Run.ID, in.ContextPerCallWarnTokens); err != nil {
+				writeWorkflowError(w, r, err)
+				return
 			}
 		}
 	}
