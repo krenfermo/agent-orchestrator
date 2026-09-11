@@ -58,18 +58,42 @@ func (m *Manager) CompactConversation(ctx context.Context, id domain.SessionID, 
 	if !ok {
 		return false, nil
 	}
-	// Through SendReportingSubmission rather than Send: a compaction directive
-	// left sitting in a composer is worse than one never sent, because the
-	// fix prompt that follows would land UNDERNEATH it in the same draft. A
-	// verdict of loaded-not-submitted is reported as not-requested so the
-	// caller's own guard is what decides, and the submit retry the workflow
-	// path already owns is not duplicated here.
+	// Through SendReportingSubmission rather than Send, and the reason is the
+	// transport: tmux delivers a prompt with `paste-buffer`, which APPENDS to
+	// whatever the composer already holds and never clears it. So a compaction
+	// directive left sitting unsubmitted is worse than one never sent -- the
+	// fix prompt that follows would be pasted underneath it, and the combined
+	// draft would submit as a single message in which `/compact` swallows the
+	// fix cycle's instructions as its argument. AO would then record a
+	// delivered repair the agent never received.
 	submission, err := m.SendReportingSubmission(ctx, id, directive, nil)
 	if err != nil {
 		return false, fmt.Errorf("compact %s: %w", id, err)
 	}
 	if submission == ports.PromptLoadedNotSubmitted {
-		return false, fmt.Errorf("compact %s: %w", id, ports.ErrPromptUndelivered)
+		// Exactly the wf-57f90ff2 shape, and exactly what SubmitPending is
+		// for: press Enter on a draft the caller can prove is AO's own. It is
+		// provably AO's own here -- the compaction checkpoint was written
+		// before this send, so nothing else could have put this text there --
+		// and submitting writes no new bytes and deletes nothing, so it cannot
+		// touch a human's draft.
+		//
+		// One attempt, not a loop. A composer that will not clear on a second
+		// Enter is wedged, and a wedged composer is already handled correctly
+		// downstream: the fix prompt's own delivery reports
+		// loaded_not_submitted too, and deliverFixPrompt records that rather
+		// than claiming a delivered cycle. The window this closes is the
+		// transient one (a pane in copy-mode, a frame not yet redrawn), which
+		// is the only case where the directive could strand while the fix
+		// prompt on top of it still submits.
+		resubmitted, serr := m.SubmitPending(ctx, id)
+		if serr != nil {
+			return false, fmt.Errorf("compact %s: %w", id, serr)
+		}
+		if resubmitted != ports.PromptSubmitted {
+			return false, fmt.Errorf("compact %s: %w", id, ports.ErrPromptUndelivered)
+		}
+		return true, nil
 	}
 	return true, nil
 }
