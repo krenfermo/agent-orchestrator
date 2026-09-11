@@ -59,6 +59,20 @@ const (
 	// early in a step. A dead worker is the recovery path's business, not
 	// this one's.
 	AdvisoryGrowthWithoutProgress UsageAdvisoryCode = "growth_without_progress"
+	// AdvisoryContextPerCallHigh -- the mean size of the conversation over the
+	// run's calls is above what the profile expects. This is the SECOND lever
+	// stated on its own: growth says the conversation got big, this says every
+	// call paid for it. A run can cross this without crossing growth (a
+	// conversation that started huge and barely moved) and vice versa.
+	AdvisoryContextPerCallHigh UsageAdvisoryCode = "context_per_call_above_profile"
+	// AdvisoryCoordinationTurnsDominant -- more of the classified calls were
+	// coordination than work. Derived from turn classes (usage_turn_class.go),
+	// so a run whose calls AO could not classify never earns it.
+	AdvisoryCoordinationTurnsDominant UsageAdvisoryCode = "coordination_turns_dominant"
+	// AdvisoryRepeatedWaitShape -- the run spent whole context re-reads asking
+	// whether something it had already started had finished. The one turn
+	// class that is pure overhead by construction; see TurnWait.
+	AdvisoryRepeatedWaitShape UsageAdvisoryCode = "repeated_wait_check_shape"
 	// AdvisoryCacheReadDominant is informational, not a fault: it names the
 	// arithmetic when nearly all the bill is the model re-reading a
 	// conversation that never shrinks. It exists so a reader is not left to
@@ -117,6 +131,12 @@ type UsageBudgetProfile struct {
 	// one never stops anything, so it can be set at a figure a person
 	// actually wants to hear about.
 	CostUSD float64
+	// ContextPerCallTokens is how big the conversation is expected to be on
+	// the average call. Anchored the same way ProviderCalls is: the measured
+	// run's own mean (36,082,816 / 193 = 186,957) rounded DOWN, so the figure
+	// that should have been said out loud sits above the line rather than
+	// under it.
+	ContextPerCallTokens int64
 }
 
 // Profile defaults, per strategy.
@@ -128,14 +148,17 @@ var (
 	taskUsageProfile = UsageBudgetProfile{
 		Strategy: ExecutionStrategyTask, WallClock: 30 * time.Minute,
 		ProviderCalls: 120, ContextGrowthTokens: 100_000, CostUSD: 5,
+		ContextPerCallTokens: 150_000,
 	}
 	autonomousUsageProfile = UsageBudgetProfile{
 		Strategy: ExecutionStrategyAutonomous, WallClock: 2 * time.Hour,
 		ProviderCalls: 600, ContextGrowthTokens: 250_000, CostUSD: 25,
+		ContextPerCallTokens: 200_000,
 	}
 	masterUsageProfile = UsageBudgetProfile{
 		Strategy: ExecutionStrategyMaster, WallClock: 6 * time.Hour,
 		ProviderCalls: 2000, ContextGrowthTokens: 400_000, CostUSD: 75,
+		ContextPerCallTokens: 250_000,
 	}
 )
 
@@ -176,6 +199,35 @@ func (p UsageBudgetProfile) WithOverrides(policy UsageBudgetPolicy) UsageBudgetP
 	}
 	return p
 }
+
+// CoordinationDominantPercent and RepeatedWaitShapeCalls expose the two
+// unanchored thresholds so an evaluation site and a UI read the same number
+// without either re-declaring it.
+func CoordinationDominantPercent() int { return coordinationDominantPercent }
+func RepeatedWaitShapeCalls() int64    { return repeatedWaitShapeCalls }
+
+// coordinationDominantPercent is the share of CLASSIFIED calls that must be
+// coordination before AO says so.
+//
+// Unlike every other threshold in this file, this one is NOT anchored on a
+// measurement, and saying so matters: the measured run (wf-1c2cb9bd) was 99.0%
+// work -- 183 commands and 8 edits against 2 calls that only talked -- so
+// there was nothing to anchor it on. It is set where the sentence stops being
+// arguable: past half, more of the run's calls were talking about the work
+// than doing it. A future run that actually exhibits the shape is what will
+// move this number, not a guess refined in advance.
+const coordinationDominantPercent = 50
+
+// repeatedWaitShapeCalls is how many wait-class calls a run may make before AO
+// mentions it.
+//
+// Also unanchored, for the same reason and more sharply: the measured run made
+// ZERO. It waited the way a runtime should be waited on -- a bounded loop
+// inside one command, and a background task that woke the session when it
+// finished -- so the polling shape everyone expects to find was not there to
+// measure. Ten is the point past which a run has paid ten whole context
+// re-reads for the word "yet".
+const repeatedWaitShapeCalls = 10
 
 // cacheReadDominantPercent is the share of billable input that must be cache
 // reads before AO says so. It is not a fault threshold -- 98.8% was measured on

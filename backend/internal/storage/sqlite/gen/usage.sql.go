@@ -251,7 +251,8 @@ func (q *Queries) FinalizeUsageBindingsForSubject(ctx context.Context, arg Final
 const getModelUsageEventByKey = `-- name: GetModelUsageEventByKey :one
 SELECT
     model_id, input_tokens, uncached_input_tokens,
-    cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens
+    cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
+    turn_class
 FROM model_usage_events
 WHERE binding_id = ? AND source_event_key = ?
 `
@@ -269,6 +270,7 @@ type GetModelUsageEventByKeyRow struct {
 	CacheWriteTokens    int64
 	OutputTokens        int64
 	ReasoningTokens     sql.NullInt64
+	TurnClass           domain.TurnClass
 }
 
 func (q *Queries) GetModelUsageEventByKey(ctx context.Context, arg GetModelUsageEventByKeyParams) (GetModelUsageEventByKeyRow, error) {
@@ -282,6 +284,7 @@ func (q *Queries) GetModelUsageEventByKey(ctx context.Context, arg GetModelUsage
 		&i.CacheWriteTokens,
 		&i.OutputTokens,
 		&i.ReasoningTokens,
+		&i.TurnClass,
 	)
 	return i, err
 }
@@ -467,8 +470,8 @@ const insertModelUsageEvent = `-- name: InsertModelUsageEvent :exec
 INSERT INTO model_usage_events (
     binding_id, usage_source_id, model_id, input_tokens, uncached_input_tokens,
     cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
-    source_event_key, observed_at, recorded_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    source_event_key, turn_class, observed_at, recorded_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertModelUsageEventParams struct {
@@ -482,6 +485,7 @@ type InsertModelUsageEventParams struct {
 	OutputTokens        int64
 	ReasoningTokens     sql.NullInt64
 	SourceEventKey      string
+	TurnClass           domain.TurnClass
 	ObservedAt          sql.NullTime
 	RecordedAt          sql.NullTime
 }
@@ -498,6 +502,7 @@ func (q *Queries) InsertModelUsageEvent(ctx context.Context, arg InsertModelUsag
 		arg.OutputTokens,
 		arg.ReasoningTokens,
 		arg.SourceEventKey,
+		arg.TurnClass,
 		arg.ObservedAt,
 		arg.RecordedAt,
 	)
@@ -1021,6 +1026,38 @@ func (q *Queries) ListWatchableUsageSources(ctx context.Context) ([]UsageSource,
 		return nil, err
 	}
 	return items, nil
+}
+
+const refineModelUsageEventTurnClass = `-- name: RefineModelUsageEventTurnClass :exec
+UPDATE model_usage_events
+SET turn_class = ?1
+WHERE binding_id = ?2
+  AND source_event_key = ?3
+  AND turn_class <> ?1
+`
+
+type RefineModelUsageEventTurnClassParams struct {
+	TurnClass      domain.TurnClass
+	BindingID      int64
+	SourceEventKey string
+}
+
+// Raise an already-stored event's turn class as later records of the SAME
+// billed message arrive.
+//
+// One assistant message routinely spans several transcript records, and the
+// tool call is often not in the first of them. The event is inserted on the
+// first record (that is what keeps exactly-once anchored to the message id and
+// not to a record offset), so its class starts as whatever that record could
+// imply and is raised here when a later record of the same message shows the
+// turn did more.
+//
+// This is a CLASS-ONLY write. No token column appears in it, so a refinement
+// can never move a number; and it is guarded on turn_class <> the new value so
+// a re-read of an unchanged transcript writes nothing at all.
+func (q *Queries) RefineModelUsageEventTurnClass(ctx context.Context, arg RefineModelUsageEventTurnClassParams) error {
+	_, err := q.db.ExecContext(ctx, refineModelUsageEventTurnClass, arg.TurnClass, arg.BindingID, arg.SourceEventKey)
+	return err
 }
 
 const touchUsageBinding = `-- name: TouchUsageBinding :exec

@@ -294,6 +294,12 @@ sql:
             go_type:
               import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
               type: "UsageBindingState"
+          # P7: the closed turn-shape vocabulary, so a read model cannot
+          # compare a class against a bare string literal.
+          - column: "model_usage_events.turn_class"
+            go_type:
+              import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"
+              type: "TurnClass"
           - column: "usage_sources.kind"
             go_type:
               import: "github.com/aoagents/agent-orchestrator/backend/internal/domain"

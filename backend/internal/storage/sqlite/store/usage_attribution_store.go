@@ -292,6 +292,10 @@ type UsageTrajectoryEvent struct {
 	ModelID        string
 	ObservedAt     time.Time
 	Tokens         domain.UsageTokenTotals
+	// TurnClass is what this one call DID. Empty means unclassified, which
+	// every row written before migration 0169 and every Codex rollout carries
+	// -- a fold over these must report that share rather than absorb it.
+	TurnClass domain.TurnClass
 }
 
 // ListRunContextTrajectoryEvents returns one run's placeable provider calls in
@@ -321,6 +325,7 @@ func (s *Store) ListRunContextTrajectoryEvents(ctx context.Context, runID string
 			Role:           domain.WorkflowRole(r.Role),
 			Cycle:          r.Cycle,
 			ModelID:        r.ModelID,
+			TurnClass:      turnClassOrUnclassified(r.TurnClass),
 			ObservedAt:     r.ObservedAt.Time.UTC(),
 			Tokens: domain.UsageTokenTotals{
 				InputTokens:         r.InputTokens,
@@ -333,6 +338,21 @@ func (s *Store) ListRunContextTrajectoryEvents(ctx context.Context, runID string
 		})
 	}
 	return out, nil
+}
+
+// turnClassOrUnclassified narrows a stored string to the closed vocabulary.
+//
+// The view projects the column as a plain string (sqlc resolves type overrides
+// against base tables, not views), so this is the one place the value crosses
+// back into the enum. A value outside the vocabulary -- only reachable from a
+// row written by a future binary and read by this one -- becomes unclassified
+// rather than being passed through, so a read model can never fold a class it
+// does not understand into one it does.
+func turnClassOrUnclassified(raw string) domain.TurnClass {
+	if c := domain.TurnClass(raw); c.Valid() {
+		return c
+	}
+	return domain.TurnUnclassified
 }
 
 // CountRunUnplaceableUsageEvents reports how many of a run's usage events carry

@@ -226,6 +226,18 @@ type ModelUsageEvent struct {
 	// stated no time: role attribution then falls back to the session's first
 	// window and is reported as approximate rather than being guessed.
 	ObservedAt *time.Time
+	// TurnClass is what this call DID, derived from the block types and tool
+	// names of the assistant message it bills for -- never from any command,
+	// argument, path or message body (see usage_turn_class.go). Empty means
+	// unclassified, which is an absence of information and not a class: a
+	// Codex rollout, a malformed record, or a row written before the column
+	// existed all carry it.
+	//
+	// It may be REFINED upward as later transcript records of the same message
+	// arrive, which is why the event ingest path treats a differing class on
+	// an already-stored key as a refinement rather than as the token conflict
+	// a differing token vector would be.
+	TurnClass TurnClass
 }
 
 // UsageModelAggregate is the raw model-level aggregate read from storage before

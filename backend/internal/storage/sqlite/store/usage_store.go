@@ -467,6 +467,23 @@ func (s *Store) ApplyUsageChunk(
 				if !usageEventMatches(existing, ev) {
 					return fmt.Errorf("%w: binding %d event %q", domain.ErrUsageSourceEventConflict, source.BindingID, ev.SourceEventKey)
 				}
+				// The tokens match, so this is the SAME call being re-reported
+				// -- either a re-read of an unchanged transcript or, far more
+				// often, a later record of a billed message whose first record
+				// already produced the row. The second case is the only way a
+				// turn class can arrive after the event does, so a differing
+				// class here is a refinement and not the conflict a differing
+				// token vector would be. Class-only, monotonic, and a no-op
+				// when nothing changed.
+				if refined, ok := refinedTurnClass(existing.TurnClass, ev.TurnClass); ok {
+					if err := q.RefineModelUsageEventTurnClass(ctx, gen.RefineModelUsageEventTurnClassParams{
+						TurnClass:      refined,
+						BindingID:      source.BindingID,
+						SourceEventKey: ev.SourceEventKey,
+					}); err != nil {
+						return err
+					}
+				}
 				continue
 			}
 			if err := q.InsertModelUsageEvent(ctx, usageEventInsertParams(source, ev, timeOrNow(nextState.UpdatedAt))); err != nil {
@@ -655,8 +672,41 @@ func usageEventInsertParams(source gen.GetUsageSourceWithBindingAndSessionRow, e
 		OutputTokens:        ev.Tokens.OutputTokens,
 		ReasoningTokens:     ptrInt64ToNull(ev.Tokens.ReasoningTokens),
 		SourceEventKey:      ev.SourceEventKey,
+		TurnClass:           ev.TurnClass,
 		ObservedAt:          ptrTimeToNullTime(ev.ObservedAt),
 		RecordedAt:          sql.NullTime{Time: recordedAt, Valid: !recordedAt.IsZero()},
+	}
+}
+
+// refinedTurnClass decides whether an already-stored class should be replaced
+// by one derived from a later record of the same message, and with what.
+//
+// Monotonic in one direction only: a class may be raised from "AO saw no tool
+// in the records it had" to a real one, and a real one may broaden to mixed.
+// It is never lowered, and an unclassified incoming value never overwrites a
+// class already recorded -- a re-read that failed to decode a record must not
+// be able to erase what an earlier read established.
+func refinedTurnClass(existing, incoming domain.TurnClass) (domain.TurnClass, bool) {
+	if incoming == domain.TurnUnclassified || !incoming.Valid() || existing == incoming {
+		return "", false
+	}
+	switch existing {
+	case domain.TurnUnclassified, domain.TurnMessage:
+		// Nothing was known, or nothing but talk was seen. Anything the later
+		// records show is more informed than that.
+		return incoming, true
+	case domain.TurnMixed:
+		// Already the broadest class there is.
+		return "", false
+	default:
+		// A real class meeting a different real class means this one message
+		// did more than one kind of thing -- which is precisely TurnMixed, and
+		// picking either side would hide the batching the class exists to make
+		// visible.
+		if incoming == domain.TurnMessage {
+			return "", false
+		}
+		return domain.TurnMixed, true
 	}
 }
 

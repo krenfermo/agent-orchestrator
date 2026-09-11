@@ -40,6 +40,13 @@ var expectedUsageTableColumns = map[string][]string{
 		// the role window that was open when it was spent, and it stays NULL
 		// rather than being invented when an artifact carried no timestamp.
 		"observed_at", "recorded_at",
+		// P7 (migration 0169). turn_class is what the call DID, derived from
+		// the block types and tool names of the assistant message it bills
+		// for. It belongs on this list for the same reason observed_at does:
+		// it is collected, not displayed, and it is deliberately the ONLY
+		// thing the classifier keeps -- no command, no argument, no path and
+		// no message body reaches this table through it.
+		"turn_class",
 	},
 }
 

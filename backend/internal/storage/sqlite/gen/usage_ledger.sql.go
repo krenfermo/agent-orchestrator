@@ -606,6 +606,7 @@ WITH attributed AS (
     a.cache_read_tokens     AS cache_read_tokens,
     a.cache_write_tokens    AS cache_write_tokens,
     a.output_tokens         AS output_tokens,
+    a.turn_class            AS turn_class,
     a.observed_at           AS observed_at
     FROM usage_event_attribution a
     WHERE a.observed_at IS NOT NULL
@@ -622,6 +623,7 @@ SELECT
     w.role             AS role,
     w.cycle            AS cycle,
     a.model_id         AS model_id,
+    a.turn_class       AS turn_class,
     a.observed_at      AS observed_at,
     a.input_tokens          AS input_tokens,
     a.uncached_input_tokens AS uncached_input_tokens,
@@ -639,6 +641,7 @@ type ListRunContextTrajectoryEventsRow struct {
 	Role                string
 	Cycle               int64
 	ModelID             string
+	TurnClass           string
 	ObservedAt          sql.NullTime
 	InputTokens         int64
 	UncachedInputTokens int64
@@ -680,6 +683,7 @@ func (q *Queries) ListRunContextTrajectoryEvents(ctx context.Context, workflowRu
 			&i.Role,
 			&i.Cycle,
 			&i.ModelID,
+			&i.TurnClass,
 			&i.ObservedAt,
 			&i.InputTokens,
 			&i.UncachedInputTokens,

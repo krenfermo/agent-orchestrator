@@ -53,6 +53,29 @@ type ContextTrajectory struct {
 	// observed_at and were therefore left out. Non-zero makes every figure
 	// above a lower bound, which the UI must say rather than imply.
 	UnplaceableEvents int64
+	// CumulativeInputTokens is the sum of the context over the calls: the
+	// quantity the identity at the top of this file is about, and the one
+	// number that moves when EITHER lever moves. The ledger's own input total
+	// is the same arithmetic over the same rows -- it is repeated here so a
+	// trajectory can be read on its own without a second fetch, and so a
+	// SEGMENT of a run (one step, one repair cycle) has the figure at all,
+	// which no run-level total can give it.
+	CumulativeInputTokens int64
+	// Turns is what those calls DID. Counts of calls, never tokens -- see
+	// TurnMix. A scope whose events all predate migration 0169 has an empty
+	// mix with every call in Unclassified, which is a different statement from
+	// "no coordination happened".
+	Turns TurnMix
+}
+
+// MeanContextPerCall is the average size of the conversation over the calls,
+// and whether it is knowable. This is the second lever stated as one number:
+// halving it halves the bill at an unchanged call count.
+func (t ContextTrajectory) MeanContextPerCall() (int64, bool) {
+	if !t.Observable || t.ProviderCalls <= 0 {
+		return 0, false
+	}
+	return t.CumulativeInputTokens / t.ProviderCalls, true
 }
 
 // GrowthPerCall is the mean growth between consecutive calls, and whether it
