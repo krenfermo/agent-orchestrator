@@ -412,6 +412,40 @@ type UsageBudgetPolicy struct {
 	// Default true via EffectiveUsageBudgetPolicy: ten children each entitled
 	// to the parent's whole budget is the exact failure P3-E §16 names.
 	ParentScope *bool `json:"parentScope,omitempty"`
+
+	// --- advisory thresholds (P5/P6) ------------------------------------
+	//
+	// The four fields below are ADVISORY OVERRIDES, not ceilings. They never
+	// produce BudgetExhausted, they are never consulted by usageBudgetBlocks,
+	// and nothing in AO refuses a dispatch because of them. They exist so an
+	// operator can move the line at which AO speaks about a run's SHAPE --
+	// how long it ran, how many calls it made, how much its conversation
+	// grew, what it cost -- away from the per-strategy defaults in
+	// UsageBudgetProfileFor.
+	//
+	// Zero means "use the profile default", exactly as zero means "no limit"
+	// on the ceilings above, and for the same forward-compatibility reason: a
+	// snapshot written before these existed must not read as a run whose
+	// every expectation is zero and therefore permanently in warning.
+	//
+	// See usage_advisory.go for why these warn and do not stop.
+
+	// WorkflowWallClockWarnSeconds is the elapsed time past which AO says the
+	// run is taking longer than its kind usually does. Seconds rather than a
+	// time.Duration because this value is serialized into a durable policy
+	// snapshot, and a Duration's JSON form is a nanosecond count that no
+	// human would ever recognise in a stored row.
+	WorkflowWallClockWarnSeconds int64 `json:"workflowWallClockWarnSeconds,omitempty"`
+	// WorkflowProviderCallWarn is the model-invocation count past which AO
+	// says so.
+	WorkflowProviderCallWarn int64 `json:"workflowProviderCallWarn,omitempty"`
+	// WorkflowContextGrowthWarnTokens is how much the conversation may grow
+	// between the first placeable call and the last before AO says so.
+	WorkflowContextGrowthWarnTokens int64 `json:"workflowContextGrowthWarnTokens,omitempty"`
+	// WorkflowCostWarnUSD is an advisory spend figure, independent of the
+	// hard WorkflowCostBudgetUSD ceiling. It exists so a person can be told
+	// about a $20 run without having to authorize AO to stop one.
+	WorkflowCostWarnUSD float64 `json:"workflowCostWarnUsd,omitempty"`
 }
 
 // DefaultUsageWarnPercent is the soft threshold when a policy names none.

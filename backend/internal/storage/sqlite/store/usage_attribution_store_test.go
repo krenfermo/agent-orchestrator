@@ -351,6 +351,7 @@ type window struct {
 	run         string
 	parent      string
 	role        domain.WorkflowRole
+	step        string
 	attemptID   string
 	ordinal     int64
 	cycle       int64
@@ -372,7 +373,8 @@ func openWindow(t *testing.T, s *sqlite.Store, w window) {
 	err := s.OpenUsageAttributionWindow(context.Background(), domain.UsageAttributionWindow{
 		DedupeKey: w.key, SubjectKind: kind, SessionID: w.session, ProjectID: attrProjectID,
 		WorkflowRunID: runID, ParentWorkflowRunID: w.parent,
-		AttemptID: w.attemptID, AttemptOrdinal: w.ordinal, Cycle: w.cycle,
+		WorkflowStepID: w.step,
+		AttemptID:      w.attemptID, AttemptOrdinal: w.ordinal, Cycle: w.cycle,
 		Role: w.role, Harness: w.harness, Provider: w.provider,
 		OpenedAt: w.opened, CreatedAt: w.opened,
 	})

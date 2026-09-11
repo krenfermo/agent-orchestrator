@@ -4431,6 +4431,25 @@ export interface components {
             /** @enum {string} */
             source: "task_spec" | "project_memory" | "shared_knowledge" | "repo_content" | "index_reuse" | "other";
         };
+        ControllersContextTrajectoryResponse: {
+            elapsedSeconds: null | number;
+            /** Format: int64 */
+            firstContextTokens: number;
+            firstObservedAt?: string;
+            growthPerCall: null | number;
+            /** Format: int64 */
+            growthTokens: number;
+            /** Format: int64 */
+            lastContextTokens: number;
+            lastObservedAt?: string;
+            observable: boolean;
+            /** Format: int64 */
+            peakContextTokens: number;
+            /** Format: int64 */
+            providerCalls: number;
+            /** Format: int64 */
+            unplaceableEvents: number;
+        };
         ControllersCreateProviderProfileRequest: {
             defaultModel?: string;
             displayName: string;
@@ -5373,6 +5392,16 @@ export interface components {
             handleId: string;
             instructions: string;
         };
+        ControllersStepUsageResponse: {
+            cost: components["schemas"]["ControllersUsageCostResponse"];
+            /** Format: int64 */
+            cycle: number;
+            role: string;
+            source: string;
+            tokens: components["schemas"]["ControllersUsageTokenTotalsResponse"];
+            trajectory: components["schemas"]["ControllersContextTrajectoryResponse"];
+            workflowStepId: string;
+        };
         ControllersSubjectUsageHookRequest: {
             /** @description The harness that invoked the hook. */
             agent?: string;
@@ -5448,6 +5477,17 @@ export interface components {
             defaultModel?: string;
             displayName: string;
             enabled: boolean;
+        };
+        ControllersUsageAdvisoryResponse: {
+            /** @enum {string} */
+            code: "duration_above_profile" | "provider_calls_above_profile" | "context_growth_above_profile" | "cost_above_profile" | "growth_without_progress" | "cache_read_dominant";
+            /** Format: int64 */
+            observed: number;
+            profile?: string;
+            /** @enum {string} */
+            severity: "info" | "warn";
+            /** Format: int64 */
+            threshold: number;
         };
         ControllersUsageBudgetResponse: {
             /** Format: double */
@@ -5528,6 +5568,16 @@ export interface components {
             repoId: string;
             repoIdentity?: string;
             truncated: boolean;
+        };
+        ControllersWorkerLivenessResponse: {
+            lastSignalAt?: string;
+            lastTransitionAt?: string;
+            observed: boolean;
+            sessionId?: string;
+            silentForSeconds: null | number;
+            state?: string;
+            stepId?: string;
+            stepKind?: string;
         };
         ControllersWorkflowActionAuthorityRequest: {
             /** Format: int64 */
@@ -5770,6 +5820,12 @@ export interface components {
             supersededReviewRunId?: string;
             taskId: string;
         };
+        ControllersWorkflowUsageDynamicsResponse: {
+            recorded: boolean;
+            steps?: components["schemas"]["ControllersStepUsageResponse"][];
+            trajectory: components["schemas"]["ControllersContextTrajectoryResponse"];
+            warnings?: components["schemas"]["ControllersUsageAdvisoryResponse"][];
+        };
         ControllersWorkflowUsageLedgerResponse: {
             /** Format: int64 */
             approximateEvents: number;
@@ -5780,6 +5836,7 @@ export interface components {
             complete: boolean;
             context?: components["schemas"]["ControllersWorkflowContextResponse"];
             cost: components["schemas"]["ControllersUsageCostResponse"];
+            dynamics?: components["schemas"]["ControllersWorkflowUsageDynamicsResponse"];
             familyCost: components["schemas"]["ControllersUsageCostResponse"];
             familyTotals: components["schemas"]["ControllersUsageTokenTotalsResponse"];
             incompleteReason?: string;
@@ -8932,6 +8989,7 @@ export interface components {
             waitReason?: string;
             /** Format: int64 */
             wakeAttemptCount?: number;
+            workerLiveness?: components["schemas"]["ControllersWorkerLivenessResponse"];
         };
         WorkflowStepProgressView: {
             /** @enum {string} */

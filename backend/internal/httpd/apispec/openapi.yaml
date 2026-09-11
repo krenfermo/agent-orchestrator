@@ -13534,6 +13534,51 @@ components:
       - bytes
       - estimatedTokens
       type: object
+    ControllersContextTrajectoryResponse:
+      properties:
+        elapsedSeconds:
+          type:
+          - "null"
+          - integer
+        firstContextTokens:
+          format: int64
+          type: integer
+        firstObservedAt:
+          type: string
+        growthPerCall:
+          type:
+          - "null"
+          - integer
+        growthTokens:
+          format: int64
+          type: integer
+        lastContextTokens:
+          format: int64
+          type: integer
+        lastObservedAt:
+          type: string
+        observable:
+          type: boolean
+        peakContextTokens:
+          format: int64
+          type: integer
+        providerCalls:
+          format: int64
+          type: integer
+        unplaceableEvents:
+          format: int64
+          type: integer
+      required:
+      - observable
+      - providerCalls
+      - firstContextTokens
+      - lastContextTokens
+      - peakContextTokens
+      - growthTokens
+      - growthPerCall
+      - elapsedSeconds
+      - unplaceableEvents
+      type: object
     ControllersCreateProviderProfileRequest:
       properties:
         defaultModel:
@@ -16045,6 +16090,32 @@ components:
       - handleId
       - instructions
       type: object
+    ControllersStepUsageResponse:
+      properties:
+        cost:
+          $ref: '#/components/schemas/ControllersUsageCostResponse'
+        cycle:
+          format: int64
+          type: integer
+        role:
+          type: string
+        source:
+          type: string
+        tokens:
+          $ref: '#/components/schemas/ControllersUsageTokenTotalsResponse'
+        trajectory:
+          $ref: '#/components/schemas/ControllersContextTrajectoryResponse'
+        workflowStepId:
+          type: string
+      required:
+      - workflowStepId
+      - role
+      - cycle
+      - tokens
+      - cost
+      - source
+      - trajectory
+      type: object
     ControllersSubjectUsageHookRequest:
       properties:
         agent:
@@ -16241,6 +16312,36 @@ components:
       - displayName
       - enabled
       type: object
+    ControllersUsageAdvisoryResponse:
+      properties:
+        code:
+          enum:
+          - duration_above_profile
+          - provider_calls_above_profile
+          - context_growth_above_profile
+          - cost_above_profile
+          - growth_without_progress
+          - cache_read_dominant
+          type: string
+        observed:
+          format: int64
+          type: integer
+        profile:
+          type: string
+        severity:
+          enum:
+          - info
+          - warn
+          type: string
+        threshold:
+          format: int64
+          type: integer
+      required:
+      - code
+      - severity
+      - observed
+      - threshold
+      type: object
     ControllersUsageBudgetResponse:
       properties:
         costBudget:
@@ -16433,6 +16534,30 @@ components:
       - edgesRetired
       - truncated
       - findings
+      type: object
+    ControllersWorkerLivenessResponse:
+      properties:
+        lastSignalAt:
+          type: string
+        lastTransitionAt:
+          type: string
+        observed:
+          type: boolean
+        sessionId:
+          type: string
+        silentForSeconds:
+          type:
+          - "null"
+          - integer
+        state:
+          type: string
+        stepId:
+          type: string
+        stepKind:
+          type: string
+      required:
+      - observed
+      - silentForSeconds
       type: object
     ControllersWorkflowActionAuthorityRequest:
       properties:
@@ -17046,6 +17171,24 @@ components:
       - approvedBy
       - createdAt
       type: object
+    ControllersWorkflowUsageDynamicsResponse:
+      properties:
+        recorded:
+          type: boolean
+        steps:
+          items:
+            $ref: '#/components/schemas/ControllersStepUsageResponse'
+          type: array
+        trajectory:
+          $ref: '#/components/schemas/ControllersContextTrajectoryResponse'
+        warnings:
+          items:
+            $ref: '#/components/schemas/ControllersUsageAdvisoryResponse'
+          type: array
+      required:
+      - recorded
+      - trajectory
+      type: object
     ControllersWorkflowUsageLedgerResponse:
       properties:
         approximateEvents:
@@ -17067,6 +17210,8 @@ components:
           $ref: '#/components/schemas/ControllersWorkflowContextResponse'
         cost:
           $ref: '#/components/schemas/ControllersUsageCostResponse'
+        dynamics:
+          $ref: '#/components/schemas/ControllersWorkflowUsageDynamicsResponse'
         familyCost:
           $ref: '#/components/schemas/ControllersUsageCostResponse'
         familyTotals:
@@ -25592,6 +25737,8 @@ components:
         wakeAttemptCount:
           format: int64
           type: integer
+        workerLiveness:
+          $ref: '#/components/schemas/ControllersWorkerLivenessResponse'
       required:
       - id
       - projectId

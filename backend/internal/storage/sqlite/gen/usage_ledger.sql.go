@@ -470,6 +470,26 @@ func (q *Queries) CountProjectUsageWorkflows(ctx context.Context, arg CountProje
 	return column_1, err
 }
 
+const countRunUnplaceableUsageEvents = `-- name: CountRunUnplaceableUsageEvents :one
+SELECT CAST(COUNT(*) AS INTEGER) AS unplaceable
+FROM usage_event_attribution a
+WHERE a.observed_at IS NULL
+  AND a.subject_kind || char(31) || a.subject_id IN (
+    SELECT s.subject_kind || char(31) || s.session_id FROM usage_attribution_windows s
+    WHERE s.workflow_run_id = ?1
+  )
+`
+
+// How many of this run's events carry no observed_at, so a trajectory built
+// from the query above can say it is a lower bound instead of implying it saw
+// every call.
+func (q *Queries) CountRunUnplaceableUsageEvents(ctx context.Context, workflowRunID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countRunUnplaceableUsageEvents, workflowRunID)
+	var unplaceable int64
+	err := row.Scan(&unplaceable)
+	return unplaceable, err
+}
+
 const insertDirectUsageEvent = `-- name: InsertDirectUsageEvent :exec
 INSERT INTO model_usage_events (
     binding_id, usage_source_id, model_id, input_tokens, uncached_input_tokens,
@@ -572,6 +592,112 @@ func (q *Queries) InsertUsageAttributionWindow(ctx context.Context, arg InsertUs
 		arg.CreatedAt,
 	)
 	return err
+}
+
+const listRunContextTrajectoryEvents = `-- name: ListRunContextTrajectoryEvents :many
+WITH attributed AS (
+    SELECT
+    a.subject_kind          AS subject_kind,
+    a.subject_id            AS subject_id,
+    a.window_id             AS window_id,
+    a.model_id              AS model_id,
+    a.input_tokens          AS input_tokens,
+    a.uncached_input_tokens AS uncached_input_tokens,
+    a.cache_read_tokens     AS cache_read_tokens,
+    a.cache_write_tokens    AS cache_write_tokens,
+    a.output_tokens         AS output_tokens,
+    a.observed_at           AS observed_at
+    FROM usage_event_attribution a
+    WHERE a.observed_at IS NOT NULL
+      AND a.subject_kind || char(31) || a.subject_id IN (
+        SELECT s.subject_kind || char(31) || s.session_id FROM usage_attribution_windows s
+        WHERE s.workflow_run_id = ?1
+    )    -- LIMIT -1 is not a limit. It is the documented way to stop SQLite
+    -- flattening a single-use CTE back into the outer query: flattened, the
+    -- planner reverts to the quadratic plan this shape exists to avoid.
+    LIMIT -1
+)
+SELECT
+    w.workflow_step_id AS workflow_step_id,
+    w.role             AS role,
+    w.cycle            AS cycle,
+    a.model_id         AS model_id,
+    a.observed_at      AS observed_at,
+    a.input_tokens          AS input_tokens,
+    a.uncached_input_tokens AS uncached_input_tokens,
+    a.cache_read_tokens     AS cache_read_tokens,
+    a.cache_write_tokens    AS cache_write_tokens,
+    a.output_tokens         AS output_tokens
+FROM attributed a
+CROSS JOIN usage_attribution_windows w ON w.id = a.window_id
+WHERE w.workflow_run_id = ?1
+ORDER BY a.observed_at ASC, w.workflow_step_id ASC
+`
+
+type ListRunContextTrajectoryEventsRow struct {
+	WorkflowStepID      string
+	Role                string
+	Cycle               int64
+	ModelID             string
+	ObservedAt          sql.NullTime
+	InputTokens         int64
+	UncachedInputTokens int64
+	CacheReadTokens     int64
+	CacheWriteTokens    int64
+	OutputTokens        int64
+}
+
+// One run's provider calls, in the order the provider made them.
+//
+// Every other read in this file folds the ledger into SUMs, because a total is
+// all a cost question needs. A context question is different in kind: "the
+// conversation grew from 54k to 324k over 193 calls" cannot be recovered from
+// any sum, because it is about the SHAPE of the series and not its area. So
+// this is the one read that returns rows.
+//
+// input_tokens is the whole context the provider re-read on that call: the V1
+// parser folds cache reads and writes into it, so context(i) is one column and
+// not an addition the caller could get wrong.
+//
+// Events with no observed_at are excluded rather than ordered arbitrarily. An
+// event AO cannot place in time contributes nothing to a trajectory and would
+// corrupt the first/last pair if it were guessed into one end of the series;
+// the caller counts what it dropped and reports the series as partial.
+//
+// Same CTE + CROSS JOIN shape as AggregateWorkflowRunUsage, and for the same
+// reason: written as a plain join it re-resolves every event once per window.
+func (q *Queries) ListRunContextTrajectoryEvents(ctx context.Context, workflowRunID string) ([]ListRunContextTrajectoryEventsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listRunContextTrajectoryEvents, workflowRunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListRunContextTrajectoryEventsRow{}
+	for rows.Next() {
+		var i ListRunContextTrajectoryEventsRow
+		if err := rows.Scan(
+			&i.WorkflowStepID,
+			&i.Role,
+			&i.Cycle,
+			&i.ModelID,
+			&i.ObservedAt,
+			&i.InputTokens,
+			&i.UncachedInputTokens,
+			&i.CacheReadTokens,
+			&i.CacheWriteTokens,
+			&i.OutputTokens,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listUsageAttributionWindowsForRun = `-- name: ListUsageAttributionWindowsForRun :many

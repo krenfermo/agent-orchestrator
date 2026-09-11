@@ -179,6 +179,13 @@ type WorkflowUsageLedgerResponse struct {
 	// in bytes and converted to tokens by AO's own heuristic. Absent when no
 	// evidence was recorded.
 	Context *WorkflowContextResponse `json:"context,omitempty"`
+
+	// Dynamics is a THIRD quantity again: how the conversation moved. The
+	// totals above say what the run spent and cannot say why; this says how
+	// many calls there were, how far the context grew between the first and the
+	// last, which step carried it, and what AO advises about that shape.
+	// Absent when no usage event could be placed in time.
+	Dynamics *WorkflowUsageDynamicsResponse `json:"dynamics,omitempty"`
 }
 
 // ProjectUsageResponse is a project's rollup for one period.

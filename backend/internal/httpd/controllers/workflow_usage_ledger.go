@@ -13,6 +13,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/identity"
 	usagesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/usage"
+	workflowsvc "github.com/aoagents/agent-orchestrator/backend/internal/workflow"
 )
 
 // UsageLedgerService is the controller-facing P3-E read contract.
@@ -109,6 +110,7 @@ func (c *WorkflowsController) getWorkflowUsage(w http.ResponseWriter, r *http.Re
 	}
 	response := workflowUsageLedgerResponse(ledger)
 	response.Context = c.runUsageContext(r.Context(), workflowID)
+	response.Dynamics = c.runUsageDynamics(r.Context(), detail)
 	envelope.WriteJSON(w, http.StatusOK, response)
 }
 
@@ -134,4 +136,121 @@ func (c *WorkflowsController) getProjectUsage(w http.ResponseWriter, r *http.Req
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, projectUsageResponse(summary))
+}
+
+// UsageDynamicsService is the controller-facing read contract for a run's
+// context SHAPE. *usage.DynamicsReader satisfies it.
+//
+// A third service rather than a widened ledger, for the same reason
+// UsageContextService is a second one: what a provider reported spending, what
+// AO assembled, and how the conversation moved are three different quantities,
+// and one reader that could return all three is one refactor away from adding
+// two of them together.
+type UsageDynamicsService interface {
+	WorkflowRun(ctx context.Context, runID string, opts usagesvc.DynamicsOptions) (domain.RunContextDynamics, error)
+}
+
+// runUsageDynamics builds the run's context-shape block.
+//
+// A failure costs the block and nothing else: a run whose trajectory cannot be
+// read must still report the tokens it spent. The progress evidence is taken
+// from the detail the caller already has -- no extra store read -- and is
+// passed as evidence rather than as a verdict, so an unknown term leaves the
+// growth-without-progress conjunction unfired instead of firing it.
+func (c *WorkflowsController) runUsageDynamics(ctx context.Context, detail workflowsvc.RunDetail) *WorkflowUsageDynamicsResponse {
+	if c.UsageDynamics == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	opts := usagesvc.DynamicsOptions{
+		Strategy:     runExecutionStrategy(detail.Run),
+		Budget:       runFrozenUsagePolicy(detail.Run),
+		RunStartedAt: detail.Run.CreatedAt,
+		RunEndedAt:   detail.Run.CompletedAt,
+		Now:          now,
+		Progress:     progressEvidenceFor(detail),
+	}
+	view, err := c.UsageDynamics.WorkflowRun(ctx, detail.Run.ID, opts)
+	if err != nil {
+		return nil
+	}
+	out := workflowUsageDynamicsResponse(view)
+	return &out
+}
+
+// runFrozenUsagePolicy decodes the run's frozen budget by exactly the rule the
+// ENFORCING side uses (workflow.policyForRun): a snapshot counts only when it
+// carries a fix budget, which is what proves CreateRun wrote it. The advisory
+// thresholds must come from the same snapshot the ceilings do, or a run would
+// warn against numbers its own policy never recorded.
+func runFrozenUsagePolicy(run domain.WorkflowRun) domain.UsageBudgetPolicy {
+	var policy domain.WorkflowPolicy
+	if run.PolicySnapshot != "" && run.PolicySnapshot != "{}" {
+		var decoded domain.WorkflowPolicy
+		if err := json.Unmarshal([]byte(run.PolicySnapshot), &decoded); err == nil && decoded.MaxFixCycles > 0 {
+			policy = decoded
+		}
+	}
+	return policy.EffectiveUsageBudgetPolicy()
+}
+
+// runExecutionStrategy reads the run's frozen strategy, or empty when the
+// snapshot records none. Empty is deliberately NOT mapped to "task" here:
+// UsageBudgetProfileFor answers an unknown strategy with the middle profile,
+// because measuring a run of unknown shape against the tightest expectations
+// would warn constantly and teach a person to ignore the warnings.
+func runExecutionStrategy(run domain.WorkflowRun) domain.ExecutionStrategy {
+	if run.PolicySnapshot == "" || run.PolicySnapshot == "{}" {
+		return ""
+	}
+	var decoded domain.WorkflowPolicy
+	if err := json.Unmarshal([]byte(run.PolicySnapshot), &decoded); err != nil {
+		return ""
+	}
+	if !decoded.Strategy.Effective.Valid() {
+		return ""
+	}
+	return decoded.Strategy.Effective
+}
+
+// progressEvidenceFor assembles what this read already knows about whether the
+// run is getting anywhere.
+//
+// Known is true only when there IS a running agent to judge. A run between
+// steps has no dispatch to measure progress from, and calling that "no
+// progress" would fire the advisory on every gap between a worker finishing
+// and a review starting.
+func progressEvidenceFor(detail workflowsvc.RunDetail) usagesvc.ProgressEvidence {
+	live := detail.WorkerLiveness
+	if !live.Observed {
+		return usagesvc.ProgressEvidence{}
+	}
+	out := usagesvc.ProgressEvidence{
+		Known:              true,
+		WorkerLastSignalAt: live.LastSignalAt,
+	}
+	for _, sd := range detail.Steps {
+		if sd.Step.ID != live.StepID {
+			continue
+		}
+		// The running step's own dispatch instant: its newest attempt's start,
+		// falling back to when the step itself began.
+		out.DispatchedAt = sd.Step.UpdatedAt
+		for _, att := range sd.Attempts {
+			if att.StartedAt.After(out.DispatchedAt) {
+				out.DispatchedAt = att.StartedAt
+			}
+		}
+		if sd.LatestCheckpoint != nil {
+			out.LastDurableProgressAt = sd.LatestCheckpoint.CreatedAt
+		}
+		break
+	}
+	// The run's own newest durable act counts too: a checkpoint written at run
+	// level (a placement, an adoption, an observation) is progress even when
+	// the running step has not written one of its own.
+	if detail.LatestCheckpointAt.After(out.LastDurableProgressAt) {
+		out.LastDurableProgressAt = detail.LatestCheckpointAt
+	}
+	return out
 }
