@@ -973,6 +973,17 @@ type RunDetail struct {
 	// made indistinguishable apart: a repair working, a repair spent, and a run
 	// waiting for the review of a change AO has already adopted.
 	Repair RepairLifecycle
+	// WorkerLiveness is the running agent's own two clocks -- when it was last
+	// HEARD FROM and when it last CHANGED STATE -- read live from its session
+	// while a step is running. Zero (Observed=false) for a terminal run, a run
+	// with no running step, or a session AO could not read.
+	//
+	// It is deliberately a THIRD clock rather than a redefinition of either
+	// existing one: LatestCheckpointAt is the workflow's own last durable act
+	// and must stay so (an idle worker during a review is not an idle
+	// workflow), and activity_last_at is a transition clock by design. See
+	// worker_liveness_view.go.
+	WorkerLiveness WorkerLiveness
 }
 
 // RepairLifecycle is the durable projection of one run's repair state.
@@ -1556,6 +1567,11 @@ func (c *Coordinator) GetRun(ctx stdctx.Context, runID string) (RunDetail, error
 	// the released claim can no longer authorize a mutation in a runtime this
 	// call is about to destroy by incarnation.
 	c.reclaimTerminalRuntimes(ctx, detail.Run, steps)
+
+	// The running agent's liveness, read last because it is the only field
+	// here that describes RIGHT NOW rather than the durable record, and every
+	// cascade above may have changed which step is running.
+	c.observeWorkerLiveness(ctx, &detail)
 
 	return detail, nil
 }

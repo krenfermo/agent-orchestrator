@@ -195,3 +195,122 @@ describe("WorkflowTokenLedger", () => {
 		expect(screen.getByText(/3 of 12 events carried no provider timestamp/)).toBeTruthy();
 	});
 });
+
+// --- P5/P6: the SHAPE block -----------------------------------------------
+//
+// A total explains nothing on its own. These assertions pin the three figures
+// that do explain it, and the one claim the block must never make.
+
+type Dynamics = components["schemas"]["ControllersWorkflowUsageDynamicsResponse"];
+type Trajectory = components["schemas"]["ControllersContextTrajectoryResponse"];
+
+function trajectory(overrides: Partial<Trajectory> = {}): Trajectory {
+	return {
+		observable: true,
+		providerCalls: 193,
+		firstContextTokens: 54_402,
+		lastContextTokens: 323_736,
+		peakContextTokens: 323_736,
+		growthTokens: 269_334,
+		growthPerCall: 1_403,
+		elapsedSeconds: 3_000,
+		unplaceableEvents: 0,
+		...overrides,
+	};
+}
+
+function dynamics(overrides: Partial<Dynamics> = {}): Dynamics {
+	return { recorded: true, trajectory: trajectory(), steps: [], warnings: [], ...overrides };
+}
+
+describe("WorkflowTokenLedger shape block", () => {
+	it("shows the call count and both ends of the context, because the total contains neither", () => {
+		render(<WorkflowTokenLedger ledger={ledger({ dynamics: dynamics() })} />);
+		expect(screen.getByTestId("usage-shape-calls").textContent).toBe("193");
+		const context = screen.getByTestId("usage-shape-context").textContent ?? "";
+		expect(context).toContain("54.4k");
+		expect(context).toContain("323.7k");
+	});
+
+	// PHASE J.4 -- cache-read dominance is its own line, visibly informational.
+	// 98.8% was measured on a run with no loop and no defect; styling it as a
+	// fault would teach a person to distrust a healthy run.
+	it("separates cache-read dominance as information rather than as a warning", () => {
+		render(
+			<WorkflowTokenLedger
+				ledger={ledger({
+					dynamics: dynamics({
+						warnings: [
+							{ code: "cache_read_dominant", severity: "info", observed: 99, threshold: 90, profile: "task" },
+						],
+					}),
+				})}
+			/>,
+		);
+		const advisories = screen.getByTestId("usage-shape-advisories");
+		expect(advisories.textContent).toContain("re-reading the same conversation");
+		// An info note must not carry the warning styling the warn notes do.
+		expect(advisories.querySelector(".text-warning")).toBeNull();
+	});
+
+	it("styles a real warning as a warning", () => {
+		render(
+			<WorkflowTokenLedger
+				ledger={ledger({
+					dynamics: dynamics({
+						warnings: [
+							{ code: "context_growth_above_profile", severity: "warn", observed: 269_334, threshold: 100_000, profile: "task" },
+						],
+					}),
+				})}
+			/>,
+		);
+		const advisories = screen.getByTestId("usage-shape-advisories");
+		expect(advisories.querySelector(".text-warning")).not.toBeNull();
+		expect(advisories.textContent).toContain("269,334");
+	});
+
+	it("attributes spend to the step that incurred it", () => {
+		render(
+			<WorkflowTokenLedger
+				ledger={ledger({
+					dynamics: dynamics({
+						steps: [
+							{
+								workflowStepId: "step-work", role: "worker", cycle: 0,
+								tokens: tokens(34_000), cost: knownCost, source: "provider_reported",
+								trajectory: trajectory({ providerCalls: 180 }),
+							},
+							{
+								workflowStepId: "step-fix", role: "fix_worker", cycle: 1,
+								tokens: tokens(9_000), cost: knownCost, source: "provider_reported",
+								trajectory: trajectory({ providerCalls: 13 }),
+							},
+						],
+					}),
+				})}
+			/>,
+		);
+		const steps = screen.getByTestId("usage-shape-steps").textContent ?? "";
+		expect(steps).toContain("180 calls");
+		expect(steps).toContain("13 calls");
+		expect(steps).toContain("repair 1");
+	});
+
+	// The same discipline the rest of this file enforces: an absence is said
+	// out loud, never rendered as zero.
+	it("says no context data was recorded rather than rendering a zero-length series", () => {
+		render(<WorkflowTokenLedger ledger={ledger({ dynamics: { recorded: false, trajectory: trajectory({ observable: false }) } })} />);
+		expect(screen.getByTestId("usage-shape").textContent).toContain("No context data recorded");
+	});
+
+	it("declares itself a lower bound when events could not be placed in time", () => {
+		render(<WorkflowTokenLedger ledger={ledger({ dynamics: dynamics({ trajectory: trajectory({ unplaceableEvents: 7 }) }) })} />);
+		expect(screen.getByTestId("usage-shape").textContent).toContain("lower bound");
+	});
+
+	it("renders no shape block at all when the daemon sent none", () => {
+		render(<WorkflowTokenLedger ledger={ledger()} />);
+		expect(screen.queryByTestId("usage-shape")).toBeNull();
+	});
+});

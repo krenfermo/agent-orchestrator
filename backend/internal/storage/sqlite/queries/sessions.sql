@@ -11,13 +11,13 @@ INSERT INTO sessions (
     preview_url, preview_revision, terminate_on_pr_merge, cleanup_generation, browser_capability_verifier,
     session_mode, provider_conversation_id, controller_generation,
     created_at, updated_at, is_pinned, pinned_at, auto_inject_review, auto_inject_ci,
-    runtime_instance_id, runtime_owner_token
+    runtime_instance_id, runtime_owner_token, last_signal_at
 ) VALUES (
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-    ?, ?
+    ?, ?, ?
 );
 
 -- name: UpdateSession :exec
@@ -31,7 +31,7 @@ UPDATE sessions SET
     cleanup_generation = ?, browser_capability_verifier = ?,
     provider_conversation_id = ?, controller_generation = ?, updated_at = ?,
     is_pinned = ?, pinned_at = ?, auto_inject_review = ?, auto_inject_ci = ?,
-    runtime_instance_id = ?, runtime_owner_token = ?
+    runtime_instance_id = ?, runtime_owner_token = ?, last_signal_at = ?
 WHERE id = ?;
 
 -- name: RecordSessionLatestUserPrompt :execrows
@@ -82,7 +82,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     reviewer_harness, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
     latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled,
-    runtime_instance_id, runtime_owner_token
+    runtime_instance_id, runtime_owner_token, last_signal_at
 FROM sessions WHERE id = ?;
 
 -- name: GetSessionByProjectAndIssueID :one
@@ -101,7 +101,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     reviewer_harness, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
     latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled,
-    runtime_instance_id, runtime_owner_token
+    runtime_instance_id, runtime_owner_token, last_signal_at
 FROM sessions WHERE project_id = ? AND issue_id = ? ORDER BY created_at DESC, num DESC LIMIT 1;
 
 -- name: ListSessionsByProject :many
@@ -114,7 +114,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     reviewer_harness, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
     latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled,
-    runtime_instance_id, runtime_owner_token
+    runtime_instance_id, runtime_owner_token, last_signal_at
 FROM sessions WHERE project_id = ? ORDER BY num;
 
 -- name: ListAllSessions :many
@@ -127,7 +127,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     reviewer_harness, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
     latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled,
-    runtime_instance_id, runtime_owner_token
+    runtime_instance_id, runtime_owner_token, last_signal_at
 FROM sessions ORDER BY project_id, num;
 
 

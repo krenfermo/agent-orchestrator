@@ -279,3 +279,69 @@ func (s *Store) RecordDirectUsageEvent(ctx context.Context, bindingID int64, ev 
 	}
 	return nil
 }
+
+// UsageTrajectoryEvent is one provider call as the trajectory read sees it:
+// when it happened, which step and role it belonged to, and how big the
+// conversation was. Deliberately narrow -- no prompt, no message, no artifact
+// path -- because measuring a conversation's SIZE must never require reading
+// its content.
+type UsageTrajectoryEvent struct {
+	WorkflowStepID string
+	Role           domain.WorkflowRole
+	Cycle          int64
+	ModelID        string
+	ObservedAt     time.Time
+	Tokens         domain.UsageTokenTotals
+}
+
+// ListRunContextTrajectoryEvents returns one run's placeable provider calls in
+// provider order, oldest first.
+//
+// This is the only usage read in AO that returns rows rather than a fold, and
+// the reason is in the query's own comment: a trajectory is a property of the
+// series, and no SUM over the series preserves it. The row count is one per
+// model invocation of one run -- 193 for the worked example, and bounded by
+// the run rather than by the project -- which is why it is affordable here and
+// would not be on a project rollup.
+func (s *Store) ListRunContextTrajectoryEvents(ctx context.Context, runID string) ([]UsageTrajectoryEvent, error) {
+	rows, err := s.qr.ListRunContextTrajectoryEvents(ctx, runID)
+	if err != nil {
+		return nil, fmt.Errorf("list context trajectory events for run %s: %w", runID, err)
+	}
+	out := make([]UsageTrajectoryEvent, 0, len(rows))
+	for _, r := range rows {
+		if !r.ObservedAt.Valid {
+			// The query already excludes these; the guard is here so a future
+			// edit to the WHERE clause cannot silently start ordering events
+			// AO cannot place in time.
+			continue
+		}
+		out = append(out, UsageTrajectoryEvent{
+			WorkflowStepID: r.WorkflowStepID,
+			Role:           domain.WorkflowRole(r.Role),
+			Cycle:          r.Cycle,
+			ModelID:        r.ModelID,
+			ObservedAt:     r.ObservedAt.Time.UTC(),
+			Tokens: domain.UsageTokenTotals{
+				InputTokens:         r.InputTokens,
+				UncachedInputTokens: r.UncachedInputTokens,
+				CacheReadTokens:     r.CacheReadTokens,
+				CacheWriteTokens:    r.CacheWriteTokens,
+				OutputTokens:        r.OutputTokens,
+				EventCount:          1,
+			},
+		})
+	}
+	return out, nil
+}
+
+// CountRunUnplaceableUsageEvents reports how many of a run's usage events carry
+// no observed_at, so a trajectory can declare itself a lower bound rather than
+// implying it saw every call.
+func (s *Store) CountRunUnplaceableUsageEvents(ctx context.Context, runID string) (int64, error) {
+	n, err := s.qr.CountRunUnplaceableUsageEvents(ctx, runID)
+	if err != nil {
+		return 0, fmt.Errorf("count unplaceable usage events for run %s: %w", runID, err)
+	}
+	return n, nil
+}

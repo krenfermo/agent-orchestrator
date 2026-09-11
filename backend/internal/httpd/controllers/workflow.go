@@ -559,6 +559,16 @@ type WorkflowRunView struct {
 	// list is flat, so the link is what keeps a repair distinguishable from
 	// work somebody asked for.
 	RepairOfWorkflowID string `json:"repairOfWorkflowId,omitempty"`
+	// WorkerLiveness is the running agent's own clocks, read live while a step
+	// is running. It is a THIRD clock beside lastMeaningfulActivityAt (the
+	// workflow's last durable act) and the session's transition clock -- see
+	// WorkerLivenessResponse. Absent when there is no running agent to ask.
+	//
+	// A surface that wants to say "silent" or "stuck" must read this and
+	// nothing else. lastMeaningfulActivityAt is correct and is not a liveness
+	// figure: a work step in progress writes no checkpoints, so it stands
+	// still for the whole of a twenty-minute turn by design.
+	WorkerLiveness *WorkerLivenessResponse `json:"workerLiveness,omitempty"`
 }
 
 // WorkflowRepairStateView is the wire form of workflow.RepairLifecycle.
@@ -1003,6 +1013,16 @@ type WorkflowsController struct {
 	// from UsageLedger because the two measure different quantities -- what AO
 	// sent versus what a provider reported receiving -- and must never be added.
 	UsageContext UsageContextService
+	// UsageDynamics backs the context-SHAPE section: how many provider calls a
+	// run made, how far its conversation grew, which step carried the cost, and
+	// what AO advises about that. Optional in exactly the same way -- nil
+	// leaves the section unset rather than failing the request.
+	//
+	// Separate from both readers above because it measures a third quantity.
+	// The ledger says what was spent, the context reader says what AO sent, and
+	// this says how the conversation MOVED; adding any two of them produces a
+	// number that is none of them.
+	UsageDynamics UsageDynamicsService
 	// boardUsage memoizes the per-project usage fold for a few seconds. The
 	// Board polls every two seconds while anything moves, and the fold covers
 	// the project's whole append-only ledger -- see workflow_board_usage.go.
@@ -1175,6 +1195,9 @@ func (c *WorkflowsController) workflowRunDetailView(ctx context.Context, detail 
 	if !presentation.LastMeaningfulActivityAt.IsZero() {
 		at := presentation.LastMeaningfulActivityAt
 		runView.LastMeaningfulActivityAt = &at
+	}
+	if live := workerLivenessResponse(detail.WorkerLiveness, time.Now().UTC()); live != nil {
+		runView.WorkerLiveness = live
 	}
 	if reader, ok := c.Svc.(workflowsvc.RepairOriginReader); ok {
 		if originID, _, isRepair := reader.RepairRunOrigin(ctx, detail.Run.ID); isRepair {

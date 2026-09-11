@@ -961,7 +961,13 @@ func RunWithConfig(cfg config.Config) error {
 		// are different quantities, and one reader that could return both is
 		// one refactor away from adding them.
 		UsageContext: usagesvc.NewContextReader(usageEvidenceSource(log)),
-		Capacity:     capacitysvc.NewReader(store),
+		// P5/P6: the context-SHAPE reader. Same store, same rate card, same
+		// rows -- it folds the ledger into a series rather than a sum, because
+		// "193 calls against a context that grew from 54k to 324k" is the
+		// explanation a total cannot carry. It shares the ledger's pricing so
+		// a per-step cost and the run total can never name different rates.
+		UsageDynamics: usagesvc.NewDynamicsReader(store, usagePricing(cfg.DataDir, log)),
+		Capacity:      capacitysvc.NewReader(store),
 		// ONE service instance backs both surfaces: the memory routes and the
 		// code-graph routes are two views of the same subsystem, and giving
 		// them separate resolvers would give them separate opinions about

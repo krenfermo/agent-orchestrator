@@ -9,6 +9,7 @@ import { useWorkflowRecovery } from "../hooks/useWorkflowRecovery";
 import { useWorkflowStatusLabel } from "../hooks/useWorkflowExecutionStatus";
 import { useChildTaskRouting } from "../hooks/useChildTaskRouting";
 import { WorkflowVerifyDetails } from "../components/workflow-verify-details";
+import { WorkflowLivenessPanel } from "../components/workflow-liveness-panel";
 import { WorkflowUsageSection } from "../components/workflow-usage-section";
 import { WorkflowQuestionsSection } from "../components/workflow-questions-section";
 import { WorkflowCapacityWaitBanner } from "../components/workflow-capacity-wait-banner";
@@ -324,6 +325,13 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 				    the board card cannot tell two different stories. The technical
 				    vocabulary keeps its place further down, in a disclosure. */}
 				{presentation ? <WorkflowStatusPanel presentation={presentation} /> : null}
+				{/* P5/P6: the running agent's own clocks, directly under the
+				    status, because "is it alive" is the question the status line
+				    could not answer. The workflow's own last durable act stays
+				    where it is further down: a work step in progress writes no
+				    checkpoints, so it is not a liveness figure and must never be
+				    rendered as one. */}
+				<WorkflowLivenessPanel liveness={workflow.run.workerLiveness} />
 				{/* P3-C: the daemon's own answer to "what do I do now" -- whether
 				    anyone is needed, what AO will do by itself, what comes next,
 				    and every action it is refusing WITH the reason. It sits

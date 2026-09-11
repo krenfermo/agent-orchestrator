@@ -973,6 +973,10 @@ func (c *Coordinator) getMasterRun(ctx stdctx.Context, run domain.WorkflowRun, s
 			detail.WaitReason = string(next.Reason)
 		}
 	}
+	// A master's own steps can be running too (its planner), so it gets the
+	// same live liveness read the single-run path does. Its CHILDREN carry
+	// their own, read when their own detail is read.
+	c.observeWorkerLiveness(ctx, &detail)
 	return detail, nil
 }
 

@@ -59,6 +59,8 @@ type APIDeps struct {
 	UsageLedger controllers.UsageLedgerService
 	// UsageContext backs the AO-assembled context section. Optional.
 	UsageContext controllers.UsageContextService
+	// UsageDynamics backs the context-shape/advisory section. Optional.
+	UsageDynamics controllers.UsageDynamicsService
 	// Capacity backs Checkpoint 8J's read-only capacity/quota view. Optional
 	// like the other 8H/8J surfaces; nil answers 501.
 	Capacity controllers.CapacityService
@@ -419,6 +421,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			UsageReader:      deps.UsageSummary,
 			UsageLedger:      deps.UsageLedger,
 			UsageContext:     deps.UsageContext,
+			UsageDynamics:    deps.UsageDynamics,
 			QuestionsReader:  deps.Questions,
 			Ownership:        deps.WorkflowOwnership,
 			TrustedLocal:     cfg.TrustedLocalMode,

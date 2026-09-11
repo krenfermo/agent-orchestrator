@@ -116,7 +116,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     reviewer_harness, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
     latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled,
-    runtime_instance_id, runtime_owner_token
+    runtime_instance_id, runtime_owner_token, last_signal_at
 FROM sessions WHERE id = ?
 `
 
@@ -163,6 +163,7 @@ type GetSessionRow struct {
 	AutoReviewEnabled         bool
 	RuntimeInstanceID         string
 	RuntimeOwnerToken         string
+	LastSignalAt              sql.NullTime
 }
 
 func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessionRow, error) {
@@ -211,6 +212,7 @@ func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessi
 		&i.AutoReviewEnabled,
 		&i.RuntimeInstanceID,
 		&i.RuntimeOwnerToken,
+		&i.LastSignalAt,
 	)
 	return i, err
 }
@@ -225,7 +227,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     reviewer_harness, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
     latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled,
-    runtime_instance_id, runtime_owner_token
+    runtime_instance_id, runtime_owner_token, last_signal_at
 FROM sessions WHERE project_id = ? AND issue_id = ? ORDER BY created_at DESC, num DESC LIMIT 1
 `
 
@@ -277,6 +279,7 @@ type GetSessionByProjectAndIssueIDRow struct {
 	AutoReviewEnabled         bool
 	RuntimeInstanceID         string
 	RuntimeOwnerToken         string
+	LastSignalAt              sql.NullTime
 }
 
 // Workflow (Checkpoint 8B) uses issue_id as a durable natural key to find a
@@ -331,6 +334,7 @@ func (q *Queries) GetSessionByProjectAndIssueID(ctx context.Context, arg GetSess
 		&i.AutoReviewEnabled,
 		&i.RuntimeInstanceID,
 		&i.RuntimeOwnerToken,
+		&i.LastSignalAt,
 	)
 	return i, err
 }
@@ -345,13 +349,13 @@ INSERT INTO sessions (
     preview_url, preview_revision, terminate_on_pr_merge, cleanup_generation, browser_capability_verifier,
     session_mode, provider_conversation_id, controller_generation,
     created_at, updated_at, is_pinned, pinned_at, auto_inject_review, auto_inject_ci,
-    runtime_instance_id, runtime_owner_token
+    runtime_instance_id, runtime_owner_token, last_signal_at
 ) VALUES (
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-    ?, ?
+    ?, ?, ?
 )
 `
 
@@ -398,6 +402,7 @@ type InsertSessionParams struct {
 	AutoInjectCI              bool
 	RuntimeInstanceID         string
 	RuntimeOwnerToken         string
+	LastSignalAt              sql.NullTime
 }
 
 func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) error {
@@ -444,6 +449,7 @@ func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) er
 		arg.AutoInjectCI,
 		arg.RuntimeInstanceID,
 		arg.RuntimeOwnerToken,
+		arg.LastSignalAt,
 	)
 	return err
 }
@@ -458,7 +464,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     reviewer_harness, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
     latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled,
-    runtime_instance_id, runtime_owner_token
+    runtime_instance_id, runtime_owner_token, last_signal_at
 FROM sessions ORDER BY project_id, num
 `
 
@@ -505,6 +511,7 @@ type ListAllSessionsRow struct {
 	AutoReviewEnabled         bool
 	RuntimeInstanceID         string
 	RuntimeOwnerToken         string
+	LastSignalAt              sql.NullTime
 }
 
 func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, error) {
@@ -559,6 +566,7 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, er
 			&i.AutoReviewEnabled,
 			&i.RuntimeInstanceID,
 			&i.RuntimeOwnerToken,
+			&i.LastSignalAt,
 		); err != nil {
 			return nil, err
 		}
@@ -583,7 +591,7 @@ SELECT id, project_id, num, issue_id, kind, harness,
     reviewer_harness, is_pinned, pinned_at,
     session_mode, provider_conversation_id, controller_generation, browser_capability_verifier,
     latest_user_prompt, latest_assistant_update, native_transcript_path, auto_inject_review, auto_inject_ci, auto_review_enabled,
-    runtime_instance_id, runtime_owner_token
+    runtime_instance_id, runtime_owner_token, last_signal_at
 FROM sessions WHERE project_id = ? ORDER BY num
 `
 
@@ -630,6 +638,7 @@ type ListSessionsByProjectRow struct {
 	AutoReviewEnabled         bool
 	RuntimeInstanceID         string
 	RuntimeOwnerToken         string
+	LastSignalAt              sql.NullTime
 }
 
 func (q *Queries) ListSessionsByProject(ctx context.Context, projectID domain.ProjectID) ([]ListSessionsByProjectRow, error) {
@@ -684,6 +693,7 @@ func (q *Queries) ListSessionsByProject(ctx context.Context, projectID domain.Pr
 			&i.AutoReviewEnabled,
 			&i.RuntimeInstanceID,
 			&i.RuntimeOwnerToken,
+			&i.LastSignalAt,
 		); err != nil {
 			return nil, err
 		}
@@ -923,7 +933,7 @@ UPDATE sessions SET
     cleanup_generation = ?, browser_capability_verifier = ?,
     provider_conversation_id = ?, controller_generation = ?, updated_at = ?,
     is_pinned = ?, pinned_at = ?, auto_inject_review = ?, auto_inject_ci = ?,
-    runtime_instance_id = ?, runtime_owner_token = ?
+    runtime_instance_id = ?, runtime_owner_token = ?, last_signal_at = ?
 WHERE id = ?
 `
 
@@ -965,6 +975,7 @@ type UpdateSessionParams struct {
 	AutoInjectCI              bool
 	RuntimeInstanceID         string
 	RuntimeOwnerToken         string
+	LastSignalAt              sql.NullTime
 	ID                        domain.SessionID
 }
 
@@ -1007,6 +1018,7 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) er
 		arg.AutoInjectCI,
 		arg.RuntimeInstanceID,
 		arg.RuntimeOwnerToken,
+		arg.LastSignalAt,
 		arg.ID,
 	)
 	return err

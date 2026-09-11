@@ -30,6 +30,10 @@ type CostResponse = components["schemas"]["ControllersUsageCostResponse"];
 type TokensResponse = components["schemas"]["ControllersUsageTokenTotalsResponse"];
 type BudgetResponse = components["schemas"]["ControllersUsageBudgetResponse"];
 type ContextResponse = components["schemas"]["ControllersWorkflowContextResponse"];
+type DynamicsResponse = components["schemas"]["ControllersWorkflowUsageDynamicsResponse"];
+type TrajectoryResponse = components["schemas"]["ControllersContextTrajectoryResponse"];
+type AdvisoryResponse = components["schemas"]["ControllersUsageAdvisoryResponse"];
+type StepUsageResponse = components["schemas"]["ControllersStepUsageResponse"];
 
 const ROLE_LABEL_KEYS: Record<string, string> = {
 	planner: "shell.workflowUsage.roleLabel.planner",
@@ -38,6 +42,15 @@ const ROLE_LABEL_KEYS: Record<string, string> = {
 	fix_worker: "shell.workflowUsage.roleLabel.fix_worker",
 	verify: "shell.workflowUsage.roleLabel.verify",
 	decision_resolver: "shell.workflowUsage.roleLabel.decision_resolver",
+};
+
+const ADVISORY_LABEL_KEYS: Record<string, string> = {
+	duration_above_profile: "shell.usageShape.advisory.duration",
+	provider_calls_above_profile: "shell.usageShape.advisory.calls",
+	context_growth_above_profile: "shell.usageShape.advisory.growth",
+	cost_above_profile: "shell.usageShape.advisory.cost",
+	growth_without_progress: "shell.usageShape.advisory.noProgress",
+	cache_read_dominant: "shell.usageShape.advisory.cacheDominant",
 };
 
 const SOURCE_LABEL_KEYS: Record<string, string> = {
@@ -261,6 +274,147 @@ function ContextBlock({ context }: { context: ContextResponse }) {
 }
 
 /**
+ * durationText renders a second count as the coarsest unit that still says
+ * something. It never renders "0s" for an unknown duration: null is passed
+ * through as the unknown label, because a run whose clock AO could not read is
+ * not a run that took no time.
+ */
+function durationText(t: TFunction, seconds: number | null | undefined): string {
+	if (seconds === null || seconds === undefined) return t("shell.usageLedger.unknown");
+	if (seconds < 60) return t("shell.usageShape.seconds", { value: Math.round(seconds) });
+	if (seconds < 3600) return t("shell.usageShape.minutes", { value: Math.round(seconds / 60) });
+	return t("shell.usageShape.hours", { value: (seconds / 3600).toFixed(1) });
+}
+
+/**
+ * AdvisoryList renders what AO has to say about a run's SHAPE.
+ *
+ * These never change what AO does — no dispatch is refused and no run is
+ * parked because of one — so they are styled as notes, and the informational
+ * ones (cache-read dominance is the current example) are visibly not warnings.
+ * Reading 98% cache read as a fault would be the opposite of the point: it is
+ * the arithmetic of an agentic loop, and it is shown so a large bill is not
+ * left to be interpreted alone.
+ */
+function AdvisoryList({ warnings }: { warnings: AdvisoryResponse[] }) {
+	const { t } = useTranslation();
+	if (warnings.length === 0) return null;
+	return (
+		<ul className="flex flex-col gap-1" data-testid="usage-shape-advisories">
+			{warnings.map((warning) => (
+				<li
+					className={
+						warning.severity === "warn"
+							? "rounded border border-warning/50 bg-warning/10 px-2 py-1 text-warning"
+							: "rounded border border-border px-2 py-1 text-muted-foreground"
+					}
+					key={warning.code}
+					role="note"
+				>
+					{translate(t, ADVISORY_LABEL_KEYS[warning.code] ?? "shell.usageShape.advisory.unknown")}
+					<span className="ml-1">
+						{t("shell.usageShape.advisoryNumbers", {
+							observed: warning.observed.toLocaleString(),
+							threshold: warning.threshold.toLocaleString(),
+						})}
+					</span>
+				</li>
+			))}
+		</ul>
+	);
+}
+
+/** TrajectoryLine renders one context series: how many calls, and both ends. */
+function TrajectoryLine({ trajectory }: { trajectory: TrajectoryResponse }) {
+	const { t } = useTranslation();
+	if (!trajectory.observable) return <span>{t("shell.usageShape.notObservable")}</span>;
+	return (
+		<span>
+			{t("shell.usageShape.contextRange", {
+				first: compactNumber(trajectory.firstContextTokens),
+				last: compactNumber(trajectory.lastContextTokens),
+				growth: compactNumber(trajectory.growthTokens),
+			})}
+		</span>
+	);
+}
+
+/** StepTable answers "which step cost the money". */
+function StepTable({ steps }: { steps: StepUsageResponse[] }) {
+	const { t } = useTranslation();
+	if (steps.length === 0) return null;
+	return (
+		<div className="flex flex-col gap-1" data-testid="usage-shape-steps">
+			<h4 className="font-medium">{t("shell.usageShape.stepsTitle")}</h4>
+			{steps.map((step) => (
+				<div className="flex items-baseline justify-between gap-2" key={`${step.workflowStepId}-${step.cycle}`}>
+					<span className="truncate text-muted-foreground">
+						{translate(t, ROLE_LABEL_KEYS[step.role] ?? "shell.usageShape.stepUnknownRole")}
+						{step.cycle > 0 ? t("shell.usageShape.stepCycle", { cycle: step.cycle }) : ""}
+					</span>
+					<span className="shrink-0">
+						{t("shell.usageShape.stepFigures", {
+							calls: step.trajectory.providerCalls,
+							tokens: tokenText(t, step.tokens, step.source),
+							cost: costText(t, step.cost),
+						})}
+					</span>
+				</div>
+			))}
+		</div>
+	);
+}
+
+/**
+ * DynamicsBlock is the SHAPE of a run's cost, beside its total.
+ *
+ * The total is what the ledger above already says and it explains nothing on
+ * its own: $23 for a one-field fix is 193 calls against a conversation that
+ * grew from 54k to 324k, and no sum contains that. These three figures — call
+ * count, both ends of the context, elapsed — are the whole explanation, and
+ * they are also the only two levers there are (the number of turns, and how
+ * fast the context grows).
+ */
+function DynamicsBlock({ dynamics }: { dynamics: DynamicsResponse }) {
+	const { t } = useTranslation();
+	if (!dynamics.recorded) {
+		return (
+			<div className="rounded border border-border p-2" data-testid="usage-shape">
+				<h3 className="font-medium">{t("shell.usageShape.title")}</h3>
+				<p className="mt-1 text-muted-foreground">{t("shell.usageShape.notRecorded")}</p>
+			</div>
+		);
+	}
+	const trajectory = dynamics.trajectory;
+	return (
+		<div className="flex flex-col gap-2 rounded border border-border p-2" data-testid="usage-shape">
+			<h3 className="font-medium">{t("shell.usageShape.title")}</h3>
+			<dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-muted-foreground">
+				<dt>{t("shell.usageShape.providerCalls")}</dt>
+				<dd data-testid="usage-shape-calls">{trajectory.providerCalls.toLocaleString()}</dd>
+				<dt>{t("shell.usageShape.context")}</dt>
+				<dd data-testid="usage-shape-context">
+					<TrajectoryLine trajectory={trajectory} />
+				</dd>
+				<dt>{t("shell.usageShape.peak")}</dt>
+				<dd>{compactNumber(trajectory.peakContextTokens)}</dd>
+				<dt>{t("shell.usageShape.elapsed")}</dt>
+				<dd>{durationText(t, trajectory.elapsedSeconds)}</dd>
+			</dl>
+			{/* A series with events AO could not place in time is a LOWER BOUND,
+			    and says so rather than implying it saw every call. */}
+			{trajectory.unplaceableEvents > 0 ? (
+				<p className="text-muted-foreground">
+					{t("shell.usageShape.lowerBound", { count: trajectory.unplaceableEvents })}
+				</p>
+			) : null}
+			<StepTable steps={dynamics.steps ?? []} />
+			<AdvisoryList warnings={dynamics.warnings ?? []} />
+		</div>
+	);
+}
+
+/**
  * WorkflowTokenLedger renders the canonical per-run token and cost answer.
  */
 export function WorkflowTokenLedger({ ledger }: { ledger: LedgerResponse }) {
@@ -297,6 +451,9 @@ export function WorkflowTokenLedger({ ledger }: { ledger: LedgerResponse }) {
 			) : null}
 
 			<BudgetMeter budget={ledger.budget} />
+
+			{/* The SHAPE, directly under the total it explains. */}
+			{ledger.dynamics ? <DynamicsBlock dynamics={ledger.dynamics} /> : null}
 
 			<RoleTable roles={ledger.roles} />
 			<ModelTable models={ledger.models} />
