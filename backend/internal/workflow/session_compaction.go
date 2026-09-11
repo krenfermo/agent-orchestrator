@@ -148,8 +148,14 @@ func (c *Coordinator) sessionCompactionAlreadyRequested(ctx stdctx.Context, runI
 // compactionRecordMarker identifies one cycle's compaction record inside the
 // checkpoint payload. Derived from the step and the cycle, never from a clock,
 // so recovery reconstructs the same marker rather than writing a second one.
+//
+// The TRAILING COMMA is load-bearing. Without it the marker for cycle 1 is a
+// prefix of the payload for cycle 10, so a run whose policy allows ten repair
+// cycles would find cycle 10's record while looking for cycle 1's and skip a
+// compaction it had never performed. The payload writes the session field
+// immediately after the cycle, so the comma is always there to match.
 func compactionRecordMarker(stepID string, cycleNumber int) string {
-	return `"step":"` + stepID + `","cycle":` + itoaInt(cycleNumber)
+	return `"step":"` + stepID + `","cycle":` + itoaInt(cycleNumber) + `,`
 }
 
 func (c *Coordinator) recordSessionCompactionRequest(
@@ -161,7 +167,7 @@ func (c *Coordinator) recordSessionCompactionRequest(
 ) error {
 	sid := string(sessionID)
 	payload := `{` + compactionRecordMarker(fixStep.ID, cycleNumber) +
-		`,"session":"` + sid + `","policyVersion":"` + domain.SessionLifecyclePolicyVersion + `"}`
+		`"session":"` + sid + `","policyVersion":"` + domain.SessionLifecyclePolicyVersion + `"}`
 	_, err := c.store.CreateWorkflowCheckpoint(ctx, domain.WorkflowCheckpoint{
 		ID:             "wfc-" + c.newID(),
 		WorkflowRunID:  run.ID,
@@ -197,4 +203,11 @@ func itoaInt(v int) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
+}
+
+// CompactionRecordMarkerForTest exposes compactionRecordMarker to the external
+// workflow_test package, matching this package's existing ...ForTest
+// convention (see DecodeSessionLifecycleDecisionForTest).
+func CompactionRecordMarkerForTest(stepID string, cycleNumber int) string {
+	return compactionRecordMarker(stepID, cycleNumber)
 }

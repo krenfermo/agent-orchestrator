@@ -463,6 +463,19 @@ New tests added by this checkpoint:
 
 ---
 
+## Deliberate omissions
+
+- **The turn mix is on the API and not yet on screen.** `trajectory.turns`
+  carries the classification (work / coordination / per-class counts /
+  unclassified share) and the three new advisories render with real labels in
+  all eight locales, but no new UI block was added: the host had a live AO with
+  active sessions throughout this work, and the frontend gates are not run
+  beside one. Rendering it is a follow-up with its own demo.
+- **No `ao ctx snapshot` batching command** — §D says why, with the number.
+- **No out-of-band tool-result capture** — §F says why, with the number.
+- **No `ao wait`** — §C says why: the wait was already outside the model.
+- **No model was changed** and no turn cap was imposed — §I.
+
 ## Residual risks
 
 1. **`/compact` has never been exercised by AO against a live session.** The

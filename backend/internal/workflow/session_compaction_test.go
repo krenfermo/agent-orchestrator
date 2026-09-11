@@ -266,3 +266,19 @@ func hasLifecycleReason(d domain.SessionLifecycleDecision, want domain.SessionLi
 	}
 	return false
 }
+
+// A cycle marker must not be a prefix of another cycle's. Before the trailing
+// comma, cycle 1's marker matched cycle 10's record -- so a run whose policy
+// allowed ten repair cycles would have found cycle 10's record while looking
+// for cycle 1's and skipped a compaction it had never performed.
+func TestCompactionRecordMarkerIsNotAPrefixOfAnother(t *testing.T) {
+	one := workflowcore.CompactionRecordMarkerForTest("wfs-1", 1)
+	ten := workflowcore.CompactionRecordMarkerForTest("wfs-1", 10)
+	if strings.Contains(ten, one) {
+		t.Fatalf("cycle 1's marker %q is contained in cycle 10's %q", one, ten)
+	}
+	payloadTen := "{" + ten + `"session":"s","policyVersion":"v1"}`
+	if strings.Contains(payloadTen, one) {
+		t.Fatalf("cycle 1's marker %q matches a cycle 10 payload %q", one, payloadTen)
+	}
+}
