@@ -2,6 +2,7 @@ package workflow
 
 import (
 	stdctx "context"
+	"fmt"
 	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -210,4 +211,86 @@ func itoaInt(v int) string {
 // convention (see DecodeSessionLifecycleDecisionForTest).
 func CompactionRecordMarkerForTest(stepID string, cycleNumber int) string {
 	return compactionRecordMarker(stepID, cycleNumber)
+}
+
+// --- the opt-in -------------------------------------------------------------
+//
+// Everything above is the ACT. What follows is the only way a production run
+// can ever ask for it.
+//
+// Both knobs are frozen through the same `pending` precondition every other
+// per-run policy uses (ApplyRepairPolicy, ApplyAutonomyPolicy,
+// ApplyReviewDepthPolicy), and for a sharper reason than those have. A
+// compaction flag flipped mid-run would apply to a conversation that has
+// already grown under the opposite contract, and the context-pressure
+// threshold is the input to the lifecycle decision that reads it -- moving
+// either one after a fix cycle has been dispatched would make the run's own
+// audit record a description of a rule that was no longer in force when it
+// mattered.
+
+// ApplySessionCompactionPolicy freezes a just-created run's explicit
+// session-compaction choice and records who made it.
+//
+// An explicit FALSE is written exactly as an explicit true is, and that is the
+// point rather than an edge case: it is what makes "this run was told not to
+// compact" a fact the run carries, distinguishable from "nobody said", and it
+// is what a controlled A/B needs so the control arm is a recorded decision
+// instead of an absence. It is also what inheritance keys on -- see
+// domain.InheritWorkflowPolicy.
+func (c *Coordinator) ApplySessionCompactionPolicy(ctx stdctx.Context, runID string, enabled bool, requestedBy string) error {
+	run, ok, err := c.store.GetWorkflowRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: workflow run %q", ErrNotFound, runID)
+	}
+	if run.State != domain.WorkflowRunPending {
+		return fmt.Errorf("%w: workflow run %q is already %s; its session-compaction choice is frozen", ErrInvalid, runID, run.State)
+	}
+	return c.rewriteFrozenPolicy(ctx, run, func(p *domain.WorkflowPolicy) {
+		p.SessionCompactionEnabled = enabled
+		p.CompactionProvenance = domain.SessionCompactionProvenance{
+			Version:     domain.SessionCompactionPolicyVersion,
+			Source:      domain.SessionCompactionExplicit,
+			RequestedBy: strings.TrimSpace(requestedBy),
+			At:          c.clock(),
+		}
+	})
+}
+
+// ApplyContextPerCallWarnTokens freezes a per-run override of the
+// context-per-call threshold, leaving every other budget field alone.
+//
+// The value is validated HERE as well as at the API edge and again when it is
+// read back, because this is the one advisory override a lifecycle decision
+// acts on: sessionContextPressure compares a live conversation against it, and
+// the COMPACT branch is what it gates. An out-of-range value is refused rather
+// than clamped -- silently widening 1 to 20,000 would hand back a run whose
+// threshold is not the one the caller named, which is exactly the kind of
+// substitution a lab experiment cannot afford.
+func (c *Coordinator) ApplyContextPerCallWarnTokens(ctx stdctx.Context, runID string, tokens int64) error {
+	if !domain.ValidContextPerCallWarnTokens(tokens) {
+		return fmt.Errorf("%w: contextPerCallWarnTokens %d is outside [%d, %d]",
+			ErrInvalid, tokens, domain.MinContextPerCallWarnTokens, domain.MaxContextPerCallWarnTokens)
+	}
+	run, ok, err := c.store.GetWorkflowRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: workflow run %q", ErrNotFound, runID)
+	}
+	if run.State != domain.WorkflowRunPending {
+		return fmt.Errorf("%w: workflow run %q is already %s; its context-pressure threshold is frozen", ErrInvalid, runID, run.State)
+	}
+	return c.rewriteFrozenPolicy(ctx, run, func(p *domain.WorkflowPolicy) {
+		// EffectiveUsageBudgetPolicy, not p.Usage: it fills in Version and the
+		// ParentScope default, so a run whose budget nobody had configured
+		// ends up with a snapshot inheritance recognises as recorded rather
+		// than one carrying a lone advisory number and no version.
+		usage := p.EffectiveUsageBudgetPolicy()
+		usage.WorkflowContextPerCallWarnTokens = tokens
+		p.Usage = usage
+	})
 }

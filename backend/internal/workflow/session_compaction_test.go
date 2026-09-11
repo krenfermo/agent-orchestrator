@@ -65,6 +65,24 @@ type compactionFixture struct {
 // capable sender and a context reading installed for the worker's session.
 func newCompactionFixture(t *testing.T, contextTokens int64, compactionEnabled bool, sender *fakeCompactingSender) compactionFixture {
 	t.Helper()
+	return newCompactionFixtureWithPolicy(t, contextTokens, sender,
+		func(_ *workflowcore.Coordinator, store *fakeStore, clk *fakeClock, runID string) {
+			setCompactionPolicy(t, store, runID, compactionEnabled, clk.Now())
+		})
+}
+
+// newCompactionFixtureWithPolicy is newCompactionFixture with the policy freeze
+// left to the caller, so a test can exercise the REAL per-run opt-in
+// (ApplySessionCompactionPolicy / ApplyContextPerCallWarnTokens) rather than
+// writing a snapshot by hand. `configure` runs while the run is still pending,
+// which is the same window the create route freezes policy in.
+func newCompactionFixtureWithPolicy(
+	t *testing.T,
+	contextTokens int64,
+	sender *fakeCompactingSender,
+	configure func(c *workflowcore.Coordinator, store *fakeStore, clk *fakeClock, runID string),
+) compactionFixture {
+	t.Helper()
 	sessionFacts := newFakeSessionFacts()
 	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
 	workspaceFacts := &fakeWorkspaceFacts{}
@@ -94,7 +112,7 @@ func newCompactionFixture(t *testing.T, contextTokens int64, compactionEnabled b
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	setCompactionPolicy(t, store, created.Run.ID, compactionEnabled, clk.Now())
+	configure(c, store, clk, created.Run.ID)
 
 	driveToChangesRequested(t, c, store, clk, sessionFacts, workspaceFacts, reviewRuns, created.Run.ID)
 	return compactionFixture{c: c, store: store, clk: clk, sender: sender, facts: contextFacts, runID: created.Run.ID}

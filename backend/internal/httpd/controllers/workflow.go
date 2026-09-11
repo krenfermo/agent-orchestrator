@@ -151,6 +151,37 @@ type CreateWorkflowRunRequest struct {
 	// PlacementReason is recorded on the durable request, so the audit row
 	// answers \"why\" as well as \"what\".
 	PlacementReason string `json:"placementReason,omitempty"`
+	// SessionCompaction is P7's per-run opt-in: may this run ask an agent to
+	// replace its own conversation with a summary before a fix cycle's fact
+	// pack and prompt are delivered.
+	//
+	// Tri-state on purpose, and a pointer for the same reason `autonomous` is
+	// one. OMITTED means nobody chose, and the run gets the global default,
+	// which is OFF -- there is no env var, no setting and no code path that
+	// can make an omitted field mean anything else. `false` is a recorded
+	// refusal rather than an absence, which is what lets a control run in an
+	// A/B carry a decision instead of a gap, and what lets a child inherit it.
+	// `true` opts THIS RUN ONLY in; nothing is written back to any stored
+	// policy and the next run created is unaffected.
+	//
+	// The saving compaction offers is arithmetic and large (a 39.0% reduction
+	// in billable input on the one run that was replayed) and has never been
+	// observed live, because observing it costs real money on a real defect.
+	// This field is how somebody chooses to observe it, one run at a time.
+	SessionCompaction *bool `json:"sessionCompaction,omitempty" description:"Per-run opt-in to P7 session compaction. Omit to keep the default (off); false records an explicit refusal; true applies to this run only."`
+	// ContextPerCallWarnTokens overrides, for this run only, how big a
+	// session's conversation may get on the average placed call before AO
+	// treats it as under context pressure.
+	//
+	// It is the threshold the fix-cycle lifecycle decision compares a live
+	// session against, so lowering it is how an experiment reaches the COMPACT
+	// branch without waiting for a conversation to grow past the per-strategy
+	// default (150,000 tokens for a task). Omitted keeps that default.
+	//
+	// Bounded by domain.ValidContextPerCallWarnTokens. A value outside the
+	// range is REFUSED, never clamped: a run executing against a threshold
+	// other than the one its creator named is worse than a rejected request.
+	ContextPerCallWarnTokens int64 `json:"contextPerCallWarnTokens,omitempty" minimum:"20000" maximum:"2000000" description:"Per-run override of the context-pressure threshold, in tokens. Omit to keep the execution strategy default. Out-of-range values are refused."`
 }
 
 // WorkflowStrategySignals is the bounded, deterministic input to AUTO
@@ -485,6 +516,13 @@ type WorkflowRunView struct {
 	// the deeper of this request and that change's own risk tier, and lives on
 	// the review step's durable decision rather than on the run.
 	ReviewDepth *WorkflowReviewDepthView `json:"reviewDepth,omitempty"`
+	// ContextEconomy is P7's frozen context-economy configuration for this
+	// run: whether it may compact a session's conversation before a fix cycle,
+	// where that choice came from, and the conversation size AO treats as
+	// context pressure. Present for any run whose policy snapshot is readable,
+	// because "compaction is off and nobody asked otherwise" is an answer a
+	// person auditing a run needs stated rather than inferred from silence.
+	ContextEconomy *WorkflowContextEconomyView `json:"contextEconomy,omitempty"`
 	// Recovery is P1-B's deterministic recovery assessment. It is populated
 	// only by the routes a person explicitly took -- recovery, resume,
 	// continue, plan reuse/regenerate, repair -- because deciding it probes
@@ -900,6 +938,62 @@ func workflowRunView(run domain.WorkflowRun, nextAction string) WorkflowRunView 
 		// simply omits the field until boot reconciliation records its mapping.
 		ExecutionStrategy: executionStrategyView(workflowcore.RecordedExecutionStrategy(run)),
 		ReviewDepth:       reviewDepthView(run),
+		ContextEconomy:    contextEconomyView(run),
+	}
+}
+
+// WorkflowContextEconomyView is the read-only projection of a run's frozen P7
+// context-economy configuration.
+type WorkflowContextEconomyView struct {
+	// SessionCompactionEnabled is the flag every dispatch path actually reads.
+	SessionCompactionEnabled bool `json:"sessionCompactionEnabled"`
+	// CompactionSource is how that flag came to hold its value: "explicit" (a
+	// caller chose it for this run), "inherited" (a child carrying its parent
+	// objective's choice), or absent, which means nobody ever chose and the
+	// run is on the global default. Absent is NOT the same as "explicit
+	// false"; the whole reason this field is projected is that those two are
+	// different facts.
+	CompactionSource string `json:"compactionSource,omitempty" enum:"explicit,inherited"`
+	// CompactionRequestedBy and CompactionParentRunId carry the rest of the
+	// audit record: who asked, and for an inherited choice, which objective it
+	// came from.
+	CompactionRequestedBy string `json:"compactionRequestedBy,omitempty"`
+	CompactionParentRunID string `json:"compactionParentRunId,omitempty"`
+	// ContextPerCallWarnTokens is the EFFECTIVE threshold this run is judged
+	// against -- the per-run override when one was frozen and is in range, and
+	// the execution strategy's own default otherwise. It is reported resolved
+	// rather than raw so a reader never has to know which of the two produced
+	// it in order to know what the run is running under.
+	ContextPerCallWarnTokens int64 `json:"contextPerCallWarnTokens,omitempty"`
+	// ContextPerCallOverridden says which of those two it was.
+	ContextPerCallOverridden bool `json:"contextPerCallOverridden,omitempty"`
+}
+
+// contextEconomyView projects a run's frozen context-economy configuration. A
+// run whose policy snapshot is unreadable projects nothing rather than the
+// defaults, for the same reason reviewDepthView does: a configuration this
+// response cannot read is one it must not claim to know.
+func contextEconomyView(run domain.WorkflowRun) *WorkflowContextEconomyView {
+	if run.PolicySnapshot == "" || run.PolicySnapshot == "{}" {
+		return nil
+	}
+	var p domain.WorkflowPolicy
+	if err := json.Unmarshal([]byte(run.PolicySnapshot), &p); err != nil {
+		return nil
+	}
+	budget := p.EffectiveUsageBudgetPolicy()
+	// The same WithOverrides the lifecycle decision and the advisory both go
+	// through, so this view reports the threshold that is genuinely in force
+	// -- including the case where a stored override is out of range and is
+	// therefore NOT in force.
+	profile := domain.UsageBudgetProfileFor(p.Strategy.Effective).WithOverrides(budget)
+	return &WorkflowContextEconomyView{
+		SessionCompactionEnabled: p.SessionCompactionEnabled,
+		CompactionSource:         string(p.CompactionProvenance.Source),
+		CompactionRequestedBy:    p.CompactionProvenance.RequestedBy,
+		CompactionParentRunID:    p.CompactionProvenance.ParentRunID,
+		ContextPerCallWarnTokens: profile.ContextPerCallTokens,
+		ContextPerCallOverridden: domain.ValidContextPerCallWarnTokens(budget.WorkflowContextPerCallWarnTokens),
 	}
 }
 
@@ -1608,6 +1702,18 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// P7: validated BEFORE anything is created, like every other policy field
+	// above. A threshold the daemon would have to substitute is refused here
+	// rather than silently replaced with the profile default, because a run
+	// created against a threshold nobody asked for is precisely the outcome an
+	// explicit override exists to prevent.
+	if in.ContextPerCallWarnTokens != 0 && !domain.ValidContextPerCallWarnTokens(in.ContextPerCallWarnTokens) {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_CONTEXT_PER_CALL_TOKENS",
+			fmt.Sprintf("contextPerCallWarnTokens must be between %d and %d, or omitted to use the execution strategy default",
+				domain.MinContextPerCallWarnTokens, domain.MaxContextPerCallWarnTokens), nil)
+		return
+	}
+
 	// A TASK run has no planner to derive its checks, so an empty or unusable
 	// verification plan is not a smaller task -- it is a run that does the whole
 	// job and then fails at Verify with verify_ambiguous, six steps after the
@@ -1712,6 +1818,21 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 	if reviewDepth != "" {
 		if svc, ok := c.Svc.(workflowsvc.ReviewDepthManager); ok {
 			_ = svc.ApplyReviewDepthPolicy(r.Context(), detail.Run.ID, reviewDepth)
+		}
+	}
+	// P7: and this run's context-economy choices, in the same window and for
+	// the same reason. Creation already wrote the safe defaults -- compaction
+	// off, the strategy's own context-pressure threshold -- so a request that
+	// named neither is unaffected, and a daemon without the capability behaves
+	// exactly as it did before these fields existed.
+	if in.SessionCompaction != nil || in.ContextPerCallWarnTokens != 0 {
+		if svc, ok := c.Svc.(workflowsvc.ContextEconomyManager); ok {
+			if in.SessionCompaction != nil {
+				_ = svc.ApplySessionCompactionPolicy(r.Context(), detail.Run.ID, *in.SessionCompaction, operatorIdentity(r))
+			}
+			if in.ContextPerCallWarnTokens != 0 {
+				_ = svc.ApplyContextPerCallWarnTokens(r.Context(), detail.Run.ID, in.ContextPerCallWarnTokens)
+			}
 		}
 	}
 	// Re-fetch after stampOwner: it just wrote the caller's (possibly

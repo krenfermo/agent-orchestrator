@@ -201,6 +201,25 @@ type ReviewDepthManager interface {
 	RunReviewDepthPolicy(ctx context.Context, runID string) (domain.ReviewDepthPolicySnapshot, error)
 }
 
+// ContextEconomyManager is the optional capability a workflow service carries
+// when it can freeze a run's P7 context-economy choices: whether the run may
+// compact a session's conversation before a fix cycle, and the conversation
+// size at which AO considers a session to be under pressure.
+//
+// Separate from ReviewDepthManager rather than folded into it because the two
+// answer different questions and a daemon could plausibly support one without
+// the other; discovered by type assertion at the controller, exactly as every
+// other Apply*Policy capability is.
+type ContextEconomyManager interface {
+	// ApplySessionCompactionPolicy freezes a just-created run's explicit
+	// session-compaction choice, true or false, and who asked for it.
+	ApplySessionCompactionPolicy(ctx context.Context, runID string, enabled bool, requestedBy string) error
+	// ApplyContextPerCallWarnTokens freezes a per-run override of the
+	// context-per-call threshold. It refuses a value outside
+	// domain.ValidContextPerCallWarnTokens rather than clamping one.
+	ApplyContextPerCallWarnTokens(ctx context.Context, runID string, tokens int64) error
+}
+
 // WorkReportManager is P5-A phase 2B's worker-declaration surface: a worker
 // records what it says it did, addressed by its own session.
 //
