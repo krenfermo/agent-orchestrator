@@ -446,6 +446,63 @@ type UsageBudgetPolicy struct {
 	// hard WorkflowCostBudgetUSD ceiling. It exists so a person can be told
 	// about a $20 run without having to authorize AO to stop one.
 	WorkflowCostWarnUSD float64 `json:"workflowCostWarnUsd,omitempty"`
+	// WorkflowContextPerCallWarnTokens is how big a session's conversation may
+	// get, on the average placed call, before AO says so.
+	//
+	// It is the ONE field in this block that is not purely advisory, and the
+	// difference is worth stating rather than discovering. The same
+	// UsageBudgetProfile.ContextPerCallTokens that produces
+	// AdvisoryContextPerCallHigh is also the threshold
+	// workflow.sessionContextPressure compares a live session against, and
+	// that comparison feeds SessionLifecycleRequest.ContextPressure -- which
+	// is what moves a fix cycle's lifecycle decision to COMPACT. Lowering this
+	// therefore changes what AO DOES on a run whose compaction is enabled, not
+	// only what it says about one.
+	//
+	// That is precisely why it exists: a controlled experiment needs to reach
+	// the COMPACT branch on a conversation smaller than the 150k the measured
+	// run anchored the Task profile on, without moving the profile for every
+	// other run. And it is why, unlike its neighbours, an out-of-range value
+	// here is IGNORED rather than trusted -- see
+	// ValidContextPerCallWarnTokens and UsageBudgetProfile.WithOverrides. A
+	// corrupt or hostile snapshot must not be able to put every session
+	// permanently under pressure by recording 1.
+	//
+	// Zero means "use the profile default", exactly as above.
+	WorkflowContextPerCallWarnTokens int64 `json:"workflowContextPerCallWarnTokens,omitempty"`
+}
+
+// Bounds on WorkflowContextPerCallWarnTokens.
+//
+// Neither number is a tuning preference; each is the edge past which the field
+// stops meaning what it says.
+//
+//   - Below the minimum, "the conversation is bigger than a call of this kind
+//     usually is" is true of the system prompt and the first fact pack alone.
+//     Every session would be under pressure from its first turn, which is not
+//     a tight threshold -- it is a constant, and one that silently changes
+//     lifecycle decisions rather than reporting anything.
+//   - Above the maximum, no conversation any current harness can hold could
+//     ever cross it, so the override reads as "configured" while being
+//     unreachable. A ceiling nobody can hit is worse than no ceiling, because
+//     an operator believes it is in force.
+//
+// The lab target this was built for (60,000-80,000 for a Task) sits
+// comfortably inside the range, and so does every per-strategy default.
+const (
+	MinContextPerCallWarnTokens int64 = 20_000
+	MaxContextPerCallWarnTokens int64 = 2_000_000
+)
+
+// ValidContextPerCallWarnTokens reports whether n is a usable
+// WorkflowContextPerCallWarnTokens override.
+//
+// Zero is NOT valid here, and that is not an oversight: zero is the "no
+// override recorded" sentinel every field in this struct uses, so callers ask
+// this question only about a value somebody actually sent. An API that wants
+// to accept an omitted field checks for zero first.
+func ValidContextPerCallWarnTokens(n int64) bool {
+	return n >= MinContextPerCallWarnTokens && n <= MaxContextPerCallWarnTokens
 }
 
 // DefaultUsageWarnPercent is the soft threshold when a policy names none.

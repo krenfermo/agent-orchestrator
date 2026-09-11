@@ -29,6 +29,20 @@ type WorkflowPolicy struct {
 	// offering it. Flip it per run, watch the trajectory block, then argue
 	// about the default from a measurement.
 	SessionCompactionEnabled bool `json:"sessionCompactionEnabled"`
+	// CompactionProvenance records HOW SessionCompactionEnabled came to hold
+	// its value: a per-run choice somebody made, or a child carrying its
+	// parent objective's choice. It is evidence, never a second copy of the
+	// flag -- every reader still consults SessionCompactionEnabled, so nothing
+	// here can disagree with what the run executes.
+	//
+	// It exists because a bare bool cannot tell "a person opted this run into
+	// compaction" apart from "this snapshot predates compaction", and without
+	// that distinction inheritance would have to either refuse to carry the
+	// choice at all or invent one for every legacy parent. See
+	// session_compaction_policy.go.
+	//
+	// Zero value (Source == "") is a snapshot nobody recorded a choice on.
+	CompactionProvenance SessionCompactionProvenance `json:"compactionProvenance,omitempty"`
 	// MaxWorkProviderAttempts bounds how many total provider attempts
 	// (Checkpoint 8H: one per harness tried, e.g. Codex then Claude) a work
 	// step's dispatch may make before it stops trying and instead surfaces
@@ -161,6 +175,20 @@ func (p WorkflowPolicy) EffectiveReviewDepthPolicy() ReviewDepthPolicySnapshot {
 		depth.Version = ReviewDepthPolicyVersion
 	}
 	return depth
+}
+
+// SessionCompactionRequested reports whether this run was explicitly opted
+// into (or explicitly out of) P7 session compaction, and what it was opted
+// into. A run nobody chose for reports (false, false) -- never (false, true),
+// which would claim somebody asked for the default.
+//
+// The effective flag every dispatch path reads stays SessionCompactionEnabled
+// itself. This is the audit question, not the execution one.
+func (p WorkflowPolicy) SessionCompactionRequested() (enabled, recorded bool) {
+	if !p.CompactionProvenance.Recorded() {
+		return false, false
+	}
+	return p.SessionCompactionEnabled, true
 }
 
 // UsageBudgetPolicyVersion identifies the shape of a frozen usage budget.

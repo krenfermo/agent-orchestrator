@@ -6137,6 +6137,11 @@ export interface components {
             autonomous?: null | boolean;
             /** @enum {string} */
             autonomyPolicy?: "ask_always" | "auto_decide_low_risk" | "full_autonomy";
+            /**
+             * Format: int64
+             * @description Per-run override of the context-pressure threshold, in tokens. Omit to keep the execution strategy default. Out-of-range values are refused.
+             */
+            contextPerCallWarnTokens?: number;
             /** @description Generate a provider-neutral master plan before execution. */
             masterPlan?: boolean;
             /** @description The workflow run's objective. For the task strategy this is the task's full specification: multi-line and markdown-friendly, preserved verbatim, up to 131072 bytes of UTF-8. Never truncated; an over-long objective is refused. */
@@ -6153,6 +6158,8 @@ export interface components {
             repairPolicy?: "disabled" | "suggest" | "automatic";
             /** @enum {string} */
             reviewDepth?: "auto" | "none" | "light" | "deep";
+            /** @description Per-run opt-in to P7 session compaction. Omit to keep the default (off); false records an explicit refusal; true applies to this run only. */
+            sessionCompaction?: null | boolean;
             /** @enum {string} */
             strategy?: "task" | "autonomous" | "master" | "auto";
             strategySignals?: components["schemas"]["WorkflowStrategySignals"];
@@ -8595,6 +8602,16 @@ export interface components {
             reason: "provider_health_stale" | "provider_cooldown" | "provider_unavailable" | "no_eligible_provider";
             role?: string;
         };
+        WorkflowContextEconomyView: {
+            compactionParentRunId?: string;
+            compactionRequestedBy?: string;
+            /** @enum {string} */
+            compactionSource?: "explicit" | "inherited";
+            contextPerCallOverridden?: boolean;
+            /** Format: int64 */
+            contextPerCallWarnTokens?: number;
+            sessionCompactionEnabled: boolean;
+        };
         WorkflowExecutionStrategyView: {
             depth?: number;
             /** @enum {string} */
@@ -8972,6 +8989,7 @@ export interface components {
             capacityWait?: components["schemas"]["WorkflowCapacityWaitView"];
             /** Format: date-time */
             completedAt?: null | string;
+            contextEconomy?: components["schemas"]["WorkflowContextEconomyView"];
             /** Format: date-time */
             createdAt: string;
             /** @enum {string} */

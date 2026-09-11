@@ -18013,6 +18013,13 @@ components:
           - auto_decide_low_risk
           - full_autonomy
           type: string
+        contextPerCallWarnTokens:
+          description: Per-run override of the context-pressure threshold, in tokens.
+            Omit to keep the execution strategy default. Out-of-range values are refused.
+          format: int64
+          maximum: 2e+06
+          minimum: 20000
+          type: integer
         masterPlan:
           description: Generate a provider-neutral master plan before execution.
           type: boolean
@@ -18051,6 +18058,12 @@ components:
           - light
           - deep
           type: string
+        sessionCompaction:
+          description: Per-run opt-in to P7 session compaction. Omit to keep the default
+            (off); false records an explicit refusal; true applies to this run only.
+          type:
+          - "null"
+          - boolean
         strategy:
           enum:
           - task
@@ -24600,6 +24613,27 @@ components:
       required:
       - reason
       type: object
+    WorkflowContextEconomyView:
+      properties:
+        compactionParentRunId:
+          type: string
+        compactionRequestedBy:
+          type: string
+        compactionSource:
+          enum:
+          - explicit
+          - inherited
+          type: string
+        contextPerCallOverridden:
+          type: boolean
+        contextPerCallWarnTokens:
+          format: int64
+          type: integer
+        sessionCompactionEnabled:
+          type: boolean
+      required:
+      - sessionCompactionEnabled
+      type: object
     WorkflowExecutionStrategyView:
       properties:
         depth:
@@ -25670,6 +25704,8 @@ components:
           type:
           - "null"
           - string
+        contextEconomy:
+          $ref: '#/components/schemas/WorkflowContextEconomyView'
         createdAt:
           format: date-time
           type: string
