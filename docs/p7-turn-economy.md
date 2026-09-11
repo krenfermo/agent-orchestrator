@@ -463,6 +463,32 @@ New tests added by this checkpoint:
 
 ---
 
+## Validation actually run
+
+| gate | result |
+|---|---|
+| `go build ./...` | ok |
+| `go vet ./...` | ok, no findings |
+| `go test ./... -short` | ok, no failures |
+| `go test ./internal/workflow/...` | ok |
+| `go test -race` on `observe/usage`, `observe/turnbench`, `domain`, `service/usage` | ok |
+| `golangci-lint v2.12.2` on every touched package | **18 findings, 17 of them pre-existing in files this branch never opened**; the one that was mine (a missing doc comment on an exported threshold accessor) is fixed. Lint delta: **0**. |
+| `npm run api` + `openapi-typescript@7.4.4` | both artifacts regenerated and committed |
+
+**Not run, and why.** The wide `go test -race ./internal/workflow/...` was not
+run: the host had a live AO with active sessions throughout, and the standing
+rule here is that heavy race/Vitest/Playwright gates are not run beside one and
+AO is not killed to make room. The changes to that package add no concurrency —
+the compaction request happens inside the existing outbox-claimed, single-flight
+fix dispatch, behind the same claim that already serialises it — so this is a
+deferred gate, not a skipped risk. Frontend Vitest was not run for the same
+reason; the frontend change is three keys in a `Record<string, string>` and
+three strings per locale, with no type surface and no render logic.
+
+`npm run api` exits 0 even when its `api:ts` half fails to find the binary, so
+`frontend/src/api/schema.ts` was regenerated explicitly with the pinned
+`openapi-typescript@7.4.4` and both generated files were verified to have moved.
+
 ## Deliberate omissions
 
 - **The turn mix is on the API and not yet on screen.** `trajectory.turns`

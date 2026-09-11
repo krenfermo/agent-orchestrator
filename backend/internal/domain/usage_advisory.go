@@ -200,11 +200,16 @@ func (p UsageBudgetProfile) WithOverrides(policy UsageBudgetPolicy) UsageBudgetP
 	return p
 }
 
-// CoordinationDominantPercent and RepeatedWaitShapeCalls expose the two
-// unanchored thresholds so an evaluation site and a UI read the same number
-// without either re-declaring it.
+// CoordinationDominantPercent is the share of classified calls that must be
+// coordination before AO says so. Exposed so an evaluation site and a UI read
+// the same number without either re-declaring it; see the constant for why it
+// is NOT anchored on a measurement.
 func CoordinationDominantPercent() int { return coordinationDominantPercent }
-func RepeatedWaitShapeCalls() int64    { return repeatedWaitShapeCalls }
+
+// RepeatedWaitShapeCalls is how many wait-class calls a run may make before AO
+// mentions it. Exposed for the same reason as CoordinationDominantPercent, and
+// unanchored for the same reason: the measured run made zero.
+func RepeatedWaitShapeCalls() int64 { return repeatedWaitShapeCalls }
 
 // coordinationDominantPercent is the share of CLASSIFIED calls that must be
 // coordination before AO says so.
