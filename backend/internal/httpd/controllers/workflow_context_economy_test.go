@@ -321,6 +321,14 @@ func TestWorkflowCreateRunRefusesAnExplicitChoiceWithoutTheCapability(t *testing
 			if env.Code != "CONTEXT_ECONOMY_NOT_SUPPORTED" {
 				t.Fatalf("code = %q, want CONTEXT_ECONOMY_NOT_SUPPORTED (body %s)", env.Code, body)
 			}
+			// And it refused BEFORE creating anything. A run left behind by a
+			// refused request is not merely untidy: this one is autonomous, so
+			// its own kickoff wake starts it executing while the caller holds
+			// an error saying it does not exist. wf-88e71ef2 reached a
+			// dispatched fix cycle that way.
+			if svc.taskReq != nil {
+				t.Fatal("a run was created for a request the daemon then refused with 501")
+			}
 		})
 	}
 }

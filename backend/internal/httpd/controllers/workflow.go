@@ -1713,6 +1713,23 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 				domain.MinContextPerCallWarnTokens, domain.MaxContextPerCallWarnTokens), nil)
 		return
 	}
+	// And the capability itself, in the same window and for a sharper reason.
+	// Whether this daemon can freeze a context-economy choice is a STATIC
+	// property of its own wiring -- it does not depend on the run, so asking
+	// after creating one is asking too late. Refusing here leaves nothing
+	// behind; refusing afterwards leaves a run the caller was told did not
+	// happen, and an autonomous run left behind that way starts executing on
+	// its own kickoff wake while its creator holds an error response.
+	//
+	// That is not hypothetical: it is exactly what the first real canary
+	// request did. wf-88e71ef2 was created, refused with 501, and had reached
+	// a dispatched fix cycle before anybody noticed it existed.
+	contextEconomySvc, hasContextEconomy := c.Svc.(workflowsvc.ContextEconomyManager)
+	if (in.SessionCompaction != nil || in.ContextPerCallWarnTokens != 0) && !hasContextEconomy {
+		envelope.WriteAPIError(w, r, http.StatusNotImplemented, "not_implemented", "CONTEXT_ECONOMY_NOT_SUPPORTED",
+			"this daemon cannot honour an explicit session-compaction or context-pressure choice", nil)
+		return
+	}
 
 	// A TASK run has no planner to derive its checks, so an empty or unusable
 	// verification plan is not a smaller task -- it is a run that does the whole
@@ -1843,21 +1860,15 @@ func (c *WorkflowsController) create(w http.ResponseWriter, r *http.Request) {
 	// contradicts the request that made it. The run is left pending with
 	// compaction OFF, which is the safe direction; the error is what stops it
 	// from being mistaken for an opted-in one.
-	if in.SessionCompaction != nil || in.ContextPerCallWarnTokens != 0 {
-		svc, ok := c.Svc.(workflowsvc.ContextEconomyManager)
-		if !ok {
-			envelope.WriteAPIError(w, r, http.StatusNotImplemented, "not_implemented", "CONTEXT_ECONOMY_NOT_SUPPORTED",
-				"this daemon cannot honour an explicit session-compaction or context-pressure choice", nil)
-			return
-		}
+	if hasContextEconomy {
 		if in.SessionCompaction != nil {
-			if err := svc.ApplySessionCompactionPolicy(r.Context(), detail.Run.ID, *in.SessionCompaction, operatorIdentity(r)); err != nil {
+			if err := contextEconomySvc.ApplySessionCompactionPolicy(r.Context(), detail.Run.ID, *in.SessionCompaction, operatorIdentity(r)); err != nil {
 				writeWorkflowError(w, r, err)
 				return
 			}
 		}
 		if in.ContextPerCallWarnTokens != 0 {
-			if err := svc.ApplyContextPerCallWarnTokens(r.Context(), detail.Run.ID, in.ContextPerCallWarnTokens); err != nil {
+			if err := contextEconomySvc.ApplyContextPerCallWarnTokens(r.Context(), detail.Run.ID, in.ContextPerCallWarnTokens); err != nil {
 				writeWorkflowError(w, r, err)
 				return
 			}
