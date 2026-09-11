@@ -426,6 +426,34 @@ func (s *Service) ApplyAutonomyPolicy(ctx context.Context, runID string, mode do
 	return s.coordinator.ApplyAutonomyPolicy(ctx, runID, mode)
 }
 
+// The create route reaches every per-run policy freeze through a TYPE
+// ASSERTION on this Service, so an interface the Service does not satisfy is
+// not a compile error anywhere -- it is a capability that silently disappears
+// at runtime. P7 shipped exactly that: ContextEconomyManager existed, the
+// Coordinator implemented it, and the daemon wires workflowsvc.New(coordinator)
+// rather than the Coordinator itself, so every explicit sessionCompaction
+// request reached a daemon that reported it could not honour one. These
+// assertions make the next such omission a build failure.
+var (
+	_ AdvisorManager           = (*Service)(nil)
+	_ ContextEconomyManager    = (*Service)(nil)
+	_ PlacementOverrideManager = (*Service)(nil)
+	_ PlannerManager           = (*Service)(nil)
+	_ RecoveryManager          = (*Service)(nil)
+	_ ReviewDepthManager       = (*Service)(nil)
+	_ StrategyManager          = (*Service)(nil)
+)
+
+// ApplySessionCompactionPolicy implements ContextEconomyManager.
+func (s *Service) ApplySessionCompactionPolicy(ctx context.Context, runID string, enabled bool, requestedBy string) error {
+	return s.coordinator.ApplySessionCompactionPolicy(ctx, runID, enabled, requestedBy)
+}
+
+// ApplyContextPerCallWarnTokens implements ContextEconomyManager.
+func (s *Service) ApplyContextPerCallWarnTokens(ctx context.Context, runID string, tokens int64) error {
+	return s.coordinator.ApplyContextPerCallWarnTokens(ctx, runID, tokens)
+}
+
 // RecoveryStatusFor implements RecoveryManager: "how is AO trying to recover
 // this run". A strict read, like its neighbour.
 func (s *Service) RecoveryStatusFor(ctx context.Context, runID string) (workflowcore.RecoveryStatus, error) {
