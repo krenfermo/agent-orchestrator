@@ -1279,6 +1279,12 @@ func (c *Coordinator) createRunWithPlanArtifact(ctx stdctx.Context, projectID, o
 
 	steps := make([]domain.WorkflowStep, 0, len(workflowStepPolicyV1))
 	planArtifact := BuildPlanArtifact(projectID, objective, policyVersionV1, verification...)
+	// P7: bind the frozen strategy into the artifact the work prompt is built
+	// (and rebuilt, after a restart) from, so which standing guidance a worker
+	// receives is a durable property of the run and not of whichever code path
+	// happened to reconstruct its prompt.
+	planArtifact.Strategy = strategy.Effective
+	planArtifact.TaskPrompt = BuildWorkStepPrompt(planArtifact)
 	// CP21: the planned task's real criteria and write intent are bound here,
 	// inside the same transaction that writes the run and its six steps --
 	// never as a follow-up UPDATE a crash can lose.

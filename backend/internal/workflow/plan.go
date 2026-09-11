@@ -29,6 +29,14 @@ type PlanArtifact struct {
 	// crash. Empty for every standalone objective and every legacy plan, which
 	// is Unspecified, which is treated as mutating.
 	WriteIntent domain.WorkflowWriteIntent `json:"writeIntent,omitempty"`
+	// Strategy is the run's frozen execution strategy, bound at create time so
+	// the work prompt can carry Checkpoint P7's turn-economy section for a
+	// TASK and not for an open-ended run.
+	//
+	// Empty for every artifact written before P7 and for any caller that does
+	// not bind one, which is what keeps every previously-built prompt
+	// byte-identical: the section is appended only when this field says TASK.
+	Strategy domain.ExecutionStrategy `json:"strategy,omitempty"`
 }
 
 // VerificationPlan is how a planned task says it can be checked: commands that
@@ -180,7 +188,59 @@ Two things about it. It is a DECLARATION, not proof: AO runs this task's own
 checks itself before anyone reviews the change, and claiming a test passed
 gains you nothing. And declaring a limitation, a risk, or a criterion you did
 NOT address makes AO review the change more carefully rather than less — so
-saying what you did not finish is the most useful thing you can put in it.`, artifact.Objective, task, criteria, effectiveSpec, extraGuardrail, "`")
+saying what you did not finish is the most useful thing you can put in it.%[7]s`, artifact.Objective, task, criteria, effectiveSpec, extraGuardrail, "`", turnEconomySection(artifact.Strategy))
+}
+
+// turnEconomySection is Checkpoint P7's turn-economy guidance, and it is
+// appended to a TASK's work prompt only.
+//
+// WHY ONLY A TASK. Every line below trades breadth for turns, and that trade
+// is right for a bounded change with a stated objective and wrong for an
+// open-ended one. An autonomous run that is asked not to explore the
+// repository has been asked not to do its job, so it gets none of this and its
+// wider advisory profile stays exactly as it was.
+//
+// WHY IT IS PHRASED AS HABITS AND NOT AS LIMITS. AO cannot enforce any of it:
+// it does not own the model loop, it cannot cap a turn count, and a hard
+// instruction like "use at most N commands" would buy a cheap run that stops
+// before it is finished. These are the habits the measured run's own shape
+// argues for, stated as preferences a competent agent can weigh against the
+// work in front of it.
+//
+// WHAT IT IS NOT. It is NOT a measured saving. The two levers this checkpoint
+// quantified -- the call count and the size of the conversation each call
+// re-reads -- were quantified by replaying a recorded run
+// (internal/observe/turnbench). The effect of this text cannot be replayed,
+// because changing it changes which calls the agent makes, and there is no
+// recording of the run it would have produced. It is here because it is cheap,
+// because it is true, and because the alternative is saying nothing; it is
+// deliberately not counted in any before/after figure.
+func turnEconomySection(strategy domain.ExecutionStrategy) string {
+	if strategy != domain.ExecutionStrategyTask {
+		return ""
+	}
+	return `
+
+How to spend your turns on this task (it is a bounded change, not an
+exploration):
+- Every message you send re-reads this whole conversation, so the cost of a
+  turn grows with what you have already said. Prefer one command that answers
+  several related questions to several commands that each answer one.
+- Read what the task points at. Do not survey the repository first; widen only
+  when something you actually read sends you somewhere else.
+- Wait for long work OUTSIDE a turn. Run it in the background and let its
+  completion wake you, or block on it inside the same command. Do not spend a
+  turn asking whether it has finished.
+- Verify once. Re-running a check whose inputs have not changed since it passed
+  tells you nothing you did not already know.
+- Keep the messages between actions short. The report that matters is the final
+  one and the ` + "`ao work report`" + ` you record beside it; a running commentary in
+  between is re-read by every turn that follows it.
+- If a well-bounded question would take several turns of reading to answer --
+  where something is defined, why one test fails -- delegating it to a subagent
+  keeps that reading out of this conversation. Delegate the QUESTION only:
+  the change itself, the commits and the report stay in this session, because
+  they are what AO tracks and reviews.`
 }
 
 // promptForRun reconstructs the work step's task prompt from the plan step's
