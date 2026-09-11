@@ -197,6 +197,18 @@ func (p UsageBudgetProfile) WithOverrides(policy UsageBudgetPolicy) UsageBudgetP
 	if policy.WorkflowCostWarnUSD > 0 {
 		p.CostUSD = policy.WorkflowCostWarnUSD
 	}
+	// Range-checked rather than merely non-zero, unlike every field above it.
+	// ContextPerCallTokens is the one profile figure a lifecycle decision acts
+	// on (workflow.sessionContextPressure -> COMPACT), so a nonsense value
+	// here would not produce a noisy warning -- it would quietly change what
+	// AO does to a live session. An out-of-range override is therefore
+	// discarded in favour of the profile default rather than trusted, which
+	// also means a policy snapshot that has been corrupted, hand-edited or
+	// written by some future binary can never drive a session permanently
+	// under pressure. See ValidContextPerCallWarnTokens for the two bounds.
+	if ValidContextPerCallWarnTokens(policy.WorkflowContextPerCallWarnTokens) {
+		p.ContextPerCallTokens = policy.WorkflowContextPerCallWarnTokens
+	}
 	return p
 }
 
