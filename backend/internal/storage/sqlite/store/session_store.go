@@ -49,6 +49,7 @@ func (s *Store) UpdateSessionFromActivitySignal(ctx context.Context, rec domain.
 	rows, err := s.qw.UpdateSessionFromActivitySignal(ctx, gen.UpdateSessionFromActivitySignalParams{
 		ActivityState:                activity.State,
 		ActivityLastAt:               activity.LastActivityAt,
+		LastSignalAt:                 timeToNullTime(activity.LastSignalAt),
 		FirstSignalAt:                timeToNullTime(rec.FirstSignalAt),
 		TurnCompletedAt:              timeToNullTime(rec.TurnCompletedAt),
 		AgentSessionID:               rec.Metadata.AgentSessionID,
@@ -394,6 +395,7 @@ func rowToRecord(row gen.GetSessionRow) domain.SessionRecord {
 		Activity: domain.Activity{
 			State:          row.ActivityState,
 			LastActivityAt: row.ActivityLastAt,
+			LastSignalAt:   nullTimeToTime(row.LastSignalAt),
 		},
 		FirstSignalAt:      nullTimeToTime(row.FirstSignalAt),
 		TurnCompletedAt:    nullTimeToTime(row.TurnCompletedAt),
@@ -456,6 +458,7 @@ func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams
 		DisplayName:               rec.DisplayName,
 		ActivityState:             activity.State,
 		ActivityLastAt:            activity.LastActivityAt,
+		LastSignalAt:              timeToNullTime(activity.LastSignalAt),
 		FirstSignalAt:             timeToNullTime(rec.FirstSignalAt),
 		TurnCompletedAt:           timeToNullTime(rec.TurnCompletedAt),
 		IsTerminated:              rec.IsTerminated,
@@ -502,6 +505,7 @@ func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
 		DisplayName:               rec.DisplayName,
 		ActivityState:             activity.State,
 		ActivityLastAt:            activity.LastActivityAt,
+		LastSignalAt:              timeToNullTime(activity.LastSignalAt),
 		FirstSignalAt:             timeToNullTime(rec.FirstSignalAt),
 		TurnCompletedAt:           timeToNullTime(rec.TurnCompletedAt),
 		IsTerminated:              rec.IsTerminated,
@@ -573,6 +577,13 @@ func normalActivity(a domain.Activity, fallback time.Time) domain.Activity {
 	}
 	if a.LastActivityAt.IsZero() {
 		a.LastActivityAt = time.Now().UTC()
+	}
+	// Every write path that sets a transition has, by definition, just heard
+	// from the session. Seeding the liveness clock from it here means a caller
+	// that only knows about the transition (spawn, restore, the reaper) cannot
+	// leave behind a row that reads as never-heard-from.
+	if a.LastSignalAt.Before(a.LastActivityAt) {
+		a.LastSignalAt = a.LastActivityAt
 	}
 	return a
 }

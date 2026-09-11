@@ -891,6 +891,7 @@ type Session struct {
 	TurnCompletedAt           sql.NullTime
 	RuntimeInstanceID         string
 	RuntimeOwnerToken         string
+	LastSignalAt              sql.NullTime
 }
 
 type SessionCleanupFact struct {

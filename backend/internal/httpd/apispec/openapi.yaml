@@ -18038,6 +18038,9 @@ components:
         lastActivityAt:
           format: date-time
           type: string
+        lastSignalAt:
+          format: date-time
+          type: string
         state:
           type: string
       required:

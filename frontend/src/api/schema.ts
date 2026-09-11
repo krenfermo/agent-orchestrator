@@ -6135,6 +6135,8 @@ export interface components {
         DomainActivity: {
             /** Format: date-time */
             lastActivityAt: string;
+            /** Format: date-time */
+            lastSignalAt?: string;
             state: string;
         };
         DomainReviewerConfig: {

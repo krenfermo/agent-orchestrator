@@ -546,9 +546,31 @@ func (m *Manager) ApplyRuntimeObservation(ctx context.Context, id domain.Session
 	return nil
 }
 
+// livenessCoalesceWindow bounds how often a signal that changes nothing but the
+// liveness clock is allowed to reach the database.
+//
+// Without it, this reducer would write once per hook callback: run wf-1c2cb9bd
+// made 111 model calls in twenty minutes, and a busier agent makes far more.
+// None of those writes would carry new information — the state is unchanged and
+// the only field moving is a clock nobody reads at sub-minute resolution.
+//
+// Thirty seconds is chosen against the two consumers that exist. The Board
+// renders a relative time, where being up to half a minute behind is invisible.
+// workerNeedsInputCorroborationWindow asks whether a session has been silent
+// for fifteen MINUTES, so a thirty-second quantisation cannot change its
+// verdict. In exchange the write rate for an active session is bounded at two
+// per minute regardless of how hard the agent is working.
+//
+// The window only gates writes whose SOLE effect is the liveness clock. A
+// signal that changes state, stamps a completion receipt, or carries new
+// metadata is written immediately and refreshes liveness on the way through.
+const livenessCoalesceWindow = 30 * time.Second
+
 // ApplyActivitySignal records an authoritative agent activity signal and any
 // native agent session id carried alongside it. Metadata-only hooks leave the
-// existing activity and first-signal facts untouched.
+// existing activity state and first-signal facts untouched; they do advance the
+// liveness clock, because a callback that cleared every generation fence above
+// is this launch reporting in whether or not it carries a state.
 func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, s ports.ActivitySignal) error {
 	// Direct-branch execution ownership is turn-scoped (Checkpoint 8P-E.14A),
 	// and this is where a turn is observed to start and end. The action itself
@@ -723,6 +745,11 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	}
 	if !s.Valid {
 		applyActivityMetadata(&rec.Metadata, s)
+		// A metadata-only callback (SessionStart handing over the native resume
+		// handle, say) carries no state, but it has already passed every
+		// generation fence above: it is the current launch reporting in, which
+		// is exactly what the liveness clock records.
+		markHeardFrom(&rec.Activity, timeOr(s.Timestamp, now))
 		rec.UpdatedAt = now
 		_, err := m.store.UpdateSessionFromActivitySignal(ctx, rec)
 		m.mu.Unlock()
@@ -735,7 +762,13 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	}
 	prevState := rec.Activity.State
 	prevAt := rec.Activity.LastActivityAt
-	act := domain.Activity{State: s.State, LastActivityAt: timeOr(s.Timestamp, now)}
+	heardAt := timeOr(s.Timestamp, now)
+	act := domain.Activity{
+		State:          s.State,
+		LastActivityAt: heardAt,
+		LastSignalAt:   rec.Activity.LastSignalAt,
+	}
+	markHeardFrom(&act, heardAt)
 	sameState := sameActivity(rec.Activity, act)
 	// A same-state repeat is still a write when it is the FIRST signal for
 	// this spawn: the receipt itself is a durable fact (it clears the
@@ -748,7 +781,14 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 		// itself: the turn's "active" POST may never have arrived, or an
 		// untagged idle beat the Stop to the row. Dropping it here as a
 		// same-state repeat would throw away the only proof the work is done.
-		if metadataChanged || completionChanged || s.Event == "user-prompt-submit" {
+		// The liveness clock is the one thing a same-state repeat DOES carry.
+		// It is coalesced so a hard-working agent cannot turn every tool call
+		// into a database write, and it never moves the transition clock:
+		// LastActivityAt keeps identifying the moment this state was entered,
+		// which is what every pause-scoped consumer downstream depends on.
+		livenessDue := heardAt.Sub(rec.Activity.LastSignalAt) >= livenessCoalesceWindow
+		if metadataChanged || completionChanged || s.Event == "user-prompt-submit" || livenessDue {
+			markHeardFrom(&rec.Activity, heardAt)
 			rec.UpdatedAt = now
 			applied, err := m.store.UpdateSessionFromActivitySignal(ctx, rec)
 			// Captured under the lock, emitted after it: the receipt is only
@@ -1564,12 +1604,25 @@ func reactivateSessionUsage(
 }
 
 // sameActivity reports whether two activity signals describe the same state.
-// LastActivityAt is intentionally ignored: same-state repeats (e.g. a stream
-// of idle notifications) must not rewrite UpdatedAt or fan out a CDC event.
-// LastActivityAt now marks when this state was first entered since the last
-// transition, which is the timestamp a UI actually wants.
+// Both timestamps are intentionally ignored, for different reasons. Same-state
+// repeats (e.g. a stream of idle notifications) must not rewrite UpdatedAt or
+// fan out a CDC event, and LastActivityAt marks when this state was first
+// entered since the last transition — including it would make every repeat look
+// like a change. LastSignalAt moves on every signal by construction, so
+// including it would defeat the same-state fold entirely; the reducer advances
+// it explicitly instead, coalesced, on the paths that write.
 func sameActivity(a, b domain.Activity) bool {
 	return a.State == b.State
+}
+
+// markHeardFrom advances the liveness clock, never backwards. Hook deliveries
+// are best-effort and can arrive out of order, so an older callback overtaking
+// a newer one must not make a live session look staler than AO already proved
+// it to be.
+func markHeardFrom(a *domain.Activity, at time.Time) {
+	if at.After(a.LastSignalAt) {
+		a.LastSignalAt = at
+	}
 }
 
 func mergeMetadata(base, in domain.SessionMetadata) domain.SessionMetadata {

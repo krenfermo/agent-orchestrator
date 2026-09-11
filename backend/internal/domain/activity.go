@@ -53,9 +53,51 @@ func (a ActivityState) WorkInFlight() bool {
 	return a == ActivityActive || a.NeedsInput()
 }
 
-// Activity captures the persisted activity reading: the state and when it was
-// last observed.
+// Activity captures the persisted activity reading: the state, when that state
+// last CHANGED, and when a signal was last HEARD at all.
+//
+// The two timestamps answer different questions and must not be conflated.
+//
+// LastActivityAt is a state-TRANSITION clock. It advances only when a signal
+// carries a state the row did not already hold, because that is what every
+// consumer scoped to a pause depends on: PauseScopeID keys one notification to
+// one pause, humanQuestionFact keys one blocked entry to one dialog, and the
+// waiting-input telemetry measures how long a single pause lasted. If it were
+// refreshed by every repeat those all become "now" and stop identifying the
+// episode they were built to identify.
+//
+// LastSignalAt is a LIVENESS clock. It advances on every signal that provably
+// belongs to the session's current launch, including the same-state repeats
+// LastActivityAt deliberately ignores — an agent hammering PostToolUse for
+// twenty minutes emits scores of them and changes state in none. Before it
+// existed, "is this worker alive?" had to be answered from the transition
+// clock, and a worker that stayed `active` for twenty minutes was
+// indistinguishable from one that had said `active` once and died: run
+// wf-1c2cb9bd sat at a LastActivityAt of 17:10:20Z while its worker made 111
+// model calls, and the code that reads it (workerNeedsInputCorroborationWindow)
+// documented the opposite assumption in its own comment.
+//
+// It is deliberately coalesced rather than written per signal — see
+// lifecycle.livenessCoalesceWindow for the bound and why it is sound.
+//
+// Zero means no signal has been heard for the current row. Rows written before
+// the column existed are backfilled from LastActivityAt, which is the newest
+// liveness fact those rows actually carry.
 type Activity struct {
 	State          ActivityState `json:"state"`
 	LastActivityAt time.Time     `json:"lastActivityAt"`
+	LastSignalAt   time.Time     `json:"lastSignalAt,omitempty"`
+}
+
+// Liveness is the freshest evidence that this session was heard from at all:
+// the liveness clock when it has advanced, and otherwise the transition clock
+// it was backfilled from. Every "has this session gone silent?" question must
+// go through here rather than reading LastActivityAt directly, so a row written
+// before LastSignalAt existed — or by a path that only sets the transition —
+// still answers with the newest fact it has instead of a zero value.
+func (a Activity) Liveness() time.Time {
+	if a.LastSignalAt.After(a.LastActivityAt) {
+		return a.LastSignalAt
+	}
+	return a.LastActivityAt
 }

@@ -95,11 +95,24 @@ const (
 // It is not a "wait longer and hope" timeout: an uncorroborated reading never
 // becomes a worker-blocked stop no matter how long it lasts, and a corroborated
 // one stops the run immediately without consulting this at all. It exists only
-// so the ambiguous tail is bounded rather than polled forever, and it is
-// measured from the session's last activity reading — which, for a worker that
-// is genuinely still working, keeps moving (the terminal activity observer
-// re-asserts `active` from the pane), so an actively working agent can never
-// age into it.
+// so the ambiguous tail is bounded rather than polled forever.
+//
+// It is measured from Activity.Liveness() — the newest moment AO was heard from
+// at all — and that distinction is the whole point. This comment used to say
+// the window was measured from "the session's last activity reading", which for
+// a working agent "keeps moving (the terminal activity observer re-asserts
+// `active` from the pane), so an actively working agent can never age into it".
+// That was false for the field it actually read. Re-asserting `active` on a row
+// already reading `active` is a same-state repeat, which the lifecycle reducer
+// folds without touching the transition clock, so the reading did NOT keep
+// moving: run wf-1c2cb9bd held a LastActivityAt of 17:10:20Z through twenty
+// minutes and 111 model calls of real work. Any uncorroborated waiting_input
+// hint landing on a worker that had been busy for fifteen minutes would have
+// been read as fifteen minutes of silence and stopped a healthy run.
+//
+// Liveness() restores the property the comment claimed: it advances on every
+// signal, so an actively working agent genuinely cannot age into this window,
+// and a session that has really gone quiet still ages into it on schedule.
 const workerNeedsInputCorroborationWindow = 15 * time.Minute
 
 // WorkStepDecision is the outcome of evaluating a work step's session/
@@ -261,13 +274,13 @@ func evaluateWorkStepProgress(
 		// Uncorroborated. The worker is alive and inside a turn; "alive with no
 		// completion signal" is explicitly not grounds to stop a run, so the
 		// default is to leave it alone and look again.
-		if session.Activity.LastActivityAt.IsZero() ||
-			now.Sub(session.Activity.LastActivityAt) <= workerNeedsInputCorroborationWindow {
+		heardAt := session.Activity.Liveness()
+		if heardAt.IsZero() || now.Sub(heardAt) <= workerNeedsInputCorroborationWindow {
 			return WorkStepDecision{Progress: WorkerActive, NoChange: true}
 		}
 		// The reading has neither been corroborated nor refreshed for the whole
-		// window: the session has gone completely silent in a state AO cannot
-		// explain. Say that, rather than claiming the worker is waiting on the
+		// window: no signal of any kind has arrived, so the session has gone
+		// completely silent in a state AO cannot explain. Say that, rather than claiming the worker is waiting on the
 		// user — a claim AO has no evidence for and which sends the person to
 		// look for a prompt that may not exist. Bounded and reopenable by a
 		// normal Continue, like every other ambiguous stop.

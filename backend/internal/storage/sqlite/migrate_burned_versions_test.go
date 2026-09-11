@@ -171,6 +171,7 @@ var shippedMigrations = map[int64]string{
 	165: "0165_skill_private_registry.sql",
 	166: "0166_skill_trust_roots.sql",
 	167: "0167_skill_external_registry.sql",
+	168: "0168_session_last_signal.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

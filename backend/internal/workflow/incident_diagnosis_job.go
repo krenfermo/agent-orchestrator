@@ -84,11 +84,11 @@ type IncidentDiagnosisJob struct {
 	StartedAt      time.Time `json:"startedAt,omitempty"`
 	ElapsedSeconds int       `json:"elapsedSeconds,omitempty"`
 
-	// LastActivityAt is the agent session's newest activity reading, and
-	// LastSignalAt the first/most recent hook signal AO received from it. They
-	// are different facts and both matter: activity can come from the pane
-	// while the hook pipeline is silent, which is precisely how a stuck startup
-	// looks.
+	// LastActivityAt is when the session's activity STATE last changed, and
+	// LastSignalAt the most recent moment a signal of any kind arrived. They
+	// are different facts and both matter: a worker that has been `active` for
+	// twenty minutes has an ancient LastActivityAt and a LastSignalAt seconds
+	// old, while a stuck startup has neither moving at all.
 	LastActivityAt time.Time `json:"lastActivityAt,omitempty"`
 	LastSignalAt   time.Time `json:"lastSignalAt,omitempty"`
 
@@ -159,9 +159,15 @@ func (c *Coordinator) DeriveIncidentDiagnosisJob(ctx stdctx.Context, inc Inciden
 	}
 	job.Harness = string(sess.Harness)
 	job.LastActivityAt = sess.Activity.LastActivityAt
-	job.LastSignalAt = sess.FirstSignalAt
-	if !sess.TurnCompletedAt.IsZero() && sess.TurnCompletedAt.After(job.LastSignalAt) {
-		job.LastSignalAt = sess.TurnCompletedAt
+	// The newest moment AO was heard from, over every signal fact the session
+	// carries. Activity.Liveness() is the exact one; FirstSignalAt and the
+	// completion receipt are still folded in because they can outlive a row
+	// whose liveness clock was only ever seeded from the transition clock.
+	job.LastSignalAt = sess.Activity.Liveness()
+	for _, at := range []time.Time{sess.FirstSignalAt, sess.TurnCompletedAt} {
+		if at.After(job.LastSignalAt) {
+			job.LastSignalAt = at
+		}
 	}
 
 	switch {

@@ -108,8 +108,8 @@ func writeOrchestratorList(cmd *cobra.Command, sessions []sessionDTO) error {
 
 func orchestratorLineParts(sess sessionDTO) []string {
 	parts := []string{}
-	if !sess.Activity.LastActivityAt.IsZero() {
-		parts = append(parts, "("+formatSessionAge(time.Since(sess.Activity.LastActivityAt))+")")
+	if heard := sess.Activity.lastHeardFrom(); !heard.IsZero() {
+		parts = append(parts, "("+formatSessionAge(time.Since(heard))+")")
 	}
 	if sess.Status != "" {
 		parts = append(parts, "["+sess.Status+"]")
