@@ -36,6 +36,14 @@ A one-field defect: an enrolled image already linked to an entity still showed
 **The success criterion was ≥30% off one of the two levers. Criterion B is met
 at 39.0%; criterion A (call count) is not met and is not claimed.**
 
+> **P7.1 correction.** Every figure in this table is a TOKEN figure, and the
+> 39.0% is cumulative billed input, not money. Priced, the same replay is a
+> **25.1%** cost reduction: compaction moves tokens from the cheapest input rate
+> to the dearest, and it generates a summary at output prices that no call
+> series contains. See `docs/p7-compaction-observability.md`, and §K.2's
+> "3,000 for the summary and fact pack" — measured, the rewritten prefix is
+> roughly 20,000, of which the generated summary is one part.
+
 The "después" column is produced by `internal/observe/turnbench` replaying the
 run's recorded call series with the conversation replaced at each repair
 boundary, which is what `workflow.maybeCompactBeforeFix` does when the session

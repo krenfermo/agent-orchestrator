@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -72,6 +73,19 @@ const (
 	maxCodexAttributionIDBytes = 256
 	maxCodexAttributionIDs     = 4096
 	integrityCheckpointBytes   = 4 << 10
+	// maxCompactionObservations bounds the per-source boundary list. A real
+	// session compacts a handful of times; the bound exists so a malformed or
+	// hostile transcript cannot grow parser state without limit. Boundaries
+	// past the bound still increment CompactionCount, so the COUNT stays true
+	// even when the detail stops.
+	maxCompactionObservations = 32
+	// maxHarnessRollupModels bounds the self-reported rollup for the same
+	// reason. A session runs one or two models; sixteen is already generous.
+	maxHarnessRollupModels = 16
+	// maxHarnessModelIDBytes rejects an implausible model id rather than
+	// storing it. The keys of the rollup map are the one part of these records
+	// that is free text, so it is the one part that is length-checked.
+	maxHarnessModelIDBytes = 128
 )
 
 type codexTokenVector struct {
@@ -121,6 +135,55 @@ type claudeParserStateV1 struct {
 	// across two reads would be classified from half of itself.
 	OpenTurnKey     string   `json:"open_turn_key,omitempty"`
 	OpenTurnClasses []string `json:"open_turn_classes,omitempty"`
+	// Compactions and HarnessTotals are P7.1's observation state: the
+	// conversation replacements this transcript has reported, and the
+	// harness's own end-of-session spend rollup.
+	//
+	// They live in the parser's durable state rather than in a table of their
+	// own because they are already derived-from-this-artifact facts that must
+	// survive a restart, and because the alternative is a migration for a
+	// handful of numbers per session. The list is BOUNDED (see
+	// maxCompactionObservations): a transcript that somehow reported a
+	// thousand boundaries must not turn this column into an unbounded log, so
+	// the count keeps rising after the list stops.
+	Compactions        []compactionObservationV1 `json:"compactions,omitempty"`
+	CompactionCount    int                       `json:"compaction_count,omitempty"`
+	CompactionsDropped int                       `json:"compactions_dropped,omitempty"`
+	HarnessTotals      *harnessTotalsV1          `json:"harness_totals,omitempty"`
+}
+
+// compactionObservationV1 is one `system` / `compact_boundary` record, reduced
+// to numbers. There is no field for the summary, the preserved messages or the
+// conversation -- the same omission-is-the-design rule claudeContentBlock
+// follows.
+type compactionObservationV1 struct {
+	UUID                    string `json:"uuid"`
+	Trigger                 string `json:"trigger,omitempty"`
+	Timestamp               string `json:"timestamp,omitempty"`
+	ModelID                 string `json:"model_id,omitempty"`
+	PreTokens               int64  `json:"pre_tokens"`
+	PostTokens              int64  `json:"post_tokens"`
+	CumulativeDroppedTokens int64  `json:"cumulative_dropped_tokens,omitempty"`
+	DurationMs              int64  `json:"duration_ms,omitempty"`
+}
+
+// harnessTotalsV1 is the harness's own per-session spend rollup, carried so the
+// ledger can be checked against something. Cumulative and rewritten whole: the
+// last one observed wins, never a sum of them.
+type harnessTotalsV1 struct {
+	TotalCostUSD        float64                `json:"total_cost_usd,omitempty"`
+	AnyUnknownModelCost bool                   `json:"any_unknown_model_cost,omitempty"`
+	Models              []harnessModelTotalsV1 `json:"models,omitempty"`
+}
+
+type harnessModelTotalsV1 struct {
+	ModelID          string  `json:"model_id"`
+	InputTokens      int64   `json:"input_tokens,omitempty"`
+	CacheReadTokens  int64   `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64   `json:"cache_write_tokens,omitempty"`
+	OutputTokens     int64   `json:"output_tokens,omitempty"`
+	ThinkingTokens   int64   `json:"thinking_tokens,omitempty"`
+	ReportedCostUSD  float64 `json:"reported_cost_usd,omitempty"`
 }
 
 type codexParserStateV1 struct {
@@ -247,7 +310,11 @@ func validSHA256Digest(value string) bool {
 
 type claudeTranscriptRecord struct {
 	Type string `json:"type"`
-	UUID string `json:"uuid"`
+	// Subtype separates the `system` records from each other. Only
+	// "compact_boundary" is read; every other system record is ignored exactly
+	// as it was before P7.1.
+	Subtype string `json:"subtype"`
+	UUID    string `json:"uuid"`
 	// Timestamp is Claude Code's own event time for the record. Read only to
 	// place the event on a timeline (P3-E role attribution); it is never part
 	// of SourceEventKey, because an identity that moved with a clock would
@@ -270,6 +337,49 @@ type claudeTranscriptRecord struct {
 		// no field for `input` cannot accidentally hold a command.
 		Content []claudeContentBlock `json:"content"`
 	} `json:"message"`
+
+	// CompactMetadata is the payload of a `system` / `compact_boundary`
+	// record: the harness saying it replaced its own conversation, and by how
+	// much. Numbers and one closed-vocabulary word.
+	//
+	// The record also carries `preservedSegment` and `preservedMessages` --
+	// lists of message uuids -- and a `content` string. None of the three is
+	// declared here, so none of them can reach parser state even by accident.
+	CompactMetadata *claudeCompactMetadata `json:"compactMetadata"`
+
+	// ModelUsage, TotalCostUSD and HasUnknownModelCost are the payload of a
+	// `cost-state` record: the harness's own end-of-session spend rollup, per
+	// model.
+	//
+	// It is read for ONE reason. The summarization turn a compaction performs
+	// never appears as an assistant record, so it never becomes a usage event,
+	// so the ledger cannot see it. This rollup is the only structured place
+	// the harness admits to that spend, and the difference between it and what
+	// AO attributed is the measurement P7.1 exists to produce. The map's keys
+	// are model ids; it is bounded at decode time.
+	ModelUsage          map[string]claudeCostStateModel `json:"modelUsage"`
+	TotalCostUSD        float64                         `json:"totalCostUSD"`
+	HasUnknownModelCost bool                            `json:"hasUnknownModelCost"`
+}
+
+// claudeCompactMetadata is the compact_boundary payload, narrowed to what a
+// cost question needs.
+type claudeCompactMetadata struct {
+	Trigger                 string `json:"trigger"`
+	PreTokens               int64  `json:"preTokens"`
+	PostTokens              int64  `json:"postTokens"`
+	CumulativeDroppedTokens int64  `json:"cumulativeDroppedTokens"`
+	DurationMs              int64  `json:"durationMs"`
+}
+
+// claudeCostStateModel is one model's row of the harness's rollup.
+type claudeCostStateModel struct {
+	InputTokens              int64   `json:"inputTokens"`
+	OutputTokens             int64   `json:"outputTokens"`
+	ThinkingTokens           int64   `json:"thinkingTokens"`
+	CacheReadInputTokens     int64   `json:"cacheReadInputTokens"`
+	CacheCreationInputTokens int64   `json:"cacheCreationInputTokens"`
+	CostUSD                  float64 `json:"costUSD"`
 }
 
 // claudeContentBlock is one content block of an assistant message, decoded
@@ -289,6 +399,19 @@ func parseClaude(source domain.UsageSourceContext, records []jsonlRecord, state 
 		var native claudeTranscriptRecord
 		if err := json.Unmarshal(record.Data, &native); err != nil {
 			recordMalformed(result)
+			continue
+		}
+		// P7.1: the two records that carry spend AO never billed. Both are
+		// observations only -- they produce no usage event, change no token
+		// total the ledger holds, and cannot alter an event that already
+		// exists. A transcript that contains neither parses exactly as it did
+		// before.
+		if native.Type == "system" && native.Subtype == "compact_boundary" {
+			recordCompactionBoundary(&native, state)
+			continue
+		}
+		if native.Type == "cost-state" {
+			recordHarnessRollup(&native, state)
 			continue
 		}
 		if native.Type != "assistant" || native.Message.Usage == nil || native.Message.StopReason == nil || strings.TrimSpace(*native.Message.StopReason) == "" {
@@ -345,6 +468,100 @@ func parseClaude(source domain.UsageSourceContext, records []jsonlRecord, state 
 		}
 		result.Events = append(result.Events, event)
 	}
+}
+
+// recordCompactionBoundary folds one compact_boundary record into parser state.
+//
+// Idempotent on the record's own uuid. A source re-read from offset zero -- an
+// artifact replaced, a recovery, a watcher restart -- must recognise a boundary
+// it has already seen rather than counting it twice, and the uuid is the only
+// identity in the record that does not move.
+//
+// A boundary whose metadata is missing entirely is still COUNTED. The harness
+// said it replaced the conversation; that it did not say by how much makes the
+// figures unknown, not the event unreal.
+func recordCompactionBoundary(native *claudeTranscriptRecord, state *claudeParserStateV1) {
+	recordID := strings.TrimSpace(native.UUID)
+	for i := range state.Compactions {
+		if state.Compactions[i].UUID != "" && state.Compactions[i].UUID == recordID {
+			return
+		}
+	}
+	state.CompactionCount++
+	if len(state.Compactions) >= maxCompactionObservations {
+		state.CompactionsDropped++
+		return
+	}
+	observation := compactionObservationV1{
+		UUID:      recordID,
+		Timestamp: strings.TrimSpace(native.Timestamp),
+		ModelID:   state.ModelID,
+	}
+	if md := native.CompactMetadata; md != nil {
+		observation.Trigger = string(domain.NormalizeCompactionTrigger(md.Trigger))
+		observation.PreTokens = nonNegative(md.PreTokens)
+		observation.PostTokens = nonNegative(md.PostTokens)
+		observation.CumulativeDroppedTokens = nonNegative(md.CumulativeDroppedTokens)
+		observation.DurationMs = nonNegative(md.DurationMs)
+	} else {
+		observation.Trigger = string(domain.CompactionTriggerUnknown)
+	}
+	state.Compactions = append(state.Compactions, observation)
+}
+
+// recordHarnessRollup replaces the stored rollup with the one just observed.
+//
+// The record is CUMULATIVE for the whole session, so the last one wins and two
+// of them are never added together. A rollup with no models is ignored rather
+// than stored as an observed-and-empty one, because "the harness reported
+// nothing" and "the harness reported zero" are different claims and only the
+// second one would be a lie.
+func recordHarnessRollup(native *claudeTranscriptRecord, state *claudeParserStateV1) {
+	if len(native.ModelUsage) == 0 {
+		return
+	}
+	rollup := &harnessTotalsV1{
+		TotalCostUSD:        native.TotalCostUSD,
+		AnyUnknownModelCost: native.HasUnknownModelCost,
+	}
+	ids := make([]string, 0, len(native.ModelUsage))
+	for id := range native.ModelUsage {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if len(rollup.Models) >= maxHarnessRollupModels {
+			break
+		}
+		model := native.ModelUsage[id]
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" || len(trimmed) > maxHarnessModelIDBytes {
+			continue
+		}
+		rollup.Models = append(rollup.Models, harnessModelTotalsV1{
+			ModelID:          trimmed,
+			InputTokens:      nonNegative(model.InputTokens),
+			CacheReadTokens:  nonNegative(model.CacheReadInputTokens),
+			CacheWriteTokens: nonNegative(model.CacheCreationInputTokens),
+			OutputTokens:     nonNegative(model.OutputTokens),
+			ThinkingTokens:   nonNegative(model.ThinkingTokens),
+			ReportedCostUSD:  model.CostUSD,
+		})
+	}
+	if len(rollup.Models) == 0 {
+		return
+	}
+	state.HarnessTotals = rollup
+}
+
+// nonNegative floors a harness-reported figure at zero. A negative token count
+// is a malformed record, and carrying it would let one bad line make a total
+// smaller than the truth.
+func nonNegative(v int64) int64 {
+	if v < 0 {
+		return 0
+	}
+	return v
 }
 
 type codexEnvelope struct {
