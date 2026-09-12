@@ -1,0 +1,311 @@
+{
+ "source": "wf-66f0ee54-52ff-4bc4-910e-20b570d4c741",
+ "note": "Numbers only. The canary that proved the mechanism: two real compactions. Per-call figures are model_usage_events rows; the two compactions are the harness's own system/compact_boundary records; unattributed is its end-of-session cost-state rollup minus what the ledger attributed. No prompt, command, path or message body is reproduced here. Provenance: docs/p7-compaction-observability.md.",
+ "strategy": "task",
+ "modelId": "claude-opus-5",
+ "calls": [
+  {
+   "contextTokens": 45942,
+   "outputTokens": 191,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 30533,
+   "cacheWriteTokens": 15407,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-11T20:54:29.736Z"
+  },
+  {
+   "contextTokens": 48680,
+   "outputTokens": 197,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 45940,
+   "cacheWriteTokens": 2738,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-11T20:54:32.975Z"
+  },
+  {
+   "contextTokens": 49822,
+   "outputTokens": 200,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 48678,
+   "cacheWriteTokens": 1142,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-11T20:54:38.488Z"
+  },
+  {
+   "contextTokens": 54874,
+   "outputTokens": 353,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 49820,
+   "cacheWriteTokens": 5052,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-11T20:54:40.873Z"
+  },
+  {
+   "contextTokens": 58550,
+   "outputTokens": 1454,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 54872,
+   "cacheWriteTokens": 3676,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-11T20:55:01.709Z"
+  },
+  {
+   "contextTokens": 60684,
+   "outputTokens": 119,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 58548,
+   "cacheWriteTokens": 2134,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-11T20:55:04.559Z"
+  },
+  {
+   "contextTokens": 63010,
+   "outputTokens": 2723,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 60682,
+   "cacheWriteTokens": 2326,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-11T20:55:27.923Z"
+  },
+  {
+   "contextTokens": 66659,
+   "outputTokens": 3561,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 63008,
+   "cacheWriteTokens": 3649,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-11T20:55:39.258Z"
+  },
+  {
+   "contextTokens": 70209,
+   "outputTokens": 5094,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 66657,
+   "cacheWriteTokens": 3550,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-11T20:56:22.22Z"
+  },
+  {
+   "contextTokens": 75449,
+   "outputTokens": 1524,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 70207,
+   "cacheWriteTokens": 5240,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-11T20:57:08.519Z"
+  },
+  {
+   "contextTokens": 77142,
+   "outputTokens": 484,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 75447,
+   "cacheWriteTokens": 1693,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-11T20:57:28.41Z"
+  },
+  {
+   "contextTokens": 78472,
+   "outputTokens": 213,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 77140,
+   "cacheWriteTokens": 1330,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-11T20:57:36.952Z"
+  },
+  {
+   "contextTokens": 78989,
+   "outputTokens": 909,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 78470,
+   "cacheWriteTokens": 517,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-11T20:57:48.927Z"
+  },
+  {
+   "contextTokens": 80731,
+   "outputTokens": 1888,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 78987,
+   "cacheWriteTokens": 1742,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-11T20:57:52.414Z"
+  },
+  {
+   "contextTokens": 82704,
+   "outputTokens": 2115,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 80729,
+   "cacheWriteTokens": 1973,
+   "class": "command",
+   "segment": "work",
+   "observedAt": "2026-09-11T20:58:35.997Z"
+  },
+  {
+   "contextTokens": 84897,
+   "outputTokens": 950,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 82702,
+   "cacheWriteTokens": 2193,
+   "class": "message",
+   "segment": "work",
+   "observedAt": "2026-09-11T20:58:49.924Z"
+  },
+  {
+   "contextTokens": 57803,
+   "outputTokens": 182,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 37379,
+   "cacheWriteTokens": 20422,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-11T21:04:04.554Z"
+  },
+  {
+   "contextTokens": 59169,
+   "outputTokens": 2267,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 57801,
+   "cacheWriteTokens": 1366,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-11T21:04:23.893Z"
+  },
+  {
+   "contextTokens": 61597,
+   "outputTokens": 987,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 59167,
+   "cacheWriteTokens": 2428,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-11T21:04:36.999Z"
+  },
+  {
+   "contextTokens": 62576,
+   "outputTokens": 1108,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 61595,
+   "cacheWriteTokens": 979,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-11T21:04:51.921Z"
+  },
+  {
+   "contextTokens": 64495,
+   "outputTokens": 558,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 62574,
+   "cacheWriteTokens": 1919,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-11T21:05:07.853Z"
+  },
+  {
+   "contextTokens": 65350,
+   "outputTokens": 481,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 64493,
+   "cacheWriteTokens": 855,
+   "class": "command",
+   "segment": "fix/1",
+   "observedAt": "2026-09-11T21:05:15.76Z"
+  },
+  {
+   "contextTokens": 66185,
+   "outputTokens": 927,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 65348,
+   "cacheWriteTokens": 835,
+   "class": "message",
+   "segment": "fix/1",
+   "observedAt": "2026-09-11T21:05:25.041Z"
+  },
+  {
+   "contextTokens": 61099,
+   "outputTokens": 273,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 37379,
+   "cacheWriteTokens": 23718,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-11T21:09:18.786Z"
+  },
+  {
+   "contextTokens": 62871,
+   "outputTokens": 445,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 61097,
+   "cacheWriteTokens": 1772,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-11T21:09:26.727Z"
+  },
+  {
+   "contextTokens": 63381,
+   "outputTokens": 458,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 62869,
+   "cacheWriteTokens": 510,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-11T21:09:30.705Z"
+  },
+  {
+   "contextTokens": 63971,
+   "outputTokens": 185,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 63379,
+   "cacheWriteTokens": 590,
+   "class": "command",
+   "segment": "fix/2",
+   "observedAt": "2026-09-11T21:09:38.928Z"
+  },
+  {
+   "contextTokens": 64499,
+   "outputTokens": 654,
+   "uncachedInputTokens": 2,
+   "cacheReadTokens": 63969,
+   "cacheWriteTokens": 528,
+   "class": "message",
+   "segment": "fix/2",
+   "observedAt": "2026-09-11T21:09:49.676Z"
+  }
+ ],
+ "compactions": [
+  {
+   "preTokens": 85847,
+   "postTokens": 10956,
+   "durationMs": 95073
+  },
+  {
+   "preTokens": 67663,
+   "postTokens": 13240,
+   "durationMs": 87393
+  }
+ ],
+ "unattributed": {
+  "modelId": "claude-opus-5[1m]",
+  "tokens": {
+   "InputTokens": 374816,
+   "UncachedInputTokens": 6060,
+   "CacheReadTokens": 363625,
+   "CacheWriteTokens": 5131,
+   "OutputTokens": 16953,
+   "EventCount": 0
+  }
+ }
+}

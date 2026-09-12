@@ -47,6 +47,19 @@ type Call struct {
 	// call: the term this call contributes to billable input.
 	ContextTokens int64 `json:"contextTokens"`
 	OutputTokens  int64 `json:"outputTokens"`
+	// UncachedInputTokens, CacheReadTokens and CacheWriteTokens partition
+	// ContextTokens the way the provider bills it. They are OPTIONAL: a series
+	// recorded before P7.1 carries none of them, and such a series can still
+	// answer every token question -- it simply cannot answer a money one,
+	// because the three dimensions are priced at rates that differ by a factor
+	// of twelve and a sum over them is not a cost.
+	//
+	// A series where they are present must have them add up to ContextTokens.
+	// SplitKnown is what enforces that, and Cost refuses to price a series
+	// where it does not hold rather than pricing the difference away.
+	UncachedInputTokens int64 `json:"uncachedInputTokens,omitempty"`
+	CacheReadTokens     int64 `json:"cacheReadTokens,omitempty"`
+	CacheWriteTokens    int64 `json:"cacheWriteTokens,omitempty"`
 	// Class is what the call did. See domain.TurnClass.
 	Class domain.TurnClass `json:"class"`
 	// Segment names the dispatch that owned the call -- "work", "fix/1". It is
@@ -65,11 +78,73 @@ type Series struct {
 	Source   string                   `json:"source"`
 	Note     string                   `json:"note,omitempty"`
 	Strategy domain.ExecutionStrategy `json:"strategy,omitempty"`
-	Calls    []Call                   `json:"calls"`
+	// ModelID is the model the calls were made on. Required to price a series
+	// and irrelevant to measuring one, which is exactly the asymmetry this
+	// package now has to carry.
+	ModelID string `json:"modelId,omitempty"`
+	Calls   []Call `json:"calls"`
+	// Compactions are the conversation replacements this series performed.
+	// Empty for a recorded run that never compacted -- which, until P7, was
+	// every recorded run.
+	Compactions []Compaction `json:"compactions,omitempty"`
+	// Unattributed is spend the harness charged itself for that NO call in
+	// this series accounts for: the residual between the harness's own
+	// end-of-session rollup and what the usage pipeline attributed.
+	//
+	// On a session that never compacted it is noise -- retries, a title
+	// generated on a small model. On a session that compacted it is dominated
+	// by the summarization turns, and it is the only MEASURED figure for them
+	// that exists, because the harness reports its spend once per session and
+	// never once per compaction.
+	//
+	// When present it is preferred over the modelled compaction cost, and the
+	// result says which of the two it used.
+	Unattributed *UnattributedSpend `json:"unattributed,omitempty"`
+}
+
+// UnattributedSpend is the measured residual and the model to price it as.
+type UnattributedSpend struct {
+	// ModelID is the model the HARNESS rolled the session up under, which is
+	// routinely not the spelling its own per-call records use. It is carried
+	// separately for exactly that reason: a long-context variant is priced
+	// differently from the base model, and pricing this residual as the base
+	// model would be substituting a rate rather than looking one up.
+	ModelID string                  `json:"modelId"`
+	Tokens  domain.UsageTokenTotals `json:"tokens"`
+}
+
+// Compaction is one conversation replacement, in the shape a cost question
+// needs it.
+//
+// It is deliberately NOT a Call. A compaction is a model turn -- it re-reads
+// the conversation and generates a summary -- but no assistant record is
+// written for it, so it never becomes a usage event and it never appears in a
+// recorded call series. Folding it into Calls would make it invisible in
+// exactly the way the ledger already makes it invisible.
+type Compaction struct {
+	// PreTokens is the conversation the summarization turn read; PostTokens is
+	// what it left behind. Both are the harness's own figures.
+	PreTokens  int64 `json:"preTokens"`
+	PostTokens int64 `json:"postTokens"`
+	DurationMs int64 `json:"durationMs,omitempty"`
+	// SummaryOutputTokens is what the turn GENERATED, at output prices, and it
+	// is the largest single term in the cost of compacting.
+	//
+	// SummaryOutputKnown is false when nobody measured it. The cost fold then
+	// refuses to produce a total rather than treating the unmeasured term as
+	// zero -- which is the precise error that made a 39% token reduction read
+	// as a 39% saving.
+	SummaryOutputTokens int64 `json:"summaryOutputTokens,omitempty"`
+	SummaryOutputKnown  bool  `json:"summaryOutputKnown,omitempty"`
 }
 
 // Metrics is everything a before/after comparison needs, and nothing derived
 // from an assumption.
+//
+// Everything here is a TOKEN figure. Cost lives in CostMetrics, in cost.go,
+// behind a rate card and a split this type does not require -- so that a
+// reduction measured here can never be quoted as a saving without someone
+// having asked for the other type by name.
 type Metrics struct {
 	Calls int64
 	// FirstContext / LastContext / PeakContext are the series' own ends and
@@ -87,6 +162,22 @@ type Metrics struct {
 	// Turns is the class fold. Work and coordination split the classified
 	// calls; see domain.TurnMix.
 	Turns domain.TurnMix
+
+	// Tokens is the billed vector over the calls, when the series carries the
+	// split. SplitKnown is false when it does not, and every dimension of
+	// Tokens except InputTokens and OutputTokens is then meaningless.
+	Tokens     domain.UsageTokenTotals
+	SplitKnown bool
+
+	// Compactions and the three figures under it fold Series.Compactions.
+	// SummaryOutputKnown is false when ANY compaction left its generated
+	// tokens unmeasured, because a partial sum of them is worse than none.
+	Compactions          int64
+	CompactionPreTokens  int64
+	CompactionPostTokens int64
+	CompactionDurationMs int64
+	SummaryOutputTokens  int64
+	SummaryOutputKnown   bool
 }
 
 // Measure folds a series into its metrics. Pure: the same series always
@@ -98,10 +189,19 @@ func Measure(s Series) Metrics {
 	}
 	m.FirstContext = s.Calls[0].ContextTokens
 	m.LastContext = s.Calls[len(s.Calls)-1].ContextTokens
+	m.SplitKnown = true
 	var firstAt, lastAt time.Time
 	for _, c := range s.Calls {
 		m.CumulativeInput += c.ContextTokens
 		m.OutputTokens += c.OutputTokens
+		if !c.splitConsistent() {
+			m.SplitKnown = false
+		}
+		m.Tokens.InputTokens += c.ContextTokens
+		m.Tokens.UncachedInputTokens += c.UncachedInputTokens
+		m.Tokens.CacheReadTokens += c.CacheReadTokens
+		m.Tokens.CacheWriteTokens += c.CacheWriteTokens
+		m.Tokens.OutputTokens += c.OutputTokens
 		if c.ContextTokens > m.PeakContext {
 			m.PeakContext = c.ContextTokens
 		}
@@ -123,7 +223,30 @@ func Measure(s Series) Metrics {
 	if !firstAt.IsZero() && !lastAt.IsZero() && !lastAt.Before(firstAt) {
 		m.Elapsed, m.ElapsedKnown = lastAt.Sub(firstAt), true
 	}
+	m.Tokens.EventCount = m.Calls
+	m.SummaryOutputKnown = true
+	for _, compaction := range s.Compactions {
+		m.Compactions++
+		m.CompactionPreTokens += compaction.PreTokens
+		m.CompactionPostTokens += compaction.PostTokens
+		m.CompactionDurationMs += compaction.DurationMs
+		if !compaction.SummaryOutputKnown {
+			m.SummaryOutputKnown = false
+			continue
+		}
+		m.SummaryOutputTokens += compaction.SummaryOutputTokens
+	}
+	if !m.SummaryOutputKnown {
+		m.SummaryOutputTokens = 0
+	}
 	return m
+}
+
+// splitConsistent reports whether this call's billed dimensions add up to the
+// context it declares. A call that carries none of them is not consistent: it
+// is unsplit, which is a different and equally unpriceable state.
+func (c Call) splitConsistent() bool {
+	return c.UncachedInputTokens+c.CacheReadTokens+c.CacheWriteTokens == c.ContextTokens
 }
 
 // Policy is the change whose effect is being replayed.
@@ -147,6 +270,23 @@ type Policy struct {
 	// compacted conversation. A caller states it, and a sensitivity test
 	// states how much the answer moves when it is wrong.
 	PostCompactContextTokens int64
+	// PostCompactCacheWriteTokens is how much of PostCompactContextTokens the
+	// first call after a compaction has to WRITE rather than read from cache:
+	// the summary, the fact pack and everything the harness re-attaches. The
+	// rest is the standing prefix, which stays cached across the replacement.
+	//
+	// It matters out of all proportion to its size, because a written token is
+	// priced at twelve and a half times a read one. Leaving it zero says "the
+	// whole post-compaction conversation was already cached", which is false
+	// for every compaction ever observed -- so a zero here makes the cost fold
+	// report the series as unsplit rather than cheap.
+	PostCompactCacheWriteTokens int64
+	// CompactionSummaryOutputTokens is what the summarization turn GENERATES.
+	// CompactionSummaryOutputKnown must be set for it to count: an unset value
+	// leaves the replayed series' cost explicitly unknown instead of quietly
+	// omitting the largest term in it.
+	CompactionSummaryOutputTokens int64
+	CompactionSummaryOutputKnown  bool
 }
 
 // Apply replays a series under a policy, returning the series that policy
@@ -166,6 +306,7 @@ func Apply(s Series, p Policy) Series {
 	segment := out.Calls[0].Segment
 	level := out.Calls[0].ContextTokens
 	for i := range out.Calls {
+		boundary := false
 		if i > 0 {
 			delta := s.Calls[i].ContextTokens - s.Calls[i-1].ContextTokens
 			if out.Calls[i].Segment != segment {
@@ -173,6 +314,7 @@ func Apply(s Series, p Policy) Series {
 				// the post-compaction level rather than everything before it.
 				segment = out.Calls[i].Segment
 				level = p.PostCompactContextTokens
+				boundary = true
 			} else {
 				level += delta
 			}
@@ -181,8 +323,53 @@ func Apply(s Series, p Policy) Series {
 			level = 0
 		}
 		out.Calls[i].ContextTokens = level
+		if boundary {
+			previous := s.Calls[i-1]
+			out.Compactions = append(out.Compactions, Compaction{
+				// The summarization turn reads the conversation as it stood
+				// plus the answer that had just been added to it, which is
+				// what the harness's own preTokens figure counts.
+				PreTokens:           previous.ContextTokens + previous.OutputTokens,
+				PostTokens:          p.PostCompactContextTokens,
+				SummaryOutputTokens: p.CompactionSummaryOutputTokens,
+				SummaryOutputKnown:  p.CompactionSummaryOutputKnown,
+			})
+			// The first call after a replacement writes the new prefix; only
+			// what the policy names as written is written.
+			out.Calls[i].CacheWriteTokens = p.PostCompactCacheWriteTokens
+		}
+		rebillCall(&out.Calls[i], s.Calls[i])
 	}
 	return out
+}
+
+// rebillCall redistributes a replayed call's billed dimensions to match the
+// context it now carries.
+//
+// The uncached and written halves are properties of the WORK -- a tool result
+// is the same size whatever came before it -- so they survive the replay
+// untouched. Only the cached read moves, because only the cached read is the
+// history. A source call whose split was never recorded leaves the replayed
+// call unsplit too: a replay cannot invent a partition the recording did not
+// have, and the cost fold refuses to price what it cannot partition.
+func rebillCall(out *Call, source Call) {
+	if !source.splitConsistent() {
+		out.UncachedInputTokens, out.CacheReadTokens, out.CacheWriteTokens = 0, 0, 0
+		return
+	}
+	read := out.ContextTokens - out.UncachedInputTokens - out.CacheWriteTokens
+	if read < 0 {
+		// The policy asked for a post-compaction conversation smaller than
+		// what this call must write into it. Clamp the write rather than
+		// report a negative read, and leave the context as stated.
+		read = 0
+		out.CacheWriteTokens = out.ContextTokens - out.UncachedInputTokens
+		if out.CacheWriteTokens < 0 {
+			out.CacheWriteTokens = 0
+			out.UncachedInputTokens = out.ContextTokens
+		}
+	}
+	out.CacheReadTokens = read
 }
 
 // Comparison is a before/after pair and the percentages between them.
