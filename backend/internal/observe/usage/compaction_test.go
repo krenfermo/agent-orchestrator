@@ -403,3 +403,25 @@ func TestAccountingWithoutAPricerStillReportsEveryToken(t *testing.T) {
 		t.Fatal("no rate card means no cost, never a zero one")
 	}
 }
+
+// TestAPartialOrMalformedRecordProducesNoObservation covers the tailer's own
+// worst case: a batch that ends mid-record. The chunk reader only yields whole
+// lines, so a truncated one arrives as unparseable JSON and must raise the
+// anomaly the parser already raises for any malformed record -- never half an
+// observation with half its figures.
+func TestAPartialOrMalformedRecordProducesNoObservation(t *testing.T) {
+	truncated := compactBoundaryRecord[:len(compactBoundaryRecord)-40]
+	res, state := parseClaudeRecords(t, truncated)
+	if state.CompactionCount != 0 || len(state.Compactions) != 0 {
+		t.Fatalf("a truncated record produced an observation: %+v", state.Compactions)
+	}
+	if res.Cursor.AnomalyCount == 0 {
+		t.Fatalf("a malformed record must raise an anomaly, got cursor %+v", res.Cursor)
+	}
+	t.Logf("anomalies=%d", res.Cursor.AnomalyCount)
+	// A cost-state whose modelUsage is not an object at all.
+	_, state2 := parseClaudeRecords(t, `{"type":"cost-state","modelUsage":"nope"}`)
+	if state2.HarnessTotals != nil {
+		t.Fatal("a malformed rollup must not be stored")
+	}
+}

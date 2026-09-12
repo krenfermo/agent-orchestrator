@@ -359,13 +359,22 @@ func BuildCompactionAccounting(in CompactionAccountingInput, pricer ModelTokenPr
 		return out
 	}
 
+	// The attributed side is CONSUMED as it is matched, never re-applied.
+	//
+	// Two harness buckets can share one canonical model -- a session that ran
+	// "claude-opus-5" and rolled part of itself up as "claude-opus-5[1m]" is
+	// exactly that shape -- and crediting the same attributed tokens against
+	// both of them would subtract them twice. The residual would come out
+	// SMALLER than it is, which is the one direction of error this whole file
+	// exists to remove: it would under-report the spend AO cannot see.
 	for _, model := range in.Harness.Models {
 		key := canonicalModelKey(model.ModelID)
-		attributed, matched := attributedByKey[key]
-		residual, negative := subtractFloored(model.Tokens, attributed)
-		if negative {
-			out.UnattributedNegative = true
-		}
+		credit, matched := attributedByKey[key]
+		residual, used := consumeCredit(model.Tokens, credit)
+		// Write the remainder back so the next bucket sharing this key can
+		// only claim what is left. The entry is updated, never deleted, so
+		// `matched` keeps meaning "some attributed line named this model".
+		attributedByKey[key] = subtractExact(credit, used)
 		if residual == (UsageTokenTotals{}) {
 			continue
 		}
@@ -381,33 +390,70 @@ func BuildCompactionAccounting(in CompactionAccountingInput, pricer ModelTokenPr
 		out.Unattributed = out.Unattributed.Add(residual)
 		out.UnattributedByModel = append(out.UnattributedByModel, line)
 	}
+	// Credit nobody could absorb means AO holds events the harness does not
+	// admit to. That is a statement about the pipeline, not a discount, so it
+	// is flagged rather than netted off against anything.
+	for _, leftover := range attributedByKey {
+		if billedDimensions(leftover) != (UsageTokenTotals{}) {
+			out.UnattributedNegative = true
+			break
+		}
+	}
 	sort.SliceStable(out.UnattributedByModel, func(i, j int) bool {
 		return out.UnattributedByModel[i].ModelID < out.UnattributedByModel[j].ModelID
 	})
 	return out
 }
 
-// subtractFloored is a - b on every dimension, floored at zero, reporting
-// whether any dimension would have gone negative.
+// consumeCredit subtracts as much of credit from have as have can absorb,
+// returning what is left of have and how much of the credit was actually used.
+//
+// Per dimension, because the dimensions are priced apart and a shortfall on one
+// must not be paid for out of another.
 //
 // EventCount and the reasoning fields are deliberately not carried into a
 // residual: a count of events AO does not have is zero events, and a reasoning
 // figure the harness reports separately is not comparable to one folded out of
 // per-call usage.
-func subtractFloored(a, b UsageTokenTotals) (UsageTokenTotals, bool) {
-	negative := false
-	sub := func(x, y int64) int64 {
-		if x < y {
-			negative = true
-			return 0
+func consumeCredit(have, credit UsageTokenTotals) (residual, used UsageTokenTotals) {
+	take := func(h, c int64) (int64, int64) {
+		if c > h {
+			c = h
 		}
-		return x - y
+		if c < 0 {
+			c = 0
+		}
+		return h - c, c
 	}
+	residual.InputTokens, used.InputTokens = take(have.InputTokens, credit.InputTokens)
+	residual.UncachedInputTokens, used.UncachedInputTokens = take(have.UncachedInputTokens, credit.UncachedInputTokens)
+	residual.CacheReadTokens, used.CacheReadTokens = take(have.CacheReadTokens, credit.CacheReadTokens)
+	residual.CacheWriteTokens, used.CacheWriteTokens = take(have.CacheWriteTokens, credit.CacheWriteTokens)
+	residual.OutputTokens, used.OutputTokens = take(have.OutputTokens, credit.OutputTokens)
+	return residual, used
+}
+
+// billedDimensions keeps only the five dimensions a residual is made of, so a
+// leftover event count -- which is bookkeeping, not spend -- cannot be mistaken
+// for tokens AO attributed and the harness did not report.
+func billedDimensions(t UsageTokenTotals) UsageTokenTotals {
 	return UsageTokenTotals{
-		InputTokens:         sub(a.InputTokens, b.InputTokens),
-		UncachedInputTokens: sub(a.UncachedInputTokens, b.UncachedInputTokens),
-		CacheReadTokens:     sub(a.CacheReadTokens, b.CacheReadTokens),
-		CacheWriteTokens:    sub(a.CacheWriteTokens, b.CacheWriteTokens),
-		OutputTokens:        sub(a.OutputTokens, b.OutputTokens),
-	}, negative
+		InputTokens:         t.InputTokens,
+		UncachedInputTokens: t.UncachedInputTokens,
+		CacheReadTokens:     t.CacheReadTokens,
+		CacheWriteTokens:    t.CacheWriteTokens,
+		OutputTokens:        t.OutputTokens,
+	}
+}
+
+// subtractExact is a - b on the five billed dimensions, with no floor, used
+// only where b is known to be no larger than a.
+func subtractExact(a, b UsageTokenTotals) UsageTokenTotals {
+	return UsageTokenTotals{
+		InputTokens:         a.InputTokens - b.InputTokens,
+		UncachedInputTokens: a.UncachedInputTokens - b.UncachedInputTokens,
+		CacheReadTokens:     a.CacheReadTokens - b.CacheReadTokens,
+		CacheWriteTokens:    a.CacheWriteTokens - b.CacheWriteTokens,
+		OutputTokens:        a.OutputTokens - b.OutputTokens,
+	}
 }

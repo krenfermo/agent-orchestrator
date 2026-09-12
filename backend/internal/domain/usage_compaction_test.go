@@ -380,3 +380,67 @@ func TestModelVariantsAreMatchedForTheResidualAndNeverForThePrice(t *testing.T) 
 		t.Fatal("matching for the gap must not become matching for the rate")
 	}
 }
+
+// TestAttributedTokensAreCreditedExactlyOnce is the regression for the defect
+// the P7.1 integration review found.
+//
+// Two harness buckets can canonicalise to the same model -- a session that ran
+// "claude-opus-5" and rolled part of itself up as "claude-opus-5[1m]" is
+// exactly that shape. Crediting the attributed tokens against both of them
+// subtracted them twice and made the residual SMALLER than it is, which is the
+// one direction of error this whole file exists to remove: it under-reports the
+// spend AO cannot see, on the feature whose entire purpose is to stop
+// under-reporting it.
+func TestAttributedTokensAreCreditedExactlyOnce(t *testing.T) {
+	got := domain.BuildCompactionAccounting(domain.CompactionAccountingInput{
+		SessionID: "s",
+		Attributed: []domain.ModelUsageLine{{
+			ModelID: "claude-opus-5",
+			Tokens:  domain.UsageTokenTotals{InputTokens: 500, OutputTokens: 50, EventCount: 3},
+		}},
+		Harness: domain.HarnessSessionTotals{Observed: true, Models: []domain.HarnessModelTotals{
+			{ModelID: "claude-opus-5", Tokens: domain.UsageTokenTotals{InputTokens: 1000, OutputTokens: 100}},
+			{ModelID: "claude-opus-5[1m]", Tokens: domain.UsageTokenTotals{InputTokens: 2000, OutputTokens: 200}},
+		}},
+	}, nil)
+
+	// The harness reported 3,000 in and 300 out; AO holds 500 and 50.
+	if got.Unattributed.InputTokens != 2500 || got.Unattributed.OutputTokens != 250 {
+		t.Fatalf("residual = %d/%d, want 2500/250 -- the credit was applied more than once",
+			got.Unattributed.InputTokens, got.Unattributed.OutputTokens)
+	}
+	// The first bucket absorbs the credit; the second gets none of it.
+	if got.UnattributedByModel[0].Tokens.InputTokens != 500 {
+		t.Fatalf("first bucket = %d, want 1000-500", got.UnattributedByModel[0].Tokens.InputTokens)
+	}
+	if got.UnattributedByModel[1].Tokens.InputTokens != 2000 {
+		t.Fatalf("second bucket = %d, want its whole total", got.UnattributedByModel[1].Tokens.InputTokens)
+	}
+	// Everything AO attributed was absorbed, so nothing is flagged.
+	if got.UnattributedNegative {
+		t.Fatal("all attributed tokens were absorbed; nothing should be flagged")
+	}
+}
+
+// TestAModelTheRollupNeverMentionsIsFlagged pins the other half of the same
+// bookkeeping: credit no bucket could absorb means AO holds events the harness
+// does not admit to. It is a statement about the pipeline, never a discount.
+func TestAModelTheRollupNeverMentionsIsFlagged(t *testing.T) {
+	got := domain.BuildCompactionAccounting(domain.CompactionAccountingInput{
+		SessionID: "s",
+		Attributed: []domain.ModelUsageLine{
+			{ModelID: "claude-opus-5", Tokens: domain.UsageTokenTotals{InputTokens: 100}},
+			{ModelID: "claude-sonnet-5", Tokens: domain.UsageTokenTotals{InputTokens: 40}},
+		},
+		Harness: domain.HarnessSessionTotals{Observed: true, Models: []domain.HarnessModelTotals{
+			{ModelID: "claude-opus-5", Tokens: domain.UsageTokenTotals{InputTokens: 300}},
+		}},
+	}, nil)
+	if !got.UnattributedNegative {
+		t.Fatal("an attributed model absent from the rollup must be flagged")
+	}
+	if got.Unattributed.InputTokens != 200 {
+		t.Fatalf("residual = %d, want 300-100 with sonnet's 40 not netted off anything",
+			got.Unattributed.InputTokens)
+	}
+}

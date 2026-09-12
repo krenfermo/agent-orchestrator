@@ -88,13 +88,21 @@ type CostMetrics struct {
 	Known  bool
 	Reason CostUnknownReason
 
-	// CallCost is the cost of the calls in the series. CompactionCost is the
-	// cost of the summarization turns beside them: what they re-read, at cache
-	// read prices, plus what they generated, at output prices.
+	// CallCost is the cost of the calls in the series. CompactionCost is what
+	// the series spent OUTSIDE those calls.
 	//
-	// They are separate because the whole finding of P7.1 is that the second
-	// one exists and was never counted. A reader who sees only a total cannot
-	// tell whether it was.
+	// Read its CompactionBasis before reading its amount. Modelled, it is the
+	// summarization turns and nothing else: what they re-read at cache read
+	// prices plus what they generated at output prices. MEASURED, it is the
+	// whole harness residual -- dominated by the summarizations on a session
+	// that compacted, and on a session that did not it is retries and a
+	// generated title, which is a real cost and not a compaction. A zero
+	// compaction count beside a non-zero measured amount is that second case,
+	// and it is why Report does not label this row "compactions".
+	//
+	// The two are separate from CallCost because the whole finding of P7.1 is
+	// that spend outside the call series exists and was never counted. A reader
+	// who sees only a total cannot tell whether it was.
 	CallCost       domain.UsageCost
 	CompactionCost domain.UsageCost
 	TotalCost      domain.UsageCost
@@ -288,7 +296,11 @@ func Report(before, after Scenario) string {
 	row("cost basis", string(before.Cost.CompactionBasis), string(after.Cost.CompactionBasis))
 	b.WriteString("-- COST --------------------------------------------------------------\n")
 	row("calls", money(before.Cost.CallCost, before.Cost.Known), money(after.Cost.CallCost, after.Cost.Known))
-	row("compactions", money(before.Cost.CompactionCost, before.Cost.Known), money(after.Cost.CompactionCost, after.Cost.Known))
+	// NOT labelled "compactions": measured, this row is the whole residual,
+	// and on a series that never compacted that residual is retries and a
+	// title. Naming it after compactions would invite exactly the misreading
+	// this file exists to prevent.
+	row("spend outside calls", money(before.Cost.CompactionCost, before.Cost.Known), money(after.Cost.CompactionCost, after.Cost.Known))
 	row("total", money(before.Cost.TotalCost, before.Cost.Known), money(after.Cost.TotalCost, after.Cost.Known))
 	if before.Cost.Reason != CostReasonNone || after.Cost.Reason != CostReasonNone {
 		row("unknown because", string(before.Cost.Reason), string(after.Cost.Reason))
