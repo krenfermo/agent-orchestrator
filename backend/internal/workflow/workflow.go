@@ -391,6 +391,13 @@ type Deps struct {
 	// without it a token ceiling still applies (it needs no rate card) and a
 	// cost ceiling reports itself unenforceable rather than being guessed at.
 	UsagePricer UsagePricer
+	// UsageRateCard, SessionCompactionObservations and CompactionSummaryPriors
+	// back the SHADOW economic gate of P7.2B2. All three optional: absent, the
+	// gate records UNKNOWN verdicts and changes nothing, which is the same
+	// behaviour as a coordinator built before it existed.
+	UsageRateCard                 UsageRateCard
+	SessionCompactionObservations SessionCompactionObservations
+	CompactionSummaryPriors       CompactionSummaryPriors
 	// PlannerUsage meters the planner's own provider calls. Optional.
 	PlannerUsage PlannerUsageRecorder
 
@@ -678,6 +685,14 @@ type Coordinator struct {
 	// to dispatch, it reports the budget as unmeasurable. See usage_budget.go.
 	usageBudgets usageBudgetStore
 	usagePricer  UsagePricer
+	// The four below back P7.2B2's SHADOW economic gate. Every one of them is
+	// optional and nothing branches on what they produce: a coordinator missing
+	// all four records UNKNOWN verdicts and behaves exactly as it did before the
+	// gate existed. See compaction_economics.go.
+	compactionEconomics     compactionEconomicsStore
+	usageRateCard           UsageRateCard
+	compactionObservations  SessionCompactionObservations
+	compactionSummaryPriors CompactionSummaryPriors
 	// plannerUsage records what a planner invocation reported spending. The
 	// planner is a real `claude --print` subprocess with no transcript, so this
 	// response-reported path is the ONLY way its tokens can be seen. Optional:
@@ -855,6 +870,10 @@ func New(d Deps) *Coordinator {
 		usageWindows:             func() usageAttributionStore { s, _ := d.Store.(usageAttributionStore); return s }(),
 		usageBudgets:             func() usageBudgetStore { s, _ := d.Store.(usageBudgetStore); return s }(),
 		usagePricer:              d.UsagePricer,
+		compactionEconomics:      func() compactionEconomicsStore { s, _ := d.Store.(compactionEconomicsStore); return s }(),
+		usageRateCard:            d.UsageRateCard,
+		compactionObservations:   d.SessionCompactionObservations,
+		compactionSummaryPriors:  d.CompactionSummaryPriors,
 		plannerUsage:             d.PlannerUsage,
 		planner:                  d.Planner,
 		plannerContextBuilder:    d.PlannerContextBuilder,

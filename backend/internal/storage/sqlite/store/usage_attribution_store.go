@@ -422,3 +422,38 @@ func eventCacheCreation(five, hour sql.NullInt64, total int64) domain.CacheCreat
 	}
 	return domain.CacheCreationSplit{Ephemeral5mTokens: five.Int64, Ephemeral1hTokens: hour.Int64}
 }
+
+// ListRunWorkerCallObservations returns the WORKER side of one run's call
+// series, in provider order, as domain values.
+//
+// Same single indexed read as ListRunContextTrajectoryEvents -- no new query and
+// no new index -- narrowed twice. It keeps only the roles that own a conversation
+// somebody could decide to compact: a reviewer pane and a planner invocation are
+// usage subjects too, and neither is a conversation with a fix cycle in it. And
+// it returns domain types rather than the store's own, so internal/workflow can
+// declare a port for this read without importing the store package, exactly as
+// it does for every other ledger read it consumes.
+//
+// The row count is one per worker model invocation of one run -- 193 on the
+// largest run AO has metered -- which is what makes this affordable on a fix
+// boundary. It is bounded by the run and never by the project.
+func (s *Store) ListRunWorkerCallObservations(ctx context.Context, runID string) ([]domain.SessionCallObservation, error) {
+	events, err := s.ListRunContextTrajectoryEvents(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.SessionCallObservation, 0, len(events))
+	for _, e := range events {
+		if e.Role != domain.WorkflowRoleWorker && e.Role != domain.WorkflowRoleFixWorker {
+			continue
+		}
+		out = append(out, domain.SessionCallObservation{
+			Role:       e.Role,
+			Cycle:      e.Cycle,
+			ModelID:    e.ModelID,
+			ObservedAt: e.ObservedAt,
+			Tokens:     e.Tokens,
+		})
+	}
+	return out, nil
+}

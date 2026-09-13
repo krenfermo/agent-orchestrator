@@ -41,6 +41,7 @@ func newUsageCommand(ctx *commandContext) *cobra.Command {
 		Short: "Maintain AO's token usage ledger",
 	}
 	cmd.AddCommand(newUsageBackfillCacheTTLCommand(ctx))
+	cmd.AddCommand(newUsageCompactionVerdictsCommand(ctx))
 	return cmd
 }
 
