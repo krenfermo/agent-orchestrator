@@ -198,6 +198,16 @@ func printCompactionVerdicts(
 			r.GateVersion, r.EstimatorVersion, pricingProvenance(r))
 	}
 	_, _ = fmt.Fprintf(out, "\n  Nothing above changed what this run did. The shadow gate governs nothing.\n")
+	if summary.Skip > 0 {
+		// Said out loud because the opposite is the easiest wrong conclusion to
+		// draw from this screen. A SKIP on a compaction that then did not happen
+		// has NO observed counterfactual: AO never learns what the post-compaction
+		// context or the summary would have been, so the skip is predicted correct
+		// and never measured correct. The margin beside each one is a bound on how
+		// wrong it could be, not a measurement of how wrong it was.
+		_, _ = fmt.Fprintf(out, "  A SKIP whose compaction did not happen has no observed counterfactual:\n")
+		_, _ = fmt.Fprintf(out, "  it is predicted correct, never measured correct. Read the margin as a bound.\n")
+	}
 }
 
 type countLine struct {
