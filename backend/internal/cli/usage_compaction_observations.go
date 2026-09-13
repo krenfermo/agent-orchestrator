@@ -22,7 +22,8 @@ import (
 // It answers three questions and refuses to flatter any of them: how many
 // compactions AO has observed, how many of those sessions carry the rollup that
 // makes a summary cost measurable, and how many INDEPENDENT sessions therefore
-// contribute to the prior. Three boundaries of one session are one sample.
+// contribute to the prior -- PER exact (harness, model) cohort, because the gate
+// never mixes cohorts. Three boundaries of one session are one sample.
 //
 // Read-only, like the verdict readback beside it: sqlite.OpenReadOnly takes no
 // writable connection, runs no migration and needs no daemon.
@@ -95,6 +96,8 @@ func (c *commandContext) runUsageCompactionObservations(cmd *cobra.Command, json
 		}
 		lines = append(lines, compactionObservationLine{
 			SessionID:                o.SessionID,
+			Harness:                  o.Harness,
+			ModelID:                  o.ModelID,
 			Compactions:              o.Compactions,
 			HarnessRollupObserved:    true,
 			UnattributedOutputTokens: o.UnattributedOutputTokens,
@@ -104,9 +107,7 @@ func (c *commandContext) runUsageCompactionObservations(cmd *cobra.Command, json
 	}
 	sort.SliceStable(lines, func(i, j int) bool { return lines[i].SessionID < lines[j].SessionID })
 
-	// The estimator's own answer, asked rather than reimplemented, so this screen
-	// can never disagree with the gate.
-	prior := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{Observations: observations})
+	cohorts := summaryPriorCohorts(observations)
 
 	if jsonOut {
 		return writeJSON(cmd.OutOrStdout(), map[string]any{
@@ -114,14 +115,56 @@ func (c *commandContext) runUsageCompactionObservations(cmd *cobra.Command, json
 			"completeSummaryObservations": len(lines),
 			"independentSessions":         len(independent),
 			"minimumIndependentSessions":  domain.MinSummaryPriorSessions(),
-			"summaryPriorKnown":           prior.Known,
-			"summaryPriorTokens":          prior.Value,
-			"summaryPriorSamples":         prior.Samples,
+			"cohorts":                     cohorts,
 			"sessions":                    lines,
 		})
 	}
-	printCompactionObservations(cmd, boundaries, lines, independent, prior)
+	printCompactionObservations(cmd, boundaries, lines, independent, cohorts)
 	return nil
+}
+
+// summaryPriorCohort is the estimator's answer for one exact (harness, model).
+type summaryPriorCohort struct {
+	Harness string `json:"harness"`
+	ModelID string `json:"modelId"`
+	Known   bool   `json:"summaryPriorKnown"`
+	Tokens  int64  `json:"summaryPriorTokens"`
+	Samples int    `json:"summaryPriorSamples"`
+}
+
+// summaryPriorCohorts asks the estimator once per exact cohort present, rather
+// than reimplementing it, so this screen can never disagree with the gate. An
+// observation with no identity belongs to no cohort and is reported under an
+// empty one, which the estimator always answers UNKNOWN.
+func summaryPriorCohorts(observations []domain.CompactionSummarySessionObservation) []summaryPriorCohort {
+	type key struct{ harness, model string }
+	seen := map[key]struct{}{}
+	var keys []key
+	for _, o := range observations {
+		k := key{o.Harness, o.ModelID}
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].harness != keys[j].harness {
+			return keys[i].harness < keys[j].harness
+		}
+		return keys[i].model < keys[j].model
+	})
+	out := make([]summaryPriorCohort, 0, len(keys))
+	for _, k := range keys {
+		prior := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+			Harness: k.harness, ModelID: k.model, Observations: observations,
+		})
+		out = append(out, summaryPriorCohort{
+			Harness: k.harness, ModelID: k.model,
+			Known: prior.Known, Tokens: prior.Value, Samples: prior.Samples,
+		})
+	}
+	return out
 }
 
 func printCompactionObservations(
@@ -129,7 +172,7 @@ func printCompactionObservations(
 	boundaries int,
 	lines []compactionObservationLine,
 	independent map[string]struct{},
-	prior domain.EstimatedTokens,
+	cohorts []summaryPriorCohort,
 ) {
 	out := cmd.OutOrStdout()
 	minimum := domain.MinSummaryPriorSessions()
@@ -139,17 +182,26 @@ func printCompactionObservations(
 	_, _ = fmt.Fprintf(out, "  complete summary observations   %d  (a boundary AND the session's rollup)\n", len(lines))
 	_, _ = fmt.Fprintf(out, "  independent sessions            %d of %d needed\n", len(independent), minimum)
 
-	_, _ = fmt.Fprintf(out, "\n  summary cost prior (S)\n")
-	if prior.Known {
-		_, _ = fmt.Fprintf(out, "    KNOWN    %d tokens per compaction, from %d independent sessions\n",
-			prior.Value, prior.Samples)
-		_, _ = fmt.Fprintf(out, "    The conservative MAXIMUM across those sessions, not their mean: S enters the\n")
-		_, _ = fmt.Fprintf(out, "    cost of compacting, so understating it would make compaction look cheaper.\n")
-	} else {
-		_, _ = fmt.Fprintf(out, "    UNKNOWN  %d independent session(s) observed, %d needed\n", prior.Samples, minimum)
-		_, _ = fmt.Fprintf(out, "    Every shadow verdict will read summary_cost_unknown until this is met. That\n")
-		_, _ = fmt.Fprintf(out, "    is the fail-closed answer and NOT a reason to lower the minimum.\n")
+	_, _ = fmt.Fprintf(out, "\n  summary cost upper bound (S), per exact harness + model cohort\n")
+	if len(cohorts) == 0 {
+		_, _ = fmt.Fprintf(out, "    UNKNOWN  no cohort has any observation, %d independent sessions needed\n", minimum)
 	}
+	for _, co := range cohorts {
+		name := co.Harness + " / " + co.ModelID
+		if co.Harness == "" || co.ModelID == "" {
+			name = "(no single harness + model: never used)"
+		}
+		if co.Known {
+			_, _ = fmt.Fprintf(out, "    %s\n      KNOWN    %d tokens per compaction, from %d independent sessions\n",
+				name, co.Tokens, co.Samples)
+		} else {
+			_, _ = fmt.Fprintf(out, "    %s\n      UNKNOWN  %d independent session(s) observed, %d needed\n",
+				name, co.Samples, minimum)
+		}
+	}
+	_, _ = fmt.Fprintf(out, "    A KNOWN figure is the conservative MAXIMUM across that cohort's sessions. An\n")
+	_, _ = fmt.Fprintf(out, "    UNKNOWN cohort makes every verdict for it read summary_cost_unknown: the\n")
+	_, _ = fmt.Fprintf(out, "    fail-closed answer, and NOT a reason to lower the minimum or mix cohorts.\n")
 
 	if len(lines) == 0 {
 		_, _ = fmt.Fprintf(out, "\n  No session has both compacted and written a rollup yet.\n")
@@ -168,7 +220,7 @@ func printCompactionObservations(
 			// counts here and not there.
 			placeable = "  [NOT placeable in time: the estimator will drop it]"
 		}
-		_, _ = fmt.Fprintf(out, "    %s\n", l.SessionID)
+		_, _ = fmt.Fprintf(out, "    %s  (%s / %s)\n", l.SessionID, l.Harness, l.ModelID)
 		_, _ = fmt.Fprintf(out, "      compactions %d, unattributed output %d, summary/compaction %d%s\n",
 			l.Compactions, l.UnattributedOutputTokens, l.SummaryTokensPerCompact, placeable)
 	}

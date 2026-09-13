@@ -771,13 +771,16 @@ func TestContextAfterEstimatorRefusesWithoutABoundary(t *testing.T) {
 // so much as a thing that cannot be correct.
 func TestSummaryEstimatorNeverUsesTheSessionUnderJudgement(t *testing.T) {
 	own := domain.CompactionSummarySessionObservation{
+		Harness: "claude-code", ModelID: "claude-opus-5",
 		SessionID: "session-under-judgement", Compactions: 2, UnattributedOutputTokens: 999999,
 	}
 	other := domain.CompactionSummarySessionObservation{
+		Harness: "claude-code", ModelID: "claude-opus-5",
 		SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16986,
 	}
 
 	only := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+		Harness: "claude-code", ModelID: "claude-opus-5",
 		ExcludeSessionID: "session-under-judgement",
 		Observations:     []domain.CompactionSummarySessionObservation{own},
 	})
@@ -792,6 +795,7 @@ func TestSummaryEstimatorNeverUsesTheSessionUnderJudgement(t *testing.T) {
 	// below the minimum of three independent sessions, and therefore UNKNOWN with
 	// the sample count reported so a reader can see how far off it is.
 	got := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+		Harness: "claude-code", ModelID: "claude-opus-5",
 		ExcludeSessionID: "session-under-judgement",
 		Observations:     []domain.CompactionSummarySessionObservation{own, other},
 	})
@@ -810,9 +814,10 @@ func TestSummaryEstimatorNeverUsesTheSessionUnderJudgement(t *testing.T) {
 // minimum sample it uses the worst observation, not an average of two.
 func TestSummaryEstimatorTakesTheExpensiveEndUntilThereIsAPopulation(t *testing.T) {
 	obs := func(id string, compactions int, out int64) domain.CompactionSummarySessionObservation {
-		return domain.CompactionSummarySessionObservation{SessionID: id, Compactions: compactions, UnattributedOutputTokens: out}
+		return domain.CompactionSummarySessionObservation{Harness: "claude-code", ModelID: "claude-opus-5", SessionID: id, Compactions: compactions, UnattributedOutputTokens: out}
 	}
 	twoSessions := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+		Harness: "claude-code", ModelID: "claude-opus-5",
 		Observations: []domain.CompactionSummarySessionObservation{obs("a", 1, 4000), obs("b", 1, 9000)},
 	})
 	if twoSessions.Known {
@@ -822,6 +827,7 @@ func TestSummaryEstimatorTakesTheExpensiveEndUntilThereIsAPopulation(t *testing.
 	// MAXIMUM rather than the mean: S enters the cost of compacting, so
 	// underestimating it makes compaction look cheaper than it is.
 	threeSessions := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+		Harness: "claude-code", ModelID: "claude-opus-5",
 		Observations: []domain.CompactionSummarySessionObservation{obs("a", 1, 4000), obs("b", 1, 9000), obs("c", 1, 5000)},
 	})
 	if !threeSessions.Known {
@@ -838,6 +844,7 @@ func TestSummaryEstimatorTakesTheExpensiveEndUntilThereIsAPopulation(t *testing.
 	// project and a task shape, and the quantity being estimated moves with all
 	// three, so counting them as three would be a fabricated population.
 	sameSession := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+		Harness: "claude-code", ModelID: "claude-opus-5",
 		Observations: []domain.CompactionSummarySessionObservation{
 			obs("a", 3, 27000), obs("a", 3, 27000), obs("a", 3, 27000),
 		},

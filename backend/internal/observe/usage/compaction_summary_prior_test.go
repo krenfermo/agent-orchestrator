@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +25,10 @@ import (
 func summaryPriorStore(t *testing.T, sessions []domain.SessionID, records ...string) fakeCompactionStore {
 	t.Helper()
 	source := usageSource(domain.UsageSourceClaudeMain)
+	// An ordinary turn first, so the parser knows the model the session is
+	// running when a boundary arrives. That model, in the ledger's own spelling,
+	// is the cohort identity the boundary carries.
+	records = append([]string{claudeTurnWithLifetimes("turn-0", "claude-opus-5", 30_000, 0, 4_000, 150)}, records...)
 	rows := make([]jsonlRecord, 0, len(records))
 	for i, r := range records {
 		rows = append(rows, jsonlRecord{Offset: int64(i * 900), Data: []byte(r)})
@@ -81,11 +86,16 @@ func TestTheSummaryPriorReadsOneObservationPerCompactingSession(t *testing.T) {
 		if o.ObservedAt == nil {
 			t.Error("an observation with no timestamp cannot be ordered against a decision and the estimator will drop it")
 		}
+		if o.Harness != "claude-code" || o.ModelID != "claude-opus-5" {
+			t.Errorf("cohort = %q / %q, want claude-code / claude-opus-5 exactly as AO recorded them", o.Harness, o.ModelID)
+		}
 	}
 	// And the whole point: three independent sessions is exactly the minimum, so
 	// the estimator now answers.
 	prior := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
 		ExcludeSessionID: "judged",
+		Harness:          "claude-code",
+		ModelID:          "claude-opus-5",
 		DecisionAt:       time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC),
 		Observations:     got,
 	})
@@ -200,5 +210,64 @@ func TestTheSummaryPriorCarriesTokensAndNeverAPrice(t *testing.T) {
 	}
 	if got[0].UnattributedOutputTokens <= 0 {
 		t.Error("the observation must carry its token figure regardless of pricing")
+	}
+}
+
+// TestTheSummaryPriorFiltersOnTheExactCohort: the port's (harness, modelID) is a
+// filter, compared as recorded. No alias is resolved and no spelling normalized,
+// so the rollup's "claude-opus-5[1m]" is NOT the boundary's "claude-opus-5".
+func TestTheSummaryPriorFiltersOnTheExactCohort(t *testing.T) {
+	store := summaryPriorStore(t, []domain.SessionID{"s-1", "s-2", "s-3"}, compactBoundaryRecord, costStateRecord)
+	reader := NewCompactionReader(store, nil)
+	for name, tc := range map[string]struct {
+		harness, model string
+		want           int
+	}{
+		"exact cohort":           {"claude-code", "claude-opus-5", 3},
+		"inventory, no filter":   {"", "", 3},
+		"another model":          {"claude-code", "claude-sonnet-5", 0},
+		"the rollup's alias":     {"claude-code", "claude-opus-5[1m]", 0},
+		"case is not normalized": {"claude-code", "Claude-Opus-5", 0},
+		"another harness":        {"codex", "claude-opus-5", 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := reader.CompactionSummaryObservations(context.Background(), tc.harness, tc.model)
+			if err != nil {
+				t.Fatalf("err: %v", err)
+			}
+			if len(got) != tc.want {
+				t.Errorf("observations = %d, want %d", len(got), tc.want)
+			}
+		})
+	}
+}
+
+// A session whose boundaries were taken on two different models belongs to
+// neither cohort: its residual is one number and cannot be divided between them.
+// It stays visible to an inventory with NO identity, and a filtered read -- the
+// gate's -- never returns it.
+func TestASessionThatCompactedOnTwoModelsBelongsToNoCohort(t *testing.T) {
+	second := strings.Replace(compactBoundaryRecord, `"uuid":"boundary-1"`, `"uuid":"boundary-2"`, 1)
+	store := summaryPriorStore(t, []domain.SessionID{"s-1"},
+		compactBoundaryRecord,
+		claudeTurnWithLifetimes("turn-sonnet", "claude-sonnet-5", 10_000, 0, 1_000, 100),
+		second, costStateRecord)
+	reader := NewCompactionReader(store, nil)
+
+	all, err := reader.CompactionSummaryObservations(context.Background(), "", "")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(all) != 1 || all[0].Harness != "" || all[0].ModelID != "" {
+		t.Fatalf("inventory = %+v, want one observation with no cohort identity", all)
+	}
+	for _, model := range []string{"claude-opus-5", "claude-sonnet-5"} {
+		got, err := reader.CompactionSummaryObservations(context.Background(), "claude-code", model)
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("a mixed-model session reached the %s cohort: %+v", model, got)
+		}
 	}
 }

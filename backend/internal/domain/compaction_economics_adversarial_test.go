@@ -239,6 +239,7 @@ func TestTheSummaryPriorExcludesTheFutureAndTheJudgedSession(t *testing.T) {
 
 	obs := func(id string, out int64, at *time.Time) domain.CompactionSummarySessionObservation {
 		return domain.CompactionSummarySessionObservation{
+			Harness: "claude-code", ModelID: "claude-opus-5",
 			SessionID: id, Compactions: 1, UnattributedOutputTokens: out, ObservedAt: at,
 		}
 	}
@@ -248,6 +249,7 @@ func TestTheSummaryPriorExcludesTheFutureAndTheJudgedSession(t *testing.T) {
 		obs("a", 5000, &past), obs("b", 6000, &past), obs("c", 7000, &past),
 	}
 	want := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+		Harness: "claude-code", ModelID: "claude-opus-5",
 		ExcludeSessionID: "judged", DecisionAt: decisionAt, Observations: admissible,
 	})
 	if !want.Known || want.Samples != 3 || want.Value != 7000 {
@@ -270,6 +272,7 @@ func TestTheSummaryPriorExcludesTheFutureAndTheJudgedSession(t *testing.T) {
 		obs("", 999_999, &past),
 	)
 	got := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+		Harness: "claude-code", ModelID: "claude-opus-5",
 		ExcludeSessionID: "judged", DecisionAt: decisionAt, Observations: contaminated,
 	})
 	if got != want {
@@ -279,6 +282,7 @@ func TestTheSummaryPriorExcludesTheFutureAndTheJudgedSession(t *testing.T) {
 	// And without the three admissible ones, the inadmissible set alone is not a
 	// prior at any sample count.
 	onlyBad := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+		Harness: "claude-code", ModelID: "claude-opus-5",
 		ExcludeSessionID: "judged", DecisionAt: decisionAt,
 		Observations: contaminated[len(admissible):],
 	})
@@ -317,5 +321,70 @@ func TestAKnownSummaryPriorStillCannotProduceCompactWithoutEverythingElse(t *tes
 				t.Errorf("COMPACT with %s, although S was known", name)
 			}
 		})
+	}
+}
+
+// TestTheSummaryPriorNeverMixesCohorts is the grouping guard. Three sessions are
+// enough ONLY within one exact (harness, model) cohort: observations from another
+// model, another harness, an alias spelling, or no identity at all must change
+// neither the sample count nor the value, and must never complete a cohort that
+// is short of the minimum.
+func TestTheSummaryPriorNeverMixesCohorts(t *testing.T) {
+	decisionAt := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	past := decisionAt.Add(-time.Hour)
+	obs := func(id, harness, model string, out int64) domain.CompactionSummarySessionObservation {
+		return domain.CompactionSummarySessionObservation{
+			SessionID: id, Harness: harness, ModelID: model, Compactions: 1,
+			UnattributedOutputTokens: out, ObservedAt: &past,
+		}
+	}
+	in := func(harness, model string, o ...domain.CompactionSummarySessionObservation) domain.EstimatedTokens {
+		return domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+			ExcludeSessionID: "judged", DecisionAt: decisionAt, Harness: harness, ModelID: model, Observations: o,
+		})
+	}
+
+	cohort := []domain.CompactionSummarySessionObservation{
+		obs("a", "claude-code", "claude-opus-5", 5000),
+		obs("b", "claude-code", "claude-opus-5", 6000),
+		obs("c", "claude-code", "claude-opus-5", 7000),
+	}
+	want := in("claude-code", "claude-opus-5", cohort...)
+	if !want.Known || want.Samples != 3 || want.Value != 7000 {
+		t.Fatalf("control cohort = %+v, want known/3/7000", want)
+	}
+
+	foreign := []domain.CompactionSummarySessionObservation{
+		obs("d", "claude-code", "claude-sonnet-5", 999_999),   // another model
+		obs("e", "codex", "claude-opus-5", 999_999),           // another harness
+		obs("f", "claude-code", "claude-opus-5[1m]", 999_999), // an alias spelling: NOT normalized
+		obs("g", "claude-code", "Claude-Opus-5", 999_999),     // case: NOT normalized
+		obs("h", "", "", 999_999),                             // no single identity
+		obs("i", "claude-code", "unknown", 999_999),           // the parser's placeholder
+	}
+	if got := in("claude-code", "claude-opus-5", append(append([]domain.CompactionSummarySessionObservation(nil), cohort...), foreign...)...); got != want {
+		t.Errorf("a foreign cohort reached the prior:\n got  %+v\n want %+v", got, want)
+	}
+
+	// Two of the cohort plus any number of foreign sessions is still two.
+	short := in("claude-code", "claude-opus-5", append(append([]domain.CompactionSummarySessionObservation(nil), cohort[:2]...), foreign...)...)
+	if short.Known || short.Samples != 2 {
+		t.Errorf("foreign sessions completed a short cohort: %+v, want unknown with 2 samples", short)
+	}
+
+	// An unidentified cohort is UNKNOWN whatever it is offered -- including
+	// observations that are themselves unidentified.
+	for name, c := range map[string][2]string{
+		"no harness":        {"", "claude-opus-5"},
+		"no model":          {"claude-code", ""},
+		"placeholder model": {"claude-code", "unknown"},
+		"neither":           {"", ""},
+	} {
+		unidentified := []domain.CompactionSummarySessionObservation{
+			obs("x", c[0], c[1], 1), obs("y", c[0], c[1], 1), obs("z", c[0], c[1], 1),
+		}
+		if got := in(c[0], c[1], append(unidentified, cohort...)...); got.Known || got.Samples != 0 {
+			t.Errorf("%s: an unidentified cohort produced %+v, want unknown with 0 samples", name, got)
+		}
 	}
 }

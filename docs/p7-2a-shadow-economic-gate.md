@@ -1077,7 +1077,7 @@ Demonstrated three ways rather than argued:
 | question | answer | evidence |
 |---|---|---|
 | does the parser detect a compaction on a new transcript? | **yes** | `TestANewSessionProducesEveryObservationTheEconomicGateNeeds` — a fixture of ordinary turns, a boundary, the post-compaction rewrite and the session rollup, parsed from offset zero |
-| is the historical gap only advanced offsets? | **yes** | 137 of 138 transcripts still on disk, and they still CONTAIN the evidence: 2 `compact_boundary` records in 1 file, **166 `cost-state` records across 74 files**. Nothing was lost; it was skipped. |
+| is the historical gap only advanced offsets? | **yes** | 137 of 138 transcripts still on disk, and they still CONTAIN the evidence: 2 `compact_boundary` records in 1 file, **166 `cost-state` records across 74 files (60 sessions)**. The one file with boundaries sits at `byte_offset == size`, last updated 2026-09-11 21:13 UTC, before P7.1 existed. Nothing was lost; it was skipped. |
 | would a session created today accumulate correctly? | **yes** | the same test asserts boundary identity, pre/post tokens, duration, trigger, timestamp, model, uuid, the rollup's output AND reasoning, the full cache vector, and the 5m/1h/unknown split partitioning its own reported total |
 
 And the two properties a recovery would depend on:
@@ -1109,7 +1109,7 @@ transcripts, and idempotent (proven above). A dry-run would recover:
 
 ```
 compact_boundary records recoverable    2   (1 session: ao-canary-fixture-6)
-cost-state rollups recoverable        166   (74 sessions)
+cost-state rollups recoverable        166   (74 files, 60 sessions)
 sessions gaining a COMPLETE summary observation   1
 ```
 
@@ -1118,17 +1118,46 @@ The prior needs three independent sessions that compacted; exactly one exists on
 disk, and recovering it moves the cohort from 0/3 to 1/3. The brief's own rule —
 *do not choose the backfill merely to accelerate statistics* — decides it, and
 §20's rule that shadow observation may begin with S UNKNOWN removes the urgency.
-The 74 recoverable rollups belong to sessions that never compacted; they are the
+The other recoverable rollups belong to sessions that never compacted; they are the
 non-compaction baseline, which this estimator does not net against.
 
 If a later checkpoint wants them, the shape is settled: a separate command,
 dry-run by default, that never touches the ledger, the offsets or the event keys.
 
-## S — what it is
+## S — SUMMARY COST UPPER BOUND
 
-`S` is the tokens the harness GENERATES producing a summary, per compaction,
-derived as **the harness's own output total minus what AO's ledger holds an event
-for**. The summarization turn reaches no assistant record, so the residual is it.
+`S` is an **upper bound** on the tokens the harness GENERATES producing a summary,
+per compaction, derived as **the harness's own output total minus what AO's ledger
+holds an event for**. It is never a realized cost and must not be reported as one.
+
+The arithmetic, per session (`domain.BuildCompactionAccounting`):
+
+```
+for each model bucket m in the harness rollup (cost-state, cumulative, last wins):
+    residual_m = max(0, rollup_output_m - ledger_output_credit_m)   # credit consumed once
+S_session  = sum_m residual_m / compactions                           # integer division
+```
+
+- **rollup output** is `modelUsage[m].outputTokens` from the harness's own
+  `cost-state` record: every output token the harness was billed for in the
+  session, on every model, including calls that never become an assistant record
+  (the summarization, background title/topic calls on a small model).
+- **ledger-attributed output** is `model_usage_events.output_tokens` summed for the
+  session: exactly the assistant records AO parsed.
+- **Reasoning is counted once.** Both sides use the provider's `output_tokens`,
+  which already INCLUDES thinking; `thinkingTokens` is a sub-count carried beside
+  it and is never added. No double counting.
+- **Never negative.** Each dimension is floored at zero, and credit is consumed as
+  it is matched so two rollup spellings of one model cannot subtract it twice.
+
+Why it bounds the summary from ABOVE: the residual is summarization output PLUS
+every other unattributed call. Everything extra overstates `S`, and overstating the
+cost of compacting can only move a verdict away from COMPACT. The bound holds only
+while the rollup covers at least everything the ledger attributed — see the
+admissibility rules below; where AO cannot show that, the session is not a sample.
+
+Unknown pricing does not enter here at all: the reader carries tokens and never a
+price, and the gate's own `RatesKnown` / TTL checks refuse to price a verdict.
 
 Three properties make it usable and each one is deliberate:
 
@@ -1142,14 +1171,27 @@ Three properties make it usable and each one is deliberate:
 - **It can never come from the session being judged.** Structural: the rollup is
   written when a session ends, so a running session has none.
 
-Grouping: the port takes `(harness, modelID)` and **does not filter on them yet**,
-which is stated in its own comment rather than left to be discovered. On the corpus
-that exists every compacting session is one harness and one model, so filtering
-would narrow nothing — while making the reported sample count depend on a model
-match AO cannot yet perform honestly, because the rollup spells the model
-differently from the assistant records it summarises (`claude-opus-5[1m]` against
-`claude-opus-5`) and resolving that spelling is a **pricing** question this read
-must not answer.
+### Grouping — EXACT (harness, model) cohorts (corrected in review)
+
+As first implemented the port took `(harness, modelID)` and ignored both, on the
+grounds that today's corpus is homogeneous. The review rejected that: a prior that
+mixes a cheap summarizer's sessions into an expensive one's is optimistic for the
+expensive cohort, and "homogeneous today" is not a property of the code.
+
+Now:
+
+- An observation's cohort is the binding's **harness** and the **model its
+  boundaries were taken on**, in the ledger's own spelling. The boundary — not the
+  rollup — supplies the model, so it matches the judged session's call series
+  (`claude-opus-5`) **exactly**, with no alias resolution: the rollup's
+  `claude-opus-5[1m]` is never consulted for identity.
+- A session whose boundaries disagree on model or harness belongs to **no** cohort.
+- The gate reads the judged session's harness from its session record (one
+  primary-key read) and passes the call series' model. Either one empty, or the
+  parser's `unknown` placeholder, is an unidentified cohort: **UNKNOWN**, and the
+  candidate list is not even read.
+- The reader filters on exact equality, and the estimator filters again.
+  Case and suffix are not normalized.
 
 ## The minimum sample rule, and the estimator
 
@@ -1174,6 +1216,10 @@ Both halves changed in this checkpoint and both got stricter:
 **INDEPENDENT means distinct sessions.** Three boundaries of one session are ONE
 sample — they share a harness, a project, a task shape and a CLAUDE.md, and the
 quantity being estimated moves with all of them. Pinned by test.
+
+`estimatorVersion` is now **`compaction-estimators/v2`**. The v1 label had shipped
+with the mean and the below-minimum maximum; a verdict must never carry a label
+that names two different rules.
 
 ## Look-ahead protections
 
@@ -1212,7 +1258,12 @@ model_usage_events touched       NONE
 transcripts opened               NONE
 ```
 
-Two indexes, not a scan, and the 3,879-row ledger table is not in the plan at all.
+Two indexes, and the 3,879-row ledger table is not in the plan at all. Stated
+precisely: the plan walks every **session binding's sources** through those
+indexes and evaluates `json_extract` on each one's parser state, so the work grows
+with the number of sources, not with the number of compacted sessions; only the
+OUTPUT is the handful. 138 sources today; if that ever becomes a decision-path cost,
+the answer is the folded aggregate, not a wider cap.
 The candidate list is additionally capped at 64 sessions: a cohort large enough to
 reach that ceiling has earned a folded aggregate of its own, and truncating is
 better than an unbounded read on a decision path.

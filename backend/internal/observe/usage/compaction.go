@@ -397,12 +397,15 @@ func ReconstructableSourceKind(kind domain.UsageSourceKind) bool {
 // exactly what a fail-closed gate wants: overstating the cost of compacting can
 // only move a verdict away from COMPACT.
 //
-// WHAT IT DELIBERATELY DOES NOT DO. It does not price anything, does not filter by
-// harness or model, and does not decide whether there are enough samples. Pricing
-// is the rate card's job, the sample rule is the estimator's, and a reader that
-// silently dropped observations it judged unsuitable would make the sample count
-// it reports a fiction. The arguments are accepted and ignored for exactly that
-// reason -- see the comment on them.
+// COHORT. Every observation carries the session's (harness, model) exactly as AO
+// recorded them, and a non-empty harness or modelID argument keeps only the
+// matching sessions. Exact string equality: no normalization, no alias
+// resolution. Empty arguments return every cohort, which is what an inventory
+// wants and what the estimator refuses to price -- it requires both.
+//
+// WHAT IT DELIBERATELY DOES NOT DO. It does not price anything and does not decide
+// whether there are enough samples. Pricing is the rate card's job and the sample
+// rule is the estimator's.
 //
 // COST. One bounded read for the candidate list plus the per-session fold that
 // already exists, over a population that is by construction tiny. No transcript is
@@ -411,16 +414,6 @@ func (r *CompactionReader) CompactionSummaryObservations(ctx context.Context, ha
 	if r == nil || r.store == nil {
 		return nil, nil
 	}
-	// harness and modelID are accepted for the port's shape and NOT used to
-	// filter. On the corpus that exists every compacting session is one harness
-	// and one model, so filtering would narrow nothing while making the reported
-	// sample count depend on a match AO cannot yet perform honestly: the rollup
-	// spells a model differently from the assistant records it summarises
-	// ("claude-opus-5[1m]" against "claude-opus-5"), and resolving that spelling
-	// is a pricing question this read must not answer. When the cohort is large
-	// enough for the grouping to matter, it belongs here with its own test.
-	_, _ = harness, modelID
-
 	sessions, err := r.store.ListCompactedSessionsForSummaryPrior(ctx, maxSummaryPriorCandidateSessions)
 	if err != nil {
 		return nil, fmt.Errorf("list compacted sessions: %w", err)
@@ -443,8 +436,22 @@ func (r *CompactionReader) CompactionSummaryObservations(ctx context.Context, ha
 			// summary, so it contributes nothing rather than a zero.
 			continue
 		}
+		// The cohort is read from the BOUNDARIES, never from the rollup: the
+		// boundary carries the model in the ledger's own spelling (the same
+		// spelling the judged session's calls carry), while the rollup spells
+		// it its own way ("claude-opus-5[1m]"). Matching on the boundary is
+		// therefore exact without resolving any alias.
+		obsHarness, obsModel := summaryCohortIdentity(accounting.Boundaries)
+		if harness != "" && obsHarness != harness {
+			continue
+		}
+		if modelID != "" && obsModel != modelID {
+			continue
+		}
 		out = append(out, domain.CompactionSummarySessionObservation{
 			SessionID:                string(sessionID),
+			Harness:                  obsHarness,
+			ModelID:                  obsModel,
 			Compactions:              accounting.Compactions,
 			UnattributedOutputTokens: accounting.Unattributed.OutputTokens,
 			// The LATEST boundary AO can place in time. It is what lets a
@@ -455,6 +462,30 @@ func (r *CompactionReader) CompactionSummaryObservations(ctx context.Context, ha
 		})
 	}
 	return out, nil
+}
+
+// summaryCohortIdentity is the one (harness, model) every boundary of a session
+// agrees on, or two empty strings when they do not agree or name nothing.
+//
+// A session that compacted once on one model and once on another is not a sample
+// of either cohort: its residual is one number and cannot be divided between
+// them without inventing a ratio.
+func summaryCohortIdentity(boundaries []domain.CompactionBoundary) (string, string) {
+	var harness, model string
+	for i, b := range boundaries {
+		h, m := string(b.Harness), b.ModelID
+		if h == "" || m == "" {
+			return "", ""
+		}
+		if i == 0 {
+			harness, model = h, m
+			continue
+		}
+		if h != harness || m != model {
+			return "", ""
+		}
+	}
+	return harness, model
 }
 
 // latestBoundaryTime is the newest placeable boundary timestamp, or nil when none

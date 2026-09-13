@@ -398,9 +398,10 @@ func TestTheCanaryPreDecisionVerdictUsesOnlyWhatWasAvailable(t *testing.T) {
 			DecisionAt: decisionAt,
 		})
 		in.SummaryTokens = domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+			Harness: "claude-code", ModelID: "claude-opus-5",
 			ExcludeSessionID: "ao-canary-fixture-6",
 			Observations: []domain.CompactionSummarySessionObservation{
-				{SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16986},
+				{Harness: "claude-code", ModelID: "claude-opus-5", SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16986},
 			},
 		})
 		got := domain.EvaluateCompactionEconomics(in)
@@ -424,9 +425,10 @@ func TestTheCanaryPreDecisionVerdictUsesOnlyWhatWasAvailable(t *testing.T) {
 			t.Fatal("compact 1's boundary must make A estimable")
 		}
 		in.SummaryTokens = domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+			Harness: "claude-code", ModelID: "claude-opus-5",
 			ExcludeSessionID: "ao-canary-fixture-6",
 			Observations: []domain.CompactionSummarySessionObservation{
-				{SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16986},
+				{Harness: "claude-code", ModelID: "claude-opus-5", SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16986},
 			},
 		})
 		got := domain.EvaluateCompactionEconomics(in)
@@ -444,15 +446,16 @@ func TestTheCanaryPreDecisionVerdictUsesOnlyWhatWasAvailable(t *testing.T) {
 		})
 		prior := decisionAt.Add(-24 * time.Hour)
 		in.SummaryTokens = domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+			Harness: "claude-code", ModelID: "claude-opus-5",
 			ExcludeSessionID: "ao-canary-fixture-6",
 			DecisionAt:       decisionAt,
 			Observations: []domain.CompactionSummarySessionObservation{
 				// The judged session's own rollup: excluded by construction.
-				{SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16986, ObservedAt: &prior},
+				{Harness: "claude-code", ModelID: "claude-opus-5", SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16986, ObservedAt: &prior},
 				// Three OTHER sessions, which is the minimum the rule accepts.
-				{SessionID: "other-1", Compactions: 1, UnattributedOutputTokens: 8493, ObservedAt: &prior},
-				{SessionID: "other-2", Compactions: 1, UnattributedOutputTokens: 7000, ObservedAt: &prior},
-				{SessionID: "other-3", Compactions: 1, UnattributedOutputTokens: 6000, ObservedAt: &prior},
+				{Harness: "claude-code", ModelID: "claude-opus-5", SessionID: "other-1", Compactions: 1, UnattributedOutputTokens: 8493, ObservedAt: &prior},
+				{Harness: "claude-code", ModelID: "claude-opus-5", SessionID: "other-2", Compactions: 1, UnattributedOutputTokens: 7000, ObservedAt: &prior},
+				{Harness: "claude-code", ModelID: "claude-opus-5", SessionID: "other-3", Compactions: 1, UnattributedOutputTokens: 6000, ObservedAt: &prior},
 			},
 		})
 		if !in.SummaryTokens.Known {
