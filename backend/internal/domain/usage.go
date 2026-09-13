@@ -226,6 +226,25 @@ type UsageTokenMetrics struct {
 	CacheCreation CacheCreationSplit
 }
 
+// StoredModelUsageEvent is one event as the ledger already holds it, read back
+// so a maintenance path can compare what is stored against what an artifact
+// says before writing anything.
+//
+// CacheCreationObserved and CacheCreationPartial are the two states the
+// lifetime columns can be in besides "neither set". They are separate because
+// they mean different things: observed is a row nobody should touch, and
+// partial is a row with one column written and the other NULL -- unreachable
+// through the write path, treated as unknown by every aggregate, and
+// deliberately never completed from one side.
+type StoredModelUsageEvent struct {
+	ModelID string
+	Tokens  UsageTokenMetrics
+	// CacheCreationObserved is true when BOTH lifetime columns are present.
+	CacheCreationObserved bool
+	// CacheCreationPartial is true when exactly one of them is.
+	CacheCreationPartial bool
+}
+
 // ModelUsageEvent is one append-only normalized usage fact.
 type ModelUsageEvent struct {
 	ModelID string

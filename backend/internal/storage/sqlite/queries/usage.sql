@@ -464,3 +464,43 @@ WHERE (sqlc.arg(project_id) = '' OR s.project_id = sqlc.arg(project_id))
   AND (sqlc.narg(owner_user_id) IS NULL OR s.owner_user_id = sqlc.narg(owner_user_id))
 GROUP BY ub.session_id
 ORDER BY s.project_id, s.num;
+
+-- name: ListUsageSourceIDsForCacheTTLBackfill :many
+-- Every transcript source that could still carry a cache lifetime for rows
+-- that do not have one.
+--
+-- Scoped to the sources whose binding has at least one event with NULL
+-- lifetime columns, so a backfill does not re-read artifacts it can learn
+-- nothing from. Ordered by id so two runs visit them in the same order and a
+-- partial run resumes deterministically.
+SELECT DISTINCT us.id AS source_id
+FROM usage_sources us
+JOIN model_usage_events mue ON mue.usage_source_id = us.id
+WHERE mue.cache_write_5m_tokens IS NULL
+   OR mue.cache_write_1h_tokens IS NULL
+ORDER BY us.id;
+
+-- name: BackfillModelUsageEventCacheTTL :execrows
+-- Move ONE event from lifetime-unknown to lifetime-observed.
+--
+-- The WHERE clause is the whole safety of this operation and it is deliberately
+-- over-specified. The two IS NULL predicates make the update monotonic: a row
+-- can only ever go from unobserved to observed, never from one observation to
+-- another, so re-running the backfill is a no-op and a half-written pair is
+-- left alone rather than completed from one side. The token vector is repeated
+-- in the predicate so a row that changed between the read and the write -- an
+-- ingest that landed in between, a transcript that no longer describes this
+-- event -- updates nothing instead of writing a lifetime onto a different call.
+UPDATE model_usage_events
+SET cache_write_5m_tokens = ?,
+    cache_write_1h_tokens = ?
+WHERE binding_id = ?
+  AND source_event_key = ?
+  AND cache_write_5m_tokens IS NULL
+  AND cache_write_1h_tokens IS NULL
+  AND model_id = ?
+  AND input_tokens = ?
+  AND uncached_input_tokens = ?
+  AND cache_read_tokens = ?
+  AND cache_write_tokens = ?
+  AND output_tokens = ?;
