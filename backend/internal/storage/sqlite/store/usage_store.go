@@ -850,3 +850,108 @@ func int64PtrWhen(v int64, ok bool) *int64 {
 	}
 	return &v
 }
+
+// ListUsageSourceIDsForCacheTTLBackfill lists the transcript sources that own
+// at least one event whose cache lifetime was never observed.
+func (s *Store) ListUsageSourceIDsForCacheTTLBackfill(ctx context.Context) ([]int64, error) {
+	ids, err := s.qr.ListUsageSourceIDsForCacheTTLBackfill(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list usage sources for cache ttl backfill: %w", err)
+	}
+	return ids, nil
+}
+
+// BackfillModelUsageEventCacheTTL records a cache lifetime on one event that
+// did not have one, and reports whether it actually changed a row.
+//
+// false means the guarded UPDATE matched nothing: the row already carries a
+// lifetime, carries half of one, or no longer matches the token vector this
+// lifetime was reconstructed from. All three are reasons to leave it alone, and
+// the caller counts which rather than retrying.
+func (s *Store) BackfillModelUsageEventCacheTTL(
+	ctx context.Context,
+	bindingID int64,
+	ev domain.ModelUsageEvent,
+) (bool, error) {
+	tokens := ev.Tokens
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qr.BackfillModelUsageEventCacheTTL(ctx, gen.BackfillModelUsageEventCacheTTLParams{
+		CacheWrite5mTokens:  sql.NullInt64{Int64: tokens.CacheCreation.Ephemeral5mTokens, Valid: true},
+		CacheWrite1hTokens:  sql.NullInt64{Int64: tokens.CacheCreation.Ephemeral1hTokens, Valid: true},
+		BindingID:           bindingID,
+		SourceEventKey:      ev.SourceEventKey,
+		ModelID:             ev.ModelID,
+		InputTokens:         tokens.InputTokens,
+		UncachedInputTokens: tokens.UncachedInputTokens,
+		CacheReadTokens:     tokens.CacheReadTokens,
+		CacheWriteTokens:    tokens.CacheWriteTokens,
+		OutputTokens:        tokens.OutputTokens,
+	})
+	if err != nil {
+		return false, fmt.Errorf("backfill cache ttl for event %q: %w", ev.SourceEventKey, err)
+	}
+	return rows > 0, nil
+}
+
+// GetStoredModelUsageEvent reads one event back as the ledger holds it.
+//
+// Used by the cache-lifetime backfill to compare the stored vector against a
+// reconstruction before writing. Returns the lifetime columns' STATE rather
+// than their values: what a caller needs to decide is whether the row has an
+// observation, half of one, or none, and handing back the numbers would invite
+// a caller to complete a partial pair.
+func (s *Store) GetStoredModelUsageEvent(ctx context.Context, bindingID int64, sourceEventKey string) (domain.StoredModelUsageEvent, bool, error) {
+	row, err := s.qr.GetModelUsageEventByKey(ctx, gen.GetModelUsageEventByKeyParams{
+		BindingID:      bindingID,
+		SourceEventKey: sourceEventKey,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.StoredModelUsageEvent{}, false, nil
+	}
+	if err != nil {
+		return domain.StoredModelUsageEvent{}, false, fmt.Errorf("get usage event %q: %w", sourceEventKey, err)
+	}
+	out := domain.StoredModelUsageEvent{
+		ModelID: row.ModelID,
+		Tokens: domain.UsageTokenMetrics{
+			InputTokens:         row.InputTokens,
+			UncachedInputTokens: row.UncachedInputTokens,
+			CacheReadTokens:     row.CacheReadTokens,
+			CacheWriteTokens:    row.CacheWriteTokens,
+			OutputTokens:        row.OutputTokens,
+			ReasoningTokens:     nullInt64ToPtr(row.ReasoningTokens),
+		},
+		CacheCreationObserved: row.CacheWrite5mTokens.Valid && row.CacheWrite1hTokens.Valid,
+		CacheCreationPartial:  row.CacheWrite5mTokens.Valid != row.CacheWrite1hTokens.Valid,
+	}
+	return out, true, nil
+}
+
+// nullInt64ToPtr is ptrInt64ToNull's inverse: a NULL column comes back as a nil
+// pointer, never as a zero, so a dimension the provider never reported stays
+// distinguishable from one it reported as zero.
+func nullInt64ToPtr(v sql.NullInt64) *int64 {
+	if !v.Valid {
+		return nil
+	}
+	out := v.Int64
+	return &out
+}
+
+// ExecForCacheTTLMaintenanceTest runs one statement directly against the write
+// connection.
+//
+// TEST SEAM, and a narrow one on purpose. The cache-lifetime backfill has to be
+// proved correct against a row state its own write path cannot produce -- one
+// lifetime column set and the other NULL -- and there is no honest way to reach
+// that state except by writing it by hand. Nothing in production calls this;
+// the name is long so that stays true.
+func (s *Store) ExecForCacheTTLMaintenanceTest(ctx context.Context, stmt string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if _, err := s.writeDB.ExecContext(ctx, stmt); err != nil {
+		return fmt.Errorf("exec maintenance statement: %w", err)
+	}
+	return nil
+}

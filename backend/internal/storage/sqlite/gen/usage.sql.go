@@ -101,6 +101,64 @@ func (q *Queries) AggregateUsageBySessionHarnessModel(ctx context.Context, sessi
 	return items, nil
 }
 
+const backfillModelUsageEventCacheTTL = `-- name: BackfillModelUsageEventCacheTTL :execrows
+UPDATE model_usage_events
+SET cache_write_5m_tokens = ?,
+    cache_write_1h_tokens = ?
+WHERE binding_id = ?
+  AND source_event_key = ?
+  AND cache_write_5m_tokens IS NULL
+  AND cache_write_1h_tokens IS NULL
+  AND model_id = ?
+  AND input_tokens = ?
+  AND uncached_input_tokens = ?
+  AND cache_read_tokens = ?
+  AND cache_write_tokens = ?
+  AND output_tokens = ?
+`
+
+type BackfillModelUsageEventCacheTTLParams struct {
+	CacheWrite5mTokens  sql.NullInt64
+	CacheWrite1hTokens  sql.NullInt64
+	BindingID           int64
+	SourceEventKey      string
+	ModelID             string
+	InputTokens         int64
+	UncachedInputTokens int64
+	CacheReadTokens     int64
+	CacheWriteTokens    int64
+	OutputTokens        int64
+}
+
+// Move ONE event from lifetime-unknown to lifetime-observed.
+//
+// The WHERE clause is the whole safety of this operation and it is deliberately
+// over-specified. The two IS NULL predicates make the update monotonic: a row
+// can only ever go from unobserved to observed, never from one observation to
+// another, so re-running the backfill is a no-op and a half-written pair is
+// left alone rather than completed from one side. The token vector is repeated
+// in the predicate so a row that changed between the read and the write -- an
+// ingest that landed in between, a transcript that no longer describes this
+// event -- updates nothing instead of writing a lifetime onto a different call.
+func (q *Queries) BackfillModelUsageEventCacheTTL(ctx context.Context, arg BackfillModelUsageEventCacheTTLParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, backfillModelUsageEventCacheTTL,
+		arg.CacheWrite5mTokens,
+		arg.CacheWrite1hTokens,
+		arg.BindingID,
+		arg.SourceEventKey,
+		arg.ModelID,
+		arg.InputTokens,
+		arg.UncachedInputTokens,
+		arg.CacheReadTokens,
+		arg.CacheWriteTokens,
+		arg.OutputTokens,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const completeUsageBindingIfSettled = `-- name: CompleteUsageBindingIfSettled :execrows
 UPDATE usage_bindings
 SET state = CASE
@@ -946,6 +1004,50 @@ func (q *Queries) ListUsageDiscoveryBindings(ctx context.Context, limit int64) (
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsageSourceIDsForCacheTTLBackfill = `-- name: ListUsageSourceIDsForCacheTTLBackfill :many
+SELECT DISTINCT us.id AS source_id
+FROM usage_sources us
+JOIN model_usage_events mue ON mue.binding_id = us.binding_id
+WHERE mue.cache_write_5m_tokens IS NULL
+   OR mue.cache_write_1h_tokens IS NULL
+ORDER BY us.id
+`
+
+// Every transcript source that could still carry a cache lifetime for a row
+// that does not have one.
+//
+// Scoped by BINDING and not by the source that happens to own the events. A
+// ledger row is identified by (binding, source_event_key), so a source can
+// describe rows another source owns -- which is exactly what a REPLACED
+// artifact leaves behind: the old source keeps the rows and loses its file,
+// the new one has the file. Selecting on us.id = mue.usage_source_id would
+// skip the source that can still read them.
+//
+// Ordered by id so two runs visit them in the same order and a partial run
+// resumes deterministically.
+func (q *Queries) ListUsageSourceIDsForCacheTTLBackfill(ctx context.Context) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listUsageSourceIDsForCacheTTLBackfill)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int64{}
+	for rows.Next() {
+		var source_id int64
+		if err := rows.Scan(&source_id); err != nil {
+			return nil, err
+		}
+		items = append(items, source_id)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err

@@ -147,9 +147,14 @@ var legacyActorlessUserCLICommands = map[string]struct{}{
 	"ao dev import-projects":    {},
 	"ao doctor":                 {},
 	"ao import":                 {},
-	"ao incident":               {},
-	"ao incident diagnose":      {},
-	"ao incident submit":        {},
+	// The cache-lifetime backfill is operator activity by the same definition
+	// `ao import` is: it runs with the daemon stopped, rewrites the ledger, and
+	// exists precisely because nothing automatic is allowed to take it.
+	"ao usage":                    {},
+	"ao usage backfill-cache-ttl": {},
+	"ao incident":                 {},
+	"ao incident diagnose":        {},
+	"ao incident submit":          {},
 	// The P0-B operator recoveries. They are user activity by definition: each
 	// one exists precisely because nothing automatic is allowed to take it.
 	"ao workflow":                           {},

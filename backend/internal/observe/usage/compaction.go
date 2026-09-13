@@ -1,9 +1,13 @@
 package usage
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"strings"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/usage/pricing"
@@ -280,4 +284,87 @@ func (r *CompactionReader) SessionCompactionAccounting(ctx context.Context, sess
 		accounting.Compactions = merged.Count
 	}
 	return accounting, nil
+}
+
+// --- reconstruction ---------------------------------------------------------
+
+// ReconstructEvents re-derives every usage event a transcript describes, using
+// the SAME parser the ingest path uses.
+//
+// It exists for one caller: the historical cache-lifetime backfill, which has
+// to answer "what would AO have recorded for this artifact, had it known about
+// cache lifetimes" — and the only defensible answer is the one AO's own parser
+// gives. Re-deriving with a second, simpler reader would be reconstructing the
+// past from a different program than the one that recorded it.
+//
+// Parsed from a FRESH parser state, deliberately. The stored state is a resume
+// cursor for a tailer; a reconstruction reads the whole artifact from the start
+// and must not inherit a half-open message from a previous batch boundary.
+// Every event it returns therefore carries the same SourceEventKey the ingest
+// path would have produced for it, which is the identity the caller matches on.
+//
+// Reads the artifact. Writes nothing, and returns no content: the events are
+// numbers, a model id and a key, exactly as the ingest path produces them.
+func ReconstructEvents(source domain.UsageSourceContext, r io.Reader, now time.Time) ([]domain.ModelUsageEvent, error) {
+	switch source.Source.Kind {
+	case domain.UsageSourceClaudeMain, domain.UsageSourceClaudeSubagent:
+	default:
+		return nil, fmt.Errorf("reconstruct events: unsupported source kind %q", source.Source.Kind)
+	}
+	state, err := newParserState(source.Source.Kind)
+	if err != nil {
+		return nil, fmt.Errorf("reconstruct events: %w", err)
+	}
+	records, offset, err := readAllJSONLRecords(r)
+	if err != nil {
+		return nil, fmt.Errorf("reconstruct events: %w", err)
+	}
+	result := parseRecordsWithState(source, records, offset, now, state)
+	if result.err != nil {
+		return nil, fmt.Errorf("reconstruct events: %w", result.err)
+	}
+	return result.Events, nil
+}
+
+// readAllJSONLRecords splits an artifact into the same per-line records the
+// tailer feeds the parser. Blank lines are skipped; a line too large for the
+// scanner is an error rather than a silently dropped event, because a
+// reconstruction that quietly saw less than the artifact holds would under-
+// report and call it a clean run.
+func readAllJSONLRecords(r io.Reader) ([]jsonlRecord, int64, error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), defaultRecordBytes)
+	var (
+		records []jsonlRecord
+		offset  int64
+	)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(bytes.TrimSpace(line)) > 0 {
+			records = append(records, jsonlRecord{
+				Data:   append([]byte(nil), line...),
+				Offset: offset,
+			})
+		}
+		offset += int64(len(line)) + 1
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, 0, err
+	}
+	return records, offset, nil
+}
+
+// ReconstructableSourceKind reports whether ReconstructEvents can read this
+// artifact format at all.
+//
+// A Codex rollout is not an error and not a gap: its envelope has no cache
+// lifetime vocabulary, so there is nothing in it to reconstruct. A caller that
+// treated it as a parser failure would report a clean run as broken.
+func ReconstructableSourceKind(kind domain.UsageSourceKind) bool {
+	switch kind {
+	case domain.UsageSourceClaudeMain, domain.UsageSourceClaudeSubagent:
+		return true
+	default:
+		return false
+	}
 }
