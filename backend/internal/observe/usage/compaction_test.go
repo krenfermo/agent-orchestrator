@@ -297,6 +297,11 @@ type fakeCompactionStore struct {
 	bindings   []domain.UsageBindingRecord
 	sources    map[int64][]domain.UsageSourceRecord
 	aggregates []domain.UsageModelAggregate
+	// compacted is the candidate list for the summary prior: the sessions that
+	// actually replaced their own conversation. Empty for every test that does
+	// not install one, which is the state a corpus with no compaction is in.
+	compacted    []domain.SessionID
+	compactedErr error
 }
 
 func (f fakeCompactionStore) ListUsageBindingsForSession(context.Context, domain.SessionID) ([]domain.UsageBindingRecord, error) {
@@ -309,6 +314,16 @@ func (f fakeCompactionStore) ListUsageSourcesForBinding(_ context.Context, id in
 
 func (f fakeCompactionStore) ListUsageModelAggregates(context.Context, domain.SessionID) ([]domain.UsageModelAggregate, error) {
 	return f.aggregates, nil
+}
+
+func (f fakeCompactionStore) ListCompactedSessionsForSummaryPrior(_ context.Context, limit int64) ([]domain.SessionID, error) {
+	if f.compactedErr != nil {
+		return nil, f.compactedErr
+	}
+	if int64(len(f.compacted)) > limit {
+		return f.compacted[:limit], nil
+	}
+	return f.compacted, nil
 }
 
 func TestSessionCompactionAccountingFoldsTheStoreRowsThatAlreadyExist(t *testing.T) {

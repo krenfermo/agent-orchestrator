@@ -955,3 +955,34 @@ func (s *Store) ExecForCacheTTLMaintenanceTest(ctx context.Context, stmt string)
 	}
 	return nil
 }
+
+// ListCompactedSessionsForSummaryPrior returns the sessions that have ever
+// replaced their own conversation and carry a harness rollup.
+//
+// It is the candidate list for the cross-session summary-cost prior, and it is
+// one column on purpose: the per-session arithmetic already exists in
+// observe/usage.CompactionReader, and duplicating it in SQL would give two
+// answers to one question. The filter -- sessions that actually compacted -- is
+// what keeps the read affordable, because a prior about compaction concerns a
+// handful of sessions however large the corpus becomes.
+//
+// limit is a ceiling rather than a page. A cohort big enough to reach it has long
+// since earned a folded aggregate of its own, and silently truncating is better
+// than an unbounded read on a decision path.
+func (s *Store) ListCompactedSessionsForSummaryPrior(ctx context.Context, limit int64) ([]domain.SessionID, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.qr.ListCompactedSessionsForSummaryPrior(ctx, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list compacted sessions for the summary prior: %w", err)
+	}
+	out := make([]domain.SessionID, 0, len(rows))
+	for _, row := range rows {
+		if row == nil || *row == "" {
+			continue
+		}
+		out = append(out, *row)
+	}
+	return out, nil
+}

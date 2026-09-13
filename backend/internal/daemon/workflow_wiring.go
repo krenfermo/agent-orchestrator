@@ -284,10 +284,13 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		// gate records what it WOULD have recommended and nothing consults it.
 		UsageRateCard:                 usagePricing(cfg.DataDir, log),
 		SessionCompactionObservations: usagepipeline.NewCompactionReader(store, usagePricing(cfg.DataDir, log)),
-		// CompactionSummaryPriors is deliberately NOT wired: the cross-session
-		// summary prior needs a read model folded when a session completes, not
-		// a corpus walk on every fix boundary. Until it exists the gate records
-		// UNKNOWN/summary_cost_unknown, which is the fail-closed answer.
+		// P7.2B2.1: the cross-session summary prior, now wired. Same reader: the
+		// candidate list is the sessions that actually compacted, which SQL
+		// narrows to a handful, so the decision path stays one bounded read plus
+		// a fold that already existed. Below three independent sessions the
+		// estimator still answers UNKNOWN, which is the fail-closed default and
+		// the state the corpus is in today.
+		CompactionSummaryPriors: usagepipeline.NewCompactionReader(store, usagePricing(cfg.DataDir, log)),
 		// P3-E: the planner's own provider calls. It runs under
 		// --no-session-persistence and writes no transcript, so this
 		// response-reported path is the only way its tokens are ever seen.

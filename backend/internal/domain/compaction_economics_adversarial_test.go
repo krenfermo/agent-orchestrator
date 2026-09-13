@@ -3,6 +3,7 @@ package domain_test
 import (
 	"math"
 	"testing"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
@@ -223,5 +224,98 @@ func TestTheRecordIsIndependentOfTheCallersReasonSlice(t *testing.T) {
 		if callerReasons[0] != before[0] {
 			t.Errorf("the record shares storage with the caller's reasons")
 		}
+	}
+}
+
+// TestTheSummaryPriorExcludesTheFutureAndTheJudgedSession is the look-ahead guard
+// on the S axis. Three observations would be enough -- but only if all three
+// predate the decision and none of them is the session being judged.
+func TestTheSummaryPriorExcludesTheFutureAndTheJudgedSession(t *testing.T) {
+	decisionAt := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	past := decisionAt.Add(-time.Hour)
+	present := decisionAt
+	future := decisionAt.Add(time.Hour)
+	var unplaceable *time.Time
+
+	obs := func(id string, out int64, at *time.Time) domain.CompactionSummarySessionObservation {
+		return domain.CompactionSummarySessionObservation{
+			SessionID: id, Compactions: 1, UnattributedOutputTokens: out, ObservedAt: at,
+		}
+	}
+
+	// Three admissible sessions: known.
+	admissible := []domain.CompactionSummarySessionObservation{
+		obs("a", 5000, &past), obs("b", 6000, &past), obs("c", 7000, &past),
+	}
+	want := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+		ExcludeSessionID: "judged", DecisionAt: decisionAt, Observations: admissible,
+	})
+	if !want.Known || want.Samples != 3 || want.Value != 7000 {
+		t.Fatalf("control cohort = %+v, want known/3/7000", want)
+	}
+
+	// The same three, plus every inadmissible shape. The answer must be
+	// IDENTICAL: none of the extras may raise the sample count or the value.
+	contaminated := append([]domain.CompactionSummarySessionObservation(nil), admissible...)
+	contaminated = append(contaminated,
+		// The judged session's own rollup -- structurally impossible to have.
+		obs("judged", 999_999, &past),
+		// An observation at the decision instant: the present is not the past.
+		obs("d", 999_999, &present),
+		// The future.
+		obs("e", 999_999, &future),
+		// Unplaceable in time: inadmissible, never assumed old.
+		obs("f", 999_999, unplaceable),
+		// No session id at all: cannot be counted as an independent session.
+		obs("", 999_999, &past),
+	)
+	got := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+		ExcludeSessionID: "judged", DecisionAt: decisionAt, Observations: contaminated,
+	})
+	if got != want {
+		t.Errorf("the prior read something it must not see:\n got  %+v\n want %+v", got, want)
+	}
+
+	// And without the three admissible ones, the inadmissible set alone is not a
+	// prior at any sample count.
+	onlyBad := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+		ExcludeSessionID: "judged", DecisionAt: decisionAt,
+		Observations: contaminated[len(admissible):],
+	})
+	if onlyBad.Known {
+		t.Errorf("a cohort of inadmissible observations produced a prior: %+v", onlyBad)
+	}
+}
+
+// TestAKnownSummaryPriorStillCannotProduceCompactWithoutEverythingElse. S
+// becoming known is not a licence: every other input still has to be there, and
+// each one independently refuses.
+func TestAKnownSummaryPriorStillCannotProduceCompactWithoutEverythingElse(t *testing.T) {
+	healthy := historicalInput(293224, 47809, 26009, 2500, 8493, 19)
+	healthy.SummaryTokens = domain.EstimatedTokens{
+		Value: 8493, Known: true, Basis: domain.CompactionBasisCrossSessionPrior, Samples: 3,
+	}
+	if got := domain.EvaluateCompactionEconomics(healthy); got.Verdict != domain.CompactionVerdictCompact {
+		t.Fatalf("control must compact, got %s/%s", got.Verdict, got.Reason)
+	}
+	for name, mutate := range map[string]func(*domain.CompactionEconomicsInput){
+		"pricing gone":     func(in *domain.CompactionEconomicsInput) { in.RatesKnown = false },
+		"lifetime unknown": func(in *domain.CompactionEconomicsInput) { in.ObservedCacheCreation.UnknownTTLTokens = 1 },
+		"ttl assumed":      func(in *domain.CompactionEconomicsInput) { in.ObservedCostTTLAssumedTokens = 1 },
+		"A gone":           func(in *domain.CompactionEconomicsInput) { in.ContextAfter = domain.EstimatedTokens{} },
+		"N gone":           func(in *domain.CompactionEconomicsInput) { in.RemainingCalls = domain.EstimatedCalls{} },
+		"terminal cycle": func(in *domain.CompactionEconomicsInput) {
+			in.Cycle, in.MaxFixCycles = 3, 3
+			in.LifecycleReasons = []domain.SessionLifecycleReason{domain.LifecycleReasonManyFixCycles}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := healthy
+			in.LifecycleReasons = append([]domain.SessionLifecycleReason(nil), healthy.LifecycleReasons...)
+			mutate(&in)
+			if got := domain.EvaluateCompactionEconomics(in); got.Verdict == domain.CompactionVerdictCompact {
+				t.Errorf("COMPACT with %s, although S was known", name)
+			}
+		})
 	}
 }

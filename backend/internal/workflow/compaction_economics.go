@@ -97,22 +97,18 @@ type SessionCompactionObservations interface {
 // CompactionSummaryPriors supplies the cross-session prior for how many tokens a
 // harness GENERATES producing a summary.
 //
-// DELIBERATELY UNWIRED IN P7.2B2, and the reason is worth stating rather than
-// leaving as an absent implementation. S is only measurable from a harness's
-// end-of-session rollup, so it is structurally a cross-session figure -- a
-// running session has no rollup and can never estimate its own summary cost.
-// Reading it therefore means visiting other sessions' sources, which is a corpus
-// walk, and a corpus walk on every fix boundary is exactly what the performance
-// rule forbids. It needs a precomputed read model, folded when a session
-// completes rather than when a decision is taken, and that read model is not
-// part of this checkpoint.
+// WIRED IN P7.2B2.1. It was left unwired in P7.2B2 on the belief that reading it
+// meant walking the corpus on every fix boundary. It does not: a prior about
+// compaction is only ever about sessions that COMPACTED, and filtering to those
+// in SQL collapses the candidate list to a handful whatever the corpus size. The
+// per-session arithmetic then reuses the fold that already existed.
 //
-// The consequence is stated plainly and is not hidden by a fallback: until it
-// exists, live shadow verdicts are UNKNOWN with reason summary_cost_unknown.
-// That is the fail-closed outcome, it is what the design predicted a first
-// deployment would look like, and it still accrues everything shadow mode can
-// calibrate without a compaction -- pricing coverage, cache-lifetime honesty,
-// the remaining-calls estimator and the terminal-cycle population.
+// S is structurally cross-session and always will be: it is only measurable from
+// a harness's end-of-session rollup, so a running session has no rollup and can
+// never estimate its own summary cost. Satisfied by
+// *observe/usage.CompactionReader. Optional: without it the verdict is UNKNOWN
+// with reason summary_cost_unknown, which is also what a cohort of fewer than
+// three independent sessions produces.
 type CompactionSummaryPriors interface {
 	CompactionSummaryObservations(ctx stdctx.Context, harness, modelID string) ([]domain.CompactionSummarySessionObservation, error)
 }
@@ -284,7 +280,7 @@ func (c *Coordinator) computeShadowCompactionVerdict(
 		CycleCalls:   cycleCallCounts(series),
 	})
 	in.ContextAfter = c.estimateShadowContextAfter(ctx, sessionID, in.StablePrefixTokens, in.PromptTokens, decisionAt)
-	in.SummaryTokens = c.estimateShadowSummaryTokens(ctx, sessionID, in.Harness, in.ModelID)
+	in.SummaryTokens = c.estimateShadowSummaryTokens(ctx, sessionID, in.Harness, in.ModelID, decisionAt)
 
 	return domain.EvaluateCompactionEconomics(in)
 }
@@ -334,7 +330,7 @@ func (c *Coordinator) estimateShadowContextAfter(
 // estimateShadowSummaryTokens asks the cross-session prior. See
 // CompactionSummaryPriors for why it is unwired in P7.2B2 and what that costs.
 func (c *Coordinator) estimateShadowSummaryTokens(
-	ctx stdctx.Context, sessionID domain.SessionID, harness, modelID string,
+	ctx stdctx.Context, sessionID domain.SessionID, harness, modelID string, decisionAt time.Time,
 ) domain.EstimatedTokens {
 	if c.compactionSummaryPriors == nil {
 		return domain.EstimatedTokens{Basis: domain.CompactionBasisNone}
@@ -346,6 +342,11 @@ func (c *Coordinator) estimateShadowSummaryTokens(
 	return domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
 		ExcludeSessionID: string(sessionID),
 		Observations:     observations,
+		// The decision instant, so the estimator can drop an observation that is
+		// younger than the verdict it would inform. Passed even though the read
+		// happens now and therefore cannot see the future: the filter is what
+		// makes that a property of the code rather than of the call order.
+		DecisionAt: decisionAt,
 	})
 }
 

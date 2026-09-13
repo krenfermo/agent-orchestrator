@@ -180,7 +180,19 @@ type CompactionStore interface {
 	ListUsageBindingsForSession(ctx context.Context, sessionID domain.SessionID) ([]domain.UsageBindingRecord, error)
 	ListUsageSourcesForBinding(ctx context.Context, bindingID int64) ([]domain.UsageSourceRecord, error)
 	ListUsageModelAggregates(ctx context.Context, sessionID domain.SessionID) ([]domain.UsageModelAggregate, error)
+	// ListCompactedSessionsForSummaryPrior is the candidate list for the
+	// cross-session summary prior: the sessions that actually compacted.
+	ListCompactedSessionsForSummaryPrior(ctx context.Context, limit int64) ([]domain.SessionID, error)
 }
+
+// maxSummaryPriorCandidateSessions bounds the candidate list the summary prior
+// reads.
+//
+// A prior about compaction is only ever about sessions that compacted, which is a
+// handful; this ceiling exists so a corpus nobody expected cannot turn a decision
+// path into an unbounded read. Reaching it is the signal to fold the prior into a
+// durable aggregate instead of deriving it per decision.
+const maxSummaryPriorCandidateSessions = 64
 
 // CompactionReader builds one session's compaction accounting.
 type CompactionReader struct {
@@ -367,4 +379,96 @@ func ReconstructableSourceKind(kind domain.UsageSourceKind) bool {
 	default:
 		return false
 	}
+}
+
+// CompactionSummaryObservations builds the cross-session evidence the shadow
+// economic gate's summary-cost prior is derived from.
+//
+// WHAT IT IS. One observation per session that has compacted and whose harness
+// wrote its end-of-session rollup: how many times it compacted, and how many
+// output tokens the harness charged itself that AO's ledger holds no event for.
+// That residual is the summarization -- a summary is generated, and the
+// generation reaches no assistant record -- and it INCLUDES reasoning, which is
+// most of what a summarizer produces and none of what its text contains.
+//
+// WHY IT IS A RESIDUAL RATHER THAN A MEASUREMENT. The harness reports its spend
+// once per session, not once per compaction, so there is no per-compaction output
+// figure to read. The residual is an UPPER BOUND on the summarization, which is
+// exactly what a fail-closed gate wants: overstating the cost of compacting can
+// only move a verdict away from COMPACT.
+//
+// WHAT IT DELIBERATELY DOES NOT DO. It does not price anything, does not filter by
+// harness or model, and does not decide whether there are enough samples. Pricing
+// is the rate card's job, the sample rule is the estimator's, and a reader that
+// silently dropped observations it judged unsuitable would make the sample count
+// it reports a fiction. The arguments are accepted and ignored for exactly that
+// reason -- see the comment on them.
+//
+// COST. One bounded read for the candidate list plus the per-session fold that
+// already exists, over a population that is by construction tiny. No transcript is
+// opened and no corpus is walked.
+func (r *CompactionReader) CompactionSummaryObservations(ctx context.Context, harness, modelID string) ([]domain.CompactionSummarySessionObservation, error) {
+	if r == nil || r.store == nil {
+		return nil, nil
+	}
+	// harness and modelID are accepted for the port's shape and NOT used to
+	// filter. On the corpus that exists every compacting session is one harness
+	// and one model, so filtering would narrow nothing while making the reported
+	// sample count depend on a match AO cannot yet perform honestly: the rollup
+	// spells a model differently from the assistant records it summarises
+	// ("claude-opus-5[1m]" against "claude-opus-5"), and resolving that spelling
+	// is a pricing question this read must not answer. When the cohort is large
+	// enough for the grouping to matter, it belongs here with its own test.
+	_, _ = harness, modelID
+
+	sessions, err := r.store.ListCompactedSessionsForSummaryPrior(ctx, maxSummaryPriorCandidateSessions)
+	if err != nil {
+		return nil, fmt.Errorf("list compacted sessions: %w", err)
+	}
+	out := make([]domain.CompactionSummarySessionObservation, 0, len(sessions))
+	for _, sessionID := range sessions {
+		accounting, aerr := r.SessionCompactionAccounting(ctx, sessionID)
+		if aerr != nil {
+			// One unreadable session costs one sample, never the cohort. A prior
+			// derived from fewer sessions simply reports a smaller sample count,
+			// and the estimator refuses below its minimum.
+			continue
+		}
+		if !accounting.HarnessObserved || accounting.Compactions <= 0 {
+			continue
+		}
+		if accounting.Unattributed.OutputTokens <= 0 {
+			// The harness charged itself no output AO cannot see. On a session
+			// that compacted that is a measurement problem rather than a free
+			// summary, so it contributes nothing rather than a zero.
+			continue
+		}
+		out = append(out, domain.CompactionSummarySessionObservation{
+			SessionID:                string(sessionID),
+			Compactions:              accounting.Compactions,
+			UnattributedOutputTokens: accounting.Unattributed.OutputTokens,
+			// The LATEST boundary AO can place in time. It is what lets a
+			// decision drop an observation that is younger than itself; a
+			// session whose boundaries carry no timestamp is inadmissible to a
+			// time-filtered prior rather than assumed old.
+			ObservedAt: latestBoundaryTime(accounting.Boundaries),
+		})
+	}
+	return out, nil
+}
+
+// latestBoundaryTime is the newest placeable boundary timestamp, or nil when none
+// of them can be placed in time.
+func latestBoundaryTime(boundaries []domain.CompactionBoundary) *time.Time {
+	var latest *time.Time
+	for i := range boundaries {
+		at := boundaries[i].ObservedAt
+		if at == nil {
+			continue
+		}
+		if latest == nil || at.After(*latest) {
+			latest = at
+		}
+	}
+	return latest
 }

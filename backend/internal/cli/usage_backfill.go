@@ -42,6 +42,7 @@ func newUsageCommand(ctx *commandContext) *cobra.Command {
 	}
 	cmd.AddCommand(newUsageBackfillCacheTTLCommand(ctx))
 	cmd.AddCommand(newUsageCompactionVerdictsCommand(ctx))
+	cmd.AddCommand(newUsageCompactionObservationsCommand(ctx))
 	return cmd
 }
 

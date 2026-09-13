@@ -250,9 +250,29 @@ func profitableSetup(enabled bool) shadowSetup {
 		observations: &fakeCompactionObservations{accounting: domain.CompactionAccounting{
 			Boundaries: []domain.CompactionBoundary{{PostTokens: 10_956, ObservedAt: &boundaryAt}},
 		}},
-		priors: &fakeSummaryPriors{observations: []domain.CompactionSummarySessionObservation{
-			{SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16_986},
-		}},
+		priors: &fakeSummaryPriors{observations: summaryPriorCohort()},
+	}
+}
+
+// summaryPriorCohort is the minimum cohort the summary-cost rule accepts: THREE
+// INDEPENDENT sessions, each observed strictly before the fixture's decision
+// instant of 2026-08-13T12:00:00Z.
+//
+// Three is not decoration. One session is a point estimate wearing a statistic's
+// name, and three boundaries of one session are still one sample -- they share a
+// harness, a project and a task shape, and the quantity being estimated moves with
+// all three. The first figure is the canary's own measured residual, 16,986 over 2
+// compactions; the other two are plausible neighbours, and the estimator takes the
+// conservative maximum of the three rather than their mean.
+func summaryPriorCohort() []domain.CompactionSummarySessionObservation {
+	at := func(d time.Duration) *time.Time {
+		t := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC).Add(d)
+		return &t
+	}
+	return []domain.CompactionSummarySessionObservation{
+		{SessionID: "prior-session-1", Compactions: 2, UnattributedOutputTokens: 16_986, ObservedAt: at(-72 * time.Hour)},
+		{SessionID: "prior-session-2", Compactions: 1, UnattributedOutputTokens: 7_400, ObservedAt: at(-48 * time.Hour)},
+		{SessionID: "prior-session-3", Compactions: 1, UnattributedOutputTokens: 6_900, ObservedAt: at(-24 * time.Hour)},
 	}
 }
 
