@@ -414,9 +414,17 @@ func (r *CompactionReader) CompactionSummaryObservations(ctx context.Context, ha
 	if r == nil || r.store == nil {
 		return nil, nil
 	}
-	sessions, err := r.store.ListCompactedSessionsForSummaryPrior(ctx, maxSummaryPriorCandidateSessions)
+	// One past the ceiling, so reaching it is DETECTED rather than silently
+	// truncated. The prior is a maximum: computed over an arbitrary subset it can
+	// only understate, which is the optimistic direction, so a cohort AO cannot
+	// read whole is an error and the gate answers UNKNOWN.
+	sessions, err := r.store.ListCompactedSessionsForSummaryPrior(ctx, maxSummaryPriorCandidateSessions+1)
 	if err != nil {
 		return nil, fmt.Errorf("list compacted sessions: %w", err)
+	}
+	if len(sessions) > maxSummaryPriorCandidateSessions {
+		return nil, fmt.Errorf("summary prior candidates exceed the ceiling of %d: fold them into an aggregate rather than read a subset",
+			maxSummaryPriorCandidateSessions)
 	}
 	out := make([]domain.CompactionSummarySessionObservation, 0, len(sessions))
 	for _, sessionID := range sessions {
@@ -428,6 +436,23 @@ func (r *CompactionReader) CompactionSummaryObservations(ctx context.Context, ha
 			continue
 		}
 		if !accounting.HarnessObserved || accounting.Compactions <= 0 {
+			continue
+		}
+		// THE UPPER BOUND HOLDS ONLY WHILE THE ROLLUP COVERS THE LEDGER. Credit
+		// nobody could absorb means AO attributed spend the rollup does not
+		// admit to: a rollup written before later turns (a resumed session), or
+		// a ledger counting sources the rollup does not. Either way the residual
+		// is no longer an upper bound on anything, so the session is not a
+		// sample.
+		if accounting.UnattributedNegative {
+			continue
+		}
+		// Every counted compaction must be a distinct, detailed boundary. A count
+		// above the detail is a boundary list that overflowed (its identity is
+		// unknown) or the same boundaries counted by two generations of one
+		// artifact -- and dividing the residual by an inflated count UNDERSTATES
+		// the per-compaction figure.
+		if accounting.Compactions != len(accounting.Boundaries) {
 			continue
 		}
 		if accounting.Unattributed.OutputTokens <= 0 {

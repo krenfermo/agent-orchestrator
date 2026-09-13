@@ -1159,6 +1159,36 @@ admissibility rules below; where AO cannot show that, the session is not a sampl
 Unknown pricing does not enter here at all: the reader carries tokens and never a
 price, and the gate's own `RatesKnown` / TTL checks refuse to price a verdict.
 
+### Admissibility — when a session is a sample (tightened in review)
+
+A session contributes an observation only when ALL hold; otherwise it costs one
+sample and never enters the prior:
+
+| rule | why the residual would otherwise understate |
+|---|---|
+| the harness wrote a rollup and the session compacted | no rollup, no residual at all |
+| `UnattributedNegative` is **false** | AO attributed spend the rollup does not admit to: a rollup written before later turns (resumed session) or a ledger counting sources the rollup does not. The subtraction no longer bounds anything. |
+| compaction count == distinct detailed boundaries | an overflowed boundary list (identity unknown) or the same boundaries counted by two artifact generations inflates the divisor |
+| residual output > 0 | a compacting session with no unattributed output is a measurement problem, not a free summary |
+| every boundary names one harness + one model | the cohort rule above |
+| a placeable timestamp | the look-ahead rule below |
+
+The candidate list is capped at 64 sessions and **reaching the cap fails closed**:
+the prior is a maximum, and a maximum over an arbitrary subset can only understate.
+
+Measured against the only real compacting session (`ao-canary-fixture-6`,
+recomputed independently from its transcript and the ledger): `UnattributedNegative
+= false`, residual output 16,953 (opus) + 33 (haiku) = 16,986 over 2 compactions,
+**8,493 per compaction**. The guards do not exclude the one real sample.
+
+**Known limitation, not fixed here.** A `cost-state` record carries no timestamp and
+the parser does not store where in the transcript it sat. A session whose latest
+rollup was written *before* its latest boundary *and* made no call after it cannot be
+told apart from a complete one, and would contribute a figure that misses that
+compaction's summary. The ledger-coverage rule above catches every such session that
+made a call after the rollup; closing the rest needs the rollup's position in parser
+state, which is an ingest change and out of scope for a read model.
+
 Three properties make it usable and each one is deliberate:
 
 - **It includes reasoning.** The rollup reports `thinkingTokens` separately and the
@@ -1237,6 +1267,12 @@ Three, and the third is new:
 
 The filter lives in the pure estimator as well as in the caller, because a guard
 that exists in one place is a guard one refactor can remove.
+
+`S`'s `ObservedAt` is the session's **latest boundary** timestamp, because the rollup
+has none. That is a lower bound on when the evidence became complete. On the
+decision path it cannot leak the future — the read happens at decision time and
+cannot see bytes not yet written — but an OFFLINE replay over a historical snapshot
+would need the rollup's own time to be strict. No such replay exists today.
 
 ## Read model and decision-time cost
 

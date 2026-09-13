@@ -177,21 +177,109 @@ func TestTheSummaryPriorDegradesOneSessionAtATime(t *testing.T) {
 	})
 }
 
-// The candidate ceiling is a ceiling. A cohort large enough to reach it has earned
-// a folded aggregate, and truncating is better than an unbounded read on a
-// decision path.
-func TestTheSummaryPriorCandidateListIsBounded(t *testing.T) {
-	many := make([]domain.SessionID, maxSummaryPriorCandidateSessions+25)
-	for i := range many {
-		many[i] = domain.SessionID(fmt.Sprintf("s-%d", i))
+// The candidate ceiling is a ceiling, and reaching it FAILS CLOSED. The prior is a
+// maximum, so computing it over an arbitrary subset can only understate it; a
+// cohort AO cannot read whole is an error, never a quietly truncated answer.
+func TestTheSummaryPriorCandidateListIsBoundedAndNeverTruncated(t *testing.T) {
+	ids := func(n int) []domain.SessionID {
+		out := make([]domain.SessionID, n)
+		for i := range out {
+			out[i] = domain.SessionID(fmt.Sprintf("s-%d", i))
+		}
+		return out
 	}
-	store := summaryPriorStore(t, many, compactBoundaryRecord, costStateRecord)
-	got, err := NewCompactionReader(store, nil).CompactionSummaryObservations(context.Background(), "", "")
+	atCeiling := summaryPriorStore(t, ids(maxSummaryPriorCandidateSessions), compactBoundaryRecord, costStateRecord)
+	got, err := NewCompactionReader(atCeiling, nil).CompactionSummaryObservations(context.Background(), "", "")
+	if err != nil {
+		t.Fatalf("at the ceiling: err %v", err)
+	}
+	if len(got) != maxSummaryPriorCandidateSessions {
+		t.Errorf("observations = %d, want all %d", len(got), maxSummaryPriorCandidateSessions)
+	}
+
+	over := summaryPriorStore(t, ids(maxSummaryPriorCandidateSessions+25), compactBoundaryRecord, costStateRecord)
+	got, err = NewCompactionReader(over, nil).CompactionSummaryObservations(context.Background(), "", "")
+	if err == nil {
+		t.Errorf("past the ceiling: got %d observations and no error, want a refusal", len(got))
+	}
+}
+
+// THE RESIDUAL IS AN UPPER BOUND ONLY WHILE IT CAN BE ONE. Each shape below is a
+// session whose residual would UNDERSTATE the summarization, and each must cost a
+// sample rather than enter the prior.
+func TestTheSummaryPriorRefusesAResidualThatIsNotAnUpperBound(t *testing.T) {
+	t.Run("the ledger holds spend the rollup does not admit to", func(t *testing.T) {
+		// A rollup written before later turns: AO attributed more cache reads
+		// than the harness reported, so the rollup does not cover the ledger.
+		store := summaryPriorStore(t, []domain.SessionID{"s-1"}, compactBoundaryRecord, costStateRecord)
+		store.aggregates = []domain.UsageModelAggregate{{
+			Harness: domain.HarnessClaudeCode, ModelID: "claude-opus-5",
+			Tokens: domain.UsageTokenMetrics{OutputTokens: 30_500, CacheReadTokens: 9_000_000, InputTokens: 9_000_000},
+		}}
+		got, err := NewCompactionReader(store, nil).CompactionSummaryObservations(context.Background(), "", "")
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("observations = %+v, want none: the residual no longer bounds anything", got)
+		}
+	})
+
+	t.Run("the same boundary counted by two generations of one artifact", func(t *testing.T) {
+		store := summaryPriorStore(t, []domain.SessionID{"s-1"}, compactBoundaryRecord, costStateRecord)
+		first := store.sources[42][0]
+		second := first
+		second.ID = 8
+		second.Generation = 1
+		store.sources[42] = append(store.sources[42], second)
+		got, err := NewCompactionReader(store, nil).CompactionSummaryObservations(context.Background(), "", "")
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		// Two sources count 2 compactions of ONE distinct boundary; dividing by 2
+		// would halve the figure.
+		if len(got) != 0 {
+			t.Errorf("observations = %+v, want none: an inflated count understates per-compaction S", got)
+		}
+	})
+
+	t.Run("malformed parser state is no evidence, not an error", func(t *testing.T) {
+		store := summaryPriorStore(t, []domain.SessionID{"s-1"}, compactBoundaryRecord, costStateRecord)
+		store.sources[42][0].ParserStateJSON = `{"version":1,"claude":{"compaction_count":"lots"`
+		got, err := NewCompactionReader(store, nil).CompactionSummaryObservations(context.Background(), "", "")
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("observations = %+v, want none", got)
+		}
+	})
+}
+
+// One unreadable session inside a readable candidate list costs exactly that
+// session: the others still arrive, and the error does not surface.
+func TestOneUnreadableSessionCostsOneSample(t *testing.T) {
+	store := summaryPriorStore(t, []domain.SessionID{"s-1", "s-2", "s-3"}, compactBoundaryRecord, costStateRecord)
+	store.unreadable = "s-2"
+	got, err := NewCompactionReader(store, nil).CompactionSummaryObservations(context.Background(), "claude-code", "claude-opus-5")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if len(got) != maxSummaryPriorCandidateSessions {
-		t.Errorf("observations = %d, want the ceiling of %d", len(got), maxSummaryPriorCandidateSessions)
+	if len(got) != 2 {
+		t.Fatalf("observations = %d, want 2", len(got))
+	}
+	for _, o := range got {
+		if o.SessionID == "s-2" {
+			t.Error("the unreadable session produced an observation")
+		}
+	}
+	// And two is below the minimum: the lost sample makes S UNKNOWN, never a
+	// prior over what was left.
+	prior := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+		Harness: "claude-code", ModelID: "claude-opus-5", DecisionAt: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), Observations: got,
+	})
+	if prior.Known {
+		t.Errorf("prior = %+v, want unknown on two sessions", prior)
 	}
 }
 

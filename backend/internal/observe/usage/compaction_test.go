@@ -302,9 +302,15 @@ type fakeCompactionStore struct {
 	// not install one, which is the state a corpus with no compaction is in.
 	compacted    []domain.SessionID
 	compactedErr error
+	// unreadable makes one session's bindings fail to read, the per-session
+	// failure the summary prior must absorb as one lost sample.
+	unreadable domain.SessionID
 }
 
-func (f fakeCompactionStore) ListUsageBindingsForSession(context.Context, domain.SessionID) ([]domain.UsageBindingRecord, error) {
+func (f fakeCompactionStore) ListUsageBindingsForSession(_ context.Context, sessionID domain.SessionID) ([]domain.UsageBindingRecord, error) {
+	if f.unreadable != "" && sessionID == f.unreadable {
+		return nil, fmt.Errorf("session %s unreadable", sessionID)
+	}
 	return f.bindings, nil
 }
 
