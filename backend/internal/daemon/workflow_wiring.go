@@ -23,6 +23,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/integration"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/observe/projectmemory/wfdispatch"
+	usagepipeline "github.com/aoagents/agent-orchestrator/backend/internal/observe/usage"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	durablememory "github.com/aoagents/agent-orchestrator/backend/internal/projectmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/projectmemory/wfmemory"
@@ -276,6 +277,17 @@ func startWorkflows(cfg config.Config, store *sqlite.Store, memory *durablememor
 		// the read model uses, so what a run is stopped for and what the UI
 		// shows it spent can never disagree.
 		UsagePricer: usagePricing(cfg.DataDir, log),
+		// P7.2B2: the SHADOW economic gate. Same rate card again -- read as
+		// RATES rather than as a priced vector, because the economic model is
+		// ratio arithmetic -- and the per-session compaction observations P7.1
+		// already writes. Both are reads; neither changes what a run does. The
+		// gate records what it WOULD have recommended and nothing consults it.
+		UsageRateCard:                 usagePricing(cfg.DataDir, log),
+		SessionCompactionObservations: usagepipeline.NewCompactionReader(store, usagePricing(cfg.DataDir, log)),
+		// CompactionSummaryPriors is deliberately NOT wired: the cross-session
+		// summary prior needs a read model folded when a session completes, not
+		// a corpus walk on every fix boundary. Until it exists the gate records
+		// UNKNOWN/summary_cost_unknown, which is the fail-closed answer.
 		// P3-E: the planner's own provider calls. It runs under
 		// --no-session-persistence and writes no transcript, so this
 		// response-reported path is the only way its tokens are ever seen.

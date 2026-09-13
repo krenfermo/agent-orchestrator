@@ -396,3 +396,42 @@ func cacheCreationCost(rate ModelRate, tokens domain.UsageTokenTotals) (amount f
 // prefix rule in Rate, where a human-written Match decides what counts as the
 // same model.
 func normalize(id string) string { return strings.ToLower(strings.TrimSpace(id)) }
+
+// RateView returns one model's rates, for a caller that needs the RATES rather
+// than a priced vector.
+//
+// Cost answers "what did this cost". A gate comparing two futures needs
+// something Cost cannot give it: the ratios between rates, because `Co/Cr` and
+// `Cw/Cr` are what decide whether replacing a conversation with a summary pays.
+// Recovering those by pricing unit vectors and dividing works, and reads like
+// the trick it is; this is the same read, named.
+//
+// IT IS A READ AND NOTHING ELSE. Same resolution as Rate -- the model id exactly
+// as the caller spelled it, then the explicit prefix rule -- so a model this
+// catalog does not cover returns false and no view, exactly as Cost returns
+// CostUnknown. No default, no family fallback, no zero standing in for a rate
+// the card does not state. In particular a card that carries the short
+// cache-write rate and not the long one produces a view whose
+// CacheWrite1hPerMTok is zero, and domain.ModelRateView.CacheWriteRateFor is
+// what refuses to price long-lived creation from it.
+func (t *Table) RateView(modelID string) (domain.ModelRateView, bool) {
+	rate, ok := t.Rate(modelID)
+	if !ok {
+		return domain.ModelRateView{}, false
+	}
+	return domain.ModelRateView{
+		// The id as ASKED, not the Match that answered. A record has to be able
+		// to show that "claude-opus-5[1m]" is what was looked up, and a view
+		// carrying the row's own Match would erase exactly that distinction.
+		ModelID:             strings.TrimSpace(modelID),
+		InputPerMTok:        rate.InputPerMTok,
+		OutputPerMTok:       rate.OutputPerMTok,
+		CacheReadPerMTok:    rate.CacheReadPerMTok,
+		CacheWrite5mPerMTok: rate.CacheWritePerMTok,
+		CacheWrite1hPerMTok: rate.CacheWrite1hPerMTok,
+		Currency:            t.currency,
+		Source:              t.source,
+		Version:             t.version,
+		EffectiveDate:       t.effectiveDate,
+	}, true
+}

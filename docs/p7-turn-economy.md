@@ -36,13 +36,33 @@ A one-field defect: an enrolled image already linked to an entity still showed
 **The success criterion was ≥30% off one of the two levers. Criterion B is met
 at 39.0%; criterion A (call count) is not met and is not claimed.**
 
-> **P7.1 correction.** Every figure in this table is a TOKEN figure, and the
-> 39.0% is cumulative billed input, not money. Priced, the same replay is a
-> **25.1%** cost reduction: compaction moves tokens from the cheapest input rate
-> to the dearest, and it generates a summary at output prices that no call
-> series contains. See `docs/p7-compaction-observability.md`, and §K.2's
-> "3,000 for the summary and fact pack" — measured, the rewritten prefix is
-> roughly 20,000, of which the generated summary is one part.
+> **P7.1 correction, superseded by P7.2B1.** Every figure in this table is a
+> TOKEN figure, and the 39.0% is cumulative billed input, not money. Priced, the
+> same replay is a **24.0%** cost reduction: compaction moves tokens from the
+> cheapest input rate to the dearest, and it generates a summary at output prices
+> that no call series contains.
+>
+> The figure moved from P7.1's 25.1% because P7.2B1 established that **every
+> cache write in this run was created at the ONE-HOUR lifetime**, which costs
+> $10.00/MTok on Opus 5 rather than the embedded catalog's derived 5-minute
+> $6.25. That raises both arms — the run's own baseline to **$24.317756**
+> (verified against the real ledger, 2026-09-12) and each compaction's rewrite
+> along with it. Derived:
+>
+> ```
+> baseline   386·5.00 + 35,787,742·0.50 + 294,688·10.00 + 139,003·25.00 = $24.317756
+> three boundaries, cost  P·Cr + S·Co + (A−P−Δ)·Cw1h = $0.407255 each  = $1.221764
+> realized saving         Σ N·D·Cr  (N = 29, 24, 19)                   = $7.066714
+> net                                                                  = $5.844951
+> cost reduction          5.844951 / 24.317756                         = 24.04%
+> ```
+>
+> Pinned as a test —
+> `domain.TestTheReplayCostReductionIsNotTheTokenReduction` — which fails if the
+> token figure and the money figure are ever reported as one number. See
+> `docs/p7-compaction-observability.md` and `docs/p7-2a-shadow-economic-gate.md`,
+> and §K.2's "3,000 for the summary and fact pack" — measured, the rewritten
+> prefix is roughly 20,000, of which the generated summary is one part.
 
 The "después" column is produced by `internal/observe/turnbench` replaying the
 run's recorded call series with the conversation replaced at each repair

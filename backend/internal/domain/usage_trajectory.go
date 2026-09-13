@@ -174,3 +174,22 @@ func (r SessionContextReading) UnderPressure(thresholdTokens int64) (bool, bool)
 	}
 	return r.LastContextTokens >= thresholdTokens, true
 }
+
+// SessionCallObservation is one placeable provider call, narrowed to what a
+// decision about a conversation's size is allowed to see.
+//
+// It exists so internal/workflow can read a run's call series without importing
+// the store package: the shadow economic gate needs the SHAPE of the series --
+// which cycle each call belonged to, how big the conversation was, which cache
+// lifetime the write used -- and every one of those is a number the store
+// already has. No prompt, no message, no artifact path: measuring a
+// conversation's size must never require reading its content, the same rule the
+// trajectory read itself is built on.
+type SessionCallObservation struct {
+	Role WorkflowRole
+	// Cycle is 0 for base execution and 1..n for repair cycles.
+	Cycle      int64
+	ModelID    string
+	ObservedAt time.Time
+	Tokens     UsageTokenTotals
+}

@@ -152,9 +152,15 @@ var legacyActorlessUserCLICommands = map[string]struct{}{
 	// exists precisely because nothing automatic is allowed to take it.
 	"ao usage":                    {},
 	"ao usage backfill-cache-ttl": {},
-	"ao incident":                 {},
-	"ao incident diagnose":        {},
-	"ao incident submit":          {},
+	// Reading the shadow economic cohort back is operator activity too, for a
+	// milder version of the same reason: it opens the database directly (read
+	// only, no migration, no writable connection) because the question "what
+	// would the gate have recommended" is usually asked after the run, when
+	// there is no daemon left to ask.
+	"ao usage compaction-verdicts": {},
+	"ao incident":                  {},
+	"ao incident diagnose":         {},
+	"ao incident submit":           {},
 	// The P0-B operator recoveries. They are user activity by definition: each
 	// one exists precisely because nothing automatic is allowed to take it.
 	"ao workflow":                           {},

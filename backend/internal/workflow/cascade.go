@@ -368,6 +368,12 @@ func (c *Coordinator) applyFixLifecycleDecision(ctx stdctx.Context, run domain.W
 		ContextPressure: pressure, UsageKnown: usageKnown,
 	})
 	decision.ToSessionID = string(reviewRun.SessionID)
+	// P7.2B2: compute what the ECONOMIC model would have recommended, and record
+	// it. Nothing below reads the answer -- the call returns no value, so there
+	// is nothing to read -- and it runs here, before the compaction is requested,
+	// because this is the last instant at which every observation it consults is
+	// untouched by the act it is judging. See compaction_economics.go.
+	c.evaluateShadowCompactionEconomics(ctx, run, fixStep, reviewRun.SessionID, decision, cycleCount, prompt)
 	// Ask BEFORE the pack is built and prepended, so the message that
 	// re-anchors the session arrives after the conversation it re-anchors has
 	// been replaced. Best-effort throughout: every way this can fail leaves

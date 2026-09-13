@@ -26,6 +26,16 @@ type fakeStore struct {
 	checkpoints map[string][]domain.WorkflowCheckpoint // by workflow_run_id, oldest first
 	outbox      map[string]domain.WorkflowOutboxEntry  // by idempotency_key
 
+	// workerCalls backs P7.2B2's shadow economic gate: one run's worker-side
+	// provider calls, keyed by workflow_run_id, oldest first. Empty for every
+	// test that does not install a series, which is how the gate sees a run
+	// whose usage pipeline has placed nothing in time -- and therefore how the
+	// whole existing suite exercises the gate's fail-closed path.
+	workerCalls map[string][]domain.SessionCallObservation
+	// workerCallsErr makes the shadow gate's one read fail, which is how the
+	// failure-injection tests check that a broken economic read costs a data
+	// point and never a delivery.
+	workerCallsErr error
 	// healthEvents backs Checkpoint 8H's minimal agent health, append-only
 	// per harness, oldest first (mirrors agent_health_events).
 	healthEvents map[string][]domain.AgentHealthEvent
@@ -129,7 +139,19 @@ func newFakeStore() *fakeStore {
 		scopedHealthEvents: map[string][]domain.AgentHealthEvent{},
 		owners:             map[string]domain.UserID{},
 		checkpointClaims:   map[string]bool{},
+		workerCalls:        map[string][]domain.SessionCallObservation{},
 	}
+}
+
+// ListRunWorkerCallObservations satisfies the narrow read P7.2B2's shadow
+// economic gate type-asserts for. Present on the shared fake ON PURPOSE: it
+// means the gate runs in EVERY workflow test, so the whole existing suite is
+// itself the proof that recording a verdict changes nothing.
+func (f *fakeStore) ListRunWorkerCallObservations(_ context.Context, runID string) ([]domain.SessionCallObservation, error) {
+	if f.workerCallsErr != nil {
+		return nil, f.workerCallsErr
+	}
+	return f.workerCalls[runID], nil
 }
 
 func (f *fakeStore) RecordAgentHealthEvent(_ context.Context, ev domain.AgentHealthEvent) (domain.AgentHealthEvent, error) {
