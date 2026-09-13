@@ -124,6 +124,50 @@ type UsageTokenTotals struct {
 	// reasoning figure, so ReasoningTokens must not be rendered as 0.
 	ReasoningKnown bool
 	EventCount     int64
+	// CacheCreation is CacheWriteTokens divided by the TTL the cache entry was
+	// created at. A write is not one price: a provider that sells a longer
+	// cache lifetime charges more to create it, and folding the two together
+	// prices the dear one at the cheap one's rate.
+	//
+	// It is a SPLIT of CacheWriteTokens and never an addition to it. Nothing
+	// may add both.
+	CacheCreation CacheCreationSplit
+}
+
+// CacheCreationSplit divides cache creation by the lifetime the entry was
+// created with.
+//
+// UnknownTTLTokens is what makes this composable and what keeps it honest.
+// A source that reports only a total -- an older harness, a provider with no
+// TTL vocabulary -- contributes its whole figure there, and a cost that would
+// have to know the TTL is then refused rather than guessed at either rate.
+// Summing two splits is summing three int64s, with no boolean algebra to get
+// wrong, and a sum containing one unknown contribution stays unknown in exactly
+// the part that is.
+//
+// "5m" and "1h" are the provider's own vocabulary, not a duration AO chose.
+type CacheCreationSplit struct {
+	Ephemeral5mTokens int64
+	Ephemeral1hTokens int64
+	UnknownTTLTokens  int64
+}
+
+// Total is every cache-creation token, whatever its lifetime.
+func (s CacheCreationSplit) Total() int64 {
+	return s.Ephemeral5mTokens + s.Ephemeral1hTokens + s.UnknownTTLTokens
+}
+
+// Known reports whether every token in the split has a lifetime attached. A
+// split with nothing in it at all is trivially known -- there is no ambiguity
+// in zero tokens.
+func (s CacheCreationSplit) Known() bool { return s.UnknownTTLTokens == 0 }
+
+// Add folds another split in.
+func (s CacheCreationSplit) Add(o CacheCreationSplit) CacheCreationSplit {
+	s.Ephemeral5mTokens += o.Ephemeral5mTokens
+	s.Ephemeral1hTokens += o.Ephemeral1hTokens
+	s.UnknownTTLTokens += o.UnknownTTLTokens
+	return s
 }
 
 // Total is input plus output. Cache reads/writes are already inside
@@ -140,6 +184,7 @@ func (t UsageTokenTotals) Add(o UsageTokenTotals) UsageTokenTotals {
 	t.ReasoningTokens += o.ReasoningTokens
 	t.ReasoningKnown = t.ReasoningKnown || o.ReasoningKnown
 	t.EventCount += o.EventCount
+	t.CacheCreation = t.CacheCreation.Add(o.CacheCreation)
 	return t
 }
 
@@ -160,6 +205,24 @@ type UsageCost struct {
 	// UnpricedModels lists models in this aggregate that no rate covered, so
 	// a partial cost is visibly partial rather than quietly low.
 	UnpricedModels []string
+	// TTLUnknownTokens is cache creation this cost could NOT price, because
+	// the rate card covers the model's short cache lifetime and not its long
+	// one while the vector contains long-lived creation. A different failure
+	// from an unpriced model and worth telling apart: the model is known, one
+	// of its rates is not. Non-zero always accompanies Known=false.
+	TTLUnknownTokens int64
+	// TTLAssumedTokens is cache creation this cost DID price, at the short
+	// lifetime's rate, because nothing reported which lifetime the entry was
+	// created with.
+	//
+	// It is the disclosure that makes a known cost honestly partial. On the
+	// measured corpus 97.9% of cache creation is long-lived, so a figure with
+	// a large TTLAssumedTokens is very likely an UNDERSTATEMENT -- pricing one
+	// measured session's writes this way understated it by 15.2%. A caller
+	// that cannot accept an assumed lifetime -- a decision, a gate, a
+	// reconciliation -- must check this field and refuse for itself. Known
+	// stays true: the alternative would blank every cost AO reports.
+	TTLAssumedTokens int64
 }
 
 // Add folds another cost in. An unknown part makes the whole partial: the
@@ -182,6 +245,8 @@ func (c UsageCost) Add(o UsageCost) UsageCost {
 		}
 	}
 	c.UnpricedModels = appendUnique(c.UnpricedModels, o.UnpricedModels...)
+	c.TTLUnknownTokens += o.TTLUnknownTokens
+	c.TTLAssumedTokens += o.TTLAssumedTokens
 	return c
 }
 

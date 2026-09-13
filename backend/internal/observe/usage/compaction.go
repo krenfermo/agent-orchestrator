@@ -33,12 +33,19 @@ type CompactionObservations struct {
 	// harness has not written one yet, which is the normal state of a session
 	// that is still running.
 	Harness domain.HarnessSessionTotals
+	// CacheCreation is this source's cache creation summed per lifetime, and
+	// CacheCreationTotal is the same messages' reported totals. The pair is
+	// what lets a consumer check the aggregate against the ledger's own sum
+	// before trusting it to apportion anything.
+	CacheCreation      domain.CacheCreationSplit
+	CacheCreationTotal int64
 }
 
 // Empty reports whether the source observed nothing at all -- the state of
 // every source that predates P7.1 and of every session that never compacted.
 func (o CompactionObservations) Empty() bool {
-	return o.Count == 0 && len(o.Boundaries) == 0 && !o.Harness.Observed
+	return o.Count == 0 && len(o.Boundaries) == 0 && !o.Harness.Observed &&
+		o.CacheCreation.Total() == 0
 }
 
 // ExtractCompactionObservations reads one source's observations out of its
@@ -62,6 +69,12 @@ func ExtractCompactionObservations(source domain.UsageSourceRecord, sessionID do
 	claude := state.Claude
 	out.Count = claude.CompactionCount
 	out.Dropped = claude.CompactionsDropped
+	out.CacheCreation = domain.CacheCreationSplit{
+		Ephemeral5mTokens: claude.CacheCreation5m,
+		Ephemeral1hTokens: claude.CacheCreation1h,
+		UnknownTTLTokens:  claude.CacheCreationUnknown,
+	}
+	out.CacheCreationTotal = claude.CacheCreationTotal
 	for _, observed := range claude.Compactions {
 		boundary := domain.CompactionBoundary{
 			RecordUUID: observed.UUID,
@@ -130,6 +143,8 @@ func MergeCompactionObservations(parts ...CompactionObservations) CompactionObse
 		}
 		out.Count += part.Count
 		out.Dropped += part.Dropped
+		out.CacheCreation = out.CacheCreation.Add(part.CacheCreation)
+		out.CacheCreationTotal += part.CacheCreationTotal
 		if part.Harness.Observed && len(part.Harness.Models) > len(out.Harness.Models) {
 			out.Harness = part.Harness
 		}
@@ -206,19 +221,38 @@ func (r *CompactionReader) SessionCompactionAccounting(ctx context.Context, sess
 	if err != nil {
 		return domain.CompactionAccounting{}, fmt.Errorf("aggregate session usage: %w", err)
 	}
+	// The ledger row carries no lifetime, so the split comes from the parser's
+	// own aggregate over the same messages -- but ONLY when the two agree on
+	// the total. A disagreement means the two are not counting the same
+	// messages (a re-read, a replaced artifact, a source the ledger does not
+	// have), and apportioning across it would be inventing a distribution.
+	ledgerWrites := int64(0)
+	for _, aggregate := range aggregates {
+		ledgerWrites += aggregate.Tokens.CacheWriteTokens
+	}
+	splitUsable := merged.CacheCreationTotal > 0 && merged.CacheCreationTotal == ledgerWrites
 	attributed := make([]domain.ModelUsageLine, 0, len(aggregates))
 	for _, aggregate := range aggregates {
+		tokens := domain.UsageTokenTotals{
+			InputTokens:         aggregate.Tokens.InputTokens,
+			UncachedInputTokens: aggregate.Tokens.UncachedInputTokens,
+			CacheReadTokens:     aggregate.Tokens.CacheReadTokens,
+			CacheWriteTokens:    aggregate.Tokens.CacheWriteTokens,
+			OutputTokens:        aggregate.Tokens.OutputTokens,
+		}
+		if splitUsable && len(aggregates) == 1 {
+			// One model, one aggregate, one transcript: the split belongs to
+			// this line whole. With more than one model the parser aggregate
+			// cannot say which of them each write belonged to, so the lifetime
+			// stays unknown rather than being divided by a ratio nobody
+			// measured.
+			tokens.CacheCreation = merged.CacheCreation
+		}
 		attributed = append(attributed, domain.ModelUsageLine{
 			Harness: string(aggregate.Harness),
 			ModelID: aggregate.ModelID,
-			Tokens: domain.UsageTokenTotals{
-				InputTokens:         aggregate.Tokens.InputTokens,
-				UncachedInputTokens: aggregate.Tokens.UncachedInputTokens,
-				CacheReadTokens:     aggregate.Tokens.CacheReadTokens,
-				CacheWriteTokens:    aggregate.Tokens.CacheWriteTokens,
-				OutputTokens:        aggregate.Tokens.OutputTokens,
-			},
-			Source: domain.TokenSourceProvider,
+			Tokens:  tokens,
+			Source:  domain.TokenSourceProvider,
 		})
 	}
 	var pricer domain.ModelTokenPricer
