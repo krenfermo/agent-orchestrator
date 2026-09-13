@@ -466,16 +466,21 @@ GROUP BY ub.session_id
 ORDER BY s.project_id, s.num;
 
 -- name: ListUsageSourceIDsForCacheTTLBackfill :many
--- Every transcript source that could still carry a cache lifetime for rows
--- that do not have one.
+-- Every transcript source that could still carry a cache lifetime for a row
+-- that does not have one.
 --
--- Scoped to the sources whose binding has at least one event with NULL
--- lifetime columns, so a backfill does not re-read artifacts it can learn
--- nothing from. Ordered by id so two runs visit them in the same order and a
--- partial run resumes deterministically.
+-- Scoped by BINDING and not by the source that happens to own the events. A
+-- ledger row is identified by (binding, source_event_key), so a source can
+-- describe rows another source owns -- which is exactly what a REPLACED
+-- artifact leaves behind: the old source keeps the rows and loses its file,
+-- the new one has the file. Selecting on us.id = mue.usage_source_id would
+-- skip the source that can still read them.
+--
+-- Ordered by id so two runs visit them in the same order and a partial run
+-- resumes deterministically.
 SELECT DISTINCT us.id AS source_id
 FROM usage_sources us
-JOIN model_usage_events mue ON mue.usage_source_id = us.id
+JOIN model_usage_events mue ON mue.binding_id = us.binding_id
 WHERE mue.cache_write_5m_tokens IS NULL
    OR mue.cache_write_1h_tokens IS NULL
 ORDER BY us.id;

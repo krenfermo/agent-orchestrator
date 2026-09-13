@@ -938,3 +938,20 @@ func nullInt64ToPtr(v sql.NullInt64) *int64 {
 	out := v.Int64
 	return &out
 }
+
+// ExecForCacheTTLMaintenanceTest runs one statement directly against the write
+// connection.
+//
+// TEST SEAM, and a narrow one on purpose. The cache-lifetime backfill has to be
+// proved correct against a row state its own write path cannot produce -- one
+// lifetime column set and the other NULL -- and there is no honest way to reach
+// that state except by writing it by hand. Nothing in production calls this;
+// the name is long so that stays true.
+func (s *Store) ExecForCacheTTLMaintenanceTest(ctx context.Context, stmt string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if _, err := s.writeDB.ExecContext(ctx, stmt); err != nil {
+		return fmt.Errorf("exec maintenance statement: %w", err)
+	}
+	return nil
+}

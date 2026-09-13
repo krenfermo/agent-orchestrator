@@ -170,6 +170,15 @@ func (f *fixture) run(t *testing.T, apply bool) *usagebackfill.Report {
 	return report
 }
 
+// execRaw runs one statement straight against the database, for the states the
+// write path cannot produce.
+func (f *fixture) execRaw(t *testing.T, stmt string) {
+	t.Helper()
+	if err := f.store.ExecForCacheTTLMaintenanceTest(context.Background(), stmt); err != nil {
+		t.Fatalf("exec %q: %v", stmt, err)
+	}
+}
+
 // split is the session's cache-creation lifetime as every reader sees it.
 func (f *fixture) split(t *testing.T) domain.CacheCreationSplit {
 	t.Helper()
@@ -406,6 +415,182 @@ func TestTheReportCarriesNoContent(t *testing.T) {
 	} {
 		if strings.Contains(rendered, forbidden) {
 			t.Fatalf("the report leaked %q:\n%s", forbidden, rendered)
+		}
+	}
+}
+
+// --- adversarial: identity ---------------------------------------------------
+//
+// The development of this command already produced one identity bug (a guard
+// keyed on the source when the row is keyed on the binding), so the cases below
+// attack the identity directly rather than trusting that it holds.
+
+// secondSource attaches another transcript source to the SAME binding -- what a
+// replaced artifact leaves behind, and what a subagent transcript looks like.
+func (f *fixture) secondSource(t *testing.T, transcript string) domain.UsageSourceRecord {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "sibling.jsonl")
+	if err := os.WriteFile(path, []byte(transcript), 0o600); err != nil {
+		t.Fatalf("write sibling transcript: %v", err)
+	}
+	source, err := f.store.InsertUsageSource(context.Background(), domain.UsageSourceRecord{
+		BindingID: f.binding.ID, Kind: domain.UsageSourceClaudeMain,
+		NativeSessionID: "native-1", ArtifactPath: path,
+		State: domain.UsageSourceActive, UpdatedAt: time.Unix(1700000000, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("sibling source: %v", err)
+	}
+	return source
+}
+
+func TestASiblingSourceDescribingTheSameRowUpdatesItOnce(t *testing.T) {
+	// A replaced artifact: two sources on one binding, both describing the same
+	// calls. The row is identified by (binding, key), so it must be counted and
+	// updated exactly once -- counting per source is what promised to recover
+	// twice the tokens the ledger holds.
+	transcript := transcriptRecord("m-1h", 2, 1000, 2193, 50, lifetimes(0, 2193)) + "\n"
+	f := newFixture(t, transcript, nil)
+	f.secondSource(t, transcript)
+
+	report := f.run(t, true)
+	if report.RowsUpdated != 1 {
+		t.Fatalf("updated = %d, want 1 (%s)", report.RowsUpdated, report)
+	}
+	if report.Skipped[usagebackfill.SkipDuplicateRecord] != 1 {
+		t.Fatalf("the sibling's reconstruction must be recognised as the same row: %v", report.Skipped)
+	}
+	if report.Recovered1h != 2193 {
+		t.Fatalf("recovered = %d, want the row's tokens counted once", report.Recovered1h)
+	}
+	if got := f.split(t); got.Ephemeral1hTokens != 2193 || got.UnknownTTLTokens != 0 {
+		t.Fatalf("split = %+v", got)
+	}
+}
+
+func TestTwoCallsWithIdenticalVectorsKeepTheirOwnIdentities(t *testing.T) {
+	// Same numbers, different messages: two rows, two keys, two updates. A
+	// match on metrics rather than identity would collapse them.
+	transcript := strings.Join([]string{
+		transcriptRecord("m-a", 2, 1000, 2193, 50, lifetimes(0, 2193)),
+		transcriptRecord("m-b", 2, 1000, 2193, 50, lifetimes(2193, 0)),
+	}, "\n") + "\n"
+	f := newFixture(t, transcript, nil)
+
+	report := f.run(t, true)
+	if report.RowsUpdated != 2 {
+		t.Fatalf("updated = %d, want 2 (%s)", report.RowsUpdated, report)
+	}
+	// One went to each lifetime: the rows were told apart.
+	if got := f.split(t); got.Ephemeral5mTokens != 2193 || got.Ephemeral1hTokens != 2193 {
+		t.Fatalf("split = %+v, want 2193 in each bucket", got)
+	}
+}
+
+func TestAKeyFromAnotherBindingNeverMatches(t *testing.T) {
+	// The same source_event_key under a different binding is a different row.
+	transcript := transcriptRecord("m-1h", 2, 1000, 2193, 50, lifetimes(0, 2193)) + "\n"
+	f := newFixture(t, transcript, nil)
+	key := f.reconstruct(t)[0].SourceEventKey
+
+	other, err := f.store.UpsertUsageBinding(context.Background(), domain.UsageBindingRecord{
+		Subject:   domain.UsageSubject{Kind: domain.UsageSubjectSession, ID: string(f.session.ID)},
+		SessionID: f.session.ID, Harness: domain.HarnessClaudeCode,
+		NativeRootID: "root-2", State: domain.UsageBindingActive,
+		UpdatedAt: time.Unix(1700000000, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("second binding: %v", err)
+	}
+	updated, err := f.store.BackfillModelUsageEventCacheTTL(context.Background(), other.ID, domain.ModelUsageEvent{
+		ModelID:        testTranscriptModel,
+		SourceEventKey: key,
+		Tokens: domain.UsageTokenMetrics{
+			InputTokens: 3195, UncachedInputTokens: 2, CacheReadTokens: 1000,
+			CacheWriteTokens: 2193, OutputTokens: 50,
+			CacheCreation: domain.CacheCreationSplit{Ephemeral1hTokens: 2193},
+		},
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated {
+		t.Fatal("a key under a different binding must not match any row")
+	}
+}
+
+func TestAStaleVectorLosesTheWrite(t *testing.T) {
+	// The row changed between the read and the write -- an ingest that landed
+	// in between, or a transcript that no longer describes this call. The
+	// guarded UPDATE must match nothing rather than write a lifetime onto a
+	// call it was not reconstructed from.
+	transcript := transcriptRecord("m-1h", 2, 1000, 2193, 50, lifetimes(0, 2193)) + "\n"
+	f := newFixture(t, transcript, nil)
+	ev := f.reconstruct(t)[0]
+	ev.Tokens.OutputTokens = 999 // the vector the writer believes, now wrong
+
+	updated, err := f.store.BackfillModelUsageEventCacheTTL(context.Background(), f.binding.ID, ev)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated {
+		t.Fatal("a stale vector must not win the write")
+	}
+	if got := f.split(t); got.Known() {
+		t.Fatalf("the row was written anyway: %+v", got)
+	}
+}
+
+func TestAPartialLifetimeIsReportedAndLeftAlone(t *testing.T) {
+	// One column written and the other NULL. Unreachable through the write
+	// path; exactly what a careless backfill could produce. It must be named
+	// and left, never completed from the half that is there.
+	for _, tc := range []struct{ name, sql string }{
+		{"five set, hour null", `UPDATE model_usage_events SET cache_write_5m_tokens = 2193`},
+		{"hour set, five null", `UPDATE model_usage_events SET cache_write_1h_tokens = 2193`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transcript := transcriptRecord("m-1h", 2, 1000, 2193, 50, lifetimes(0, 2193)) + "\n"
+			f := newFixture(t, transcript, nil)
+			f.execRaw(t, tc.sql)
+
+			before := f.split(t)
+			report := f.run(t, true)
+			if report.RowsUpdated != 0 {
+				t.Fatalf("a partial state must not be completed: %s", report)
+			}
+			if report.Skipped[usagebackfill.SkipPartialExistingState] != 1 {
+				t.Fatalf("skip reasons = %v", report.Skipped)
+			}
+			// Still reported as unknown by every aggregate, and unchanged.
+			if after := f.split(t); after != before {
+				t.Fatalf("the row changed: %+v -> %+v", before, after)
+			}
+			if before.Known() {
+				t.Fatalf("a half-written pair must not read as known: %+v", before)
+			}
+		})
+	}
+}
+
+func TestAThirdApplyStillUpdatesNothing(t *testing.T) {
+	transcript := strings.Join([]string{
+		transcriptRecord("m-1h", 2, 1000, 2193, 50, lifetimes(0, 2193)),
+		transcriptRecord("m-none", 2, 4000, 0, 20, lifetimes(0, 0)),
+	}, "\n") + "\n"
+	f := newFixture(t, transcript, nil)
+
+	if got := f.run(t, true).RowsUpdated; got != 1 {
+		t.Fatalf("first apply = %d, want 1", got)
+	}
+	after := f.split(t)
+	for i, run := range []int{2, 3} {
+		report := f.run(t, true)
+		if report.RowsUpdated != 0 {
+			t.Fatalf("apply #%d updated %d rows", run, report.RowsUpdated)
+		}
+		if got := f.split(t); got != after {
+			t.Fatalf("apply #%d (iteration %d) changed the data: %+v", run, i, got)
 		}
 	}
 }

@@ -1,9 +1,14 @@
 package cli
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
+	_ "modernc.org/sqlite" // the probe below opens the database directly
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
@@ -73,15 +78,8 @@ func (c *commandContext) runUsageBackfillCacheTTL(cmd *cobra.Command, opts usage
 		return err
 	}
 
-	// The daemon is the sole writer. Refuse to open the store underneath a live
-	// one -- for the dry run too, because opening the database at all beside an
-	// active ingest is the part that is unsafe, not the writing. A stale
-	// run-file (dead PID) is treated as safe, exactly as `ao import` does.
-	if live, err := runfile.CheckStale(cfg.RunFilePath); err != nil {
-		return fmt.Errorf("inspect run-file: %w", err)
-	} else if live != nil {
-		return usageError{fmt.Errorf(
-			"the AO daemon is running (pid %d); stop it first with `ao stop` before backfilling the usage ledger", live.PID)}
+	if err := assertNoLiveDaemon(cfg); err != nil {
+		return err
 	}
 
 	store, err := sqlite.Open(cfg.DataDir)
@@ -146,4 +144,102 @@ func newUsageBackfillReportJSON(r *usagebackfill.Report) usageBackfillReportJSON
 		Recovered1hTokens:   r.Recovered1h,
 		RecoveredTotal:      r.RecoverableTotal,
 	}
+}
+
+// assertNoLiveDaemon refuses to touch the database while something else has it.
+//
+// TWO LAYERS, AND THE SECOND ONE IS THE LOAD-BEARING ONE.
+//
+// The run-file check is the cheap, friendly layer: it names the pid and tells
+// the operator to run `ao stop`. It is NOT sufficient on its own, and this is
+// not a theoretical objection. `ao server --data-dir X` overrides the run-file
+// path to X/running.json (server.go), ignoring both AO_RUN_FILE and the default
+// under ~/.ao -- so the canonical location an offline command computes from
+// config.Load() is NOT where a daemon launched that way writes. A live daemon
+// was observed on this machine doing exactly that, with ~/.ao/running.json
+// absent and ~/.ao/data/running.json holding its pid. A guard that trusted one
+// path would have concluded "stopped" and rewritten the ledger underneath it.
+// So both paths are checked.
+//
+// The second layer trusts no file at all. SQLite itself knows whether another
+// connection is attached: opening with locking_mode=exclusive and taking a
+// write transaction acquires a file lock that no other connection can hold, and
+// a daemon with the database open -- even an idle one, because WAL keeps shared
+// state mapped -- makes it fail. That is a fact about the database rather than
+// about a handshake file somebody may have moved, and it is what makes this
+// command safe to run when the run files disagree, are stale, are missing, or
+// belong to an instance nobody remembers starting.
+//
+// Nothing is killed and nothing is waited on: the command refuses and returns.
+func assertNoLiveDaemon(cfg config.Config) error {
+	candidates := []string{cfg.RunFilePath}
+	if cfg.DataDir != "" {
+		dataDirRunFile := filepath.Join(cfg.DataDir, "running.json")
+		if dataDirRunFile != cfg.RunFilePath {
+			candidates = append(candidates, dataDirRunFile)
+		}
+	}
+	for _, path := range candidates {
+		live, err := runfile.CheckStale(path)
+		if err != nil {
+			return fmt.Errorf("inspect run-file %s: %w", path, err)
+		}
+		if live != nil {
+			return usageError{fmt.Errorf(
+				"the AO daemon is running (pid %d); stop it first with `ao stop` before backfilling the usage ledger", live.PID)}
+		}
+	}
+	return assertDatabaseQuiet(cfg.DataDir)
+}
+
+// assertDatabaseQuiet asks SQLite whether anybody else has the database open.
+//
+// busy_timeout(0) is deliberate: this is a probe, not an attempt to win. A
+// database another process holds must fail immediately and loudly rather than
+// block an operator for seconds and then proceed.
+func assertDatabaseQuiet(dataDir string) error {
+	if dataDir == "" {
+		return nil
+	}
+	path := filepath.Join(dataDir, "ao.db")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(0)&_pragma=locking_mode(exclusive)")
+	if err != nil {
+		return fmt.Errorf("probe database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	// BEGIN EXCLUSIVE forces the lock to be taken now rather than lazily at the
+	// first write, which is what makes this a probe and not a hope.
+	tx, err := db.Begin()
+	if err == nil {
+		_, err = tx.Exec("CREATE TABLE IF NOT EXISTS ao_backfill_lock_probe_never_created (x INTEGER)")
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && err == nil {
+			err = rollbackErr
+		}
+	}
+	if err != nil {
+		if isDatabaseBusy(err) {
+			return usageError{errors.New(
+				"another process has AO's database open; stop the AO daemon with `ao stop` before backfilling the usage ledger")}
+		}
+		return fmt.Errorf("probe database %s: %w", path, err)
+	}
+	return nil
+}
+
+// isDatabaseBusy recognises SQLite's two flavours of "somebody else has it".
+// Matched on the message because the driver does not export a typed sentinel
+// for them, and a probe that failed to recognise a busy database would be worse
+// than no probe.
+func isDatabaseBusy(err error) bool {
+	msg := err.Error()
+	return containsAny(msg, "database is locked", "SQLITE_BUSY", "database table is locked", "locked")
+}
+
+func containsAny(haystack string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(haystack, needle) {
+			return true
+		}
+	}
+	return false
 }
