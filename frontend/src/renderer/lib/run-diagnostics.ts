@@ -1,4 +1,5 @@
 import type { components } from "../../api/schema";
+import { fixCycleSummary, reviewSummary, verifySummary } from "./workflow-control-center";
 
 type WorkflowRunDetailView = components["schemas"]["WorkflowRunDetailView"];
 
@@ -86,6 +87,31 @@ export type RunDiagnostics = {
 	baseBranch?: string;
 	worktreeName?: string;
 	integration?: string;
+	/** P8: the fix budget and outcomes, in the same terms the run page shows. */
+	maxFixCycles?: number;
+	fixCyclesSpent?: number;
+	reviewOutcome?: string;
+	verifyOutcome?: string;
+	/** A count only: check labels are commands, and a command's args may carry a secret. */
+	verifyFailedChecks?: number;
+	/** The running agent's clocks, as the daemon reported them. */
+	livenessObserved?: boolean;
+	lastSignalAt?: string;
+	lastTransitionAt?: string;
+	silentForSeconds?: number;
+	/** Usage totals and how they were obtained. Numbers only — no prompt, transcript or tool content. */
+	tokenSource?: string;
+	inputTokens?: number;
+	outputTokens?: number;
+	totalTokens?: number;
+	costKnown?: boolean;
+	costAmount?: number;
+	costCurrency?: string;
+	costBasis?: string;
+	unpricedModels?: string[];
+	budgetState?: string;
+	/** Which desktop build produced the bundle, when the bridge reports it. */
+	appVersion?: string;
 	steps: RunDiagnosticsStep[];
 };
 
@@ -136,11 +162,19 @@ function nullableIso(value: string | null | undefined): string | undefined {
 	return value ?? undefined;
 }
 
-export function buildRunDiagnostics(detail: WorkflowRunDetailView): RunDiagnostics {
+export function buildRunDiagnostics(
+	detail: WorkflowRunDetailView,
+	options: { appVersion?: string } = {},
+): RunDiagnostics {
 	const run = detail.run;
 	const tech = detail.presentation?.technical;
 	const advice = detail.advice;
 	const placement = detail.presentation?.placement;
+	const cycles = fixCycleSummary(detail);
+	const review = reviewSummary(detail);
+	const verify = verifySummary(detail);
+	const liveness = run.workerLiveness;
+	const ledger = detail.usage?.tokens;
 
 	return {
 		runId: run.id,
@@ -194,6 +228,30 @@ export function buildRunDiagnostics(detail: WorkflowRunDetailView): RunDiagnosti
 		baseBranch: placement?.baseBranch,
 		worktreeName: basename(placement?.worktreePath),
 		integration: placement?.integration,
+
+		maxFixCycles: run.maxFixCycles ?? undefined,
+		fixCyclesSpent: cycles.spent ?? undefined,
+		reviewOutcome: review?.outcome,
+		verifyOutcome: verify?.outcome,
+		verifyFailedChecks: verify && verify.checks.length > 0 ? verify.failedCount : undefined,
+
+		livenessObserved: liveness?.observed,
+		lastSignalAt: liveness?.lastSignalAt,
+		lastTransitionAt: liveness?.lastTransitionAt,
+		silentForSeconds: liveness?.silentForSeconds ?? undefined,
+
+		tokenSource: ledger?.source,
+		inputTokens: ledger?.recorded ? ledger.totals.input : undefined,
+		outputTokens: ledger?.recorded ? ledger.totals.output : undefined,
+		totalTokens: ledger?.recorded ? ledger.totals.total : undefined,
+		costKnown: ledger?.cost?.known,
+		costAmount: ledger?.cost?.known ? ledger.cost.amount : undefined,
+		costCurrency: ledger?.cost?.currency || undefined,
+		costBasis: ledger?.cost?.basis,
+		unpricedModels: ledger?.cost?.unpricedModels,
+		budgetState: ledger?.budget?.state,
+
+		appVersion: options.appVersion,
 
 		steps: (detail.steps ?? []).map((step) => {
 			const facts = step.reviewPolicy?.facts;
@@ -254,6 +312,7 @@ export function formatRunDiagnostics(d: RunDiagnostics): string {
 	put("executionMode", d.executionMode);
 	put("createdAt", d.createdAt);
 	put("lastActivityAt", d.lastActivityAt);
+	put("appVersion", d.appVersion);
 
 	lines.push("", "## Stop");
 	put("attention", d.attention);
@@ -294,6 +353,32 @@ export function formatRunDiagnostics(d: RunDiagnostics): string {
 	put("baseBranch", d.baseBranch);
 	put("worktree", d.worktreeName);
 	put("integration", d.integration);
+
+	lines.push("", "## Review / Verify");
+	if (d.fixCyclesSpent !== undefined || d.maxFixCycles !== undefined) {
+		put("fixCycles", `${d.fixCyclesSpent ?? "unknown"} of ${d.maxFixCycles ?? "unknown"}`);
+	}
+	put("reviewOutcome", d.reviewOutcome);
+	put("verifyOutcome", d.verifyOutcome);
+	put("verifyFailedChecks", d.verifyFailedChecks);
+
+	lines.push("", "## Liveness");
+	put("observed", d.livenessObserved);
+	put("lastSignalAt", d.lastSignalAt);
+	put("lastTransitionAt", d.lastTransitionAt);
+	put("silentForSeconds", d.silentForSeconds);
+
+	lines.push("", "## Usage");
+	put("tokenSource", d.tokenSource);
+	put("inputTokens", d.inputTokens);
+	put("outputTokens", d.outputTokens);
+	put("totalTokens", d.totalTokens);
+	put("costKnown", d.costKnown);
+	put("costAmount", d.costAmount);
+	put("costCurrency", d.costCurrency);
+	put("costBasis", d.costBasis);
+	put("unpricedModels", d.unpricedModels);
+	put("budgetState", d.budgetState);
 
 	for (const step of d.steps) {
 		lines.push("", `## Step ${step.ordinal} — ${step.kind} (${step.state})`);

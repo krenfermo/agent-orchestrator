@@ -217,7 +217,7 @@ describe("WorkflowRunView", () => {
 		render(<WorkflowRunView workflowId="wf-active" />, { wrapper });
 
 		await waitFor(() => expect(screen.getByText("Ship the board activity indicator")).toBeInTheDocument());
-		expect(screen.getByTestId("workflow-stage-badge")).toHaveTextContent("Working");
+		expect(screen.getByTestId("workflow-headline-status")).toHaveTextContent("Working");
 		// §16: the page answers "what do I do" without anyone reading a log.
 		expect(screen.getByTestId("workflow-status-guidance")).toHaveTextContent(
 			"AO is working. You do not need to do anything.",
@@ -230,13 +230,16 @@ describe("WorkflowRunView", () => {
 		expect(location).toHaveTextContent("feat/board-activity");
 		expect(location).not.toHaveTextContent("Integrates into");
 		expect(screen.getByRole("status", { name: "In progress" })).toBeInTheDocument();
-		const panel = screen.getByTestId("workflow-activity-panel");
-		expect(panel).toHaveTextContent("Working right now");
-		expect(panel).toHaveTextContent("7m");
-		expect(panel).toHaveTextContent("claude-code");
-		expect(panel).toHaveTextContent("feat/board-activity");
-		// No usage record on this run: the total stays Unknown rather than 0.
-		expect(panel).toHaveTextContent("Unknown");
+		// P8: the control-center facts answer "what is it doing, who is working,
+		// since when" in one block, in place of the old activity panel.
+		expect(screen.getByTestId("workflow-fact-step")).toHaveTextContent("#2 · Worker");
+		expect(screen.getByTestId("workflow-fact-agent")).toHaveTextContent("Worker · claude-code");
+		expect(screen.getByTestId("workflow-fact-duration")).toHaveTextContent("7m");
+		// No liveness reading on this run: the page says so rather than inventing a clock.
+		expect(screen.getByTestId("workflow-fact-signal")).toHaveTextContent("No running agent observed");
+		// No usage record on this run: no usage digest, rather than a zero.
+		expect(screen.queryByTestId("workflow-usage-digest")).toBeNull();
+		expect(screen.queryByTestId("workflow-activity-panel")).toBeNull();
 	});
 
 	it("shows a finished run without a spinner or an activity block", async () => {
@@ -280,7 +283,7 @@ describe("WorkflowRunView", () => {
 		render(<WorkflowRunView workflowId="wf-done" />, { wrapper });
 
 		await waitFor(() => expect(screen.getByText("Already finished")).toBeInTheDocument());
-		expect(screen.getByTestId("workflow-stage-badge")).toHaveTextContent("Completed");
+		expect(screen.getByTestId("workflow-headline-status")).toHaveTextContent("Completed");
 		expect(screen.queryByTestId("workflow-spinner")).toBeNull();
 		expect(screen.queryByTestId("workflow-activity-panel")).toBeNull();
 	});

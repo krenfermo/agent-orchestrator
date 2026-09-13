@@ -523,6 +523,14 @@ type WorkflowRunView struct {
 	// because "compaction is off and nobody asked otherwise" is an answer a
 	// person auditing a run needs stated rather than inferred from silence.
 	ContextEconomy *WorkflowContextEconomyView `json:"contextEconomy,omitempty"`
+	// MaxFixCycles is the run's frozen fix-cycle budget (P8): how many
+	// review->fix cycles the automatic loop may dispatch before it stops and
+	// asks a person. It is the ceiling only; what has been SPENT is the fix
+	// step's fixDelivery.cycleNumber, which is folded from the same
+	// fix_dispatched ledger the budget is enforced against. Absent when the
+	// policy snapshot is unreadable -- a budget this response cannot read is
+	// one it must not claim to know.
+	MaxFixCycles *int `json:"maxFixCycles,omitempty"`
 	// Recovery is P1-B's deterministic recovery assessment. It is populated
 	// only by the routes a person explicitly took -- recovery, resume,
 	// continue, plan reuse/regenerate, repair -- because deciding it probes
@@ -939,7 +947,24 @@ func workflowRunView(run domain.WorkflowRun, nextAction string) WorkflowRunView 
 		ExecutionStrategy: executionStrategyView(workflowcore.RecordedExecutionStrategy(run)),
 		ReviewDepth:       reviewDepthView(run),
 		ContextEconomy:    contextEconomyView(run),
+		MaxFixCycles:      maxFixCyclesForRun(run),
 	}
+}
+
+// maxFixCyclesForRun projects the frozen fix-cycle budget, or nil when the
+// snapshot cannot be read or carries no positive budget. It reads the same
+// field the coordinator enforces and never substitutes DefaultWorkflowPolicy:
+// the page must not state a ceiling the run is not actually running under.
+func maxFixCyclesForRun(run domain.WorkflowRun) *int {
+	if run.PolicySnapshot == "" || run.PolicySnapshot == "{}" {
+		return nil
+	}
+	var p domain.WorkflowPolicy
+	if err := json.Unmarshal([]byte(run.PolicySnapshot), &p); err != nil || p.MaxFixCycles <= 0 {
+		return nil
+	}
+	n := p.MaxFixCycles
+	return &n
 }
 
 // WorkflowContextEconomyView is the read-only projection of a run's frozen P7

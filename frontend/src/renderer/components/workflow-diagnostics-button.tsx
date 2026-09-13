@@ -32,7 +32,15 @@ export function WorkflowDiagnosticsButton({ detail }: { detail: WorkflowRunDetai
 	);
 
 	const copy = async () => {
-		const text = formatRunDiagnostics(buildRunDiagnostics(detail));
+		// The build that produced the bundle, when the bridge can say. A bridge
+		// that cannot is not a reason to refuse the copy.
+		let appVersion: string | undefined;
+		try {
+			appVersion = await aoBridge.app?.getVersion?.();
+		} catch {
+			appVersion = undefined;
+		}
+		const text = formatRunDiagnostics(buildRunDiagnostics(detail, { appVersion }));
 		try {
 			await aoBridge.clipboard.writeText(text);
 			setCopied(true);

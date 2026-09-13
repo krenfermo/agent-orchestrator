@@ -136,6 +136,32 @@ func TestWorkflowRunViewCarriesTheFrozenReviewDepth(t *testing.T) {
 	}
 }
 
+// P8: the same response carries the frozen fix-cycle ceiling on the wire, so
+// the run page can say "N / max" without reading the policy snapshot itself.
+func TestWorkflowRunViewCarriesTheFrozenFixCycleBudget(t *testing.T) {
+	svc := &reviewDepthWorkflowService{}
+	srv := newWorkflowTestServer(t, svc)
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/projects/proj-1/workflows",
+		`{"objective":"x","strategy":"task",`+taskVerificationBody+`}`)
+	if status != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	var resp struct {
+		Workflow struct {
+			Run struct {
+				MaxFixCycles *int `json:"maxFixCycles"`
+			} `json:"run"`
+		} `json:"workflow"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode %s: %v", body, err)
+	}
+	want := domain.DefaultWorkflowPolicy().MaxFixCycles
+	if resp.Workflow.Run.MaxFixCycles == nil || *resp.Workflow.Run.MaxFixCycles != want {
+		t.Fatalf("maxFixCycles = %v, want %d", resp.Workflow.Run.MaxFixCycles, want)
+	}
+}
+
 // A deployment whose service predates the capability must still create the run
 // on its frozen strategy default rather than failing the request.
 func TestWorkflowCreateRunWithoutReviewDepthCapability(t *testing.T) {

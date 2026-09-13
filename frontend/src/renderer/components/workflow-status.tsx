@@ -496,7 +496,7 @@ export function WorkflowCompletionSummary({
 				{verdict ? (
 					<>
 						<dt>{t("wf.completed.review")}</dt>
-						<dd>{verdict}</dd>
+						<dd>{translateDynamic(t as TFunction, `cc.review.outcome.${verdict}`, verdict)}</dd>
 					</>
 				) : null}
 				{verificationPassed !== undefined ? (

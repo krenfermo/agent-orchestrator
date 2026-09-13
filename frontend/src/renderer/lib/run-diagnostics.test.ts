@@ -189,6 +189,71 @@ describe("buildRunDiagnostics", () => {
 		expect(text).not.toContain("token-should-never-appear");
 	});
 
+	// P8: the bundle now also carries what the control center shows — fix budget,
+	// review/Verify outcomes, the agent's clocks, usage totals and the build —
+	// and still nothing that could carry a secret: a check label is a command,
+	// and its arguments never travel.
+	it("carries fix budget, outcomes, liveness, usage totals and version, but never a check's command", () => {
+		const base = detail();
+		const d = buildRunDiagnostics(
+			{
+				...base,
+				run: {
+					...base.run,
+					maxFixCycles: 3,
+					workerLiveness: { observed: true, lastSignalAt: "2026-09-01T10:29:00.000Z", silentForSeconds: 60 },
+				},
+				steps: [
+					{ id: "r", kind: "review", ordinal: 1, state: "completed", verdict: "changes_requested", attempts: [], createdAt: "x", updatedAt: "x" },
+					{ id: "f", kind: "fix", ordinal: 2, state: "completed", attempts: [], createdAt: "x", updatedAt: "x", fixDelivery: { cycleNumber: 2 } },
+					{
+						id: "v",
+						kind: "verify",
+						ordinal: 3,
+						state: "completed",
+						attempts: [],
+						createdAt: "x",
+						updatedAt: "x",
+						verification: {
+							passed: false,
+							checks: [{ kind: "command", label: "deploy --token=SECRET-VERIFY-ARG", passed: false, stderrTail: "SECRET-STDERR" }],
+							preFingerprint: "",
+							postFingerprint: "",
+							reviewedFingerprint: "",
+							targetKey: "",
+							version: "v1",
+						},
+					},
+				],
+				usage: {
+					tokens: {
+						recorded: true,
+						source: "provider_reported",
+						totals: { input: 100, output: 20, total: 120 },
+						cost: { known: false, basis: "unknown", amount: 0, unpricedModels: ["sonnet"] },
+						budget: { state: "unset" },
+					},
+				},
+			} as unknown as WorkflowRunDetailView,
+			{ appVersion: "1.2.3" },
+		);
+		const text = formatRunDiagnostics(d);
+		expect(text).toContain("appVersion: 1.2.3");
+		expect(text).toContain("fixCycles: 2 of 3");
+		expect(text).toContain("reviewOutcome: changes_requested");
+		expect(text).toContain("verifyOutcome: failed");
+		expect(text).toContain("verifyFailedChecks: 1");
+		expect(text).toContain("lastSignalAt: 2026-09-01T10:29:00.000Z");
+		expect(text).toContain("tokenSource: provider_reported");
+		expect(text).toContain("inputTokens: 100");
+		expect(text).toContain("costKnown: false");
+		expect(text).toContain("unpricedModels: sonnet");
+		// An unknown cost is never printed as an amount.
+		expect(text).not.toContain("costAmount");
+		expect(text).not.toContain("SECRET-VERIFY-ARG");
+		expect(text).not.toContain("SECRET-STDERR");
+	});
+
 	it("omits absent facts rather than printing empty or invented ones", () => {
 		const text = formatRunDiagnostics(buildRunDiagnostics(detail()));
 		expect(text).toContain("run: wf-1234abcd");

@@ -287,7 +287,13 @@ export function WorkflowsList({ initialProjectId }: { initialProjectId?: string 
 		// its own, so a long workflow list ran off the bottom of the window.
 		// See that route for why `[&>*]:shrink-0` is required here.
 		<div className="mx-auto flex h-full min-h-0 max-w-6xl flex-col gap-6 overflow-y-auto break-words p-6 [&>*]:shrink-0">
-			<h1 className="text-lg font-semibold">{t("shell.workflows")}</h1>
+			{/* P8: this page is THE place new work starts. Every "new work" entry
+			    point (board, sidebar, command palette) lands here; "new agent
+			    session" is a different thing and says so in its own dialog. */}
+			<div className="flex flex-col gap-1">
+				<h1 className="text-lg font-semibold">{t("cc.newWork.title")}</h1>
+				<p className="text-sm text-muted-foreground">{t("cc.newWork.subtitle")}</p>
+			</div>
 
 			{noProjects ? (
 				<div className="flex flex-col gap-3 rounded-lg border border-border p-4">
@@ -303,6 +309,34 @@ export function WorkflowsList({ initialProjectId }: { initialProjectId?: string 
 				</div>
 			) : (
 				<form className="flex flex-col gap-3 rounded-lg border border-border p-4" onSubmit={onSubmit}>
+					{/* P8: the mode comes first. It decides what kind of run this is —
+					    a bounded Task, an Autonomous plan, a Master initiative — and the
+					    rest of the form (checks, review depth) reads differently under it. */}
+					<fieldset className="flex flex-col gap-2">
+						<legend className="text-sm font-medium">{t("shell.workflowsStrategy")}</legend>
+						<div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+							{EXECUTION_STRATEGIES.map((value) => (
+								<label
+									className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
+										strategy === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
+									}`}
+									key={value}
+								>
+									<span className="flex items-center gap-2 font-medium text-foreground">
+										<input
+											checked={strategy === value}
+											name="workflow-execution-strategy"
+											onChange={() => setStrategy(value)}
+											type="radio"
+											value={value}
+										/>
+										{strategyLabels[value].label}
+									</span>
+									<span className="pl-5 text-muted-foreground">{strategyLabels[value].explainer}</span>
+								</label>
+							))}
+						</div>
+					</fieldset>
 					<label className="flex flex-col gap-1 text-sm">
 						{t("shell.workflowsProjectLabel")}
 						<Select value={projectId} onValueChange={setProjectId}>
@@ -365,29 +399,6 @@ export function WorkflowsList({ initialProjectId }: { initialProjectId?: string 
 					    desktop window has room to compare Strategy against Approval
 					    side by side instead of scrolling through four stacked lists. */}
 					<div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-						<fieldset className="flex flex-col gap-2">
-							<legend className="text-sm">{t("shell.workflowsStrategy")}</legend>
-							{EXECUTION_STRATEGIES.map((value) => (
-								<label
-									className={`flex cursor-pointer flex-col gap-0.5 rounded border px-3 py-2 text-xs ${
-										strategy === value ? "border-primary bg-primary/5" : "border-border bg-muted/40"
-									}`}
-									key={value}
-								>
-									<span className="flex items-center gap-2 font-medium text-foreground">
-										<input
-											checked={strategy === value}
-											name="workflow-execution-strategy"
-											onChange={() => setStrategy(value)}
-											type="radio"
-											value={value}
-										/>
-										{strategyLabels[value].label}
-									</span>
-									<span className="pl-5 text-muted-foreground">{strategyLabels[value].explainer}</span>
-								</label>
-							))}
-						</fieldset>
 						<fieldset className="flex flex-col gap-2" disabled={policyLoading}>
 							<legend className="text-sm">{t("shell.workflowsApproval")}</legend>
 							{APPROVAL_POLICIES.map((value) => (
@@ -528,6 +539,7 @@ export function WorkflowsList({ initialProjectId }: { initialProjectId?: string 
 			{isLoading && <p className="text-sm text-muted-foreground">{t("shell.workflowsLoading")}</p>}
 			{error && <p className="text-sm text-destructive">{error}</p>}
 
+			<h2 className="text-sm font-semibold text-muted-foreground">{t("cc.newWork.listTitle")}</h2>
 			<ul className="flex flex-col gap-2">
 				{runs.map((run) => (
 					<li className="rounded-lg border border-border p-3" key={run.id}>
@@ -609,7 +621,13 @@ function TaskCreationSummary({
 			<h2 className="text-sm font-semibold">{t("wf.create.summaryTitle")}</h2>
 			<dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
 				<dt>{t("wf.create.strategy")}</dt>
-				<dd>{t(`shell.workflowsStrategy${strategy === "task" ? "Task" : strategy === "master" ? "Master" : "Autonomous"}Label`)}</dd>
+				<dd className="font-medium text-foreground" data-testid="task-creation-mode">
+					{t(`shell.workflowsStrategy${strategy === "task" ? "Task" : strategy === "master" ? "Master" : "Autonomous"}Label`)}
+				</dd>
+				{/* Stated rather than guessed: routing picks the agent and model when
+				    each step launches, so nothing before creation can name them. */}
+				<dt>{t("wf.create.agent")}</dt>
+				<dd>{t("wf.create.agentValue")}</dd>
 				<dt>{t("wf.create.approval")}</dt>
 				<dd>{t(approvalPolicy === "automatic" ? "shell.workflowsApprovalAutomaticLabel" : "shell.workflowsApprovalManualLabel")}</dd>
 				<dt>{t("wf.create.repair")}</dt>
