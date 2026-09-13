@@ -368,7 +368,7 @@ WHERE id = sqlc.arg(usage_binding_id)
 SELECT
     model_id, input_tokens, uncached_input_tokens,
     cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
-    turn_class
+    turn_class, cache_write_5m_tokens, cache_write_1h_tokens
 FROM model_usage_events
 WHERE binding_id = ? AND source_event_key = ?;
 
@@ -376,8 +376,11 @@ WHERE binding_id = ? AND source_event_key = ?;
 INSERT INTO model_usage_events (
     binding_id, usage_source_id, model_id, input_tokens, uncached_input_tokens,
     cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
-    source_event_key, turn_class, observed_at, recorded_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    source_event_key, turn_class, observed_at, recorded_at,
+    -- NULL when the transcript reported no lifetime for this call's cache
+    -- creation. Never 0: zero would assert the writes were short-lived.
+    cache_write_5m_tokens, cache_write_1h_tokens
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: RefineModelUsageEventTurnClass :exec
 -- Raise an already-stored event's turn class as later records of the SAME
@@ -410,6 +413,15 @@ SELECT
     CAST(SUM(mue.uncached_input_tokens) AS INTEGER) AS uncached_input_tokens,
     CAST(SUM(mue.cache_read_tokens) AS INTEGER) AS cache_read_tokens,
     CAST(SUM(mue.cache_write_tokens) AS INTEGER) AS cache_write_tokens,
+    -- The cache-creation lifetime split. The third column is the quantity
+    -- whose lifetime was never observed: NULL columns beside a non-zero total,
+    -- which is every row written before migration 0170. It is reported rather
+    -- than folded into the short lifetime, because unknown is not five minutes.
+    CAST(COALESCE(SUM(mue.cache_write_5m_tokens), 0) AS INTEGER) AS cache_write_5m_tokens,
+    CAST(COALESCE(SUM(mue.cache_write_1h_tokens), 0) AS INTEGER) AS cache_write_1h_tokens,
+    CAST(COALESCE(SUM(CASE WHEN mue.cache_write_5m_tokens IS NULL
+                           THEN mue.cache_write_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_unknown_ttl_tokens,
     CAST(SUM(mue.output_tokens) AS INTEGER) AS output_tokens,
     CAST(COALESCE(SUM(mue.reasoning_tokens), 0) AS INTEGER) AS reasoning_tokens,
     COUNT(mue.reasoning_tokens) AS reasoning_event_count

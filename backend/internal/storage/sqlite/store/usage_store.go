@@ -661,6 +661,7 @@ func usageSourceInsertParams(rec domain.UsageSourceRecord) gen.InsertUsageSource
 // artifact carried none, because a period or a role window built on a
 // fabricated timestamp is worse than one that admits the gap.
 func usageEventInsertParams(source gen.GetUsageSourceWithBindingAndSessionRow, ev domain.ModelUsageEvent, recordedAt time.Time) gen.InsertModelUsageEventParams {
+	five, hour := cacheLifetimeColumns(ev.Tokens)
 	return gen.InsertModelUsageEventParams{
 		BindingID:           source.BindingID,
 		UsageSourceID:       sql.NullInt64{Int64: source.SourceID, Valid: true},
@@ -675,7 +676,36 @@ func usageEventInsertParams(source gen.GetUsageSourceWithBindingAndSessionRow, e
 		TurnClass:           ev.TurnClass,
 		ObservedAt:          ptrTimeToNullTime(ev.ObservedAt),
 		RecordedAt:          sql.NullTime{Time: recordedAt, Valid: !recordedAt.IsZero()},
+		CacheWrite5mTokens:  five,
+		CacheWrite1hTokens:  hour,
 	}
+}
+
+// cacheLifetimeColumns turns a decoded lifetime split into the pair of nullable
+// columns, or into two NULLs.
+//
+// NULL means the lifetime of this call's cache creation was not observed. It
+// does NOT mean zero tokens -- that claim already has a home in
+// cache_write_tokens -- and the distinction is the entire reason the columns
+// are nullable. Three cases produce NULL and all three are the same statement:
+// a transcript with no cache_creation block, a split the parser could not
+// reconcile with its own total, and a source that reported creation without
+// saying what kind.
+//
+// A split that does not add up to the total it accompanies is REFUSED rather
+// than stored beside it. The parser already raised the anomaly; persisting two
+// numbers that contradict the third would put the contradiction in the ledger
+// where every later sum would inherit it.
+func cacheLifetimeColumns(tokens domain.UsageTokenMetrics) (five, hour sql.NullInt64) {
+	split := tokens.CacheCreation
+	if split.UnknownTTLTokens > 0 || split.Total() == 0 {
+		return sql.NullInt64{}, sql.NullInt64{}
+	}
+	if split.Total() != tokens.CacheWriteTokens {
+		return sql.NullInt64{}, sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: split.Ephemeral5mTokens, Valid: true},
+		sql.NullInt64{Int64: split.Ephemeral1hTokens, Valid: true}
 }
 
 // refinedTurnClass decides whether an already-stored class should be replaced
@@ -710,6 +740,17 @@ func refinedTurnClass(existing, incoming domain.TurnClass) (domain.TurnClass, bo
 	}
 }
 
+// usageEventMatches compares an already-stored row against an event arriving
+// under the same key.
+//
+// The cache-lifetime columns are DELIBERATELY NOT COMPARED. A row written
+// before migration 0170 carries NULL there and the same call re-read today
+// carries a split, and that is not a conflict -- it is the same event, better
+// measured. Treating it as one would make every pre-0170 row raise
+// source_event_conflict on the next pass over a transcript that has not
+// changed. What the columns are worth is a refinement, handled where turn_class
+// already is; what they must never do is invalidate a token vector that agrees
+// in every dimension that was ever stored.
 func usageEventMatches(existing gen.GetModelUsageEventByKeyRow, event domain.ModelUsageEvent) bool {
 	reasoning := ptrInt64ToNull(event.Tokens.ReasoningTokens)
 	return existing.ModelID == event.ModelID &&
@@ -732,6 +773,11 @@ func usageAggregateFromGen(row gen.AggregateUsageBySessionHarnessModelRow) domai
 			CacheWriteTokens:    row.CacheWriteTokens,
 			OutputTokens:        row.OutputTokens,
 			ReasoningTokens:     int64PtrWhen(row.ReasoningTokens, row.ReasoningEventCount > 0),
+			CacheCreation: domain.CacheCreationSplit{
+				Ephemeral5mTokens: row.CacheWrite5mTokens,
+				Ephemeral1hTokens: row.CacheWrite1hTokens,
+				UnknownTTLTokens:  row.CacheWriteUnknownTtlTokens,
+			},
 		},
 		ReasoningEventCount: row.ReasoningEventCount,
 	}

@@ -98,7 +98,60 @@ now does, in all three of its costing paths. When the per-event columns exist,
 
 No path assumes 1h. No path assumes 5m silently.
 
-## 5. MIGRATION: stopped, not created
+## 5. MIGRATION 0170 - approved and applied to the schema (P7.2B1.1)
+
+**`0170_usage_cache_ttl.sql`.** 0170 was verified free across all 68 branches in
+this tree, not merely free on ECC -- the `shippedMigrations` ledger exists
+because a number claimed twice has already cost this project an outage, and the
+claim is registered there in the same change.
+
+```sql
+ALTER TABLE model_usage_events ADD COLUMN cache_write_5m_tokens INTEGER;
+ALTER TABLE model_usage_events ADD COLUMN cache_write_1h_tokens INTEGER;
+-- plus a rebuild of the usage_event_attribution VIEW to project them
+```
+
+**Nullable, and no DEFAULT.** NULL means the lifetime was never observed. `0`
+would mean no short-lived entry was created -- a claim about the tokens, and on
+97.9% of this corpus a false one. `DEFAULT 0` would have made every historical
+row assert exactly the thing this checkpoint exists to stop AO asserting. The
+distinction is pinned by `TestMigration0170LeavesHistoricalRowsNull`, which also
+checks that `SUM` over only NULLs stays NULL rather than collapsing to zero.
+
+**Purely structural.** The migration reads no file, estimates nothing,
+apportions no aggregate and assumes neither lifetime; `TestMigration0170IsStructuralOnly`
+compares every pre-existing column before and after. No table rebuild: two
+`ADD COLUMN`s and a view, which is a projection and not a rebuild -- the same
+reasoning 0169 used on the same view. No CHECK ties the pair to the total
+because SQLite cannot add one without the rebuild AGENTS.md warns about; the
+write path enforces it instead.
+
+**Write path.** `cacheLifetimeColumns` persists the pair only when the split is
+complete AND sums to the total it accompanies. Three cases write NULL and all
+three are the same statement: no `cache_creation` block, a split the parser
+could not reconcile, and creation reported without a lifetime. A contradictory
+split is REFUSED rather than stored beside the total it contradicts -- the
+parser already raised the anomaly, and putting the contradiction in the ledger
+would let every later sum inherit it.
+
+**Dedupe.** `usageEventMatches` deliberately does NOT compare the lifetime
+columns. A row written before 0170 carries NULL and the same call re-read today
+carries a split; that is the same event better measured, not a conflict, and
+comparing them would make every pre-0170 row raise `source_event_conflict` on
+the next pass over an unchanged transcript.
+
+**Read path.** Every aggregate -- run, project, role, cycle, family, session --
+now returns three figures instead of one: `SUM(5m)`, `SUM(1h)`, and
+`SUM(cache_write_tokens) WHERE the pair IS NULL`, which is exactly
+`UnknownTTLTokens`. The per-event trajectory read projects the nullable pair
+through the view and maps NULL to unknown, never to zero.
+
+**Round trip, measured.** `TestTheMeasuredSessionsReconcileThroughTheDurablePath`
+writes both known runs' real vectors through the real ingest path and prices
+what comes back: 93.6% -> 98.0% and 67.9% -> 80.1% explained, identical to the
+offline arithmetic in section 6.
+
+### What P7.2B1 said before the migration existed
 
 **A per-event lifetime needs two nullable INTEGER columns on
 `model_usage_events`. I did not create the migration. This is the STOP the
@@ -116,7 +169,7 @@ What P7.2B1 delivers without it:
 |---|---|---|
 | `turnbench` | per call, from fixtures | **yes** |
 | compaction accounting (`CompactionReader`) | per session, from parser state | **yes**, when the parser aggregate and the ledger agree on the total |
-| `LedgerReader` — run / project / role / cycle costs | per event | **no** — assumption disclosed |
+| `LedgerReader` — run / project / role / cycle costs | per event | **yes, for events written after 0170**; rows written before it stay lifetime-unknown until a backfill |
 
 Why I did not force it another way: apportioning a session aggregate across
 events would be inventing a per-event distribution, and the brief forbids
@@ -200,10 +253,10 @@ harness's own cost line. It is now measured by AO's own code.
 
 ## 9. Risks
 
-1. **The ledger is still short.** Until the per-event columns exist, every
-   run/project/role cost understates cache creation by up to the 1h-vs-5m
-   difference, disclosed but not corrected. On the measured sessions that is
-   4.8% and 17.9%.
+1. **Historical rows are still short.** Events written before 0170 carry no
+   lifetime and are priced at the short rate with `TTLAssumedTokens` set: 3,381
+   rows across 78 sessions, 7.5M cache-creation tokens. New events are exact.
+   Section 10 says what a backfill would and would not be able to fix.
 2. **The 1-hour rates for models AO has never metered are derived, not quoted.**
    Opus 5's is confirmed to six significant figures against the harness's own
    number; the rest follow the same 2x multiplier the vendor publishes, exactly
@@ -215,3 +268,51 @@ harness's own cost line. It is now measured by AO's own code.
    falls back to unknown when they do not.
 5. **`claude-opus-5[1m]` is untouched** and still unpriced. Separate problem,
    deliberately left alone.
+
+
+---
+
+## 10. Backfill: analysed, not implemented
+
+**Should it exist?** Probably yes, as `ao usage backfill-cache-ttl`, and it is
+cheap -- but it is not urgent, because nothing downstream needs history to be
+exact. The shadow gate judges live runs.
+
+**How much is reconstructible:**
+
+| | rows | cache creation |
+|---|---:|---:|
+| Claude events whose transcript is still on disk | **3,381** | 7,499,849 |
+| Claude events whose transcript is gone | 104 | 144,662 |
+| Codex events (no cache creation at all) | 389 | 0 |
+| events with zero cache creation (nothing to fix) | 396 | 0 |
+
+So ~97% of the affected rows could be reconstructed today. That number falls
+every week a transcript is rotated, which is the only argument for doing it
+soon.
+
+**How it would have to work.**
+
+1. **Key on `source_event_key`, never on position.** The key is already the
+   exactly-once identity and is derived from the artifact, the source kind, the
+   native session and the message id -- it is reproducible from the transcript
+   without a clock. Re-deriving it and matching gives a row-to-message join that
+   cannot drift.
+2. **Verify before writing.** A candidate row is updated only when the
+   transcript message it matched agrees on the ENTIRE token vector -- uncached,
+   read, total creation, output. A transcript that has been rotated or
+   truncated then matches nothing rather than matching the wrong thing, and the
+   `cache_creation` buckets must still sum to the stored total or the row is
+   skipped.
+3. **Idempotent by construction.** `UPDATE ... WHERE cache_write_5m_tokens IS
+   NULL` -- it can only ever move a row from unobserved to observed, never
+   rewrite an observation, and re-running it is a no-op. That single predicate
+   is what makes it safe to run twice, or half-way, or after a crash.
+4. **Never widen.** No estimation, no apportioning a session aggregate, no
+   assuming the dominant lifetime, no filling a row whose transcript is gone.
+   A row that cannot be verified stays NULL, which is already the honest answer.
+5. **Report, do not decide.** It should print how many rows it matched, skipped,
+   and could not find a transcript for, and change nothing else.
+
+**Not a prerequisite for P7.2B2.** Shadow verdicts are about runs happening now,
+whose events carry the lifetime from the moment 0170 lands.

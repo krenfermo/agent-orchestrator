@@ -221,16 +221,22 @@ func (r *CompactionReader) SessionCompactionAccounting(ctx context.Context, sess
 	if err != nil {
 		return domain.CompactionAccounting{}, fmt.Errorf("aggregate session usage: %w", err)
 	}
-	// The ledger row carries no lifetime, so the split comes from the parser's
-	// own aggregate over the same messages -- but ONLY when the two agree on
-	// the total. A disagreement means the two are not counting the same
-	// messages (a re-read, a replaced artifact, a source the ledger does not
-	// have), and apportioning across it would be inventing a distribution.
-	ledgerWrites := int64(0)
+	// Since migration 0170 the ledger row carries the cache lifetime itself, so
+	// the aggregate is authoritative and nothing has to be apportioned.
+	//
+	// The parser's own session aggregate stays as a FALLBACK, for the rows
+	// written before that column existed: they come back as lifetime-unknown,
+	// and the parser -- which re-read the same transcript -- may know better.
+	// It is used only when the ledger knows nothing at all and the two agree on
+	// the total, because a disagreement means they are not counting the same
+	// messages and apportioning across that would invent a distribution.
+	ledgerWrites, ledgerUnknown := int64(0), int64(0)
 	for _, aggregate := range aggregates {
 		ledgerWrites += aggregate.Tokens.CacheWriteTokens
+		ledgerUnknown += aggregate.Tokens.CacheCreation.UnknownTTLTokens
 	}
-	splitUsable := merged.CacheCreationTotal > 0 && merged.CacheCreationTotal == ledgerWrites
+	splitUsable := ledgerUnknown == ledgerWrites && ledgerWrites > 0 &&
+		merged.CacheCreationTotal == ledgerWrites && merged.CacheCreation.Known()
 	attributed := make([]domain.ModelUsageLine, 0, len(aggregates))
 	for _, aggregate := range aggregates {
 		tokens := domain.UsageTokenTotals{
@@ -240,12 +246,13 @@ func (r *CompactionReader) SessionCompactionAccounting(ctx context.Context, sess
 			CacheWriteTokens:    aggregate.Tokens.CacheWriteTokens,
 			OutputTokens:        aggregate.Tokens.OutputTokens,
 		}
+		tokens.CacheCreation = aggregate.Tokens.CacheCreation
 		if splitUsable && len(aggregates) == 1 {
-			// One model, one aggregate, one transcript: the split belongs to
-			// this line whole. With more than one model the parser aggregate
-			// cannot say which of them each write belonged to, so the lifetime
-			// stays unknown rather than being divided by a ratio nobody
-			// measured.
+			// One model, one aggregate, one transcript, and a ledger that knows
+			// no lifetime for any of it: the parser's split belongs to this
+			// line whole. With more than one model the parser aggregate cannot
+			// say which of them each write belonged to, so the lifetime stays
+			// unknown rather than being divided by a ratio nobody measured.
 			tokens.CacheCreation = merged.CacheCreation
 		}
 		attributed = append(attributed, domain.ModelUsageLine{

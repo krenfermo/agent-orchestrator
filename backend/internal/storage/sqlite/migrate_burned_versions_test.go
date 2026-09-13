@@ -173,6 +173,7 @@ var shippedMigrations = map[int64]string{
 	167: "0167_skill_external_registry.sql",
 	168: "0168_session_last_signal.sql",
 	169: "0169_usage_turn_class.sql",
+	170: "0170_usage_cache_ttl.sql",
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they

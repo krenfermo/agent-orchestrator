@@ -129,6 +129,11 @@ func (s *Store) AggregateWorkflowRunUsage(ctx context.Context, runID string) ([]
 				CacheReadTokens: r.CacheReadTokens, CacheWriteTokens: r.CacheWriteTokens,
 				OutputTokens: r.OutputTokens, ReasoningTokens: r.ReasoningTokens,
 				ReasoningKnown: r.ReasoningEventCount > 0, EventCount: r.EventCount,
+				CacheCreation: domain.CacheCreationSplit{
+					Ephemeral5mTokens: r.CacheWrite5mTokens,
+					Ephemeral1hTokens: r.CacheWrite1hTokens,
+					UnknownTTLTokens:  r.CacheWriteUnknownTtlTokens,
+				},
 			},
 			ApproximateEvents: r.ApproximateCount,
 		})
@@ -155,6 +160,11 @@ func (s *Store) AggregateProjectUsage(ctx context.Context, projectID string, fro
 				CacheReadTokens: r.CacheReadTokens, CacheWriteTokens: r.CacheWriteTokens,
 				OutputTokens: r.OutputTokens, ReasoningTokens: r.ReasoningTokens,
 				ReasoningKnown: r.ReasoningEventCount > 0, EventCount: r.EventCount,
+				CacheCreation: domain.CacheCreationSplit{
+					Ephemeral5mTokens: r.CacheWrite5mTokens,
+					Ephemeral1hTokens: r.CacheWrite1hTokens,
+					UnknownTTLTokens:  r.CacheWriteUnknownTtlTokens,
+				},
 			},
 			ApproximateEvents: r.ApproximateCount,
 		})
@@ -177,6 +187,11 @@ func (s *Store) AggregateCompactRunUsageForProject(ctx context.Context, projectI
 				InputTokens: r.InputTokens, UncachedInputTokens: r.UncachedInputTokens,
 				CacheReadTokens: r.CacheReadTokens, CacheWriteTokens: r.CacheWriteTokens,
 				OutputTokens: r.OutputTokens, EventCount: r.EventCount,
+				CacheCreation: domain.CacheCreationSplit{
+					Ephemeral5mTokens: r.CacheWrite5mTokens,
+					Ephemeral1hTokens: r.CacheWrite1hTokens,
+					UnknownTTLTokens:  r.CacheWriteUnknownTtlTokens,
+				},
 			},
 			ApproximateEvents: r.ApproximateCount,
 		})
@@ -200,6 +215,11 @@ func (s *Store) AggregateRunFamilyUsage(ctx context.Context, runID string) ([]Us
 				InputTokens: r.InputTokens, UncachedInputTokens: r.UncachedInputTokens,
 				CacheReadTokens: r.CacheReadTokens, CacheWriteTokens: r.CacheWriteTokens,
 				OutputTokens: r.OutputTokens, EventCount: r.EventCount,
+				CacheCreation: domain.CacheCreationSplit{
+					Ephemeral5mTokens: r.CacheWrite5mTokens,
+					Ephemeral1hTokens: r.CacheWrite1hTokens,
+					UnknownTTLTokens:  r.CacheWriteUnknownTtlTokens,
+				},
 			},
 		})
 	}
@@ -334,6 +354,7 @@ func (s *Store) ListRunContextTrajectoryEvents(ctx context.Context, runID string
 				CacheWriteTokens:    r.CacheWriteTokens,
 				OutputTokens:        r.OutputTokens,
 				EventCount:          1,
+				CacheCreation:       eventCacheCreation(r.CacheWrite5mTokens, r.CacheWrite1hTokens, r.CacheWriteTokens),
 			},
 		})
 	}
@@ -386,4 +407,18 @@ func (s *Store) CountRunUnplaceableUsageEvents(ctx context.Context, runID string
 		return 0, fmt.Errorf("count unplaceable usage events for run %s: %w", runID, err)
 	}
 	return n, nil
+}
+
+// eventCacheCreation turns one event's nullable lifetime columns into a split.
+//
+// NULL is the absence of an observation, not a zero: a row written before
+// migration 0170 carries NULL beside a real cache_write_tokens, and folding
+// that into the short lifetime would make AO assert something it never saw.
+// It becomes UnknownTTLTokens, which every consumer already knows how to
+// refuse.
+func eventCacheCreation(five, hour sql.NullInt64, total int64) domain.CacheCreationSplit {
+	if !five.Valid || !hour.Valid {
+		return domain.CacheCreationSplit{UnknownTTLTokens: total}
+	}
+	return domain.CacheCreationSplit{Ephemeral5mTokens: five.Int64, Ephemeral1hTokens: hour.Int64}
 }
