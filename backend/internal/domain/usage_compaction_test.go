@@ -99,7 +99,7 @@ func controlHarness() domain.HarnessSessionTotals {
 // fakePricer is a rate card with exactly the rows a test names. It exists so a
 // pricing assertion cannot be made accidentally true by the embedded catalog
 // gaining or losing a model.
-type fakePricer map[string]struct{ in, out, read, write float64 }
+type fakePricer map[string]struct{ in, out, read, write5m, write1h float64 }
 
 func (f fakePricer) Cost(modelID string, tokens domain.UsageTokenTotals) domain.UsageCost {
 	rate, ok := f[modelID]
@@ -111,14 +111,35 @@ func (f fakePricer) Cost(modelID string, tokens domain.UsageTokenTotals) domain.
 		Known: true, Basis: domain.CostCalculated, Currency: "USD",
 		Amount: float64(tokens.UncachedInputTokens)*rate.in/perMillion +
 			float64(tokens.CacheReadTokens)*rate.read/perMillion +
-			float64(tokens.CacheWriteTokens)*rate.write/perMillion +
+			cacheCost(rate, tokens)/perMillion +
 			float64(tokens.OutputTokens)*rate.out/perMillion,
-		PricingSource: "test", PricingVersion: "test",
+		TTLAssumedTokens: assumedTTL(tokens),
+		PricingSource:    "test", PricingVersion: "test",
 	}
 }
 
 func opusOnly() fakePricer {
-	return fakePricer{"claude-opus-5": {in: 5, out: 25, read: 0.5, write: 6.25}}
+	return fakePricer{"claude-opus-5": {in: 5, out: 25, read: 0.5, write5m: 6.25, write1h: 10}}
+}
+
+// cacheCost prices cache creation by lifetime, falling back to the short rate
+// for tokens whose lifetime nothing reported -- the same compromise the real
+// table makes, disclosed the same way through TTLAssumedTokens.
+func cacheCost(rate struct{ in, out, read, write5m, write1h float64 }, tokens domain.UsageTokenTotals) float64 {
+	split := tokens.CacheCreation
+	if split.Total() == 0 {
+		split = domain.CacheCreationSplit{UnknownTTLTokens: tokens.CacheWriteTokens}
+	}
+	return float64(split.Ephemeral5mTokens)*rate.write5m +
+		float64(split.Ephemeral1hTokens)*rate.write1h +
+		float64(split.UnknownTTLTokens)*rate.write5m
+}
+
+func assumedTTL(tokens domain.UsageTokenTotals) int64 {
+	if tokens.CacheCreation.Total() == 0 {
+		return tokens.CacheWriteTokens
+	}
+	return tokens.CacheCreation.UnknownTTLTokens
 }
 
 func opusAndLongContext() fakePricer {
@@ -128,7 +149,7 @@ func opusAndLongContext() fakePricer {
 	// long-context variant is not guaranteed to cost what the base model
 	// costs. It is here to exercise the priced path, not to claim a rate.
 	f["claude-opus-5[1m]"] = f["claude-opus-5"]
-	f["claude-haiku-4-5-20251001"] = struct{ in, out, read, write float64 }{in: 1, out: 5, read: 0.1, write: 1.25}
+	f["claude-haiku-4-5-20251001"] = struct{ in, out, read, write5m, write1h float64 }{in: 1, out: 5, read: 0.1, write5m: 1.25, write1h: 2}
 	return f
 }
 

@@ -1,6 +1,6 @@
 {
  "source": "wf-1c2cb9bd-6380-4491-918c-37e34b5f229c",
- "note": "Numbers only. The same worker session as wf-1c2cb9bd.json, carrying the billed split that file predates: uncached / cache read / cache write per call. This run never compacted, so it is also the control for the unattributed residual -- 121 output tokens over 193 calls. No prompt, command, path or message body is reproduced here. Provenance: docs/p7-compaction-observability.md.",
+ "note": "Numbers only. The same worker session as wf-1c2cb9bd.json, carrying the billed split that file predates: uncached / cache read / cache write per call. This run never compacted, so it is also the control for the unattributed residual -- 121 output tokens over 193 calls. Cache creation carries the lifetime each entry was created with, read from the same transcript records. No prompt, command, path or message body is reproduced here. Provenance: docs/p7-compaction-observability.md.",
  "strategy": "task",
  "modelId": "claude-opus-5",
  "calls": [
@@ -12,7 +12,8 @@
    "cacheWriteTokens": 28393,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:10:22.243Z"
+   "observedAt": "2026-09-09T17:10:22.243Z",
+   "cacheWrite1hTokens": 28393
   },
   {
    "contextTokens": 55997,
@@ -22,7 +23,8 @@
    "cacheWriteTokens": 1593,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:10:35.695Z"
+   "observedAt": "2026-09-09T17:10:35.695Z",
+   "cacheWrite1hTokens": 1593
   },
   {
    "contextTokens": 56156,
@@ -32,7 +34,8 @@
    "cacheWriteTokens": 159,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:10:38.371Z"
+   "observedAt": "2026-09-09T17:10:38.371Z",
+   "cacheWrite1hTokens": 159
   },
   {
    "contextTokens": 56498,
@@ -42,7 +45,8 @@
    "cacheWriteTokens": 342,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:10:40.88Z"
+   "observedAt": "2026-09-09T17:10:40.88Z",
+   "cacheWrite1hTokens": 342
   },
   {
    "contextTokens": 67507,
@@ -52,7 +56,8 @@
    "cacheWriteTokens": 11009,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:10:44.372Z"
+   "observedAt": "2026-09-09T17:10:44.372Z",
+   "cacheWrite1hTokens": 11009
   },
   {
    "contextTokens": 67932,
@@ -62,7 +67,8 @@
    "cacheWriteTokens": 425,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:10:51.918Z"
+   "observedAt": "2026-09-09T17:10:51.918Z",
+   "cacheWrite1hTokens": 425
   },
   {
    "contextTokens": 68665,
@@ -72,7 +78,8 @@
    "cacheWriteTokens": 733,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:10:53.766Z"
+   "observedAt": "2026-09-09T17:10:53.766Z",
+   "cacheWrite1hTokens": 733
   },
   {
    "contextTokens": 70709,
@@ -82,7 +89,8 @@
    "cacheWriteTokens": 2044,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:11:03.022Z"
+   "observedAt": "2026-09-09T17:11:03.022Z",
+   "cacheWrite1hTokens": 2044
   },
   {
    "contextTokens": 72520,
@@ -92,7 +100,8 @@
    "cacheWriteTokens": 1811,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:11:07.594Z"
+   "observedAt": "2026-09-09T17:11:07.594Z",
+   "cacheWrite1hTokens": 1811
   },
   {
    "contextTokens": 72800,
@@ -102,7 +111,8 @@
    "cacheWriteTokens": 280,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:11:12.762Z"
+   "observedAt": "2026-09-09T17:11:12.762Z",
+   "cacheWrite1hTokens": 280
   },
   {
    "contextTokens": 73213,
@@ -112,7 +122,8 @@
    "cacheWriteTokens": 413,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:11:15.778Z"
+   "observedAt": "2026-09-09T17:11:15.778Z",
+   "cacheWrite1hTokens": 413
   },
   {
    "contextTokens": 73366,
@@ -122,7 +133,8 @@
    "cacheWriteTokens": 153,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:11:18.525Z"
+   "observedAt": "2026-09-09T17:11:18.525Z",
+   "cacheWrite1hTokens": 153
   },
   {
    "contextTokens": 76115,
@@ -132,7 +144,8 @@
    "cacheWriteTokens": 2749,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:11:21.955Z"
+   "observedAt": "2026-09-09T17:11:21.955Z",
+   "cacheWrite1hTokens": 2749
   },
   {
    "contextTokens": 76577,
@@ -142,7 +155,8 @@
    "cacheWriteTokens": 462,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:11:25.086Z"
+   "observedAt": "2026-09-09T17:11:25.086Z",
+   "cacheWrite1hTokens": 462
   },
   {
    "contextTokens": 79358,
@@ -152,7 +166,8 @@
    "cacheWriteTokens": 2781,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:11:28.056Z"
+   "observedAt": "2026-09-09T17:11:28.056Z",
+   "cacheWrite1hTokens": 2781
   },
   {
    "contextTokens": 80046,
@@ -162,7 +177,8 @@
    "cacheWriteTokens": 688,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:11:31.364Z"
+   "observedAt": "2026-09-09T17:11:31.364Z",
+   "cacheWrite1hTokens": 688
   },
   {
    "contextTokens": 80680,
@@ -172,7 +188,8 @@
    "cacheWriteTokens": 634,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:11:35.038Z"
+   "observedAt": "2026-09-09T17:11:35.038Z",
+   "cacheWrite1hTokens": 634
   },
   {
    "contextTokens": 84035,
@@ -182,7 +199,8 @@
    "cacheWriteTokens": 3355,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:11:39.059Z"
+   "observedAt": "2026-09-09T17:11:39.059Z",
+   "cacheWrite1hTokens": 3355
   },
   {
    "contextTokens": 85771,
@@ -192,7 +210,8 @@
    "cacheWriteTokens": 1736,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:12:13.399Z"
+   "observedAt": "2026-09-09T17:12:13.399Z",
+   "cacheWrite1hTokens": 1736
   },
   {
    "contextTokens": 88731,
@@ -202,7 +221,8 @@
    "cacheWriteTokens": 2960,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:12:18.725Z"
+   "observedAt": "2026-09-09T17:12:18.725Z",
+   "cacheWrite1hTokens": 2960
   },
   {
    "contextTokens": 88999,
@@ -212,7 +232,8 @@
    "cacheWriteTokens": 268,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:12:22.105Z"
+   "observedAt": "2026-09-09T17:12:22.105Z",
+   "cacheWrite1hTokens": 268
   },
   {
    "contextTokens": 89231,
@@ -222,7 +243,8 @@
    "cacheWriteTokens": 232,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:12:29.949Z"
+   "observedAt": "2026-09-09T17:12:29.949Z",
+   "cacheWrite1hTokens": 232
   },
   {
    "contextTokens": 90670,
@@ -232,7 +254,8 @@
    "cacheWriteTokens": 1439,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:12:33.325Z"
+   "observedAt": "2026-09-09T17:12:33.325Z",
+   "cacheWrite1hTokens": 1439
   },
   {
    "contextTokens": 91499,
@@ -242,7 +265,8 @@
    "cacheWriteTokens": 829,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:12:42.042Z"
+   "observedAt": "2026-09-09T17:12:42.042Z",
+   "cacheWrite1hTokens": 829
   },
   {
    "contextTokens": 92860,
@@ -252,7 +276,8 @@
    "cacheWriteTokens": 1361,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:12:52.3Z"
+   "observedAt": "2026-09-09T17:12:52.3Z",
+   "cacheWrite1hTokens": 1361
   },
   {
    "contextTokens": 93593,
@@ -262,7 +287,8 @@
    "cacheWriteTokens": 733,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:12:58.406Z"
+   "observedAt": "2026-09-09T17:12:58.406Z",
+   "cacheWrite1hTokens": 733
   },
   {
    "contextTokens": 94717,
@@ -272,7 +298,8 @@
    "cacheWriteTokens": 1124,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:13:10.877Z"
+   "observedAt": "2026-09-09T17:13:10.877Z",
+   "cacheWrite1hTokens": 1124
   },
   {
    "contextTokens": 95534,
@@ -282,7 +309,8 @@
    "cacheWriteTokens": 817,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:13:15.907Z"
+   "observedAt": "2026-09-09T17:13:15.907Z",
+   "cacheWrite1hTokens": 817
   },
   {
    "contextTokens": 96792,
@@ -292,7 +320,8 @@
    "cacheWriteTokens": 1258,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:13:34.868Z"
+   "observedAt": "2026-09-09T17:13:34.868Z",
+   "cacheWrite1hTokens": 1258
   },
   {
    "contextTokens": 98336,
@@ -302,7 +331,8 @@
    "cacheWriteTokens": 1544,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:13:47.711Z"
+   "observedAt": "2026-09-09T17:13:47.711Z",
+   "cacheWrite1hTokens": 1544
   },
   {
    "contextTokens": 103346,
@@ -312,7 +342,8 @@
    "cacheWriteTokens": 5010,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:13:51.437Z"
+   "observedAt": "2026-09-09T17:13:51.437Z",
+   "cacheWrite1hTokens": 5010
   },
   {
    "contextTokens": 105003,
@@ -322,7 +353,8 @@
    "cacheWriteTokens": 1657,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:14:24.041Z"
+   "observedAt": "2026-09-09T17:14:24.041Z",
+   "cacheWrite1hTokens": 1657
   },
   {
    "contextTokens": 108881,
@@ -332,7 +364,8 @@
    "cacheWriteTokens": 3878,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:14:34.425Z"
+   "observedAt": "2026-09-09T17:14:34.425Z",
+   "cacheWrite1hTokens": 3878
   },
   {
    "contextTokens": 111569,
@@ -342,7 +375,8 @@
    "cacheWriteTokens": 2688,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:14:36.61Z"
+   "observedAt": "2026-09-09T17:14:36.61Z",
+   "cacheWrite1hTokens": 2688
   },
   {
    "contextTokens": 113689,
@@ -352,7 +386,8 @@
    "cacheWriteTokens": 2120,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:14:39.409Z"
+   "observedAt": "2026-09-09T17:14:39.409Z",
+   "cacheWrite1hTokens": 2120
   },
   {
    "contextTokens": 116659,
@@ -362,7 +397,8 @@
    "cacheWriteTokens": 2970,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:14:43.309Z"
+   "observedAt": "2026-09-09T17:14:43.309Z",
+   "cacheWrite1hTokens": 2970
   },
   {
    "contextTokens": 117191,
@@ -372,7 +408,8 @@
    "cacheWriteTokens": 532,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:14:45.744Z"
+   "observedAt": "2026-09-09T17:14:45.744Z",
+   "cacheWrite1hTokens": 532
   },
   {
    "contextTokens": 118557,
@@ -382,7 +419,8 @@
    "cacheWriteTokens": 1366,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:15:12.061Z"
+   "observedAt": "2026-09-09T17:15:12.061Z",
+   "cacheWrite1hTokens": 1366
   },
   {
    "contextTokens": 120956,
@@ -392,7 +430,8 @@
    "cacheWriteTokens": 2399,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:15:16.528Z"
+   "observedAt": "2026-09-09T17:15:16.528Z",
+   "cacheWrite1hTokens": 2399
   },
   {
    "contextTokens": 121667,
@@ -402,7 +441,8 @@
    "cacheWriteTokens": 711,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:15:22.84Z"
+   "observedAt": "2026-09-09T17:15:22.84Z",
+   "cacheWrite1hTokens": 711
   },
   {
    "contextTokens": 122130,
@@ -412,7 +452,8 @@
    "cacheWriteTokens": 463,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:15:24.616Z"
+   "observedAt": "2026-09-09T17:15:24.616Z",
+   "cacheWrite1hTokens": 463
   },
   {
    "contextTokens": 123474,
@@ -422,7 +463,8 @@
    "cacheWriteTokens": 1344,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:15:40.228Z"
+   "observedAt": "2026-09-09T17:15:40.228Z",
+   "cacheWrite1hTokens": 1344
   },
   {
    "contextTokens": 124262,
@@ -432,7 +474,8 @@
    "cacheWriteTokens": 788,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:15:51.018Z"
+   "observedAt": "2026-09-09T17:15:51.018Z",
+   "cacheWrite1hTokens": 788
   },
   {
    "contextTokens": 124815,
@@ -442,7 +485,8 @@
    "cacheWriteTokens": 553,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:15:52.656Z"
+   "observedAt": "2026-09-09T17:15:52.656Z",
+   "cacheWrite1hTokens": 553
   },
   {
    "contextTokens": 125468,
@@ -452,7 +496,8 @@
    "cacheWriteTokens": 653,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:16:01.781Z"
+   "observedAt": "2026-09-09T17:16:01.781Z",
+   "cacheWrite1hTokens": 653
   },
   {
    "contextTokens": 129581,
@@ -462,7 +507,8 @@
    "cacheWriteTokens": 4113,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:16:04.074Z"
+   "observedAt": "2026-09-09T17:16:04.074Z",
+   "cacheWrite1hTokens": 4113
   },
   {
    "contextTokens": 130077,
@@ -472,7 +518,8 @@
    "cacheWriteTokens": 496,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:16:13.352Z"
+   "observedAt": "2026-09-09T17:16:13.352Z",
+   "cacheWrite1hTokens": 496
   },
   {
    "contextTokens": 130926,
@@ -482,7 +529,8 @@
    "cacheWriteTokens": 849,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:16:16.368Z"
+   "observedAt": "2026-09-09T17:16:16.368Z",
+   "cacheWrite1hTokens": 849
   },
   {
    "contextTokens": 131734,
@@ -492,7 +540,8 @@
    "cacheWriteTokens": 808,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:16:17.894Z"
+   "observedAt": "2026-09-09T17:16:17.894Z",
+   "cacheWrite1hTokens": 808
   },
   {
    "contextTokens": 132310,
@@ -502,7 +551,8 @@
    "cacheWriteTokens": 576,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:16:34.14Z"
+   "observedAt": "2026-09-09T17:16:34.14Z",
+   "cacheWrite1hTokens": 576
   },
   {
    "contextTokens": 136248,
@@ -512,7 +562,8 @@
    "cacheWriteTokens": 3938,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:16:35.876Z"
+   "observedAt": "2026-09-09T17:16:35.876Z",
+   "cacheWrite1hTokens": 3938
   },
   {
    "contextTokens": 139540,
@@ -522,7 +573,8 @@
    "cacheWriteTokens": 3292,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:17:11.946Z"
+   "observedAt": "2026-09-09T17:17:11.946Z",
+   "cacheWrite1hTokens": 3292
   },
   {
    "contextTokens": 139802,
@@ -532,7 +584,8 @@
    "cacheWriteTokens": 262,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:17:14.544Z"
+   "observedAt": "2026-09-09T17:17:14.544Z",
+   "cacheWrite1hTokens": 262
   },
   {
    "contextTokens": 140647,
@@ -542,7 +595,8 @@
    "cacheWriteTokens": 845,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:17:19.694Z"
+   "observedAt": "2026-09-09T17:17:19.694Z",
+   "cacheWrite1hTokens": 845
   },
   {
    "contextTokens": 140934,
@@ -552,7 +606,8 @@
    "cacheWriteTokens": 287,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:17:23.032Z"
+   "observedAt": "2026-09-09T17:17:23.032Z",
+   "cacheWrite1hTokens": 287
   },
   {
    "contextTokens": 143013,
@@ -562,7 +617,8 @@
    "cacheWriteTokens": 2079,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:17:42.766Z"
+   "observedAt": "2026-09-09T17:17:42.766Z",
+   "cacheWrite1hTokens": 2079
   },
   {
    "contextTokens": 144978,
@@ -572,7 +628,8 @@
    "cacheWriteTokens": 1965,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:17:46.62Z"
+   "observedAt": "2026-09-09T17:17:46.62Z",
+   "cacheWrite1hTokens": 1965
   },
   {
    "contextTokens": 147298,
@@ -582,7 +639,8 @@
    "cacheWriteTokens": 2320,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:17:59.798Z"
+   "observedAt": "2026-09-09T17:17:59.798Z",
+   "cacheWrite1hTokens": 2320
   },
   {
    "contextTokens": 149621,
@@ -592,7 +650,8 @@
    "cacheWriteTokens": 2323,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:18:23.788Z"
+   "observedAt": "2026-09-09T17:18:23.788Z",
+   "cacheWrite1hTokens": 2323
   },
   {
    "contextTokens": 149853,
@@ -602,7 +661,8 @@
    "cacheWriteTokens": 232,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:18:31.037Z"
+   "observedAt": "2026-09-09T17:18:31.037Z",
+   "cacheWrite1hTokens": 232
   },
   {
    "contextTokens": 151420,
@@ -612,7 +672,8 @@
    "cacheWriteTokens": 1567,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:18:43.221Z"
+   "observedAt": "2026-09-09T17:18:43.221Z",
+   "cacheWrite1hTokens": 1567
   },
   {
    "contextTokens": 151855,
@@ -622,7 +683,8 @@
    "cacheWriteTokens": 435,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:18:52.36Z"
+   "observedAt": "2026-09-09T17:18:52.36Z",
+   "cacheWrite1hTokens": 435
   },
   {
    "contextTokens": 152105,
@@ -632,7 +694,8 @@
    "cacheWriteTokens": 250,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:19:01.777Z"
+   "observedAt": "2026-09-09T17:19:01.777Z",
+   "cacheWrite1hTokens": 250
   },
   {
    "contextTokens": 155380,
@@ -642,7 +705,8 @@
    "cacheWriteTokens": 3275,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:19:26.013Z"
+   "observedAt": "2026-09-09T17:19:26.013Z",
+   "cacheWrite1hTokens": 3275
   },
   {
    "contextTokens": 156698,
@@ -652,7 +716,8 @@
    "cacheWriteTokens": 1318,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:19:36.749Z"
+   "observedAt": "2026-09-09T17:19:36.749Z",
+   "cacheWrite1hTokens": 1318
   },
   {
    "contextTokens": 158003,
@@ -662,7 +727,8 @@
    "cacheWriteTokens": 1305,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:19:41.217Z"
+   "observedAt": "2026-09-09T17:19:41.217Z",
+   "cacheWrite1hTokens": 1305
   },
   {
    "contextTokens": 159160,
@@ -672,7 +738,8 @@
    "cacheWriteTokens": 1157,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:19:46.203Z"
+   "observedAt": "2026-09-09T17:19:46.203Z",
+   "cacheWrite1hTokens": 1157
   },
   {
    "contextTokens": 159649,
@@ -682,7 +749,8 @@
    "cacheWriteTokens": 489,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:19:52.377Z"
+   "observedAt": "2026-09-09T17:19:52.377Z",
+   "cacheWrite1hTokens": 489
   },
   {
    "contextTokens": 160038,
@@ -692,7 +760,8 @@
    "cacheWriteTokens": 389,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:19:56.677Z"
+   "observedAt": "2026-09-09T17:19:56.677Z",
+   "cacheWrite1hTokens": 389
   },
   {
    "contextTokens": 160724,
@@ -702,7 +771,8 @@
    "cacheWriteTokens": 686,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:20:00.758Z"
+   "observedAt": "2026-09-09T17:20:00.758Z",
+   "cacheWrite1hTokens": 686
   },
   {
    "contextTokens": 161088,
@@ -712,7 +782,8 @@
    "cacheWriteTokens": 364,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:20:08.513Z"
+   "observedAt": "2026-09-09T17:20:08.513Z",
+   "cacheWrite1hTokens": 364
   },
   {
    "contextTokens": 162490,
@@ -722,7 +793,8 @@
    "cacheWriteTokens": 1402,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:20:17.033Z"
+   "observedAt": "2026-09-09T17:20:17.033Z",
+   "cacheWrite1hTokens": 1402
   },
   {
    "contextTokens": 162980,
@@ -732,7 +804,8 @@
    "cacheWriteTokens": 490,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:22:05.599Z"
+   "observedAt": "2026-09-09T17:22:05.599Z",
+   "cacheWrite1hTokens": 490
   },
   {
    "contextTokens": 163258,
@@ -742,7 +815,8 @@
    "cacheWriteTokens": 278,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:24:07.484Z"
+   "observedAt": "2026-09-09T17:24:07.484Z",
+   "cacheWrite1hTokens": 278
   },
   {
    "contextTokens": 163586,
@@ -752,7 +826,8 @@
    "cacheWriteTokens": 328,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:24:26.966Z"
+   "observedAt": "2026-09-09T17:24:26.966Z",
+   "cacheWrite1hTokens": 328
   },
   {
    "contextTokens": 164114,
@@ -762,7 +837,8 @@
    "cacheWriteTokens": 528,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:24:42.052Z"
+   "observedAt": "2026-09-09T17:24:42.052Z",
+   "cacheWrite1hTokens": 528
   },
   {
    "contextTokens": 164738,
@@ -772,7 +848,8 @@
    "cacheWriteTokens": 624,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:24:52.085Z"
+   "observedAt": "2026-09-09T17:24:52.085Z",
+   "cacheWrite1hTokens": 624
   },
   {
    "contextTokens": 165222,
@@ -782,7 +859,8 @@
    "cacheWriteTokens": 484,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:24:58.265Z"
+   "observedAt": "2026-09-09T17:24:58.265Z",
+   "cacheWrite1hTokens": 484
   },
   {
    "contextTokens": 165543,
@@ -792,7 +870,8 @@
    "cacheWriteTokens": 321,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:25:00.679Z"
+   "observedAt": "2026-09-09T17:25:00.679Z",
+   "cacheWrite1hTokens": 321
   },
   {
    "contextTokens": 165917,
@@ -802,7 +881,8 @@
    "cacheWriteTokens": 374,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:25:02.848Z"
+   "observedAt": "2026-09-09T17:25:02.848Z",
+   "cacheWrite1hTokens": 374
   },
   {
    "contextTokens": 166943,
@@ -812,7 +892,8 @@
    "cacheWriteTokens": 1026,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:25:17.881Z"
+   "observedAt": "2026-09-09T17:25:17.881Z",
+   "cacheWrite1hTokens": 1026
   },
   {
    "contextTokens": 167861,
@@ -822,7 +903,8 @@
    "cacheWriteTokens": 918,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:25:22.303Z"
+   "observedAt": "2026-09-09T17:25:22.303Z",
+   "cacheWrite1hTokens": 918
   },
   {
    "contextTokens": 168261,
@@ -832,7 +914,8 @@
    "cacheWriteTokens": 400,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:25:26.346Z"
+   "observedAt": "2026-09-09T17:25:26.346Z",
+   "cacheWrite1hTokens": 400
   },
   {
    "contextTokens": 169122,
@@ -842,7 +925,8 @@
    "cacheWriteTokens": 861,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:25:29.903Z"
+   "observedAt": "2026-09-09T17:25:29.903Z",
+   "cacheWrite1hTokens": 861
   },
   {
    "contextTokens": 169733,
@@ -852,7 +936,8 @@
    "cacheWriteTokens": 611,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:25:36.034Z"
+   "observedAt": "2026-09-09T17:25:36.034Z",
+   "cacheWrite1hTokens": 611
   },
   {
    "contextTokens": 170038,
@@ -862,7 +947,8 @@
    "cacheWriteTokens": 305,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:25:38.788Z"
+   "observedAt": "2026-09-09T17:25:38.788Z",
+   "cacheWrite1hTokens": 305
   },
   {
    "contextTokens": 170477,
@@ -872,7 +958,8 @@
    "cacheWriteTokens": 439,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:25:41.522Z"
+   "observedAt": "2026-09-09T17:25:41.522Z",
+   "cacheWrite1hTokens": 439
   },
   {
    "contextTokens": 171723,
@@ -882,7 +969,8 @@
    "cacheWriteTokens": 1246,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:25:47.493Z"
+   "observedAt": "2026-09-09T17:25:47.493Z",
+   "cacheWrite1hTokens": 1246
   },
   {
    "contextTokens": 172278,
@@ -892,7 +980,8 @@
    "cacheWriteTokens": 555,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:25:53.649Z"
+   "observedAt": "2026-09-09T17:25:53.649Z",
+   "cacheWrite1hTokens": 555
   },
   {
    "contextTokens": 172981,
@@ -902,7 +991,8 @@
    "cacheWriteTokens": 703,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:26:02.35Z"
+   "observedAt": "2026-09-09T17:26:02.35Z",
+   "cacheWrite1hTokens": 703
   },
   {
    "contextTokens": 173783,
@@ -912,7 +1002,8 @@
    "cacheWriteTokens": 802,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:26:08.689Z"
+   "observedAt": "2026-09-09T17:26:08.689Z",
+   "cacheWrite1hTokens": 802
   },
   {
    "contextTokens": 174393,
@@ -922,7 +1013,8 @@
    "cacheWriteTokens": 610,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:26:15.481Z"
+   "observedAt": "2026-09-09T17:26:15.481Z",
+   "cacheWrite1hTokens": 610
   },
   {
    "contextTokens": 174984,
@@ -932,7 +1024,8 @@
    "cacheWriteTokens": 591,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:26:18.354Z"
+   "observedAt": "2026-09-09T17:26:18.354Z",
+   "cacheWrite1hTokens": 591
   },
   {
    "contextTokens": 175233,
@@ -942,7 +1035,8 @@
    "cacheWriteTokens": 249,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:26:21.481Z"
+   "observedAt": "2026-09-09T17:26:21.481Z",
+   "cacheWrite1hTokens": 249
   },
   {
    "contextTokens": 175678,
@@ -952,7 +1046,8 @@
    "cacheWriteTokens": 445,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:26:24.551Z"
+   "observedAt": "2026-09-09T17:26:24.551Z",
+   "cacheWrite1hTokens": 445
   },
   {
    "contextTokens": 176029,
@@ -962,7 +1057,8 @@
    "cacheWriteTokens": 351,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:26:28.842Z"
+   "observedAt": "2026-09-09T17:26:28.842Z",
+   "cacheWrite1hTokens": 351
   },
   {
    "contextTokens": 176370,
@@ -972,7 +1068,8 @@
    "cacheWriteTokens": 341,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:26:31.909Z"
+   "observedAt": "2026-09-09T17:26:31.909Z",
+   "cacheWrite1hTokens": 341
   },
   {
    "contextTokens": 177252,
@@ -982,7 +1079,8 @@
    "cacheWriteTokens": 882,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:26:37.204Z"
+   "observedAt": "2026-09-09T17:26:37.204Z",
+   "cacheWrite1hTokens": 882
   },
   {
    "contextTokens": 177689,
@@ -992,7 +1090,8 @@
    "cacheWriteTokens": 437,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:26:40.175Z"
+   "observedAt": "2026-09-09T17:26:40.175Z",
+   "cacheWrite1hTokens": 437
   },
   {
    "contextTokens": 181520,
@@ -1002,7 +1101,8 @@
    "cacheWriteTokens": 3831,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:26:42.737Z"
+   "observedAt": "2026-09-09T17:26:42.737Z",
+   "cacheWrite1hTokens": 3831
   },
   {
    "contextTokens": 182180,
@@ -1012,7 +1112,8 @@
    "cacheWriteTokens": 660,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:26:52.928Z"
+   "observedAt": "2026-09-09T17:26:52.928Z",
+   "cacheWrite1hTokens": 660
   },
   {
    "contextTokens": 183293,
@@ -1022,7 +1123,8 @@
    "cacheWriteTokens": 1113,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:27:44.002Z"
+   "observedAt": "2026-09-09T17:27:44.002Z",
+   "cacheWrite1hTokens": 1113
   },
   {
    "contextTokens": 184282,
@@ -1032,7 +1134,8 @@
    "cacheWriteTokens": 989,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:27:53.432Z"
+   "observedAt": "2026-09-09T17:27:53.432Z",
+   "cacheWrite1hTokens": 989
   },
   {
    "contextTokens": 184638,
@@ -1042,7 +1145,8 @@
    "cacheWriteTokens": 356,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:27:58.272Z"
+   "observedAt": "2026-09-09T17:27:58.272Z",
+   "cacheWrite1hTokens": 356
   },
   {
    "contextTokens": 185094,
@@ -1052,7 +1156,8 @@
    "cacheWriteTokens": 456,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:28:03.016Z"
+   "observedAt": "2026-09-09T17:28:03.016Z",
+   "cacheWrite1hTokens": 456
   },
   {
    "contextTokens": 186106,
@@ -1062,7 +1167,8 @@
    "cacheWriteTokens": 1012,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:29:55.639Z"
+   "observedAt": "2026-09-09T17:29:55.639Z",
+   "cacheWrite1hTokens": 1012
   },
   {
    "contextTokens": 186320,
@@ -1072,7 +1178,8 @@
    "cacheWriteTokens": 214,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:29:59.009Z"
+   "observedAt": "2026-09-09T17:29:59.009Z",
+   "cacheWrite1hTokens": 214
   },
   {
    "contextTokens": 186820,
@@ -1082,7 +1189,8 @@
    "cacheWriteTokens": 500,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:30:02.326Z"
+   "observedAt": "2026-09-09T17:30:02.326Z",
+   "cacheWrite1hTokens": 500
   },
   {
    "contextTokens": 188076,
@@ -1092,7 +1200,8 @@
    "cacheWriteTokens": 1256,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:30:07.425Z"
+   "observedAt": "2026-09-09T17:30:07.425Z",
+   "cacheWrite1hTokens": 1256
   },
   {
    "contextTokens": 188543,
@@ -1102,7 +1211,8 @@
    "cacheWriteTokens": 467,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:30:11.435Z"
+   "observedAt": "2026-09-09T17:30:11.435Z",
+   "cacheWrite1hTokens": 467
   },
   {
    "contextTokens": 188888,
@@ -1112,7 +1222,8 @@
    "cacheWriteTokens": 345,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:30:19.912Z"
+   "observedAt": "2026-09-09T17:30:19.912Z",
+   "cacheWrite1hTokens": 345
   },
   {
    "contextTokens": 189528,
@@ -1122,7 +1233,8 @@
    "cacheWriteTokens": 640,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:30:26.777Z"
+   "observedAt": "2026-09-09T17:30:26.777Z",
+   "cacheWrite1hTokens": 640
   },
   {
    "contextTokens": 190021,
@@ -1132,7 +1244,8 @@
    "cacheWriteTokens": 493,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:30:31.257Z"
+   "observedAt": "2026-09-09T17:30:31.257Z",
+   "cacheWrite1hTokens": 493
   },
   {
    "contextTokens": 190534,
@@ -1142,7 +1255,8 @@
    "cacheWriteTokens": 513,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:30:38.344Z"
+   "observedAt": "2026-09-09T17:30:38.344Z",
+   "cacheWrite1hTokens": 513
   },
   {
    "contextTokens": 191735,
@@ -1152,7 +1266,8 @@
    "cacheWriteTokens": 1201,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:30:46.327Z"
+   "observedAt": "2026-09-09T17:30:46.327Z",
+   "cacheWrite1hTokens": 1201
   },
   {
    "contextTokens": 192735,
@@ -1162,7 +1277,8 @@
    "cacheWriteTokens": 1000,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:30:52.869Z"
+   "observedAt": "2026-09-09T17:30:52.869Z",
+   "cacheWrite1hTokens": 1000
   },
   {
    "contextTokens": 196385,
@@ -1172,7 +1288,8 @@
    "cacheWriteTokens": 3650,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:31:38.448Z"
+   "observedAt": "2026-09-09T17:31:38.448Z",
+   "cacheWrite1hTokens": 3650
   },
   {
    "contextTokens": 196853,
@@ -1182,7 +1299,8 @@
    "cacheWriteTokens": 468,
    "class": "",
    "segment": "work",
-   "observedAt": "2026-09-09T17:32:18.658Z"
+   "observedAt": "2026-09-09T17:32:18.658Z",
+   "cacheWrite1hTokens": 468
   },
   {
    "contextTokens": 204146,
@@ -1192,7 +1310,8 @@
    "cacheWriteTokens": 4254,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:37:26.252Z"
+   "observedAt": "2026-09-09T17:37:26.252Z",
+   "cacheWrite1hTokens": 4254
   },
   {
    "contextTokens": 206572,
@@ -1202,7 +1321,8 @@
    "cacheWriteTokens": 2426,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:37:33.8Z"
+   "observedAt": "2026-09-09T17:37:33.8Z",
+   "cacheWrite1hTokens": 2426
   },
   {
    "contextTokens": 207258,
@@ -1212,7 +1332,8 @@
    "cacheWriteTokens": 686,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:37:38.021Z"
+   "observedAt": "2026-09-09T17:37:38.021Z",
+   "cacheWrite1hTokens": 686
   },
   {
    "contextTokens": 207803,
@@ -1222,7 +1343,8 @@
    "cacheWriteTokens": 545,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:37:39.794Z"
+   "observedAt": "2026-09-09T17:37:39.794Z",
+   "cacheWrite1hTokens": 545
   },
   {
    "contextTokens": 208244,
@@ -1232,7 +1354,8 @@
    "cacheWriteTokens": 441,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:37:43.422Z"
+   "observedAt": "2026-09-09T17:37:43.422Z",
+   "cacheWrite1hTokens": 441
   },
   {
    "contextTokens": 210211,
@@ -1242,7 +1365,8 @@
    "cacheWriteTokens": 1967,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:37:46.902Z"
+   "observedAt": "2026-09-09T17:37:46.902Z",
+   "cacheWrite1hTokens": 1967
   },
   {
    "contextTokens": 210891,
@@ -1252,7 +1376,8 @@
    "cacheWriteTokens": 680,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:37:51.324Z"
+   "observedAt": "2026-09-09T17:37:51.324Z",
+   "cacheWrite1hTokens": 680
   },
   {
    "contextTokens": 212192,
@@ -1262,7 +1387,8 @@
    "cacheWriteTokens": 1301,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:38:14.241Z"
+   "observedAt": "2026-09-09T17:38:14.241Z",
+   "cacheWrite1hTokens": 1301
   },
   {
    "contextTokens": 215084,
@@ -1272,7 +1398,8 @@
    "cacheWriteTokens": 2892,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:38:50.494Z"
+   "observedAt": "2026-09-09T17:38:50.494Z",
+   "cacheWrite1hTokens": 2892
   },
   {
    "contextTokens": 217959,
@@ -1282,7 +1409,8 @@
    "cacheWriteTokens": 2875,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:38:59.211Z"
+   "observedAt": "2026-09-09T17:38:59.211Z",
+   "cacheWrite1hTokens": 2875
   },
   {
    "contextTokens": 218493,
@@ -1292,7 +1420,8 @@
    "cacheWriteTokens": 534,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:39:01.162Z"
+   "observedAt": "2026-09-09T17:39:01.162Z",
+   "cacheWrite1hTokens": 534
   },
   {
    "contextTokens": 220803,
@@ -1302,7 +1431,8 @@
    "cacheWriteTokens": 2310,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:39:24.621Z"
+   "observedAt": "2026-09-09T17:39:24.621Z",
+   "cacheWrite1hTokens": 2310
   },
   {
    "contextTokens": 222671,
@@ -1312,7 +1442,8 @@
    "cacheWriteTokens": 1868,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:39:45.444Z"
+   "observedAt": "2026-09-09T17:39:45.444Z",
+   "cacheWrite1hTokens": 1868
   },
   {
    "contextTokens": 224016,
@@ -1322,7 +1453,8 @@
    "cacheWriteTokens": 1345,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:39:58.25Z"
+   "observedAt": "2026-09-09T17:39:58.25Z",
+   "cacheWrite1hTokens": 1345
   },
   {
    "contextTokens": 225081,
@@ -1332,7 +1464,8 @@
    "cacheWriteTokens": 1065,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:40:03.993Z"
+   "observedAt": "2026-09-09T17:40:03.993Z",
+   "cacheWrite1hTokens": 1065
   },
   {
    "contextTokens": 225454,
@@ -1342,7 +1475,8 @@
    "cacheWriteTokens": 373,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:40:09.153Z"
+   "observedAt": "2026-09-09T17:40:09.153Z",
+   "cacheWrite1hTokens": 373
   },
   {
    "contextTokens": 225980,
@@ -1352,7 +1486,8 @@
    "cacheWriteTokens": 526,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:40:28.28Z"
+   "observedAt": "2026-09-09T17:40:28.28Z",
+   "cacheWrite1hTokens": 526
   },
   {
    "contextTokens": 227317,
@@ -1362,7 +1497,8 @@
    "cacheWriteTokens": 1337,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:40:36.364Z"
+   "observedAt": "2026-09-09T17:40:36.364Z",
+   "cacheWrite1hTokens": 1337
   },
   {
    "contextTokens": 235536,
@@ -1372,7 +1508,8 @@
    "cacheWriteTokens": 8219,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:41:22.021Z"
+   "observedAt": "2026-09-09T17:41:22.021Z",
+   "cacheWrite1hTokens": 8219
   },
   {
    "contextTokens": 235914,
@@ -1382,7 +1519,8 @@
    "cacheWriteTokens": 378,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:41:33.099Z"
+   "observedAt": "2026-09-09T17:41:33.099Z",
+   "cacheWrite1hTokens": 378
   },
   {
    "contextTokens": 236502,
@@ -1392,7 +1530,8 @@
    "cacheWriteTokens": 588,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:41:35.78Z"
+   "observedAt": "2026-09-09T17:41:35.78Z",
+   "cacheWrite1hTokens": 588
   },
   {
    "contextTokens": 238102,
@@ -1402,7 +1541,8 @@
    "cacheWriteTokens": 1600,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:42:02.762Z"
+   "observedAt": "2026-09-09T17:42:02.762Z",
+   "cacheWrite1hTokens": 1600
   },
   {
    "contextTokens": 242536,
@@ -1412,7 +1552,8 @@
    "cacheWriteTokens": 4434,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:42:08.554Z"
+   "observedAt": "2026-09-09T17:42:08.554Z",
+   "cacheWrite1hTokens": 4434
   },
   {
    "contextTokens": 243413,
@@ -1422,7 +1563,8 @@
    "cacheWriteTokens": 877,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:42:23.333Z"
+   "observedAt": "2026-09-09T17:42:23.333Z",
+   "cacheWrite1hTokens": 877
   },
   {
    "contextTokens": 244262,
@@ -1432,7 +1574,8 @@
    "cacheWriteTokens": 849,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:42:25.299Z"
+   "observedAt": "2026-09-09T17:42:25.299Z",
+   "cacheWrite1hTokens": 849
   },
   {
    "contextTokens": 246409,
@@ -1442,7 +1585,8 @@
    "cacheWriteTokens": 2147,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:42:54.12Z"
+   "observedAt": "2026-09-09T17:42:54.12Z",
+   "cacheWrite1hTokens": 2147
   },
   {
    "contextTokens": 249031,
@@ -1452,7 +1596,8 @@
    "cacheWriteTokens": 2622,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:43:15.515Z"
+   "observedAt": "2026-09-09T17:43:15.515Z",
+   "cacheWrite1hTokens": 2622
   },
   {
    "contextTokens": 249404,
@@ -1462,7 +1607,8 @@
    "cacheWriteTokens": 373,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:43:19.873Z"
+   "observedAt": "2026-09-09T17:43:19.873Z",
+   "cacheWrite1hTokens": 373
   },
   {
    "contextTokens": 249959,
@@ -1472,7 +1618,8 @@
    "cacheWriteTokens": 555,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:43:23.893Z"
+   "observedAt": "2026-09-09T17:43:23.893Z",
+   "cacheWrite1hTokens": 555
   },
   {
    "contextTokens": 250429,
@@ -1482,7 +1629,8 @@
    "cacheWriteTokens": 470,
    "class": "",
    "segment": "fix/1",
-   "observedAt": "2026-09-09T17:43:34.508Z"
+   "observedAt": "2026-09-09T17:43:34.508Z",
+   "cacheWrite1hTokens": 470
   },
   {
    "contextTokens": 251279,
@@ -1492,7 +1640,8 @@
    "cacheWriteTokens": 850,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:43:38.716Z"
+   "observedAt": "2026-09-09T17:43:38.716Z",
+   "cacheWrite1hTokens": 850
   },
   {
    "contextTokens": 252350,
@@ -1502,7 +1651,8 @@
    "cacheWriteTokens": 1071,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:43:42.449Z"
+   "observedAt": "2026-09-09T17:43:42.449Z",
+   "cacheWrite1hTokens": 1071
   },
   {
    "contextTokens": 257032,
@@ -1512,7 +1662,8 @@
    "cacheWriteTokens": 4682,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:44:05.311Z"
+   "observedAt": "2026-09-09T17:44:05.311Z",
+   "cacheWrite1hTokens": 4682
   },
   {
    "contextTokens": 259107,
@@ -1522,7 +1673,8 @@
    "cacheWriteTokens": 2075,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:44:13.452Z"
+   "observedAt": "2026-09-09T17:44:13.452Z",
+   "cacheWrite1hTokens": 2075
   },
   {
    "contextTokens": 259647,
@@ -1532,7 +1684,8 @@
    "cacheWriteTokens": 540,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:44:18.929Z"
+   "observedAt": "2026-09-09T17:44:18.929Z",
+   "cacheWrite1hTokens": 540
   },
   {
    "contextTokens": 261619,
@@ -1542,7 +1695,8 @@
    "cacheWriteTokens": 1972,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:44:33.511Z"
+   "observedAt": "2026-09-09T17:44:33.511Z",
+   "cacheWrite1hTokens": 1972
   },
   {
    "contextTokens": 262654,
@@ -1552,7 +1706,8 @@
    "cacheWriteTokens": 1035,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:44:37.961Z"
+   "observedAt": "2026-09-09T17:44:37.961Z",
+   "cacheWrite1hTokens": 1035
   },
   {
    "contextTokens": 264217,
@@ -1562,7 +1717,8 @@
    "cacheWriteTokens": 1563,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:44:59.942Z"
+   "observedAt": "2026-09-09T17:44:59.942Z",
+   "cacheWrite1hTokens": 1563
   },
   {
    "contextTokens": 266365,
@@ -1572,7 +1728,8 @@
    "cacheWriteTokens": 2148,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:45:06.301Z"
+   "observedAt": "2026-09-09T17:45:06.301Z",
+   "cacheWrite1hTokens": 2148
   },
   {
    "contextTokens": 266975,
@@ -1582,7 +1739,8 @@
    "cacheWriteTokens": 610,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:45:13.244Z"
+   "observedAt": "2026-09-09T17:45:13.244Z",
+   "cacheWrite1hTokens": 610
   },
   {
    "contextTokens": 267755,
@@ -1592,7 +1750,8 @@
    "cacheWriteTokens": 780,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:45:30.771Z"
+   "observedAt": "2026-09-09T17:45:30.771Z",
+   "cacheWrite1hTokens": 780
   },
   {
    "contextTokens": 268281,
@@ -1602,7 +1761,8 @@
    "cacheWriteTokens": 526,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:45:40.334Z"
+   "observedAt": "2026-09-09T17:45:40.334Z",
+   "cacheWrite1hTokens": 526
   },
   {
    "contextTokens": 269053,
@@ -1612,7 +1772,8 @@
    "cacheWriteTokens": 772,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:45:45.063Z"
+   "observedAt": "2026-09-09T17:45:45.063Z",
+   "cacheWrite1hTokens": 772
   },
   {
    "contextTokens": 269532,
@@ -1622,7 +1783,8 @@
    "cacheWriteTokens": 479,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:45:50.407Z"
+   "observedAt": "2026-09-09T17:45:50.407Z",
+   "cacheWrite1hTokens": 479
   },
   {
    "contextTokens": 270948,
@@ -1632,7 +1794,8 @@
    "cacheWriteTokens": 1416,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:45:53.615Z"
+   "observedAt": "2026-09-09T17:45:53.615Z",
+   "cacheWrite1hTokens": 1416
   },
   {
    "contextTokens": 271581,
@@ -1642,7 +1805,8 @@
    "cacheWriteTokens": 633,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:46:14.402Z"
+   "observedAt": "2026-09-09T17:46:14.402Z",
+   "cacheWrite1hTokens": 633
   },
   {
    "contextTokens": 274831,
@@ -1652,7 +1816,8 @@
    "cacheWriteTokens": 3250,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:46:26.118Z"
+   "observedAt": "2026-09-09T17:46:26.118Z",
+   "cacheWrite1hTokens": 3250
   },
   {
    "contextTokens": 275846,
@@ -1662,7 +1827,8 @@
    "cacheWriteTokens": 1015,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:46:34.413Z"
+   "observedAt": "2026-09-09T17:46:34.413Z",
+   "cacheWrite1hTokens": 1015
   },
   {
    "contextTokens": 276710,
@@ -1672,7 +1838,8 @@
    "cacheWriteTokens": 864,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:47:14.669Z"
+   "observedAt": "2026-09-09T17:47:14.669Z",
+   "cacheWrite1hTokens": 864
   },
   {
    "contextTokens": 281373,
@@ -1682,7 +1849,8 @@
    "cacheWriteTokens": 4663,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:47:18.909Z"
+   "observedAt": "2026-09-09T17:47:18.909Z",
+   "cacheWrite1hTokens": 4663
   },
   {
    "contextTokens": 282879,
@@ -1692,7 +1860,8 @@
    "cacheWriteTokens": 1506,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:47:21.315Z"
+   "observedAt": "2026-09-09T17:47:21.315Z",
+   "cacheWrite1hTokens": 1506
   },
   {
    "contextTokens": 283245,
@@ -1702,7 +1871,8 @@
    "cacheWriteTokens": 366,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:47:28.89Z"
+   "observedAt": "2026-09-09T17:47:28.89Z",
+   "cacheWrite1hTokens": 366
   },
   {
    "contextTokens": 283690,
@@ -1712,7 +1882,8 @@
    "cacheWriteTokens": 445,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:47:31.133Z"
+   "observedAt": "2026-09-09T17:47:31.133Z",
+   "cacheWrite1hTokens": 445
   },
   {
    "contextTokens": 292482,
@@ -1722,7 +1893,8 @@
    "cacheWriteTokens": 8792,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:48:54.238Z"
+   "observedAt": "2026-09-09T17:48:54.238Z",
+   "cacheWrite1hTokens": 8792
   },
   {
    "contextTokens": 293062,
@@ -1732,7 +1904,8 @@
    "cacheWriteTokens": 580,
    "class": "",
    "segment": "fix/2",
-   "observedAt": "2026-09-09T17:48:57.317Z"
+   "observedAt": "2026-09-09T17:48:57.317Z",
+   "cacheWrite1hTokens": 580
   },
   {
    "contextTokens": 294234,
@@ -1742,7 +1915,8 @@
    "cacheWriteTokens": 1172,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:49:03.323Z"
+   "observedAt": "2026-09-09T17:49:03.323Z",
+   "cacheWrite1hTokens": 1172
   },
   {
    "contextTokens": 299413,
@@ -1752,7 +1926,8 @@
    "cacheWriteTokens": 5179,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:49:39.655Z"
+   "observedAt": "2026-09-09T17:49:39.655Z",
+   "cacheWrite1hTokens": 5179
   },
   {
    "contextTokens": 302729,
@@ -1762,7 +1937,8 @@
    "cacheWriteTokens": 3316,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:49:47.321Z"
+   "observedAt": "2026-09-09T17:49:47.321Z",
+   "cacheWrite1hTokens": 3316
   },
   {
    "contextTokens": 303735,
@@ -1772,7 +1948,8 @@
    "cacheWriteTokens": 1006,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:50:16.164Z"
+   "observedAt": "2026-09-09T17:50:16.164Z",
+   "cacheWrite1hTokens": 1006
   },
   {
    "contextTokens": 305778,
@@ -1782,7 +1959,8 @@
    "cacheWriteTokens": 2043,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:50:29.736Z"
+   "observedAt": "2026-09-09T17:50:29.736Z",
+   "cacheWrite1hTokens": 2043
   },
   {
    "contextTokens": 306528,
@@ -1792,7 +1970,8 @@
    "cacheWriteTokens": 750,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:50:46.34Z"
+   "observedAt": "2026-09-09T17:50:46.34Z",
+   "cacheWrite1hTokens": 750
   },
   {
    "contextTokens": 309710,
@@ -1802,7 +1981,8 @@
    "cacheWriteTokens": 3182,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:51:19.509Z"
+   "observedAt": "2026-09-09T17:51:19.509Z",
+   "cacheWrite1hTokens": 3182
   },
   {
    "contextTokens": 310699,
@@ -1812,7 +1992,8 @@
    "cacheWriteTokens": 989,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:51:30.732Z"
+   "observedAt": "2026-09-09T17:51:30.732Z",
+   "cacheWrite1hTokens": 989
   },
   {
    "contextTokens": 312048,
@@ -1822,7 +2003,8 @@
    "cacheWriteTokens": 1349,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:51:47.623Z"
+   "observedAt": "2026-09-09T17:51:47.623Z",
+   "cacheWrite1hTokens": 1349
   },
   {
    "contextTokens": 312390,
@@ -1832,7 +2014,8 @@
    "cacheWriteTokens": 342,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:51:52.828Z"
+   "observedAt": "2026-09-09T17:51:52.828Z",
+   "cacheWrite1hTokens": 342
   },
   {
    "contextTokens": 313010,
@@ -1842,7 +2025,8 @@
    "cacheWriteTokens": 620,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:52:11.155Z"
+   "observedAt": "2026-09-09T17:52:11.155Z",
+   "cacheWrite1hTokens": 620
   },
   {
    "contextTokens": 313669,
@@ -1852,7 +2036,8 @@
    "cacheWriteTokens": 659,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:52:14.39Z"
+   "observedAt": "2026-09-09T17:52:14.39Z",
+   "cacheWrite1hTokens": 659
   },
   {
    "contextTokens": 314204,
@@ -1862,7 +2047,8 @@
    "cacheWriteTokens": 535,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:52:37.787Z"
+   "observedAt": "2026-09-09T17:52:37.787Z",
+   "cacheWrite1hTokens": 535
   },
   {
    "contextTokens": 314955,
@@ -1872,7 +2058,8 @@
    "cacheWriteTokens": 751,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:54:40.751Z"
+   "observedAt": "2026-09-09T17:54:40.751Z",
+   "cacheWrite1hTokens": 751
   },
   {
    "contextTokens": 315275,
@@ -1882,7 +2069,8 @@
    "cacheWriteTokens": 320,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:54:55.913Z"
+   "observedAt": "2026-09-09T17:54:55.913Z",
+   "cacheWrite1hTokens": 320
   },
   {
    "contextTokens": 316841,
@@ -1892,7 +2080,8 @@
    "cacheWriteTokens": 1566,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:56:02.018Z"
+   "observedAt": "2026-09-09T17:56:02.018Z",
+   "cacheWrite1hTokens": 1566
   },
   {
    "contextTokens": 317906,
@@ -1902,7 +2091,8 @@
    "cacheWriteTokens": 1065,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:57:02.753Z"
+   "observedAt": "2026-09-09T17:57:02.753Z",
+   "cacheWrite1hTokens": 1065
   },
   {
    "contextTokens": 322768,
@@ -1912,7 +2102,8 @@
    "cacheWriteTokens": 4862,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:57:06.317Z"
+   "observedAt": "2026-09-09T17:57:06.317Z",
+   "cacheWrite1hTokens": 4862
   },
   {
    "contextTokens": 323114,
@@ -1922,7 +2113,8 @@
    "cacheWriteTokens": 346,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:57:11.063Z"
+   "observedAt": "2026-09-09T17:57:11.063Z",
+   "cacheWrite1hTokens": 346
   },
   {
    "contextTokens": 323738,
@@ -1932,7 +2124,8 @@
    "cacheWriteTokens": 624,
    "class": "",
    "segment": "fix/3",
-   "observedAt": "2026-09-09T17:57:46.885Z"
+   "observedAt": "2026-09-09T17:57:46.885Z",
+   "cacheWrite1hTokens": 624
   }
  ],
  "unattributed": {

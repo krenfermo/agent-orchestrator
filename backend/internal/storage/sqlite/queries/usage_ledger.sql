@@ -73,6 +73,8 @@ WITH attributed AS (
     a.uncached_input_tokens AS uncached_input_tokens,
     a.cache_read_tokens    AS cache_read_tokens,
     a.cache_write_tokens   AS cache_write_tokens,
+    a.cache_write_5m_tokens AS cache_write_5m_tokens,
+    a.cache_write_1h_tokens AS cache_write_1h_tokens,
     a.output_tokens        AS output_tokens,
     a.reasoning_tokens     AS reasoning_tokens,
     a.attribution_basis    AS attribution_basis
@@ -110,6 +112,20 @@ SELECT
     CAST(SUM(a.uncached_input_tokens) AS INTEGER) AS uncached_input_tokens,
     CAST(SUM(a.cache_read_tokens) AS INTEGER)     AS cache_read_tokens,
     CAST(SUM(a.cache_write_tokens) AS INTEGER)    AS cache_write_tokens,
+    -- The three terms partition cache_write_tokens: see
+    -- AggregateUsageBySessionHarnessModel for why both columns must be present.
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NOT NULL
+                            AND a.cache_write_1h_tokens IS NOT NULL
+                           THEN a.cache_write_5m_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_5m_tokens,
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NOT NULL
+                            AND a.cache_write_1h_tokens IS NOT NULL
+                           THEN a.cache_write_1h_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_1h_tokens,
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NULL
+                             OR a.cache_write_1h_tokens IS NULL
+                           THEN a.cache_write_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_unknown_ttl_tokens,
     CAST(SUM(a.output_tokens) AS INTEGER)         AS output_tokens,
     CAST(COALESCE(SUM(a.reasoning_tokens), 0) AS INTEGER) AS reasoning_tokens,
     CAST(COUNT(a.reasoning_tokens) AS INTEGER)    AS reasoning_event_count,
@@ -140,6 +156,8 @@ WITH attributed AS (
     a.uncached_input_tokens AS uncached_input_tokens,
     a.cache_read_tokens    AS cache_read_tokens,
     a.cache_write_tokens   AS cache_write_tokens,
+    a.cache_write_5m_tokens AS cache_write_5m_tokens,
+    a.cache_write_1h_tokens AS cache_write_1h_tokens,
     a.output_tokens        AS output_tokens,
     a.reasoning_tokens     AS reasoning_tokens,
     a.attribution_basis    AS attribution_basis
@@ -166,6 +184,20 @@ SELECT
     CAST(SUM(a.uncached_input_tokens) AS INTEGER) AS uncached_input_tokens,
     CAST(SUM(a.cache_read_tokens) AS INTEGER)     AS cache_read_tokens,
     CAST(SUM(a.cache_write_tokens) AS INTEGER)    AS cache_write_tokens,
+    -- The three terms partition cache_write_tokens: see
+    -- AggregateUsageBySessionHarnessModel for why both columns must be present.
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NOT NULL
+                            AND a.cache_write_1h_tokens IS NOT NULL
+                           THEN a.cache_write_5m_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_5m_tokens,
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NOT NULL
+                            AND a.cache_write_1h_tokens IS NOT NULL
+                           THEN a.cache_write_1h_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_1h_tokens,
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NULL
+                             OR a.cache_write_1h_tokens IS NULL
+                           THEN a.cache_write_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_unknown_ttl_tokens,
     CAST(SUM(a.output_tokens) AS INTEGER)         AS output_tokens,
     CAST(COALESCE(SUM(a.reasoning_tokens), 0) AS INTEGER) AS reasoning_tokens,
     CAST(COUNT(a.reasoning_tokens) AS INTEGER)    AS reasoning_event_count,
@@ -193,6 +225,8 @@ WITH attributed AS (
     a.uncached_input_tokens AS uncached_input_tokens,
     a.cache_read_tokens    AS cache_read_tokens,
     a.cache_write_tokens   AS cache_write_tokens,
+    a.cache_write_5m_tokens AS cache_write_5m_tokens,
+    a.cache_write_1h_tokens AS cache_write_1h_tokens,
     a.output_tokens        AS output_tokens,
     a.reasoning_tokens     AS reasoning_tokens,
     a.attribution_basis    AS attribution_basis
@@ -215,6 +249,20 @@ SELECT
     CAST(SUM(a.uncached_input_tokens) AS INTEGER) AS uncached_input_tokens,
     CAST(SUM(a.cache_read_tokens) AS INTEGER)     AS cache_read_tokens,
     CAST(SUM(a.cache_write_tokens) AS INTEGER)    AS cache_write_tokens,
+    -- The three terms partition cache_write_tokens: see
+    -- AggregateUsageBySessionHarnessModel for why both columns must be present.
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NOT NULL
+                            AND a.cache_write_1h_tokens IS NOT NULL
+                           THEN a.cache_write_5m_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_5m_tokens,
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NOT NULL
+                            AND a.cache_write_1h_tokens IS NOT NULL
+                           THEN a.cache_write_1h_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_1h_tokens,
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NULL
+                             OR a.cache_write_1h_tokens IS NULL
+                           THEN a.cache_write_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_unknown_ttl_tokens,
     CAST(SUM(a.output_tokens) AS INTEGER)         AS output_tokens,
     CAST(COUNT(*) AS INTEGER)                     AS event_count,
     CAST(SUM(CASE WHEN a.attribution_basis = 'approximate' THEN 1 ELSE 0 END) AS INTEGER) AS approximate_count
@@ -247,6 +295,8 @@ WITH attributed AS (
     a.uncached_input_tokens AS uncached_input_tokens,
     a.cache_read_tokens    AS cache_read_tokens,
     a.cache_write_tokens   AS cache_write_tokens,
+    a.cache_write_5m_tokens AS cache_write_5m_tokens,
+    a.cache_write_1h_tokens AS cache_write_1h_tokens,
     a.output_tokens        AS output_tokens,
     a.reasoning_tokens     AS reasoning_tokens,
     a.attribution_basis    AS attribution_basis
@@ -269,6 +319,20 @@ SELECT
     CAST(SUM(a.input_tokens) AS INTEGER)       AS input_tokens,
     CAST(SUM(a.cache_read_tokens) AS INTEGER)  AS cache_read_tokens,
     CAST(SUM(a.cache_write_tokens) AS INTEGER) AS cache_write_tokens,
+    -- The three terms partition cache_write_tokens: see
+    -- AggregateUsageBySessionHarnessModel for why both columns must be present.
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NOT NULL
+                            AND a.cache_write_1h_tokens IS NOT NULL
+                           THEN a.cache_write_5m_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_5m_tokens,
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NOT NULL
+                            AND a.cache_write_1h_tokens IS NOT NULL
+                           THEN a.cache_write_1h_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_1h_tokens,
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NULL
+                             OR a.cache_write_1h_tokens IS NULL
+                           THEN a.cache_write_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_unknown_ttl_tokens,
     CAST(SUM(a.uncached_input_tokens) AS INTEGER) AS uncached_input_tokens,
     CAST(SUM(a.output_tokens) AS INTEGER)      AS output_tokens,
     CAST(COUNT(*) AS INTEGER)                  AS event_count
@@ -307,6 +371,8 @@ WITH attributed AS (
     a.uncached_input_tokens AS uncached_input_tokens,
     a.cache_read_tokens     AS cache_read_tokens,
     a.cache_write_tokens    AS cache_write_tokens,
+    a.cache_write_5m_tokens AS cache_write_5m_tokens,
+    a.cache_write_1h_tokens AS cache_write_1h_tokens,
     a.output_tokens         AS output_tokens,
     a.turn_class            AS turn_class,
     a.observed_at           AS observed_at
@@ -331,6 +397,8 @@ SELECT
     a.uncached_input_tokens AS uncached_input_tokens,
     a.cache_read_tokens     AS cache_read_tokens,
     a.cache_write_tokens    AS cache_write_tokens,
+    a.cache_write_5m_tokens AS cache_write_5m_tokens,
+    a.cache_write_1h_tokens AS cache_write_1h_tokens,
     a.output_tokens         AS output_tokens
 FROM attributed a
 CROSS JOIN usage_attribution_windows w ON w.id = a.window_id

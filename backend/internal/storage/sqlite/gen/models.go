@@ -465,6 +465,8 @@ type ModelUsageEvent struct {
 	ObservedAt          sql.NullTime
 	RecordedAt          sql.NullTime
 	TurnClass           domain.TurnClass
+	CacheWrite5mTokens  sql.NullInt64
+	CacheWrite1hTokens  sql.NullInt64
 }
 
 type Notification struct {
@@ -1302,6 +1304,8 @@ type UsageEventAttribution struct {
 	UncachedInputTokens int64
 	CacheReadTokens     int64
 	CacheWriteTokens    int64
+	CacheWrite5mTokens  sql.NullInt64
+	CacheWrite1hTokens  sql.NullInt64
 	OutputTokens        int64
 	ReasoningTokens     sql.NullInt64
 	TurnClass           string

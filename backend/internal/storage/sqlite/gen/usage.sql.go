@@ -21,6 +21,25 @@ SELECT
     CAST(SUM(mue.uncached_input_tokens) AS INTEGER) AS uncached_input_tokens,
     CAST(SUM(mue.cache_read_tokens) AS INTEGER) AS cache_read_tokens,
     CAST(SUM(mue.cache_write_tokens) AS INTEGER) AS cache_write_tokens,
+    -- The three terms below PARTITION cache_write_tokens: every token is in
+    -- exactly one of them, whatever shape the row is in. Both columns must be
+    -- present for either lifetime to be believed -- a half-written pair is
+    -- unreachable through the write path today and is exactly what a future
+    -- backfill could produce, and counting its one known column would both
+    -- overstate that lifetime and double count the row against the unknown
+    -- bucket.
+    CAST(COALESCE(SUM(CASE WHEN mue.cache_write_5m_tokens IS NOT NULL
+                            AND mue.cache_write_1h_tokens IS NOT NULL
+                           THEN mue.cache_write_5m_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_5m_tokens,
+    CAST(COALESCE(SUM(CASE WHEN mue.cache_write_5m_tokens IS NOT NULL
+                            AND mue.cache_write_1h_tokens IS NOT NULL
+                           THEN mue.cache_write_1h_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_1h_tokens,
+    CAST(COALESCE(SUM(CASE WHEN mue.cache_write_5m_tokens IS NULL
+                             OR mue.cache_write_1h_tokens IS NULL
+                           THEN mue.cache_write_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_unknown_ttl_tokens,
     CAST(SUM(mue.output_tokens) AS INTEGER) AS output_tokens,
     CAST(COALESCE(SUM(mue.reasoning_tokens), 0) AS INTEGER) AS reasoning_tokens,
     COUNT(mue.reasoning_tokens) AS reasoning_event_count
@@ -32,15 +51,18 @@ ORDER BY SUM(mue.input_tokens + mue.output_tokens) DESC, ub.harness, mue.model_i
 `
 
 type AggregateUsageBySessionHarnessModelRow struct {
-	Harness             domain.AgentHarness
-	ModelID             string
-	InputTokens         int64
-	UncachedInputTokens int64
-	CacheReadTokens     int64
-	CacheWriteTokens    int64
-	OutputTokens        int64
-	ReasoningTokens     int64
-	ReasoningEventCount int64
+	Harness                    domain.AgentHarness
+	ModelID                    string
+	InputTokens                int64
+	UncachedInputTokens        int64
+	CacheReadTokens            int64
+	CacheWriteTokens           int64
+	CacheWrite5mTokens         int64
+	CacheWrite1hTokens         int64
+	CacheWriteUnknownTtlTokens int64
+	OutputTokens               int64
+	ReasoningTokens            int64
+	ReasoningEventCount        int64
 }
 
 func (q *Queries) AggregateUsageBySessionHarnessModel(ctx context.Context, sessionID *domain.SessionID) ([]AggregateUsageBySessionHarnessModelRow, error) {
@@ -59,6 +81,9 @@ func (q *Queries) AggregateUsageBySessionHarnessModel(ctx context.Context, sessi
 			&i.UncachedInputTokens,
 			&i.CacheReadTokens,
 			&i.CacheWriteTokens,
+			&i.CacheWrite5mTokens,
+			&i.CacheWrite1hTokens,
+			&i.CacheWriteUnknownTtlTokens,
 			&i.OutputTokens,
 			&i.ReasoningTokens,
 			&i.ReasoningEventCount,
@@ -252,7 +277,7 @@ const getModelUsageEventByKey = `-- name: GetModelUsageEventByKey :one
 SELECT
     model_id, input_tokens, uncached_input_tokens,
     cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
-    turn_class
+    turn_class, cache_write_5m_tokens, cache_write_1h_tokens
 FROM model_usage_events
 WHERE binding_id = ? AND source_event_key = ?
 `
@@ -271,6 +296,8 @@ type GetModelUsageEventByKeyRow struct {
 	OutputTokens        int64
 	ReasoningTokens     sql.NullInt64
 	TurnClass           domain.TurnClass
+	CacheWrite5mTokens  sql.NullInt64
+	CacheWrite1hTokens  sql.NullInt64
 }
 
 func (q *Queries) GetModelUsageEventByKey(ctx context.Context, arg GetModelUsageEventByKeyParams) (GetModelUsageEventByKeyRow, error) {
@@ -285,6 +312,8 @@ func (q *Queries) GetModelUsageEventByKey(ctx context.Context, arg GetModelUsage
 		&i.OutputTokens,
 		&i.ReasoningTokens,
 		&i.TurnClass,
+		&i.CacheWrite5mTokens,
+		&i.CacheWrite1hTokens,
 	)
 	return i, err
 }
@@ -470,8 +499,11 @@ const insertModelUsageEvent = `-- name: InsertModelUsageEvent :exec
 INSERT INTO model_usage_events (
     binding_id, usage_source_id, model_id, input_tokens, uncached_input_tokens,
     cache_read_tokens, cache_write_tokens, output_tokens, reasoning_tokens,
-    source_event_key, turn_class, observed_at, recorded_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    source_event_key, turn_class, observed_at, recorded_at,
+    -- NULL when the transcript reported no lifetime for this call's cache
+    -- creation. Never 0: zero would assert the writes were short-lived.
+    cache_write_5m_tokens, cache_write_1h_tokens
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertModelUsageEventParams struct {
@@ -488,6 +520,8 @@ type InsertModelUsageEventParams struct {
 	TurnClass           domain.TurnClass
 	ObservedAt          sql.NullTime
 	RecordedAt          sql.NullTime
+	CacheWrite5mTokens  sql.NullInt64
+	CacheWrite1hTokens  sql.NullInt64
 }
 
 func (q *Queries) InsertModelUsageEvent(ctx context.Context, arg InsertModelUsageEventParams) error {
@@ -505,6 +539,8 @@ func (q *Queries) InsertModelUsageEvent(ctx context.Context, arg InsertModelUsag
 		arg.TurnClass,
 		arg.ObservedAt,
 		arg.RecordedAt,
+		arg.CacheWrite5mTokens,
+		arg.CacheWrite1hTokens,
 	)
 	return err
 }

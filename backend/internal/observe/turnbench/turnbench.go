@@ -60,6 +60,16 @@ type Call struct {
 	UncachedInputTokens int64 `json:"uncachedInputTokens,omitempty"`
 	CacheReadTokens     int64 `json:"cacheReadTokens,omitempty"`
 	CacheWriteTokens    int64 `json:"cacheWriteTokens,omitempty"`
+	// CacheWrite5mTokens and CacheWrite1hTokens divide CacheWriteTokens by the
+	// lifetime each cache entry was created with, because creating a
+	// longer-lived entry costs more. They are a SPLIT of the line above and
+	// never an addition to it.
+	//
+	// Both zero on a series that predates the vocabulary: the lifetime is then
+	// unknown, and a cost that would have to distinguish them says so instead
+	// of picking one.
+	CacheWrite5mTokens int64 `json:"cacheWrite5mTokens,omitempty"`
+	CacheWrite1hTokens int64 `json:"cacheWrite1hTokens,omitempty"`
 	// Class is what the call did. See domain.TurnClass.
 	Class domain.TurnClass `json:"class"`
 	// Segment names the dispatch that owned the call -- "work", "fix/1". It is
@@ -168,6 +178,10 @@ type Metrics struct {
 	// Tokens except InputTokens and OutputTokens is then meaningless.
 	Tokens     domain.UsageTokenTotals
 	SplitKnown bool
+	// CacheTTLKnown is false when any call's cache creation carries no
+	// lifetime. The token figures stay exact; only a cost that must tell the
+	// two lifetimes apart is affected.
+	CacheTTLKnown bool
 
 	// Compactions and the three figures under it fold Series.Compactions.
 	// SummaryOutputKnown is false when ANY compaction left its generated
@@ -190,6 +204,7 @@ func Measure(s Series) Metrics {
 	m.FirstContext = s.Calls[0].ContextTokens
 	m.LastContext = s.Calls[len(s.Calls)-1].ContextTokens
 	m.SplitKnown = true
+	m.CacheTTLKnown = true
 	var firstAt, lastAt time.Time
 	for _, c := range s.Calls {
 		m.CumulativeInput += c.ContextTokens
@@ -202,6 +217,16 @@ func Measure(s Series) Metrics {
 		m.Tokens.CacheReadTokens += c.CacheReadTokens
 		m.Tokens.CacheWriteTokens += c.CacheWriteTokens
 		m.Tokens.OutputTokens += c.OutputTokens
+		switch {
+		case c.CacheWriteTokens == 0:
+			// Nothing was created; there is no lifetime to be unsure about.
+		case c.CacheWrite5mTokens+c.CacheWrite1hTokens == c.CacheWriteTokens:
+			m.Tokens.CacheCreation.Ephemeral5mTokens += c.CacheWrite5mTokens
+			m.Tokens.CacheCreation.Ephemeral1hTokens += c.CacheWrite1hTokens
+		default:
+			m.Tokens.CacheCreation.UnknownTTLTokens += c.CacheWriteTokens
+			m.CacheTTLKnown = false
+		}
 		if c.ContextTokens > m.PeakContext {
 			m.PeakContext = c.ContextTokens
 		}
@@ -281,6 +306,12 @@ type Policy struct {
 	// for every compaction ever observed -- so a zero here makes the cost fold
 	// report the series as unsplit rather than cheap.
 	PostCompactCacheWriteTokens int64
+	// PostCompactCacheLifetime is the lifetime that rewritten prefix is
+	// created with: "5m", "1h", or empty for "nobody said". Empty leaves the
+	// replayed series' cache lifetime unknown and its cost refused, which is
+	// the honest outcome for a conversation that never existed -- the caller
+	// has to state the assumption for it to be priced.
+	PostCompactCacheLifetime string
 	// CompactionSummaryOutputTokens is what the summarization turn GENERATES.
 	// CompactionSummaryOutputKnown must be set for it to count: an unset value
 	// leaves the replayed series' cost explicitly unknown instead of quietly
@@ -335,8 +366,16 @@ func Apply(s Series, p Policy) Series {
 				SummaryOutputKnown:  p.CompactionSummaryOutputKnown,
 			})
 			// The first call after a replacement writes the new prefix; only
-			// what the policy names as written is written.
+			// what the policy names as written is written, at the lifetime the
+			// policy names -- or at none, which leaves it unknown.
 			out.Calls[i].CacheWriteTokens = p.PostCompactCacheWriteTokens
+			out.Calls[i].CacheWrite5mTokens, out.Calls[i].CacheWrite1hTokens = 0, 0
+			switch p.PostCompactCacheLifetime {
+			case "5m":
+				out.Calls[i].CacheWrite5mTokens = p.PostCompactCacheWriteTokens
+			case "1h":
+				out.Calls[i].CacheWrite1hTokens = p.PostCompactCacheWriteTokens
+			}
 		}
 		rebillCall(&out.Calls[i], s.Calls[i])
 	}
@@ -355,6 +394,7 @@ func Apply(s Series, p Policy) Series {
 func rebillCall(out *Call, source Call) {
 	if !source.splitConsistent() {
 		out.UncachedInputTokens, out.CacheReadTokens, out.CacheWriteTokens = 0, 0, 0
+		out.CacheWrite5mTokens, out.CacheWrite1hTokens = 0, 0
 		return
 	}
 	read := out.ContextTokens - out.UncachedInputTokens - out.CacheWriteTokens

@@ -57,6 +57,11 @@ const (
 	UsageErrorInvalidParserState          = "invalid_parser_state"
 	UsageErrorUnresolvedSpawnCall         = "unresolved_spawn_call"
 	UsageErrorCodexSourceBudgetExceeded   = "codex_source_budget_exceeded"
+	// UsageErrorCacheTTLInconsistent is a record whose cache-creation
+	// lifetime split does not add up to the total it reports beside it.
+	// Neither figure is trusted over the other and no distribution is
+	// invented; the event is kept with its lifetime marked unknown.
+	UsageErrorCacheTTLInconsistent = "cache_ttl_inconsistent"
 )
 
 // Usage ingestion sentinel errors report replay and cursor conflicts.
@@ -210,6 +215,15 @@ type UsageTokenMetrics struct {
 	CacheWriteTokens    int64
 	OutputTokens        int64
 	ReasoningTokens     *int64
+	// CacheCreation splits CacheWriteTokens by the lifetime the cache entry
+	// was created with. A source that reports no split leaves it zero, which
+	// the accounting reads as "this event's TTL is unknown" -- never as 5m and
+	// never as 1h.
+	//
+	// NOT PERSISTED YET. model_usage_events has no column for it, so this
+	// travels through the pipeline and is dropped at the row. Per-event TTL
+	// storage needs a migration; see docs/p7-2b1-cache-ttl-accounting.md.
+	CacheCreation CacheCreationSplit
 }
 
 // ModelUsageEvent is one append-only normalized usage fact.

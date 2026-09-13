@@ -1,6 +1,6 @@
 {
  "source": "wf-66f0ee54-52ff-4bc4-910e-20b570d4c741",
- "note": "Numbers only. The canary that proved the mechanism: two real compactions. Per-call figures are model_usage_events rows; the two compactions are the harness's own system/compact_boundary records; unattributed is its end-of-session cost-state rollup minus what the ledger attributed. No prompt, command, path or message body is reproduced here. Provenance: docs/p7-compaction-observability.md.",
+ "note": "Numbers only. The canary that proved the mechanism: two real compactions. Per-call figures are model_usage_events rows; the two compactions are the harness's own system/compact_boundary records; unattributed is its end-of-session cost-state rollup minus what the ledger attributed. Cache creation carries the lifetime each entry was created with, read from the same transcript records. No prompt, command, path or message body is reproduced here. Provenance: docs/p7-compaction-observability.md.",
  "strategy": "task",
  "modelId": "claude-opus-5",
  "calls": [
@@ -12,7 +12,8 @@
    "cacheWriteTokens": 15407,
    "class": "command",
    "segment": "work",
-   "observedAt": "2026-09-11T20:54:29.736Z"
+   "observedAt": "2026-09-11T20:54:29.736Z",
+   "cacheWrite1hTokens": 15407
   },
   {
    "contextTokens": 48680,
@@ -22,7 +23,8 @@
    "cacheWriteTokens": 2738,
    "class": "command",
    "segment": "work",
-   "observedAt": "2026-09-11T20:54:32.975Z"
+   "observedAt": "2026-09-11T20:54:32.975Z",
+   "cacheWrite1hTokens": 2738
   },
   {
    "contextTokens": 49822,
@@ -32,7 +34,8 @@
    "cacheWriteTokens": 1142,
    "class": "command",
    "segment": "work",
-   "observedAt": "2026-09-11T20:54:38.488Z"
+   "observedAt": "2026-09-11T20:54:38.488Z",
+   "cacheWrite1hTokens": 1142
   },
   {
    "contextTokens": 54874,
@@ -42,7 +45,8 @@
    "cacheWriteTokens": 5052,
    "class": "command",
    "segment": "work",
-   "observedAt": "2026-09-11T20:54:40.873Z"
+   "observedAt": "2026-09-11T20:54:40.873Z",
+   "cacheWrite1hTokens": 5052
   },
   {
    "contextTokens": 58550,
@@ -52,7 +56,8 @@
    "cacheWriteTokens": 3676,
    "class": "command",
    "segment": "work",
-   "observedAt": "2026-09-11T20:55:01.709Z"
+   "observedAt": "2026-09-11T20:55:01.709Z",
+   "cacheWrite1hTokens": 3676
   },
   {
    "contextTokens": 60684,
@@ -62,7 +67,8 @@
    "cacheWriteTokens": 2134,
    "class": "command",
    "segment": "work",
-   "observedAt": "2026-09-11T20:55:04.559Z"
+   "observedAt": "2026-09-11T20:55:04.559Z",
+   "cacheWrite1hTokens": 2134
   },
   {
    "contextTokens": 63010,
@@ -72,7 +78,8 @@
    "cacheWriteTokens": 2326,
    "class": "command",
    "segment": "work",
-   "observedAt": "2026-09-11T20:55:27.923Z"
+   "observedAt": "2026-09-11T20:55:27.923Z",
+   "cacheWrite1hTokens": 2326
   },
   {
    "contextTokens": 66659,
@@ -82,7 +89,8 @@
    "cacheWriteTokens": 3649,
    "class": "command",
    "segment": "work",
-   "observedAt": "2026-09-11T20:55:39.258Z"
+   "observedAt": "2026-09-11T20:55:39.258Z",
+   "cacheWrite1hTokens": 3649
   },
   {
    "contextTokens": 70209,
@@ -92,7 +100,8 @@
    "cacheWriteTokens": 3550,
    "class": "command",
    "segment": "work",
-   "observedAt": "2026-09-11T20:56:22.22Z"
+   "observedAt": "2026-09-11T20:56:22.22Z",
+   "cacheWrite1hTokens": 3550
   },
   {
    "contextTokens": 75449,
@@ -102,7 +111,8 @@
    "cacheWriteTokens": 5240,
    "class": "command",
    "segment": "work",
-   "observedAt": "2026-09-11T20:57:08.519Z"
+   "observedAt": "2026-09-11T20:57:08.519Z",
+   "cacheWrite1hTokens": 5240
   },
   {
    "contextTokens": 77142,
@@ -112,7 +122,8 @@
    "cacheWriteTokens": 1693,
    "class": "command",
    "segment": "work",
-   "observedAt": "2026-09-11T20:57:28.41Z"
+   "observedAt": "2026-09-11T20:57:28.41Z",
+   "cacheWrite1hTokens": 1693
   },
   {
    "contextTokens": 78472,
@@ -122,7 +133,8 @@
    "cacheWriteTokens": 1330,
    "class": "command",
    "segment": "work",
-   "observedAt": "2026-09-11T20:57:36.952Z"
+   "observedAt": "2026-09-11T20:57:36.952Z",
+   "cacheWrite1hTokens": 1330
   },
   {
    "contextTokens": 78989,
@@ -132,7 +144,8 @@
    "cacheWriteTokens": 517,
    "class": "command",
    "segment": "work",
-   "observedAt": "2026-09-11T20:57:48.927Z"
+   "observedAt": "2026-09-11T20:57:48.927Z",
+   "cacheWrite1hTokens": 517
   },
   {
    "contextTokens": 80731,
@@ -142,7 +155,8 @@
    "cacheWriteTokens": 1742,
    "class": "command",
    "segment": "work",
-   "observedAt": "2026-09-11T20:57:52.414Z"
+   "observedAt": "2026-09-11T20:57:52.414Z",
+   "cacheWrite1hTokens": 1742
   },
   {
    "contextTokens": 82704,
@@ -152,7 +166,8 @@
    "cacheWriteTokens": 1973,
    "class": "command",
    "segment": "work",
-   "observedAt": "2026-09-11T20:58:35.997Z"
+   "observedAt": "2026-09-11T20:58:35.997Z",
+   "cacheWrite1hTokens": 1973
   },
   {
    "contextTokens": 84897,
@@ -162,7 +177,8 @@
    "cacheWriteTokens": 2193,
    "class": "message",
    "segment": "work",
-   "observedAt": "2026-09-11T20:58:49.924Z"
+   "observedAt": "2026-09-11T20:58:49.924Z",
+   "cacheWrite1hTokens": 2193
   },
   {
    "contextTokens": 57803,
@@ -172,7 +188,8 @@
    "cacheWriteTokens": 20422,
    "class": "command",
    "segment": "fix/1",
-   "observedAt": "2026-09-11T21:04:04.554Z"
+   "observedAt": "2026-09-11T21:04:04.554Z",
+   "cacheWrite1hTokens": 20422
   },
   {
    "contextTokens": 59169,
@@ -182,7 +199,8 @@
    "cacheWriteTokens": 1366,
    "class": "command",
    "segment": "fix/1",
-   "observedAt": "2026-09-11T21:04:23.893Z"
+   "observedAt": "2026-09-11T21:04:23.893Z",
+   "cacheWrite1hTokens": 1366
   },
   {
    "contextTokens": 61597,
@@ -192,7 +210,8 @@
    "cacheWriteTokens": 2428,
    "class": "command",
    "segment": "fix/1",
-   "observedAt": "2026-09-11T21:04:36.999Z"
+   "observedAt": "2026-09-11T21:04:36.999Z",
+   "cacheWrite1hTokens": 2428
   },
   {
    "contextTokens": 62576,
@@ -202,7 +221,8 @@
    "cacheWriteTokens": 979,
    "class": "command",
    "segment": "fix/1",
-   "observedAt": "2026-09-11T21:04:51.921Z"
+   "observedAt": "2026-09-11T21:04:51.921Z",
+   "cacheWrite1hTokens": 979
   },
   {
    "contextTokens": 64495,
@@ -212,7 +232,8 @@
    "cacheWriteTokens": 1919,
    "class": "command",
    "segment": "fix/1",
-   "observedAt": "2026-09-11T21:05:07.853Z"
+   "observedAt": "2026-09-11T21:05:07.853Z",
+   "cacheWrite1hTokens": 1919
   },
   {
    "contextTokens": 65350,
@@ -222,7 +243,8 @@
    "cacheWriteTokens": 855,
    "class": "command",
    "segment": "fix/1",
-   "observedAt": "2026-09-11T21:05:15.76Z"
+   "observedAt": "2026-09-11T21:05:15.76Z",
+   "cacheWrite1hTokens": 855
   },
   {
    "contextTokens": 66185,
@@ -232,7 +254,8 @@
    "cacheWriteTokens": 835,
    "class": "message",
    "segment": "fix/1",
-   "observedAt": "2026-09-11T21:05:25.041Z"
+   "observedAt": "2026-09-11T21:05:25.041Z",
+   "cacheWrite1hTokens": 835
   },
   {
    "contextTokens": 61099,
@@ -242,7 +265,8 @@
    "cacheWriteTokens": 23718,
    "class": "command",
    "segment": "fix/2",
-   "observedAt": "2026-09-11T21:09:18.786Z"
+   "observedAt": "2026-09-11T21:09:18.786Z",
+   "cacheWrite1hTokens": 23718
   },
   {
    "contextTokens": 62871,
@@ -252,7 +276,8 @@
    "cacheWriteTokens": 1772,
    "class": "command",
    "segment": "fix/2",
-   "observedAt": "2026-09-11T21:09:26.727Z"
+   "observedAt": "2026-09-11T21:09:26.727Z",
+   "cacheWrite1hTokens": 1772
   },
   {
    "contextTokens": 63381,
@@ -262,7 +287,8 @@
    "cacheWriteTokens": 510,
    "class": "command",
    "segment": "fix/2",
-   "observedAt": "2026-09-11T21:09:30.705Z"
+   "observedAt": "2026-09-11T21:09:30.705Z",
+   "cacheWrite1hTokens": 510
   },
   {
    "contextTokens": 63971,
@@ -272,7 +298,8 @@
    "cacheWriteTokens": 590,
    "class": "command",
    "segment": "fix/2",
-   "observedAt": "2026-09-11T21:09:38.928Z"
+   "observedAt": "2026-09-11T21:09:38.928Z",
+   "cacheWrite1hTokens": 590
   },
   {
    "contextTokens": 64499,
@@ -282,7 +309,8 @@
    "cacheWriteTokens": 528,
    "class": "message",
    "segment": "fix/2",
-   "observedAt": "2026-09-11T21:09:49.676Z"
+   "observedAt": "2026-09-11T21:09:49.676Z",
+   "cacheWrite1hTokens": 528
   }
  ],
  "compactions": [

@@ -150,6 +150,24 @@ type claudeParserStateV1 struct {
 	CompactionCount    int                       `json:"compaction_count,omitempty"`
 	CompactionsDropped int                       `json:"compactions_dropped,omitempty"`
 	HarnessTotals      *harnessTotalsV1          `json:"harness_totals,omitempty"`
+	// CacheCreation is this transcript's cache creation, summed per lifetime,
+	// once per billed message.
+	//
+	// It exists because model_usage_events has no column for the split, so the
+	// per-event figure this parser now decodes is dropped at the row and every
+	// read that goes back through the ledger is left pricing a long-lived
+	// write at the short-lived rate. Four int64s in the state AO already
+	// writes give the session grain back without a migration. Per-event grain
+	// still needs one; see docs/p7-2b1-cache-ttl-accounting.md.
+	//
+	// CacheCreationTotal is the same messages' reported totals, carried so a
+	// consumer can check this aggregate against the ledger's own sum before
+	// trusting it to apportion anything.
+	CacheCreation5m       int64 `json:"cache_creation_5m,omitempty"`
+	CacheCreation1h       int64 `json:"cache_creation_1h,omitempty"`
+	CacheCreationUnknown  int64 `json:"cache_creation_unknown_ttl,omitempty"`
+	CacheCreationTotal    int64 `json:"cache_creation_total,omitempty"`
+	CacheCreationMessages int64 `json:"cache_creation_messages,omitempty"`
 }
 
 // compactionObservationV1 is one `system` / `compact_boundary` record, reduced
@@ -330,6 +348,20 @@ type claudeTranscriptRecord struct {
 			CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 			CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 			OutputTokens             int64 `json:"output_tokens"`
+			// CacheCreation is the same figure as CacheCreationInputTokens,
+			// divided by the lifetime each entry was created with. The
+			// provider charges more to create a longer-lived entry, so the
+			// total alone cannot be priced.
+			//
+			// Present on every one of the 4,523 assistant messages in every
+			// transcript AO holds, and absent by construction from any harness
+			// that predates the vocabulary -- which is why it is a POINTER:
+			// absent is a different fact from two zeroes, and only the pointer
+			// can tell them apart.
+			CacheCreation *struct {
+				Ephemeral5mInputTokens int64 `json:"ephemeral_5m_input_tokens"`
+				Ephemeral1hInputTokens int64 `json:"ephemeral_1h_input_tokens"`
+			} `json:"cache_creation"`
 		} `json:"usage"`
 		// Content is decoded for its block TYPES and tool NAMES only -- see
 		// claudeContentBlock. It is what turn classification reads, and it is
@@ -441,6 +473,29 @@ func parseClaude(source domain.UsageSourceContext, records []jsonlRecord, state 
 			recordMalformed(result)
 			continue
 		}
+		// The lifetime split. A record that carries none leaves
+		// CacheCreation zero, which every consumer reads as "the lifetime of
+		// these writes is unknown" -- never as five minutes and never as an
+		// hour.
+		if split := usage.CacheCreation; split != nil {
+			five, hour := nonNegative(split.Ephemeral5mInputTokens), nonNegative(split.Ephemeral1hInputTokens)
+			if five+hour == usage.CacheCreationInputTokens {
+				tokens.CacheCreation = domain.CacheCreationSplit{
+					Ephemeral5mTokens: five, Ephemeral1hTokens: hour,
+				}
+			} else {
+				// The split and the total disagree. Neither is trusted over
+				// the other and no distribution is invented: the total stands,
+				// its lifetime is recorded as unknown, and the disagreement is
+				// counted as the anomaly it is. The event is NOT dropped --
+				// its tokens are real and the ledger still needs them.
+				tokens.CacheCreation = domain.CacheCreationSplit{
+					UnknownTTLTokens: usage.CacheCreationInputTokens,
+				}
+				result.Cursor.AnomalyCount++
+				result.Cursor.LastErrorCode = domain.UsageErrorCacheTTLInconsistent
+			}
+		}
 		model := firstNonEmpty(native.Message.Model, state.ModelID, source.InitialModelID, "unknown")
 		state.ModelID = model
 		keyID := firstNonEmpty(native.Message.ID, native.UUID, strconv.FormatInt(record.Offset, 10))
@@ -448,8 +503,21 @@ func parseClaude(source domain.UsageSourceContext, records []jsonlRecord, state 
 		// to. A new key closes the previous message (nothing to finalize: the
 		// class was emitted with every record of it) and opens this one.
 		if keyID != state.OpenTurnKey {
+			// A new billed message. One message arrives as several records
+			// with the same usage on each, so the lifetime aggregate is
+			// accumulated HERE and only here -- accumulating per record would
+			// count the same writes three times, which is the same trap
+			// turn classification already navigates with this key.
 			state.OpenTurnKey = keyID
 			state.OpenTurnClasses = nil
+			state.CacheCreation5m += tokens.CacheCreation.Ephemeral5mTokens
+			state.CacheCreation1h += tokens.CacheCreation.Ephemeral1hTokens
+			state.CacheCreationUnknown += tokens.CacheCreation.UnknownTTLTokens
+			if tokens.CacheCreation.Total() == 0 {
+				state.CacheCreationUnknown += tokens.CacheWriteTokens
+			}
+			state.CacheCreationTotal += tokens.CacheWriteTokens
+			state.CacheCreationMessages++
 		}
 		state.OpenTurnClasses = accumulateTurnClasses(state.OpenTurnClasses, native.Message.Content)
 		event := domain.ModelUsageEvent{

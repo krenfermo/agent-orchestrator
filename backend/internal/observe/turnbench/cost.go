@@ -52,6 +52,12 @@ const (
 	// before P7.1 is in this state, and none of them can be priced: a total of
 	// billed input carries no information about which rate applied to it.
 	CostReasonSplitUnknown CostUnknownReason = "split_unknown"
+	// CostReasonCacheTTLUnknown is a series whose cache creation carries no
+	// lifetime. Creating a long-lived cache entry costs more than a
+	// short-lived one -- on the measured corpus 97.9% of creation is
+	// long-lived -- so a series that cannot say which it made cannot be
+	// priced without assuming the cheap one.
+	CostReasonCacheTTLUnknown CostUnknownReason = "cache_ttl_unknown"
 	// CostReasonSummaryOutputUnknown is a series that compacted without anyone
 	// measuring what the summarization generated. The calls could be priced;
 	// the compactions could not, so the total is refused rather than reported
@@ -147,8 +153,19 @@ func CostOf(s Series, pricer domain.ModelTokenPricer, metrics Metrics) CostMetri
 	case !metrics.SplitKnown:
 		out.Reason = CostReasonSplitUnknown
 		return out
+	case !metrics.CacheTTLKnown:
+		out.Reason = CostReasonCacheTTLUnknown
+		return out
 	}
 	out.CallCost = pricer.Cost(s.ModelID, metrics.Tokens)
+	if out.CallCost.TTLAssumedTokens > 0 {
+		// The rate card priced it, on an assumed lifetime. A benchmark whose
+		// whole purpose is to separate a token figure from a money one does
+		// not get to accept that: it refuses and says which fact is missing.
+		out.Reason = CostReasonCacheTTLUnknown
+		out.CallCost = domain.UsageCost{}
+		return out
+	}
 	if !out.CallCost.Known {
 		out.Reason = CostReasonUnpricedModel
 		out.CallCost = domain.UsageCost{}
@@ -162,6 +179,15 @@ func CostOf(s Series, pricer domain.ModelTokenPricer, metrics Metrics) CostMetri
 		out.CompactionBasis = CompactionBasisMeasured
 		out.CompactionTokens = s.Unattributed.Tokens
 		out.CompactionCost = pricer.Cost(s.Unattributed.ModelID, s.Unattributed.Tokens)
+		if out.CompactionCost.TTLAssumedTokens > 0 {
+			// The harness's end-of-session rollup reports no cache lifetime,
+			// so a residual containing cache creation can only be priced on an
+			// assumption. The calls are exact and the gap is not, and a
+			// benchmark built to keep two figures apart does not add them.
+			out.Reason = CostReasonCacheTTLUnknown
+			out.CallCost, out.CompactionCost = domain.UsageCost{}, domain.UsageCost{}
+			return out
+		}
 		if !out.CompactionCost.Known {
 			out.Reason = CostReasonUnpricedUnattributedModel
 			out.CallCost = domain.UsageCost{}
@@ -284,6 +310,9 @@ func Report(before, after Scenario) string {
 	row("uncached input", num(before.Metrics.Tokens.UncachedInputTokens), num(after.Metrics.Tokens.UncachedInputTokens))
 	row("cache read", num(before.Metrics.Tokens.CacheReadTokens), num(after.Metrics.Tokens.CacheReadTokens))
 	row("cache write", num(before.Metrics.Tokens.CacheWriteTokens), num(after.Metrics.Tokens.CacheWriteTokens))
+	row("  created 5m", num(before.Metrics.Tokens.CacheCreation.Ephemeral5mTokens), num(after.Metrics.Tokens.CacheCreation.Ephemeral5mTokens))
+	row("  created 1h", num(before.Metrics.Tokens.CacheCreation.Ephemeral1hTokens), num(after.Metrics.Tokens.CacheCreation.Ephemeral1hTokens))
+	row("  lifetime unknown", num(before.Metrics.Tokens.CacheCreation.UnknownTTLTokens), num(after.Metrics.Tokens.CacheCreation.UnknownTTLTokens))
 	row("output", num(before.Metrics.Tokens.OutputTokens), num(after.Metrics.Tokens.OutputTokens))
 	b.WriteString("-- COMPACTIONS -------------------------------------------------------\n")
 	row("count", num(before.Metrics.Compactions), num(after.Metrics.Compactions))
@@ -300,7 +329,17 @@ func Report(before, after Scenario) string {
 	// and on a series that never compacted that residual is retries and a
 	// title. Naming it after compactions would invite exactly the misreading
 	// this file exists to prevent.
-	row("spend outside calls", money(before.Cost.CompactionCost, before.Cost.Known), money(after.Cost.CompactionCost, after.Cost.Known))
+	// A series with no compactions and no residual has no spend outside its
+	// calls, which is a zero and not an unknown. Rendering it as "unknown"
+	// beside a total that already equals the calls would be a contradiction on
+	// the face of the table.
+	outside := func(s Scenario) string {
+		if s.Cost.CompactionBasis == CompactionBasisNone && s.Cost.Known {
+			return "none"
+		}
+		return money(s.Cost.CompactionCost, s.Cost.Known)
+	}
+	row("spend outside calls", outside(before), outside(after))
 	row("total", money(before.Cost.TotalCost, before.Cost.Known), money(after.Cost.TotalCost, after.Cost.Known))
 	if before.Cost.Reason != CostReasonNone || after.Cost.Reason != CostReasonNone {
 		row("unknown because", string(before.Cost.Reason), string(after.Cost.Reason))

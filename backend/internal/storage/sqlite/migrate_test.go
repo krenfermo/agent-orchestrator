@@ -47,6 +47,14 @@ var expectedUsageTableColumns = map[string][]string{
 		// thing the classifier keeps -- no command, no argument, no path and
 		// no message body reaches this table through it.
 		"turn_class",
+		// P7.2B1 (migration 0170). Which cache LIFETIME this call's creation
+		// bought: creating an entry that lives an hour costs more than one
+		// that lives five minutes, and the provider says which it made. Both
+		// are NULLABLE and NULL is not zero -- a row written before the column
+		// never observed the lifetime, which is a different fact from having
+		// created no short-lived cache. They are counts, like every other
+		// column here, and carry nothing about what the call said or did.
+		"cache_write_5m_tokens", "cache_write_1h_tokens",
 	},
 }
 

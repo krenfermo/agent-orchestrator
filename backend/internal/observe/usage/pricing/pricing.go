@@ -57,10 +57,27 @@ type ModelRate struct {
 	Match    string `json:"match"`
 	Provider string `json:"provider,omitempty"`
 
-	InputPerMTok      float64 `json:"inputPerMTok"`
-	OutputPerMTok     float64 `json:"outputPerMTok"`
-	CacheReadPerMTok  float64 `json:"cacheReadPerMTok"`
+	InputPerMTok     float64 `json:"inputPerMTok"`
+	OutputPerMTok    float64 `json:"outputPerMTok"`
+	CacheReadPerMTok float64 `json:"cacheReadPerMTok"`
+	// CacheWritePerMTok is the rate for creating a cache entry with the
+	// SHORT (5-minute) lifetime. It kept its original name because that is
+	// what it always meant -- the embedded catalog's own Source string has
+	// said "5-minute-TTL cache multipliers" since the day it was written.
 	CacheWritePerMTok float64 `json:"cacheWritePerMTok"`
+	// CacheWrite1hPerMTok is the rate for creating an entry with the LONG
+	// (1-hour) lifetime, which costs more because it lasts longer.
+	//
+	// Zero means this rate card does not carry the long rate. It is NOT read
+	// as free and NOT read as equal to the short one: a model whose long-TTL
+	// writes cannot be priced reports an unknown cost for them, which is the
+	// same rule an unpriced model already follows.
+	CacheWrite1hPerMTok float64 `json:"cacheWrite1hPerMTok"`
+}
+
+// PricesCacheTTL reports whether this rate covers both cache lifetimes.
+func (m ModelRate) PricesCacheTTL() bool {
+	return m.CacheWritePerMTok >= 0 && m.CacheWrite1hPerMTok > 0
 }
 
 // Catalog is a versioned set of rates plus the provenance every cost derived
@@ -76,31 +93,40 @@ type Catalog struct {
 // anthropicListPrices is the embedded catalog.
 //
 // Input and output rates are Anthropic's published first-party API list
-// prices. Cache rates are derived from them by Anthropic's published
-// 5-minute-TTL cache multipliers — 0.1x input for a cache read, 1.25x input
-// for a cache write — which is why Source names both halves: a reader must be
-// able to tell a quoted rate from a derived one.
+// prices. Cache rates are derived from them by Anthropic's published cache
+// multipliers — 0.1x input for a read, 1.25x input to create a 5-minute entry,
+// 2x input to create a 1-hour one — which is why Source names both halves: a
+// reader must be able to tell a quoted rate from a derived one.
+//
+// THE LONG RATE IS NOT AN EMBELLISHMENT. On every Claude transcript AO holds --
+// 4,523 assistant messages across 75 files -- 97.9% of cache creation is at the
+// ONE-HOUR lifetime, and pricing all of it at the 5-minute rate understated one
+// measured session by 15.2%. Reproducing the harness's own cost figure for run
+// wf-1c2cb9bd requires exactly this rate and no other change:
+//
+//	1,488*5.00 + 36,634,616*0.50 + 294,688*10.00 + 139,003*25.00 = $24.805628
+//	  and the harness's own cost-state reports                      $24.805628
 //
 // There is deliberately NO entry for any OpenAI/Codex model. AO meters Codex
 // tokens exactly as it meters Claude's, but this binary has no rate it can
 // vouch for, so those tokens report cost=unknown until an operator supplies a
 // rate card. That is the honest outcome, not a gap to paper over with a guess.
 var anthropicListPrices = Catalog{
-	Source:        "anthropic-list-price + published 5m cache multipliers (0.1x read, 1.25x write)",
-	Version:       "2026-06-24",
+	Source:        "anthropic-list-price + published cache multipliers (0.1x read, 1.25x 5m write, 2x 1h write)",
+	Version:       "2026-09-12",
 	EffectiveDate: "2026-06-24",
 	Currency:      "USD",
 	Models: []ModelRate{
-		anthropicRate("claude-fable-5-1", 10.00, 50.00, 0.25, 12.50),
-		anthropicRate("claude-mythos-5-1", 10.00, 50.00, 0.25, 12.50),
-		anthropicRate("claude-fable-5", 10.00, 50.00, 1.00, 12.50),
-		anthropicRate("claude-opus-5", 5.00, 25.00, 0.50, 6.25),
-		anthropicRate("claude-opus-4-8", 5.00, 25.00, 0.50, 6.25),
-		anthropicRate("claude-opus-4-7", 5.00, 25.00, 0.50, 6.25),
-		anthropicRate("claude-opus-4-6", 5.00, 25.00, 0.50, 6.25),
-		anthropicRate("claude-sonnet-5", 2.00, 10.00, 0.20, 2.50),
-		anthropicRate("claude-sonnet-4-6", 3.00, 15.00, 0.30, 3.75),
-		anthropicRate("claude-haiku-4-5", 1.00, 5.00, 0.10, 1.25),
+		anthropicRate("claude-fable-5-1", 10.00, 50.00, 0.25, 12.50, 20.00),
+		anthropicRate("claude-mythos-5-1", 10.00, 50.00, 0.25, 12.50, 20.00),
+		anthropicRate("claude-fable-5", 10.00, 50.00, 1.00, 12.50, 20.00),
+		anthropicRate("claude-opus-5", 5.00, 25.00, 0.50, 6.25, 10.00),
+		anthropicRate("claude-opus-4-8", 5.00, 25.00, 0.50, 6.25, 10.00),
+		anthropicRate("claude-opus-4-7", 5.00, 25.00, 0.50, 6.25, 10.00),
+		anthropicRate("claude-opus-4-6", 5.00, 25.00, 0.50, 6.25, 10.00),
+		anthropicRate("claude-sonnet-5", 2.00, 10.00, 0.20, 2.50, 4.00),
+		anthropicRate("claude-sonnet-4-6", 3.00, 15.00, 0.30, 3.75, 6.00),
+		anthropicRate("claude-haiku-4-5", 1.00, 5.00, 0.10, 1.25, 2.00),
 	},
 }
 
@@ -109,11 +135,13 @@ var anthropicListPrices = Catalog{
 // tokens exactly the same way, but this binary has no OpenAI rate it can vouch
 // for, so those models report cost=unknown until an operator supplies a rate
 // card. An operator's card names its own provider per row.
-func anthropicRate(match string, in, out, cacheRead, cacheWrite float64) ModelRate {
+func anthropicRate(match string, in, out, cacheRead, cacheWrite5m, cacheWrite1h float64) ModelRate {
 	return ModelRate{
 		Match: match, Provider: "anthropic",
 		InputPerMTok: in, OutputPerMTok: out,
-		CacheReadPerMTok: cacheRead, CacheWritePerMTok: cacheWrite,
+		CacheReadPerMTok:    cacheRead,
+		CacheWritePerMTok:   cacheWrite5m,
+		CacheWrite1hPerMTok: cacheWrite1h,
 	}
 }
 
@@ -197,6 +225,7 @@ func validate(c Catalog) error {
 		for name, v := range map[string]float64{
 			"inputPerMTok": m.InputPerMTok, "outputPerMTok": m.OutputPerMTok,
 			"cacheReadPerMTok": m.CacheReadPerMTok, "cacheWritePerMTok": m.CacheWritePerMTok,
+			"cacheWrite1hPerMTok": m.CacheWrite1hPerMTok,
 		} {
 			if v < 0 {
 				return fmt.Errorf("models[%d] (%s): %s must not be negative", i, m.Match, name)
@@ -285,15 +314,81 @@ func (t *Table) Cost(modelID string, tokens domain.UsageTokenTotals) domain.Usag
 		}
 	}
 	const perMillion = 1_000_000.0
+	writeCost, assumed, unpriceable := cacheCreationCost(rate, tokens)
+	if unpriceable > 0 {
+		// This model's rate card knows the short cache lifetime and not the
+		// long one, and the vector contains long-lived creation. There is no
+		// honest amount: the short rate is the wrong price for these tokens by
+		// construction.
+		return domain.UsageCost{
+			Known: false, Basis: domain.CostUnknown,
+			UnpricedModels:   []string{strings.TrimSpace(modelID)},
+			TTLUnknownTokens: unpriceable,
+		}
+	}
 	amount := float64(tokens.UncachedInputTokens)*rate.InputPerMTok/perMillion +
 		float64(tokens.CacheReadTokens)*rate.CacheReadPerMTok/perMillion +
-		float64(tokens.CacheWriteTokens)*rate.CacheWritePerMTok/perMillion +
+		writeCost +
 		float64(tokens.OutputTokens)*rate.OutputPerMTok/perMillion
 	return domain.UsageCost{
 		Known: true, Basis: domain.CostCalculated, Currency: t.currency,
-		Amount:        amount,
-		PricingSource: t.source, PricingVersion: t.version, EffectiveDate: t.effectiveDate,
+		Amount:           amount,
+		TTLAssumedTokens: assumed,
+		PricingSource:    t.source, PricingVersion: t.version, EffectiveDate: t.effectiveDate,
 	}
+}
+
+// cacheCreationCost prices the cache-creation half of a vector by lifetime,
+// returning the amount and how many tokens it could not price.
+//
+// THE SPLIT IS AUTHORITATIVE AND THE TOTAL IS NEVER ADDED TO IT. A caller that
+// populates domain.UsageTokenTotals.CacheCreation is priced from that; a caller
+// that reports only CacheWriteTokens -- every caller written before cache
+// lifetimes existed in this codebase, and every read that goes through
+// model_usage_events, which has no column for the split -- has its figure
+// priced at the SHORT rate and the quantity returned as `assumed`.
+//
+// That second path is a compromise and it is worth saying why, because the
+// alternative was considered and rejected for a reason that is not laziness.
+// Refusing to price a lifetime-unknown write would be the purer rule, and it
+// would also blank every cost figure in the product the day it shipped: the
+// per-event store has no TTL column, so every ledger read would become
+// "unknown" while AO holds the fact in the transcript it already parsed. So the
+// assumption is kept, its exact size travels on the cost as TTLAssumedTokens,
+// and a caller that must not accept it checks that field and refuses for
+// itself. When the per-event columns exist, `assumed` goes to zero on its own
+// and this paragraph can be deleted.
+//
+// Returns: the amount, tokens priced on an assumed lifetime, and tokens that
+// could not be priced at all.
+func cacheCreationCost(rate ModelRate, tokens domain.UsageTokenTotals) (amount float64, assumed, unpriceable int64) {
+	const perMillion = 1_000_000.0
+	split := tokens.CacheCreation
+	if split.Total() == 0 {
+		if tokens.CacheWriteTokens == 0 {
+			return 0, 0, 0
+		}
+		split = domain.CacheCreationSplit{UnknownTTLTokens: tokens.CacheWriteTokens}
+	}
+	amount = float64(split.Ephemeral5mTokens) * rate.CacheWritePerMTok / perMillion
+	if split.Ephemeral1hTokens > 0 {
+		if rate.CacheWrite1hPerMTok <= 0 {
+			// The rate card knows this model but not what a long-lived cache
+			// entry costs on it. Unpriceable, and named as such.
+			return 0, 0, split.Ephemeral1hTokens
+		}
+		amount += float64(split.Ephemeral1hTokens) * rate.CacheWrite1hPerMTok / perMillion
+	}
+	if split.UnknownTTLTokens > 0 {
+		amount += float64(split.UnknownTTLTokens) * rate.CacheWritePerMTok / perMillion
+		// Only an ASSUMPTION when the two lifetimes actually differ in price.
+		// Where they do not, the missing fact cannot change the answer and
+		// there is nothing to disclose.
+		if rate.CacheWrite1hPerMTok != rate.CacheWritePerMTok {
+			assumed = split.UnknownTTLTokens
+		}
+	}
+	return amount, assumed, 0
 }
 
 // normalize lowercases and trims a model id. It deliberately does NOT strip a
