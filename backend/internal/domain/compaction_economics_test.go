@@ -771,35 +771,42 @@ func TestContextAfterEstimatorRefusesWithoutABoundary(t *testing.T) {
 // so much as a thing that cannot be correct.
 func TestSummaryEstimatorNeverUsesTheSessionUnderJudgement(t *testing.T) {
 	own := domain.CompactionSummarySessionObservation{
+		Harness: "claude-code", ModelID: "claude-opus-5",
 		SessionID: "session-under-judgement", Compactions: 2, UnattributedOutputTokens: 999999,
 	}
 	other := domain.CompactionSummarySessionObservation{
+		Harness: "claude-code", ModelID: "claude-opus-5",
 		SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16986,
 	}
 
 	only := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+		Harness: "claude-code", ModelID: "claude-opus-5",
 		ExcludeSessionID: "session-under-judgement",
 		Observations:     []domain.CompactionSummarySessionObservation{own},
 	})
 	if only.Known {
 		t.Errorf("estimated S from the session being judged: %+v", only)
 	}
+	if only.Samples != 0 {
+		t.Errorf("samples = %d, want 0: the only observation was the judged session's own", only.Samples)
+	}
 
+	// The judged session is excluded, so this cohort has ONE admissible sample --
+	// below the minimum of three independent sessions, and therefore UNKNOWN with
+	// the sample count reported so a reader can see how far off it is.
 	got := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+		Harness: "claude-code", ModelID: "claude-opus-5",
 		ExcludeSessionID: "session-under-judgement",
 		Observations:     []domain.CompactionSummarySessionObservation{own, other},
 	})
-	if !got.Known || got.Samples != 1 {
-		t.Fatalf("got %+v, want one admissible sample", got)
+	if got.Known {
+		t.Errorf("one session is not a prior: %+v", got)
 	}
-	// 16,986 unattributed output over 2 compactions = 8,493 each, un-netted.
-	// Un-netted deliberately: the residual is an upper bound on the
-	// summarization, and the upper bound is the direction that skips.
-	if got.Value != 8493 {
-		t.Errorf("estimated S = %d, want 8493", got.Value)
+	if got.Samples != 1 {
+		t.Errorf("samples = %d, want 1 reported even though the answer is unknown", got.Samples)
 	}
-	if got.Basis != domain.CompactionBasisCrossSessionPrior {
-		t.Errorf("basis = %q, want cross_session_prior", got.Basis)
+	if got.Value != 0 {
+		t.Errorf("an unknown estimate must carry no value, got %d", got.Value)
 	}
 }
 
@@ -807,22 +814,43 @@ func TestSummaryEstimatorNeverUsesTheSessionUnderJudgement(t *testing.T) {
 // minimum sample it uses the worst observation, not an average of two.
 func TestSummaryEstimatorTakesTheExpensiveEndUntilThereIsAPopulation(t *testing.T) {
 	obs := func(id string, compactions int, out int64) domain.CompactionSummarySessionObservation {
-		return domain.CompactionSummarySessionObservation{SessionID: id, Compactions: compactions, UnattributedOutputTokens: out}
+		return domain.CompactionSummarySessionObservation{Harness: "claude-code", ModelID: "claude-opus-5", SessionID: id, Compactions: compactions, UnattributedOutputTokens: out}
 	}
 	twoSessions := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+		Harness: "claude-code", ModelID: "claude-opus-5",
 		Observations: []domain.CompactionSummarySessionObservation{obs("a", 1, 4000), obs("b", 1, 9000)},
 	})
-	if twoSessions.Value != 9000 {
-		t.Errorf("with 2 samples S = %d, want the expensive end 9000", twoSessions.Value)
+	if twoSessions.Known {
+		t.Errorf("two sessions is not a prior: %+v", twoSessions)
 	}
+	// At three independent sessions the prior becomes known, and it is the
+	// MAXIMUM rather than the mean: S enters the cost of compacting, so
+	// underestimating it makes compaction look cheaper than it is.
 	threeSessions := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+		Harness: "claude-code", ModelID: "claude-opus-5",
 		Observations: []domain.CompactionSummarySessionObservation{obs("a", 1, 4000), obs("b", 1, 9000), obs("c", 1, 5000)},
 	})
-	if threeSessions.Value != 6000 {
-		t.Errorf("with 3 samples S = %d, want the mean 6000", threeSessions.Value)
+	if !threeSessions.Known {
+		t.Fatalf("three independent sessions must make S known, got %+v", threeSessions)
+	}
+	if threeSessions.Value != 9000 {
+		t.Errorf("with 3 samples S = %d, want the conservative maximum 9000 (the mean would be 6000 and would understate)",
+			threeSessions.Value)
 	}
 	if threeSessions.Samples != 3 {
 		t.Errorf("samples = %d, want 3", threeSessions.Samples)
+	}
+	// THREE BOUNDARIES OF ONE SESSION ARE ONE SAMPLE. They share a harness, a
+	// project and a task shape, and the quantity being estimated moves with all
+	// three, so counting them as three would be a fabricated population.
+	sameSession := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+		Harness: "claude-code", ModelID: "claude-opus-5",
+		Observations: []domain.CompactionSummarySessionObservation{
+			obs("a", 3, 27000), obs("a", 3, 27000), obs("a", 3, 27000),
+		},
+	})
+	if sameSession.Known || sameSession.Samples != 1 {
+		t.Errorf("three rows from one session gave %+v, want unknown with 1 sample", sameSession)
 	}
 	none := domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{})
 	if none.Known {

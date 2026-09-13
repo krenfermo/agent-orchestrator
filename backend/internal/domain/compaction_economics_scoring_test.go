@@ -398,9 +398,10 @@ func TestTheCanaryPreDecisionVerdictUsesOnlyWhatWasAvailable(t *testing.T) {
 			DecisionAt: decisionAt,
 		})
 		in.SummaryTokens = domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+			Harness: "claude-code", ModelID: "claude-opus-5",
 			ExcludeSessionID: "ao-canary-fixture-6",
 			Observations: []domain.CompactionSummarySessionObservation{
-				{SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16986},
+				{Harness: "claude-code", ModelID: "claude-opus-5", SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16986},
 			},
 		})
 		got := domain.EvaluateCompactionEconomics(in)
@@ -424,9 +425,10 @@ func TestTheCanaryPreDecisionVerdictUsesOnlyWhatWasAvailable(t *testing.T) {
 			t.Fatal("compact 1's boundary must make A estimable")
 		}
 		in.SummaryTokens = domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+			Harness: "claude-code", ModelID: "claude-opus-5",
 			ExcludeSessionID: "ao-canary-fixture-6",
 			Observations: []domain.CompactionSummarySessionObservation{
-				{SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16986},
+				{Harness: "claude-code", ModelID: "claude-opus-5", SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16986},
 			},
 		})
 		got := domain.EvaluateCompactionEconomics(in)
@@ -435,22 +437,36 @@ func TestTheCanaryPreDecisionVerdictUsesOnlyWhatWasAvailable(t *testing.T) {
 		}
 	})
 
-	t.Run("compact 2 once another session supplies a summary prior: a genuine SKIP", func(t *testing.T) {
+	t.Run("compact 2 once three independent sessions supply a summary prior: a genuine SKIP", func(t *testing.T) {
 		in := base()
 		in.ContextAfter = domain.EstimateContextAfter(domain.CompactionContextAfterEstimatorInput{
 			StablePrefixTokens: 37379, PromptTokens: 1062,
 			Boundaries: []domain.CompactionBoundary{{PostTokens: 10956, ObservedAt: &compact1At}},
 			DecisionAt: decisionAt,
 		})
+		prior := decisionAt.Add(-24 * time.Hour)
 		in.SummaryTokens = domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+			Harness: "claude-code", ModelID: "claude-opus-5",
 			ExcludeSessionID: "ao-canary-fixture-6",
+			DecisionAt:       decisionAt,
 			Observations: []domain.CompactionSummarySessionObservation{
-				{SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16986},
-				{SessionID: "some-other-session", Compactions: 1, UnattributedOutputTokens: 8493},
+				// The judged session's own rollup: excluded by construction.
+				{Harness: "claude-code", ModelID: "claude-opus-5", SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16986, ObservedAt: &prior},
+				// Three OTHER sessions, which is the minimum the rule accepts.
+				{Harness: "claude-code", ModelID: "claude-opus-5", SessionID: "other-1", Compactions: 1, UnattributedOutputTokens: 8493, ObservedAt: &prior},
+				{Harness: "claude-code", ModelID: "claude-opus-5", SessionID: "other-2", Compactions: 1, UnattributedOutputTokens: 7000, ObservedAt: &prior},
+				{Harness: "claude-code", ModelID: "claude-opus-5", SessionID: "other-3", Compactions: 1, UnattributedOutputTokens: 6000, ObservedAt: &prior},
 			},
 		})
 		if !in.SummaryTokens.Known {
-			t.Fatal("another session's rollup must make S estimable")
+			t.Fatalf("three independent sessions must make S estimable, got %+v", in.SummaryTokens)
+		}
+		if in.SummaryTokens.Samples != 3 {
+			t.Errorf("samples = %d, want 3 (the judged session excluded)", in.SummaryTokens.Samples)
+		}
+		// The conservative maximum, 8,493 -- not the mean of 7,164.
+		if in.SummaryTokens.Value != 8493 {
+			t.Errorf("S = %d, want the conservative maximum 8493", in.SummaryTokens.Value)
 		}
 		got := domain.EvaluateCompactionEconomics(in)
 		if got.Verdict != domain.CompactionVerdictSkip {

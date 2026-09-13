@@ -24,7 +24,13 @@ import "time"
 // CompactionEstimatorsVersion identifies the three estimators together. Bumping
 // it is how a cohort computed with recalibrated constants is kept apart from one
 // computed with these.
-const CompactionEstimatorsVersion = "compaction-estimators/v1"
+//
+// v2 (P7.2B2.1) is S's rule, not a constant: UNKNOWN below three independent
+// sessions instead of the most expensive observation, the MAXIMUM above it
+// instead of the mean, the look-ahead filter on the observation's time, and an
+// EXACT (harness, model) cohort. A v1 verdict and a v2 verdict can disagree
+// about S on identical evidence, so they must never share a label.
+const CompactionEstimatorsVersion = "compaction-estimators/v2"
 
 // compactionReattachFactor scales a compacted conversation's LAST KNOWN post size
 // up to what the first call after the NEXT compaction actually pays for.
@@ -58,13 +64,19 @@ const CompactionEstimatorsVersion = "compaction-estimators/v1"
 // re-derived the moment there is a second.
 const compactionReattachFactor = 1.25
 
-// minSummaryPriorSessions is how many completed sessions the summary prior wants
-// before it will use their mean.
+// minSummaryPriorSessions is how many INDEPENDENT sessions the summary prior
+// requires before it will produce a figure at all.
 //
-// Below it the estimator uses the single most expensive observation instead of
-// an average, because an average over one or two sessions is a point estimate
-// wearing a statistic's clothing, and the expensive end is the direction that
-// skips.
+// Below it the answer is UNKNOWN, not a cheaper statistic. One or two
+// observations are a point estimate wearing a statistic's clothing, and the
+// whole purpose of the shadow phase is to find out what the distribution is
+// rather than to assume one -- a prior built from a single fixture session would
+// be exactly the fabricated precision this design keeps refusing.
+//
+// INDEPENDENT means distinct sessions. Three boundaries of one session are one
+// sample: they share a harness, a project, a task shape and a CLAUDE.md, and the
+// quantity being estimated is how much a summarizer generates, which those
+// things move together.
 const minSummaryPriorSessions = 3
 
 // remainingCallsFirstCycleRatio and remainingCallsLaterCycleRatio are the
@@ -177,9 +189,26 @@ func admissibleBoundaries(in []CompactionBoundary, decisionAt time.Time) []Compa
 // measurement of it, which is exactly why it is the figure a fail-closed gate
 // wants.
 type CompactionSummarySessionObservation struct {
-	SessionID                string
-	Compactions              int
+	SessionID   string
+	Compactions int
+	// Harness and ModelID are the economic cohort this session belongs to,
+	// exactly as AO recorded them: the binding's harness and the model the
+	// session was running when it compacted, in the ledger's own spelling. Empty
+	// means the session cannot be placed in ONE cohort -- its boundaries named
+	// different models, or none -- and such an observation is never used.
+	Harness string
+	ModelID string
+	// UnattributedOutputTokens is the harness's own output total minus what AO's
+	// ledger accounts for. It INCLUDES reasoning, which is most of what a
+	// summarization turn generates and none of what its text contains -- the
+	// reason a figure derived from the summary's characters understated it
+	// roughly twofold.
 	UnattributedOutputTokens int64
+	// ObservedAt is when this session's evidence became observable. A prior may
+	// only use observations that predate the decision it informs; an observation
+	// with no timestamp cannot be ordered against one and is inadmissible rather
+	// than assumed old.
+	ObservedAt *time.Time
 }
 
 // CompactionSummaryEstimatorInput is what estimating S is allowed to see.
@@ -190,53 +219,105 @@ type CompactionSummaryEstimatorInput struct {
 	// signal, not a precaution.
 	ExcludeSessionID string
 	Observations     []CompactionSummarySessionObservation
+	// Harness and ModelID are the cohort being estimated FOR: the judged
+	// session's harness and model. Only observations whose identity matches both
+	// EXACTLY are admissible. No normalization and no alias resolution: a
+	// summarizer on another model or another harness generates a different
+	// amount, and mixing cohorts to reach the minimum sooner would be a prior
+	// that is optimistic for whichever cohort is the more expensive one. Either
+	// one empty, or the parser's "unknown" model placeholder, is an unidentified
+	// cohort and the answer is UNKNOWN.
+	Harness string
+	ModelID string
+	// DecisionAt is when the verdict is being taken. Observations at or after it
+	// are the future and are dropped, the same strict comparison the
+	// context-after estimator uses. A zero DecisionAt disables the filter, which
+	// is only correct for a caller that has already frozen its input -- every
+	// production path sets it.
+	DecisionAt time.Time
 }
 
 // EstimateSummaryTokens predicts how many tokens the harness will GENERATE
 // producing the summary -- the term that is priced at output rates and is
 // therefore the largest single cost of compacting.
 //
-// It is structurally a cross-session prior. Below minSummaryPriorSessions it
-// takes the most expensive observation rather than a mean, and with no
-// observation it returns UNKNOWN rather than a constant. There is no default
+// It is structurally a cross-session prior over ONE exact (harness, model)
+// cohort. Below minSummaryPriorSessions independent sessions it returns UNKNOWN,
+// and at or above it the most expensive per-compaction figure -- never a
+// constant. There is no default
 // summary size in this file, and that is on purpose: the design that guessed one
 // guessed 4,600 tokens by counting the characters of the summary text, and the
 // measured figure is roughly twice that because most of what a summarizer
 // generates is thinking, which the text does not contain.
 func EstimateSummaryTokens(in CompactionSummaryEstimatorInput) EstimatedTokens {
-	var perCompaction []int64
+	if !summaryCohortIdentified(in.Harness, in.ModelID) {
+		return EstimatedTokens{Basis: CompactionBasisNone}
+	}
+	// Deduplicated by session, so a session that contributed several sources
+	// counts once. The quantity is per-compaction, so a session that compacted
+	// three times contributes one sample of its own average -- never three.
+	perSession := map[string]int64{}
 	for _, o := range in.Observations {
-		if o.SessionID != "" && o.SessionID == in.ExcludeSessionID {
+		// THE COHORT, exact. Checked first so an observation from another model
+		// or harness cannot reach the sample count at all.
+		if o.Harness != in.Harness || o.ModelID != in.ModelID {
+			continue
+		}
+		if o.SessionID == "" {
+			// An observation AO cannot attribute to a session cannot be counted
+			// as an independent one.
+			continue
+		}
+		if o.SessionID == in.ExcludeSessionID {
 			continue
 		}
 		if o.Compactions <= 0 || o.UnattributedOutputTokens <= 0 {
 			continue
 		}
-		perCompaction = append(perCompaction, o.UnattributedOutputTokens/int64(o.Compactions))
-	}
-	if len(perCompaction) == 0 {
-		return EstimatedTokens{Basis: CompactionBasisNone}
-	}
-	value := perCompaction[0]
-	if len(perCompaction) >= minSummaryPriorSessions {
-		var sum int64
-		for _, v := range perCompaction {
-			sum += v
-		}
-		value = sum / int64(len(perCompaction))
-	} else {
-		for _, v := range perCompaction[1:] {
-			if v > value {
-				value = v
+		// The look-ahead filter, strict and applied here as well as in the
+		// caller: an observation without a timestamp cannot be ordered against
+		// the decision, and one at or after it is the future.
+		if !in.DecisionAt.IsZero() {
+			if o.ObservedAt == nil || !o.ObservedAt.Before(in.DecisionAt) {
+				continue
 			}
+		}
+		perCompaction := o.UnattributedOutputTokens / int64(o.Compactions)
+		if existing, seen := perSession[o.SessionID]; !seen || perCompaction > existing {
+			perSession[o.SessionID] = perCompaction
+		}
+	}
+	// BELOW THE MINIMUM THE ANSWER IS UNKNOWN, not a cheaper statistic.
+	if len(perSession) < minSummaryPriorSessions {
+		return EstimatedTokens{Basis: CompactionBasisNone, Samples: len(perSession)}
+	}
+	// THE MAXIMUM, not the mean. The estimate enters the cost of compacting, so
+	// underestimating it makes compaction look cheaper than it is -- the one
+	// direction this whole design refuses. The maximum never understates any
+	// session AO has actually observed, and with a cohort this small it is the
+	// most conservative choice that is not absurd. A percentile becomes the
+	// right answer when there are enough sessions for one to mean something;
+	// that change bumps CompactionEstimatorsVersion.
+	var value int64
+	for _, v := range perSession {
+		if v > value {
+			value = v
 		}
 	}
 	return EstimatedTokens{
 		Value:   value,
 		Known:   true,
 		Basis:   CompactionBasisCrossSessionPrior,
-		Samples: len(perCompaction),
+		Samples: len(perSession),
 	}
+}
+
+// summaryCohortIdentified reports whether a (harness, model) pair names a cohort
+// at all. The parser records the literal "unknown" when a transcript never
+// named its model, and two sessions that both said nothing are not thereby the
+// same economic population.
+func summaryCohortIdentified(harness, modelID string) bool {
+	return harness != "" && modelID != "" && modelID != "unknown"
 }
 
 // CompactionCycleCalls is how many provider calls one already-completed cycle of
@@ -336,3 +417,8 @@ func maxInt64(a, b int64) int64 {
 	}
 	return b
 }
+
+// MinSummaryPriorSessions exposes the minimum independent-session count so a
+// readback can report "N of M needed" without carrying its own copy of M. A
+// second copy is how a screen starts disagreeing with the rule it describes.
+func MinSummaryPriorSessions() int { return minSummaryPriorSessions }

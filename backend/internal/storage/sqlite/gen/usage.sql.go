@@ -735,6 +735,58 @@ func (q *Queries) ListCompactSessionUsage(ctx context.Context, arg ListCompactSe
 	return items, nil
 }
 
+const listCompactedSessionsForSummaryPrior = `-- name: ListCompactedSessionsForSummaryPrior :many
+SELECT DISTINCT ub.session_id AS session_id
+FROM usage_sources us
+JOIN usage_bindings ub ON ub.id = us.binding_id
+WHERE ub.session_id IS NOT NULL
+  AND json_valid(us.parser_state_json)
+  AND COALESCE(CAST(json_extract(us.parser_state_json, '$.claude.compaction_count') AS INTEGER), 0) > 0
+  AND json_extract(us.parser_state_json, '$.claude.harness_totals') IS NOT NULL
+ORDER BY ub.session_id
+LIMIT ?
+`
+
+// The sessions that have ever replaced their own conversation, newest state last.
+//
+// This is the candidate list for the cross-session summary-cost prior, and the
+// filter is what keeps it affordable: a prior about compaction is only ever about
+// sessions that compacted, and those are a handful even on a corpus of hundreds.
+// Everything else -- what the harness charged itself, what AO attributed, how the
+// residual divides -- is already folded per session by CompactionReader, so this
+// read deliberately returns ONE COLUMN and leaves the arithmetic where it lives.
+//
+// compaction_count is the counter the parser keeps beside the bounded boundary
+// list, so a session whose detail list overflowed still qualifies.
+//
+// Sources with no session, invalid state, or no harness rollup are excluded here
+// rather than in Go: a session with no rollup cannot contribute a summary cost at
+// all, and fetching it only to discard it is a row this read does not need to
+// carry. The LIMIT is a ceiling, not a page: a cohort large enough to hit it has
+// long since earned a folded aggregate of its own.
+func (q *Queries) ListCompactedSessionsForSummaryPrior(ctx context.Context, limit int64) ([]*domain.SessionID, error) {
+	rows, err := q.db.QueryContext(ctx, listCompactedSessionsForSummaryPrior, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []*domain.SessionID{}
+	for rows.Next() {
+		var session_id *domain.SessionID
+		if err := rows.Scan(&session_id); err != nil {
+			return nil, err
+		}
+		items = append(items, session_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listLatestRetiredCodexReplacementClaimsByPath = `-- name: ListLatestRetiredCodexReplacementClaimsByPath :many
 SELECT us.id, us.binding_id, us.kind, us.native_session_id, us.subagent_id, us.artifact_path, us.file_identity, us.generation, us.byte_offset, us.parser_state_json, us.state, us.failure_count, us.anomaly_count, us.next_retry_at, us.last_error_code, us.updated_at
 FROM usage_bindings ub

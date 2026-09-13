@@ -1055,3 +1055,265 @@ and the next checkpoint is scoped accordingly:
 Until (1) lands, a shadow observation period would accumulate rows that all say
 `summary_cost_unknown`. That is honest and it is not evidence. **An UNKNOWN must
 not be reported as a SKIP to make the cohort look populated.**
+
+---
+
+# P7.2B2.1 — COMPACTION OBSERVATION AVAILABILITY + SUMMARY COST READ MODEL
+
+**Status: IMPLEMENTED. Shadow still governs nothing.** P7.2B2's review closed with
+"integrated but not operationally useful": the gate was correct and the corpus held
+no evidence for it. This closes that, and the first thing it establishes is that
+the parser was never at fault.
+
+## Root cause — proven, not assumed
+
+**The parser was already right. The offsets were already past.** Every registered
+source had been consumed beyond the records that carry compaction evidence before
+P7.1 taught the parser to look for them, and a source at an advanced byte offset
+never re-reads what it has already passed.
+
+Demonstrated three ways rather than argued:
+
+| question | answer | evidence |
+|---|---|---|
+| does the parser detect a compaction on a new transcript? | **yes** | `TestANewSessionProducesEveryObservationTheEconomicGateNeeds` — a fixture of ordinary turns, a boundary, the post-compaction rewrite and the session rollup, parsed from offset zero |
+| is the historical gap only advanced offsets? | **yes** | 137 of 138 transcripts still on disk, and they still CONTAIN the evidence: 2 `compact_boundary` records in 1 file, **166 `cost-state` records across 74 files (60 sessions)**. The one file with boundaries sits at `byte_offset == size`, last updated 2026-09-11 21:13 UTC, before P7.1 existed. Nothing was lost; it was skipped. |
+| would a session created today accumulate correctly? | **yes** | the same test asserts boundary identity, pre/post tokens, duration, trigger, timestamp, model, uuid, the rollup's output AND reasoning, the full cache vector, and the 5m/1h/unknown split partitioning its own reported total |
+
+And the two properties a recovery would depend on:
+`TestObservationsSurviveAParserResumeFromThePersistedOffset` (interrupted directly
+after the boundary, resumed, nothing re-counted) and
+`TestReprocessingTheWholeSessionIsIdempotent`.
+
+## Forward observation path — before and after
+
+Before: nothing was wrong with it and nothing exercised it end to end. After: the
+whole shape is a test, including the two things the earlier design got wrong by
+estimating them — **reasoning**, which is most of what a summarizer generates and
+none of what its text contains (6,326 tokens on the measured session), and the
+**cache-creation lifetimes**, without which the rewrite is priced at 62% of what
+the provider charges.
+
+No parser change was needed. No offset was rewound. No `source_event_key` moved.
+The four assistant turns in the fixture produce exactly four ledger events, and
+the boundary and the rollup produce none — asserted, because an observation that
+billed something would be a second telemetry.
+
+## Historical recovery — assessment, and the decision
+
+**DECISION: (A) FORWARD ONLY. No backfill implemented.**
+
+It *could* be done safely: the transcripts exist, re-parsing into throwaway state
+and merging only the observation fields is deterministic, read-only over
+transcripts, and idempotent (proven above). A dry-run would recover:
+
+```
+compact_boundary records recoverable    2   (1 session: ao-canary-fixture-6)
+cost-state rollups recoverable        166   (74 files, 60 sessions)
+sessions gaining a COMPLETE summary observation   1
+```
+
+That last number is why the answer is no. **A backfill would not make S known.**
+The prior needs three independent sessions that compacted; exactly one exists on
+disk, and recovering it moves the cohort from 0/3 to 1/3. The brief's own rule —
+*do not choose the backfill merely to accelerate statistics* — decides it, and
+§20's rule that shadow observation may begin with S UNKNOWN removes the urgency.
+The other recoverable rollups belong to sessions that never compacted; they are the
+non-compaction baseline, which this estimator does not net against.
+
+If a later checkpoint wants them, the shape is settled: a separate command,
+dry-run by default, that never touches the ledger, the offsets or the event keys.
+
+## S — SUMMARY COST UPPER BOUND
+
+`S` is an **upper bound** on the tokens the harness GENERATES producing a summary,
+per compaction, derived as **the harness's own output total minus what AO's ledger
+holds an event for**. It is never a realized cost and must not be reported as one.
+
+The arithmetic, per session (`domain.BuildCompactionAccounting`):
+
+```
+for each model bucket m in the harness rollup (cost-state, cumulative, last wins):
+    residual_m = max(0, rollup_output_m - ledger_output_credit_m)   # credit consumed once
+S_session  = sum_m residual_m / compactions                           # integer division
+```
+
+- **rollup output** is `modelUsage[m].outputTokens` from the harness's own
+  `cost-state` record: every output token the harness was billed for in the
+  session, on every model, including calls that never become an assistant record
+  (the summarization, background title/topic calls on a small model).
+- **ledger-attributed output** is `model_usage_events.output_tokens` summed for the
+  session: exactly the assistant records AO parsed.
+- **Reasoning is counted once.** Both sides use the provider's `output_tokens`,
+  which already INCLUDES thinking; `thinkingTokens` is a sub-count carried beside
+  it and is never added. No double counting.
+- **Never negative.** Each dimension is floored at zero, and credit is consumed as
+  it is matched so two rollup spellings of one model cannot subtract it twice.
+
+Why it bounds the summary from ABOVE: the residual is summarization output PLUS
+every other unattributed call. Everything extra overstates `S`, and overstating the
+cost of compacting can only move a verdict away from COMPACT. The bound holds only
+while the rollup covers at least everything the ledger attributed — see the
+admissibility rules below; where AO cannot show that, the session is not a sample.
+
+Unknown pricing does not enter here at all: the reader carries tokens and never a
+price, and the gate's own `RatesKnown` / TTL checks refuse to price a verdict.
+
+### Admissibility — when a session is a sample (tightened in review)
+
+A session contributes an observation only when ALL hold; otherwise it costs one
+sample and never enters the prior:
+
+| rule | why the residual would otherwise understate |
+|---|---|
+| the harness wrote a rollup and the session compacted | no rollup, no residual at all |
+| `UnattributedNegative` is **false** | AO attributed spend the rollup does not admit to: a rollup written before later turns (resumed session) or a ledger counting sources the rollup does not. The subtraction no longer bounds anything. |
+| compaction count == distinct detailed boundaries | an overflowed boundary list (identity unknown) or the same boundaries counted by two artifact generations inflates the divisor |
+| residual output > 0 | a compacting session with no unattributed output is a measurement problem, not a free summary |
+| every boundary names one harness + one model | the cohort rule above |
+| a placeable timestamp | the look-ahead rule below |
+
+The candidate list is capped at 64 sessions and **reaching the cap fails closed**:
+the prior is a maximum, and a maximum over an arbitrary subset can only understate.
+
+Measured against the only real compacting session (`ao-canary-fixture-6`,
+recomputed independently from its transcript and the ledger): `UnattributedNegative
+= false`, residual output 16,953 (opus) + 33 (haiku) = 16,986 over 2 compactions,
+**8,493 per compaction**. The guards do not exclude the one real sample.
+
+**Known limitation, not fixed here.** A `cost-state` record carries no timestamp and
+the parser does not store where in the transcript it sat. A session whose latest
+rollup was written *before* its latest boundary *and* made no call after it cannot be
+told apart from a complete one, and would contribute a figure that misses that
+compaction's summary. The ledger-coverage rule above catches every such session that
+made a call after the rollup; closing the rest needs the rollup's position in parser
+state, which is an ingest change and out of scope for a read model.
+
+Three properties make it usable and each one is deliberate:
+
+- **It includes reasoning.** The rollup reports `thinkingTokens` separately and the
+  residual contains them. Counting the summary's characters instead understated it
+  roughly twofold.
+- **It is an UPPER BOUND, not a measurement.** The harness reports spend once per
+  session, not once per compaction, so there is no per-compaction figure to read.
+  Overstating the cost of compacting can only move a verdict away from COMPACT,
+  which is the direction this design always takes.
+- **It can never come from the session being judged.** Structural: the rollup is
+  written when a session ends, so a running session has none.
+
+### Grouping — EXACT (harness, model) cohorts (corrected in review)
+
+As first implemented the port took `(harness, modelID)` and ignored both, on the
+grounds that today's corpus is homogeneous. The review rejected that: a prior that
+mixes a cheap summarizer's sessions into an expensive one's is optimistic for the
+expensive cohort, and "homogeneous today" is not a property of the code.
+
+Now:
+
+- An observation's cohort is the binding's **harness** and the **model its
+  boundaries were taken on**, in the ledger's own spelling. The boundary — not the
+  rollup — supplies the model, so it matches the judged session's call series
+  (`claude-opus-5`) **exactly**, with no alias resolution: the rollup's
+  `claude-opus-5[1m]` is never consulted for identity.
+- A session whose boundaries disagree on model or harness belongs to **no** cohort.
+- The gate reads the judged session's harness from its session record (one
+  primary-key read) and passes the call series' model. Either one empty, or the
+  parser's `unknown` placeholder, is an unidentified cohort: **UNKNOWN**, and the
+  candidate list is not even read.
+- The reader filters on exact equality, and the estimator filters again.
+  Case and suffix are not normalized.
+
+## The minimum sample rule, and the estimator
+
+```
+fewer than 3 INDEPENDENT sessions  ->  UNKNOWN, with the sample count reported
+3 or more                          ->  the MAXIMUM per-compaction figure
+```
+
+Both halves changed in this checkpoint and both got stricter:
+
+- P7.2B2 returned the most expensive observation below the minimum. It now returns
+  **UNKNOWN**. One or two observations are a point estimate wearing a statistic's
+  name, and the whole purpose of a shadow phase is to find the distribution rather
+  than assume it.
+- Above the minimum it returned the **mean**; it now returns the **maximum**. `S`
+  enters the *cost* of compacting, so the mean understates on every session above
+  it. The maximum never understates any session AO has observed, and with a cohort
+  this small it is the most conservative choice that is not absurd. A percentile is
+  the right answer when a percentile means something; that change bumps
+  `estimatorVersion`.
+
+**INDEPENDENT means distinct sessions.** Three boundaries of one session are ONE
+sample — they share a harness, a project, a task shape and a CLAUDE.md, and the
+quantity being estimated moves with all of them. Pinned by test.
+
+`estimatorVersion` is now **`compaction-estimators/v2`**. The v1 label had shipped
+with the mean and the below-minimum maximum; a verdict must never carry a label
+that names two different rules.
+
+## Look-ahead protections
+
+Three, and the third is new:
+
+1. `A` reads only boundaries strictly before the decision instant, and a boundary
+   with no timestamp is inadmissible rather than assumed old.
+2. `N` counts only cycles strictly below the current one.
+3. **`S` now carries `ObservedAt` per observation and `DecisionAt` on the input**,
+   with the same strict comparison. `TestTheSummaryPriorExcludesTheFutureAndThe
+   JudgedSession` offers the estimator the judged session's own rollup, an
+   observation at the decision instant, one after it, one unplaceable in time and
+   one with no session id — and asserts the result is IDENTICAL to the clean
+   cohort.
+
+The filter lives in the pure estimator as well as in the caller, because a guard
+that exists in one place is a guard one refactor can remove.
+
+`S`'s `ObservedAt` is the session's **latest boundary** timestamp, because the rollup
+has none. That is a lower bound on when the evidence became complete. On the
+decision path it cannot leak the future — the read happens at decision time and
+cannot see bytes not yet written — but an OFFLINE replay over a historical snapshot
+would need the rollup's own time to be strict. No such replay exists today.
+
+## Read model and decision-time cost
+
+No migration. No new table. No session-completion hook. **One new query**, and the
+filter is what makes it affordable: *a prior about compaction is only ever about
+sessions that compacted*, so SQL narrows the candidate list to those and the
+per-session arithmetic reuses the fold that already existed.
+
+Measured on the real 905 MB database:
+
+```
+EXPLAIN QUERY PLAN
+  SEARCH ub USING COVERING INDEX idx_usage_bindings_session_state (session_id>?)
+  SEARCH us USING INDEX idx_usage_sources_binding_kind (binding_id=?)
+
+wall clock, three runs           0.01s / 0.00s / 0.00s
+usage_sources touched            138 rows, 43,629 bytes of parser state
+model_usage_events touched       NONE
+transcripts opened               NONE
+```
+
+Two indexes, and the 3,879-row ledger table is not in the plan at all. Stated
+precisely: the plan walks every **session binding's sources** through those
+indexes and evaluates `json_extract` on each one's parser state, so the work grows
+with the number of sources, not with the number of compacted sessions; only the
+OUTPUT is the handful. 138 sources today; if that ever becomes a decision-path cost,
+the answer is the folded aggregate, not a wider cap.
+The candidate list is additionally capped at 64 sessions: a cohort large enough to
+reach that ceiling has earned a folded aggregate of its own, and truncating is
+better than an unbounded read on a decision path.
+
+## What this changes about starting shadow observation
+
+Before: observing produced nothing, because the input the gate was missing was not
+something observation generated. Every verdict would have said
+`summary_cost_unknown` forever.
+
+After: **a session that compacts now records the evidence, and the prior becomes
+known on its own at the third independent session.** S is still UNKNOWN today —
+`ao usage compaction-observations` reports `0 of 3 needed` against the real
+database — and that is the correct answer, not a reason to lower the minimum.
+
+That difference is the whole point of this checkpoint, and it is why shadow
+observation can begin: the cohort now accrues the thing it was missing.

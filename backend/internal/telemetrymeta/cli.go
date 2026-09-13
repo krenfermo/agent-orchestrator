@@ -158,9 +158,11 @@ var legacyActorlessUserCLICommands = map[string]struct{}{
 	// would the gate have recommended" is usually asked after the run, when
 	// there is no daemon left to ask.
 	"ao usage compaction-verdicts": {},
-	"ao incident":                  {},
-	"ao incident diagnose":         {},
-	"ao incident submit":           {},
+	// And the evidence inventory beside it: same read-only shape, same reason.
+	"ao usage compaction-observations": {},
+	"ao incident":                      {},
+	"ao incident diagnose":             {},
+	"ao incident submit":               {},
 	// The P0-B operator recoveries. They are user activity by definition: each
 	// one exists precisely because nothing automatic is allowed to take it.
 	"ao workflow":                           {},

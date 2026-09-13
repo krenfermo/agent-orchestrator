@@ -45,10 +45,9 @@ func (f *fakeCompactionObservations) SessionCompactionAccounting(_ context.Conte
 	return f.accounting, f.err
 }
 
-// fakeSummaryPriors is the cross-session summary prior, which production leaves
-// unwired in P7.2B2. The tests wire it so the arithmetic can be exercised end to
-// end; the absence of a production implementation is a data-availability fact,
-// not an arithmetic one.
+// fakeSummaryPriors is the cross-session summary prior. It returns whatever it is
+// given WITHOUT filtering, so a test can prove the estimator refuses a foreign
+// cohort even when a reader failed to.
 type fakeSummaryPriors struct {
 	observations []domain.CompactionSummarySessionObservation
 	err          error
@@ -141,7 +140,10 @@ func newShadowFixture(t *testing.T, setup shadowSetup) shadowFixture {
 func newShadowFixtureWith(t *testing.T, setup shadowSetup, configureStore func(*fakeStore)) shadowFixture {
 	t.Helper()
 	sessionFacts := newFakeSessionFacts()
-	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
+	spawner := &fakeSpawner{rec: domain.SessionRecord{
+		Harness:  shadowCohortHarness,
+		Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"},
+	}, facts: sessionFacts}
 	workspaceFacts := &fakeWorkspaceFacts{}
 	reviewRuns := newFakeReviewRuns()
 	launcher := &fakeReviewerLauncher{}
@@ -250,9 +252,29 @@ func profitableSetup(enabled bool) shadowSetup {
 		observations: &fakeCompactionObservations{accounting: domain.CompactionAccounting{
 			Boundaries: []domain.CompactionBoundary{{PostTokens: 10_956, ObservedAt: &boundaryAt}},
 		}},
-		priors: &fakeSummaryPriors{observations: []domain.CompactionSummarySessionObservation{
-			{SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16_986},
-		}},
+		priors: &fakeSummaryPriors{observations: summaryPriorCohort()},
+	}
+}
+
+// summaryPriorCohort is the minimum cohort the summary-cost rule accepts: THREE
+// INDEPENDENT sessions, each observed strictly before the fixture's decision
+// instant of 2026-08-13T12:00:00Z.
+//
+// Three is not decoration. One session is a point estimate wearing a statistic's
+// name, and three boundaries of one session are still one sample -- they share a
+// harness, a project and a task shape, and the quantity being estimated moves with
+// all three. The first figure is the canary's own measured residual, 16,986 over 2
+// compactions; the other two are plausible neighbours, and the estimator takes the
+// conservative maximum of the three rather than their mean.
+func summaryPriorCohort() []domain.CompactionSummarySessionObservation {
+	at := func(d time.Duration) *time.Time {
+		t := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC).Add(d)
+		return &t
+	}
+	return []domain.CompactionSummarySessionObservation{
+		{SessionID: "prior-session-1", Harness: shadowCohortHarness, ModelID: shadowCohortModel, Compactions: 2, UnattributedOutputTokens: 16_986, ObservedAt: at(-72 * time.Hour)},
+		{SessionID: "prior-session-2", Harness: shadowCohortHarness, ModelID: shadowCohortModel, Compactions: 1, UnattributedOutputTokens: 7_400, ObservedAt: at(-48 * time.Hour)},
+		{SessionID: "prior-session-3", Harness: shadowCohortHarness, ModelID: shadowCohortModel, Compactions: 1, UnattributedOutputTokens: 6_900, ObservedAt: at(-24 * time.Hour)},
 	}
 }
 
@@ -696,5 +718,54 @@ func TestARecordedVerdictDoesNotBecomeTheRunsLatestPhase(t *testing.T) {
 	if detail.LatestCheckpointPhase == workflowcore.ShadowCompactionVerdictPhaseForTest() {
 		t.Errorf("latestCheckpointPhase = %q: a verdict nobody reads renamed the run's last activity",
 			detail.LatestCheckpointPhase)
+	}
+}
+
+// shadowCohortHarness and shadowCohortModel are the judged worker's cohort in this
+// fixture: the harness the workflow spawned it with and the model workerSeries
+// reports.
+const (
+	shadowCohortHarness = "claude-code"
+	shadowCohortModel   = "claude-opus-5"
+)
+
+// TestTheShadowSummaryPriorNeverBorrowsAnotherCohort: a complete, admissible,
+// three-session prior from ANOTHER model or ANOTHER harness is not a prior for
+// this session. The verdict is UNKNOWN/summary_cost_unknown -- the same verdict
+// as no evidence at all -- and delivery is untouched.
+func TestTheShadowSummaryPriorNeverBorrowsAnotherCohort(t *testing.T) {
+	control := newShadowFixture(t, profitableSetup(true))
+	if v := shadowVerdicts(t, control.store, control.runID); len(v) != 1 || v[0].Verdict != domain.CompactionVerdictCompact {
+		t.Fatalf("control must COMPACT on its own cohort, got %+v", v)
+	}
+	if v := shadowVerdicts(t, control.store, control.runID); v[0].Harness != shadowCohortHarness {
+		t.Errorf("recorded harness = %q, want %q: the cohort the prior was drawn from", v[0].Harness, shadowCohortHarness)
+	}
+
+	for name, mutate := range map[string]func(*domain.CompactionSummarySessionObservation){
+		"another model":      func(o *domain.CompactionSummarySessionObservation) { o.ModelID = "claude-sonnet-5" },
+		"the rollup's alias": func(o *domain.CompactionSummarySessionObservation) { o.ModelID = "claude-opus-5[1m]" },
+		"another harness":    func(o *domain.CompactionSummarySessionObservation) { o.Harness = "codex" },
+		"no identity":        func(o *domain.CompactionSummarySessionObservation) { o.Harness, o.ModelID = "", "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			setup := profitableSetup(true)
+			cohort := summaryPriorCohort()
+			for i := range cohort {
+				mutate(&cohort[i])
+			}
+			setup.priors = &fakeSummaryPriors{observations: cohort}
+			fx := newShadowFixture(t, setup)
+			verdicts := shadowVerdicts(t, fx.store, fx.runID)
+			if len(verdicts) != 1 {
+				t.Fatalf("shadow verdicts = %d, want 1", len(verdicts))
+			}
+			if verdicts[0].Verdict != domain.CompactionVerdictUnknown || verdicts[0].Reason != domain.CompactionReasonSummaryCostUnknown {
+				t.Errorf("verdict = %s/%s, want unknown/summary_cost_unknown", verdicts[0].Verdict, verdicts[0].Reason)
+			}
+			if fx.sender.calls != control.sender.calls {
+				t.Errorf("deliveries = %d, want %d: a cohort mismatch must change nothing about delivery", fx.sender.calls, control.sender.calls)
+			}
+		})
 	}
 }

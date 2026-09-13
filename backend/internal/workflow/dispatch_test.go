@@ -53,7 +53,11 @@ func (f *fakeSpawner) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.Se
 		rec.ID = domain.SessionID(fmt.Sprintf("sess-%d", f.calls))
 	}
 	rec.ProjectID = cfg.ProjectID
-	rec.Harness = cfg.Harness
+	// A preset harness survives a config that names none, so a fixture can give
+	// its session the identity a real spawn would record.
+	if cfg.Harness != "" || rec.Harness == "" {
+		rec.Harness = cfg.Harness
+	}
 	rec.Kind = cfg.Kind
 	rec.IssueID = cfg.IssueID
 	if f.facts != nil {
@@ -76,6 +80,12 @@ func newFakeSessionFacts() *fakeSessionFacts {
 }
 
 func (f *fakeSessionFacts) put(rec domain.SessionRecord) {
+	// A session's harness is fixed at spawn. A helper that re-puts a record to
+	// move its activity does not re-state it, and the real store would not lose
+	// it, so neither does the fake.
+	if prev, ok := f.byID[rec.ID]; ok && rec.Harness == "" {
+		rec.Harness = prev.Harness
+	}
 	f.byID[rec.ID] = rec
 	f.byIssue[string(rec.ProjectID)+"|"+string(rec.IssueID)] = rec
 }

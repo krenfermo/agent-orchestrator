@@ -97,22 +97,19 @@ type SessionCompactionObservations interface {
 // CompactionSummaryPriors supplies the cross-session prior for how many tokens a
 // harness GENERATES producing a summary.
 //
-// DELIBERATELY UNWIRED IN P7.2B2, and the reason is worth stating rather than
-// leaving as an absent implementation. S is only measurable from a harness's
-// end-of-session rollup, so it is structurally a cross-session figure -- a
-// running session has no rollup and can never estimate its own summary cost.
-// Reading it therefore means visiting other sessions' sources, which is a corpus
-// walk, and a corpus walk on every fix boundary is exactly what the performance
-// rule forbids. It needs a precomputed read model, folded when a session
-// completes rather than when a decision is taken, and that read model is not
-// part of this checkpoint.
+// WIRED IN P7.2B2.1. It was left unwired in P7.2B2 on the belief that reading it
+// meant walking the corpus on every fix boundary. It does not: a prior about
+// compaction is only ever about sessions that COMPACTED, and filtering to those
+// in SQL collapses the candidate list to a handful whatever the corpus size. The
+// per-session arithmetic then reuses the fold that already existed.
 //
-// The consequence is stated plainly and is not hidden by a fallback: until it
-// exists, live shadow verdicts are UNKNOWN with reason summary_cost_unknown.
-// That is the fail-closed outcome, it is what the design predicted a first
-// deployment would look like, and it still accrues everything shadow mode can
-// calibrate without a compaction -- pricing coverage, cache-lifetime honesty,
-// the remaining-calls estimator and the terminal-cycle population.
+// S is structurally cross-session and always will be: it is only measurable from
+// a harness's end-of-session rollup, so a running session has no rollup and can
+// never estimate its own summary cost. Satisfied by
+// *observe/usage.CompactionReader, which filters on the EXACT harness and model;
+// the estimator filters again. Optional: without it the verdict is UNKNOWN with
+// reason summary_cost_unknown, which is also what a cohort of fewer than three
+// independent sessions, or an unidentified harness or model, produces.
 type CompactionSummaryPriors interface {
 	CompactionSummaryObservations(ctx stdctx.Context, harness, modelID string) ([]domain.CompactionSummarySessionObservation, error)
 }
@@ -269,12 +266,9 @@ func (c *Coordinator) computeShadowCompactionVerdict(
 		}
 	}
 
-	// Harness and Provider are left EMPTY rather than fetched. They are record
-	// metadata and not inputs to the arithmetic -- nothing below reads them --
-	// and the only place they live durably is a second table. A read taken on
-	// every fix boundary to label a row is exactly the cost the performance rule
-	// says to refuse; the model id, which the arithmetic does depend on, comes
-	// from the series AO already read.
+	// Provider is left EMPTY rather than fetched: it is record metadata and not
+	// an input to the arithmetic. The model id, which the arithmetic does depend
+	// on, comes from the series AO already read.
 	if c.usageRateCard != nil && in.ModelID != "" {
 		in.Rates, in.RatesKnown = c.usageRateCard.RateView(in.ModelID)
 	}
@@ -284,7 +278,13 @@ func (c *Coordinator) computeShadowCompactionVerdict(
 		CycleCalls:   cycleCallCounts(series),
 	})
 	in.ContextAfter = c.estimateShadowContextAfter(ctx, sessionID, in.StablePrefixTokens, in.PromptTokens, decisionAt)
-	in.SummaryTokens = c.estimateShadowSummaryTokens(ctx, sessionID, in.Harness, in.ModelID)
+	// Harness IS read, because since P7.2B2.1 it is an input: together with the
+	// model it names the one cohort the summary prior may draw from. One
+	// primary-key read of the session record; a failure leaves it empty, and an
+	// empty harness makes S UNKNOWN rather than a prior borrowed from whichever
+	// harness happened to compact.
+	in.Harness = c.shadowSessionHarness(ctx, sessionID)
+	in.SummaryTokens = c.estimateShadowSummaryTokens(ctx, sessionID, in.Harness, in.ModelID, decisionAt)
 
 	return domain.EvaluateCompactionEconomics(in)
 }
@@ -331,12 +331,31 @@ func (c *Coordinator) estimateShadowContextAfter(
 	})
 }
 
-// estimateShadowSummaryTokens asks the cross-session prior. See
-// CompactionSummaryPriors for why it is unwired in P7.2B2 and what that costs.
+// shadowSessionHarness is the judged session's harness as AO recorded it, or
+// empty when it cannot be read. Empty is the fail-closed value: the summary prior
+// refuses an unidentified cohort.
+func (c *Coordinator) shadowSessionHarness(ctx stdctx.Context, sessionID domain.SessionID) string {
+	if c.sessionFacts == nil || sessionID == "" {
+		return ""
+	}
+	rec, found, err := c.sessionFacts.GetSession(ctx, sessionID)
+	if err != nil || !found {
+		return ""
+	}
+	return string(rec.Harness)
+}
+
+// estimateShadowSummaryTokens asks the cross-session prior for the judged
+// session's exact (harness, model) cohort. See CompactionSummaryPriors.
 func (c *Coordinator) estimateShadowSummaryTokens(
-	ctx stdctx.Context, sessionID domain.SessionID, harness, modelID string,
+	ctx stdctx.Context, sessionID domain.SessionID, harness, modelID string, decisionAt time.Time,
 ) domain.EstimatedTokens {
 	if c.compactionSummaryPriors == nil {
+		return domain.EstimatedTokens{Basis: domain.CompactionBasisNone}
+	}
+	// No cohort, no read: an unidentified harness or model can only ever be
+	// UNKNOWN, so the candidate list is not worth fetching.
+	if harness == "" || modelID == "" {
 		return domain.EstimatedTokens{Basis: domain.CompactionBasisNone}
 	}
 	observations, err := c.compactionSummaryPriors.CompactionSummaryObservations(ctx, harness, modelID)
@@ -345,7 +364,14 @@ func (c *Coordinator) estimateShadowSummaryTokens(
 	}
 	return domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
 		ExcludeSessionID: string(sessionID),
+		Harness:          harness,
+		ModelID:          modelID,
 		Observations:     observations,
+		// The decision instant, so the estimator can drop an observation that is
+		// younger than the verdict it would inform. Passed even though the read
+		// happens now and therefore cannot see the future: the filter is what
+		// makes that a property of the code rather than of the call order.
+		DecisionAt: decisionAt,
 	})
 }
 
