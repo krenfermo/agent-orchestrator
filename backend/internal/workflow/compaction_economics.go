@@ -180,9 +180,15 @@ func (c *Coordinator) computeShadowCompactionVerdict(
 		MaxFixCycles:           policy.MaxFixCycles,
 		Strategy:               string(policy.Strategy.Effective),
 		ContextThresholdTokens: profile.ContextPerCallTokens,
-		LifecycleReasons:       decision.Reasons,
-		SafetyFactor:           domain.DefaultCompactionSafetyFactor,
-		MinReductionFraction:   domain.DefaultCompactionMinReductionFraction,
+		// COPIED, not aliased. decision.Reasons belongs to the caller's own
+		// SessionLifecycleDecision, which is persisted moments later; handing the
+		// gate the same backing array would be the one way a shadow evaluation
+		// could reach out and alter the decision it is shadowing. Nothing in the
+		// gate appends to it today, and this copy is what makes that a property
+		// rather than a promise.
+		LifecycleReasons:     append([]domain.SessionLifecycleReason(nil), decision.Reasons...),
+		SafetyFactor:         domain.DefaultCompactionSafetyFactor,
+		MinReductionFraction: domain.DefaultCompactionMinReductionFraction,
 		// Delta is the prompt AO is about to send, at the 4-bytes-per-token
 		// estimator this repo already uses elsewhere. It is measured BEFORE the
 		// fact pack is prepended, so it is an UNDERSTATEMENT of what will

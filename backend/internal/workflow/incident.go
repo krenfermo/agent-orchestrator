@@ -244,6 +244,15 @@ const incidentLaunchFailedPhase = "incident_diagnosis_launch_failed"
 // not isIncidentLedgerPhase directly.
 func isBookkeepingPhase(phase string) bool {
 	return isIncidentLedgerPhase(phase) ||
+		// P7.2B2's shadow economic verdict is the purest case this guard
+		// describes. It records what the economic model WOULD have recommended
+		// about a compaction, and by construction nothing reads it: the run did
+		// not compact because of it and did not refuse to. It therefore cannot,
+		// on its own, change what the run owes -- which is this list's entry
+		// test -- and counting it would let it displace LatestCheckpointPhase,
+		// which the lifecycle derivation reads. A row that governs nothing must
+		// not be able to rename the run's last activity.
+		phase == CompactionEconomicsDurablePhase ||
 		phase == attemptReapedPhase ||
 		phase == verifySupersededPhase ||
 		phase == verifyRaceReconciledPhase ||

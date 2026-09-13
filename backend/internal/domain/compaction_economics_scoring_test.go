@@ -3,6 +3,7 @@ package domain_test
 import (
 	"math"
 	"testing"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
@@ -355,4 +356,123 @@ func TestTheReplayCostReductionIsNotTheTokenReduction(t *testing.T) {
 		t.Errorf("the cost reduction (%.2f%%) must stay clearly distinct from the token reduction (%.1f%%)",
 			reduction, tokenReduction)
 	}
+}
+
+// TestTheCanaryPreDecisionVerdictUsesOnlyWhatWasAvailable is §16's real
+// requirement, and it CORRECTS a claim that was easy to make and wrong.
+//
+// It is tempting to say "the gate would have said SKIP to both canary
+// compactions". It would not have, and the difference is the whole discipline of
+// this checkpoint: a verdict may only use inputs that existed BEFORE the decision.
+//
+//   - compact 1 is the session's FIRST compaction. The context-after estimator
+//     needs a PRIOR boundary and there is none, so the honest verdict is
+//     UNKNOWN. Feeding it the measured A=57,803 -- which the compaction itself
+//     produced -- is exactly the look-ahead that would make a cohort's accuracy
+//     an artefact.
+//   - compact 2 does have compact 1's boundary, so A is estimable. But S is a
+//     cross-session prior and the only session with a rollup is the one being
+//     judged, so S is UNKNOWN too, and the verdict is UNKNOWN.
+//
+// Only when a THIRD session supplies a summary prior does compact 2 become a
+// genuine SKIP -- and then it is rejected on the structural reduction floor, at
+// an estimated A that never saw compact 2's own post size.
+func TestTheCanaryPreDecisionVerdictUsesOnlyWhatWasAvailable(t *testing.T) {
+	decisionAt := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	compact1At := decisionAt.Add(-2 * time.Hour)
+
+	base := func() domain.CompactionEconomicsInput {
+		in := historicalInput(67663, 0, 37379, 1062, 0, 4)
+		// Wipe the hand-fed estimates: this test builds them from the estimators.
+		in.ContextAfter = domain.EstimatedTokens{}
+		in.SummaryTokens = domain.EstimatedTokens{}
+		in.Cycle, in.MaxFixCycles = 2, 3
+		return in
+	}
+
+	t.Run("compact 1: no prior boundary, so A is unknowable", func(t *testing.T) {
+		in := historicalInput(85847, 0, 37379, 1181, 0, 6)
+		in.ContextAfter = domain.EstimateContextAfter(domain.CompactionContextAfterEstimatorInput{
+			StablePrefixTokens: 37379, PromptTokens: 1181,
+			Boundaries: nil, // the session has never compacted
+			DecisionAt: decisionAt,
+		})
+		in.SummaryTokens = domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+			ExcludeSessionID: "ao-canary-fixture-6",
+			Observations: []domain.CompactionSummarySessionObservation{
+				{SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16986},
+			},
+		})
+		got := domain.EvaluateCompactionEconomics(in)
+		if got.Verdict != domain.CompactionVerdictUnknown {
+			t.Fatalf("verdict = %s/%s, want unknown: neither A nor S was available pre-decision",
+				got.Verdict, got.Reason)
+		}
+		if got.Reason != domain.CompactionReasonContextAfterUnknown {
+			t.Errorf("reason = %s, want context_after_unknown (A is checked first)", got.Reason)
+		}
+	})
+
+	t.Run("compact 2 with no other session's rollup: S is unknowable", func(t *testing.T) {
+		in := base()
+		in.ContextAfter = domain.EstimateContextAfter(domain.CompactionContextAfterEstimatorInput{
+			StablePrefixTokens: 37379, PromptTokens: 1062,
+			Boundaries: []domain.CompactionBoundary{{PostTokens: 10956, ObservedAt: &compact1At}},
+			DecisionAt: decisionAt,
+		})
+		if !in.ContextAfter.Known {
+			t.Fatal("compact 1's boundary must make A estimable")
+		}
+		in.SummaryTokens = domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+			ExcludeSessionID: "ao-canary-fixture-6",
+			Observations: []domain.CompactionSummarySessionObservation{
+				{SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16986},
+			},
+		})
+		got := domain.EvaluateCompactionEconomics(in)
+		if got.Verdict != domain.CompactionVerdictUnknown || got.Reason != domain.CompactionReasonSummaryCostUnknown {
+			t.Fatalf("verdict = %s/%s, want unknown/summary_cost_unknown", got.Verdict, got.Reason)
+		}
+	})
+
+	t.Run("compact 2 once another session supplies a summary prior: a genuine SKIP", func(t *testing.T) {
+		in := base()
+		in.ContextAfter = domain.EstimateContextAfter(domain.CompactionContextAfterEstimatorInput{
+			StablePrefixTokens: 37379, PromptTokens: 1062,
+			Boundaries: []domain.CompactionBoundary{{PostTokens: 10956, ObservedAt: &compact1At}},
+			DecisionAt: decisionAt,
+		})
+		in.SummaryTokens = domain.EstimateSummaryTokens(domain.CompactionSummaryEstimatorInput{
+			ExcludeSessionID: "ao-canary-fixture-6",
+			Observations: []domain.CompactionSummarySessionObservation{
+				{SessionID: "ao-canary-fixture-6", Compactions: 2, UnattributedOutputTokens: 16986},
+				{SessionID: "some-other-session", Compactions: 1, UnattributedOutputTokens: 8493},
+			},
+		})
+		if !in.SummaryTokens.Known {
+			t.Fatal("another session's rollup must make S estimable")
+		}
+		got := domain.EvaluateCompactionEconomics(in)
+		if got.Verdict != domain.CompactionVerdictSkip {
+			t.Fatalf("verdict = %s/%s, want skip", got.Verdict, got.Reason)
+		}
+		// Rejected on the structural floor, from an A that never saw compact 2's
+		// own post size: 1.25 * (37,379 + 10,956 + 1,062) = 61,746, so the
+		// predicted reduction is (67,663 + 1,062) - 61,746 = 6,979, which is
+		// 10.3% of the conversation -- below the 25% floor.
+		if got.Reason != domain.CompactionReasonReductionTooSmall {
+			t.Errorf("reason = %s, want reduction_too_small", got.Reason)
+		}
+		if got.EstimatedContextAfterTokens != 61746 {
+			t.Errorf("estimated A = %d, want 61746", got.EstimatedContextAfterTokens)
+		}
+		// And the measured outcome confirms it: this compaction lost $0.43.
+		score := domain.ScoreCompactionVerdict(got, canaryOutcome(67663, 61099, 1062, 4))
+		if score.Outcome != domain.CompactionScoreSkipVindicated {
+			t.Errorf("outcome = %s, want skip_vindicated", score.Outcome)
+		}
+		if score.RealizedNetMicros >= 0 {
+			t.Errorf("realized net = %d, want a loss", score.RealizedNetMicros)
+		}
+	})
 }

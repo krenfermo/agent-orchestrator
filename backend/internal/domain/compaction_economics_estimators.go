@@ -26,22 +26,37 @@ import "time"
 // computed with these.
 const CompactionEstimatorsVersion = "compaction-estimators/v1"
 
-// compactionReattachFactor scales a compacted conversation's own reported size
-// up to what the FIRST call after it actually pays for.
+// compactionReattachFactor scales a compacted conversation's LAST KNOWN post size
+// up to what the first call after the NEXT compaction actually pays for.
 //
 // The harness re-attaches material beyond the summary -- files, the preserved
 // segment -- so the post-compaction context is reliably larger than
-// prefix + postTokens + prompt. Measured on the only two boundaries AO has:
+// prefix + postTokens + prompt.
+//
+// THE DERIVATION MUST BE OUT OF SAMPLE, AND THAT IS WHY THIS CONSTANT IS NOT 1.19.
+//
+// The tempting derivation divides each boundary's own measured A by its own
+// reported postTokens:
 //
 //	compact 1  57,803 / (37,379 + 10,956 + 1,181) = 1.1673
 //	compact 2  61,099 / (37,379 + 13,240 + 1,062) = 1.1822
 //
-// 1.19 is the LARGER of the two, rounded up. Both are then over-estimated
-// (+1.9% and +0.7%), which is the conservative direction: a larger A means a
-// smaller reduction means a verdict further from COMPACT. Two observations from
-// one fixture session is a thin anchor and this constant should be re-derived
-// the moment there is a third.
-const compactionReattachFactor = 1.19
+// Both of those use the boundary's OWN post size, which is the one number a
+// prediction about that boundary cannot have: it is produced BY the compaction
+// being predicted. A factor fitted that way is fitted in sample, and it is
+// optimistic out of sample -- which is the direction that compacts.
+//
+// The corpus supports exactly ONE honest prediction: compact 2's A from compact
+// 1's post size, which is what the estimator actually has in hand.
+//
+//	61,099 / (37,379 + 10,956 + 1,062) = 61,099 / 49,397 = 1.2369
+//
+// 1.25 is that, rounded up. It over-estimates the one prediction it can be
+// checked against by 1.06%, and it would have over-estimated it by 4.9% at 1.19
+// in the wrong direction. ONE out-of-sample point from one fixture session is a
+// very thin anchor; it is the conservative end of what exists, and it should be
+// re-derived the moment there is a second.
+const compactionReattachFactor = 1.25
 
 // minSummaryPriorSessions is how many completed sessions the summary prior wants
 // before it will use their mean.

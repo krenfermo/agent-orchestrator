@@ -674,10 +674,15 @@ func TestContextAfterEstimatorPrefersTheSessionsOwnBoundary(t *testing.T) {
 	decisionAt := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	earlier := decisionAt.Add(-2 * time.Hour)
 
+	// THE ONLY OUT-OF-SAMPLE PREDICTION THE CORPUS SUPPORTS: compact 2's context
+	// predicted from compact 1's post size, which is the only post size a
+	// decision about compact 2 can actually have. Using compact 2's OWN
+	// postTokens (13,240) here would be the look-ahead this estimator exists to
+	// prevent, and a factor fitted that way is optimistic out of sample.
 	got := domain.EstimateContextAfter(domain.CompactionContextAfterEstimatorInput{
 		StablePrefixTokens: 37379,
 		PromptTokens:       1062,
-		Boundaries:         []domain.CompactionBoundary{{PostTokens: 13240, ObservedAt: &earlier}},
+		Boundaries:         []domain.CompactionBoundary{{PostTokens: 10956, ObservedAt: &earlier}},
 		DecisionAt:         decisionAt,
 	})
 	if !got.Known {
@@ -686,14 +691,17 @@ func TestContextAfterEstimatorPrefersTheSessionsOwnBoundary(t *testing.T) {
 	if got.Basis != domain.CompactionBasisSessionPriorBoundary || got.Samples != 1 {
 		t.Errorf("basis/samples = %q/%d, want session_prior_boundary/1", got.Basis, got.Samples)
 	}
-	// 1.19 * (37379 + 13240 + 1062) = 61,500. The measured A was 61,099, so the
-	// estimate is conservative by 0.7% -- a larger A is a smaller reduction is a
-	// verdict further from COMPACT.
-	if got.Value != 61500 {
-		t.Errorf("estimated A = %d, want 61500", got.Value)
+	// 1.25 * (37379 + 10956 + 1062) = 1.25 * 49397 = 61,746.
+	if got.Value != 61746 {
+		t.Errorf("estimated A = %d, want 61746", got.Value)
 	}
+	// The measured A was 61,099. The estimate MUST be at or above it: a larger A
+	// is a smaller reduction is a verdict further from COMPACT. At the in-sample
+	// factor of 1.19 this estimate would have been 58,782 -- 3.8% BELOW the
+	// measurement, which is the optimistic direction, and this assertion is what
+	// catches a future re-fit that slips back into it.
 	if got.Value < 61099 {
-		t.Errorf("estimate %d is below the measured 61099; the reattach factor must never be optimistic", got.Value)
+		t.Errorf("estimated A = %d is below the measured 61099; the reattach factor must never be optimistic", got.Value)
 	}
 }
 

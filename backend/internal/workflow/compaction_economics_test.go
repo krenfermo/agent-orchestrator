@@ -132,6 +132,14 @@ type shadowSetup struct {
 // because the shadow ports are constructor dependencies.
 func newShadowFixture(t *testing.T, setup shadowSetup) shadowFixture {
 	t.Helper()
+	return newShadowFixtureWith(t, setup, nil)
+}
+
+// newShadowFixtureWith is newShadowFixture with a hook that reaches the fake
+// store before the run is driven, so a failure can be injected into a path the
+// fixture itself exercises.
+func newShadowFixtureWith(t *testing.T, setup shadowSetup, configureStore func(*fakeStore)) shadowFixture {
+	t.Helper()
 	sessionFacts := newFakeSessionFacts()
 	spawner := &fakeSpawner{rec: domain.SessionRecord{Metadata: domain.SessionMetadata{Branch: "ao/wf", WorkspacePath: "/ws/wf"}}, facts: sessionFacts}
 	workspaceFacts := &fakeWorkspaceFacts{}
@@ -148,6 +156,9 @@ func newShadowFixture(t *testing.T, setup shadowSetup) shadowFixture {
 	}
 
 	store := newFakeStore()
+	if configureStore != nil {
+		configureStore(store)
+	}
 	clk := &fakeClock{t: time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)}
 	var idSeq int
 	deps := workflowcore.Deps{
@@ -600,5 +611,90 @@ func TestNoVerdictIsRecordedWhenTheLifecycleDoesNotSayCompact(t *testing.T) {
 	}
 	if got := len(shadowVerdicts(t, fx.store, fx.runID)); got != 0 {
 		t.Errorf("shadow verdicts = %d, want none for a %s decision", got, decision.Action)
+	}
+}
+
+// --- failure injection -------------------------------------------------------
+//
+// The rule under test in every case below is the same: a shadow gate that breaks
+// costs a data point and never a delivery, a compaction, or a run's state.
+
+// The gate's ONE read fails. The verdict is UNKNOWN, and everything the run was
+// going to do, it does.
+func TestAFailedUsageReadCostsAVerdictAndNothingElse(t *testing.T) {
+	setup := profitableSetup(true)
+	fx := newShadowFixtureWith(t, setup, func(store *fakeStore) {
+		store.workerCallsErr = fmt.Errorf("ledger unavailable")
+	})
+
+	verdicts := shadowVerdicts(t, fx.store, fx.runID)
+	if len(verdicts) != 1 {
+		t.Fatalf("shadow verdicts = %d, want 1: a verdict AO could not compute is still a fact", len(verdicts))
+	}
+	if verdicts[0].Verdict != domain.CompactionVerdictUnknown {
+		t.Errorf("verdict = %s/%s, want unknown", verdicts[0].Verdict, verdicts[0].Reason)
+	}
+	if verdicts[0].EstimatedCompactionCostMicros != 0 {
+		t.Error("a cost was computed from a failed read")
+	}
+	if fx.sender.compactCalls != 1 {
+		t.Errorf("compaction requests = %d, want 1", fx.sender.compactCalls)
+	}
+	if fx.sender.calls != 1 {
+		t.Errorf("fix prompt deliveries = %d, want 1", fx.sender.calls)
+	}
+}
+
+// The verdict's own checkpoint write fails. Nothing is recorded, nothing else
+// changes, and the run is NOT escalated.
+func TestAFailedVerdictWriteIsNonFatalAndNeverEscalates(t *testing.T) {
+	setup := profitableSetup(true)
+	fx := newShadowFixtureWith(t, setup, func(store *fakeStore) {
+		store.checkpointWriteErr = func(cp domain.WorkflowCheckpoint) error {
+			if cp.DurablePhase == workflowcore.ShadowCompactionVerdictPhaseForTest() {
+				return fmt.Errorf("disk full")
+			}
+			return nil
+		}
+	})
+
+	if got := len(shadowVerdicts(t, fx.store, fx.runID)); got != 0 {
+		t.Errorf("shadow verdicts = %d, want 0: the write failed", got)
+	}
+	// And every pre-existing behaviour is intact.
+	if fx.sender.compactCalls != 1 {
+		t.Errorf("compaction requests = %d, want 1: a lost shadow record must not cost a compaction", fx.sender.compactCalls)
+	}
+	if fx.sender.calls != 1 {
+		t.Errorf("fix prompt deliveries = %d, want 1", fx.sender.calls)
+	}
+	decision, ok := fixLifecycleDecision(t, fx.store, fx.runID)
+	if !ok || decision.Action != domain.LifecycleCompact {
+		t.Error("the lifecycle decision must still be recorded and still be compact")
+	}
+	detail, err := fx.c.GetRun(context.Background(), fx.runID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if detail.NextAction == "needs_attention" {
+		t.Error("a failed shadow write must never escalate a run")
+	}
+}
+
+// THE CLASSIFICATION, END TO END. A recorded verdict must not become the run's
+// latest checkpoint phase: it records something ABOUT the run, and the lifecycle
+// derivation reads that field.
+func TestARecordedVerdictDoesNotBecomeTheRunsLatestPhase(t *testing.T) {
+	fx := newShadowFixture(t, profitableSetup(true))
+	if got := len(shadowVerdicts(t, fx.store, fx.runID)); got != 1 {
+		t.Fatalf("shadow verdicts = %d, want 1", got)
+	}
+	detail, err := fx.c.GetRun(context.Background(), fx.runID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if detail.LatestCheckpointPhase == workflowcore.ShadowCompactionVerdictPhaseForTest() {
+		t.Errorf("latestCheckpointPhase = %q: a verdict nobody reads renamed the run's last activity",
+			detail.LatestCheckpointPhase)
 	}
 }

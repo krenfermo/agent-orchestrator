@@ -801,7 +801,7 @@ done.
 |---|---|---|
 | `safetyFactor` | 1.5 | the estimator's worst overprediction (+25%) plus headroom for two one-observation priors. 1.0 gives the same five verdicts. |
 | `minReductionFraction` | 0.25 | the measured compaction that reduced 11.1% and lost $0.43. |
-| `reattachFactor` | 1.19 | the LARGER of the two measured ratios (1.1673, 1.1822), rounded up. Over-estimates both, which is the direction that skips. |
+| `reattachFactor` | **1.25** | the ONE out-of-sample prediction the corpus supports (compact 2's A from compact 1's post size): 61,099/49,397 = 1.2369, rounded up. See the review findings below for why 1.19 was wrong. |
 | remaining-calls ratios | 0.25 / 0.80 | the bottom of the observed range, across 8 fix-cycle samples in 5 runs. |
 | remaining-calls ceiling | 19 | p50 of those 8 samples (19.5, floored). Only ever lowers. |
 | near-miss floor | 0.8 | both measured compactions sit at 0.03–0.09, two orders of magnitude below. |
@@ -878,3 +878,180 @@ different base, say which and this section is a one-line change.
    margin above 3x, one at a time, reporting realized P/L each time.
 5. **`internal/workflow -race`** has not been run against this diff. It needs
    ~1100–1200s and an explicit timeout; it should pass before integration merge.
+
+---
+
+# P7.2B2 — INDEPENDENT INTEGRATION REVIEW FINDINGS
+
+Reviewed at feature `d6df06706`, base ECC `ae670846e`. Three defects found and
+corrected before merge; two claims in the implementation report corrected.
+
+## D1 (CODE, behaviour-visible) — the verdict displaced the run's latest phase
+
+`foldCheckpointAuthority` folds every checkpoint whose phase is not
+`isBookkeepingPhase` into `LatestCheckpointPhase`/`LatestCheckpointAt` — the
+field whose own comment says *"this is the run's timeline, and the lifecycle
+derivation reads it"*. `compaction_economic_decision` was not in that set, so an
+unknown phase fell through `classifyCheckpointPhase` to `authorityLifecycle` and
+counted.
+
+**A row that governs nothing was able to rename the run's last activity.** That
+is precisely the hazard `isBookkeepingPhase` documents, and its own entry test —
+*"can this row, on its own, change what the run owes?"* — answers no for a shadow
+verdict by construction.
+
+Fixed by one entry in `isBookkeepingPhase`, which `classifyCheckpointPhase`
+consults FIRST, so the same edit also makes the phase an observation rather than a
+lifecycle row. Guarded by three tests, verified to fail without the fix:
+`TestTheShadowEconomicVerdictIsBookkeeping`,
+`TestTheShadowEconomicVerdictCanNeverBecomeAStopOrALifecyclePhase`,
+`TestAShadowVerdictDoesNotDisplaceTheRunsLatestPhase`, plus the end-to-end
+`TestARecordedVerdictDoesNotBecomeTheRunsLatestPhase`.
+
+Every other checkpoint consumer was cleared: all five `switch cp.DurablePhase`
+folds in the launch/recovery paths `continue` on `cp.WorkflowStepID == nil`
+before reaching the switch, and the run-level nil-step convention is what makes
+them structurally blind to this phase. `NextAction` is guarded by
+`if cp.NextAction != ""`, which an empty one cannot displace.
+
+## D2 (CODE, hardening) — the gate aliased the caller's reason slice
+
+`LifecycleReasons: decision.Reasons` handed the gate the same backing array as the
+`SessionLifecycleDecision` persisted moments later. Nothing appended to it, so
+nothing was wrong — but the one path by which a shadow evaluation could reach out
+and alter the decision it shadows should not exist as a matter of reading. Now
+copied, with `TestTheRecordIsIndependentOfTheCallersReasonSlice` pinning it.
+
+## D3 (ESTIMATOR, optimistic) — `reattachFactor` was fitted in sample
+
+1.19 was derived by dividing each boundary's measured `A` by **its own** reported
+`postTokens`:
+
+```
+compact 1   57,803 / (37,379 + 10,956 + 1,181) = 1.1673
+compact 2   61,099 / (37,379 + 13,240 + 1,062) = 1.1822
+```
+
+Compact 2's own post size is the one number a prediction about compact 2 cannot
+have — it is produced BY the compaction being predicted. **The factor was fitted
+with the answer in the training set**, which is the same look-ahead the estimator
+exists to prevent, one level up.
+
+The corpus supports exactly one honest prediction: compact 2's `A` from compact
+1's post size, which is what the estimator actually holds.
+
+```
+61,099 / (37,379 + 10,956 + 1,062) = 61,099 / 49,397 = 1.2369   ->  1.25
+```
+
+At 1.19 that prediction is **58,782 against a measured 61,099 — 3.8% optimistic**,
+and optimistic on `A` is the direction that compacts. Corrected to **1.25**
+(1.06% conservative on the one point it can be checked against). The estimator
+test was rewritten to be the out-of-sample prediction rather than the in-sample
+fit, and it asserts `A_est >= 61,099` so a future re-fit cannot slip back.
+
+## R1 (REPORT) — the canary retrospective claimed a SKIP it could not have made
+
+The implementation report said the gate *"would have said SKIP to both"* canary
+compactions. It would not have, and the correction matters more than the claim:
+
+| | honest pre-decision verdict | why |
+|---|---|---|
+| compact 1 | **UNKNOWN / `context_after_unknown`** | it is the session's FIRST compaction, so there is no prior boundary and `A` is unknowable. The measured A=57,803 was produced by the compaction being judged. |
+| compact 2, as the corpus stands | **UNKNOWN / `summary_cost_unknown`** | `A` is estimable from compact 1, but `S` is a cross-session prior and the only session with a rollup is the one being judged. |
+| compact 2, once any other session supplies a summary prior | **SKIP / `reduction_too_small`** | at A_est = 61,746 the predicted reduction is 6,979 = 10.3% of the conversation, below the 25% floor — and the measurement confirms it lost $0.4313. |
+
+Pinned in `TestTheCanaryPreDecisionVerdictUsesOnlyWhatWasAvailable`. The SKIP
+that survives is a genuine one: it is reached from an `A` that never saw compact
+2's own post size.
+
+## R2 (REPORT) — "69/69 sessions priceable, 100% coverage" had the wrong denominator
+
+The claim was computed over sessions with any usage at all, with a `MAX()` that
+let one priceable model cover a session that also ran an unpriceable one. The
+correct denominators:
+
+| denominator | scope | priceable | note |
+|---|---|---:|---|
+| A — all ledger events | 3,879 events | **3,481 (89.7%)** | includes non-session subjects |
+| B — events on a session | 3,433 | 3,429 (99.9%) | the 4 exceptions are `<synthetic>` |
+| C — sessions with any usage | 69 | 68 single-model priceable, 1 multi-model | the prior claim's scope, and it was 68/69 not 69/69 |
+| **D — the gate's actual universe: sessions with a worker/fix_worker role** | **23** | **22 (95.7%)** | 1 session ran `claude-opus-5` + `<synthetic>` and records `inconsistent_accounting` |
+
+**Denominator D is the honest one for the enforcement criterion**, and 95.7%
+clears the ≥90% bar. Both of the following are true and do not contradict each
+other: *the ledger still holds 263,976 unknown-TTL tokens*, and *no shadow verdict
+can be blocked by them* — because those 5 rows carry `model_id = "sonnet"` on
+bindings with **no session id**, so they are outside the gate's universe
+entirely. The earlier "100%" was not a lie about pricing; it was a denominator
+that had quietly excluded exactly the rows in question.
+
+## CANONICAL ECONOMIC NOMENCLATURE
+
+The review found four different figures all being called "cost savings". They are
+different scopes and from now on they carry different names. **Never use the bare
+phrase "cost saving" for any of them.**
+
+| canonical name | scope | measured or modelled | figure |
+|---|---|---|---|
+| **LEDGER COST** | the run's attributed events, priced by the embedded card at the observed 1h cache-write rate. Unpriced models report tokens with cost unknown and are NOT in the amount. | MEASURED | **$24.317756** (`wf-1c2cb9bd`) |
+| **HARNESS COST** | the harness's own end-of-session cost figure. A different party, a different rate card, and it includes spend AO holds no event for. Never to be folded into a ledger total. | MEASURED by the harness | $24.805628 |
+| **TOKEN REDUCTION** | cumulative billed input, replayed by `turnbench`. **Not money.** | MEASURED replay of the real call series | **−39.0%** |
+| **MODELLED REPLAY SAVING (measured tails)** | the 3 replay boundaries with `A`, `S`, `P` as priors and `N` as each boundary's OWN measured call tail (29, 24, 19) | MODELLED | **+$5.844951 = 24.04% of LEDGER COST** |
+| **MODELLED REPLAY SAVING (forecast tails)** | the same, with `N` from the estimator's capped forecast (19, 19, 19) | MODELLED | +$4.557438 = 18.74% |
+| **REALIZED P/L** | a compaction that actually happened, every term measured | MEASURED | canary: **−$0.3247** and **−$0.4313** |
+
+```
+LEDGER COST        = 386·5.00 + 35,787,742·0.50 + 294,688·10.00 + 139,003·25.00  (per MTok)
+per-boundary cost  = P·Cr + S·Co + (A−P−Δ)·Cw1h                     = $0.407255
+saving per call    = D·Cr ,  D = (B+Δ) − A
+MODELLED REPLAY SAVING (measured tails) = Σ N·D·Cr − Σ cost         = $5.844951
+                                        / LEDGER COST               = 24.04%
+```
+
+**THE CURRENT FIGURE, EXPLICITLY: the `wf-1c2cb9bd` replay is a TOKEN REDUCTION of
+−39.0% and a MODELLED REPLAY SAVING (measured tails) of 24.04% of LEDGER COST.**
+The word "realized" does not apply to it: that run never compacted. `~21.2%` is
+not reproducible from any of these scopes and is not published; `~27%` and `25.1%`
+are superseded.
+
+## S READ MODEL — DECISION: DO NOT IMPLEMENT NOW
+
+The brief asked whether a minimal durable read model for `S` should land before
+merge so the gate is observable on real runs. **No, and the reason is not
+scope — it is that the input does not exist.**
+
+Measured on the real database, 2026-09-13:
+
+```
+usage_sources                      138
+  carrying "compactions"             0
+  carrying "harness_totals"          0
+  carrying "cache_creation"          0
+sessions that could supply an S prior  0
+```
+
+Not one source's durable parser state carries any P7.1 observation. The fields
+exist in the parser, but every registered source was consumed past those records
+before P7.1 landed and sits at an advanced byte offset, and no session has
+compacted since. A read model built now would read an empty set, so it cannot
+change a single verdict — while costing two new sqlc queries, a service reader,
+daemon wiring and their tests.
+
+**The blocker is observation availability, not the read model**, and that
+reordering is the finding. Therefore:
+
+> **P7.2B2 is integrated but NOT operationally useful yet.**
+
+and the next checkpoint is scoped accordingly:
+
+> **P7.2B2.1 — Compaction Observation Availability, then the Summary Cost Read
+> Model.** In that order. (1) Establish how a source's P7.1 observations get
+> written at all — a re-read from offset zero for complete sources, or acceptance
+> that only sessions started after P7.1 will ever carry them. (2) Only then fold
+> the cross-session summary prior at session completion, keyed by (harness,
+> model), with sample counts and no decision-time corpus walk.
+
+Until (1) lands, a shadow observation period would accumulate rows that all say
+`summary_cost_unknown`. That is honest and it is not evidence. **An UNKNOWN must
+not be reported as a SKIP to make the cohort look populated.**
