@@ -413,13 +413,23 @@ SELECT
     CAST(SUM(mue.uncached_input_tokens) AS INTEGER) AS uncached_input_tokens,
     CAST(SUM(mue.cache_read_tokens) AS INTEGER) AS cache_read_tokens,
     CAST(SUM(mue.cache_write_tokens) AS INTEGER) AS cache_write_tokens,
-    -- The cache-creation lifetime split. The third column is the quantity
-    -- whose lifetime was never observed: NULL columns beside a non-zero total,
-    -- which is every row written before migration 0170. It is reported rather
-    -- than folded into the short lifetime, because unknown is not five minutes.
-    CAST(COALESCE(SUM(mue.cache_write_5m_tokens), 0) AS INTEGER) AS cache_write_5m_tokens,
-    CAST(COALESCE(SUM(mue.cache_write_1h_tokens), 0) AS INTEGER) AS cache_write_1h_tokens,
+    -- The three terms below PARTITION cache_write_tokens: every token is in
+    -- exactly one of them, whatever shape the row is in. Both columns must be
+    -- present for either lifetime to be believed -- a half-written pair is
+    -- unreachable through the write path today and is exactly what a future
+    -- backfill could produce, and counting its one known column would both
+    -- overstate that lifetime and double count the row against the unknown
+    -- bucket.
+    CAST(COALESCE(SUM(CASE WHEN mue.cache_write_5m_tokens IS NOT NULL
+                            AND mue.cache_write_1h_tokens IS NOT NULL
+                           THEN mue.cache_write_5m_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_5m_tokens,
+    CAST(COALESCE(SUM(CASE WHEN mue.cache_write_5m_tokens IS NOT NULL
+                            AND mue.cache_write_1h_tokens IS NOT NULL
+                           THEN mue.cache_write_1h_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_1h_tokens,
     CAST(COALESCE(SUM(CASE WHEN mue.cache_write_5m_tokens IS NULL
+                             OR mue.cache_write_1h_tokens IS NULL
                            THEN mue.cache_write_tokens ELSE 0 END), 0) AS INTEGER)
         AS cache_write_unknown_ttl_tokens,
     CAST(SUM(mue.output_tokens) AS INTEGER) AS output_tokens,

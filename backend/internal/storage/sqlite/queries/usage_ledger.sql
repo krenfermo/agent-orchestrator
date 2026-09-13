@@ -112,9 +112,18 @@ SELECT
     CAST(SUM(a.uncached_input_tokens) AS INTEGER) AS uncached_input_tokens,
     CAST(SUM(a.cache_read_tokens) AS INTEGER)     AS cache_read_tokens,
     CAST(SUM(a.cache_write_tokens) AS INTEGER)    AS cache_write_tokens,
-    CAST(COALESCE(SUM(a.cache_write_5m_tokens), 0) AS INTEGER) AS cache_write_5m_tokens,
-    CAST(COALESCE(SUM(a.cache_write_1h_tokens), 0) AS INTEGER) AS cache_write_1h_tokens,
+    -- The three terms partition cache_write_tokens: see
+    -- AggregateUsageBySessionHarnessModel for why both columns must be present.
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NOT NULL
+                            AND a.cache_write_1h_tokens IS NOT NULL
+                           THEN a.cache_write_5m_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_5m_tokens,
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NOT NULL
+                            AND a.cache_write_1h_tokens IS NOT NULL
+                           THEN a.cache_write_1h_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_1h_tokens,
     CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NULL
+                             OR a.cache_write_1h_tokens IS NULL
                            THEN a.cache_write_tokens ELSE 0 END), 0) AS INTEGER)
         AS cache_write_unknown_ttl_tokens,
     CAST(SUM(a.output_tokens) AS INTEGER)         AS output_tokens,
@@ -175,9 +184,18 @@ SELECT
     CAST(SUM(a.uncached_input_tokens) AS INTEGER) AS uncached_input_tokens,
     CAST(SUM(a.cache_read_tokens) AS INTEGER)     AS cache_read_tokens,
     CAST(SUM(a.cache_write_tokens) AS INTEGER)    AS cache_write_tokens,
-    CAST(COALESCE(SUM(a.cache_write_5m_tokens), 0) AS INTEGER) AS cache_write_5m_tokens,
-    CAST(COALESCE(SUM(a.cache_write_1h_tokens), 0) AS INTEGER) AS cache_write_1h_tokens,
+    -- The three terms partition cache_write_tokens: see
+    -- AggregateUsageBySessionHarnessModel for why both columns must be present.
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NOT NULL
+                            AND a.cache_write_1h_tokens IS NOT NULL
+                           THEN a.cache_write_5m_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_5m_tokens,
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NOT NULL
+                            AND a.cache_write_1h_tokens IS NOT NULL
+                           THEN a.cache_write_1h_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_1h_tokens,
     CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NULL
+                             OR a.cache_write_1h_tokens IS NULL
                            THEN a.cache_write_tokens ELSE 0 END), 0) AS INTEGER)
         AS cache_write_unknown_ttl_tokens,
     CAST(SUM(a.output_tokens) AS INTEGER)         AS output_tokens,
@@ -231,9 +249,18 @@ SELECT
     CAST(SUM(a.uncached_input_tokens) AS INTEGER) AS uncached_input_tokens,
     CAST(SUM(a.cache_read_tokens) AS INTEGER)     AS cache_read_tokens,
     CAST(SUM(a.cache_write_tokens) AS INTEGER)    AS cache_write_tokens,
-    CAST(COALESCE(SUM(a.cache_write_5m_tokens), 0) AS INTEGER) AS cache_write_5m_tokens,
-    CAST(COALESCE(SUM(a.cache_write_1h_tokens), 0) AS INTEGER) AS cache_write_1h_tokens,
+    -- The three terms partition cache_write_tokens: see
+    -- AggregateUsageBySessionHarnessModel for why both columns must be present.
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NOT NULL
+                            AND a.cache_write_1h_tokens IS NOT NULL
+                           THEN a.cache_write_5m_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_5m_tokens,
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NOT NULL
+                            AND a.cache_write_1h_tokens IS NOT NULL
+                           THEN a.cache_write_1h_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_1h_tokens,
     CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NULL
+                             OR a.cache_write_1h_tokens IS NULL
                            THEN a.cache_write_tokens ELSE 0 END), 0) AS INTEGER)
         AS cache_write_unknown_ttl_tokens,
     CAST(SUM(a.output_tokens) AS INTEGER)         AS output_tokens,
@@ -292,9 +319,18 @@ SELECT
     CAST(SUM(a.input_tokens) AS INTEGER)       AS input_tokens,
     CAST(SUM(a.cache_read_tokens) AS INTEGER)  AS cache_read_tokens,
     CAST(SUM(a.cache_write_tokens) AS INTEGER) AS cache_write_tokens,
-    CAST(COALESCE(SUM(a.cache_write_5m_tokens), 0) AS INTEGER) AS cache_write_5m_tokens,
-    CAST(COALESCE(SUM(a.cache_write_1h_tokens), 0) AS INTEGER) AS cache_write_1h_tokens,
+    -- The three terms partition cache_write_tokens: see
+    -- AggregateUsageBySessionHarnessModel for why both columns must be present.
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NOT NULL
+                            AND a.cache_write_1h_tokens IS NOT NULL
+                           THEN a.cache_write_5m_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_5m_tokens,
+    CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NOT NULL
+                            AND a.cache_write_1h_tokens IS NOT NULL
+                           THEN a.cache_write_1h_tokens ELSE 0 END), 0) AS INTEGER)
+        AS cache_write_1h_tokens,
     CAST(COALESCE(SUM(CASE WHEN a.cache_write_5m_tokens IS NULL
+                             OR a.cache_write_1h_tokens IS NULL
                            THEN a.cache_write_tokens ELSE 0 END), 0) AS INTEGER)
         AS cache_write_unknown_ttl_tokens,
     CAST(SUM(a.uncached_input_tokens) AS INTEGER) AS uncached_input_tokens,

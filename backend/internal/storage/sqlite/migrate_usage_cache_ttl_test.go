@@ -223,3 +223,76 @@ func TestMigration0170RollsBack(t *testing.T) {
 		t.Fatalf("view not restored: %v", err)
 	}
 }
+
+// TestMigration0170LifetimeTermsPartitionTheTotal pins the property the
+// aggregates depend on and that the integration review found was not yet true.
+//
+// The three figures every aggregate returns -- 5m, 1h, and lifetime-unknown --
+// must PARTITION cache_write_tokens: every token in exactly one of them, for
+// every shape a row can be in. The half-written shapes below (one column set,
+// the other NULL) are unreachable through the write path, which writes both or
+// neither. They are exactly what a backfill could produce, and the first
+// version of these queries both overstated the known lifetime and double
+// counted the row against the unknown bucket.
+func TestMigration0170LifetimeTermsPartitionTheTotal(t *testing.T) {
+	db := openMigrationDB(t)
+	upTo(t, db, 170)
+	seedUsageEvent(t, db, "seed-legacy", 1000) // pre-0170 shape: NULL pair
+
+	ins := func(key string, total int64, five, hour sql.NullInt64) {
+		if _, err := db.Exec(`INSERT INTO model_usage_events
+			(binding_id, model_id, input_tokens, uncached_input_tokens, cache_read_tokens,
+			 cache_write_tokens, output_tokens, source_event_key, recorded_at,
+			 cache_write_5m_tokens, cache_write_1h_tokens)
+			VALUES (1,'claude-opus-5',?,0,0,?,1,?,CURRENT_TIMESTAMP,?,?)`,
+			total, total, key, five, hour); err != nil {
+			t.Fatalf("insert %s: %v", key, err)
+		}
+	}
+	n := func(v int64) sql.NullInt64 { return sql.NullInt64{Int64: v, Valid: true} }
+	ins("a-1h", 2193, n(0), n(2193))
+	ins("b-5m", 900, n(900), n(0))
+	ins("c-mix", 1000, n(400), n(600))
+	ins("d-zero-write", 0, n(0), n(0))
+	ins("e-null", 5240, sql.NullInt64{}, sql.NullInt64{})
+	// Adversarial: one column set and the other NULL (only reachable by a
+	// hand-written UPDATE or a future backfill bug).
+	ins("f-half", 700, n(700), sql.NullInt64{})
+	ins("g-half2", 300, sql.NullInt64{}, n(300))
+
+	var total, sum5, sum1h, unknown int64
+	if err := db.QueryRow(`
+		SELECT COALESCE(SUM(cache_write_tokens),0),
+		       COALESCE(SUM(CASE WHEN cache_write_5m_tokens IS NOT NULL AND cache_write_1h_tokens IS NOT NULL
+		                         THEN cache_write_5m_tokens ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN cache_write_5m_tokens IS NOT NULL AND cache_write_1h_tokens IS NOT NULL
+		                         THEN cache_write_1h_tokens ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN cache_write_5m_tokens IS NULL
+		                           OR cache_write_1h_tokens IS NULL
+		                         THEN cache_write_tokens ELSE 0 END),0)
+		FROM model_usage_events`).Scan(&total, &sum5, &sum1h, &unknown); err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	t.Logf("total=%d  5m=%d  1h=%d  unknown=%d  sum-of-parts=%d", total, sum5, sum1h, unknown, sum5+sum1h+unknown)
+	if sum5+sum1h+unknown != total {
+		t.Errorf("INVARIANT BROKEN: parts %d != total %d", sum5+sum1h+unknown, total)
+	}
+	// The view projects the raw columns -- guarding belongs in the aggregate,
+	// not the projection -- so it is compared with the same guarded expression.
+	var vt, v5, v1, vu int64
+	if err := db.QueryRow(`
+		SELECT COALESCE(SUM(cache_write_tokens),0),
+		       COALESCE(SUM(CASE WHEN cache_write_5m_tokens IS NOT NULL AND cache_write_1h_tokens IS NOT NULL
+		                         THEN cache_write_5m_tokens ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN cache_write_5m_tokens IS NOT NULL AND cache_write_1h_tokens IS NOT NULL
+		                         THEN cache_write_1h_tokens ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN cache_write_5m_tokens IS NULL OR cache_write_1h_tokens IS NULL
+		                         THEN cache_write_tokens ELSE 0 END),0)
+		FROM usage_event_attribution`).Scan(&vt, &v5, &v1, &vu); err != nil {
+		t.Fatalf("view: %v", err)
+	}
+	if vt != total || v5 != sum5 || v1 != sum1h || vu != unknown {
+		t.Errorf("view disagrees with the table: %d/%d/%d/%d vs %d/%d/%d/%d",
+			vt, v5, v1, vu, total, sum5, sum1h, unknown)
+	}
+}
