@@ -49,39 +49,53 @@ func inspectDatabase(ctx context.Context, path string, quick bool) (dbFacts, err
 	if quick {
 		pragma = "quick_check"
 	}
-	rows, err := db.QueryContext(ctx, "PRAGMA "+pragma)
+	lines, err := pragmaLines(ctx, db, pragma, 10)
 	if err != nil {
-		return facts, fmt.Errorf("%s: %w", pragma, err)
-	}
-	var lines []string
-	for rows.Next() {
-		var line string
-		if err := rows.Scan(&line); err != nil {
-			_ = rows.Close()
-			return facts, fmt.Errorf("%s: %w", pragma, err)
-		}
-		if len(lines) < 10 {
-			lines = append(lines, line)
-		}
-	}
-	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return facts, fmt.Errorf("%s: %w", pragma, err)
 	}
 	facts.Integrity = strings.Join(lines, "; ")
 
-	fk, err := db.QueryContext(ctx, "PRAGMA foreign_key_check")
+	facts.ForeignKeyViolations, err = countRows(ctx, db, "PRAGMA foreign_key_check")
 	if err != nil {
-		return facts, fmt.Errorf("foreign_key_check: %w", err)
-	}
-	for fk.Next() {
-		facts.ForeignKeyViolations++
-	}
-	if err := errors.Join(fk.Err(), fk.Close()); err != nil {
 		return facts, fmt.Errorf("foreign_key_check: %w", err)
 	}
 
 	facts.GooseVersion, err = readGooseVersion(ctx, db)
 	return facts, err
+}
+
+// pragmaLines returns up to limit first-column lines a PRAGMA reports.
+func pragmaLines(ctx context.Context, db *sql.DB, pragma string, limit int) ([]string, error) {
+	rows, err := db.QueryContext(ctx, "PRAGMA "+pragma)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var lines []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			return nil, err
+		}
+		if len(lines) < limit {
+			lines = append(lines, line)
+		}
+	}
+	return lines, rows.Err()
+}
+
+// countRows counts the rows a query returns without reading them.
+func countRows(ctx context.Context, db *sql.DB, query string) (int, error) {
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+	n := 0
+	for rows.Next() {
+		n++
+	}
+	return n, rows.Err()
 }
 
 func readGooseVersion(ctx context.Context, db *sql.DB) (int64, error) {

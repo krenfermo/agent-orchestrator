@@ -110,6 +110,9 @@ func projectIDs(t *testing.T, dbPath string) []string {
 		}
 		ids = append(ids, id)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	return ids
 }
 
@@ -131,6 +134,9 @@ func liveProjectIDs(t *testing.T, dataDir string) []string {
 		}
 		ids = append(ids, id)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	return ids
 }
 
@@ -140,19 +146,8 @@ func semanticState(t *testing.T, dataDir string) string {
 	t.Helper()
 	db := openRW(t, dataDir)
 	defer func() { _ = db.Close() }()
-	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var tables []string
-	for rows.Next() {
-		var n string
-		_ = rows.Scan(&n)
-		tables = append(tables, n)
-	}
-	_ = rows.Close()
 	var b strings.Builder
-	for _, tbl := range tables {
+	for _, tbl := range tableNames(t, db) {
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM "` + tbl + `"`).Scan(&n); err != nil {
 			t.Fatal(err)
@@ -165,6 +160,27 @@ func semanticState(t *testing.T, dataDir string) string {
 	}
 	fmt.Fprintf(&b, "goose=%d\nprojects=%v\n", v, liveProjectIDs(t, dataDir))
 	return b.String()
+}
+
+func tableNames(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var tables []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		tables = append(tables, n)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return tables
 }
 
 // treeDigest fingerprints every file under dir (names, modes, contents), so a

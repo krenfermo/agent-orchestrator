@@ -466,11 +466,11 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 	return rep, nil
 }
 
-func firstReason(fs []Finding) string {
-	if len(fs) == 0 {
+func firstReason(findings []Finding) string {
+	if len(findings) == 0 {
 		return "no reason recorded"
 	}
-	return string(fs[0].Code) + ": " + fs[0].Detail
+	return string(findings[0].Code) + ": " + findings[0].Detail
 }
 
 func refuseUnresolvedJournal(dataDir string) error {

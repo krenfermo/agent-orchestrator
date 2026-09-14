@@ -186,30 +186,32 @@ func copyFileHashed(ctx context.Context, src, dst string, mode os.FileMode) (n i
 // writeFileAtomic writes data to a temp file in the same directory, fsyncs it,
 // renames it into place and fsyncs the directory: a reader or a crash sees the
 // old file or the complete new one, never a partial one.
-func writeFileAtomic(p string, data []byte, mode os.FileMode) (err error) {
+func writeFileAtomic(p string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(p)
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(p)+".tmp-*")
 	if err != nil {
 		return err
 	}
 	tmpName := tmp.Name()
+	renamed := false
 	defer func() {
-		if err != nil {
+		if !renamed {
 			_ = os.Remove(tmpName)
 		}
 	}()
 	_, werr := tmp.Write(data)
 	serr := tmp.Sync()
 	cerr := tmp.Close()
-	if err = errors.Join(werr, serr, cerr); err != nil {
+	if err := errors.Join(werr, serr, cerr); err != nil {
 		return err
 	}
-	if err = os.Chmod(tmpName, mode); err != nil {
+	if err := os.Chmod(tmpName, mode); err != nil {
 		return err
 	}
-	if err = os.Rename(tmpName, p); err != nil {
+	if err := os.Rename(tmpName, p); err != nil {
 		return err
 	}
+	renamed = true
 	return syncDir(dir)
 }
 

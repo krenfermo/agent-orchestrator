@@ -10,8 +10,9 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/aoagents/agent-orchestrator/backend/internal/daemonlock"
 	"github.com/google/uuid"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonlock"
 )
 
 // fixture is a scratch installation with a backup of state A, then mutated to

@@ -20,6 +20,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 )
 
+// Manifest format, asset names and snapshot vocabulary.
 const (
 	// FormatV1 is the only manifest format this binary reads or writes. Any
 	// other ao.backup/vN is UNSUPPORTED: a parser that guessed at a future
@@ -43,6 +44,7 @@ const (
 // Kind says why a backup exists. Only manual backups are ever pruned.
 type Kind string
 
+// Backup kinds.
 const (
 	KindManual       Kind = "manual"
 	KindPreRestore   Kind = "pre-restore"
@@ -59,6 +61,7 @@ func (k Kind) Protected() bool { return k == KindPreRestore || k == KindPreMigra
 // Role says what an asset is, and constrains where it may live.
 type Role string
 
+// Asset roles.
 const (
 	RoleDatabase             Role = "database"
 	RoleInstallationIdentity Role = "installation_identity"
@@ -126,8 +129,8 @@ type Asset struct {
 }
 
 var (
-	formatPattern      = regexp.MustCompile(`^ao\.backup/v[0-9]+$`)
-	backupIDPattern    = regexp.MustCompile(`^aob-[0-9]{8}T[0-9]{6}\.[0-9]{9}Z-[0-9a-f]{8}$`)
+	formatPattern      = regexp.MustCompile(`^ao\.backup/v\d+$`)
+	backupIDPattern    = regexp.MustCompile(`^aob-\d{8}T\d{6}\.\d{9}Z-[0-9a-f]{8}$`)
 	sha256Pattern      = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	fingerprintPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 	modePattern        = regexp.MustCompile(`^0[0-7]{3}$`)

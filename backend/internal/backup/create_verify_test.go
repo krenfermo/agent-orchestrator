@@ -248,11 +248,11 @@ func TestCreateRefusesSymlinksInTheSource(t *testing.T) {
 	})
 	t.Run("database", func(t *testing.T) {
 		dataDir := newInstallation(t, t.TempDir())
-		real := filepath.Join(t.TempDir(), "real.db")
-		if err := os.Rename(filepath.Join(dataDir, DatabaseAsset), real); err != nil {
+		realDB := filepath.Join(t.TempDir(), "real.db")
+		if err := os.Rename(filepath.Join(dataDir, DatabaseAsset), realDB); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(real, filepath.Join(dataDir, DatabaseAsset)); err != nil {
+		if err := os.Symlink(realDB, filepath.Join(dataDir, DatabaseAsset)); err != nil {
 			t.Fatal(err)
 		}
 		_, err := Create(context.Background(), CreateOptions{DataDir: dataDir, Root: filepath.Join(t.TempDir(), "b"), Tool: ToolInfo{Name: "ao-test"}})

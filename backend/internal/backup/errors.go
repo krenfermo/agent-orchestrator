@@ -25,8 +25,10 @@ import (
 // depend on these strings; never rename one.
 type Code string
 
+// Reason codes.
 const (
 	// Refusals: unsafe to proceed, nothing was changed.
+
 	CodeDaemonActive            Code = "daemon_active"
 	CodeDaemonUnverified        Code = "daemon_unverified"
 	CodeDaemonAmbiguous         Code = "daemon_ambiguous"
@@ -43,6 +45,7 @@ const (
 	CodeInvalidArgument         Code = "invalid_argument"
 
 	// Verification findings.
+
 	CodeManifestMissing      Code = "manifest_missing"
 	CodeManifestInvalid      Code = "manifest_invalid"
 	CodeUnsupportedManifest  Code = "unsupported_manifest"
@@ -63,6 +66,7 @@ const (
 	CodeDataDirDiffers       Code = "data_dir_differs"
 
 	// Operation failures.
+
 	CodeSnapshotFailed       Code = "snapshot_failed"
 	CodeRollbackBackupFailed Code = "rollback_backup_failed"
 	CodeStagingFailed        Code = "restore_staging_failed"
@@ -79,18 +83,18 @@ const (
 type Class string
 
 const (
-	// ClassRefused: a safety precondition failed; nothing was changed.
+	// ClassRefused means a safety precondition failed; nothing was changed.
 	ClassRefused Class = "refused"
-	// ClassInvalid: the backup is not intact.
+	// ClassInvalid means the backup is not intact.
 	ClassInvalid Class = "invalid"
-	// ClassIncompatible: the backup is intact but this binary must not use it.
+	// ClassIncompatible means the backup is intact but this binary must not use it.
 	ClassIncompatible Class = "incompatible"
-	// ClassFailed: the operation failed; the destination was not modified.
+	// ClassFailed means the operation failed; the destination was not modified.
 	ClassFailed Class = "failed"
-	// ClassRolledBack: a restore replaced the destination, failed, and put the
+	// ClassRolledBack means a restore replaced the destination, failed, and put the
 	// previous state back.
 	ClassRolledBack Class = "rolled_back"
-	// ClassRollbackFailed: a restore failed and so did putting the previous
+	// ClassRollbackFailed means a restore failed and so did putting the previous
 	// state back. The journal says where everything is.
 	ClassRollbackFailed Class = "rollback_failed"
 )
@@ -139,6 +143,7 @@ func failedf(code Code, err error, format string, args ...any) *Error {
 // Status is a verification verdict.
 type Status string
 
+// Verification verdicts.
 const (
 	StatusValid       Status = "VALID"
 	StatusInvalid     Status = "INVALID"

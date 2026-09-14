@@ -17,6 +17,7 @@ import (
 // it names begins, so after a crash the journal never claims less than happened.
 type Phase string
 
+// Restore phases, in order.
 const (
 	PhasePreparing      Phase = "preparing"
 	PhaseRollbackReady  Phase = "rollback_ready"
@@ -51,7 +52,7 @@ func (p Phase) known() bool {
 
 const journalFormat = "ao.restore-journal/v1"
 
-var restoreIDPattern = regexp.MustCompile(`^aor-[0-9]{8}T[0-9]{6}\.[0-9]{9}Z-[0-9a-f]{8}$`)
+var restoreIDPattern = regexp.MustCompile(`^aor-\d{8}T\d{6}\.\d{9}Z-[0-9a-f]{8}$`)
 
 // sqliteSidecars are the files SQLite keeps beside ao.db. Moved aside FIRST,
 // so a crash mid-swap can never leave a sidecar next to a database it does not
@@ -167,7 +168,7 @@ func removeJournal(dataDir string) error {
 func CheckStartup(dataDir string) error {
 	j, err := readJournal(dataDir)
 	if err != nil {
-		return fmt.Errorf("a restore journal exists in %s but cannot be trusted (%v); run `ao backup recover` before starting AO", dataDir, err)
+		return fmt.Errorf("a restore journal exists in %s but cannot be trusted (%w); run `ao backup recover` before starting AO", dataDir, err)
 	}
 	if j != nil && j.Phase.critical() {
 		return fmt.Errorf("restore %s was interrupted in phase %s and the data dir %s may hold a mix of two states; run `ao backup recover` before starting AO",

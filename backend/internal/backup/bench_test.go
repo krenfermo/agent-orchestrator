@@ -137,18 +137,20 @@ func TestP10BenchmarkSyntheticDatabase(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		stmt, err := tx.Prepare(`INSERT INTO workflow_runs (id, project_id, objective, state, policy_version, policy_snapshot, created_at, updated_at)
+		func() {
+			stmt, err := tx.Prepare(`INSERT INTO workflow_runs (id, project_id, objective, state, policy_version, policy_snapshot, created_at, updated_at)
 			VALUES (?, 'bench', ?, 'running', 'v1', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for i := 0; i < 2000 && done < rows; i++ {
-			if _, err := stmt.Exec(fmt.Sprintf("r%09d", done), blob); err != nil {
+			if err != nil {
 				t.Fatal(err)
 			}
-			done++
-		}
-		_ = stmt.Close()
+			defer func() { _ = stmt.Close() }()
+			for i := 0; i < 2000 && done < rows; i++ {
+				if _, err := stmt.Exec(fmt.Sprintf("r%09d", done), blob); err != nil {
+					t.Fatal(err)
+				}
+				done++
+			}
+		}()
 		if err := tx.Commit(); err != nil {
 			t.Fatal(err)
 		}

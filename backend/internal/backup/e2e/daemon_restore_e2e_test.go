@@ -279,8 +279,13 @@ func (s *scratch) projectIDs() []string {
 	var ids []string
 	for rows.Next() {
 		var id string
-		_ = rows.Scan(&id)
+		if err := rows.Scan(&id); err != nil {
+			s.t.Fatal(err)
+		}
 		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		s.t.Fatal(err)
 	}
 	return ids
 }

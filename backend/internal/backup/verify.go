@@ -16,6 +16,7 @@ import (
 // Compatibility is how a backup's schema relates to this binary's.
 type Compatibility string
 
+// Compatibility verdicts.
 const (
 	CompatCompatible      Compatibility = "compatible"
 	CompatUpgradeRequired Compatibility = "upgrade_required"
@@ -267,6 +268,7 @@ func scanBackupTree(dir string, m *Manifest, add func(Code, string, ...any)) {
 		}
 		rel, rerr := filepath.Rel(dir, p)
 		if rerr != nil {
+			add(CodeIO, "scan %s: %v", p, rerr)
 			return nil
 		}
 		rel = filepath.ToSlash(rel)

@@ -128,28 +128,28 @@ func Create(ctx context.Context, opts CreateOptions) (res *CreateResult, err err
 		_ = os.Remove(lockPath(root, id))
 		_ = lock.Release()
 	}()
-	fail := func(code Code, cause error, format string, args ...any) (*CreateResult, error) {
+	fail := func(code Code, cause error, format string, args ...any) error {
 		if ctx.Err() != nil {
-			return nil, &Error{Code: CodeCanceled, Class: ClassFailed, Msg: "backup canceled; nothing was kept", Err: ctx.Err()}
+			return &Error{Code: CodeCanceled, Class: ClassFailed, Msg: "backup canceled; nothing was kept", Err: ctx.Err()}
 		}
-		return nil, failedf(code, cause, format, args...)
+		return failedf(code, cause, format, args...)
 	}
 
 	progress("snapshotting")
 	stagedDB := filepath.Join(staging, DatabaseAsset)
 	journalMode, err := snapshotDatabase(ctx, dbPath, stagedDB)
 	if err != nil {
-		return fail(CodeSnapshotFailed, err, "snapshot %s", dbPath)
+		return nil, fail(CodeSnapshotFailed, err, "snapshot %s", dbPath)
 	}
 	if err := os.Chmod(stagedDB, 0o600); err != nil {
-		return fail(CodeIO, err, "protect snapshot")
+		return nil, fail(CodeIO, err, "protect snapshot")
 	}
 	if err := syncFile(stagedDB); err != nil {
-		return fail(CodeIO, err, "fsync snapshot")
+		return nil, fail(CodeIO, err, "fsync snapshot")
 	}
 	if h := opts.hooks; h != nil && h.afterSnapshot != nil {
 		if err := h.afterSnapshot(staging); err != nil {
-			return fail(CodeIO, err, "after snapshot")
+			return nil, fail(CodeIO, err, "after snapshot")
 		}
 	}
 
@@ -158,51 +158,51 @@ func Create(ctx context.Context, opts CreateOptions) (res *CreateResult, err err
 	installationID := ""
 	identSrc := filepath.Join(dataDir, IdentityAsset)
 	if _, ok, err := present(identSrc); err != nil {
-		return fail(CodeUnsafePath, err, "inspect installation identity")
+		return nil, fail(CodeUnsafePath, err, "inspect installation identity")
 	} else if ok {
 		identDst := filepath.Join(staging, IdentityAsset)
 		n, sum, err := copyFileHashed(ctx, identSrc, identDst, 0o600)
 		if err != nil {
-			return fail(CodeIO, err, "copy installation identity")
+			return nil, fail(CodeIO, err, "copy installation identity")
 		}
 		raw, err := os.ReadFile(identDst)
 		if err != nil {
-			return fail(CodeIO, err, "read installation identity")
+			return nil, fail(CodeIO, err, "read installation identity")
 		}
 		installationID = strings.TrimSpace(string(raw))
 		if !daemonmeta.ValidInstallationID(installationID) {
-			return fail(CodeIO, nil, "installation identity in %s is malformed; refusing to back it up", dataDir)
+			return nil, fail(CodeIO, nil, "installation identity in %s is malformed; refusing to back it up", dataDir)
 		}
 		assets = append(assets, Asset{Path: IdentityAsset, Role: RoleInstallationIdentity, Size: n, SHA256: sum, Mode: formatMode(0o600)})
 	}
 	skills, err := copySkillCatalog(ctx, dataDir, staging)
 	if err != nil {
-		return fail(CodeIO, err, "copy skill catalog")
+		return nil, fail(CodeIO, err, "copy skill catalog")
 	}
 	assets = append(assets, skills...)
 
 	progress("hashing")
 	dbSize, dbSum, err := hashFile(ctx, stagedDB)
 	if err != nil {
-		return fail(CodeIO, err, "hash snapshot")
+		return nil, fail(CodeIO, err, "hash snapshot")
 	}
 	assets = append(assets, Asset{Path: DatabaseAsset, Role: RoleDatabase, Size: dbSize, SHA256: dbSum, Mode: formatMode(0o600)})
 
 	progress("verifying")
 	facts, err := inspectDatabase(ctx, stagedDB, false)
 	if err != nil {
-		return fail(CodeDBUnreadable, err, "check snapshot")
+		return nil, fail(CodeDBUnreadable, err, "check snapshot")
 	}
 	if facts.Integrity != "ok" {
-		return fail(CodeIntegrityFailed, nil, "snapshot integrity_check: %s", facts.Integrity)
+		return nil, fail(CodeIntegrityFailed, nil, "snapshot integrity_check: %s", facts.Integrity)
 	}
 	if facts.ForeignKeyViolations != 0 {
-		return fail(CodeForeignKeyViolations, nil, "snapshot has %d foreign-key violations", facts.ForeignKeyViolations)
+		return nil, fail(CodeForeignKeyViolations, nil, "snapshot has %d foreign-key violations", facts.ForeignKeyViolations)
 	}
 
 	secretFP, err := secretKeyFingerprint(dataDir)
 	if err != nil {
-		return fail(CodeUnsafePath, err, "inspect secret key")
+		return nil, fail(CodeUnsafePath, err, "inspect secret key")
 	}
 	sort.Slice(assets, func(i, j int) bool { return assets[i].Path < assets[j].Path })
 	m := &Manifest{
@@ -228,29 +228,29 @@ func Create(ctx context.Context, opts CreateOptions) (res *CreateResult, err err
 		m.Tool.Name = "ao"
 	}
 	if findings := m.validate(); len(findings) > 0 {
-		return fail(CodeManifestInvalid, nil, "refusing to write an invalid manifest: %s", findings[0].Detail)
+		return nil, fail(CodeManifestInvalid, nil, "refusing to write an invalid manifest: %s", findings[0].Detail)
 	}
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
-		return fail(CodeIO, err, "encode manifest")
+		return nil, fail(CodeIO, err, "encode manifest")
 	}
 	if err := writeFileAtomic(filepath.Join(staging, ManifestName), append(data, '\n'), 0o600); err != nil {
-		return fail(CodeIO, err, "write manifest")
+		return nil, fail(CodeIO, err, "write manifest")
 	}
 
 	progress("finalizing")
 	if err := syncTree(staging); err != nil {
-		return fail(CodeIO, err, "fsync staging")
+		return nil, fail(CodeIO, err, "fsync staging")
 	}
 	if ctx.Err() != nil {
-		return fail(CodeCanceled, ctx.Err(), "canceled")
+		return nil, fail(CodeCanceled, ctx.Err(), "canceled")
 	}
 	final := filepath.Join(root, id)
 	if _, err := os.Lstat(final); err == nil {
-		return fail(CodeIO, nil, "%s already exists", final)
+		return nil, fail(CodeIO, nil, "%s already exists", final)
 	}
 	if err := opts.hooks.move(staging, final); err != nil {
-		return fail(CodeIO, err, "promote backup")
+		return nil, fail(CodeIO, err, "promote backup")
 	}
 	promoted = true
 	if err := syncDir(root); err != nil {
