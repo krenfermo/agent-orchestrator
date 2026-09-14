@@ -1,6 +1,6 @@
 # P10 — Backup / Restore / Operations
 
-*Estado: implementado en `feat/p10-backup-restore-operations`. Sustituye la
+*Estado: implementado en `feat/p10-backup-restore-operations` (base `847c47808`). Clasificación: **BACKUP / RESTORE OPERATIONALLY PROVEN**; la fiabilidad operativa de larga duración todavía **no** está probada (P11). Sustituye la
 sección "Pendiente" de [`backup-restore.md`](backup-restore.md), que describía el
 procedimiento manual con `VACUUM INTO` y la prueba de que funciona; P10 lo
 convierte en comandos con verificación, restauración, rollback y retención.*
@@ -148,7 +148,10 @@ base abierta `immutable=1`: `integrity_check` (o `quick_check` con `--quick`),
 6. sonda SQLite exclusiva sobre `ao.db` (`db_in_use`);
 7. `ao.db`/`installation_id`/`skills/catalog` del destino no son symlinks;
 8. política de identidad y de clave (§19);
-9. espacio libre: tamaño del backup (staging) + tamaño actual (rollback) + 64 MiB
+9. sin base en el destino no hay backup pre-restore posible: rechazo
+   `no_rollback_possible` si el restore reemplazaría un `skills/catalog` no vacío
+   o una identidad distinta, que sólo existen ahí;
+10. espacio libre: tamaño del backup (staging) + tamaño actual (rollback) + 64 MiB
    (`insufficient_space`).
 
 **Ejecución:**
@@ -183,8 +186,17 @@ se respaldó; el siguiente arranque del daemon decide migrar (§21-22).
 - Si el rollback también falla: `RESTORE_FAILED_ROLLBACK_FAILED` (exit 7), el
   journal queda en `rollback_failed`, y el mensaje nombra el backup de rollback y
   `ao backup recover`.
-- El algoritmo es idempotente: para cada entrada, si su copia staged ya no está
-  en `staged/` fue promovida; si su original está en `previous/`, vuelve.
+- El algoritmo es idempotente y converge desde cualquier punto (incluido un
+  rollback interrumpido): una entrada promovida cuyo original sigue en
+  `previous/`, o que no existía antes del swap (`preExisting` del journal), es la
+  restaurada y va a `failed/`; si su original ya volvió, se conserva. Un lateral
+  SQLite que no existía antes del swap va a `failed/`. Todo lo que sigue en
+  `previous/` vuelve a su nombre. Nunca se mueve un archivo a través de un
+  symlink del work dir.
+- Si no se puede registrar `complete` en el journal, se elimina el journal (el
+  restore verificado pasa a ser el estado registrado); si tampoco se puede, se
+  hace rollback, para que el resultado informado coincida con lo que concluiría
+  `recover`.
 
 ## F. Manifest `ao.backup/v1`
 
@@ -230,7 +242,8 @@ para el data dir:
 | Sonda SQLite exclusiva, antes del rollback y antes del swap | que **ninguna** conexión (daemon, sqlite3, otro `ao`) tiene la base abierta | `db_in_use` |
 
 `ao import` y `ao usage backfill-cache-ttl` pasan a usar el mismo guard offline
-(ambos run-files + `daemon.lock` + sonda) — cierra la deuda P9 de import.
+(ambos run-files + `daemon.lock` + sonda cuando hay base + la puerta de arranque:
+se niegan ante un restore interrumpido en fase crítica) — cierra la deuda P9 de import.
 
 Riesgo residual, documentado: un proceso **no AO** que abra `ao.db` entre la
 segunda sonda y el `rename` (ventana de milisegundos). AO no puede excluir a un
@@ -242,7 +255,7 @@ segunda sonda y el `rename` (ventana de milisegundos). AO no puede excluir a un
 | --- | --- |
 | backup create falla / Ctrl+C | origen intacto; staging eliminado; nada con aspecto válido |
 | verify falla | ninguna escritura |
-| preflight de restore falla | destino intacto (sólo se crea `daemon.lock`, el lock P9) |
+| preflight de restore falla | ninguna entrada gestionada reemplazada; puede crearse `daemon.lock`, y la sonda SQLite puede checkpointear marcos WAL confirmados (el mismo estado lógico) y dejar un `-shm` vacío |
 | rollback backup falla | destino intacto; journal eliminado |
 | staging falla (copia, hash, ENOSPC, EXDEV) | destino intacto; staging eliminado |
 | Ctrl+C antes de `swapping` | aborta limpio, destino intacto |
@@ -266,6 +279,7 @@ restore, el swap y el rollback. No en temporales sin valor durable.
 | Fase del journal | `ao backup recover` | Arranque del daemon |
 | --- | --- | --- |
 | `preparing`, `rollback_ready`, `staged` | elimina staging y journal (no hubo swap) | **permitido** (staging viejo inofensivo) |
+| `rolled_back` | limpia el work dir y el journal | permitido |
 | `swapping`, `swapped`, `rolling_back`, `rollback_failed` | rollback idempotente | **rechazado**: estado ambiguo |
 | `complete` | limpia `previous/` y journal | permitido |
 
@@ -319,11 +333,15 @@ binario:
 - **Nunca**: `pre-restore`, `pre-migration`, el backup válido más reciente, uno
   con lock tomado (en uso por un restore), entradas que no son `aob-*`.
 - Staging huérfano (lock libre) y `.deleting-*` se limpian con `--apply`.
+- Quien tiene un lock (`.locks/<id>.lock`) nunca borra su archivo: borrarlo con
+  otro proceso esperando dejaría a dos "dueños" del mismo backup. El restore
+  bloquea el backup origen en **su** raíz, sea cual sea `--root`. `prune --apply`
+  barre los lock files de backups que ya no existen.
 
 ## 30. Estado operativo
 
 `ao backup list` muestra por backup: id, kind, fecha UTC, tamaño, goose,
-compatibilidad, checks de creación, estado (`ok`/`incomplete`/`invalid_manifest`);
+compatibilidad, checks de creación, estado (`ok`/`in_progress`/`incomplete`/`deleting`/`invalid_manifest`/`unsupported`);
 y al final, de `operations.jsonl`: último backup, último restore y su backup de
 rollback.
 
@@ -343,7 +361,7 @@ bucles de arranque. Integración futura: en `daemon.RunWithConfig`, tras
 | 0 | éxito / `VALID` compatible o `upgrade_required` |
 | 1 | fallo interno o de E/S |
 | 2 | uso incorrecto |
-| 3 | rechazado por seguridad (`daemon_active`, `daemon_unverified`, `daemon_ambiguous`, `data_dir_locked`, `db_in_use`, `installation_mismatch`, `secret_key_mismatch`, `source_inside_destination`, `insufficient_space`, `restore_interrupted`, `unsafe_path`) |
+| 3 | rechazado por seguridad (`daemon_active`, `daemon_unverified`, `daemon_ambiguous`, `data_dir_locked`, `db_in_use`, `backup_in_use`, `no_rollback_possible`, `installation_mismatch`, `secret_key_mismatch`, `source_inside_destination`, `insufficient_space`, `restore_interrupted`, `unsafe_path`, `invalid_backup_root`) |
 | 4 | backup `INVALID` |
 | 5 | backup `UNSUPPORTED` o `newer_than_binary` |
 | 6 | `RESTORE_FAILED_ROLLED_BACK` |
@@ -413,7 +431,7 @@ La salida nombra el backup de rollback `pre-restore` creado.
 
 ```bash
 ao stop
-ao backup restore ~/.ao/backups/aob-…-pre-restore-backup-id
+ao backup restore <ruta del backup pre-restore que imprimió el restore>
 ```
 
 ### Si AO no arranca
@@ -443,7 +461,7 @@ ao backup create --note "p11-t24" --json > p11-t24.json
 ao backup verify --json "$(jq -r .path p11-t24.json)" > p11-t24-verify.json
 
 # Salud de la base entre snapshots (sin tocar la base viva):
-jq '.status, .compatibility, .checks' p11-t24-verify.json
+jq '.status, .compatibility, .checkMode, .integrity, .reasons' p11-t24-verify.json
 
 # Comparar estado entre snapshots (sobre las copias, nunca la base viva):
 for t in t0 t24; do
@@ -460,7 +478,129 @@ ao backup restore "$(jq -r .path p11-t24.json)"
 ao start
 ```
 
-## Evidencia
+## Evidencia P10
 
-Ver la sección "Evidencia P10" al final (tests, E2E, medidas) — se completa con
-los resultados de las gates.
+Todas las pruebas construyen su propia instalación scratch; ninguna abre, copia ni
+restaura `~/.ao`. El único acceso a la base real fue la medición opt-in de solo
+lectura (`mode=ro&immutable=1`), con comprobación antes/después.
+
+### Mapa de pruebas
+
+| Propiedad (DoD) | Prueba |
+| --- | --- |
+| A/B snapshot consistente, WAL sin checkpoint capturado sin copiar `-wal` (§51) | `TestCreateCapturesUncheckpointedWALWithoutCopyingIt` |
+| Escritor concurrente: prefijo consistente, integridad y FK (§35) | `TestCreateUnderConcurrentWritesIsConsistent` |
+| Creates concurrentes sin colisión (§34) | `TestConcurrentCreatesNeverCollide` |
+| Fallo/Ctrl+C en create: nada válido, origen intacto (§38, §65) | `TestCreateFailureOrCancelKeepsNothingAndTouchesNoSource` |
+| Raíz de backup peligrosa (§72) | `TestCreateRefusesADangerousRoot` |
+| Symlinks en origen y destino (§40) | `TestCreateRefusesSymlinksInTheSource`, `TestRestoreRefusesUnsafePaths` |
+| Permisos 0700/0600 (§39) | `TestCreatePermissions`, `TestRestoreRoundTripReturnsStateA` |
+| Privacidad (§42) | `TestBackupCarriesNoSecrets` |
+| Hash en streaming (§59) | `TestVerifyHashesByStreaming` (base de 39 MB, pico de heap +1–4 MiB) |
+| C manifest versionado, rutas (§41, §45) | `TestParseManifest*`, `TestManifestAssetRules`, `TestValidateAssetPath`, `TestBackupIDsAreSortableAndDistinct`, `TestJournalRejectsPathsOutsideTheManagedEntries` |
+| D corrupción (§25): 18 casos fallan cerrados y el restore no toca el destino | `TestCorruptBackupsFailClosedAndNeverRestore`, `TestVerifyWritesNothing` |
+| E/F daemon activo, lock, conexión abierta | `TestRestoreRefusesWhenAODaemonIsNotProvenStopped`, `TestRestoreRefusesWhenTheDataDirOrDatabaseIsHeld` |
+| G/H/I/J round trip, pre-restore verificado, WAL/SHM viejos (§23, §24, §52) | `TestRestoreRoundTripReturnsStateA`, `TestRestoreLeavesNoStaleWALOrSHM`, `TestSwapAndRollbackAreExactAndIdempotent` |
+| K auto-rollback y rollback fallido recuperable (§27, §55) | `TestRestoreAutoRollbackAfterTheSwap`, `TestRestoreRollbackFailureIsExplicitAndRecoverable` |
+| Inyección de fallos antes del swap (§26) | `TestRestoreFailuresBeforeTheSwapLeaveTheDestinationUntouched` |
+| EXDEV (§70) | `TestRestoreAutoRollbackAfterTheSwap/promotion_crosses_a_device` |
+| Cancelación (§38) | `TestRestoreCancellation` |
+| Crash en create y restore, journal, arranque (§77–§79) | `TestRollbackFromEveryPartialSwap` (cada rename), `TestCrashDuringRestoreIsAlwaysResolvable` (6 puntos, proceso hijo real con `os.Exit`), `TestCrashDuringCreateNeverLooksValid` |
+| O esquema anterior sin migrar / posterior rechazado (§56, §57) | `TestRestoreOlderSchemaIsNotMigrated`, `TestRestoreNewerSchemaFailsClosed`, `TestMigrationHeadIsTheVersionAFreshDatabaseReaches` |
+| Identidad y clave (§19) | `TestRestoreInstallationIdentityPolicy`, `TestDecideIdentity`, `TestRestoreSecretKeyPolicy` |
+| Runtime posterior al backup nunca adoptado (§20) | `TestRestoredStateNeverOwnsARuntimeLaunchedAfterTheBackup` |
+| P retención (§28, §58, §65) | `TestPruneDeletesOnlyCandidates`, `TestPruneNewestAndMaxAge`, `TestPruneFailureLeavesOtherBackupsIntact` |
+| CLI: daemon vivo (ambas convenciones), no verificado, unhealthy, lock, stale, confirmación, códigos de salida, guard de import | `TestBackupCLI_*`, `TestRestoreCLI_*`, `TestHoldDataDirOfflineRefusesAHeldDataDir`, `TestBackupExitCodes` |
+
+### E2E con el daemon real (`AO_P10_E2E=1`)
+
+| Prueba | Resultado |
+| --- | --- |
+| `TestP10_OnlineBackupRestoreRefusedWhileRunningThenRestoredAfterStop` — backup online válido; `ao restore` con daemon vivo → exit 3 `daemon_active`, daemon intacto; tras `ao stop` → RESTORED, fila posterior al backup desaparece, sin `-wal`/`-shm`; el daemon arranca sobre el estado restaurado | PASS (3.9 s) |
+| `TestP10_RestoreRefusesAnUnverifiedLivePID` — PID vivo con probe de otra identidad → exit 3 `daemon_unverified`, proceso sin señal, run-file intacto; tras resolverlo → restore OK | PASS (1.0 s) |
+| `TestP10_DaemonRefusesToBootOverAnInterruptedRestore` — journal en `swapping` → `ao daemon` se niega nombrando `ao backup recover`; recover → `RECOVERED_ROLLED_BACK`; el daemon arranca | PASS (1.1 s) |
+
+### Gates
+
+| Gate | Resultado |
+| --- | --- |
+| `gofmt -l` | limpio |
+| `go build ./...`; `GOOS=linux`/`GOOS=windows go build ./internal/backup/` | OK |
+| `go vet` backup, backup/e2e, cli, daemon | OK |
+| `go test` backup, cli, daemon, daemonlock, runfile, daemonmeta, telemetrymeta | OK |
+| `go test ./internal/storage/sqlite/` (suite completa) | OK (38.5 s) |
+| `-race` backup (186 s, incluye crashes en proceso hijo), daemonlock, telemetrymeta, cli (backup/restore/import/guard/discovery/stop, 48 s) | OK, sin data races |
+| Race amplio de workflow | no ejecutado: P10 no toca workflow/lifecycle/recovery |
+| golangci-lint v2.12.2 | 28 incidencias = base `847c47808`, diff vacío (delta 0) |
+| Frontend / OpenAPI | sin cambios de API: no aplica |
+
+### Mediciones (§36, §59)
+
+Base sintética de 449 MiB (`AO_P10_BENCH=1`, macOS arm64, SSD interno):
+
+| Operación | Tiempo | Pico de heap sobre base | Pico de disco extra |
+| --- | --- | --- | --- |
+| `create` | 2.4 s | +4.2 MiB | +448 MiB (1× snapshot) |
+| `verify` completo | 0.86 s | +4.0 MiB | 0 |
+| `verify --quick` | 0.47 s | +4.0 MiB | 0 |
+| `restore` (incluye pre-restore + staging + verificación) | 6.1 s | +6.1 MiB | +896 MiB (≈2×) |
+
+maxrss del proceso: 51 MiB. El swap son renames: `previous/` no ocupa espacio extra.
+
+Base real de 866 MiB, **solo lectura** (`AO_P10_REAL_DB`, `mode=ro&immutable=1`,
+copia en el scratchpad y borrada después): `VACUUM INTO` 5.1 s → 811 MiB;
+`integrity_check` + `foreign_key_check` + goose sobre la copia 10.4 s: `ok`, 0
+violaciones, goose 170; SHA-256 del origen 0.9 s. Estimación para la base real:
+`create` ≈ +811 MiB de disco, `restore` ≈ +1.7 GiB de pico; libres 66 GiB.
+
+### Base real antes / después
+
+| | Antes | Después |
+| --- | --- | --- |
+| Ruta | `~/.ao/data/ao.db` | igual |
+| Tamaño | 908 447 744 | 908 447 744 |
+| mtime | 2026-09-13 19:37:21 | 2026-09-13 19:37:21 |
+| SHA-256 | `7ee966e6a7dfa5a1dc8b9860cd6cd478dbb3c0a4637a5f52ff01263b59a4e03f` | idéntico |
+| goose | 170 | 170 |
+| `-wal`/`-shm`/`-journal` | ausentes | ausentes |
+
+AO real al final: parado (puerto 3002 libre, sin run-files, sin daemon, sin
+Electron, sin servidor tmux). `~/.ao/backups` histórico sin cambios.
+
+### Revisión adversarial interna (§82)
+
+Revisión independiente de sólo lectura sobre `847c47808..HEAD` (un agente
+aparte, sin builds ni acceso a `~/.ao`), con los puntos de §82. Sin ningún camino
+de pérdida silenciosa de la base original; confirmados como seguros: mismo
+camino/anidamiento/symlinks, manifest y journal manipulados, ventana del daemon
+(daemon.lock retenido hasta el final, rollback incluido), WAL/laterales,
+convergencia ante crash en cada rename, EXDEV/ENOSPC, staging y prune,
+cancelación, permisos y secretos, clasificación de resultados y puerta de arranque.
+
+Hallazgos y disposición — todos corregidos, cada uno con su prueba:
+
+| # | Severidad | Hallazgo | Corrección | Prueba |
+| --- | --- | --- | --- | --- |
+| F1 | media | Si fallaba escribir `complete` en el journal se informaba RESTORED con el journal en `swapped`, y el `recover` recomendado deshacía el restore | Se elimina el journal; si tampoco se puede, rollback inmediato | `TestRestoreCompletionThatCannotBeJournaledStaysRestored`, `TestRestoreCompletionWithNoUsableJournalRollsBack` |
+| F2 | media | Sin `ao.db` no hay backup pre-restore, pero el `skills/catalog` (y la identidad con `--identity=backup`) se borraban al terminar | Rechazo `no_rollback_possible` | `TestRestoreRefusesToReplaceWhatADatabaselessDataDirAloneHolds` |
+| F3 | media | `ao import` y el backfill escribían sobre un restore interrumpido a mitad del swap (escritura perdida o recuperación rota) | El guard offline aplica la puerta de arranque | `TestHoldDataDirOfflineRefusesAnInterruptedRestore` |
+| F4 | baja | Mensajes "el data dir no cambió" imprecisos (la sonda puede checkpointear; el lector deja laterales vacíos) | Redacción exacta en código y documento | revisión de texto |
+| F5 | baja | Borrar el lock file al soltarlo permitía dos dueños; el origen fuera de `--root` no se bloqueaba | Los lock files no los borra quien los tiene; el origen se bloquea en su raíz; prune barre huérfanos | `TestRestoreLocksTheSourceInItsOwnRoot`, `TestLockFilesStayWithHoldersAndPruneSweepsOrphans` |
+| F6 | baja | Recover seguía symlinks dentro del work dir | Rechazo antes de mover nada | `TestRecoverRefusesToMoveFilesThroughASymlinkedWorkDir` |
+
+### Deudas restantes
+
+- **Hook de backup previo a migración** (§31): documentado, no activado.
+- **Riesgo residual de exclusión**: un proceso no AO (un `sqlite3` manual) que abra
+  `ao.db` entre la segunda sonda y el `rename`. AO no puede excluir lo que no
+  respeta `daemon.lock`.
+- **Windows**: compila, no está probado (`flock`, `rename` sobre abiertos, fsync de
+  directorios).
+- **`secret.key`** fuera del backup por diseño: el operador debe respaldarla aparte.
+- **Worktrees, logins de proveedor y credenciales** fuera del backup por diseño.
+- **Firma/autenticidad** de backups: no existe; verify prueba integridad.
+- **Recover nunca rueda hacia delante**: un restore interrumpido tras el swap se
+  deshace y se repite.
+- **Stamp `size+mtime` del journal** en recover: si una sonda de `recover`
+  llegara a checkpointear un WAL del estado original, la comprobación falla
+  cerrada (`RECOVER_FAILED`) en lugar de aceptar un estado dudoso.
