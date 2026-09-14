@@ -44,8 +44,14 @@ func TestP9_TerminalRunIsImmutableThroughStartupReconciliation(t *testing.T) {
 					f.launcher.foreign = map[string]bool{identity: true}
 				}
 
+				// The ledger is counted BEFORE any read entry point runs, so a
+				// write made by the read itself cannot hide inside the baseline.
+				ledgerBefore := len(f.checkpointPhases())
 				before := p9TerminalSurface(t, f)
-				launches, cancels := f.launcher.launchCalls, f.launcher.cancelCalls
+				if before.checkpoints != ledgerBefore {
+					t.Fatalf("reading a %s run wrote to its ledger: %d -> %d", terminal, ledgerBefore, before.checkpoints)
+				}
+				launches, cancels, probes := f.launcher.launchCalls, f.launcher.cancelCalls, f.launcher.probeCalls
 
 				// Well past the probe budget (5): every boot, then the read and
 				// resume entry points, then more boots.
@@ -82,6 +88,11 @@ func TestP9_TerminalRunIsImmutableThroughStartupReconciliation(t *testing.T) {
 				}
 				if f.launcher.cancelCalls != cancels {
 					t.Fatal("a session AO cannot prove it owns was destroyed")
+				}
+				// Vacuity guard: the sweep really looked at the orphan reviewer.
+				// Immutability that holds because nothing was probed proves nothing.
+				if f.launcher.probeCalls == probes {
+					t.Fatal("the sweep never probed the reviewer of the closed run; the test is vacuous")
 				}
 			})
 		}
