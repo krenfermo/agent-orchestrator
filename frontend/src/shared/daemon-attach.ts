@@ -34,6 +34,12 @@ export type DaemonProbe = {
 	startupWorkingDirectory?: string;
 	/** Stable outer .AppImage path (AO_APPIMAGE), present only when the daemon's launcher runs under AppImage. */
 	appImagePath?: string;
+	/** P9: this daemon process lifetime's identity, when the daemon reports it. */
+	instanceId?: string;
+	/** P9: the AO installation (data dir) identity, when the daemon reports it. */
+	installationId?: string;
+	/** P9: the data dir the daemon serves, when it reports it. */
+	dataDir?: string;
 };
 
 /** A /healthz|/readyz probe of a loopback port; resolves null when nothing valid answers. */
@@ -69,6 +75,9 @@ export function parseDaemonProbe(endpoint: "healthz" | "readyz", body: unknown):
 		startupWorkingDirectory:
 			typeof candidate.startupWorkingDirectory === "string" ? candidate.startupWorkingDirectory : undefined,
 		appImagePath: typeof candidate.appImagePath === "string" ? candidate.appImagePath : undefined,
+		instanceId: typeof candidate.instanceId === "string" ? candidate.instanceId : undefined,
+		installationId: typeof candidate.installationId === "string" ? candidate.installationId : undefined,
+		dataDir: typeof candidate.dataDir === "string" ? candidate.dataDir : undefined,
 	};
 }
 

@@ -66,7 +66,7 @@ import {
 	resolveDaemonFromPort,
 	resolveDaemonFromRunFile,
 } from "./shared/daemon-attach";
-import { browserDaemonOwnershipDecision, shouldReplacePortHolder } from "./shared/daemon-takeover";
+import { browserDaemonOwnershipDecision, decidePortHolderTakeover } from "./shared/daemon-takeover";
 import { buildDaemonEnv, resolveShellEnv, type ShellRunner } from "./shared/shell-env";
 import {
 	handleCloudDeepLink,
@@ -1111,62 +1111,59 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		}
 	}
 
-	// Wedged-orphan kill+replace: both attach paths returned null, but a process
-	// may still be holding the port. The only reachable case here is a hung/wedged
-	// holder whose run-file PID is still alive but is not answering /healthz (e.g.
-	// our own daemon that bound the port and then deadlocked). Two cases are
-	// intentionally NOT handled: an identity-mismatched but healthy AO daemon is
-	// already surfaced as an error status upstream by resolveDaemonFromPort (not
-	// killed here), and a foreign non-AO process holding the port with a dead
-	// run-file PID is not replaced (out of scope). When no holder is detectable,
-	// skip straight to spawn.
+	// Port-holder takeover (P9): both attach paths returned null, but a process
+	// may still hold the port. AO never signals a process whose ownership it has
+	// not proven -- a PID that is merely alive may belong to anything after PID
+	// reuse, and its process group with it. A holder is only ever asked to stop
+	// through the daemon's own /shutdown, and only when it is provably the daemon
+	// the run-file names and passes this launch's identity check. Everything else
+	// is refused with the process named, and nothing is touched.
 	const orphanProbe = await readDaemonProbe(resolvedDaemonPort(), "healthz");
 	const runFilePath_ = runFilePath();
-	let runFilePid: number | null = null;
+	let runFileInfo: ReturnType<typeof parseRunFile> = null;
 	if (runFilePath_) {
 		try {
-			runFilePid = parseRunFile(await readFile(runFilePath_, "utf8"))?.pid ?? null;
+			runFileInfo = parseRunFile(await readFile(runFilePath_, "utf8"));
 		} catch {
-			// run-file absent or unreadable; proceed without a PID.
+			// run-file absent or unreadable; proceed without it.
 		}
 	}
-	// process.kill(pid, 0) does not kill; it throws iff the PID is not live.
-	let holderPidAlive = false;
-	if (runFilePid) {
+	const runFilePid = runFileInfo?.pid || null;
+	const takeover = decidePortHolderTakeover({
+		probe: orphanProbe,
+		runFilePid,
+		runFileInstanceId: runFileInfo?.instanceId,
+		runFilePidAlive: runFilePid ? processAlive(runFilePid) : false,
+		identityError: orphanProbe ? daemonIdentityError(launch, orphanProbe) : null,
+	});
+	if (takeover.action === "refuse") {
+		setDaemonStatus({
+			state: "error",
+			message: `The AO daemon port is held by a process AO cannot prove it owns: ${takeover.reason}`,
+			code: "not_ready",
+		});
+		return daemonStatus;
+	}
+	if (takeover.action === "graceful_shutdown" && orphanProbe) {
 		try {
-			process.kill(runFilePid, 0);
-			holderPidAlive = true;
-		} catch {
-			holderPidAlive = false;
+			await gracefullyReplaceDaemonForBrowser({ ...daemonStatus, port: resolvedDaemonPort() });
+		} catch (err) {
+			setDaemonStatus({
+				state: "error",
+				message: `The previous AO daemon did not shut down: ${(err as Error).message}`,
+				code: "not_ready",
+			});
+			return daemonStatus;
 		}
-	}
-	if (shouldReplacePortHolder(orphanProbe, holderPidAlive)) {
-		// Use the run-file PID when available; fall back to the probe's reported
-		// PID as a last resort (a wedged daemon may not have written a fresh run-file).
-		const pidToKill = runFilePid ?? orphanProbe?.pid ?? null;
-		if (pidToKill) {
+		// The run-file is removed only while it still names the daemon that just
+		// stopped, and only once that process is gone.
+		if (runFilePath_ && runFilePid && !processAlive(runFilePid)) {
 			try {
-				process.kill(-pidToKill, "SIGTERM");
+				const current = parseRunFile(await readFile(runFilePath_, "utf8"));
+				if (current?.pid === runFilePid) await rm(runFilePath_, { force: true });
 			} catch {
-				try {
-					process.kill(pidToKill, "SIGTERM");
-				} catch {
-					// process already gone; proceed
-				}
+				// already gone
 			}
-		}
-		// Poll until the port is free (probe returns null) or 8 s elapses.
-		const TAKEOVER_TIMEOUT_MS = 8_000;
-		const TAKEOVER_POLL_MS = 200;
-		const deadline = Date.now() + TAKEOVER_TIMEOUT_MS;
-		while (Date.now() < deadline) {
-			const still = await readDaemonProbe(resolvedDaemonPort(), "healthz");
-			if (!still) break;
-			await new Promise<void>((r) => setTimeout(r, TAKEOVER_POLL_MS));
-		}
-		// Remove the stale run-file so the new daemon can write a fresh one.
-		if (runFilePath_) {
-			await rm(runFilePath_, { force: true });
 		}
 	}
 
