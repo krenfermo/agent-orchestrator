@@ -207,7 +207,7 @@ func newRecoverOwnershipCommand(ctx *commandContext) *cobra.Command {
 			var res struct {
 				WorkerOwnership []workerOwnershipRow `json:"workerOwnership"`
 			}
-			if err := ctx.getJSON(cmd.Context(), "workflows/"+url.PathEscape(runID)+"/recovery", &res); err != nil {
+			if err := ctx.getJSON(cmd.Context(), "workflows/"+url.PathEscape(runID)+"/recovery?ownership=1", &res); err != nil {
 				return err
 			}
 			out := cmd.OutOrStdout()

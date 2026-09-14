@@ -228,7 +228,8 @@ type WorkflowRecoveryResponse struct {
 	Status *WorkflowRecoveryStatusView `json:"status,omitempty"`
 	// WorkerOwnership is P9's ownership readback: per worker step, whether AO
 	// can PROVE the runtime is the one it launched, and what recovery would
-	// decide about it. Absent when the daemon cannot compose it.
+	// decide about it. Present only when requested with ?ownership=1, and absent
+	// when the daemon cannot compose it.
 	WorkerOwnership []WorkflowWorkerOwnershipView `json:"workerOwnership,omitempty"`
 }
 
@@ -565,8 +566,11 @@ func (c *WorkflowsController) getRecovery(w http.ResponseWriter, r *http.Request
 	if status, serr := svc.RecoveryStatusFor(r.Context(), runID); serr == nil {
 		out.Status = workflowRecoveryStatusView(status)
 	}
-	// P9: the ownership readback rides on the same read, for the same reason.
-	if reader, ok := svc.(workerOwnershipReader); ok {
+	// P9: the ownership readback rides on the same read, for the same reason --
+	// but only when asked for (?ownership=1). Each row reads the worker's runtime
+	// identity back (tmux + a process listing), and the run page polls this route
+	// every few seconds; an operator question must not become a background cost.
+	if reader, ok := svc.(workerOwnershipReader); ok && r.URL.Query().Get("ownership") == "1" {
 		if rows, oerr := reader.WorkerOwnershipFor(r.Context(), runID); oerr == nil {
 			out.WorkerOwnership = workflowWorkerOwnershipViews(rows)
 		}

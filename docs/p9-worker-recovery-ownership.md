@@ -196,3 +196,194 @@ reason is `worker_ownership_unproven`, distinct from every failure reason.
 * **Fresh launch confirmation** is not re-gated on the runtime read; P9 gates every
   path that acts **without** the launching process's memory (adoption, reopen,
   reconciliation).
+
+---
+
+## 7. What was implemented (second pass)
+
+| Block | Commit | Content |
+| --- | --- | --- |
+| A | `dddcda93e` | This document §1–§6 |
+| B+C | `561850f2f` | Runtime ownership proof, identities, decision model, fail-closed CAS fixes |
+| F | `22bc808b2` | Terminal-run immutability, Fix liveness |
+| D+E+G(tmux) | `2d0164d19` | Crash windows C1–C10, real-tmux E2E, daemon discovery/stop |
+| H | `458d4b693` | Ownership readback (HTTP + CLI) |
+| G(daemon) | `a4e3c4fb0` | Real daemon restart/crash E2E in scratch |
+
+No migration and no sqlc change: every decision input already had a column (§1).
+
+## 8. Identity model as implemented
+
+| Identity | Where it lives | Created | Used for |
+| --- | --- | --- | --- |
+| Installation | `<data dir>/installation_id` (`aoi-<uuid>`), `daemonmeta.LoadOrCreateInstallationID` — O_EXCL, never regenerated; a malformed file is an error, not a reason to mint another | first daemon boot on that data dir | tmux stamp `AO_INSTALLATION_ID`; `running.json`; `/healthz`; `installation_mismatch` |
+| Daemon instance | `daemonmeta.NewDaemonInstanceID` (`aod-<uuid>`), one per process; it IS the branch-lock / placement owner token (one incarnation, one id) | every boot | tmux stamp `AO_DAEMON_INSTANCE_ID` (provenance only), `running.json`, `/healthz`, stop verification |
+| Worker launch | `sessions.runtime_launch_id` + owner token `ao-session:<session>:<launch>` in tmux session env | every spawn/restore | the ownership proof |
+| Runtime incarnation | tmux `$N` in `sessions.runtime_instance_id` | tmux `new-session -P` | addressing facts and destroys; `instance_mismatch` |
+| Dispatch generation | `workflow_outbox.dispatch_generation` (unchanged) | outbox claim | claim fence |
+
+PID is never an identity. A tmux session name is never evidence.
+
+## 9. The ownership proof (`workerownership.Classify`)
+
+Order is the proof: (1) the row must carry complete provenance, and its token must be
+`SessionRuntimeOwnerToken(id, launch)` — otherwise `provenance_missing`/`owner_mismatch`
+without asking the runtime; (2) the recorded `$N` is read first; (3) only if it is gone is
+the name consulted, to separate `absent` from `instance_mismatch`; (4) owner token, then
+installation stamp (an unstamped runtime is not a mismatch); (5) workload liveness last.
+
+`session_manager.ObserveWorkerRuntime` wraps it; the daemon wires it as
+`workflow.Deps.WorkerRuntimeOwnership`. `tmux.Restart` now re-stamps the owner token
+before `respawn-pane` (RC4 — every restored worker would otherwise fail closed falsely).
+
+**conpty / Windows: option B.** No `SessionFactsReader` ⇒ `unsupported` ⇒ recovery and
+adoption FAIL CLOSED with `worker_ownership_unproven`. Fresh launches are unaffected.
+NOT production-ready for restart adoption on Windows; parity is a separate block.
+
+## 10. Where the decision is enforced
+
+`decideWorkerAdoption` (ADOPT / RELAUNCH / WAIT / NOOP / FAIL_CLOSED, closed reason codes)
+is the single answer for:
+
+* `adoptLiveLaunch` (reconciliation of an intended/unconfirmed launch);
+* `adoptOrMarkAmbiguous` (dispatched command, natural-key session);
+* `resumeWorkerLaunchAfterFailure` (human reopen).
+
+And `ownedExecution.Live()` requires proof `owned` when the port is wired, so the reconcile
+sweep can no longer protect or adopt on row + name.
+
+Fences, in order: terminal run → runtime proof → recorded launch id → generation fence (a
+session created before the claim in force, when no launch was recorded) → worktree →
+branch. An unreadable runtime is waited out for `workerRuntimeUnreadableGrace` (15 min),
+then fails closed; it is never adopted.
+
+CAS / fail-closed fixes: RC5 `stillOwnsWorkerDispatch` answers false on a read error; RC6
+the session bind's result is checked (a lost bind writes no usage window, lock pointer or
+RUNNING); RC7 an unreadable ledger is an exhausted budget; C4 a confirmed, bound, live
+launch stuck at `ready` finishes RUNNING through `StartWorkflowStepForSession`; I18 a step
+already holding a session is never re-adopted (the order of dispatch records sharing one
+clock reading had produced a second confirmation).
+
+## 11. Crash / restart matrix (tests: `p9_worker_recovery_test.go`)
+
+| # | Durable before | Runtime before | Recovery action | Durable after | Runtime after |
+| --- | --- | --- | --- | --- | --- |
+| C1 | run created, nothing launched | none | next start launches once | one session, RUNNING | one worker |
+| C2 | claim + intent + open attempt, no session | none | settle window, then proven absent (natural key) → bounded retry | one replacement, RUNNING | one worker |
+| C3 | intent + session row, unconfirmed | owned | ADOPT through the ordinary confirmation | confirmed, RUNNING over it | untouched |
+| C3′ | same | instance/owner/installation mismatch, legacy, unsupported | FAIL_CLOSED `worker_ownership_unproven`, outbox stays dispatched | needs_attention, no session bound | untouched, never killed |
+| C3″ | same | unreadable | WAIT ≤15 min, then FAIL_CLOSED | unchanged, then needs_attention | untouched |
+| C3‴ | unconfirmed record with launch L1 / worktree W1 | owned, but row now L2 / W2 | FAIL_CLOSED (launch / worktree mismatch) | needs_attention | untouched |
+| C4 | confirmed + ack + session bound, step `ready` | owned | finish RUNNING via CAS | RUNNING | untouched |
+| C5/C7 | confirmed RUNNING | owned | protected; nothing written | unchanged | untouched |
+| C6 | RUNNING, turn receipt after dispatch | owned_exited | ending belongs to work observation | observed, no ambiguity | pane kept |
+| C8 | confirmed RUNNING, row live | proven absent (phantom) | classified `worker_dispatch_ambiguous` with evidence, never relaunched (the step owns a session that may have written the tree) | needs_attention | none |
+| I9 | gen-1 session unconfirmed & dead → gen-2 RUNNING | gen-1 exits late | gen-1's late completion ignored | gen-2 still RUNNING | gen-2 untouched |
+| C10 | C3 state | owned | two recoveries race (20 rounds): one owner, one ack, one confirmation | RUNNING | untouched |
+| earlier gen | live AO session created before the claim in force | owned | FAIL_CLOSED `generation_mismatch` | needs_attention | untouched |
+| terminal | C3 state, run cancelled | owned | NOOP; no row written | unchanged | untouched |
+
+## 12. Sleep / wake
+
+Silence is never a death certificate. A work step's active worker has no silence stop; a
+three-hour clock jump over an owned runtime writes nothing (`TestP9Crash_ClockJump…`). A fix
+cycle past `fixActiveSilenceWindow` re-reads the runtime: owned → nothing; provably gone →
+concluded on workspace evidence; unprovable → nothing (`TestP9Fix_ClockJump…`).
+`last_signal_at` is evidence of life, never ownership. Residue: an uncorroborated
+`waiting_input` silent for 15 min still stops as before — that stop asks a person, it does
+not declare the worker dead.
+
+## 13. Fix liveness
+
+A fix cycle rides in the worker's session and its step has no `session_id`. P9:
+`fixCycleStarted` counts an `active` signal after the dispatch (never an idle one —
+wf-57f90ff2 stays closed); `observeActiveFixSilence` bounds silence with a runtime re-check;
+the liveness view resolves the fix step's session from its dispatch record (P8 debt 11).
+
+## 14. Terminal-run immutability
+
+The boot orphan-reviewer sweep no longer writes `review_reviewer_unproven` nor escalates a
+STOP on a completed/failed/cancelled run; a reviewer PROVEN to be AO's is still terminated.
+`appendUnprovenReviewerProbe` and `escalateUnprovenReviewer` re-read the run and refuse a
+closed one. Held byte-for-byte across repeated boots (row, ledger, full `RunDetail`) for all
+three terminal states. Budget and escalation are unchanged on live runs. Worker
+reconciliation already skipped terminal runs; `TestP9Crash_TerminalRun…` pins it.
+
+## 15. Daemon discovery and stop
+
+`running.json` v2 adds `formatVersion`, `instanceId`, `installationId`, `dataDir`; `/healthz`
+publishes the same identity. `ao status` / `ao stop` inspect BOTH conventions for the
+installation (`AO_RUN_FILE` and `<data dir>/running.json`) and classify each:
+
+| State | Meaning | stop |
+| --- | --- | --- |
+| verified (`ready`/`not_ready`) | PID alive, probe answers with the same PID, instance and data dir | `/shutdown`, then wait for exit (PID gone, or file gone AND the port no longer answering as that incarnation) |
+| `unhealthy` | PID alive, probe unreachable — RUNNING BUT UNVERIFIED | refused |
+| `running_unverified` | probe answers as another incarnation/installation | refused |
+| `foreign` | run-file or probe names another data dir | refused, file kept, never probed |
+| `stale` | PID dead, or the port is answered by a different PID | file removed by exact match (`RemoveIfMatches`) |
+| two verified daemons | — | refuses to guess |
+
+Nothing ever sends a signal. The daemon's startup guard checks both locations too.
+Electron's wedged-orphan takeover (`frontend/src/main.ts`, SIGTERM on a PID that is merely
+alive) is unchanged and remains a debt (§20).
+
+## 16. Readback
+
+`GET /api/v1/workflows/{id}/recovery` → `workerOwnership[]` and `ao workflow recover ownership
+<id>`: ownership, proof, recorded/observed incarnation, installation, launch state,
+generation, phase, attempt, last signal, and the recovery decision + reason code from the
+same `decideWorkerAdoption`. Strict read; no prompt, command, env or token.
+
+## 17. False-positive matrix
+
+| Scenario | Base (pre-P9) | P9 |
+| --- | --- | --- |
+| worker alive, no transition | adopted/protected on row + name | protected on runtime proof |
+| worker alive after sleep | protected | protected; nothing written |
+| fix active, signalling | running | running, runtime never probed |
+| fix active, quiet, runtime alive | running forever | running |
+| fix runtime dead, row `active` | running forever | concluded on workspace evidence |
+| reviewer alive | adopted on reviewer probe | unchanged |
+| runtime dead (unconfirmed launch) | retried | retried once |
+| runtime dead (confirmed phantom) | stop with evidence | stop with evidence |
+| runtime of another generation | adopted by natural key | FAIL_CLOSED |
+| runtime of another installation | adopted if the name matched | FAIL_CLOSED |
+| name reused by a new incarnation | adopted (`has-session` true) | FAIL_CLOSED `instance_mismatch` |
+| legacy session, no provenance | adopted on liveness | FAIL_CLOSED `legacy_provenance_missing` |
+| unreadable runtime probe | adopted (unknown liveness counted as alive) | WAIT, then FAIL_CLOSED |
+| restored worker (Restart) | token stale in tmux | token re-stamped, proven |
+| stale `running.json` | removed unconditionally | removed by exact match |
+| reused PID | stale if the probe PID differs; unhealthy otherwise | same, never signalled |
+| daemon under `<data dir>/running.json` | reported STOPPED | found and verified |
+| terminal run at boot | `review_reviewer_unproven` appended, possible STOP | nothing written |
+| duplicate recovery race | one owner (evidence could duplicate) | one owner, one confirmation |
+
+## 18. Privacy
+
+Runtime stamps are identities only (installation, daemon instance, owner token). Readback,
+proofs and stop records carry identities and closed codes; tests put secrets in the session
+prompt and assert they never reach a proof detail or the readback JSON.
+
+## 19. Performance
+
+No new query and no schema change; reads use `idx_workflow_dispatch_checkpoints_step`,
+`idx_workflow_checkpoints_run` and `idx_sessions_project` (EXPLAIN QUERY PLAN on the real
+DB, read-only). A proof is one `show-environment` per stamp, one pane-pid read, one `ps` and
+one `has-session`, taken only on boot reconciliation, `ContinueRun`/wakes, a human reopen,
+a fix cycle already silent past its window, and the readback. The `/recovery` readback is
+gated behind `?ownership=1` so the UI's 5-second recovery poll does not run it.
+
+## 20. Debts left for P10 / P11 and risks
+
+* Electron wedged-orphan takeover signals a PID that is merely alive (`main.ts`).
+* session_manager's boot `reconcileLive` still adopts a session whose tmux NAME is alive
+  (it grants no workflow ownership, but it is the same weaker probe).
+* Reviewer residues (untokened ack, status-only still-authorized check) — documented, not
+  changed (closed lifecycle, no duplicate demonstrated).
+* conpty recovery parity.
+* `ao import` checks only the configured run-file.
+* Attempt-outcome refinements in `failover.go` / `work_adoption.go` stay unconditional.
+* Trusted-local mode issues no worker credential, so a work report is fenced by the
+  session binding alone.
+* Soak (P11): 15-minute unreadable grace and fix silence window unvalidated over days.

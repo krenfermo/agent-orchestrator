@@ -38,7 +38,14 @@ func TestGetRecoveryIncludesTheWorkerOwnershipReadback(t *testing.T) {
 		Detail: "runtime incarnation $4 carries an ownership token that is not this launch's",
 	}}}
 	srv := newWorkflowTestServer(t, svc)
-	body, status, _ := doRequest(t, srv, "GET", "/api/v1/workflows/wf-1/recovery", "")
+
+	// The page's own poll does not pay for a runtime read-back.
+	plain, plainStatus, _ := doRequest(t, srv, "GET", "/api/v1/workflows/wf-1/recovery", "")
+	if plainStatus != http.StatusOK || strings.Contains(string(plain), "workerOwnership") || svc.calls != 0 {
+		t.Fatalf("an unrequested readback was computed: status=%d calls=%d body=%s", plainStatus, svc.calls, plain)
+	}
+
+	body, status, _ := doRequest(t, srv, "GET", "/api/v1/workflows/wf-1/recovery?ownership=1", "")
 	if status != http.StatusOK {
 		t.Fatalf("status=%d body=%s", status, body)
 	}

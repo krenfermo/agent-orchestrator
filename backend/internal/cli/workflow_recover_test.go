@@ -108,7 +108,7 @@ func TestWorkflowRecoverOwnershipPrintsTheReadback(t *testing.T) {
 			t.Fatalf("output lacks %q:\n%s", want, out)
 		}
 	}
-	if want := []string{"GET /api/v1/workflows/wf-1/recovery"}; !reflect.DeepEqual(requests, want) {
+	if want := []string{"GET /api/v1/workflows/wf-1/recovery?ownership=1"}; !reflect.DeepEqual(requests, want) {
 		t.Fatalf("requests=%#v want %#v", requests, want)
 	}
 }
