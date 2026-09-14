@@ -701,7 +701,11 @@ func TestP9Daemon_LivePIDWithMismatchedIdentityIsNeverSignalledOrTakenOver(t *te
 	bystanderDone := make(chan error, 1)
 	go func() { bystanderDone <- bystander.Wait() }()
 	t.Cleanup(func() {
-		if bystander.ProcessState == nil {
+		// The Wait goroutine owns ProcessState; only the channel says whether the
+		// bystander already exited (reading ProcessState here is a data race).
+		select {
+		case <-bystanderDone:
+		default:
 			_ = bystander.Process.Kill() // our own child only
 			<-bystanderDone
 		}
