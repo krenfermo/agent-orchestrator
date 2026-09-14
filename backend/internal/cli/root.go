@@ -50,6 +50,10 @@ func ExitCode(err error) int {
 	if err == nil {
 		return 0
 	}
+	var ce exitCodeError
+	if errors.As(err, &ce) {
+		return ce.code
+	}
 	var ue usageError
 	if errors.As(err, &ue) {
 		return 2
@@ -210,6 +214,8 @@ func NewRootCommand(deps Deps) *cobra.Command {
 	root.AddCommand(newLaunchCommand(ctx))
 	root.AddCommand(newPtyHostCommand())
 	root.AddCommand(newImportCommand(ctx))
+	root.AddCommand(newBackupCommand(ctx))
+	root.AddCommand(newRestoreCommand(ctx, "restore <backup-dir>"))
 	root.AddCommand(newUsageCommand(ctx))
 	root.AddCommand(newDevCommand(ctx))
 	root.AddCommand(newProjectCommand(ctx))
