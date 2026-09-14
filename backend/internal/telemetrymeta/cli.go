@@ -147,6 +147,16 @@ var legacyActorlessUserCLICommands = map[string]struct{}{
 	"ao dev import-projects":    {},
 	"ao doctor":                 {},
 	"ao import":                 {},
+	// Backup and restore are operator activity by the same definition (P10):
+	// run by a person, a restore only with the daemon stopped, never automatic.
+	"ao backup":         {},
+	"ao backup create":  {},
+	"ao backup list":    {},
+	"ao backup prune":   {},
+	"ao backup recover": {},
+	"ao backup restore": {},
+	"ao backup verify":  {},
+	"ao restore":        {},
 	// The cache-lifetime backfill is operator activity by the same definition
 	// `ao import` is: it runs with the daemon stopped, rewrites the ledger, and
 	// exists precisely because nothing automatic is allowed to take it.

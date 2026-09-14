@@ -22,6 +22,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/runtime/runtimeselect"
 	"github.com/aoagents/agent-orchestrator/backend/internal/autoreview"
+	"github.com/aoagents/agent-orchestrator/backend/internal/backup"
 	"github.com/aoagents/agent-orchestrator/backend/internal/branchlock"
 	"github.com/aoagents/agent-orchestrator/backend/internal/browserruntime"
 	"github.com/aoagents/agent-orchestrator/backend/internal/codegraph"
@@ -140,6 +141,13 @@ func RunWithConfig(cfg config.Config) error {
 		return fmt.Errorf("lock run-file: %w", lerr)
 	}
 	defer func() { _ = runFileLock.Release() }()
+
+	// P10: a restore interrupted while the data dir may hold a mix of two states
+	// must be resolved with `ao backup recover` before anything opens the store.
+	// Checked under daemon.lock, so a live restore is never caught mid-write.
+	if err := backup.CheckStartup(cfg.DataDir); err != nil {
+		return err
+	}
 
 	cfg.DaemonInstanceID = daemonmeta.NewDaemonInstanceID()
 	installationID, ierr := daemonmeta.LoadOrCreateInstallationID(cfg.DataDir)

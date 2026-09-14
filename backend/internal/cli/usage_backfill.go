@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 	_ "modernc.org/sqlite" // the probe below opens the database directly
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonlock"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/usagebackfill"
@@ -80,9 +82,11 @@ func (c *commandContext) runUsageBackfillCacheTTL(cmd *cobra.Command, opts usage
 		return err
 	}
 
-	if err := assertNoLiveDaemon(cfg); err != nil {
+	release, err := holdDataDirOffline(cfg, "backfilling the usage ledger")
+	if err != nil {
 		return err
 	}
+	defer release()
 
 	store, err := sqlite.Open(cfg.DataDir)
 	if err != nil {
@@ -174,6 +178,15 @@ func newUsageBackfillReportJSON(r *usagebackfill.Report) usageBackfillReportJSON
 //
 // Nothing is killed and nothing is waited on: the command refuses and returns.
 func assertNoLiveDaemon(cfg config.Config) error {
+	if err := assertNoLiveRunFiles(cfg); err != nil {
+		return err
+	}
+	return assertDatabaseQuiet(cfg.DataDir)
+}
+
+// assertNoLiveRunFiles is the run-file layer of assertNoLiveDaemon: both
+// conventions, a live PID refuses.
+func assertNoLiveRunFiles(cfg config.Config) error {
 	candidates := []string{cfg.RunFilePath}
 	if cfg.DataDir != "" {
 		dataDirRunFile := filepath.Join(cfg.DataDir, "running.json")
@@ -188,10 +201,39 @@ func assertNoLiveDaemon(cfg config.Config) error {
 		}
 		if live != nil {
 			return usageError{fmt.Errorf(
-				"the AO daemon is running (pid %d); stop it first with `ao stop` before backfilling the usage ledger", live.PID)}
+				"the AO daemon is running (pid %d); stop it first with `ao stop`", live.PID)}
 		}
 	}
-	return assertDatabaseQuiet(cfg.DataDir)
+	return nil
+}
+
+// holdDataDirOffline is the guard for an offline command that WRITES the
+// database (P10, closing the P9 import debt): both run-file conventions and
+// the SQLite probe (assertNoLiveDaemon), then the data dir's P9 daemon.lock,
+// held until release -- so no daemon can start underneath the write either.
+// Nothing is signalled; a held lock refuses.
+func holdDataDirOffline(cfg config.Config, doing string) (release func(), err error) {
+	if err := assertNoLiveRunFiles(cfg); err != nil {
+		return nil, err
+	}
+	if cfg.DataDir == "" {
+		return func() {}, nil
+	}
+	lock, err := daemonlock.Acquire(filepath.Join(cfg.DataDir, "daemon.lock"))
+	if errors.Is(err, daemonlock.ErrHeld) {
+		return nil, usageError{fmt.Errorf("an AO daemon holds data dir %s; stop it with `ao stop` before %s", cfg.DataDir, doing)}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock data dir: %w", err)
+	}
+	// A fresh data dir (the import bootstrap) has no database for anyone to hold.
+	if _, statErr := os.Stat(filepath.Join(cfg.DataDir, "ao.db")); statErr == nil {
+		if err := assertDatabaseQuiet(cfg.DataDir); err != nil {
+			_ = lock.Release()
+			return nil, err
+		}
+	}
+	return func() { _ = lock.Release() }, nil
 }
 
 // assertDatabaseQuiet asks SQLite whether anybody else has the database open.
@@ -221,7 +263,7 @@ func assertDatabaseQuiet(dataDir string) error {
 	if err != nil {
 		if isDatabaseBusy(err) {
 			return usageError{errors.New(
-				"another process has AO's database open; stop the AO daemon with `ao stop` before backfilling the usage ledger")}
+				"another process has AO's database open; stop the AO daemon with `ao stop` first")}
 		}
 		return fmt.Errorf("probe database %s: %w", path, err)
 	}
