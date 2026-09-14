@@ -1,6 +1,6 @@
 # P8 — Control Center UX
 
-Status: implemented on `feat/p8-control-center-ux`, pending independent review.
+Status: implemented, independently reviewed and visually validated on real data; integrated into `feat/engineering-control-center`. Section 8 supersedes any earlier detail it contradicts.
 Base: `feat/engineering-control-center@eeeeb7253`.
 
 P8 makes AO operable and legible before P9. It is a presentation layer over the
@@ -154,3 +154,83 @@ Other mappings:
 - detail page, now on the control center facts
 - board and contract tests, for the "New work" name
 - diagnostics bundle: new fields, and no check commands or stderr
+
+## 8. Independent integration review (supersedes earlier details above)
+
+An independent adversarial review (fresh context) and a read-only visual
+validation of the real desktop app against the real `~/.ao/data` found defects
+the fixtures did not. All were fixed in the feature (`fix(ui,p8)` commit),
+presentation/copy only.
+
+**Semantics as integrated**
+
+- **Fix cycle N** is the *current* cycle: the newest fix delivery's
+  `cycleNumber`. It is not the enforced "spent" count (the budget folds distinct
+  `fix_dispatched` checkpoints; a delivery being recorded/retried already carries
+  its cycle's number). Diagnostics field: `fixCycle: N of max`.
+  `usage.metrics.fixCycles` counts fix-step attempts and is now labelled
+  "Fix attempts / Intentos de fix" in the usage section.
+- **Verify**: `waiting` behind a verification-sourced fix (or
+  `verify_fix_reentry`) → **handed_back** ("Devuelto a fix"); only then "this
+  failure was handed back to a fix cycle". A later passed/failed result never
+  inherits an earlier cycle's cause. A plain `waiting` verify is pending;
+  `completed` without a readable result is **completed_unrecorded**, never
+  "unknown" next to a "verified" banner.
+- **Current step / who is working**: a `needs_attention` run has no current
+  step; "who is working" requires the step's durable state to be `running`.
+  "Waiting for the agent" still requires a ready/waiting work|fix step AND no
+  observed liveness on that same step.
+- **Agent clocks**: liveness exists only for a running step whose row carries a
+  session. A fix cycle delivered into the worker's existing session has none, so
+  the copy says "agent clocks not available for this step" (never "no running
+  agent"), and "not applicable" when no step is in progress.
+- **Session tree**: no model is shown for fix (the attempt stores its cycle key)
+  or verify (a fingerprint); verify shows no harness.
+- **needs_attention**: fix-step stops take the session from `fixDelivery`; a
+  Verify stop lists no missing session/clock as unknown; the header no longer
+  repeats the stop sentence (the attention block states it once);
+  `review_dispatch_ambiguous` is undetermined.
+- **Advisor**: no "0% of budget" when the daemon sends no percent; no "0 failed
+  checks" when no check result is recorded; timeline counts "failed attempts"
+  (the daemon emits `provider_failed` for any failed attempt, including verify).
+- **Usage**: `ao_counted` / `mixed` tokens are shown as modelled; a known cost
+  with unpriced models is marked partial; context with unplaceable calls is a
+  lower bound.
+- **New work**: Autonomous/Master/agent copy aligned with the backend (same
+  planner; Master's tasks run as Task workflows; the agent is chosen when each
+  agent step starts). "Work" is the primary board button.
+- **Detail heading**: the objective's first line; the full specification is
+  folded below it.
+
+**Visual validation (real data, read-only)**
+
+Dev Electron app against `~/.ao/data`, no workflow created, no prompt, no agent.
+Screens: New work form, project board, completed run `wf-66f0ee54`,
+needs_attention `wf-32518ccf` (verify_unrepairable) and `wf-43e93bbf`
+(dispatch_failed). 0 console errors, 0 non-GET API calls, 0 horizontal
+overflow after fixes; idle traffic = the pre-existing run-detail (2 s),
+recovery (5 s) and workspace polls.
+
+Daemon startup (pre-existing behaviour, not P8 code) wrote to the real DB while
+it ran; workflow runs, states, wakes, sessions and migrations were unchanged and
+`integrity_check` is ok. Writes observed: 1 observational checkpoint
+`review_reviewer_unproven` on an already-completed run (`wf-0aadfcde`, state and
+`updated_at` unchanged), code-graph and project-memory re-index of
+`agent-orchestrator`, one model-catalog refresh, one `ao.daemon.started`
+telemetry event, and their `change_log` rows. A pre-launch snapshot is at
+`~/.ao/backups/pre-p8-visual-20260913-191437/`.
+
+**Additional debts for P9 (discovered in review)**
+
+11. Worker liveness does not cover fix cycles delivered into an existing session
+    (the fix step row has no session), so a silent fix agent cannot be flagged.
+12. Boot reconciliation probes reviewers of completed runs and appends an
+    observational checkpoint to them.
+13. Pre-existing untranslated surfaces seen on real data: daemon attention
+    sentences with no `wf.summary.*` copy (e.g. `verify_unrepairable`,
+    `dispatch_failed`) render in English and as raw codes in the workflow list;
+    the step routing summary shows English labels ("Current agent", "Reason");
+    `shell.workflowUsage.routingReason.user_preferred_provider` is a raw key;
+    the recovery panel repeats the stop sentence.
+14. The six non-es/en locales still word `shell.workflowUsage.highUsageWarning`
+    as "cycles".
