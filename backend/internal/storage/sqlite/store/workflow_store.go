@@ -756,6 +756,55 @@ func (s *Store) StartWorkflowStepForSession(
 	return n == 1, nil
 }
 
+// RefineConcludedWorkflowAttempt rewrites a CONCLUDED attempt's outcome fields
+// only while its outcome is still expectedOutcome (P9). It is the stale-safe
+// form of the refinement observation applies to an attempt some other path
+// already closed: a verdict recorded since the caller read the row matches no
+// row, and nothing is overwritten. An empty expectedOutcome matches a concluded
+// row whose outcome was recorded as NULL.
+func (s *Store) RefineConcludedWorkflowAttempt(
+	ctx context.Context,
+	attemptID string,
+	expectedOutcome domain.WorkflowAttemptOutcome,
+	finishedAt time.Time,
+	outcome domain.WorkflowAttemptOutcome,
+	errorClass domain.WorkflowErrorClass,
+) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	var finishedAtNull sql.NullTime
+	if !finishedAt.IsZero() {
+		finishedAtNull = sql.NullTime{Time: finishedAt, Valid: true}
+	}
+	var outcomePtr *domain.WorkflowAttemptOutcome
+	if outcome != "" {
+		outcomePtr = &outcome
+	}
+	var errorClassPtr *domain.WorkflowErrorClass
+	if errorClass != "" {
+		errorClassPtr = &errorClass
+	}
+	query := `UPDATE workflow_attempts
+	    SET finished_at = ?, outcome = ?, error_class = ?
+	  WHERE id = ? AND finished_at IS NOT NULL AND outcome = ?`
+	args := []any{finishedAtNull, outcomePtr, errorClassPtr, attemptID, string(expectedOutcome)}
+	if expectedOutcome == "" {
+		query = `UPDATE workflow_attempts
+	    SET finished_at = ?, outcome = ?, error_class = ?
+	  WHERE id = ? AND finished_at IS NOT NULL AND outcome IS NULL`
+		args = args[:4]
+	}
+	res, err := s.writeDB.ExecContext(ctx, query, args...)
+	if err != nil {
+		return false, fmt.Errorf("refine workflow attempt %s: %w", attemptID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("refine workflow attempt %s: rows affected: %w", attemptID, err)
+	}
+	return n == 1, nil
+}
+
 // ClaimOpenWorkflowAttempt returns the step's currently OPEN attempt, creating
 // one only if there is none — atomically, under the store's write lock.
 //

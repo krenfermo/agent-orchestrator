@@ -77,6 +77,10 @@ export type RunFileInfo = {
 	/** Desktop launch that supplied this daemon's private browser token. */
 	appRunId?: string;
 	browserRuntimeAddress?: string;
+	/** P9 (run-file v2): the daemon process lifetime identity that wrote this file. */
+	instanceId?: string;
+	/** P9 (run-file v2): the data dir the daemon that wrote this file serves. */
+	dataDir?: string;
 };
 
 /** Parse running.json contents. Returns null for malformed JSON or an invalid port. */
@@ -88,13 +92,15 @@ export function parseRunFile(contents: string): RunFileInfo | null {
 		return null;
 	}
 	if (typeof raw !== "object" || raw === null) return null;
-	const { pid, port, startedAt, owner, appRunId, browserRuntimeAddress } = raw as {
+	const { pid, port, startedAt, owner, appRunId, browserRuntimeAddress, instanceId, dataDir } = raw as {
 		pid?: unknown;
 		port?: unknown;
 		startedAt?: unknown;
 		owner?: unknown;
 		appRunId?: unknown;
 		browserRuntimeAddress?: unknown;
+		instanceId?: unknown;
+		dataDir?: unknown;
 	};
 	if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) return null;
 	const startedAtMs = typeof startedAt === "string" ? Date.parse(startedAt) : NaN;
@@ -105,6 +111,8 @@ export function parseRunFile(contents: string): RunFileInfo | null {
 		owner: typeof owner === "string" ? owner : undefined,
 		appRunId: typeof appRunId === "string" ? appRunId : undefined,
 		browserRuntimeAddress: typeof browserRuntimeAddress === "string" ? browserRuntimeAddress : undefined,
+		instanceId: typeof instanceId === "string" && instanceId !== "" ? instanceId : undefined,
+		dataDir: typeof dataDir === "string" && dataDir !== "" ? dataDir : undefined,
 	};
 }
 

@@ -139,6 +139,14 @@ type Config struct {
 	// fresh id per boot, which correctly makes any surviving shell terminals
 	// from an earlier run look like orphans and get cleaned up.
 	AppRunID string
+	// InstallationID and DaemonInstanceID are P9's identities, resolved by the
+	// daemon at startup (never from the environment): the installation is a
+	// file inside DataDir created once, the daemon instance is minted per
+	// process. Both are published in running.json and the probes so discovery
+	// can prove a daemon belongs to THIS data dir, and stamped into runtimes so
+	// recovery can prove a worker belongs to this installation.
+	InstallationID   string
+	DaemonInstanceID string
 	// AllowedOrigins are the browser origins granted CORS read access (see
 	// DefaultAllowedOrigins). Overridden by AO_ALLOWED_ORIGINS.
 	AllowedOrigins []string
@@ -630,6 +638,12 @@ func newAppRunID() string {
 	}
 	return "apprun-" + hex.EncodeToString(buf)
 }
+
+// DefaultRunFilePath is where running.json lives for a caller that did not name
+// one: AO_RUN_FILE when set, otherwise ~/.ao/running.json (P9: the daemon's
+// startup guard also checks it, so an `ao server --data-dir` start cannot miss a
+// daemon published under the default convention).
+func DefaultRunFilePath() (string, error) { return resolveRunFilePath() }
 
 // resolveRunFilePath picks where running.json lives. An explicit AO_RUN_FILE
 // wins; otherwise it sits under the canonical AO home directory so the CLI and

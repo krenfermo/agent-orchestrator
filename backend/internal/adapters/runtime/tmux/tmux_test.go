@@ -868,14 +868,119 @@ func TestRestartRespawnsExistingPaneAndPreservesHandle(t *testing.T) {
 	if got != handle {
 		t.Fatalf("Restart handle = %+v, want %+v", got, handle)
 	}
-	if len(fr.calls) != 2 {
-		t.Fatalf("calls = %d, want respawn + liveness probe", len(fr.calls))
+	if len(fr.calls) != 3 {
+		t.Fatalf("calls = %d, want owner read + respawn + liveness probe", len(fr.calls))
 	}
-	if args := fr.calls[0].args; len(args) < 8 || args[0] != "-L" || args[2] != "respawn-pane" || args[3] != "-k" || args[5] != "sess-1:0.0" || args[7] != "/tmp/ws" {
+	if args := fr.calls[0].args; !reflect.DeepEqual(args, srv(sessionEnvArgs("sess-1", ownerEnvKey))) {
+		t.Fatalf("owner read args = %#v", args)
+	}
+	if args := fr.calls[1].args; len(args) < 8 || args[0] != "-L" || args[2] != "respawn-pane" || args[3] != "-k" || args[5] != "sess-1:0.0" || args[7] != "/tmp/ws" {
 		t.Fatalf("respawn args = %#v", args)
 	}
-	if args := fr.calls[1].args; !reflect.DeepEqual(args, srv(hasSessionArgs("sess-1"))) {
+	if args := fr.calls[2].args; !reflect.DeepEqual(args, srv(hasSessionArgs("sess-1"))) {
 		t.Fatalf("liveness args = %#v, want %#v", args, srv(hasSessionArgs("sess-1")))
+	}
+}
+
+// P9 review 5.2: a restart that restamps the owner token and then fails must put
+// the previous token back -- otherwise the runtime claims a launch the session
+// row never recorded, and every later ownership proof fails closed.
+func TestRestartRollsBackTheOwnerTokenWhenTheRespawnFails(t *testing.T) {
+	r, fr := newTestRuntime(0)
+	const previous = "ao-session:sess-1:launch-old"
+	fr.outputs = [][]byte{[]byte(ownerEnvKey + "=" + previous + "\n")}
+	fr.hook = func(_ context.Context, n int) error {
+		if subcommandOf(fr.calls[n-1].args) == "respawn-pane" {
+			return errors.New("respawn failed")
+		}
+		return nil
+	}
+	_, err := r.Restart(context.Background(), ports.RuntimeHandle{ID: "sess-1", InstanceID: "$7"}, ports.RuntimeConfig{
+		SessionID: "sess-1", WorkspacePath: "/tmp/ws", Argv: []string{"codex"}, Owner: "ao-session:sess-1:launch-new",
+	})
+	if err == nil {
+		t.Fatal("a failed respawn reported success")
+	}
+	var ownerWrites []string
+	for _, c := range fr.calls {
+		if subcommandOf(c.args) != "set-environment" {
+			continue
+		}
+		if c.args[len(c.args)-2] == ownerEnvKey {
+			if c.args[len(c.args)-3] != "$7" {
+				t.Fatalf("owner write addressed %q, want the exact incarnation", c.args[len(c.args)-3])
+			}
+			ownerWrites = append(ownerWrites, c.args[len(c.args)-1])
+		}
+	}
+	if len(ownerWrites) != 2 || ownerWrites[0] != "ao-session:sess-1:launch-new" || ownerWrites[1] != previous {
+		t.Fatalf("owner writes = %v, want restamp then rollback to %q", ownerWrites, previous)
+	}
+}
+
+// A restart that cannot read the owner it would overwrite does not overwrite it.
+func TestRestartRefusesWhenThePreviousOwnerIsUnreadable(t *testing.T) {
+	r, fr := newTestRuntime(0)
+	fr.outputs = [][]byte{[]byte("server exited unexpectedly")}
+	fr.hook = func(_ context.Context, n int) error {
+		if n == 1 {
+			return errors.New("exit status 1")
+		}
+		return nil
+	}
+	_, err := r.Restart(context.Background(), ports.RuntimeHandle{ID: "sess-1", InstanceID: "$7"}, ports.RuntimeConfig{
+		SessionID: "sess-1", WorkspacePath: "/tmp/ws", Argv: []string{"codex"}, Owner: "ao-session:sess-1:launch-new",
+	})
+	if err == nil {
+		t.Fatal("restart proceeded over an unreadable owner")
+	}
+	if countCalls(fr, "set-environment") != 0 || countCalls(fr, "respawn-pane") != 0 {
+		t.Fatalf("restart wrote after an unreadable owner: %+v", fr.calls)
+	}
+}
+
+// P9 review 2.1/2.2: only a missing SOCKET is absence, and only "unknown
+// variable" is an unmarked session. Every other failure is an error.
+func TestServerAbsenceAndUnknownVariableAreTheOnlyConclusiveFailures(t *testing.T) {
+	absent := serverUnreachableError("probe", "error connecting to /private/tmp/tmux-501/ao (No such file or directory)")
+	if !errors.Is(absent, ports.ErrRuntimeServerAbsent) || !errors.Is(absent, ports.ErrRuntimeUnavailable) {
+		t.Fatalf("missing socket = %v, want absent and unavailable", absent)
+	}
+	for _, out := range []string{
+		"no server running on /private/tmp/tmux-501/ao",
+		"error connecting to /private/tmp/tmux-501/ao (Permission denied)",
+		"error connecting to /private/tmp/tmux-501/ao (Connection refused)",
+	} {
+		err := serverUnreachableError("probe", out)
+		if errors.Is(err, ports.ErrRuntimeServerAbsent) || !errors.Is(err, ports.ErrRuntimeUnavailable) {
+			t.Fatalf("%q = %v, want unavailable and NOT absent", out, err)
+		}
+	}
+
+	r, fr := newTestRuntime(0)
+	fr.outputs = [][]byte{[]byte("unknown variable: " + ownerEnvKey)}
+	fr.hook = func(context.Context, int) error { return errors.New("exit status 1") }
+	if v, known, err := r.instanceEnv(context.Background(), "$3", ownerEnvKey); err != nil || known || v != "" {
+		t.Fatalf("unknown variable = (%q, %v, %v), want unmarked", v, known, err)
+	}
+	fr.outputs = [][]byte{[]byte("lost server")}
+	if _, known, err := r.instanceEnv(context.Background(), "$3", ownerEnvKey); err == nil || known {
+		t.Fatalf("an unexplained failure = (known=%v, err=%v), want an error", known, err)
+	}
+	fr.outputs = [][]byte{[]byte("no such session: $3")}
+	if _, _, err := r.instanceEnv(context.Background(), "$3", ownerEnvKey); !errors.Is(err, errInstanceGone) {
+		t.Fatalf("missing incarnation = %v, want errInstanceGone", err)
+	}
+}
+
+// Review 1.3: resolution by name is EXACT in the one form tmux honours for
+// display-message; a bare name would let "proj-1" resolve "proj-12".
+func TestSessionInstanceResolutionUsesTheExactFormatTarget(t *testing.T) {
+	if got := sessionInstanceArgs("proj-1"); got[3] != "=proj-1:" {
+		t.Fatalf("name target = %q, want =proj-1:", got[3])
+	}
+	if got := sessionInstanceArgs("$4"); got[3] != "$4" {
+		t.Fatalf("instance target = %q, want $4", got[3])
 	}
 }
 

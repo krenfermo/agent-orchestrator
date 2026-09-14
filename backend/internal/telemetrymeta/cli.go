@@ -171,12 +171,14 @@ var legacyActorlessUserCLICommands = map[string]struct{}{
 	"ao workflow recover review-provenance": {},
 	// P1-B's recovery surface. Same argument: every one of these is a person
 	// deciding what happens to a stopped run.
-	"ao workflow recover status":  {},
-	"ao workflow resume":          {},
-	"ao workflow repair":          {},
-	"ao workflow plan":            {},
-	"ao workflow plan reuse":      {},
-	"ao workflow plan regenerate": {},
+	"ao workflow recover status": {},
+	// P9: reading why AO adopted, refused or relaunched a worker is a person asking.
+	"ao workflow recover ownership": {},
+	"ao workflow resume":            {},
+	"ao workflow repair":            {},
+	"ao workflow plan":              {},
+	"ao workflow plan reuse":        {},
+	"ao workflow plan regenerate":   {},
 	// P1-C's operator commands. Inspecting capacity and sweeping runtimes are
 	// both things a person does deliberately.
 	"ao capacity":        {},

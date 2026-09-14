@@ -95,21 +95,29 @@ type Options struct {
 	// falls back to the OS temp dir; the daemon passes an AO-owned directory so
 	// these files live under the data dir with everything else AO writes.
 	ScratchDir string
+	// InstallationID and DaemonInstanceID are P9's provenance stamps, written
+	// into every session this runtime creates and read back by SessionFacts.
+	// Empty means "do not stamp": an unstamped session is not a mismatch, it is
+	// a session whose ownership rests on its owner token alone.
+	InstallationID   string
+	DaemonInstanceID string
 }
 
 // Runtime runs agent sessions inside tmux sessions, driving them via the tmux
 // CLI. It implements ports.Runtime.
 type Runtime struct {
-	binary       string
-	shell        string
-	socket       string
-	timeout      time.Duration
-	chunkSize    int
-	scratchDir   string
-	enterDelay   time.Duration
-	reapGrace    time.Duration
-	runner       runner
-	reapSessions func(ctx context.Context, pids []int, grace time.Duration)
+	binary           string
+	shell            string
+	socket           string
+	installationID   string
+	daemonInstanceID string
+	timeout          time.Duration
+	chunkSize        int
+	scratchDir       string
+	enterDelay       time.Duration
+	reapGrace        time.Duration
+	runner           runner
+	reapSessions     func(ctx context.Context, pids []int, grace time.Duration)
 }
 
 var _ ports.Runtime = (*Runtime)(nil)
@@ -372,16 +380,19 @@ func New(opts Options) *Runtime {
 		socket = defaultSocket
 	}
 	return &Runtime{
-		binary:       binary,
-		shell:        shellPath,
-		socket:       socket,
-		timeout:      timeout,
-		chunkSize:    chunkSize,
-		scratchDir:   opts.ScratchDir,
-		enterDelay:   enterDelay,
-		reapGrace:    reapGrace,
-		runner:       execRunner{},
-		reapSessions: killSessionsByPID,
+		binary:     binary,
+		shell:      shellPath,
+		socket:     socket,
+		timeout:    timeout,
+		chunkSize:  chunkSize,
+		scratchDir: opts.ScratchDir,
+		// P9 provenance stamps; see Options.
+		installationID:   strings.TrimSpace(opts.InstallationID),
+		daemonInstanceID: strings.TrimSpace(opts.DaemonInstanceID),
+		enterDelay:       enterDelay,
+		reapGrace:        reapGrace,
+		runner:           execRunner{},
+		reapSessions:     killSessionsByPID,
 	}
 }
 
@@ -486,7 +497,7 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 		removeScript = cleanup
 		launchCmd = ". " + shellQuote(path)
 	}
-	args := newSessionArgs(id, cfg.WorkspacePath, r.shell, launchCmd, cfg.Owner)
+	args := newSessionArgs(id, cfg.WorkspacePath, r.shell, launchCmd, cfg.Owner, r.identityEnv()...)
 	createOut, err := r.run(ctx, args...)
 	if err != nil {
 		removeScript()
@@ -695,15 +706,63 @@ func (r *Runtime) Restart(ctx context.Context, handle ports.RuntimeHandle, cfg p
 		return ports.RuntimeHandle{}, err
 	}
 
+	// P9: a restart is a NEW launch of the same session, so the pane's new
+	// process runs under a NEW ownership token. The token lives in the SESSION
+	// environment, which respawn-pane does not touch — so without this the
+	// runtime would go on answering with the previous launch's token while the
+	// session row records the new one, and every later ownership proof would
+	// fail closed on a worker AO really does own. It is rewritten BEFORE the
+	// respawn, addressed to the exact incarnation when the handle names one, so
+	// no observer can see the new process under the old identity.
+	target := id
+	if isSessionInstanceID(handle.InstanceID) {
+		target = handle.InstanceID
+	}
+	// The token the session carries NOW, read from the exact target, so any
+	// failure after the restamp can put it back: a restart that did not happen
+	// must not leave the runtime claiming a launch the session row never
+	// recorded (which would fail every later ownership proof closed).
+	previousOwner, previousKnown, perr := r.instanceEnv(ctx, target, ownerEnvKey)
+	if perr != nil {
+		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: read owner of session %s before restart: %w", id, perr)
+	}
+	restamped := false
+	rollback := func() {
+		if restamped && previousKnown && previousOwner != cfg.Owner {
+			_, _ = r.run(ctx, setSessionEnvArgs(target, ownerEnvKey, previousOwner)...)
+		}
+	}
+	if cfg.Owner != "" {
+		if _, err := r.run(ctx, setSessionEnvArgs(target, ownerEnvKey, cfg.Owner)...); err != nil {
+			return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: restamp owner of session %s: %w", id, err)
+		}
+		restamped = true
+	}
+	for _, stamp := range []struct{ key, value string }{
+		{installationEnvKey, r.installationID},
+		{daemonInstanceEnvKey, r.daemonInstanceID},
+	} {
+		if stamp.value == "" {
+			continue
+		}
+		if _, err := r.run(ctx, setSessionEnvArgs(target, stamp.key, stamp.value)...); err != nil {
+			rollback()
+			return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: restamp provenance of session %s: %w", id, err)
+		}
+	}
+
 	launchCmd := buildLaunchCommand(cfg)
 	if _, err := r.run(ctx, respawnPaneArgs(id, cfg.WorkspacePath, r.shell, launchCmd)...); err != nil {
+		rollback()
 		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: restart session %s: %w", id, err)
 	}
 	alive, err := r.IsAlive(ctx, handle)
 	if err != nil {
+		rollback()
 		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: verify restarted session %s: %w", id, err)
 	}
 	if !alive {
+		rollback()
 		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: session %s exited during restart", id)
 	}
 	return handle, nil
@@ -835,8 +894,7 @@ func (r *Runtime) IsAlive(ctx context.Context, handle ports.RuntimeHandle) (bool
 				return false, nil
 			}
 			if serverUnreachableOutput(string(out)) {
-				return false, fmt.Errorf("tmux runtime: probe session %s: %w: %s",
-					id, ports.ErrRuntimeUnavailable, strings.TrimSpace(string(out)))
+				return false, serverUnreachableError("probe session "+id, string(out))
 			}
 		}
 		return false, fmt.Errorf("tmux runtime: probe session %s: %w", id, err)
@@ -1553,7 +1611,9 @@ func handleID(handle ports.RuntimeHandle) (string, error) {
 func sessionMissingOutput(out string) bool {
 	s := strings.ToLower(out)
 	return strings.Contains(s, "can't find session") ||
-		strings.Contains(s, "session not found")
+		strings.Contains(s, "session not found") ||
+		// tmux 3.7b, for an exact `$N` target that no longer exists.
+		strings.Contains(s, "no such session")
 }
 
 // noServerOutput reports the one unreachable-server answer that is CONCLUSIVE
@@ -1572,6 +1632,22 @@ func noServerOutput(out string) bool {
 // serverUnreachableOutput reports whether a non-zero tmux exit means the
 // server itself could not be reached, which is inconclusive for any single
 // session's liveness.
+// serverUnreachableError wraps an unreachable-server answer as
+// ErrRuntimeUnavailable, and additionally as ErrRuntimeServerAbsent ONLY when
+// tmux says the socket itself does not exist ("error connecting to <socket>
+// (No such file or directory)") -- measured on this platform: a server that
+// never existed, or whose /tmp was cleared by a reboot. "no server running"
+// (the socket file is still there, the connection was refused) and every other
+// "error connecting" (permission, resources) are NOT proof that nothing runs.
+func serverUnreachableError(what, out string) error {
+	text := strings.TrimSpace(out)
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "error connecting to") && strings.Contains(lower, "no such file or directory") {
+		return fmt.Errorf("tmux runtime: %s: %w: %w: %s", what, ports.ErrRuntimeUnavailable, ports.ErrRuntimeServerAbsent, text)
+	}
+	return fmt.Errorf("tmux runtime: %s: %w: %s", what, ports.ErrRuntimeUnavailable, text)
+}
+
 func serverUnreachableOutput(out string) bool {
 	s := strings.ToLower(out)
 	return strings.Contains(s, "no server running") ||
@@ -1836,6 +1912,16 @@ func (r *Runtime) SessionFacts(ctx context.Context, handle ports.RuntimeHandle) 
 	}
 	facts.Owner, facts.OwnerKnown = owner, ownerKnown
 
+	// P9: the installation stamp, read from the SAME incarnation.
+	installation, installationKnown, ierr := r.instanceEnv(ctx, instance, installationEnvKey)
+	if errors.Is(ierr, errInstanceGone) {
+		return ports.SessionFacts{}, false, nil
+	}
+	if ierr != nil {
+		return ports.SessionFacts{}, true, ierr
+	}
+	facts.Installation, facts.InstallationKnown = installation, installationKnown
+
 	panePID, panePIDState, perr := r.instancePanePID(ctx, instance)
 	if perr != nil {
 		return ports.SessionFacts{}, true, perr
@@ -1920,8 +2006,7 @@ func (r *Runtime) resolveInstance(ctx context.Context, id string) (string, bool,
 			return "", false, nil
 		}
 		if serverUnreachableOutput(string(out)) {
-			return "", false, fmt.Errorf("tmux runtime: resolve session %s: %w: %s",
-				id, ports.ErrRuntimeUnavailable, strings.TrimSpace(string(out)))
+			return "", false, serverUnreachableError("resolve session "+id, string(out))
 		}
 		return "", false, fmt.Errorf("tmux runtime: resolve session %s: %w", id, err)
 	}
@@ -1943,8 +2028,7 @@ func (r *Runtime) instanceAlive(ctx context.Context, instance string) (bool, err
 				return false, nil
 			}
 			if serverUnreachableOutput(string(out)) {
-				return false, fmt.Errorf("tmux runtime: probe instance %s: %w: %s",
-					instance, ports.ErrRuntimeUnavailable, strings.TrimSpace(string(out)))
+				return false, serverUnreachableError("probe instance "+instance, string(out))
 			}
 		}
 		return false, fmt.Errorf("tmux runtime: probe instance %s: %w", instance, err)
@@ -1954,7 +2038,14 @@ func (r *Runtime) instanceAlive(ctx context.Context, instance string) (bool, err
 
 // instanceOwner reads the ownership token from ONE EXACT incarnation.
 func (r *Runtime) instanceOwner(ctx context.Context, instance string) (owner string, known bool, err error) {
-	out, rerr := r.run(ctx, sessionOwnerArgs(instance)...)
+	return r.instanceEnv(ctx, instance, ownerEnvKey)
+}
+
+// instanceEnv reads one session-environment variable of one exact incarnation.
+// A variable the session does not carry is "unknown", never an error; a
+// session that is gone is errInstanceGone, never "unknown".
+func (r *Runtime) instanceEnv(ctx context.Context, instance, key string) (value string, known bool, err error) {
+	out, rerr := r.run(ctx, sessionEnvArgs(instance, key)...)
 	if rerr != nil {
 		if sessionMissingOutput(string(out)) {
 			// The incarnation is gone. Reported as such — never as "unmarked",
@@ -1963,24 +2054,42 @@ func (r *Runtime) instanceOwner(ctx context.Context, instance string) (owner str
 			return "", false, errInstanceGone
 		}
 		if serverUnreachableOutput(string(out)) {
-			return "", false, fmt.Errorf("tmux runtime: read owner of instance %s: %w: %s",
-				instance, ports.ErrRuntimeUnavailable, strings.TrimSpace(string(out)))
+			return "", false, serverUnreachableError("read "+key+" of instance "+instance, string(out))
 		}
-		return "", false, nil
+		if strings.Contains(strings.ToLower(string(out)), "unknown variable") {
+			// The ONLY answer that means "this session carries no such
+			// variable". A timeout or any other failure is not that answer, and
+			// reading it as "unmarked" turned a slow tmux into provenance_missing.
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("tmux runtime: read %s of instance %s: %w: %s",
+			key, instance, rerr, strings.TrimSpace(string(out)))
 	}
 	line := strings.TrimSpace(string(out))
 	if line == "" || strings.HasPrefix(line, "-") {
 		return "", false, nil
 	}
-	owner, ok := strings.CutPrefix(line, ownerEnvKey+"=")
+	value, ok := strings.CutPrefix(line, key+"=")
 	if !ok {
 		return "", false, nil
 	}
-	owner = strings.TrimSpace(owner)
-	if owner == "" {
+	value = strings.TrimSpace(value)
+	if value == "" {
 		return "", false, nil
 	}
-	return owner, true, nil
+	return value, true, nil
+}
+
+// identityEnv renders the provenance stamps this runtime writes at creation.
+func (r *Runtime) identityEnv() []string {
+	var out []string
+	if r.installationID != "" {
+		out = append(out, installationEnvKey+"="+r.installationID)
+	}
+	if r.daemonInstanceID != "" {
+		out = append(out, daemonInstanceEnvKey+"="+r.daemonInstanceID)
+	}
+	return out
 }
 
 // panePIDStatus is what a pane-pid read of one exact incarnation can mean.
@@ -2023,8 +2132,7 @@ func (r *Runtime) instancePanePID(ctx context.Context, instance string) (int, pa
 			return 0, panePIDInstanceGone, nil
 		}
 		if serverUnreachableOutput(string(out)) {
-			return 0, panePIDUnreadable, fmt.Errorf("tmux runtime: read pane pid of instance %s: %w: %s",
-				instance, ports.ErrRuntimeUnavailable, strings.TrimSpace(string(out)))
+			return 0, panePIDUnreadable, serverUnreachableError("read pane pid of instance "+instance, string(out))
 		}
 		return 0, panePIDUnreadable, fmt.Errorf("tmux runtime: read pane pid of instance %s: %w", instance, err)
 	}

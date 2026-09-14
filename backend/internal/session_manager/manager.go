@@ -301,10 +301,11 @@ type Store interface {
 // Manager coordinates internal session spawn, restore, kill, and cleanup over
 // the outbound ports. User-facing read-model assembly lives in the service package.
 type Manager struct {
-	runtime   runtimeController
-	agents    ports.AgentResolver
-	workspace ports.Workspace
-	store     Store
+	installationID string
+	runtime        runtimeController
+	agents         ports.AgentResolver
+	workspace      ports.Workspace
+	store          Store
 	// messenger is a sessionguard.Guard wrapping the raw messenger, so every
 	// pane write is guarded (re-read state, refuse a blocked session) without
 	// each call site re-deriving the check. Send/confirmActive use Deliver for
@@ -609,6 +610,10 @@ type Deps struct {
 	// harness is now missing/disabled. Optional: nil preserves pre-8P-B.2
 	// behavior exactly (relaunch/restore never touches env at all).
 	RuntimeIsolation RelaunchRuntimeIsolation
+	// InstallationID (P9) is this AO installation's identity. It is what a
+	// runtime's installation stamp is compared against when a worker's
+	// ownership is proven after a restart. Empty disables that one check.
+	InstallationID string
 }
 
 // RelaunchRuntimeIsolation is session_manager's narrow view of
@@ -623,6 +628,7 @@ type RelaunchRuntimeIsolation interface {
 // time.Now when Deps.Clock is nil.
 func New(d Deps) *Manager {
 	m := &Manager{
+		installationID:               d.InstallationID,
 		runtime:                      d.Runtime,
 		agents:                       d.Agents,
 		workspace:                    d.Workspace,
@@ -1734,7 +1740,9 @@ func (m *Manager) ResumeAgentWithMode(ctx context.Context, id domain.SessionID) 
 	if mode == domain.SessionModeChat {
 		return m.relaunchSession(ctx, "resume agent", rec, project, ws, nil)
 	}
-	handle := ports.RuntimeHandle{ID: meta.RuntimeHandleID}
+	// P9: the recorded incarnation travels with the name, so the runtime restamps
+	// and verifies THAT incarnation -- never whatever answers under the name.
+	handle := ports.RuntimeHandle{ID: meta.RuntimeHandleID, InstanceID: meta.RuntimeInstanceID}
 	return m.relaunchSession(ctx, "resume agent", rec, project, ws, &handle)
 }
 
@@ -1866,6 +1874,16 @@ func (m *Manager) relaunchSessionWithPolicy(ctx context.Context, operation strin
 		handle, err = m.runtime.Create(ctx, runtimeCfg)
 	} else {
 		handle, err = m.restartRuntime(ctx, *restartHandle, runtimeCfg)
+		// P9: a respawn of a live pane keeps its tmux incarnation, but the
+		// handle built from the row carries only the name, so Restart hands back
+		// no instance id -- and writing that empty value would erase the `$N`
+		// every later ownership proof needs, failing a legitimately restored
+		// worker closed forever. The recorded incarnation is carried over when
+		// the runtime returned the same session without naming one; a runtime
+		// that created a new incarnation names it and wins.
+		if err == nil && handle.InstanceID == "" && handle.ID == rec.Metadata.RuntimeHandleID {
+			handle.InstanceID = rec.Metadata.RuntimeInstanceID
+		}
 	}
 	if err != nil {
 		m.cleanupSystemPromptDir(rec.ID)
@@ -1917,12 +1935,13 @@ func (m *Manager) relaunchSessionWithPolicy(ctx context.Context, operation strin
 func (m *Manager) restartRuntime(ctx context.Context, handle ports.RuntimeHandle, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
 	alive, err := m.runtime.IsAlive(ctx, handle)
 	if err != nil {
-		if !errors.Is(err, ports.ErrRuntimeUnavailable) {
+		if !errors.Is(err, ports.ErrRuntimeServerAbsent) {
 			return ports.RuntimeHandle{}, fmt.Errorf("probe existing runtime: %w", err)
 		}
-		// The runtime infrastructure itself is gone (e.g. the tmux server was
-		// killed). Restore/restart is exactly the recovery path for that
-		// outage, so proceed as "no existing runtime" and create a fresh one.
+		// P9: the runtime server provably does not exist (its socket is gone,
+		// e.g. after a reboot). Only that is "no existing runtime"; a server
+		// that merely could not be reached may still hold a live session, and
+		// creating over it would put a second process on one session.
 		alive = false
 	}
 	if alive {
@@ -2087,9 +2106,12 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 			alive, err := m.runtime.IsAlive(ctx, handle)
 			switch {
 			case err == nil:
-			case errors.Is(err, ports.ErrRuntimeUnavailable):
-				// Normal after a machine reboot: the runtime is conclusively gone,
-				// so preserve work and create the restore marker below.
+			case errors.Is(err, ports.ErrRuntimeServerAbsent):
+				// Normal after a machine reboot: the runtime server's socket is
+				// gone, so the runtime is conclusively gone -- preserve work and
+				// create the restore marker below. P9: a server that merely could
+				// not be REACHED is not this case; it falls to the default and the
+				// live session (and its worktree) is left exactly as it is.
 				alive = false
 			default:
 				// A failed probe is not proof of death: leave the session as-is.

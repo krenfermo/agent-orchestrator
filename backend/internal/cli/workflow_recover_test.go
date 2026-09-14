@@ -81,3 +81,34 @@ func TestWorkflowRecoverPlanSendsTheObservedVersionAndRefusesWithoutIt(t *testin
 		}
 	}
 }
+
+// P9 §25: `ao workflow recover ownership` prints the readback and reads only.
+func TestWorkflowRecoverOwnershipPrintsTheReadback(t *testing.T) {
+	cfg := setConfigEnv(t)
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		appendPrimaryRequest(&requests, r)
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/workflows/wf-1/recovery" {
+			_, _ = io.WriteString(w, `{"recovery":{},"repair":{},"plan":{},"workerOwnership":[{"stepId":"wfs-work","stepKind":"work","stepState":"waiting","sessionId":"proj-1-1","ownership":"unproven","proof":"instance_mismatch","runtimeInstanceId":"$4","observedInstanceId":"$9","launchState":"dispatched","dispatchGeneration":"wfd-1","dispatchPhase":"intended","attemptId":"wfa-1","recoveryDecision":"fail_closed","recoveryReason":"instance_mismatch","detail":"runtime incarnation $4 is gone; its name is now held by incarnation $9"}]}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	writeRunFileFor(t, cfg, srv)
+
+	out, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+		"workflow", "recover", "ownership", "wf-1")
+	if err != nil {
+		t.Fatalf("recover ownership failed: %v stderr=%s", err, errOut)
+	}
+	for _, want := range []string{"ownership unproven [instance_mismatch]", "runtime $4 -> $9", "recovery: fail_closed (instance_mismatch)", "generation wfd-1"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if want := []string{"GET /api/v1/workflows/wf-1/recovery?ownership=1"}; !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests=%#v want %#v", requests, want)
+	}
+}

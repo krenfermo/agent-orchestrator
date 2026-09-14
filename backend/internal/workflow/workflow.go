@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -336,6 +337,16 @@ type Deps struct {
 	// ownership proof read back from it, can each be faked independently.
 	WorkerLauncher   WorkerLauncher
 	SessionOwnership SessionOwnership
+
+	// WorkerRuntimeOwnership (P9) reads a worker session's runtime identity back
+	// and classifies it. Every path that acts on a worker without the launching
+	// process's memory -- reconciliation, adoption after a restart, a human
+	// reopen -- consults it before adopting. Optional: nil keeps the pre-P9
+	// behaviour (unit fixtures with no runtime); the daemon always wires it.
+	WorkerRuntimeOwnership WorkerRuntimeOwnership
+	// MonotonicClock measures durations that must not follow the wall clock
+	// (P9: the unreadable-runtime grace). Nil defaults to time.Now.
+	MonotonicClock func() time.Time
 	// WorkerCredentialAdopter re-attaches an orphaned worker credential when a
 	// launch is adopted after a crash between Spawn and bind
 	// (worker_credential_adoption.go). Optional: a nil adopter is the pre-P5
@@ -648,8 +659,19 @@ type Coordinator struct {
 	// SessionFacts. They exist as separate, injectable interfaces so a test can
 	// drive launch success, launch failure and evidence-free success without a
 	// process or a timer.
-	workerLauncher   WorkerLauncher
-	sessionOwnership SessionOwnership
+	workerLauncher         WorkerLauncher
+	sessionOwnership       SessionOwnership
+	workerRuntimeOwnership WorkerRuntimeOwnership
+	// runtimeUnreadable (P9) remembers, per session, the current episode of
+	// failed runtime identity reads. See unreadableFor.
+	runtimeUnreadable sync.Map
+	// closedRunReviewerWarned dedupes the P9 warning for an unprovable reviewer
+	// that outlives a closed run (one per step and review run, per process).
+	closedRunReviewerWarned sync.Map
+	// monotonicNow measures those episodes. Deps.MonotonicClock, defaulting to
+	// time.Now -- which, unlike the UTC workflow clock, keeps Go's monotonic
+	// reading, so a wall-clock step cannot consume a grace.
+	monotonicNow func() time.Time
 	// workerCredentialAdopter re-attaches an orphaned worker credential on the
 	// adoption path. Optional.
 	workerCredentialAdopter WorkerCredentialAdopter
@@ -860,6 +882,8 @@ func New(d Deps) *Coordinator {
 		workspaceFacts:           d.WorkspaceFacts,
 		workerLauncher:           d.WorkerLauncher,
 		sessionOwnership:         d.SessionOwnership,
+		workerRuntimeOwnership:   d.WorkerRuntimeOwnership,
+		monotonicNow:             monotonicClockOr(d.MonotonicClock),
 		workerCredentialAdopter:  d.WorkerCredentialAdopter,
 		reviewerLauncher:         d.ReviewerLauncher,
 		incidentAgents:           d.IncidentAgents,
@@ -2316,4 +2340,11 @@ func (c *Coordinator) CancelRun(ctx stdctx.Context, runID string) (RunDetail, er
 	c.syncCancelledTask(ctx, run)
 
 	return c.GetRun(ctx, runID)
+}
+
+func monotonicClockOr(clock func() time.Time) func() time.Time {
+	if clock != nil {
+		return clock
+	}
+	return time.Now
 }

@@ -146,6 +146,20 @@ func (c *Coordinator) resumeAdoptedTaskCommit(ctx stdctx.Context, run domain.Wor
 		return run, false, nil
 	}
 	rec.Generation = generation
+	// P9: a launch AO has authorized for this step -- a pending or dispatched
+	// spawn command -- is a generation that may be starting right now. Adopting
+	// a commit under it would complete, and close the attempt of, a worker that
+	// is being launched. The adoption waits for no one and takes nothing: it
+	// refuses, and a later Continue re-derives everything.
+	if entry, found, ferr := c.findDispatchOutboxEntry(ctx, run, *workStep); ferr != nil {
+		return run, false, ferr
+	} else if found && (entry.Status == domain.WorkflowOutboxPending || entry.Status == domain.WorkflowOutboxDispatched) {
+		if c.log != nil {
+			c.log.Info("workflow: refusing to adopt a task commit while a worker launch is authorized for the step",
+				"run", run.ID, "step", workStep.ID, "outbox", entry.Status)
+		}
+		return run, false, nil
+	}
 	if reason, _, ok := c.stopReason(ctx, run); ok {
 		rec.PriorStopReason = reason
 	}
@@ -161,23 +175,40 @@ func (c *Coordinator) resumeAdoptedTaskCommit(ctx stdctx.Context, run domain.Wor
 	// failed -> ready -> running -> completed. Every hop is a real transition
 	// the state machine already allows, so nothing here is a back door around
 	// ValidWorkflowStepTransition.
+	//
+	// P9: every hop is a compare-and-swap whose RESULT is honoured. A hop that
+	// matches no row means another actor moved the step since it was read -- a
+	// reopened launch, a concurrent Continue -- and the adoption stops there,
+	// before it can carry a step that is not its own to completed.
 	if workStep.State == domain.WorkflowStepFailed {
-		if _, err := c.store.ReopenFailedWorkflowStep(ctx, workStep.ID, now); err != nil {
+		reopened, err := c.store.ReopenFailedWorkflowStep(ctx, workStep.ID, now)
+		if err != nil {
 			return run, false, err
+		}
+		if !reopened {
+			return run, false, nil
 		}
 		workStep.State = domain.WorkflowStepReady
 	}
 	if workStep.State == domain.WorkflowStepReady {
-		if _, err := c.store.UpdateWorkflowStepState(ctx, workStep.ID, domain.WorkflowStepReady, domain.WorkflowStepRunning, now); err != nil {
+		moved, err := c.store.UpdateWorkflowStepState(ctx, workStep.ID, domain.WorkflowStepReady, domain.WorkflowStepRunning, now)
+		if err != nil {
 			return run, false, err
+		}
+		if !moved {
+			return run, false, nil
 		}
 		workStep.State = domain.WorkflowStepRunning
 	}
 	if workStep.State != domain.WorkflowStepRunning && workStep.State != domain.WorkflowStepWaiting {
 		return run, false, nil
 	}
-	if _, err := c.store.UpdateWorkflowStepState(ctx, workStep.ID, workStep.State, domain.WorkflowStepCompleted, now); err != nil {
+	completed, err := c.store.UpdateWorkflowStepState(ctx, workStep.ID, workStep.State, domain.WorkflowStepCompleted, now)
+	if err != nil {
 		return run, false, err
+	}
+	if !completed {
+		return run, false, nil
 	}
 	workStep.State = domain.WorkflowStepCompleted
 
@@ -217,8 +248,13 @@ func (c *Coordinator) resumeAdoptedTaskCommit(ctx stdctx.Context, run domain.Wor
 	// whatever class it failed on, and the adoption record is what says the work
 	// nonetheless exists. Overwriting it as "succeeded" would be a lie in the
 	// ledger about which agent did what.
-	if latest, ok, aerr := c.store.GetLatestWorkflowAttempt(ctx, workStep.ID); aerr == nil && ok && latest.FinishedAt == nil {
-		_ = c.store.UpdateWorkflowAttemptOutcome(ctx, latest.ID, now, domain.WorkflowAttemptFailed, latest.ErrorClass)
+	//
+	// P9: only the attempt of the dispatch being adopted, and only through the
+	// claim -- never "whatever attempt is latest", which after a concurrent
+	// launch is generation N+1's.
+	if latest, ok, aerr := c.store.GetLatestWorkflowAttempt(ctx, workStep.ID); aerr == nil && ok && latest.FinishedAt == nil &&
+		c.attemptBelongsToAdoptedDispatch(ctx, run.ID, workStep.ID, latest) {
+		_, _ = c.store.ClaimWorkflowAttemptOutcome(ctx, latest.ID, now, domain.WorkflowAttemptFailed, latest.ErrorClass)
 	}
 
 	// Un-park. The stop this releases is one whose whole content was "AO lost
@@ -462,4 +498,18 @@ func (c *Coordinator) recordWorkAdoption(ctx stdctx.Context, run domain.Workflow
 		CreatedAt:      c.clock(),
 	})
 	return err
+}
+
+// attemptBelongsToAdoptedDispatch reports that attempt is the one the adopted
+// dispatch ran under (P9): the dispatch record names it, or -- for a record
+// that names none -- the attempt started no later than that dispatch.
+func (c *Coordinator) attemptBelongsToAdoptedDispatch(ctx stdctx.Context, runID, stepID string, attempt domain.WorkflowAttempt) bool {
+	dispatchCP, ok := c.workDispatchCheckpoint(ctx, runID, stepID)
+	if !ok {
+		return false
+	}
+	if dispatchCP.AttemptID != nil && *dispatchCP.AttemptID != "" {
+		return *dispatchCP.AttemptID == attempt.ID
+	}
+	return !attempt.StartedAt.After(dispatchCP.CreatedAt)
 }

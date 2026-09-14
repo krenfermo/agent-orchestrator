@@ -5,6 +5,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -26,6 +27,8 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/codegraph"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemon/supervisor"
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonlock"
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
@@ -43,7 +46,6 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/previewserver"
 	"github.com/aoagents/agent-orchestrator/backend/internal/projectmemory"
 	"github.com/aoagents/agent-orchestrator/backend/internal/push"
-	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runtimegc"
 	"github.com/aoagents/agent-orchestrator/backend/internal/secretbox"
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
@@ -113,6 +115,42 @@ func RunWithConfig(cfg config.Config) error {
 
 	log := newLogger()
 	log.Info("daemon starting", "data_dir", cfg.DataDir, "listen", cfg.Addr(), "frontend_root", cfg.WebRoot)
+	// P9: the daemon's two identities, resolved before anything can launch or
+	// publish a run-file. A data dir whose installation identity cannot be read
+	// runs WITHOUT one (unstamped runtimes, no installation check) rather than
+	// minting a second identity over it: a new identity would silently disown
+	// every runtime the first one stamped.
+	//
+	// Exclusive ownership first: the data dir, and the run-file this daemon will
+	// publish, each held by an OS lock for the daemon's whole lifetime. Two
+	// daemons starting at the same moment cannot both pass a check-then-write
+	// guard; they cannot both hold these locks. The kernel releases them on any
+	// exit, so a crash never leaves them held.
+	dataDirLock, lerr := daemonlock.Acquire(filepath.Join(cfg.DataDir, "daemon.lock"))
+	if errors.Is(lerr, daemonlock.ErrHeld) {
+		return fmt.Errorf("another AO daemon holds data dir %s; refusing to start", cfg.DataDir)
+	} else if lerr != nil {
+		return fmt.Errorf("lock data dir: %w", lerr)
+	}
+	defer func() { _ = dataDirLock.Release() }()
+	runFileLock, lerr := daemonlock.Acquire(cfg.RunFilePath + ".lock")
+	if errors.Is(lerr, daemonlock.ErrHeld) {
+		return fmt.Errorf("another AO daemon owns run-file %s; refusing to start", cfg.RunFilePath)
+	} else if lerr != nil {
+		return fmt.Errorf("lock run-file: %w", lerr)
+	}
+	defer func() { _ = runFileLock.Release() }()
+
+	cfg.DaemonInstanceID = daemonmeta.NewDaemonInstanceID()
+	installationID, ierr := daemonmeta.LoadOrCreateInstallationID(cfg.DataDir)
+	if ierr != nil {
+		// Fail CLOSED. Running without an installation identity would leave
+		// every runtime unstamped and skip the installation check, so ownership
+		// would silently rest on less than it claims.
+		return fmt.Errorf("installation identity: %w (check the file by hand; AO will not replace an identity that may still own running workers)", ierr)
+	}
+	cfg.InstallationID = installationID
+	log.Info("daemon identity", "installation_id", cfg.InstallationID, "daemon_instance_id", cfg.DaemonInstanceID)
 	var browserRuntimeToken string
 	if os.Getenv(browserruntime.RuntimeTokenStdinEnv) == "1" {
 		browserRuntimeToken, err = browserruntime.ReadRuntimeToken(os.Stdin)
@@ -137,10 +175,15 @@ func RunWithConfig(cfg config.Config) error {
 	// PID for unrelated processes. So a "live" PID is verified against an actual
 	// /healthz probe; a run-file left by a crashed/hard-killed/reused-PID
 	// predecessor is treated as stale and overwritten when the new server starts.
-	if live, err := runfile.CheckStale(cfg.RunFilePath); err != nil {
+	//
+	// P9: both run-file conventions for this data dir are checked, so a daemon
+	// started as `ao server --data-dir X` (X/running.json) is not missed by a
+	// start that reads the default path -- the two-daemons-on-one-DB shape.
+	if live, path, err := liveDaemonForDataDir(&http.Client{Timeout: staleProbeTimeout}, cfg.RunFilePath, cfg.DataDir); err != nil {
 		return fmt.Errorf("inspect run-file: %w", err)
-	} else if live != nil && runFileOwnerServing(&http.Client{Timeout: staleProbeTimeout}, config.LoopbackHost, live) {
-		return fmt.Errorf("daemon already running (pid %d, port %d); refusing to start", live.PID, live.Port)
+	} else if live != nil {
+		return fmt.Errorf("daemon already running for data dir %s (pid %d, port %d, run-file %s); refusing to start",
+			cfg.DataDir, live.PID, live.Port, path)
 	}
 
 	// Open the durable store and bring up the CDC substrate: DB triggers capture
@@ -355,7 +398,8 @@ func RunWithConfig(cfg config.Config) error {
 	// attach Stream and liveness; the CDC broadcaster feeds the session-state channel. The manager
 	// is handed to httpd, which mounts it at /mux. Raw PTY bytes never flow
 	// through the CDC change_log -- only session-state events do.
-	runtimeAdapter := runtimeselect.New(log, cfg.TmuxSocket, filepath.Join(cfg.DataDir, "tmp"))
+	runtimeAdapter := runtimeselect.New(log, cfg.TmuxSocket, filepath.Join(cfg.DataDir, "tmp"),
+		runtimeselect.Identity{InstallationID: cfg.InstallationID, DaemonInstanceID: cfg.DaemonInstanceID})
 	managedPreview := previewserver.New(log, cfg.DataDir)
 	termMgr := terminal.NewManager(runtimeAdapter, cdcPipe.Broadcaster, log)
 	defer termMgr.Close()
@@ -715,7 +759,9 @@ func RunWithConfig(cfg config.Config) error {
 	// coordinator freezes, so a placement and the lock protecting it name the
 	// SAME daemon incarnation. Two independently generated tokens would mean
 	// boot reconciliation could believe it owns the lock and not the placement.
-	daemonInstanceToken := uuid.NewString()
+	// P9: the SAME daemon instance identity running.json, the probes and every
+	// runtime stamp carry -- one incarnation, one id.
+	daemonInstanceToken := cfg.DaemonInstanceID
 	branchLocks := branchlock.New(branchlock.Deps{
 		Store:      store,
 		Preflight:  workspaceObserver,

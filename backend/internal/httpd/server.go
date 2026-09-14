@@ -96,13 +96,20 @@ func (s *Server) Run(ctx context.Context) error {
 		Owner:                 os.Getenv("AO_OWNER"),
 		AppRunID:              s.cfg.AppRunID,
 		BrowserRuntimeAddress: os.Getenv("AO_BROWSER_RUNTIME_ADDRESS"),
+		// P9: the identity discovery proves a daemon by.
+		FormatVersion:  runfile.CurrentFormatVersion,
+		InstanceID:     s.cfg.DaemonInstanceID,
+		InstallationID: s.cfg.InstallationID,
+		DataDir:        s.cfg.DataDir,
 	}
 	if err := runfile.Write(s.cfg.RunFilePath, info); err != nil {
 		_ = s.listen.Close()
 		return fmt.Errorf("write run-file: %w", err)
 	}
 	defer func() {
-		if err := runfile.RemoveIfOwned(s.cfg.RunFilePath, info.PID); err != nil {
+		// Removed only while it still describes THIS incarnation: a successor
+		// that already rewrote it keeps its handshake.
+		if _, err := runfile.RemoveIfMatches(s.cfg.RunFilePath, info); err != nil {
 			s.log.Warn("failed to remove run-file", "path", s.cfg.RunFilePath, "err", err)
 		}
 	}()

@@ -17,24 +17,67 @@
 import type { DaemonProbe } from "./daemon-attach";
 
 /**
- * Reports whether something is holding the daemon port that we must kill before
- * spawning. By the time it is called, both healthy-reuse attach paths have already
- * returned null. The primary trigger is holderPidAlive: the run-file names a PID
- * that is still alive but is not answering /healthz (a hung/wedged holder). The
- * probe disjunct is a defensive guard: a holder that answers at this point is
- * unexpected (resolveDaemonFromPort already returned null), but if it does appear,
- * we replace it rather than colliding on spawn.
+ * What to do about whatever holds the daemon port once both attach paths have
+ * returned null (P9).
  *
- * Returns true when the caller should kill the holder, wait for the port to
- * free, clear the stale run-file, then spawn a fresh daemon.
+ * The rule is the one the daemon and the CLI follow: NEVER SIGNAL A PROCESS
+ * WHOSE OWNERSHIP IS NOT PROVEN. A PID that is merely alive proves nothing --
+ * the OS reuses PIDs -- and signalling its process group can kill an unrelated
+ * program. So there is no signal action at all:
  *
- * Returns false when there is no detectable holder; spawn immediately.
- *
- * ponytail: two-condition OR covers the entire decision surface; the probe's
- * content (pid, executablePath) is for the caller's kill logic, not ours.
+ * - nothing answers and no run-file PID is alive          -> spawn;
+ * - an AO daemon answers AND it is provably the one the run-file names
+ *   (same PID, same instance when both carry one) AND it passes this launch's
+ *   identity check                                         -> ask it to shut
+ *   down through its own /shutdown endpoint, then spawn;
+ * - anything else (a live PID with no answering daemon, a daemon that is not
+ *   the run-file's, a daemon of another checkout/installation) -> refuse, touch
+ *   nothing, and tell the person which process holds the port.
  */
-export function shouldReplacePortHolder(probe: DaemonProbe | null, holderPidAlive: boolean): boolean {
-	return probe !== null || holderPidAlive;
+export type PortHolderDecision =
+	| { action: "spawn" }
+	| { action: "graceful_shutdown" }
+	| { action: "refuse"; reason: string };
+
+export type PortHolderFacts = {
+	/** /healthz answer on the daemon port, or null when nothing valid answered. */
+	probe: DaemonProbe | null;
+	/** The run-file's PID and instance, when a run-file could be read. */
+	runFilePid: number | null;
+	runFileInstanceId?: string;
+	/** Whether the run-file PID is a live process (kill(pid, 0)). */
+	runFilePidAlive: boolean;
+	/** This launch's identity check on the probe: null when it matches. */
+	identityError: string | null;
+};
+
+export function decidePortHolderTakeover(facts: PortHolderFacts): PortHolderDecision {
+	const { probe, runFilePid, runFileInstanceId, runFilePidAlive, identityError } = facts;
+	if (!probe) {
+		if (runFilePid && runFilePidAlive) {
+			return {
+				action: "refuse",
+				reason: `the run-file names process ${runFilePid}, which is alive but is not answering as an AO daemon; AO will not signal a process whose ownership it cannot prove. Stop it yourself, then restart the app.`,
+			};
+		}
+		return { action: "spawn" };
+	}
+	if (!runFilePid || probe.pid !== runFilePid) {
+		return {
+			action: "refuse",
+			reason: `an AO daemon (pid ${probe.pid}) answers on the port but it is not the daemon the run-file names; stop it yourself, then restart the app.`,
+		};
+	}
+	if (runFileInstanceId && probe.instanceId && probe.instanceId !== runFileInstanceId) {
+		return {
+			action: "refuse",
+			reason: `the daemon answering (instance ${probe.instanceId}) is not the incarnation the run-file names (${runFileInstanceId}); stop it yourself, then restart the app.`,
+		};
+	}
+	if (identityError) {
+		return { action: "refuse", reason: identityError };
+	}
+	return { action: "graceful_shutdown" };
 }
 
 export type BrowserDaemonOwnershipDecision =

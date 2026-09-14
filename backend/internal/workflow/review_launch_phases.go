@@ -1118,6 +1118,17 @@ func (c *Coordinator) ReconcileOrphanedReviewers(
 				}
 			case perr == nil && presence == ReviewerPresenceAbsent:
 				// Nothing there. The obligation is discharged by proof.
+			case perr == nil && run.State.Terminal():
+				// P9 (I10/I11): a TERMINAL run's lifecycle is closed. The sweep may
+				// still terminate a reviewer it PROVES is its own (above) -- that
+				// acts on a process, not on the run -- but an identity it cannot
+				// act on must neither move the closed run's NextAction, latest
+				// phase or last activity, nor escalate a STOP nobody can act on --
+				// and nothing is appended to its ledger at all. It is made visible
+				// as a warning instead.
+				c.warnClosedRunReviewerObligation(run, step, reviewRunID, ref.String(), string(presence), "")
+			case perr != nil && run.State.Terminal():
+				c.warnClosedRunReviewerObligation(run, step, reviewRunID, ref.String(), string(presence), perr.Error())
 			case perr == nil && presence == ReviewerPresenceForeign:
 				// Something AO can prove is NOT its own. Never touched — but
 				// recorded, so a session sitting on a reviewer identity is a
@@ -1308,6 +1319,10 @@ func (c *Coordinator) appendUnprovenReviewerProbe(
 	ctx stdctx.Context, run domain.WorkflowRun, reviewStep domain.WorkflowStep,
 	reviewRunID, identity string, presence ReviewerPresence, why string,
 ) (attempt int, appended bool, err error) {
+	if c.runIsTerminalOnDisk(ctx, run) {
+		// P9 (I11): never appended to a closed run, whatever the caller read.
+		return 0, false, nil
+	}
 	prior := c.unprovenReviewerProbeCount(ctx, run.ID, reviewStep.ID, reviewRunID)
 	if prior >= maxUnprovenReviewerProbes {
 		// Budget spent. The obligation is already on the ledger exactly
@@ -1384,6 +1399,11 @@ func (c *Coordinator) escalateUnprovenReviewer(
 	ctx stdctx.Context, run domain.WorkflowRun, reviewStep domain.WorkflowStep,
 	reviewRunID, identity string, presence ReviewerPresence, probeErr error,
 ) error {
+	if c.runIsTerminalOnDisk(ctx, run) {
+		// P9 (I10/I11): an escalation is a STOP, a notification and possibly a
+		// wake. None of them may land on a run that is already closed.
+		return nil
+	}
 	why := "AO could not classify what is at this reviewer identity"
 	if probeErr != nil {
 		why = probeErr.Error()
@@ -1585,4 +1605,37 @@ func (c *Coordinator) reviewLaunchAbandonMarker(
 		return true, nil
 	}
 	return false, nil
+}
+
+// runIsTerminalOnDisk reports whether the run is terminal either in the caller's
+// copy or in the store right now. A read failure answers "terminal": refusing
+// one observational write is always safer than landing a STOP on a closed run.
+func (c *Coordinator) runIsTerminalOnDisk(ctx stdctx.Context, run domain.WorkflowRun) bool {
+	if run.State.Terminal() {
+		return true
+	}
+	current, ok, err := c.store.GetWorkflowRun(ctx, run.ID)
+	if err != nil || !ok {
+		return true
+	}
+	return current.State.Terminal()
+}
+
+// warnClosedRunReviewerObligation makes a reviewer identity AO cannot act on,
+// outliving a CLOSED run, visible WITHOUT touching that run (P9, I10): a closed
+// run's ledger, row and projection receive nothing from reconciliation. It is a
+// warning, once per (step, review run) per process, so repeated sweeps do not
+// flood the log; the obligation itself stays durable on the launch intent, and
+// every boot looks again.
+func (c *Coordinator) warnClosedRunReviewerObligation(
+	run domain.WorkflowRun, step domain.WorkflowStep, reviewRunID, identity, presence, probeErr string,
+) {
+	if c.log == nil {
+		return
+	}
+	if _, seen := c.closedRunReviewerWarned.LoadOrStore(step.ID+"\x00"+reviewRunID, struct{}{}); seen {
+		return
+	}
+	c.log.Warn("workflow: a reviewer identity AO cannot act on outlives a closed run; nothing is written to the closed run, and AO will neither launch over it nor terminate it",
+		"run", run.ID, "step", step.ID, "reviewRun", reviewRunID, "identity", identity, "presence", presence, "err", probeErr)
 }

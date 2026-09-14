@@ -293,26 +293,24 @@ func TestStopDoesNotShutdownUnverifiedReusedPID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, _, err := executeCLI(t, Deps{
+	_, _, err := executeCLI(t, Deps{
 		ProcessAlive: func(pid int) bool { return pid == 4242 },
 	}, "stop", "--json")
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("stop reported success over a live PID it could not verify")
 	}
 	select {
 	case <-shutdownCalled:
 		t.Fatal("stop requested shutdown from a process whose health probe did not prove AO daemon ownership")
 	default:
 	}
-	if !strings.Contains(out, `"state": "stopped"`) {
-		t.Fatalf("stop did not report stopped:\n%s", out)
+	// P9: the PID is alive and unproven. Its run-file is evidence, not garbage.
+	info, rerr := runfile.Read(cfg.runFile)
+	if rerr != nil {
+		t.Fatal(rerr)
 	}
-	info, err := runfile.Read(cfg.runFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info != nil {
-		t.Fatalf("unverified run-file was not removed: %#v", info)
+	if info == nil {
+		t.Fatal("the run-file of a live, unverified PID was removed")
 	}
 }
 

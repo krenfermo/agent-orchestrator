@@ -412,6 +412,18 @@ func daemonProbePayload(status string, cfg config.Config) map[string]any {
 	if cfg.StartupWorkingDirectory != "" {
 		payload["startupWorkingDirectory"] = cfg.StartupWorkingDirectory
 	}
+	// P9: identity, so a caller can prove the daemon answering is the one a
+	// run-file names and that it serves the data dir the caller means. Identities
+	// and a path only -- no token, no environment.
+	if cfg.DaemonInstanceID != "" {
+		payload["instanceId"] = cfg.DaemonInstanceID
+	}
+	if cfg.InstallationID != "" {
+		payload["installationId"] = cfg.InstallationID
+	}
+	if cfg.DataDir != "" {
+		payload["dataDir"] = cfg.DataDir
+	}
 	// AO_APPIMAGE is set by the Electron app at spawn time when it runs from an
 	// AppImage. The value is the stable outer .AppImage file path, which the
 	// app's daemon identity check compares instead of the transient

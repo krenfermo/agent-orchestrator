@@ -18,6 +18,16 @@ import (
 // is allowed to take.
 const fixCyclePickupTimeout = 10 * time.Minute
 
+// fixActiveSilenceWindow bounds how long an ACTIVE fix cycle may go unheard
+// before AO re-checks its runtime (P9 §18). It is not a timeout: silence alone
+// is never a conclusion. A laptop that slept for three hours wakes with every
+// clock "silent" and a worker that is perfectly alive, so past this window AO
+// asks the runtime whether the execution is provably gone -- and only a proven
+// ending moves the step. Quiet-but-alive and unprovable both leave it alone.
+// Same value as workerNeedsInputCorroborationWindow: both answer "how long may a
+// live agent say nothing before AO looks harder".
+const fixActiveSilenceWindow = 15 * time.Minute
+
 // fixCycleStarted reports whether the worker session produced ANY signal that
 // postdates this cycle's dispatch.
 //
@@ -50,7 +60,15 @@ func fixCycleStarted(sess domain.SessionRecord, dispatchedAt time.Time) bool {
 	}
 	return afterInstant(sess.Activity.LastActivityAt, dispatchedAt) ||
 		afterInstant(sess.TurnCompletedAt, dispatchedAt) ||
-		afterInstant(sess.FirstSignalAt, dispatchedAt)
+		afterInstant(sess.FirstSignalAt, dispatchedAt) ||
+		// P9 §18: an agent that was already ACTIVE keeps emitting same-state
+		// signals, which move only the coalesced liveness clock (last_signal_at),
+		// never the transition clock. Such a signal after the dispatch, from a
+		// session that reads active, is the agent working -- counting it keeps a
+		// busy fix cycle from being stopped as "never started". It is deliberately
+		// NOT counted for an idle session: an idle heartbeat after the dispatch is
+		// exactly the stale-looking fact incident wf-57f90ff2 was stopped on.
+		(sess.Activity.State == domain.ActivityActive && afterInstant(sess.Activity.LastSignalAt, dispatchedAt))
 }
 
 // fixCycleNumberOf reads the cycle number off a dispatch checkpoint's durable
@@ -121,18 +139,7 @@ func (c *Coordinator) observeFixStep(ctx stdctx.Context, run domain.WorkflowRun,
 
 	terminatedOrExited := !found || sess.IsTerminated || sess.Activity.State == domain.ActivityExited
 	if terminatedOrExited {
-		obs, ok := c.observeFixWorkspace(ctx, sess)
-		if !ok {
-			return step, nil
-		}
-		fp := WorkspaceFingerprint(obs)
-		if fp != fingerprintBefore {
-			return c.recordFixOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunWaiting,
-				fp, true, "fix delivered (worker session ended) — awaiting next review cycle", "", &obs)
-		}
-		return c.stopFix(ctx, run, step, domain.WorkflowStepFailed, ReasonFixNoVerifiableChange,
-			"fix worker session terminated with no verifiable change (no dirty, staged, or untracked change, and fingerprint unchanged)",
-			domain.WorkflowErrorWorkerTerminatedUnexpectedly)
+		return c.concludeEndedFixSession(ctx, run, step, sess, fingerprintBefore)
 	}
 
 	// Checkpoint 8P-E.16: nothing below may draw a conclusion about what this
@@ -163,7 +170,7 @@ func (c *Coordinator) observeFixStep(ctx stdctx.Context, run domain.WorkflowRun,
 
 	switch sess.Activity.State {
 	case domain.ActivityActive:
-		return step, nil
+		return c.observeActiveFixSilence(ctx, run, step, sess, latestCP.CreatedAt, fingerprintBefore, now)
 	case domain.ActivityWaitingInput, domain.ActivityBlocked:
 		return c.stopFix(ctx, run, step, domain.WorkflowStepWaiting, ReasonFixWorkerBlocked,
 			"fix worker awaiting input/blocked — needs human attention", "")
@@ -366,4 +373,65 @@ func observationOrNil(obs ports.WorkspaceObservation, ok bool) *ports.WorkspaceO
 		return nil
 	}
 	return &obs
+}
+
+// concludeEndedFixSession is the one ending a fix cycle's worker session can
+// have once it provably stopped running: a new fingerprint delivers the cycle,
+// an unchanged one fails it. A workspace AO cannot read concludes nothing.
+func (c *Coordinator) concludeEndedFixSession(
+	ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep,
+	sess domain.SessionRecord, fingerprintBefore string,
+) (domain.WorkflowStep, error) {
+	obs, ok := c.observeFixWorkspace(ctx, sess)
+	if !ok {
+		return step, nil
+	}
+	fp := WorkspaceFingerprint(obs)
+	if fp != fingerprintBefore {
+		return c.recordFixOutcome(ctx, run, step, domain.WorkflowStepWaiting, domain.WorkflowRunWaiting,
+			fp, true, "fix delivered (worker session ended) — awaiting next review cycle", "", &obs)
+	}
+	return c.stopFix(ctx, run, step, domain.WorkflowStepFailed, ReasonFixNoVerifiableChange,
+		"fix worker session terminated with no verifiable change (no dirty, staged, or untracked change, and fingerprint unchanged)",
+		domain.WorkflowErrorWorkerTerminatedUnexpectedly)
+}
+
+// observeActiveFixSilence is P9's liveness for a fix cycle delivered into the
+// worker's EXISTING session (§18).
+//
+// The fix step owns no session row of its own, so nothing else watches it: a fix
+// agent whose process died while its row still read `active` stayed "running"
+// forever. The liveness clock is the session's coalesced signal clock
+// (Activity.Liveness), floored at this cycle's own dispatch so the previous
+// cycle's signals can never make this one look heard-from (or silent).
+//
+// Silence is never the conclusion. Past fixActiveSilenceWindow AO asks the
+// runtime, and:
+//
+//   - owned and running  -> quiet but alive (a long tool call, a slept laptop):
+//     nothing is written;
+//   - provably gone      -> the session ended; concluded exactly like a
+//     terminated row, on workspace evidence;
+//   - anything unprovable (no port, a mismatch, an unread probe) -> nothing is
+//     written. An unknown probe is never proof a session is dead.
+func (c *Coordinator) observeActiveFixSilence(
+	ctx stdctx.Context, run domain.WorkflowRun, step domain.WorkflowStep,
+	sess domain.SessionRecord, dispatchedAt time.Time, fingerprintBefore string, now time.Time,
+) (domain.WorkflowStep, error) {
+	heard := sess.Activity.Liveness()
+	if heard.Before(dispatchedAt) {
+		heard = dispatchedAt
+	}
+	if now.Sub(heard) <= fixActiveSilenceWindow {
+		return step, nil
+	}
+	obs := c.observeWorkerRuntime(ctx, sess.ID)
+	if obs == nil || !obs.Proof.ExecutionProvenGone() {
+		return step, nil
+	}
+	if c.log != nil {
+		c.log.Warn("workflow: an active fix cycle went silent and its runtime is provably gone",
+			"run", run.ID, "step", step.ID, "session", sess.ID, "proof", obs.Proof, "silent", now.Sub(heard).Round(time.Second))
+	}
+	return c.concludeEndedFixSession(ctx, run, step, sess, fingerprintBefore)
 }
