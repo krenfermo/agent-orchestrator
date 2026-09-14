@@ -83,6 +83,15 @@ func (c *Coordinator) observeWorkerLiveness(ctx stdctx.Context, detail *RunDetai
 		return
 	}
 	step, sessionID, ok := runningWorkerSession(detail.Steps)
+	// P9 §18 (P8 debt 11): a fix cycle is delivered into the worker's EXISTING
+	// session and its step row never carries a session id, so the rule above
+	// could never see it. A running fix step newer than whatever it found takes
+	// the session named on its own durable dispatch record instead.
+	if fix, fixFound := newestRunningStepOfKind(detail.Steps, domain.WorkflowStepFix); fixFound && (!ok || fix.Ordinal >= step.Ordinal) {
+		if sid := c.DurableSessionForStep(ctx, detail.Run.ID, fix); sid != "" {
+			step, sessionID, ok = fix, string(sid), true
+		}
+	}
 	if !ok {
 		return
 	}
@@ -125,4 +134,19 @@ func runningWorkerSession(steps []StepDetail) (domain.WorkflowStep, string, bool
 		}
 	}
 	return best, sessionID, found
+}
+
+// newestRunningStepOfKind returns the highest-ordinal RUNNING step of one kind.
+func newestRunningStepOfKind(steps []StepDetail, kind domain.WorkflowStepKind) (domain.WorkflowStep, bool) {
+	var best domain.WorkflowStep
+	found := false
+	for _, sd := range steps {
+		if sd.Step.Kind != kind || sd.Step.State != domain.WorkflowStepRunning {
+			continue
+		}
+		if !found || sd.Step.Ordinal >= best.Ordinal {
+			best, found = sd.Step, true
+		}
+	}
+	return best, found
 }

@@ -349,10 +349,13 @@ type fixRecoveryFixture struct {
 	// into. Empty models an install that has not configured one, which is its
 	// own tested refusal.
 	selfRepairProject string
-	runID             string
-	fixStepID         string
-	workSessionID     domain.SessionID
-	idSeq             int
+	// runtimeOwnership is P9's runtime identity read-back. nil models a daemon
+	// without the port (the pre-P9 behaviour every older test in this file holds).
+	runtimeOwnership workflowcore.WorkerRuntimeOwnership
+	runID            string
+	fixStepID        string
+	workSessionID    domain.SessionID
+	idSeq            int
 }
 
 func newFixRecoveryFixture(t *testing.T) *fixRecoveryFixture {
@@ -385,16 +388,17 @@ func newFixRecoveryFixture(t *testing.T) *fixRecoveryFixture {
 // again by restart() to model a daemon that came back over the same rows.
 func (f *fixRecoveryFixture) newCoordinator() *workflowcore.Coordinator {
 	return workflowcore.New(workflowcore.Deps{
-		Store:               f.store,
-		Spawner:             f.spawner,
-		SessionFacts:        f.sessionFacts,
-		WorkspaceFacts:      f.workspaceFacts,
-		ReviewRuns:          f.reviewRuns,
-		ReviewerLauncher:    f.launcher,
-		MessageSender:       f.messageSender(),
-		IncidentAgents:      f.incidentAgents,
-		SelfRepairProjectID: f.selfRepairProject,
-		Clock:               f.clk.Now,
+		Store:                  f.store,
+		Spawner:                f.spawner,
+		SessionFacts:           f.sessionFacts,
+		WorkspaceFacts:         f.workspaceFacts,
+		ReviewRuns:             f.reviewRuns,
+		ReviewerLauncher:       f.launcher,
+		MessageSender:          f.messageSender(),
+		IncidentAgents:         f.incidentAgents,
+		SelfRepairProjectID:    f.selfRepairProject,
+		WorkerRuntimeOwnership: f.runtimeOwnership,
+		Clock:                  f.clk.Now,
 		NewID: func() string {
 			f.idSeq++
 			return fmt.Sprintf("id%d", f.idSeq)

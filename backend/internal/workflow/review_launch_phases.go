@@ -1118,6 +1118,25 @@ func (c *Coordinator) ReconcileOrphanedReviewers(
 				}
 			case perr == nil && presence == ReviewerPresenceAbsent:
 				// Nothing there. The obligation is discharged by proof.
+			case perr == nil && run.State.Terminal():
+				// P9 (I10/I11): a TERMINAL run's ledger is closed. The sweep may
+				// still terminate a reviewer it PROVES is its own (above) -- that
+				// acts on a process, not on the run -- but an identity it cannot
+				// act on is not a fact about the closed run's lifecycle. Appending
+				// review_reviewer_unproven there moved a completed run's NextAction,
+				// latest phase and last activity on every boot, and past the probe
+				// budget escalated into an attention STOP on a run nobody can
+				// continue. It is logged instead; the obligation stays durable on
+				// the intent, and the next boot looks again.
+				if c.log != nil {
+					c.log.Info("workflow: an unprovable reviewer identity outlives a terminal run; nothing is written to the closed run",
+						"run", run.ID, "step", step.ID, "reviewRun", reviewRunID, "presence", presence)
+				}
+			case perr != nil && run.State.Terminal():
+				if c.log != nil {
+					c.log.Info("workflow: a reviewer probe failed for a terminal run; nothing is written to the closed run",
+						"run", run.ID, "step", step.ID, "reviewRun", reviewRunID, "err", perr)
+				}
 			case perr == nil && presence == ReviewerPresenceForeign:
 				// Something AO can prove is NOT its own. Never touched — but
 				// recorded, so a session sitting on a reviewer identity is a
@@ -1308,6 +1327,10 @@ func (c *Coordinator) appendUnprovenReviewerProbe(
 	ctx stdctx.Context, run domain.WorkflowRun, reviewStep domain.WorkflowStep,
 	reviewRunID, identity string, presence ReviewerPresence, why string,
 ) (attempt int, appended bool, err error) {
+	if c.runIsTerminalOnDisk(ctx, run) {
+		// P9 (I11): never appended to a closed run, whatever the caller read.
+		return 0, false, nil
+	}
 	prior := c.unprovenReviewerProbeCount(ctx, run.ID, reviewStep.ID, reviewRunID)
 	if prior >= maxUnprovenReviewerProbes {
 		// Budget spent. The obligation is already on the ledger exactly
@@ -1384,6 +1407,11 @@ func (c *Coordinator) escalateUnprovenReviewer(
 	ctx stdctx.Context, run domain.WorkflowRun, reviewStep domain.WorkflowStep,
 	reviewRunID, identity string, presence ReviewerPresence, probeErr error,
 ) error {
+	if c.runIsTerminalOnDisk(ctx, run) {
+		// P9 (I10/I11): an escalation is a STOP, a notification and possibly a
+		// wake. None of them may land on a run that is already closed.
+		return nil
+	}
 	why := "AO could not classify what is at this reviewer identity"
 	if probeErr != nil {
 		why = probeErr.Error()
@@ -1585,4 +1613,18 @@ func (c *Coordinator) reviewLaunchAbandonMarker(
 		return true, nil
 	}
 	return false, nil
+}
+
+// runIsTerminalOnDisk reports whether the run is terminal either in the caller's
+// copy or in the store right now. A read failure answers "terminal": refusing
+// one observational write is always safer than landing a STOP on a closed run.
+func (c *Coordinator) runIsTerminalOnDisk(ctx stdctx.Context, run domain.WorkflowRun) bool {
+	if run.State.Terminal() {
+		return true
+	}
+	current, ok, err := c.store.GetWorkflowRun(ctx, run.ID)
+	if err != nil || !ok {
+		return true
+	}
+	return current.State.Terminal()
 }

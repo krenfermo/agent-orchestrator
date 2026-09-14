@@ -55,10 +55,11 @@ func TestReviewSweep_UnprovableReviewerAccumulatesEvidenceThenEscalates(t *testi
 
 	// The run ends with that launch unresolved, and the identity is
 	// unclassifiable from here on.
-	if _, err := f.store.UpdateWorkflowRunState(
-		f.ctx, f.runID, f.run().State, domain.WorkflowRunCancelled, f.clk.Now()); err != nil {
-		t.Fatalf("cancel the run: %v", err)
-	}
+	// P9 §19: a CLOSED run's ledger receives nothing from this sweep (see
+	// p9_terminal_immutability_test.go). The obligation mechanics this test
+	// holds -- evidence, budget, escalation -- are exercised where they still
+	// apply: a review step that ended on a run somebody can still continue.
+	failReviewStepOnLiveRun(t, f)
 	f.launcher.probeUnknown = true
 
 	launches := f.launcher.launchCalls
@@ -105,10 +106,11 @@ func TestReviewSweep_ForeignSessionIsRecordedAndLeftAlone(t *testing.T) {
 	identity := "workflow-review-" + subject
 	f.crashIdentity(subject)
 	f.seedLaunchPhaseFor(subject, "review_launch_intent")
-	if _, err := f.store.UpdateWorkflowRunState(
-		f.ctx, f.runID, f.run().State, domain.WorkflowRunCancelled, f.clk.Now()); err != nil {
-		t.Fatalf("cancel the run: %v", err)
-	}
+	// P9 §19: a CLOSED run's ledger receives nothing from this sweep (see
+	// p9_terminal_immutability_test.go). The obligation mechanics this test
+	// holds -- evidence, budget, escalation -- are exercised where they still
+	// apply: a review step that ended on a run somebody can still continue.
+	failReviewStepOnLiveRun(t, f)
 	f.launcher.foreign = map[string]bool{identity: true}
 
 	cancels := f.launcher.cancelCalls
@@ -218,10 +220,11 @@ func TestReviewSweep_UnprovenEvidenceIsBoundedByItsProbeBudget(t *testing.T) {
 	subject := "rr-bounded"
 	f.crashIdentity(subject)
 	f.seedLaunchPhaseFor(subject, "review_launch_intent")
-	if _, err := f.store.UpdateWorkflowRunState(
-		f.ctx, f.runID, f.run().State, domain.WorkflowRunCancelled, f.clk.Now()); err != nil {
-		t.Fatalf("cancel the run: %v", err)
-	}
+	// P9 §19: a CLOSED run's ledger receives nothing from this sweep (see
+	// p9_terminal_immutability_test.go). The obligation mechanics this test
+	// holds -- evidence, budget, escalation -- are exercised where they still
+	// apply: a review step that ended on a run somebody can still continue.
+	failReviewStepOnLiveRun(t, f)
 	f.launcher.probeUnknown = true
 
 	const budget = 5
@@ -266,10 +269,11 @@ func TestReviewSweep_ProbeBudgetIsDurablePerReviewerObligation(t *testing.T) {
 	first := "rr-budget-a"
 	f.crashIdentity(first)
 	f.seedLaunchPhaseFor(first, "review_launch_intent")
-	if _, err := f.store.UpdateWorkflowRunState(
-		f.ctx, f.runID, f.run().State, domain.WorkflowRunCancelled, f.clk.Now()); err != nil {
-		t.Fatalf("cancel the run: %v", err)
-	}
+	// P9 §19: a CLOSED run's ledger receives nothing from this sweep (see
+	// p9_terminal_immutability_test.go). The obligation mechanics this test
+	// holds -- evidence, budget, escalation -- are exercised where they still
+	// apply: a review step that ended on a run somebody can still continue.
+	failReviewStepOnLiveRun(t, f)
 	f.launcher.probeUnknown = true
 
 	for i := 0; i < 3; i++ {
@@ -2563,5 +2567,16 @@ func TestBudgetClosure_CorruptResetRecordFailsClosed(t *testing.T) {
 					"most dangerous one to honour, not the least")
 			}
 		})
+	}
+}
+
+// failReviewStepOnLiveRun ends the review step while its run stays live: the
+// shape in which the orphaned-reviewer sweep still owes durable evidence and,
+// past its budget, a stop a person can act on.
+func failReviewStepOnLiveRun(t *testing.T, f *reviewAuthorityFixture) {
+	t.Helper()
+	review := f.reviewStep()
+	if _, err := f.store.UpdateWorkflowStepState(f.ctx, review.ID, review.State, domain.WorkflowStepFailed, f.clk.Now()); err != nil {
+		t.Fatalf("fail the review step: %v", err)
 	}
 }
