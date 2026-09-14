@@ -662,3 +662,99 @@ func TestP9Daemon_RefusesARuntimeThatIsNotThisLaunch(t *testing.T) {
 		t.Fatalf("second boot: sessions %d, ledger %d -> %d (added %v)", sessions2, len(phases), len(phases2), phases2[len(phases):])
 	}
 }
+
+// aoFails runs the real `ao` with an overridden environment and returns its
+// output and whether it failed, without failing the test itself.
+func (s *scratch) aoFails(env []string, args ...string) (string, bool) {
+	s.t.Helper()
+	cmd := exec.Command(s.bin, args...)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	return string(out), err != nil
+}
+
+func withEnv(env []string, key, value string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, key+"=") {
+			out = append(out, kv)
+		}
+	}
+	return append(out, key+"="+value)
+}
+
+// Case 3 (P9 review): a run-file whose PID is ALIVE but whose daemon identity
+// does not match what answers on its port. `ao status` must say it is running
+// but unverified, `ao stop` must refuse, the process at that PID must receive
+// NO signal, the answering daemon must NOT be shut down, the file must be kept
+// -- and a second daemon on the same data dir must refuse to start at all.
+func TestP9Daemon_LivePIDWithMismatchedIdentityIsNeverSignalledOrTakenOver(t *testing.T) {
+	s := newScratch(t)
+	s.startDaemon()
+	daemonPID := s.daemon.Process.Pid
+
+	// A live process of this test's own, standing in for a reused PID.
+	bystander := exec.Command("sleep", "300")
+	if err := bystander.Start(); err != nil {
+		t.Fatal(err)
+	}
+	bystanderDone := make(chan error, 1)
+	go func() { bystanderDone <- bystander.Wait() }()
+	t.Cleanup(func() {
+		if bystander.ProcessState == nil {
+			_ = bystander.Process.Kill() // our own child only
+			<-bystanderDone
+		}
+	})
+
+	forged := filepath.Join(s.root, "forged-running.json")
+	body, _ := json.Marshal(map[string]any{
+		"pid": bystander.Process.Pid, "port": s.port, "startedAt": time.Now().UTC(),
+		"formatVersion": 2, "instanceId": "aod-" + uuid.NewString(), "installationId": s.install, "dataDir": s.dataDir,
+	})
+	if err := os.WriteFile(forged, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := withEnv(s.env(), "AO_RUN_FILE", forged)
+
+	if out, _ := s.aoFails(env, "status"); !strings.Contains(out, "unverified") {
+		t.Fatalf("ao status over a live, mismatched PID said: %s", out)
+	}
+	if out, failed := s.aoFails(env, "stop"); !failed {
+		t.Fatalf("ao stop acted on a live PID it could not verify: %s", out)
+	}
+	select {
+	case err := <-bystanderDone:
+		t.Fatalf("the process at the recorded PID was signalled: %v", err)
+	default:
+	}
+	if err := bystander.Process.Signal(syscallZero()); err != nil {
+		t.Fatalf("the bystander is gone: %v", err)
+	}
+	if _, err := os.Stat(forged); err != nil {
+		t.Fatalf("the run-file of a live, unverified PID was removed: %v", err)
+	}
+	var ready struct {
+		Status string `json:"status"`
+		PID    int    `json:"pid"`
+	}
+	if err := s.getJSON("/readyz", &ready); err != nil || ready.PID != daemonPID {
+		t.Fatalf("the answering daemon was taken down: %+v err=%v", ready, err)
+	}
+
+	// No takeover by a second daemon on the same data dir either.
+	second := exec.Command(s.bin, "daemon")
+	second.Env = withEnv(withEnv(s.env(), "AO_RUN_FILE", filepath.Join(s.root, "second-running.json")), "AO_PORT", strconv.Itoa(freePort(t)))
+	second.Dir = s.root
+	out, err := second.CombinedOutput()
+	if err == nil {
+		t.Fatalf("a second daemon started on a data dir another daemon holds: %s", out)
+	}
+	if !strings.Contains(string(out), "refusing to start") {
+		t.Fatalf("second daemon failed for another reason: %s", out)
+	}
+	if err := s.getJSON("/readyz", &ready); err != nil || ready.PID != daemonPID {
+		t.Fatalf("the first daemon did not survive a refused takeover: %+v err=%v", ready, err)
+	}
+	s.stopDaemon()
+}

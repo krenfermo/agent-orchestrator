@@ -69,21 +69,43 @@ func LoadOrCreateInstallationID(dataDir string) (string, error) {
 		return "", fmt.Errorf("daemonmeta: create data dir: %w", err)
 	}
 	id := installationIDPrefix + uuid.NewString()
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	// Written COMPLETE to a private temp file, fsynced, and only then linked
+	// into place. os.Link fails if the name already exists, so it is the
+	// exclusive create -- and because the name only ever appears pointing at a
+	// fully written file, no racer and no crash can ever observe (or leave) an
+	// empty or partial identity.
+	tmp, err := os.CreateTemp(dataDir, ".installation_id-*")
 	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			// Somebody else created it between our read and our create.
-			return readInstallationID(path)
-		}
-		return "", fmt.Errorf("daemonmeta: create installation identity: %w", err)
+		return "", fmt.Errorf("daemonmeta: stage installation identity: %w", err)
 	}
-	_, werr := f.WriteString(id + "\n")
-	serr := f.Sync()
-	cerr := f.Close()
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	_, werr := tmp.WriteString(id + "\n")
+	serr := tmp.Sync()
+	cerr := tmp.Close()
 	if err := errors.Join(werr, serr, cerr); err != nil {
 		return "", fmt.Errorf("daemonmeta: write installation identity: %w", err)
 	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return "", fmt.Errorf("daemonmeta: protect installation identity: %w", err)
+	}
+	if err := os.Link(tmpName, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			// Somebody else linked theirs first; it is complete by construction.
+			return readInstallationID(path)
+		}
+		return "", fmt.Errorf("daemonmeta: publish installation identity: %w", err)
+	}
+	syncDir(dataDir)
 	return id, nil
+}
+
+// syncDir makes the new directory entry durable where the platform supports it.
+func syncDir(dir string) {
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 }
 
 func readInstallationID(path string) (string, error) {

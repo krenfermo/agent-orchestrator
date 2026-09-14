@@ -639,6 +639,12 @@ func newAppRunID() string {
 	return "apprun-" + hex.EncodeToString(buf)
 }
 
+// DefaultRunFilePath is where running.json lives for a caller that did not name
+// one: AO_RUN_FILE when set, otherwise ~/.ao/running.json (P9: the daemon's
+// startup guard also checks it, so an `ao server --data-dir` start cannot miss a
+// daemon published under the default convention).
+func DefaultRunFilePath() (string, error) { return resolveRunFilePath() }
+
 // resolveRunFilePath picks where running.json lives. An explicit AO_RUN_FILE
 // wins; otherwise it sits under the canonical AO home directory so the CLI and
 // Electron supervisor share one handshake location.

@@ -184,7 +184,11 @@ func (c *commandContext) inspectRunFile(ctx context.Context, cfg config.Config, 
 		return st, info, nil
 	}
 	if mismatch := probeOwnerMismatch(health, info.PID, "healthz"); mismatch != "" {
-		st.State = stateStale
+		// P9: the recorded PID is ALIVE and the port answers as a different
+		// process. The file may well be stale -- or the PID may belong to
+		// something else entirely; neither is provable, so it is never cleared
+		// and never acted on.
+		st.State = stateUnverified
 		st.Error = mismatch
 		return st, info, nil
 	}
@@ -210,7 +214,7 @@ func (c *commandContext) inspectRunFile(ctx context.Context, cfg config.Config, 
 		return st, info, nil
 	}
 	if mismatch := probeOwnerMismatch(ready, info.PID, "readyz"); mismatch != "" {
-		st.State = stateStale
+		st.State = stateUnverified
 		st.owned = false
 		st.Error = mismatch
 		return st, info, nil

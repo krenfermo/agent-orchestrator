@@ -5,6 +5,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/codegraph"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemon/supervisor"
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonlock"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
@@ -118,12 +120,36 @@ func RunWithConfig(cfg config.Config) error {
 	// runs WITHOUT one (unstamped runtimes, no installation check) rather than
 	// minting a second identity over it: a new identity would silently disown
 	// every runtime the first one stamped.
-	cfg.DaemonInstanceID = daemonmeta.NewDaemonInstanceID()
-	if installationID, ierr := daemonmeta.LoadOrCreateInstallationID(cfg.DataDir); ierr != nil {
-		log.Warn("daemon: installation identity unavailable; runtimes will not be stamped", "err", ierr)
-	} else {
-		cfg.InstallationID = installationID
+	//
+	// Exclusive ownership first: the data dir, and the run-file this daemon will
+	// publish, each held by an OS lock for the daemon's whole lifetime. Two
+	// daemons starting at the same moment cannot both pass a check-then-write
+	// guard; they cannot both hold these locks. The kernel releases them on any
+	// exit, so a crash never leaves them held.
+	dataDirLock, lerr := daemonlock.Acquire(filepath.Join(cfg.DataDir, "daemon.lock"))
+	if errors.Is(lerr, daemonlock.ErrHeld) {
+		return fmt.Errorf("another AO daemon holds data dir %s; refusing to start", cfg.DataDir)
+	} else if lerr != nil {
+		return fmt.Errorf("lock data dir: %w", lerr)
 	}
+	defer func() { _ = dataDirLock.Release() }()
+	runFileLock, lerr := daemonlock.Acquire(cfg.RunFilePath + ".lock")
+	if errors.Is(lerr, daemonlock.ErrHeld) {
+		return fmt.Errorf("another AO daemon owns run-file %s; refusing to start", cfg.RunFilePath)
+	} else if lerr != nil {
+		return fmt.Errorf("lock run-file: %w", lerr)
+	}
+	defer func() { _ = runFileLock.Release() }()
+
+	cfg.DaemonInstanceID = daemonmeta.NewDaemonInstanceID()
+	installationID, ierr := daemonmeta.LoadOrCreateInstallationID(cfg.DataDir)
+	if ierr != nil {
+		// Fail CLOSED. Running without an installation identity would leave
+		// every runtime unstamped and skip the installation check, so ownership
+		// would silently rest on less than it claims.
+		return fmt.Errorf("installation identity: %w (check the file by hand; AO will not replace an identity that may still own running workers)", ierr)
+	}
+	cfg.InstallationID = installationID
 	log.Info("daemon identity", "installation_id", cfg.InstallationID, "daemon_instance_id", cfg.DaemonInstanceID)
 	var browserRuntimeToken string
 	if os.Getenv(browserruntime.RuntimeTokenStdinEnv) == "1" {

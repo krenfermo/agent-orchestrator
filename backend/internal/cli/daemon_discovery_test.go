@@ -188,18 +188,26 @@ func TestStop_ReusedPIDWithNoAOProbeIsNeverActedOn(t *testing.T) {
 	}
 }
 
-// A reused PID answered by a DIFFERENT AO daemon: the file is stale for the pid
-// it names, and removing it is safe only by exact match.
-func TestStop_ReusedPIDAnsweredByAnotherDaemonIsStale(t *testing.T) {
+// P9 review: the recorded PID is ALIVE and the port answers as a DIFFERENT AO
+// daemon. The file may be stale -- or the PID may be something else entirely.
+// Neither is provable: RUNNING BUT UNVERIFIED, nothing is shut down, and the
+// file is kept.
+func TestStop_LivePIDAnsweredByAnotherDaemonIsUnverified(t *testing.T) {
 	env := newDiscoveryEnv(t)
 	d := newFakeDaemon(t, 9999, "aod-other", env.dataDir)
 	writeDiscoveryRunFile(t, env.runFile, runfile.Info{PID: 4500, Port: d.port(t), InstanceID: "aod-old", DataDir: env.dataDir})
-	st, err := discoveryContext(func(int) bool { return true }).stopDaemon(context.Background(), stopOptions{timeout: time.Second})
-	if err != nil || st.State != stateStopped {
-		t.Fatalf("stop = %s err=%v", st.State, err)
+	c := discoveryContext(func(int) bool { return true })
+	if st, err := c.inspectDaemon(context.Background()); err != nil || st.State != stateUnverified || st.owned {
+		t.Fatalf("status = %+v err=%v, want running_unverified and unowned", st, err)
+	}
+	if _, err := c.stopDaemon(context.Background(), stopOptions{timeout: time.Second}); err == nil {
+		t.Fatal("stop acted on a process it could not verify")
 	}
 	if _, shutdowns := d.counts(); shutdowns != 0 {
 		t.Fatal("a daemon the run-file does not name was asked to shut down")
+	}
+	if info, _ := runfile.Read(env.runFile); info == nil {
+		t.Fatal("the run-file of a live, unverified PID was deleted")
 	}
 }
 

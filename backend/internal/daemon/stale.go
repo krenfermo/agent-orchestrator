@@ -72,10 +72,25 @@ func runFileDaemonServing(client *http.Client, host string, info *runfile.Info) 
 // which `ao server --data-dir` writes.
 func startupRunFileCandidates(runFilePath, dataDir string) []string {
 	paths := []string{runFilePath}
-	if dataDir != "" {
-		if alt := filepath.Join(dataDir, "running.json"); filepath.Clean(alt) != filepath.Clean(runFilePath) {
-			paths = append(paths, alt)
+	add := func(p string) {
+		if p == "" {
+			return
 		}
+		for _, existing := range paths {
+			if filepath.Clean(existing) == filepath.Clean(p) {
+				return
+			}
+		}
+		paths = append(paths, p)
+	}
+	if dataDir != "" {
+		add(filepath.Join(dataDir, "running.json"))
+	}
+	// The default convention too: `ao server --data-dir X` names X/running.json,
+	// and a daemon on the same data dir published under ~/.ao/running.json would
+	// otherwise be invisible to it.
+	if def, err := config.DefaultRunFilePath(); err == nil {
+		add(def)
 	}
 	return paths
 }
@@ -87,10 +102,9 @@ func liveDaemonForDataDir(client *http.Client, runFilePath, dataDir string) (*ru
 	for i, path := range startupRunFileCandidates(runFilePath, dataDir) {
 		live, err := runfile.CheckStale(path)
 		if err != nil {
-			if i == 0 {
-				return nil, "", err
-			}
-			continue
+			// An unreadable candidate is not proof nothing serves this data
+			// dir; a start that cannot read it refuses rather than guesses.
+			return nil, "", fmt.Errorf("inspect run-file %s: %w", path, err)
 		}
 		if live == nil {
 			continue
