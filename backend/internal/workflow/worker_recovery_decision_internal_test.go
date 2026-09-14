@@ -49,19 +49,40 @@ func TestDecideWorkerAdoptionTable(t *testing.T) {
 		{"conpty: unsupported fails closed", with(func(f *workerAdoptionFacts) { f.Runtime = obsOf(domain.WorkerRuntimeUnsupported) }), WorkerRecoveryFailClosed, WorkerReasonRuntimeUnsupported},
 		{"unavailable probe waits, concludes nothing", with(func(f *workerAdoptionFacts) {
 			f.Runtime = obsOf(domain.WorkerRuntimeUnavailable)
-			f.UnreadableSince = claimed
-			f.Now = claimed.Add(time.Minute)
+			f.UnreadableFor, f.UnreadableKnown = time.Minute, true
 		}), WorkerRecoveryWait, WorkerReasonRuntimeUnavailable},
 		{"an hours-old claim with a FIRST failed read still waits", with(func(f *workerAdoptionFacts) {
 			f.Runtime = obsOf(domain.WorkerRuntimeUnavailable)
-			f.Now = claimed.Add(6 * time.Hour)
-			f.UnreadableSince = f.Now
+			f.UnreadableFor, f.UnreadableKnown = 0, true
+		}), WorkerRecoveryWait, WorkerReasonRuntimeUnavailable},
+		{"an unreadable runtime with no recorded episode never stops", with(func(f *workerAdoptionFacts) {
+			f.Runtime = obsOf(domain.WorkerRuntimeUnavailable)
+			f.UnreadableFor, f.UnreadableKnown = 0, false
 		}), WorkerRecoveryWait, WorkerReasonRuntimeUnavailable},
 		{"a runtime unreadable past the grace fails closed, never adopts", with(func(f *workerAdoptionFacts) {
 			f.Runtime = obsOf(domain.WorkerRuntimeUnavailable)
-			f.UnreadableSince = claimed
-			f.Now = claimed.Add(workerRuntimeUnreadableGrace + time.Second)
+			f.UnreadableFor, f.UnreadableKnown = workerRuntimeUnreadableGrace+time.Second, true
 		}), WorkerRecoveryFailClosed, WorkerReasonRuntimeUnavailable},
+		{"a terminated session row is never adopted", with(func(f *workerAdoptionFacts) { f.SessionTerminated = true }), WorkerRecoveryRelaunch, WorkerReasonRuntimeMissing},
+		{"review 1.2: a claim with no recorded instant cannot fence, so it cannot adopt", with(func(f *workerAdoptionFacts) { f.ClaimedAt = time.Time{} }), WorkerRecoveryFailClosed, WorkerReasonGenerationMismatch},
+		{"a session with no creation instant cannot be fenced", with(func(f *workerAdoptionFacts) { f.SessionCreatedAt = time.Time{} }), WorkerRecoveryFailClosed, WorkerReasonGenerationMismatch},
+		{"review 1.1: an older generation's session fails the fence even when a launch is recorded", with(func(f *workerAdoptionFacts) {
+			f.SessionCreatedAt = claimed.Add(-10 * time.Minute)
+			f.Runtime = obsOf(domain.WorkerRuntimeOwnedExited)
+		}), WorkerRecoveryFailClosed, WorkerReasonGenerationMismatch},
+		{"restore: same session under a new launch, proven, named by this generation", with(func(f *workerAdoptionFacts) {
+			f.RecordedLaunchID = "launch-1"
+			f.RecordedSessionID = "sess-1"
+		}), WorkerRecoveryAdopt, WorkerReasonMatchingRuntime},
+		{"a new launch on a session this generation never named is refused", with(func(f *workerAdoptionFacts) {
+			f.RecordedLaunchID = "launch-1"
+			f.RecordedSessionID = "sess-9"
+		}), WorkerRecoveryFailClosed, WorkerReasonLaunchMismatch},
+		{"a restore claim is refused without a runtime proof of ownership", with(func(f *workerAdoptionFacts) {
+			f.RecordedLaunchID = "launch-1"
+			f.RecordedSessionID = "sess-1"
+			f.Runtime = nil
+		}), WorkerRecoveryFailClosed, WorkerReasonLaunchMismatch},
 		{"out-of-vocabulary proof waits", with(func(f *workerAdoptionFacts) { f.Runtime = obsOf("bogus") }), WorkerRecoveryWait, WorkerReasonRuntimeUnavailable},
 		{"I14: recorded launch disagrees", with(func(f *workerAdoptionFacts) { f.RecordedLaunchID = "launch-1" }), WorkerRecoveryFailClosed, WorkerReasonLaunchMismatch},
 		{"I13: no recorded launch, session inside this claim", with(func(f *workerAdoptionFacts) { f.RecordedLaunchID = "" }), WorkerRecoveryAdopt, WorkerReasonMatchingRuntime},

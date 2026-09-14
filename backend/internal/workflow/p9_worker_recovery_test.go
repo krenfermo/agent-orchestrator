@@ -17,6 +17,7 @@ package workflow_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
@@ -161,7 +162,7 @@ func (f *p9Fixture) newCoordinator(ownership workflowcore.SessionOwnership, lock
 	return workflowcore.New(workflowcore.Deps{
 		Store: f.store, Projects: f.store, Spawner: f.spawner, SessionFacts: f.store, WorkspaceFacts: f.ws,
 		SessionOwnership: ownership, BranchLocks: locks, WorkerRuntimeOwnership: f.runtime,
-		Clock: f.clk.Now, NewID: launchIDSeq(fmt.Sprintf("boot%d-", f.boots)),
+		Clock: f.clk.Now, MonotonicClock: f.clk.Now, NewID: launchIDSeq(fmt.Sprintf("boot%d-", f.boots)),
 	})
 }
 
@@ -487,28 +488,37 @@ func TestP9Crash_C3_RuntimeReadableAgainInsideTheGraceIsAdopted(t *testing.T) {
 	}
 }
 
-// I14 — the launch AO recorded disagrees with the one the session now runs.
-func TestP9Crash_C3_RecordedLaunchMismatchIsNotAdopted(t *testing.T) {
+// I14, integration review: AO itself relaunched the SAME session under a new
+// launch (restore/resume), so the row carries a launch id the dispatch evidence
+// never recorded. The runtime proves the row's current launch and this
+// generation's own evidence names this very session: it is this generation's
+// worker, adopted once -- never a launch_mismatch stop, never a second worker.
+// (A new launch on a session the generation never named stays refused: see the
+// decision table; a live session of an EARLIER generation: see the I9/I2 test.)
+func TestP9Crash_C3_SameSessionRelaunchedByAOIsAdopted(t *testing.T) {
 	f := newP9Fixture(t)
 	f.startCrashing(f.newCoordinator(unconfirmedOwnership{f.store}, nil))
 	f.assertSpawns(1, 1)
 	rec, _, _ := f.store.GetSession(f.ctx, f.sid(1))
-	rec.Metadata.RuntimeLaunchID = "p9-launch-relaunched-elsewhere"
+	rec.Metadata.RuntimeLaunchID = "p9-launch-restored-by-ao"
 	rec.Metadata.RuntimeOwnerToken = domain.SessionRuntimeOwnerToken(rec.ID, rec.Metadata.RuntimeLaunchID)
 	if err := f.store.UpdateSession(f.ctx, rec); err != nil {
 		t.Fatalf("UpdateSession: %v", err)
 	}
-	f.runtime.set(f.sid(1), domain.WorkerRuntimeOwned) // owned by ITS launch, not the recorded one
+	f.runtime.set(f.sid(1), domain.WorkerRuntimeOwned) // the runtime proves the row's CURRENT launch
 	f.boot()
 	f.clk.Advance(time.Minute)
 	f.reconcile(1)
 	f.assertSpawns(1, 1)
-	if f.sessionOnStep() != "" {
-		t.Fatal("a session running a launch AO never recorded was adopted")
+	if f.sessionOnStep() != string(f.sid(1)) {
+		t.Fatalf("step session = %q, want the restored session adopted", f.sessionOnStep())
 	}
-	if f.run().State != domain.WorkflowRunNeedsAttention {
-		t.Fatalf("run = %q, want needs_attention", f.run().State)
+	if f.run().State == domain.WorkflowRunNeedsAttention {
+		t.Fatal("a session AO itself restored was stopped as a launch mismatch")
 	}
+	f.boot()
+	f.reconcile(1)
+	f.assertSpawns(1, 1)
 }
 
 // I15 — the worktree the session reports is not the one the launch recorded.
@@ -828,4 +838,39 @@ func TestP9Crash_HoursOldLaunchIsNotParkedOnItsFirstUnreadableRead(t *testing.T)
 	f.reconcile(1)
 	f.assertParkedOwnershipUnproven()
 	f.assertSpawns(1, 1)
+}
+
+// Trusted-local work report (integration review): generation 1's session is
+// replaced by generation 2's while it is still reachable, and then submits a
+// late report through the session-scoped transport. The report is bound to the
+// step's CURRENT session; generation 1 is nobody's worker any more, so it is
+// refused and generation 2's step is left exactly as it was.
+func TestP9Crash_ReplacedGenerationsLateWorkReportIsRefused(t *testing.T) {
+	f := newP9Fixture(t)
+	f.spawner.crashAfterRuntime[1] = true
+	f.startCrashing(f.coord)
+	f.runtime.set(f.sid(1), domain.WorkerRuntimeAbsent)
+	f.boot()
+	for i := 0; i < 4; i++ {
+		f.clk.Advance(time.Minute)
+		f.reconcile(1)
+	}
+	f.runtime.set(f.sid(2), domain.WorkerRuntimeOwned)
+	if f.sessionOnStep() != string(f.sid(2)) || f.workStep().State != domain.WorkflowStepRunning {
+		t.Fatalf("step = %s/%q, want running over the replacement", f.sessionOnStep(), f.workStep().State)
+	}
+	stepBefore, runBefore, ledgerBefore := f.workStep(), f.run(), len(f.ledger())
+
+	_, err := f.coord.SubmitWorkReportForSession(f.ctx, string(f.sid(1)), domain.WorkReport{Version: "v1", Summary: "late report from the replaced generation"})
+	if !errors.Is(err, workflowcore.ErrNotFound) {
+		t.Fatalf("late report from generation 1 = %v, want ErrNotFound", err)
+	}
+	stepAfter, runAfter := f.workStep(), f.run()
+	if stepAfter.State != stepBefore.State || f.sessionOnStep() != string(f.sid(2)) || !stepAfter.UpdatedAt.Equal(stepBefore.UpdatedAt) {
+		t.Fatalf("generation 2's step moved: %+v -> %+v", stepBefore, stepAfter)
+	}
+	if runAfter.State != runBefore.State || len(f.ledger()) != ledgerBefore {
+		t.Fatalf("run/ledger moved on a refused report: %s -> %s, %d -> %d", runBefore.State, runAfter.State, ledgerBefore, len(f.ledger()))
+	}
+	f.assertSpawns(2, 2)
 }

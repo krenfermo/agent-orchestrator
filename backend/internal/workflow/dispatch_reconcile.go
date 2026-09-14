@@ -3,7 +3,6 @@ package workflow
 import (
 	stdctx "context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -771,7 +770,7 @@ func (c *Coordinator) reconcileWorkStepDispatch(
 	// a live worker; the grace runs from the first failed read in THIS process,
 	// never from the age of the launch record (hours old after a reboot).
 	if owned.Unprovable() && owned.Runtime != nil && owned.Runtime.Proof == domain.WorkerRuntimeUnavailable &&
-		c.clock().Sub(c.unreadableSince(owned.SessionID)) <= workerRuntimeUnreadableGrace {
+		c.unreadableWithinGrace(owned.SessionID) {
 		result.Detail = fmt.Sprintf("the runtime behind this dispatch could not be read; nothing is concluded yet (%s)",
 			owned.describe())
 		return result, run, nil
@@ -1098,6 +1097,19 @@ func (c *Coordinator) stopReconciledDispatchFor(
 	result DispatchReconciliation,
 	reason string,
 ) (DispatchReconciliation, domain.WorkflowRun, error) {
+	// P9 (idempotency across boots): the very stop this pass would raise is
+	// already standing -- the run is parked on this reason and the step is
+	// parked. Re-recording the evidence, re-raising the gate and re-stopping
+	// would grow a parked run's ledger on every boot and notify again about a
+	// contradiction a person has already been told about. A different reason,
+	// or a step that is somehow running again, still goes through below.
+	if run.State == domain.WorkflowRunNeedsAttention &&
+		step.State != domain.WorkflowStepRunning && step.State != domain.WorkflowStepReady {
+		if standing, ok := c.latestCanonicalStopReason(ctx, run.ID); ok && standing == reason {
+			result.Action = DispatchReconcileNeedsAttention
+			return result, run, nil
+		}
+	}
 	entry, err := c.dispatchOutboxEntry(ctx, run, step)
 	if err != nil {
 		return result, run, err
@@ -1424,27 +1436,10 @@ func (c *Coordinator) getWorkflowStep(
 	return domain.WorkflowStep{}, false, nil
 }
 
-// recordedLaunchIDForStep returns the runtime launch id AO durably recorded for
-// this step's newest launch, or "" when nothing recorded one.
-//
-// It reads the dispatch table first because that is where a confirmation and an
-// unconfirmed launch both write the id, and falls back to the ledger's own
-// unconfirmed record for the one case the dispatch table cannot hold (the write
-// that failed BECAUSE that table refused it). "" means AO holds no statement
-// about which launch this step's session should be running under, which is a
-// different fact from a mismatch and is never treated as one.
-func (c *Coordinator) recordedLaunchIDForStep(ctx stdctx.Context, runID, stepID string) string {
-	if ps, ok := c.provenanceStore(); ok && stepID != "" {
-		if records, err := ps.ListWorkflowDispatchCheckpointsByStep(ctx, stepID); err == nil {
-			for i := len(records) - 1; i >= 0; i-- {
-				if id := strings.TrimSpace(records[i].RuntimeLaunchID); id != "" {
-					return id
-				}
-			}
-		}
-	}
-	if rec, ok := c.latestUnconfirmedLaunchRecord(ctx, runID, stepID); ok {
-		return strings.TrimSpace(rec.RuntimeLaunchID)
-	}
-	return ""
+// unreadableWithinGrace reports that the runtime's current episode of failed
+// reads is still inside the grace -- including when no episode is recorded at
+// all, which is never grounds to stop.
+func (c *Coordinator) unreadableWithinGrace(id domain.SessionID) bool {
+	d, known := c.unreadableFor(id)
+	return !known || d <= workerRuntimeUnreadableGrace
 }

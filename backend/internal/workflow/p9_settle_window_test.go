@@ -24,7 +24,7 @@ func TestP9_InFlightLaunchIsNotStoppedInsideTheSettleWindow(t *testing.T) {
 	var idSeq int
 	c := workflowcore.New(workflowcore.Deps{
 		Store: store, Spawner: &fakeSpawner{}, SessionFacts: sessionFacts, WorkspaceFacts: &fakeWorkspaceFacts{},
-		WorkerRuntimeOwnership: rt, Clock: clk.Now,
+		WorkerRuntimeOwnership: rt, Clock: clk.Now, MonotonicClock: clk.Now,
 		NewID: func() string { idSeq++; return fmt.Sprintf("id%d", idSeq) },
 	})
 	ctx := context.Background()

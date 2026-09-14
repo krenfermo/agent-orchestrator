@@ -107,9 +107,18 @@ func (c *Coordinator) workStepOwnership(ctx stdctx.Context, run domain.WorkflowR
 		return rb
 	}
 	rb.LastSignalAt = rec.Activity.Liveness()
-	obs := c.observeWorkerRuntime(ctx, rec.ID)
+	// The read-only form: asking "who owns this" never starts or extends the
+	// unreadable-runtime grace recovery decides stops on.
+	obs := c.readWorkerRuntime(ctx, rec.ID)
 	fillRuntimeProof(&rb, obs)
 	decision := decideWorkerAdoption(c.workerAdoptionFactsFor(ctx, run, step, entry, rec, obs))
+	if decision.Action != WorkerRecoveryAdopt && entry.DispatchedAt != nil &&
+		c.clock().Sub(*entry.DispatchedAt) < dispatchReconcileSettleWindow {
+		// Recovery concludes nothing but an adoption inside the settle window,
+		// and the readback says so rather than showing a stop that is not due.
+		decision = WorkerRecoveryDecision{Action: WorkerRecoveryWait, Reason: WorkerReasonSettleWindow,
+			Detail: "the launch is younger than its settle window; only an adoption may be concluded yet"}
+	}
 	rb.Decision, rb.Reason, rb.Detail = decision.Action, decision.Reason, decision.Detail
 	return rb
 }
@@ -130,7 +139,7 @@ func (c *Coordinator) fixStepOwnership(ctx stdctx.Context, run domain.WorkflowRu
 		return rb
 	}
 	rb.LastSignalAt = rec.Activity.Liveness()
-	fillRuntimeProof(&rb, c.observeWorkerRuntime(ctx, rec.ID))
+	fillRuntimeProof(&rb, c.readWorkerRuntime(ctx, rec.ID))
 	rb.Detail = "fix cycles run inside the worker's own session; recovery never adopts or relaunches them. " + rb.Detail
 	return rb
 }
