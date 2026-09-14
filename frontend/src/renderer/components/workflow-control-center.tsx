@@ -5,7 +5,7 @@ import { AlertTriangle, CircleCheck, CircleX, Lightbulb } from "lucide-react";
 import type { components } from "../../api/schema";
 import { cn } from "../lib/utils";
 import { formatDurationCompact } from "../lib/format-time";
-import { actionLabelKey, summaryKey } from "../lib/workflow-presentation";
+import { actionLabelKey, guidanceKey, summaryKey } from "../lib/workflow-presentation";
 import {
 	activeAgent,
 	attentionReport,
@@ -174,10 +174,10 @@ function ModeChips({ run }: { run: RunView }) {
 }
 
 function fixCycleText(cycles: FixCycleSummary, t: TFunction): string {
-	if (cycles.spent === null) return t("cc.fixCycle.unknown");
+	if (cycles.current === null) return t("cc.fixCycle.unknown");
 	return cycles.max === null
-		? t("cc.fixCycle.noMax", { spent: cycles.spent })
-		: t("cc.fixCycle.ofMax", { spent: cycles.spent, max: cycles.max });
+		? t("cc.fixCycle.noMax", { current: cycles.current })
+		: t("cc.fixCycle.ofMax", { current: cycles.current, max: cycles.max });
 }
 
 function agentText(node: SessionNode, t: TFunction): string {
@@ -329,7 +329,10 @@ function IncidentAdvisor({ signals, renderSessionLink }: { signals: IncidentSign
 							<span className="font-medium text-foreground">{t(`cc.incident.${signal.id}.title` as "cc.incident.worker_quiet.title")}</span>
 							<span className="text-muted-foreground">
 								{t("cc.incident.evidenceLine", {
-									text: t(`cc.incident.${signal.id}.evidence` as "cc.incident.worker_quiet.evidence", signal.params),
+									text: t(
+										(signal.evidenceKey ?? `cc.incident.${signal.id}.evidence`) as "cc.incident.worker_quiet.evidence",
+										signal.params,
+									),
 								})}
 							</span>
 							<span className="text-muted-foreground">
@@ -514,10 +517,14 @@ function VerifyCard({ verify }: { verify: VerifySummary | undefined }) {
 function UsageCard({ usage }: { usage: UsageDigest }) {
 	const { t } = useTranslation();
 	const tt = t as TFunction;
+	const amount =
+		usage.cost.amount === undefined ? "" : `${usage.cost.currency ?? ""} ${usage.cost.amount.toFixed(2)}`.trim();
 	const cost =
 		usage.cost.certainty === "unknown" || usage.cost.amount === undefined
 			? t("cc.usage.unknown")
-			: `${usage.cost.currency ?? ""} ${usage.cost.amount.toFixed(2)}`.trim();
+			: usage.cost.partial
+				? t("cc.usage.costPartial", { amount })
+				: amount;
 	return (
 		<Card testId="workflow-usage-digest" title={t("cc.usage.title")}>
 			<dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs text-muted-foreground sm:grid-cols-[auto_1fr_auto_1fr]">
@@ -534,6 +541,7 @@ function UsageCard({ usage }: { usage: UsageDigest }) {
 								current: formatTokens(usage.contextCurrent, tt),
 								peak: formatTokens(usage.contextPeak, tt),
 							})}
+					{usage.contextLowerBound ? ` ${t("cc.usage.lowerBound")}` : ""}
 					<CertaintyChip certainty={usage.context} />
 				</dd>
 				<dt>{t("cc.usage.growth")}</dt>
@@ -569,7 +577,9 @@ function UsageCard({ usage }: { usage: UsageDigest }) {
 					<>
 						<dt>{t("cc.usage.budget")}</dt>
 						<dd className="text-foreground">
-							{t("cc.usage.budgetValue", { percent: usage.budgetPercent ?? 0, state: usage.budgetState })}
+							{usage.budgetPercent === undefined
+								? t("cc.usage.budgetStateOnly", { state: usage.budgetState })
+								: t("cc.usage.budgetValue", { percent: usage.budgetPercent, state: usage.budgetState })}
 						</dd>
 					</>
 				) : null}
@@ -612,6 +622,7 @@ export function WorkflowControlCenter({
 	const run = detail.run;
 	const presentation = detail.presentation;
 	const status = headlineStatus(detail);
+	const current = sessionTree(detail).find((node) => node.current);
 	const agent = activeAgent(detail);
 	const cycles = fixCycleSummary(detail);
 	const report = attentionReport(detail);
@@ -641,15 +652,22 @@ export function WorkflowControlCenter({
 					<WorkflowHeadlineStatus status={status} />
 					<ModeChips run={run} />
 				</div>
-				{presentation ? <WorkflowStatusSummary presentation={presentation} /> : null}
+				{/* For a stopped run the attention block below states what happened;
+				    repeating the same sentence here only adds a third copy of it. */}
+				{presentation && !report ? <WorkflowStatusSummary presentation={presentation} /> : null}
+				{presentation && report ? (
+					<p className="text-sm text-muted-foreground" data-testid="workflow-status-guidance">
+						{t(guidanceKey(presentation) as "wf.guidance.none")}
+					</p>
+				) : null}
 				<dl
 					className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs text-muted-foreground sm:grid-cols-[auto_1fr_auto_1fr]"
 					data-testid="workflow-control-facts"
 				>
 					<dt>{t("cc.fact.currentStep")}</dt>
 					<dd className="text-foreground" data-testid="workflow-fact-step">
-						{agent
-							? t("cc.fact.stepValue", { ordinal: agent.ordinal, role: t(`cc.role.${agent.role}` as "cc.role.worker") })
+						{current
+							? t("cc.fact.stepValue", { ordinal: current.ordinal, role: t(`cc.role.${current.role}` as "cc.role.worker") })
 							: t("cc.fact.noCurrentStep")}
 					</dd>
 					<dt>{t("cc.fact.whoWorks")}</dt>
@@ -665,7 +683,7 @@ export function WorkflowControlCenter({
 					</dd>
 					<dt>{t("cc.fact.lastSignal")}</dt>
 					<dd className="text-foreground" data-testid="workflow-fact-signal">
-						{liveness?.observed ? agoText(tt, silent) : t("cc.fact.noSignal")}
+						{liveness?.observed ? agoText(tt, silent) : current ? t("cc.fact.noSignal") : t("cc.fact.notApplicable")}
 					</dd>
 					<dt>{t("cc.fact.lastTransition")}</dt>
 					<dd className="text-foreground">

@@ -266,7 +266,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 							data-priority="secondary"
 							disabled={isProjectRestarting}
 							onClick={() => projectId && requestNewTask(projectId)}
-							variant="primary"
+							variant="accent"
 						>
 							<Plus className="size-icon-md" aria-hidden="true" />
 							<span data-compact-label>{t("shell.newSessionCompact")}</span>
@@ -291,7 +291,7 @@ export function SessionsBoard({ projectId }: SessionsBoardProps) {
 							data-priority="primary"
 							disabled={isProjectRestarting}
 							onClick={() => projectId && void navigate({ to: "/workflows", search: { projectId } })}
-							variant="accent"
+							variant="primary"
 						>
 							<Workflow className="size-icon-md" aria-hidden="true" />
 							<span data-compact-label>{t("shell.newWorkflowRunCompact")}</span>

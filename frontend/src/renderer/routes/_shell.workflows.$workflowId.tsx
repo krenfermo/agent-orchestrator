@@ -44,6 +44,17 @@ export const Route = createFileRoute("/_shell/workflows/$workflowId")({
 
 type TranslateFn = (key: string, opts?: Record<string, unknown>) => string;
 
+/** The objective's first non-empty line: the run's name. */
+function objectiveHeading(objective: string): string {
+	const first = objective.split("\n", 1)[0]?.trim();
+	return first && first.length > 0 ? first : objective.trim();
+}
+
+/** Whether the objective carries more than its first line. */
+function objectiveHasBody(objective: string): boolean {
+	return objective.trim() !== objectiveHeading(objective);
+}
+
 /**
  * The run's next action in the reader's language.
  *
@@ -289,7 +300,16 @@ export function WorkflowRunView({ workflowId }: { workflowId: string }) {
 			    trace of it here. */}
 			<WorkItemLinkPanel projectId={workflow.run.projectId} scope="run" scopeId={workflow.run.id} />
 			<div className="flex flex-col gap-3">
-				<h1 className="min-w-0 flex-1 text-lg font-semibold">{workflow.run.objective}</h1>
+				{/* P8: the objective's first line is the run's name. A pasted
+				    specification rendered whole as the heading pushed the status off
+				    the first screen, so its body sits one click away, unabridged. */}
+				<h1 className="min-w-0 flex-1 text-lg font-semibold">{objectiveHeading(workflow.run.objective)}</h1>
+				{objectiveHasBody(workflow.run.objective) ? (
+					<details className="text-sm text-muted-foreground" data-testid="workflow-objective-full">
+						<summary className="cursor-pointer">{t("cc.objective.full")}</summary>
+						<p className="mt-2 whitespace-pre-wrap">{workflow.run.objective}</p>
+					</details>
+				) : null}
 				{/* P8: the control-center header replaces the separate status panel,
 				    liveness panel, raw-state line and activity block, which told the
 				    same story four times in four vocabularies. One reading: status

@@ -89,7 +89,8 @@ export type RunDiagnostics = {
 	integration?: string;
 	/** P8: the fix budget and outcomes, in the same terms the run page shows. */
 	maxFixCycles?: number;
-	fixCyclesSpent?: number;
+	/** The newest fix delivery's cycle number: the cycle reached, not the enforced spent count. */
+	fixCycleCurrent?: number;
 	reviewOutcome?: string;
 	verifyOutcome?: string;
 	/** A count only: check labels are commands, and a command's args may carry a secret. */
@@ -230,7 +231,7 @@ export function buildRunDiagnostics(
 		integration: placement?.integration,
 
 		maxFixCycles: run.maxFixCycles ?? undefined,
-		fixCyclesSpent: cycles.spent ?? undefined,
+		fixCycleCurrent: cycles.current ?? undefined,
 		reviewOutcome: review?.outcome,
 		verifyOutcome: verify?.outcome,
 		verifyFailedChecks: verify && verify.checks.length > 0 ? verify.failedCount : undefined,
@@ -355,8 +356,8 @@ export function formatRunDiagnostics(d: RunDiagnostics): string {
 	put("integration", d.integration);
 
 	lines.push("", "## Review / Verify");
-	if (d.fixCyclesSpent !== undefined || d.maxFixCycles !== undefined) {
-		put("fixCycles", `${d.fixCyclesSpent ?? "unknown"} of ${d.maxFixCycles ?? "unknown"}`);
+	if (d.fixCycleCurrent !== undefined || d.maxFixCycles !== undefined) {
+		put("fixCycle", `${d.fixCycleCurrent ?? "unknown"} of ${d.maxFixCycles ?? "unknown"}`);
 	}
 	put("reviewOutcome", d.reviewOutcome);
 	put("verifyOutcome", d.verifyOutcome);

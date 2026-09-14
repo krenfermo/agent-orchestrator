@@ -173,7 +173,9 @@ function latestAttempt(step: Step) {
  * or a run with nothing in flight — has no current step, and says so.
  */
 export function currentStep(detail: WorkflowRunDetail): Step | undefined {
-	if (runIsTerminal(detail)) return undefined;
+	// A stopped run has nothing in progress: a step still parked `waiting`
+	// under needs_attention is where it stopped, not where it is working.
+	if (runIsTerminal(detail) || detail.run.state === "needs_attention") return undefined;
 	const steps = byOrdinal(detail.steps).filter((step) => step.kind !== "advance");
 	return (
 		steps.find((step) => step.state === "running") ??
@@ -212,14 +214,22 @@ export function sessionTree(detail: WorkflowRunDetail): SessionNode[] {
 			const attempt = latestAttempt(step);
 			const liveSession =
 				liveness?.observed && liveness.stepId === step.id ? liveness.sessionId : undefined;
+			// The attempt's `model` column is a model id only for launched agents
+			// (worker, reviewer, planner). A fix attempt stores its cycle key there
+			// and a verify attempt a fingerprint, and Verify's harness is AO's own
+			// local verifier — none of them is an agent or a model to name.
+			const namesModel = role === "worker" || role === "reviewer" || role === "planner";
 			return {
 				stepId: step.id,
 				ordinal: step.ordinal,
 				role,
 				state: step.state,
 				agentSession: role !== "verify",
-				harness: (role === "reviewer" ? step.reviewer : undefined) || attempt?.harness || step.assignedHarness || undefined,
-				model: attempt?.model || undefined,
+				harness:
+					role === "verify"
+						? undefined
+						: (role === "reviewer" ? step.reviewer : undefined) || attempt?.harness || step.assignedHarness || undefined,
+				model: namesModel ? attempt?.model || undefined : undefined,
 				sessionId: step.sessionId || step.fixDelivery?.sessionId || liveSession || undefined,
 				attempts: step.attempts.length,
 				current: current?.id === step.id,
@@ -229,9 +239,14 @@ export function sessionTree(detail: WorkflowRunDetail): SessionNode[] {
 
 export type ActiveAgent = SessionNode;
 
-/** Who is working right now, or undefined when nobody is. */
+/**
+ * Who is working right now: the current step only while its durable state is
+ * `running`. A step that is ready or waiting has nobody on it yet, and saying
+ * "Reviewer · codex" under "who is working" for it would name an agent that is
+ * not working.
+ */
 export function activeAgent(detail: WorkflowRunDetail): ActiveAgent | undefined {
-	return sessionTree(detail).find((node) => node.current);
+	return sessionTree(detail).find((node) => node.current && node.state === "running");
 }
 
 // ---------------------------------------------------------------------------
@@ -240,15 +255,17 @@ export function activeAgent(detail: WorkflowRunDetail): ActiveAgent | undefined 
 
 export type FixCycleSummary = {
 	/**
-	 * Fix cycles actually dispatched: the highest cycle number on the fix
-	 * step's delivery record, which is folded from the same fix_dispatched
-	 * ledger the budget is enforced against. `null` when a fix step has run but
-	 * carries no delivery record, so the number cannot be stated.
+	 * The fix cycle the run is on, or last reached: the cycle number on the fix
+	 * step's NEWEST delivery record. It is not the enforced "spent" count — the
+	 * budget folds distinct fix_dispatched checkpoints, and a delivery still
+	 * being recorded or retried already carries its cycle's number — so it is
+	 * shown as "current cycle", never as budget spent. `null` when a fix step
+	 * has run but carries no delivery record, so the number cannot be stated.
 	 *
 	 * NOT usage.metrics.fixCycles: that metric counts fix-step ATTEMPTS, which
 	 * is a different number (a re-delivered cycle is one cycle, two attempts).
 	 */
-	spent: number | null;
+	current: number | null;
 	/** The run's frozen budget, or null when the daemon did not project one. */
 	max: number | null;
 };
@@ -256,13 +273,13 @@ export type FixCycleSummary = {
 export function fixCycleSummary(detail: WorkflowRunDetail): FixCycleSummary {
 	const fixSteps = detail.steps.filter((step) => step.kind === "fix");
 	const max = detail.run.maxFixCycles ?? null;
-	if (fixSteps.length === 0) return { spent: 0, max };
+	if (fixSteps.length === 0) return { current: 0, max };
 	const delivered = fixSteps
 		.map((step) => step.fixDelivery?.cycleNumber)
 		.filter((n): n is number => typeof n === "number" && n > 0);
-	if (delivered.length > 0) return { spent: Math.max(...delivered), max };
+	if (delivered.length > 0) return { current: Math.max(...delivered), max };
 	const neverStarted = fixSteps.every((step) => step.attempts.length === 0 && (step.state === "pending" || step.state === "ready"));
-	return { spent: neverStarted ? 0 : null, max };
+	return { current: neverStarted ? 0 : null, max };
 }
 
 export type ReviewOutcome = "approved" | "changes_requested" | "in_progress" | "pending" | "skipped" | "unknown";
@@ -305,7 +322,20 @@ export function reviewSummary(detail: WorkflowRunDetail): ReviewSummary | undefi
 // 4. Verify
 // ---------------------------------------------------------------------------
 
-export type VerifyOutcome = "pending" | "running" | "passed" | "failed" | "unknown";
+/**
+ * `handed_back` is Verify's own waiting state after a repairable failure: the
+ * backend parks the verify step as `waiting` and writes a verify_fix_reentry
+ * checkpoint while a fix cycle runs. It is not "running".
+ */
+export type VerifyOutcome =
+	| "pending"
+	| "running"
+	| "handed_back"
+	| "passed"
+	| "failed"
+	/** The step completed but its result is not readable in this view (its latest checkpoint is a later phase). */
+	| "completed_unrecorded"
+	| "unknown";
 
 export type VerifyCheckLine = {
 	label: string;
@@ -326,8 +356,11 @@ export type VerifySummary = {
 	stopReason?: string;
 	infraFailure?: { kind: string; detail: string; command: string };
 	/**
-	 * True only when a durable record says so: a fix delivery whose findings
-	 * came from verification, or a stop reason that names the verify re-entry.
+	 * True only while THIS Verify failure is the one handed back to a fix
+	 * cycle: the verify step is parked `waiting` and either the fix step's
+	 * newest delivery carries verification findings or the run's reason names
+	 * the verify re-entry. A passed or a later failed result never inherits an
+	 * earlier cycle's cause.
 	 */
 	triggeredFix: boolean;
 };
@@ -346,11 +379,17 @@ export function verifySummary(detail: WorkflowRunDetail): VerifySummary | undefi
 	const step = verifies[verifies.length - 1];
 	if (!step) return undefined;
 	const result = step.verification;
+	const handedBack =
+		step.state === "waiting" &&
+		(detail.steps.some((s) => s.kind === "fix" && s.fixDelivery?.findingsSource === "verification") ||
+			detail.run.attentionReason === "verify_fix_reentry");
 	let outcome: VerifyOutcome;
 	if (result) outcome = result.passed ? "passed" : "failed";
-	else if (step.state === "pending" || step.state === "ready") outcome = "pending";
-	else if (step.state === "running" || step.state === "waiting") outcome = "running";
+	else if (handedBack) outcome = "handed_back";
+	else if (step.state === "pending" || step.state === "ready" || step.state === "waiting") outcome = "pending";
+	else if (step.state === "running") outcome = "running";
 	else if (step.state === "failed") outcome = "failed";
+	else if (step.state === "completed") outcome = "completed_unrecorded";
 	else outcome = "unknown";
 	const checks: VerifyCheckLine[] = (result?.checks ?? []).map((check) => ({
 		label: check.label,
@@ -360,9 +399,7 @@ export function verifySummary(detail: WorkflowRunDetail): VerifySummary | undefi
 		durationMs: check.durationMs,
 		reason: check.passed ? undefined : shortReason(check.failureReason),
 	}));
-	const triggeredFix =
-		detail.steps.some((s) => s.kind === "fix" && s.fixDelivery?.findingsSource === "verification") ||
-		detail.run.attentionReason === "verify_fix_reentry";
+	const triggeredFix = outcome === "handed_back";
 	return {
 		outcome,
 		checks,
@@ -390,6 +427,7 @@ export function verifySummary(detail: WorkflowRunDetail): VerifySummary | undefi
 const UNDETERMINED_REASONS: ReadonlySet<string> = new Set([
 	"unclassified_stop",
 	"review_state_ambiguous",
+	"review_dispatch_ambiguous",
 	"fix_dispatch_ambiguous",
 	"fix_generation_unprovable",
 	"planner_ambiguous",
@@ -474,7 +512,9 @@ export function attentionReport(detail: WorkflowRunDetail): AttentionReport | un
 	if (step) {
 		known.push({ labelKey: "cc.evidence.step", textKey: `cc.role.${stepRole(step.kind)}` });
 	}
-	const sessionId = tech?.sessionId || step?.sessionId || undefined;
+	// A fix cycle is delivered into the worker's existing session, so a fix
+	// step's row carries no session of its own; its delivery record names it.
+	const sessionId = tech?.sessionId || step?.sessionId || step?.fixDelivery?.sessionId || undefined;
 	if (sessionId) known.push({ labelKey: "cc.evidence.session", text: sessionId, mono: true });
 	if (tech?.attemptNumber) {
 		known.push({
@@ -504,8 +544,11 @@ export function attentionReport(detail: WorkflowRunDetail): AttentionReport | un
 
 	const unknowns: string[] = [];
 	if (causeUndetermined) unknowns.push("cc.unknown.cause");
-	if (!sessionId) unknowns.push("cc.unknown.noSession");
-	if (!liveness?.observed) unknowns.push("cc.unknown.noSignal");
+	// A Verify stop has no agent session by design, so a missing session and a
+	// missing agent clock are not unknowns there — they are simply not facts.
+	const agentStop = step ? stepRole(step.kind) !== "verify" : true;
+	if (agentStop && !sessionId) unknowns.push("cc.unknown.noSession");
+	if (agentStop && !liveness?.observed) unknowns.push("cc.unknown.noSignal");
 	if (tech?.authority === "legacy_unproven") unknowns.push("cc.unknown.authorityUnproven");
 	if (advice?.repairEligibility === "unknown_condition") unknowns.push("cc.unknown.repairCondition");
 
@@ -542,6 +585,8 @@ export type IncidentSignal = {
 	severity: "warn" | "info";
 	/** Interpolation values for the signal's title/evidence/next copy. */
 	params: Record<string, string | number>;
+	/** Overrides the default evidence copy when a figure it needs is absent. */
+	evidenceKey?: string;
 	/** A session the "next" step can link to, when the evidence names one. */
 	sessionId?: string;
 };
@@ -582,15 +627,22 @@ export function incidentSignals(detail: WorkflowRunDetail): IncidentSignal[] {
 	const reason = detail.run.attentionReason || tech?.attentionReason;
 	if (reason === "fix_budget_exhausted") {
 		const cycles = fixCycleSummary(detail);
+		const known = cycles.current !== null && cycles.max !== null;
 		signals.push({
 			id: "fix_budget_exhausted",
 			severity: "warn",
-			params: { spent: cycles.spent ?? "?", max: cycles.max ?? "?" },
+			params: known ? { current: cycles.current as number, max: cycles.max as number } : {},
+			...(known ? {} : { evidenceKey: "cc.incident.fix_budget_exhausted.evidenceUnknown" }),
 		});
 	}
 	const verify = verifySummary(detail);
 	if (verify?.outcome === "failed") {
-		signals.push({ id: "verify_failed", severity: "warn", params: { failed: verify.failedCount } });
+		// A failed step with no recorded checks is not "0 failed checks".
+		signals.push(
+			verify.checks.length > 0
+				? { id: "verify_failed", severity: "warn", params: { failed: verify.failedCount } }
+				: { id: "verify_failed", severity: "warn", params: {}, evidenceKey: "cc.incident.verify_failed.evidenceNoChecks" },
+		);
 	}
 	const step = currentStep(detail) ?? stoppedStep(detail);
 	const attempt = step ? latestAttempt(step) : undefined;
@@ -603,10 +655,13 @@ export function incidentSignals(detail: WorkflowRunDetail): IncidentSignal[] {
 	}
 	const budget = detail.usage?.tokens?.budget;
 	if (budget && (budget.state === "warning" || budget.state === "exhausted")) {
+		const percent = budget.tokenPercent ?? budget.costPercent;
 		signals.push({
 			id: "usage_budget",
 			severity: budget.state === "exhausted" ? "warn" : "info",
-			params: { percent: Math.round(budget.tokenPercent ?? budget.costPercent ?? 0), state: budget.state },
+			// No percent from the daemon is not 0%: state the budget state alone.
+			params: percent === null || percent === undefined ? { state: budget.state } : { percent: Math.round(percent), state: budget.state },
+			...(percent === null || percent === undefined ? { evidenceKey: "cc.incident.usage_budget.evidenceState" } : {}),
 		});
 	}
 	const waiting = (detail.questions ?? []).filter((question) => question.state === "human_required").length;
@@ -714,6 +769,8 @@ export type UsageDigest = {
 	contextCurrent?: number;
 	contextPeak?: number;
 	contextGrowth?: number;
+	/** Some provider calls could not be placed, so the context figures are a lower bound. */
+	contextLowerBound: boolean;
 	/** AO's own estimate of the context it assembled; always modelled. */
 	assembledContextEstimate?: number;
 	cost: {
@@ -722,16 +779,25 @@ export type UsageDigest = {
 		currency?: string;
 		basis?: string;
 		unpricedModels: string[];
+		/** A known amount that excludes unpriced models: a lower bound, never the whole cost. */
+		partial: boolean;
 	};
 	budgetState?: string;
 	budgetPercent?: number;
 	advisories: string[];
 };
 
+/**
+ * Token certainty from the ledger's measurement source (domain/usage_ledger.go):
+ * only `provider_reported` is measured. `estimated` (bytes-per-token
+ * heuristic), `ao_counted` (exact AO counts that are not token counts) and
+ * `mixed` (an aggregate whose parts do not share one source) are all figures
+ * AO produced or combined itself, so they are shown — labelled modelled.
+ */
 export function tokenCertainty(source: string | undefined, recorded: boolean): Certainty {
 	if (!recorded) return "unknown";
 	if (source === "provider_reported") return "measured";
-	if (source === "estimated") return "modelled";
+	if (source === "estimated" || source === "ao_counted" || source === "mixed") return "modelled";
 	return "unknown";
 }
 
@@ -756,6 +822,7 @@ export function usageDigest(usage: Usage | undefined): UsageDigest | undefined {
 		contextCurrent: observable ? trajectory?.lastContextTokens : undefined,
 		contextPeak: observable ? trajectory?.peakContextTokens : undefined,
 		contextGrowth: observable ? trajectory?.growthTokens : undefined,
+		contextLowerBound: observable && (trajectory?.unplaceableEvents ?? 0) > 0,
 		assembledContextEstimate:
 			ledger.context?.recorded && ledger.context.estimatedAssembledTokens > 0 ? ledger.context.estimatedAssembledTokens : undefined,
 		cost: {
@@ -764,11 +831,13 @@ export function usageDigest(usage: Usage | undefined): UsageDigest | undefined {
 			currency: cost?.currency || undefined,
 			basis: cost?.basis || undefined,
 			unpricedModels: cost?.unpricedModels ?? [],
+			partial: costCertainty !== "unknown" && (cost?.unpricedModels?.length ?? 0) > 0,
 		},
 		budgetState: ledger.budget && ledger.budget.state !== "unset" ? ledger.budget.state : undefined,
+		// An absent percent stays absent: "0%" of an exhausted budget would be a lie.
 		budgetPercent:
-			ledger.budget && ledger.budget.state !== "unset"
-				? Math.round(ledger.budget.tokenPercent ?? ledger.budget.costPercent ?? 0)
+			ledger.budget && ledger.budget.state !== "unset" && (ledger.budget.tokenPercent ?? ledger.budget.costPercent) !== null
+				? Math.round((ledger.budget.tokenPercent ?? ledger.budget.costPercent) as number)
 				: undefined,
 		advisories: (ledger.dynamics?.warnings ?? []).map((warning) => warning.code),
 	};

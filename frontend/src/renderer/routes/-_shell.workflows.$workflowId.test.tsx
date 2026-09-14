@@ -236,7 +236,7 @@ describe("WorkflowRunView", () => {
 		expect(screen.getByTestId("workflow-fact-agent")).toHaveTextContent("Worker · claude-code");
 		expect(screen.getByTestId("workflow-fact-duration")).toHaveTextContent("7m");
 		// No liveness reading on this run: the page says so rather than inventing a clock.
-		expect(screen.getByTestId("workflow-fact-signal")).toHaveTextContent("No running agent observed");
+		expect(screen.getByTestId("workflow-fact-signal")).toHaveTextContent("Agent clocks not available for this step");
 		// No usage record on this run: no usage digest, rather than a zero.
 		expect(screen.queryByTestId("workflow-usage-digest")).toBeNull();
 		expect(screen.queryByTestId("workflow-activity-panel")).toBeNull();
@@ -287,6 +287,38 @@ describe("WorkflowRunView", () => {
 		expect(screen.queryByTestId("workflow-spinner")).toBeNull();
 		expect(screen.queryByTestId("workflow-activity-panel")).toBeNull();
 	});
+	// P8 review: a pasted specification rendered whole as the heading pushed the
+	// run's status below the first screen. The heading is the first line; the
+	// body stays one click away, unabridged.
+	it("titles a run by its objective's first line and keeps the full specification folded", async () => {
+		const objective = "Add batch-file loading\n\nA book can be built in code.\n1. Add internal/importer";
+		getMock.mockResolvedValue({
+			data: {
+				workflow: {
+					run: {
+						id: "wf-spec",
+						projectId: "proj-1",
+						objective,
+						state: "completed",
+						phase: "completed",
+						createdAt: "2026-01-01T00:00:00Z",
+						updatedAt: "2026-01-01T00:10:00Z",
+						executionMode: "autonomous",
+					},
+					steps: [],
+				},
+			},
+			error: undefined,
+		});
+
+		render(<WorkflowRunView workflowId="wf-spec" />, { wrapper });
+
+		await waitFor(() => expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(/^Add batch-file loading$/));
+		const full = screen.getByTestId("workflow-objective-full");
+		expect(full).toHaveTextContent("A book can be built in code.");
+		expect(full).not.toHaveAttribute("open");
+	});
+
 	// P4-I: the two buttons that did nothing. On a run stopped in review the
 	// daemon offers "Open session" and "Repair", and this page had a handler
 	// for neither -- so both rendered greyed out with no explanation, and a
