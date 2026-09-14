@@ -28,7 +28,15 @@ type testHooks struct {
 	finalVerify       func() error
 	failJournal       func(Phase) error
 	failJournalRemove func() error
+	openHolders       func(paths []string) ([]int, error)
 	binaryHead        int64
+}
+
+func (h *testHooks) holders(paths []string) ([]int, error) {
+	if h != nil && h.openHolders != nil {
+		return h.openHolders(paths)
+	}
+	return openHolders(paths)
 }
 
 // move renames within one filesystem. A cross-device rename is never retried

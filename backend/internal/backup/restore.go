@@ -248,6 +248,9 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 	if err := ProbeExclusive(dbPath); err != nil {
 		return rep, failedf(CodeIO, err, "probe destination database")
 	}
+	if err := refuseOpenHolders(opts.hooks, "the destination database", dbFamily(dataDir)); err != nil {
+		return rep, err
+	}
 
 	destID, err := readIdentity(dataDir)
 	if err != nil {
@@ -406,6 +409,9 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 	if err := ProbeExclusive(dbPath); err != nil {
 		return rep, abandon(failedf(CodeIO, err, "probe destination database"))
 	}
+	if err := refuseOpenHolders(opts.hooks, "the destination database", dbFamily(dataDir)); err != nil {
+		return rep, abandon(err)
+	}
 
 	pre := map[string]os.FileInfo{}
 	for _, e := range managedEntries {
@@ -472,7 +478,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (rep *RestoreReport, err 
 		return rep, rollback(CodeRestoreVerifyFailed, err)
 	}
 	progress("verifying restore")
-	if err := finalVerify(critical, dataDir, m, promoteIdentity, destID, opts.hooks); err != nil {
+	if err := finalVerify(critical, dataDir, workDir, m, promoteIdentity, destID, opts.hooks); err != nil {
 		return rep, rollback(CodeRestoreVerifyFailed, err)
 	}
 
@@ -784,8 +790,9 @@ func checkRolledBack(dataDir string, j *journal, pre map[string]os.FileInfo) err
 
 // finalVerify proves the data dir now holds the backup: no stale sidecar, the
 // database byte-identical to the manifest and passing quick_check at the same
-// goose version, the expected identity, and exactly the backup's skill files.
-func finalVerify(ctx context.Context, dataDir string, m *Manifest, promoteIdentity bool, destID string, h *testHooks) error {
+// goose version, the expected identity, exactly the backup's skill files, and
+// no process still holding the database the swap replaced.
+func finalVerify(ctx context.Context, dataDir, workDir string, m *Manifest, promoteIdentity bool, destID string, h *testHooks) error {
 	for _, s := range sqliteSidecars {
 		if _, ok, _ := present(filepath.Join(dataDir, s)); ok {
 			return fmt.Errorf("stale %s survived the swap", s)
@@ -819,11 +826,6 @@ func finalVerify(ctx context.Context, dataDir string, m *Manifest, promoteIdenti
 			}
 		}
 	}
-	for _, s := range sqliteSidecars {
-		if _, ok, _ := present(filepath.Join(dataDir, s)); ok {
-			return fmt.Errorf("%s appeared while verifying the restore", s)
-		}
-	}
 	want := destID
 	if promoteIdentity {
 		want = m.Source.InstallationID
@@ -848,6 +850,18 @@ func finalVerify(ctx context.Context, dataDir string, m *Manifest, promoteIdenti
 	})
 	if werr != nil {
 		return werr
+	}
+	// A process that opened ao.db before the swap still holds the OLD file, now
+	// in previous/, while the -wal/-shm it would create attach by name to the
+	// restored database. No process can gain such a descriptor once the renames
+	// are done, so this check, after them, closes the window the probes leave.
+	if err := refuseOpenHolders(h, "the database this restore replaced", dbFamily(filepath.Join(workDir, "previous"))); err != nil {
+		return err
+	}
+	for _, s := range sqliteSidecars {
+		if _, ok, _ := present(filepath.Join(dataDir, s)); ok {
+			return fmt.Errorf("%s appeared while verifying the restore", s)
+		}
 	}
 	if h != nil && h.finalVerify != nil {
 		return h.finalVerify()
